@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- §15: CSP meta tag. Single-file build inlines all JS/CSS, so 'unsafe-inline' is
+         required; blob:/data: needed for inlined lazy modules, workers and asset URLs. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self' blob: data:; script-src 'self' 'unsafe-inline' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob: data:; connect-src 'self' blob: data: ws: wss: https:; worker-src 'self' blob:; font-src 'self' data:; frame-src 'self' blob:;"
+    />
+    <title>VTT</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/app/main.ts"></script>
+  </body>
+</html>
