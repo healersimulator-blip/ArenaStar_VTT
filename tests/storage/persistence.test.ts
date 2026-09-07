@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
 import { describe, expect, test } from "vitest";
 import { HostPersister } from "../../src/storage/persistence";
-import { openVttDb, STORES } from "../../src/storage/idb";
+import { openVttDb, STORES, type WorldsRecord } from "../../src/storage/idb";
 import { DocumentStore, type StoreMeta } from "../../src/core/store";
 import { OpLog } from "../../src/core/oplog";
 import { jsonEqual } from "../../src/core/diff";
@@ -341,5 +341,41 @@ describe("HostPersister — lifecycle", () => {
       await persister.close();
       db.close();
     }
+  });
+  test("patchWorld survives the next flush; a direct putWorld does not (§12 activation)", async () => {
+    // The §12 world-record fields (activeRulesPackage, trustedPackages, migration version) are
+    // written while the persister is live, and every flush rewrites the persister's OWN cached
+    // record — which used to silently revert an activation on the next write-behind tick.
+    const { worldId, store, log, persister, db } = await freshSetup();
+    commit(store, log, envOf([{ kind: "create", coll: "scenes", data: sceneDoc("s1") }]));
+    await persister.flush();
+    const cached = { ...(await db.get(STORES.worlds, worldId)) } as WorldsRecord;
+
+    // (1) bypassing the persister: the write lands, then a plain flush loses it
+    await db.put(STORES.worlds, { ...cached, activeRulesPackage: "bypass" });
+    expect((await db.get(STORES.worlds, worldId))?.activeRulesPackage).toBe("bypass");
+    await persister.flush();
+    expect((await db.get(STORES.worlds, worldId))?.activeRulesPackage).toBeUndefined();
+
+    // (2) through patchWorld: it updates the cached record, so flushes keep it
+    await persister.patchWorld({ activeRulesPackage: "pf1e-mass-battles" });
+    await persister.flush();
+    expect((await db.get(STORES.worlds, worldId))?.activeRulesPackage).toBe("pf1e-mass-battles");
+
+    // (3) clearing a key deletes it rather than storing undefined (package deactivation)
+    await persister.patchWorld({ activeRulesPackage: undefined });
+    const cleared = await db.get(STORES.worlds, worldId);
+    expect(cleared).not.toHaveProperty("activeRulesPackage");
+
+    // (4) the flush-owned fields stay untouched by a patch
+    const before = (await db.get(STORES.worlds, worldId)) as WorldsRecord;
+    await persister.patchWorld({ name: "Renamed" });
+    const after = (await db.get(STORES.worlds, worldId)) as WorldsRecord;
+    expect(after.name).toBe("Renamed");
+    expect(after.flushedSeq).toBe(before.flushedSeq);
+    expect(after.oplogBase).toBe(before.oplogBase);
+
+    await persister.close();
+    db.close();
   });
 });

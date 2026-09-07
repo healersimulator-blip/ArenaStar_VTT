@@ -14,13 +14,24 @@ import type {
   TurnReadyMsg,
 } from "../core/messages";
 import { OWNERSHIP_LEVELS } from "../core/documents";
-import type { ArmyDocument, FactionDocument, TurnDocument, TurnPhase } from "../core/strategic";
+import type {
+  ArmyDocument,
+  FactionDocument,
+  TurnDocument,
+  TurnPhase,
+} from "../core/strategic";
 import type { Op } from "../core/ops";
 import type { DocId, UnitId } from "../core/ids";
 import type { OrderQueue } from "../core/strategic";
 import type { RulesContext, RulesWallsContext, UnitView } from "../core/rules";
-import type { RealtimeClockConfig, SimEvent, TurnEngineState, TurnReport } from "../core/sim";
+import type {
+  RealtimeClockConfig,
+  SimEvent,
+  TurnEngineState,
+  TurnReport,
+} from "../core/sim";
 import { DEFAULT_REALTIME_CONFIG } from "../core/sim";
+import { worldSettingsFrom } from "../core/worldSettings";
 import type { SimResolveResult } from "../sim/runner";
 import type { SysSchema } from "../sim/pool";
 import {
@@ -113,9 +124,18 @@ export class TurnChannel {
   private rtLastFlushAt = 0;
   private rtLastReportAt = 0;
   private rtEvents: SimEvent[] = [];
-  private rtVis: { userBitmap: (userId: string) => Uint8Array | null; at: number } | null = null;
+  private rtVis: {
+    userBitmap: (userId: string) => Uint8Array | null;
+    at: number;
+  } | null = null;
   private rtPumping = false;
-  private rtStats = { ticksTotal: 0, deltaFrames: 0, coalescedMax: 0, reports: 0, checkpoints: 0 };
+  private rtStats = {
+    ticksTotal: 0,
+    deltaFrames: 0,
+    coalescedMax: 0,
+    reports: 0,
+    checkpoints: 0,
+  };
   /** Inverse of the last resolve's unit stat/range envelope (turn undo). */
   private lastInverse: Op[] = [];
   private resolving = false;
@@ -209,7 +229,7 @@ export class TurnChannel {
       factions: this.factions(),
       armies: this.armies(),
       leaderActors: {},
-      worldSettings: {},
+      worldSettings: worldSettingsFrom(this.store.getAll("settings")),
     };
   }
 
@@ -243,7 +263,11 @@ export class TurnChannel {
         if (!army) continue;
         ops.push({
           kind: "update",
-          ref: { coll: "units", id: unitId, parent: { coll: "armies", id: army._id } },
+          ref: {
+            coll: "units",
+            id: unitId,
+            parent: { coll: "armies", id: army._id },
+          },
           diff: { modelRange: range as unknown as number[] },
         });
       }
@@ -286,7 +310,8 @@ export class TurnChannel {
     if (this.resolving) return;
     switch (msg.action) {
       case "start":
-        if (this.engine.phase === "idle") void this.start(msg.mode ?? "stepwise");
+        if (this.engine.phase === "idle")
+          void this.start(msg.mode ?? "stepwise");
         return;
       case "advance":
         void this.advance();
@@ -366,7 +391,11 @@ export class TurnChannel {
 
   private async advance(): Promise<void> {
     if (this.resolving) return;
-    const step = turnEngineReduce(this.engine, { type: "turn.advance" }, this.now());
+    const step = turnEngineReduce(
+      this.engine,
+      { type: "turn.advance" },
+      this.now(),
+    );
     if (step.effects.some((e) => e.type === "reject")) return;
     this.engine = step.state; // "resolution": order ops now rejected phase_locked
     this.broadcastPhase();
@@ -376,9 +405,12 @@ export class TurnChannel {
       const ctx = this.rulesCtx();
       this.bridge.refresh(ctx, units);
       const orders: Array<[UnitId, OrderQueue]> = units
-        .filter((u) => u.orders && (u.orders.pending.length > 0 || u.orders.active))
+        .filter(
+          (u) => u.orders && (u.orders.pending.length > 0 || u.orders.active),
+        )
         .map((u) => [u.id, u.orders as OrderQueue]);
-      const turnNumber = this.engine.phase === "resolution" ? this.engine.turnNumber : 0;
+      const turnNumber =
+        this.engine.phase === "resolution" ? this.engine.turnNumber : 0;
       const result = await this.bridge.resolveTurn(
         { orders, seed: turnSeed(this.seed, turnNumber), turnNumber },
         ctx,
@@ -386,7 +418,11 @@ export class TurnChannel {
       );
       this.commitResolveEnvelope(units, result, turnNumber);
       await this.syncHeroTokens();
-      this.engine = turnEngineReduce(this.engine, { type: "sim.resolved" }, this.now()).state;
+      this.engine = turnEngineReduce(
+        this.engine,
+        { type: "sim.resolved" },
+        this.now(),
+      ).state;
       await this.broadcastSimTurn(result, units);
     } catch (e) {
       // §5A/§12: resolution failed (e.g. CPU limit) — the bridge already
@@ -460,7 +496,9 @@ export class TurnChannel {
       inverse.unshift({
         kind: "update",
         ref,
-        diff: { modelRange: (unit.modelRange ?? null) as unknown as number[] | null },
+        diff: {
+          modelRange: (unit.modelRange ?? null) as unknown as number[] | null,
+        },
       });
     }
     const turnId = this.currentTurnId(turnNumber);
@@ -540,13 +578,17 @@ export class TurnChannel {
    */
   async pumpRealtime(nowMs?: number): Promise<void> {
     const eng = this.engine;
-    if (eng.phase !== "orders" || eng.mode !== "realtime" || this.rtPumping) return;
+    if (eng.phase !== "orders" || eng.mode !== "realtime" || this.rtPumping)
+      return;
     this.rtPumping = true;
     try {
       const now = nowMs ?? this.now();
       const cfg = this.rtConfig();
       const tickMs = 1000 / Math.max(0.1, cfg.simHz);
-      this.rtDueMs = Math.min(this.rtDueMs + (now - this.rtPumpAt), RT_MAX_CATCHUP_TICKS * tickMs);
+      this.rtDueMs = Math.min(
+        this.rtDueMs + (now - this.rtPumpAt),
+        RT_MAX_CATCHUP_TICKS * tickMs,
+      );
       this.rtPumpAt = now;
       let due = Math.floor(this.rtDueMs / tickMs);
       this.rtDueMs -= due * tickMs;
@@ -556,7 +598,9 @@ export class TurnChannel {
         const units = this.unitViews();
         this.bridge.refresh(this.rulesCtx(), units);
         const orders = units
-          .filter((u) => u.orders && (u.orders.pending.length > 0 || u.orders.active))
+          .filter(
+            (u) => u.orders && (u.orders.pending.length > 0 || u.orders.active),
+          )
           .map((u) => [u.id, u.orders as OrderQueue] as [UnitId, OrderQueue]);
         for (let i = 0; i < due; i++) {
           const res = await this.bridge.tickOnce({
@@ -585,7 +629,10 @@ export class TurnChannel {
         await this.rtFlush(now);
         await this.syncHeroTokens();
       }
-      if ((now - this.rtLastReportAt) * Math.max(0.1, cfg.reportHz) >= 1000 - 1) {
+      if (
+        (now - this.rtLastReportAt) * Math.max(0.1, cfg.reportHz) >=
+        1000 - 1
+      ) {
         await this.rtReport(now);
       }
     } catch (e) {
@@ -662,7 +709,8 @@ export class TurnChannel {
 
   /** 1 Hz realtime TurnReport (bounded events; projected per faction). */
   private async rtReport(now: number): Promise<void> {
-    if (this.engine.phase !== "orders" && this.engine.phase !== "paused") return;
+    if (this.engine.phase !== "orders" && this.engine.phase !== "paused")
+      return;
     const turnNumber = currentTurnNumber(this.engine);
     const subPhases = [...new Set(this.rtEvents.map((e) => e.subPhase))];
     const report: TurnReport = {
@@ -717,8 +765,11 @@ export class TurnChannel {
   }
 
   /** §5A tick checkpoint (K-tick interval + pause/scene change). */
-  private async realtimeCheckpoint(reason: "interval" | "pause"): Promise<void> {
-    const turnNumber = this.engine.phase === "idle" ? 0 : this.engine.turnNumber;
+  private async realtimeCheckpoint(
+    reason: "interval" | "pause",
+  ): Promise<void> {
+    const turnNumber =
+      this.engine.phase === "idle" ? 0 : this.engine.turnNumber;
     try {
       await this.bridge.tickCheckpoint(
         turnNumber,
@@ -749,7 +800,9 @@ export class TurnChannel {
       Math.max(snap.bytes.length, 64),
     );
     const anchors = new Map(
-      (await this.bridge.unitAnchors()).map(([id, x, y]) => [id, { x, y }] as const),
+      (await this.bridge.unitAnchors()).map(
+        ([id, x, y]) => [id, { x, y }] as const,
+      ),
     );
     const radii = new Map(await this.bridge.detections());
     const sources: DetectionSource[] = [];
@@ -757,11 +810,20 @@ export class TurnChannel {
       const anchor = anchors.get(unit.id);
       const radius = radii.get(unit.id);
       if (anchor && radius !== undefined) {
-        sources.push({ anchor: { x: anchor.x, y: anchor.y }, factionId: unit.factionId, radius });
+        sources.push({
+          anchor: { x: anchor.x, y: anchor.y },
+          factionId: unit.factionId,
+          radius,
+        });
       }
     }
     const grid = new DetectionGrid(5);
-    grid.reseed(sources, this.poolBoundsOf(pool), this.rulesCtx().walls, this.store.seq);
+    grid.reseed(
+      sources,
+      this.poolBoundsOf(pool),
+      this.rulesCtx().walls,
+      this.store.seq,
+    );
     const perFaction = new Map<string, Uint8Array>();
     for (const f of factions) {
       perFaction.set(f._id, grid.visibleModels(pool, f._id, f.allies));
@@ -806,11 +868,15 @@ export class TurnChannel {
       if (y < minY) minY = y;
       if (y > maxY) maxY = y;
     }
-    if (!Number.isFinite(minX)) return { minX: 0, minY: 0, maxX: 100, maxY: 100 };
+    if (!Number.isFinite(minX))
+      return { minX: 0, minY: 0, maxX: 100, maxY: 100 };
     return { minX, minY, maxX, maxY };
   }
 
-  private async broadcastSimTurn(result: SimResolveResult, units: UnitView[]): Promise<void> {
+  private async broadcastSimTurn(
+    result: SimResolveResult,
+    units: UnitView[],
+  ): Promise<void> {
     const { userBitmap } = await this.visibilityMaps(units);
     const factions = this.factions();
     const armies = this.armies();
@@ -834,7 +900,11 @@ export class TurnChannel {
           (u) => u.id === user.id,
         );
         this.host.broadcastSim(
-          { kind: "turn.report", turnId: this.turnIdOf(), report: result.report },
+          {
+            kind: "turn.report",
+            turnId: this.turnIdOf(),
+            report: result.report,
+          },
           (u) => u.id === user.id,
         );
         continue;
@@ -881,7 +951,9 @@ export class TurnChannel {
   }
 
   private turnIdOf(): DocId {
-    return this.engine.phase === "idle" ? (this.lastTurnDocId ?? "") : this.engine.turnId;
+    return this.engine.phase === "idle"
+      ? (this.lastTurnDocId ?? "")
+      : this.engine.turnId;
   }
 
   // ─── next / undo (§5A step 5) ───────────────────────────────────────────────
@@ -891,13 +963,19 @@ export class TurnChannel {
   }
 
   private async undoTurn(): Promise<void> {
-    const step = turnEngineReduce(this.engine, { type: "turn.undo" }, this.now());
+    const step = turnEngineReduce(
+      this.engine,
+      { type: "turn.undo" },
+      this.now(),
+    );
     if (step.effects.some((e) => e.type === "reject")) return;
-    const turnNumber = this.engine.phase === "idle" ? 0 : this.engine.turnNumber;
+    const turnNumber =
+      this.engine.phase === "idle" ? 0 : this.engine.turnNumber;
     this.engine = step.state;
     const units = this.unitViews();
     await this.bridge.reloadFromFreeze(turnNumber, this.rulesCtx(), units);
-    if (this.lastInverse.length > 0) this.host.commitSystem([...this.lastInverse]);
+    if (this.lastInverse.length > 0)
+      this.host.commitSystem([...this.lastInverse]);
     if (this.lastTurnDocId) {
       this.host.commitSystem([
         {
@@ -922,8 +1000,7 @@ export class TurnChannel {
     const rawAnchors = await this.bridge.unitAnchors();
     const anchors = new Map(rawAnchors.map(([id, x, y]) => [id, { x, y }]));
     const scene = this.store.get("scenes", this.sceneId) as
-      | { tokens?: Array<{ _id: string; x: number; y: number }> }
-      | undefined;
+      { tokens?: Array<{ _id: string; x: number; y: number }> } | undefined;
     if (!scene || !scene.tokens) return;
     const ops: Op[] = [];
     for (const u of heroesToSync) {
@@ -934,11 +1011,16 @@ export class TurnChannel {
       const existingToken = scene.tokens.find((t) => t._id === u.leaderTokenId);
       if (
         existingToken &&
-        (Math.abs(existingToken.x - x) > 0.01 || Math.abs(existingToken.y - y) > 0.01)
+        (Math.abs(existingToken.x - x) > 0.01 ||
+          Math.abs(existingToken.y - y) > 0.01)
       ) {
         ops.push({
           kind: "update",
-          ref: { coll: "tokens", id: u.leaderTokenId, parent: { coll: "scenes", id: this.sceneId } },
+          ref: {
+            coll: "tokens",
+            id: u.leaderTokenId,
+            parent: { coll: "scenes", id: this.sceneId },
+          },
           diff: { x, y },
         });
       }
@@ -961,7 +1043,12 @@ export class TurnChannel {
     const snap = await this.bridge.snapshotBytes();
     if (user.role === "GM") {
       this.host.broadcastSim(
-        { kind: "sim.snapshot", sceneId: this.sceneId, version: snap.version, bytes: snap.bytes },
+        {
+          kind: "sim.snapshot",
+          sceneId: this.sceneId,
+          version: snap.version,
+          bytes: snap.bytes,
+        },
         (u) => u.id === user.id,
       );
       return;
@@ -983,7 +1070,10 @@ export class TurnChannel {
     );
   }
 
-  private async reportDetailTo(user: SessionUser, msg: ReportDetailMsg): Promise<void> {
+  private async reportDetailTo(
+    user: SessionUser,
+    msg: ReportDetailMsg,
+  ): Promise<void> {
     const report = await getReport(
       this.bridge.db,
       this.bridge.worldId,
@@ -991,11 +1081,22 @@ export class TurnChannel {
       turnNumberOf(msg.turnId),
     );
     if (!report) return;
-    const events = report.events.filter((e) => !msg.unitId || e.unitId === msg.unitId);
+    const events = report.events.filter(
+      (e) => !msg.unitId || e.unitId === msg.unitId,
+    );
     const totalPages = Math.max(1, Math.ceil(events.length / REPORT_PAGE_SIZE));
-    const page = events.slice(msg.page * REPORT_PAGE_SIZE, (msg.page + 1) * REPORT_PAGE_SIZE);
+    const page = events.slice(
+      msg.page * REPORT_PAGE_SIZE,
+      (msg.page + 1) * REPORT_PAGE_SIZE,
+    );
     this.host.broadcastSim(
-      { kind: "report.detail.page", turnId: msg.turnId, page: msg.page, totalPages, events: page },
+      {
+        kind: "report.detail.page",
+        turnId: msg.turnId,
+        page: msg.page,
+        totalPages,
+        events: page,
+      },
       (u) => u.id === user.id,
     );
   }
@@ -1004,15 +1105,21 @@ export class TurnChannel {
     if (this.engine.phase === "idle") return;
     if (this.engine.phase === "orders") this.lastTurnDocId = this.engine.turnId;
     const paused = this.engine.phase === "paused";
-    const realtime = paused || (this.engine.phase === "orders" && this.engine.mode === "realtime");
-    const phase: TurnPhase = this.engine.phase === "paused" ? "orders" : this.engine.phase;
+    const realtime =
+      paused ||
+      (this.engine.phase === "orders" && this.engine.mode === "realtime");
+    const phase: TurnPhase =
+      this.engine.phase === "paused" ? "orders" : this.engine.phase;
     this.host.broadcastSim({
       kind: "turn.phase",
       turnId: this.engine.turnId,
       phase,
       deadlineMs: this.engine.phase === "orders" ? this.engine.deadline : null,
-      readyUsers: this.engine.phase === "orders" ? [...this.engine.readyUsers] : [],
-      ...(realtime ? { mode: "realtime" as const, paused, simHz: this.rtConfig().simHz } : {}),
+      readyUsers:
+        this.engine.phase === "orders" ? [...this.engine.readyUsers] : [],
+      ...(realtime
+        ? { mode: "realtime" as const, paused, simHz: this.rtConfig().simHz }
+        : {}),
     });
   }
 }

@@ -40,6 +40,7 @@
   import { startHostShare, type HostShare } from "./hostShare";
   import type { SceneDocument, SceneGrid } from "../core/documents";
   import type { Op } from "../core/ops";
+  import { worldSettingsFrom } from "../core/worldSettings";
   import { installGmFogE2e } from "./e2eHook";
 
   let { app = null, bootError = null }: { app?: HostApp | null; bootError?: string | null } =
@@ -276,7 +277,11 @@
       factions,
       factionId: gmState.viewAsFaction,
       radiusOf: (unit: UnitDocument) =>
-        massBattle.detection({ worldSettings: {} } as Parameters<typeof massBattle.detection>[0], {
+        massBattle.detection(
+          { worldSettings: worldSettingsFrom(client.store.getAll("settings")) } as Parameters<
+            typeof massBattle.detection
+          >[0],
+          {
           id: unit._id,
           armyId: "",
           factionId: "",

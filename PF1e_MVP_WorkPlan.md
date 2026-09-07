@@ -4,6 +4,18 @@
 **Package Scope:** `packages/pf1e-core` + `packages/pf1e-mass-battles`  
 **Goal:** Deliver a fully functional MVP module for Pathfinder 1e Mass Combat simulation with complete feature parity to `Combat_Resolver_5`, including per-model d20 attack routines, DR/SR, enveloping, spell avoidance, player hero participation, and detailed combat analytics.
 
+> **Status 2026-09-08** (branch `arena/01a07ced-arenastar-vtt`, PR #4): Tasks 1–5 are delivered (spatial
+> grid in `src/core/spatialGrid.ts`, `PF1E_MODEL_SCHEMA` + profile compile, per-model PF1e attacks with
+> AC/DR/SR, envelopment, spell avoidance/saves in the sim), Task 9 is delivered (`pnpm build:systems`
+> emits the manifest-verified packages + `pf1e-core` seed packs), and Task 10 is delivered as a Node gate
+> (`tests/packages/pf1eMassBattleScale.test.ts`: 10k models, 66.00 B/model, p95 ≈ 45–50 ms) with a
+> browser half that asserts the shipped zips. Task 6 is **partly** done (six analytics fields declared and
+> never incremented; `exportAnalyticsToCsv` unquoted; `generateReport()` uncalled by the module) and
+> Task 7's hero bridge has **no in-repo producer** for `isHeroUnit`. Task 8's components exist but are not
+> mounted in `WindowHost` (only `e2eHook.ts` can open `ArmyWindow`). Those remainders, plus everything at
+> tactical (hero) scale, are sequenced in `PF1e_ImplementationPlan.md` — this file is kept for the
+> parity matrix it verified against `Combat_Resolver_5`.
+
 ---
 
 ## 1. Feature Parity Matrix: `Combat_Resolver_5` ⇄ `ArenaStar_VTT`

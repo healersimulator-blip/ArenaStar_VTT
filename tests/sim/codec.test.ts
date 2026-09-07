@@ -190,4 +190,35 @@ describe("SimDelta codec (§5A)", () => {
     const replica = poolFromSnapshot(snapshotFromPool(pool, SCENE, 0, SYS), 4, SYS);
     expect(hashPool(replica)).toBe(hashPool(pool));
   });
+
+  test("i8 sys columns round-trip (signed, 1 byte) — regression for the PF1e save columns", () => {
+    // `ModelColumnType` admits i8, and `rulesLoader`/`packageManifest` validate it, but the
+    // wire kinds once omitted it: an i8 column packed to a zero-length buffer (silently
+    // dropped from the delta) and `canonicalPoolHash` threw RangeError on the first turn of
+    // any battle whose module declared one.
+    const I8_SYS = { fort: "i8", ref: "i8", will: "i8", ac: "u8" } as const;
+    const pool = createModelPool(8, I8_SYS);
+    allocModel(pool, { id: 1, unitIdx: 0, x: 0, y: 0, hp: 4, hpMax: 8, sys: { fort: 7, ref: -3, will: 2, ac: 19 } });
+    allocModel(pool, { id: 2, unitIdx: 0, x: 1, y: 0, hp: 8, hpMax: 8, sys: { fort: -128, ref: 127, will: 0, ac: 10 } });
+
+    const replica = poolFromSnapshot(snapshotFromPool(pool, SCENE, 0, I8_SYS), 8, I8_SYS);
+    expect(replica.sys["fort"]?.[0]).toBe(7);
+    expect(replica.sys["ref"]?.[0]).toBe(-3); // negatives survive
+    expect(replica.sys["will"]?.[0]).toBe(2);
+    expect(replica.sys["fort"]?.[1]).toBe(-128); // full signed range
+    expect(replica.sys["ref"]?.[1]).toBe(127);
+    expect(replica.sys["ac"]?.[0]).toBe(19);
+
+    // the same columns through the delta path, which packs per changed column
+    const empty = createModelPool(8, I8_SYS);
+    for (let i = 0; i < 2; i++) {
+      allocModel(empty, { id: i + 1, unitIdx: 0, x: 0, y: 0, hp: 8, hpMax: 8, sys: { fort: 0, ref: 0, will: 0, ac: 10 } });
+    }
+    const wire = encodeSimDelta(diffPools(empty, pool, SCENE, I8_SYS), 8);
+    const { delta: decoded, maxHpMax: m } = decodeSimDelta(wire);
+    const live = poolFromSnapshot(snapshotFromPool(empty, SCENE, 0, I8_SYS), 8, I8_SYS);
+    applySimDelta(live, decoded, m, I8_SYS);
+    expect(live.sys["ref"]?.[0]).toBe(-3);
+    expect(live.sys["fort"]?.[1]).toBe(-128);
+  });
 });

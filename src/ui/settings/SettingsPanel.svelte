@@ -10,6 +10,13 @@
   import type { EventBus } from "../../core/events";
   import type { SceneDocument, SceneGrid } from "../../core/documents";
   import { DEFAULT_BINDINGS } from "../../core/keys";
+  import {
+    advanceClockOnRoundOf,
+    secondsPerRoundOf,
+    validateWorldSettingsPatch,
+    worldSettingsFrom,
+    worldSettingsOps,
+  } from "../../core/worldSettings";
 
   let {
     client,
@@ -25,6 +32,20 @@
 
   let grid = $state<SceneGrid | null>(null);
   let sceneId = $state("");
+
+  /** World rules options (the replicated `settings` document, D-113). */
+  let rules = $state<RulesOptions>(DEFAULT_RULES);
+  let rulesError = $state("");
+  interface RulesOptions {
+    secondsPerRound: number;
+    detectionMultiplier: number;
+    advanceClockOnRound: boolean;
+  }
+  const DEFAULT_RULES: RulesOptions = {
+    secondsPerRound: 6,
+    detectionMultiplier: 1,
+    advanceClockOnRound: true,
+  };
   let scale = $state<"tactical" | "strategic">("tactical");
 
   function refresh(): void {
@@ -36,6 +57,25 @@
       (active?.flags as { core?: { scale?: unknown } } | undefined)?.core?.scale === "strategic"
         ? "strategic"
         : "tactical";
+    const settings = worldSettingsFrom(client.store.getAll("settings"));
+    rules = {
+      secondsPerRound: secondsPerRoundOf(settings),
+      detectionMultiplier:
+        typeof settings.detectionMultiplier === "number" && settings.detectionMultiplier > 0
+          ? settings.detectionMultiplier
+          : DEFAULT_RULES.detectionMultiplier,
+      advanceClockOnRound: advanceClockOnRoundOf(settings),
+    };
+  }
+
+  /** Submit a rules-option patch, creating the world's settings document on first edit. */
+  function applyRules(patch: Partial<RulesOptions>): void {
+    const checked = validateWorldSettingsPatch({ ...patch });
+    rulesError = checked.error ?? "";
+    if (!checked.ok) return;
+    const ops = worldSettingsOps(client.store.getAll("settings"), checked.clean);
+    if (ops.length === 0) return;
+    client.submit(ops);
   }
 
   /** §9A: scale flag gates strategic fog + linked-scene behaviour (D-080). */
@@ -182,6 +222,55 @@
     </div>
   {/if}
 
+  <h4>Rules options</h4>
+  <div class="row">
+    <label>
+      Seconds / round
+      <input
+        data-world-seconds
+        type="number"
+        min="1"
+        max="3600"
+        value={rules.secondsPerRound}
+        onchange={(e) => {
+          rules = { ...rules, secondsPerRound: Number((e.target as HTMLInputElement).value) };
+          applyRules({ secondsPerRound: rules.secondsPerRound });
+        }}
+      />
+    </label>
+    <label>
+      Detection ×
+      <input
+        data-world-detection
+        type="number"
+        min="0"
+        step="0.25"
+        value={rules.detectionMultiplier}
+        onchange={(e) => {
+          rules = { ...rules, detectionMultiplier: Number((e.target as HTMLInputElement).value) };
+          applyRules({ detectionMultiplier: rules.detectionMultiplier });
+        }}
+      />
+    </label>
+    <label>
+      Advance clock
+      <input
+        data-world-clock
+        type="checkbox"
+        checked={rules.advanceClockOnRound}
+        onchange={(e) => {
+          rules = { ...rules, advanceClockOnRound: (e.target as HTMLInputElement).checked };
+          applyRules({ advanceClockOnRound: rules.advanceClockOnRound });
+        }}
+      />
+    </label>
+  </div>
+  <p class="hint">
+    Stored as a replicated <code>settings</code> document, so players see the clock their durations
+    tick against.
+  </p>
+  {#if rulesError}<p class="error" data-world-error>{rulesError}</p>{/if}
+
   <h4>Keybindings</h4>
   <table class="keys">
     <tbody>
@@ -233,6 +322,16 @@
     padding: 1px 4px;
     font-size: 12px;
     border-bottom: 1px solid #262e3a;
+  }
+  .hint {
+    margin: 0;
+    font-size: 10px;
+    color: #7d8ea6;
+  }
+  .error {
+    margin: 0;
+    font-size: 11px;
+    color: #e0736b;
   }
   kbd {
     background: #1d2530;

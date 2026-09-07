@@ -1325,3 +1325,229 @@ existing sim channel.
 - Unit tested in `tests/net/voiceVideo.test.ts`.
 
 
+## D-105 — §12 PF1e: deploy-time profile compilation, content-addressed interning, real model columns
+
+- Gap List §1.2–§1.4 (PR 1). `systems/pf1e-mass-battles/manifest.json` declared 9 `modelColumns` while
+  `PF1E_MODEL_SCHEMA` uses 13; the host builds the deploy schema from the **manifest**
+  (`src/app/hostBoot.ts:433-443`), so undeclared columns are never allocated: reads return `undefined`,
+  writes are dropped, and the column vanishes from diffs, hashes and joiner replicas. Manifest now
+  matches the schema and `tests/packages/pf1eManifest.test.ts` pins them together.
+- `PF1E_MODEL_SCHEMA` grew `flatFootedAc` (§2.1) and `nonlethal` (§2.3/§2.12). AC is no longer taken off
+  the unit sheet: `compilePF1eProfile` derives `ac` / `touchAc` / `flatFootedAc` from one
+  `ACBreakdown` (armor + shield + Dex + natural + size + misc + dodge; no Dex/dodge when flat-footed,
+  no armor/shield/natural when touching), so one breakdown serves every attack flavour.
+- New `src/packages/pf1e/deploySeed.ts`: `src/sim/deploy.ts` only allocates `hp/hpMax = 1` + `sys.ammo`,
+  so PF1e battles fought at AC 0 and — because nothing wrote `profileIdx` — resolved **zero attacks**
+  (`registry.get(0)` is `undefined` ⇒ every attack loop `continue`d). `buildUnitProfiles` +
+  `seedPF1ePool` now compile and stamp every model at turn start.
+- Profiles are **content-addressed**: `PF1eProfileRegistry.intern` keys on the stat-bearing fields
+  (`pf1eProfileKey`), so identical profiles share one id. That makes the old per-turn `register()` churn
+  (a new id for every unit every turn, registry never cleared, `profileIdx` frozen at deploy) harmless
+  and puts profile identity — hence dice order — outside the RNG stream, where it belongs.
+- Interning happens over `sortUnitsForInterning` (id-sorted), never over `Object.keys(army.units)`: unit
+  key order is a persistence artefact and must not reach the dice.
+- `resolveTurn` re-seeds every turn on purpose. The host's `applyHeroLeadershipToUnits` mutates
+  `unit.stats` (and it accumulates auras turn over turn — unfixed, Gap List §5), so a deploy-time-only
+  snapshot would freeze AC/attack at whatever the stats were at deploy.
+
+## D-106 — §12 PF1e: all battle dice come from the runner's PRNG
+
+- Gap List §1.5. `massBattlePf1e.ts` seeded its own `SimpleRng` from `Math.random()` in two places and
+  `combatEngine.ts` / `spells.ts` rolled on private LCGs, so PF1e battles were neither reproducible from
+  a seed nor checkpoint/hash/replay stable (`src/sim/runner.ts` hands rules a `BulkDice(req.seed)`;
+  `massBattleBasic.ts` forks per unit).
+- `combatEngine.ts` now takes a `PF1eRng` (`pf1eRngFromPrng` bridges the host `PRNG`,
+  `pf1eRngFromSeed` keeps unit tests free of RNG plumbing); the module forks
+  `rng.fork(unitIndex(unit), phase)` (phase 1 = melee, 2 = spellcasting) exactly like the basic module,
+  and `resolvePF1eSpellAOE` takes the same `rng`. `SimpleRng` is `@deprecated`, kept only so
+  `tests/packages/pf1eCombat.test.ts` still compiles.
+- Verified by `tests/packages/pf1eDeploySeed.test.ts`: same seed ⇒ equal `canonicalPoolHash`, and a
+  unit's fork key is its identity (`unitIdx` alone would make two same-army units share one stream).
+
+## D-107 — §12 PF1e: flat-footed AC column, single-count flanking, minimum damage is nonlethal
+
+- Gap List §2.1–§2.3. `targetAcType: "flatFooted"` read a column that did not exist and fell back to the
+  **attacker's** `profile.ac` — with the fallback AC column absent, unseeded battles attacked AC 0, which
+  is why the pre-existing troll-regen test "hit" only by luck (now seeded explicitly in
+  `tests/packages/pf1ePrecreatedUnits.test.ts`). `resolveTargetAc(pool, index, acType, defProfile)` is
+  the single entry point; it also fixes DR, which used `pool.sys.drVal ?? profile.dr` and so read the
+  attacker's DR whenever the defender's was 0.
+- Flanking was +2 to-hit *and* −2 to AC (SRD: +2 to-hit only, from the helper), so a +2 flank could turn
+  a 19 into a 20 twice over. The −2 is gone; the `FLANKED` status bit is still set by the caller
+  (envelopment geometry owns it later, §5).
+- Minimum damage (CRB: "if penalties would reduce damage below 1, deal 1 point of **nonlethal**") was
+  `Math.max(1, …)` lethal in all three resolvers. Damage now returns `{lethal, nonlethal}`; sub-lethal
+  nonlethal accumulates in `sys.nonlethal` and trips `UNCONSCIOUS` at ≥ current hp (and `DEAD` at 0 hp,
+  which is the bit `compactPool` reclaims), so the §2.12 thresholds have somewhere to live.
+- Deliberately NOT done: the hero cleave (still one unconditional kill), envelopment's flanked bit and
+  routing logic, and the analytics fields — all wrong in ways that need the §5 rules data model, not a
+  patch.
+
+## D-108 — §4A codec: `i8` is a real wire kind (found while doing Gap List §1.3)
+
+- `ModelColumnType` admits `i8`, `rulesLoader.validateRulesModule` and `packageManifest` accept it, and
+  `pool.ts` allocates an `Int32Array` for it — but `codec.ts`'s `ColKind`/`KIND_BYTES` had no `i8`, and
+  `colKind` casts the schema value through unchecked. Consequences: `packCodes` wrote a
+  `codes.length * undefined = NaN`-sized buffer (empty) so the column silently disappeared from every
+  delta, and `unpackCodes` computed `n = 0 / undefined = NaN` → `new Array(NaN)` threw
+  `RangeError: Invalid array length` in `canonicalPoolHash`, i.e. at the end of the first turn of any
+  battle whose module declared an i8 column (PF1e's three saves).
+- Fixed in `src/sim/codec.ts` (signed 1-byte kind) rather than by re-typing PF1e's saves as `i16`: the
+  platform promised the type, so a third-party module would otherwise hit the same trap. Regression test
+  covers both the snapshot and the delta path, including −128/+127.
+
+## D-109 — §12 PF1e: scale authority is the two implementations, not a shared kernel
+
+- Answered on the Gap List review (2026-09-08), overriding its recommendation: tactical (ActorDocument /
+  CombatDocument / grid) and strategic (ModelPool / SimWorker) each implement the Combat chapter
+  separately. Parity is a convention — shared *data and tables* under `src/packages/pf1e/` — and there
+  is **no** parity gate and no `resolveAttackRoll`-style kernel. The strategic layer keeps grid-quantised
+  abstractions where exact tactical bookkeeping would cost 10 000× the work.
+- Same review: **no core `EffectDocument` changes** (`mode`/`type`/`origin`/`duration` rejected), so
+  core PRD items P-12/P-13/P-14 are retired and no document migration is needed; typed bonuses live in
+  PF1e's own data and stacking is PF1e's business.
+## D-110 — §12 PF1e ships as a real package: build step, data-only core pack, generated `rules.js`
+
+- Gap List §1.1 (PR 2). `scripts/buildSystemPackages.mjs` (`pnpm build:systems`) bundles
+  `src/packages/pf1e/rulesEntry.ts` with vite into one self-contained ESM file and writes
+  `systems/<id>/rules.js`, then zips every package folder to `dist/packages/<id>-<version>.zip` — the
+  shape `#pkg-file`/`readZipPackage` actually consume. The generated `rules.js` is git-ignored
+  (`.gitignore`, `.prettierignore`, eslint ignores): a committed bundle would drift from the module it
+  was bundled from, which is the exact failure mode §1.2/§1.3 just fixed.
+- The emitted file is rewritten into `export default (() => { … })();`. Not cosmetics:
+  `rulesLoader.evalRulesModule` (the fallback for engines whose classic workers cannot import module
+  scripts) matches only a single-`export default <expression>` source. The rewrite **throws** instead
+  of emitting a bundle that still contains `import`/`export`, so an unloadable package fails the build.
+- `systems/pf1e-core` became `type: "data"` with its two packs, and its `module: { entry: "module.js" }`
+  block was deleted rather than fabricated. As declared it was uninstallable — `validatePackageManifest`
+  rejects a `system` package with no `rules` block — and PF1e's hero-level sheets are in-repo Svelte
+  (§1.7), not a sandboxed iframe module. Nothing was invented to make a manifest honest.
+  `pf1e-mass-battles` keeps a `dependencies: ["pf1e-core"]` key that **nothing enforces** (the manifest
+  validator ignores unknown fields); it is documentation of intent, and PF1e must stay loadable with
+  only itself installed.
+- Seed packs open Gap List §6 rather than finish it: `packs/spells.json` (fireball, magic missile,
+  shield, true strike — the fields `PF1eSpellOrder` consumes under `system.massBattle`) and
+  `packs/bestiary.json` (the six `PRECREATED_PF1E_UNITS`, in readable `dr.bypass` /
+  `regeneration.suppress` names). `tests/packages/pf1ePackage.test.ts` translates the names back into
+  the engine bitfields and requires `compilePF1eProfile` to agree with the in-repo table, so content
+  and code cannot drift silently.
+- `HostPersister.patchWorld(patch)` is now the only sanctioned way to change a live world record
+  (activation, GM trust, migration version stamp). `HostPersister` owns a cached `WorldsRecord` and
+  rewrites it on every write-behind flush; the §12 sites called `putWorld` directly, so activations
+  were reverted by the next tick — "import zip → activate → reload" only worked by timing. Keys are
+  cleared by omission because structured clone preserves `key: undefined`.
+- `HostAppOptions.simRunner` was added as a boot seam (alongside the existing injected `db`/`codec`/
+  `root`). Node has no DOM `Worker`, and `WorkerSimRunner` constructs successfully and fails only at
+  `loadRules`, so without the seam the package-boot path is untestable outside a browser — the
+  alternative (silently falling back to the unsandboxed runner) is a security regression, not a fix.
+
+## D-111 — §4A codec, follow-up: `i8` was not the only unchecked cast
+
+- `colKind` still casts `sys[name]` to `ColKind` for every declared type; `f64` is deliberately widened
+  to `f32` (matching `pool.ts` storage) and `i8` now exists on the wire (D-108), so the cast is
+  total over `ModelColumnType`. If a type is ever added to `ModelColumnType`, the compiler will not
+  catch the missing `KIND_BYTES` entry — the `toSingleDefaultExpression`-style approach of throwing on
+  an unmapped kind at encode time is the follow-up, deferred because it is a hot path (per-column, per
+  model, per turn) and no consumer needs a new type yet.
+
+## D-112 — §1.8: the 10k gate runs in Node; the browser asserts artifacts, not timings
+
+- The 10 000-model acceptance test for PF1e moved from `e2e/` to `tests/packages/pf1eMassBattleScale.test.ts`,
+  driving the real `deploySnapshot` → `InlineSimRunner` → `SimRunnerCore` path (the code the SimWorker runs)
+  for 4 warm-up + 24 turns. A Playwright-only gate is unauditable in this environment (no browser binaries,
+  `playwright install` blocked), and turn-cost assertions are machine-dependent by nature; the old spec was
+  worse than unauditable — it asserted a hardcoded `{ok:true,hits:15}` and never touched the sim.
+- **Budgets are asserted, timings are measured.** Strict on everything reproducible: `bytesPerModel ≤ 200`
+  (66.00 with the 13 PF1e columns), a full 10k checkpoint ≤ 1.5 MB, `toVersion == turns`, casualties
+  (`Σ rangeDiffs length` between 0 and 10 000), melee events emitted, `report.rulesVersion`/`subPhases`
+  stamped by the module, `console.error`/`console.warn` call counts 0 via spies, and replay equality of the
+  pool hash *and* the wire. The p95 gate is a catastrophe ceiling (250 ms) with the measured p50/p95/max
+  logged, so the test fails on a 5× regression instead of on noisy CI. §19's "p95 < 50 ms at 10k" is
+  reported against, not asserted; the dense 40 × 250 shape genuinely misses it (p95 54–58 ms) and that is
+  recorded as a perf finding in Gap List §5 rather than hidden by shaping the fixture until it passes.
+- **Determinism is asserted on the decompressed wire.** `encodeSimDelta`/`encodeSimSnapshot` gzip via fflate
+  `compressSync`, whose header carries MTIME: two byte-identical turns produce different compressed bytes.
+  Comparing `decompressSync(bytes)` (or decoded structures, as `tests/sim/replay.test.ts` already does) is
+  the rule for any future wire-level determinism test. Nothing is content-addressed from compressed bytes —
+  checkpoint identity is `canonicalPoolHash(pool, sys)` — so this is a test-authoring trap, not a wire bug,
+  and making fflate emit a fixed mtime was rejected as an unnecessary wire change.
+- **The browser half keeps only what a browser can prove.** `e2e/pf1e_mass_battles.spec.ts` imports the
+  *shipped* `dist/packages/pf1e-{core,mass-battles}-1.0.0.zip` through the app surface, asserts `packages()`
+  rows (a data package refuses activation with "data-only"), that `rulesBoot` reports
+  `{source:"package", packageId:"pf1e-mass-battles", version:"1.0.0", error:null}` — i.e. a real Worker
+  imported the bundle from a blob URL — that deactivation returns to `builtin`, and that the page threw no
+  `pageerror`. `test:e2e` now runs `pnpm build:systems` after `pnpm build` (vite empties `dist/`, so the
+  zips must be built after it) and the spec fails loudly with "run pnpm build:systems" if the artifacts are
+  absent, instead of silently skipping the thing it exists to check.
+- No host-side `simAdvance` e2e hook was invented. The `?e2e` app surface has no deploy/advance entry and the
+  §5A readbacks live on the joiner surface; adding one is deferred until the tactical (§4) flow needs the
+  same hook, so the seam is designed once.
+
+## D-113 — §10 P0: three tactical data contracts, and world settings as a replicated document
+
+The five open questions in `PF1e_ImplementationPlan.md` §10 were answered "adopt the plan's defaults";
+the defaults are recorded here as decisions, and **two of them were revised against the code** before a
+line was written. The revisions matter more than the adoptions, so they lead.
+
+- **World settings are a document, not a `WorldsRecord` field.** The plan proposed storing
+  `worldSettings` + the round clock on `WorldsRecord` through `HostPersister.patchWorld`. That record is
+  the local host's row and is **not replicated** — players would be buffed against a clock they cannot
+  see. `src/core/documents.ts:314` already declares `SettingsDocument` (`type: "settings"`, in
+  `TOP_LEVEL_COLLECTIONS`) and nothing anywhere read or wrote it; `projectWorld`
+  (`src/core/projection.ts:122`) replicates any top-level document at effective ownership ≥ LIMITED. So
+  `src/core/worldSettings.ts` reads/merges that collection into one document, `_id="world-settings"`,
+  `ownership.default = LIMITED` (1), with flat keys in `system` — the same flat convention
+  `massBattleBasic.ts:380` already uses for `detectionMultiplier`. `tests/core/worldSettings.test.ts`
+  asserts the ownership level *through the projection itself*, and that a `default: 0` settings doc does
+  **not** reach a player, so the level is load-bearing rather than decorative. Name collision to avoid:
+  `src/storage/idb.ts:189`'s `getSetting/putSetting` are app-local `[scope, key]` pairs — unrelated.
+- **No manifest version bump, no declarative migration in P0.** `derivePF1eActor` is *total over partial
+  input* instead: a document with no `system.pf1e` at all yields a legal Medium commoner, naming every
+  reconstructed field in `defaults` and every malformed one in `issues`. The parity a migration would
+  have bought is asserted directly, by deriving the shipped `systems/pf1e-core/packs/bestiary.json` and
+  comparing it against `compilePF1eProfile`. A bump would have churned the zip names and the §12 manifest
+  tests to migrate data that does not exist. (For whoever lands a real one: `MigrationStep` carries
+  `transforms`, not `ops` — `src/core/migrations.ts:58`.)
+- **1. `system.pf1e` is the single authored tactical location** and `derivePF1eActor` its only tactical
+  consumer; nothing derived is ever stored, which is also what makes buff expiry free.
+- **2. Effects stay in `flags.pf1e`; core keeps ticking.** `EffectDocument` is untouched (D-112 stands),
+  `changes` is not the mechanic — a typed bonus cannot be expressed as a path overwrite. Core's
+  `flags.core.duration` remains the only timer, read through
+  `combatant.flags.core.effects` exactly as `core/combat.ts` stores it, and a round-start expiry
+  variant is a wrapper transition in `combatState.ts`, not a core edit. `ttlToTicks` is the one place
+  `1 round = 6 s` / `1 minute = 10 rounds` is written down, so the seed and the SRD text cannot drift.
+- **3. Round structure lives in `combat.flags.pf1e` / `combatant.flags.pf1e`.** Surprise (A.1: only when
+  *every* attacker beats *every* defender, and the round runs before core's round 1 so `combat.round`
+  stays 0), flat-footed-until-your-first-turn, the AoO ledger (A.10: refreshed at the start of *your*
+  turn), held actions (A.10: six allies acting before you turns the hold into a full-round action), and
+  the clock. Core still owns `round`/`turn`/initiative order — `startWithSurprise` hands over to
+  `startCombat`, `pf1eNextTurn` delegates to `nextTurn` and only then applies PF1e's boundaries. The
+  last test in `pf1eCombatState.test.ts` exists to prove that delegation: an embedded effect still ticks
+  down and expires through the wrapper, with the expiry *reported*.
+- **4. Fireball is 20 ft.** The pack/SRD value wins; the sim's 15 ft and the invented spell scatter are
+  due to be deleted or filed in `DEVIATIONS.md` in P5 — that file still reads "None." and is stale.
+- **5. PR order A→B→C** (sheet before tracker): a context menu needs a derived actor to act on.
+- **Initiative ties carry a 0.5 marker** rather than a re-rolled die or an insertion-order accident:
+  core orders purely by `initiative`, and `initiativeDisplay()` floors the value for display, so the
+  tie-break is expressible without lying about what was rolled. Equal roll *and* equal Dexterity returns
+  `needsReroll` instead of picking a winner.
+- **A stat-block adapter, because the pack and the sheet author different shapes.** The shipped bestiary
+  publishes totals and modifiers (`bab`, `strMod`, `ac`, `weapon.damageMod`, `dr: {val, bypass}`) —
+  pool-shaped, because that is what `compilePF1eProfile` consumes; a sheet must author components (six
+  scores, armor/shield/natural) or no buff can move a total. `src/packages/pf1e/statBlock.ts` converts
+  one into the other *once*, and reports it: an ability score rebuilt from a modifier says so (a modifier
+  only determines the even score), a published AC is honoured as a total rather than recomposed into fake
+  components, `weapon.damageMod` is marked as already containing the ability bonus so Strength is not
+  added twice, and published saves are flagged so Con/Dex/Wis are not re-added. Fields no tactical rule
+  implements yet are listed in `unsupported` **with the phase that owns them** (`weapon.isFirearm —
+  firearm rules are P6`), which is what keeps "not modelled" from reading as "not present". The
+  conversion is idempotent, so an import round-trips.
+- **Deliberately not fixed here:** `compilePF1eProfile`'s `maxAoos` and its generic `sizeMod` on
+  CMB/CMD, and its base-only saves. `rulesTables.ts` is correct and the strategic compile is not; the
+  three differences are recorded in Gap List §10.2 with the parity relationship pinned by a test, because
+  silently editing them would move 10k-model fixtures and their byte budgets in a PR about data shapes.
+  P8 switches the sim onto the same tables.
+- **Found while reading, not fixed:** `nextTurn`'s round-wrap loop tests `"delayed" in c.flags` while the
+  flag lives at `flags.core.delayed` (`src/core/combat.ts:103`), so a delayed combatant is never
+  un-flagged. `startCombat`'s clear works, which is why nobody noticed. Fixed in P2, where the plan
+  already intends to assert delay behaviour — see the corrected P2 accept item.

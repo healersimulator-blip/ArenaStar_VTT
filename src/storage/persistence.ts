@@ -33,6 +33,14 @@ export interface HostPersisterOptions {
 
 const DEFAULT_FLUSH_MS = 500;
 
+/**
+ * Keys `HostPersister.patchWorld` may change on a world record. `| undefined` is explicit so
+ * `exactOptionalPropertyTypes` still allows clearing an optional field (deactivating a package).
+ */
+export type WorldsRecordPatch = {
+  [K in keyof Omit<WorldsRecord, "worldId">]?: Omit<WorldsRecord, "worldId">[K] | undefined;
+};
+
 export class HostPersister {
   private readonly db: IDBPDatabase;
   private readonly flushMs: number;
@@ -256,6 +264,26 @@ export class HostPersister {
     await tx.done;
     this.log?.compact(seq);
     this.dirty.clear();
+  }
+
+  /**
+   * Patch the world record THROUGH the persister (§12 package activation, GM trust grant,
+   * migration version). The persister owns a cached copy and rewrites it on every flush, so a
+   * direct `putWorld` is silently reverted by the next write-behind tick (500 ms) or by the
+   * final flush on close — which is how "activate a system package, reload" lost the activation.
+   * A key set to `undefined` is deleted from the record rather than stored as undefined.
+   */
+  async patchWorld(patch: WorldsRecordPatch): Promise<WorldsRecord> {
+    const merged: Record<string, unknown> = { ...this.record };
+    for (const [key, value] of Object.entries(patch)) merged[key] = value;
+    // Rebuild instead of mutating: structuredClone keeps `key: undefined`, and the optional
+    // §12 fields must be *absent* when cleared for `worldRec.activeRulesPackage` to read falsy.
+    const next = Object.fromEntries(
+      Object.entries(merged).filter(([, value]) => value !== undefined),
+    ) as unknown as WorldsRecord;
+    this.record = next;
+    await this.db.put(STORES.worlds, this.record);
+    return this.record;
   }
 
   /** Final flush + stop the timer. */

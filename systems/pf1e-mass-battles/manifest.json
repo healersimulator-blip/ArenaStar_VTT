@@ -10,13 +10,17 @@
     "modelColumns": {
       "ac": "u8",
       "touchAc": "u8",
+      "flatFootedAc": "u8",
       "fort": "i8",
       "ref": "i8",
       "will": "i8",
       "sr": "u8",
       "drType": "u8",
       "drVal": "u8",
-      "profileIdx": "u16"
+      "profileIdx": "u16",
+      "lethalDmg": "u16",
+      "nonlethal": "u16",
+      "aooUsed": "u8"
     }
   }
 }

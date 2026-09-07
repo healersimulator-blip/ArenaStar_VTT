@@ -25,7 +25,7 @@ import { columnNames, hashPool } from "./pool";
 
 const TAU = Math.PI * 2;
 
-type ColKind = "u32" | "i32" | "u16" | "i16" | "u8" | "f32";
+type ColKind = "u32" | "i32" | "u16" | "i16" | "u8" | "i8" | "f32";
 
 /** Per-column wire element kind. Base columns fixed (§5A); sys by schema. */
 function colKind(name: string, sys: SysSchema): ColKind | null {
@@ -49,12 +49,18 @@ function colKind(name: string, sys: SysSchema): ColKind | null {
     default: {
       const t = sys[name];
       if (!t) return null;
-      return t === "f32" || t === "f64" ? "f32" : (t as ColKind);
+      // f64 is stored single-precision in the pool (§4A), so it packs as f32. Every other
+      // declared column type has a wire kind — `i8` was missing from `ColKind`, which made
+      // KIND_BYTES[i8] undefined: i8 sys columns then packed to a zero-length buffer (the
+      // column silently vanished from the delta) and threw `RangeError: Invalid array
+      // length` in canonicalPoolHash, i.e. any module declaring i8 columns (PF1e saves)
+      // crashed at the end of its first turn.
+      return t === "f64" ? "f32" : (t as ColKind);
     }
   }
 }
 
-const KIND_BYTES: Record<ColKind, number> = { u32: 4, i32: 4, u16: 2, i16: 2, u8: 1, f32: 4 };
+const KIND_BYTES: Record<ColKind, number> = { u32: 4, i32: 4, u16: 2, i16: 2, u8: 1, i8: 1, f32: 4 };
 
 /** Quantized code for one element of a column (deterministic rounding). */
 function quantize(name: string, value: number, ctx: QuantCtx): number {
@@ -156,6 +162,9 @@ function packCodes(codes: number[], kind: ColKind): Uint8Array {
       case "u8":
         view.setUint8(o, c & 0xff);
         break;
+      case "i8":
+        view.setInt8(o, c | 0);
+        break;
       case "f32":
         view.setFloat32(o, f32BitsToNumber(c), true);
         break;
@@ -186,6 +195,9 @@ function unpackCodes(bytes: Uint8Array, kind: ColKind): number[] {
         break;
       case "u8":
         out[i] = view.getUint8(o);
+        break;
+      case "i8":
+        out[i] = view.getInt8(o);
         break;
       case "f32":
         out[i] = numberToF32Bits(view.getFloat32(o, true));

@@ -1,0 +1,965 @@
+/**
+ * PF1e tactical **actor state** — what an actor *is* in combat, and the one derivation that turns
+ * `system.pf1e` + active effects into the numbers combat consumes.
+ *
+ * Two load-bearing rules (Gap List §10.1 items 1–2, recorded as D-112):
+ *  1. `actor.system.pf1e` is the **only** authored tactical location, and nothing derived from it is
+ *     ever persisted. The strategic pack's `data.system.pf1e` is a *compat read*, not a second place
+ *     to edit.
+ *  2. Effects never write to the actor: they are read live (`effects.ts`), so an expired buff needs
+ *     no undo, no restore, and no cleanup on delete. The derivation is pure, which is also why a UI
+ *     can never drift from it.
+ *
+ * `derivePF1eActor` is **total**: a document missing every PF1e field yields a legal Medium commoner,
+ * and every absent-or-malformed input is named in `issues` or `defaults`. Nothing is silently read
+ * as 0 where the rules say 10, and nothing throws — a half-filled sheet must still render.
+ */
+import { err, okVal, type Result } from "../../core/result";
+import {
+  abilityMod,
+  acFromBreakdown,
+  attacksOfOpportunityPerRound,
+  cmdFrom,
+  cmbFrom,
+  iterativeAttackBonuses,
+  normalizeSize,
+  sizeEntry,
+  spellSaveDc,
+  type PF1eBonusType,
+  type PF1eSize,
+} from "./rulesTables";
+import {
+  resolveEffects,
+  type PF1eActiveEffect,
+  type ResolvedEffects,
+} from "./effects";
+import { normalizePF1eSystem } from "./statBlock";
+
+export const PF1E_ABILITY_KEYS = [
+  "str",
+  "dex",
+  "con",
+  "int",
+  "wis",
+  "cha",
+] as const;
+export type PF1eAbilityKey = (typeof PF1E_ABILITY_KEYS)[number];
+
+/** The six abilities, as scores (modifiers are derived). */
+export interface PF1eAbilities {
+  str: number;
+  dex: number;
+  con: number;
+  int: number;
+  wis: number;
+  cha: number;
+}
+
+/** Authored AC components — never the total (composing it is what Gap List §2.1 fixed strategically). */
+export interface PF1eAcComponents {
+  armor?: number;
+  shield?: number;
+  natural?: number;
+  dodge?: number;
+  misc?: number;
+}
+
+export interface PF1eArmorEntry {
+  armorBonus?: number;
+  shieldBonus?: number;
+  /** Armor's maximum Dexterity bonus — a lower cap than the wearer's Dex modifier wins (A.2). */
+  maxDexBonus?: number;
+  /** Armor check penalty. */
+  checkPenalty?: number;
+  /** Arcane spell failure chance, percent. */
+  spellFailure?: number;
+}
+
+/** An authored attack line; iterative extra attacks and ability damage are derived, not authored. */
+export interface PF1eAttackEntry {
+  name?: string;
+  ranged?: boolean;
+  rangeIncrementFt?: number;
+  /** Authored damage dice, e.g. "1d8". */
+  damageDice?: string;
+  /** Flat damage already on the line (masterwork/magic weapon bonuses and friends). */
+  damageBonus?: number;
+  damageType?: string;
+  /** Two-handed weapons add 1.5× Str, off-hand and secondary natural attacks 0.5× (A.3). */
+  twoHanded?: boolean;
+  offHand?: boolean;
+  /** Natural attacks never iterate with BAB (A.2). */
+  natural?: boolean;
+  secondary?: boolean;
+  reachSquares?: number;
+  critMultiplier?: number;
+  /** Lowest die roll that threatens a critical (20 = 20 only). Carried, never inverted. */
+  critThreatMin?: number;
+  /** Ranged touch (rays, touch spells): ignores armor, shield, and natural armor (A.2). */
+  touchAttack?: boolean;
+  /** The authored `damageBonus` already contains the ability contribution (stat blocks do). */
+  abilityDamageIncluded?: boolean;
+}
+
+/** Spellcasting, authored once; prepared and spontaneous differ only in slot bookkeeping. */
+export interface PF1eSpellsAuthored {
+  keyAbility?: PF1eAbilityKey;
+  casterLevel?: number;
+  /** Extra flat bonus on save DCs (focus item, special). */
+  dcBonus?: number;
+  casterLevelBonus?: number;
+  concentrationBonus?: number;
+  mode?: "prepared" | "spontaneous";
+  /** Slots per day by spell level (0–10). Consumption is P5 — this is the authored budget. */
+  slotsPerDay?: Partial<Record<number, number>>;
+}
+
+/** Everything a PF1e actor document may author under `system.pf1e`. */
+export interface PF1eActorSystem {
+  size?: string;
+  speedFt?: number;
+  landSpeedFt?: number;
+  climbSpeedFt?: number;
+  flySpeedFt?: number;
+  swimSpeedFt?: number;
+  burrowSpeedFt?: number;
+  abilities?: Partial<Record<PF1eAbilityKey, number>>;
+  baseAttack?: number;
+  attackBonus?: number;
+  /** Authored misc CMB / CMD adjustments on top of the formula (racial, "Grab", …). */
+  combatManeuverBonus?: number;
+  cmb?: number;
+  cmd?: number;
+  cmdBonus?: number;
+  armorClass?: PF1eAcComponents;
+  armor?: PF1eArmorEntry;
+  saves?: { fort?: number; ref?: number; will?: number };
+  /** Non-Dexterity initiative adjustments (Improved Initiative, Trait, bonus feats). */
+  initiative?: number;
+  attacks?: PF1eAttackEntry[];
+  spells?: PF1eSpellsAuthored;
+  feats?: string[];
+  traits?: string[];
+  conditions?: string[];
+  hp?: number;
+  hpMax?: number;
+  nonlethalDamage?: number;
+  /** Damage reduction list is P7; the flat shortcut lives here for pack compatibility. */
+  dr?: number;
+  spellResistance?: number;
+  spellResistanceNote?: string;
+  /** Melee penalty for shooting a struck-then-withdraw snipe (A.9's sniping note). */
+  snipingPenalty?: number;
+  /**
+   * AC published as totals by a stat block (`normalizePF1eSystem` writes this). Used only when no AC
+   * components exist, and effect bonuses still add on top.
+   */
+  acTotals?: { normal: number; touch?: number; flatFooted?: number };
+  /** Set when `saves` holds published totals, so ability modifiers are not added twice. */
+  savesAsTotal?: boolean;
+  /** Stat blocks publish the generic size modifier, not a category (see A.4's deviation note). */
+  sizeMod?: number;
+  drBypass?: string[];
+  regeneration?: number;
+  regenSuppress?: string[];
+  fastHealing?: number;
+  spellPenetration?: number;
+  casterLevel?: number;
+  /** Anything a rule needs that this contract has no field for yet — preserved, never invented from. */
+  [key: string]: unknown;
+}
+
+/** A resolved attack line: everything one attack roll and one damage roll need. */
+export interface PF1eDerivedAttack {
+  name: string;
+  ranged: boolean;
+  /** Every iterative bonus in order, already including ability, size, and effect modifiers (A.2). */
+  attackBonuses: number[];
+  /** The full attack bonus of the first iterative, for display and for AoO reads. */
+  attackBonus: number;
+  damageDice: string | null;
+  /** Ability contribution after two-hand / off-hand multipliers (A.3). */
+  abilityDamage: number;
+  /** Everything added to damage: ability contribution, authored flat, and effect bonuses. */
+  damageBonus: number;
+  damageType: string;
+  critThreatMin: number;
+  critMultiplier: number;
+  reachSquares: number;
+  touchAttack: boolean;
+  rangedTouch: boolean;
+  explain: string;
+}
+
+export interface PF1eDerived {
+  size: PF1eSize;
+  sizeEntry: ReturnType<typeof sizeEntry>;
+  abilities: PF1eAbilities;
+  abilityMods: PF1eAbilities;
+  baseAttack: number;
+  iterativeAttacks: number[];
+  ac: { normal: number; touch: number; flatFooted: number };
+  saves: { fort: number; ref: number; will: number };
+  initiative: number;
+  cmb: number;
+  cmd: number;
+  cmdFlatFooted: number;
+  /** Empty list ⇒ the actor had no attack lines at all (a display concern, not an error). */
+  attacks: PF1eDerivedAttack[];
+  aooPerRound: number;
+  canTakeAoO: boolean;
+  speedFt: number;
+  flySpeedFt: number | null;
+  hp: number;
+  hpMax: number;
+  nonlethalDamage: number;
+  conditions: string[];
+  flatFooted: boolean;
+  deniedDexToAc: boolean;
+  immuneMindAffecting: boolean;
+  denies: ReadonlySet<string>;
+  grants: ReadonlySet<string>;
+  dr: number;
+  drBypass: string[];
+  regeneration: number;
+  regenerationSuppress: string[];
+  fastHealing: number;
+  spellResistance: number;
+  spellPenetration: number;
+  concentration: number;
+  spellCasterLevel: number;
+  spellKeyAbility: PF1eAbilityKey;
+  casting: boolean;
+  /** Index = spell level (0–10); value = save DC, or null when the actor cannot cast. */
+  spellSaveDc: (number | null)[];
+  /** Index = spell level; authored slots per day, null when the actor has no slots at that level. */
+  spellSlots: (number | null)[];
+  spellMode: "prepared" | "spontaneous";
+  /** `key → why this number is what it is`, so the sheet shows its work instead of trusting itself. */
+  explain: Record<string, string>;
+  /** Per mod key, the contributions that summed to it (`resolveEffects`). */
+  effectBreakdown: Partial<Record<string, string>>;
+  /** Active effects that fed this derivation, for the UI's list. */
+  effects: readonly PF1eActiveEffect[];
+  /** Malformed authored data. */
+  issues: string[];
+  /** Fields the actor did not author, filled from a documented default. */
+  defaults: string[];
+  /** What a stat-block import had to reconstruct (empty for a hand-authored sheet). */
+  converted: string[];
+  /** Authored fields the tactical rules do not implement yet, each with the phase that owns it. */
+  unsupported: string[];
+  /** AC came from published totals rather than components. */
+  acFromTotals: boolean;
+}
+
+const UNARMED_DICE_BY_SIZE: Partial<Record<PF1eSize, string>> = {
+  Small: "1d2",
+  Medium: "1d2",
+  Large: "1d3",
+  Huge: "1d4",
+  Gargantuan: "1d6",
+  Colossal: "1d8",
+};
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** Core `attributes.hp` is `{ value, max, temp }`; the pack's legacy block is a flat number. */
+function unwrap(v: unknown, prefer: "value" | "max"): number | undefined {
+  if (typeof v === "number" && Number.isFinite(v)) return Math.trunc(v);
+  if (isRecord(v)) {
+    const pick = v[prefer] ?? (prefer === "max" ? v.max : v.value) ?? v.total;
+    if (typeof pick === "number" && Number.isFinite(pick))
+      return Math.trunc(pick);
+  }
+  return undefined;
+}
+
+interface Collector {
+  issues: string[];
+  defaults: string[];
+}
+
+function readNumber(
+  raw: unknown,
+  field: string,
+  c: Collector,
+  opts: { fallback?: number; defaultWhenAbsent?: number } = {},
+): number {
+  const fallback = opts.fallback ?? 0;
+  if (raw === undefined || raw === null || raw === "") {
+    if (opts.defaultWhenAbsent !== undefined) {
+      c.defaults.push(
+        `${field}: not authored — using ${opts.defaultWhenAbsent}`,
+      );
+      return opts.defaultWhenAbsent;
+    }
+    return fallback;
+  }
+  const n =
+    typeof raw === "number"
+      ? raw
+      : typeof raw === "string" && raw.trim() !== ""
+        ? Number(raw)
+        : NaN;
+  if (!Number.isFinite(n)) {
+    c.issues.push(
+      `${field}: ${JSON.stringify(raw)} is not a number — using ${fallback}`,
+    );
+    return fallback;
+  }
+  return Math.trunc(n);
+}
+
+/**
+ * Read + validate a `system.pf1e` block. The sheet calls this **before** submitting so a bad edit
+ * surfaces as a form error rather than as a silently wrong number on the character sheet.
+ */
+export function parsePF1eActorSystem(raw: unknown): Result<PF1eActorSystem> {
+  if (raw === undefined || raw === null) return okVal({});
+  if (!isRecord(raw)) return err("system.pf1e must be an object");
+  const o = raw as Record<string, unknown>;
+  if (
+    o.size !== undefined &&
+    o.size !== null &&
+    o.size !== "" &&
+    normalizeSize(o.size) === null
+  ) {
+    return err(
+      `system.pf1e.size ${JSON.stringify(o.size)} is not a PF1e size category`,
+    );
+  }
+  if (o.attacks !== undefined && !Array.isArray(o.attacks)) {
+    return err("system.pf1e.attacks must be an array");
+  }
+  if (Array.isArray(o.attacks)) {
+    for (const [i, a] of o.attacks.entries()) {
+      if (!isRecord(a))
+        return err(`system.pf1e.attacks[${i}] must be an object`);
+    }
+  }
+  if (o.abilities !== undefined && !isRecord(o.abilities)) {
+    return err("system.pf1e.abilities must be an object of scores");
+  }
+  if (isRecord(o.abilities)) {
+    for (const [k, v] of Object.entries(o.abilities)) {
+      if (!(PF1E_ABILITY_KEYS as readonly string[]).includes(k)) {
+        return err(`system.pf1e.abilities: "${k}" is not an ability`);
+      }
+      if (typeof v !== "number" || !Number.isFinite(v)) {
+        return err(`system.pf1e.abilities.${k} must be a number`);
+      }
+    }
+  }
+  if (o.spells !== undefined) {
+    if (!isRecord(o.spells)) return err("system.pf1e.spells must be an object");
+    const s = o.spells as Record<string, unknown>;
+    if (
+      s.keyAbility !== undefined &&
+      !(PF1E_ABILITY_KEYS as readonly string[]).includes(String(s.keyAbility))
+    ) {
+      return err(
+        `system.pf1e.spells.keyAbility ${JSON.stringify(s.keyAbility)} is not an ability`,
+      );
+    }
+    if (
+      s.mode !== undefined &&
+      s.mode !== "prepared" &&
+      s.mode !== "spontaneous"
+    ) {
+      return err(
+        `system.pf1e.spells.mode ${JSON.stringify(s.mode)} must be "prepared" or "spontaneous"`,
+      );
+    }
+  }
+  if (o.armorClass !== undefined && !isRecord(o.armorClass)) {
+    return err("system.pf1e.armorClass must be an object of AC components");
+  }
+  if (o.saves !== undefined && !isRecord(o.saves)) {
+    return err("system.pf1e.saves must be an object with fort/ref/will");
+  }
+  if (
+    o.feats !== undefined &&
+    !Array.isArray(o.feats) &&
+    typeof o.feats !== "string"
+  ) {
+    return err(
+      "system.pf1e.feats must be a list of names or a comma-separated string",
+    );
+  }
+  return okVal(o as PF1eActorSystem);
+}
+
+export interface DeriveInput {
+  system?: PF1eActorSystem | Record<string, unknown> | null | undefined;
+  /** Core-owned attributes (`hp`, `ac`, `movement`), which is where pack documents keep them. */
+  attributes?: Record<string, unknown> | undefined;
+  effects?: readonly PF1eActiveEffect[] | undefined;
+}
+
+/**
+ * The single tactical derivation. The order is the rules' order: ability scores first (effects can
+ * raise them), then everything that consumes a modifier, so a +2 Strength buff moves damage, CMB,
+ * and CMD exactly the way the SRD does.
+ */
+export function derivePF1eActor(input: DeriveInput): PF1eDerived {
+  const c: Collector = { issues: [], defaults: [] };
+  // Stat blocks (`bab`, `strMod`, `ac`, `weapon`, …) are converted to components where that is
+  // possible and carried as totals where it is not; `converted`/`unsupported` say which is which.
+  const normalized = normalizePF1eSystem(input.system ?? {});
+  for (const line of normalized.converted) c.defaults.push(line);
+  const sys = (normalized.system ?? {}) as PF1eActorSystem;
+  const attrs = isRecord(input.attributes) ? input.attributes : {};
+  const effects = input.effects ?? [];
+  const resolved: ResolvedEffects = resolveEffects(effects);
+
+  // 1. Ability scores, then typed modifiers *on the scores* (bull's strength and friends), then
+  //    the modifiers themselves. An untyped +2 to Str and an enhancement +2 to Str both move the score.
+  const base: PF1eAbilities = {
+    str: 10,
+    dex: 10,
+    con: 10,
+    int: 10,
+    wis: 10,
+    cha: 10,
+  };
+  const authoredAbilities = isRecord(sys.abilities) ? sys.abilities : {};
+  if (sys.abilities !== undefined && !isRecord(sys.abilities)) {
+    c.issues.push("abilities: expected an object of scores — ignored");
+  }
+  const abilities: PF1eAbilities = { ...base };
+  for (const k of PF1E_ABILITY_KEYS) {
+    const v = authoredAbilities[k];
+    if (v === undefined) continue;
+    const n = readNumber(v, `abilities.${k}`, c, { fallback: 10 });
+    if (n < 3 || n > 55)
+      c.issues.push(
+        `abilities.${k} = ${n} is outside the 3–55 range — kept as authored`,
+      );
+    abilities[k] = n;
+  }
+  for (const k of PF1E_ABILITY_KEYS) {
+    const m = resolved.mods[`ability.${k}`];
+    if (m !== undefined) abilities[k] = abilities[k] + m;
+  }
+  const mods: PF1eAbilities = {
+    str: abilityMod(abilities.str),
+    dex: abilityMod(abilities.dex),
+    con: abilityMod(abilities.con),
+    int: abilityMod(abilities.int),
+    wis: abilityMod(abilities.wis),
+    cha: abilityMod(abilities.cha),
+  };
+
+  // 2. Size and base attack bonus.
+  let size: PF1eSize = "Medium";
+  const authoredSize = normalizeSize(sys.size);
+  if (authoredSize !== null) {
+    size = authoredSize;
+  } else if (typeof sys.size === "string" && sys.size.trim() !== "") {
+    c.issues.push(
+      `size ${JSON.stringify(sys.size)} is not a PF1e size category — using Medium`,
+    );
+  } else if (sys.size !== undefined && sys.size !== null) {
+    c.issues.push(
+      `size ${JSON.stringify(sys.size)} is not a string — using Medium`,
+    );
+  } else {
+    c.defaults.push("size: not authored — using Medium");
+  }
+  const sz = sizeEntry(size);
+  // A stat block that only published `sizeMod` keeps that number for attack/AC *and* CMB/CMD — the
+  // SRD wants the special size ladder there (A.4), which is the recorded strategic deviation.
+  const sizeAttackAc = sys.sizeMod ?? sz.attackAc;
+  const babRaw =
+    sys.baseAttack ??
+    sys.attackBonus ??
+    attrs.baseAttack ??
+    attrs.baseAttackBonus;
+  const baseAttack = readNumber(babRaw, "baseAttack", c);
+  const iterativeAttacks = iterativeAttackBonuses(baseAttack);
+
+  // 3. Armor, the Dexterity cap it imposes, and the three ACs (A.2).
+  const armor = isRecord(sys.armor) ? (sys.armor as PF1eArmorEntry) : {};
+  const acC = isRecord(sys.armorClass)
+    ? (sys.armorClass as PF1eAcComponents)
+    : {};
+  const legacyAc = isRecord(attrs.ac)
+    ? (attrs.ac as Record<string, unknown>)
+    : {};
+  const armorBonus = readNumber(
+    armor.armorBonus ?? acC.armor ?? attrs.armor ?? legacyAc.armor,
+    "armor.armorBonus",
+    c,
+  );
+  const shieldBonus = readNumber(
+    armor.shieldBonus ?? acC.shield ?? attrs.shield,
+    "armor.shieldBonus",
+    c,
+  );
+  const naturalArmor = readNumber(
+    acC.natural ?? attrs.naturalArmor,
+    "armorClass.natural",
+    c,
+  );
+  const dodgeBonus = readNumber(acC.dodge, "armorClass.dodge", c);
+  const acMisc = readNumber(acC.misc, "armorClass.misc", c);
+  const maxDex =
+    armor.maxDexBonus === undefined || armor.maxDexBonus === null
+      ? Number.POSITIVE_INFINITY
+      : readNumber(armor.maxDexBonus, "armor.maxDexBonus", c, {
+          fallback: Number.POSITIVE_INFINITY,
+        });
+  const cappedDex = Number.isFinite(maxDex)
+    ? Math.min(mods.dex, maxDex)
+    : mods.dex;
+  const flatFooted = resolved.flatFooted;
+  const deniedDex = flatFooted || resolved.deniedDexToAc;
+  const authoredTotals = isRecord(sys.acTotals)
+    ? (sys.acTotals as PF1eActorSystem["acTotals"])
+    : null;
+  const composedAc = acFromBreakdown({
+    armor: armorBonus,
+    shield: shieldBonus,
+    dex: deniedDex ? 0 : cappedDex,
+    natural: naturalArmor,
+    dodge: deniedDex ? 0 : dodgeBonus, // dodge bonuses are lost when flat-footed (A.2)
+    misc: acMisc,
+    size: sizeAttackAc,
+  });
+  const acMod = resolved.mods.ac ?? 0;
+  // A stat block publishes totals that cannot be recomposed (no armor/natural breakdown was authored),
+  // so those totals stand and only the effect layer is added on top — the same precedence
+  // `compilePF1eProfile` uses, which is what keeps the two scales from disagreeing about the content.
+  const acBase =
+    authoredTotals === null || authoredTotals === undefined
+      ? composedAc
+      : {
+          normal: authoredTotals.normal ?? 10,
+          touch:
+            authoredTotals.touch ??
+            Math.max(
+              10,
+              (authoredTotals.normal ?? 10) - cappedDex - dodgeBonus,
+            ),
+          flatFooted:
+            authoredTotals.flatFooted ??
+            Math.max(
+              10,
+              (authoredTotals.normal ?? 10) -
+                (deniedDex ? 0 : cappedDex) -
+                dodgeBonus,
+            ),
+        };
+  const ac = {
+    // A general "+N AC" effect applies to all three; `acTouch`/`acFlatFooted` add on top of the
+    // ones they name. Armor, shield, and natural bonuses never apply to touch (A.2).
+    normal: acBase.normal + acMod,
+    touch: acBase.touch + acMod + (resolved.mods.acTouch ?? 0),
+    flatFooted: acBase.flatFooted + acMod + (resolved.mods.acFlatFooted ?? 0),
+  };
+
+  // 4. Saving throws (A.16's basis: class base + key ability + typed mods).
+  const savesAuthored = isRecord(sys.saves) ? sys.saves : {};
+  const allSaves = resolved.mods.saves ?? 0;
+  const totalsArePublished = sys.savesAsTotal === true;
+  const abilitySave = (
+    base: unknown,
+    key: keyof PF1eAbilities,
+    field: string,
+  ): number =>
+    readNumber(base, field, c) + (totalsArePublished ? 0 : mods[key]);
+  const saves = {
+    fort:
+      abilitySave(savesAuthored.fort, "con", "saves.fort") +
+      allSaves +
+      (resolved.mods["save.fort"] ?? 0),
+    ref:
+      abilitySave(savesAuthored.ref, "dex", "saves.ref") +
+      allSaves +
+      (resolved.mods["save.ref"] ?? 0),
+    will:
+      abilitySave(savesAuthored.will, "wis", "saves.will") +
+      allSaves +
+      (resolved.mods["save.will"] ?? 0),
+  };
+
+  // 5. Initiative = Dexterity check + authored adjustments + effect modifiers (A.1). Ties, surprise,
+  //    and the flat-footed-until-first-turn state are `combatState.ts`'s business.
+  const initiativeAuthored = readNumber(sys.initiative, "initiative", c);
+  const initiativeEffects = resolved.mods.initiative ?? 0;
+  const initiative =
+    (deniedDex ? 0 : mods.dex) + initiativeAuthored + initiativeEffects;
+
+  // 6. CMB and CMD (A.9): the special size ladder, not the attack one, and CMD borrows the
+  //    transferable AC bonuses plus every AC penalty.
+  const cmbMisc = readNumber(
+    sys.combatManeuverBonus ?? sys.cmb,
+    "combatManeuverBonus",
+    c,
+  );
+  const cmdMisc = readNumber(sys.cmdBonus ?? sys.cmd, "cmdBonus", c);
+  const cmb = cmbFrom({
+    bab: baseAttack,
+    strMod: mods.str,
+    dexMod: mods.dex,
+    size,
+    misc: cmbMisc + (resolved.mods.cmb ?? 0),
+    ...(sys.sizeMod !== undefined ? { sizeModOverride: sys.sizeMod } : {}),
+  });
+  const cmdParts = cmdFrom({
+    bab: baseAttack,
+    strMod: mods.str,
+    dexMod: mods.dex,
+    size,
+    misc: cmdMisc + (resolved.mods.cmd ?? 0),
+    acTransfer: resolved.acTransfer,
+    acPenalties: resolved.acPenalties,
+    ...(sys.sizeMod !== undefined ? { sizeModOverride: sys.sizeMod } : {}),
+  });
+
+  // 7. Attack lines (A.2/A.3).
+  const authoredAttacks: PF1eAttackEntry[] = Array.isArray(sys.attacks)
+    ? sys.attacks.filter(isRecord).map((a) => a as PF1eAttackEntry)
+    : [];
+  if (sys.attacks !== undefined && !Array.isArray(sys.attacks)) {
+    c.issues.push("attacks: expected an array — ignored");
+  }
+  const toHit = (ranged: boolean): number =>
+    (resolved.mods.attack ?? 0) +
+    (ranged
+      ? (resolved.mods.attackRanged ?? 0)
+      : (resolved.mods.attackMelee ?? 0));
+  const lines: PF1eAttackEntry[] =
+    authoredAttacks.length > 0
+      ? authoredAttacks
+      : [{ name: "Unarmed strike", damageDice: unarmedDamageDice(size) }];
+  const attacks: PF1eDerivedAttack[] = lines.map((a, idx) => {
+    const ranged = a.ranged === true || a.rangeIncrementFt !== undefined;
+    const natural = a.natural === true || a.secondary === true;
+    const ability = ranged ? mods.dex : mods.str;
+    const strMult =
+      a.twoHanded === true
+        ? 1.5
+        : a.offHand === true || a.secondary === true
+          ? 0.5
+          : 1;
+    const abilityDamage =
+      a.abilityDamageIncluded === true
+        ? 0 // the authored `damageBonus` already contains it (stat-block weapon.damageMod)
+        : ranged
+          ? 0
+          : Math.floor(ability * strMult);
+    const flatDamage = readNumber(
+      a.damageBonus,
+      `attacks[${idx}].damageBonus`,
+      c,
+    );
+    const effectDamage = resolved.mods.damage ?? 0;
+    const ladder = natural ? [baseAttack] : iterativeAttacks;
+    const bonus = ability + sizeAttackAc + toHit(ranged);
+    const damageBonus = abilityDamage + flatDamage + effectDamage;
+    const critMultiplier = readNumber(
+      a.critMultiplier,
+      `attacks[${idx}].critMultiplier`,
+      c,
+      { fallback: 2 },
+    );
+    const critThreatMin = readNumber(
+      a.critThreatMin,
+      `attacks[${idx}].critThreatMin`,
+      c,
+      {
+        fallback: 20,
+      },
+    );
+    if (critThreatMin < 1 || critThreatMin > 20) {
+      c.issues.push(
+        `attacks[${idx}].critThreatMin = ${critThreatMin} is outside 1–20 — kept, 20 is the default`,
+      );
+    }
+    return {
+      name:
+        typeof a.name === "string" && a.name !== ""
+          ? a.name
+          : ranged
+            ? "Ranged attack"
+            : "Unarmed strike",
+      ranged,
+      attackBonuses: ladder.map((b) => b + bonus),
+      attackBonus: (ladder[0] ?? 0) + bonus,
+      damageDice:
+        typeof a.damageDice === "string" && a.damageDice !== ""
+          ? a.damageDice
+          : null,
+      abilityDamage,
+      damageBonus,
+      damageType:
+        typeof a.damageType === "string"
+          ? a.damageType
+          : ranged
+            ? "piercing"
+            : "bludgeoning",
+      critThreatMin: critThreatMin,
+      critMultiplier: critMultiplier < 2 ? 2 : critMultiplier,
+      reachSquares:
+        a.reachSquares !== undefined
+          ? readNumber(a.reachSquares, `attacks[${idx}].reachSquares`, c)
+          : sz.reachSquares,
+      touchAttack: a.touchAttack === true,
+      rangedTouch: a.touchAttack === true && ranged,
+      explain:
+        `${bonus >= 0 ? "+" : ""}${bonus} = ${ranged ? `Dex ${fmt(mods.dex)}` : `Str ${fmt(ability)}${strMult !== 1 ? ` ×${strMult}` : ""}`}` +
+        `, size ${fmt(sz.attackAc)}${toHit(ranged) !== 0 ? `, effects ${fmt(toHit(ranged))}` : ""}` +
+        `; damage ${fmt(damageBonus)}`,
+    };
+  });
+
+  // 8. Attacks of opportunity budget (A.10) and the denials that zero it.
+  const feats = featList(sys, c.issues);
+  const combatReflexes = feats.some(
+    (f) => f.trim().toLowerCase() === "combat reflexes",
+  );
+  const aooPerRound = attacksOfOpportunityPerRound(mods.dex, combatReflexes);
+  const canTakeAoO = !resolved.cannotAoO && !flatFooted && aooPerRound > 0;
+
+  // 9. Movement, hit points, conditions.
+  const speedRaw = sys.landSpeedFt ?? sys.speedFt ?? attrs.movement;
+  const speedFt = readNumber(speedRaw, "speedFt", c, { defaultWhenAbsent: 30 });
+  const flySpeedFt =
+    sys.flySpeedFt === undefined
+      ? null
+      : readNumber(sys.flySpeedFt, "flySpeedFt", c);
+  const hpMax = readNumber(
+    sys.hpMax ?? attrs.hpMax ?? unwrap(attrs.hp, "max"),
+    "hpMax",
+    c,
+  );
+  const hp = readNumber(
+    sys.hp ?? unwrap(attrs.hp, "value") ?? attrs.hpValue,
+    "hp",
+    c,
+    { fallback: hpMax },
+  );
+  const nonlethalDamage = readNumber(sys.nonlethalDamage, "nonlethalDamage", c);
+  const dr = readNumber(sys.dr, "dr", c);
+  const spellResistance = readNumber(sys.spellResistance, "spellResistance", c);
+  const authoredConditions = Array.isArray(sys.conditions)
+    ? sys.conditions.filter((x): x is string => typeof x === "string")
+    : [];
+  const conditions = [
+    ...new Set([...authoredConditions, ...resolved.conditions]),
+  ];
+
+  // 10. Spellcasting (A.16): DC = 10 + spell level + key ability modifier, per level.
+  const spellsAuthored = isRecord(sys.spells)
+    ? (sys.spells as PF1eSpellsAuthored)
+    : {};
+  const keyAbility: PF1eAbilityKey =
+    typeof spellsAuthored.keyAbility === "string" &&
+    (PF1E_ABILITY_KEYS as readonly string[]).includes(spellsAuthored.keyAbility)
+      ? spellsAuthored.keyAbility
+      : "int";
+  const dcBonus = readNumber(spellsAuthored.dcBonus, "spells.dcBonus", c);
+  const casterLevel =
+    readNumber(spellsAuthored.casterLevel, "spells.casterLevel", c) +
+    readNumber(spellsAuthored.casterLevelBonus, "spells.casterLevelBonus", c) +
+    (resolved.mods.casterLevel ?? 0);
+  const hasSlots = isRecord(spellsAuthored.slotsPerDay)
+    ? Object.values(spellsAuthored.slotsPerDay as Record<string, unknown>).some(
+        (v) => typeof v === "number" && v > 0,
+      )
+    : false;
+  const casting = hasSlots || (sys.spells !== undefined && casterLevel > 0);
+  const spellSaveDcs: (number | null)[] = [];
+  const spellSlots: (number | null)[] = [];
+  for (let level = 0; level <= 10; level += 1) {
+    const slots = spellsAuthored.slotsPerDay?.[level];
+    spellSlots.push(
+      typeof slots === "number" && Number.isFinite(slots)
+        ? Math.max(0, Math.trunc(slots))
+        : null,
+    );
+    // A DC exists for a level the actor has slots at, which is what a sheet lists; a caster level with
+    // no slot budget (a stat block's "caster level 3") publishes no per-level DC rather than a guess.
+    const slotsLeft =
+      typeof slots === "number" && Number.isFinite(slots) && slots > 0;
+    spellSaveDcs.push(
+      casting && slotsLeft
+        ? spellSaveDc({
+            spellLevel: level,
+            keyMod: mods[keyAbility],
+            focus: dcBonus,
+          }) + (resolved.mods.spellDc ?? 0)
+        : null,
+    );
+  }
+  const concentration =
+    readNumber(
+      spellsAuthored.concentrationBonus,
+      "spells.concentrationBonus",
+      c,
+    ) + (resolved.mods.concentration ?? 0);
+
+  return {
+    size,
+    sizeEntry: sz,
+    abilities,
+    abilityMods: mods,
+    baseAttack,
+    iterativeAttacks,
+    ac,
+    saves,
+    initiative,
+    cmb,
+    cmd: cmdParts.normal,
+    cmdFlatFooted: cmdParts.flatFooted,
+    attacks,
+    aooPerRound,
+    canTakeAoO,
+    speedFt,
+    flySpeedFt,
+    hp,
+    hpMax,
+    nonlethalDamage,
+    conditions,
+    flatFooted,
+    deniedDexToAc: deniedDex,
+    immuneMindAffecting: resolved.immuneMindAffecting,
+    denies: resolved.denies,
+    grants: resolved.grants,
+    dr,
+    drBypass: Array.isArray(sys.drBypass)
+      ? sys.drBypass.filter((x): x is string => typeof x === "string")
+      : [],
+    regeneration: readNumber(sys.regeneration, "regeneration", c),
+    regenerationSuppress: Array.isArray(sys.regenSuppress)
+      ? sys.regenSuppress.filter((x): x is string => typeof x === "string")
+      : [],
+    fastHealing: readNumber(sys.fastHealing, "fastHealing", c),
+    spellResistance,
+    spellPenetration: readNumber(sys.spellPenetration, "spellPenetration", c),
+    concentration,
+    spellCasterLevel: casting ? Math.max(0, casterLevel) : 0,
+    spellKeyAbility: keyAbility,
+    casting,
+    spellSaveDc: spellSaveDcs,
+    spellSlots,
+    spellMode:
+      spellsAuthored.mode === "spontaneous" ? "spontaneous" : "prepared",
+    explain: {
+      ac: authoredTotals
+        ? `authored total ${authoredTotals.normal}${acMod !== 0 ? ` + effects ${fmt(acMod)}` : ""} — no components to recompose from`
+        : `10 + armor ${armorBonus} + shield ${shieldBonus} + Dex ${deniedDex ? "0 (denied)" : cappedDex}` +
+          ` + natural ${naturalArmor} + size ${fmt(sz.attackAc)} + dodge ${deniedDex ? "0 (flat-footed)" : dodgeBonus}` +
+          ` + misc ${acMisc}${acMod !== 0 ? ` + effects ${fmt(acMod)}` : ""}`,
+      touch:
+        `10 + Dex ${deniedDex ? "0 (denied)" : cappedDex} + size ${fmt(sizeAttackAc)} + dodge ${deniedDex ? "0" : dodgeBonus}` +
+        ` + misc ${acMisc}${acMod !== 0 ? ` + effects ${fmt(acMod)}` : ""}${
+          (resolved.mods.acTouch ?? 0) !== 0
+            ? ` + touch ${fmt(resolved.mods.acTouch ?? 0)}`
+            : ""
+        }`,
+      flatFooted: `10 + armor ${armorBonus} + shield ${shieldBonus} + natural ${naturalArmor} + size ${fmt(sizeAttackAc)} + misc ${acMisc}`,
+      saves: `base + ability (Con/Dex/Wis)${allSaves !== 0 ? ` + ${fmt(allSaves)} all-saves` : ""}`,
+      cmb:
+        `BAB ${baseAttack} + ${sz.dexToCmb ? `Dex ${fmt(mods.dex)}` : `Str ${fmt(mods.str)}`}` +
+        ` + size ${fmt(sys.sizeMod ?? sz.cmbCmd)} + misc ${fmt(cmbMisc)}${(resolved.mods.cmb ?? 0) !== 0 ? ` + effects ${fmt(resolved.mods.cmb ?? 0)}` : ""}`,
+      cmd:
+        `10 + BAB ${baseAttack} + Str ${fmt(mods.str)} + Dex ${flatFooted ? "0 (flat-footed)" : fmt(mods.dex)}` +
+        ` + size ${fmt(sys.sizeMod ?? sz.cmbCmd)} + transferable AC ${fmt(resolved.acTransfer)} + AC penalties ${fmt(resolved.acPenalties)}`,
+      initiative:
+        `Dex ${deniedDex ? "0 (denied)" : fmt(mods.dex)} + authored ${initiativeAuthored}` +
+        `${initiativeEffects !== 0 ? ` + effects ${fmt(initiativeEffects)}` : ""}`,
+      aoo: `${aooPerRound}/round${combatReflexes ? " (Combat Reflexes)" : ""}${
+        flatFooted ? " — none while flat-footed" : ""
+      }`,
+      speed: `${speedFt} ft; ${sz.spaceFeet} ft space, ${sz.reachSquares} reach`,
+    },
+    effectBreakdown: resolved.breakdown,
+    effects,
+    issues: c.issues,
+    defaults: c.defaults,
+    converted: normalized.converted,
+    unsupported: normalized.unsupported,
+    acFromTotals: authoredTotals !== null && authoredTotals !== undefined,
+  };
+}
+
+function fmt(n: number): string {
+  return `${n >= 0 ? "+" : ""}${n}`;
+}
+
+/** Feats may be authored as a list or (as in the shipped pack) as a comma string or JSON blob. */
+function featList(raw: Record<string, unknown>, issues: string[]): string[] {
+  const direct = raw.feats;
+  if (Array.isArray(direct))
+    return direct.filter((f): f is string => typeof f === "string");
+  if (typeof direct === "string" && direct.trim() !== "") {
+    const text = direct.trim();
+    if (text.startsWith("[") || text.startsWith("{")) {
+      try {
+        const parsed: unknown = JSON.parse(text);
+        if (Array.isArray(parsed)) {
+          return parsed
+            .map((e) =>
+              typeof e === "string"
+                ? e
+                : isRecord(e) && typeof e.name === "string"
+                  ? e.name
+                  : "",
+            )
+            .filter((s) => s !== "");
+        }
+      } catch {
+        issues.push(
+          'feats: looked like JSON but did not parse — read as "name, name"',
+        );
+      }
+    }
+    return text
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s !== "");
+  }
+  if (direct !== undefined)
+    issues.push("feats: expected a list of names — ignored");
+  return [];
+}
+
+/** Unarmed strike damage by size (the full table is P6; Tiny-and-smaller unarmed is listed as such). */
+export function unarmedDamageDice(size: PF1eSize): string {
+  return UNARMED_DICE_BY_SIZE[size] ?? "1d2";
+}
+
+/** A derived view straight from documents, for the sheet and the combat panel. */
+export function deriveFromDocuments(input: {
+  actor: {
+    system?: Record<string, unknown> | undefined;
+    attributes?: Record<string, unknown> | undefined;
+  };
+  effects?: readonly PF1eActiveEffect[] | undefined;
+}): PF1eDerived {
+  const block = input.actor.system?.pf1e;
+  const parsed = parsePF1eActorSystem(block);
+  const d = derivePF1eActor({
+    system: parsed.ok ? parsed.value : {},
+    attributes: input.actor.attributes,
+    effects: input.effects ?? [],
+  });
+  return parsed.ok ? d : { ...d, issues: [parsed.error, ...d.issues] };
+}
+
+/** Bonus types that move CMD through AC (re-exported so the editor can label them). */
+export const CMD_TRANSFER_TYPES: readonly PF1eBonusType[] = [
+  "deflection",
+  "dodge",
+  "insight",
+  "luck",
+  "morale",
+  "profane",
+  "sacred",
+  "circumstance",
+];
