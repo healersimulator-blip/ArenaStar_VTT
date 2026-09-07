@@ -240,8 +240,20 @@ export interface GmFogSurface {
   ): { ok: boolean; unitId: string | null; error: string | null };
   /** Fire a GM sim.control (start/pause/resume/rate/…) through the client. */
   simControl(
-    action: "pause" | "resume" | "rate" | "advance" | "next" | "undoTurn" | "mode" | "start",
-    extra?: { rateHz?: number; mode?: "stepwise" | "realtime"; deadlineMs?: number },
+    action:
+      | "pause"
+      | "resume"
+      | "rate"
+      | "advance"
+      | "next"
+      | "undoTurn"
+      | "mode"
+      | "start",
+    extra?: {
+      rateHz?: number;
+      mode?: "stepwise" | "realtime";
+      deadlineMs?: number;
+    },
   ): void;
   /** §11 commit-reveal audit: newest roll record + in-app verification. */
   committedRoll(): Promise<{
@@ -311,7 +323,9 @@ function playerSurface(playerApp: PlayerApp): PlayerSurface {
   playerApp.bus.on("turnReport", (m) => {
     lastReportEvents = m.report.events.length;
     const dist = (
-      m.report.summary as unknown as { distributions?: { byType?: Record<string, number> } }
+      m.report.summary as unknown as {
+        distributions?: { byType?: Record<string, number> };
+      }
     ).distributions;
     lastByType = dist?.byType ?? {};
   });
@@ -387,7 +401,8 @@ function appSurface(app: HostApp): AppSurface {
       return (scenes.find((sc) => sc.active) ?? scenes[0])?._id ?? null;
     },
     sceneCount: () => client.store.getAll("scenes").length,
-    lastRejected: () => globalThis.localStorage.getItem("vtt-e2e-last-rejected"),
+    lastRejected: () =>
+      globalThis.localStorage.getItem("vtt-e2e-last-rejected"),
     rulesBoot: () => app.rulesBoot,
     migrationBoot: () => app.migrationBoot,
     packages: () => app.packages.list(),
@@ -399,7 +414,8 @@ function appSurface(app: HostApp): AppSurface {
     deactivatePackage: () => app.packages.deactivate(),
     gridSize: () => {
       const scenes = client.store.getAll("scenes");
-      return ((scenes.find((sc) => sc.active) ?? scenes[0])?.grid.size ?? null) as number | null;
+      return ((scenes.find((sc) => sc.active) ?? scenes[0])?.grid.size ??
+        null) as number | null;
     },
   };
 }
@@ -409,7 +425,11 @@ async function runCanvasSmoke(): Promise<CanvasSmokeResult> {
     const { createStage, LAYER_ORDER } = await import("../canvas/stage");
     const host = globalThis.document.createElement("div");
     globalThis.document.body.appendChild(host);
-    const stage = await createStage({ width: 320, height: 240, hostElement: host });
+    const stage = await createStage({
+      width: 320,
+      height: 240,
+      hostElement: host,
+    });
     stage.setGrid({ type: "square", size: 64 });
     stage.fit(640, 480);
     stage.syncTokens([
@@ -470,7 +490,11 @@ async function runModelsSmoke(): Promise<ModelsSmokeResult> {
     type FactionDocument = import("../core/strategic").FactionDocument;
     const host = globalThis.document.createElement("div");
     globalThis.document.body.appendChild(host);
-    const stage = await createStage({ width: 640, height: 480, hostElement: host });
+    const stage = await createStage({
+      width: 640,
+      height: 480,
+      hostElement: host,
+    });
     const layer = stage.getModelLayer();
 
     const unit = (
@@ -491,9 +515,19 @@ async function runModelsSmoke(): Promise<ModelsSmokeResult> {
         sceneId: null,
         modelRange: range,
         orders: { pending: [], issuedBy: "gm", issuedTurn: 0 },
-        stats: { strength: range[1] - range[0], morale: 5, supply: 5, fatigue: 0 },
+        stats: {
+          strength: range[1] - range[0],
+          morale: 5,
+          supply: 5,
+          fatigue: 0,
+        },
       }) as UnitDocument;
-    const army = (id: string, name: string, factionId: string, units: UnitDocument[]) =>
+    const army = (
+      id: string,
+      name: string,
+      factionId: string,
+      units: UnitDocument[],
+    ) =>
       ({
         _id: id,
         type: "army" as const,
@@ -576,11 +610,23 @@ async function runModelsSmoke(): Promise<ModelsSmokeResult> {
     const stats0 = layer.sync(pool, units, cam, stage.viewport);
     stage.render();
     const hitUnit = layer.hitTest(100.5, 100.5, pool);
-    const boxUnits = [...layer.unitsInRect({ x: 95, y: 95, width: 30, height: 30 }, pool)].sort();
+    const boxUnits = [
+      ...layer.unitsInRect({ x: 95, y: 95, width: 30, height: 30 }, pool),
+    ].sort();
 
-    const stats1 = layer.sync(pool, units, { ...cam, scale: 0.3 }, stage.viewport);
+    const stats1 = layer.sync(
+      pool,
+      units,
+      { ...cam, scale: 0.3 },
+      stage.viewport,
+    );
     stage.render();
-    const stats2 = layer.sync(pool, units, { ...cam, scale: 0.1 }, stage.viewport);
+    const stats2 = layer.sync(
+      pool,
+      units,
+      { ...cam, scale: 0.1 },
+      stage.viewport,
+    );
     stage.render();
 
     const again = layer.sync(pool, units, cam, stage.viewport); // warm path timing
@@ -727,7 +773,12 @@ async function runArmiesSmoke(): Promise<ArmiesSmokeResult> {
       import("svelte"),
     ]);
     const store = new DocumentStore({
-      meta: { worldId: "w-amw", name: "AMW", system: "mass-battle-basic", systemVersion: "1" },
+      meta: {
+        worldId: "w-amw",
+        name: "AMW",
+        system: "mass-battle-basic",
+        systemVersion: "1",
+      },
     });
     const host = new HostSync({
       store,
@@ -743,7 +794,12 @@ async function runArmiesSmoke(): Promise<ArmiesSmokeResult> {
     const client = new ClientSync({
       transport: pair.a,
       bus: clientBus,
-      meta: { worldId: "w-amw", name: "AMW", system: "mass-battle-basic", systemVersion: "1" },
+      meta: {
+        worldId: "w-amw",
+        name: "AMW",
+        system: "mass-battle-basic",
+        systemVersion: "1",
+      },
     });
     host.addSession("g", pair.b, gmSessionUser("gm"));
     await flushMicrotasks();
@@ -751,7 +807,11 @@ async function runArmiesSmoke(): Promise<ArmiesSmokeResult> {
     type FactionDocument = import("../core/strategic").FactionDocument;
     type UnitDocument = import("../core/strategic").UnitDocument;
     type ArmyDocument = import("../core/strategic").ArmyDocument;
-    const unit = (id: string, type: string, range: [number, number] | null): UnitDocument => ({
+    const unit = (
+      id: string,
+      type: string,
+      range: [number, number] | null,
+    ): UnitDocument => ({
       _id: id,
       type,
       name: id,
@@ -806,14 +866,21 @@ async function runArmiesSmoke(): Promise<ArmiesSmokeResult> {
           unit("u-r-1", "cavalry", null),
         ]),
       },
-      { kind: "create", coll: "armies", data: armyDoc("army-b", "Blue Host", "f-blue", many) },
+      {
+        kind: "create",
+        coll: "armies",
+        data: armyDoc("army-b", "Blue Host", "f-blue", many),
+      },
     ]);
     await flushMicrotasks();
     await flushMicrotasks();
 
-    const { default: ArmiesTab } = await import("../ui/armies/ArmiesTab.svelte");
-    const { default: ArmyWindow } = await import("../ui/armies/ArmyWindow.svelte");
-    const { createMassBattleBasic } = await import("../packages/massBattleBasic");
+    const { default: ArmiesTab } =
+      await import("../ui/armies/ArmiesTab.svelte");
+    const { default: ArmyWindow } =
+      await import("../ui/armies/ArmyWindow.svelte");
+    const { createMassBattleBasic } =
+      await import("../packages/massBattleBasic");
     const host0 = globalThis.document.createElement("div");
     globalThis.document.body.appendChild(host0);
     let opened = "";
@@ -857,7 +924,9 @@ async function runArmiesSmoke(): Promise<ArmiesSmokeResult> {
     const treeUnits = win0.querySelectorAll("[data-unit]").length;
 
     // select the first unit, issue the "Advance" template, assert the op lands
-    const firstUnitRow = win0.querySelector("[data-unit]") as HTMLElement | null;
+    const firstUnitRow = win0.querySelector(
+      "[data-unit]",
+    ) as HTMLElement | null;
     if (!firstUnitRow) {
       return {
         ok: false,
@@ -874,7 +943,9 @@ async function runArmiesSmoke(): Promise<ArmiesSmokeResult> {
     await flushMicrotasks();
     (win0.querySelector('[data-tab="orders"]') as HTMLElement).click();
     await flushMicrotasks();
-    const templateBtn = win0.querySelector('[data-template="advance"]') as HTMLElement | null;
+    const templateBtn = win0.querySelector(
+      '[data-template="advance"]',
+    ) as HTMLElement | null;
     if (!templateBtn) {
       return {
         ok: false,
@@ -968,9 +1039,12 @@ async function runVisionSmoke(): Promise<VisionSmokeResult> {
   try {
     const { createStage } = await import("../canvas/stage");
     const { sightSegments } = await import("../canvas/vision/wallSight");
-    const { WorkerVisionComputer } = await import("../workers/visionWorkerClient");
+    const { WorkerVisionComputer } =
+      await import("../workers/visionWorkerClient");
     const { pointInPolygon } = await import("../canvas/vision/polygon");
-    const VisionWorkerCtor = (await import("../workers/vision.worker.ts?worker&inline")).default;
+    const VisionWorkerCtor = (
+      await import("../workers/vision.worker.ts?worker&inline")
+    ).default;
     const { DocumentStore } = await import("../core/store");
     const { OpLog } = await import("../core/oplog");
     const { UndoStack } = await import("../core/undo");
@@ -979,7 +1053,8 @@ async function runVisionSmoke(): Promise<VisionSmokeResult> {
     type ClientEvents = import("../client/sync").ClientEvents;
     const { HostSync, gmSessionUser } = await import("../host/sync");
     const { ClientSync } = await import("../client/sync");
-    const { createTransportPair, flushMicrotasks } = await import("../net/memory");
+    const { createTransportPair, flushMicrotasks } =
+      await import("../net/memory");
 
     // room with one lit interior; polygon computed by the REAL worker
     type WallDoc = import("../core/documents").WallDocument;
@@ -1019,7 +1094,9 @@ async function runVisionSmoke(): Promise<VisionSmokeResult> {
       flat[i * 4 + 2] = sg.x2;
       flat[i * 4 + 3] = sg.y2;
     });
-    const computer = new WorkerVisionComputer(VisionWorkerCtor as unknown as new () => Worker);
+    const computer = new WorkerVisionComputer(
+      VisionWorkerCtor as unknown as new () => Worker,
+    );
     const poly = await computer.compute(200, 120, flat, 260);
     const seesDoorway = pointInPolygon(poly, 200, -10);
     const shadowBehindWall = !pointInPolygon(poly, 20, -10);
@@ -1028,7 +1105,11 @@ async function runVisionSmoke(): Promise<VisionSmokeResult> {
     // layers draw from file://
     const host = globalThis.document.createElement("div");
     globalThis.document.body.appendChild(host);
-    const stage = await createStage({ width: 320, height: 240, hostElement: host });
+    const stage = await createStage({
+      width: 320,
+      height: 240,
+      hostElement: host,
+    });
     stage.fit(400, 300);
     const cam = stage.camera;
     const wallsLayer = stage.getWallsLayer();
@@ -1069,7 +1150,12 @@ async function runVisionSmoke(): Promise<VisionSmokeResult> {
 
     // fog.put round trip over the real sync pair
     const store = new DocumentStore({
-      meta: { worldId: "w-vision", name: "V", system: "mass-battle-basic", systemVersion: "1" },
+      meta: {
+        worldId: "w-vision",
+        name: "V",
+        system: "mass-battle-basic",
+        systemVersion: "1",
+      },
     });
     const hostSync = new HostSync({
       store,
@@ -1085,13 +1171,19 @@ async function runVisionSmoke(): Promise<VisionSmokeResult> {
     const client = new ClientSync({
       transport: pair.a,
       bus: clientBus,
-      meta: { worldId: "w-vision", name: "V", system: "mass-battle-basic", systemVersion: "1" },
+      meta: {
+        worldId: "w-vision",
+        name: "V",
+        system: "mass-battle-basic",
+        systemVersion: "1",
+      },
     });
     hostSync.addSession("g", pair.b, gmSessionUser("gm"));
     await flushMicrotasks();
     client.sendFogPng("scene-1", png);
     await flushMicrotasks();
-    const fogPutLanded = (hostSync.fogPngs.get("scene-1:gm")?.length ?? 0) === png.length;
+    const fogPutLanded =
+      (hostSync.fogPngs.get("scene-1:gm")?.length ?? 0) === png.length;
 
     const ok =
       poly.length > 16 &&
@@ -1110,7 +1202,14 @@ async function runVisionSmoke(): Promise<VisionSmokeResult> {
       fogPutLanded,
       ...(ok
         ? {}
-        : { error: JSON.stringify({ seesDoorway, shadowBehindWall, png: png.length, layers }) }),
+        : {
+            error: JSON.stringify({
+              seesDoorway,
+              shadowBehindWall,
+              png: png.length,
+              layers,
+            }),
+          }),
     };
   } catch (err) {
     return {
@@ -1127,19 +1226,27 @@ async function runVisionSmoke(): Promise<VisionSmokeResult> {
 /** §9 grids/templates/drawings smoke: hex snap + layers draw from file://. */
 async function runGridsSmoke(): Promise<GridsSmokeResult> {
   try {
-    const { hexCenter, hexFromPixel, snapPoint } = await import("../canvas/grid");
-    const { pointInTemplate } = await import("../canvas/layers/templateGeometry");
+    const { hexCenter, hexFromPixel, snapPoint } =
+      await import("../canvas/grid");
+    const { pointInTemplate } =
+      await import("../canvas/layers/templateGeometry");
     const { createStage } = await import("../canvas/stage");
 
     const hex = { type: "hex" as const, size: 20, layout: "oddR" as const };
     const center = hexCenter(hex, 3, 2);
     const snapped = snapPoint(hex, center.x + 4, center.y - 3);
-    const isCenter = Math.abs(snapped.x - center.x) < 1e-6 && Math.abs(snapped.y - center.y) < 1e-6;
+    const isCenter =
+      Math.abs(snapped.x - center.x) < 1e-6 &&
+      Math.abs(snapped.y - center.y) < 1e-6;
     const containing = hexFromPixel(hex, center.x, center.y);
 
     const host = globalThis.document.createElement("div");
     globalThis.document.body.appendChild(host);
-    const stage = await createStage({ width: 320, height: 240, hostElement: host });
+    const stage = await createStage({
+      width: 320,
+      height: 240,
+      hostElement: host,
+    });
     stage.setGrid(hex);
     stage.getTemplatesLayer().sync(
       [
@@ -1183,21 +1290,31 @@ async function runGridsSmoke(): Promise<GridsSmokeResult> {
     await new Promise((r) => setTimeout(r, 60)); // let the grid ticker draw
     stage.render();
     const templateHit = pointInTemplate(
-      { kind: "cone", x: 100, y: 100, distance: 60, direction: Math.PI / 2, width: 60 },
+      {
+        kind: "cone",
+        x: 100,
+        y: 100,
+        distance: 60,
+        direction: Math.PI / 2,
+        width: 60,
+      },
       100,
       150,
     );
     stage.destroy();
     host.remove();
 
-    const ok = isCenter && containing.q === 3 && containing.r === 2 && templateHit;
+    const ok =
+      isCenter && containing.q === 3 && containing.r === 2 && templateHit;
     return {
       ok,
       snapped,
       isCenter,
       ...(ok
         ? {}
-        : { error: `containing=${containing.q},${containing.r} templateHit=${templateHit}` }),
+        : {
+            error: `containing=${containing.q},${containing.r} templateHit=${templateHit}`,
+          }),
     };
   } catch (err) {
     return {
@@ -1216,7 +1333,8 @@ function tinyWavDataUri(): string {
   const buffer = new ArrayBuffer(44 + samples * 2);
   const view = new DataView(buffer);
   const ascii = (at: number, text: string): void => {
-    for (let i = 0; i < text.length; i++) view.setUint8(at + i, text.charCodeAt(i));
+    for (let i = 0; i < text.length; i++)
+      view.setUint8(at + i, text.charCodeAt(i));
   };
   ascii(0, "RIFF");
   view.setUint32(4, 36 + samples * 2, true);
@@ -1231,11 +1349,16 @@ function tinyWavDataUri(): string {
   ascii(36, "data");
   view.setUint32(40, samples * 2, true);
   for (let i = 0; i < samples; i++) {
-    view.setInt16(44 + i * 2, Math.round(1200 * Math.sin((i / rate) * 2 * Math.PI * 440)), true);
+    view.setInt16(
+      44 + i * 2,
+      Math.round(1200 * Math.sin((i / rate) * 2 * Math.PI * 440)),
+      true,
+    );
   }
   let binary = "";
   const bytes = new Uint8Array(buffer);
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i] as number);
+  for (let i = 0; i < bytes.length; i++)
+    binary += String.fromCharCode(bytes[i] as number);
   return "data:audio/wav;base64," + globalThis.btoa(binary);
 }
 
@@ -1314,7 +1437,8 @@ async function runParitySmoke(): Promise<ParitySmokeResult> {
     await flushMicrotasks();
     const clock = client.clockOffset();
     if (!clock) return fail("no clock estimate after 3 probes");
-    if (Math.abs(clock.offsetMs) > 5000) return fail(`offset out of range: ${clock.offsetMs}`);
+    if (Math.abs(clock.offsetMs) > 5000)
+      return fail(`offset out of range: ${clock.offsetMs}`);
 
     // ── seed journal (with <secret>), table, playlist via GM ops
     const wav = tinyWavDataUri();
@@ -1385,9 +1509,15 @@ async function runParitySmoke(): Promise<ParitySmokeResult> {
     const hostEl = globalThis.document.createElement("div");
     globalThis.document.body.appendChild(hostEl);
     cleanup.push(() => hostEl.remove());
-    const journalsMount = mount(JournalsPanel, { target: hostEl, props: { client, bus } });
+    const journalsMount = mount(JournalsPanel, {
+      target: hostEl,
+      props: { client, bus },
+    });
     cleanup.push(() => unmount(journalsMount));
-    const tablesMount = mount(TablesPanel, { target: hostEl, props: { client, bus } });
+    const tablesMount = mount(TablesPanel, {
+      target: hostEl,
+      props: { client, bus },
+    });
     cleanup.push(() => unmount(tablesMount));
     const player = new AudioPlayer({ client, bus });
     const plMount = mount(PlaylistsPanel, {
@@ -1405,7 +1535,9 @@ async function runParitySmoke(): Promise<ParitySmokeResult> {
     const heading = hostEl.querySelector(".page h1")?.textContent ?? "";
 
     // table draw lands in the messages store
-    const drawBtn = hostEl.querySelector("#table-draw") as HTMLButtonElement | null;
+    const drawBtn = hostEl.querySelector(
+      "#table-draw",
+    ) as HTMLButtonElement | null;
     if (!drawBtn) return fail("no #table-draw button");
     drawBtn.click();
     await flushMicrotasks();
@@ -1416,7 +1548,12 @@ async function runParitySmoke(): Promise<ParitySmokeResult> {
     // ── audio loop: play cmd → host stamps → rebroadcast → player schedules
     let audioLanded = false;
     const offAudio = bus.on("audio", () => (audioLanded = true));
-    client.sendAudioCmd({ playlistId: "pl1", soundId: "snd1", action: "play", offset: 0 });
+    client.sendAudioCmd({
+      playlistId: "pl1",
+      soundId: "snd1",
+      action: "play",
+      offset: 0,
+    });
     await flushMicrotasks();
     offAudio();
     await new Promise((r) => setTimeout(r, 400)); // lead 120 ms + decode
@@ -1482,10 +1619,13 @@ async function runRulesPackageSmoke(): Promise<RulesPackageSmokeResult> {
     "export default { schema: { version: '1.0.0-smoke', modelColumns: { morale: 'u8' }, unitTypes: {}, orderTypes: ['probe'], subPhases: ['probe'] }, validateOrder() { return { ok: true }; }, resolveTurn(ctx, pool, units, orders, rng, emit) { emit({ subPhase: 'probe', type: 'probe', unitId: 'u-probe', text: 'package ran inside the sim worker', data: { sandbox: [typeof fetch, typeof importScripts, typeof XMLHttpRequest, typeof WebSocket, typeof indexedDB] } }); }, detection() { return 5; } };";
   try {
     const { WorkerSimRunner } = await import("../workers/simWorkerClient");
-    const SimWorkerCtor = (await import("../workers/sim.worker.ts?worker&inline")).default;
+    const SimWorkerCtor = (
+      await import("../workers/sim.worker.ts?worker&inline")
+    ).default;
     const runner = new WorkerSimRunner(SimWorkerCtor);
 
-    const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+    const msg = (e: unknown): string =>
+      e instanceof Error ? e.message : String(e);
     let syntaxError = "";
     try {
       await runner.loadRules("export default {{{{", 4_000);
@@ -1506,7 +1646,13 @@ async function runRulesPackageSmoke(): Promise<RulesPackageSmokeResult> {
 
     const ctx = {
       sceneId: "s-rules",
-      grid: { type: "gridless", size: 5, distance: 5, units: "m", diagonals: "ignore" },
+      grid: {
+        type: "gridless",
+        size: 5,
+        distance: 5,
+        units: "m",
+        diagonals: "ignore",
+      },
       walls: {
         x1: new Float32Array(0),
         y1: new Float32Array(0),
@@ -1517,6 +1663,8 @@ async function runRulesPackageSmoke(): Promise<RulesPackageSmokeResult> {
       factions: [],
       armies: [],
       leaderActors: {},
+      // Deliberately empty: this is a synthetic context for a sandbox probe inside the sim worker,
+      // which has no store. World settings reach the engine through host/turnChannel's rulesCtx().
       worldSettings: {},
     } as import("../core/rules").RulesContext;
 
@@ -1545,7 +1693,10 @@ async function runRulesPackageSmoke(): Promise<RulesPackageSmokeResult> {
     let cpuAbuseError = "";
     try {
       // hangs at module evaluation on the loader paths that execute packages
-      await runner.loadRules("export default (() => { while (true) {} })();", 800);
+      await runner.loadRules(
+        "export default (() => { while (true) {} })();",
+        800,
+      );
       cpuAbuseError = "unexpectedly loaded";
     } catch (e) {
       cpuAbuseError = msg(e);
@@ -1553,8 +1704,17 @@ async function runRulesPackageSmoke(): Promise<RulesPackageSmokeResult> {
 
     // resilience: the (possibly fresh, post-termination) worker still runs
     // the built-in mass-battle rules
-    await runner.load({ sceneId: "s-builtin", sys: { ammo: "u8" }, ctx, units: [] });
-    const builtin = await runner.resolve({ orders: [], seed: 7, turnNumber: 1 });
+    await runner.load({
+      sceneId: "s-builtin",
+      sys: { ammo: "u8" },
+      ctx,
+      units: [],
+    });
+    const builtin = await runner.resolve({
+      orders: [],
+      seed: 7,
+      turnNumber: 1,
+    });
     runner.terminate();
 
     const first = result?.report.events[0];

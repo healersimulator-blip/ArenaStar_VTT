@@ -14,6 +14,7 @@
     type RouteDocument,
     type LogisticsForecast,
   } from "../../core/logistics";
+  import { worldSettingsFrom } from "../../core/worldSettings";
 
   let {
     client,
@@ -83,7 +84,7 @@
         factions,
         armies,
         leaderActors: {},
-        worldSettings: {},
+        worldSettings: worldSettingsFrom(client.store.getAll("settings")),
       };
       return rules.forecast(ctx, armies, depots, routes, reinforcements);
     }

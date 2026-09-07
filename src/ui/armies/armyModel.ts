@@ -17,8 +17,13 @@ import type {
 import type { SimEvent, TurnReport } from "../../core/sim";
 import type { Op } from "../../core/ops";
 import type { DocumentStore } from "../../core/store";
-import type { RulesContext, RulesGridContext, RulesWallsContext } from "../../core/rules";
+import type {
+  RulesContext,
+  RulesGridContext,
+  RulesWallsContext,
+} from "../../core/rules";
 import type { WallDocument } from "../../core/documents";
+import { worldSettingsFrom } from "../../core/worldSettings";
 
 // ─── Armies tab cards ─────────────────────────────────────────────────────────
 
@@ -41,11 +46,15 @@ export function armyCards(
   const byId = new Map(factions.map((f) => [f._id, f] as const));
   return armies.map((army) => {
     const faction = byId.get(army.factionId);
-    const strength = army.units.reduce((acc, u) => acc + (u.stats.strength ?? 0), 0);
+    const strength = army.units.reduce(
+      (acc, u) => acc + (u.stats.strength ?? 0),
+      0,
+    );
     const morale =
       army.units.length === 0
         ? 0
-        : army.units.reduce((acc, u) => acc + (u.stats.morale ?? 0), 0) / army.units.length;
+        : army.units.reduce((acc, u) => acc + (u.stats.morale ?? 0), 0) /
+          army.units.length;
     return {
       id: army._id,
       name: army.name,
@@ -64,7 +73,14 @@ export function armyCards(
 
 export type TreeRow =
   | { kind: "army"; depth: 0; army: ArmyDocument }
-  | { kind: "echelon"; depth: 1; armyId: string; type: string; count: number; strength: number }
+  | {
+      kind: "echelon";
+      depth: 1;
+      armyId: string;
+      type: string;
+      count: number;
+      strength: number;
+    }
   | { kind: "unit"; depth: 2; armyId: string; unit: UnitDocument };
 
 /**
@@ -91,7 +107,8 @@ export function flattenTree(army: ArmyDocument): TreeRow[] {
       count: units.length,
       strength: units.reduce((acc, u) => acc + (u.stats.strength ?? 0), 0),
     });
-    for (const unit of units) rows.push({ kind: "unit", depth: 2, armyId: army._id, unit });
+    for (const unit of units)
+      rows.push({ kind: "unit", depth: 2, armyId: army._id, unit });
   }
   return rows;
 }
@@ -101,12 +118,20 @@ export function flattenTree(army: ArmyDocument): TreeRow[] {
  * armies = delete from the old embedded list + create under the new parent.
  * Model ranges are scene-pool indices, not army state, so they carry over.
  */
-export function moveUnitOps(unit: UnitDocument, fromArmyId: string, toArmyId: string): Op[] {
+export function moveUnitOps(
+  unit: UnitDocument,
+  fromArmyId: string,
+  toArmyId: string,
+): Op[] {
   if (fromArmyId === toArmyId) return [];
   return [
     {
       kind: "delete",
-      ref: { coll: "units", id: unit._id, parent: { coll: "armies", id: fromArmyId } },
+      ref: {
+        coll: "units",
+        id: unit._id,
+        parent: { coll: "armies", id: fromArmyId },
+      },
     },
     {
       kind: "create",
@@ -188,7 +213,12 @@ export function rosterRows(
       });
     }
     if (hidden > 0)
-      rows.push({ kind: "modelGap", key: `${unit._id}#gap`, unitId: unit._id, hidden });
+      rows.push({
+        kind: "modelGap",
+        key: `${unit._id}#gap`,
+        unitId: unit._id,
+        hidden,
+      });
   }
   return rows;
 }
@@ -228,7 +258,10 @@ export function sortRoster(
   return [...units].sort((a, b) => compare(a, b) * dir);
 }
 
-export function filterRoster(army: ArmyDocument, query: string): UnitDocument[] {
+export function filterRoster(
+  army: ArmyDocument,
+  query: string,
+): UnitDocument[] {
   const q = query.trim().toLowerCase();
   if (!q) return [...army.units];
   return army.units.filter(
@@ -286,9 +319,16 @@ export interface ReportFilter {
   type?: string;
 }
 
-export function filterReportEvents(report: TurnReport, filter: ReportFilter): SimEvent[] {
+export function filterReportEvents(
+  report: TurnReport,
+  filter: ReportFilter,
+): SimEvent[] {
   return report.events.filter((e: SimEvent) => {
-    if (filter.unitId && e.unitId !== filter.unitId && e.targetUnitId !== filter.unitId)
+    if (
+      filter.unitId &&
+      e.unitId !== filter.unitId &&
+      e.targetUnitId !== filter.unitId
+    )
       return false;
     if (filter.type && e.type !== filter.type) return false;
     return true;
@@ -319,7 +359,11 @@ export function eventsToCsv(events: readonly SimEvent[]): string {
   };
   const lines = ["turn,subPhase,type,unitId,targetUnitId,text"];
   for (const e of events) {
-    lines.push([e.subPhase, e.type, e.unitId, e.targetUnitId ?? "", e.text].map(cell).join(","));
+    lines.push(
+      [e.subPhase, e.type, e.unitId, e.targetUnitId ?? "", e.text]
+        .map(cell)
+        .join(","),
+    );
   }
   return lines.join("\n") + "\n";
 }
@@ -335,7 +379,7 @@ type AnyStore = Pick<DocumentStore, "get" | "getAll">;
 export function rulesContextFromStore(
   store: AnyStore,
   sceneId: string | null,
-  worldSettings: Record<string, unknown> = {},
+  worldSettings?: Record<string, unknown> | undefined,
 ): RulesContext {
   const scene = sceneId ? store.get("scenes", sceneId) : null;
   const gridDoc = scene?.grid;
@@ -374,6 +418,9 @@ export function rulesContextFromStore(
     factions: store.getAll("factions") as FactionDocument[],
     armies: store.getAll("armies") as ArmyDocument[],
     leaderActors: {},
-    worldSettings: worldSettings as Record<string, never>,
+    // Absent means "read the world": the replicated settings doc is the authority (D-113), and an
+    // explicit argument only overrides it for callers that are simulating a context (tests, e2e).
+    worldSettings: (worldSettings ??
+      worldSettingsFrom(store.getAll("settings"))) as Record<string, never>,
   };
 }
