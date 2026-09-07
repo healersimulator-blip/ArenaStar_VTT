@@ -12,6 +12,8 @@ export default tseslint.config(
       "playwright-report/**",
       "test-results/**",
       "coverage/**",
+      // §12 generated package artifacts (build step: pnpm build:systems)
+      "systems/**/rules.js",
     ],
   },
   eslint.configs.recommended,

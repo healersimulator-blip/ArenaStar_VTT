@@ -1,23 +1,11 @@
 {
   "id": "pf1e-core",
-  "name": "Pathfinder 1e Core System",
+  "name": "Pathfinder 1e Core",
   "version": "1.0.0",
-  "type": "system",
-  "description": "Full Pathfinder 1st Edition system integration including character sheets, feats, skills, spells, stealth/perception, and active effect stacking.",
-  "module": {
-    "entry": "module.js",
-    "trusted": false
-  },
+  "type": "data",
+  "description": "Seed content packs for the Pathfinder 1e integration: the spells the mass-battle engine can resolve, and the bestiary entries its unit profiles compile from. Character sheets and the tactical (hero-level) rules are in-repo UI, not a package script, so this package is data-only — declare code here only when a sandboxed module.js actually exists.",
   "packs": [
-    {
-      "name": "PF1e Spells",
-      "type": "items",
-      "file": "packs/spells.json"
-    },
-    {
-      "name": "PF1e Bestiary",
-      "type": "actors",
-      "file": "packs/bestiary.json"
-    }
+    { "name": "PF1e Spells", "type": "items", "file": "packs/spells.json" },
+    { "name": "PF1e Bestiary", "type": "actors", "file": "packs/bestiary.json" }
   ]
 }

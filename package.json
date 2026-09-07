@@ -7,7 +7,7 @@
   "engines": {
     "node": ">=20"
   },
-  "description": "Serverless browser-only Virtual Tabletop — single self-contained index.html (host = GM tab)",
+  "description": "Serverless browser-only Virtual Tabletop \u2014 single self-contained index.html (host = GM tab)",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -16,7 +16,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "size": "node scripts/size.mjs"
+    "size": "node scripts/size.mjs",
+    "build:systems": "node scripts/buildSystemPackages.mjs"
   },
   "dependencies": {
     "@msgpack/msgpack": "^3.1.3",

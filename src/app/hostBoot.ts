@@ -42,7 +42,7 @@ import {
   planMigrationChain,
   type MigrationStep,
 } from "../core/migrations";
-import { getPackage, getWorld, listPackages, putPackage, putWorld } from "../storage/idb";
+import { getPackage, getWorld, listPackages, putPackage } from "../storage/idb";
 import type { BaseDocument, CollectionName } from "../core/documents";
 import { TOP_LEVEL_COLLECTIONS } from "../core/documents";
 import { diffFlat, type JsonRecord } from "../core/diff";
@@ -64,6 +64,13 @@ export interface HostAppOptions {
   codec?: ImageCodec;
   /** OPFS root (tests: MemDirHandle); default: real OPFS when available. */
   root?: DirHandleLike | null;
+  /**
+   * Sim runner override. Default: the sandboxed SimWorker, degrading to the inline runner when it
+   * cannot be constructed. Node hosts/tests have no DOM `Worker` global, where the *construction*
+   * still succeeds and only `loadRules` fails — so without this seam the §12 package-boot path
+   * (rules.entry → blob/data-URL import → schema echo) is untestable outside a browser.
+   */
+  simRunner?: SimRunner;
   now?: () => number;
 }
 
@@ -362,7 +369,7 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
             migrationBoot = { ...base, error: `migration log: ${appended.error}` };
           } else {
             await persister.drain();
-            await putWorld(db, { ...worldRec, version: currentVersion } as WorldsRecord);
+            await persister.patchWorld({ version: currentVersion });
             migrationBoot = {
               ...base,
               applied: [
@@ -374,7 +381,7 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
           }
         }
       } else {
-        await putWorld(db, { ...worldRec, version: currentVersion } as WorldsRecord);
+        await persister.patchWorld({ version: currentVersion });
         migrationBoot = {
           ...base,
           applied: [
@@ -419,7 +426,7 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
 
   let runner: SimRunner;
   try {
-    runner = new WorkerSimRunner(SimWorkerCtor);
+    runner = options.simRunner ?? new WorkerSimRunner(SimWorkerCtor);
   } catch {
     runner = new InlineSimRunner();
   }
@@ -543,12 +550,10 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
   };
   const trustedIds = async (): Promise<string[]> =>
     (await getWorld(db, meta.worldId))?.trustedPackages ?? [];
-  const writeTrusted = async (
-    next: string[],
-  ): Promise<{ ok: true } | { ok: false; error: string }> => {
-    const w = await getWorld(db, meta.worldId);
-    if (!w) return { ok: false, error: "world record missing" };
-    await putWorld(db, { ...w, trustedPackages: next });
+  const writeTrusted = async (next: string[]): Promise<{ ok: true }> => {
+    // §12: world-record patches go through the persister — a bare putWorld is reverted by its
+    // next write-behind flush (the cached record is the authority).
+    await persister.patchWorld({ trustedPackages: next });
     return { ok: true };
   };
   const packages: HostPackages = {
@@ -588,20 +593,14 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
       }
       const guarded = await guardFreshCampaign();
       if (guarded) return { ok: false, error: guarded };
-      const w = await getWorld(db, meta.worldId);
-      if (!w) return { ok: false, error: "world record missing" };
       // §12: the world's version tracks the ACTIVE system (migration baseline)
-      await putWorld(db, { ...w, activeRulesPackage: id, version: rec.manifest.version });
+      await persister.patchWorld({ activeRulesPackage: id, version: rec.manifest.version });
       return { ok: true };
     },
     async deactivate() {
       const guarded = await guardFreshCampaign();
       if (guarded) return { ok: false, error: guarded };
-      const w = await getWorld(db, meta.worldId);
-      if (!w) return { ok: false, error: "world record missing" };
-      const next = { ...w };
-      delete next.activeRulesPackage;
-      await putWorld(db, next);
+      await persister.patchWorld({ activeRulesPackage: undefined });
       return { ok: true };
     },
     async grantTrust(id) {

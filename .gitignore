@@ -2,3 +2,7 @@ node_modules/
 dist/
 test-results/
 .pw-browsers/
+
+# §12 generated system-package artifacts (build step: pnpm build:systems)
+systems/*/rules.js
+playwright-report/

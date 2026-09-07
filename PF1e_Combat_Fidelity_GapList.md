@@ -73,15 +73,17 @@ tactical rules core that doesn't exist yet**, then making the sim consume the sa
 
 ## 1. P0 — Blockers: make the module actually run (nothing else is testable until this lands)
 
-> **Status 2026-09-08** (branch `arena/01a07ced-arenastar-vtt`, PR 1 of the M1/M2 split): 1.2 ✅,
-> 1.3 ✅, 1.4 ✅, 1.5 ✅ and 1.3b ✅ — a deployed PF1e battle now compiles profiles, seeds every
-> model and resolves attacks against real ACs from a forked PRNG. 1.1, 1.6, 1.7, 1.8 are open, so
-> **the module still never runs in the product** (there is no `rules.js` to load); this PR is the
-> prerequisite for that, not the delivery of it. §2: 2.1, 2.2, 2.3 ✅.
+> **Status 2026-09-08** (branch `arena/01a07ced-arenastar-vtt`): PR 1 closed 1.2–1.5 (+1.3b) and
+> 2.1–2.3 — a deployed PF1e battle compiles profiles, seeds every model and resolves attacks
+> against real ACs from a forked PRNG. PR 2 closed **1.1** (+1.1b) — `pnpm build:systems` now emits
+> `systems/pf1e-mass-battles/rules.js` and installable zips, and a booted world activates the
+> package (`rulesBoot.source === "package"`). Still open: **1.6** (joiner schema — needs a wire
+> field, see §1.10), **1.7** (orphaned Svelte mounts) and **1.8** (the 10k e2e).
+> §2: 2.1, 2.2, 2.3 ✅.
 
 | # | Task | Target files | Done when |
 |---|---|---|---|
-| 1.1 | Emit real package artifacts for the two manifests: `rules.js` (self-contained ESM, `export default <rules object>`), `module.js`, `packs/spells.json`, `packs/bestiary.json`; add a build step that bundles `src/packages/pf1e` into `systems/*/rules.js` (the SimWorker sandbox cannot resolve bare imports — `src/sim/rulesLoader.ts` imports one blob-URL module). | `systems/pf1e-mass-battles/{manifest.json,rules.js}`, `systems/pf1e-core/{manifest.json,module.js,packs/*.json}`, new `scripts/buildSystemPackages.mjs` | `packageLoader.test.ts`-style load of both packages succeeds; GmExtrasPanel → import zip → activate → world reload shows `rulesBoot.source === "package"` with `error === null`. |
+| 1.1 ✅ | Emit real package artifacts for the two manifests: `rules.js` (self-contained ESM, `export default <rules object>`), `module.js`, `packs/spells.json`, `packs/bestiary.json`; add a build step that bundles `src/packages/pf1e` into `systems/*/rules.js` (the SimWorker sandbox cannot resolve bare imports — `src/sim/rulesLoader.ts` imports one blob-URL module). | `systems/pf1e-mass-battles/{manifest.json,rules.js}`, `systems/pf1e-core/{manifest.json,module.js,packs/*.json}`, new `scripts/buildSystemPackages.mjs` | `packageLoader.test.ts`-style load of both packages succeeds; GmExtrasPanel → import zip → activate → world reload shows `rulesBoot.source === "package"` with `error === null`. **Met** — the reload half is asserted on the real `bootHostApp` in Node (`tests/packages/pf1ePackage.test.ts`); the panel click itself stays covered generically by `e2e/packages.spec.ts`, and a PF1e-specific browser run belongs to 1.8. |
 | 1.2 ✅ | Fix the model-column mismatch: manifest declares 9 columns, `PF1E_MODEL_SCHEMA` has 11 (missing `lethalDmg`, `aooUsed`). Without them, regeneration tracking and AoO budgets silently vanish because `hostBoot` passes `manifest.rules.modelColumns` (not the module's schema) as `simSys`. | `systems/pf1e-mass-battles/manifest.json`, `src/packages/pf1e/schema.ts` | A test asserts `manifest.rules.modelColumns` deep-equals `PF1E_MODEL_SCHEMA`. |
 | 1.3 ✅ | Seed PF1e columns at deploy. `src/sim/deploy.ts:~163` allocates only `hp/hpMax = 1` and `sys.ammo = 6`, so `ac/fort/ref/will/sr/dr*/profileIdx` are all zero and `resolvePF1eAttacks` reads `ac === 0` (auto-hit). Also nothing ever writes `profileIdx`, so `registry.get(0)` returns `undefined` and **every attack loop `continue`s before rolling**. Add a `prepare(pool, units, ctx)`/deploy-time compile step that maps `UnitView.stats` + `leaderActors` → profile registry → `profileIdx`. | `src/sim/deploy.ts`, `src/packages/massBattlePf1e.ts`, new `src/packages/pf1e/deploy.ts` | Deploying a PF1e scene yields non-zero AC/HP/`profileIdx` for every model. |
 | 1.4 ✅ | Kill the per-turn registry churn: `resolveTurn` calls `registry.register()` once per unit per turn and never `clear()`s, while `profileIdx` is frozen at deploy → ids drift and the registry grows unbounded. Make profiles **content-addressed at deploy time**, immutable during a battle. | `src/packages/pf1e/schema.ts` (`PF1eProfileRegistry`), `src/packages/massBattlePf1e.ts` | N turns → `registry.size()` constant; replay of the same seed is byte-identical. |
@@ -91,6 +93,7 @@ tactical rules core that doesn't exist yet**, then making the sim consume the sa
 | 1.8 | Replace the stub e2e. `e2e/pf1e_mass_battles.spec.ts` asserts a hardcoded `{ok:true,hits:15}` and never runs the sim. | `e2e/pf1e_mass_battles.spec.ts` | Real 10k-model run: p95 turn-resolve < 50 ms, `bytesPerModel ≤ 200` (`tests/sim/pool.test.ts:102`), zero console errors. |
 
 | 1.3b | **(new, found while doing 1.3 — FIXED)** `i8` is in `ModelColumnType` and in both PF1e declarations (`fort`/`ref`/`will`) but was **missing from the codec's `ColKind`/`KIND_BYTES`**, so `KIND_BYTES["i8"]` was `undefined`: i8 columns packed to a zero-length buffer (silently dropped from every delta and from the joiner replica) and `canonicalPoolHash` threw `RangeError: Invalid array length` — any module declaring an i8 column crashed at the end of its first turn, PF1e's rules irrelevant. | `src/sim/codec.ts` | `i8` added to the wire kinds (signed, 1 byte) with a snapshot + delta regression test in `tests/sim/codec.test.ts`. Rejected alternative: re-typing the saves as `i16` in `PF1E_MODEL_SCHEMA`, which leaves the platform bug for the next module. |
+| 1.1b | **(new, found while doing 1.1 — FIXED)** §12 world-record writes bypassed the persister: `activate`/`deactivate`/`grantTrust`/the migration version stamp called `putWorld(db, …)` directly, while `HostPersister` keeps its own cached copy and rewrites it on every write-behind tick (500 ms) and on close — so an activation silently reverted if any flush happened after it, and the reload-after-activate flow only worked by timing. | `src/storage/persistence.ts`, `src/app/hostBoot.ts` | `HostPersister.patchWorld(patch)` is now the only sanctioned way to change a live world record (it updates the cached copy, and clears keys by omitting them rather than storing `undefined`); pinned by a bypass-vs-patch test in `tests/storage/persistence.test.ts`. |
 
 ### 1.9 What shipped, and the two places the plan above was wrong
 
@@ -128,6 +131,40 @@ tactical rules core that doesn't exist yet**, then making the sim consume the sa
 2. **1.3 had a blocker in front of it** (1.3b above): with the codec's missing `i8` kind, a PF1e
    pool could not survive `canonicalPoolHash` no matter how correctly it was seeded. Fixing 1.3
    without that would have produced a battle that resolves and then throws.
+
+### 1.10 PR 2 — packaging (§1.1), and what it found
+
+- `scripts/buildSystemPackages.mjs` + `pnpm build:systems`: bundles `src/packages/pf1e/rulesEntry.ts`
+  with vite into **one self-contained ESM file**, then rewrites the tail into
+  `export default (() => { … })();` because `rulesLoader.evalRulesModule` — the fallback for engines
+  whose classic workers cannot import module scripts — only accepts that shape. The rewrite **throws**
+  rather than emitting a bundle that still contains `import`/`export` statements, so a package the
+  SimWorker could not load fails the build instead of the GM. `rules.js` is a build product and is
+  git-ignored; each folder is also zipped to `dist/packages/<id>-<version>.zip`, which is what the
+  `#pkg-file` input expects.
+- `systems/pf1e-core/manifest.json` was **unloadable as declared**: `type: "system"` with a `module`
+  block and packs but no `rules` block, and `validatePackageManifest` rejects exactly that
+  ("system packages need a rules block"). It is now `type: "data"` with the two packs, and the
+  `module.js` declaration is dropped rather than fabricated — the hero-level sheets are in-repo UI
+  (§1.7), not a sandboxed iframe module, so there was no `module.js` to write. Inventing one to
+  satisfy the manifest would have been the wrong kind of green.
+- Seed content packs (this opens §6, it does not close it): `packs/spells.json` (fireball, magic
+  missile, shield, true strike) and `packs/bestiary.json` (the six `PRECREATED_PF1E_UNITS`). The
+  bestiary speaks in readable names (`dr.bypass: ["magic"]`, `regeneration.suppress: ["fire","acid"]`)
+  and a test translates those into the engine's bitfields and requires the **compiled profiles to be
+  identical** to the in-repo table, so the pack cannot drift from the code silently.
+- `1.1b` (above) was the blocker: without `patchWorld`, "import zip → activate → reload" lost the
+  activation on the next flush, so §1.1's acceptance criterion was unverifiable rather than met.
+- **1.6 needs more than a code move.** `src/app/joinBoot.ts` hardcodes *both* `simSys:
+  MASS_BATTLE_SCHEMA_COLUMNS` and `simSceneId: DEFAULT_SCENE_ID` when constructing `ClientSync`, and
+  nothing on the wire announces the host's active package schema — a joiner cannot derive it from
+  anything it receives. 1.6 is therefore a protocol change (PROTOCOL.md + host announce + joiner
+  adopt before the first sim delta), not an import swap. It stays open on that basis.
+
+**Not asserted anywhere:** the browser flow. `e2e/packages.spec.ts` proves the panel-import path for a
+probe package; the PF1e package is proven in Node (`tests/packages/pf1ePackage.test.ts` boots the real
+`bootHostApp` with `simRunner` injected — Node has no DOM `Worker`, and `WorkerSimRunner` constructs
+fine and only fails at `loadRules`, which would otherwise hide this path entirely).
 
 ---
 

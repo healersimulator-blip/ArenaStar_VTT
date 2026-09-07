@@ -1406,3 +1406,46 @@ existing sim channel.
 - Same review: **no core `EffectDocument` changes** (`mode`/`type`/`origin`/`duration` rejected), so
   core PRD items P-12/P-13/P-14 are retired and no document migration is needed; typed bonuses live in
   PF1e's own data and stacking is PF1e's business.
+## D-110 — §12 PF1e ships as a real package: build step, data-only core pack, generated `rules.js`
+
+- Gap List §1.1 (PR 2). `scripts/buildSystemPackages.mjs` (`pnpm build:systems`) bundles
+  `src/packages/pf1e/rulesEntry.ts` with vite into one self-contained ESM file and writes
+  `systems/<id>/rules.js`, then zips every package folder to `dist/packages/<id>-<version>.zip` — the
+  shape `#pkg-file`/`readZipPackage` actually consume. The generated `rules.js` is git-ignored
+  (`.gitignore`, `.prettierignore`, eslint ignores): a committed bundle would drift from the module it
+  was bundled from, which is the exact failure mode §1.2/§1.3 just fixed.
+- The emitted file is rewritten into `export default (() => { … })();`. Not cosmetics:
+  `rulesLoader.evalRulesModule` (the fallback for engines whose classic workers cannot import module
+  scripts) matches only a single-`export default <expression>` source. The rewrite **throws** instead
+  of emitting a bundle that still contains `import`/`export`, so an unloadable package fails the build.
+- `systems/pf1e-core` became `type: "data"` with its two packs, and its `module: { entry: "module.js" }`
+  block was deleted rather than fabricated. As declared it was uninstallable — `validatePackageManifest`
+  rejects a `system` package with no `rules` block — and PF1e's hero-level sheets are in-repo Svelte
+  (§1.7), not a sandboxed iframe module. Nothing was invented to make a manifest honest.
+  `pf1e-mass-battles` keeps a `dependencies: ["pf1e-core"]` key that **nothing enforces** (the manifest
+  validator ignores unknown fields); it is documentation of intent, and PF1e must stay loadable with
+  only itself installed.
+- Seed packs open Gap List §6 rather than finish it: `packs/spells.json` (fireball, magic missile,
+  shield, true strike — the fields `PF1eSpellOrder` consumes under `system.massBattle`) and
+  `packs/bestiary.json` (the six `PRECREATED_PF1E_UNITS`, in readable `dr.bypass` /
+  `regeneration.suppress` names). `tests/packages/pf1ePackage.test.ts` translates the names back into
+  the engine bitfields and requires `compilePF1eProfile` to agree with the in-repo table, so content
+  and code cannot drift silently.
+- `HostPersister.patchWorld(patch)` is now the only sanctioned way to change a live world record
+  (activation, GM trust, migration version stamp). `HostPersister` owns a cached `WorldsRecord` and
+  rewrites it on every write-behind flush; the §12 sites called `putWorld` directly, so activations
+  were reverted by the next tick — "import zip → activate → reload" only worked by timing. Keys are
+  cleared by omission because structured clone preserves `key: undefined`.
+- `HostAppOptions.simRunner` was added as a boot seam (alongside the existing injected `db`/`codec`/
+  `root`). Node has no DOM `Worker`, and `WorkerSimRunner` constructs successfully and fails only at
+  `loadRules`, so without the seam the package-boot path is untestable outside a browser — the
+  alternative (silently falling back to the unsandboxed runner) is a security regression, not a fix.
+
+## D-111 — §4A codec, follow-up: `i8` was not the only unchecked cast
+
+- `colKind` still casts `sys[name]` to `ColKind` for every declared type; `f64` is deliberately widened
+  to `f32` (matching `pool.ts` storage) and `i8` now exists on the wire (D-108), so the cast is
+  total over `ModelColumnType`. If a type is ever added to `ModelColumnType`, the compiler will not
+  catch the missing `KIND_BYTES` entry — the `toSingleDefaultExpression`-style approach of throwing on
+  an unmapped kind at encode time is the follow-up, deferred because it is a hot path (per-column, per
+  model, per turn) and no consumer needs a new type yet.
