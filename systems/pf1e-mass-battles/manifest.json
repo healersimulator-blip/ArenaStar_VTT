@@ -1,0 +1,22 @@
+{
+  "id": "pf1e-mass-battles",
+  "name": "Pathfinder 1e Mass Battles Engine",
+  "version": "1.0.0",
+  "type": "system",
+  "dependencies": ["pf1e-core"],
+  "description": "Strategic mass combat add-on for PF1e. Compiles PF1e actor sheets into 10,000+ model strategic formations with spatial envelopment, AOE spell scatter, and player hero participation.",
+  "rules": {
+    "entry": "rules.js",
+    "modelColumns": {
+      "ac": "u8",
+      "touchAc": "u8",
+      "fort": "i8",
+      "ref": "i8",
+      "will": "i8",
+      "sr": "u8",
+      "drType": "u8",
+      "drVal": "u8",
+      "profileIdx": "u16"
+    }
+  }
+}

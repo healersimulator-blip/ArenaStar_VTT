@@ -1,0 +1,23 @@
+{
+  "id": "pf1e-core",
+  "name": "Pathfinder 1e Core System",
+  "version": "1.0.0",
+  "type": "system",
+  "description": "Full Pathfinder 1st Edition system integration including character sheets, feats, skills, spells, stealth/perception, and active effect stacking.",
+  "module": {
+    "entry": "module.js",
+    "trusted": false
+  },
+  "packs": [
+    {
+      "name": "PF1e Spells",
+      "type": "items",
+      "file": "packs/spells.json"
+    },
+    {
+      "name": "PF1e Bestiary",
+      "type": "actors",
+      "file": "packs/bestiary.json"
+    }
+  ]
+}
