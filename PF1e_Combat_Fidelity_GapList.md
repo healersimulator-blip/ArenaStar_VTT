@@ -518,6 +518,33 @@ patch is undocumented, which is itself a gap worth closing).
    `tests/packages/pf1eDeploySeed.test.ts` and the manifest/schema equality test, and *no*
    new rules surface. OK to cut it there, or do you want the e2e (1.8) in the same PR?
 
+### 10.1 Decisions — answered 2026-09-08 (implemented by PR #4)
+
+1. **Scale authority: two independent implementations.** Tactical (ActorDocument /
+   CombatDocument / grid) and strategic (ModelPool / SimWorker) each implement the chapter on
+   their own; parity is a convention, **not** a gate. This overrides the recommendation above,
+   so §3 is downgraded from "shared kernel + parity test" to *shared data and tables only*
+   (`schema.ts` constants, SRD modifiers, condition/DR/weapon enums), and §0's gate item and
+   §4's "kernel" wording read as "same numbers", not "same code". Accepted risk: the two scales
+   can and will disagree in edge cases, and the strategic layer keeps grid-quantised
+   abstractions where exact tactical bookkeeping would cost 10 000× the work.
+2. **Packaging: trusted in-repo first, real `systems/*` build as M2.** Importing
+   `createMassBattlePf1e()` behind the trusted seam stays the M1 path (it is how the tests run
+   today); 1.1's bundling step is a first-class M2 deliverable rather than a prerequisite.
+3. **No core `EffectDocument` changes.** `mode`/`type`/`origin`/`duration` are **rejected**: no
+   change to `src/core/documents.ts`, no migration, no effect on any other module. PF1e owns its
+   typed bonuses in its own data (actor system data / `flags.pf1e`) and models stacking via
+   `source` + `name` collision groups in PF1e code. This retires core PRD items **P-12, P-13,
+   P-14** and removes the only migration hazard in the whole plan; §4 rows 7 and 10 (partly) and
+   the size-cap row now describe PF1e-side structures.
+4. **First PR = 1.2 + 1.3 + 1.4 + 1.5 + 2.1 + 2.2 + 2.3**, with
+   `tests/packages/pf1eDeploySeed.test.ts` and the manifest↔schema equality test, no new rules
+   surface, no dependency on 1.1's bundling; the 1.8 e2e rewrite explicitly deferred. Cut as
+   proposed, plus one item pulled in when it turned out to block 1.3: the codec's missing `i8`
+   wire kind (row 1.3b above).
+5. **Still open:** whether the invented spell **scatter** (`spells.ts`) stays. It has no core-rule
+   basis; propose a `worldSettings` toggle at the next review rather than deciding it silently.
+
 ---
 
 ## 11. Appendix A — the SRD numbers to encode (fixture tables)
