@@ -385,6 +385,7 @@ export class TurnChannel {
         units,
       );
       this.commitResolveEnvelope(units, result, turnNumber);
+      await this.syncHeroTokens();
       this.engine = turnEngineReduce(this.engine, { type: "sim.resolved" }, this.now()).state;
       await this.broadcastSimTurn(result, units);
     } catch (e) {
@@ -582,6 +583,7 @@ export class TurnChannel {
         (now - this.rtLastFlushAt) * Math.max(0.1, cfg.flushHz) >= 1000 - 1
       ) {
         await this.rtFlush(now);
+        await this.syncHeroTokens();
       }
       if ((now - this.rtLastReportAt) * Math.max(0.1, cfg.reportHz) >= 1000 - 1) {
         await this.rtReport(now);
@@ -910,6 +912,40 @@ export class TurnChannel {
     const freeze = await this.bridge.freezeBytes(turnNumber);
     if (freeze) await this.broadcastSnapshots();
     this.broadcastPhase();
+  }
+
+  /** §5A hero attachment: move leaderTokens to their owning units' anchors via Ops. */
+  async syncHeroTokens(): Promise<void> {
+    const units = this.unitViews();
+    const heroesToSync = units.filter((u) => Boolean(u.leaderTokenId));
+    if (heroesToSync.length === 0) return;
+    const rawAnchors = await this.bridge.unitAnchors();
+    const anchors = new Map(rawAnchors.map(([id, x, y]) => [id, { x, y }]));
+    const scene = this.store.get("scenes", this.sceneId) as
+      | { tokens?: Array<{ _id: string; x: number; y: number }> }
+      | undefined;
+    if (!scene || !scene.tokens) return;
+    const ops: Op[] = [];
+    for (const u of heroesToSync) {
+      if (!u.leaderTokenId) continue;
+      const anchor = anchors.get(u.id);
+      if (!anchor) continue;
+      const { x, y } = anchor;
+      const existingToken = scene.tokens.find((t) => t._id === u.leaderTokenId);
+      if (
+        existingToken &&
+        (Math.abs(existingToken.x - x) > 0.01 || Math.abs(existingToken.y - y) > 0.01)
+      ) {
+        ops.push({
+          kind: "update",
+          ref: { coll: "tokens", id: u.leaderTokenId, parent: { coll: "scenes", id: this.sceneId } },
+          diff: { x, y },
+        });
+      }
+    }
+    if (ops.length > 0) {
+      this.host.commitSystem(ops);
+    }
   }
 
   // ─── snapshots & report pages ───────────────────────────────────────────────

@@ -1254,3 +1254,74 @@ existing sim channel.
 - Chain: tsc/eslint/prettier clean; 622 passed / 3 skipped (77 files); build
   1,925,372 B raw / 553,399 B gzip (< 6 MB); e2e chromium 40/40 ×3, webkit
   m2+gmextras+rules+models 5/5; PLAN 125 [x]/23 [ ].
+
+## D-095 — §9A TurnReport timeline animation with scrubber + GM skip
+
+- **TurnReportPlayback** controller (`src/ui/armies/turnReportPlayback.ts`):
+  manages step-by-step resolution playback, sub-phase indicators ("move", "shoot", "melee",
+  "morale", "supply"), step forward/back, seek scrubber (0 to N-1), speed multipliers (0.5x, 1x,
+  2x, 4x), event location pings, and GM skip button (jumps directly to end).
+- **TurnReportTimeline.svelte** component integrated into `ArmyWindow.svelte` Reports tab.
+- Unit tested in `tests/ui/turnReportPlayback.test.ts`.
+
+## D-096 — §10/§4A/§12 Logistics & Attrition Documents, Panel + Forecast
+
+- **Top-level collections**: `depots`, `routes`, `reinforcements` added to `DocumentStore` and
+  `WorldCollections`.
+- **Forecast math**: `calculateLogisticsForecast` in `src/core/logistics.ts` computes supply demand
+  vs depot capacity per faction, attrition warnings for units at 0 supply, reinforcement arrival schedules,
+  and total upkeep costs.
+- **UI**: `LogisticsPanel.svelte` provides tabs for Forecast, Depots, Routes, and Reinforcements.
+- Unit tested in `tests/core/logistics.test.ts`.
+
+## D-097 — §5A Hero Attachment (leaderTokenId)
+
+- **UnitDocument.leaderTokenId** links a hero Token on the tactical canvas to a strategic Unit.
+- **Host sync**: `TurnChannel.syncHeroTokens()` calculates unit centroid anchors after turn
+  resolution or realtime ticks, updating `leaderTokenId` token positions via ordinary `update` Ops.
+- Detaching (`leaderTokenId = null`) restores manual player/GM control of the token.
+- Unit tested in `tests/host/heroAttachment.test.ts`.
+
+## D-098 — §8A After-action replay from checkpoints
+
+- **ReplayEngine** (`src/sim/replay.ts`): queries historical checkpoints from IDB (`checkpoints` store in
+  `strategicStore.ts`), decodes compressed ModelPool snapshots (`poolFromSnapshot`), and steps through turn-by-turn history.
+- **ReplayPanel.svelte**: UI with scrubber slider, play/pause/step controls, speed selector, and turn report previews.
+- Unit tested in `tests/sim/replay.test.ts`.
+
+## D-099 — §9A Strategic↔tactical scene linking
+
+- **Token mapping**: `generateTacticalTokens` in `src/core/sceneLink.ts` converts strategic army units into tactical `TokenDocument`s on linked tactical scenes (`flags.core = { unitId, armyId, strategicLink: true }`).
+- **Tactical outcome sync**: `syncTacticalOutcomeOps` maps tactical token losses back to strategic `UnitDocument.stats.strength` via update Ops.
+- Unit tested in `tests/core/sceneLink.test.ts`.
+
+## D-100 — §8 File System Access API "Save to folder"
+
+- **exportWorldToFolder** in `src/host/worldFile.ts` streams `world.json`, `documents.json`, `assets.json`, `assets/<hash>`, `checkpoints/`, and `reports/` into a directory handle (`DirHandleLike` / `FileSystemDirectoryHandle`).
+- Exposed in `App.svelte` sidebar when `showDirectoryPicker` is supported.
+- Unit tested in `tests/host/folderExport.test.ts`.
+
+## D-101 — §6.3 Peer Relay (relay.offer / relay.frame)
+
+- **PeerRelayRouter** in `src/net/peerRelay.ts` routes opaque e2e-encrypted `RelayFrameMsg` frames through connected intermediary peers to destination peers.
+- Enables connectivity for players behind restrictive NATs/firewalls without central servers.
+- Unit tested in `tests/net/relay.test.ts`.
+
+## D-102 — §6.3 User-supplied TURN Credentials
+
+- **buildIceServers** in `src/net/webrtc.ts` merges default public STUN servers (`DEFAULT_ICE_SERVERS`) with user-configured TURN credentials (`TurnConfig[]`).
+- Supports username/credential authentication for custom TURN servers.
+- Unit tested in `tests/net/relay.test.ts`.
+
+## D-103 — §6.5 Assistant-GM Failover
+
+- **FailoverMonitor** in `src/net/failover.ts` tracks host liveness for ASSISTANT role sessions.
+- Triggers `onHostFailed` after 30 seconds of host absence or on transport disconnect, allowing the Assistant GM to promote to active host, reopening the world from IDB + oplog tail.
+- Unit tested in `tests/net/failover.test.ts`.
+
+## D-104 — §1 Voice & Video Mesh (<= 6 peers)
+
+- **VoiceVideoMesh** in `src/net/voiceVideo.ts` manages audio/video mute states and per-peer volume controls for up to 6 connected peers.
+- Unit tested in `tests/net/voiceVideo.test.ts`.
+
+

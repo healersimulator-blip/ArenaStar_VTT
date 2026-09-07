@@ -9,7 +9,7 @@
   // pixi into the single-file bundle (+290 KB, D-083)
   import { Assets } from "pixi.js";
   import { CanvasController, domPointerSource, type TokenView } from "../canvas/interactions";
-  import { exportWorldZip, importWorldZip } from "../host/worldFile";
+  import { exportWorldToFolder, exportWorldZip, importWorldZip } from "../host/worldFile";
   import { ChatPanel } from "../ui/chat";
   import { CombatPanel } from "../ui/combat";
   import { JournalsPanel } from "../ui/journals";
@@ -376,6 +376,22 @@
       setTimeout(() => URL.revokeObjectURL(url), 5_000);
     } catch (err) {
       canvasError = `export failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
+  async function exportToFolder(): Promise<void> {
+    if (!app || typeof window.showDirectoryPicker !== "function") return;
+    try {
+      const handle = await window.showDirectoryPicker();
+      const res = await exportWorldToFolder(
+        { db: app.db, worldId: app.worldId, root: app.root, persister: app.persister },
+        handle as unknown as import("../storage/opfs").DirHandleLike,
+      );
+      canvasError = null;
+      console.info(`vtt: exported ${res.filesCount} files to folder`);
+    } catch (err) {
+      if ((err as Error)?.name === "AbortError") return;
+      canvasError = `folder export failed: ${err instanceof Error ? err.message : String(err)}`;
     }
   }
 
@@ -1024,6 +1040,9 @@
         </div>
         <h3>World file (§8)</h3>
         <button id="export-world" type="button" onclick={exportWorld}> Export world (.zip) </button>
+        {#if typeof globalThis.showDirectoryPicker === "function"}
+          <button id="export-folder" type="button" onclick={exportToFolder}> Save to folder… </button>
+        {/if}
         <label class="btn">
           Import world (.zip)
           <input

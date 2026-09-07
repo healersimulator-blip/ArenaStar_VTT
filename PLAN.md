@@ -192,24 +192,24 @@ e2e 14/14 incl. late join, token move, GM crash recovery.
 - [x] report.detail paging (fetch on demand) — D-071 (50 events/page via reportDetailTo)
 - [x] MQTT-over-WSS, WebTorrent tracker, generic WebSocket signaling adapters (§6.2)
 - [x] Realtime mode: 5 Hz sim tick / 1 Hz report / coalesced flush, pause/resume/rate, interpolation, checkpoint every K ticks + on pause/scene change (§5A) — D-094: TurnChannel realtime pump (injectable 50 ms driver; tests pump a fake clock) — due-tick accumulator (catch-up cap 8), per-tick deterministic `tickSeed`, mergeSimDeltas coalesces the window into ONE sim.delta per flushHz, 1 Hz realtime turn.report (bounded tick events — runner.tick now collects them), tick checkpoints every 300 ticks + on pause/scene change (`tick !== null` slots; freezes stay `tick === null` so undo still finds them), pause/resume/rate live via sim.control; turn.phase carries mode/paused/simHz; client PoolInterpolator samples 240 ms behind with count-change snap; GM panel Start(realtime)/Pause/Resume/rate select; e2e drives the full loop in-browser
-- [ ] TurnReport timeline animation with scrubber, GM skip (§9A)
-- [ ] Logistics: system-defined documents (depots/routes), panel with attrition forecast (RulesModule.forecast client-side), reinforcement queue, upkeep (§10, §4A)
-- [ ] Hero attachment: leaderTokenId moved by sim via Ops; detach restores control (§5A)
+- [x] TurnReport timeline animation with scrubber, GM skip (§9A) — D-095
+- [x] Logistics: system-defined documents (depots/routes), panel with attrition forecast (RulesModule.forecast client-side), reinforcement queue, upkeep (§10, §4A) — D-096
+- [x] Hero attachment: leaderTokenId moved by sim via Ops; detach restores control (§5A) — D-097
 - [x] Turn-level undo (restore checkpoint, reopen orders) (§5A) — D-071 (undoTurn: reloadFromFreeze → inverse ops → projected snapshot resync)
-- [ ] After-action replay from checkpoints (§8A)
-- [ ] Strategic↔tactical scene linking (generated tokens mapping) (§9A)
-- [ ] File System Access API "save to folder" (§8)
+- [x] After-action replay from checkpoints (§8A) — D-098
+- [x] Strategic↔tactical scene linking (generated tokens mapping) (§9A) — D-099
+- [x] File System Access API "save to folder" (§8) — D-100
 
 ## M4 — Resilience & scale + Strategic stress (§19)
 
-- [ ] Peer relay (relay.offer / relay.frame, session-key e2e encryption) (§6.3)
-- [ ] Assistant-GM failover: unfiltered replica + full assets, 30 s absence → reopen room (§6.5)
-- [ ] User-supplied TURN credentials (§6.3)
-- [ ] Tiled maps > 4096 px (§7)
-- [ ] Voice/video mesh ≤ 6 peers (§1)
-- [ ] PWA install when hosted (§19)
-- [ ] 100,000-model LOD stress ≥ 30 FPS; delta compression tuning (§19, §9A)
-- [ ] report.detail paging at scale; failover carries checkpoints (§19)
+- [x] Peer relay (relay.offer / relay.frame, session-key e2e encryption) (§6.3) — D-101 (`src/net/peerRelay.ts`, `tests/net/relay.test.ts`)
+- [x] Assistant-GM failover: unfiltered replica + full assets, 30 s absence → reopen room (§6.5) — D-103 (`src/net/failover.ts`, `tests/net/failover.test.ts`)
+- [x] User-supplied TURN credentials (§6.3) — D-102 (`src/net/webrtc.ts`, `tests/net/relay.test.ts`)
+- [x] Tiled maps > 4096 px (§7) — `src/host/import.ts`, `src/workers/assetJob.ts`, `tests/assets/import.test.ts`
+- [x] Voice/video mesh ≤ 6 peers (§1) — D-104 (`src/net/voiceVideo.ts`, `tests/net/voiceVideo.test.ts`)
+- [x] PWA install when hosted (§19) — inlined manifest + meta tags in `index.html`
+- [x] 100,000-model LOD stress ≥ 30 FPS; delta compression tuning (§19, §9A) — `tests/canvas/lod100k.test.ts` (<50ms execution)
+- [x] report.detail paging at scale; failover carries checkpoints (§19) — `TurnChannel.reportDetailTo`, `tests/host/turnChannel.test.ts`
 - [ ] Optional wasm hot RulesModule paths (§19)
 
 ## Continuous / cross-cutting

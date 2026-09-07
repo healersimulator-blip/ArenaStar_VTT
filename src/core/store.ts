@@ -181,6 +181,9 @@ function emptyCollections(): WorldCollections {
     factions: [],
     armies: [],
     turns: [],
+    depots: [],
+    routes: [],
+    reinforcements: [],
     assetManifest: {},
   };
 }

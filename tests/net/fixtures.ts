@@ -184,6 +184,9 @@ export function emptyWorld(): WorldCollections {
     factions: [],
     armies: [],
     turns: [],
+    depots: [],
+    routes: [],
+    reinforcements: [],
     assetManifest: {},
   };
 }

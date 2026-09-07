@@ -322,7 +322,7 @@
         if (Number.isFinite(hz) && hz > 0) client.simControl("rate", { rateHz: hz });
       }}
     >
-      {#each ["2", "5", "10"] as hz}
+      {#each ["2", "5", "10"] as hz (hz)}
         <option value={hz}>{hz} Hz</option>
       {/each}
     </select>
