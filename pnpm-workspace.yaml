@@ -1,0 +1,5 @@
+# §0: pnpm workspace. The project is one bundle (single-file index.html), so the
+# workspace currently has a single member — the root package. `systems/*` are
+# runtime data packages (§12), not npm workspaces.
+packages:
+  - "systems/*"
