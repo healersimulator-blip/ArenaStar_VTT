@@ -381,7 +381,10 @@ export type CollectionName =
   | "compendia"
   | "factions"
   | "armies"
-  | "turns";
+  | "turns"
+  | "depots"
+  | "routes"
+  | "reinforcements";
 
 /** Every top-level collection, in canonical order (indexes IDB `documents` too, §8). */
 export const TOP_LEVEL_COLLECTIONS: readonly CollectionName[] = [
@@ -402,6 +405,9 @@ export const TOP_LEVEL_COLLECTIONS: readonly CollectionName[] = [
   "factions",
   "armies",
   "turns",
+  "depots",
+  "routes",
+  "reinforcements",
 ];
 
 /**
@@ -446,6 +452,9 @@ export interface WorldCollections {
   factions: import("./strategic").FactionDocument[];
   armies: import("./strategic").ArmyDocument[];
   turns: import("./strategic").TurnDocument[];
+  depots: import("./logistics").DepotDocument[];
+  routes: import("./logistics").RouteDocument[];
+  reinforcements: import("./logistics").ReinforcementDocument[];
   /** Maintained by the host AssetServer, not an Op target (D-015). */
   assetManifest: AssetManifest;
 }

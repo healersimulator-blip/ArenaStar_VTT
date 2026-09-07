@@ -29,6 +29,7 @@
     type SortKey,
     type TreeRow,
   } from "./armyModel";
+  import TurnReportTimeline from "./TurnReportTimeline.svelte";
 
   let {
     client,
@@ -476,6 +477,21 @@
             <h3>
               Turn {report.turn} · {summary.casualties} casualties · {summary.attacks} attacks
             </h3>
+            <TurnReportTimeline
+              {report}
+              isGm={client.user?.role === "gm" || client.user?.role === "assistant"}
+              onEventFocus={(event) => {
+                if (event.at) {
+                  bus.call("ephemeral", {
+                    type: "ping",
+                    userId: client.user?.id ?? "gm",
+                    sceneId: report.sceneId ?? "",
+                    x: event.at.x,
+                    y: event.at.y,
+                  });
+                }
+              }}
+            />
             {#if dist && (dist.totals.wounds > 0 || dist.totals.routs > 0)}
               <p class="dist" data-report-distributions>
                 {Object.entries(dist.byType)

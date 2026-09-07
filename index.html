@@ -3,6 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#14171c" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <!-- PWA Web App Manifest inlined as data URI for single-file compliance (§15) -->
+    <link
+      rel="manifest"
+      href='data:application/manifest+json,{"name":"ArenaStar VTT","short_name":"VTT","description":"Serverless Virtual Tabletop","start_url":".","display":"standalone","background_color":"#14171c","theme_color":"#14171c"}'
+    />
     <!-- §15: CSP meta tag. Single-file build inlines all JS/CSS, so 'unsafe-inline' is
          required; blob:/data: needed for inlined lazy modules, workers and asset URLs. -->
     <meta

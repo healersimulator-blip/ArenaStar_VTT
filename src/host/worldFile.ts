@@ -297,3 +297,112 @@ export async function importWorldZip(options: ImportWorldOptions): Promise<Impor
 
   return { worldId, name: meta.name, seq: meta.seq };
 }
+
+// ─── export to folder handle (File System Access API, §8) ────────────────────
+
+export async function exportWorldToFolder(
+  options: ExportWorldOptions,
+  dirHandle: DirHandleLike,
+): Promise<{ filesCount: number }> {
+  await options.persister?.flush();
+  const world = await getWorld(options.db, options.worldId);
+  if (!world) throw new Error(`world file: unknown world ${options.worldId}`);
+
+  const docs = await readDocuments(options.db, options.worldId);
+  const assets = await listAssets(options.db, options.worldId);
+  const opfs = await OpfsAssetStore.open(options.worldId, options.root ?? null);
+
+  const meta: WorldFileMeta = {
+    format: WORLD_FILE_FORMAT,
+    worldId: world.worldId,
+    name: world.name,
+    system: world.system,
+    version: world.version,
+    seq: world.flushedSeq,
+    exportedAt: (options.now ?? Date.now)(),
+  };
+
+  const assetEntries: WorldFileAsset[] = [];
+  const blobs: Array<{ hash: AssetId; bytes: Uint8Array }> = [];
+  for (const record of assets) {
+    const bytes = record.bytes ?? (await opfs?.get(record.hash));
+    if (!bytes) throw new Error(`world file: missing blob for asset ${record.hash}`);
+    const entry: WorldFileAsset = {
+      hash: record.hash,
+      name: record.name,
+      mime: record.mime,
+      size: record.size,
+      chunks: record.chunks,
+    };
+    if (record.width !== undefined) entry.width = record.width;
+    if (record.height !== undefined) entry.height = record.height;
+    if (record.thumb !== undefined) entry.thumb = record.thumb;
+    if (record.mid !== undefined) entry.mid = record.mid;
+    if (record.tiles !== undefined) entry.tiles = record.tiles;
+    assetEntries.push(entry);
+    blobs.push({ hash: record.hash, bytes });
+  }
+
+  const writeFile = async (
+    parent: DirHandleLike,
+    name: string,
+    bytes: Uint8Array,
+  ): Promise<void> => {
+    const handle = await parent.getFileHandle(name, { create: true });
+    const writable = await handle.createWritable();
+    await writable.write(bytes);
+    await writable.close();
+  };
+
+  let filesCount = 0;
+
+  // 1. world.json
+  await writeFile(dirHandle, "world.json", jsonBytes(meta));
+  filesCount++;
+
+  // 2. documents.json
+  await writeFile(
+    dirHandle,
+    "documents.json",
+    jsonBytes({ seq: meta.seq, docs } satisfies WorldFileDocuments),
+  );
+  filesCount++;
+
+  // 3. assets.json & assets/ folder
+  await writeFile(dirHandle, "assets.json", jsonBytes(assetEntries));
+  filesCount++;
+
+  if (blobs.length > 0) {
+    const assetsDir = await dirHandle.getDirectoryHandle("assets", { create: true });
+    for (const b of blobs) {
+      await writeFile(assetsDir, b.hash, b.bytes);
+      filesCount++;
+    }
+  }
+
+  // 4. checkpoints & reports
+  const checkpoints = await listCheckpointsForWorld(options.db, options.worldId);
+  const reports = await listReportsForWorld(options.db, options.worldId);
+
+  if (checkpoints.length > 0) {
+    const cpDir = await dirHandle.getDirectoryHandle("checkpoints", { create: true });
+    for (const cp of checkpoints) {
+      const sceneCpDir = await cpDir.getDirectoryHandle(cp.sceneId, { create: true });
+      const { pool, ...cpMeta } = cp;
+      await writeFile(sceneCpDir, `${cp.slot}.json`, jsonBytes(cpMeta));
+      await writeFile(sceneCpDir, `${cp.slot}.pool`, pool);
+      filesCount += 2;
+    }
+  }
+
+  if (reports.length > 0) {
+    const repDir = await dirHandle.getDirectoryHandle("reports", { create: true });
+    for (const rep of reports) {
+      const sceneRepDir = await repDir.getDirectoryHandle(rep.sceneId, { create: true });
+      await writeFile(sceneRepDir, `${rep.turnNumber}.json`, jsonBytes(decodeReport(rep.bytes)));
+      filesCount++;
+    }
+  }
+
+  return { filesCount };
+}

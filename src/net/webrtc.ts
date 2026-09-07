@@ -14,11 +14,30 @@
  */
 import type { ChannelName, Transport, TransportMessageHandler, TransportStats } from "../core/net";
 
+export interface TurnConfig {
+  urls: string[];
+  username?: string;
+  credential?: string;
+}
+
 /** §6.3 public STUN list (no TURN by default; user-supplied later, §6.3). */
 export const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
   { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
   { urls: ["stun:stun.cloudflare.com:3478"] },
 ];
+
+export function buildIceServers(customTurn?: readonly TurnConfig[]): RTCIceServer[] {
+  const result: RTCIceServer[] = [...DEFAULT_ICE_SERVERS];
+  if (customTurn && customTurn.length > 0) {
+    for (const turn of customTurn) {
+      const entry: RTCIceServer = { urls: turn.urls };
+      if (turn.username) entry.username = turn.username;
+      if (turn.credential) entry.credential = turn.credential;
+      result.push(entry);
+    }
+  }
+  return result;
+}
 
 const CHANNEL_ORDER: readonly ChannelName[] = ["ops", "ephemeral", "assets", "sim"];
 
