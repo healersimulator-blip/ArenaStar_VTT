@@ -1325,3 +1325,84 @@ existing sim channel.
 - Unit tested in `tests/net/voiceVideo.test.ts`.
 
 
+## D-105 — §12 PF1e: deploy-time profile compilation, content-addressed interning, real model columns
+
+- Gap List §1.2–§1.4 (PR 1). `systems/pf1e-mass-battles/manifest.json` declared 9 `modelColumns` while
+  `PF1E_MODEL_SCHEMA` uses 13; the host builds the deploy schema from the **manifest**
+  (`src/app/hostBoot.ts:433-443`), so undeclared columns are never allocated: reads return `undefined`,
+  writes are dropped, and the column vanishes from diffs, hashes and joiner replicas. Manifest now
+  matches the schema and `tests/packages/pf1eManifest.test.ts` pins them together.
+- `PF1E_MODEL_SCHEMA` grew `flatFootedAc` (§2.1) and `nonlethal` (§2.3/§2.12). AC is no longer taken off
+  the unit sheet: `compilePF1eProfile` derives `ac` / `touchAc` / `flatFootedAc` from one
+  `ACBreakdown` (armor + shield + Dex + natural + size + misc + dodge; no Dex/dodge when flat-footed,
+  no armor/shield/natural when touching), so one breakdown serves every attack flavour.
+- New `src/packages/pf1e/deploySeed.ts`: `src/sim/deploy.ts` only allocates `hp/hpMax = 1` + `sys.ammo`,
+  so PF1e battles fought at AC 0 and — because nothing wrote `profileIdx` — resolved **zero attacks**
+  (`registry.get(0)` is `undefined` ⇒ every attack loop `continue`d). `buildUnitProfiles` +
+  `seedPF1ePool` now compile and stamp every model at turn start.
+- Profiles are **content-addressed**: `PF1eProfileRegistry.intern` keys on the stat-bearing fields
+  (`pf1eProfileKey`), so identical profiles share one id. That makes the old per-turn `register()` churn
+  (a new id for every unit every turn, registry never cleared, `profileIdx` frozen at deploy) harmless
+  and puts profile identity — hence dice order — outside the RNG stream, where it belongs.
+- Interning happens over `sortUnitsForInterning` (id-sorted), never over `Object.keys(army.units)`: unit
+  key order is a persistence artefact and must not reach the dice.
+- `resolveTurn` re-seeds every turn on purpose. The host's `applyHeroLeadershipToUnits` mutates
+  `unit.stats` (and it accumulates auras turn over turn — unfixed, Gap List §5), so a deploy-time-only
+  snapshot would freeze AC/attack at whatever the stats were at deploy.
+
+## D-106 — §12 PF1e: all battle dice come from the runner's PRNG
+
+- Gap List §1.5. `massBattlePf1e.ts` seeded its own `SimpleRng` from `Math.random()` in two places and
+  `combatEngine.ts` / `spells.ts` rolled on private LCGs, so PF1e battles were neither reproducible from
+  a seed nor checkpoint/hash/replay stable (`src/sim/runner.ts` hands rules a `BulkDice(req.seed)`;
+  `massBattleBasic.ts` forks per unit).
+- `combatEngine.ts` now takes a `PF1eRng` (`pf1eRngFromPrng` bridges the host `PRNG`,
+  `pf1eRngFromSeed` keeps unit tests free of RNG plumbing); the module forks
+  `rng.fork(unitIndex(unit), phase)` (phase 1 = melee, 2 = spellcasting) exactly like the basic module,
+  and `resolvePF1eSpellAOE` takes the same `rng`. `SimpleRng` is `@deprecated`, kept only so
+  `tests/packages/pf1eCombat.test.ts` still compiles.
+- Verified by `tests/packages/pf1eDeploySeed.test.ts`: same seed ⇒ equal `canonicalPoolHash`, and a
+  unit's fork key is its identity (`unitIdx` alone would make two same-army units share one stream).
+
+## D-107 — §12 PF1e: flat-footed AC column, single-count flanking, minimum damage is nonlethal
+
+- Gap List §2.1–§2.3. `targetAcType: "flatFooted"` read a column that did not exist and fell back to the
+  **attacker's** `profile.ac` — with the fallback AC column absent, unseeded battles attacked AC 0, which
+  is why the pre-existing troll-regen test "hit" only by luck (now seeded explicitly in
+  `tests/packages/pf1ePrecreatedUnits.test.ts`). `resolveTargetAc(pool, index, acType, defProfile)` is
+  the single entry point; it also fixes DR, which used `pool.sys.drVal ?? profile.dr` and so read the
+  attacker's DR whenever the defender's was 0.
+- Flanking was +2 to-hit *and* −2 to AC (SRD: +2 to-hit only, from the helper), so a +2 flank could turn
+  a 19 into a 20 twice over. The −2 is gone; the `FLANKED` status bit is still set by the caller
+  (envelopment geometry owns it later, §5).
+- Minimum damage (CRB: "if penalties would reduce damage below 1, deal 1 point of **nonlethal**") was
+  `Math.max(1, …)` lethal in all three resolvers. Damage now returns `{lethal, nonlethal}`; sub-lethal
+  nonlethal accumulates in `sys.nonlethal` and trips `UNCONSCIOUS` at ≥ current hp (and `DEAD` at 0 hp,
+  which is the bit `compactPool` reclaims), so the §2.12 thresholds have somewhere to live.
+- Deliberately NOT done: the hero cleave (still one unconditional kill), envelopment's flanked bit and
+  routing logic, and the analytics fields — all wrong in ways that need the §5 rules data model, not a
+  patch.
+
+## D-108 — §4A codec: `i8` is a real wire kind (found while doing Gap List §1.3)
+
+- `ModelColumnType` admits `i8`, `rulesLoader.validateRulesModule` and `packageManifest` accept it, and
+  `pool.ts` allocates an `Int32Array` for it — but `codec.ts`'s `ColKind`/`KIND_BYTES` had no `i8`, and
+  `colKind` casts the schema value through unchecked. Consequences: `packCodes` wrote a
+  `codes.length * undefined = NaN`-sized buffer (empty) so the column silently disappeared from every
+  delta, and `unpackCodes` computed `n = 0 / undefined = NaN` → `new Array(NaN)` threw
+  `RangeError: Invalid array length` in `canonicalPoolHash`, i.e. at the end of the first turn of any
+  battle whose module declared an i8 column (PF1e's three saves).
+- Fixed in `src/sim/codec.ts` (signed 1-byte kind) rather than by re-typing PF1e's saves as `i16`: the
+  platform promised the type, so a third-party module would otherwise hit the same trap. Regression test
+  covers both the snapshot and the delta path, including −128/+127.
+
+## D-109 — §12 PF1e: scale authority is the two implementations, not a shared kernel
+
+- Answered on the Gap List review (2026-09-08), overriding its recommendation: tactical (ActorDocument /
+  CombatDocument / grid) and strategic (ModelPool / SimWorker) each implement the Combat chapter
+  separately. Parity is a convention — shared *data and tables* under `src/packages/pf1e/` — and there
+  is **no** parity gate and no `resolveAttackRoll`-style kernel. The strategic layer keeps grid-quantised
+  abstractions where exact tactical bookkeeping would cost 10 000× the work.
+- Same review: **no core `EffectDocument` changes** (`mode`/`type`/`origin`/`duration` rejected), so
+  core PRD items P-12/P-13/P-14 are retired and no document migration is needed; typed bonuses live in
+  PF1e's own data and stacking is PF1e's business.

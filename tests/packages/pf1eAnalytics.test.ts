@@ -16,6 +16,7 @@ describe("PF1e Battle Analytics & Reporter (§12 / Task 6)", () => {
       drBypassed: 5,
       srBlocked: 0,
       netDamageDealt: 105,
+      nonlethalDealt: 0,
       killsCount: 4,
       aooExecuted: 1,
       aooHits: 1,

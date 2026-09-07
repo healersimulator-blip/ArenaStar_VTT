@@ -4,7 +4,7 @@
 import type { ModelPool } from "../../core/strategic";
 import { ModelStatus } from "../../core/strategic";
 import type { SpatialGrid } from "../../core/spatialGrid";
-import { resolvePF1eAoO, SimpleRng } from "./combatEngine";
+import { pf1eRngFromSeed, resolvePF1eAoO, type PF1eRng } from "./combatEngine";
 import type { PF1eProfileRegistry } from "./schema";
 
 export interface PF1eSpellOrder {
@@ -43,7 +43,12 @@ export interface PF1eSpellOptions {
   pool: ModelPool;
   grid: SpatialGrid;
   spell: PF1eSpellOrder;
-  seed: number;
+  /**
+   * Dice source. When omitted, `seed` seeds the sim's Xoshiro stream (never
+   * `Math.random()`), so the turn stays replayable (Gap List §1.5).
+   */
+  rng?: PF1eRng;
+  seed?: number;
   registry?: PF1eProfileRegistry;
   casterAdjacentEnemies?: number[];
   /** When true (default), evaluates CL vs SR rolls and Concentration/AoO rules. */
@@ -66,7 +71,7 @@ export function resolvePF1eAOESpell(opts: PF1eSpellOptions): PF1eSpellResult {
     highFidelity = true,
   } = opts;
 
-  const rng = new SimpleRng(seed);
+  const rng = opts.rng ?? pf1eRngFromSeed(seed ?? 0);
 
   const metrics: PF1eSpellMetrics = {
     modelsTargeted: 0,

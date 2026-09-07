@@ -69,12 +69,15 @@ describe("PF1e Precreated Units & Advanced Mechanics (Fast Healing, Regeneration
     expect(pool.hp[trollIdx]).toBe(15);
 
     // 2. Hero attacks Troll with Fire weapon -> deals LETHAL damage!
+    // A fixed dice source is used instead of a seed so the assertion is about the
+    // regeneration mechanic, not about luck: d20 = 12 hits AC 16 (+4 attack bonus) without
+    // threatening a critical, and the weapon's damage dice come up 2 (2 + 3 Str = 5).
     resolvePF1eAttacks({
       pool,
       attackers: [heroIdx],
       defenders: [trollIdx],
       registry,
-      seed: 42,
+      rng: { d: (sides: number) => (sides === 20 ? 12 : 2) },
       highFidelity: true,
     });
 

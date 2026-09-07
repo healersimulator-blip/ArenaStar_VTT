@@ -3,7 +3,14 @@
  */
 import type { ModelPool } from "../../core/strategic";
 import { ModelStatus } from "../../core/strategic";
-import { PF1eCondition, PF1eDrType, type PF1eProfileRegistry } from "./schema";
+import type { PRNG } from "../../core/sim";
+import { XoshiroPRNG } from "../../sim/prng";
+import {
+  PF1eCondition,
+  PF1eDrType,
+  type PF1eProfileRegistry,
+  type PF1eUnitProfile,
+} from "./schema";
 
 export interface PF1eCombatMetrics {
   totalAttacks: number;
@@ -17,6 +24,8 @@ export interface PF1eCombatMetrics {
   drBypassed: number;
   srBlocked: number;
   netDamageDealt: number;
+  /** Nonlethal damage dealt (SRD: Minimum Damage / Dealing Nonlethal Damage). */
+  nonlethalDealt: number;
   killsCount: number;
   aooExecuted: number;
   aooHits: number;
@@ -28,8 +37,15 @@ export interface PF1eCombatOptions {
   attackers: number[];
   defenders: number[];
   registry: PF1eProfileRegistry;
-  seed: number;
-  targetAcType?: "ac" | "touchAc" | "flatFooted";
+  /**
+   * Dice source. Production callers MUST pass a fork of the turn's injected PRNG
+   * (`pf1eRngFromPrng(rng.fork(unitIndex))`) so PF1e resolves identically under
+   * checkpoint, replay and the §5A hash. `seed` remains as a deterministic fallback for
+   * tests and ad-hoc callers.
+   */
+  rng?: PF1eRng;
+  seed?: number;
+  targetAcType?: PF1eAcType;
   isRanged?: boolean;
   isFlanked?: boolean;
   /** When true (default), evaluates full PF1e rules: Firearms range/misfires, DR material bypass, and Condition penalties. */
@@ -41,7 +57,70 @@ export interface PF1eCombatResult {
   metrics: PF1eCombatMetrics;
 }
 
-// Linear congruential generator for deterministic rolls inside worker
+/** Minimal dice interface the PF1e kernel needs. */
+export interface PF1eRng {
+  d(sides: number): number;
+}
+
+/**
+ * Adapt the sim's §5A PRNG (Xoshiro-identical, `src/sim/prng.ts`, or `BulkDice`) into the
+ * kernel's dice source. Replaces the module-local LCG, whose streams were unrelated to the
+ * seeded turn and therefore broke replay/checkpoint parity (Gap List §1.5).
+ */
+export function pf1eRngFromPrng(prng: PRNG): PF1eRng {
+  return {
+    d(sides: number): number {
+      return Math.floor(prng.nextFloat() * sides) + 1;
+    },
+  };
+}
+
+/** Deterministic fallback when no PRNG is injected (tests, offline resolvers). */
+export function pf1eRngFromSeed(seed: number): PF1eRng {
+  return pf1eRngFromPrng(new XoshiroPRNG(seed >>> 0));
+}
+
+/** The three AC flavours the SRD distinguishes, plus the legacy alias for flat-footed. */
+export type PF1eAcType = "ac" | "touchAc" | "flatFootedAc" | "flatFooted";
+
+/**
+ * `targetAcType` → pool column. `flatFooted` is accepted as an alias so callers written
+ * against the old (non-existent-column) spelling still resolve — that spelling is what made
+ * flat-footed attacks silently read the *attacker's* AC (Gap List §2.1).
+ */
+export function pf1eAcColumn(acType: PF1eAcType): "ac" | "touchAc" | "flatFootedAc" {
+  switch (acType) {
+    case "ac":
+      return "ac";
+    case "touchAc":
+      return "touchAc";
+    case "flatFootedAc":
+    case "flatFooted":
+      return "flatFootedAc";
+    default:
+      throw new Error(`pf1e: unknown targetAcType ${JSON.stringify(acType)}`);
+  }
+}
+
+/**
+ * Defender's AC of the requested flavour. The pool column is authoritative (it is what the
+ * replica and the hash carry); an unset/zero column falls back to the **defender's** profile,
+ * and a target with no profile falls back to the SRD base of 10 — never to the attacker's AC.
+ */
+export function resolveTargetAc(
+  pool: ModelPool,
+  defenderProfile: PF1eUnitProfile | undefined,
+  targetIdx: number,
+  acType: PF1eAcType,
+): number {
+  const column = pf1eAcColumn(acType);
+  const fromPool = pool.sys[column]?.[targetIdx] ?? 0;
+  if (fromPool > 0) return fromPool;
+  if (!defenderProfile) return 10;
+  return defenderProfile[column];
+}
+
+/** @deprecated Tests only — production paths inject the turn PRNG via `pf1eRngFromPrng`. */
 export class SimpleRng {
   private state: number;
   constructor(seed: number) {
@@ -107,7 +186,7 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
     highFidelity = true,
   } = opts;
 
-  const rng = new SimpleRng(seed);
+  const rng = opts.rng ?? pf1eRngFromSeed(seed ?? 0);
 
   const metrics: PF1eCombatMetrics = {
     totalAttacks: 0,
@@ -121,6 +200,7 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
     drBypassed: 0,
     srBlocked: 0,
     netDamageDealt: 0,
+    nonlethalDealt: 0,
     killsCount: 0,
     aooExecuted: 0,
     aooHits: 0,
@@ -157,8 +237,11 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
 
       const defStatus = pool.status[targetIdx] ?? 0;
 
+      // The defender's own profile — never the attacker's — backs up missing columns.
+      const defProfile = registry.get(pool.sys["profileIdx"]?.[targetIdx] ?? 0);
+
       // Calculate Target AC with High-Fidelity Firearms & Touch AC rules
-      let effectiveAcType = targetAcType;
+      let effectiveAcType: PF1eAcType = targetAcType;
       const distance = getModelDistance(pool, atkIdx, targetIdx);
       let rangePenalty = 0;
 
@@ -172,10 +255,11 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
         }
       }
 
-      let targetAc = pool.sys[effectiveAcType]?.[targetIdx] ?? profile.ac;
-      if (isFlanked || (defStatus & PF1eCondition.FLANKED) !== 0) {
-        targetAc = Math.max(0, targetAc - 2);
-      }
+      // SRD (Combat Modifiers > Flanking): flanking is a +2 flanking **bonus on the attack
+      // roll**, and nothing else — it does not reduce the defender's AC. Applying it to both
+      // sides double-counted the bonus (Gap List §2.2).
+      const isDefenderFlanked = isFlanked || (defStatus & PF1eCondition.FLANKED) !== 0;
+      let targetAc = resolveTargetAc(pool, defProfile, targetIdx, effectiveAcType);
 
       if (highFidelity) {
         // Prone AC modifier: -4 vs Melee, +4 vs Ranged
@@ -203,7 +287,7 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
       }
 
       // Apply Attacker Condition & Range Modifiers
-      let attackMod = attackBonus + (isFlanked ? 2 : 0) + profile.enhancementBonus - rangePenalty;
+      let attackMod = attackBonus + (isDefenderFlanked ? 2 : 0) + profile.enhancementBonus - rangePenalty;
       if (highFidelity) {
         if ((atkStatus & PF1eCondition.SHAKEN) !== 0) attackMod -= 2;
         if ((atkStatus & PF1eCondition.SICKENED) !== 0) attackMod -= 2;
@@ -236,23 +320,48 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
         }
       }
 
-      // Roll Base Damage
+      // Roll Base Damage. Multipliers scale the dice *and* the static bonus, and the
+      // minimum-damage rule applies to the final result: if penalties drive it below 1 the
+      // attack deals 1 point of nonlethal damage instead of 1 point of lethal damage
+      // (SRD: Combat Statistics > Damage, "Minimum Damage"; Gap List §2.3).
       let rawDamage = 0;
-      for (let m = 0; m < mult; m++) {
-        let diceTotal = 0;
-        for (let d = 0; d < profile.damageDiceCount; d++) {
-          diceTotal += rng.d(profile.damageDiceSides);
+      let nonlethalDamage = 0;
+      {
+        let damageTotal = 0;
+        for (let m = 0; m < mult; m++) {
+          let diceTotal = 0;
+          for (let d = 0; d < profile.damageDiceCount; d++) {
+            diceTotal += rng.d(profile.damageDiceSides);
+          }
+          let dmgMod = profile.damageMod;
+          if (highFidelity && (atkStatus & PF1eCondition.SICKENED) !== 0) dmgMod -= 2;
+          damageTotal += diceTotal + dmgMod;
         }
-        let dmgMod = profile.damageMod;
-        if (highFidelity && (atkStatus & PF1eCondition.SICKENED) !== 0) dmgMod -= 2;
-        rawDamage += Math.max(1, diceTotal + dmgMod);
+        if (damageTotal < 1) nonlethalDamage = 1;
+        else rawDamage = damageTotal;
       }
 
       metrics.rawDamageDealt += rawDamage;
+      if (nonlethalDamage > 0) {
+        metrics.nonlethalDealt += nonlethalDamage;
+        const priorNonlethal = pool.sys["nonlethal"]?.[targetIdx] ?? 0;
+        const totalNonlethal = priorNonlethal + nonlethalDamage;
+        if (pool.sys["nonlethal"]) pool.sys["nonlethal"][targetIdx] = totalNonlethal;
+        // SRD: nonlethal damage does not reduce hit points; reaching past current HP makes
+        // the target unconscious (staggered-at-equal is Gap List §2.12).
+        if (totalNonlethal > (pool.hp[targetIdx] ?? 0)) {
+          pool.status[targetIdx] = (pool.status[targetIdx] ?? 0) | PF1eCondition.UNCONSCIOUS;
+        }
+      }
 
-      // Calculate Damage Reduction (DR) with Material Bypass
-      const drVal = pool.sys["drVal"]?.[targetIdx] ?? profile.drVal;
-      const drTypeFlags = (pool.sys["drType"]?.[targetIdx] ?? 0) || profile.drTypeFlags;
+      // Damage Reduction is a property of the DEFENDER. Reading it as
+      // `(pool column ?? 0) || attacker profile` silently applied the attacker's own DR to
+      // the blow when the defender's column was 0 (Gap List §2.10, the fallback half).
+      const defDrVal = pool.sys["drVal"]?.[targetIdx] ?? 0;
+      const defDrType = pool.sys["drType"]?.[targetIdx] ?? 0;
+      const drVal = defDrVal > 0 ? defDrVal : (defProfile?.drVal ?? 0);
+      const drTypeFlags = defDrType > 0 ? defDrType : (defProfile?.drTypeFlags ?? 0);
+      // DR never applies to nonlethal damage.
       let effectiveDr = Math.min(rawDamage, drVal);
 
       if (highFidelity) {
@@ -274,7 +383,7 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
       metrics.netDamageDealt += netDamage;
 
       // Apply Damage to Model HP / Lethal Damage
-      const targetProfile = registry.get(pool.sys["profileIdx"]?.[targetIdx] ?? 1);
+      const targetProfile = defProfile;
       const isRegenMonster = targetProfile && targetProfile.regenerationVal > 0;
       const isLethalType = (profile.elementalType & (targetProfile?.regenerationSuppressFlags ?? 0)) !== 0;
 
@@ -389,7 +498,7 @@ export function resolvePF1eTrample(
   registry: PF1eProfileRegistry,
   seed: number
 ): { totalTrampled: number; totalDamage: number } {
-  const rng = new SimpleRng(seed);
+  const rng = pf1eRngFromSeed(seed);
   let totalTrampled = 0;
   let totalDamage = 0;
 
@@ -440,7 +549,7 @@ export function resolvePF1eCombatManeuver(
   defenderIdx: number,
   maneuver: "trip" | "grapple" | "bull_rush" | "disarm",
   registry: PF1eProfileRegistry,
-  rng: SimpleRng
+  rng: PF1eRng
 ): { success: boolean; conditionApplied?: number } {
   const atkProfile = registry.get(pool.sys["profileIdx"]?.[attackerIdx] ?? 1);
   const defProfile = registry.get(pool.sys["profileIdx"]?.[defenderIdx] ?? 1);
@@ -473,7 +582,7 @@ export function resolvePF1eAoO(
   provokingModelIdx: number,
   adjacentEnemies: number[],
   registry: PF1eProfileRegistry,
-  rng: SimpleRng
+  rng: PF1eRng
 ): { hits: number; totalDamage: number } {
   let hits = 0;
   let totalDamage = 0;
