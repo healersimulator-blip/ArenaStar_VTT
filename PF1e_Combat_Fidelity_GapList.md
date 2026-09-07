@@ -19,6 +19,10 @@ transcribed in Appendix A so the work can proceed without re-opening the SRD.
 
 Status codes: ✅ faithful · 🟡 partial · 🔴 wrong (implemented but contradicts SRD) · ⚪ absent.
 
+> **Build order, data contracts and PR slices: `PF1e_ImplementationPlan.md`** (2026-09-08). This file
+> stays the rule-by-rule inventory and the verified SRD numbers (Appendix A); that file is the plan.
+> Rows closed here are accounted for there — do not re-plan from this table.
+
 ---
 
 ## 0. Verdict
