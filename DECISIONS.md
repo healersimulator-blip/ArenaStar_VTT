@@ -1449,3 +1449,36 @@ existing sim channel.
   catch the missing `KIND_BYTES` entry — the `toSingleDefaultExpression`-style approach of throwing on
   an unmapped kind at encode time is the follow-up, deferred because it is a hot path (per-column, per
   model, per turn) and no consumer needs a new type yet.
+
+## D-112 — §1.8: the 10k gate runs in Node; the browser asserts artifacts, not timings
+
+- The 10 000-model acceptance test for PF1e moved from `e2e/` to `tests/packages/pf1eMassBattleScale.test.ts`,
+  driving the real `deploySnapshot` → `InlineSimRunner` → `SimRunnerCore` path (the code the SimWorker runs)
+  for 4 warm-up + 24 turns. A Playwright-only gate is unauditable in this environment (no browser binaries,
+  `playwright install` blocked), and turn-cost assertions are machine-dependent by nature; the old spec was
+  worse than unauditable — it asserted a hardcoded `{ok:true,hits:15}` and never touched the sim.
+- **Budgets are asserted, timings are measured.** Strict on everything reproducible: `bytesPerModel ≤ 200`
+  (66.00 with the 13 PF1e columns), a full 10k checkpoint ≤ 1.5 MB, `toVersion == turns`, casualties
+  (`Σ rangeDiffs length` between 0 and 10 000), melee events emitted, `report.rulesVersion`/`subPhases`
+  stamped by the module, `console.error`/`console.warn` call counts 0 via spies, and replay equality of the
+  pool hash *and* the wire. The p95 gate is a catastrophe ceiling (250 ms) with the measured p50/p95/max
+  logged, so the test fails on a 5× regression instead of on noisy CI. §19's "p95 < 50 ms at 10k" is
+  reported against, not asserted; the dense 40 × 250 shape genuinely misses it (p95 54–58 ms) and that is
+  recorded as a perf finding in Gap List §5 rather than hidden by shaping the fixture until it passes.
+- **Determinism is asserted on the decompressed wire.** `encodeSimDelta`/`encodeSimSnapshot` gzip via fflate
+  `compressSync`, whose header carries MTIME: two byte-identical turns produce different compressed bytes.
+  Comparing `decompressSync(bytes)` (or decoded structures, as `tests/sim/replay.test.ts` already does) is
+  the rule for any future wire-level determinism test. Nothing is content-addressed from compressed bytes —
+  checkpoint identity is `canonicalPoolHash(pool, sys)` — so this is a test-authoring trap, not a wire bug,
+  and making fflate emit a fixed mtime was rejected as an unnecessary wire change.
+- **The browser half keeps only what a browser can prove.** `e2e/pf1e_mass_battles.spec.ts` imports the
+  *shipped* `dist/packages/pf1e-{core,mass-battles}-1.0.0.zip` through the app surface, asserts `packages()`
+  rows (a data package refuses activation with "data-only"), that `rulesBoot` reports
+  `{source:"package", packageId:"pf1e-mass-battles", version:"1.0.0", error:null}` — i.e. a real Worker
+  imported the bundle from a blob URL — that deactivation returns to `builtin`, and that the page threw no
+  `pageerror`. `test:e2e` now runs `pnpm build:systems` after `pnpm build` (vite empties `dist/`, so the
+  zips must be built after it) and the spec fails loudly with "run pnpm build:systems" if the artifacts are
+  absent, instead of silently skipping the thing it exists to check.
+- No host-side `simAdvance` e2e hook was invented. The `?e2e` app surface has no deploy/advance entry and the
+  §5A readbacks live on the joiner surface; adding one is deferred until the tactical (§4) flow needs the
+  same hook, so the seam is designed once.

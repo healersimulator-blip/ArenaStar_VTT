@@ -12,7 +12,7 @@
     "dev": "vite",
     "build": "vite build",
     "test": "vitest run",
-    "test:e2e": "pnpm build && playwright test",
+    "test:e2e": "pnpm build && pnpm build:systems && playwright test",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
