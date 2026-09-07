@@ -655,6 +655,29 @@ patch is undocumented, which is itself a gap worth closing).
 5. **Still open:** whether the invented spell **scatter** (`spells.ts`) stays. It has no core-rule
    basis; propose a `worldSettings` toggle at the next review rather than deciding it silently.
 
+### 10.2 P0 contracts landed (PR-A, D-113) — what the shared tables changed, and what they did not
+
+`src/packages/pf1e/rulesTables.ts` is now the single place the SRD *numbers* live, per decision 1
+(data shared, kernels not). It deliberately does **not** rewrite `compilePF1eProfile`: three known
+strategic deviations survive in it, each now visible and each with a fix phase, because changing them
+would move 10 000-model fixtures with no tactical need:
+
+1. **AoO budget.** `maxAoos: 1 + max(0, dexMod)` (schema.ts) vs A.10's *one per round, +1 while the Dexterity
+   modifier is positive, +1 per point with Combat Reflexes*. `attacksOfOpportunityPerRound()` encodes the
+   correct rule for the tactical path; the strategic one switches in P8, together with the analytics that
+   let the diff be read as a scale-fidelity trade-off rather than a guess.
+2. **CMB/CMD size.** `sizeMod` (the generic attack/AC ladder) where A.4 mandates the *special* size
+   modifier. The tactical path uses the special ladder; a stat block that publishes only `sizeMod` keeps
+   it, and `normalizePF1eSystem` records that in `converted` so the difference is visible per document
+   rather than averaged away.
+3. **Saving throws.** The sim uses the published number alone (`fort ?? 0`), the tactical rules add the
+   ability modifier the SRD says a save contains. `tests/packages/pf1eActor.test.ts` pins the exact
+   relationship (`tactical == strategic + conMod`) so the gap cannot widen before P8 unifies the compile.
+
+Item 5 above is decided: the invented spell **scatter** is not getting a toggle in P0. P5 either deletes it
+or files it in `DEVIATIONS.md` next to the fireball-radius row (that file still reads "None." while the sim
+fires at 15 ft against the pack's 20 ft, and that is due to be corrected in the same phase).
+
 ---
 
 ## 11. Appendix A — the SRD numbers to encode (fixture tables)

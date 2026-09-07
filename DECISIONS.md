@@ -1482,3 +1482,72 @@ existing sim channel.
 - No host-side `simAdvance` e2e hook was invented. The `?e2e` app surface has no deploy/advance entry and the
   §5A readbacks live on the joiner surface; adding one is deferred until the tactical (§4) flow needs the
   same hook, so the seam is designed once.
+
+## D-113 — §10 P0: three tactical data contracts, and world settings as a replicated document
+
+The five open questions in `PF1e_ImplementationPlan.md` §10 were answered "adopt the plan's defaults";
+the defaults are recorded here as decisions, and **two of them were revised against the code** before a
+line was written. The revisions matter more than the adoptions, so they lead.
+
+- **World settings are a document, not a `WorldsRecord` field.** The plan proposed storing
+  `worldSettings` + the round clock on `WorldsRecord` through `HostPersister.patchWorld`. That record is
+  the local host's row and is **not replicated** — players would be buffed against a clock they cannot
+  see. `src/core/documents.ts:314` already declares `SettingsDocument` (`type: "settings"`, in
+  `TOP_LEVEL_COLLECTIONS`) and nothing anywhere read or wrote it; `projectWorld`
+  (`src/core/projection.ts:122`) replicates any top-level document at effective ownership ≥ LIMITED. So
+  `src/core/worldSettings.ts` reads/merges that collection into one document, `_id="world-settings"`,
+  `ownership.default = LIMITED` (1), with flat keys in `system` — the same flat convention
+  `massBattleBasic.ts:380` already uses for `detectionMultiplier`. `tests/core/worldSettings.test.ts`
+  asserts the ownership level *through the projection itself*, and that a `default: 0` settings doc does
+  **not** reach a player, so the level is load-bearing rather than decorative. Name collision to avoid:
+  `src/storage/idb.ts:189`'s `getSetting/putSetting` are app-local `[scope, key]` pairs — unrelated.
+- **No manifest version bump, no declarative migration in P0.** `derivePF1eActor` is *total over partial
+  input* instead: a document with no `system.pf1e` at all yields a legal Medium commoner, naming every
+  reconstructed field in `defaults` and every malformed one in `issues`. The parity a migration would
+  have bought is asserted directly, by deriving the shipped `systems/pf1e-core/packs/bestiary.json` and
+  comparing it against `compilePF1eProfile`. A bump would have churned the zip names and the §12 manifest
+  tests to migrate data that does not exist. (For whoever lands a real one: `MigrationStep` carries
+  `transforms`, not `ops` — `src/core/migrations.ts:58`.)
+- **1. `system.pf1e` is the single authored tactical location** and `derivePF1eActor` its only tactical
+  consumer; nothing derived is ever stored, which is also what makes buff expiry free.
+- **2. Effects stay in `flags.pf1e`; core keeps ticking.** `EffectDocument` is untouched (D-112 stands),
+  `changes` is not the mechanic — a typed bonus cannot be expressed as a path overwrite. Core's
+  `flags.core.duration` remains the only timer, read through
+  `combatant.flags.core.effects` exactly as `core/combat.ts` stores it, and a round-start expiry
+  variant is a wrapper transition in `combatState.ts`, not a core edit. `ttlToTicks` is the one place
+  `1 round = 6 s` / `1 minute = 10 rounds` is written down, so the seed and the SRD text cannot drift.
+- **3. Round structure lives in `combat.flags.pf1e` / `combatant.flags.pf1e`.** Surprise (A.1: only when
+  *every* attacker beats *every* defender, and the round runs before core's round 1 so `combat.round`
+  stays 0), flat-footed-until-your-first-turn, the AoO ledger (A.10: refreshed at the start of *your*
+  turn), held actions (A.10: six allies acting before you turns the hold into a full-round action), and
+  the clock. Core still owns `round`/`turn`/initiative order — `startWithSurprise` hands over to
+  `startCombat`, `pf1eNextTurn` delegates to `nextTurn` and only then applies PF1e's boundaries. The
+  last test in `pf1eCombatState.test.ts` exists to prove that delegation: an embedded effect still ticks
+  down and expires through the wrapper, with the expiry *reported*.
+- **4. Fireball is 20 ft.** The pack/SRD value wins; the sim's 15 ft and the invented spell scatter are
+  due to be deleted or filed in `DEVIATIONS.md` in P5 — that file still reads "None." and is stale.
+- **5. PR order A→B→C** (sheet before tracker): a context menu needs a derived actor to act on.
+- **Initiative ties carry a 0.5 marker** rather than a re-rolled die or an insertion-order accident:
+  core orders purely by `initiative`, and `initiativeDisplay()` floors the value for display, so the
+  tie-break is expressible without lying about what was rolled. Equal roll *and* equal Dexterity returns
+  `needsReroll` instead of picking a winner.
+- **A stat-block adapter, because the pack and the sheet author different shapes.** The shipped bestiary
+  publishes totals and modifiers (`bab`, `strMod`, `ac`, `weapon.damageMod`, `dr: {val, bypass}`) —
+  pool-shaped, because that is what `compilePF1eProfile` consumes; a sheet must author components (six
+  scores, armor/shield/natural) or no buff can move a total. `src/packages/pf1e/statBlock.ts` converts
+  one into the other *once*, and reports it: an ability score rebuilt from a modifier says so (a modifier
+  only determines the even score), a published AC is honoured as a total rather than recomposed into fake
+  components, `weapon.damageMod` is marked as already containing the ability bonus so Strength is not
+  added twice, and published saves are flagged so Con/Dex/Wis are not re-added. Fields no tactical rule
+  implements yet are listed in `unsupported` **with the phase that owns them** (`weapon.isFirearm —
+  firearm rules are P6`), which is what keeps "not modelled" from reading as "not present". The
+  conversion is idempotent, so an import round-trips.
+- **Deliberately not fixed here:** `compilePF1eProfile`'s `maxAoos` and its generic `sizeMod` on
+  CMB/CMD, and its base-only saves. `rulesTables.ts` is correct and the strategic compile is not; the
+  three differences are recorded in Gap List §10.2 with the parity relationship pinned by a test, because
+  silently editing them would move 10k-model fixtures and their byte budgets in a PR about data shapes.
+  P8 switches the sim onto the same tables.
+- **Found while reading, not fixed:** `nextTurn`'s round-wrap loop tests `"delayed" in c.flags` while the
+  flag lives at `flags.core.delayed` (`src/core/combat.ts:103`), so a delayed combatant is never
+  un-flagged. `startCombat`'s clear works, which is why nobody noticed. Fixed in P2, where the plan
+  already intends to assert delay behaviour — see the corrected P2 accept item.

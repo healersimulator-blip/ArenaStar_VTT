@@ -204,20 +204,31 @@ Effort is in focused days for one engineer, matching the Gap List's M-scale. Eac
 Gap List rows it closes, its acceptance scenario, and what it must **not** touch.
 
 ### P0 — Contracts (2–3 d) → unlocks everything
-* `src/packages/pf1e/actor.ts` (schema + `derivePF1eActor`), `effects.ts` (`applyBonuses`),
-  `combatState.ts` (flag helpers), all pure + node-tested.
-* `worldSettings` made real: a `worldSettings` field on `WorldsRecord` (`src/storage/idb.ts`),
-  written through `HostPersister.patchWorld` (the seam added in PR #2 — **never** `putWorld`),
-  plumbed into the four `RulesContext` producers that currently pass `{}`
-  (`src/app/App.svelte:279`, `src/host/turnChannel.ts:212`, `src/ui/armies/armyModel.ts:338`,
-  `src/app/e2eHook.ts:1520`), and a "PF1e rules options" group in `SettingsPanel`
-  (crit-on-20 only vs confirmed ×N, auto-roll saves for my tokens, spell scatter deviation on/off).
-* Bump `systems/*/manifest.json` to `1.1.0` with declarative `migrations`
-  (`default` steps filling `system.pf1e.abilities` etc.) — `validateMigrationSteps` + the §12 world-load
-  path already execute this; add a migration test to `tests/packages/pf1eManifest.test.ts`.
+* `src/packages/pf1e/rulesTables.ts` (the SRD tables both scales read), `actor.ts` (schema +
+  `derivePF1eActor`), `statBlock.ts` (the pack's totals/mods ⇄ the sheet's components), `effects.ts`
+  (`resolveEffects` — the stacking resolver, named for what it does rather than `applyBonuses`, since
+  it applies nothing), `combatState.ts` (round structure under `combat.flags.pf1e`), all pure and
+  node-tested.
+* `worldSettings` made real (D-113 revised this: **not** on `WorldsRecord`, which is local and
+  un-replicated): a `src/core/worldSettings.ts` reader/writer over the existing `settings` collection,
+  one document `_id="world-settings"`, `ownership.default = LIMITED` so players see the clock their
+  durations tick against. Plumbed into the `RulesContext` producers that used to pass `{}`
+  (`src/app/App.svelte`, `src/host/turnChannel.ts`, `src/ui/armies/armyModel.ts`, plus
+  `src/ui/logistics/LogisticsPanel.svelte` which the audit had not counted), with a "Rules options"
+  group in `SettingsPanel` for `secondsPerRound` / `advanceClockOnRound` / `detectionMultiplier`.
+  The rules-behaviour toggles (crit confirmation, auto-roll saves, spell scatter) land **with the rules
+  that read them** — P3, P4 and P5 — rather than as options that do nothing yet.
+* **No** `systems/*/manifest.json` bump and no declarative `migrations` step (D-113): nothing persisted
+  needs converting — the packs already ship `data.system.pf1e`, and the orphan sheet that wrote the flat
+  `system.ac`/`system.bab` shape was never mounted, so there is no data at risk. A version bump would
+  only churn the zip names and the §12 manifest tests. The parity guarantee is instead a test that
+  derives the *shipped bestiary JSON* through the tactical reader, so content and code cannot drift.
+  If a real migration is ever needed, the step shape is `{ from, to, transforms }` with
+  `set|default|move|rename` (`src/core/migrations.ts:58`), not `ops`.
 * **Accept:** unit tests for every derived field with the exact Appendix A fixture (`A.2`, `A.8`,
-  `A.15`); `derivePF1eActor` is idempotent and writes nothing; the four `worldSettings` call sites
-  return a persisted value.
+  `A.15`); `derivePF1eActor` is idempotent and writes nothing; the rules-context producers read the
+  settings document instead of a literal `{}` (the sim-worker probe in `src/app/e2eHook.ts` has no store
+  by design and stays empty, with a comment saying so).
 * **Must not touch:** `src/core/documents.ts`, `EffectDocument`, `src/sim/*` schema.
 
 ### P1 — Sheets that are not orphans (3–4 d) → closes Gap List §1.7, §4.1
@@ -254,7 +265,10 @@ Gap List rows it closes, its acceptance scenario, and what it must **not** touch
   transitions are untouched.
 * Hidden NPC rolls: reuse `src/dice/commitReveal.ts` so GM rolls are verifiable and not shown raw.
 * **Accept:** S1's initiative half; tests for tie-break, selection-scoped roll, surprise order, and
-  "delay re-joins at the top of the next round" (already true in core — assert it does not regress).
+  "delay re-joins at the top of the next round" — which is **not** already true: `nextTurn`'s round-wrap
+  loop tests `"delayed" in c.flags` while the flag is written to `flags.core.delayed`
+  (`src/core/combat.ts:103`), so a delayed combatant stays delayed forever. Fix that one-line scope bug
+  in P2 (it is core behaviour the plan depends on, not a PF1e rule), and let the test say so.
 
 ### P3 — Attacks and damage from the sheet (4–6 d) → closes §3.2, §3.4, §4.7 (tactical half)
 * `src/packages/pf1e/tactical.ts` (new): `attackRoll({attacker, defender, mode, situational})` and
@@ -264,8 +278,8 @@ Gap List rows it closes, its acceptance scenario, and what it must **not** touch
   invisible = total concealment (50 % miss) + denied Dex, A.7), threat → **confirm** roll at full
   bonus, min 1 damage, nonlethal/lethal swap, and precision damage immunity.
   It reads `PF1eDerived`, **not** a `ModelPool`. The strategic loops in `combatEngine.ts` stay as they
-  are (decision 2); only the tables/rule constants are shared, via `schema.ts` and a new
-  `rulesTables.ts` extracted from them.
+  are (decision 2); only the tables/rule constants are shared, and `rulesTables.ts` (P0) is that shared
+  layer — `schema.ts` keeps its own compile, so the seam is data, never a kernel.
 * Sheet buttons → `{type:"roll"}` message with `rollData` (already on the wire, `sync.ts:795`) so the
   result posts to chat with the breakdown line ("+7 = BAB 6 + Str 3 − 2 charge"), and a *Verify* chip
   using `verifyCommitRoll` where the GM opted in.
@@ -418,7 +432,8 @@ actual browser runs happen wherever browsers exist — say so in the PR, don't i
 ## 7. Platform constraints to respect (each already bit us once)
 
 * **World-record writes go through `HostPersister.patchWorld`.** A bare `putWorld` is reverted by the
-  next 500 ms write-behind flush (Gap List §1.1b).
+  next 500 ms write-behind flush (Gap List §1.1b). PR-A sidestepped the whole seam by putting world
+  settings in a replicated document instead, which is the lesson: prefer a document to a record field.
 * **Wire bytes are gzip-compressed, so determinism tests compare `decompressSync(bytes)`** (fflate's
   header carries MTIME; Gap List §1.11 Trap 1).
 * **`rules.js` is a build product** (`pnpm build:systems`, git/prettier/eslint-ignored, one
@@ -462,17 +477,27 @@ actual browser runs happen wherever browsers exist — say so in the PR, don't i
 
 ---
 
-## 10. What I need from you before PR-A
+## 10. What I need from you before PR-A — **resolved 2026-09-08, see `DECISIONS.md` D-113**
 
-1. **`system.pf1e` as the single authored location** (§3.1) — including migrating the orphan sheet's
-   flat `system.ac`/`system.bab` into it (they are written by a component nobody imports, so there is
-   no data at risk; still, confirm the bump to `1.1.0` + declarative `default` migrations is the way).
-2. **Effects stay in `flags.pf1e` with `flags.core.duration` doing the ticking** (§3.2) — and the
-   round-start variant shipped as a *wrapper* transition rather than a `core/combat.ts` edit.
-3. **World clock in the world record via `patchWorld`** (§3.3/P0) vs a scene-level field: the world
-   record is where `worldSettings` will live, and it is already patch-safe.
-4. **Fireball: fix the sim to the pack's 20 ft, or keep 15 ft as a recorded deviation** (§P5).
-5. **PR order**: A→B→C→D→E as tabled, or C (initiative/menu) before B (sheet rendering) if playability
-   of the tracker matters more to you than the sheet this quarter.
+Answers below, with the two revisions the code forced (both are *improvements* to what I proposed, so
+they are recorded rather than silently applied):
 
-Answer those (or say "defaults are fine") and I'll open PR-A against this plan.
+1. **Adopted as stated.** `system.pf1e` is the single authored tactical location; `derivePF1eActor` is
+   its only tactical consumer; nothing derived is persisted. **Revision:** no `1.1.0` bump and no
+   declarative migration in P0 — there is no persisted PF1e tactical data to migrate (the orphan sheet's
+   `applyEnvelope` was never mounted, and the packs already ship `data.system.pf1e`). Instead the
+   derivation is total over partial input and a test derives the *shipped bestiary JSON*, so pack data
+   and code cannot drift. Whoever later adds a real migration: the step field is `transforms`, not `ops`
+   (`src/core/migrations.ts:58`).
+2. **Adopted as stated.** Effects stay `flags.pf1e` payloads; core's `flags.core.duration` keeps ticking;
+   the round-start variant arrives as a wrapper transition, not a `core/combat.ts` edit.
+3. **Revised — and the original proposal was wrong.** `worldSettings` and the round clock do **not** go on
+   `WorldsRecord` (`src/storage/idb.ts:41`): that record is the local host's row and is not replicated, so
+   players would buff against a clock they cannot see. They live in the `settings` collection that already
+   exists but had no reader or writer (`src/core/documents.ts:314`), as one document `_id="world-settings"`,
+   which `projectWorld` replicates at `ownership.default = LIMITED` (`src/core/projection.ts:138`).
+   Not to be confused with `idb.getSetting/putSetting` (`src/storage/idb.ts:189`), which are app-local.
+4. **Adopted as stated.** Fireball is 20 ft (the pack, i.e. the SRD); the sim's 15 ft and the invented
+   scatter are filed in `DEVIATIONS.md` in P5 — deleted or justified there, not left to diverge.
+5. **Adopted as stated.** Order A→B→C: sheet before tracker, because the tracker's context menu needs
+   something to act on.
