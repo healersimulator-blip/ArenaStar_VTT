@@ -254,9 +254,13 @@ Gap List rows it closes, its acceptance scenario, and what it must **not** touch
   already builds (`:283-291`). Menu items: *Roll initiative (n)*, *Add to combat / Remove*,
   *Mark hidden*, *Target with spell* (P5), *Apply effect* (P4).
 * `CombatPanel.beginCombat`: create combatants from **selected tokens** when a selection exists, else
-  all tokens (current behavior), and set `actorId: token.actorId`.
-* `rollInitiative` → `evaluateFormula("1d20 + @initiative", {initiative})` per combatant, ties broken
-  by the Dex check (compare `derived.initDex`, re-sort); `applyInitiative` keeps its
+  all current-scene tokens, and set `actorId: token.actorId`. **D-124 delivers the selected-token
+  tracker path** (creation, add/remove, partial initiative, scene/deletion guards). Existing
+  encounter Start does not rebuild its roster. The token context menu itself remains open.
+* `rollInitiative` → actor-derived initiative per combatant (**public path delivered D-122**).
+  Tie policy correction (CRB p.178): compare total initiative modifiers, then roll remaining
+  ties, not just `derived.initDex`; **public PF1e tie handling delivered D-123** (recorded
+  subgroup roll-offs and persisted equal-total order). `applyInitiative` keeps its
   "values pre-rolled by caller" contract so `core/combat.ts` still needs no PF1e knowledge.
 * Surprise round: `combatState.startWithSurprise` (only flat-footed-unaware combatants act; then
   normal order) — Appendix A.1.
@@ -265,10 +269,12 @@ Gap List rows it closes, its acceptance scenario, and what it must **not** touch
   transitions are untouched.
 * Hidden NPC rolls: reuse `src/dice/commitReveal.ts` so GM rolls are verifiable and not shown raw.
 * **Accept:** S1's initiative half; tests for tie-break, selection-scoped roll, surprise order, and
-  "delay re-joins at the top of the next round" — which is **not** already true: `nextTurn`'s round-wrap
-  loop tests `"delayed" in c.flags` while the flag is written to `flags.core.delayed`
-  (`src/core/combat.ts:103`), so a delayed combatant stays delayed forever. Fix that one-line scope bug
-  in P2 (it is core behaviour the plan depends on, not a PF1e rule), and let the test say so.
+  "delay re-joins at the top of the next round" — the original marker bug was: `nextTurn`'s round-wrap
+  loop originally tested `"delayed" in c.flags` while the writer uses `flags.core.delayed`.
+  **D-120 repaired this generic marker cleanup with core and browser regression tests.**
+  Previously non-starting combatants stayed marked until their individual turn start, not
+  forever. This is generic compatibility behavior, not PF1e delay/resume scheduling; that
+  rule still requires explicit initiative changes and cross-round handling.
 
 ### P3 — Attacks and damage from the sheet (4–6 d) → closes §3.2, §3.4, §4.7 (tactical half)
 * `src/packages/pf1e/tactical.ts` (new): `attackRoll({attacker, defender, mode, situational})` and

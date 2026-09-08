@@ -172,7 +172,7 @@ describe("effects move the numbers they name", () => {
     expect(plain.cmb).toBe(6 + 2);
   });
 
-  test("flat-footed denies Dexterity to AC, initiative, and CMD, and blocks attacks of opportunity", () => {
+  test("flat-footed denies Dexterity to AC and CMD, but not initiative, and blocks attacks of opportunity", () => {
     const d = derivePF1eActor({
       system: {
         ...base,
@@ -183,7 +183,7 @@ describe("effects move the numbers they name", () => {
     });
     expect(d.ac.normal).toBe(13); // 10 + armor 3, Dexterity denied
     expect(d.ac.flatFooted).toBe(13);
-    expect(d.initiative).toBe(0 + 0);
+    expect(d.initiative).toBe(1); // CRB p.178 Initiative: Dex 12 still supplies +1
     expect(d.canTakeAoO).toBe(false);
     expect(d.deniedDexToAc).toBe(true);
   });

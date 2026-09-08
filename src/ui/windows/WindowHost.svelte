@@ -12,6 +12,7 @@
   import MacrosPanel from "../macros/MacrosPanel.svelte";
   import SettingsPanel from "../settings/SettingsPanel.svelte";
   import JournalPopout from "../journals/JournalPopout.svelte";
+  import PF1eSheetWindow from "../sheets/PF1eSheetWindow.svelte";
   import GmExtrasPanel from "../armies/GmExtrasPanel.svelte";
   import type { ClientSync } from "../../client/sync";
   import type { ClientEvents } from "../../client/sync";
@@ -85,7 +86,11 @@
     e.preventDefault();
     const start = { x: e.clientX, y: e.clientY, wx: win.x, wy: win.y };
     dragGlobals((ev) => {
-      manager.moveTo(win.id, start.wx + (ev.clientX - start.x), start.wy + (ev.clientY - start.y));
+      manager.moveTo(
+        win.id,
+        start.wx + (ev.clientX - start.x),
+        start.wy + (ev.clientY - start.y),
+      );
     });
   }
 
@@ -95,7 +100,11 @@
     e.preventDefault();
     const start = { x: e.clientX, y: e.clientY, w: win.width, h: win.height };
     dragGlobals((ev) => {
-      manager.resize(win.id, start.w + (ev.clientX - start.x), start.h + (ev.clientY - start.y));
+      manager.resize(
+        win.id,
+        start.w + (ev.clientX - start.x),
+        start.h + (ev.clientY - start.y),
+      );
     });
   }
 </script>
@@ -131,7 +140,9 @@
         </span>
       </header>
       <div class="wm-body">
-        {#if win.kind === "permissions"}
+        {#if win.kind === "pf1e-sheet" && win.data}
+          <PF1eSheetWindow {client} {bus} actorId={win.data.actorId ?? ""} />
+        {:else if win.kind === "permissions"}
           <PermissionsPanel {client} {bus} />
         {:else if win.kind === "macros"}
           <MacrosPanel {client} {bus} />

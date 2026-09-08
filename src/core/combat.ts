@@ -4,7 +4,7 @@
  * them on Hooks). Delay & effect durations ride combatant/effect `flags`
  * (§0 FlagStore is the sanctioned extension point — CombatantDocument and
  * EffectDocument carry no dedicated fields):
- *   combatant.flags.core.delayed : true once delayed this round (cleared on start)
+ *   combatant.flags.core.delayed : manual marker (cleared on turn start / round wrap)
  *   effect.flags.core.duration  : turns remaining; hits 0 → expired
  *   effects live in combatant.flags.core.effects (id → EffectDocument)
  */
@@ -43,7 +43,10 @@ export function currentCombatant(combat: CombatDocument): CombatantDocument | nu
   return sorted[idx] ?? null;
 }
 
-function withCombatants(combat: CombatDocument, combatants: CombatantDocument[]): CombatDocument {
+function withCombatants(
+  combat: CombatDocument,
+  combatants: CombatantDocument[],
+): CombatDocument {
   return { ...combat, combatants };
 }
 
@@ -97,12 +100,10 @@ export function nextTurn(combat: CombatDocument): CombatTransition {
     round += 1;
     turn = 0;
     hooks.push("combat:round:start");
-    // delayed combatants rejoin at the top of the new round
+    // Generic tracker marker cleanup, not PF1e delay/rescheduling semantics.
     for (let i = 0; i < sorted.length; i++) {
       const c = sorted[i];
-      if (c?.flags && typeof c.flags === "object" && "delayed" in c.flags) {
-        sorted[i] = clearDelayed(c);
-      }
+      if (c) sorted[i] = clearDelayed(c);
     }
   } else {
     turn += 1;
@@ -168,17 +169,19 @@ function omitScope(flags: FlagStore): FlagStore {
 }
 
 /**
- * Delay: the combatant passes now and acts LAST this round (Foundry-style).
- * Implemented as a `delayed` flag; sortCombatants still ranks by initiative,
- * so delay only affects scheduling via turn order — the flag marks them and
- * the UI nudges them to the end of the current round's display.
+ * Mark delayed for the generic tracker UI. This does not advance the turn,
+ * change initiative, or reorder combatants. The marker clears at the combatant's
+ * next turn start or round wrap. Full PF1e delay/resume scheduling is separate.
  */
 export function delayCombatant(combat: CombatDocument, id: string): CombatTransition {
   let found = false;
   const combatants: CombatantDocument[] = combat.combatants.map((c): CombatantDocument => {
     if (c._id !== id) return c;
     found = true;
-    return { ...c, flags: { ...(c.flags as object), [SCOPE]: { ...coreFlags(c), delayed: true } } };
+    return {
+      ...c,
+      flags: { ...(c.flags as object), [SCOPE]: { ...coreFlags(c), delayed: true } },
+    };
   });
   if (!found) return { combat, hooks: [], expired: [] };
   return {
@@ -240,7 +243,10 @@ function tickEffects(
       }
       effects[id] = {
         ...effect,
-        flags: { ...(effect.flags as object), [SCOPE]: { ...coreFlags(effect), duration: left } },
+        flags: {
+          ...(effect.flags as object),
+          [SCOPE]: { ...coreFlags(effect), duration: left },
+        },
       } as unknown as Json;
     }
     return { ...c, flags: { ...(c.flags as object), [SCOPE]: { ...coreFlags(c), effects } } };

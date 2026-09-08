@@ -94,7 +94,11 @@ function projectMessage(user: PermissionUser, msg: MessageDocument): MessageDocu
 }
 
 /** §5: hidden tokens omitted unless owner (≥ OWNER, cascade-aware) or GM. */
-function tokenVisible(user: PermissionUser, token: TokenDocument, scene: SceneDocument): boolean {
+function tokenVisible(
+  user: PermissionUser,
+  token: TokenDocument,
+  scene: SceneDocument,
+): boolean {
   if (!token.hidden) return true;
   return getEffectiveOwnership(user, token, scene) >= OWNERSHIP_LEVELS.OWNER;
 }
@@ -164,7 +168,11 @@ function stripSecretsFromDiff(diff: Record<string, Json | null>): Record<string,
   let changed = false;
   for (const [key, value] of Object.entries(diff)) {
     const path = key.startsWith("-=") ? key.slice(2) : key;
-    if (path.split(".").pop() === "text" && typeof value === "string" && HAS_SECRET.test(value)) {
+    if (
+      path.split(".").pop() === "text" &&
+      typeof value === "string" &&
+      HAS_SECRET.test(value)
+    ) {
       out[key] = stripSecretText(value);
       changed = true;
     } else {
@@ -180,7 +188,14 @@ function createVisible(
   resolver?: ProjectionResolver,
 ): Op | null {
   if (op.coll === "walls" || op.coll === "lights") return op; // §5/D-022
-  const data = op.data as BaseDocument;
+  // D-019 accepts creates without common fields; DocumentStore adds private ownership
+  // on its clone, not on the original envelope. Projection must use the same default,
+  // otherwise one sparse compendium actor can throw and stop a peer's whole broadcast
+  // (including a public linked-token create in the same transaction).
+  const authored = op.data as BaseDocument;
+  const data = authored.ownership
+    ? authored
+    : { ...authored, ownership: { default: 0 as const } };
   const parent = op.parent !== undefined ? resolver?.resolve(op.parent) : undefined;
   if (op.coll === "messages") {
     const access = messageAccess(user, data as MessageDocument);

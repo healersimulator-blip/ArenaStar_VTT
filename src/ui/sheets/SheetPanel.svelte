@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import PF1eActorSheet from "./PF1eActorSheet.svelte";
+  import { isPF1eActor } from "./pf1eSheetModel";
   import { can } from "../../core/permissions";
   import type { ClientSync } from "../../client/sync";
   import type { ClientEvents } from "../../client/sync";
@@ -9,9 +11,11 @@
   let {
     client,
     bus,
+    onOpenActor,
   }: {
     client: ClientSync;
     bus: EventBus<ClientEvents>;
+    onOpenActor?: (actorId: string) => void;
   } = $props();
 
   type SheetColl = "actors" | "items";
@@ -98,10 +102,12 @@
   onMount(() => {
     const offSnapshot = bus.on("snapshot", refresh);
     const offOps = bus.on("ops", refresh);
+    const offRejected = bus.on("rejected", refresh);
     refresh();
     return () => {
       offSnapshot();
       offOps();
+      offRejected();
     };
   });
 </script>
@@ -162,7 +168,9 @@
           value={selected.name}
           disabled={!editable}
           onchange={(event) =>
-            void update({ name: (event.currentTarget as HTMLInputElement).value })}
+            void update({
+              name: (event.currentTarget as HTMLInputElement).value,
+            })}
         />
       </label>
 
@@ -183,50 +191,62 @@
         </label>
       {/if}
 
-      <div id="sheet-fields">
-        {#each Object.entries(selected.system) as [key, value] (key)}
-          <label class="edrow">
-            {key}
-            {#if typeof value === "boolean"}
-              <input
-                class="sys-field"
-                data-key={key}
-                type="checkbox"
-                checked={value}
-                disabled={!editable}
-                onchange={(event) =>
-                  setField(key, (event.currentTarget as HTMLInputElement).checked)}
-              />
-            {:else if typeof value === "number"}
-              <input
-                class="sys-field"
-                data-key={key}
-                type="number"
-                {value}
-                disabled={!editable}
-                onchange={(event) =>
-                  setField(key, Number((event.currentTarget as HTMLInputElement).value))}
-              />
-            {:else}
-              <input
-                class="sys-field"
-                data-key={key}
-                type="text"
-                value={String(value)}
-                disabled={!editable}
-                onchange={(event) => setField(key, (event.currentTarget as HTMLInputElement).value)}
-              />
-            {/if}
-          </label>
-        {/each}
-      </div>
-
-      {#if editable && (client.user?.role === "GM" || client.user?.role === "ASSISTANT")}
-        <div class="edrow addfield">
-          <input id="field-key" type="text" placeholder="field" bind:value={fieldKey} />
-          <input id="field-value" type="text" placeholder="value" bind:value={fieldValue} />
-          <button id="add-field" type="button" onclick={() => addField()}>Add field</button>
+      {#if coll === "actors" && isPF1eActor(selected)}
+        {#if onOpenActor}
+          <button type="button" data-open-pf1e-sheet onclick={() => onOpenActor?.(selected._id)}
+            >Open character sheet window</button
+          >
+        {/if}
+        {#key selected._id}
+          <PF1eActorSheet doc={selected} {client} {bus} />
+        {/key}
+      {:else}
+        <div id="sheet-fields">
+          {#each Object.entries(selected.system) as [key, value] (key)}
+            <label class="edrow">
+              {key}
+              {#if typeof value === "boolean"}
+                <input
+                  class="sys-field"
+                  data-key={key}
+                  type="checkbox"
+                  checked={value}
+                  disabled={!editable}
+                  onchange={(event) =>
+                    setField(key, (event.currentTarget as HTMLInputElement).checked)}
+                />
+              {:else if typeof value === "number"}
+                <input
+                  class="sys-field"
+                  data-key={key}
+                  type="number"
+                  {value}
+                  disabled={!editable}
+                  onchange={(event) =>
+                    setField(key, Number((event.currentTarget as HTMLInputElement).value))}
+                />
+              {:else}
+                <input
+                  class="sys-field"
+                  data-key={key}
+                  type="text"
+                  value={String(value)}
+                  disabled={!editable}
+                  onchange={(event) =>
+                    setField(key, (event.currentTarget as HTMLInputElement).value)}
+                />
+              {/if}
+            </label>
+          {/each}
         </div>
+
+        {#if editable && (client.user?.role === "GM" || client.user?.role === "ASSISTANT")}
+          <div class="edrow addfield">
+            <input id="field-key" type="text" placeholder="field" bind:value={fieldKey} />
+            <input id="field-value" type="text" placeholder="value" bind:value={fieldValue} />
+            <button id="add-field" type="button" onclick={() => addField()}>Add field</button>
+          </div>
+        {/if}
       {/if}
       {#if !editable}
         <p class="hint">read-only (no ownership)</p>

@@ -36,6 +36,7 @@
   import { PlaylistsPanel } from "../ui/playlists";
   import { AudioPlayer } from "../client/audioPlayer";
   import { onDestroy } from "svelte";
+  import { openPF1eSheetWindow } from "../ui/sheets/pf1eSheetWindow";
   import { SheetPanel } from "../ui/sheets";
   import { startHostShare, type HostShare } from "./hostShare";
   import type { SceneDocument, SceneGrid } from "../core/documents";
@@ -74,6 +75,14 @@
   let loadedMapHash: string | null = null;
   let stage: Stage | null = null;
   let controller: CanvasController | null = null;
+  let tokenSelection = $state.raw<{ sceneId: string | null; ids: readonly string[] }>({
+    sceneId: null,
+    ids: [],
+  });
+  function clearTokenSelection(): void {
+    controller?.clearSelection();
+    tokenSelection = { sceneId: activeScene()?._id ?? null, ids: [] };
+  }
   /** §9 tile textures by asset hash/URL (session cache; blob URLs stay alive).
    * SvelteMap satisfies the reactive-state lint rule; used as a plain cache. */
   let tileTextureCache: SvelteMap<string, Promise<unknown>> | null = null;
@@ -100,7 +109,9 @@
     if (!app) return null;
     const scenes = app.gm.client.store.getAll("scenes") as readonly SceneDocument[];
     return (
-      scenes.find((sc) => sc.active) ?? app.gm.client.store.get("scenes", DEFAULT_SCENE_ID) ?? null
+      scenes.find((sc) => sc.active) ??
+      app.gm.client.store.get("scenes", DEFAULT_SCENE_ID) ??
+      null
     );
   }
 
@@ -122,6 +133,17 @@
       height: 420,
       ...(data ? { data } : {}),
     });
+  }
+
+  function openActorSheet(actorId: string): void {
+    if (!app) return;
+    const rect = canvasHost?.getBoundingClientRect();
+    openPF1eSheetWindow(
+      wm,
+      app.gm.client,
+      actorId,
+      rect ? { width: rect.width, height: rect.height } : undefined,
+    );
   }
 
   function undo(): void {
@@ -282,19 +304,20 @@
             typeof massBattle.detection
           >[0],
           {
-          id: unit._id,
-          armyId: "",
-          factionId: "",
-          type: unit.type,
-          name: unit.name,
-          profile: unit.profile,
-          stats: { ...unit.stats },
-          orders: unit.orders,
-          formation: unit.formation,
-          sceneId: unit.sceneId,
-          modelRange: unit.modelRange,
-          leaderTokenId: unit.leaderTokenId ?? null,
-        }),
+            id: unit._id,
+            armyId: "",
+            factionId: "",
+            type: unit.type,
+            name: unit.name,
+            profile: unit.profile,
+            stats: { ...unit.stats },
+            orders: unit.orders,
+            formation: unit.formation,
+            sceneId: unit.sceneId,
+            modelRange: unit.modelRange,
+            leaderTokenId: unit.leaderTokenId ?? null,
+          },
+        ),
     });
     const cam = stage.camera;
     const w = canvasHost?.clientWidth ?? 800;
@@ -314,6 +337,7 @@
     const view = stage;
     if (!current || !view) return;
     const scene = activeScene();
+    if (tokenSelection.sceneId !== (scene?._id ?? null)) clearTokenSelection();
     worldName = current.meta.name;
     seq = current.gm.client.store.seq;
     tokenCount = scene?.tokens.length ?? 0;
@@ -469,11 +493,20 @@
       let y = scene.height / 2;
       if (canvas && ev.clientX !== 0) {
         const rect = canvas.getBoundingClientRect();
-        const world = screenToWorld(stage.camera, ev.clientX - rect.left, ev.clientY - rect.top);
+        const world = screenToWorld(
+          stage.camera,
+          ev.clientX - rect.left,
+          ev.clientY - rect.top,
+        );
         x = Math.round(world.x);
         y = Math.round(world.y);
       }
-      const token = makeToken(`t-${globalThis.crypto.randomUUID().slice(0, 8)}`, x, y, entry.name);
+      const token = makeToken(
+        `t-${globalThis.crypto.randomUUID().slice(0, 8)}`,
+        x,
+        y,
+        entry.name,
+      );
       token.img = entry.img ?? "";
       token.actorId = docId;
       ops.push({
@@ -499,8 +532,13 @@
       {
         kind: "create",
         coll: "tokens",
-        parent: { coll: "scenes", id: DEFAULT_SCENE_ID },
-        data: makeToken(id, scene.width / 2, scene.height / 2, `Token ${scene.tokens.length + 1}`),
+        parent: { coll: "scenes", id: scene._id },
+        data: makeToken(
+          id,
+          scene.width / 2,
+          scene.height / 2,
+          `Token ${scene.tokens.length + 1}`,
+        ),
       },
     ]);
   }
@@ -557,6 +595,12 @@
         stage = view;
         view.fit(scene?.width ?? 2000, scene?.height ?? 1500);
         controller = new CanvasController({
+          onSelectionChange: (ids) => {
+            tokenSelection = { sceneId: activeScene()?._id ?? null, ids: [...ids] };
+          },
+          onTokenActivate: ({ token }) => {
+            if (token.actorId) openActorSheet(token.actorId);
+          },
           stage: view,
           source: domPointerSource(view.app.canvas as HTMLCanvasElement),
           client: {
@@ -700,7 +744,9 @@
                   handlers,
                   onSubscribe,
                 });
-          current.gm.bus.on("snapshot", (m) => moduleHost?.emitHook("snapshot", { seq: m.seq }));
+          current.gm.bus.on("snapshot", (m) =>
+            moduleHost?.emitHook("snapshot", { seq: m.seq }),
+          );
           current.gm.bus.on("ops", (m) =>
             moduleHost?.emitHook("snapshot", { seq: m.envelope.seq }),
           );
@@ -759,7 +805,8 @@
               packs: list.length,
               entries: list.reduce((n, r) => n + r.pack.entries.length, 0),
             })),
-          actorCount: () => (current.gm.client.store.getAll("actors") as readonly unknown[]).length,
+          actorCount: () =>
+            (current.gm.client.store.getAll("actors") as readonly unknown[]).length,
           importedTokens: () => [...importedTokens],
           dice3d: () => ({ ...dice3dStats, lastValues: [...dice3dStats.lastValues] }),
           realtimeInfo: () => {
@@ -794,7 +841,11 @@
               current.gm.client.submit([
                 {
                   kind: "update",
-                  ref: { coll: "units", id: unit._id, parent: { coll: "armies", id: army._id } },
+                  ref: {
+                    coll: "units",
+                    id: unit._id,
+                    parent: { coll: "armies", id: army._id },
+                  },
                   diff: {
                     orders: {
                       pending: [{ kind: "move", path: [{ x, y }], pace: "march" }],
@@ -811,7 +862,11 @@
           simControl: (
             action:
               "pause" | "resume" | "rate" | "advance" | "next" | "undoTurn" | "mode" | "start",
-            extra: { rateHz?: number; mode?: "stepwise" | "realtime"; deadlineMs?: number } = {},
+            extra: {
+              rateHz?: number;
+              mode?: "stepwise" | "realtime";
+              deadlineMs?: number;
+            } = {},
           ) => {
             current.gm.client.simControl(action, extra);
           },
@@ -954,12 +1009,16 @@
         <button id="add-token" type="button" onclick={addToken}>Add token</button>
         <h3>Invite (§6.2)</h3>
         {#if !share}
-          <button id="share" type="button" onclick={() => void beginShare()}> Share invite </button>
+          <button id="share" type="button" onclick={() => void beginShare()}>
+            Share invite
+          </button>
         {:else}
           <textarea id="invite-link" rows="3" readonly value={share.inviteLink}></textarea>
           <label for="peer-code">Player's code</label>
           <textarea id="peer-code" rows="4" bind:value={peerCode}></textarea>
-          <button id="code-apply" type="button" onclick={applyPeerCode}>Apply player code</button>
+          <button id="code-apply" type="button" onclick={applyPeerCode}
+            >Apply player code</button
+          >
           <label>Your answer code</label>
           <textarea id="share-out" rows="4" readonly value={hostAnswer}></textarea>
         {/if}
@@ -1025,7 +1084,12 @@
           {#if activeTab === "chat"}
             <ChatPanel client={app.gm.client} bus={app.gm.bus} />
           {:else if activeTab === "combat"}
-            <CombatPanel client={app.gm.client} bus={app.gm.bus} />
+            <CombatPanel
+              client={app.gm.client}
+              bus={app.gm.bus}
+              selection={tokenSelection}
+              onClearSelection={clearTokenSelection}
+            />
           {:else if activeTab === "journals"}
             <JournalsPanel
               client={app.gm.client}
@@ -1038,15 +1102,19 @@
           {:else if activeTab === "playlists"}
             <PlaylistsPanel client={app.gm.client} bus={app.gm.bus} {player} />
           {:else if activeTab === "actors"}
-            <SheetPanel client={app.gm.client} bus={app.gm.bus} />
+            <SheetPanel client={app.gm.client} bus={app.gm.bus} onOpenActor={openActorSheet} />
           {:else if activeTab === "compendia"}
             <CompendiaPanel client={app.gm.client} packages={app.packages} />
           {/if}
         </div>
         <h3>World file (§8)</h3>
-        <button id="export-world" type="button" onclick={exportWorld}> Export world (.zip) </button>
+        <button id="export-world" type="button" onclick={exportWorld}>
+          Export world (.zip)
+        </button>
         {#if typeof globalThis.showDirectoryPicker === "function"}
-          <button id="export-folder" type="button" onclick={exportToFolder}> Save to folder… </button>
+          <button id="export-folder" type="button" onclick={exportToFolder}>
+            Save to folder…
+          </button>
         {/if}
         <label class="btn">
           Import world (.zip)

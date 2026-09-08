@@ -6,6 +6,9 @@
   import { CanvasController, domPointerSource, type TokenView } from "../canvas/interactions";
   import { can } from "../core/permissions";
   import { ChatPanel } from "../ui/chat";
+  import { WindowManager } from "../core/windows";
+  import { WindowHost } from "../ui/windows";
+  import { openPF1eSheetWindow } from "../ui/sheets/pf1eSheetWindow";
   import { SheetPanel } from "../ui/sheets";
   import type { SceneDocument, SceneGrid } from "../core/documents";
   import type { Op } from "../core/ops";
@@ -22,6 +25,24 @@
   let tokenCount = $state(0);
   let playerName = $state("");
   let connState = $state("new");
+
+  const wm = new WindowManager({ width: 800, height: 600 });
+  let wmVersion = $state(0);
+  const wmWindows = $derived.by(() => {
+    void wmVersion;
+    return [...wm.list()];
+  });
+
+  function openActorSheet(actorId: string): void {
+    if (!app?.client) return;
+    const rect = canvasHost?.getBoundingClientRect();
+    openPF1eSheetWindow(
+      wm,
+      app.client,
+      actorId,
+      rect ? { width: rect.width, height: rect.height } : undefined,
+    );
+  }
 
   let canvasHost: HTMLDivElement;
   let canvasError = $state<string | null>(null);
@@ -83,7 +104,8 @@
   }
 
   function squareGrid(grid: SceneGrid | undefined): { type: "square"; size: number } | null {
-    if (grid && grid.type === "square" && grid.size > 0) return { type: "square", size: grid.size };
+    if (grid && grid.type === "square" && grid.size > 0)
+      return { type: "square", size: grid.size };
     return null;
   }
 
@@ -133,6 +155,9 @@
         stage = view;
         view.fit(scene?.width ?? 2000, scene?.height ?? 1500);
         controller = new CanvasController({
+          onTokenActivate: ({ token }) => {
+            if (token.actorId) openActorSheet(token.actorId);
+          },
           stage: view,
           source: domPointerSource(view.app.canvas as HTMLCanvasElement),
           client: {
@@ -145,7 +170,13 @@
             const user = client.user;
             if (!user) return false;
             const scene = activeScene();
-            return can(user, "update", tokenView.token, "tokens", scene ? { parent: scene } : {});
+            return can(
+              user,
+              "update",
+              tokenView.token,
+              "tokens",
+              scene ? { parent: scene } : {},
+            );
           },
         });
         client.bus.on("snapshot", refresh);
@@ -159,6 +190,7 @@
   }
 
   onMount(() => {
+    const offWm = wm.onChange(() => wmVersion++);
     // auto-join from an invite fragment (?…#room=<id>&k=<secret>)
     const hash = globalThis.location.hash;
     if (hash.length > 1 && hash.includes("room=")) {
@@ -172,6 +204,7 @@
       if (code) hostCode = code;
     }, 250);
     return () => {
+      offWm();
       if (pollTimer !== null) clearInterval(pollTimer);
       controller?.destroy();
       stage?.destroy();
@@ -228,10 +261,22 @@
         </div>
         {#if app?.client}
           <ChatPanel client={app.client} bus={app.bus} />
-          <SheetPanel client={app.client} bus={app.bus} />
+          <SheetPanel client={app.client} bus={app.bus} onOpenActor={openActorSheet} />
         {/if}
       </aside>
-      <div class="canvas-host" bind:this={canvasHost}></div>
+      <div class="canvas-area">
+        <div class="canvas-host" bind:this={canvasHost}></div>
+        {#if app?.client}
+          <WindowHost
+            manager={wm}
+            windows={wmWindows}
+            client={app.client}
+            bus={app.bus}
+            onUndo={() => undefined}
+            onRedo={() => undefined}
+          />
+        {/if}
+      </div>
     </section>
   {/if}
 </main>
@@ -299,6 +344,8 @@
   }
   .sidebar {
     width: 200px;
+    flex-shrink: 0;
+    overflow-y: auto;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -315,8 +362,14 @@
   #pstatus strong {
     font-size: 14px;
   }
-  .canvas-host {
+  .canvas-area {
+    position: relative;
     flex: 1;
+    min-width: 0;
+  }
+  .canvas-host {
+    height: 100%;
+    box-sizing: border-box;
     border: 1px solid #3a3f4a;
     border-radius: 8px;
     overflow: hidden;

@@ -47,3 +47,17 @@ The deliverable must boot from `https://` and `file://`:
 
 Chromium ≥ 110, Firefox ≥ 115, Safari ≥ 16.4. Playwright e2e runs Chromium; the
 other engines are exercised per the matrix during milestone acceptance.
+
+For an already-installed Chromium when the Playwright browser CDN is unavailable,
+set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to its executable:
+
+```bash
+pnpm build
+PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/path/to/chromium \
+  pnpm exec playwright test e2e/sheets.spec.ts e2e/windows.spec.ts --project=chromium --workers=1
+```
+
+The override affects only the Chromium project and adds no browser-security bypass
+flags. Without it, Playwright uses its pinned browser as before. Record the actual
+browser version when using an alternate binary; this is not Firefox/WebKit or full
+supported-matrix acceptance. Browser executables and their libraries stay outside Git.

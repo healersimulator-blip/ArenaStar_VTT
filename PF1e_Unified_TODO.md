@@ -1,0 +1,301 @@
+# PF1e — Unified TODO
+
+Consolidated on **2026-09-08**, against repository base `4d6658a`.
+
+One execution checklist for tactical PF1e play, strategic mass battles, and their integration. This is a documentation synthesis, not a fresh rules audit or a claim that the test suite was executed. The four source documents remain supporting design/history references; use this file to track work without duplicating tasks across them.
+
+## Sources and status conventions
+
+| Key | Source | Use |
+| --- | --- | --- |
+| G | [Combat Fidelity Gap List](PF1e_Combat_Fidelity_GapList.md) | Detailed gaps, historical fixes, Appendix A rule inventory |
+| I | [Implementation Plan](PF1e_ImplementationPlan.md) | Current contracts, P0–P8 delivery sequence, tabletop scenarios |
+| M | [MVP Work Plan](PF1e_MVP_WorkPlan.md) | Combat_Resolver_5 strategic feature inventory and acceptance |
+| B | [Mass Battles Integration Plan](PF_MassBattles_IntegrationPlan.md) | Dual-scale architecture and longer-term system scope |
+
+References below use source sections, phases, or task numbers. `[x]` means documented as landed with corresponding code/test files present; it does **not** mean independently revalidated in this pass. `[ ]` means remaining work, including completion of partial implementations. Deferred items are explicitly separated, not silently dropped.
+
+### Project context
+
+ArenaStar_VTT is a browser-only, GM-authoritative VTT, built with TypeScript, Svelte 5, PixiJS and Vite into one self-contained `index.html`. Host-authorized Ops replicate documents to players; mass combat uses a worker, deterministic RNG, columnar ModelPool storage, and compiled unit profiles. Relevant areas:
+
+- `src/core/`, `src/host/`, `src/client/`, `src/net/`: documents, permissions, persistence, replication, combat and world settings.
+- `src/packages/pf1e/`: tactical data contracts and strategic PF1e rules; `src/packages/massBattlePf1e.ts`: strategic orchestration.
+- `src/sim/`: deployment, rules loading, worker execution, codecs, checkpoints and replay.
+- `src/canvas/`, `src/ui/sheets/`, `src/ui/combat/`, `src/ui/armies/`: playable surfaces still needing PF1e integration.
+- `systems/pf1e-core/`: data-only seed packs; `systems/pf1e-mass-battles/`: packaged strategic rules. `scripts/buildSystemPackages.mjs` emits ignored build artifacts.
+- `tests/packages/pf1e*.test.ts` and `e2e/pf1e_mass_battles.spec.ts`: existing rule/contract/scale tests and browser package flow.
+
+## 0. Controlling decisions and reconciliation
+
+These constraints override older proposals, not additional implementation tasks:
+
+1. **Separate tactical and strategic resolvers, shared data/tables only.** No shared resolution kernel, sim adapter rewrite, or mandatory cross-scale numerical parity gate. Test each scale independently; document intentional differences. (G §10.1; I §2)
+2. **Do not extend core ActorDocument or EffectDocument shapes.** Authored tactical data belongs in `system.pf1e`; effect and encounter semantics belong in `flags.pf1e`. Derive statistics on read, never persist derived totals. (I §§2–3; G §10.1)
+3. **P0 is landed.** Use `rulesTables.ts`, `actor.ts`, `statBlock.ts`, `effects.ts`, `combatState.ts` and the replicated `settings` document `_id="world-settings"`. Do not recreate the contracts, put the clock on local WorldsRecord, or invent a P0 migration/version bump. (I P0, §10; DECISIONS D-113)
+4. **Keep the existing packaging boundary.** Tactical UI is trusted in-repo code; `pf1e-core` is data-only and the mass-battle rules ship as a real package. The older `module.js` and core-system manifest sketches are superseded. (G §1.10; I §§2, 7)
+5. **Keep per-model seeded d20 resolution.** B's probability-table optimization proposal is not approval to replace it with aggregate probability resolution. Preserve determinism and measure optimizations. (G §5; M Task 3)
+6. **Budget changes must be measured.** No new pool columns without manifest/codec/replica coverage and a ≤200 B/model check. Keep the single-file ≤6 MB raw budget. The 50 ms strategic target and existing 250 ms portable regression gate are different requirements. (G §1.11; I §7)
+
+### Reconciliation tasks — before encoding disputed rules
+
+- [ ] **R01 — Correct source-to-test rule references.** I refers to nonexistent Appendix A.19–A.21 and mislabels several others. Actual G headings: A.5 space/reach; A.6 actions; A.7 movement; A.8 cover; A.9 maneuvers; A.10 AoO; A.11 mounted; A.12 splash; A.13 injury; A.14 conditions; A.15 stances; A.16 spells; A.17 mitigation; A.18 regeneration/massive damage. Locate a canonical source for charge and any missing rules before writing fixtures. (I P3–P7; G Appendix A)
+- [ ] **R02 — Verify contradictory rules and repair acceptance scenarios.** Do not blindly copy the appendix or current code as an oracle. Recheck surprise participation; touch AC/Dex; AoO budgets/Combat Reflexes; delay/ready; Bull's Strength magnitude and whether Str should change initiative; mid-combat initiative reordering; charge modifiers; Evasion versus ordinary half damage; defensive casting versus injury concentration; prone/grapple consequences; mounted higher-ground bonus; dying/stabilization/nonlethal thresholds; coup-de-grace critical/save; temporary HP stacking; DR/precision/riders; firearm threat/misfire/clearing rules; invisibility Stealth modifiers; spell-per-round/component restrictions. These have conflicting or suspect statements within/across G, I and B. Require authoritative rule citations and discriminating fixtures before closure. (G §§2–4, Appendix A; I S1–S5/P2–P7; B §4)
+- [ ] **R03 — Resolve intentional variants explicitly.** Decide removal versus documented opt-in treatment of invented spell scatter, heroic overkill carryover, and total-envelopment +4/flat-footed effects. Distinguish SRD Cleave from damage spillover. Add decisions and named deviations/settings only with consumers; do not label Combat_Resolver_5 parity as SRD fidelity. Fireball's agreed baseline is the pack's 20 ft. (G §§5, 10.1–10.2; I P5/P8; M Tasks 4–7; B §4)
+
+## 1. Landed baseline — preserve, do not re-plan
+
+- [x] **D01 — Pure spatial grid extraction** with Node tests in `tests/core/spatialGrid.test.ts`. Fidelity of distance/reach consumers remains open below. (M Task 1; B §6.1)
+- [x] **D02 — PF1e schema/profile/deploy foundation:** manifest-schema alignment, content-addressed profiles, deterministic interning and pool seeding, plus signed `i8` codec support. (G §1.2–1.4/1.3b; M Task 2)
+- [x] **D03 — Seeded strategic attack/spell plumbing** and foundational AC/flanking/minimum-nonlethal fixes. Full rule coverage, nonlethal thresholds and stale flanking flags remain open. (G §1.5, §2.1–2.3; M Tasks 3–5)
+- [x] **D04 — Buildable/importable packages and initial content:** four spells, six bestiary entries, pack/profile equality tests, persisted activation via `HostPersister.patchWorld`. Feats and expanded content are not delivered by this checkbox. (G §1.1/1.1b/1.10; M Task 9)
+- [x] **D05 — Portable 10k-model scale/replay gate and real-package browser spec.** Recorded baseline: 66 B/model, checkpoint ≤1.5 MB, warmed timing reports and 250 ms regression ceiling. This does not close the two-peer battle/hero flow or dense-army 50 ms target. (G §1.8/1.11; M Task 10)
+- [x] **D06 — Tactical P0 contracts and replicated rules settings** with actor/effect/round/table/stat-block tests; derivation supports partial shipped pack input without a migration. Pure helpers are not equivalent to working sheet, tracker or timer UI. (I P0/§10; G §10.2)
+
+## 2. Multiplayer correctness — early integration blocker
+
+Can proceed alongside sheet work; required before claiming multiplayer mass-battle completion.
+
+- [ ] **N01 — Announce active sim schema and scene on the wire.** Replace joinBoot's hardcoded `MASS_BATTLE_SCHEMA_COLUMNS` and `DEFAULT_SCENE_ID` with host-announced package schema/scene adopted before the first sim delta. Update host/joiner/ClientSync and `PROTOCOL.md`; cover initial join, package/schema changes and resync ordering. (G §1.6/1.10)
+- [ ] **N02 — Prove a second peer receives PF1e state.** Test signed saves and PF1e HP/AC/status/profile columns across snapshots/deltas; browser joiner renders the correct scene and state without decode errors. (G §1.6; M Task 10)
+
+## 3. P1 — Playable actor and monster sheets
+
+Depends on D06. Primary surfaces: `PF1eActorSheet.svelte`, `SheetPanel.svelte`, `WindowHost.svelte`, token interactions.
+
+- [ ] **S01 — Mount the PF1e sheet** from actor rows and token double-click, selected by PF1e actor/world context; preserve generic sheets for other systems. (I P1; G §1.7/§4.1; M Task 8)
+- [ ] **S02 — Replace hand-entered totals with authored fields + derived readouts:** six abilities/modifiers, HP/temp/nonlethal/ability damage, AC breakdown, attacks, saves, CMB/CMD, DR/ER/SR, speed, feats/traits and conditional monster CR/type/alignment/senses/special-attacks tab. (I P1; B §6.2)
+- [x] **S03 — Route edits through authorized submit Ops**, remove the orphan sheet's fabricated `applyEnvelope` sequence path, and test ownership/rejection and player replication. (I P1; B §5)
+- [ ] **S04 — Complete compendium-to-token-to-sheet flow** using shipped bestiary actors and normalization metadata; test derived UI values against `derivePF1eActor`, including the planned AC 18/13/15 fixture. Memoize on authored data/effect changes, not animation frames. (I P1; B §7)
+
+### P1 progress — 2026-09-08, first implementation slice (D-114)
+
+- **S01 partial:** the specialized sheet is mounted in the shared Sheets panel for actors with an explicit object-shaped `system.pf1e`, on both GM and player paths. Generic actors/items keep their existing editor. Floating WindowHost sheets and token double-click are still open.
+- **S02 partial:** summary, six authored abilities, numeric HP/nonlethal/BAB/initiative/speed/save editors, derived AC/saves/CMB/CMD/DR/SR/conditions, attack readouts and calculation/import diagnostics are connected to the P0 reader. Do not mistake this for the full editor: temp HP/ability damage, armor/weapon/feat/trait authoring, dedicated monster tab and other unsupported P0 fields remain open. No combat rules changed.
+- **S03 complete for the mounted sheet:** removed direct `applyEnvelope` writes; allowlisted authored edits use `ClientSync.submit`, with current-document ownership checks, input validation and rejection feedback. Tests prove host/GM/two-player replication and host rejection of a forged non-owner update. Imported save edits preserve sibling totals and `savesAsTotal`, rather than double-adding ability modifiers.
+- **S04 partial:** all six shipped bestiary records pass the same sheet/contract reader tests; active versus disabled effects and the AC 18/13/15 fixture are covered. A browser compendium-import → sheet → edit/recompute scenario was added, but was only collected, not executed. Drag-to-token/double-click acceptance remains open.
+- **Evidence:** full Vitest run: 106 files passed, 1 skipped; 828 tests passed, 3 skipped. Typecheck and lint passed. Build/size: 1,975,252 bytes raw (1.884 MB), below 6 MB. Chromium installation failed with `ECONNRESET` downloading from cdn.playwright.dev; Playwright collected 6 sheet tests across 3 projects, not a browser pass.
+
+### P1 progress — 2026-09-08, floating-sheet/navigation slice (D-115)
+
+- **S01 implementation delivered; browser acceptance pending:** both GM and player Sheets panels can open one restoreable WindowHost window per PF1e actor. Both canvas controllers route an unmodified left double-click on a linked token to the same projected-store/actor-read-permission gate. Generic actors retain the generic sheet; merely owning a token never grants access to a private actor.
+- **Live-window safety:** actor content is read by ID, refreshed on snapshots/Ops/rejections/welcome, and removed when access is revoked or the actor is deleted. Window titles are generic so revoked names do not survive in chrome. Subscriptions are disposed on close. Unit/integration tests cover current HP, Dex/AC, effects, renaming, regrant, deletion and a real host-to-player visibility crossing.
+- **S04 progress:** browser scenario now includes compendium drag-to-token, token double-click, popout edits reflected in the sidebar, rename, singleton reopening and minimize/restore/close. This remains a collected specification, not an executed browser pass, so S01/S04 stay unchecked until browser acceptance is verified.
+- **Interaction regression:** with token activation enabled, clicks within a 4-screen-pixel dead zone submit no movement and never snap off-grid tokens. Real drags still emit their usual snapped Ops; modifier gestures and topmost picking at non-default camera transforms are tested. Non-activation consumers keep their existing behavior.
+- **Evidence:** 107 Vitest files passed, 1 skipped; 835 tests passed, 3 skipped. Typecheck, lint, touched-code formatting, build and size passed (1,978,647 raw bytes / 1.887 MB). Six sheet browser tests collected across three projects; browser execution still unavailable following the recorded download failure. Remaining P1 work is the fuller authored/monster editors and browser acceptance, not more sheet-navigation scaffolding.
+
+### P1 progress — 2026-09-08, authored armor/features/monster editors (D-116)
+
+- **S02 further implemented:** an Armor tab edits existing P0 component fields (armor/shield/natural/dodge/misc AC and maximum Dex); a Features tab edits string-list feats/traits; a conditional Monster tab edits descriptive CR/type/alignment/senses/languages/special attacks/qualities/treasure. “Add monster details” explicitly creates the metadata block without guessing creature identity from a pack or name. No new combat rules or automatic class/feat/vision behavior were introduced.
+- **Import safety:** actors using published AC totals cannot use component editors until an explicit conversion is authored; the UI never silently drops those totals or submits ineffective component edits. Structured feat/trait/monster fields remain read-only and their complete data stays visible. Unknown metadata survives edits; list/text proposals detect a changed expected value in the current local document. This is a local stale-edit guard, not a new host-side compare-and-swap protocol.
+- **S03 regression repaired:** first-time nested ability/save edits could fail because FlatDiff requires intermediate objects to exist. A shared authored-patch builder now creates only the missing group, preserving normalized sibling data. Tests actually apply Ops to partial actors and all six shipped bestiary actors, rather than merely inspecting the proposed diff.
+- **Still open:** weapon/attack authoring, richer HP/temp/ability-damage fields, broader defensive fields such as ER, explicit conversion from published AC totals, and actual browser acceptance. Armor check penalty and arcane spell failure are record-only fields with visible labels; skill/casting enforcement is not implied. S02 remains unchecked.
+- **Evidence:** 108 Vitest files passed, 1 skipped; 843 tests passed, 3 skipped. Typecheck, lint, formatting, build and size passed (1,987,523 bytes raw / 1.895 MB). Extended browser spec covers component AC recomputation, feat names and monster creation/editing; 6 sheet tests collected across 3 projects, not executed. Chromium executable remains absent in this environment.
+
+### P1 progress — 2026-09-08, weapon authoring and supported defenses (D-117)
+
+- **S02 further implemented:** Weapons tab adds/edits/removes authored tactical attack lines: name, bounded NdM weapon dice, static damage bonus, damage type, threat/multiplier, range/reach and existing ranged/touch/handedness/natural/ability-included flags. Blank optional fields remove the authored property and restore existing defaults. Derived attack bonuses/damage stay read-only; no attack, damage or critical rolls were added.
+- **Import/Op safety:** first legacy weapon edit materializes the existing normalized tactical lines, leaving the original strategic `weapon` object untouched and visible. Existing tactical edits use one-property dotted Ops; add/remove replace the array and preserve all surviving rows/unknown fields. Removing the last row stores `[]` so the legacy weapon is not reactivated. Malformed/structured data is not silently replaced; stale local lists, indices, input types and bounded list/dice values are validated. The local expected-list guard is not a host-side concurrency guarantee.
+- **Supported defense/HP readouts:** numeric DR, SR, fast healing and regeneration can be authored through the existing contract, with imported DR/regeneration objects updated in place to preserve bypass/suppression/unknown fields. Recovery and mitigation automation are not implied. Added a clamped HP progress indicator, retaining the exact numeric HP readout (including negative HP).
+- **Contract bug fixed:** `normalizePF1eSystem` dropped already-canonical numeric DR/regeneration values. Those values now survive, including mixed stat-block inputs and repeated normalization. This is authored-data preservation, not a new mitigation/healing rule.
+- **Still open:** temporary HP, ability damage/drain and ER have no usable P0 derived contract; they were not added as pretend working controls. Explicit published-AC conversion and actual browser acceptance also remain. S02 stays unchecked. Weapon authoring is no longer a remaining P1 item; attack legality/rolling belongs to P3/P6.
+- **Evidence:** 109 Vitest files passed, 1 skipped; 853 tests passed, 3 skipped. Tests include all six shipped legacy weapons, actual FlatDiff application, unknown-field retention, owner enforcement, and host/GM/player add/edit/remove replication. Typecheck/lint/edited-UI formatting/build/size passed (1,998,905 raw bytes / 1.906 MB); browser spec expanded and 6 sheet tests collected across 3 projects, but Chromium remains absent and browser execution is unverified.
+
+### P1 progress — 2026-09-08, explicit AC conversion and manual health contracts (D-118)
+
+- **S02 further implemented:** a preview-required tactical AC source workflow accepts explicitly supplied components (no reconstruction), uses the same effect-aware derivation on both preview sides, and preserves original published/strategic AC totals. `acMode` selects components or retained published totals; no-mode actors keep prior behavior. Component editors unlock only after applying component mode. Apply rebuilds Ops against the latest projected document, rejecting a stale local preview or lost permission; this is not host CAS.
+- **Real but deliberately manual contracts:** canonical `tempHp` is a separate remaining pool, never added into current/max HP. `energyResistance` holds adjudicated acid/cold/electricity/fire/sonic amounts with derived readouts, validation, default-zero diagnostics and metadata-preserving Ops. They are not source aggregators or automatic mitigation/healing controls. Opaque imports remain protected, and unsupported energy entries are retained and reported.
+- **Rules boundary:** checked CRB p.191 Temporary Hit Points (AoN Rules ID 171) and Special Abilities → Energy Resistance (d20pfsrd). No automatic absorption, source stacking/expiration, Constitution/HD HP calculation, resistance mitigation or healing was added. Ability damage/drain still needs its full contract and verified propagation; S02 remains unchecked. Existing source-plan HP/damage disputes are not declared resolved.
+- **Evidence:** 111 Vitest files passed / 1 skipped; 862 tests passed / 3 skipped. Tests apply real FlatDiff Ops, preserve legacy/canonical sources, check reversible AC/effect previews and permission/staleness, and replicate HP/resistance/source changes through real HostSync/ClientSync. Typecheck/lint/new and edited UI/test formatting/build/size/build:systems passed; HTML 2,006,409 raw bytes (1.913 MB), gzip 579,755. Six browser cases collected, with conversion/reversal and manual health flows added; Chromium installation retried and failed with CDN TLS ECONNRESET, so no browser execution claim.
+
+### P1 progress — 2026-09-08, executed Chromium acceptance and runtime repairs (D-119)
+
+- **Browser acceptance now executed, not just collected:** four sheet scenarios pass on a real Chromium 149.0.7827.0 headless binary, booting built `dist/index.html` via `file://`. Coverage includes generic GM/player ownership, full PF1e editing/popup/conversion/stale-preview flow, all six shipped bestiary sheets against shared derivation, and a shipped actor drag → token → player double-click → live edit → observer downgrade → revoke → regrant. Runtime page errors are asserted absent in the PF1e flows.
+- **Runtime repairs:** rename the Weapons `derived` prop, which made Svelte interpret `$derived` as a store subscription; snapshot the reactive actor before AC-preview FlatDiff cloning and keep preview/request objects non-proxied. These failures were not caught by plain TypeScript/model tests.
+- **Multiplayer import repair:** raw sparse compendium creates omitted ownership, which the store defaulted on its clone but projection accessed on the original envelope. Apply the same private default during create projection; one private actor no longer aborts broadcasting its public linked token. Real host/GM/two-player regression proves the actor stays private until explicitly granted, while the token reaches both peers.
+- **Shared-window regression:** broader window acceptance exposed Settings reading `DEFAULT_RULES` before initialization; move initialization after its constant. All five existing window tests now pass, for **9 actual browser tests passed** across sheets/windows.
+- **Evidence:** 863 unit/integration tests passed / 3 skipped; 111 files passed / 1 skipped. Typecheck/lint/edited-code formatting/build/size passed; HTML 2,006,541 raw bytes (1.914 MB), gzip 579,746. Alternate binary came from external `@sparticuz/chromium@149.0.0`; no added browser-security bypass flags, no browser assets/dependency added to the repo. Optional `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` config documented; default pinned-browser behavior unchanged.
+- **Remaining:** S01/S04 Chromium flows are verified; their full supported-browser acceptance remains unchecked pending Firefox/WebKit. S02 still needs ability damage/drain and verified propagation. No new injury, resistance, attack or strategic rules were implemented; the existing manual-field limitations stand.
+
+## 4. P2 — Initiative, encounter selection and action foundations
+
+Depends on P1 for the approved sheet-before-tracker flow and on R02 for disputed semantics. Reuse `combatState.ts`, do not rebuild it.
+
+- [ ] **T01 — Add selection-aware token context menu:** initiative count, add/remove combatant, hidden state; retain a pan gesture. Add effect/spell actions only when P4/P5 handlers exist. (I P2)
+- [ ] **T02 — Roll actor-aware initiative** with linked `actorId`, derived Dex/feat/misc modifiers, tie-break/reroll policy, selected-token fallback and active-scene scoping. Support verifiable hidden GM rolls without leaking values. (I P2; G §4.3)
+- [ ] **T03 — Wire surprise and flat-footed-before-first-turn transitions**, round resets and encounter flags into actual tracker flow. Correct the `flags.core.delayed` round-wrap lookup bug with a regression test. (I P2; G §4.3/4.11)
+- [x] **T04 — Add create/activate encounter list** rather than taking `getAll("combats")[0]`; test multiple scenes/encounters and unchanged non-PF1e behavior. (I P2/§7)
+- [ ] **T05 — Implement visible action budgets and legality:** standard/move/full-round/free/swift/immediate, move substitution, restricted activity, start/complete full-round actions, 5-foot-step eligibility and next-turn swift consumption. Add the verified action/provoke table as shared data. Interrupt execution completes in P6. (G §3/§4.4; I P6)
+
+### P2 prerequisite repair — 2026-09-08 (D-120)
+
+- **T03 scope-lookup bug fixed:** round wrap now delegates to the existing scoped `clearDelayed` helper for every combatant. Previously the loop looked for a top-level flag although the writer uses `flags.core.delayed`; only the newly starting combatant was reliably cleared. Regression covers a marked non-starting combatant, input immutability, other scopes/metadata, initiative preservation and exactly-once ending-owner effect expiration.
+- **UI honesty:** “Mark delayed” and its tooltip now identify a manual marker. Corrected core comments that incorrectly promised last-in-round scheduling. No initiative change, automatic turn advance, PF1e resume/interrupt logic, surprise or flat-footed transitions were added. This is the generic compatibility repair explicitly called out by the plan, not completion of T03 or a bypass of remaining P1 work.
+- **Evidence:** 866 unit/integration tests passed / 3 skipped; 11 actual Chromium tests passed across combat/sheets/windows, including a new three-combatant round-wrap regression. Typecheck/lint/edited-code formatting/build/size passed; raw HTML 2,006,597 bytes, gzip 579,796. Same alternate Chromium 149 setup as D-119; Firefox/WebKit remain unverified.
+
+### P2 encounter selection — 2026-09-08 (D-121)
+
+- **T04 implemented:** GM tracker has a named encounter create control and scene-scoped selector. New encounters copy only the active scene's tokens, retain linked actor IDs, and start at round zero. Switching does not start/restart encounters or change initiative, rounds, turns or combatants. Start-without-an-encounter still creates and starts in one user action.
+- **Replicated contract:** `combat.flags.core.sceneId` binds new encounters; `scene.flags.core.activeCombatId` is the single selected encounter pointer per scene. Create+activate is one submit transaction. Explicit dangling or cross-scene pointers resolve to no encounter, never silently select another. Unbound legacy combats appear only under the first stored scene, with the old first-encounter fallback only when no pointer was authored. No schema migration or system-specific rules dependency.
+- **Validation/safety:** latest-store scene/encounter permission checks, rejection refresh, narrow flag writes preserving siblings, unit cases for legacy/cross-scene/deleted selection and generic actor links, and real host/GM/player pointer replication without resetting inactive rounds. Browser proves two encounters retain separate turns while switching between two scenes. Fixed Add token's hard-coded bootstrap parent discovered by that test; it now writes to the active scene.
+- **Evidence:** 871 tests passed / 3 skipped (112 files passed / 1 skipped); 12 actual Chromium tests passed across combat/sheets/windows. Typecheck/lint/edited-code formatting/build/size passed; HTML 2,009,452 raw bytes (1.916 MB), gzip 580,819. Firefox/WebKit remain unverified. T01/T02/T03/T05 and P1 ability damage/drain remain open; actor-aware initiative, hidden-roll verification and selection-aware rosters are not claimed here.
+
+### P2 public actor-aware initiative — 2026-09-08 (D-122)
+
+- **T02 partial:** Roll init reads the current selected encounter, resolves linked actors from the projected store (with token-link fallback for legacy rosters), and uses the existing PF1e derived initiative modifier. Generic/unlinked actors retain flat d20 behavior. Per-combatant `flags.core.initiativeRoll` records die, modifier, total, explanation and actor ID; manual overrides clear that record. These are public local rolls, not commit/reveal proofs, and feat-name strings are not newly interpreted as mechanics.
+- **Turn policy:** the first roll at round 1 / turn 0 with all initiatives unrolled establishes the highest result as the first combatant. Subsequent explicit rerolls/manual changes retain the current combatant's identity even if its sorted index moves. Later actor/effect changes do not automatically reroll/resort the encounter. Ties remain stable pending GM adjudication, with the missing automatic tie policy explicitly stated in the UI.
+- **Rules correction:** flat-footed/denied-Dex-to-AC previously suppressed Dex in derived initiative. CRB p.178 Initiative is a Dexterity check; remove that erroneous coupling and correct its regression expectation and explanation. Full tie resolution must compare total initiative modifiers, then roll remaining ties—not just compare Dexterity. This rule is verified but not yet automated.
+- **Safety:** validate the complete roster before RNG. Missing/wrong-scene tokens, unavailable linked actors, malformed PF1e data/effects and unauthorized updates produce no transition. Hidden combatants/tokens block the public batch rather than leak a hidden roll. Verified hidden rolls and selected-token initiation remain open.
+- **Evidence:** 879 tests passed / 3 skipped (113 files passed / 1 skipped); 12 actual Chromium combat/sheet/window tests passed. Browser checks the linked dragged token's +3 modifier, not the unrelated selected actor, and manual receipt removal. Host/GM/player replication preserves public totals/receipts without publishing the private actor document. Typecheck/lint/new and edited UI/test formatting/build/size passed; HTML 2,012,386 raw bytes (1.919 MB), gzip 582,120. Full browser matrix, T01/T02 remainder, T03/T05 and P1 ability damage/drain remain open.
+
+### P2 automatic public initiative ties — 2026-09-08 (D-123)
+
+- **T02 further implemented:** public roll batches containing a PF1e actor order equal initiative totals by total initiative modifier, then roll remaining tied groups with unmodified d20s. Only still-tied subgroups reroll; already-resolved positions stay fixed. This follows the CRB p.178 Initiative rule verified in D-122. Generic-only encounters and manual overrides keep their previous stable-tie behavior, explicitly labeled in the UI.
+- **Persistence without core rule coupling:** persist resolved equal-total order in the combatant array, reusing core's existing stable sort. No fractional initiatives, live-actor comparator, hidden core PF1e dependency or schema change. Core next/start/round-wrap operations retain the order, and explicit rerolls retain the active combatant under D-122's policy. Receipt fields `tiePolicy` and `tieRolls` document the actual policy and complete per-combatant roll-off history; initiative totals remain unchanged.
+- **Safety:** invalid tie dice or 20 unresolved roll-off rounds discard the entire proposal, preserving prior totals/order/receipts. The cap prevents a broken RNG from hanging the UI; it never silently chooses a winner. Hidden-roll blocking remains unchanged. These public local rolls are not cryptographic verification.
+- **Evidence:** 889 tests passed / 3 skipped (114 files passed / 1 skipped); 13 actual Chromium combat/sheet/window tests passed. Six pure rule fixtures and four adapter regressions cover modifier-vs-total ordering, multiple/repeated subgroups, invalid RNG, immutability, generic fallback and turn/round stability. Host/GM/player regression verifies the resolved order and tie receipts; a deterministic real DOM browser roll between two shipped bestiary actors survives round wrap. Typecheck/lint/edited-code formatting/build/size/build:systems passed; raw HTML 2,013,894 bytes (1.921 MB), gzip 582,633.
+- **Still open:** T02's selected-token workflow and verified hidden rolls, the rest of T01/T03/T05, P1 ability damage/drain and Firefox/WebKit acceptance. T02 remains unchecked; automatic ties for the implemented public PF1e roll path are no longer a remaining item.
+
+### P2 selected-token workflows — 2026-09-08 (D-124)
+
+- **T01/T02 selection path implemented:** the existing GM canvas click/marquee selection now feeds the tracker with a scene ID and token IDs. Selected count/names, clear, Add selected, Remove selected, Roll selected and explicit Roll all controls are mounted. New encounters use only selected tokens, falling back to all current-scene tokens only when selection is genuinely empty. Existing encounter Start does not silently rebuild its roster.
+- **Scene/staleness guards:** scene changes clear selection and cancel stale canvas gestures without submitting movement. Deleted/partly stale token selections remain visibly invalid until cleared/reselected; they never degrade into an all-token operation. Selected non-roster tokens must be added before initiative. Selection is local UI state, not ownership or replicated document state. Right/middle/Shift panning and existing generic workflows remain unchanged.
+- **Roster safety:** additions are idempotent and preserve existing records/metadata. Removal touches only matching members, preserves active identity, emits no turn/effect ticks, and refuses to remove the current combatant until advancing or ending combat. Ended encounters may remove their full roster. Latest selected encounter and host permissions remain decisive.
+- **Partial initiative scope:** roll only selected roster members and retain unselected totals/receipts exactly. Ties within the selected batch use D-123. A newly rolled result tying an unselected result rejects the whole proposal with an explicit Roll all/manual-adjudication prompt: never silently reroll an unselected combatant or infer a modifier for a manual old result. Explicit Roll all deliberately ignores local selection.
+- **Evidence:** 899 unit/integration tests passed / 3 skipped (115 files passed / 1 skipped); 15 real Chromium combat/sheet/window tests passed. Ten new regressions cover selected creation, stale/foreign/deleted selections, no-op additions, active-removal guard, partial-roll preservation/collisions, gesture cancellation and host/GM/player replication. Two browser flows cover real marquee/click selection, scoped creation, add/remove, partial receipts, scene reset, all-token fallback and undo-deletion without scope broadening. Typecheck/lint/edited-code formatting/build/size passed; HTML 2,018,741 raw bytes (1.925 MB), gzip 584,344.
+- **Still open:** T01's context-menu/hidden-state controls and T02's verified hidden-roll workflow; T01/T02 stay unchecked. No player tracker surface, new injury/ability-damage mechanics, surprise/action budgets or full browser-matrix acceptance is claimed.
+
+### GM-control correction — 2026-09-08 (D-125, supersedes D-124 restrictions)
+
+- **Standing user requirement:** the GM must be able to remove or change active and non-active combatants whenever desired. Do not impose gameplay-phase restrictions on GM authoring to simplify scheduling. Ownership checks and malformed/stale-reference validation remain data-safety checks, not turn-state vetoes.
+- **Active removal allowed:** remove the active member immediately, including multi-remove or the last remaining member. If needed, move the current pointer to the next surviving member in the old order, wrapping without incrementing the round. Never tick effects or emit turn-start/end hooks as a side effect of a roster edit. Empty running encounters retain the round and show “No combatants.” Manual initiative edits already work on active/non-active members.
+- **Selected tie no longer blocks:** accept the selected results and preserve stable cross-selection tie order, without rerolling/replacing unselected results. Mark affected selected receipts `crossSelectionTie: "stable-order"`; Roll all remains an optional full tie-resolution operation. This supersedes D-124's rejection policy.
+- **Evidence:** 900 unit/integration tests passed / 3 skipped; 15 Chromium browser tests passed. Core-adapter tests cover next surviving successor, wrap, multiple/last removal, no implicit ticks and accepted partial ties. Browser and host/GM/player tests cover removal of active/last members. Typecheck/lint/edited-code formatting/build/size passed; HTML 2,018,848 bytes raw, gzip 584,394. No additional battle rules or browser-matrix coverage claimed.
+
+## 5. P3 — Tactical attack, damage and equipment mechanics
+
+Depends on D06 and R01–R02. Implement actor-based resolution (planned `tactical.ts`), independent of ModelPool loops. Strategic consumption/fixes are tracked in §10.
+
+- [ ] **A01 — Build typed weapon/equipment attack descriptors** for melee/ranged/touch, handedness/off-hand/light/double/natural/unarmed, proficiency, range, crits, material/alignment/enhancement, ammo, armor/max Dex/ACP/ASF, item HP/hardness/broken state. (I P3; G §§2.4–2.10, 3, 6)
+- [ ] **A02 — Implement attack eligibility and arithmetic:** BAB iteratives, Str/Dex and size, natural 1/20, normal/touch/flat-footed defense, TWF table, natural primary/secondary attacks, unarmed/lethal conversion, nonproficiency and shooting-into-melee exceptions. (I P3; G §2.6/§4.7)
+- [ ] **A03 — Complete damage and critical arithmetic:** threat/confirmation, expanded threat sources, base dice/static versus bonus/precision dice, additive multipliers, handedness Str rules, enhancement, minimum nonlethal damage and precision immunity. (I P3; G §2.4–2.7)
+- [ ] **A04 — Implement range and ranged/splash legality:** range penalties/max thrown/projectile increments, reach restrictions, grid-intersection targeting and miss scatter for splash weapons (not invented spell scatter). (I P3; G §2.8/§4.7; Appendix A.12)
+- [ ] **A05 — Apply verified defensive mitigation:** defender-owned compound DR/bypass thresholds, alignment/epic/ammunition interactions, energy resistance per type, immunity/vulnerability, damage-dependent riders, and separate object hardness. (I P3/P7; G §2.10/Appendix A.17)
+- [ ] **A06 — Connect attacks/saves/checks to sheet roll buttons**, actor `rollData`, chat breakdown and optional commit-roll verification; apply HP Ops authoritatively and add full-attack controls plus preliminary AoO prompts. (I P3; B §5)
+- [ ] **A07 — Encode supported feat/stance modifiers and exceptions** from verified tables: Power Attack/Deadly Aim, Combat Expertise, fighting defensively/total defense, Weapon Focus/Specialization/Finesse, Improved Critical, TWF tree, Precise/Point-Blank Shot/Manyshot, unarmed and related prerequisites. Content entries alone do not close their mechanical behavior. (G §§3, 6, Appendix A.15; I P3/P8; B §4.3)
+
+## 6. P4 — Effects, conditions and real duration handling
+
+Depends on P3 and D06; keep core EffectDocument unchanged.
+
+- [ ] **E01 — Persist/apply effects through PF1e helpers** using actor embedded effects and combatant effect references expected by core badge/tick code; resolve typed/source stacking, penalties, suppression, boosts and action denies. (I P4; G §4.2; B §6.3)
+- [ ] **E02 — Build custom effect editor/application flow:** name/icon, open-ended stat keys, typed/source groups, conditions, boosts/denies, origin, duration units/per-level/end boundary, concentration/sustained flags; support token application and player permissions. (I P4)
+- [ ] **E03 — Complete the mathematical condition library** including flat-footed, prone, blinded/invisible, entangled, grappled/pinned, stunned/dazed, dazzled, shaken/frightened/panicked, fatigued/exhausted, sickened/nauseated, helpless/cowering, disabled/dying/stable/unconscious, paralyzed/petrified/confused and mind-affecting immunity. Do not conflate conditions with different consequences. (I P4; G §3/Appendix A.14; B §4.5)
+- [ ] **E04 — Wire turn-end and round-start expiration**, per-level conversion, concentration interruption and sustained-action maintenance; reuse core ticking without double-decrementing. (I P4)
+- [ ] **E05 — Advance the replicated clock** on configured round boundaries and GM out-of-combat time controls; implement minute/hour/day expiration and consistent joiner readback. Never write the clock only to local storage. (I P4 corrected by §10)
+- [ ] **E06 — Recompute UI/roll statistics on effect changes**, render token condition icons/badges, and prove expiry restores base values. Verify initiative policy under R02 before any re-sort behavior. (I P4/S2)
+
+## 7. P5 — Spellcasting, targeting and awareness
+
+Depends on effects, attacks, action foundations and verified rule fixtures. Tactical targeting and strategic spell resolution remain independent implementations using common spell data.
+
+- [ ] **C01 — Add pure grid targeting + canvas preview overlay:** burst, cone, line, emanation, spread/cylinder where supported; scene distance/units/diagonals, affected-token highlighting, walls/line of effect and cover. (I P5; G §4.10; B §4.4)
+- [ ] **C02 — Implement tactical casting/save flow:** chosen targets, DC from spell level/key ability/focus, Fort/Ref/Will, save-negates/half/no-save distinctions, Evasion/Improved Evasion, per-type damage/ER and SR without natural-roll auto outcomes. Respect target-specific resistance bookkeeping. (I P5; G §2.11/Appendix A.16; M Task 5)
+- [ ] **C03 — Implement concentration/components and timing:** defensive casting versus taking-damage checks, spell loss, threatened casting, armor spell failure, verbal/somatic/material/focus requirements, touch/held charge, multi-round casting, swift/quickened/metamagic timing. Validate dubious source restrictions under R02. (I P5; G §4.10; B §4.4)
+- [ ] **C04 — Add level 0–9 spellbook/preparation/slot readouts**, prepared versus spontaneous data and bonus slots; MVP overuse produces warnings, not hard enforcement. (I P5; B §6.2)
+- [ ] **C05 — Replace hardcoded strategic Fireball with profile/pack-driven cast payloads** for location, shape, range, radius, CL, DC, dice and targets; use the agreed 20-ft Fireball. Remove or explicitly document scatter under R03 and keep spatial membership/ranges consistent if displacement remains. (G §5; I P5; M Task 5)
+- [ ] **C06 — Connect Stealth/Perception to host detection and ambush state:** verified distance/environment/cover modifiers, spatial queries and hidden-target legality; distinguish presence detection from locating/seeing a target. (B §§4.2, 6, 9; G §4.5–4.6)
+- [ ] **C07 — Add verified sensory-mode behavior** for normal/low-light/darkvision, scent, tremorsense, blindsight and true seeing, with appropriate ranges, lighting/LOS/concealment exceptions and faction projection. Avoid treating distinct senses as interchangeable. (B §§4.2, 10)
+- [ ] **C08 — Define and document mass stealth aggregation** (unit-level policy and entry-triggered checks) rather than per-model all-pairs checks; test ambush/flat-footed effects and scale cost. (B §§4.2, 7)
+
+## 8. P6 — Positioning, maneuvers, real interrupts and mounted/firearm combat
+
+Depends on P2–P5. Complete action costs and modifiers together with their legal execution.
+
+- [ ] **P01 — Normalize scene/model/feet conversions** across deploy spacing, envelopment reach, aura radii and spells. Use scene grid metadata, not incompatible hardcoded 1.5/5/15/30 constants. (G §2.15; B §6.1)
+- [ ] **P02 — Implement space/reach/threat geometry:** token footprints, size/tall/long reach, reach-weapon dead zones, tiny-creature occupancy/zero reach, diagonals and threatened-square highlighting. (G §4.5; I P6)
+- [ ] **P03 — Implement movement legality and cost:** terrain multipliers, obstacles/occupied squares/allies, squeezing, minimum movement, run/withdraw, legal ending squares, 5-foot steps and charge path/action restrictions. (I P6; G §3/§4.5)
+- [ ] **P04 — Implement positional defenses/modifiers:** corner-based soft/partial/standard/improved/total cover, concealment non-stacking, invisibility/denied Dex, helplessness, higher ground, opposite-border flanking and threatening-ally requirements. Use independently verified fixtures. (I P3/P6; G §4.6)
+- [ ] **P05 — Complete maneuver checks and aftermath:** bull rush, trip, disarm, sunder, grapple/maintain/pin/escape/tie-up, overrun, dirty trick, drag, reposition, steal; aid another/feint separately. Include special CMB/CMD size, Tiny Dex substitution, legality/limbs/free hands, size limits, improved/greater feat exceptions, attack substitution, failed-check consequences and item hardness/HP. Verify I's ambiguous “reverse” rather than inventing a maneuver. (I P6; G §4.8/Appendix A.9)
+- [ ] **P06 — Implement authoritative interrupt queue** before movement/action Ops commit: AoO trigger table, verified budgets and owner-turn reset, one opportunity per triggering action, exclusions, damage effects on maneuvers/casting, and ready-before-trigger ordering. UI prompts alone are not completion. (I P6; G §2.14/§4.11)
+- [ ] **P07 — Complete delay/ready execution and UI:** triggers, interrupt resolution, initiative adjustment, unused/lost actions and re-ready; prevent extra-turn/action exploits. (G §4.11; I P2/P6)
+- [ ] **P08 — Add mount/companion linkage and mounted rules:** shared initiative/space, Ride DCs, movement/full-attack limits, mounted ranged penalties, charge/lance multipliers, casting concentration, falls/unconscious riders and supported mounted feats. (I P6; G Appendix A.11)
+- [ ] **P09 — Complete firearms independently at both scales:** early/advanced touch windows and max range, ammo/capacity/loading/provoke, weapon-owned broken/misfire state, penalties/escalation/Gun Training/nonproficient loading, early explosion saves/destruction and clearing actions. Reverify questionable G firearm formulas before encoding; measure any new strategic state columns. (G §2.9/2.9b; I P6/D-113 normalization notes)
+
+## 9. P7 — Injury, recovery and death
+
+Depends on damage/effects/turns and corrected S5 rules from R02.
+
+- [ ] **H01 — Implement disabled/dying/stable/dead progression** with negative-HP bookkeeping, Constitution-based stabilization, Heal assistance, ongoing turn effects, natural recovery and helpless/coup-de-grace resolution. (I P7; G §4.9/Appendix A.13)
+- [ ] **H02 — Complete nonlethal and temporary HP semantics:** separate accumulation, staggered/unconscious thresholds, excess conversion, absorption/stacking/expiry and lethal/nonlethal healing relationships. Do not equate tactical 0 HP with strategic compaction death. (G §2.12/§4.9; I P7)
+- [ ] **H03 — Add healing, fast healing and regeneration** including suppression sources/timing and death implications; ensure damage/healing state and analytics agree. (I P7; M Tasks 3/6; G Appendix A.18)
+- [ ] **H04 — Add ability damage/drain and energy drain/negative levels**, recovery and derived-stat consequences. Ability burn/massive damage remain explicit optional follow-ups below unless separately approved. (I P7; G §4.9)
+
+## 10. P8 — Strategic fidelity, hero bridge, analytics and content
+
+Split into reviewable sub-slices. Depends on the relevant tactical data/effect/spell work, N01–N02 for multiplayer acceptance, and R03 for variants. These are not a shared-kernel rewrite.
+
+### Strategic resolver completion
+
+- [ ] **M01 — Bring strategic attack/damage rules up to the verified data contract:** outstanding G §2.4–2.10 (crit/bonus dice, ranged Dex/size, handedness/enhancement, range/firearms and defender mitigation) using independent sim loops; add scale-specific fixtures, not a cross-scale equality gate. (G §§2, 5; I P8)
+- [ ] **M02 — Reconcile strategic compile differences** in AoO budget, CMB/CMD special size and save bases/modifiers using verified shared tables; keep legacy/stat-block conversion differences explicit and measure changed fixtures. (G §10.2; I P8)
+- [ ] **M03 — Fix condition/status bit collisions** with a budgeted separate column or safe allocation; update manifest, codec, spatial filters, compaction and joiner tests so prone/flanked never masquerade as hidden/pinned. (G §2.13; I P8; B §4.5)
+- [ ] **M04 — Replace heuristic engagement with scale-appropriate contact/reach/flanking geometry** and clear/recompute stale FLANKED bits each turn; handle envelopment movement and document any non-SRD bonuses. (G §2.2/§5; M Task 4)
+- [ ] **M05 — Execute declared movement/shoot/melee/spell order phases** rather than accepting no-op move/hold/retreat/custom orders; implement range/terrain/charge/withdraw/run and movement-triggered AoOs. Decide adopted morale behavior explicitly; a broader morale subsystem is deferred below. (G §5; M Tasks 3–5)
+- [ ] **M06 — Complete strategic SR/save, nonlethal, healing and regeneration paths** with correct counters and model lifecycle handling; retain independently seeded deterministic resolution. (G §2.11–2.12/§5; I P5/P7/P8)
+
+### Player hero bridge
+
+- [ ] **M07 — Produce real hero identity and actor inputs:** `leaderTokenId` → actor → profile/`isHeroUnit`; populate `RulesContext.leaderActors` at production construction sites instead of empty maps or fixture IDs. (G §4.12/§5; I P8; M Task 7)
+- [ ] **M08 — Implement bidirectional position/HP/condition sync** between hero documents and model slots; snapshot/lock inputs for advance and reconcile worker results through atomic authorized Ops, with movement-during-turn race tests. (B §§4.1, 7; G §4.12; M Task 7)
+- [ ] **M09 — Fix aura application/removal and stacking:** radius/bonuses from feat/class data, spatially eligible allies only, no per-model/per-turn accumulation into base stats; leaving formation or losing the leader removes benefits. (G §5; B §4.1; M Task 7)
+- [ ] **M10 — Wire hero melee/casting/direct targeting and approved cleave behavior** into normal player controls and reports. Treat bodyguard/rank shielding/duels as separately scoped extensions below, not hidden requirements for initial bridge delivery. (I P8; M Task 7; B §4.1)
+
+### Analytics and battle UI
+
+- [ ] **M11 — Populate all advertised metrics at their real event sources:** attacks/hits/misses/percentage, damage dealt/taken/overkill, threats/confirms, kills/deaths/remaining, DR absorbed/SR blocked, saves, AoO executed/hits, CMB success, healing/regeneration/channel-energy counts. Specifically close the six unincremented fields identified by I P8. (M Task 6; G §5; I P8)
+- [ ] **M12 — Call `generateReport()` from actual turn resolution**, reconcile per-model/per-unit totals into TurnReport summaries, and test resets/aggregation/attribution rather than collector-only fixtures. (M Task 6; G §5)
+- [ ] **M13 — Implement RFC-4180 CSV escaping** for commas, quotes and newlines with round-trip tests. (M Tasks 6/8; I P8)
+- [ ] **M14 — Mount ArmyWindow, PF1eBattleAnalysis and TurnReportTimeline** in normal WindowHost navigation, not just e2eHook; reactive analysis/table/report readback and CSV export must work after real turns. (G §1.7; I P8; M Task 8)
+
+### Data and content
+
+- [ ] **M15 — Expand spells from 4 to approximately 40** with textual school/descriptors/components/casting time/range/target/area/duration/save/SR and tactical + mass-battle payloads; distinguish descriptive-only entries from automated ones. (I P5; G §6; M Task 9)
+- [ ] **M16 — Expand bestiary from 6 to approximately 30 CR-appropriate entries**, add equipment/armor/shield tables and an explicitly selected six-class starter table. Include feats that affect calculations (initiative, Toughness, Dodge/Mobility/Spring Attack, Combat Casting, save feats and the attack/maneuver feats above). (I P8; G §6)
+- [ ] **M17 — Complete and verify shared SRD data coverage** for size, reach, speed/armor, cover/concealment, TWF, actions/provokes, weapons and armor properties; do not treat P0 table presence as complete coverage. (G §6; B §6.3)
+- [ ] **M18 — Keep packs, normalization and compiled profiles aligned**, generate or validate PRECREATED_PF1E_UNITS from packs, declare added packs in manifests, test every mechanical field and enforce the 2,000-entry pack cap. Load content on demand from IndexedDB instead of inflating the base HTML. (G §6; I P5/P8; B §10)
+
+## 11. Verification and release gates — part of every relevant slice
+
+- [ ] **V01 — Build independently sourced, heading-cited rule fixtures**, approximately 500 worked examples in the proposed `tests/packages/pf1eFixtures.json`, covering modifier/size/reach/TWF/provoke/save/cover tables and exceptions. Never snapshot current outputs as expected truth. Close R01–R02 as fixtures are verified. (G §7; I §6)
+- [ ] **V02 — Add seeded probability oracles** at 100k iterations for fixed builds/defenses with tolerances, plus exact single-roll assertions. Include discriminating AC 22/16/17, flank boundary and minimum-nonlethal regressions. Test tactical and strategic paths independently. (I P3/§6; G §7)
+- [ ] **V03 — Execute corrected S1–S5 tabletop flows** with pure logic tests and browser interactions: fighter/bestiary/initiative/attack; timed buff and revert; 20-ft Fireball cluster; trip and defensive/injury concentration as distinct cases; dying/stabilization/coup de grace. Use R02-corrected expectations, not contradictory source prose. (I §1)
+- [ ] **V04 — Add the broader tactical encounter flow:** 2 PCs vs 3 goblins, surprise, step, AoO, charge, cover/concealment, maneuver and injury progression, with player ownership/replication assertions. (G §7.5)
+- [ ] **V05 — Run the full two-peer mass-battle acceptance flow:** import/activate real zips, deploy 10k, resolve 20 turns, move/cast/attack with a hero, inspect exact analytics and CSV, assert clean rules boot/console and joiner state. Browser package activation alone does not satisfy this. (M Task 10; G §7.5)
+- [ ] **V06 — Preserve deploy/manifest/codec/replay gates with every strategic change:** seeded hashes and decompressed wire equality, checkpoint ≤1.5 MB at 10k, ≤200 B/model, warm-up before timing and genuine combat events rather than empty late-turn work. (G §1.11; I §7)
+- [ ] **V07 — Address dense-army performance:** benchmark at least 20×500 and 40×250 models, reduce per-unit overhead to pursue warmed p95 <50 ms, report environment/distributions separately from the existing 250 ms regression gate. Avoid hot-loop `Math.hypot` dependence where integer/squared-distance geometry suffices. Do not loosen tests to conceal misses. (G §5; I P8; B §7)
+- [ ] **V08 — Gate 200-actor tactical refresh/resolution within a documented frame budget**, including sheet derivation, effects, tracker and relevant detection work; recheck single-file size after UI mounts. (I P8; B §7)
+- [ ] **V09 — Generate rules-coverage dashboard** from test `@srd` headings (proposed `scripts/coverage.mjs`), with implemented/tested/deviated/deferred rows and links to this checklist. (G §7.6; I P8)
+- [ ] **V10 — Run and report quality checks per slice:** `pnpm test`, `pnpm typecheck`, `pnpm lint`, touched-file Prettier check; `pnpm build` + `pnpm size` for UI, `pnpm build:systems` for rules/packs, and actual browser tests where binaries are available. Test collection (`playwright test --list`) is not a passing browser run. Respect https/file boot and supported browser matrix. (I §§5, 7; M §3; README)
+- [ ] **V11 — Keep decisions/deviations and checklist synchronized** in the same reviewable phase slice; record changed contracts, verified rule citations, measured budgets and test evidence. No drive-by platform refactors or dormant rule toggles. (I §2/§5)
+
+## 12. Deferred / expanded-system backlog — retained from the sources
+
+These are not prerequisites for the scoped S1–S5 MVP unless promoted explicitly. Core combat behavior listed above must not be deferred merely because an advanced variant appears here.
+
+- [ ] **L01 — Full character-building depth:** full skills/ranks/class-skill/ACP UI, point buy, inventory/encumbrance/loot management, broader class progression and feature automation beyond starter combat requirements. Retain the integration plan's full-sheet vision without expanding P1 silently. (B §§4.3, 6.2; I §9; G §8)
+- [ ] **L02 — Broader class/feat mechanics:** Sneak Attack, Smite Evil, Rage, Clustered Shots, school-specific spell feats and remaining leadership/commander features, with verified rules rather than B's simplified formulas. Promote needed starter features into A07/E03/C02/M09 individually. (B §4.3; G §3)
+- [ ] **L03 — Advanced hero interactions:** In Harm's Way/bodyguards, rank shielding, capture/duels and formation exit/re-entry actions beyond basic direct targeting. (B §4.1; G §4.12)
+- [ ] **L04 — Full spell catalog and advanced preparation/metamagic automation**, complete equipment pricing/crafting and non-combat skills beyond the selected combat subset. (B §§1, 6.2; I §9; G §8)
+- [ ] **L05 — Optional/house-rule systems:** massive damage, ability burn, grouped/modern initiative, facing, knockback, mounted overrun, pursuit and advanced illusion/invisibility variants. Require explicit scope, sourced behavior, named settings and default policy; do not silently change core rules. (G §8; I P7/§9)
+- [ ] **L06 — Third-party and wider strategic subsystems:** interleaved 3PP maneuvers/wounds/crippling variants, vehicles/siege/domain/politics and mass-battle morale rework. Gate 3PP data with `flags.pf1e.thirdParty` if adopted. (G §8; I §9)
+- [ ] **L07 — Optional player-sidebar parity and visual polish:** journals/tables/tracker exposure beyond scoped ownership/rolls/effects, portrait frames/themes, extra dice/token animation and richer template dragging. Existing platform dice infrastructure is not a new PF1e engine task. (I §9; G §8; B §5)
+
+## Recommended execution order
+
+1. **Reconcile R01–R03**, preserve D01–D06; start **N01–N02** as an independent protocol slice.
+2. **P1 sheets → P2 tracker/actions → P3 attacks → P4 effects → P5 casting/awareness → P6 interrupts/movement → P7 injury**. Verify disputed rules before each affected slice; implement only context-menu options that work.
+3. Split **P8** into strategic fixes, hero sync, analytics/UI and content PR-sized changes. Pull schema collisions/scale conversions forward if they block an earlier consumer. Content can proceed with its owning rule phase rather than waiting for all of P8.
+4. Apply **V01–V11 throughout**, then complete the combined multiplayer/scale acceptance. Promote **L** items only by explicit scope decision.
+
+Original I PR labels map to this sequence: PR-A/P0 is already landed; B/P1, C/P2, D/P3, E/P4, F–H/P5–P7, I/P8. The old G milestone estimates and M task numbers are historical cross-references, not a second schedule or additional copies of these tasks.
