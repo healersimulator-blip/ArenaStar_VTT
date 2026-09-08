@@ -12,7 +12,11 @@ import {
   endCombat,
   type CombatTransition,
 } from "../../src/core/combat";
-import type { CombatDocument, CombatantDocument, EffectDocument } from "../../src/core/documents";
+import type {
+  CombatDocument,
+  CombatantDocument,
+  EffectDocument,
+} from "../../src/core/documents";
 import type { Json } from "../../src/core/documents";
 
 function combatant(
@@ -136,6 +140,65 @@ describe("combat tracker (§10)", () => {
     const t = nextTurn(delayed.combat);
     const a = t.combat.combatants.find((x) => x._id === "a");
     expect(a?.flags.core).toBeUndefined();
+  });
+
+  test("round wrap clears scoped markers on every combatant, not only the starting one", () => {
+    let c = startCombat(
+      combat(combatant("a", 30), combatant("b", 20), combatant("c", 10)),
+    ).combat;
+    c = nextTurn(nextTurn(c).combat).combat;
+    c = delayCombatant(delayCombatant(c, "b").combat, "c").combat;
+    const before = structuredClone(c);
+    const result = nextTurn(c);
+    expect(result.combat.round).toBe(2);
+    expect(currentCombatant(result.combat)?._id).toBe("a");
+    expect(result.combat.combatants.every((x) => x.flags.core?.delayed === undefined)).toBe(
+      true,
+    );
+    expect(result.combat.combatants.map((x) => x.initiative)).toEqual([30, 20, 10]);
+    expect(result.hooks).toEqual([
+      "combat:turn:end",
+      "combat:round:start",
+      "combat:turn:start",
+    ]);
+    expect(c).toEqual(before);
+  });
+
+  test("round cleanup preserves other scopes and effects and ticks only the ending owner", () => {
+    const b = withEffects(combatant("b", 20, { delayed: true, custom: "keep" }), {
+      buff: effect("buff", 2) as unknown as Json,
+    });
+    b.flags.other = { delayed: true, note: "keep" };
+    const c = withEffects(combatant("c", 10, { delayed: true }), {
+      ending: effect("ending", 1) as unknown as Json,
+    });
+    const input = { ...combat(combatant("a", 30), b, c), round: 1, turn: 2 };
+    const before = structuredClone(input);
+    const result = nextTurn(input);
+    expect(result.combat.combatants[1]?.flags).toMatchObject({
+      core: { custom: "keep" },
+      other: { delayed: true, note: "keep" },
+    });
+    expect(result.combat.combatants[1]?.flags.core).not.toHaveProperty("delayed");
+    expect(activeEffects(result.combat).map((x) => [x.id, x.duration])).toEqual([["buff", 2]]);
+    expect(result.expired).toEqual([{ combatantId: "c", effectId: "ending" }]);
+    expect(result.hooks).toEqual([
+      "combat:turn:end",
+      "combat:effect:expire",
+      "combat:round:start",
+      "combat:turn:start",
+    ]);
+    expect(input).toEqual(before);
+  });
+
+  test("marking delay is metadata only and missing IDs are a no-op", () => {
+    const c = startCombat(combat(combatant("a", 20), combatant("b", 10))).combat;
+    const result = delayCombatant(c, "a");
+    expect(result.combat.turn).toBe(c.turn);
+    expect(result.combat.round).toBe(c.round);
+    expect(sortCombatants(result.combat.combatants).map((x) => x._id)).toEqual(["a", "b"]);
+    expect(currentCombatant(result.combat)?._id).toBe("a");
+    expect(delayCombatant(c, "missing")).toEqual({ combat: c, hooks: [], expired: [] });
   });
 
   test("defeated sorts last and keeps initiative", () => {

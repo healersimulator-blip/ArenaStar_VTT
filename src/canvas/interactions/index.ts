@@ -63,6 +63,9 @@ export interface PointerEventSource {
   ): void;
   addWheelListener(cb: (ev: WheelEvt) => void): void;
   removeWheelListener(cb: (ev: WheelEvt) => void): void;
+  /** Optional for non-DOM sources; activation never requires movement ownership. */
+  addDoubleClickListener?(cb: (ev: PointerEvt) => void): void;
+  removeDoubleClickListener?(cb: (ev: PointerEvt) => void): void;
 }
 
 export interface IntentSink {
@@ -131,6 +134,8 @@ export interface ControllerOptions {
   getGrid: () => GridSpec | null;
   /** Ownership gate (players drag only tokens they own; GM all). */
   canMove: (view: TokenView) => boolean;
+  /** App-owned actor sheet/navigation callback; the canvas knows nothing about PF1e. */
+  onTokenActivate?: (view: TokenView) => void;
   onSelectionChange?: (selection: readonly DocId[]) => void;
   /** §9: alt+click on the canvas emits a ping at the world point. */
   onPing?: (world: { x: number; y: number }) => void;
@@ -148,6 +153,7 @@ export class CanvasController {
   private startCamera: Camera = { x: 0, y: 0, scale: 1 };
   private startWorld = { x: 0, y: 0 };
   private grabbed: TokenView | null = null;
+  private dragged = false;
   private readonly selection = new Set<DocId>();
   private rulerPoints: Array<{ x: number; y: number }> = [];
 
@@ -156,15 +162,46 @@ export class CanvasController {
   private readonly onUp = (ev: PointerEvt): void => this.pointerUp(ev);
   private readonly onWheel = (ev: WheelEvt): void => this.wheel(ev);
 
+  private readonly onDoubleClick = (ev: PointerEvt): void => {
+    if (
+      ev.button !== 0 ||
+      ev.shiftKey ||
+      ev.altKey ||
+      ev.ctrlKey ||
+      this.mode !== "idle" ||
+      this.dragged
+    )
+      return;
+    const hit = pickToken(
+      this.options.getTokens(),
+      screenToWorld(this.options.stage.camera, ev.x, ev.y),
+    );
+    if (hit && this.options.onTokenActivate) {
+      ev.preventDefault();
+      this.options.onTokenActivate(hit);
+    }
+  };
+
   constructor(private readonly options: ControllerOptions) {
     options.source.addPointerListener("pointerdown", this.onDown);
     options.source.addPointerListener("pointermove", this.onMove);
     options.source.addPointerListener("pointerup", this.onUp);
     options.source.addWheelListener(this.onWheel);
+    if (options.onTokenActivate) options.source.addDoubleClickListener?.(this.onDoubleClick);
   }
 
   get selected(): readonly DocId[] {
     return [...this.selection];
+  }
+
+  /** Scene switches / explicit clear cancel stale selection gestures without submitting movement. */
+  clearSelection(): void {
+    this.selection.clear();
+    this.grabbed = null;
+    this.dragged = false;
+    this.mode = "idle";
+    this.options.stage.setMarquee(null);
+    this.options.onSelectionChange?.([]);
   }
 
   get ruler(): ReadonlyArray<{ x: number; y: number }> {
@@ -179,6 +216,7 @@ export class CanvasController {
   }
 
   private pointerDown(ev: PointerEvt): void {
+    this.dragged = false;
     const camera = this.options.stage.camera;
     const world = screenToWorld(camera, ev.x, ev.y);
     if (ev.button === 0 && ev.altKey && this.options.onPing) {
@@ -214,6 +252,7 @@ export class CanvasController {
         this.mode = "drag";
         this.grabbed = hit;
         this.startWorld = world;
+        this.startScreen = { x: ev.x, y: ev.y };
       } else {
         this.mode = "idle"; // select-only (not owned)
       }
@@ -234,6 +273,10 @@ export class CanvasController {
       }
       case "drag": {
         if (!this.grabbed) return;
+        if (Math.abs(ev.x - this.startScreen.x) > 4 || Math.abs(ev.y - this.startScreen.y) > 4)
+          this.dragged = true;
+        // With activation enabled a click must not snap an off-grid token or emit a move.
+        if (this.options.onTokenActivate && !this.dragged) return;
         const camera = this.options.stage.camera;
         const world = screenToWorld(camera, ev.x, ev.y);
         const delta = { x: world.x - this.startWorld.x, y: world.y - this.startWorld.y };
@@ -258,6 +301,9 @@ export class CanvasController {
         this.grabbed = null;
         this.mode = "idle";
         if (!grabbed) return;
+        if (Math.abs(ev.x - this.startScreen.x) > 4 || Math.abs(ev.y - this.startScreen.y) > 4)
+          this.dragged = true;
+        if (this.options.onTokenActivate && !this.dragged) return;
         const camera = this.options.stage.camera;
         const world = screenToWorld(camera, ev.x, ev.y);
         const delta = { x: world.x - this.startWorld.x, y: world.y - this.startWorld.y };
@@ -320,6 +366,8 @@ export class CanvasController {
     this.options.source.removePointerListener("pointermove", this.onMove);
     this.options.source.removePointerListener("pointerup", this.onUp);
     this.options.source.removeWheelListener(this.onWheel);
+    if (this.options.onTokenActivate)
+      this.options.source.removeDoubleClickListener?.(this.onDoubleClick);
     this.mode = "idle";
     this.grabbed = null;
     this.rulerPoints = [];
@@ -332,6 +380,7 @@ type PointerType = "pointerdown" | "pointermove" | "pointerup";
 
 export function domPointerSource(canvas: HTMLCanvasElement): PointerEventSource {
   const pointerWrapped = new Map<PointerType, Map<(ev: PointerEvt) => void, EventListener>>();
+  const doubleClickWrapped = new Map<(ev: PointerEvt) => void, EventListener>();
   const wheelWrapped = new Map<(ev: WheelEvt) => void, EventListener>();
 
   const pointerList = (type: PointerType): Map<(ev: PointerEvt) => void, EventListener> => {
@@ -344,6 +393,30 @@ export function domPointerSource(canvas: HTMLCanvasElement): PointerEventSource 
   };
 
   return {
+    addDoubleClickListener(cb) {
+      const wrapped = (ev: MouseEvent): void => {
+        const rect = canvas.getBoundingClientRect();
+        cb({
+          x: ev.clientX - rect.left,
+          y: ev.clientY - rect.top,
+          button: ev.button,
+          shiftKey: ev.shiftKey,
+          altKey: ev.altKey,
+          ctrlKey: ev.ctrlKey,
+          pointerId: 0,
+          preventDefault: () => ev.preventDefault(),
+        });
+      };
+      doubleClickWrapped.set(cb, wrapped as EventListener);
+      canvas.addEventListener("dblclick", wrapped as EventListener);
+    },
+    removeDoubleClickListener(cb) {
+      const wrapped = doubleClickWrapped.get(cb);
+      if (wrapped) {
+        canvas.removeEventListener("dblclick", wrapped);
+        doubleClickWrapped.delete(cb);
+      }
+    },
     addPointerListener(type, cb) {
       const wrapped = (ev: PointerEvent): void => {
         const rect = canvas.getBoundingClientRect();

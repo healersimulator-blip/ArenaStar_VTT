@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   CanvasController,
   dragTarget,
+  domPointerSource,
   panByScreen,
   pickToken,
   type IntentSink,
@@ -18,7 +19,12 @@ import type { SquareGrid } from "../../src/canvas/grid";
 
 // ─── fakes ────────────────────────────────────────────────────────────────────
 
-function token(id: string, x: number, y: number, over: Partial<TokenDocument> = {}): TokenDocument {
+function token(
+  id: string,
+  x: number,
+  y: number,
+  over: Partial<TokenDocument> = {},
+): TokenDocument {
   return {
     _id: id,
     type: "token",
@@ -55,6 +61,25 @@ class FakeSource implements PointerEventSource {
     pointerup: [],
   };
   wheel: Array<(ev: WheelEvt) => void> = [];
+  doubleClicks: Array<(ev: PointerEvt) => void> = [];
+  addDoubleClickListener(cb: (ev: PointerEvt) => void): void {
+    this.doubleClicks.push(cb);
+  }
+  removeDoubleClickListener(cb: (ev: PointerEvt) => void): void {
+    this.doubleClicks = this.doubleClicks.filter((fn) => fn !== cb);
+  }
+  doubleClick(x: number, y: number, opts: Partial<PointerEvt> = {}): void {
+    for (const cb of [...this.doubleClicks])
+      cb({
+        x,
+        y,
+        button: 0,
+        shiftKey: false,
+        pointerId: 1,
+        preventDefault: () => undefined,
+        ...opts,
+      });
+  }
 
   addPointerListener(
     type: "pointerdown" | "pointermove" | "pointerup",
@@ -134,7 +159,11 @@ class RecordingClient implements IntentSink {
 
 function makeHarness(
   tokens: TokenView[],
-  opts: { grid?: SquareGrid | null; canMove?: boolean } = {},
+  opts: {
+    grid?: SquareGrid | null;
+    canMove?: boolean;
+    onTokenActivate?: (view: TokenView) => void;
+  } = {},
 ) {
   const stage = new FakeStage();
   const source = new FakeSource();
@@ -150,6 +179,7 @@ function makeHarness(
     getGrid: (): SquareGrid | null =>
       opts.grid === undefined ? { type: "square", size: 100 } : opts.grid,
     canMove: () => opts.canMove ?? true,
+    ...(opts.onTokenActivate ? { onTokenActivate: opts.onTokenActivate } : {}),
     onSelectionChange: (sel) => selectionChanges.push([...sel]),
     onPing: (world) => pings.push({ x: world.x, y: world.y }),
     onRulerChange: (points) => rulerChanges.push([...points]),
@@ -185,6 +215,17 @@ describe("interaction math (§10)", () => {
 // ─── controller state machine ─────────────────────────────────────────────────
 
 describe("CanvasController (§10)", () => {
+  test("clearing selection cancels a stale drag without moving tokens", () => {
+    const h = makeHarness([view(token("a", 50, 50))]);
+    h.source.down(50, 50);
+    expect(h.controller.selected).toEqual(["a"]);
+    h.controller.clearSelection();
+    h.source.up(200, 200);
+    expect(h.controller.selected).toEqual([]);
+    expect(h.selectionChanges.at(-1)).toEqual([]);
+    expect(h.client.submitted).toEqual([]);
+  });
+
   test("token drag: preview follows the pointer; release submits one snapped move op", () => {
     const t = token("hero", 100, 100);
     const h = makeHarness([view(t)]);
@@ -330,5 +371,82 @@ describe("canvas ephemera interactions (§9)", () => {
     expect(h.controller.ruler).toHaveLength(12);
     h.controller.destroy();
     expect(h.controller.ruler).toHaveLength(0);
+  });
+});
+
+describe("token activation without movement side effects", () => {
+  test("double-click picks the topmost token through camera transform, even if not movable", () => {
+    const activated: string[] = [];
+    const h = makeHarness([view(token("a", 125, 150)), view(token("b", 125, 150))], {
+      canMove: false,
+      onTokenActivate: (v) => activated.push(v.token._id),
+    });
+    h.stage.setCamera({ x: 100, y: 100, scale: 2 });
+    h.source.down(50, 100);
+    h.source.up(50, 100);
+    h.source.down(50, 100);
+    h.source.up(50, 100);
+    h.source.doubleClick(50, 100);
+    expect(activated).toEqual(["b"]);
+    expect(h.client.submitted).toEqual([]);
+    h.source.doubleClick(700, 700);
+    for (const opts of [{ shiftKey: true }, { ctrlKey: true }, { altKey: true }, { button: 2 }])
+      h.source.doubleClick(50, 100, opts);
+    expect(activated).toEqual(["b"]);
+  });
+  test("clicking an owned off-grid token does not snap or submit; a real drag still does", () => {
+    const activated: string[] = [];
+    const h = makeHarness([view(token("a", 123, 117))], {
+      onTokenActivate: (v) => activated.push(v.token._id),
+    });
+    h.source.down(123, 117);
+    h.source.move(125, 119);
+    h.source.up(125, 119);
+    expect(h.client.submitted).toEqual([]);
+    expect(h.stage.tokenRenders).toEqual([]);
+    h.source.down(123, 117);
+    h.source.up(123, 117);
+    h.source.doubleClick(123, 117);
+    expect(activated).toEqual(["a"]);
+    h.source.down(123, 117);
+    h.source.move(183, 177);
+    h.source.up(183, 177);
+    expect(h.client.submitted).toHaveLength(1);
+    expect(h.client.submitted[0]?.[0]).toMatchObject({ diff: { x: 200, y: 200 } });
+    h.source.doubleClick(123, 117);
+    expect(activated).toEqual(["a"]); // a drag cannot activate a sheet
+    h.controller.destroy();
+    expect(h.source.doubleClicks).toHaveLength(0);
+    h.source.doubleClick(123, 117);
+    expect(activated).toEqual(["a"]);
+  });
+  test("DOM adapter converts dblclick to canvas-relative coordinates and removes listeners", () => {
+    const target = new EventTarget();
+    const canvas = Object.assign(target, {
+      getBoundingClientRect: () => ({ left: 20, top: 30 }),
+    }) as unknown as HTMLCanvasElement;
+    const source = domPointerSource(canvas);
+    const events: PointerEvt[] = [];
+    const listener = (e: PointerEvt) => {
+      events.push(e);
+      e.preventDefault();
+    };
+    source.addDoubleClickListener?.(listener);
+    const event = () =>
+      Object.assign(new Event("dblclick", { cancelable: true }), {
+        clientX: 70,
+        clientY: 90,
+        button: 0,
+        shiftKey: false,
+        altKey: false,
+        ctrlKey: false,
+      });
+    const first = event();
+    target.dispatchEvent(first);
+    expect(events[0]).toMatchObject({ x: 50, y: 60, button: 0, pointerId: 0 });
+    expect(first.defaultPrevented).toBe(true);
+    source.removeDoubleClickListener?.(listener);
+    target.dispatchEvent(event());
+    expect(events).toHaveLength(1);
   });
 });

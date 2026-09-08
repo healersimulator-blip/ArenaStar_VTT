@@ -34,7 +34,6 @@
   let sceneId = $state("");
 
   /** World rules options (the replicated `settings` document, D-113). */
-  let rules = $state<RulesOptions>(DEFAULT_RULES);
   let rulesError = $state("");
   interface RulesOptions {
     secondsPerRound: number;
@@ -46,6 +45,8 @@
     detectionMultiplier: 1,
     advanceClockOnRound: true,
   };
+  // Initialize only after the defaults exist (opening the window executes this script).
+  let rules = $state<RulesOptions>(DEFAULT_RULES);
   let scale = $state<"tactical" | "strategic">("tactical");
 
   function refresh(): void {
@@ -132,7 +133,10 @@
           data-grid-type
           value={grid.type}
           onchange={(e) => {
-            grid = { ...grid, type: (e.target as HTMLSelectElement).value as SceneGrid["type"] };
+            grid = {
+              ...grid,
+              type: (e.target as HTMLSelectElement).value as SceneGrid["type"],
+            };
             apply();
           }}
         >
@@ -247,7 +251,10 @@
         step="0.25"
         value={rules.detectionMultiplier}
         onchange={(e) => {
-          rules = { ...rules, detectionMultiplier: Number((e.target as HTMLInputElement).value) };
+          rules = {
+            ...rules,
+            detectionMultiplier: Number((e.target as HTMLInputElement).value),
+          };
           applyRules({ detectionMultiplier: rules.detectionMultiplier });
         }}
       />

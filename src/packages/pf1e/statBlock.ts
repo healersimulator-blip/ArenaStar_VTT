@@ -165,7 +165,7 @@ export function normalizePF1eSystem(raw: unknown): NormalizeResult {
   // honours only when no AC components were authored — the same precedence the sim uses.
   const authoredComponents = isRecord(src.armorClass) || isRecord(src.armor);
   const acTotal = finiteNumber(src.ac);
-  if (acTotal !== undefined && !authoredComponents) {
+  if (acTotal !== undefined && (!authoredComponents || src.acMode === "published")) {
     const totals: Record<string, number> = { normal: acTotal };
     const touch = finiteNumber(src.touchAc);
     const flat = finiteNumber(src.flatFootedAc);
@@ -296,10 +296,10 @@ export function normalizePF1eSystem(raw: unknown): NormalizeResult {
     );
   }
   // `spellPenetration` and `hp` are spelled the same in both shapes, so they need no copy.
-  // The flat fields the conversion consumed are dropped, so re-running the adapter on its own output
-  // is a no-op instead of leaving two sources of truth in one block. `dr` and `regeneration` survive
-  // when they were objects — the conversion replaced them with the numbers the derivation reads — and
-  // `hp` / `spellPenetration` keep their key across both shapes, so neither is touched.
+  // Numeric authored dr/regeneration are already canonical and must survive too.
+  // Consumed flat aliases are dropped so normalizing the output again is a no-op.
+  // dr/regeneration stay as canonical numeric values, whether authored that way or
+  // converted from objects above. hp/spellPenetration also keep their keys unchanged.
   const dropped = [
     "strMod",
     "dexMod",
@@ -317,8 +317,6 @@ export function normalizePF1eSystem(raw: unknown): NormalizeResult {
     "weapon",
     "sr",
     "casterLevel",
-    ...(isRecord(dr) ? [] : ["dr"]),
-    ...(isRecord(regen) ? [] : ["regeneration"]),
   ];
   const kept: Record<string, Json> = {};
   for (const [key, value] of Object.entries(out)) {

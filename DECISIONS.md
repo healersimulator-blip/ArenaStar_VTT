@@ -1551,3 +1551,361 @@ line was written. The revisions matter more than the adoptions, so they lead.
   flag lives at `flags.core.delayed` (`src/core/combat.ts:103`), so a delayed combatant is never
   un-flagged. `startCombat`'s clear works, which is why nobody noticed. Fixed in P2, where the plan
   already intends to assert delay behaviour — see the corrected P2 accept item.
+
+
+## D-114 — PF1e P1 first slice: mounted sheet, authored edits through ClientSync
+
+**Date:** 2026-09-08. **Tracking:** `PF1e_Unified_TODO.md` S01–S04 (only S03 closed).
+
+- Replace the orphan PF1e sheet's fabricated local envelopes with `ClientSync.submit`.
+  A pure `pf1eSheetModel.ts` adapter builds allowlisted authored-field Ops and reads
+  the latest projected actor/ownership before sending. Host permission checks remain
+  authoritative; non-owner forged requests are covered by the real memory-transport
+  HostSync/ClientSync test.
+- Mount in the shared Sheets panel first, so GM and player owners can use it without
+  expanding player window infrastructure in this slice. An object-shaped `system.pf1e`
+  selects this sheet; generic actors/items retain their existing editor. WindowHost
+  popouts and token double-click remain S01 work, not silently removed requirements.
+- Read `deriveFromDocuments` with parsed embedded effects, and expose normalization,
+  unsupported-field and validation notes. Never show derived totals as editable fields,
+  or write an effect-adjusted score back as an authored base. No tables/rules are changed.
+- On the first edit to legacy flat saves, materialize the normalized authored save group
+  and `savesAsTotal` in the same transaction. Otherwise editing Fort alone discards Ref/Will
+  or causes ability modifiers to be added to already-published totals. Preserve unrelated
+  actor data and do not migrate entire documents as a side effect of an edit.
+- Initial UI is intentionally bounded: numeric authored inputs and derived summary/attack
+  readouts. Armor/weapon authoring, dedicated monster editor, richer HP fields, rolls and
+  timer authoring are not claimed complete. The TODO records those remainders.
+- Validation: 828 unit tests passed / 3 skipped; typecheck, lint, build and size passed
+  (1.884 MB raw). Added Playwright sheet flow collects for all three projects. Browser
+  execution is unverified: installing Chromium failed with download `ECONNRESET`.
+
+
+## D-115 — PF1e P1 floating sheets and token activation through projected actor access
+
+**Date:** 2026-09-08. **Tracking:** `PF1e_Unified_TODO.md` S01/S04 implementation progress;
+checkboxes remain open pending actual browser acceptance.
+
+- Both app paths use `openPF1eSheetWindow` and the existing WindowManager/WindowHost.
+  Sheet-row navigation and token double-click identify the actor; opening resolves it
+  from the client's projected store and requires actor read permission. Movement ownership
+  of a linked token is neither required to inspect a readable actor nor sufficient to
+  inspect a private actor. No host-private lookup or core document/schema change.
+- Window payloads contain actor IDs, not captured actor objects. `PF1eSheetWindow` subscribes
+  to snapshots/Ops/rejections/welcome and disposes subscriptions on close. It clears the
+  content on revocation/deletion and uses a generic title to avoid retaining private names
+  in window chrome. Reopening restores/focuses one stable window per actor.
+- CanvasController gains an optional, system-independent `onTokenActivate` callback and
+  DOM dblclick adapter. Unmodified left double-click uses existing camera/picking math.
+  With activation enabled, a 4-screen-pixel click dead zone prevents inspection from
+  submitting moves/snapping an off-grid token. Real drags, pan, ping and ruler gestures
+  retain their paths; non-activation consumers retain their previous behavior.
+- The player shell now hosts sheet windows over a positioned canvas area; this does not
+  expose new GM tools or add player undo/redo capabilities. Its sidebar scrolls when the
+  expanded sheet exceeds the viewport.
+- Tests: topmost camera-transformed picking, non-movable readable tokens, click-vs-drag,
+  modifier exclusion, DOM event cleanup, singleton/restore, live data/effects and real
+  player revocation/regrant/deletion. Full suite: 835 passed / 3 skipped. Typecheck, lint,
+  build and size pass (1.887 MB raw). Expanded Playwright sheet spec collects for all three
+  projects; no browser execution claim (browser download previously failed).
+
+
+## D-116 — PF1e P1 bounded detail authoring and missing-parent edit repair
+
+**Date:** 2026-09-08. **Tracking:** unified TODO S02 partial; S03 regression repair.
+
+- Add authored armor/AC component, string-list feat/trait and descriptive monster editors
+  through the existing authorized submit path. The monster tab exists only for an object
+  `system.pf1e.creature`; adding that block is an explicit user action, not pack-based inference.
+  CR accepts textual fractions; senses/special attacks remain descriptive metadata.
+- P0 AC derivation prioritizes published totals. Do not invent a decomposition, clear totals
+  implicitly, or present ineffective armor changes as successful: component editing for
+  those actors is disabled with an explanation pending explicit conversion work.
+- Preserve structured imported list/monster fields as read-only data, with full readback.
+  Text/list edits compare their expected value against the current local document; this
+  catches known stale edits but does not add host-side conditional-write semantics. Diffs
+  remain narrow and preserve unknown sibling metadata. Lists and text have bounded lengths.
+- Armor check penalty and spell failure are visibly record-only until their mechanics land.
+  Clearing maximum Dex means no cap, not a zero cap; derived statistics remain read-only.
+  Weapon authoring, richer HP fields and ER remain open; this is not full S02 acceptance.
+- Found a prior-slice bug: `applyDiff` rejects missing intermediate objects, so a first
+  `abilities.str` or base-save edit on a partial/imported actor could fail despite a correct
+  looking Op. Materialize only the missing authored group (with normalized siblings), not
+  the entire actor. Tests apply these Ops to every shipped bestiary actor and empty actors.
+- Validation: 843 tests passed / 3 skipped, typecheck/lint/format/build/size passed, 1.895 MB
+  raw HTML. Browser spec extended and collected; Chromium executable absent, no browser
+  execution claim. No core document, rules table, pool schema or package version changes.
+
+
+## D-117 — PF1e P1 tactical weapon authoring and canonical defense preservation
+
+**Date:** 2026-09-08. **Tracking:** unified TODO S02 partial; no new combat resolver.
+
+- Add a bounded attack-line editor over the existing P0 attack descriptors. Authoring
+  supports names, simple NdM dice, static damage, type, threat/multiplier, range/reach
+  and existing boolean flags. Optional-field clearing deletes the key instead of writing
+  a misleading zero. Derived totals remain read-only. Complex dice expressions, extra
+  weapon mechanics, attack legality/rolls and critical/damage resolution remain later work.
+- On the first legacy weapon edit, materialize the normalized tactical attack array only.
+  Keep the raw strategic weapon object intact and visible: tactical edits are not a silent
+  rewrite of strategic data. Tests pin unchanged derived attack readouts on first
+  materialization for all six shipped bestiary entries. Original adapter rule arithmetic
+  is reused, not reinterpreted or certified as SRD-correct by this UI slice.
+- Existing-row edits use narrow dotted Ops; add/remove replace the array. Preserve unknown
+  metadata, reject malformed/structured inputs and known stale local lists, and keep an
+  empty array after final deletion so a legacy weapon cannot reappear. The expected-list
+  check is local validation, not host-side compare-and-swap for simultaneous writers.
+- Expose existing DR/SR/fast-healing/regeneration inputs, explicitly marked record-only
+  where mitigation/recovery is not automated. Preserve imported object bypass/suppression
+  metadata by updating val/value, not replacing the object. Add an HP progress readout;
+  temporary HP, ability damage and ER await real contracts rather than inert new fields.
+- Found/fixed in `statBlock.ts`: the alias-drop list removed canonical numeric DR and
+  regeneration, even on tactical actors. Preserve those values (including mixed inputs)
+  and assert normalization idempotence and derived readback. No pool/schema/package
+  version changes and no new damage/healing algorithm.
+- Validation: 853 tests passed / 3 skipped; typecheck, lint, edited UI/test formatting,
+  build and size passed (1.906 MB raw). Real HostSync/ClientSync test covers attack edits;
+  Playwright flow covers UI authoring/validation/removal but is only collected. Chromium
+  remains uninstalled, so browser execution is not claimed.
+
+
+## D-118 — Reversible tactical AC selection and manual health/defense contracts
+
+**Date:** 2026-09-08. **Tracking:** P1 / S02 remains partial.
+
+- Add `system.pf1e.acMode: "components" | "published"`. Absence keeps historical source
+  selection. Component mode explicitly ignores retained AC totals; published mode can
+  normalize original strategic totals even when manually authored components now exist.
+  This is a tactical choice, not a strategic profile rewrite. No guessed decomposition.
+- The owner supplies every armor/shield/natural/dodge/misc component and an optional Dex
+  cap, previews both sides through `pf1eSheetView`, then confirms. Preserve published
+  totals, effects, unrelated armor metadata and all other source data. A second preview
+  can restore original published totals. Reject opaque armor imports rather than overwrite.
+  Snapshot checks cover the actor, including effects/ownership; rebuild from latest local
+  projection at submit. They are local stale-preview guards, not distributed host CAS.
+- Introduce a typed, pure P1 read contract for canonical `tempHp` and per-type
+  `energyResistance` (acid/cold/electricity/fire/sonic). These are manually adjudicated
+  remaining/effective values, not stacks of grants. UI labels state this limitation;
+  current/max HP do not include temporary HP. Invalid values contribute zero with issues;
+  unsupported resistance keys remain authored and are reported, never silently applied.
+  Numeric edits preserve resistance siblings; opaque group/temp-HP imports are protected.
+- Rule checks: [Temporary Hit Points, CRB p.191](https://aonprd.com/Rules.aspx?ID=171)
+  keeps temporary HP distinct from real HP/Constitution increases, consumes it first and
+  does not heal lost temporary HP; [Energy Resistance](https://www.d20pfsrd.com/gamemastering/special-abilities/#energy_resistance)
+  is typed per-attack mitigation, not immunity or a spent resource. Only the P1 storage
+  boundary is implemented here. Automatic absorption, expiry/stacking, Con/HD HP changes,
+  mitigation and healing await their owning phases. Ability damage/drain is not guessed
+  or partially propagated; broader rule-plan disputes remain open.
+- Evidence: 862 tests passed / 3 skipped (111 files passed / 1 skipped); real host/GM/player
+  round trips for health and reversible source changes; typecheck/lint/edited UI and test
+  formatting/build/size/system-package build passed. HTML 1.913 MB raw (2,006,409 bytes).
+  Browser flows extended and six cases collected only. Chromium download retried and
+  failed with TLS ECONNRESET from cdn.playwright.dev; browser acceptance remains unverified.
+  No core document/pool schema, strategic resolver or package version changes.
+
+
+## D-119 — Executed PF1e sheet acceptance and browser-only runtime fixes
+
+**Date:** 2026-09-08. **Tracking:** P1 S01/S04 Chromium acceptance; S02 remains partial.
+
+- Playwright's CDN remains inaccessible, but an external npm-distributed headless
+  Chromium (`@sparticuz/chromium@149.0.0`, browser 149.0.7827.0) runs here. Add optional
+  `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to the Chromium project, preserving the pinned
+  default. Do not adopt the package's suggested security-disabling flags. The run used
+  ordinary Playwright launch defaults and external library path `/tmp/al2023/lib`.
+  Browser/dependency assets remain outside Git; README documents the binary override.
+- Actual browser execution exposed two PF1e UI bugs: `derived` as a prop shadows the
+  Svelte `$derived` rune and triggers an invalid store subscription; rename it to
+  `derivedAttacks`. AC preview cloned a Svelte proxy; snapshot the actor at the UI
+  boundary and use `$state.raw` for request/preview. Latest-store apply/staleness and
+  permission checks are preserved. Exercise stale-preview refusal via a second window.
+- Shipped compendium drag in a live two-peer world exposed a projection exception:
+  D-019 default ownership was present only on the store clone, absent on the raw create
+  passed to projection. Mirror that private default locally in `createVisible`; don't
+  broaden ownership or mutate the envelope. Private actor/public linked-token creation
+  now reaches peers correctly without leaking the actor. Add real two-player host
+  regression and actual player token-to-sheet/revocation/regrant coverage.
+- Wider window tests exposed a Settings temporal-dead-zone error: initialize rules after
+  `DEFAULT_RULES`, not before. No settings mechanics changed.
+- Evidence: **9 actual Chromium browser tests passed** (4 sheets, 5 existing windows),
+  `file://` build, including all six shipped bestiary actors and clean PF1e page-error
+  assertions. **863 unit/integration tests passed / 3 skipped**, typecheck/lint/edited-code
+  formatting/build/size passed; raw HTML 2,006,541 bytes, gzip 579,746. Firefox/WebKit and
+  pinned Chromium were not executed, so no complete supported-matrix acceptance claim.
+  S01/S04 checkboxes retain that matrix gate; ability damage/drain and combat automation
+  remain future scoped work. No new rule formulas, wire formats or package versions.
+
+
+## D-120 — Repair scoped delayed-marker cleanup without claiming PF1e scheduling
+
+**Date:** 2026-09-08. **Tracking:** T03 partial, bounded generic tracker prerequisite.
+
+- The round-wrap loop checked the wrong flag level. Delegate to `clearDelayed` for each
+  combatant, preserving scoped siblings and other modules. The bug left non-starting
+  combatants marked until their individual turn start; it was not literally permanent.
+- Keep the existing generic marker lifecycle (start/end/turn start/round wrap). Rename
+  the button “Mark delayed” with an explicit no-rescheduling tooltip, and remove false
+  core comments claiming that marking delay acts last or changes UI order.
+- Rules boundary: PF1e Delay changes initiative when the delayed action is taken and
+  may cross the round boundary before the original turn; it does not merely clear at
+  a round boundary (CRB p.203, [2](https://www.aonprd.com/Rules.aspx?ID=200)). The generic
+  cleanup repair is not implementation of that rule. PF1e delay/resume, surprise and
+  flat-footed transitions still need separate state/verified scheduling work.
+- Add three core tests (non-starting marker, metadata/effect preservation, metadata-only
+  behavior) and a real three-combatant browser regression. No new document fields,
+  initiative policy, effect tick policy or combat resolution formulas.
+- Validation: 866 tests passed / 3 skipped (111 files passed / 1 skipped), 11 actual
+  Chromium combat/sheet/window tests passed, typecheck/lint/edited-code format/build/size
+  passed. HTML 2,006,597 bytes raw, gzip 579,796. Alternate Chromium 149 as D-119;
+  full browser matrix, P1 ability damage/drain and remaining T03 work stay open.
+
+
+## D-121 — Scene-scoped encounter creation and replicated selection
+
+**Date:** 2026-09-08. **Tracking:** T04 delivered for the GM tracker.
+
+- Replace arbitrary first-combat lookup with a named encounter selector using scoped
+  flags: combat `core.sceneId`, scene `core.activeCombatId`. A single pointer per scene
+  avoids inconsistent per-combat active booleans. Create and select are atomic submit
+  Ops; switching preserves encounter progress and does not reset initiative or effects.
+- New rosters copy active-scene tokens with optional linked actor IDs. Normal Start
+  retains the one-action create/start path when there is no selected encounter. An
+  explicit missing/cross-scene pointer shows no selected encounter rather than falling
+  back unexpectedly. Unbound legacy encounters remain accessible only from the first
+  stored scene; absent-pointer fallback preserves legacy first-encounter behavior there.
+- Keep this generic: no PF1e formulas, actor-aware initiative, token selection policy,
+  surprise/action budget or hidden-roll behavior is introduced. Core documents and
+  transitions are unchanged; this is an authored binding/selection adapter over them.
+- Validate selection permissions on current projected documents, preserve other core
+  flags, and refresh on rejection. Host authorization remains decisive; these checks are
+  not host CAS. Concurrent activation has the existing last-authorized-write semantics.
+- Two-scene browser acceptance exposed Add token still writing to DEFAULT_SCENE_ID;
+  fix its parent reference to the active scene, matching the coordinates already used.
+- Evidence: 871 tests passed / 3 skipped, 12 Chromium combat/sheet/window tests passed,
+  typecheck/lint/edited-code formatting/build/size passed. Tests include legacy binding,
+  stale pointer, permission denial, applied flag Ops, metadata preservation and real
+  host/GM/player replication with inactive-round retention. HTML 2,009,452 bytes raw,
+  gzip 580,819. Alternate Chromium 149 as D-119; Firefox/WebKit remain unverified.
+
+
+## D-122 — Public actor-aware initiative and explicit reroll policy
+
+**Date:** 2026-09-08. **Tracking:** T02 partial; no hidden-roll/tie-resolution completion.
+
+- Use current projected actor/effect data and the shared sheet derivation for PF1e
+  initiative; generic actors remain unmodified d20. Prefer the combatant's actor link,
+  with scene-token fallback for older null-actor rosters. Validate the entire roster
+  before RNG; missing actor/token, wrong scene, malformed PF1e data or hidden roster
+  prevents any proposed update. Current encounter/permission checks remain at submit.
+- Record die/modifier/total/explanation/actor ID under combatant `flags.core.initiativeRoll`.
+  The roll is explicitly public and local, not cryptographically verified. A public
+  result can expose the modifier of a private actor without publishing its document;
+  hidden-token/combatant rolls are blocked until their own verification/projection path.
+  No new feat-name parsing or core sorting changes.
+- Initial all-unrolled initiative at round 1, turn 0 establishes the first combatant.
+  Subsequent rerolls/manual edits preserve current combatant identity while re-sorting,
+  without turn-start hooks or extra effect ticks. Manual edits invalidate old receipts.
+  Actor/effect changes do not retroactively alter an already recorded initiative roll.
+- Fix derived initiative dropping Dex when denied Dex to AC. The rule is a Dexterity
+  check, and flat-footed removes the AC bonus, not the initiative modifier. Ties use
+  total initiative modifiers and then a tie roll, not Dex alone (CRB p.178 Initiative,
+  [1](https://www.aonprd.com/Rules.aspx?ID=95)). Tests pin the corrected +1 for flat-footed
+  Dex 12 and the effect-aware +9 for Dex 16 / authored +4 / active +2.
+  Automatic tie handling remains unimplemented; stable order + GM adjudication is
+  explicitly disclosed in the tracker. No automatic flat-footed transitions added.
+- Validation: 879 tests passed / 3 skipped, 12 actual Chromium browser tests passed,
+  typecheck/lint/new and edited UI/test formatting/build/size passed. HTML 2,012,386 bytes
+  raw, gzip 582,120. Seven new model tests and one real host/GM/player test cover totals,
+  effects, turn retention, initial order, malformed/hidden data, and manual receipt clearing.
+  Browser exercises real compendium-token links. Alternate Chromium 149 as D-119;
+  Firefox/WebKit and the rest of T02 remain open.
+
+
+## D-123 — PF1e public initiative tie resolution with stable persisted order
+
+**Date:** 2026-09-08. **Tracking:** T02 partial, automatic public tie policy implemented.
+
+- Implement CRB p.178 Initiative's verified rule (D-122;
+  https://www.aonprd.com/Rules.aspx?ID=95): compare equal-total combatants by total
+  initiative modifier, then roll still-tied groups. Use unmodified d20 roll-offs;
+  equal modifiers cancel. Only duplicate subgroups reroll; resolved positions do not.
+- Apply the PF1e policy to batches containing a PF1e actor, including mixed rosters.
+  Generic-only batches and manual overrides retain stable ties. The UI states both
+  boundaries. Read modifiers from the same roll snapshot, not live later actor data.
+- Preserve the resolved relative order in the combatant array. Core's stable equal-total
+  sort retains it during next/start/round-wrap, without fractional totals or a PF1e
+  comparator in core. Existing defeated-last behavior is unchanged. D-122's initial-roll
+  and active-identity-preserving reroll policy remains in force.
+- Extend the public roll receipt with `tiePolicy` and per-combatant `tieRolls` histories.
+  These record how order was determined, not extra initiative bonuses or cryptographic
+  proof. Manual overrides still clear stale receipts. No package/schema version bump.
+- Reject invalid dice and unresolved ties after 20 roll-off rounds on a still-tied path.
+  Discard the full proposed transition; retain the old encounter unchanged. This is a
+  defensive retry bound, not a rule that settles ties by insertion order or arbitrary IDs.
+- Validation: 889 tests passed / 3 skipped, 13 actual Chromium browser tests passed;
+  typecheck/lint/edited-code formatting/build/size/build:systems passed. Six rule-helper
+  fixtures, four adapter regressions, and updated real host/GM/player replication test
+  cover order/receipt persistence. Browser deterministically ties two shipped actors
+  through the real DOM handler and checks turn/round order. HTML 2,013,894 bytes raw,
+  gzip 582,633. Alternate Chromium 149 as D-119; Firefox/WebKit remain unverified.
+  T02 remains open for selected-token and verified hidden-roll work; no P1 closure claim.
+
+
+## D-124 — Scene-scoped canvas selection into encounter roster and initiative workflows
+
+**Date:** 2026-09-08. **Tracking:** selected-token portions of T01/T02, both still partial.
+
+- Reuse CanvasController's existing click/marquee selection callback; route local
+  `{sceneId, ids}` through App to the GM tracker, with count/names and an explicit clear
+  control. No selected flags are persisted on tokens or interpreted as permissions.
+  Preserve right/middle/Shift pan gestures. Clear/cancel selection gestures on scene
+  changes; pending pointer-up cannot submit a stale drag after that cancellation.
+- New encounters copy selected tokens (including actor links), using all current-scene
+  tokens only when the selection is empty. Nonempty foreign/deleted selections reject
+  instead of being filtered down into an implicit all-token fallback. A deletion keeps
+  the local selection visibly stale until explicit clearing/reselection. Starting an
+  existing encounter does not rebuild its roster from the current selection.
+- Add selected is idempotent and keeps existing data. Remove selected preserves current
+  combatant identity, never ticks effects or advances the turn, and rejects removal of
+  the active member while combat is running. Advance/end first; this avoids inventing
+  scheduler semantics in a roster-edit operation. All changes still use authorized Ops.
+- Selected initiative validates membership and rolls only the selected subset. Unselected
+  records remain byte-for-byte equivalent; D-122 active-turn policy and D-123 within-batch
+  ties apply. Cross-subset equal totals reject the proposal and ask for explicit Roll all
+  or a manual override. Do not silently expand the randomization scope, rewrite another
+  combatant's receipt, or invent a modifier for an unrecorded old result. An explicit
+  Roll all control remains available even with selection. Hidden chosen tokens remain
+  blocked by the existing public-roll validator; no hidden-roll verification added.
+- Evidence: 899 tests passed / 3 skipped, 15 real Chromium browser tests passed,
+  typecheck/lint/edited-code formatting/build/size passed. Tests include real host/GM/player
+  replication of selected roster edits/partial rolls and unchanged unselected records.
+  Browser uses actual marquee/click gestures and undo-deletion, not injected selections.
+  HTML 2,018,741 bytes raw, gzip 584,344. Alternate Chromium 149 as D-119; Firefox/WebKit
+  remain unverified. Context menu/hidden state, verified hidden rolls and remaining
+  P1/P2 mechanics remain future work. No schema, wire format or package version changes.
+
+
+## D-125 — GM control overrides the D-124 active-removal and selected-tie restrictions
+
+**Date:** 2026-09-08. **User correction:** GM must be free to remove/change active or
+non-active combatants whenever desired. D-124's two blocking policies were too restrictive.
+
+- Allow immediate active-combatant removal, including batch and last-member removal.
+  Retain the active identity if it survives; otherwise choose the next surviving member
+  in the old sorted order, wrapping as necessary. Preserve the round; no automatic
+  advancement, effect ticks or turn lifecycle hooks. This is GM roster editing, not a
+  gameplay turn action. Show “No combatants” for an emptied running encounter.
+- Accept selected rolls even when their totals tie untouched results. Keep stable
+  cross-selection order and all untouched receipts, annotating newly tied receipts with
+  `crossSelectionTie: "stable-order"`. Full Roll all tie resolution is optional, not a
+  prerequisite imposed on the GM. Existing manual initiative edits remain unrestricted
+  by active status. Permission and invalid/stale-reference checks remain in place.
+- These policies explicitly supersede D-124's active-removal veto and cross-subset tie
+  rejection. Future gameplay automation should not veto valid GM authoring simply to
+  avoid resolving tracker state. No new map-token deletion behavior is introduced;
+  these controls edit the encounter roster.
+- Validation: 900 tests passed / 3 skipped, 15 real Chromium combat/sheet/window tests
+  passed, typecheck/lint/edited-code formatting/build/size passed. Added successor test,
+  replaced restrictive expectations, and extended browser/peer tests through active/last
+  removal and accepted selected ties. HTML 2,018,848 bytes raw, gzip 584,394. Other
+  unfinished TODO work and Firefox/WebKit acceptance are unchanged.

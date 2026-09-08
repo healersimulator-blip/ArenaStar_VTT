@@ -1,3 +1,17 @@
+import { editSelectedRoster, selectedTokens } from "../../src/ui/combat/tokenSelection";
+import {
+  rollEncounterInitiative,
+  rollSelectedInitiative,
+} from "../../src/ui/combat/initiative";
+import {
+  activateEncounter,
+  newEncounter,
+  selectedEncounter,
+} from "../../src/ui/combat/encounters";
+import { acRevision, previewAcConversion } from "../../src/ui/sheets/pf1eAcConversion";
+import { pf1eAttackEdit, pf1eAttackEditorView } from "../../src/ui/sheets/pf1eAttackEditor";
+import { observePF1eSheetActor } from "../../src/ui/sheets/pf1eSheetWindow";
+import { pf1eSheetEdit, pf1eSheetView } from "../../src/ui/sheets/pf1eSheetModel";
 import { describe, expect, test } from "vitest";
 import { HostSync, gmSessionUser, type HostEvents } from "../../src/host/sync";
 import { ClientSync, type ClientEvents } from "../../src/client/sync";
@@ -8,6 +22,7 @@ import type { HelloMsg } from "../../src/core/messages";
 import type { Op, OpEnvelope } from "../../src/core/ops";
 import type {
   ActorDocument,
+  Json,
   MessageDocument,
   SceneDocument,
   TokenDocument,
@@ -78,7 +93,11 @@ function tokenDoc(id: string, over: Partial<TokenDocument> = {}): TokenDocument 
   };
 }
 
-function userDoc(id: string, name: string, role: UserDocument["role"] = "PLAYER"): UserDocument {
+function userDoc(
+  id: string,
+  name: string,
+  role: UserDocument["role"] = "PLAYER",
+): UserDocument {
   return {
     _id: id,
     type: "user",
@@ -226,14 +245,26 @@ describe("HostSync ⇄ ClientSync over InMemoryTransport (§2, §5, §6.4)", () 
     h.host.addSession("peer-nova", pair.a);
     const bus = createEventBus<ClientEvents>();
     const nova = new ClientSync({ transport: pair.b, bus, meta });
-    nova.connect({ kind: "hello", pubkey: "nova-key", displayName: "Nova", ts: 1, sig: "valid" });
+    nova.connect({
+      kind: "hello",
+      pubkey: "nova-key",
+      displayName: "Nova",
+      ts: 1,
+      sig: "valid",
+    });
     await flushMicrotasks();
     expect(nova.user).toBeNull(); // awaiting approval
 
     const requests: HostEvents["join:request"][] = [];
     h.hostBus.on("join:request", (req) => requests.push(req));
     // re-hello on the same session (still unauthenticated)
-    nova.connect({ kind: "hello", pubkey: "nova-key", displayName: "Nova", ts: 2, sig: "valid" });
+    nova.connect({
+      kind: "hello",
+      pubkey: "nova-key",
+      displayName: "Nova",
+      ts: 2,
+      sig: "valid",
+    });
     await flushMicrotasks();
     expect(requests).toHaveLength(1);
     expect(requests[0]?.hello.displayName).toBe("Nova");
@@ -487,7 +518,11 @@ describe("HostSync ⇄ ClientSync over InMemoryTransport (§2, §5, §6.4)", () 
     expect(client.store.get("actors", "a-open")?.name).toBe("Tavern Keeper");
     // live broadcasts respect it too
     h.gm.submit([
-      { kind: "update", ref: { coll: "actors", id: "a-secret" }, diff: { name: "Still Hidden" } },
+      {
+        kind: "update",
+        ref: { coll: "actors", id: "a-secret" },
+        diff: { name: "Still Hidden" },
+      },
     ]);
     await flushMicrotasks();
     expect(client.store.get("actors", "a-secret")).toBeUndefined();
@@ -513,4 +548,457 @@ describe("HostSync ⇄ ClientSync over InMemoryTransport (§2, §5, §6.4)", () 
     expect(a.store.seq).toBe(h.hostStore.seq);
     expect(b.store.seq).toBe(h.hostStore.seq);
   });
+});
+
+test("PF1e sheet Ops replicate through host authorization; forged non-owner edit is rejected", async () => {
+  const h = await setup();
+  const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const other = await h.addPlayer(OTHER_ID, "Ivy");
+  h.gm.submit([
+    {
+      kind: "create",
+      coll: "actors",
+      data: {
+        _id: "pf-fighter",
+        type: "actor",
+        name: "PF Fighter",
+        ownership: { default: 2, [PLAYER_ID]: 3 },
+        flags: {},
+        system: {
+          pf1e: {
+            hp: 12,
+            hpMax: 20,
+            abilities: { str: 16, dex: 16 },
+            armorClass: { armor: 5 },
+          },
+        },
+        items: [],
+        effects: [],
+      } as ActorDocument,
+    },
+  ]);
+  await flushMicrotasks();
+  let windowActor: ActorDocument | null = null;
+  const stopWindow = observePF1eSheetActor(player, playerBus, "pf-fighter", (actor) => {
+    windowActor = actor;
+  });
+  const windowHp = () => (windowActor ? pf1eSheetView(windowActor).derived.hp : null);
+  expect(windowHp()).toBe(12);
+  const owned = player.store.get("actors", "pf-fighter") as ActorDocument;
+  expect(pf1eSheetView(owned).derived.ac).toEqual({
+    normal: 18,
+    touch: 13,
+    flatFooted: 15,
+  });
+  const proposal = pf1eSheetEdit(owned, player.user, "hp", "7");
+  expect(proposal.error).toBeNull();
+  player.submit(proposal.ops);
+  await flushMicrotasks();
+  for (const store of [h.hostStore, h.gm.store, player.store, other.client.store]) {
+    expect(pf1eSheetView(store.get("actors", "pf-fighter") as ActorDocument).derived.hp).toBe(
+      7,
+    );
+  }
+  const rejected: string[] = [];
+  other.bus.on("rejected", (e) => rejected.push(e.reason));
+  other.client.submit([
+    {
+      kind: "update",
+      ref: { coll: "actors", id: "pf-fighter" },
+      diff: { "system.pf1e.hp": 99 },
+    },
+  ]);
+  await flushMicrotasks();
+  expect(rejected).toHaveLength(1);
+  expect(
+    pf1eSheetView(h.hostStore.get("actors", "pf-fighter") as ActorDocument).derived.hp,
+  ).toBe(7);
+  expect(
+    pf1eSheetView(other.client.store.get("actors", "pf-fighter") as ActorDocument).derived.hp,
+  ).toBe(7);
+  expect(windowHp()).toBe(7);
+  h.gm.submit([
+    {
+      kind: "update",
+      ref: { coll: "actors", id: "pf-fighter" },
+      diff: { ownership: { default: 0 } },
+    },
+  ]);
+  await flushMicrotasks();
+  expect(player.store.get("actors", "pf-fighter")).toBeUndefined();
+  expect(windowHp()).toBeNull(); // revocation projection deletes the open window's data
+  h.gm.submit([
+    {
+      kind: "update",
+      ref: { coll: "actors", id: "pf-fighter" },
+      diff: { ownership: { default: 2 } },
+    },
+  ]);
+  await flushMicrotasks();
+  expect(windowHp()).toBe(7); // regrant materializes the current document, not stale state
+  h.gm.submit([{ kind: "delete", ref: { coll: "actors", id: "pf-fighter" } }]);
+  await flushMicrotasks();
+  expect(windowHp()).toBeNull();
+  stopWindow();
+});
+
+test("PF1e attack authoring add/edit/remove replicates as authorized Ops", async () => {
+  const h = await setup();
+  const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+  h.gm.submit([
+    {
+      kind: "create",
+      coll: "actors",
+      data: {
+        _id: "armed",
+        type: "actor",
+        name: "Armed hero",
+        ownership: { default: 0, [PLAYER_ID]: 3 },
+        flags: {},
+        system: { pf1e: { abilities: { str: 16 }, attacks: [] } },
+        items: [],
+        effects: [],
+      } as ActorDocument,
+    },
+  ]);
+  await flushMicrotasks();
+  const current = () => player.store.get("actors", "armed") as ActorDocument;
+  const added = pf1eAttackEdit(current(), player.user, { kind: "add", expected: [] });
+  expect(added.error).toBeNull();
+  player.submit(added.ops);
+  await flushMicrotasks();
+  const changed = pf1eAttackEdit(current(), player.user, {
+    kind: "set",
+    index: 0,
+    field: "damageDice",
+    value: "1d8",
+    expected: pf1eAttackEditorView(current()).rows,
+  });
+  expect(changed.error).toBeNull();
+  player.submit(changed.ops);
+  await flushMicrotasks();
+  for (const store of [h.hostStore, h.gm.store, player.store]) {
+    expect(
+      pf1eSheetView(store.get("actors", "armed") as ActorDocument).derived.attacks[0]
+        ?.damageDice,
+    ).toBe("1d8");
+  }
+  const removed = pf1eAttackEdit(current(), player.user, {
+    kind: "remove",
+    index: 0,
+    expected: pf1eAttackEditorView(current()).rows,
+  });
+  expect(removed.error).toBeNull();
+  player.submit(removed.ops);
+  await flushMicrotasks();
+  for (const store of [h.hostStore, h.gm.store, player.store]) {
+    expect(pf1eAttackEditorView(store.get("actors", "armed") as ActorDocument).rows).toEqual(
+      [],
+    );
+  }
+});
+
+test("PF1e manual health and reversible AC source Ops replicate through host authorization", async () => {
+  const h = await setup();
+  const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+  h.gm.submit([
+    {
+      kind: "create",
+      coll: "actors",
+      data: {
+        _id: "published",
+        type: "actor",
+        name: "Published hero",
+        ownership: { default: 0, [PLAYER_ID]: 3 },
+        flags: {},
+        system: {
+          pf1e: {
+            abilities: { dex: 16 },
+            hp: 7,
+            hpMax: 20,
+            ac: 22,
+            touchAc: 16,
+            flatFootedAc: 17,
+          },
+        },
+        items: [],
+        effects: [],
+      } as ActorDocument,
+    },
+  ]);
+  await flushMicrotasks();
+  const current = () => player.store.get("actors", "published") as ActorDocument;
+  for (const [field, value] of [
+    ["tempHp", "8"],
+    ["energyResistance.fire", "10"],
+  ] as const) {
+    const edit = pf1eSheetEdit(current(), player.user, field, value);
+    expect(edit.error).toBeNull();
+    player.submit(edit.ops);
+    await flushMicrotasks();
+  }
+  for (const mode of ["components", "published"] as const) {
+    const preview = previewAcConversion(current(), player.user, {
+      mode,
+      expected: acRevision(current()),
+      draft: { armor: "5", shield: "0", natural: "0", dodge: "0", misc: "0", maxDex: "" },
+    });
+    expect(preview.error).toBeNull();
+    player.submit(preview.ops);
+    await flushMicrotasks();
+    for (const store of [h.hostStore, h.gm.store, player.store]) {
+      const a = store.get("actors", "published") as ActorDocument;
+      expect(pf1eSheetView(a).derived).toMatchObject({
+        hp: 7,
+        hpMax: 20,
+        tempHp: 8,
+        energyResistance: { fire: 10 },
+        ac: preview.after,
+        acFromTotals: mode === "published",
+      });
+      expect(a.system.pf1e).toMatchObject({ ac: 22, touchAc: 16, flatFootedAc: 17 });
+    }
+  }
+});
+
+test("sparse private compendium create cannot block a public linked token broadcast", async () => {
+  const h = await setup();
+  const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+  const { client: other } = await h.addPlayer(OTHER_ID, "Other");
+  const raw = {
+    _id: "sparse",
+    type: "actor",
+    name: "Private infantry",
+    system: { pf1e: { ac: 16 } },
+    items: [],
+    effects: [],
+  };
+  h.gm.submit([
+    // D-019 runtime input deliberately omits the optional common fields.
+    { kind: "create", coll: "actors", data: raw as unknown as ActorDocument },
+    {
+      kind: "create",
+      coll: "tokens",
+      parent: { coll: "scenes", id: "s1" },
+      data: tokenDoc("linked", { actorId: "sparse", ownership: { default: 3 } }),
+    },
+  ]);
+  await flushMicrotasks();
+  expect(raw).not.toHaveProperty("ownership");
+  expect(h.hostStore.get("actors", "sparse")?.ownership).toEqual({ default: 0 });
+  for (const client of [player, other]) {
+    expect(client.store.seq).toBe(h.hostStore.seq);
+    expect(client.store.get("actors", "sparse")).toBeUndefined();
+    expect(client.store.get("scenes", "s1")?.tokens.some((t) => t._id === "linked")).toBe(true);
+  }
+  h.gm.submit([
+    {
+      kind: "update",
+      ref: { coll: "actors", id: "sparse" },
+      diff: { ownership: { default: 0, [PLAYER_ID]: 3 } },
+    },
+  ]);
+  await flushMicrotasks();
+  expect(
+    pf1eSheetView(player.store.get("actors", "sparse") as ActorDocument).derived.ac.normal,
+  ).toBe(16);
+  expect(other.store.get("actors", "sparse")).toBeUndefined();
+});
+
+test("encounter activation replicates its scene pointer without resetting inactive rounds", async () => {
+  const h = await setup();
+  const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+  const scene = h.gm.store.get("scenes", "s1") as SceneDocument;
+  let id = 0;
+  const first = {
+    ...newEncounter(scene, "fight-a", "A", () => `member-${id++}`),
+    round: 3,
+    turn: 0,
+  };
+  const second = newEncounter(scene, "fight-b", "B", () => `member-${id++}`);
+  const initial = activateEncounter(scene, first, h.gm.user, "s1");
+  h.gm.submit([
+    { kind: "create", coll: "combats", data: first },
+    { kind: "create", coll: "combats", data: second },
+    ...initial.ops,
+  ]);
+  await flushMicrotasks();
+  const currentScene = h.gm.store.get("scenes", "s1") as SceneDocument;
+  const selection = activateEncounter(currentScene, second, h.gm.user, "s1");
+  expect(selection.error).toBeNull();
+  h.gm.submit(selection.ops);
+  await flushMicrotasks();
+  for (const store of [h.hostStore, h.gm.store, player.store]) {
+    const selected = selectedEncounter(
+      store.getAll("combats"),
+      store.get("scenes", "s1") as SceneDocument,
+      "s1",
+    );
+    expect(selected?._id).toBe("fight-b");
+    expect(store.get("combats", "fight-a")?.round).toBe(3);
+  }
+});
+
+test("public actor initiative totals and roll records replicate through authorized combat updates", async () => {
+  const h = await setup();
+  const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+  const scene = h.gm.store.get("scenes", "s1") as SceneDocument;
+  let id = 0;
+  const fight = newEncounter(scene, "initiative-fight", "Fight", () => `init-${id++}`);
+  fight.combatants = fight.combatants.map((c) => ({ ...c, actorId: "init-actor" }));
+  const actor: ActorDocument = {
+    _id: "init-actor",
+    type: "actor",
+    name: "Actor",
+    ownership: { default: 0 },
+    flags: {},
+    system: { pf1e: { abilities: { dex: 16 }, initiative: 4 } },
+    items: [],
+    effects: [],
+  };
+  h.gm.submit([
+    { kind: "create", coll: "actors", data: actor },
+    { kind: "create", coll: "combats", data: fight },
+  ]);
+  await flushMicrotasks();
+  const dice = [10, 10, 1, 20];
+  const result = rollEncounterInitiative(
+    fight,
+    scene,
+    [actor],
+    h.gm.user,
+    () => dice.shift() ?? NaN,
+  );
+  expect(result.error).toBeNull();
+  if (!result.transition) throw new Error("Expected roll transition");
+  h.gm.submit([
+    {
+      kind: "update",
+      ref: { coll: "combats", id: fight._id },
+      diff: { combatants: result.transition.combat.combatants as unknown as Json },
+    },
+  ]);
+  await flushMicrotasks();
+  for (const store of [h.hostStore, h.gm.store, player.store]) {
+    const members = store.get("combats", fight._id)?.combatants ?? [];
+    expect(members).toHaveLength(2);
+    expect(members.map((c) => c._id)).toEqual(["init-1", "init-0"]);
+    expect(members[0]?.flags.core?.initiativeRoll).toMatchObject({
+      tiePolicy: "pf1e",
+      tieRolls: [20],
+    });
+    for (const member of members) {
+      expect(member.initiative).toBe(17);
+      expect(member.flags.core?.initiativeRoll).toMatchObject({
+        die: 10,
+        modifier: 7,
+        total: 17,
+      });
+    }
+  }
+  expect(player.store.get("actors", actor._id)).toBeUndefined();
+});
+
+test("selected roster edits and partial initiative replicate without modifying unselected combatants", async () => {
+  const h = await setup();
+  const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+  const scene = h.gm.store.get("scenes", "s1") as SceneDocument;
+  const selection = { sceneId: "s1", ids: ["t-pl"] };
+  const chosen = selectedTokens(scene, selection, true);
+  const initial = newEncounter(
+    { ...scene, tokens: chosen.tokens },
+    "selected-fight",
+    "Selected",
+    () => "member-a",
+  );
+  initial.round = 1;
+  initial.combatants = initial.combatants.map((c) => ({ ...c, initiative: 10 }));
+  h.gm.submit([{ kind: "create", coll: "combats", data: initial }]);
+  await flushMicrotasks();
+  const extra = { sceneId: "s1", ids: ["t-ivy"] };
+  expect(
+    editSelectedRoster(initial, scene, extra, player.user, "add", () => "blocked").transition,
+  ).toBeNull();
+  const added = editSelectedRoster(initial, scene, extra, h.gm.user, "add", () => "member-b");
+  if (!added.transition) throw new Error(added.error ?? "Missing transition");
+  h.gm.submit([
+    {
+      kind: "update",
+      ref: { coll: "combats", id: initial._id },
+      diff: {
+        combatants: added.transition.combat.combatants as unknown as Json,
+        turn: added.transition.combat.turn,
+      },
+    },
+  ]);
+  await flushMicrotasks();
+  const current = h.gm.store.get("combats", initial._id);
+  if (!current) throw new Error("Missing combat");
+  const rolled = rollSelectedInitiative(current, scene, [], h.gm.user, () => 7, extra);
+  if (!rolled.transition) throw new Error(rolled.error ?? "Missing roll");
+  h.gm.submit([
+    {
+      kind: "update",
+      ref: { coll: "combats", id: initial._id },
+      diff: {
+        combatants: rolled.transition.combat.combatants as unknown as Json,
+        turn: rolled.transition.combat.turn,
+      },
+    },
+  ]);
+  await flushMicrotasks();
+  for (const store of [h.hostStore, h.gm.store, player.store]) {
+    const c = store.get("combats", initial._id);
+    expect(c?.combatants[0]).toEqual(initial.combatants[0]);
+    expect(c?.combatants[1]?.initiative).toBe(7);
+    expect(c?.turn).toBe(0);
+  }
+  const removed = editSelectedRoster(
+    rolled.transition.combat,
+    scene,
+    extra,
+    h.gm.user,
+    "remove",
+    () => "unused",
+  );
+  if (!removed.transition) throw new Error(removed.error ?? "Missing removal");
+  h.gm.submit([
+    {
+      kind: "update",
+      ref: { coll: "combats", id: initial._id },
+      diff: {
+        combatants: removed.transition.combat.combatants as unknown as Json,
+        turn: removed.transition.combat.turn,
+      },
+    },
+  ]);
+  await flushMicrotasks();
+  expect(player.store.get("combats", initial._id)?.combatants).toEqual(initial.combatants);
+  // The GM may also remove the last (active) member without ending the encounter.
+  const empty = editSelectedRoster(
+    removed.transition.combat,
+    scene,
+    selection,
+    h.gm.user,
+    "remove",
+    () => "unused",
+  );
+  if (!empty.transition) throw new Error(empty.error ?? "Missing active removal");
+  h.gm.submit([
+    {
+      kind: "update",
+      ref: { coll: "combats", id: initial._id },
+      diff: {
+        combatants: empty.transition.combat.combatants as unknown as Json,
+        turn: empty.transition.combat.turn,
+      },
+    },
+  ]);
+  await flushMicrotasks();
+  for (const store of [h.hostStore, h.gm.store, player.store])
+    expect(store.get("combats", initial._id)).toMatchObject({
+      round: 1,
+      turn: 0,
+      combatants: [],
+    });
 });

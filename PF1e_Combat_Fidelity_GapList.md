@@ -19,6 +19,77 @@ transcribed in Appendix A so the work can proceed without re-opening the SRD.
 
 Status codes: ✅ faithful · 🟡 partial · 🔴 wrong (implemented but contradicts SRD) · ⚪ absent.
 
+> **GM-control correction (D-125):** active and last-member removal are now allowed
+> immediately; roster edits preserve the round and do not tick effects. Cross-selection
+> initiative ties no longer block a GM roll; stable order is retained and full tie resolution
+> remains optional. This supersedes D-124's two restrictions per explicit user direction.
+
+> **Selected-token workflows, 2026-09-08 (D-124):** GM canvas selection now drives
+> encounter creation, add/remove controls and partial initiative rolls. Scene/deletion
+> guards prevent stale selections from broadening scope; unselected initiative records
+> are preserved. Real browser and host/peer tests pass. Context-menu/hidden-state controls
+> and verified hidden rolls remain open; selected-token tracker controls are no longer absent.
+
+> **Public initiative ties, 2026-09-08 (D-123):** PF1e-containing public roll batches
+> now resolve equal totals by total modifier and recorded subgroup roll-offs, preserving
+> the resolved order across core turn/round operations and peer replication. Generic-only
+> and manual ties remain stable by design. T02 still awaits selected-token and verified
+> hidden-roll workflows; earlier notes about automatic ties being absent are historical.
+
+> **Public initiative, 2026-09-08 (D-122):** Roll init now uses linked PF1e
+> derived modifiers and records a public breakdown. Flat-footed no longer incorrectly
+> removes Dexterity from initiative. Explicit rerolls preserve the active combatant;
+> hidden rosters are blocked. T02 remains partial: selected-token workflows, verified
+> hidden rolls and automatic modifier/tie-roll resolution are still open.
+
+> **Encounter selection, 2026-09-08 (D-121):** GM encounter creation/activation is
+> scene-scoped and replicated; switching preserves progress. Legacy unbound encounters
+> remain accessible under the first stored scene. A two-scene browser regression also
+> repaired Add token's hard-coded bootstrap parent. T04 is delivered; actor-aware
+> initiative, selection-aware rosters and remaining combat rules are still open.
+
+> **Tracker prerequisite, 2026-09-08 (D-120):** scoped delayed-marker round-wrap
+> cleanup is repaired and browser-tested. “Mark delayed” is explicitly metadata-only;
+> PF1e delay/resume scheduling, surprise and flat-footed transitions remain open. This
+> bounded T03 repair does not close P2 or the remaining P1 contracts.
+
+> **P1 browser acceptance, 2026-09-08 (D-119):** nine real Chromium sheet/window
+> tests now pass, including all shipped bestiary readouts and player token activation,
+> live editing, downgrade/revocation/regrant. Browser-only Weapons/AC preview failures,
+> a sparse-create projection failure blocking linked-token broadcasts, and Settings
+> initialization were repaired. Firefox/WebKit acceptance and ability damage/drain remain
+> open; earlier "browser unverified" notes below are historical. See unified TODO D-119.
+
+> **P1 AC/health contracts, 2026-09-08 (D-118):** explicit, reversible AC source
+> conversion now requires a same-engine preview and preserves published totals. Canonical
+> temporary HP and typed energy resistance have validated manual authoring/readouts; they
+> are not damage/healing automation. Ability damage/drain, full injury propagation and
+> actual browser acceptance remain open. Rule boundaries and 862-test evidence are in
+> unified TODO / D-118; earlier progress notes below are historical.
+
+> **P1 weapon authoring, 2026-09-08 (D-117):** tactical attack-line add/edit/remove and
+> supported DR/SR/recovery-value editors are implemented; legacy strategic weapons and
+> imported defense metadata are preserved. Numeric DR/regeneration normalization loss was
+> repaired. Richer HP/ER contracts, explicit published-AC conversion and actual browser
+> acceptance remain open; no attack/damage/healing resolver was added in this slice.
+
+> **P1 detail editors, 2026-09-08 (D-116):** armor components, string-list feats/traits
+> and conditional descriptive monster details now have authorized editors. Published AC
+> totals and structured imports are preserved rather than silently converted. Missing-parent
+> first-edit Ops were repaired. Weapon/richer HP/ER editors and browser acceptance remain
+> open; see unified TODO S02/S03 progress for exact scope and evidence.
+
+> **P1 follow-up, 2026-09-08 (D-115):** WindowHost sheets and linked-token double-click
+> are now implemented for GM and player paths, with live projected-store refresh and
+> revocation/deletion handling. S01/S04 await actual browser acceptance; full editor
+> fields and battle-analysis mounts remain open. See `PF1e_Unified_TODO.md` for evidence.
+
+> **P1 progress, 2026-09-08 (D-114):** §1.7's PF1e actor sheet is now reachable from the
+> normal Sheets panel for GM and players, using authored `system.pf1e`, the P0 derivation
+> and authorized submit Ops. This is a partial closure: floating windows/token double-click,
+> full editor fields and battle-analysis mounting remain open. See the unified checklist
+> S01–S04 for exact scope and verification; browser flow has been collected, not run.
+
 > **Build order, data contracts and PR slices: `PF1e_ImplementationPlan.md`** (2026-09-08). This file
 > stays the rule-by-rule inventory and the verified SRD numbers (Appendix A); that file is the plan.
 > Rows closed here are accounted for there — do not re-plan from this table.

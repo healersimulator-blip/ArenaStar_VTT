@@ -33,6 +33,7 @@ import {
   type PF1eActiveEffect,
   type ResolvedEffects,
 } from "./effects";
+import { readPF1eHealth, type PF1eHealthAuthored, type PF1eHealthReadout } from "./healthState";
 import { normalizePF1eSystem } from "./statBlock";
 
 export const PF1E_ABILITY_KEYS = [
@@ -115,7 +116,7 @@ export interface PF1eSpellsAuthored {
 }
 
 /** Everything a PF1e actor document may author under `system.pf1e`. */
-export interface PF1eActorSystem {
+export interface PF1eActorSystem extends PF1eHealthAuthored {
   size?: string;
   speedFt?: number;
   landSpeedFt?: number;
@@ -152,9 +153,11 @@ export interface PF1eActorSystem {
   snipingPenalty?: number;
   /**
    * AC published as totals by a stat block (`normalizePF1eSystem` writes this). Used only when no AC
-   * components exist, and effect bonuses still add on top.
+   * components exist (unless acMode explicitly selects components). Effects still add on top.
    */
   acTotals?: { normal: number; touch?: number; flatFooted?: number };
+  /** Explicit tactical choice; absent preserves the historical published-total behavior. */
+  acMode?: "published" | "components";
   /** Set when `saves` holds published totals, so ability modifiers are not added twice. */
   savesAsTotal?: boolean;
   /** Stat blocks publish the generic size modifier, not a category (see A.4's deviation note). */
@@ -191,7 +194,7 @@ export interface PF1eDerivedAttack {
   explain: string;
 }
 
-export interface PF1eDerived {
+export interface PF1eDerived extends Pick<PF1eHealthReadout, "tempHp" | "energyResistance"> {
   size: PF1eSize;
   sizeEntry: ReturnType<typeof sizeEntry>;
   abilities: PF1eAbilities;
@@ -321,6 +324,8 @@ export function parsePF1eActorSystem(raw: unknown): Result<PF1eActorSystem> {
   if (raw === undefined || raw === null) return okVal({});
   if (!isRecord(raw)) return err("system.pf1e must be an object");
   const o = raw as Record<string, unknown>;
+  if (o.acMode !== undefined && o.acMode !== "published" && o.acMode !== "components")
+    return err("system.pf1e.acMode must be published or components");
   if (
     o.size !== undefined &&
     o.size !== null &&
@@ -411,6 +416,8 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
   const normalized = normalizePF1eSystem(input.system ?? {});
   for (const line of normalized.converted) c.defaults.push(line);
   const sys = (normalized.system ?? {}) as PF1eActorSystem;
+  const health = readPF1eHealth(sys);
+  c.issues.push(...health.issues);
   const attrs = isRecord(input.attributes) ? input.attributes : {};
   const effects = input.effects ?? [];
   const resolved: ResolvedEffects = resolveEffects(effects);
@@ -517,7 +524,7 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     : mods.dex;
   const flatFooted = resolved.flatFooted;
   const deniedDex = flatFooted || resolved.deniedDexToAc;
-  const authoredTotals = isRecord(sys.acTotals)
+  const authoredTotals = sys.acMode !== "components" && isRecord(sys.acTotals)
     ? (sys.acTotals as PF1eActorSystem["acTotals"])
     : null;
   const composedAc = acFromBreakdown({
@@ -590,8 +597,8 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
   //    and the flat-footed-until-first-turn state are `combatState.ts`'s business.
   const initiativeAuthored = readNumber(sys.initiative, "initiative", c);
   const initiativeEffects = resolved.mods.initiative ?? 0;
-  const initiative =
-    (deniedDex ? 0 : mods.dex) + initiativeAuthored + initiativeEffects;
+  // CRB p.178 Initiative: flat-footed denies Dex to AC, not to this Dexterity check.
+  const initiative = mods.dex + initiativeAuthored + initiativeEffects;
 
   // 6. CMB and CMD (A.9): the special size ladder, not the attack one, and CMD borrows the
   //    transferable AC bonuses plus every AC penalty.
@@ -823,6 +830,8 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     flySpeedFt,
     hp,
     hpMax,
+    tempHp: health.tempHp,
+    energyResistance: health.energyResistance,
     nonlethalDamage,
     conditions,
     flatFooted,
@@ -871,7 +880,7 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
         `10 + BAB ${baseAttack} + Str ${fmt(mods.str)} + Dex ${flatFooted ? "0 (flat-footed)" : fmt(mods.dex)}` +
         ` + size ${fmt(sys.sizeMod ?? sz.cmbCmd)} + transferable AC ${fmt(resolved.acTransfer)} + AC penalties ${fmt(resolved.acPenalties)}`,
       initiative:
-        `Dex ${deniedDex ? "0 (denied)" : fmt(mods.dex)} + authored ${initiativeAuthored}` +
+        `Dex ${fmt(mods.dex)} + authored ${initiativeAuthored}` +
         `${initiativeEffects !== 0 ? ` + effects ${fmt(initiativeEffects)}` : ""}`,
       aoo: `${aooPerRound}/round${combatReflexes ? " (Combat Reflexes)" : ""}${
         flatFooted ? " — none while flat-footed" : ""
