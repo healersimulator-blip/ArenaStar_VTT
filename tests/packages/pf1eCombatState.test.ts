@@ -13,6 +13,7 @@ import type {
 } from "../../src/core/documents";
 import {
   HELD_FULL_ROUND_ALLIES,
+  activePF1eCombatant,
   clockRounds,
   combatantStateDiff,
   holdAction,
@@ -25,6 +26,7 @@ import {
   resolveInitiative,
   roundStateDiff,
   checkSurprise,
+  pf1eEndCombat,
   spendCombatantAction,
   startWithSurprise,
   useAttackOfOpportunity,
@@ -154,22 +156,35 @@ describe("initiative (A.1)", () => {
 });
 
 describe("surprise round (A.1)", () => {
-  test("every attacker must beat every defender, or there is no surprise round", () => {
-    const all = checkSurprise(["d1", "d2"], {
-      stealth: { a1: 17, a2: 16 },
-      perception: { d1: 12, d2: 14 },
-    });
-    expect(all.surpriseRound).toBe(true);
-    expect(all.flatFooted).toEqual(["d1", "d2"]);
-    const seen = checkSurprise(["d1", "d2"], {
+  test("mixed awareness is a surprise round: only the unaware stay flat-footed, the aware defender acts (CRB p.178)", () => {
+    // d2's Perception 14 matches a2's Stealth 13 — d2 noticed SOMEONE, so d2 is aware
+    // and acts in the surprise round; d1 (12) noticed nothing and is flat-footed.
+    const mixed = checkSurprise(["d1", "d2"], {
       stealth: { a1: 17, a2: 13 },
       perception: { d1: 12, d2: 14 },
     });
-    expect(seen.surpriseRound).toBe(false);
-    expect(seen.note).toContain("d2 noticed");
+    expect(mixed.surpriseRound).toBe(true);
+    expect(mixed.flatFooted).toEqual(["d1"]);
+    expect(mixed.aware).toEqual(["a1", "a2", "d2"]);
+    expect(mixed.note).toBeNull();
+    // every defender noticed someone — no surprise round at all
+    const alert = checkSurprise(["d1", "d2"], {
+      stealth: { a1: 17, a2: 13 },
+      perception: { d1: 18, d2: 14 },
+    });
+    expect(alert.surpriseRound).toBe(false);
+    expect(alert.flatFooted).toEqual([]);
+    expect(alert.note).toContain("no surprise round");
     expect(
       checkSurprise([], { stealth: { a1: 20 }, perception: {} }).surpriseRound,
     ).toBe(false);
+    // a defender with no Perception authored cannot notice anyone: unaware
+    const blind = checkSurprise(["d1"], {
+      stealth: { a1: 10 },
+      perception: {},
+    });
+    expect(blind.surpriseRound).toBe(true);
+    expect(blind.flatFooted).toEqual(["d1"]);
   });
 
   test("the surprise round runs before round 1 and only the aware act in it", () => {
@@ -198,17 +213,36 @@ describe("surprise round (A.1)", () => {
         started.combat.combatants[2] ?? combatant("d1", 4),
       ).why,
     ).toBe("surprise");
+    // the first surprise actor's turn has started: acted, restricted budget (A.1/A.6)
+    const firstActor = readCombatantState(
+      started.combat.combatants[0] ?? combatant("a1", 15),
+    );
+    expect(firstActor.acted).toBe(true);
+    expect(firstActor.actions.restriction).toBe("single-standard-or-move");
+    expect(activePF1eCombatant(started.combat)?._id).toBe("a1"); // core's turn pointer is meaningless in the surprise round
 
     const one = pf1eNextTurn(started.combat);
     expect(one.state.phase).toBe("surprise");
     expect(one.state.surpriseTurn).toBe(1);
     expect(one.combat.round).toBe(0);
+    const secondActor = readCombatantState(
+      one.combat.combatants.find((x) => x._id === "a2") ?? combatant("a2", 11),
+    );
+    expect(secondActor.acted).toBe(true);
+    expect(secondActor.actions.restriction).toBe("single-standard-or-move");
 
     const two = pf1eNextTurn(one.combat);
     expect(two.state.phase).toBe("rounds");
     expect(two.combat.round).toBe(1);
     expect(two.hooks).toContain("combat:round:start");
     expect(currentCombatant(two.combat)?._id).toBe("a1");
+    expect(activePF1eCombatant(two.combat)?._id).toBe("a1");
+    // regular rounds lift the surprise restriction for everyone whose turn starts
+    const a1 = readCombatantState(
+      two.combat.combatants.find((x) => x._id === "a1") ?? combatant("a1", 15),
+    );
+    expect(a1.actions.restriction).toBe("none");
+    expect(a1.acted).toBe(true);
   });
 
   test("without stealth data combat starts normally and the first actor is no longer flat-footed", () => {
@@ -557,5 +591,72 @@ describe("action budget wiring (T05, CRB p.181)", () => {
     expect(readCombatantState(a1 ?? combatant("a1", 15)).actions).toEqual(
       EMPTY_ACTION_LEDGER,
     );
+  });
+});
+
+describe("explicit awareness and encounter end (T03, A.1)", () => {
+  const twoVTwo = () =>
+    combat([
+      combatant("a1", 15),
+      combatant("a2", 11),
+      combatant("d1", 12),
+      combatant("d2", 6),
+    ]);
+
+  test("GM awareness marks drive the surprise round; the aware defender acts too", () => {
+    const started = startWithSurprise(twoVTwo(), {
+      initiative: [
+        { combatantId: "a1", value: 15, dexMod: 2 },
+        { combatantId: "a2", value: 11, dexMod: 1 },
+        { combatantId: "d1", value: 12, dexMod: 0 },
+        { combatantId: "d2", value: 6, dexMod: 0 },
+      ],
+      unaware: ["d2"],
+    });
+    expect(started.surprise?.surpriseRound).toBe(true);
+    // d1 is aware (not marked) — defenders who noticed act in the surprise round
+    expect(started.state.surpriseOrder).toEqual(["a1", "d1", "a2"]);
+    expect(started.state.surprised).toEqual(["d2"]);
+    expect(
+      readCombatantState(
+        started.combat.combatants.find((x) => x._id === "d2") ??
+          combatant("d2", 6),
+      ).surprised,
+    ).toBe(true);
+    // unknown ids in the marks are ignored, not invented combatants
+    expect(started.surprise?.aware).not.toContain("ghost");
+  });
+
+  test("no surprise round when the marks make everyone aware or everyone unaware", () => {
+    const all = startWithSurprise(twoVTwo(), {
+      initiative: [],
+      unaware: ["d1", "d2", "a1", "a2"],
+    });
+    expect(all.surprise?.surpriseRound).toBe(false);
+    expect(all.surprise?.note).toContain("no combatant is aware");
+    expect(all.state.phase).toBe("rounds"); // starts normally through core
+    const none = startWithSurprise(twoVTwo(), {
+      initiative: [],
+      unaware: ["ghost"], // resolves to "no one is unaware"
+    });
+    expect(none.surprise?.surpriseRound).toBe(false);
+    expect(none.surprise?.note).toContain("no combatant is unaware");
+  });
+
+  test("pf1eEndCombat resets the round structure for a clean restart", () => {
+    const started = startWithSurprise(twoVTwo(), {
+      initiative: [],
+      unaware: ["d2"],
+    });
+    const inProgress = pf1eNextTurn(started.combat); // surprise advances
+    expect(inProgress.state.phase).toBe("surprise");
+    const ended = pf1eEndCombat(inProgress.combat);
+    expect(ended.combat.round).toBe(0);
+    expect(ended.combat.turn).toBe(0);
+    expect(ended.state.phase).toBe("setup");
+    expect(ended.state.surpriseOrder).toEqual([]);
+    expect(ended.state.surprised).toEqual([]);
+    expect(ended.state.clockSeconds).toBe(0);
+    expect(readRoundState(ended.combat).phase).toBe("setup");
   });
 });

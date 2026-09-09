@@ -2217,3 +2217,53 @@ the 5-foot-step/movement lock (CRB p.189), and swift-actions-in-surprise-rounds
   (readied/immediate resolution) stays in P6 as the TODO states; setting the
   restriction from the surprise round lands with T03's tracker wiring, and from
   conditions (staggered) with the condition library.
+
+## D-132 — T03: the surprise round, flat-footed transitions and encounter flags run in the real tracker
+
+**Date:** 2026-09-09. **Scope:** T03. Source: CRB p.178 Surprise/Flat-Footed (the
+corrected A.1 from D-129). The `flags.core.delayed` round-wrap lookup bug named by the
+TODO was already fixed in D-120 with its regression; this slice wired the rest.
+
+- **`checkSurprise` was still encoding the pre-D-129 rule and is rewritten:** awareness
+  is per combatant (a defender is aware when their Perception matches or beats ANY ONE
+  attacker's Stealth; a defender with no Perception authored notices nothing). A
+  surprise round happens when some but not all combatants are aware — including the
+  case where one defender noticed but another did not (the old code cancelled the
+  round for everyone the moment any defender saw anything). The outcome now carries
+  `aware` (attackers + aware defenders — **aware defenders act in the surprise
+  round**) and `flatFooted` is the unaware list only, not every defender. No round
+  when every defender noticed someone, and none when the marks make everyone unaware.
+- **`startWithSurprise` gains an explicit-awareness path:** `unaware: ids` — the GM's
+  marks — produce the same outcome shape as the stealth/perception check (the tracker
+  path; the GM knows who is ambushing without inventing dice). Unknown ids are
+  ignored. The surprise order is the aware combatants in initiative order. The first
+  surprise actor's turn starts immediately: `acted` (acting in the surprise round ends
+  flat-footed — "unaware combatants are flat-footed because they have not acted yet")
+  and a **single-standard-or-move restricted budget** (A.1/A.6 — the T05 wiring this
+  slice owed). `pf1eNextTurn`'s surprise branch marks each subsequent surprise actor
+  the same way; the surprise→round-1 boundary lifts the restriction (verified by the
+  T05 boundary test, now strengthened).
+- **New helpers:** `activePF1eCombatant` (during a surprise round the acting combatant
+  is the surprise-order pointer — core's `turn` is meaningless while round is 0) and
+  `pf1eEndCombat` (core's end + a fresh setup round state, so a restarted encounter
+  cannot inherit a stale phase, surprise order or clock).
+- **Tracker flow (the actual wiring):** the panel's update diff now carries
+  `combat.flags` — until now the PF1e round state was computed and then **dropped on
+  submit**, so no client ever saw it. PF1e encounters (≥1 PF1e-linked actor, the
+  initiative roller's detection) route Start through `startWithSurprise` (initiative
+  must be rolled and ties resolved first; GM awareness marks are pre-start local
+  input, cleared on encounter switch), Next through `pf1eNextTurn` (AoO refresh, held
+  delivery, world clock and budget reset now actually flow), and End through
+  `pf1eEndCombat`. A surprise round renders as a running tracker state ("Surprise
+  round · 2/3 aware") even though core's round is still 0, the active row and budget
+  bar follow the surprise pointer, and every roster row shows a flat-footed chip with
+  its reason (surprise / has-not-acted). Generic encounters keep the plain core
+  transitions with no PF1e flags written.
+- **Verification:** 3 surprise tests rewritten/added against the corrected rule
+  (mixed awareness with an aware defender acting, all-aware and all-unaware refusals,
+  explicit marks with unknown ids ignored, actor marking through the surprise round,
+  end-of-combat reset) plus strengthened assertions in the two existing surprise
+  fixtures. Full suite 947 passed / 3 skipped; typecheck/lint/format/build/size green
+  (dist 2,044,962 raw / 591,474 gzip). T03 is checked off; the PF1e resume/interrupt
+  logic beyond this (delay/ready rescheduling, held-action interrupts) remains P6/T05
+  follow-up work as the plan states.

@@ -18,7 +18,6 @@
   } from "../../core/documents";
   import {
     activeEffects,
-    currentCombatant,
     delayCombatant,
     endCombat,
     nextTurn,
@@ -41,7 +40,16 @@
     isPf1eEncounter,
     spendCombatantActionAuthorized,
   } from "./actionBudget";
-  import { readCombatantState } from "../../packages/pf1e/combatState";
+  import {
+    activePF1eCombatant,
+    isFlatFootedByRound,
+    pf1eEndCombat,
+    pf1eNextTurn,
+    readCombatantState,
+    readRoundState,
+    startWithSurprise,
+    type InitiativeRoll,
+  } from "../../packages/pf1e/combatState";
   import type { PF1eActionSpend } from "../../packages/pf1e/actions";
   import {
     selectedTokens,
@@ -89,9 +97,14 @@
     encounters = scene
       ? encounterList(state.combats, scene, state.legacySceneId)
       : [];
-    combat = scene
+    const selected = scene
       ? selectedEncounter(state.combats, scene, state.legacySceneId)
       : null;
+    if ((selected?._id ?? "") !== marksFor) {
+      marksFor = selected?._id ?? "";
+      unawareMarks = [];
+    }
+    combat = selected;
     actors = client.store.getAll("actors") as readonly ActorDocument[];
   }
   function activate(id: string): void {
@@ -188,6 +201,7 @@
           round: combat.round,
           turn: combat.turn,
           combatants: combat.combatants,
+          flags: combat.flags,
         },
       },
     ]);
@@ -195,8 +209,41 @@
 
   function beginCombat(): void {
     refresh();
-    if (combat) push(startCombat($state.snapshot(combat)));
-    else createEncounter(true);
+    if (!combat) {
+      createEncounter(true);
+      return;
+    }
+    if (!pf1e) {
+      push(startCombat($state.snapshot(combat)));
+      return;
+    }
+    // PF1e: the round structure starts through the surprise-aware transition. The GM's
+    // awareness marks decide who is caught flat-footed; initiative must already be
+    // rolled and its ties resolved.
+    const roster = $state.snapshot(combat);
+    if (roster.combatants.some((c) => c.initiative === null)) {
+      error = "Roll initiative before starting a PF1e encounter.";
+      return;
+    }
+    const rolls: InitiativeRoll[] = roster.combatants.map((c) => ({
+      combatantId: c._id,
+      value: c.initiative ?? 0,
+      dexMod: 0,
+    }));
+    const started = startWithSurprise(roster, {
+      initiative: rolls,
+      unaware: unawareMarks,
+    });
+    if (started.state.ties.some((tie) => tie.resolvedBy === "reroll-needed")) {
+      error = "Initiative ties are unresolved — use Roll all before starting.";
+      return;
+    }
+    error =
+      started.surprise?.note && !started.surprise.surpriseRound
+        ? started.surprise.note
+        : "";
+    push({ combat: started.combat, hooks: started.hooks, expired: [] });
+    unawareMarks = [];
   }
 
   function updateRoster(action: "add" | "remove"): void {
@@ -277,7 +324,20 @@
   }
 
   const ordered = $derived(combat ? sortCombatants(combat.combatants) : []);
-  const current = $derived(combat ? currentCombatant(combat) : null);
+  const current = $derived(combat ? activePF1eCombatant(combat) : null);
+  const pf1eState = $derived(combat ? readRoundState(combat) : null);
+  /** A surprise round runs before core has started round 1 — it is a running tracker state. */
+  const running = $derived(
+    Boolean(combat && (combat.round >= 1 || pf1eState?.phase === "surprise")),
+  );
+  /** GM awareness marks for the surprise round (pre-start input, cleared on encounter switch). */
+  let unawareMarks = $state<string[]>([]);
+  let marksFor = $state("");
+  function toggleUnaware(id: string): void {
+    unawareMarks = unawareMarks.includes(id)
+      ? unawareMarks.filter((x) => x !== id)
+      : [...unawareMarks, id];
+  }
   const effects = $derived(combat ? activeEffects(combat) : []);
 
   onMount(() => {
@@ -361,7 +421,7 @@
     >{scene?.name ?? "No active scene"} · New encounters use selected tokens, or all
     scene tokens if none are selected; switching preserves progress.</small
   >
-  {#if !combat || combat.round < 1}
+  {#if !combat || !running}
     <button
       id="combat-start"
       type="button"
@@ -370,6 +430,29 @@
     >
       Start combat ({combat?.combatants.length ?? tokens.length} combatants)
     </button>
+    {#if combat && pf1e}
+      <div class="unaware" data-unaware-setup>
+        <span class="budget-title"
+          >Surprise setup — mark who starts unaware (CRB p.178):</span
+        >
+        {#each ordered as c (c._id)}
+          <button
+            type="button"
+            data-unaware-toggle={c._id}
+            class:marked={unawareMarks.includes(c._id)}
+            onclick={() => toggleUnaware(c._id)}
+          >
+            {c.name}: {unawareMarks.includes(c._id) ? "unaware" : "aware"}
+          </button>
+        {/each}
+        <small
+          >A surprise round happens when some but not all combatants are aware;
+          the aware ones each take one standard or move action, the unaware
+          don't act and are flat-footed. Marks are input for the start, not
+          replicated state.</small
+        >
+      </div>
+    {/if}
   {:else}
     <div class="bar">
       <button
@@ -379,14 +462,28 @@
         aria-label="Previous turn">◀</button
       >
       <span class="round"
-        >Round {combat.round} · {ordered.length
-          ? `Turn ${combat.turn + 1}/${ordered.length}`
-          : "No combatants"}</span
+        >{pf1eState?.phase === "surprise"
+          ? `Surprise round · ${
+              pf1eState.surpriseOrder.length
+                ? `${pf1eState.surpriseTurn + 1}/${pf1eState.surpriseOrder.length} aware`
+                : "no aware combatants"
+            }`
+          : `Round ${combat.round} · ${
+              ordered.length
+                ? `Turn ${combat.turn + 1}/${ordered.length}`
+                : "No combatants"
+            }`}</span
       >
       <button
         id="combat-next"
         type="button"
-        onclick={() => combat && push(nextTurn(combat))}
+        onclick={() =>
+          combat &&
+          push(
+            pf1e
+              ? pf1eNextTurn($state.snapshot(combat))
+              : nextTurn($state.snapshot(combat)),
+          )}
         aria-label="Next turn">▶</button
       >
       <button id="combat-init" type="button" onclick={() => rollInitiative()}
@@ -402,7 +499,13 @@
       <button
         id="combat-end"
         type="button"
-        onclick={() => combat && push(endCombat(combat))}>End</button
+        onclick={() =>
+          combat &&
+          push(
+            pf1e
+              ? { ...pf1eEndCombat($state.snapshot(combat)), expired: [] }
+              : endCombat($state.snapshot(combat)),
+          )}>End</button
       >
     </div>
     {#if pf1e && current}
@@ -438,6 +541,14 @@
           {#if budget.ledger.movementFt > 0}
             <span class="chip spent" data-budget-moved
               >moved {budget.ledger.movementFt} ft</span
+            >
+          {/if}
+          {#if budget.ledger.restriction !== "none"}
+            <span
+              class="chip pending"
+              data-budget-restricted
+              title="Surprise round / staggered: a single standard or move action, plus free and swift actions"
+              >restricted: 1 std or move</span
             >
           {/if}
           {#if budget.ledger.fullRoundPending}
@@ -586,6 +697,19 @@
               >Immediate</button
             >
           {/if}
+          {#if pf1e}
+            {@const ff = isFlatFootedByRound(combat, c)}
+            {#if ff.flatFooted}
+              <span
+                class="effect"
+                data-flat-footed={ff.why}
+                title={ff.why === "surprise"
+                  ? "Caught unaware — flat-footed until they act"
+                  : "Has not acted yet — flat-footed until their first turn"}
+                >flat-footed</span
+              >
+            {/if}
+          {/if}
           {#each effects.filter((e) => e.combatantId === c._id) as e (e.id)}
             <span class="effect" title={e.effect.name}
               >{e.effect.name}{e.duration !== null
@@ -643,6 +767,16 @@
   }
   .init {
     width: 3.5em;
+  }
+  .unaware {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+    font-size: 12px;
+  }
+  .unaware button.marked {
+    background: #5e2c2c;
   }
   .budget {
     display: flex;

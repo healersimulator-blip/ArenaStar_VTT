@@ -137,7 +137,7 @@ Depends on P1 for the approved sheet-before-tracker flow and on R02 for disputed
 
 - [ ] **T01 — Add selection-aware token context menu:** initiative count, add/remove combatant, hidden state; retain a pan gesture. Add effect/spell actions only when P4/P5 handlers exist. (I P2)
 - [ ] **T02 — Roll actor-aware initiative** with linked `actorId`, derived Dex/feat/misc modifiers, tie-break/reroll policy, selected-token fallback and active-scene scoping. Support verifiable hidden GM rolls without leaking values. (I P2; G §4.3)
-- [ ] **T03 — Wire surprise and flat-footed-before-first-turn transitions**, round resets and encounter flags into actual tracker flow. Correct the `flags.core.delayed` round-wrap lookup bug with a regression test. (I P2; G §4.3/4.11)
+- [x] **T03 — Wire surprise and flat-footed-before-first-turn transitions**, round resets and encounter flags into actual tracker flow. Correct the `flags.core.delayed` round-wrap lookup bug with a regression test. (I P2; G §4.3/4.11)
 - [x] **T04 — Add create/activate encounter list** rather than taking `getAll("combats")[0]`; test multiple scenes/encounters and unchanged non-PF1e behavior. (I P2/§7)
 - [x] **T05 — Implement visible action budgets and legality:** standard/move/full-round/free/swift/immediate, move substitution, restricted activity, start/complete full-round actions, 5-foot-step eligibility and next-turn swift consumption. Add the verified action/provoke table as shared data. Interrupt execution completes in P6. (G §3/§4.4; I P6)
 
@@ -187,6 +187,14 @@ Depends on P1 for the approved sheet-before-tracker flow and on R02 for disputed
 - **Visible in the tracker:** the active combatant gets budget chips (STD/MOVE/SWIFT/5-ft, moved ft, pending) and spend buttons whose disabled-tooltips are the refusal reasons, plus per-row off-turn "Immediate" buttons — only for encounters with a PF1e-linked actor; generic combats are untouched.
 - **Evidence:** 20 new tests (11 table/budget fixtures against CRB p.181–185/189, 5 wiring fixtures, 4 panel-helper tests). 944 passed / 3 skipped across 119 files; typecheck/lint/edited-file formatting/build/size green; dist 2,035,684 raw / 588,837 gzip.
 - **Still open:** interrupt execution is P6 as planned; the restriction is not yet SET from the surprise round (lands with T03's tracker wiring) or from conditions like staggered (condition library).
+
+### P2 surprise and tracker wiring — 2026-09-09 (D-132, T03 closed)
+
+- **The surprise rule the code ran was the pre-D-129 one and is corrected:** awareness is per combatant (a defender noticing ANY one attacker is aware), a surprise round happens when some but not all are aware — even if another defender noticed — and **aware defenders act in it**; only the unaware are flat-footed. `startWithSurprise` also accepts explicit GM awareness marks (the tracker path — no invented dice); "no one / everyone surprised" still yields no surprise round. The `flags.core.delayed` round-wrap bug named here was already fixed in D-120.
+- **The wiring the TODO asked for is real now:** the tracker's update diff carries `combat.flags` (previously the PF1e round state was computed and silently dropped on submit); PF1e encounters route Start through `startWithSurprise` (initiative must be rolled, ties resolved; GM marks are pre-start input), Next through `pf1eNextTurn` (AoO refresh, held delivery, clock and T05 budget resets flow), End through the new `pf1eEndCombat` (fresh setup state, no stale phase/clock on restart). A surprise round renders as a running state ("Surprise round · 2/3 aware") while core's round is still 0; the active row/budget bar follow `activePF1eCombatant`; every roster row shows a flat-footed chip with its reason.
+- **Surprise actors are marked as having acted** ("unaware combatants are flat-footed because they have not acted yet") and get the single-standard-or-move restricted budget (the restriction-setting T05 deferred); the restriction lifts when regular rounds begin.
+- **Evidence:** 3 surprise tests rewritten/added against the corrected rule + strengthened existing fixtures; 947 passed / 3 skipped across 119 files; typecheck/lint/edited-file formatting/build/size green; dist 2,044,962 raw / 591,474 gzip.
+- **Still open:** delay/ready rescheduling and held-action interrupts (P6), full browser-matrix acceptance, T01's context menu and T02's verified hidden rolls.
 
 ### GM-control correction — 2026-09-08 (D-125, supersedes D-124 restrictions)
 
