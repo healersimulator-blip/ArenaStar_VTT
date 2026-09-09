@@ -1952,3 +1952,30 @@ protocol slice per the file's recommended execution order.
   gzip (within the 6 MB budget); `build:systems` emits both PF1e packages.
   `rulesBoot`-driven live package switching remains reload-based as before
   (D-087/D-110); the re-announce machinery is the protocol-level resync path.
+
+## D-127 — R01: Implementation Plan rule references corrected against the Gap List appendix
+
+**Date:** 2026-09-09. **Scope:** PF1e_Unified_TODO §0 reconciliation, before any
+P3+ rule encoding.
+
+- Verified every `A.x` citation in PF1e_ImplementationPlan.md against the
+  headings actually transcribed in PF1e_Combat_Fidelity_GapList.md Appendix A
+  (A.1 round/initiative … A.18 regeneration/massive damage). Fixed 13 wrong
+  targets and removed the three phantom entries (A.19/A.20/A.21): sheet-derivation
+  accept now cites A.2/A.9/A.14 (was A.2/A.8/A.15); the cover/concealment
+  modifier stack and its P5 accept cite A.8 (was A.7/A.5); splash cites A.12
+  (was A.18); initiative-Dex cites A.1 (was A.15); diagonals cite A.7 (was
+  A.5); defensive casting cites A.16 (was A.19); maneuver aftermath + accept
+  cite A.9 (was A.11); AoO exclusion list cites A.10 (was A.12); mounted cites
+  A.11 (was A.21); object/hardness cites A.17 (was A.18). The dying/stable A.13
+  and attack-stack A.2/A.3/A.4 citations were already correct; the SR
+  no-auto-success citation was verified to belong to A.16 (those rules close
+  that section) and stays.
+- Two rules have NO appendix entry yet: the Two-Weapon Fighting penalty table
+  and Charge. The plan now names the SRD pages as the canonical source and
+  requires transcribing them into Appendix A before fixtures are written, so
+  V01 can never snapshot a missing table as expected truth. G/M/B carry no
+  other phantom appendix references (checked).
+- No code, contracts or tests changed; the three source documents other than I
+  are untouched. This closes R01 only — R02 (disputed-rule verification) and
+  R03 (intentional variants) remain open.

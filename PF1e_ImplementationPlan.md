@@ -225,8 +225,8 @@ Gap List rows it closes, its acceptance scenario, and what it must **not** touch
   derives the *shipped bestiary JSON* through the tactical reader, so content and code cannot drift.
   If a real migration is ever needed, the step shape is `{ from, to, transforms }` with
   `set|default|move|rename` (`src/core/migrations.ts:58`), not `ops`.
-* **Accept:** unit tests for every derived field with the exact Appendix A fixture (`A.2`, `A.8`,
-  `A.15`); `derivePF1eActor` is idempotent and writes nothing; the rules-context producers read the
+* **Accept:** unit tests for every derived field with the exact Appendix A fixture (`A.2`, `A.9`,
+  `A.14`); `derivePF1eActor` is idempotent and writes nothing; the rules-context producers read the
   settings document instead of a literal `{}` (the sim-worker probe in `src/app/e2eHook.ts` has no store
   by design and stays empty, with a comment saying so).
 * **Must not touch:** `src/core/documents.ts`, `EffectDocument`, `src/sim/*` schema.
@@ -279,9 +279,11 @@ Gap List rows it closes, its acceptance scenario, and what it must **not** touch
 ### P3 — Attacks and damage from the sheet (4–6 d) → closes §3.2, §3.4, §4.7 (tactical half)
 * `src/packages/pf1e/tactical.ts` (new): `attackRoll({attacker, defender, mode, situational})` and
   `damageRoll({weapon, attacker, defender, isCrit})`, applying the full modifier stack of A.2/A.3/A.4
-  (BAB, Str ×1.5/×½, size, WB, TWF `A.6`, flanking +2, fatigue/exhaustion, bull-rush/charge −2,
-  cover `+4/+2`, improved cover +8/+4, total cover = no attack, concealment 20/50 % non-stacking,
-  invisible = total concealment (50 % miss) + denied Dex, A.7), threat → **confirm** roll at full
+  (BAB, Str ×1.5/×½, size, WB, TWF — SRD Two-Weapon Fighting table, not yet transcribed in
+  Appendix A, cite the SRD page when fixtures are written, flanking +2, fatigue/exhaustion,
+  bull-rush/charge −2, cover `+4/+2`, improved cover +8/+4, total cover = no attack,
+  concealment 20/50 % non-stacking, invisible = total concealment (50 % miss) + denied Dex,
+  A.8), threat → **confirm** roll at full
   bonus, min 1 damage, nonlethal/lethal swap, and precision damage immunity.
   It reads `PF1eDerived`, **not** a `ModelPool`. The strategic loops in `combatEngine.ts` stay as they
   are (decision 2); only the tables/rule constants are shared, and `rulesTables.ts` (P0) is that shared
@@ -292,7 +294,7 @@ Gap List rows it closes, its acceptance scenario, and what it must **not** touch
 * Actor hp writes: `update` op on `system.pf1e.hp` through the ordinary op path (players see it),
   with dying/stable bookkeeping deferred to P7 — but write the field shape now so P7 is additive.
 * Full attack iteration (BAB +6/+1), AoO opportunity **prompt** (the interrupt itself is P6),
-  ranged touch vs touch AC, splash `1d8` + grid-intersection AC (A.18) for weapons.
+  ranged touch vs touch AC, splash `1d8` + grid-intersection AC (A.12) for weapons.
 * **Accept:** S1 in full; per-rule tests named after the SRD heading (see §6), including the three
   discriminating fixtures from the Gap List (AC 22/16/17 breakdown; flanked 16+0+2 = 18 vs AC 19 miss,
   17 ⇒ 19 hit; `1d6 − 10` ⇒ 1 nonlethal, DR bypassed, 2 > hp ⇒ unconscious).
@@ -308,7 +310,7 @@ Gap List rows it closes, its acceptance scenario, and what it must **not** touch
   editor does not offer a closed enum for `key`.
 * Two-way application: `derivePF1eActor(actor, effects)` is already the consumer (P0). Add
   `recomputeOnCombatEvent` so a change re-sorts initiative when Dex changes mid-combat (documented
-  PF1e behavior: initiative is a check, but Dex penalties apply — cite A.15).
+  PF1e behavior: initiative is a check, but Dex penalties apply — cite A.1).
 * Timers: keep owner-turn-end decrement as the default (`endsOn: "own-turn"`); add `"round-start"` for
   effects the SRD measures in whole rounds, and make `clock` (P0) drive `minutes/level` and
   `hours/level` effects outside combat, including "1 min/level ⇒ 10 rounds" — the world clock lives in
@@ -328,12 +330,12 @@ Gap List rows it closes, its acceptance scenario, and what it must **not** touch
 
 ### P5 — Spellcasting & targeting (5–8 d) → closes §4.8, §4.9, part of §5
 * Targeting tool in the canvas: burst/radius, cone, line, emanation; snap-to-grid using the scene's
-  `distance`/`units` and the 5-10-5 diagonal rule (A.5) — measure with the existing
+  `distance`/`units` and the 5-10-5 diagonal rule (A.7) — measure with the existing
   `snapPoint`/`measure.ts` helpers, and highlight tokens in the area *before* committing.
 * Save resolution: for each affected actor, `1d20 + save vs DC (10 + spell level + key mod + focus)`;
   SR `1d20 + CL vs SR` **with no nat-20 auto-success** (A.16 — verified deviation in the sim); Evasion
   halves on a successful save, no half for effects with "no save" row; concentration for casting
-  defensively (A.19); AoO for casting in a threatened square (the prompt from P3, resolved here).
+  defensively (A.16); AoO for casting in a threatened square (the prompt from P3, resolved here).
 * Spell data: extend `systems/pf1e-core/packs/spells.json` from 4 → ~40 of the most-used spells, with
   `system.tactical` alongside the existing `system.massBattle` block, and keep the pack↔engine parity
   test. Each entry carries `school/descriptors/components/castingTime/range/target/area/duration/
@@ -346,22 +348,23 @@ Gap List rows it closes, its acceptance scenario, and what it must **not** touch
 * Per-class casting (prep vs spontaneous, slots, bonus spells from high key ability) as **data +
   validation warnings**, not enforcement: the sheet shows slots and flags overuse rather than blocking.
 * **Accept:** S3, plus a targeted test that cover improves the Reflex DC outcome (`+2 Reflex` under
-  standard cover, A.5) and that total cover blocks the area entirely (A.5).
+  standard cover, A.8) and that total cover blocks the area entirely (A.8).
 
 ### P6 — Maneuvers, AoO interrupts, movement, mounted (4–6 d) → closes §3.5, §3.6, §4.4
-* CMB/CMD with legality per maneuver and the full aftermath table (A.11): trip → prone (−4 to hit, +2
+* CMB/CMD with legality per maneuver and the full aftermath table (A.9): trip → prone (−4 to hit, +2
   to be hit, stand = move-provoking), grapple (no AoO, both flat-footed, pinned), bull-rush
   (forced movement), disarm/sunder (weapon hp), overrun, steal, reverse — each an action button that
   runs the check through P3's roll path.
 * Real AoO loop: `combatState.onMoveOpportunity` — one free attack per action per attacker
-  (`aoosRemaining`), withdraw/run/exclude-list per A.12, attacking unarmed provoking, and the
+  (`aoosRemaining`), withdraw/run/exclude-list per A.10, attacking unarmed provoking, and the
   "5-10-5 then leave a threatened square doesn't re-provoke" nuance.
 * Movement rules the grid can enforce: difficult terrain ×2/×4, minimum 5 ft movement provokes,
-  squeeze −4/−4, running through allies, charge path rules (`A.20`), and "you can't 5-foot-step into
+  squeeze −4/−4, running through allies, charge path rules (SRD Charge — no dedicated Appendix A
+  entry yet; transcribe the canonical source before fixtures, per R01), and "you can't 5-foot-step into
   difficult terrain".
-* Mounted (A.21): mount check DCs, +2 to hit from horseback, lance ×2, horse actions on your initiative,
+* Mounted (A.11): mount check DCs, +2 to hit from horseback, lance ×2, horse actions on your initiative,
   and unhorsed handling. (Smallest slice: the modifiers + the horse as a linked companion actor.)
-* **Accept:** S4 + a table test over Appendix A.11's legality column and the A.12 exclusion set.
+* **Accept:** S4 + a table test over Appendix A.9's legality column and the A.10 exclusion set.
 
 ### P7 — Damage consequences, healing, death (3–4 d) → closes §4.10, part of §5
 * Dying/stable per A.13 (staggered at negative up to −Con; −1 per round; endurance check vs DC 10+
@@ -370,7 +373,7 @@ Gap List rows it closes, its acceptance scenario, and what it must **not** touch
 * Ability damage/drain, ability burn (Ultimate Combat, optional behind a `worldSettings` toggle),
   hit point recovery, fast/regenerate + suppress flags (already modeled strategically in the pack's
   `regeneration.suppress`), nonlethal → unconscious at hp 0, and DR-vs-hardness for objects
-  (`A.14` splash/`A.18` object rules).
+  (`A.12` splash/`A.17` object rules).
 * **Accept:** S5 + the min-1-damage-into-nonlethal regression already written for the sim, mirrored at
   actor level.
 
