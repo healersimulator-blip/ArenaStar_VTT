@@ -43,12 +43,58 @@
  *   (§2.2), charge +2 attack (§6.5), an invisible attacker strikes at +2
  *   (A.8), squeezing −4 (A.7).
  *
- * Deliberately **not** here: damage rolls and crit confirmation (A03), range
- * increments/penalties and splash scatter (A04), DR/ER mitigation (A05), feat
- * stances like Power Attack or fighting defensively (A07 — the exact numbers
- * are now verified on AoN Rules ID 131 but belong to the feat slice), and any
- * dice rolling — callers pass the d20 result, keeping this file deterministic
- * and trivially fixture-able.
+ * A03 (damage and critical arithmetic), verified before encoding:
+ * - **Critical Hits** (CRB p.182, AoN Rules ID 131): the confirmation is
+ *   "another attack roll with all the same modifiers as the attack roll you
+ *   just made" — it must hit the target's AC (natural 20 always confirms,
+ *   natural 1 never does, the attack-roll extremes apply; it does not need to
+ *   be a 20 again). "A critical hit means that you roll your damage more than
+ *   once, with all your usual bonuses, and add the rolls together." Exception:
+ *   precision damage and additional damage dice from weapon special abilities
+ *   (flaming) are **not** multiplied on a critical hit.
+ * - **Multiplying Damage** (CRB p.179, AoN Rules ID 100): "Roll the damage
+ *   (with all modifiers) multiple times and total the results" — Str,
+ *   enhancement and other static modifiers are multiplied with the dice. "When
+ *   you multiply damage more than once, each multiplier works off the original,
+ *   unmultiplied damage" (×2 and ×2 ⇒ ×3; ×3 and ×3 ⇒ ×5 — the mounted-lance
+ *   spirited-charge crit). Extra damage dice over and above a weapon's normal
+ *   damage are never multiplied.
+ * - **Strength Bonus** (CRB p.179, AoN Rules ID 100): melee and thrown weapons
+ *   (including slings) add the full Strength modifier to damage; a Strength
+ *   **penalty**, but not a bonus, applies with a non-composite bow. Off-hand
+ *   weapons add **half** the Strength bonus ("If you have a Strength penalty,
+ *   the entire penalty applies"). Two-handed wielding adds **1½ times the
+ *   Strength bonus** ("Strength penalties are not multiplied"; no increase for
+ *   a light weapon held in two hands). Secondary natural attacks add ½ Str;
+ *   the sole natural attack adds 1½ (Bestiary UMR, carried by A02's
+ *   `oneAndHalfStr` flag).
+ * - **Minimum Damage** (CRB p.179, AoN Rules ID 100): "If penalties reduce the
+ *   damage result to less than 1, a hit still deals 1 point of nonlethal
+ *   damage."
+ * - **Nonlethal swap** (CRB p.191, AoN Rules ID 172): a weapon that deals
+ *   lethal damage can deal nonlethal instead, and a nonlethal weapon —
+ *   including an unarmed strike — can deal lethal instead; **both** directions
+ *   take a −4 penalty on the attack roll. Improved Unarmed Strike waives the
+ *   penalty for unarmed strikes only (AoN ID 131), never for other nonlethal
+ *   weapons.
+ * - **Magic weapons** (CRB p.468, AoN Rules ID 377): enhancement bonuses apply
+ *   to attack **and** damage rolls; special-ability bonuses modify neither
+ *   except where noted.
+ * - **Threat-range expansion** (Improved Critical / keen, CRB): the threat
+ *   range is doubled; "this effect doesn't stack with any other effect that
+ *   expands the threat range" — a single doubling flag, never two.
+ * - **Critical-hit and precision immunities are separate defender properties**
+ *   (Bestiary creature types via the rogue's Precision Damage & Critical Hits
+ *   sidebar): elementals, oozes and incorporeal creatures are immune to both;
+ *   swarms and aeons are immune to critical hits only. Crit immunity means
+ *   "they do not take any additional damage from critical hits" — a confirmed
+ *   crit deals normal (×1) damage.
+ *
+ * Deliberately **not** here: range increments/penalties and splash scatter
+ * (A04), DR/ER/hardness mitigation (A05), feat/stance modifiers like Power
+ * Attack and fighting defensively (A07 — the numbers are verified but belong
+ * to the feat slice), and any dice rolling — callers pass rolled results,
+ * keeping this file deterministic and trivially fixture-able.
  */
 
 import {
@@ -180,8 +226,13 @@ export interface PF1eAttackModifierInput {
   hand?: PF1eAttackHand | undefined;
   /** Melee use of a throwable weapon; defaults from the weapon class. */
   mode?: "melee" | "ranged" | undefined;
-  /** Intent to deal lethal damage with an unarmed strike without IUS: −4 (CRB p.182). */
+  /**
+   * Intent to deal lethal damage with a nonlethal weapon (unarmed strike, sap):
+   * −4 (CRB p.191). Improved Unarmed Strike waives it for unarmed strikes only.
+   */
   lethalIntent?: boolean | undefined;
+  /** Intent to deal nonlethal damage with a lethal weapon: −4 (CRB p.191). Mutually exclusive with `lethalIntent`. */
+  nonlethalIntent?: boolean | undefined;
   /** Two-weapon style is active (an extra off-hand attack exists in the plan). */
   twoWeaponStyle?: boolean | undefined;
   /** The off-hand weapon is light (unarmed/double-weapon off end always are). */
@@ -293,13 +344,23 @@ export function attackModifierParts(
     parts.push({ label: "secondary natural attack", value: -5 });
   }
 
-  // Lethal damage with an unarmed strike without IUS (CRB p.182): −4.
+  // Lethal damage with a nonlethal weapon (CRB p.191, AoN ID 172): −4 — the
+  // rule covers every nonlethal weapon, "including an unarmed strike". IUS
+  // waives it for unarmed strikes only (AoN ID 131), never for a sap/whip.
   if (
-    weapon.unarmed === true &&
+    weapon.nonlethal === true &&
     input.lethalIntent === true &&
-    !feats.includes(PF1E_FEAT_IMPROVED_UNARMED_STRIKE)
+    !(
+      weapon.unarmed === true &&
+      feats.includes(PF1E_FEAT_IMPROVED_UNARMED_STRIKE)
+    )
   ) {
-    parts.push({ label: "unarmed lethal damage", value: -4 });
+    parts.push({ label: "lethal damage with a nonlethal weapon", value: -4 });
+  }
+
+  // Nonlethal damage with a lethal weapon (CRB p.191): −4. No feat waives it.
+  if (weapon.nonlethal !== true && input.nonlethalIntent === true) {
+    parts.push({ label: "nonlethal damage with a lethal weapon", value: -4 });
   }
 
   const sit = input.situational;
@@ -364,6 +425,7 @@ export interface PF1eFullAttackInput {
   /** Natural weapons available on limbs not wielding the manufactured ones. */
   naturalWeapons?: readonly PF1eWeaponDescriptor[] | undefined;
   lethalIntent?: boolean | undefined;
+  nonlethalIntent?: boolean | undefined;
   situational?: PF1eSituationalModifiers | undefined;
   shootingIntoMelee?: { sizeCategoriesLarger?: number | undefined } | undefined;
   misc?: number | undefined;
@@ -410,6 +472,7 @@ export function fullAttackPlan(input: PF1eFullAttackInput): {
     weapon,
     hand: "primary",
     lethalIntent: input.lethalIntent,
+    nonlethalIntent: input.nonlethalIntent,
     twoWeaponStyle,
     offHandLight,
     naturalAsSecondary,
@@ -442,6 +505,7 @@ export function fullAttackPlan(input: PF1eFullAttackInput): {
       weapon: input.offHandWeapon,
       hand: "off-hand",
       lethalIntent: input.lethalIntent,
+      nonlethalIntent: input.nonlethalIntent,
       twoWeaponStyle,
       offHandLight,
       naturalAsSecondary,
@@ -470,6 +534,7 @@ export function fullAttackPlan(input: PF1eFullAttackInput): {
       weapon,
       hand: "off-hand",
       lethalIntent: input.lethalIntent,
+      nonlethalIntent: input.nonlethalIntent,
       twoWeaponStyle,
       offHandLight,
       naturalAsSecondary,
@@ -513,6 +578,7 @@ export function fullAttackPlan(input: PF1eFullAttackInput): {
       weapon: singleType ? { ...natural, naturalSecondary: false } : natural,
       hand: "natural",
       lethalIntent: input.lethalIntent,
+      nonlethalIntent: input.nonlethalIntent,
       naturalAsSecondary: asSecondary,
       situational: input.situational,
       misc: input.misc,
@@ -538,6 +604,7 @@ export function fullAttackPlan(input: PF1eFullAttackInput): {
       weapon: { ...weapon, naturalSecondary: false },
       hand: "primary",
       lethalIntent: input.lethalIntent,
+      nonlethalIntent: input.nonlethalIntent,
       naturalAsSecondary: false,
       situational: input.situational,
       misc: input.misc,
@@ -671,4 +738,471 @@ export function attackEligibility(input: {
     }
   }
   return { canAttack: refusals.length === 0, refusals, notes };
+}
+
+// ======================================================================================
+// A03 — threat range, critical confirmation, and damage arithmetic (CRB pp.179/182/191).
+// Pure and diceless like the attack half: the caller supplies rolled values, this file
+// only encodes the rules. No DR/ER (A05), no range legality (A04), no feats (A07).
+// ======================================================================================
+
+/** One extra damage line over and above the weapon's damage — flaming, sneak attack. */
+export interface PF1eBonusDamageLine {
+  label: string;
+  /** The rolled sum of the line's dice (the caller rolls — this file never does). */
+  roll: number;
+  /**
+   * Precision damage (a rogue's sneak attack and friends): never multiplied on a
+   * critical hit, dropped against precision immunity, never reduced by DR (A05
+   * consumes this flag).
+   */
+  precision?: boolean;
+  /** The line is nonlethal regardless of the weapon's damage bucket. */
+  nonlethal?: boolean;
+}
+
+/**
+ * What the defender is immune to. The two flags are **separate** properties in
+ * PF1e (Bestiary creature types via the rogue's Precision Damage & Critical Hits
+ * sidebar): elementals, oozes and incorporeal creatures are immune to both;
+ * swarms and aeons are immune to critical hits only.
+ */
+export interface PF1eDamageDefender {
+  /** "Not subject to critical hits": a confirmed critical deals normal (×1) damage. */
+  immuneToCriticalHits?: boolean | undefined;
+  /** "Does not take additional damage from precision-based attacks": precision lines are dropped. */
+  immuneToPrecisionDamage?: boolean | undefined;
+}
+
+/**
+ * The lowest d20 face that threatens, after condition and expansion effects.
+ * A broken weapon threatens on a natural 20 **only** (AoN Rules ID 413) — no
+ * expansion re-widens it. Otherwise a single doubling applies (Improved Critical
+ * / keen / keen edge — "this effect doesn't stack with any other effect that
+ * expands the threat range"): the range 21−min faces re-anchors at 2×min−21,
+ * so 20 → 19–20, 19–20 → 17–20, 18–20 → 15–20.
+ */
+export function effectiveCritThreatMin(
+  weapon: Pick<PF1eWeaponDescriptor, "critThreatMin" | "broken">,
+  options?: { threatRangeExpanded?: boolean | undefined },
+): number {
+  if (weapon.broken === true) return 20;
+  const base = weapon.critThreatMin;
+  if (options?.threatRangeExpanded !== true) return base;
+  return Math.max(1, 2 * base - 21);
+}
+
+export type PF1eConfirmationResult =
+  | {
+      ok: true;
+      confirmed: boolean;
+      /** 1 = automatic miss (never confirms), 20 = automatic hit (always confirms). */
+      natural: 1 | 20 | null;
+      /** die + bonus − ac; negative when the confirmation misses. */
+      margin: number;
+    }
+  | { ok: false; error: string };
+
+/**
+ * Resolve one critical-hit confirmation (CRB p.182, AoN Rules ID 131): "another
+ * attack roll with all the same modifiers as the attack roll you just made. If
+ * the confirmation roll also results in a hit against the target's AC, your
+ * original hit is a critical hit." It does not need to be a 20 again — but it
+ * is an attack roll, so a natural 20 always confirms and a natural 1 never
+ * does. A defender immune to critical hits makes the attempt moot; that flag
+ * lives on the damage side (`combinedDamageMultiplier`), not here.
+ */
+export function confirmCritical(input: {
+  die: number;
+  /** The full attack bonus of the attack roll that threatened. */
+  attackBonus: number;
+  ac: number;
+}): PF1eConfirmationResult {
+  const die = input.die;
+  if (!Number.isInteger(die) || die < 1 || die > 20) {
+    return {
+      ok: false,
+      error: `confirmation die = ${String(die)} is not an integer 1–20`,
+    };
+  }
+  if (die === 20) {
+    return {
+      ok: true,
+      confirmed: true,
+      natural: 20,
+      margin: 20 + input.attackBonus - input.ac,
+    };
+  }
+  if (die === 1) {
+    return {
+      ok: true,
+      confirmed: false,
+      natural: 1,
+      margin: 1 + input.attackBonus - input.ac,
+    };
+  }
+  return {
+    ok: true,
+    confirmed: die + input.attackBonus >= input.ac,
+    natural: null,
+    margin: die + input.attackBonus - input.ac,
+  };
+}
+
+export type PF1eMultiplierResult =
+  { ok: true; multiplier: number } | { ok: false; error: string };
+
+/**
+ * The damage multiplier (CRB p.179 "Multiplying Damage"): "When you multiply
+ * damage more than once, each multiplier works off the original, unmultiplied
+ * damage" — multipliers are **added**, each contributing one less than its
+ * value (×2 and ×2 ⇒ ×3; ×3 and ×2 ⇒ ×4; a ×3 lance under a ×3 spirited charge
+ * with a ×3 crit ⇒ ×5). A confirmed critical contributes the weapon's
+ * multiplier (a broken weapon's ×2, AoN ID 413); `extraMultipliers` carry
+ * verified outside multipliers such as the mounted-lance charge (P06/P08 wire
+ * them). A defender immune to critical hits contributes no crit multiplier —
+ * the extras (a charge is not a critical) still apply.
+ */
+export function combinedDamageMultiplier(input: {
+  weapon: Pick<
+    PF1eWeaponDescriptor,
+    "critMultiplier" | "critThreatMin" | "broken"
+  >;
+  confirmedCrit?: boolean | undefined;
+  extraMultipliers?: readonly number[] | undefined;
+  defender?: { immuneToCriticalHits?: boolean | undefined } | undefined;
+}): PF1eMultiplierResult {
+  const active: number[] = [];
+  if (
+    input.confirmedCrit === true &&
+    input.defender?.immuneToCriticalHits !== true
+  ) {
+    active.push(brokenWeaponAdjustments(input.weapon).critMultiplier);
+  }
+  for (const m of input.extraMultipliers ?? []) {
+    if (!Number.isInteger(m) || m < 2) {
+      return {
+        ok: false,
+        error: `extra damage multiplier ${String(m)} is not an integer ≥ 2`,
+      };
+    }
+    active.push(m);
+  }
+  if (active.length === 0) return { ok: true, multiplier: 1 };
+  return {
+    ok: true,
+    multiplier: 1 + active.reduce((sum, m) => sum + (m - 1), 0),
+  };
+}
+
+/** How Strength reaches ranged damage (CRB p.179, AoN Rules ID 100). */
+export type PF1eRangedStrRule = "full" | "penalty-only" | "none";
+
+/**
+ * The default ranged Str rule: thrown weapons add the full modifier, and so does
+ * a melee weapon with a range increment — its only ranged use is being thrown
+ * (dagger, spear, hand axe). Everything else (bows, crossbows, firearms) adds
+ * nothing by default. The verified exceptions are caller-authored through
+ * `rangedStrRule`: a **sling** adds the full modifier ("a melee or thrown
+ * weapon, **including a sling**"), a **non-composite bow** applies a penalty
+ * only, and a composite bow applies its authored Str rating as flat damage
+ * (never guessed here).
+ */
+function defaultRangedStrRule(
+  weapon: Pick<PF1eWeaponDescriptor, "class" | "rangeIncrementFt">,
+): PF1eRangedStrRule {
+  if (weapon.class === "thrown") return "full";
+  if (weapon.class === "melee" && weapon.rangeIncrementFt !== null)
+    return "full";
+  return "none";
+}
+
+export interface PF1eDamageModifierInput {
+  attacker: PF1eAttackActor;
+  weapon: PF1eWeaponDescriptor;
+  hand?: PF1eAttackHand | undefined;
+  mode?: "melee" | "ranged" | undefined;
+  /** The sole natural attack adds 1½ Str (Bestiary UMR) — `fullAttackPlan` carries the flag. */
+  oneAndHalfStr?: boolean | undefined;
+  /** All natural attacks are secondary this round (manufactured attacks present, CRB p.182): ½ Str. */
+  naturalAsSecondary?: boolean | undefined;
+  /**
+   * The weapon is being wielded in both hands (a one-handed weapon may be).
+   * Defaults to true for two-handed weapons; light weapons and unarmed strikes
+   * never gain the 1½ Str increase however they are held (CRB p.179).
+   */
+  wieldingTwoHanded?: boolean | undefined;
+  /** Overrides the default ranged Str rule — see `defaultRangedStrRule` for the verified exceptions. */
+  rangedStrRule?: PF1eRangedStrRule | undefined;
+  /**
+   * Static damage from the caller (favored enemy, an authored attack-line bonus,
+   * Power Attack once A07 lands). Multiplied on a critical hit like every
+   * static modifier ("roll the damage with all modifiers multiple times").
+   */
+  misc?: number | undefined;
+}
+
+/**
+ * The labeled static damage stack applied once per damage roll (CRB p.179 +
+ * p.468): Strength by hand/handedness/natural status, the weapon's enhancement
+ * bonus (magic weapons add to damage; special-ability equivalents never do),
+ * the broken weapon's −2, and caller misc. Strength **bonuses** are multiplied
+ * by the hand rules and rounded down; Strength **penalties** are never
+ * multiplied — the entire penalty applies off-hand, and two-handed wielding
+ * does not deepen it.
+ */
+export function damageModifierParts(input: PF1eDamageModifierInput): {
+  parts: PF1eModifierPart[];
+  total: number;
+  notes: string[];
+} {
+  const { attacker, weapon } = input;
+  const notes: string[] = [];
+  const mode =
+    input.mode ??
+    (weapon.class === "melee" || weapon.natural ? "melee" : "ranged");
+  const hand = input.hand ?? (weapon.natural === true ? "natural" : "primary");
+  const parts: PF1eModifierPart[] = [];
+
+  if (mode === "ranged") {
+    const rule = input.rangedStrRule ?? defaultRangedStrRule(weapon);
+    if (rule === "full") {
+      if (attacker.strMod !== 0) {
+        parts.push({ label: "Str", value: attacker.strMod });
+      }
+    } else if (rule === "penalty-only") {
+      if (attacker.strMod < 0) {
+        parts.push({ label: "Str (penalty)", value: attacker.strMod });
+        notes.push(
+          "non-composite bow: the Strength penalty, but not a bonus, applies to damage",
+        );
+      }
+    }
+  } else {
+    // Secondary natural attacks take ½ Str (CRB p.182); the sole natural attack
+    // takes 1½ (UMR) and overrides the secondary classification.
+    const secondaryNatural =
+      weapon.natural === true &&
+      input.oneAndHalfStr !== true &&
+      (weapon.naturalSecondary === true || input.naturalAsSecondary === true);
+    let mult = 1;
+    if (input.oneAndHalfStr === true) {
+      mult = 1.5;
+    } else if (hand === "off-hand" || secondaryNatural) {
+      mult = 0.5;
+    } else {
+      const twoHandedWield =
+        weapon.handedness === "two-handed" || input.wieldingTwoHanded === true;
+      const light = weapon.handedness === "light" || weapon.unarmed === true;
+      if (twoHandedWield && !light) mult = 1.5;
+    }
+    // Bonuses round down after the multiplier; penalties are applied as-is
+    // ("the entire penalty applies" off-hand; "not multiplied" two-handed).
+    const strDamage =
+      attacker.strMod >= 0
+        ? Math.floor(attacker.strMod * mult)
+        : attacker.strMod;
+    parts.push({
+      label: mult === 1.5 ? "Str (×1½)" : mult === 0.5 ? "Str (×½)" : "Str",
+      value: strDamage,
+    });
+  }
+
+  if (weapon.enhancementBonus > 0) {
+    parts.push({ label: "enhancement", value: weapon.enhancementBonus });
+  }
+
+  const broken = brokenWeaponAdjustments(weapon);
+  if (broken.damage !== 0) {
+    parts.push({ label: "broken weapon", value: broken.damage });
+  }
+
+  if (input.misc !== undefined && input.misc !== 0) {
+    parts.push({ label: "misc", value: input.misc });
+  }
+
+  return {
+    parts,
+    total: parts.reduce((sum, p) => sum + p.value, 0),
+    notes,
+  };
+}
+
+export type PF1eDamageRollResult =
+  | {
+      ok: true;
+      /** The effective additive multiplier that was applied to the weapon damage. */
+      multiplier: number;
+      /** Weapon damage (dice + static, multiplied) before bonus lines and the minimum rule. */
+      weaponDamage: number;
+      /** Final lethal damage (0 when the minimum rule or nonlethal intent redirects it). */
+      lethal: number;
+      /** Final nonlethal damage (the weapon's full nonlethal damage, or the 1-point minimum). */
+      nonlethal: number;
+      /** Retained bonus-line contributions, labeled — the chat breakdown for extra damage. */
+      bonusContributions: {
+        label: string;
+        amount: number;
+        nonlethal: boolean;
+      }[];
+      /** Precision lines dropped by defender immunity. */
+      precisionDropped: string[];
+      notes: string[];
+    }
+  | { ok: false; error: string };
+
+/**
+ * Resolve one hit's damage (CRB pp.179/182/191). The caller supplies one
+ * weapon-dice roll **per multiplier step** (`combinedDamageMultiplier` says how
+ * many) plus the static stack (`damageModifierParts`, or a stat-block line's
+ * derived bonus) — "roll the damage (with all modifiers) multiple times and
+ * total the results": every static modifier is multiplied with the dice, while
+ * precision damage and extra damage dice (flaming) are added exactly once.
+ * Weapon damage lands in the nonlethal bucket when the weapon is nonlethal
+ * (unarmed, saps), unless an intent flips it — both swaps cost −4 on the
+ * **attack** roll, which `attackModifierParts` applies. If penalties reduce the
+ * total damage result below 1, the hit still deals 1 point of nonlethal damage.
+ */
+export function resolveDamageRoll(input: {
+  weapon: PF1eWeaponDescriptor;
+  /** Static weapon damage applied once per roll — a `damageModifierParts` total or a stat-block line's derived damage bonus. */
+  staticDamage: number;
+  /** One rolled weapon-dice sum per multiplier step; the length must match the multiplier. */
+  weaponDamageRolls: readonly number[];
+  confirmedCrit?: boolean | undefined;
+  extraMultipliers?: readonly number[] | undefined;
+  defender?: PF1eDamageDefender | undefined;
+  bonusLines?: readonly PF1eBonusDamageLine[] | undefined;
+  lethalIntent?: boolean | undefined;
+  nonlethalIntent?: boolean | undefined;
+}): PF1eDamageRollResult {
+  if (input.lethalIntent === true && input.nonlethalIntent === true) {
+    return {
+      ok: false,
+      error: "lethalIntent and nonlethalIntent are mutually exclusive",
+    };
+  }
+  if (!Number.isFinite(input.staticDamage)) {
+    return {
+      ok: false,
+      error: `staticDamage = ${String(input.staticDamage)} is not a finite number`,
+    };
+  }
+  const multiplierResult = combinedDamageMultiplier({
+    weapon: input.weapon,
+    confirmedCrit: input.confirmedCrit,
+    extraMultipliers: input.extraMultipliers,
+    defender: input.defender,
+  });
+  if (!multiplierResult.ok) return multiplierResult;
+  const multiplier = multiplierResult.multiplier;
+
+  const rolls = input.weaponDamageRolls;
+  if (rolls.length !== multiplier) {
+    return {
+      ok: false,
+      error: `weaponDamageRolls has ${rolls.length} entr${rolls.length === 1 ? "y" : "ies"} but the effective multiplier is ×${multiplier}`,
+    };
+  }
+  for (const roll of rolls) {
+    if (!Number.isInteger(roll) || roll < 0) {
+      return {
+        ok: false,
+        error: `weapon damage roll ${String(roll)} is not a non-negative integer`,
+      };
+    }
+  }
+  for (const line of input.bonusLines ?? []) {
+    if (!Number.isInteger(line.roll) || line.roll < 0) {
+      return {
+        ok: false,
+        error: `bonus damage line "${line.label}" roll ${String(line.roll)} is not a non-negative integer`,
+      };
+    }
+  }
+
+  const notes: string[] = [];
+  if (input.confirmedCrit === true && multiplier === 1) {
+    notes.push(
+      "defender immune to critical hits — the confirmed critical deals normal damage",
+    );
+  }
+
+  // Each multiplier step adds one dice roll plus the full static stack.
+  const weaponDamage =
+    rolls.reduce((sum, roll) => sum + roll, 0) +
+    multiplier * input.staticDamage;
+
+  const weaponNonlethal =
+    input.nonlethalIntent === true
+      ? true
+      : input.lethalIntent === true
+        ? false
+        : input.weapon.nonlethal === true;
+  let lethal = weaponNonlethal ? 0 : weaponDamage;
+  let nonlethal = weaponNonlethal ? weaponDamage : 0;
+
+  const bonusContributions: {
+    label: string;
+    amount: number;
+    nonlethal: boolean;
+  }[] = [];
+  const precisionDropped: string[] = [];
+  for (const line of input.bonusLines ?? []) {
+    if (
+      line.precision === true &&
+      input.defender?.immuneToPrecisionDamage === true
+    ) {
+      precisionDropped.push(line.label);
+      continue;
+    }
+    const nonlethalLine = line.nonlethal === true;
+    bonusContributions.push({
+      label: line.label,
+      amount: line.roll,
+      nonlethal: nonlethalLine,
+    });
+    if (nonlethalLine) nonlethal += line.roll;
+    else lethal += line.roll;
+  }
+  if (precisionDropped.length > 0) {
+    notes.push(
+      `precision damage dropped — the defender does not take additional damage from precision-based attacks: ${precisionDropped.join(", ")}`,
+    );
+  }
+
+  // Minimum Damage (CRB p.179): "If penalties reduce the damage result to less
+  // than 1, a hit still deals 1 point of nonlethal damage."
+  if (lethal + nonlethal < 1) {
+    return {
+      ok: true,
+      multiplier,
+      weaponDamage,
+      lethal: 0,
+      nonlethal: 1,
+      bonusContributions,
+      precisionDropped,
+      notes: [
+        ...notes,
+        "damage reduced below 1 — the hit still deals 1 point of nonlethal damage",
+      ],
+    };
+  }
+  if (lethal < 0 || nonlethal < 0) {
+    // Mixed-sign authoring (a big Strength penalty plus nonlethal bonus dice):
+    // damage never heals the target; the negative bucket is clamped at 0.
+    notes.push("negative damage clamped to 0 (damage never heals the target)");
+    if (lethal < 0) lethal = 0;
+    if (nonlethal < 0) nonlethal = 0;
+  }
+  return {
+    ok: true,
+    multiplier,
+    weaponDamage,
+    lethal,
+    nonlethal,
+    bonusContributions,
+    precisionDropped,
+    notes,
+  };
 }

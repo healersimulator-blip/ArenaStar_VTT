@@ -5,8 +5,13 @@ import {
   PF1E_FEAT_TWO_WEAPON_FIGHTING,
   attackEligibility,
   attackModifierParts,
+  combinedDamageMultiplier,
+  confirmCritical,
+  damageModifierParts,
+  effectiveCritThreatMin,
   fullAttackPlan,
   resolveAttackRoll,
+  resolveDamageRoll,
   selectDefenseAc,
   shootingIntoMeleePenalty,
   twfPenalties,
@@ -360,16 +365,20 @@ describe("unarmed attacks (CRB p.182, AoN Rules ID 131)", () => {
       lethalIntent: true,
     });
     expect(
-      lethal.parts.find((p) => p.label === "unarmed lethal damage")?.value,
+      lethal.parts.find(
+        (p) => p.label === "lethal damage with a nonlethal weapon",
+      )?.value,
     ).toBe(-4);
     const trained = attackModifierParts({
       attacker: { ...fighter, feats: [PF1E_FEAT_IMPROVED_UNARMED_STRIKE] },
       weapon: fist,
       lethalIntent: true,
     });
-    expect(trained.parts.some((p) => p.label === "unarmed lethal damage")).toBe(
-      false,
-    );
+    expect(
+      trained.parts.some(
+        (p) => p.label === "lethal damage with a nonlethal weapon",
+      ),
+    ).toBe(false);
   });
 });
 
@@ -509,5 +518,648 @@ describe("attack eligibility (weapon-side; distance is A04)", () => {
     });
     expect(result.canAttack).toBe(true);
     expect(result.notes.some((n) => n.includes("provokes"))).toBe(true);
+  });
+});
+
+// ======================================================================================
+// A03 — damage and critical arithmetic (CRB pp.179/182/191, AoN Rules IDs 100/131/172/377)
+// ======================================================================================
+
+const greatsword = resolvePF1eWeapon({
+  name: "Greatsword",
+  class: "melee",
+  handedness: "two-handed",
+  proficiency: "martial",
+  damageDice: "2d6",
+  damageType: "slashing",
+}).weapon;
+
+const battleaxe = resolvePF1eWeapon({
+  name: "Battleaxe",
+  class: "melee",
+  handedness: "one-handed",
+  proficiency: "martial",
+  damageDice: "1d8",
+  damageType: "slashing",
+  critMultiplier: 3,
+}).weapon;
+
+const scimitar = resolvePF1eWeapon({
+  name: "Scimitar",
+  class: "melee",
+  handedness: "one-handed",
+  proficiency: "martial",
+  damageDice: "1d6",
+  damageType: "slashing",
+  critThreatMin: 18,
+}).weapon;
+
+const sap = resolvePF1eWeapon({
+  name: "Sap",
+  class: "melee",
+  handedness: "light",
+  proficiency: "martial",
+  damageDice: "1d6",
+  damageType: "bludgeoning",
+  nonlethal: true,
+}).weapon;
+
+const throwingDagger = resolvePF1eWeapon({
+  name: "Dagger",
+  class: "melee",
+  handedness: "light",
+  proficiency: "simple",
+  damageDice: "1d4",
+  damageType: "piercing",
+  critThreatMin: 19,
+  rangeIncrementFt: 10,
+}).weapon;
+
+const javelin = resolvePF1eWeapon({
+  name: "Javelin",
+  class: "thrown",
+  handedness: "light",
+  proficiency: "simple",
+  damageDice: "1d6",
+  damageType: "piercing",
+  rangeIncrementFt: 30,
+}).weapon;
+
+const sling = resolvePF1eWeapon({
+  name: "Sling",
+  class: "projectile",
+  handedness: "one-handed",
+  proficiency: "simple",
+  damageDice: "1d4",
+  damageType: "bludgeoning",
+  rangeIncrementFt: 50,
+}).weapon;
+
+const fist = resolvePF1eWeapon({
+  name: "Unarmed strike",
+  unarmed: true,
+}).weapon;
+
+const weakling = { bab: 2, strMod: -3, dexMod: 0, size: "Medium" as const };
+
+describe("critical hits: confirmation (CRB p.182, AoN Rules ID 131)", () => {
+  test("a natural 20 on the confirmation always confirms; a natural 1 never does", () => {
+    const twenty = confirmCritical({ die: 20, attackBonus: 1, ac: 30 });
+    expect(twenty).toMatchObject({ ok: true, confirmed: true, natural: 20 });
+    const one = confirmCritical({ die: 1, attackBonus: 20, ac: 5 });
+    expect(one).toMatchObject({ ok: true, confirmed: false, natural: 1 });
+  });
+
+  test("otherwise the confirmation is an attack roll that must hit — it does not need to be a 20 again", () => {
+    const hit = confirmCritical({ die: 14, attackBonus: 10, ac: 24 });
+    expect(hit).toMatchObject({ ok: true, confirmed: true, natural: null });
+    const miss = confirmCritical({ die: 13, attackBonus: 10, ac: 24 });
+    expect(miss).toMatchObject({ ok: true, confirmed: false, natural: null });
+  });
+
+  test("a die outside 1–20 is rejected, never guessed", () => {
+    expect(confirmCritical({ die: 0, attackBonus: 0, ac: 10 }).ok).toBe(false);
+    expect(confirmCritical({ die: 21, attackBonus: 0, ac: 10 }).ok).toBe(false);
+  });
+});
+
+describe("increased threat range (CRB p.182; Improved Critical/keen)", () => {
+  test("doubling re-anchors the range: 20 → 19–20, 19–20 → 17–20, 18–20 → 15–20", () => {
+    expect(effectiveCritThreatMin(sword)).toBe(20);
+    expect(effectiveCritThreatMin(sword, { threatRangeExpanded: true })).toBe(
+      19,
+    );
+    expect(effectiveCritThreatMin(dagger, { threatRangeExpanded: true })).toBe(
+      17,
+    );
+    expect(
+      effectiveCritThreatMin(scimitar, { threatRangeExpanded: true }),
+    ).toBe(15);
+  });
+
+  test("a broken weapon threatens on a natural 20 only — no expansion re-widens it (AoN Rules ID 413)", () => {
+    const brokenDagger = { ...dagger, broken: true };
+    expect(effectiveCritThreatMin(brokenDagger)).toBe(20);
+    expect(
+      effectiveCritThreatMin(brokenDagger, { threatRangeExpanded: true }),
+    ).toBe(20);
+  });
+});
+
+describe("multiplying damage (CRB p.179, AoN Rules ID 100)", () => {
+  test("a ×2 crit rolls the damage twice with all modifiers: (dice + Str + enhancement) twice", () => {
+    // fighter with the +1 longsword: static = Str 3 + enhancement 1 = 4
+    const statics = damageModifierParts({ attacker: fighter, weapon: sword });
+    expect(statics.parts).toEqual([
+      { label: "Str", value: 3 },
+      { label: "enhancement", value: 1 },
+    ]);
+    const crit = resolveDamageRoll({
+      weapon: sword,
+      staticDamage: statics.total,
+      weaponDamageRolls: [6, 4],
+      confirmedCrit: true,
+    });
+    expect(crit).toMatchObject({
+      ok: true,
+      multiplier: 2,
+      weaponDamage: 18,
+      lethal: 18,
+      nonlethal: 0,
+    });
+    // The same hit without the crit rolls once: 6 + 4 = 10.
+    const normal = resolveDamageRoll({
+      weapon: sword,
+      staticDamage: statics.total,
+      weaponDamageRolls: [6],
+    });
+    expect(normal).toMatchObject({ ok: true, multiplier: 1, lethal: 10 });
+  });
+
+  test("extra damage dice and precision damage are added exactly once on a critical hit", () => {
+    const crit = resolveDamageRoll({
+      weapon: sword,
+      staticDamage: 4,
+      weaponDamageRolls: [6, 4],
+      confirmedCrit: true,
+      bonusLines: [
+        { label: "flaming 1d6 fire", roll: 6 },
+        { label: "sneak attack 2d6", roll: 9, precision: true },
+      ],
+    });
+    expect(crit).toMatchObject({ ok: true, lethal: 18 + 6 + 9 });
+    if (crit.ok) {
+      expect(crit.bonusContributions).toEqual([
+        { label: "flaming 1d6 fire", amount: 6, nonlethal: false },
+        { label: "sneak attack 2d6", amount: 9, nonlethal: false },
+      ]);
+    }
+  });
+
+  test("multipliers are never multiplied together — each adds one less than its value", () => {
+    // ×2 weapon crit + ×2 charge ⇒ ×3 (1 + 1 + 1)
+    expect(
+      combinedDamageMultiplier({
+        weapon: sword,
+        confirmedCrit: true,
+        extraMultipliers: [2],
+      }),
+    ).toEqual({ ok: true, multiplier: 3 });
+    // ×3 battleaxe crit + ×2 charge ⇒ ×4
+    expect(
+      combinedDamageMultiplier({
+        weapon: battleaxe,
+        confirmedCrit: true,
+        extraMultipliers: [2],
+      }),
+    ).toEqual({ ok: true, multiplier: 4 });
+    // ×3 lance under a ×3 spirited charge with a ×3 crit ⇒ ×5
+    expect(
+      combinedDamageMultiplier({
+        weapon: battleaxe,
+        confirmedCrit: true,
+        extraMultipliers: [3],
+      }),
+    ).toEqual({ ok: true, multiplier: 5 });
+    // A charge multiplier without a critical still doubles (×2)
+    expect(
+      combinedDamageMultiplier({ weapon: sword, extraMultipliers: [2] }),
+    ).toEqual({ ok: true, multiplier: 2 });
+    expect(combinedDamageMultiplier({ weapon: sword })).toEqual({
+      ok: true,
+      multiplier: 1,
+    });
+  });
+
+  test("the resolver demands one roll per multiplier step and rejects garbage", () => {
+    const under = resolveDamageRoll({
+      weapon: sword,
+      staticDamage: 4,
+      weaponDamageRolls: [6],
+      confirmedCrit: true,
+    });
+    expect(under).toMatchObject({ ok: false });
+    if (!under.ok) expect(under.error).toContain("×2");
+    const badExtra = resolveDamageRoll({
+      weapon: sword,
+      staticDamage: 4,
+      weaponDamageRolls: [6, 6],
+      confirmedCrit: true,
+      extraMultipliers: [1.5],
+    });
+    expect(badExtra).toMatchObject({ ok: false });
+    const negative = resolveDamageRoll({
+      weapon: sword,
+      staticDamage: 4,
+      weaponDamageRolls: [-1],
+    });
+    expect(negative).toMatchObject({ ok: false });
+    const threeRolls = resolveDamageRoll({
+      weapon: sword,
+      staticDamage: 4,
+      weaponDamageRolls: [6, 4, 2],
+      confirmedCrit: true,
+      extraMultipliers: [2],
+    });
+    // (6+4) + (4+4) + (2+4) = 24 — each step adds the full static stack
+    expect(threeRolls).toMatchObject({ ok: true, multiplier: 3, lethal: 24 });
+  });
+
+  test("a broken weapon's confirmed critical is ×2 whatever its authored multiplier (AoN Rules ID 413)", () => {
+    const brokenAxe = { ...battleaxe, broken: true };
+    expect(
+      combinedDamageMultiplier({ weapon: brokenAxe, confirmedCrit: true }),
+    ).toEqual({ ok: true, multiplier: 2 });
+  });
+
+  test("a defender immune to critical hits takes normal damage — but charge multipliers are not criticals", () => {
+    const crit = resolveDamageRoll({
+      weapon: battleaxe,
+      staticDamage: 4,
+      weaponDamageRolls: [5],
+      confirmedCrit: true,
+      defender: { immuneToCriticalHits: true },
+    });
+    expect(crit).toMatchObject({ ok: true, multiplier: 1, lethal: 9 });
+    if (crit.ok) {
+      expect(
+        crit.notes.some((n) => n.includes("immune to critical hits")),
+      ).toBe(true);
+    }
+    expect(
+      combinedDamageMultiplier({
+        weapon: sword,
+        confirmedCrit: true,
+        extraMultipliers: [2],
+        defender: { immuneToCriticalHits: true },
+      }),
+    ).toEqual({ ok: true, multiplier: 2 });
+  });
+});
+
+describe("strength bonus to damage (CRB p.179, AoN Rules ID 100)", () => {
+  test("one-handed adds full Str; two-handed adds 1½ (rounded down)", () => {
+    const one = damageModifierParts({ attacker: fighter, weapon: sword });
+    expect(one.parts.find((p) => p.label === "Str")?.value).toBe(3);
+    const two = damageModifierParts({ attacker: fighter, weapon: greatsword });
+    expect(two.parts.find((p) => p.label === "Str (×1½)")?.value).toBe(4);
+  });
+
+  test("a light weapon in two hands never gains the 1½ increase", () => {
+    const gripped = damageModifierParts({
+      attacker: fighter,
+      weapon: dagger,
+      wieldingTwoHanded: true,
+    });
+    expect(gripped.parts.find((p) => p.label === "Str")?.value).toBe(3);
+  });
+
+  test("off-hand adds half the bonus rounded down; the entire penalty applies", () => {
+    const off = damageModifierParts({
+      attacker: fighter,
+      weapon: sword,
+      hand: "off-hand",
+    });
+    expect(off.parts.find((p) => p.label === "Str (×½)")?.value).toBe(1);
+    const weakOff = damageModifierParts({
+      attacker: weakling,
+      weapon: sword,
+      hand: "off-hand",
+    });
+    expect(weakOff.parts.find((p) => p.label === "Str (×½)")?.value).toBe(-3);
+  });
+
+  test("a two-handed wielder's Strength penalty is not multiplied", () => {
+    const weak = damageModifierParts({
+      attacker: weakling,
+      weapon: greatsword,
+    });
+    expect(weak.parts.find((p) => p.label === "Str (×1½)")?.value).toBe(-3);
+  });
+
+  test("ranged: thrown weapons add Str; a melee weapon thrown adds Str; bows do not", () => {
+    const thrown = damageModifierParts({ attacker: fighter, weapon: javelin });
+    expect(thrown.parts.find((p) => p.label === "Str")?.value).toBe(3);
+    const thrownMelee = damageModifierParts({
+      attacker: fighter,
+      weapon: throwingDagger,
+      mode: "ranged",
+    });
+    expect(thrownMelee.parts.find((p) => p.label === "Str")?.value).toBe(3);
+    const shot = damageModifierParts({ attacker: fighter, weapon: bow });
+    expect(shot.parts.find((p) => p.label === "Str")).toBeUndefined();
+  });
+
+  test("a non-composite bow applies the penalty, but not a bonus; a sling adds the full modifier", () => {
+    const weakBow = damageModifierParts({
+      attacker: weakling,
+      weapon: bow,
+      rangedStrRule: "penalty-only",
+    });
+    expect(weakBow.parts.find((p) => p.label === "Str (penalty)")?.value).toBe(
+      -3,
+    );
+    expect(
+      weakBow.notes.some((n) => n.includes("penalty, but not a bonus")),
+    ).toBe(true);
+    const strongBow = damageModifierParts({
+      attacker: fighter,
+      weapon: bow,
+      rangedStrRule: "penalty-only",
+    });
+    expect(strongBow.parts.find((p) => p.label === "Str")).toBeUndefined();
+    const hurled = damageModifierParts({
+      attacker: fighter,
+      weapon: sling,
+      rangedStrRule: "full",
+    });
+    expect(hurled.parts.find((p) => p.label === "Str")?.value).toBe(3);
+  });
+
+  test("natural attacks: primary full Str, secondary half, the sole natural attack 1½", () => {
+    const bite = damageModifierParts({
+      attacker: fighter,
+      weapon: natural("Bite"),
+    });
+    expect(bite.parts.find((p) => p.label === "Str")?.value).toBe(3);
+    const wing = damageModifierParts({
+      attacker: fighter,
+      weapon: natural("Wing", true),
+    });
+    expect(wing.parts.find((p) => p.label === "Str (×½)")?.value).toBe(1);
+    const mixed = damageModifierParts({
+      attacker: fighter,
+      weapon: natural("Claw"),
+      naturalAsSecondary: true,
+    });
+    expect(mixed.parts.find((p) => p.label === "Str (×½)")?.value).toBe(1);
+    const sole = damageModifierParts({
+      attacker: fighter,
+      weapon: natural("Bite"),
+      oneAndHalfStr: true,
+    });
+    expect(sole.parts.find((p) => p.label === "Str (×1½)")?.value).toBe(4);
+  });
+
+  test("the sole-natural 1½ flag flows from fullAttackPlan into the damage stack", () => {
+    const plan = fullAttackPlan({ attacker: fighter, weapon: natural("Bite") });
+    const bite = plan.attacks[0];
+    expect(bite?.oneAndHalfStr).toBe(true);
+    if (bite === undefined) throw new Error("the bite attack is missing");
+    const statics = damageModifierParts({
+      attacker: fighter,
+      weapon: bite.weapon,
+      oneAndHalfStr: bite.oneAndHalfStr,
+    });
+    expect(statics.parts.find((p) => p.label === "Str (×1½)")?.value).toBe(4);
+  });
+
+  test("enhancement adds to damage; the special-ability equivalent never does; broken is −2", () => {
+    const enhanced = resolvePF1eWeapon({
+      name: "Sword",
+      class: "melee",
+      handedness: "one-handed",
+      proficiency: "martial",
+      damageDice: "1d8",
+      enhancementBonus: 2,
+      specialAbilityBonus: 1,
+    }).weapon;
+    const parts = damageModifierParts({ attacker: fighter, weapon: enhanced });
+    expect(parts.parts.find((p) => p.label === "enhancement")?.value).toBe(2);
+    const brokenSword = { ...sword, broken: true };
+    const brokenParts = damageModifierParts({
+      attacker: fighter,
+      weapon: brokenSword,
+    });
+    expect(
+      brokenParts.parts.find((p) => p.label === "broken weapon")?.value,
+    ).toBe(-2);
+    expect(brokenParts.total).toBe(2);
+  });
+});
+
+describe("minimum damage (CRB p.179, AoN Rules ID 100)", () => {
+  test("penalties below 1 still deal 1 point of nonlethal damage", () => {
+    // 1d8 rolled 2 with a −4 stack (Str −3 + misc −1): 2 − 4 = −2 < 1
+    const hit = resolveDamageRoll({
+      weapon: sword,
+      staticDamage: -4,
+      weaponDamageRolls: [2],
+    });
+    expect(hit).toMatchObject({ ok: true, lethal: 0, nonlethal: 1 });
+    if (hit.ok) {
+      expect(hit.notes.some((n) => n.includes("1 point of nonlethal"))).toBe(
+        true,
+      );
+    }
+  });
+
+  test("a result of exactly 0 is still below 1", () => {
+    const zero = resolveDamageRoll({
+      weapon: sword,
+      staticDamage: -3,
+      weaponDamageRolls: [3],
+    });
+    expect(zero).toMatchObject({ ok: true, lethal: 0, nonlethal: 1 });
+  });
+
+  test("bonus dice lifting the total to 1 or more avoid the minimum", () => {
+    const lifted = resolveDamageRoll({
+      weapon: sword,
+      staticDamage: -2,
+      weaponDamageRolls: [2],
+      bonusLines: [{ label: "sneak attack 2d6", roll: 7, precision: true }],
+    });
+    expect(lifted).toMatchObject({ ok: true, lethal: 7 });
+    if (lifted.ok) {
+      expect(lifted.notes.some((n) => n.includes("1 point of nonlethal"))).toBe(
+        false,
+      );
+    }
+  });
+
+  test("a nonlethal weapon driven below 1 still deals 1 nonlethal", () => {
+    // Unarmed strike (1d3, nonlethal) with Str −3: roll 1 − 3 = −2
+    const punch = resolveDamageRoll({
+      weapon: fist,
+      staticDamage: -3,
+      weaponDamageRolls: [1],
+    });
+    expect(punch).toMatchObject({ ok: true, lethal: 0, nonlethal: 1 });
+  });
+});
+
+describe("nonlethal and lethal damage swap (CRB p.191, AoN Rules ID 172)", () => {
+  test("unarmed damage is nonlethal by default; a lethal intent moves it to the lethal bucket", () => {
+    const statics = damageModifierParts({ attacker: fighter, weapon: fist });
+    expect(statics.parts.find((p) => p.label === "Str")?.value).toBe(3);
+    const punch = resolveDamageRoll({
+      weapon: fist,
+      staticDamage: statics.total,
+      weaponDamageRolls: [3],
+    });
+    expect(punch).toMatchObject({ ok: true, lethal: 0, nonlethal: 6 });
+    const hammerFist = resolveDamageRoll({
+      weapon: fist,
+      staticDamage: statics.total,
+      weaponDamageRolls: [3],
+      lethalIntent: true,
+    });
+    expect(hammerFist).toMatchObject({ ok: true, lethal: 6, nonlethal: 0 });
+  });
+
+  test("a lethal weapon can deal nonlethal instead at −4 on the attack roll", () => {
+    const attack = attackModifierParts({
+      attacker: fighter,
+      weapon: sword,
+      nonlethalIntent: true,
+    });
+    expect(
+      attack.parts.find(
+        (p) => p.label === "nonlethal damage with a lethal weapon",
+      )?.value,
+    ).toBe(-4);
+    const merciful = resolveDamageRoll({
+      weapon: sword,
+      staticDamage: 4,
+      weaponDamageRolls: [6],
+      nonlethalIntent: true,
+    });
+    expect(merciful).toMatchObject({ ok: true, lethal: 0, nonlethal: 10 });
+  });
+
+  test("a nonlethal weapon dealing lethal takes −4 — Improved Unarmed Strike waives it for unarmed strikes only", () => {
+    // The A02 correction: the rule covers every nonlethal weapon, not just the
+    // unarmed strike; IUS never exempts a sap.
+    const sapLethal = attackModifierParts({
+      attacker: { ...fighter, feats: [PF1E_FEAT_IMPROVED_UNARMED_STRIKE] },
+      weapon: sap,
+      lethalIntent: true,
+    });
+    expect(
+      sapLethal.parts.find(
+        (p) => p.label === "lethal damage with a nonlethal weapon",
+      )?.value,
+    ).toBe(-4);
+    const fistLethalTrained = attackModifierParts({
+      attacker: { ...fighter, feats: [PF1E_FEAT_IMPROVED_UNARMED_STRIKE] },
+      weapon: fist,
+      lethalIntent: true,
+    });
+    expect(
+      fistLethalTrained.parts.some(
+        (p) => p.label === "lethal damage with a nonlethal weapon",
+      ),
+    ).toBe(false);
+    const sapDefault = resolveDamageRoll({
+      weapon: sap,
+      staticDamage: 3,
+      weaponDamageRolls: [4],
+    });
+    expect(sapDefault).toMatchObject({ ok: true, lethal: 0, nonlethal: 7 });
+  });
+
+  test("both intents at once are rejected rather than guessed", () => {
+    const both = resolveDamageRoll({
+      weapon: sword,
+      staticDamage: 4,
+      weaponDamageRolls: [6],
+      lethalIntent: true,
+      nonlethalIntent: true,
+    });
+    expect(both).toMatchObject({ ok: false });
+  });
+});
+
+describe("precision and critical immunities (rogue's Precision Damage & Critical Hits sidebar)", () => {
+  test("precision-immune defenders drop sneak attack lines but keep extra damage dice", () => {
+    const hit = resolveDamageRoll({
+      weapon: sword,
+      staticDamage: 4,
+      weaponDamageRolls: [6, 4],
+      confirmedCrit: true,
+      defender: { immuneToPrecisionDamage: true },
+      bonusLines: [
+        { label: "sneak attack 2d6", roll: 9, precision: true },
+        { label: "flaming 1d6 fire", roll: 6 },
+      ],
+    });
+    // ×2 weapon crit: (6+4) + (4+4) = 18, plus 6 fire — the sneak line is dropped
+    expect(hit).toMatchObject({ ok: true, lethal: 18 + 6 });
+    if (hit.ok) {
+      expect(hit.precisionDropped).toEqual(["sneak attack 2d6"]);
+      expect(hit.notes.some((n) => n.includes("precision-based attacks"))).toBe(
+        true,
+      );
+    }
+  });
+
+  test("a swarm takes precision damage but no extra critical damage; an elemental takes neither", () => {
+    const swarm = resolveDamageRoll({
+      weapon: battleaxe,
+      staticDamage: 3,
+      weaponDamageRolls: [5],
+      confirmedCrit: true,
+      defender: { immuneToCriticalHits: true },
+      bonusLines: [{ label: "sneak attack 2d6", roll: 8, precision: true }],
+    });
+    expect(swarm).toMatchObject({ ok: true, multiplier: 1, lethal: 5 + 3 + 8 });
+    const elemental = resolveDamageRoll({
+      weapon: battleaxe,
+      staticDamage: 3,
+      weaponDamageRolls: [5],
+      confirmedCrit: true,
+      defender: {
+        immuneToCriticalHits: true,
+        immuneToPrecisionDamage: true,
+      },
+      bonusLines: [{ label: "sneak attack 2d6", roll: 8, precision: true }],
+    });
+    expect(elemental).toMatchObject({ ok: true, multiplier: 1, lethal: 8 });
+    if (elemental.ok) {
+      expect(elemental.precisionDropped).toEqual(["sneak attack 2d6"]);
+    }
+  });
+});
+
+describe("the SRD's worked critical composition (CRB pp.179/182)", () => {
+  test("+1 flaming longsword, Str 14: the ×2 crit is 2d8 + 2×(Str+enh) + 1d6 fire once", () => {
+    const str14 = { bab: 2, strMod: 2, dexMod: 2, size: "Medium" as const };
+    const statics = damageModifierParts({ attacker: str14, weapon: sword });
+    expect(statics.total).toBe(3);
+    const crit = resolveDamageRoll({
+      weapon: sword,
+      staticDamage: statics.total,
+      weaponDamageRolls: [5, 5],
+      confirmedCrit: true,
+      bonusLines: [{ label: "flaming 1d6 fire", roll: 4 }],
+    });
+    expect(crit).toMatchObject({
+      ok: true,
+      weaponDamage: 5 + 5 + 2 * 3,
+      lethal: 16 + 4,
+    });
+    const normal = resolveDamageRoll({
+      weapon: sword,
+      staticDamage: statics.total,
+      weaponDamageRolls: [5],
+      bonusLines: [{ label: "flaming 1d6 fire", roll: 4 }],
+    });
+    expect(normal).toMatchObject({ ok: true, lethal: 8 + 4 });
+  });
+
+  test("a negative weapon total against a positive nonlethal rider is clamped, never healing", () => {
+    const odd = resolveDamageRoll({
+      weapon: sword,
+      staticDamage: -4,
+      weaponDamageRolls: [2],
+      bonusLines: [
+        { label: "stunning rider", roll: 6, precision: true, nonlethal: true },
+      ],
+    });
+    expect(odd).toMatchObject({ ok: true, lethal: 0, nonlethal: 6 });
+    if (odd.ok) {
+      expect(odd.notes.some((n) => n.includes("clamped"))).toBe(true);
+    }
   });
 });

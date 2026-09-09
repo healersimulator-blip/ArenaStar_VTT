@@ -2424,3 +2424,94 @@ Gap List and are only assembled here.
   right). Full suite 1008 passed / 3 skipped across 121 files; typecheck/lint/
   touched-file formatting/build/size green; dist 2,054,514 raw / 591,568 gzip
   (unchanged — nothing imports tactical.ts yet; A06 wires it into the sheet).
+
+## D-136 — A03: damage and critical arithmetic — confirmation, multipliers, Str rules, minimums, immunities
+
+**Date:** 2026-09-10. **Scope:** P3/A03. Sources fetched and verified against
+primary texts before encoding: Damage — minimum damage, Strength bonus,
+Multiplying Damage (CRB p.179, AoN Rules ID 100); Attack — Critical Hits
+(CRB p.182, AoN Rules ID 131); Nonlethal Damage (CRB p.191, AoN Rules ID 172);
+Magic Weapons (CRB p.468, AoN Rules ID 377); Broken (AoN Rules ID 413, already
+carried by A01); the rogue's Precision Damage & Critical Hits sidebar
+(d20pfsrd, quoting the Bestiary creature-type traits); Improved Critical /
+keen stacking ("this effect doesn't stack with any other effect that expands
+the threat range"). The strategic engine's already-fixed §2.3 semantics
+(confirm die 20 confirms / 1 fails; minimum applied to the final result) were
+mirrored, not re-decided.
+
+- **`tactical.ts` stays pure and diceless.** A03 is added to the same file the
+  A02 layer lives in, and the callers still supply every rolled value: the
+  confirmation d20, one weapon-dice sum per damage roll, and each bonus line's
+  rolled sum. No RNG, no ModelPool, no DOM — the plan's PR-D damage half as a
+  set of total helpers rather than one fat `damageRoll` closure.
+- **Criticals.** `effectiveCritThreatMin`: a broken weapon threatens on a
+  natural 20 only, and an expansion cannot re-widen it (order matters — broken
+  first, doubling second); otherwise a single doubling re-anchors the range at
+  2×min−21 (20→19–20, 19–20→17–20, 18–20→15–20). The doubling is one boolean
+  because the verified stacking text forbids two. `confirmCritical`: the
+  confirmation is an attack roll with the same modifiers — natural 20 always
+  confirms, natural 1 never does, otherwise die+bonus ≥ AC ("it doesn't need
+  to come up 20 again").
+- **Multipliers add.** `combinedDamageMultiplier` implements "each multiplier
+  works off the original, unmultiplied damage": 1 + Σ(m−1), so ×2+×2=×3,
+  ×3+×2=×4, and the ×3 lance under a ×3 spirited charge with a ×3 weapon crit
+  is ×5. A broken weapon's confirmed crit is ×2 regardless of its authored
+  multiplier. A defender immune to critical hits contributes no crit
+  multiplier — but outside multipliers (a mounted charge is not a critical)
+  still apply. Extra multipliers must be integers ≥ 2; garbage is rejected,
+  never guessed.
+- **The damage split the Gap List demanded (§2.4) is explicit.**
+  `resolveDamageRoll` takes one roll per multiplier step plus the static stack
+  (`damageModifierParts` total, or a stat-block line's derived bonus) and the
+  bonus lines separately: base dice and every static modifier are multiplied
+  ("roll the damage with all modifiers multiple times and total the results" —
+  Str, enhancement, Power-Attack-style misc all multiply), while precision
+  damage and extra damage dice (flaming) are added exactly once. The
+  base-vs-precision split is carried on the result so A05's DR resolver can
+  apply "precision damage is never reduced by DR" without re-deriving it.
+- **Strength rules exactly (CRB p.179).** One-handed ×1; two-handed wield ×1½
+  with bonuses rounded down — a light weapon or unarmed strike never gains the
+  increase however it is held; off-hand and secondary natural attacks ×½ (the
+  sole natural attack is ×1½ via A02's `oneAndHalfStr` flag, overriding the
+  secondary classification); Strength **penalties are never multiplied** — the
+  entire penalty applies off-hand, and two-handed wielding does not deepen it.
+  Ranged Str is full for thrown weapons, for a melee weapon with a range
+  increment (its only ranged use is being thrown), and for the authored sling
+  exception; penalty-only for a non-composite bow; none for everything else —
+  a composite bow's rating is authored flat damage, never guessed here.
+  Enhancement adds to damage (magic weapons apply to attack and damage;
+  special-ability equivalents modify neither, AoN ID 377).
+- **Buckets, minimum, and immunities.** Weapon damage lands nonlethal when the
+  weapon is nonlethal (unarmed, saps) unless an intent flips it; the minimum
+  rule converts a total result below 1 into 1 point of nonlethal damage
+  (mirroring the strategic §2.3 fix, applied to the whole hit so bonus dice
+  can legitimately lift a 0-weapon-total hit above the minimum); a negative
+  bucket against a positive rider is clamped with a note (damage never heals).
+  Crit immunity and precision immunity are **separate** defender flags per the
+  Bestiary traits — a swarm takes sneak attack but no extra crit damage; an
+  elemental takes neither; a confirmed crit against a crit-immune defender
+  deals normal (×1) damage with an explicit note.
+- **Rule correction found while encoding:** A02's −4 lethal-swap guard fired
+  only for unarmed strikes. CRB p.191 (AoN ID 172) covers every nonlethal
+  weapon — "a weapon that deals nonlethal damage, including an unarmed
+  strike" — and IUS waives it for unarmed strikes only, never a sap. The guard
+  now covers all nonlethal weapons; the mirror `nonlethalIntent` (−4 with a
+  lethal weapon; no core feat waives it) was added symmetrically and threaded
+  through `fullAttackPlan`. One A02 test label was updated; its behavior was
+  and is unchanged.
+- **Deliberately not encoded:** DR/ER/hardness (A05 consumes the carried
+  split), range penalties and splash scatter (A04), Improved Critical / Power
+  Attack / fighting defensively wiring (A07 — `threatRangeExpanded` and `misc`
+  are the seams), charge multipliers (P06/P08 supply `extraMultipliers`), and
+  any dice. Nothing imports the damage layer yet; A06 wires it into the sheet
+  roll buttons and chat breakdown.
+- **Evidence:** 32 new tests named after the SRD headings (confirmation
+  extremes, doubling re-anchors, additive multipliers, one-roll-per-step
+  validation, Str ladder with penalty cases, sling/bow rules, minimum damage,
+  both swap directions with the IUS-only exemption, swarm-vs-elemental
+  immunity discrimination, and the SRD's own worked flaming-longsword
+  composition). The two initial failures were test arithmetic (a missed third
+  static application; a one-roll ×2 crit), not code. Full suite 1040 passed /
+  3 skipped across 121 files; typecheck/lint/touched-file Prettier/build/
+  size/build:systems green; dist 2,054,514 raw, byte-identical to D-135 (no
+  importer yet), gzip 594,184 in this environment.
