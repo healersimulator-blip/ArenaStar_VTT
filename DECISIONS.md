@@ -2364,3 +2364,63 @@ hpMax/2`, so exactly half is not broken (also encoded in A.17's memory).
   touched-file formatting/build/size green; dist 2,054,514 raw / 591,568 gzip.
   A02–A07 remain open; nothing consumes these descriptors in the attack path
   yet (that is A02's first job).
+
+## D-135 — A02: the tactical attack layer — Table 8-7, natural attacks, unarmed, nonproficiency
+
+**Date:** 2026-09-10. **Scope:** P3/A02. Sources fetched and verified against
+primary texts before encoding: Two-Weapon Fighting + Table 8-7 (CRB p.202, AoN
+Rules ID 198), Attack — unarmed/natural/criticals/shooting-into-melee (CRB
+p.182, AoN Rules ID 131), Natural Attacks UMR (Bestiary p.301), weapon
+nonproficiency (CRB p.144 via AoN Firearm Rules' "the standard −4"), armor
+nonproficiency (CRB p.153, AoN Rules ID 361). Situational numbers (flanking +2,
+charge +2, invisible attacker +2, squeezing −4) were already verified in the
+Gap List and are only assembled here.
+
+- **`src/packages/pf1e/tactical.ts` (new, pure):** the Implementation Plan's
+  named module for the tactical half. No ModelPool, no dice — callers pass the
+  d20 result, so every fixture is exact. The modifier stack
+  (`attackModifierParts`) is a list of labeled parts (BAB / Str-or-Dex / size /
+  enhancement / broken −2 / weapon nonproficiency −4 / armor ACP / TWF per
+  Table 8-7 / secondary natural −5 / unarmed lethal −4 / situational /
+  shooting-into-melee / misc), which is what the plan's chat breakdown line is
+  built from. `resolveAttackRoll` encodes natural 1 = automatic miss, natural
+  20 = automatic hit and threat, and the CRB's two threat caveats: a threat
+  range below 20 does not make the roll an automatic hit, and a roll that does
+  not hit is never a threat. `selectDefenseAc` covers the touch × flat-footed
+  AC combination the cached three-flavor set cannot express (10 + size + misc),
+  cross-checked against `acFromBreakdown` in tests.
+- **Table 8-7 exactly:** normal −6/−10, light off-hand −4/−8, feat −4/−4,
+  feat+light −2/−2; the penalties apply to **every** primary-hand iterative and
+  to the **one** extra off-hand attack; a double weapon's off-hand end counts
+  as light; an unarmed strike is always light. `fullAttackPlan` turns those
+  into attack series: manufactured iteratives from the BAB ladder, one
+  off-hand attack (no ladder), and the natural attacks — which never iterate,
+  become secondary (−5) when any manufactured attack is made, and are **all
+  primary** when they are the only attacks and all one type (UMR), overriding
+  an authored `naturalSecondary`. A sole natural attack is always full BAB and
+  carries the 1½-Str flag for A03 (two claws do not qualify; the increase
+  never applies to one of several attacks). The limb-sharing rule is the
+  caller's authoring concern — pass only limbs that are actually free.
+- **Nonproficiency:** weapons −4 (natural weapons and unarmed strikes have no
+  proficiency group and never take it); nonproficient armor/shield applies its
+  ACP to attack rolls, armor and shield stacking (CRB p.153). An absent
+  proficiency list means "proficient" — nonproficiency is opt-in, never guessed.
+- **Shooting into a melee:** −4, −2 when the target is two size categories
+  larger than the friendly characters it is engaged with, none at three; the
+  "target ≥ 10 ft from the nearest friendly" avoidance and the "engaged"
+  definition are caller geometry (A04/C01) and only referenced in docs.
+  Precise Shot removes it. The three feats this layer recognizes are named
+  constants; A07 generalizes feat handling.
+- **Deliberately not interpreted:** the CRB sentence "feats such as Two-Weapon
+  Fighting and Multiattack can reduce these [natural secondary] penalties" —
+  ambiguous, and Multiattack is A07's; the −5 stands unreduced. Fighting
+  defensively's −4/+2 is now verified on AoN ID 131 but belongs to A07's
+  stance slice. Improvised-weapon use of a bow in melee is noted, never
+  resolved (no verified rule encoded). Damage, confirmation, range penalties
+  and DR mitigation are A03/A04/A05.
+- **Evidence:** 25 new tests in `tests/packages/pf1eTactical.test.ts`, named
+  after the SRD headings, hand-computed (the two initial failures were test
+  arithmetic that forgot the fixture sword's +1 enhancement — the code was
+  right). Full suite 1008 passed / 3 skipped across 121 files; typecheck/lint/
+  touched-file formatting/build/size green; dist 2,054,514 raw / 591,568 gzip
+  (unchanged — nothing imports tactical.ts yet; A06 wires it into the sheet).
