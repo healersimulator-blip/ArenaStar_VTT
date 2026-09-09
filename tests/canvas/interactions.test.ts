@@ -115,12 +115,26 @@ class FakeSource implements PointerEventSource {
   }
   move(x: number, y: number): void {
     for (const cb of [...this.pointer.pointermove]) {
-      cb({ x, y, button: 0, shiftKey: false, pointerId: 1, preventDefault: () => undefined });
+      cb({
+        x,
+        y,
+        button: 0,
+        shiftKey: false,
+        pointerId: 1,
+        preventDefault: () => undefined,
+      });
     }
   }
   up(x: number, y: number): void {
     for (const cb of [...this.pointer.pointerup]) {
-      cb({ x, y, button: 0, shiftKey: false, pointerId: 1, preventDefault: () => undefined });
+      cb({
+        x,
+        y,
+        button: 0,
+        shiftKey: false,
+        pointerId: 1,
+        preventDefault: () => undefined,
+      });
     }
   }
   spin(x: number, y: number, deltaY: number): void {
@@ -133,7 +147,10 @@ class FakeSource implements PointerEventSource {
 class FakeStage implements StageLike {
   cameraValue: Camera = { x: 0, y: 0, scale: 1 };
   tokenRenders: TokenDocument[][] = [];
-  marquees: Array<{ a: { x: number; y: number } | null; b?: { x: number; y: number } }> = [];
+  marquees: Array<{
+    a: { x: number; y: number } | null;
+    b?: { x: number; y: number };
+  }> = [];
 
   get camera(): Camera {
     return this.cameraValue;
@@ -144,7 +161,10 @@ class FakeStage implements StageLike {
   syncTokens(tokens: readonly TokenDocument[]): void {
     this.tokenRenders.push([...tokens]);
   }
-  setMarquee(a: { x: number; y: number } | null, b?: { x: number; y: number }): void {
+  setMarquee(
+    a: { x: number; y: number } | null,
+    b?: { x: number; y: number },
+  ): void {
     this.marquees.push({ a, ...(b !== undefined ? { b } : {}) });
   }
 }
@@ -163,6 +183,11 @@ function makeHarness(
     grid?: SquareGrid | null;
     canMove?: boolean;
     onTokenActivate?: (view: TokenView) => void;
+    onContextMenu?: (at: {
+      screen: { x: number; y: number };
+      world: { x: number; y: number };
+      tokenId: string;
+    }) => void;
   } = {},
 ) {
   const stage = new FakeStage();
@@ -171,6 +196,11 @@ function makeHarness(
   const selectionChanges: string[][] = [];
   const pings: Array<{ x: number; y: number }> = [];
   const rulerChanges: Array<Array<{ x: number; y: number }>> = [];
+  const contextMenus: Array<{
+    screen: { x: number; y: number };
+    world: { x: number; y: number };
+    tokenId: string;
+  }> = [];
   const controller = new CanvasController({
     stage,
     source,
@@ -180,11 +210,24 @@ function makeHarness(
       opts.grid === undefined ? { type: "square", size: 100 } : opts.grid,
     canMove: () => opts.canMove ?? true,
     ...(opts.onTokenActivate ? { onTokenActivate: opts.onTokenActivate } : {}),
+    onContextMenu: (at) => {
+      contextMenus.push(at);
+      opts.onContextMenu?.(at);
+    },
     onSelectionChange: (sel) => selectionChanges.push([...sel]),
     onPing: (world) => pings.push({ x: world.x, y: world.y }),
     onRulerChange: (points) => rulerChanges.push([...points]),
   });
-  return { stage, source, client, controller, selectionChanges, pings, rulerChanges };
+  return {
+    stage,
+    source,
+    client,
+    controller,
+    selectionChanges,
+    pings,
+    rulerChanges,
+    contextMenus,
+  };
 }
 
 // ─── pure helpers ─────────────────────────────────────────────────────────────
@@ -206,9 +249,18 @@ describe("interaction math (§10)", () => {
   test("dragTarget snaps to grid intersections when a grid is given", () => {
     const grid: SquareGrid = { type: "square", size: 100 };
     // 100+30=130→100 ; 100−60=40→0
-    expect(dragTarget({ x: 100, y: 100 }, { x: 30, y: -60 }, grid)).toEqual({ x: 100, y: 0 });
-    expect(dragTarget({ x: 100, y: 100 }, { x: 60, y: 60 }, grid)).toEqual({ x: 200, y: 200 });
-    expect(dragTarget({ x: 100, y: 100 }, { x: 33, y: 21 }, null)).toEqual({ x: 133, y: 121 });
+    expect(dragTarget({ x: 100, y: 100 }, { x: 30, y: -60 }, grid)).toEqual({
+      x: 100,
+      y: 0,
+    });
+    expect(dragTarget({ x: 100, y: 100 }, { x: 60, y: 60 }, grid)).toEqual({
+      x: 200,
+      y: 200,
+    });
+    expect(dragTarget({ x: 100, y: 100 }, { x: 33, y: 21 }, null)).toEqual({
+      x: 133,
+      y: 121,
+    });
   });
 });
 
@@ -377,10 +429,13 @@ describe("canvas ephemera interactions (§9)", () => {
 describe("token activation without movement side effects", () => {
   test("double-click picks the topmost token through camera transform, even if not movable", () => {
     const activated: string[] = [];
-    const h = makeHarness([view(token("a", 125, 150)), view(token("b", 125, 150))], {
-      canMove: false,
-      onTokenActivate: (v) => activated.push(v.token._id),
-    });
+    const h = makeHarness(
+      [view(token("a", 125, 150)), view(token("b", 125, 150))],
+      {
+        canMove: false,
+        onTokenActivate: (v) => activated.push(v.token._id),
+      },
+    );
     h.stage.setCamera({ x: 100, y: 100, scale: 2 });
     h.source.down(50, 100);
     h.source.up(50, 100);
@@ -390,7 +445,12 @@ describe("token activation without movement side effects", () => {
     expect(activated).toEqual(["b"]);
     expect(h.client.submitted).toEqual([]);
     h.source.doubleClick(700, 700);
-    for (const opts of [{ shiftKey: true }, { ctrlKey: true }, { altKey: true }, { button: 2 }])
+    for (const opts of [
+      { shiftKey: true },
+      { ctrlKey: true },
+      { altKey: true },
+      { button: 2 },
+    ])
       h.source.doubleClick(50, 100, opts);
     expect(activated).toEqual(["b"]);
   });
@@ -412,7 +472,9 @@ describe("token activation without movement side effects", () => {
     h.source.move(183, 177);
     h.source.up(183, 177);
     expect(h.client.submitted).toHaveLength(1);
-    expect(h.client.submitted[0]?.[0]).toMatchObject({ diff: { x: 200, y: 200 } });
+    expect(h.client.submitted[0]?.[0]).toMatchObject({
+      diff: { x: 200, y: 200 },
+    });
     h.source.doubleClick(123, 117);
     expect(activated).toEqual(["a"]); // a drag cannot activate a sheet
     h.controller.destroy();
@@ -448,5 +510,60 @@ describe("token activation without movement side effects", () => {
     source.removeDoubleClickListener?.(listener);
     target.dispatchEvent(event());
     expect(events).toHaveLength(1);
+  });
+});
+
+// ─── T01: right-click token context menu vs right-drag pan ───────────────────
+
+describe("token context menu gesture (T01)", () => {
+  const views = [view(token("a", 50, 50)), view(token("b", 300, 200))];
+
+  test("right-CLICK on a token opens the menu; right-DRAG pans and does not", () => {
+    const h = makeHarness(views);
+    // click (down+up, no movement) on token a's center
+    h.source.down(60, 60, { button: 2 });
+    h.source.up(60, 60);
+    expect(h.contextMenus.length).toBe(1);
+    expect(h.contextMenus[0]?.tokenId).toBe("a");
+    expect(h.contextMenus[0]?.screen).toEqual({ x: 60, y: 60 });
+    // a real drag pans: camera moves, no menu
+    h.source.down(400, 300, { button: 2 });
+    h.source.move(460, 330);
+    h.source.up(460, 330);
+    expect(h.contextMenus.length).toBe(1); // no new menu
+    expect(h.stage.cameraValue.x).not.toBe(0);
+    expect(h.stage.cameraValue.y).not.toBe(0);
+  });
+
+  test("a tiny right-click wiggle under the 4px threshold still opens the menu", () => {
+    const h = makeHarness(views);
+    h.source.down(60, 60, { button: 2 });
+    h.source.move(62, 61);
+    h.source.up(62, 61);
+    expect(h.contextMenus.length).toBe(1);
+  });
+
+  test("right-click on empty space never opens a menu", () => {
+    const h = makeHarness(views);
+    h.source.down(900, 700, { button: 2 });
+    h.source.up(900, 700);
+    expect(h.contextMenus.length).toBe(0);
+  });
+
+  test("middle-drag and shift+left keep panning and never open the menu", () => {
+    const h = makeHarness(views);
+    h.source.down(60, 60, { button: 1 });
+    h.source.up(60, 60);
+    h.source.down(60, 60, { button: 0, shiftKey: true });
+    h.source.up(60, 60);
+    expect(h.contextMenus.length).toBe(0);
+  });
+
+  test("left-click selection is unaffected by the menu port", () => {
+    const h = makeHarness(views);
+    h.source.down(60, 60, { button: 0 });
+    h.source.up(60, 60);
+    expect(h.selectionChanges.at(-1)).toEqual(["a"]);
+    expect(h.contextMenus.length).toBe(0);
   });
 });

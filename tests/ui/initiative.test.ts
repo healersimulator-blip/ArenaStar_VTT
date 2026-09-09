@@ -1,12 +1,24 @@
 import { describe, expect, test } from "vitest";
-import type { ActorDocument, SceneDocument, TokenDocument } from "../../src/core/documents";
+import type {
+  ActorDocument,
+  SceneDocument,
+  TokenDocument,
+} from "../../src/core/documents";
 import { newEncounter } from "../../src/ui/combat/encounters";
 import {
+  hiddenInitiativeDisplay,
   manualInitiative,
   rollEncounterInitiative,
+  rollHiddenInitiative,
   rollSelectedInitiative,
+  verifyHiddenInitiativeReceipt,
 } from "../../src/ui/combat/initiative";
-import { currentCombatant, startCombat, nextTurn, sortCombatants } from "../../src/core/combat";
+import {
+  currentCombatant,
+  startCombat,
+  nextTurn,
+  sortCombatants,
+} from "../../src/core/combat";
 function required<T>(value: T | undefined | null): T {
   if (value == null) throw new Error("Missing fixture/result");
   return value;
@@ -35,7 +47,9 @@ function fixture() {
     ] as TokenDocument[],
   } as unknown as SceneDocument;
   let id = 0;
-  const combat = startCombat(newEncounter(scene, "combat", "Fight", () => `c${id++}`)).combat;
+  const combat = startCombat(
+    newEncounter(scene, "combat", "Fight", () => `c${id++}`),
+  ).combat;
   return { actor, scene, combat };
 }
 describe("actor-aware public initiative", () => {
@@ -43,10 +57,20 @@ describe("actor-aware public initiative", () => {
   test("records actor-aware totals and generic fallback, without changing authored data", () => {
     const { actor, scene, combat } = fixture();
     const before = structuredClone([actor, scene, combat]);
-    const result = rollEncounterInitiative(combat, scene, [actor], gm, () => 10);
+    const result = rollEncounterInitiative(
+      combat,
+      scene,
+      [actor],
+      gm,
+      () => 10,
+    );
     expect(result.error).toBeNull();
-    expect(result.transition?.combat.combatants.map((c) => c.initiative)).toEqual([17, 10]);
-    expect(result.transition?.combat.combatants[0]?.flags.core?.initiativeRoll).toMatchObject({
+    expect(
+      result.transition?.combat.combatants.map((c) => c.initiative),
+    ).toEqual([17, 10]);
+    expect(
+      result.transition?.combat.combatants[0]?.flags.core?.initiativeRoll,
+    ).toMatchObject({
       die: 10,
       modifier: 7,
       total: 17,
@@ -78,8 +102,8 @@ describe("actor-aware public initiative", () => {
     actor.effects = [];
     expect(first.transition?.combat.combatants[0]?.initiative).toBe(19);
     expect(
-      rollEncounterInitiative(combat, scene, [actor], gm, () => 10).transition?.combat
-        .combatants[0]?.initiative,
+      rollEncounterInitiative(combat, scene, [actor], gm, () => 10).transition
+        ?.combat.combatants[0]?.initiative,
     ).toBe(17);
   });
   test("rerolls retain the active combatant even when it moves to a different sorted index", () => {
@@ -91,7 +115,9 @@ describe("actor-aware public initiative", () => {
       required(dice.shift()),
     );
     expect(result.transition?.combat.turn).toBe(1);
-    expect(currentCombatant(required(result.transition).combat)?._id).toBe("c0");
+    expect(currentCombatant(required(result.transition).combat)?._id).toBe(
+      "c0",
+    );
     expect(result.transition?.combat.round).toBe(1);
     expect(result.transition?.hooks).not.toContain("combat:turn:start");
   });
@@ -101,7 +127,9 @@ describe("actor-aware public initiative", () => {
     const result = rollEncounterInitiative(combat, scene, [actor], gm, () =>
       required(dice.shift()),
     );
-    expect(currentCombatant(required(result.transition).combat)?._id).toBe("c1");
+    expect(currentCombatant(required(result.transition).combat)?._id).toBe(
+      "c1",
+    );
     expect(result.transition?.combat.turn).toBe(0);
   });
   test("equal-total modifier ordering survives the generic core sort", () => {
@@ -112,7 +140,10 @@ describe("actor-aware public initiative", () => {
       required(dice.shift()),
     );
     const next = required(result.transition).combat;
-    expect(sortCombatants(next.combatants).map((c) => c._id)).toEqual(["c0", "c1"]);
+    expect(sortCombatants(next.combatants).map((c) => c._id)).toEqual([
+      "c0",
+      "c1",
+    ]);
     expect(next.combatants.map((c) => c.initiative)).toEqual([10, 10]);
     expect(dice).toHaveLength(0);
   });
@@ -121,11 +152,14 @@ describe("actor-aware public initiative", () => {
     required(combat.combatants[1]).actorId = actor._id;
     const dice = [10, 10, 1, 20];
     const first = required(
-      rollEncounterInitiative(combat, scene, [actor], gm, () => required(dice.shift()))
-        .transition,
+      rollEncounterInitiative(combat, scene, [actor], gm, () =>
+        required(dice.shift()),
+      ).transition,
     ).combat;
     expect(first.combatants.map((c) => c._id)).toEqual(["c1", "c0"]);
-    expect(required(first.combatants[0]).flags.core?.initiativeRoll).toMatchObject({
+    expect(
+      required(first.combatants[0]).flags.core?.initiativeRoll,
+    ).toMatchObject({
       total: 17,
       tiePolicy: "pf1e",
       tieRolls: [20],
@@ -135,8 +169,9 @@ describe("actor-aware public initiative", () => {
     expect(currentCombatant(nextTurn(secondTurn).combat)?._id).toBe("c1");
     const reroll = [10, 10, 20, 1];
     const updated = required(
-      rollEncounterInitiative(secondTurn, scene, [actor], gm, () => required(reroll.shift()))
-        .transition,
+      rollEncounterInitiative(secondTurn, scene, [actor], gm, () =>
+        required(reroll.shift()),
+      ).transition,
     );
     expect(currentCombatant(updated.combat)?._id).toBe("c0");
     expect(updated.hooks).not.toContain("combat:turn:start");
@@ -151,13 +186,22 @@ describe("actor-aware public initiative", () => {
     });
     expect(result.error).toBeNull();
     expect(calls).toBe(2);
-    expect(result.transition?.combat.combatants.map((c) => c._id)).toEqual(["c0", "c1"]);
+    expect(result.transition?.combat.combatants.map((c) => c._id)).toEqual([
+      "c0",
+      "c1",
+    ]);
   });
   test("unresolved tie leaves the original encounter and prior receipts untouched", () => {
     const { actor, scene, combat } = fixture();
     required(combat.combatants[1]).actorId = actor._id;
     const before = structuredClone(combat);
-    const result = rollEncounterInitiative(combat, scene, [actor], gm, () => 10);
+    const result = rollEncounterInitiative(
+      combat,
+      scene,
+      [actor],
+      gm,
+      () => 10,
+    );
     expect(result.transition).toBeNull();
     expect(result.error).toContain("20 roll-offs");
     expect(combat).toEqual(before);
@@ -294,9 +338,200 @@ describe("actor-aware public initiative", () => {
     const { actor, scene, combat } = fixture();
     for (const die of [0, 21, 2.5, NaN])
       expect(
-        rollEncounterInitiative(combat, scene, [actor], gm, () => die).transition,
+        rollEncounterInitiative(combat, scene, [actor], gm, () => die)
+          .transition,
       ).toBeNull();
     actor.system.pf1e = { initiative: "fast" };
-    expect(rollEncounterInitiative(combat, scene, [actor], gm, () => 10).transition).toBeNull();
+    expect(
+      rollEncounterInitiative(combat, scene, [actor], gm, () => 10).transition,
+    ).toBeNull();
+  });
+});
+
+// ─── T02: verifiable hidden GM rolls ──────────────────────────────────────────
+
+describe("hidden GM initiative rolls (T02)", () => {
+  const player = { id: "p1", role: "PLAYER" as const };
+
+  function hiddenFixture() {
+    const actor: ActorDocument = {
+      _id: "lurker-actor",
+      type: "actor",
+      name: "Lurker",
+      ownership: { default: 0 },
+      flags: {},
+      system: { pf1e: { abilities: { dex: 16 }, initiative: 4 } },
+      items: [],
+      effects: [],
+    };
+    const scene = {
+      _id: "scene",
+      name: "Scene",
+      type: "scene",
+      flags: {},
+      ownership: { default: 2 },
+      tokens: [
+        { _id: "hero-token", name: "Hero", actorId: "hero", hidden: false },
+        {
+          _id: "lurker-token",
+          name: "Lurker",
+          actorId: "lurker-actor",
+          hidden: true,
+        },
+        { _id: "open-mook", name: "Mook", hidden: false },
+      ],
+    } as unknown as SceneDocument;
+    let id = 0;
+    const combat = startCombat(
+      newEncounter(scene, "combat", "Fight", () => `c${id++}`),
+    ).combat;
+    return { actor, scene, combat };
+  }
+
+  test("hidden members get real order + GM receipt; no public receipt is written", () => {
+    const { actor, scene, combat } = hiddenFixture();
+    const hero = combat.combatants.find((c) => c.name === "Hero");
+    const before = structuredClone(combat);
+    const result = rollHiddenInitiative(combat, scene, [actor], gm, () => 10);
+    expect(result.error).toBeNull();
+    expect(result.rolled).toHaveLength(1); // only the hidden lurker
+    // the visible hero and mook are in scope but not hidden: skipped, untouched
+    expect(result.skipped).toHaveLength(2);
+    expect(combat).toEqual(before); // pure
+    const lurker = result.transition?.combat.combatants.find(
+      (c) => c.name === "Lurker",
+    );
+    expect(lurker?.initiative).toBe(17); // die 10 + dex 3 + improved-init style 4
+    expect(
+      (lurker?.flags as { core?: Record<string, unknown> })?.core
+        ?.initiativeRoll,
+    ).toBeUndefined();
+    const receipt = (lurker?.flags as { pf1e?: { hiddenInitiative?: unknown } })
+      ?.pf1e?.hiddenInitiative as {
+      die: number;
+      modifier: number;
+      total: number;
+      actorId: string;
+    };
+    expect(receipt).toMatchObject({
+      die: 10,
+      modifier: 7,
+      total: 17,
+      actorId: "lurker-actor",
+    });
+    // the visible hero is untouched: no initiative, no receipt of any kind
+    const heroAfter = result.transition?.combat.combatants.find(
+      (c) => c._id === hero?._id,
+    );
+    expect(heroAfter?.initiative).toBeNull();
+    expect(heroAfter?.flags).toEqual(hero?.flags);
+    // and the roll verifies
+    expect(verifyHiddenInitiativeReceipt(receipt).ok).toBe(true);
+  });
+
+  test("selection scopes the hidden roll; visible selected members are skipped untouched", () => {
+    const { actor, scene, combat } = hiddenFixture();
+    const openMook = combat.combatants.find((c) => c.name === "Mook");
+    if (!openMook) throw new Error("missing mook");
+    openMook.initiative = 5; // an existing public roll
+    const result = rollHiddenInitiative(combat, scene, [actor], gm, () => 12, {
+      sceneId: "scene",
+      ids: ["lurker-token", "open-mook"],
+    });
+    expect(result.error).toBeNull();
+    expect(result.rolled).toHaveLength(1);
+    expect(result.skipped).toEqual([openMook._id]);
+    const mookAfter = result.transition?.combat.combatants.find(
+      (c) => c._id === openMook._id,
+    );
+    expect(mookAfter?.initiative).toBe(5); // untouched, receipt intact
+    expect(
+      (mookAfter?.flags as { core?: { initiativeRoll?: unknown } })?.core
+        ?.initiativeRoll,
+    ).toBeUndefined(); // mook was rolled manually in this fixture, no receipt existed
+  });
+
+  test("combatant-level hidden flag counts as hidden even when the token is visible", () => {
+    const { actor, scene, combat } = hiddenFixture();
+    const mook = combat.combatants.find((c) => c.name === "Mook");
+    if (!mook) throw new Error("missing mook");
+    mook.hidden = true;
+    const result = rollHiddenInitiative(combat, scene, [actor], gm, () => 8);
+    expect(result.rolled).toHaveLength(2); // lurker-token + hidden-flagged mook
+  });
+
+  test("refusals: no hidden members, permission, wrong scene, and a stale public receipt is replaced", () => {
+    const { actor, scene, combat } = hiddenFixture();
+    const allVisible = {
+      ...combat,
+      combatants: combat.combatants.map((c) => ({ ...c, hidden: false })),
+    };
+    const tokens = scene.tokens.map((t) => ({ ...t, hidden: false }));
+    expect(
+      rollHiddenInitiative(
+        { ...allVisible, combatants: allVisible.combatants },
+        { ...scene, tokens },
+        [actor],
+        gm,
+        () => 10,
+      ).error,
+    ).toContain("No hidden combatants");
+    expect(
+      rollHiddenInitiative(combat, scene, [actor], player, () => 10).error,
+    ).toContain("You cannot roll");
+    // a lurker that previously had a PUBLIC receipt (e.g. it was visible then hidden)
+    const lurker = combat.combatants.find((c) => c.name === "Lurker");
+    if (!lurker) throw new Error("missing lurker");
+    lurker.flags = {
+      ...lurker.flags,
+      core: { initiativeRoll: { die: 1, modifier: 0, total: 1 } },
+    };
+    const rerolled = rollHiddenInitiative(combat, scene, [actor], gm, () => 15);
+    expect(rerolled.error).toBeNull();
+    const after = rerolled.transition?.combat.combatants.find(
+      (c) => c.name === "Lurker",
+    );
+    expect(
+      (after?.flags as { core?: { initiativeRoll?: unknown } })?.core
+        ?.initiativeRoll,
+    ).toBeUndefined(); // the public receipt was removed, not left stale
+  });
+
+  test("display conceals hidden values from players, and receipts verify strictly", () => {
+    expect(
+      hiddenInitiativeDisplay({ initiative: 17, hidden: true }, player),
+    ).toBe("?");
+    expect(hiddenInitiativeDisplay({ initiative: 17, hidden: true }, gm)).toBe(
+      "17",
+    );
+    expect(
+      hiddenInitiativeDisplay({ initiative: null, hidden: false }, player),
+    ).toBe("—");
+    expect(
+      hiddenInitiativeDisplay({ initiative: 3, hidden: false }, player),
+    ).toBe("3");
+    expect(
+      verifyHiddenInitiativeReceipt({ die: 21, modifier: 0, total: 21 }).ok,
+    ).toBe(false);
+    expect(
+      verifyHiddenInitiativeReceipt({ die: 10, modifier: 7, total: 18 }).ok,
+    ).toBe(false);
+    expect(
+      verifyHiddenInitiativeReceipt({
+        die: 10,
+        modifier: 7,
+        total: 17,
+        tieRolls: [3],
+      }).ok,
+    ).toBe(true);
+    expect(
+      verifyHiddenInitiativeReceipt({
+        die: 10,
+        modifier: 7,
+        total: 17,
+        tieRolls: [30],
+      }).ok,
+    ).toBe(false);
+    expect(verifyHiddenInitiativeReceipt(null).ok).toBe(false);
   });
 });

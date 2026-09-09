@@ -10,7 +10,10 @@ import { normalizePF1eSystem } from "../../packages/pf1e/statBlock";
 export function isPF1eActor(doc: BaseDocument): doc is ActorDocument {
   const block = doc.system.pf1e;
   return (
-    doc.type === "actor" && block !== null && typeof block === "object" && !Array.isArray(block)
+    doc.type === "actor" &&
+    block !== null &&
+    typeof block === "object" &&
+    !Array.isArray(block)
   );
 }
 
@@ -21,6 +24,19 @@ export const SHEET_FIELDS = [
   ["abilities.int", "Intelligence"],
   ["abilities.wis", "Wisdom"],
   ["abilities.cha", "Charisma"],
+  ["abilitiesDamage.str", "Strength damage (accumulated)"],
+  ["abilitiesDamage.dex", "Dexterity damage (accumulated)"],
+  ["abilitiesDamage.con", "Constitution damage (accumulated)"],
+  ["abilitiesDamage.int", "Intelligence damage (accumulated)"],
+  ["abilitiesDamage.wis", "Wisdom damage (accumulated)"],
+  ["abilitiesDamage.cha", "Charisma damage (accumulated)"],
+  ["abilitiesDrain.str", "Strength drain"],
+  ["abilitiesDrain.dex", "Dexterity drain"],
+  ["abilitiesDrain.con", "Constitution drain"],
+  ["abilitiesDrain.int", "Intelligence drain"],
+  ["abilitiesDrain.wis", "Wisdom drain"],
+  ["abilitiesDrain.cha", "Charisma drain"],
+  ["hitDice", "Hit Dice (Con damage/drain HP math)"],
   ["hp", "Current HP"],
   ["hpMax", "Maximum HP"],
   ["nonlethalDamage", "Nonlethal damage"],
@@ -44,7 +60,9 @@ export const SHEET_FIELDS = [
 export type SheetField = (typeof SHEET_FIELDS)[number][0];
 
 export function pf1eSheetView(actor: ActorDocument) {
-  const effects = readTacticalEffects(actor.effects.map((e) => [e._id, e] as const));
+  const effects = readTacticalEffects(
+    actor.effects.map((e) => [e._id, e] as const),
+  );
   return {
     authored: normalizePF1eSystem(actor.system.pf1e).system,
     derived: deriveFromDocuments({ actor, effects: effects.effects }),
@@ -52,11 +70,16 @@ export function pf1eSheetView(actor: ActorDocument) {
   };
 }
 
-export function authoredNumber(actor: ActorDocument, field: SheetField): number | null {
+export function authoredNumber(
+  actor: ActorDocument,
+  field: SheetField,
+): number | null {
   let value: unknown = normalizePF1eSystem(actor.system.pf1e).system;
   for (const key of field.split(".")) {
     value =
-      value && typeof value === "object" ? (value as Record<string, unknown>)[key] : undefined;
+      value && typeof value === "object"
+        ? (value as Record<string, unknown>)[key]
+        : undefined;
   }
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -73,13 +96,20 @@ export function pf1eSheetEdit(
     return fail("You do not own this PF1e actor.");
   if (!SHEET_FIELDS.some(([key]) => key === field))
     return fail("This field is not editable here.");
-  if (!raw.trim() || !Number.isFinite(Number(raw)) || !Number.isSafeInteger(Number(raw)))
+  if (
+    !raw.trim() ||
+    !Number.isFinite(Number(raw)) ||
+    !Number.isSafeInteger(Number(raw))
+  )
     return fail("Enter a finite whole number.");
   const value = Number(raw);
   if (
     (field.startsWith("abilities.") ||
+      field.startsWith("abilitiesDamage.") ||
+      field.startsWith("abilitiesDrain.") ||
       field.startsWith("energyResistance.") ||
       field === "tempHp" ||
+      field === "hitDice" ||
       [
         "hpMax",
         "nonlethalDamage",
@@ -105,7 +135,21 @@ export function pf1eSheetEdit(
     return fail(
       "Structured resistance import is read-only here; repair its source explicitly.",
     );
-  if (field === "tempHp" && original.tempHp !== null && typeof original.tempHp === "object")
+  for (const group of ["abilitiesDamage", "abilitiesDrain"] as const) {
+    if (
+      field.startsWith(`${group}.`) &&
+      original[group] !== undefined &&
+      !sheetRecord(original[group])
+    )
+      return fail(
+        `Structured ${group === "abilitiesDamage" ? "ability damage" : "ability drain"} import is read-only here; repair its source explicitly.`,
+      );
+  }
+  if (
+    field === "tempHp" &&
+    original.tempHp !== null &&
+    typeof original.tempHp === "object"
+  )
     return fail("Structured temporary HP import is read-only here.");
   const normalized = normalizePF1eSystem(original).system;
   if (
@@ -117,12 +161,15 @@ export function pf1eSheetEdit(
       ...(normalized.saves as Record<string, Json>),
       [field.slice(6)]: value,
     };
-    if (normalized.savesAsTotal === true) diff["system.pf1e.savesAsTotal"] = true;
+    if (normalized.savesAsTotal === true)
+      diff["system.pf1e.savesAsTotal"] = true;
   }
-  if (field === "dr" && sheetRecord(original.dr)) diff["system.pf1e.dr.val"] = value;
+  if (field === "dr" && sheetRecord(original.dr))
+    diff["system.pf1e.dr.val"] = value;
   if (field === "regeneration" && sheetRecord(original.regeneration))
     diff["system.pf1e.regeneration.value"] = value;
-  if (Object.keys(diff).length === 0) Object.assign(diff, authoredPatch(actor, field, value));
+  if (Object.keys(diff).length === 0)
+    Object.assign(diff, authoredPatch(actor, field, value));
   return {
     ops: [{ kind: "update", ref: { coll: "actors", id: actor._id }, diff }],
     error: null,
@@ -161,22 +208,39 @@ export const MONSTER_FIELDS = [
 type EditResult = { ops: Op[]; error: string | null };
 export type DetailEdit =
   | { kind: "armor"; field: string; raw: string }
-  | { kind: "list"; field: "feats" | "traits"; raw: string; expected: Json | undefined }
+  | {
+      kind: "list";
+      field: "feats" | "traits";
+      raw: string;
+      expected: Json | undefined;
+    }
   | { kind: "monster-start" }
   | { kind: "monster"; field: string; raw: string; expected: Json | undefined };
 
 /** Materialize only a missing authored group: FlatDiff cannot traverse missing parents. */
-function authoredPatch(actor: ActorDocument, field: string, value: Json): Record<string, Json> {
+function authoredPatch(
+  actor: ActorDocument,
+  field: string,
+  value: Json,
+): Record<string, Json> {
   const raw = sheetRecord(actor.system.pf1e) ?? {};
   const [group, key] = field.split(".");
   if (group && key && !sheetRecord(raw[group])) {
     const normalized = normalizePF1eSystem(raw).system;
-    return { [`system.pf1e.${group}`]: { ...sheetRecord(normalized[group]), [key]: value } };
+    return {
+      [`system.pf1e.${group}`]: {
+        ...sheetRecord(normalized[group]),
+        [key]: value,
+      },
+    };
   }
   return { [`system.pf1e.${field}`]: value };
 }
 
-export function armorFieldValue(actor: ActorDocument, field: string): number | null {
+export function armorFieldValue(
+  actor: ActorDocument,
+  field: string,
+): number | null {
   const normalized = normalizePF1eSystem(actor.system.pf1e).system;
   const [group, key] = field.split(".");
   let value = group && key ? sheetRecord(normalized[group])?.[key] : undefined;
@@ -222,19 +286,28 @@ export function pf1eDetailEdit(
         return fail("Spell failure must be between 0 and 100 percent.");
       if (edit.field === "armor.checkPenalty" && value > 0)
         return fail("Armor check penalty must be zero or negative.");
-      if (edit.field !== "armorClass.misc" && edit.field !== "armor.checkPenalty" && value < 0)
+      if (
+        edit.field !== "armorClass.misc" &&
+        edit.field !== "armor.checkPenalty" &&
+        value < 0
+      )
         return fail("This value cannot be negative.");
       diff = authoredPatch(actor, edit.field, value);
       break;
     }
     case "list": {
-      if (edit.field !== "feats" && edit.field !== "traits") return fail("Unknown list field.");
+      if (edit.field !== "feats" && edit.field !== "traits")
+        return fail("Unknown list field.");
       if (JSON.stringify(raw[edit.field]) !== JSON.stringify(edit.expected))
-        return fail("This list changed while editing. Reopen the tab and retry.");
+        return fail(
+          "This list changed while editing. Reopen the tab and retry.",
+        );
       if (
         raw[edit.field] !== undefined &&
         (!Array.isArray(raw[edit.field]) ||
-          !(raw[edit.field] as Json[]).every((value) => typeof value === "string"))
+          !(raw[edit.field] as Json[]).every(
+            (value) => typeof value === "string",
+          ))
       )
         return fail(
           "This imported list has structured entries. It is read-only here to preserve their data.",
@@ -250,7 +323,9 @@ export function pf1eDetailEdit(
     }
     case "monster-start": {
       if (raw.creature !== undefined && raw.creature !== null)
-        return fail("Creature data already exists; it will not be overwritten.");
+        return fail(
+          "Creature data already exists; it will not be overwritten.",
+        );
       diff = { "system.pf1e.creature": {} };
       break;
     }
@@ -261,8 +336,14 @@ export function pf1eDetailEdit(
       if (!creature) return fail("Add creature details first.");
       const old = creature[edit.field];
       if (JSON.stringify(old) !== JSON.stringify(edit.expected))
-        return fail("This field changed while editing. Reopen the tab and retry.");
-      if (old !== undefined && typeof old !== "string" && typeof old !== "number")
+        return fail(
+          "This field changed while editing. Reopen the tab and retry.",
+        );
+      if (
+        old !== undefined &&
+        typeof old !== "string" &&
+        typeof old !== "number"
+      )
         return fail("This imported field is structured and read-only here.");
       if (edit.raw.length > 4000) return fail("Use at most 4000 characters.");
       // CR permits fractions such as 1/3. It is descriptive, not a challenge calculator.

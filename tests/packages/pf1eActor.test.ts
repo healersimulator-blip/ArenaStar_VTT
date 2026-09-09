@@ -47,7 +47,7 @@ describe("derivation is total", () => {
     expect(d.baseAttack).toBe(0);
     expect(d.hpMax).toBe(0);
     expect(d.attacks).toHaveLength(1);
-    expect(d.attacks[0]?.damageDice).toBe("1d2");
+    expect(d.attacks[0]?.damageDice).toBe("1d3");
     expect(d.defaults.join("\n")).toContain("size: not authored");
     expect(d.issues).toEqual([]);
   });
@@ -267,12 +267,16 @@ describe("attacks of opportunity and natural attacks", () => {
     expect(d.iterativeAttacks).toEqual([11, 6, 1]);
   });
 
-  test("unarmed strike damage follows size (Small 1d2, Large 1d3)", () => {
+  test("unarmed strike damage follows size (Small 1d2, Medium 1d3, Large 1d4 — AoN ID 131)", () => {
     expect(unarmedDamageDice("Small")).toBe("1d2");
-    expect(unarmedDamageDice("Large")).toBe("1d3");
+    expect(unarmedDamageDice("Medium")).toBe("1d3");
+    expect(unarmedDamageDice("Large")).toBe("1d4");
     expect(
       derivePF1eActor({ system: { size: "Large", abilities: { str: 20 } } })
         .attacks[0]?.damageDice,
+    ).toBe("1d4");
+    expect(
+      derivePF1eActor({ system: { size: "Medium" } }).attacks[0]?.damageDice,
     ).toBe("1d3");
   });
 });
@@ -513,5 +517,274 @@ describe("the shipped bestiary derives cleanly (pack ↔ code parity)", () => {
     const compiled = compilePF1eProfile(1, { bab: 11, strMod: 5 });
     expect(d.iterativeAttacks).toEqual([11, 6, 1]);
     expect(d.attacks[0]?.attackBonuses).toEqual(compiled.iteratives);
+  });
+});
+
+/**
+ * Ability damage and drain (CRB p.555, AoN Rules ID 416 — verified, not snapshot from code):
+ *   • damage does NOT reduce the score; every two full points apply a –1 penalty to the
+ *     statistics based on that ability;
+ *   • Str: melee attack/damage, CMB (Small+), CMD; Dex: AC, ranged attack, initiative, Ref,
+ *     CMB (Tiny−), CMD; Con: Fort plus HD × penalty off current AND max HP; Int/Wis/Cha: the
+ *     spell DCs based on that key;
+ *   • drain actually reduces the score (everything follows it);
+ *   • damage ≥ score ⇒ unconscious (Con ⇒ dead).
+ */
+describe("ability damage and drain (CRB p.555)", () => {
+  const hero = {
+    size: "Medium",
+    baseAttack: 6,
+    abilities: { str: 18, dex: 16, con: 16, int: 10, wis: 12, cha: 10 },
+    armorClass: { armor: 5, shield: 2, natural: 1 },
+    saves: { fort: 5, ref: 2, will: 2 },
+    attacks: [{ name: "longsword", damageDice: "1d8", twoHanded: true }],
+  };
+
+  test("1 point of damage is no penalty: the score and every statistic are unchanged", () => {
+    const d = derivePF1eActor({
+      system: { ...hero, abilitiesDamage: { str: 1 } },
+    });
+    expect(d.abilityDamageTaken.str).toBe(1);
+    expect(d.abilityDamagePenalty.str).toBe(0);
+    expect(d.abilities.str).toBe(18);
+    expect(d.abilityMods.str).toBe(4);
+    expect(d.attacks[0]?.attackBonus).toBe(6 + 4);
+    expect(d.conditions).toEqual([]);
+  });
+
+  test("Str damage 3 → –1: melee attack, two-handed damage, CMB and CMD take it; the score stays 18", () => {
+    const d = derivePF1eActor({
+      system: { ...hero, abilitiesDamage: { str: 3 } },
+    });
+    expect(d.abilities.str).toBe(18); // damage never reduces the score
+    expect(d.abilityMods.str).toBe(3); // +4 − 1
+    expect(d.attacks[0]?.attackBonus).toBe(6 + 3);
+    expect(d.attacks[0]?.abilityDamage).toBe(Math.floor(3 * 1.5)); // 4, not 6
+    expect(d.cmb).toBe(6 + 3);
+    expect(d.cmd).toBe(10 + 6 + 3 + 3); // eff Str 3 + eff Dex 3
+    expect(d.abilityMods.dex).toBe(3); // untouched
+    expect(d.ac.normal).toBe(10 + 5 + 2 + 3 + 1); // Dex undamaged
+    expect(d.explain.abilities).toContain("STR 3 → penalties STR −1");
+  });
+
+  test("Dex damage 5 → –2: AC, touch AC, initiative, Ref and CMD take it; flat-footed AC never does", () => {
+    const d = derivePF1eActor({
+      system: { ...hero, abilitiesDamage: { dex: 5 } },
+    });
+    expect(d.abilityMods.dex).toBe(1); // +3 − 2
+    expect(d.ac.normal).toBe(10 + 5 + 2 + 1 + 1);
+    expect(d.ac.touch).toBe(10 + 1);
+    expect(d.ac.flatFooted).toBe(10 + 5 + 2 + 1); // Dex already excluded
+    expect(d.initiative).toBe(1);
+    expect(d.saves.ref).toBe(2 + 1);
+    expect(d.cmd).toBe(10 + 6 + 4 + 1);
+    expect(d.attacks[0]?.attackBonus).toBe(6 + 4); // melee: Str undamaged
+    expect(d.cmb).toBe(6 + 4);
+  });
+
+  test("drain actually reduces the score; drain and damage stack (score 14, +2, then –1 damage)", () => {
+    const drained = derivePF1eActor({
+      system: { ...hero, abilitiesDrain: { str: 4 } },
+    });
+    expect(drained.abilities.str).toBe(14);
+    expect(drained.abilityMods.str).toBe(2);
+    expect(drained.attacks[0]?.attackBonus).toBe(6 + 2);
+    expect(drained.attacks[0]?.abilityDamage).toBe(Math.floor(2 * 1.5));
+    const both = derivePF1eActor({
+      system: {
+        ...hero,
+        abilitiesDrain: { str: 4 },
+        abilitiesDamage: { str: 3 },
+      },
+    });
+    expect(both.abilities.str).toBe(14); // damage still never reduces the score
+    expect(both.abilityMods.str).toBe(1); // +2 − 1
+    expect(both.attacks[0]?.attackBonus).toBe(7);
+    expect(both.abilityDrainTaken.str).toBe(4);
+  });
+
+  test("Con damage: Fort penalty, and HD × penalty off current AND max HP when Hit Dice are authored", () => {
+    const d = derivePF1eActor({
+      system: {
+        ...hero,
+        hp: 25,
+        hpMax: 30,
+        hitDice: 6,
+        abilitiesDamage: { con: 4 },
+      },
+    });
+    expect(d.abilityDamagePenalty.con).toBe(2);
+    expect(d.saves.fort).toBe(5 + 3 - 2); // base + Con +3, penalty −2
+    expect(d.hp).toBe(25 - 6 * 2);
+    expect(d.hpMax).toBe(30 - 6 * 2);
+    expect(d.explain.hp).toContain("damage −2 × 6 HD");
+    expect(d.unsupported).toEqual([]);
+  });
+
+  test("Con drain moves the modifier itself: HP lose Δmod × HD on top of any damage penalty", () => {
+    const d = derivePF1eActor({
+      system: {
+        ...hero,
+        hp: 25,
+        hpMax: 30,
+        hitDice: 6,
+        abilitiesDrain: { con: 4 },
+        abilitiesDamage: { con: 2 },
+      },
+    });
+    // Con 16→12: mod +3→+1 (Δ −2 ⇒ −12 HP); damage 2 → penalty −1 ⇒ −6 HP
+    expect(d.abilities.con).toBe(12);
+    expect(d.hp).toBe(25 - 6 * 3);
+    expect(d.hpMax).toBe(30 - 6 * 3);
+    expect(d.saves.fort).toBe(5 + 1 - 1);
+  });
+
+  test("without Hit Dice the Con HP adjustment is reported, never guessed", () => {
+    const d = derivePF1eActor({
+      system: { ...hero, hp: 25, hpMax: 30, abilitiesDamage: { con: 4 } },
+    });
+    expect(d.saves.fort).toBe(5 + 3 - 2); // the Fort penalty still applies
+    expect(d.hp).toBe(25);
+    expect(d.hpMax).toBe(30);
+    expect(d.unsupported.join("\n")).toContain("hitDice: not authored");
+  });
+
+  test("damage ≥ score ⇒ unconscious (dead for Constitution), per the rule's threshold", () => {
+    const out = derivePF1eActor({
+      system: { ...hero, abilitiesDamage: { str: 18, con: 2 } },
+    });
+    expect(out.conditions).toContain("unconscious");
+    expect(out.conditions).not.toContain("dead");
+    const dead = derivePF1eActor({
+      system: {
+        ...hero,
+        abilities: { ...hero.abilities, con: 12 },
+        abilitiesDamage: { con: 12 },
+      },
+    });
+    expect(dead.conditions).toContain("dead");
+    expect(dead.explain.abilities).toContain("threshold: dead");
+    // the threshold compares against the CURRENT (drained) score
+    const drained = derivePF1eActor({
+      system: {
+        ...hero,
+        abilitiesDrain: { str: 10 },
+        abilitiesDamage: { str: 8 },
+      },
+    });
+    expect(drained.abilities.str).toBe(8);
+    expect(drained.conditions).toContain("unconscious"); // 8 damage ≥ drained score 8
+  });
+
+  test("published totals take the penalty on top (saves and AC), like effects do", () => {
+    const d = derivePF1eActor({
+      system: {
+        ...hero,
+        saves: { fort: 8, ref: 5, will: 4 },
+        savesAsTotal: true,
+        acTotals: { normal: 21, touch: 13, flatFooted: 18 },
+        abilitiesDamage: { dex: 5, con: 4 },
+      },
+    });
+    expect(d.saves.ref).toBe(5 - 2); // published − Dex penalty
+    expect(d.saves.fort).toBe(8 - 2); // published − Con penalty
+    expect(d.saves.will).toBe(4); // Wis undamaged
+    expect(d.ac.normal).toBe(21 - 2);
+    expect(d.ac.touch).toBe(13 - 2);
+    expect(d.ac.flatFooted).toBe(18); // Dex already excluded there
+    expect(d.explain.ac).toContain("− Dex damage 2");
+  });
+
+  test("Int/Wis/Cha damage penalizes the spell DCs based on that key", () => {
+    const wizard = {
+      abilities: { int: 18 },
+      spells: {
+        keyAbility: "int",
+        casterLevel: 5,
+        slotsPerDay: { 1: 3 },
+      },
+    };
+    const d = derivePF1eActor({
+      system: { ...wizard, abilitiesDamage: { int: 3 } },
+    });
+    expect(d.spellSaveDc[1]).toBe(10 + 1 + 3); // 10 + level + eff Int (+4 − 1 damage)
+    const drained = derivePF1eActor({
+      system: { ...wizard, abilitiesDrain: { int: 4 } },
+    });
+    expect(drained.spellSaveDc[1]).toBe(10 + 1 + 2); // Int 14 → +2
+  });
+
+  test("a stat-block line with the ability included takes the flat Str penalty on damage", () => {
+    const d = derivePF1eActor({
+      system: {
+        ...hero,
+        attacks: [
+          {
+            name: "mw longsword",
+            damageDice: "1d8",
+            damageBonus: 7, // stat block: includes +4 Str
+            abilityDamageIncluded: true,
+          },
+        ],
+        abilitiesDamage: { str: 3 },
+      },
+    });
+    expect(d.attacks[0]?.abilityDamage).toBe(0);
+    expect(d.attacks[0]?.damageBonus).toBe(7 - 1);
+    expect(d.attacks[0]?.attackBonus).toBe(6 + 3); // attack roll uses eff Str
+  });
+
+  test("malformed accumulators are issues that contribute zero, and nothing throws", () => {
+    const d = derivePF1eActor({
+      system: {
+        ...hero,
+        abilitiesDamage: { str: -2, dex: 2.5, luck: 3 } as never,
+        abilitiesDrain: "nope" as never,
+      },
+    });
+    expect(d.abilityDamageTaken.str).toBe(0);
+    expect(d.abilityDamageTaken.dex).toBe(0);
+    expect(d.abilityDamagePenalty.str).toBe(0);
+    expect(d.issues.join("\n")).toContain("abilitiesDamage.str");
+    expect(d.issues.join("\n")).toContain("abilitiesDamage.dex");
+    expect(d.issues.join("\n")).toContain("abilitiesDamage.luck");
+    expect(d.issues.join("\n")).toContain("abilitiesDrain");
+  });
+
+  test("parsePF1eActorSystem rejects bad accumulators before any op is submitted", () => {
+    expect(parsePF1eActorSystem({ abilitiesDamage: { str: -1 } }).ok).toBe(
+      false,
+    );
+    expect(parsePF1eActorSystem({ abilitiesDamage: { nope: 1 } }).ok).toBe(
+      false,
+    );
+    expect(parsePF1eActorSystem({ abilitiesDrain: { dex: 1.5 } }).ok).toBe(
+      false,
+    );
+    expect(parsePF1eActorSystem({ abilitiesDrain: { dex: 2 } }).ok).toBe(true);
+    expect(parsePF1eActorSystem({ hitDice: -1 }).ok).toBe(false);
+    expect(parsePF1eActorSystem({ hitDice: 6 }).ok).toBe(true);
+  });
+
+  test("every bestiary block derives identically with zero damage/drain fields added", () => {
+    const pack = JSON.parse(
+      readFileSync(
+        new URL("../../systems/pf1e-core/packs/bestiary.json", import.meta.url),
+        "utf8",
+      ),
+    ) as { entries: Array<{ data: { system: Record<string, unknown> } }> };
+    for (const entry of pack.entries) {
+      const block = (entry.data.system as { pf1e?: Record<string, unknown> })
+        .pf1e;
+      if (!block) continue;
+      const plain = derivePF1eActor({ system: block });
+      const labeled = derivePF1eActor({
+        system: { ...block, abilitiesDamage: {}, abilitiesDrain: {} },
+      });
+      expect(labeled.abilities).toEqual(plain.abilities);
+      expect(labeled.ac).toEqual(plain.ac);
+      expect(labeled.hp).toEqual(plain.hp);
+      expect(labeled.unsupported).toEqual(plain.unsupported);
+    }
   });
 });

@@ -29,7 +29,10 @@ export interface StageLike {
   readonly camera: Camera;
   setCamera(camera: Camera): void;
   syncTokens(tokens: readonly TokenDocument[]): void;
-  setMarquee(a: { x: number; y: number } | null, b?: { x: number; y: number }): void;
+  setMarquee(
+    a: { x: number; y: number } | null,
+    b?: { x: number; y: number },
+  ): void;
 }
 
 export interface PointerEvt {
@@ -102,7 +105,11 @@ export function pickToken(
 }
 
 /** Pan by a screen-space delta (drag distance in pixels → world shift). */
-export function panByScreen(camera: Camera, dxScreen: number, dyScreen: number): Camera {
+export function panByScreen(
+  camera: Camera,
+  dxScreen: number,
+  dyScreen: number,
+): Camera {
   return {
     x: camera.x - dxScreen / camera.scale,
     y: camera.y - dyScreen / camera.scale,
@@ -139,6 +146,17 @@ export interface ControllerOptions {
   onSelectionChange?: (selection: readonly DocId[]) => void;
   /** §9: alt+click on the canvas emits a ping at the world point. */
   onPing?: (world: { x: number; y: number }) => void;
+  /**
+   * T01: right-CLICK (no drag) on a token opens its context menu with the screen point
+   * (canvas-local coordinates for positioning the menu) and the world point. A right
+   * DRAG still pans (D-057) and never opens a menu; right-click on empty space does
+   * not open one either.
+   */
+  onContextMenu?: (at: {
+    screen: { x: number; y: number };
+    world: { x: number; y: number };
+    tokenId: string;
+  }) => void;
   /** §9: ctrl+click appends a ruler waypoint ([] clears; snapped to grid). */
   onRulerChange?: (points: ReadonlyArray<{ x: number; y: number }>) => void;
 }
@@ -154,6 +172,8 @@ export class CanvasController {
   private startWorld = { x: 0, y: 0 };
   private grabbed: TokenView | null = null;
   private dragged = false;
+  /** Button that started the current pan (0 for shift+left), to detect right-clicks. */
+  private panButton = 0;
   private readonly selection = new Set<DocId>();
   private rulerPoints: Array<{ x: number; y: number }> = [];
 
@@ -187,7 +207,8 @@ export class CanvasController {
     options.source.addPointerListener("pointermove", this.onMove);
     options.source.addPointerListener("pointerup", this.onUp);
     options.source.addWheelListener(this.onWheel);
-    if (options.onTokenActivate) options.source.addDoubleClickListener?.(this.onDoubleClick);
+    if (options.onTokenActivate)
+      options.source.addDoubleClickListener?.(this.onDoubleClick);
   }
 
   get selected(): readonly DocId[] {
@@ -227,7 +248,9 @@ export class CanvasController {
     if (ev.button === 0 && ev.ctrlKey && this.options.onRulerChange) {
       // §9 ruler waypoint: snapped append (max 12, §4A)
       const grid = this.options.getGrid();
-      const snapped = grid ? snapPoint(grid, world.x, world.y) : { x: world.x, y: world.y };
+      const snapped = grid
+        ? snapPoint(grid, world.x, world.y)
+        : { x: world.x, y: world.y };
       if (this.rulerPoints.length < RULER_MAX_WAYPOINTS) {
         this.rulerPoints = [...this.rulerPoints, snapped];
         this.options.onRulerChange(this.rulerPoints);
@@ -238,6 +261,7 @@ export class CanvasController {
     if (wantsPan) {
       ev.preventDefault();
       this.mode = "pan";
+      this.panButton = ev.button;
       this.startScreen = { x: ev.x, y: ev.y };
       this.startCamera = { ...camera };
       return;
@@ -273,13 +297,19 @@ export class CanvasController {
       }
       case "drag": {
         if (!this.grabbed) return;
-        if (Math.abs(ev.x - this.startScreen.x) > 4 || Math.abs(ev.y - this.startScreen.y) > 4)
+        if (
+          Math.abs(ev.x - this.startScreen.x) > 4 ||
+          Math.abs(ev.y - this.startScreen.y) > 4
+        )
           this.dragged = true;
         // With activation enabled a click must not snap an off-grid token or emit a move.
         if (this.options.onTokenActivate && !this.dragged) return;
         const camera = this.options.stage.camera;
         const world = screenToWorld(camera, ev.x, ev.y);
-        const delta = { x: world.x - this.startWorld.x, y: world.y - this.startWorld.y };
+        const delta = {
+          x: world.x - this.startWorld.x,
+          y: world.y - this.startWorld.y,
+        };
         this.options.stage.syncTokens(this.preview(delta));
         return;
       }
@@ -301,12 +331,18 @@ export class CanvasController {
         this.grabbed = null;
         this.mode = "idle";
         if (!grabbed) return;
-        if (Math.abs(ev.x - this.startScreen.x) > 4 || Math.abs(ev.y - this.startScreen.y) > 4)
+        if (
+          Math.abs(ev.x - this.startScreen.x) > 4 ||
+          Math.abs(ev.y - this.startScreen.y) > 4
+        )
           this.dragged = true;
         if (this.options.onTokenActivate && !this.dragged) return;
         const camera = this.options.stage.camera;
         const world = screenToWorld(camera, ev.x, ev.y);
-        const delta = { x: world.x - this.startWorld.x, y: world.y - this.startWorld.y };
+        const delta = {
+          x: world.x - this.startWorld.x,
+          y: world.y - this.startWorld.y,
+        };
         const target = dragTarget(grabbed.token, delta, this.options.getGrid());
         this.options.client.submit([
           {
@@ -319,7 +355,9 @@ export class CanvasController {
             diff: { x: target.x, y: target.y },
           },
         ]);
-        this.options.stage.syncTokens(this.options.getTokens().map((v) => v.token));
+        this.options.stage.syncTokens(
+          this.options.getTokens().map((v) => v.token),
+        );
         return;
       }
       case "marquee": {
@@ -337,6 +375,32 @@ export class CanvasController {
         this.mode = "idle";
         return;
       }
+      case "pan": {
+        // T01: a right-click that never dragged is a context-menu gesture, not a pan.
+        if (this.panButton === 2 && this.options.onContextMenu) {
+          const moved =
+            Math.abs(ev.x - this.startScreen.x) > 4 ||
+            Math.abs(ev.y - this.startScreen.y) > 4;
+          if (!moved) {
+            const camera = this.options.stage.camera;
+            const world = screenToWorld(camera, ev.x, ev.y);
+            const hit = pickToken(this.options.getTokens(), world);
+            if (hit) {
+              this.mode = "idle";
+              this.panButton = 0;
+              this.options.onContextMenu({
+                screen: { x: ev.x, y: ev.y },
+                world: { x: world.x, y: world.y },
+                tokenId: hit.token._id,
+              });
+              return;
+            }
+          }
+        }
+        this.mode = "idle";
+        this.panButton = 0;
+        return;
+      }
       default:
         this.mode = "idle";
     }
@@ -345,7 +409,9 @@ export class CanvasController {
   private wheel(ev: WheelEvt): void {
     ev.preventDefault();
     const factor = Math.exp(-ev.deltaY * 0.0015);
-    this.options.stage.setCamera(zoomAt(this.options.stage.camera, ev.x, ev.y, factor));
+    this.options.stage.setCamera(
+      zoomAt(this.options.stage.camera, ev.x, ev.y, factor),
+    );
   }
 
   /** Tokens with the dragged one offset by the live delta (local preview). */
@@ -353,7 +419,11 @@ export class CanvasController {
     const out: TokenDocument[] = [];
     for (const view of this.options.getTokens()) {
       if (this.grabbed && view.token._id === this.grabbed.token._id) {
-        out.push({ ...view.token, x: view.token.x + delta.x, y: view.token.y + delta.y });
+        out.push({
+          ...view.token,
+          x: view.token.x + delta.x,
+          y: view.token.y + delta.y,
+        });
       } else {
         out.push(view.token);
       }
@@ -378,12 +448,19 @@ export class CanvasController {
 
 type PointerType = "pointerdown" | "pointermove" | "pointerup";
 
-export function domPointerSource(canvas: HTMLCanvasElement): PointerEventSource {
-  const pointerWrapped = new Map<PointerType, Map<(ev: PointerEvt) => void, EventListener>>();
+export function domPointerSource(
+  canvas: HTMLCanvasElement,
+): PointerEventSource {
+  const pointerWrapped = new Map<
+    PointerType,
+    Map<(ev: PointerEvt) => void, EventListener>
+  >();
   const doubleClickWrapped = new Map<(ev: PointerEvt) => void, EventListener>();
   const wheelWrapped = new Map<(ev: WheelEvt) => void, EventListener>();
 
-  const pointerList = (type: PointerType): Map<(ev: PointerEvt) => void, EventListener> => {
+  const pointerList = (
+    type: PointerType,
+  ): Map<(ev: PointerEvt) => void, EventListener> => {
     let list = pointerWrapped.get(type);
     if (!list) {
       list = new Map();
@@ -391,6 +468,11 @@ export function domPointerSource(canvas: HTMLCanvasElement): PointerEventSource 
     }
     return list;
   };
+
+  // Right-drag pans and right-click opens the token menu (D-057/T01): either way the
+  // browser's own context menu would cover the canvas, so it is suppressed here.
+  const suppressMenu = (ev: MouseEvent): void => ev.preventDefault();
+  canvas.addEventListener("contextmenu", suppressMenu);
 
   return {
     addDoubleClickListener(cb) {
@@ -454,7 +536,9 @@ export function domPointerSource(canvas: HTMLCanvasElement): PointerEventSource 
         });
       };
       wheelWrapped.set(cb, wrapped as EventListener);
-      canvas.addEventListener("wheel", wrapped as EventListener, { passive: false });
+      canvas.addEventListener("wheel", wrapped as EventListener, {
+        passive: false,
+      });
     },
     removeWheelListener(cb) {
       const wrapped = wheelWrapped.get(cb);

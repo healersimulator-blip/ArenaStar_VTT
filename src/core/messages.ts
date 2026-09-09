@@ -10,7 +10,7 @@
 import type { AssetId, DocId, PeerId, TxId, UserId, WorldId } from "./ids";
 import type { AssetManifest, Json, Role, RollMode } from "./documents";
 import type { Op, OpEnvelope } from "./ops";
-import type { TurnMode, TurnPhase } from "./strategic";
+import type { ModelColumnType, TurnMode, TurnPhase } from "./strategic";
 import type { SimEvent, TurnReport } from "./sim";
 
 export type { RollMode };
@@ -198,6 +198,25 @@ export interface WorldInfo {
   version: string;
 }
 
+/**
+ * §5A/N01: the host's active strategic battle, announced in every welcome so
+ * joiners adopt the schema/scene BEFORE the first sim frame instead of guessing
+ * (the old joiner hardcoded mass-battle-basic columns + scene-1 and could not
+ * decode a PF1e campaign at all). `schema` is the active package's SysSchema
+ * (column name → wire kind); a schema/scene change re-announces and forces the
+ * client to drop its replica and pull a fresh snapshot.
+ */
+export interface WelcomeSimInfo {
+  /** The scene whose model pool the sim channel serves. */
+  sceneId: DocId;
+  /** Active rules columns (SysSchema: name → wire kind). */
+  schema: { readonly [name: string]: ModelColumnType };
+  /** Active rules package id (null = built-in mass-battle-basic). */
+  packageId: string | null;
+  /** Active rules version (package version, or the built-in's). */
+  version: string;
+}
+
 /** §6.4: after approval the client is welcomed, then receives the snapshot. */
 export interface WelcomeMsg {
   kind: "welcome";
@@ -205,6 +224,8 @@ export interface WelcomeMsg {
   world: WorldInfo;
   /** Snapshot follows; client buffers ops with seq > this. */
   snapshotSeq: number;
+  /** §5A/N01: the active strategic battle (absent when the host has none). */
+  sim?: WelcomeSimInfo;
 }
 
 /** §5: projected snapshot — manifest only; assets fetched lazily by hash (§7). */

@@ -88,7 +88,10 @@
   1. Query `SpatialGrid` for opposing models within reach ($5\text{ ft}$ or $10\text{ ft}$).
   2. Identify unengaged outer flank models when unit frontages differ.
   3. Vector outer models around the enemy flank.
-  4. Set Bit 2 (`Flanked`) on target models (+2 attacker AB) or apply Total Envelopment (+4 AB, Flat-Footed AC).
+  4. Set Bit 2 (`Flanked`) on target models for the **SRD flanking bonus: +2 melee AB, no
+     flat-footing** (A.14); flanked bits are set/cleared per round, never made permanent.
+     The invented "Total Envelopment (+4 AB, Flat-Footed AC)" is rejected (D-130) — there is
+     no such rule; do not implement it.
 - **Acceptance Criteria:** Envelopment vectors update model coordinates; verified in `tests/packages/pf1eEnvelopment.test.ts`.
 
 ---
@@ -98,14 +101,24 @@
 - **Target File:** `src/packages/pf1e/spells.ts`
 - **Avoidance Pipeline:**
   1. For spell orders (Circle, Cone, Line), identify models inside template.
-  2. Models with active awareness take a $5\text{ ft}$ Reflex scatter step away from epicenter.
+  2. Models inside the template resolve SR and the Reflex save **in their square** — no
+     scatter step exists in the SRD and the invented one is removed (D-130, DEVIATIONS
+     D-1); models never move or escape damage before saving.
   3. Models remaining in template roll Reflex save (`d20 + Ref Bonus`) vs Spell DC.
-  4. Apply Evasion (0 on pass / full on fail) and Improved Evasion (0 on pass / half on fail).
-- **Acceptance Criteria:** Scatter vectors update model coordinates; damage applied accurately; verified in `tests/packages/pf1eSpells.test.ts`.
+  4. Apply save outcomes by capability: no Evasion ⇒ **half damage on a successful save** (round
+     down, no minimum — ordinary save-for-half, e.g. fireball), Evasion ⇒ 0 on pass / full on fail,
+     Improved Evasion ⇒ 0 on pass / half on fail.
+- **Acceptance Criteria:** Damage applied accurately (no scatter side effects to assert); verified in `tests/packages/pf1eSpells.test.ts`.
 
 ---
 
-### Task 6: Battle Analytics & Detailed Combat Reporter (`Combat_Resolver_5` Parity)
+### Task 6: Battle Analytics & Detailed Combat Reporter (`Combat_Resolver_5` metric parity)
+
+> `Combat_Resolver_5` parity is a **metrics-compatibility reference** for porting the old
+> resolver's report fields (which numbers exist and where they surface) — it is NOT an
+> SRD-fidelity claim and must not be cited as one (D-130). `overkillDamage` is a
+> reporting metric (damage exceeding a model's remaining HP) and never propagates
+> damage to another model.
 - **Objective:** Collect detailed per-model and per-unit combat metrics during resolution.
 - **Target File:** `src/packages/pf1e/analytics.ts`
 - **Metrics Tracked in `TurnReport.summary`:**

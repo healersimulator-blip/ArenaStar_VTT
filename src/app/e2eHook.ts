@@ -58,6 +58,13 @@ export interface AppSurface {
     changedDocs: number;
     error: string | null;
   } | null;
+  /** §5A/N01: the battle the host announced in the GM's welcome (null = none). */
+  simInfo(): {
+    sceneId: string;
+    packageId: string | null;
+    version: string;
+    schema: Record<string, string>;
+  } | null;
   packages(): Promise<
     Array<{
       id: string;
@@ -95,6 +102,13 @@ export interface PlayerSurface {
   /** §5A strategic replica readbacks (null before the first snapshot). */
   simCount(): number | null;
   simVersion(): number;
+  /** §5A/N01: the battle adopted from the host's welcome (null = none). */
+  simInfo(): {
+    sceneId: string;
+    packageId: string | null;
+    version: string;
+    schema: Record<string, string>;
+  } | null;
   turnPhase(): string;
   /** Events in the last received turn.report (0 until one arrives). */
   reportEvents(): number;
@@ -355,6 +369,7 @@ function playerSurface(playerApp: PlayerApp): PlayerSurface {
     assetChunks: () => playerApp.assetChunks,
     simCount: () => client()?.simReplica?.count ?? null,
     simVersion: () => client()?.simReplicaVersion ?? -1,
+    simInfo: () => client()?.simInfo ?? null,
     turnPhase: () => lastPhase,
     reportEvents: () => lastReportEvents,
     reportByType: () => lastByType,
@@ -405,6 +420,7 @@ function appSurface(app: HostApp): AppSurface {
       globalThis.localStorage.getItem("vtt-e2e-last-rejected"),
     rulesBoot: () => app.rulesBoot,
     migrationBoot: () => app.migrationBoot,
+    simInfo: () => app.gm.client.simInfo,
     packages: () => app.packages.list(),
     importPackageZip: (bytes) =>
       app.packages

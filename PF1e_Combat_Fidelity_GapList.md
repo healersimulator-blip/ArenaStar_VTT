@@ -471,7 +471,7 @@ Faithful hero-level combat means the full chapter. Ordered as it should be built
    squares), `src/core/detection.ts` (LOS reuse).
 6. **Cover/concealment/flanking/helpless.** +4/+2 cover, improved cover +8/+4, total
    cover blocks attacks and AoOs, soft cover; concealment 20%/50% miss chance (non-stacking),
-   invisibility (no Dex, +20 Stealth while passive/+40 while attacking), flanking (+2,
+   invisibility (no Dex, +40 Stealth while stationary/+20 while moving), flanking (+2,
    only threatening allies, 0-ft reach can't flank), helpless (Dex 0 → −5, melee −4,
    coup de grace full-round auto-crit + Fort DC 10+damage or die).
    Files: `src/packages/pf1e/cover.ts`.
@@ -723,8 +723,10 @@ patch is undocumented, which is itself a gap worth closing).
    surface, no dependency on 1.1's bundling; the 1.8 e2e rewrite explicitly deferred. Cut as
    proposed, plus one item pulled in when it turned out to block 1.3: the codec's missing `i8`
    wire kind (row 1.3b above).
-5. **Still open:** whether the invented spell **scatter** (`spells.ts`) stays. It has no core-rule
-   basis; propose a `worldSettings` toggle at the next review rather than deciding it silently.
+5. **Decided (R03/D-130, 2026-09-09):** the invented spell **scatter** (`spells.ts`) is
+   **removed** — no core-rule basis. It is not becoming an opt-in setting; it may return only
+   as a named `worldSettings` toggle if a mass-battle consumer asks (none today). Filed as
+   DEVIATIONS D-1 with the P5 removal.
 
 ### 10.2 P0 contracts landed (PR-A, D-113) — what the shared tables changed, and what they did not
 
@@ -733,8 +735,9 @@ patch is undocumented, which is itself a gap worth closing).
 strategic deviations survive in it, each now visible and each with a fix phase, because changing them
 would move 10 000-model fixtures with no tactical need:
 
-1. **AoO budget.** `maxAoos: 1 + max(0, dexMod)` (schema.ts) vs A.10's *one per round, +1 while the Dexterity
-   modifier is positive, +1 per point with Combat Reflexes*. `attacksOfOpportunityPerRound()` encodes the
+1. **AoO budget.** `maxAoos: 1 + max(0, dexMod)` (schema.ts) vs A.10's *one per round; extra
+   AoOs equal to your Dex bonus only with Combat Reflexes (which also permits AoOs while
+   flat-footed)*. `attacksOfOpportunityPerRound()` encodes the
    correct rule for the tactical path; the strategic one switches in P8, together with the analytics that
    let the diff be read as a scale-fidelity trade-off rather than a guess.
 2. **CMB/CMD size.** `sizeMod` (the generic attack/AC ladder) where A.4 mandates the *special* size
@@ -745,9 +748,11 @@ would move 10 000-model fixtures with no tactical need:
    ability modifier the SRD says a save contains. `tests/packages/pf1eActor.test.ts` pins the exact
    relationship (`tactical == strategic + conMod`) so the gap cannot widen before P8 unifies the compile.
 
-Item 5 above is decided: the invented spell **scatter** is not getting a toggle in P0. P5 either deletes it
-or files it in `DEVIATIONS.md` next to the fireball-radius row (that file still reads "None." while the sim
-fires at 15 ft against the pack's 20 ft, and that is due to be corrected in the same phase).
+Item 5 above is decided: the invented spell **scatter** is not getting a toggle in P0. R03
+(D-130) resolved it — **remove**, with the SRD-fidelity path saving where the model stands — and
+`DEVIATIONS.md` now indexes the two live code deviations with their correction paths: the scatter
+(D-1, P5 removes it) and the hard-coded Fireball `radius: 15` against the pack's 20-ft baseline
+(D-2, P5 makes spells profile-driven; 20 ft is the agreed baseline).
 
 ---
 
@@ -757,15 +762,28 @@ Transcribed from the SRD Combat chapter on 2026-09-07 so implementation and test
 need to re-read the page. Every row below should become a table-driven test (§7.2).
 
 **A.1 The round & initiative** — 1 round = 6 s ≈ 1 melee attack. Initiative = Dex check
-(+ Dex-mod feats/abilities); ties: highest Dex bonus goes first, otherwise reroll (or a
-GM tiebreak). You're flat-footed until your first turn. Surprise round: only when *all*
-attackers beat a defender's DC; each surprised creature can take **one standard or move
-action** (plus free) in it. Delaying: you lose the standard for that round and set your
-next turn to the delayed count; you cannot delay to gain an extra attack.
+(+ modifiers from feats/magic/abilities, e.g. Improved Initiative; verified CRB p.178);
+ties: the tied characters act in order of **total initiative modifier** (highest first —
+not "Dex bonus": Improved Initiative counts), then reroll. You're flat-footed until your
+first turn (uncanny dodge excepts). Surprise round happens when some but not all
+combatants are aware; only the **aware** combatants act, each taking one standard or move
+action (plus free actions) in initiative order; the unaware do not act and are
+flat-footed. **Delay** (CRB p.203, AoN ID 200): act normally at any lower count you
+choose (full action economy — no lost standard); your initiative permanently becomes the
+count you acted on; you can't interrupt others and never regain the waited time; if you
+reach your next turn without having acted, you may delay again. **Ready** (CRB p.203,
+AoN ID 201): standard action (does not provoke) to prepare a standard/move/swift/free
+action (never full-round) with a trigger; the readied action resolves *just before* the
+trigger, interrupting it; your initiative permanently becomes the count immediately
+ahead of the triggering creature; if the trigger hasn't happened by your next turn, the
+readied action is lost (you may ready again); a 5-foot step may accompany it if you
+haven't otherwise moved. Mid-combat reordering happens **only** through delay/ready —
+a later ability change (e.g. a Str or Dex buff) never rewrites an initiative result.
 
 **A.2 Attack roll** = 1d20 + BAB + Str (melee)/Dex (ranged) + size + misc; natural 20 =
 automatic hit (and a threat), natural 1 = automatic miss. Target AC: melee =
-10 + armor + shield + Dex + natural + size + misc; touch = 10 + size + misc; flat-footed
+10 + armor + shield + Dex + natural + size + misc; touch = 10 + **Dex** + size + misc
+(dodge applies; only armor/shield/natural are lost — verified CRB p.189); flat-footed
 = 10 + armor + shield + natural + size + misc.
 
 **A.3 Damage** = weapon dice + Str (½× off-hand, 1½× two-handed *only for the bonus*,
@@ -783,32 +801,59 @@ Colossal 30/30 · 30/20. Tiny/Dim/Fine: 4/25/100 per square, must enter an oppon
 square to attack (provokes), never flank, never threaten. Large+ with a reach weapon:
 strikes up to double natural reach, **cannot** strike within its natural reach.
 
-**A.6 Table: Actions in Combat** (provoke column, as transcribed from the SRD page) —
-standard actions: attack (no), full attack (n/a, full-round), use a special ability (no),
-cast a spell (yes — unless the spell's casting time is 1 free/swift action), use an
-activated magic item — spell completion / spell trigger while on the defensive (yes),
-activate item: command word / use activated / stored knowledge / continuous (no), use a
-skill as standard (yes if it's a check you retry or that needs concentration; the
-stand-up-from-prone-type skill uses vary), complex standard action (yes), snipe (yes),
-remove curse (yes), total defense (no), verbal component only spell-like ability (no…
-spell-like abilities work like arcane spellcasting: they **provoke** unless the ability
-says otherwise). Move actions: draw a weapon (**no** — and it becomes a free action if
-your BAB is +1 or higher), draw a weapon and move (yes), sheathe a weapon (yes), move a
-5-foot step (no), move your speed (yes), full speed as a move action (yes),
-double movement (yes), stop above ground/power (no), direct or redirect a spell (no),
-pick a lock (yes), load a light/crossbow-type weapon (yes), load a heavy firearm or
-siege weapon (yes), mount or dismount a steed (yes), retrieve a stored item (yes),
-store a retrieved item (yes), stand up (yes), control a mount (no), use skill as a move
-action (yes or no depending on the skill), run (see below). Full-round: full attack (no),
-fight defensively (no), run (no), use a special ability (no), cast a spell with a
-full-round casting time (yes), withdraw (no for the first 5 feet of movement, yes for the
-rest — and you lose all Dex/dodge bonuses and take a −4 AC penalty until the start of your
-next turn), use a completed full-round action (no). Free actions: cast a quickened spell
-(no), speak or make a gesture (no), drop an item you're holding (no), stop concentrating on
-a spell (no), use a feat that explicitly requires no action (no). Swift/immediate: one
-swift per turn (an immediate action can be taken outside your turn, and then your next turn
-has no swift action). Restriction: any action that would be "one standard + one move" may be
-two move actions instead; you can never take two standard actions in a round.
+**A.6 Table: Actions in Combat** (Table 7-2, CRB p.182 — re-verified against AoN Rules
+ID 128 on 2026-09-09 for T05/D-131; the 2026-09-07 transcription had wrong provoke
+flags — run was "no", mount/dismount "yes" — and invented rows like "snipe", "remove
+curse" and "draw a weapon and move", and is replaced wholesale by the verified table
+below). The provoke column answers "does the **action itself** provoke" — moving out of
+a threatened square usually provokes regardless of the action (table footnote 1).
+
+- **Standard actions** (provoke?): attack (melee) **no** · attack (ranged) **yes** ·
+  attack (unarmed) **yes** · activate a magic item other than a potion or oil **no** ·
+  aid another **maybe** (provokes if the aided action provokes) · cast a spell
+  (1-standard-action casting time) **yes** · channel energy **no** · concentration to
+  maintain an active spell **no** · dismiss a spell **no** · draw a hidden weapon
+  (Sleight of Hand) **no** · drink a potion or apply an oil **yes** · escape a grapple
+  **no** · feint **no** · light a torch with a tindertwig **yes** · lower spell
+  resistance **no** · read a scroll **yes** · ready **no** · stabilize a dying friend
+  (Heal) **yes** · total defense **no** · use extraordinary ability **no** · use skill
+  that takes 1 action **usually** · use spell-like ability **yes** · use supernatural
+  ability **no**.
+- **Move actions:** move **yes** · control a frightened mount **yes** · direct or
+  redirect an active spell **no** · draw a weapon **no** (BAB +1: combine with a
+  regular move; Two-Weapon Fighting draws two light/one-handed weapons) · load a hand
+  or light crossbow **yes** · open or close a door **no** · mount/dismount a steed
+  **no** · move a heavy object **yes** · pick up an item **yes** · sheathe a weapon
+  **yes** · stand up from prone **yes** · ready or drop a shield **no** · retrieve a
+  stored item **yes**.
+- **Full-round actions:** full attack **no** · charge **no** (may be taken as a
+  standard action when limited to a single action — then only up to your speed, and no
+  weapon draw without Quick Draw; +2 attack / −2 AC until your next turn, verified
+  D-129) · deliver coup de grâce **yes** · escape from a net **yes** · extinguish
+  flames **no** · light a torch **yes** · load a heavy or repeating crossbow **yes** ·
+  lock or unlock a weapon in a locked gauntlet **yes** · prepare to throw a splash
+  weapon **yes** · run **yes** · use skill that takes 1 round **usually** · use a touch
+  spell on up to six friends **yes** · withdraw **no** (the first 5 ft never provoke,
+  the rest of the movement does; you lose Dex/dodge to AC and take −4 AC until your
+  next turn; may also be taken as a standard action when limited to a single action).
+- **Free actions:** cease concentration on a spell **no** · drop an item **no** · drop
+  to the floor **no** · prepare spell components to cast a spell **no** (unless the
+  component is extremely large or awkward) · speak **no**.
+- **Swift:** cast a quickened spell **no** — one swift per turn.
+- **Immediate:** e.g. cast *feather fall* **no** — usable off-turn; then your next turn
+  has no swift action.
+- **No action:** delay **no** · 5-foot step **no**.
+- **Action type varies:** perform a combat maneuver **yes** (many substitute for a
+  melee attack — usable in an attack, charge or full attack, or as an AoO) · use feat
+  **varies**.
+- **Action types (CRB p.181):** a normal round = one standard + one move, **or** one
+  full-round action, plus one swift and any number of free actions; a move action may
+  always substitute for the standard; **restricted activity** (surprise round,
+  staggered, slowed) = a single standard OR a single move action, plus free and swift
+  actions as normal — no full-round action, but a full-round action may be **started
+  or completed** with a standard action (CRB p.185; full attack, charge, run and
+  withdraw can never be split); swift actions are legal in surprise rounds because a
+  swift may be taken anytime you could take a free action.
 
 **A.7 Movement** — 1 square = 5 ft; **5-10-5** diagonals by default (`ctx.grid.diagonals`
 supports "555", "5105", "euclidean"); difficult terrain = ×2 per square (×4 double-doubled,
@@ -822,7 +867,10 @@ cover (no attack, no AoO); soft cover: +4 AC only; partial cover: +2 AC/+1 Refle
 improved cover: +8 AC/+4 Reflex (and improved evasion vs the Reflex-halved effect, +10
 Stealth); low obstacle: cover only for creatures within 30 ft of it, ignorable if the
 attacker is closer. Concealment: 20 % miss chance, non-stacking, d% roll after a hit;
-total concealment: 50 % miss chance and no AoO. Corner-to-corner geometry (§4.6), and
+total concealment: 50 % miss chance and no AoO. **Invisible** creatures (CRB
+Invisibility): +20 on Stealth checks while moving, **+40 while stationary** (blindsense/
+blindsight negates for the observer), total concealment 50 %, defenders are denied Dex
+against their attacks and they attack at +2 (A.14). Corner-to-corner geometry (§4.6), and
 Large+ creatures pick any occupied square.
 
 **A.9 Combat manœuvres** — CMB = BAB + Str (Dex if Tiny or smaller) + special size + misc;
@@ -863,13 +911,15 @@ into intrinsically dangerous space; **steal** free hand required, item selected 
 +5 CMD for sheathed/belt/brooch items, cannot take worn/armored or held items (use disarm),
 whip −4, Greater Steal ⇒ target unaware.
 
-**A.10 Attacks of opportunity** — one per round + one additional per round if your Dex
-modifier is positive (and +Dex with Combat Reflexes, which also lets you threaten with a
-reach weapon while an enemy is within your reach); each opponent gets only one AoO per
-triggering action regardless of how many squares/attacks it involves; your AoO resets at
-the start of **your** turn; none while flat-footed, none with total defense, none against
-a target with cover, none against a target with total concealment, none against an
-incorporeal creature that doesn't have Defending Ghost Style/etc. (treat as "no AoO
+**A.10 Attacks of opportunity** — **one per round** (verified CRB p.180/Combat Reflexes
+"Normal" text); additional AoOs come **only** with Combat Reflexes: a number of
+additional AoOs per round **equal to your Dex bonus**, and the feat also allows AoOs
+while flat-footed. (The strategic `maxAoos: 1 + max(0, dexMod)` is a known scale
+deviation — §10.2 — not SRD text.) Each opponent gets only one AoO per
+triggering action regardless of how many squares/attacks it involves; the budget is per
+round; none while flat-footed (without Combat Reflexes), none with total defense, none
+against a target with cover, none against a target with total concealment, none against
+an incorporeal creature that doesn't have Defending Ghost Style/etc. (treat as "no AoO
 against a foe you can't see"); a ranged attack made while threatened provokes; leaving a
 threatened square provokes (not with a 5-foot step, not on a successful Withdraw for the
 first 5 ft, not after a bull rush/drag/reposition that you didn't cause); standing from
@@ -880,8 +930,9 @@ trigger and thus act **before** an AoO from the same trigger.
 
 **A.11 Mounted combat** — untrained mount ⇒ DC 20 Ride as a move action each round (fail ⇒
 the move becomes a full-round action and you can do nothing else); DC 5 Ride as a free
-action to guide with the knees (hands free); +1 on melee attacks vs a smaller foe on foot
-(higher ground); if the mount moves more than 5 ft you can make **only one melee attack**
+action to guide with the knees (hands free); +1 on melee attacks vs a foe **smaller than
+your mount** that is **on foot** (the higher-ground bonus, verified CRB p.202); if the
+mount moves more than 5 ft you can make **only one melee attack**
 (no full attack) at the end of the move; lance on a charge deals ×2; ranged weapons at −4
 while the mount doubles its speed, −8 while it runs, attack at half-movement, full attack
 still allowed; casting while the mount moves both before and after ⇒ concentration DC
@@ -899,15 +950,26 @@ plus range penalties, splash to all adjacent squares, no direct damage; on a mis
 1d8 (1 = falls short in a straight line toward the thrower, 2–8 = rotate clockwise around
 the target), then move that many range increments and splash there.
 
-**A.13 Injury & death** — 0 HP ⇒ disabled (or unconscious with the optional "disabled at 0"
-off) and each round you take a standard action you must make a DC 10 Con check (−1 per
-point of damage you have taken) or lose 1 HP; below 0 ⇒ dying, 1 HP lost each round;
-stabilise on a natural 20, or a DC 10 + damage-taken Con check each round; another creature
-can stabilise you with a DC 15 Heal check (provokes); dead at −Con score; coup de grace =
-full-round action, auto-hit + critical (or Fort DC 10 + damage or die); temp HP absorb
-damage first, don't regenerate, don't stack between different spells that grant them;
-nonlethal tracks separately and knocks you out at (current HP) total, staggering you at
-half; deal lethal to become nonlethal (or vice versa) at −4.
+**A.13 Injury & death** — 0 HP ⇒ **staggered** (disabled: a single move or standard
+action per turn, never both, never full-round; a standard/strenuous action deals you
+1 point of damage after completing the act, putting you at −1 and dying — no
+check involved; verified AoN ID 164/166); below 0 ⇒ dying: unconscious, no actions, and
+**lose 1 HP every round** until dead or stable; each round on your turn, a DC 10
+Constitution check to stabilize, with a **penalty on the roll equal to your negative HP
+total** (nat 20 = automatic success; fail ⇒ lose 1 HP); another creature can stabilize
+you with a DC 15 Heal check (first aid — standard action, provokes); dead when negative
+HP ≥ your Con score; a stable character (aided) makes a DC 10 Con check each hour
+(same penalty) to wake disabled. Coup de grâce = full-round action vs a helpless
+defender (melee weapon, or bow/crossbow while adjacent): automatic hit and critical
+hit; if the defender survives the damage, a **mandatory** Fort save DC 10 + damage
+dealt or death; delivering it provokes AoOs; creatures immune to critical hits are
+unaffected by the critical damage and need not save (verified AoN ID 413). Temp HP:
+absorb damage first, never restored by healing real HP; **the same source does not
+stack (highest applies), different sources do stack — track them separately**
+(Paizo FAQ; CRB p.208 Combining Magical Effects). Nonlethal: tracks separately;
+nonlethal damage **exactly equal to** current HP ⇒ staggered, **exceeding** it ⇒
+unconscious; dealing nonlethal with a lethal weapon (or lethal with a nonlethal
+weapon) takes a −4 attack penalty; healing HP removes an equal amount of nonlethal.
 
 **A.14 Condition-driven attack/AC modifiers** (verbatim from the two modifier tables —
 these become `attackRollModifier(state)` / `acModifier(state)` inputs):
@@ -959,7 +1021,11 @@ creature").
 **A.17 Damage reduction / energy resistance / spell resistance / hardness** — see 2.10 for
 the bypass ladder (+1 magic, +3 cold iron/silver, +4 adamantine but not hardness, +5
 alignment, total effective enhancement ≥ +6 for DR/epic, special abilities count only for
-epic). Precision damage and ability damage/drain ignore DR; when DR negates all damage it
+epic). **Precision damage (e.g. sneak attack) does NOT ignore DR**: it is part of the
+weapon attack's damage total and is reduced by DR together with it (not separately;
+Paizo designer clarification, CRB p.562 — DR applies to the whole attack). DR does
+negate ability damage/drain, energy damage dealt along with an attack (riders), touch
+attacks, and force effects; when DR negates all damage it
 negates damage-dependent special effects too. Energy resistance: subtract per damage type,
 applies once per attack (not per die). SR: as A.16. Hardness applies to objects only:
 damage − hardness, then subtract from object HP; a weapon with hardness 10 (iron) etc.

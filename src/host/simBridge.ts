@@ -58,6 +58,16 @@ export class SimBridge {
   }
 
   /**
+   * N01: whether `start()` has loaded a pool. Snapshot requests that arrive
+   * before the campaign starts (a joiner adopting the announced battle) are
+   * dropped — the runner has no pool yet, and `start()` broadcasts the initial
+   * snapshot to every session anyway.
+   */
+  get started(): boolean {
+    return this.loaded;
+  }
+
+  /**
    * Start the scene: resume from the latest stored checkpoint when present
    * (§8A); else a fresh pool, optionally seeded with an initial snapshot
    * (GM mass-spawn builds one before turn 1). Returns the resumed turn or 0.

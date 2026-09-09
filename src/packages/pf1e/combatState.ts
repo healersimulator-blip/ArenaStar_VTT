@@ -27,8 +27,16 @@ import {
   sortCombatants,
   startCombat,
   nextTurn,
+  endCombat,
 } from "../../core/combat";
 import { DEFAULT_SECONDS_PER_ROUND } from "../../core/worldSettings";
+import {
+  readActionLedger,
+  spendAction,
+  startOfTurnLedger,
+  type PF1eActionLedger,
+  type PF1eActionSpend,
+} from "./actions";
 
 /** One combatant's entry under `combatant.flags.pf1e`. */
 export type PF1eCombatantState = {
@@ -42,6 +50,8 @@ export type PF1eCombatantState = {
   acted: boolean;
   /** Set while a surprise round caught this combatant unaware. */
   surprised: boolean;
+  /** Per-turn action budget (T05: standard/move/swift/full-round, 5-ft step, movement). */
+  actions: PF1eActionLedger;
 };
 
 export type PF1eHeldAction = {
@@ -190,6 +200,7 @@ export function readCombatantState(
         : 0,
     acted: raw.acted === true,
     surprised: raw.surprised === true,
+    actions: readActionLedger(raw.actions),
     held:
       kind === "charge" ||
       kind === "attack" ||
@@ -288,16 +299,23 @@ export interface SurpriseCheck {
 
 export interface SurpriseOutcome {
   surpriseRound: boolean;
-  /** Targets that were caught flat-footed (all of them when there is a surprise round — A.1). */
+  /** The combatants caught flat-footed: the UNAWARE ones only (A.1). */
   flatFooted: string[];
+  /** Combatants that started the battle aware — they act in the surprise round (A.1). */
+  aware: string[];
   /** Why there was no surprise round, for the roll log. */
   note: string | null;
 }
 
 /**
- * Surprise round (A.1): it happens only when **every** attacker's Stealth beats **every** defender's
- * Perception; one defender seeing one attacker cancels it for everyone. Attackers act in initiative
- * order and each takes a move or standard action — no free actions beyond the usual, no full attack.
+ * Surprise round (A.1 as corrected D-129, CRB p.178): it happens when **some but not all**
+ * combatants are aware. Awareness is per combatant: a defender is aware when their Perception
+ * matches or beats **any one** attacker's Stealth (they noticed someone); attackers are aware by
+ * the model (they are the ones initiating). The aware combatants — defenders included — each act
+ * in the surprise round with one standard or move action plus free/swift actions; the unaware do
+ * not act and are flat-footed until they do. No surprise round when every defender noticed
+ * someone ("if no one or everyone is surprised, no surprise round occurs"). A defender with no
+ * Perception authored cannot notice anyone and counts as unaware.
  */
 export function checkSurprise(
   targets: readonly string[],
@@ -308,32 +326,65 @@ export function checkSurprise(
     return {
       surpriseRound: false,
       flatFooted: [],
+      aware: [],
       note: "no stealth vs perception comparison was made",
     };
   }
-  let lowestMargin = Number.POSITIVE_INFINITY;
-  let seenBy: string | null = null;
+  const unaware: string[] = [];
+  const awareDefenders: string[] = [];
   for (const target of targets) {
     const perception = check.perception[target];
-    if (perception === undefined) continue; // unaware targets are skipped, not assumed to notice
-    for (const attacker of attackers) {
-      const margin = (check.stealth[attacker] ?? 0) - perception;
-      if (margin < lowestMargin) {
-        lowestMargin = margin;
-        seenBy = margin <= 0 ? target : null;
-      }
-    }
+    const noticed =
+      perception !== undefined &&
+      attackers.some((a) => (check.stealth[a] ?? 0) <= perception);
+    if (noticed) awareDefenders.push(target);
+    else unaware.push(target);
   }
-  if (seenBy !== null) {
+  const aware = [...attackers, ...awareDefenders];
+  if (unaware.length === 0) {
     return {
       surpriseRound: false,
       flatFooted: [],
-      note: `${seenBy} noticed at least one attacker — no surprise round`,
+      aware,
+      note: "every defender noticed an attacker — no surprise round",
+    };
+  }
+  return { surpriseRound: true, flatFooted: unaware, aware, note: null };
+}
+
+/**
+ * The GM's explicit awareness marks → the same outcome shape `checkSurprise` produces. The
+ * unaware are exactly the marked combatants (unknown ids ignored); "if no one or everyone is
+ * surprised, no surprise round occurs" covers both degenerate splits.
+ */
+function explicitAwareness(
+  combatants: readonly CombatantDocument[],
+  unaware: readonly string[],
+): SurpriseOutcome {
+  const ids = combatants.filter((c) => !c.defeated).map((c) => c._id);
+  const marked = new Set(unaware);
+  const unawareIds = ids.filter((id) => marked.has(id));
+  const awareIds = ids.filter((id) => !marked.has(id));
+  if (unawareIds.length === 0) {
+    return {
+      surpriseRound: false,
+      flatFooted: [],
+      aware: awareIds,
+      note: "no combatant is unaware — no surprise round",
+    };
+  }
+  if (awareIds.length === 0) {
+    return {
+      surpriseRound: false,
+      flatFooted: unawareIds,
+      aware: [],
+      note: "no combatant is aware — no surprise round",
     };
   }
   return {
     surpriseRound: true,
-    flatFooted: [...targets],
+    flatFooted: unawareIds,
+    aware: awareIds,
     note: null,
   };
 }
@@ -350,6 +401,11 @@ export function startWithSurprise(
     targets?: readonly string[] | undefined;
     stealth?: Record<string, number> | undefined;
     perception?: Record<string, number> | undefined;
+    /**
+     * Explicit awareness marks (the tracker path): the combatants the GM declares caught
+     * unaware. Takes precedence over stealth/perception when both are supplied.
+     */
+    unaware?: readonly string[] | undefined;
     secondsPerRound?: number | undefined;
     clockSeconds?: number | undefined;
   },
@@ -375,17 +431,20 @@ export function startWithSurprise(
     roundRolled: false,
   };
   const surprise =
-    opts.stealth !== undefined && opts.perception !== undefined
-      ? checkSurprise(opts.targets ?? withInitiative.map((c) => c._id), {
-          stealth: opts.stealth,
-          perception: opts.perception,
-        })
-      : null;
+    opts.unaware !== undefined
+      ? explicitAwareness(withInitiative, opts.unaware)
+      : opts.stealth !== undefined && opts.perception !== undefined
+        ? checkSurprise(opts.targets ?? withInitiative.map((c) => c._id), {
+            stealth: opts.stealth,
+            perception: opts.perception,
+          })
+        : null;
 
   if (surprise?.surpriseRound) {
-    // Only the aware act in the surprise round (A.1); the flat-footed wait for round 1.
+    // Only the AWARE combatants act in the surprise round (A.1) — aware defenders
+    // included; the unaware wait for round 1, flat-footed.
     const order = sortCombatants(withInitiative)
-      .filter((c) => !c.defeated && !surprise.flatFooted.includes(c._id))
+      .filter((c) => !c.defeated && surprise.aware.includes(c._id))
       .map((c) => c._id);
     const surpriseState: PF1eRoundState = {
       ...base,
@@ -394,11 +453,29 @@ export function startWithSurprise(
       surpriseTurn: 0,
       surprised: surprise.flatFooted,
     };
+    // The first surprise actor's turn starts now: they have acted (no longer
+    // flat-footed once regular rounds begin) and their budget is restricted to a
+    // single standard or move action plus free/swift (A.1/A.6, CRB p.181).
+    const firstId = order[0];
+    const combatants = withInitiative.map((c) => {
+      const cs = readCombatantState(c);
+      if (c._id === firstId) {
+        return withCombatantState(c, {
+          ...cs,
+          acted: true,
+          actions: {
+            ...startOfTurnLedger(cs.actions),
+            restriction: "single-standard-or-move",
+          },
+        });
+      }
+      if (surprise.flatFooted.includes(c._id) && !cs.surprised) {
+        return withCombatantState(c, { ...cs, surprised: true });
+      }
+      return c;
+    });
     return {
-      combat: withRoundState(
-        { ...combat, combatants: withInitiative },
-        surpriseState,
-      ),
+      combat: withRoundState({ ...combat, combatants }, surpriseState),
       state: surpriseState,
       hooks: ["combat:combatant:update", "pf1e:combat:surprise"],
       surprise,
@@ -406,17 +483,15 @@ export function startWithSurprise(
   }
 
   const started = startCombat({ ...combat, combatants: withInitiative });
-  const combatants = started.combat.combatants.map((c) =>
-    c._id === (currentCombatant(started.combat)?._id ?? "")
-      ? {
-          ...c,
-          flags: {
-            ...asRecord(c.flags),
-            [SCOPE]: { ...readCombatantState(c), acted: true },
-          },
-        }
-      : c,
-  );
+  const combatants = started.combat.combatants.map((c) => {
+    if (c._id !== (currentCombatant(started.combat)?._id ?? "")) return c;
+    const cs = readCombatantState(c);
+    return withCombatantState(c, {
+      ...cs,
+      acted: true,
+      actions: startOfTurnLedger(cs.actions),
+    });
+  });
   const roundsState: PF1eRoundState = {
     ...base,
     phase: "rounds",
@@ -462,8 +537,23 @@ export function pf1eNextTurn(
     const nextIdx = state.surpriseTurn + 1;
     if (nextIdx < state.surpriseOrder.length) {
       const surpriseState = { ...state, surpriseTurn: nextIdx };
+      // The next aware combatant's surprise turn starts: they have acted, and their
+      // budget is restricted to a single standard or move action plus free/swift (A.1).
+      const nextId = state.surpriseOrder[nextIdx];
+      const combatants = combat.combatants.map((c) => {
+        if (c._id !== nextId) return c;
+        const cs = readCombatantState(c);
+        return withCombatantState(c, {
+          ...cs,
+          acted: true,
+          actions: {
+            ...startOfTurnLedger(cs.actions),
+            restriction: "single-standard-or-move",
+          },
+        });
+      });
       return {
-        combat: withRoundState(combat, surpriseState),
+        combat: withRoundState({ ...combat, combatants }, surpriseState),
         state: surpriseState,
         hooks: ["combat:turn:end", "combat:turn:start"],
         expired: [],
@@ -474,6 +564,16 @@ export function pf1eNextTurn(
     }
     // Surprise round over: everyone is now in the initiative order, round 1 begins.
     const started = startCombat(combat);
+    const firstRegular = currentCombatant(started.combat)?._id ?? "";
+    const roundOne = started.combat.combatants.map((c) => {
+      if (c._id !== firstRegular) return c;
+      const cs = readCombatantState(c);
+      return withCombatantState(c, {
+        ...cs,
+        acted: true, // your own turn starting is the flat-footed transition (A.1)
+        actions: startOfTurnLedger(cs.actions),
+      });
+    });
     const afterSurprise: PF1eRoundState = {
       ...state,
       phase: "rounds",
@@ -481,7 +581,10 @@ export function pf1eNextTurn(
       roundRolled: false,
     };
     return {
-      combat: withRoundState(started.combat, afterSurprise),
+      combat: withRoundState(
+        { ...started.combat, combatants: roundOne },
+        afterSurprise,
+      ),
       state: afterSurprise,
       hooks: ["combat:turn:end", ...started.hooks],
       expired: [],
@@ -511,6 +614,7 @@ export function pf1eNextTurn(
       let aooUsed = cs.aooUsed;
       let held = cs.held;
       let acted = cs.acted;
+      let actions = cs.actions;
       if (active && c._id === active._id && aooUsed !== 0) {
         aooUsed = 0; // A.10: the budget comes back at the start of your turn
         changed = true;
@@ -532,8 +636,18 @@ export function pf1eNextTurn(
         acted = true; // no longer flat-footed "until your first turn" (A.1)
         changed = true;
       }
+      if (active && c._id === active._id) {
+        // T05: the action budget resets at the start of your turn; an off-turn immediate
+        // action's reservation converts into "swift already used"; a pending full-round
+        // action survives to be completed with this turn's standard action.
+        const reset = startOfTurnLedger(actions);
+        if (!sameLedger(reset, actions)) {
+          actions = reset;
+          changed = true;
+        }
+      }
       if (!changed) return c;
-      return withCombatantState(c, { ...cs, aooUsed, held, acted });
+      return withCombatantState(c, { ...cs, aooUsed, held, acted, actions });
     });
   }
 
@@ -639,6 +753,45 @@ export function holdAction(
   return withCombatantState(combatant, { ...cs, held });
 }
 
+/** Field-wise ledger equality (the reset builds a fresh object every time). */
+function sameLedger(a: PF1eActionLedger, b: PF1eActionLedger): boolean {
+  return (
+    a.standardUsed === b.standardUsed &&
+    a.moveUsed === b.moveUsed &&
+    a.swiftUsed === b.swiftUsed &&
+    a.swiftReserved === b.swiftReserved &&
+    a.fiveFootStepUsed === b.fiveFootStepUsed &&
+    a.movementFt === b.movementFt &&
+    a.fullRoundPending === b.fullRoundPending &&
+    a.restriction === b.restriction
+  );
+}
+
+/**
+ * Spend from one combatant's action budget (T05). Pure: returns the combat whose
+ * combatant carries the updated ledger, or the refusal reason — the UI/host turns the
+ * result into a `combats` update op.
+ */
+export function spendCombatantAction(
+  combat: CombatDocument,
+  combatantId: string,
+  spend: PF1eActionSpend,
+): Result<CombatDocument> {
+  const target = combat.combatants.find((c) => c._id === combatantId);
+  if (!target) return err("combatant is not part of this encounter");
+  const cs = readCombatantState(target);
+  const next = spendAction(cs.actions, spend);
+  if (!next.ok) return err(next.error);
+  return okVal({
+    ...combat,
+    combatants: combat.combatants.map((c) =>
+      c._id === combatantId
+        ? withCombatantState(c, { ...cs, actions: next.value })
+        : c,
+    ),
+  });
+}
+
 /** Is this combatant flat-footed right now for round-structural reasons (A.1 surprise / no turn yet)? */
 export function isFlatFootedByRound(
   combat: CombatDocument,
@@ -652,6 +805,49 @@ export function isFlatFootedByRound(
     return { flatFooted: true, why: "no-turn-yet" };
   }
   return { flatFooted: false, why: null };
+}
+
+/**
+ * Who is acting right now, PF1e-aware: during a surprise round the current actor is the
+ * surprise order's pointer, not core's `turn` (core has not started a round yet).
+ */
+export function activePF1eCombatant(
+  combat: CombatDocument,
+): CombatantDocument | null {
+  const state = readRoundState(combat);
+  if (state.phase === "surprise") {
+    const id = state.surpriseOrder[state.surpriseTurn];
+    return id === undefined
+      ? null
+      : (combat.combatants.find((c) => c._id === id) ?? null);
+  }
+  return currentCombatant(combat);
+}
+
+/**
+ * End combat through core, then reset the PF1e round structure to a fresh setup state so a
+ * restarted encounter cannot inherit a stale phase, surprise order or clock.
+ */
+export function pf1eEndCombat(combat: CombatDocument): {
+  combat: CombatDocument;
+  state: PF1eRoundState;
+  hooks: string[];
+} {
+  const ended = endCombat(combat);
+  const state: PF1eRoundState = {
+    ...readRoundState(combat),
+    phase: "setup",
+    surpriseOrder: [],
+    surpriseTurn: 0,
+    surprised: [],
+    roundRolled: false,
+    clockSeconds: 0,
+  };
+  return {
+    combat: withRoundState(ended.combat, state),
+    state,
+    hooks: ended.hooks,
+  };
 }
 
 /** Elapsed combat time in rounds and the remaining grace for a per-minute duration. */

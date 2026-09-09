@@ -8,10 +8,23 @@
   // static import: a dynamic import("pixi.js") would inline a SECOND copy of
   // pixi into the single-file bundle (+290 KB, D-083)
   import { Assets } from "pixi.js";
-  import { CanvasController, domPointerSource, type TokenView } from "../canvas/interactions";
-  import { exportWorldToFolder, exportWorldZip, importWorldZip } from "../host/worldFile";
+  import {
+    CanvasController,
+    domPointerSource,
+    type TokenView,
+  } from "../canvas/interactions";
+  import {
+    exportWorldToFolder,
+    exportWorldZip,
+    importWorldZip,
+  } from "../host/worldFile";
   import { ChatPanel } from "../ui/chat";
   import { CombatPanel } from "../ui/combat";
+  import {
+    applyTokenMenuEntry,
+    tokenContextMenuModel,
+  } from "../ui/combat/tokenContextMenu";
+  import { selectedEncounter } from "../ui/combat/encounters";
   import { JournalsPanel } from "../ui/journals";
   import { WindowHost } from "../ui/windows";
   import { WindowManager } from "../ui/windows";
@@ -25,12 +38,20 @@
   import { TrustedModuleHost } from "../packages/trustedModule";
   import { screenToWorld } from "../canvas/camera";
   import CompendiaPanel from "../ui/compendia/CompendiaPanel.svelte";
-  import { createModuleHandlers, type ModuleHost } from "../packages/moduleHandlers";
+  import {
+    createModuleHandlers,
+    type ModuleHost,
+  } from "../packages/moduleHandlers";
   import type { ModuleHookName } from "../core/moduleApi";
   import { getSetting } from "../storage/idb";
   import { createMassBattleBasic } from "../packages/massBattleBasic";
-  import type { ArmyDocument, FactionDocument, UnitDocument } from "../core/strategic";
+  import type {
+    ArmyDocument,
+    FactionDocument,
+    UnitDocument,
+  } from "../core/strategic";
   import { actionForCombo, comboOf, isTypingTarget } from "../core/keys";
+  import { globalHooks } from "../core/events";
   import type { GridSpec } from "../canvas/grid";
   import { TablesPanel } from "../ui/tables";
   import { PlaylistsPanel } from "../ui/playlists";
@@ -39,19 +60,29 @@
   import { openPF1eSheetWindow } from "../ui/sheets/pf1eSheetWindow";
   import { SheetPanel } from "../ui/sheets";
   import { startHostShare, type HostShare } from "./hostShare";
-  import type { SceneDocument, SceneGrid } from "../core/documents";
+  import type {
+    CombatDocument,
+    SceneDocument,
+    SceneGrid,
+  } from "../core/documents";
   import type { Op } from "../core/ops";
   import { worldSettingsFrom } from "../core/worldSettings";
   import { installGmFogE2e } from "./e2eHook";
 
-  let { app = null, bootError = null }: { app?: HostApp | null; bootError?: string | null } =
-    $props();
+  let {
+    app = null,
+    bootError = null,
+  }: { app?: HostApp | null; bootError?: string | null } = $props();
 
   const caps = detectCapabilities();
   const rows: Array<[string, boolean]> = Object.entries(caps);
   const ready = rows.filter(([, ok]) => ok).length;
 
   let canvasHost: HTMLDivElement;
+  /** T01 token context menu: opened by a right-CLICK on a token (right-drag pans). */
+  let tokenMenu = $state<{ x: number; y: number; tokenId: string } | null>(
+    null,
+  );
   let worldName = $state("—");
   let seq = $state(0);
   let tokenCount = $state(0);
@@ -75,7 +106,10 @@
   let loadedMapHash: string | null = null;
   let stage: Stage | null = null;
   let controller: CanvasController | null = null;
-  let tokenSelection = $state.raw<{ sceneId: string | null; ids: readonly string[] }>({
+  let tokenSelection = $state.raw<{
+    sceneId: string | null;
+    ids: readonly string[];
+  }>({
     sceneId: null,
     ids: [],
   });
@@ -96,7 +130,9 @@
   let lastRulesVersion = "";
   let lastByType: Record<string, number> = {};
   let notifyLog = $state<{ message: string; level: string }[]>([]);
-  let importedTokens = $state<{ name: string; actorId: string; img: string }[]>([]);
+  let importedTokens = $state<{ name: string; actorId: string; img: string }[]>(
+    [],
+  );
   let dice3dHost: HTMLElement | null = null;
   let last3dRollId: string | null = null;
   /** §5A realtime: client-side position interpolation over the replica. */
@@ -105,9 +141,83 @@
   let offSimBus: (() => void) | null = null;
   let moduleHost: ModuleHost | null = null;
 
+  /** The active encounter of the active scene (null before any is activated). */
+  function activeCombat(): CombatDocument | null {
+    if (!app) return null;
+    const scenes = app.gm.client.store.getAll(
+      "scenes",
+    ) as readonly SceneDocument[];
+    const scene = scenes.find((sc) => sc.active) ?? scenes[0] ?? null;
+    if (!scene) return null;
+    const combats = app.gm.client.store.getAll(
+      "combats",
+    ) as readonly CombatDocument[];
+    return selectedEncounter(combats, scene, scenes[0]?._id ?? "");
+  }
+
+  function closeTokenMenu(): void {
+    tokenMenu = null;
+  }
+
+  /** Apply one T01 menu entry: roster transitions go through the combat update path,
+   *  token visibility through its own op; the canvas menu closes either way. */
+  function runTokenMenuEntry(
+    entryId: "add-combatant" | "remove-combatant" | "toggle-hidden",
+  ): void {
+    if (!tokenMenu || !app) return;
+    const scene = activeScene();
+    if (!scene) {
+      closeTokenMenu();
+      return;
+    }
+    const token = scene.tokens.find((tk) => tk._id === tokenMenu?.tokenId);
+    if (!token) {
+      closeTokenMenu();
+      return;
+    }
+    const result = applyTokenMenuEntry({
+      combat: activeCombat(),
+      scene,
+      token,
+      user: app.gm.client.user,
+      entryId,
+      nextId: () => globalThis.crypto.randomUUID(),
+    });
+    if (result.error) {
+      notifyLog = [
+        ...notifyLog.slice(-49),
+        { message: result.error, level: "error" },
+      ];
+      closeTokenMenu();
+      return;
+    }
+    if (result.ops.length) {
+      app.gm.client.submit(result.ops);
+    }
+    if (result.transition) {
+      const combat = result.transition.combat;
+      for (const hook of result.transition.hooks)
+        globalHooks.callAll(hook, combat);
+      app.gm.client.submit([
+        {
+          kind: "update",
+          ref: { coll: "combats", id: combat._id },
+          diff: {
+            round: combat.round,
+            turn: combat.turn,
+            combatants: combat.combatants,
+          },
+        },
+      ]);
+    }
+    closeTokenMenu();
+  }
+
   function activeScene(): SceneDocument | null {
     if (!app) return null;
-    const scenes = app.gm.client.store.getAll("scenes") as readonly SceneDocument[];
+    const scenes = app.gm.client.store.getAll(
+      "scenes",
+    ) as readonly SceneDocument[];
     return (
       scenes.find((sc) => sc.active) ??
       app.gm.client.store.get("scenes", DEFAULT_SCENE_ID) ??
@@ -157,14 +267,19 @@
   const hotbarSlots = $derived.by(() => {
     void storeVersion;
     return macroSlots(
-      (app?.gm.client.store.getAll("macros") ?? []) as Parameters<typeof macroSlots>[0],
+      (app?.gm.client.store.getAll("macros") ?? []) as Parameters<
+        typeof macroSlots
+      >[0],
     );
   });
   // NOTE: spread-copy — store.getAll returns a LIVE array and a keyed {#each}
   // bails on identical references (the new scene button never appeared).
   const scenes = $derived.by(() => {
     void storeVersion;
-    return [...((app?.gm.client.store.getAll("scenes") ?? []) as readonly SceneDocument[])];
+    return [
+      ...((app?.gm.client.store.getAll("scenes") ??
+        []) as readonly SceneDocument[]),
+    ];
   });
   const playerUsers = $derived.by(() => {
     void storeVersion;
@@ -188,7 +303,9 @@
 
   function activateScene(id: string): void {
     if (!app) return;
-    const scenes = app.gm.client.store.getAll("scenes") as readonly SceneDocument[];
+    const scenes = app.gm.client.store.getAll(
+      "scenes",
+    ) as readonly SceneDocument[];
     const ops = scenes
       .filter((sc) => sc.active !== (sc._id === id))
       .map((sc) => ({
@@ -250,7 +367,8 @@
   function sceneGridSpec(grid: SceneGrid | undefined): GridSpec | null {
     if (!grid || grid.size <= 0) return null;
     if (grid.type === "square") return { type: "square", size: grid.size };
-    if (grid.type === "hex") return { type: "hex", size: grid.size, layout: grid.hexLayout };
+    if (grid.type === "hex")
+      return { type: "hex", size: grid.size, layout: grid.hexLayout };
     return { type: "gridless" };
   }
 
@@ -267,7 +385,9 @@
         }
         const owner = app;
         if (!owner) return null;
-        const bytes = await owner.gm.fetcher.request(img, "scene").catch(() => null);
+        const bytes = await owner.gm.fetcher
+          .request(img, "scene")
+          .catch(() => null);
         if (!bytes) return null;
         const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)]));
         return Assets.load(url).catch(() => null);
@@ -281,7 +401,12 @@
   function syncStrategicFog(): void {
     if (!app || !stage) return;
     const scene = activeScene();
-    if (!scene || !sceneIsStrategic(scene) || gmState.godView || !gmState.viewAsFaction) {
+    if (
+      !scene ||
+      !sceneIsStrategic(scene) ||
+      gmState.godView ||
+      !gmState.viewAsFaction
+    ) {
       stage.getStrategicFogLayer().sync([], stage.camera);
       return;
     }
@@ -292,7 +417,9 @@
       return;
     }
     const armies = client.store.getAll("armies") as readonly ArmyDocument[];
-    const factions = client.store.getAll("factions") as readonly FactionDocument[];
+    const factions = client.store.getAll(
+      "factions",
+    ) as readonly FactionDocument[];
     const { grid, allyFactionIds } = buildStrategicFog({
       pool,
       armies,
@@ -300,9 +427,9 @@
       factionId: gmState.viewAsFaction,
       radiusOf: (unit: UnitDocument) =>
         massBattle.detection(
-          { worldSettings: worldSettingsFrom(client.store.getAll("settings")) } as Parameters<
-            typeof massBattle.detection
-          >[0],
+          {
+            worldSettings: worldSettingsFrom(client.store.getAll("settings")),
+          } as Parameters<typeof massBattle.detection>[0],
           {
             id: unit._id,
             armyId: "",
@@ -343,8 +470,12 @@
     tokenCount = scene?.tokens.length ?? 0;
     view.syncTokens(scene?.tokens ?? []);
     // §9 tiles: roofs fade over tokens with vision (D-083)
-    const occupied = (scene?.tokens ?? []).filter((t) => t.vision).map((t) => tokenRect(t));
-    view.getTilesLayer({ loadTexture: tileTexture }).sync(scene?.tiles ?? [], occupied);
+    const occupied = (scene?.tokens ?? [])
+      .filter((t) => t.vision)
+      .map((t) => tokenRect(t));
+    view
+      .getTilesLayer({ loadTexture: tileTexture })
+      .sync(scene?.tiles ?? [], occupied);
     const img = scene?.img ?? null;
     if (img !== null && img !== loadedMapHash) {
       loadedMapHash = img;
@@ -371,7 +502,9 @@
     try {
       share = await startHostShare(app);
       if (new URLSearchParams(globalThis.location.search).has("e2e")) {
-        void import("./e2eHook").then((m) => m.installShareE2e(share as HostShare));
+        void import("./e2eHook").then((m) =>
+          m.installShareE2e(share as HostShare),
+        );
       }
       shareTimer = setInterval(() => {
         const code = share?.adapter.lastSentCode;
@@ -413,7 +546,12 @@
     try {
       const handle = await window.showDirectoryPicker();
       const res = await exportWorldToFolder(
-        { db: app.db, worldId: app.worldId, root: app.root, persister: app.persister },
+        {
+          db: app.db,
+          worldId: app.worldId,
+          root: app.root,
+          persister: app.persister,
+        },
         handle as unknown as import("../storage/opfs").DirHandleLike,
       );
       canvasError = null;
@@ -433,7 +571,9 @@
       const { db, root } = app;
       app.close(); // stop live writes; import replaces the world rows
       const imported = await importWorldZip({ db, root, file });
-      console.info(`vtt: imported world ${imported.name} at seq ${imported.seq}`);
+      console.info(
+        `vtt: imported world ${imported.name} at seq ${imported.seq}`,
+      );
       globalThis.location.reload(); // reboot into the restored world
     } catch (err) {
       canvasError = `import failed: ${err instanceof Error ? err.message : String(err)}`;
@@ -485,7 +625,11 @@
     const scene = activeScene();
     const docId = `${found.pack.type.slice(0, -1)}-${globalThis.crypto.randomUUID().slice(0, 8)}`;
     const ops: Op[] = [
-      { kind: "create", coll: found.pack.type, data: { ...entry.data, _id: docId } },
+      {
+        kind: "create",
+        coll: found.pack.type,
+        data: { ...entry.data, _id: docId },
+      },
     ];
     if (found.pack.type === "actors" && scene) {
       const canvas = stage?.app.canvas;
@@ -554,14 +698,23 @@
     });
     player = audioPlayer;
     current.gm.client.sendPing();
-    const clockTimer = globalThis.setInterval(() => current.gm.client.sendPing(), 30_000);
+    const clockTimer = globalThis.setInterval(
+      () => current.gm.client.sendPing(),
+      30_000,
+    );
     const offWm = wm.onChange(() => wmVersion++);
     const offRejected = current.gm.bus.on("rejected", (r) => {
-      globalThis.localStorage.setItem("vtt-e2e-last-rejected", `${r.reason}: ${r.detail}`);
+      globalThis.localStorage.setItem(
+        "vtt-e2e-last-rejected",
+        `${r.reason}: ${r.detail}`,
+      );
     });
     const onKey = (e: KeyboardEvent): void => {
       if (isTypingTarget(e.target)) return;
-      if (e.key === "Escape") controller?.clearRuler(); // §9 ruler dismiss
+      if (e.key === "Escape") {
+        controller?.clearRuler(); // §9 ruler dismiss
+        closeTokenMenu(); // T01 menu dismiss
+      }
       const action = actionForCombo(comboOf(e));
       if (action?.startsWith("hotbar.")) {
         e.preventDefault();
@@ -591,12 +744,23 @@
         const scene = activeScene();
         const width = Math.max(320, canvasHost.clientWidth);
         const height = Math.max(240, canvasHost.clientHeight);
-        const view = await createStage({ width, height, hostElement: canvasHost });
+        const view = await createStage({
+          width,
+          height,
+          hostElement: canvasHost,
+        });
         stage = view;
         view.fit(scene?.width ?? 2000, scene?.height ?? 1500);
         controller = new CanvasController({
           onSelectionChange: (ids) => {
-            tokenSelection = { sceneId: activeScene()?._id ?? null, ids: [...ids] };
+            tokenSelection = {
+              sceneId: activeScene()?._id ?? null,
+              ids: [...ids],
+            };
+            closeTokenMenu(); // any new gesture supersedes the menu
+          },
+          onContextMenu: ({ screen, tokenId }) => {
+            tokenMenu = { x: screen.x, y: screen.y, tokenId };
           },
           onTokenActivate: ({ token }) => {
             if (token.actorId) openActorSheet(token.actorId);
@@ -618,7 +782,11 @@
             const scene = activeScene();
             const grid = sceneGridSpec(scene?.grid);
             const measure = grid
-              ? { type: grid.type, size: grid.size, diagonals: scene?.grid.diagonals ?? "555" }
+              ? {
+                  type: grid.type,
+                  size: grid.size,
+                  diagonals: scene?.grid.diagonals ?? "555",
+                }
               : null;
             const units = scene?.grid.units ?? "ft";
             const own = current.gm.client.user?.id ?? "gm";
@@ -642,12 +810,17 @@
             if (op.kind !== "create" || op.coll !== "messages") continue;
             const data = op.data as {
               _id?: string;
-              roll?: { formula: string; total: number; terms: unknown[] } | null;
+              roll?: {
+                formula: string;
+                total: number;
+                terms: unknown[];
+              } | null;
             };
             if (!data.roll || !data._id || data._id === last3dRollId) continue;
             last3dRollId = data._id;
             const info = diceInfoFromRecord(data.roll);
-            if (info.dice.length > 0 && dice3dHost) void showDice3D(dice3dHost, info);
+            if (info.dice.length > 0 && dice3dHost)
+              void showDice3D(dice3dHost, info);
           }
         });
         current.gm.bus.on("ephemeral", (m) => {
@@ -672,7 +845,11 @@
             const scene = activeScene();
             const grid = sceneGridSpec(scene?.grid);
             const measure = grid
-              ? { type: grid.type, size: grid.size, diagonals: scene?.grid.diagonals ?? "555" }
+              ? {
+                  type: grid.type,
+                  size: grid.size,
+                  diagonals: scene?.grid.diagonals ?? "555",
+                }
               : null;
             view
               .getEffectsLayer()
@@ -725,7 +902,8 @@
             notify: (message, level) => {
               notifyLog = [...notifyLog.slice(-49), { message, level }];
             },
-            newId: (prefix) => `${prefix}${globalThis.crypto.randomUUID().slice(0, 8)}`,
+            newId: (prefix) =>
+              `${prefix}${globalThis.crypto.randomUUID().slice(0, 8)}`,
           });
           const onSubscribe = (event: ModuleHookName): void => {
             if (event === "ready") moduleHost?.emitHook("ready", {});
@@ -773,8 +951,11 @@
           rectCount: () => view.getStrategicFogLayer().rectCount,
           sceneScale: () => {
             const scene = activeScene();
-            const flags = scene?.flags as { core?: { scale?: unknown } } | undefined;
-            return flags?.core?.scale === "strategic" ? "strategic" : "tactical";
+            const flags = scene?.flags as
+              { core?: { scale?: unknown } } | undefined;
+            return flags?.core?.scale === "strategic"
+              ? "strategic"
+              : "tactical";
           },
           godView: () => gmState.godView,
           viewAsFaction: () => gmState.viewAsFaction,
@@ -785,18 +966,23 @@
           notifications: () => [...notifyLog],
           moduleSetting: (key: string) =>
             current.moduleBoot
-              ? getSetting(current.db, `module:${current.moduleBoot.packageId}`, key).then(
-                  (r) => r?.value ?? null,
-                )
+              ? getSetting(
+                  current.db,
+                  `module:${current.moduleBoot.packageId}`,
+                  key,
+                ).then((r) => r?.value ?? null)
               : Promise.resolve(null),
           moduleMode: () => current.moduleBoot?.mode ?? "none",
           migrationBoot: () => current.migrationBoot ?? null,
           firstArmyProbe: () => {
-            const armies = current.gm.client.store.getAll("armies") as readonly ArmyDocument[];
+            const armies = current.gm.client.store.getAll(
+              "armies",
+            ) as readonly ArmyDocument[];
             const first = armies[0];
             if (!first) return null;
             return {
-              schemaNote: (first.system as Record<string, unknown>).schemaNote ?? null,
+              schemaNote:
+                (first.system as Record<string, unknown>).schemaNote ?? null,
               drill: first.units[0]?.stats.drill ?? null,
             };
           },
@@ -806,9 +992,13 @@
               entries: list.reduce((n, r) => n + r.pack.entries.length, 0),
             })),
           actorCount: () =>
-            (current.gm.client.store.getAll("actors") as readonly unknown[]).length,
+            (current.gm.client.store.getAll("actors") as readonly unknown[])
+              .length,
           importedTokens: () => [...importedTokens],
-          dice3d: () => ({ ...dice3dStats, lastValues: [...dice3dStats.lastValues] }),
+          dice3d: () => ({
+            ...dice3dStats,
+            lastValues: [...dice3dStats.lastValues],
+          }),
           realtimeInfo: () => {
             const interp = rtInterp.stats;
             const pool = current.gm.client.simReplica;
@@ -831,7 +1021,9 @@
             };
           },
           setFirstUnitMoveOrder: (x: number, y: number) => {
-            const armies = current.gm.client.store.getAll("armies") as ReadonlyArray<{
+            const armies = current.gm.client.store.getAll(
+              "armies",
+            ) as ReadonlyArray<{
               _id: string;
               units: ReadonlyArray<{ _id: string }>;
             }>;
@@ -848,7 +1040,9 @@
                   },
                   diff: {
                     orders: {
-                      pending: [{ kind: "move", path: [{ x, y }], pace: "march" }],
+                      pending: [
+                        { kind: "move", path: [{ x, y }], pace: "march" },
+                      ],
                       issuedBy: "gm",
                       issuedTurn: 0,
                     },
@@ -861,7 +1055,14 @@
           },
           simControl: (
             action:
-              "pause" | "resume" | "rate" | "advance" | "next" | "undoTurn" | "mode" | "start",
+              | "pause"
+              | "resume"
+              | "rate"
+              | "advance"
+              | "next"
+              | "undoTurn"
+              | "mode"
+              | "start",
             extra: {
               rateHz?: number;
               mode?: "stepwise" | "realtime";
@@ -871,7 +1072,9 @@
             current.gm.client.simControl(action, extra);
           },
           committedRoll: async () => {
-            const msgs = current.gm.client.store.getAll("messages") as ReadonlyArray<{
+            const msgs = current.gm.client.store.getAll(
+              "messages",
+            ) as ReadonlyArray<{
               roll?: {
                 formula: string;
                 total: number;
@@ -901,7 +1104,9 @@
           tileAlphas: () => {
             const tiles = activeScene()?.tiles ?? [];
             const layer = view.getTilesLayer();
-            return Object.fromEntries(tiles.map((t) => [t._id, layer.alphaOf(t._id)]));
+            return Object.fromEntries(
+              tiles.map((t) => [t._id, layer.alphaOf(t._id)]),
+            );
           },
           seedTile: (spec) => {
             const scene = activeScene();
@@ -936,21 +1141,31 @@
               "factions",
             ) as readonly FactionDocument[];
             return Object.fromEntries(
-              factions.map((f) => [f._id, { ...f.ownership } as Record<string, number>]),
+              factions.map((f) => [
+                f._id,
+                { ...f.ownership } as Record<string, number>,
+              ]),
             );
           },
           armySnapshot: () => {
             const store = current.gm.client.store;
             const armies = store.getAll("armies") as readonly ArmyDocument[];
-            const factions = store.getAll("factions") as readonly FactionDocument[];
+            const factions = store.getAll(
+              "factions",
+            ) as readonly FactionDocument[];
             const units = armies.flatMap((a) => a.units);
             return {
               armies: armies.length,
               factions: factions.length,
               units: units.length,
-              pendingOrders: units.reduce((n, u) => n + u.orders.pending.length, 0),
+              pendingOrders: units.reduce(
+                (n, u) => n + u.orders.pending.length,
+                0,
+              ),
               strengths: units.map((u) => u.stats.strength),
-              allyLists: Object.fromEntries(factions.map((f) => [f._id, [...f.allies]])),
+              allyLists: Object.fromEntries(
+                factions.map((f) => [f._id, [...f.allies]]),
+              ),
             };
           },
         });
@@ -972,7 +1187,9 @@
 
 <main>
   <h1>VTT</h1>
-  <p class="sub">browser-only virtual tabletop · bootstrap v{__APP_VERSION__}</p>
+  <p class="sub">
+    browser-only virtual tabletop · bootstrap v{__APP_VERSION__}
+  </p>
 
   {#if bootError}
     <p class="error">boot failed: {bootError}</p>
@@ -1004,23 +1221,33 @@
         </div>
         <label class="btn">
           Import map
-          <input id="map-input" type="file" accept="image/*" onchange={importMap} hidden />
+          <input
+            id="map-input"
+            type="file"
+            accept="image/*"
+            onchange={importMap}
+            hidden
+          />
         </label>
-        <button id="add-token" type="button" onclick={addToken}>Add token</button>
+        <button id="add-token" type="button" onclick={addToken}
+          >Add token</button
+        >
         <h3>Invite (§6.2)</h3>
         {#if !share}
           <button id="share" type="button" onclick={() => void beginShare()}>
             Share invite
           </button>
         {:else}
-          <textarea id="invite-link" rows="3" readonly value={share.inviteLink}></textarea>
+          <textarea id="invite-link" rows="3" readonly value={share.inviteLink}
+          ></textarea>
           <label for="peer-code">Player's code</label>
           <textarea id="peer-code" rows="4" bind:value={peerCode}></textarea>
           <button id="code-apply" type="button" onclick={applyPeerCode}
             >Apply player code</button
           >
           <label>Your answer code</label>
-          <textarea id="share-out" rows="4" readonly value={hostAnswer}></textarea>
+          <textarea id="share-out" rows="4" readonly value={hostAnswer}
+          ></textarea>
         {/if}
         {#if shareError}
           <p class="error">{shareError}</p>
@@ -1029,14 +1256,16 @@
           <button
             id="gm-perms"
             type="button"
-            onclick={() => openWindow("permissions", "Permissions", "permissions")}
+            onclick={() =>
+              openWindow("permissions", "Permissions", "permissions")}
           >
             Perms
           </button>
           <button
             id="gm-macros"
             type="button"
-            onclick={() => openWindow("macros", "Macros", "macros")}>Macros</button
+            onclick={() => openWindow("macros", "Macros", "macros")}
+            >Macros</button
           >
           <button
             id="gm-settings"
@@ -1052,8 +1281,18 @@
           >
             Extras
           </button>
-          <button id="gm-undo" type="button" onclick={undo} title="Undo (Ctrl+Z)">↩</button>
-          <button id="gm-redo" type="button" onclick={redo} title="Redo (Ctrl+Y)">↪</button>
+          <button
+            id="gm-undo"
+            type="button"
+            onclick={undo}
+            title="Undo (Ctrl+Z)">↩</button
+          >
+          <button
+            id="gm-redo"
+            type="button"
+            onclick={redo}
+            title="Redo (Ctrl+Y)">↪</button
+          >
         </div>
         <nav class="tabs" aria-label="Sidebar tabs">
           {#each TABS as t (t.id)}
@@ -1095,14 +1334,21 @@
               client={app.gm.client}
               bus={app.gm.bus}
               popout={(journalId, pageId) =>
-                openWindow(`journal:${pageId}`, "Journal", "journal", { journalId, pageId })}
+                openWindow(`journal:${pageId}`, "Journal", "journal", {
+                  journalId,
+                  pageId,
+                })}
             />
           {:else if activeTab === "tables"}
             <TablesPanel client={app.gm.client} bus={app.gm.bus} />
           {:else if activeTab === "playlists"}
             <PlaylistsPanel client={app.gm.client} bus={app.gm.bus} {player} />
           {:else if activeTab === "actors"}
-            <SheetPanel client={app.gm.client} bus={app.gm.bus} onOpenActor={openActorSheet} />
+            <SheetPanel
+              client={app.gm.client}
+              bus={app.gm.bus}
+              onOpenActor={openActorSheet}
+            />
           {:else if activeTab === "compendia"}
             <CompendiaPanel client={app.gm.client} packages={app.packages} />
           {/if}
@@ -1139,11 +1385,18 @@
               {sc.name}
             </button>
           {/each}
-          <button id="scene-add" type="button" onclick={addScene} title="New scene">+</button>
+          <button
+            id="scene-add"
+            type="button"
+            onclick={addScene}
+            title="New scene">+</button
+          >
         </nav>
         <div class="players" aria-label="Players">
           {#each playerUsers as u (u._id)}
-            <span class="player" data-player={u._id}>{u.name} <small>{u.role}</small></span>
+            <span class="player" data-player={u._id}
+              >{u.name} <small>{u.role}</small></span
+            >
           {/each}
         </div>
         <div class="dice3d-host" bind:this={dice3dHost}></div>
@@ -1151,12 +1404,64 @@
           class="canvas-host"
           bind:this={canvasHost}
           ondragover={(ev) => {
-            if (ev.dataTransfer?.types.includes("application/x-vtt-compendium")) {
+            if (
+              ev.dataTransfer?.types.includes("application/x-vtt-compendium")
+            ) {
               ev.preventDefault();
             }
           }}
           ondrop={(ev) => void onCompendiumDrop(ev)}
-        ></div>
+          onpointerdown={() => closeTokenMenu()}
+        >
+          {#if tokenMenu && activeScene()}
+            {@const menuScene = activeScene()}
+            {@const menuToken = menuScene?.tokens.find(
+              (tk) => tk._id === tokenMenu?.tokenId,
+            )}
+            {#if menuScene && menuToken}
+              {@const model = tokenContextMenuModel({
+                combat: activeCombat(),
+                scene: menuScene,
+                token: menuToken,
+                user: app?.gm.client.user ?? null,
+              })}
+              <div
+                class="token-menu"
+                data-token-menu={menuToken._id}
+                onpointerdown={(ev) => ev.stopPropagation()}
+                style={`left: ${Math.round(tokenMenu.x)}px; top: ${Math.round(tokenMenu.y)}px;`}
+                role="menu"
+                aria-label="{model.title} actions"
+              >
+                <span class="token-menu-title">{model.title}</span>
+                {#each model.entries as entry (entry.id)}
+                  {#if entry.id === "initiative"}
+                    <span
+                      class="token-menu-static"
+                      data-token-menu-initiative
+                      title={entry.reason ?? ""}>{entry.label}</span
+                    >
+                  {:else}
+                    <button
+                      type="button"
+                      role="menuitem"
+                      data-token-menu-action={entry.id}
+                      disabled={entry.disabled}
+                      title={entry.reason ?? ""}
+                      onclick={() =>
+                        runTokenMenuEntry(
+                          entry.id as
+                            | "add-combatant"
+                            | "remove-combatant"
+                            | "toggle-hidden",
+                        )}>{entry.label}</button
+                    >
+                  {/if}
+                {/each}
+              </div>
+            {/if}
+          {/if}
+        </div>
         <WindowHost
           manager={wm}
           windows={wmWindows}
@@ -1169,7 +1474,9 @@
         />
         <div class="notify-stack" aria-live="polite">
           {#each notifyLog.slice(-4) as n, i (n.message + ":" + String(i))}
-            <div class="notify" data-notify data-notify-level={n.level}>{n.message}</div>
+            <div class="notify" data-notify data-notify-level={n.level}>
+              {n.message}
+            </div>
           {/each}
         </div>
       </div>
@@ -1397,6 +1704,39 @@
   .btn:hover,
   button:hover {
     background: #262b33;
+  }
+  .token-menu {
+    position: absolute;
+    z-index: 40;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 180px;
+    padding: 4px;
+    background: #1c2430;
+    border: 1px solid #3c4a5e;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  .token-menu-title {
+    font-weight: bold;
+    padding: 0 4px;
+  }
+  .token-menu-static {
+    opacity: 0.85;
+    padding: 2px 4px;
+  }
+  .token-menu button {
+    text-align: left;
+    background: none;
+    border: none;
+    color: inherit;
+    padding: 2px 4px;
+    cursor: pointer;
+  }
+  .token-menu button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
   }
   .canvas-host {
     flex: 1;
