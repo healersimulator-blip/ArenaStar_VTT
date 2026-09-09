@@ -47,7 +47,7 @@ describe("derivation is total", () => {
     expect(d.baseAttack).toBe(0);
     expect(d.hpMax).toBe(0);
     expect(d.attacks).toHaveLength(1);
-    expect(d.attacks[0]?.damageDice).toBe("1d2");
+    expect(d.attacks[0]?.damageDice).toBe("1d3");
     expect(d.defaults.join("\n")).toContain("size: not authored");
     expect(d.issues).toEqual([]);
   });
@@ -267,12 +267,16 @@ describe("attacks of opportunity and natural attacks", () => {
     expect(d.iterativeAttacks).toEqual([11, 6, 1]);
   });
 
-  test("unarmed strike damage follows size (Small 1d2, Large 1d3)", () => {
+  test("unarmed strike damage follows size (Small 1d2, Medium 1d3, Large 1d4 — AoN ID 131)", () => {
     expect(unarmedDamageDice("Small")).toBe("1d2");
-    expect(unarmedDamageDice("Large")).toBe("1d3");
+    expect(unarmedDamageDice("Medium")).toBe("1d3");
+    expect(unarmedDamageDice("Large")).toBe("1d4");
     expect(
       derivePF1eActor({ system: { size: "Large", abilities: { str: 20 } } })
         .attacks[0]?.damageDice,
+    ).toBe("1d4");
+    expect(
+      derivePF1eActor({ system: { size: "Medium" } }).attacks[0]?.damageDice,
     ).toBe("1d3");
   });
 });

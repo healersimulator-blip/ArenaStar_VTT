@@ -28,6 +28,9 @@ import {
   type PF1eBonusType,
   type PF1eSize,
 } from "./rulesTables";
+// The corrected unarmed ladder (P3/A01): Medium is 1d3 per AoN Rules ID 131, not the 1d2
+// this module previously carried. Import, never duplicate.
+import { UNARMED_STRIKE_DAMAGE_BY_SIZE } from "./weapons";
 import {
   resolveEffects,
   type PF1eActiveEffect,
@@ -285,15 +288,6 @@ export interface PF1eDerived extends Pick<
   /** AC came from published totals rather than components. */
   acFromTotals: boolean;
 }
-
-const UNARMED_DICE_BY_SIZE: Partial<Record<PF1eSize, string>> = {
-  Small: "1d2",
-  Medium: "1d2",
-  Large: "1d3",
-  Huge: "1d4",
-  Gargantuan: "1d6",
-  Colossal: "1d8",
-};
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -1186,9 +1180,9 @@ function featList(raw: Record<string, unknown>, issues: string[]): string[] {
   return [];
 }
 
-/** Unarmed strike damage by size (the full table is P6; Tiny-and-smaller unarmed is listed as such). */
+/** Unarmed strike damage by size (AoN Rules ID 131: Medium 1d3; see `weapons.ts` for the ladder). */
 export function unarmedDamageDice(size: PF1eSize): string {
-  return UNARMED_DICE_BY_SIZE[size] ?? "1d2";
+  return UNARMED_STRIKE_DAMAGE_BY_SIZE[size];
 }
 
 /** A derived view straight from documents, for the sheet and the combat panel. */

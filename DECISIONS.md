@@ -2307,3 +2307,60 @@ research — this slice is UI reachability and hidden-roll verification.
   still track that). T01 and T02 are checked off; P2 is complete on the unit
   level — effect/spell menu entries, delay/ready rescheduling and held-action
   interrupts remain P4–P6 work as planned.
+
+## D-134 — A01: typed weapon/armor descriptors, and two rule corrections the encoding surfaced
+
+**Date:** 2026-09-10. **Scope:** P3/A01. Sources: AoN Rules ID 131 ("Attack" ›
+Unarmed Attacks), AoN Rules ID 413 (Conditions › Broken), and the Gap List's
+already-verified rows (§2.8/§2.9/§2.9b, A.9, A.17) — no new rules research
+beyond the two corrections below, each verified against a primary text before
+encoding.
+
+- **Two shipped rules were wrong and are corrected with the descriptors:**
+  (1) the unarmed damage ladder said Medium 1d2/Large 1d3 — AoN ID 131
+  verifies Small 1d2, **Medium 1d3**, Large 1d4 (Huge 1d6 … Colossal 2d6 from
+  the SRD table Pathfinder did not republish outside that range); the shared
+  `UNARMED_STRIKE_DAMAGE_BY_SIZE` now lives in `weapons.ts` and `actor.ts`
+  imports it instead of carrying its own copy. (2) the Gap List A.9 sunder
+  paraphrase "≤ ½ HP ⇒ broken" is tightened against the glossary's primary
+  text: an item is broken at damage **in excess of** half its HP — `hp <
+hpMax/2`, so exactly half is not broken (also encoded in A.17's memory).
+- **`weapons.ts` (new):** the authored shape under `system.pf1e.weapons[]` and
+  a total `resolvePF1eWeapon` (garbage in ⇒ usable unarmed-strike-shaped
+  fallback out, every malformed field named in `issues` — the
+  `derivePF1eActor` convention). The descriptor resolves what should never be
+  persisted: max range increments by class (thrown 5, projectile 10, early
+  firearm 5, advanced 10), the firearm touch-AC window (1st increment early,
+  5th advanced), and the broken-misfire escalation (+4). Carried per weapon:
+  handedness, proficiency group, damage dice/type, nonlethal, threat range and
+  multiplier (kept even when out of range, flagged — never inverted),
+  enhancement + special-ability bonus with `effectiveBonusTotal` for the
+  /epic comparison, material (`cold iron`/`silver`/`adamantine` — the spaced
+  spelling `drBypass` already uses, not the sim's `cold_iron`), alignment
+  list, double head, natural/secondary, unarmed, touch, reach, trip/disarm,
+  splash, ammo `{type, capacity, loadActionId, consumedPerAttack}` (load
+  action ids reference A.6's Table 7-2), misfire, and item wear
+  (HP/hardness/broken). `brokenWeaponAdjustments` returns the AoN ID 413
+  facts: −2 attack and damage, crit only on a natural 20 at ×2 — the authored
+  threat range does not survive the condition.
+- **`items.ts` (new):** armor/shield authored shape + `resolvePF1eArmor`
+  (slot, proficiency, armor/shield bonus, max Dex, ACP as a non-negative
+  number — the sign belongs to the consumers, ASF), `brokenArmorAdjustments`
+  (AC bonus halved rounding down, ACP doubled, **no** ASF change — the
+  glossary lists none), `itemHpAfterDamage` (hardness first, A.17),
+  `isBrokenFromDamage` (the corrected threshold) and `sunderVerdict` (the
+  arithmetic half of A.9; the maneuver is P6). No material HP/hardness table
+  is invented — the Gap List has no verified one; those are authored per item.
+- **Deliberately not encoded:** TWF penalty numbers (the Gap List marks the
+  SRD table "not yet transcribed — cite the page when fixtures are written"),
+  Gun Training's +2 broken-misfire variant (a feat, A07), nonproficiency −4
+  (applied by A02's attack path, carried as data here), and the DR bypass
+  ladder itself (A05's resolver — the weapon carries the properties it reads).
+- **Evidence:** 18 new tests (10 weapon, 8 armor/wear) including the
+  corrections, the total-validator garbage paths, the /epic total, double
+  heads, misfire escalation and the full hardness→HP→sunder chain. Two
+  existing `pf1eActor` expectations updated to the corrected unarmed dice.
+  Full suite 983 passed / 3 skipped across 120 files; typecheck/lint/
+  touched-file formatting/build/size green; dist 2,054,514 raw / 591,568 gzip.
+  A02–A07 remain open; nothing consumes these descriptors in the attack path
+  yet (that is A02's first job).
