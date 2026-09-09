@@ -337,7 +337,9 @@ export class TurnChannel {
   }
 
   handleSimSnapshotGet(user: SessionUser, msg: SimSnapshotGetMsg): void {
-    if (msg.sceneId !== this.sceneId) return;
+    // N01: pre-start requests (joiners adopting the announced battle before any
+    // campaign exists) are a silent no-op — start() broadcasts the first snapshot.
+    if (msg.sceneId !== this.sceneId || !this.bridge.started) return;
     void this.sendSnapshotTo(user);
   }
 

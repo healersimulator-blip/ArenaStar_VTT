@@ -19,8 +19,6 @@ import { deriveRoomKey, type RoomInvite } from "../net/signaling/crypto";
 import { helloPayload, signText, type Identity } from "../net/identity";
 import { ensureIdentity } from "../net/identityStore";
 import { openVttDb } from "../storage/idb";
-import { MASS_BATTLE_SCHEMA_COLUMNS } from "../packages";
-import { DEFAULT_SCENE_ID } from "./hostBoot";
 
 export interface PlayerAppOptions {
   invite: RoomInvite;
@@ -220,9 +218,9 @@ export async function bootPlayerApp(options: PlayerAppOptions): Promise<PlayerAp
           transport: session.transport,
           bus,
           meta,
-          // §5A strategic replica: same system schema + scene as the host channel
-          simSys: MASS_BATTLE_SCHEMA_COLUMNS,
-          simSceneId: DEFAULT_SCENE_ID,
+          // §5A/N01: no schema/scene guess — the joiner adopts the host's
+          // welcome-announced battle (active package columns + scene) before
+          // the first sim frame, so PF1e campaigns decode correctly on join.
         });
         const cache = await AssetCache.open();
         const fetcher = new AssetFetcher({

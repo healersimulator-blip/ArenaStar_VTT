@@ -31,6 +31,7 @@ import type {
   TurnPhaseMsg,
   TurnReportMsg,
   WelcomeMsg,
+  WelcomeSimInfo,
   WireMessage,
 } from "../core/messages";
 import type { Json } from "../core/documents";
@@ -87,6 +88,18 @@ export const DEFAULT_OPTIMISTIC_POLICY: OptimisticPolicy = (op) => {
   return op.kind === "create" && op.coll === "drawings";
 };
 
+/** N01: column-map equality (name → wire kind), order-independent. */
+function sameSimSchema(
+  a: { readonly [name: string]: unknown },
+  b: { readonly [name: string]: unknown },
+): boolean {
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) if (a[k] !== b[k]) return false;
+  return true;
+}
+
 export interface ClientSyncOptions {
   transport: Transport;
   bus: EventBus<ClientEvents>;
@@ -109,8 +122,10 @@ export class ClientSync {
   private readonly policy: OptimisticPolicy;
   private readonly now: () => number;
   private readonly ephemeralBucket: TokenBucket;
-  private readonly simSys: SysSchema | null;
-  private readonly simSceneId: DocId | null;
+  private simSys: SysSchema | null;
+  private simSceneId: DocId | null;
+  /** §5A/N01: the host-announced battle adopted from the welcome (if any). */
+  private simAnnounce: WelcomeSimInfo | null = null;
 
   /** txId → optimistic ops (echo overlay only). */
   private pending = new Map<TxId, Op[]>();
@@ -279,6 +294,9 @@ export class ClientSync {
       case "welcome":
         this.user = msg.user;
         this.world = msg.world;
+        // §5A/N01: adopt the host-announced battle (schema/scene) before any
+        // sim frame is applied — joiners never guess columns or scene ids.
+        if (msg.sim) this.adoptSimInfo(msg.sim);
         this.bus.emit("welcome", { user: msg.user, world: msg.world });
         return;
       case "snapshot":
@@ -369,6 +387,48 @@ export class ClientSync {
 
   get simReplicaVersion(): number {
     return this.simVersion;
+  }
+
+  /** §5A/N01: the battle adopted from the host's welcome (null = none seen). */
+  get simInfo(): WelcomeSimInfo | null {
+    return this.simAnnounce;
+  }
+
+  /**
+   * §5A/N01 — adopt a welcome-announced battle. First adoption overrides any
+   * constructor guess (wrong schema/scene replicas are discarded); a changed
+   * re-announcement (package switch) resets the replica and re-pulls a
+   * snapshot, so the next frame is always decoded with the current schema.
+   * Re-announcing the same info is a no-op (reconnects stay seamless).
+   */
+  private adoptSimInfo(info: WelcomeSimInfo): void {
+    const announcedBefore = this.simAnnounce;
+    const sameAsAnnounced =
+      announcedBefore !== null &&
+      announcedBefore.sceneId === info.sceneId &&
+      announcedBefore.packageId === info.packageId &&
+      announcedBefore.version === info.version &&
+      sameSimSchema(announcedBefore.schema, info.schema);
+    const matchesCurrent =
+      this.simSys !== null &&
+      sameSimSchema(this.simSys, info.schema) &&
+      this.simSceneId === info.sceneId;
+    this.simAnnounce = info;
+    if (sameAsAnnounced && matchesCurrent) return; // idempotent reconnect
+    if (matchesCurrent && announcedBefore === null) return; // constructor already right
+    // Schema and/or scene changed (or the constructor guess was wrong): drop
+    // anything decoded under the old shape and re-sync from a full snapshot.
+    this.simSys = info.schema;
+    this.simSceneId = info.sceneId;
+    this.simPool = null;
+    this.simVersion = -1;
+    this.pendingDeltas = [];
+    this.snapshotInFlight = false;
+    // In-flight dedup (same semantics as the gap path): the host's snapshot
+    // reply clears the flag; pre-start no-ops are followed by the start()
+    // broadcast, so the request can never wedge.
+    this.snapshotInFlight = true;
+    this.requestSimSnapshot();
   }
 
   private applySimDelta(msg: SimDeltaMsg): void {

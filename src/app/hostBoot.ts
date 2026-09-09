@@ -478,6 +478,16 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
           mode: trustRequested && trustGranted ? "inPage" : "iframe",
         }
       : null;
+  // N01 (§1.6): announce the ACTIVE battle on the wire — every welcome carries
+  // the resolved schema + scene, so joiners adopt the package's columns instead
+  // of the mass-battle-basic guess (PF1e campaigns decode on join). Before the
+  // GM loopback session is added, so the first welcome already includes it.
+  host.setSimInfo({
+    sceneId: DEFAULT_SCENE_ID,
+    schema: simSys,
+    packageId: rulesBoot.packageId,
+    version: rulesBoot.version,
+  });
   const bridge = new SimBridge(DEFAULT_SCENE_ID, {
     db,
     worldId: meta.worldId,
@@ -503,8 +513,9 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
     transport: pair.b,
     bus: gmBus,
     meta,
-    simSys,
-    simSceneId: DEFAULT_SCENE_ID,
+    // N01: the GM loopback rides the SAME adoption path as remote joiners —
+    // the welcome (already carrying simInfo from setSimInfo above) installs
+    // the schema/scene. Constructor options remain a test-only escape hatch.
   });
   gmClient.connect({
     kind: "hello",

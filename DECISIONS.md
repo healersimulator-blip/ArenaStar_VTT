@@ -1909,3 +1909,46 @@ non-active combatants whenever desired. D-124's two blocking policies were too r
   replaced restrictive expectations, and extended browser/peer tests through active/last
   removal and accepted selected ties. HTML 2,018,848 bytes raw, gzip 584,394. Other
   unfinished TODO work and Firefox/WebKit acceptance are unchanged.
+
+## D-126 — N01/N02: the active sim schema and scene are host-announced in the welcome
+
+**Date:** 2026-09-09. **Scope:** PF1e_Unified_TODO §2 (multiplayer correctness),
+protocol slice per the file's recommended execution order.
+
+- `WelcomeMsg` carries optional `sim` info (`WelcomeSimInfo`: scene id, SysSchema
+  column map, package id, version). `HostSync.setSimInfo()` owns it: called by
+  hostBoot AFTER the §12 rules boot resolves the active package's schema and
+  BEFORE the GM loopback `addSession`, so every welcome (GM and joiners) carries
+  the real battle. A *changed* announcement re-welcomes live authenticated
+  sessions; identical re-announcement is a no-op (reconnects stay seamless).
+  `null`/absent keeps legacy worlds exactly as before.
+- `ClientSync` adopts the announcement in its welcome handler: no constructor
+  guess needed. First adoption overrides any constructor `simSys`/`simSceneId`
+  (the old joiner hardcoded `MASS_BATTLE_SCHEMA_COLUMNS` + `scene-1` and could
+  not decode a PF1e campaign at all); a changed re-announcement discards the
+  replica/pending deltas and re-requests a snapshot (in-flight dedup matches
+  the existing gap path). Constructor options remain for direct unit tests.
+  Pre-start requests are a host-side no-op (`SimBridge.started` gate) — the
+  campaign's `start()` broadcast is each joiner's first frame either way.
+- joinBoot no longer imports the schema guess; hostBoot's GM loopback rides the
+  same adoption path as remote joiners. PROTOCOL.md welcome section updated
+  (doc-consistency test green). e2e surfaces expose `simInfo()` (GM + player).
+- Tests (`tests/host/simAnnounce.test.ts`, 5 cases): verbatim welcome contract;
+  no-guess adoption + exactly one pre-start `sim.snapshot.get`; wrong-guess
+  override + replica discard; idempotent re-announce vs. package-switch reset
+  with snapshot rebuild (last sim event = snapshot); wire-level
+  adoption→delta-queue→snapshot→replay ordering with signed i8 intact; N02
+  mid-battle joiner receives seeded PF1e columns (u8 AC 18, i8 fort −2, u16
+  profile idx) through BOTH the snapshot and the delta path (next → advance)
+  against the real `createMassBattlePf1e()` rules.
+- `e2e/pf1e_join.spec.ts` (collected, 3 projects; NOT executed — no browser
+  binaries in this environment): import+activate dist zips → reload → PF1e
+  rules boot → GM simInfo carries the PF1e schema → manual-signaling joiner
+  adopts the identical battle → 10-model campaign start + resolved turn reach
+  the player's replica with zero page errors. Browser execution and the
+  Firefox/WebKit matrix remain open, so N01/N02 stay unchecked in the TODO.
+- Validation: 905 tests passed / 3 skipped (116 files + 1 skipped); typecheck,
+  lint and touched-file Prettier pass; build 2,020,346 bytes raw / 584,769
+  gzip (within the 6 MB budget); `build:systems` emits both PF1e packages.
+  `rulesBoot`-driven live package switching remains reload-based as before
+  (D-087/D-110); the re-announce machinery is the protocol-level resync path.

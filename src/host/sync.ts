@@ -33,6 +33,8 @@ import type {
   SimControlMsg,
   SimSnapshotGetMsg,
   TurnReadyMsg,
+  WelcomeMsg,
+  WelcomeSimInfo,
   WireMessage,
 } from "../core/messages";
 import { evaluateCommitRoll, randomSeedHex, sha256Hex } from "../dice/commitReveal";
@@ -125,6 +127,18 @@ function cryptoRng(): number {
   const buf = new Uint32Array(1);
   globalThis.crypto.getRandomValues(buf);
   return (buf[0] as number) / 2 ** 32;
+}
+
+/** N01: column-map equality (name → wire kind), order-independent. */
+function sameSchema(
+  a: { readonly [name: string]: unknown },
+  b: { readonly [name: string]: unknown },
+): boolean {
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) if (a[k] !== b[k]) return false;
+  return true;
 }
 
 /** §10/§11: rewrite `[[formula]]` → `[[total|formula]]` with host rng.
@@ -236,10 +250,55 @@ export class HostSync {
   private sessions = new Map<PeerId, Session>();
   private banned = new Set<UserId>();
   private sim: SimChannelHooks | null = null;
+  /** §5A/N01: the active strategic battle announced in every welcome. */
+  private simInfo: WelcomeSimInfo | null = null;
 
   /** Wire the §5A turn/sim channel (HostSync remains the only talker, §2). */
   attachSim(hooks: SimChannelHooks): void {
     this.sim = hooks;
+  }
+
+  /**
+   * §5A/N01: set the active strategic battle (scene + package schema) that
+   * every welcome announces, so joiners adopt it before their first sim frame
+   * instead of guessing columns/scene. A *changed* announcement is re-sent to
+   * already-authenticated sessions (package switch); clients answer by dropping
+   * their replica and pulling a fresh snapshot. Setting the same info again is
+   * a no-op. Call before addSession() so the very first welcome carries it.
+   */
+  setSimInfo(info: WelcomeSimInfo | null): void {
+    const same =
+      (info === null && this.simInfo === null) ||
+      (info !== null &&
+        this.simInfo !== null &&
+        this.simInfo.sceneId === info.sceneId &&
+        this.simInfo.packageId === info.packageId &&
+        this.simInfo.version === info.version &&
+        sameSchema(this.simInfo.schema, info.schema));
+    if (same) return;
+    this.simInfo = info;
+    if (info === null) return;
+    // Re-announce to live sessions (initial joins get it via welcomeSession).
+    for (const session of this.sessions.values()) {
+      if (!session.user) continue;
+      this.send(session, {
+        kind: "welcome",
+        user: { id: session.user.id, role: session.user.role, name: session.user.name },
+        world: this.welcomeWorld(),
+        snapshotSeq: this.store.seq,
+        sim: info,
+      });
+    }
+  }
+
+  /** The world block every welcome carries (§6.4). */
+  private welcomeWorld(): WelcomeMsg["world"] {
+    return {
+      id: this.store.meta.worldId,
+      name: this.store.meta.name,
+      system: this.store.meta.system,
+      version: this.store.meta.systemVersion,
+    };
   }
 
   /**
@@ -517,13 +576,9 @@ export class HostSync {
     this.send(session, {
       kind: "welcome",
       user: { id: user.id, role: user.role, name: user.name },
-      world: {
-        id: this.store.meta.worldId,
-        name: this.store.meta.name,
-        system: this.store.meta.system,
-        version: this.store.meta.systemVersion,
-      },
+      world: this.welcomeWorld(),
       snapshotSeq: this.catchUpSeq(session, hello),
+      ...(this.simInfo !== null ? { sim: this.simInfo } : {}),
     });
   }
 

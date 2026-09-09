@@ -222,8 +222,27 @@ interface WelcomeMsg {
   user: { id: UserId; role: Role; name: string };
   world: { id: WorldId; name: string; system: string; version: string };
   snapshotSeq: number;
+  /** §5A: the active strategic battle; clients adopt it before the first
+   *  sim frame (joiners never guess schema columns or scene id). */
+  sim?: {
+    sceneId: DocId;
+    schema: {
+      readonly [column: string]:
+        "f32" | "f64" | "i32" | "u32" | "i16" | "u16" | "i8" | "u8";
+    };
+    packageId: string | null; // null = built-in mass-battle-basic
+    version: string;
+  };
 }
 ```
+
+`sim` is the host-announced battle (N01): the active rules package's model
+columns and the scene the sim channel serves. On adoption a client without a
+replica requests `sim.snapshot.get` for that scene (pre-start requests are a
+host-side no-op; `start` broadcasts the first snapshot). When the host
+re-announces a _changed_ `sim` (package switch), clients discard replicas
+decoded under the old shape and re-pull a snapshot before applying further
+deltas; re-announcing identical info (reconnect) is a no-op.
 
 ### snapshot (0x21 · host → client · ops)
 
@@ -258,7 +277,12 @@ Sent to the origin of a failed intent; clients roll back optimistic state (§5).
 
 ```ts
 type RejectionReason =
-  "forbidden" | "invalid_schema" | "invariant" | "phase_locked" | "rate_limited" | "error";
+  | "forbidden"
+  | "invalid_schema"
+  | "invariant"
+  | "phase_locked"
+  | "rate_limited"
+  | "error";
 interface RejectedMsg {
   kind: "rejected";
   txId: TxId;
