@@ -123,7 +123,7 @@ Full PF1e rules enforce non-stacking typed bonuses (Alchemical, Armor, Enhanceme
   $$\text{Net Modifier} = \sum \max(\text{Bonuses by Type}) + \sum \text{All Dodge Bonuses} + \sum \text{All Penalties}$$
 - **Key Feat Implementations:**
   - *Power Attack / Deadly Aim:* Scaled trade-off (Attack Bonus penalty for Damage increase based on BAB).
-  - *Cleave / Great Cleave:* Free extra attack against adjacent model upon dropping a target; overkill damage carryover in mass battles.
+  - *Cleave / Great Cleave:* SRD Cleave (CRB p.119) is a **standard action**: one attack at full BAB, then — if it hits — one additional attack at full BAB against a foe adjacent to the first, at a −2 AC penalty until your next turn; it is not triggered by dropping a target, and overkill damage never carries over (D-130).
   - *Precise Shot / Clustered Shots:* Ignores melee cover penalties and combines DR reduction for full-attack series.
   - *Spell Focus / Greater Spell Focus:* Increases spell DC by +1/+2 per school.
 - **Class Feature Drivers:**
@@ -135,7 +135,7 @@ Full PF1e rules enforce non-stacking typed bonuses (Alchemical, Armor, Enhanceme
 - **Tactical Spellcasting:** Full spell slot tracking (Levels 0–9), caster level checks, Concentration checks (`d20 + CL + Ability Mod >= DC`), and Metamagic (Empower, Maximize, Widen, Quicken).
 - **Mass Combat AOE Scaling:**
   - Spells cast into strategic formations map directly to AOE templates (Circle, Cone, Line).
-  - **Reflex Avoidance Phase:** Models with active awareness attempt a 5ft scatter step.
+  - **No scatter phase:** models inside the template resolve SR and their save in their square (the invented 5-ft scatter step is removed — D-130, DEVIATIONS D-1).
   - **Saving Throw Resolution:** Vectorized Reflex/Fort/Will saves against `10 + Spell Level + Caster Ability Mod + Feat Mods`.
   - **Evasion / Improved Evasion:** Applied per-model during save resolution.
 

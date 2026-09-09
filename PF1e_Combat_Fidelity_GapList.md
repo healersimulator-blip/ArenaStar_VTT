@@ -723,8 +723,10 @@ patch is undocumented, which is itself a gap worth closing).
    surface, no dependency on 1.1's bundling; the 1.8 e2e rewrite explicitly deferred. Cut as
    proposed, plus one item pulled in when it turned out to block 1.3: the codec's missing `i8`
    wire kind (row 1.3b above).
-5. **Still open:** whether the invented spell **scatter** (`spells.ts`) stays. It has no core-rule
-   basis; propose a `worldSettings` toggle at the next review rather than deciding it silently.
+5. **Decided (R03/D-130, 2026-09-09):** the invented spell **scatter** (`spells.ts`) is
+   **removed** — no core-rule basis. It is not becoming an opt-in setting; it may return only
+   as a named `worldSettings` toggle if a mass-battle consumer asks (none today). Filed as
+   DEVIATIONS D-1 with the P5 removal.
 
 ### 10.2 P0 contracts landed (PR-A, D-113) — what the shared tables changed, and what they did not
 
@@ -746,9 +748,11 @@ would move 10 000-model fixtures with no tactical need:
    ability modifier the SRD says a save contains. `tests/packages/pf1eActor.test.ts` pins the exact
    relationship (`tactical == strategic + conMod`) so the gap cannot widen before P8 unifies the compile.
 
-Item 5 above is decided: the invented spell **scatter** is not getting a toggle in P0. P5 either deletes it
-or files it in `DEVIATIONS.md` next to the fireball-radius row (that file still reads "None." while the sim
-fires at 15 ft against the pack's 20 ft, and that is due to be corrected in the same phase).
+Item 5 above is decided: the invented spell **scatter** is not getting a toggle in P0. R03
+(D-130) resolved it — **remove**, with the SRD-fidelity path saving where the model stands — and
+`DEVIATIONS.md` now indexes the two live code deviations with their correction paths: the scatter
+(D-1, P5 removes it) and the hard-coded Fireball `radius: 15` against the pack's 20-ft baseline
+(D-2, P5 makes spells profile-driven; 20 ft is the agreed baseline).
 
 ---
 

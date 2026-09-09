@@ -2124,3 +2124,41 @@ the corrected Appendix A / scenario text.
   and were not verified this pass. No fixtures were added in this slice: the verified
   text above is the fixture oracle for the phases that implement each rule (P3–P7),
   matching how R01 closed.
+
+## D-130 — R03: intentional variants resolved — scatter removed, carryover/envelopment rejected, deviations indexed
+
+**Date:** 2026-09-09. **Scope:** R03 reconciliation. Sources verified before deciding:
+Cleave (CRB p.119, verified text), fireball 20-ft radius (the shipped pack's data, the
+agreed baseline), SRD flanking (+2, A.14), and the live code (`spells.ts` scatter,
+`massBattlePf1e.ts:170` radius literal). No runtime code changed in this slice — the
+deviations carry correction paths into P5/P8 and DEVIATIONS.md now indexes them.
+
+- **Invented spell scatter: REMOVE.** The current `spells.ts` behavior is worse than any
+  doc described: every model inside a template is *unconditionally* moved 5 ft away from
+  the epicenter (no check, no awareness gate) and takes **no damage** if the step exits
+  the radius. Nothing in the SRD lets a creature step out of a fireball. Decision: the
+  SRD-fidelity path resolves SR and the save **in the model's square**; P5 deletes the
+  scatter and its `modelsScattered` metric. It does not become a `worldSettings` toggle
+  (the P0-toggle idea stays rejected); it may return only as a *named* opt-in setting if
+  a mass-battle consumer asks for it — none exists today. Filed as DEVIATIONS D-1.
+- **Overkill carryover: REJECTED.** `overkillDamage` remains an analytics metric
+  (damage exceeding a model's remaining HP — a reporting number) and never propagates
+  damage to another model. SRD Cleave is not spillover: standard action, one attack at
+  full BAB, then if it hits one additional attack at full BAB against a foe adjacent to
+  the first, −2 AC until your next turn; not triggered by dropping a target. B §4.3's
+  "free extra attack upon dropping a target + carryover" was 3.5-flavored invention and
+  is repaired to the verified text.
+- **Total envelopment (+4 AB / flat-footed): REJECTED.** SRD flanking is +2 melee with
+  no flat-footing; no envelopment rule exists. It was plan-only (never in code); M Task 4
+  now targets real flanking geometry with per-round set/clear (per Gap List §5), and the
+  invented step is explicitly forbidden in the plan text.
+- **Combat_Resolver_5 parity ≠ SRD fidelity.** M Task 6's title is relabeled to
+  "metric parity": the old resolver is a compatibility reference for which report fields
+  exist, never a rules authority.
+- **Fireball radius: the pack's 20 ft is the baseline.** The hard-coded
+  `radius: 15` literal (`massBattlePf1e.ts:170`) is filed as DEVIATIONS D-2, corrected
+  when P5 makes spell orders profile-driven.
+- DEVIATIONS.md gets its first real entries (D-1 scatter, D-2 fireball radius) with spec
+  section, conflict, minimal change and approval state, plus a rejected-inventions list
+  and a pointer to Gap List §10.2 for the standing strategic-scale trade-offs (AoO
+  budget, published saves, size ladder) that keep their P8 unification phases.
