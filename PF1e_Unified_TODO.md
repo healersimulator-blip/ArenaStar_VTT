@@ -6,12 +6,12 @@ One execution checklist for tactical PF1e play, strategic mass battles, and thei
 
 ## Sources and status conventions
 
-| Key | Source | Use |
-| --- | --- | --- |
-| G | [Combat Fidelity Gap List](PF1e_Combat_Fidelity_GapList.md) | Detailed gaps, historical fixes, Appendix A rule inventory |
-| I | [Implementation Plan](PF1e_ImplementationPlan.md) | Current contracts, P0–P8 delivery sequence, tabletop scenarios |
-| M | [MVP Work Plan](PF1e_MVP_WorkPlan.md) | Combat_Resolver_5 strategic feature inventory and acceptance |
-| B | [Mass Battles Integration Plan](PF_MassBattles_IntegrationPlan.md) | Dual-scale architecture and longer-term system scope |
+| Key | Source                                                             | Use                                                            |
+| --- | ------------------------------------------------------------------ | -------------------------------------------------------------- |
+| G   | [Combat Fidelity Gap List](PF1e_Combat_Fidelity_GapList.md)        | Detailed gaps, historical fixes, Appendix A rule inventory     |
+| I   | [Implementation Plan](PF1e_ImplementationPlan.md)                  | Current contracts, P0–P8 delivery sequence, tabletop scenarios |
+| M   | [MVP Work Plan](PF1e_MVP_WorkPlan.md)                              | Combat_Resolver_5 strategic feature inventory and acceptance   |
+| B   | [Mass Battles Integration Plan](PF_MassBattles_IntegrationPlan.md) | Dual-scale architecture and longer-term system scope           |
 
 References below use source sections, phases, or task numbers. `[x]` means documented as landed with corresponding code/test files present; it does **not** mean independently revalidated in this pass. `[ ]` means remaining work, including completion of partial implementations. Deferred items are explicitly separated, not silently dropped.
 
@@ -135,8 +135,8 @@ Depends on D06. Primary surfaces: `PF1eActorSheet.svelte`, `SheetPanel.svelte`, 
 
 Depends on P1 for the approved sheet-before-tracker flow and on R02 for disputed semantics. Reuse `combatState.ts`, do not rebuild it.
 
-- [ ] **T01 — Add selection-aware token context menu:** initiative count, add/remove combatant, hidden state; retain a pan gesture. Add effect/spell actions only when P4/P5 handlers exist. (I P2)
-- [ ] **T02 — Roll actor-aware initiative** with linked `actorId`, derived Dex/feat/misc modifiers, tie-break/reroll policy, selected-token fallback and active-scene scoping. Support verifiable hidden GM rolls without leaking values. (I P2; G §4.3)
+- [x] **T01 — Add selection-aware token context menu:** initiative count, add/remove combatant, hidden state; retain a pan gesture. Add effect/spell actions only when P4/P5 handlers exist. (I P2)
+- [x] **T02 — Roll actor-aware initiative** with linked `actorId`, derived Dex/feat/misc modifiers, tie-break/reroll policy, selected-token fallback and active-scene scoping. Support verifiable hidden GM rolls without leaking values. (I P2; G §4.3)
 - [x] **T03 — Wire surprise and flat-footed-before-first-turn transitions**, round resets and encounter flags into actual tracker flow. Correct the `flags.core.delayed` round-wrap lookup bug with a regression test. (I P2; G §4.3/4.11)
 - [x] **T04 — Add create/activate encounter list** rather than taking `getAll("combats")[0]`; test multiple scenes/encounters and unchanged non-PF1e behavior. (I P2/§7)
 - [x] **T05 — Implement visible action budgets and legality:** standard/move/full-round/free/swift/immediate, move substitution, restricted activity, start/complete full-round actions, 5-foot-step eligibility and next-turn swift consumption. Add the verified action/provoke table as shared data. Interrupt execution completes in P6. (G §3/§4.4; I P6)
@@ -195,6 +195,13 @@ Depends on P1 for the approved sheet-before-tracker flow and on R02 for disputed
 - **Surprise actors are marked as having acted** ("unaware combatants are flat-footed because they have not acted yet") and get the single-standard-or-move restricted budget (the restriction-setting T05 deferred); the restriction lifts when regular rounds begin.
 - **Evidence:** 3 surprise tests rewritten/added against the corrected rule + strengthened existing fixtures; 947 passed / 3 skipped across 119 files; typecheck/lint/edited-file formatting/build/size green; dist 2,044,962 raw / 591,474 gzip.
 - **Still open:** delay/ready rescheduling and held-action interrupts (P6), full browser-matrix acceptance, T01's context menu and T02's verified hidden rolls.
+
+### P2 token menu and hidden rolls — 2026-09-09 (D-133, T01+T02 closed)
+
+- **T01 implemented:** right-CLICK on a token (a right-drag still pans, per D-057; <4 px movement discriminates) opens a context menu with the token's initiative state, add/remove combatant and a hidden toggle. Add/remove reuses `editSelectedRoster` (idempotent adds, D-125 active-removal policy, no implicit ticks); hidden is one narrow `tokens` update op. Players see state but mutations are permission-gated with reasons. No effect/spell entries until P4/P5 handlers exist, per the item. The menu closes on Escape, new gestures or entry run; empty-canvas right-click opens nothing.
+- **T02 completed (hidden rolls):** hidden scope = combatant.hidden OR token.hidden; `rollHiddenInitiative` writes real initiative totals (order is table-observable) but stores die/modifier/explanation/actorId/tieRolls only in `flags.pf1e.hiddenInitiative`, deletes any stale public `flags.core.initiativeRoll` for rolled members, applies D-122 modifier derivation/refusals and D-123 tie policy inside the batch. Permission/scene failures abort before any RNG call. `verifyHiddenInitiativeReceipt` re-derives each receipt (die 1–20, total = die+mod, valid tie faces) and the GM panel shows ✓/✗; players see a disabled "?" input via `hiddenInitiativeDisplay`.
+- **Evidence:** 18 new tests (5 canvas gesture, 8 pure menu model, 5 hidden-roll). 965 passed / 3 skipped across 119 files; typecheck/lint/touched-file formatting/build/size green; dist 2,054,484 raw / 591,545 gzip. Browser matrix still unverified (§2 S01/S04 track that).
+- **P2 status:** all five tracker items closed at the unit level. Remaining P2-adjacent work lives where the plan puts it: menu effect/spell entries (P4/P5), delay/ready rescheduling and held-action interrupts (P6/T05 follow-up), full browser-matrix acceptance.
 
 ### GM-control correction — 2026-09-08 (D-125, supersedes D-124 restrictions)
 

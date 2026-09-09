@@ -34,7 +34,13 @@
     activateEncounter,
     newEncounter,
   } from "./encounters";
-  import { rollSelectedInitiative, manualInitiative } from "./initiative";
+  import {
+    rollSelectedInitiative,
+    manualInitiative,
+    rollHiddenInitiative,
+    hiddenInitiativeDisplay,
+    verifyHiddenInitiativeReceipt,
+  } from "./initiative";
   import {
     combatantBudget,
     isPf1eEncounter,
@@ -281,6 +287,26 @@
     if (result.transition) push(result.transition);
   }
 
+  /** T02: GM-only hidden rolls — hidden members get real order, GM receipts, no public receipt. */
+  function rollHidden(): void {
+    refresh();
+    const state = context();
+    if (!combat || !state.scene) return;
+    const result = rollHiddenInitiative(
+      $state.snapshot(combat),
+      state.scene,
+      client.store.getAll("actors") as readonly ActorDocument[],
+      client.user,
+      () => {
+        const roll = evaluateFormula("1d20");
+        return roll.ok ? roll.value.total : NaN;
+      },
+      selection,
+    );
+    error = result.error ?? "";
+    if (result.transition) push(result.transition);
+  }
+
   function setInit(c: CombatantDocument, raw: string): void {
     refresh();
     if (!combat || !raw.trim() || !Number.isSafeInteger(Number(raw))) {
@@ -497,6 +523,12 @@
           onclick={() => rollInitiative(true)}>Roll all</button
         >{/if}
       <button
+        data-roll-hidden-initiative
+        type="button"
+        title="Roll initiative for hidden combatants only (GM). Real order, GM-only receipts, no public breakdown."
+        onclick={() => rollHidden()}>Roll hidden</button
+      >
+      <button
         id="combat-end"
         type="button"
         onclick={() =>
@@ -658,6 +690,7 @@
           class:delayed={Boolean(
             (c.flags as { core?: { delayed?: boolean } })?.core?.delayed,
           )}
+          class:hidden-row={c.hidden}
         >
           <span class="name">{c.name}</span>
           {#if c.flags.core?.initiativeRoll}
@@ -669,10 +702,33 @@
           <input
             class="init"
             type="number"
-            value={c.initiative ?? ""}
+            value={hiddenInitiativeDisplay(c, client.user) === "?"
+              ? ""
+              : (c.initiative ?? "")}
+            placeholder={c.hidden ? "?" : ""}
+            disabled={c.hidden}
+            title={c.hidden
+              ? "Hidden combatant — value concealed (GM: see receipt)"
+              : ""}
             onchange={(e) => setInit(c, (e.target as HTMLInputElement).value)}
             aria-label={`Initiative for ${c.name}`}
           />
+          {#if c.hidden && (client.user?.role === "GM" || client.user?.role === "ASSISTANT")}
+            {@const receipt = (
+              c.flags as { pf1e?: { hiddenInitiative?: unknown } }
+            )?.pf1e?.hiddenInitiative}
+            {#if receipt}
+              {@const verified = verifyHiddenInitiativeReceipt(receipt)}
+              <details data-hidden-initiative-receipt>
+                <summary
+                  >Hidden roll {verified.ok
+                    ? "✓ verified"
+                    : "✗ invalid"}</summary
+                >
+                <pre>{JSON.stringify(receipt, null, 2)}</pre>
+              </details>
+            {/if}
+          {/if}
           <button
             type="button"
             title="Manual marker only; does not advance or reschedule a turn. Clears on turn start or round wrap."
@@ -757,6 +813,9 @@
   }
   .order li.active {
     background: #2c4a6e;
+  }
+  .order li.hidden-row .name::after {
+    content: " 🙈";
   }
   .order li.defeated .name {
     text-decoration: line-through;

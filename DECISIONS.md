@@ -407,6 +407,7 @@ Five real-browser findings, all fixed in the session/transport layer (each verif
   from Unit 24 (HostSync remains the only SimWorker talker, §2).
 
 ### D-070 — DetectionGrid + per-faction sim/report projection (Unit 24, M2)
+
 - **DetectionGrid** (`src/host/detection.ts`): cell = 5 grid squares (configurable); faction
   bitmask per cell (≤31 factions/scene); sources = unit anchors × RulesModule.detection radius.
   LOS per cell pair against sight-restricted walls (`WALL_SIGHT_BIT = 1<<1` per the §0
@@ -417,7 +418,7 @@ Five real-browser findings, all fixed in the session/transport layer (each verif
   filtered index-based, once per faction per delta (never per user); projected columns carry
   rebuilt RLE runs; count is preserved (hidden indices simply never update). GM unfiltered.
 - **TurnReport projection**: events whose subject is undetected become `{type:"unknown",
-  text:"unknown enemy activity"}` stubs; detected subjects with hidden targets keep the event
+text:"unknown enemy activity"}` stubs; detected subjects with hidden targets keep the event
   but have target refs scrubbed (delete targetUnitId/modelIndices, text redacted).
 - Found while testing: my own two precedence bugs (`?? 0 | bit` mixing — SyntaxError-adjacent;
   `restriction[i] ?? 0 & BIT` which silently disabled ALL walls) — both caught by the wall
@@ -602,7 +603,7 @@ Five real-browser findings, all fixed in the session/transport layer (each verif
   defeated last, stable), start/end, next/previous turn with round wrap, delay,
   defeat, initiative application, effect-duration ticks on the owner's turn end.
   Delay & durations ride `flags.core` (§0 FlagStore is SCOPED `{[scope]: Record<string,
-  Json>}` — first attempt used flat flags and broke; empty scopes are dropped on clear).
+Json>}` — first attempt used flat flags and broke; empty scopes are dropped on clear).
 - **Chat command semantics**: `/roll|gmroll|blindroll|selfroll <formula>` (whole
   argument IS the formula, evaluated host-crypto via client.roll §11);
   `/w <name[,name…]> <message>` — FIRST token names recipients (comma-separated),
@@ -636,7 +637,7 @@ Five real-browser findings, all fixed in the session/transport layer (each verif
   ClientSync). NTP-style sync: ping {t0} → pong {t0,t1,t2} → client t3; best
   estimate = lowest-RTT sample of the last 8; offset = ((t1−t0)+(t2−t3))/2;
   client starts playback at atHostTime − offset (scheduleDelayMs). PROTOCOL.md
-  + contracts/frame tests extended to 29 kinds.
+  - contracts/frame tests extended to 29 kinds.
 - **AudioPlayer**: lazy AudioContext (constructed on FIRST play command) —
   a boot-time `new AudioContext()` froze Playwright actionability in headless
   (stability gate needs rAF; the audio thread starved it). Sounds resolve
@@ -702,7 +703,7 @@ Five real-browser findings, all fixed in the session/transport layer (each verif
 ### D-080 — strategic fog + GM extras panel (Unit 34, M2)
 
 - **Strategic fog (§9A)**: `sceneIsStrategic` gates on `flags.core.scale ===
-  "strategic"`; `buildStrategicFog` (src/core/strategicFog.ts) seeds a
+"strategic"`; `buildStrategicFog` (src/core/strategicFog.ts) seeds a
   DetectionGrid from ally-unit anchors (mean live-model position per unit,
   `unitAnchor`) using massBattleBasic detection radii; `undetectedRectsInView`
   returns the dark cell rects for the view rect. **Allies must be passed
@@ -744,7 +745,7 @@ Five real-browser findings, all fixed in the session/transport layer (each verif
 ### D-081 — §8A model deployment + campaign controls (Unit 35, M2)
 
 - **Deployment** (`src/sim/deploy.ts`, pure): `deploySnapshot(units, factions,
-  sys)` materializes each unit's `stats.strength` into pool models when a
+sys)` materializes each unit's `stats.strength` into pool models when a
   campaign starts with no stored checkpoint and no injected snapshot.
   Deterministic layout: factions sorted by id get x-lanes (150 + k·300), units
   stack in y (150 + j·250); `profile.anchor {x,y}` overrides. Formations: line
@@ -828,9 +829,9 @@ Five real-browser findings, all fixed in the session/transport layer (each verif
   a loadTexture port (asset hash via GM fetcher → blob URL → pixi Assets;
   external URLs load directly); roof outline rides a texture. FIRST PASS BUG:
   alpha was baked into the fill color while the readback read g.alpha (always
-  1) — alpha now lives on the view, g.alpha carries it for the placeholder.
-  App refresh() computes occupied rects = vision-token rects; roofs over them
-  fade to occlusion.alpha (GM affordance), fade tiles ignore occupancy.
+  1. — alpha now lives on the view, g.alpha carries it for the placeholder.
+     App refresh() computes occupied rects = vision-token rects; roofs over them
+     fade to occlusion.alpha (GM affordance), fade tiles ignore occupancy.
 - **EffectsLayer** (effects container): spawnPing (expanding ring, ticker
   driven), showRuler per user (polyline + waypoint dots + measurePath total
   label in grid units, 2.5s linger + fade), tick(dtMS) from the stage ticker.
@@ -881,7 +882,7 @@ Five real-browser findings, all fixed in the session/transport layer (each verif
 
 - **Planner** (`src/canvas/layers/ModelLayer/atlases.ts`, pure/testable): frame
   16 px, 4×4 grid = 16 frames/atlas; frame key `m-{fnv8(unitType)}-{palette
-  hex6}`, atlas id `atl-{fnv8(keys "|")}`; entries dedupe; plans cap at
+hex6}`, atlas id `atl-{fnv8(keys "|")}`; entries dedupe; plans cap at
   MAX_BOUND_ATLASES = 16 with overflow **dropped** (fallback rendering).
   `bindDecision(bound, wanted, max)` keeps the NEWEST `max` wanted ids
   (wanted is oldest→newest) — slice, don't loop.
@@ -903,7 +904,7 @@ Five real-browser findings, all fixed in the session/transport layer (each verif
   created and imported INSIDE the sandboxed worker (§12 path), data: URL
   fallback (Node), then `evalRulesModule` for engines whose classic workers
   reject module-script imports AND allow eval (single `export default
-  <expression>` form only). `validateRulesModule` shape-checks the §12
+<expression>` form only). `validateRulesModule` shape-checks the §12
   contract (schema fields incl. modelColumn types, required/optional fns)
   with specific errors; `RulesModuleRegistry` caches by exact source text.
   urlScheme echo: "blob" | "data" | "eval".
@@ -992,7 +993,7 @@ Five real-browser findings, all fixed in the session/transport layer (each verif
   Classic script (not ESM) — inline module scripts cannot rely on imports and
   the sandbox has no loader; package module entries are plain scripts.
 - **Host** (`moduleIframe.ts`): hidden `<iframe sandbox="allow-scripts"
-  srcdoc>` (opaque origin on every engine), source escaping for
+srcdoc>` (opaque origin on every engine), source escaping for
   `</script`, per-frame source validation, hook events forwarded only for
   names the module subscribed to; `onSubscribe` callback drives the "ready"
   handshake (host emits ready when the subscription lands, not on a timer).
@@ -1045,7 +1046,7 @@ Five real-browser findings, all fixed in the session/transport layer (each verif
 - **Host wiring**: `HostModuleBoot.mode: "iframe" | "inPage"`; App picks the
   host by mode. `HostPackages.grantTrust(id)` (requires the package to
   request trust) / `revokeTrust(id)`; `PackageSummary {trustRequested,
-  trusted}`. GM panel: "wants in-page" badge, two-step Grant (first click
+trusted}`. GM panel: "wants in-page" badge, two-step Grant (first click
   arms "Confirm grant?" 3 s, second grants), Revoke trust, "trusted
   (in-page)" badge. gm.moduleMode() readback.
 - **e2e** (packages.spec test 3, chromium): trust-requesting package →
@@ -1142,7 +1143,7 @@ Five real-browser findings, all fixed in the session/transport layer (each verif
 - **Determined result, never chosen by the animation**: dice terms in
   RollEvaluation carry per-die `kept` values — `diceFromTerms` maps each
   kept value to one die (≤ 8 dice in the scene). `planDieFaces(sides, value,
-  topSlot)` builds 6 face labels where the chosen top slot carries the
+topSlot)` builds 6 face labels where the chosen top slot carries the
   ROLLED value; `orientationForTopFace(face)` is the quaternion putting that
   slot on +y (unit + basis-vector verified in node tests — first test helper
   had sign errors in the Hamilton product, the DATA was right).
@@ -1157,7 +1158,7 @@ Five real-browser findings, all fixed in the session/transport layer (each verif
   message docs for `roll !== null` (dedup by message id) and fires the
   overlay into a `.dice3d-host` overlay div (absolute, pointer-events none).
 - **e2e** (`e2e/dice3d.spec.ts`): loads === 0 before any roll → `/roll 2d6 +
-  1d20` → three loaded exactly once → 3 dice settle with values in range
+1d20` → three loaded exactly once → 3 dice settle with values in range
   (1-6, 1-6, 1-20) summing EXACTLY to the roll total → overlay disposes.
 - Env trap recurred twice this unit: playwright runs WITHOUT
   PLAYWRIGHT_BROWSERS_PATH in the command env report missing browsers under
@@ -1324,7 +1325,6 @@ existing sim channel.
 - **VoiceVideoMesh** in `src/net/voiceVideo.ts` manages audio/video mute states and per-peer volume controls for up to 6 connected peers.
 - Unit tested in `tests/net/voiceVideo.test.ts`.
 
-
 ## D-105 — §12 PF1e: deploy-time profile compilation, content-addressed interning, real model columns
 
 - Gap List §1.2–§1.4 (PR 1). `systems/pf1e-mass-battles/manifest.json` declared 9 `modelColumns` while
@@ -1372,7 +1372,7 @@ existing sim channel.
   `tests/packages/pf1ePrecreatedUnits.test.ts`). `resolveTargetAc(pool, index, acType, defProfile)` is
   the single entry point; it also fixes DR, which used `pool.sys.drVal ?? profile.dr` and so read the
   attacker's DR whenever the defender's was 0.
-- Flanking was +2 to-hit *and* −2 to AC (SRD: +2 to-hit only, from the helper), so a +2 flank could turn
+- Flanking was +2 to-hit _and_ −2 to AC (SRD: +2 to-hit only, from the helper), so a +2 flank could turn
   a 19 into a 20 twice over. The −2 is gone; the `FLANKED` status bit is still set by the caller
   (envelopment geometry owns it later, §5).
 - Minimum damage (CRB: "if penalties would reduce damage below 1, deal 1 point of **nonlethal**") was
@@ -1400,12 +1400,13 @@ existing sim channel.
 
 - Answered on the Gap List review (2026-09-08), overriding its recommendation: tactical (ActorDocument /
   CombatDocument / grid) and strategic (ModelPool / SimWorker) each implement the Combat chapter
-  separately. Parity is a convention — shared *data and tables* under `src/packages/pf1e/` — and there
+  separately. Parity is a convention — shared _data and tables_ under `src/packages/pf1e/` — and there
   is **no** parity gate and no `resolveAttackRoll`-style kernel. The strategic layer keeps grid-quantised
   abstractions where exact tactical bookkeeping would cost 10 000× the work.
 - Same review: **no core `EffectDocument` changes** (`mode`/`type`/`origin`/`duration` rejected), so
   core PRD items P-12/P-13/P-14 are retired and no document migration is needed; typed bonuses live in
   PF1e's own data and stacking is PF1e's business.
+
 ## D-110 — §12 PF1e ships as a real package: build step, data-only core pack, generated `rules.js`
 
 - Gap List §1.1 (PR 2). `scripts/buildSystemPackages.mjs` (`pnpm build:systems`) bundles
@@ -1461,7 +1462,7 @@ existing sim channel.
   (66.00 with the 13 PF1e columns), a full 10k checkpoint ≤ 1.5 MB, `toVersion == turns`, casualties
   (`Σ rangeDiffs length` between 0 and 10 000), melee events emitted, `report.rulesVersion`/`subPhases`
   stamped by the module, `console.error`/`console.warn` call counts 0 via spies, and replay equality of the
-  pool hash *and* the wire. The p95 gate is a catastrophe ceiling (250 ms) with the measured p50/p95/max
+  pool hash _and_ the wire. The p95 gate is a catastrophe ceiling (250 ms) with the measured p50/p95/max
   logged, so the test fails on a 5× regression instead of on noisy CI. §19's "p95 < 50 ms at 10k" is
   reported against, not asserted; the dense 40 × 250 shape genuinely misses it (p95 54–58 ms) and that is
   recorded as a perf finding in Gap List §5 rather than hidden by shaping the fixture until it passes.
@@ -1472,7 +1473,7 @@ existing sim channel.
   checkpoint identity is `canonicalPoolHash(pool, sys)` — so this is a test-authoring trap, not a wire bug,
   and making fflate emit a fixed mtime was rejected as an unnecessary wire change.
 - **The browser half keeps only what a browser can prove.** `e2e/pf1e_mass_battles.spec.ts` imports the
-  *shipped* `dist/packages/pf1e-{core,mass-battles}-1.0.0.zip` through the app surface, asserts `packages()`
+  _shipped_ `dist/packages/pf1e-{core,mass-battles}-1.0.0.zip` through the app surface, asserts `packages()`
   rows (a data package refuses activation with "data-only"), that `rulesBoot` reports
   `{source:"package", packageId:"pf1e-mass-battles", version:"1.0.0", error:null}` — i.e. a real Worker
   imported the bundle from a blob URL — that deactivation returns to `builtin`, and that the page threw no
@@ -1498,11 +1499,11 @@ line was written. The revisions matter more than the adoptions, so they lead.
   `src/core/worldSettings.ts` reads/merges that collection into one document, `_id="world-settings"`,
   `ownership.default = LIMITED` (1), with flat keys in `system` — the same flat convention
   `massBattleBasic.ts:380` already uses for `detectionMultiplier`. `tests/core/worldSettings.test.ts`
-  asserts the ownership level *through the projection itself*, and that a `default: 0` settings doc does
+  asserts the ownership level _through the projection itself_, and that a `default: 0` settings doc does
   **not** reach a player, so the level is load-bearing rather than decorative. Name collision to avoid:
   `src/storage/idb.ts:189`'s `getSetting/putSetting` are app-local `[scope, key]` pairs — unrelated.
-- **No manifest version bump, no declarative migration in P0.** `derivePF1eActor` is *total over partial
-  input* instead: a document with no `system.pf1e` at all yields a legal Medium commoner, naming every
+- **No manifest version bump, no declarative migration in P0.** `derivePF1eActor` is _total over partial
+  input_ instead: a document with no `system.pf1e` at all yields a legal Medium commoner, naming every
   reconstructed field in `defaults` and every malformed one in `issues`. The parity a migration would
   have bought is asserted directly, by deriving the shipped `systems/pf1e-core/packs/bestiary.json` and
   comparing it against `compilePF1eProfile`. A bump would have churned the zip names and the §12 manifest
@@ -1517,30 +1518,30 @@ line was written. The revisions matter more than the adoptions, so they lead.
   variant is a wrapper transition in `combatState.ts`, not a core edit. `ttlToTicks` is the one place
   `1 round = 6 s` / `1 minute = 10 rounds` is written down, so the seed and the SRD text cannot drift.
 - **3. Round structure lives in `combat.flags.pf1e` / `combatant.flags.pf1e`.** Surprise (A.1: only when
-  *every* attacker beats *every* defender, and the round runs before core's round 1 so `combat.round`
-  stays 0), flat-footed-until-your-first-turn, the AoO ledger (A.10: refreshed at the start of *your*
+  _every_ attacker beats _every_ defender, and the round runs before core's round 1 so `combat.round`
+  stays 0), flat-footed-until-your-first-turn, the AoO ledger (A.10: refreshed at the start of _your_
   turn), held actions (A.10: six allies acting before you turns the hold into a full-round action), and
   the clock. Core still owns `round`/`turn`/initiative order — `startWithSurprise` hands over to
   `startCombat`, `pf1eNextTurn` delegates to `nextTurn` and only then applies PF1e's boundaries. The
   last test in `pf1eCombatState.test.ts` exists to prove that delegation: an embedded effect still ticks
-  down and expires through the wrapper, with the expiry *reported*.
+  down and expires through the wrapper, with the expiry _reported_.
 - **4. Fireball is 20 ft.** The pack/SRD value wins; the sim's 15 ft and the invented spell scatter are
   due to be deleted or filed in `DEVIATIONS.md` in P5 — that file still reads "None." and is stale.
 - **5. PR order A→B→C** (sheet before tracker): a context menu needs a derived actor to act on.
 - **Initiative ties carry a 0.5 marker** rather than a re-rolled die or an insertion-order accident:
   core orders purely by `initiative`, and `initiativeDisplay()` floors the value for display, so the
-  tie-break is expressible without lying about what was rolled. Equal roll *and* equal Dexterity returns
+  tie-break is expressible without lying about what was rolled. Equal roll _and_ equal Dexterity returns
   `needsReroll` instead of picking a winner.
 - **A stat-block adapter, because the pack and the sheet author different shapes.** The shipped bestiary
   publishes totals and modifiers (`bab`, `strMod`, `ac`, `weapon.damageMod`, `dr: {val, bypass}`) —
   pool-shaped, because that is what `compilePF1eProfile` consumes; a sheet must author components (six
   scores, armor/shield/natural) or no buff can move a total. `src/packages/pf1e/statBlock.ts` converts
-  one into the other *once*, and reports it: an ability score rebuilt from a modifier says so (a modifier
+  one into the other _once_, and reports it: an ability score rebuilt from a modifier says so (a modifier
   only determines the even score), a published AC is honoured as a total rather than recomposed into fake
   components, `weapon.damageMod` is marked as already containing the ability bonus so Strength is not
   added twice, and published saves are flagged so Con/Dex/Wis are not re-added. Fields no tactical rule
   implements yet are listed in `unsupported` **with the phase that owns them** (`weapon.isFirearm —
-  firearm rules are P6`), which is what keeps "not modelled" from reading as "not present". The
+firearm rules are P6`), which is what keeps "not modelled" from reading as "not present". The
   conversion is idempotent, so an import round-trips.
 - **Deliberately not fixed here:** `compilePF1eProfile`'s `maxAoos` and its generic `sizeMod` on
   CMB/CMD, and its base-only saves. `rulesTables.ts` is correct and the strategic compile is not; the
@@ -1551,7 +1552,6 @@ line was written. The revisions matter more than the adoptions, so they lead.
   flag lives at `flags.core.delayed` (`src/core/combat.ts:103`), so a delayed combatant is never
   un-flagged. `startCombat`'s clear works, which is why nobody noticed. Fixed in P2, where the plan
   already intends to assert delay behaviour — see the corrected P2 accept item.
-
 
 ## D-114 — PF1e P1 first slice: mounted sheet, authored edits through ClientSync
 
@@ -1579,7 +1579,6 @@ line was written. The revisions matter more than the adoptions, so they lead.
 - Validation: 828 unit tests passed / 3 skipped; typecheck, lint, build and size passed
   (1.884 MB raw). Added Playwright sheet flow collects for all three projects. Browser
   execution is unverified: installing Chromium failed with download `ECONNRESET`.
-
 
 ## D-115 — PF1e P1 floating sheets and token activation through projected actor access
 
@@ -1609,7 +1608,6 @@ checkboxes remain open pending actual browser acceptance.
   build and size pass (1.887 MB raw). Expanded Playwright sheet spec collects for all three
   projects; no browser execution claim (browser download previously failed).
 
-
 ## D-116 — PF1e P1 bounded detail authoring and missing-parent edit repair
 
 **Date:** 2026-09-08. **Tracking:** unified TODO S02 partial; S03 regression repair.
@@ -1635,7 +1633,6 @@ checkboxes remain open pending actual browser acceptance.
 - Validation: 843 tests passed / 3 skipped, typecheck/lint/format/build/size passed, 1.895 MB
   raw HTML. Browser spec extended and collected; Chromium executable absent, no browser
   execution claim. No core document, rules table, pool schema or package version changes.
-
 
 ## D-117 — PF1e P1 tactical weapon authoring and canonical defense preservation
 
@@ -1667,7 +1664,6 @@ checkboxes remain open pending actual browser acceptance.
   build and size passed (1.906 MB raw). Real HostSync/ClientSync test covers attack edits;
   Playwright flow covers UI authoring/validation/removal but is only collected. Chromium
   remains uninstalled, so browser execution is not claimed.
-
 
 ## D-118 — Reversible tactical AC selection and manual health/defense contracts
 
@@ -1703,7 +1699,6 @@ checkboxes remain open pending actual browser acceptance.
   failed with TLS ECONNRESET from cdn.playwright.dev; browser acceptance remains unverified.
   No core document/pool schema, strategic resolver or package version changes.
 
-
 ## D-119 — Executed PF1e sheet acceptance and browser-only runtime fixes
 
 **Date:** 2026-09-08. **Tracking:** P1 S01/S04 Chromium acceptance; S02 remains partial.
@@ -1735,7 +1730,6 @@ checkboxes remain open pending actual browser acceptance.
   S01/S04 checkboxes retain that matrix gate; ability damage/drain and combat automation
   remain future scoped work. No new rule formulas, wire formats or package versions.
 
-
 ## D-120 — Repair scoped delayed-marker cleanup without claiming PF1e scheduling
 
 **Date:** 2026-09-08. **Tracking:** T03 partial, bounded generic tracker prerequisite.
@@ -1758,7 +1752,6 @@ checkboxes remain open pending actual browser acceptance.
   Chromium combat/sheet/window tests passed, typecheck/lint/edited-code format/build/size
   passed. HTML 2,006,597 bytes raw, gzip 579,796. Alternate Chromium 149 as D-119;
   full browser matrix, P1 ability damage/drain and remaining T03 work stay open.
-
 
 ## D-121 — Scene-scoped encounter creation and replicated selection
 
@@ -1786,7 +1779,6 @@ checkboxes remain open pending actual browser acceptance.
   stale pointer, permission denial, applied flag Ops, metadata preservation and real
   host/GM/player replication with inactive-round retention. HTML 2,009,452 bytes raw,
   gzip 580,819. Alternate Chromium 149 as D-119; Firefox/WebKit remain unverified.
-
 
 ## D-122 — Public actor-aware initiative and explicit reroll policy
 
@@ -1820,7 +1812,6 @@ checkboxes remain open pending actual browser acceptance.
   Browser exercises real compendium-token links. Alternate Chromium 149 as D-119;
   Firefox/WebKit and the rest of T02 remain open.
 
-
 ## D-123 — PF1e public initiative tie resolution with stable persisted order
 
 **Date:** 2026-09-08. **Tracking:** T02 partial, automatic public tie policy implemented.
@@ -1849,7 +1840,6 @@ checkboxes remain open pending actual browser acceptance.
   through the real DOM handler and checks turn/round order. HTML 2,013,894 bytes raw,
   gzip 582,633. Alternate Chromium 149 as D-119; Firefox/WebKit remain unverified.
   T02 remains open for selected-token and verified hidden-roll work; no P1 closure claim.
-
 
 ## D-124 — Scene-scoped canvas selection into encounter roster and initiative workflows
 
@@ -1883,7 +1873,6 @@ checkboxes remain open pending actual browser acceptance.
   HTML 2,018,741 bytes raw, gzip 584,344. Alternate Chromium 149 as D-119; Firefox/WebKit
   remain unverified. Context menu/hidden state, verified hidden rolls and remaining
   P1/P2 mechanics remain future work. No schema, wire format or package version changes.
-
 
 ## D-125 — GM control overrides the D-124 active-removal and selected-tie restrictions
 
@@ -1919,7 +1908,7 @@ protocol slice per the file's recommended execution order.
   column map, package id, version). `HostSync.setSimInfo()` owns it: called by
   hostBoot AFTER the §12 rules boot resolves the active package's schema and
   BEFORE the GM loopback `addSession`, so every welcome (GM and joiners) carries
-  the real battle. A *changed* announcement re-welcomes live authenticated
+  the real battle. A _changed_ announcement re-welcomes live authenticated
   sessions; identical re-announcement is a no-op (reconnects stay seamless).
   `null`/absent keeps legacy worlds exactly as before.
 - `ClientSync` adopts the announcement in its welcome handler: no constructor
@@ -1993,7 +1982,7 @@ model/Svelte, tests. Source: CRB p.555 "Ability Score Damage, Penalty, and Drain
   which is why this is authored at all). Malformed input to `parsePF1eActorSystem`
   is rejected before any op is submitted.
 - **Damage never reduces the score** (the rule's own headline): it applies
-  `floor(damage/2)` as a penalty via an *effective modifier* (`mods − penalty`)
+  `floor(damage/2)` as a penalty via an _effective modifier_ (`mods − penalty`)
   to every ability-based statistic — AC/capped Dex, touch, component saves,
   initiative, CMB/CMD, attack to-hit and melee ability damage (×1.5/×0.5 rounded),
   AoO count, spell DCs keyed to the ability. Published save totals and published
@@ -2134,12 +2123,12 @@ agreed baseline), SRD flanking (+2, A.14), and the live code (`spells.ts` scatte
 deviations carry correction paths into P5/P8 and DEVIATIONS.md now indexes them.
 
 - **Invented spell scatter: REMOVE.** The current `spells.ts` behavior is worse than any
-  doc described: every model inside a template is *unconditionally* moved 5 ft away from
+  doc described: every model inside a template is _unconditionally_ moved 5 ft away from
   the epicenter (no check, no awareness gate) and takes **no damage** if the step exits
   the radius. Nothing in the SRD lets a creature step out of a fireball. Decision: the
   SRD-fidelity path resolves SR and the save **in the model's square**; P5 deletes the
   scatter and its `modelsScattered` metric. It does not become a `worldSettings` toggle
-  (the P0-toggle idea stays rejected); it may return only as a *named* opt-in setting if
+  (the P0-toggle idea stays rejected); it may return only as a _named_ opt-in setting if
   a mass-battle consumer asks for it — none exists today. Filed as DEVIATIONS D-1.
 - **Overkill carryover: REJECTED.** `overkillDamage` remains an analytics metric
   (damage exceeding a model's remaining HP — a reporting number) and never propagates
@@ -2267,3 +2256,54 @@ TODO was already fixed in D-120 with its regression; this slice wired the rest.
   (dist 2,044,962 raw / 591,474 gzip). T03 is checked off; the PF1e resume/interrupt
   logic beyond this (delay/ready rescheduling, held-action interrupts) remains P6/T05
   follow-up work as the plan states.
+
+## D-133 — T01/T02: a right-click token menu, and hidden initiative as real order + GM-only receipts
+
+**Date:** 2026-09-09. **Scope:** T01 + T02 (the last open P2 tracker items).
+Source: CRB p.178 Initiative (D-122/D-123 semantics unchanged); no new rules
+research — this slice is UI reachability and hidden-roll verification.
+
+- **T01's gesture is a right-CLICK, not a right-press:** the canvas controller
+  tracks the pan button and total pointer movement; a right-button release with
+  <4 px of travel over a token fires `onContextMenu({screen, world, tokenId})`,
+  while a right-drag still pans (D-057 preserved) and a right-click on empty
+  canvas opens nothing. Five gesture tests pin click-vs-drag, empty-space and
+  the `contextmenu` DOM suppression that keeps the browser menu out of the way.
+  The menu model itself (`tokenContextMenu.ts`) is pure: it reads combat/scene/
+  user, and every entry carries `disabled` + `reason`. Entries: the token's
+  initiative (informational, always disabled), add/remove combatant (reuses
+  `editSelectedRoster` — idempotent additions, D-125 active-removal policy, no
+  turn/effect ticks), and toggle hidden (one `tokens` update op). Effect/spell
+  entries are deliberately absent until P4/P5 handlers exist, per the TODO.
+  Players see state entries but every mutation is permission-gated with its
+  reason; the menu closes on Escape, any new canvas gesture, or running an entry.
+- **T02's hidden rolls are real order, concealed breakdown:** "hidden" means
+  combatant.hidden OR token.hidden (either flag is enough to hide). `rollHiddenInitiative`
+  rolls only hidden in-scope members — scope is the selected roster or the full
+  encounter — with the same PF1e modifier derivation and invalid-data refusals as
+  the public path (D-122), and PF1e tie policy inside the hidden batch (D-123,
+  tieRolls recorded per member). Initiative totals ARE written — order is
+  observable at the table — but the breakdown (die, modifier, explanation,
+  actorId, tieRolls) goes to `flags.pf1e.hiddenInitiative`, and any stale public
+  `flags.core.initiativeRoll` receipt is DELETED for rolled members so a
+  previously-visible lurker cannot keep leaking its old roll. Untouched members
+  keep everything. Permission/scene-gate failures return errors before any RNG
+  call, so a refused roll has no side effects at all.
+- **Verification, not trust:** `verifyHiddenInitiativeReceipt` re-derives the
+  receipt (die in 1–20, total = die + modifier, tieRolls are d20 faces) and the
+  GM panel renders a receipt block with ✓/✗ per rolled member. Players see "?"
+  in the initiative input (`hiddenInitiativeDisplay`), which is disabled for
+  hidden members; the GM sees the real value. The "Roll hidden" button appears
+  alongside the existing public roll controls.
+- **Test-bug corrections while landing this:** the three initially failing
+  hidden-roll tests were wrong, not the code — `skipped` legitimately lists the
+  in-scope visible members when no selection exists (Roll hidden with no
+  selection means "roll the hidden ones, skip the visible ones"), and a `player`
+  fixture was missing from that file. Fixed the expectations, kept the semantics.
+- **Evidence:** 18 new tests (5 canvas gesture, 8 menu model, 5 hidden-roll).
+  Full suite 965 passed / 3 skipped across 119 files; typecheck/lint/
+  touched-file formatting/build/size green; dist 2,054,484 raw / 591,545 gzip.
+  Browser matrix remains unverified (no Chromium in this sandbox; §2 S01/S04
+  still track that). T01 and T02 are checked off; P2 is complete on the unit
+  level — effect/spell menu entries, delay/ready rescheduling and held-action
+  interrupts remain P4–P6 work as planned.
