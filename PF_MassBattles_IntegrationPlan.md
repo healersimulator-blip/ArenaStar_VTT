@@ -107,7 +107,8 @@ High-level player characters (Heroes) participate directly in mass battles along
 Pathfinder 1e features nuanced stealth, concealment, and sensory rules that integrate directly into `ArenaStar_VTT`'s `DetectionGrid` (`src/host/detection.ts`):
 
 - **Stealth vs. Perception Checks:**
-  $$\text{Perception DC} = \text{Stealth Roll} + \left(\frac{\text{Distance (ft)}}{10}\right) - \text{Cover Bonus} + \text{Environmental Modifiers}$$
+  $$\text{Perception DC} = \text{Stealth Roll} + \left(\frac{\text{Distance (ft)}}{10}\right) + \text{Cover/Concealment Bonus} + \text{Environmental Modifiers}$$
+  (The hider's side gains the cover/concealment bonus — e.g. **+10 Stealth behind improved cover**, per the Stealth skill/A.8; invisibility adds +20 moving / +40 stationary — CRB Invisibility. Cover never lowers the DC.)
 - **Sensory Modes & Vision Masks:**
   - **Normal / Low-Light / Darkvision (60ft/120ft):** Modifies cell vision range and darkness occlusion in `LightingLayer`.
   - **Scent (30ft / 60ft upwind):** Detects presence of hidden models within radius regardless of LOS.
@@ -146,14 +147,14 @@ In `ModelPool`, model condition states are packed into a 32-bit integer `Uint32A
 | `0` | **Dead** | Model removed from active combat; slot freed during turn compaction. |
 | `1` | **Hidden / Stealthed** | Requires Perception check to target; gains total concealment. |
 | `2` | **Flanked** | Attacker gets +2 AB; Rogue Sneak Attack applies. |
-| `3` | **Prone** | -4 AC against melee, +4 AC against ranged; -4 Attack Bonus. |
-| `4` | **Shaken / Frightened** | -2 penalty on Attack Rolls, Saving Throws, and Skill Checks. |
-| `5` | **Sickened** | -2 penalty on Attack Rolls, Damage Rolls, Saving Throws. |
-| `6` | **Grappled / Pinned** | Cannot move, loses DEX to AC, cannot cast spells with somatic components. |
+| `3` | **Prone** | -4 AC against melee, +4 AC against ranged; -4 on melee attack rolls; ranged weapons unusable except crossbow/shuriken (no penalty with those). |
+| `4` | **Shaken / Frightened** | -2 penalty on Attack Rolls, Saving Throws, Skill Checks, and Ability Checks. |
+| `5` | **Sickened** | -2 penalty on Attack Rolls, Weapon Damage Rolls, Saving Throws, and Skill Checks. |
+| `6` | **Grappled / Pinned** | Grappled: cannot move, -4 Dex (may lower AC), -2 attack/CMB rolls, no AoOs, no two-hand actions, spells need a DC 10 + grappler's CMB + spell level concentration check. Pinned (separate severity): additionally denied Dex to AC, -4 AC vs melee. Neither is flat-footed. |
 | `7` | **Blinded** | Loses DEX to AC, -2 AC penalty, 50% miss chance on all attacks. |
-| `8` | **Invisible** | +2 Attack Bonus against sighted targets, targets lose DEX to AC. |
+| `8` | **Invisible** | +2 Attack Bonus against sighted targets, targets lose DEX to AC; +20 Stealth while moving / +40 while stationary. |
 | `9` | **Entangled** | Half speed, -2 Attack Bonus, -4 DEX. |
-| `10` | **Stunned / Dazed** | Cannot take actions, drops held items, loses DEX to AC, +2 AB to attackers. |
+| `10` | **Stunned / Dazed** | Stunned: cannot take actions, drops held items, loses DEX to AC, -2 AC. Dazed (milder): cannot take actions but keeps items and takes no AC penalty. |
 | `11` | **Hasted** | +1 Attack Bonus, +1 AC (Dodge), +1 extra attack on full attack, +30ft speed. |
 | `31` | **Is Hero / Commander** | Model slot maps directly to an active Player Hero `ActorDocument`. |
 

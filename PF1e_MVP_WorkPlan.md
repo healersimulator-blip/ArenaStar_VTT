@@ -100,7 +100,9 @@
   1. For spell orders (Circle, Cone, Line), identify models inside template.
   2. Models with active awareness take a $5\text{ ft}$ Reflex scatter step away from epicenter.
   3. Models remaining in template roll Reflex save (`d20 + Ref Bonus`) vs Spell DC.
-  4. Apply Evasion (0 on pass / full on fail) and Improved Evasion (0 on pass / half on fail).
+  4. Apply save outcomes by capability: no Evasion ⇒ **half damage on a successful save** (round
+     down, no minimum — ordinary save-for-half, e.g. fireball), Evasion ⇒ 0 on pass / full on fail,
+     Improved Evasion ⇒ 0 on pass / half on fail.
 - **Acceptance Criteria:** Scatter vectors update model coordinates; damage applied accurately; verified in `tests/packages/pf1eSpells.test.ts`.
 
 ---

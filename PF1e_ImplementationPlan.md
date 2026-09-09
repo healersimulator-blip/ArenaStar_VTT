@@ -48,24 +48,36 @@ as vitest against pure modules (logic) + a Playwright spec (table flow) where a 
 
 1. **S1 — "Fighter vs Goblin"** (P1–P3): GM drags a `heavy-infantry` bestiary entry onto the canvas,
    selects the token + a PC token, right-clicks → *Roll initiative (2 tokens)*; the tracker shows
-   `1d20 + Dex + Imp. Init`, tie broken by Dex, surprise round first. Clicking *Attack* on the PC's
+   `1d20 + Dex + Imp. Init`, ties broken by **total initiative modifier** (Improved Initiative counts),
+   then reroll; if only some combatants are aware, the surprise round comes first and only the
+   aware ones act (one standard or move action each; unaware combatants don't act and are
+   flat-footed). Clicking *Attack* on the PC's
    sheet rolls `1d20+7` vs the goblin's **touch/flat-footed/normal AC as appropriate**, confirms a crit
    on a threat, applies the weapon's damage with the grip's Str multiplier (two-handed longsword
    `1d8 + 3×1.5 → 1d8+4`), never below 1, and writes hp onto the actor.
-2. **S2 — "Bull's Strength for 8 rounds"** (P4): GM creates a custom buff (`+2 enhancement Str`,
-   `1 round/level`), drags it onto a token; the sheet's Str, its derived damage, and the initiative
-   order **all change**, the badge shows `8`, it ticks on the creature's turn end, and when it expires
-   every derived number reverts.
+2. **S2 — "Bull's Strength for 8 minutes"** (P4): GM creates the buff (`+4 enhancement Str`,
+   `1 min/level` at CL 8 — the spell's real magnitude and duration, CRB p.250; with 6-second
+   rounds the badge shows 80), drags it onto a token; the sheet's Str and its derived damage
+   **change**, and the initiative order does **not** (a Str buff never rewrites an initiative
+   result; only delay/ready reorder mid-combat, A.1); it ticks on the creature's turn end, and when
+   it expires every derived number reverts.
 3. **S3 — "Fireball into a cluster"** (P5): GM picks burst 20 ft on the grid; every token in the area
-   is listed with cover/concealment/Evasion applied, each rolls a Reflex save (`1d20+ref vs DC 15`),
-   takes `½` on success (min 1) with DR/ER respected, and SR is checked **without** a nat-20 auto-success.
+   is listed with cover/concealment applied, each rolls a Reflex save (`1d20+ref vs DC 15`),
+   takes `½` on success (round down, no minimum) with DR/ER respected, a character with
+   **Evasion takes 0** on a successful save (Improved Evasion: half even on a failure), and SR
+   is checked **without** a nat-20 auto-success.
 4. **S4 — "Trip the mage, then cast defensively"** (P6): an opponent takes a trip CMB vs CMD, the
-   prone condition lands as a real modifier (`−4 attacks, −4 AC melee / +4 AC ranged`,
-   stand = move action that provokes), the mage's
-   concentration check is `10 + damage + spell level` and failure burns the spell.
-5. **S5 — "Dying and stable"** (P7): damage past 0 starts the staggered → dying → stable track with the
-   per-round endurance check, a DC 15 heal removing the dying condition, and a coup de grace that skips
-   the save.
+   prone condition lands as a real modifier (`−4 melee attacks, ranged unusable except
+   crossbow/shuriken; −4 AC melee / +4 AC ranged`,
+   stand = move action that provokes), the mage casts defensively with a
+   concentration check `DC 15 + 2 × spell level` (no AoO), and if injured while casting the
+   check is `10 + damage taken + spell level`; failure burns the spell.
+5. **S5 — "Dying and stable"** (P7): damage past 0 starts the staggered → dying → stable track —
+   at 0 you're staggered and a standard action costs 1 HP after the act; dying means a DC 10
+   Con check each round with a penalty equal to your negative HP total (nat 20 auto-stabilizes,
+   failure loses 1 HP), a DC 15 Heal first aid can stabilize you, and a coup de grâce whose
+   target survives the auto-crit damage must still make the mandatory Fort save (DC 10 + damage
+   dealt) or die.
 
 Anything a phase's scenario cannot express is a scope bug, not a follow-up.
 
@@ -154,7 +166,7 @@ effect = { type: "effect", changes: [], disabled: false,
   name: "Bull's strength", icon: "…",
   flags: { core:  { duration: 8 },                     // ← the ticking authority (unchanged)
            pf1e: {
-             bonuses:  [{ key: "ability.str", value: 2, type: "enhancement", stack: "str" }],
+             bonuses:  [{ key: "ability.str", value: 4, type: "enhancement", stack: "str" }],
              penalties:[{ key: "ac", value: -4, type: "circumstance" }],   // prone
              denies:   ["full-attack"],                                   // e.g. confused
              boosts:   [{ key: "damage", value: 1, kind: "dice", sides: 6 }], // energy
@@ -262,7 +274,9 @@ Gap List rows it closes, its acceptance scenario, and what it must **not** touch
   ties, not just `derived.initDex`; **public PF1e tie handling delivered D-123** (recorded
   subgroup roll-offs and persisted equal-total order). `applyInitiative` keeps its
   "values pre-rolled by caller" contract so `core/combat.ts` still needs no PF1e knowledge.
-* Surprise round: `combatState.startWithSurprise` (only flat-footed-unaware combatants act; then
+* Surprise round: `combatState.startWithSurprise` (only combatants that started the battle aware of
+  their opponents act, each with one standard or move action plus free actions; unaware combatants
+  don't act and are flat-footed until they do; then
   normal order) — Appendix A.1.
 * Multi-encounter: `beginCombat` today reads `store.getAll("combats")[0]` (single encounter). Add a
   minimal encounter list (create/activate) in `CombatPanel`; keep one *active* combat so the existing
@@ -281,7 +295,7 @@ Gap List rows it closes, its acceptance scenario, and what it must **not** touch
   `damageRoll({weapon, attacker, defender, isCrit})`, applying the full modifier stack of A.2/A.3/A.4
   (BAB, Str ×1.5/×½, size, WB, TWF — SRD Two-Weapon Fighting table, not yet transcribed in
   Appendix A, cite the SRD page when fixtures are written, flanking +2, fatigue/exhaustion,
-  bull-rush/charge −2, cover `+4/+2`, improved cover +8/+4, total cover = no attack,
+  charge +2 attack/−2 AC (a charging bull rush also takes +2 on the CMB), cover `+4/+2`, improved cover +8/+4, total cover = no attack,
   concealment 20/50 % non-stacking, invisible = total concealment (50 % miss) + denied Dex,
   A.8), threat → **confirm** roll at full
   bonus, min 1 damage, nonlethal/lethal swap, and precision damage immunity.
@@ -289,7 +303,7 @@ Gap List rows it closes, its acceptance scenario, and what it must **not** touch
   are (decision 2); only the tables/rule constants are shared, and `rulesTables.ts` (P0) is that shared
   layer — `schema.ts` keeps its own compile, so the seam is data, never a kernel.
 * Sheet buttons → `{type:"roll"}` message with `rollData` (already on the wire, `sync.ts:795`) so the
-  result posts to chat with the breakdown line ("+7 = BAB 6 + Str 3 − 2 charge"), and a *Verify* chip
+  result posts to chat with the breakdown line ("+11 = BAB 6 + Str 3 + 2 charge"), and a *Verify* chip
   using `verifyCommitRoll` where the GM opted in.
 * Actor hp writes: `update` op on `system.pf1e.hp` through the ordinary op path (players see it),
   with dying/stable bookkeeping deferred to P7 — but write the field shape now so P7 is additive.
@@ -352,7 +366,9 @@ Gap List rows it closes, its acceptance scenario, and what it must **not** touch
 
 ### P6 — Maneuvers, AoO interrupts, movement, mounted (4–6 d) → closes §3.5, §3.6, §4.4
 * CMB/CMD with legality per maneuver and the full aftermath table (A.9): trip → prone (−4 to hit, +2
-  to be hit, stand = move-provoking), grapple (no AoO, both flat-footed, pinned), bull-rush
+  to be hit, stand = move-provoking), grapple (both grappled: no AoOs, −4 Dex, −2 attack/CMB
+  rolls, no two-hand actions; pinned denies Dex; neither is flat-footed — verified condition
+  text), bull-rush
   (forced movement), disarm/sunder (weapon hp), overrun, steal, reverse — each an action button that
   runs the check through P3's roll path.
 * Real AoO loop: `combatState.onMoveOpportunity` — one free attack per action per attacker

@@ -2028,3 +2028,99 @@ model/Svelte, tests. Source: CRB p.555 "Ability Score Damage, Penalty, and Drain
   checked off: temp HP (D-121 flow), ER, weapons, armor, features and the
   conditional monster tab landed in earlier slices; this was the last listed
   gap. In-journey healing (1/day, penalties) remains a P3+ runtime concern.
+
+## D-129 — R02: eighteen disputed rules verified against authoritative sources; G/I/B/M repaired
+
+**Date:** 2026-09-09. **Scope:** R02 reconciliation — every rule the TODO flagged as
+having conflicting or suspect statements across G/I/B/M was checked against the PRD
+text (AoN rule IDs or verbatim PRD quotes) before any repair. No runtime code changed:
+where code exists it already matched the verified rule (notably
+`attacksOfOpportunityPerRound()` vs the strategic `maxAoos` deviation, which §10.2
+documents), and the remaining rules are future-phase work whose fixture oracle is now
+the corrected Appendix A / scenario text.
+
+- **Surprise (A.1, I S1, I §3.3):** all three docs had it backwards. Correct (CRB
+  p.178): only combatants that started the battle AWARE act in the surprise round, one
+  standard or move action each (plus free actions); unaware combatants do not act and
+  are flat-footed. A surprise round requires some-but-not-all aware.
+- **Initiative ties (A.1, I S1):** "highest Dex bonus" is wrong — ties are broken by
+  the **total initiative modifier** (Improved Initiative +4 counts), then reroll. A
+  later Str buff never rewrites an initiative result (only delay/ready reorder
+  mid-combat), so I's S2 "initiative order changes" claim is removed.
+- **Delay/Ready (A.1):** delay does NOT lose the standard action — you act normally at
+  any lower count (full-round allowed) and your initiative permanently drops (AoN ID
+  200, CRB p.203). Ready was missing entirely: standard action, readies a
+  standard/move/swift/free action, resolves just before the trigger, initiative moves
+  immediately ahead of the triggerer, lost if untriggered by your next turn (AoN ID
+  201).
+- **Touch AC (A.2):** the appendix omitted Dex. Correct: 10 + Dex + size + misc (dodge
+  applies; armor/shield/natural are the only losses). The sheet's `acFromBreakdown`
+  already computes this — the appendix, not the code, was wrong.
+- **AoO budget (A.10, §10.2):** the appendix had encoded the strategic sim's house
+  rule (`1 + max(0, dexMod)`) as SRD truth. Correct (Combat Reflexes "Normal" text):
+  **one AoO per round, period**; additional AoOs equal to your Dex bonus come only
+  with Combat Reflexes, which also permits AoOs while flat-footed. The garbled
+  "threaten with a reach weapon" parenthetical and the untranscribed "resets at the
+  start of your turn" were removed; §10.2's deviation quote updated.
+- **Charge (I §7):** I listed "bull-rush/charge −2" as an attack modifier and showed
+  "− 2 charge" in the example breakdown. Correct (CRB p.198): +2 on the attack roll,
+  −2 to AC until your next turn; a charging bull rush takes +2 on the CMB. G's own §7
+  and mounted rows were already right.
+- **Bull's Strength (I S2 + effect JSON):** +2 enhancement / 1 round/level was
+  invented. The spell is **+4 enhancement, 1 min/level** (CRB p.250): at CL 8 the
+  badge reads 80 six-second rounds. Scenario retitled "Bull's Strength for 8 minutes".
+- **Evasion vs ordinary half (I S3, M Task 5):** ordinary characters take half on a
+  successful save — round down, **no minimum** (the "min 1" was a conflation with the
+  minimum-damage rule, which is 1 point of nonlethal on weapon attacks, A.3); Evasion
+  takes 0 on success; Improved Evasion half even on failure. M's pipeline never stated
+  the ordinary-half step; added.
+- **Defensive casting vs injury (I S4):** the scenario applied the injury formula
+  (10 + damage + spell level) to a "cast defensively" beat. Both are now stated:
+  defensive = DC 15 + 2 × spell level (no AoO); injury while casting = 10 + damage
+  taken + spell level (PRD Concentration table; A.16 was already correct).
+- **Prone/grapple (I §P6, B bitmask):** grapple makes nobody flat-footed (verified
+  grappled condition: −4 Dex, −2 attack/CMB rolls, no AoOs, no two-hand actions, cast
+  only with a DC 10 + grappler's CMB + spell level concentration check); pinned is the
+  state that denies Dex. B's "loses DEX to AC / no somatic spells" row and merged
+  Stunned/Dazed row were split and corrected; prone attacker ranged = crossbow or
+  shuriken only (verified modifier-table footnote — A.14 was already right).
+- **Mounted (A.11):** the higher-ground +1 applies vs a foe **smaller than your
+  mount** that is on foot (CRB p.202), not "a smaller foe".
+- **Dying/stabilization/nonlethal (A.13, I S5):** "standard action ⇒ DC 10 Con check
+  (−1 per damage taken)" was invented — at 0 HP you are staggered and a standard action
+  simply deals 1 damage after the act (AoN ID 164/166). The dying check is DC 10 Con
+  with a **penalty equal to your negative HP total** (nat 20 auto-stabilizes, fail ⇒
+  −1 HP); Heal DC 15 first aid (standard action, provokes). Nonlethal: staggered at
+  exactly equal to current HP, unconscious in excess ("staggering at half" was
+  invented); −4 to deal nonlethal with a lethal weapon and vice versa.
+- **Coup de grâce (A.13, I S5):** "skips the save" removed — the Fort save (DC 10 +
+  damage dealt) is mandatory if the target survives the auto-crit; delivery provokes
+  AoOs; bow/crossbow only while adjacent; crit-immune creatures skip both crit and
+  save (AoN ID 413).
+- **Temp HP stacking (A.13):** "don't stack between different spells" was backwards.
+  Paizo FAQ: the **same source** doesn't stack (highest applies); **different
+  sources do stack**, tracked separately.
+- **DR/precision/riders (A.17):** "precision damage ignores DR" was wrong — sneak
+  attack is part of the weapon attack's damage total and is reduced by DR together
+  with it. DR does negate ability damage/drain, energy riders, touch attacks and force
+  effects.
+- **Firearms (G §2.9):** the transcribed numbers verified correct against UC p.135
+  (early: touch AC within 1st increment, max 5; advanced: within 5th, max 10; −2 per
+  increment beyond; never a "touch attack" for Deadly Aim). **Misfire/clearing/jam
+  rules are transcribed nowhere** — they join TWF and Charge on the
+  transcribe-before-fixtures list; no conflicting statement existed to repair.
+- **Invisibility Stealth (A.8, B bitmask, G §6):** +40 Stealth while stationary, +20
+  while moving (G §6 had the values swapped and tied to "passive/attacking"); B's
+  invisible row gained the modifiers.
+- **Spell-per-round/components (A.6/A.16, B §4.4):** verified already correct —
+  one swift per turn (immediate on your turn counts as swift; off-turn immediate eats
+  next turn's swift), concentration = d20 + CL + ability mod, defensive/injury DCs,
+  component restrictions (V impossible while gagged/silenced, 20% spoil when
+  deafened; S needs a free hand; M/F/DF free action). No repair needed.
+- **B §4.2 Stealth formula:** the "− Cover Bonus" sign was backwards — cover and
+  concealment bonuses accrue to the hider's Stealth (e.g. +10 improved cover), never
+  lower the Perception DC.
+- **Out of scope by design:** rage/smite magnitudes in B §4.3 are not on R02's list
+  and were not verified this pass. No fixtures were added in this slice: the verified
+  text above is the fixture oracle for the phases that implement each rule (P3–P7),
+  matching how R01 closed.
