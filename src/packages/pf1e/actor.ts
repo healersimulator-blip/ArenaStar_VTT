@@ -33,7 +33,11 @@ import {
   type PF1eActiveEffect,
   type ResolvedEffects,
 } from "./effects";
-import { readPF1eHealth, type PF1eHealthAuthored, type PF1eHealthReadout } from "./healthState";
+import {
+  readPF1eHealth,
+  type PF1eHealthAuthored,
+  type PF1eHealthReadout,
+} from "./healthState";
 import { normalizePF1eSystem } from "./statBlock";
 
 export const PF1E_ABILITY_KEYS = [
@@ -160,6 +164,21 @@ export interface PF1eActorSystem extends PF1eHealthAuthored {
   acMode?: "published" | "components";
   /** Set when `saves` holds published totals, so ability modifiers are not added twice. */
   savesAsTotal?: boolean;
+  /**
+   * Accumulated ability damage (CRB p.555, AoN Rules ID 416): the score itself is NOT reduced —
+   * every 2 full points apply a –1 penalty to the statistics based on that ability. Damage ≥
+   * score ⇒ unconscious until healed (dead, for Constitution). Bookkeeping only: natural and
+   * magical healing are not automated here.
+   */
+  abilitiesDamage?: Partial<Record<PF1eAbilityKey, number>>;
+  /** Ability drain (CRB p.555): actually reduces the score; every statistic follows it. */
+  abilitiesDrain?: Partial<Record<PF1eAbilityKey, number>>;
+  /**
+   * Total Hit Dice. Needed only for the Constitution damage/drain hit-point adjustment
+   * (current and maximum HP each lose Hit Dice × the Con penalty); when absent that
+   * adjustment is reported as not computable, never guessed.
+   */
+  hitDice?: number;
   /** Stat blocks publish the generic size modifier, not a category (see A.4's deviation note). */
   sizeMod?: number;
   drBypass?: string[];
@@ -194,11 +213,22 @@ export interface PF1eDerivedAttack {
   explain: string;
 }
 
-export interface PF1eDerived extends Pick<PF1eHealthReadout, "tempHp" | "energyResistance"> {
+export interface PF1eDerived extends Pick<
+  PF1eHealthReadout,
+  "tempHp" | "energyResistance"
+> {
   size: PF1eSize;
   sizeEntry: ReturnType<typeof sizeEntry>;
+  /** Scores after effects and drain — drain reduces the score (CRB p.555). */
   abilities: PF1eAbilities;
+  /** Effective modifiers every ability-based statistic uses: mod(score) − damage penalty. */
   abilityMods: PF1eAbilities;
+  /** Accumulated ability damage as authored (validated; zero when absent). */
+  abilityDamageTaken: PF1eAbilities;
+  /** Accumulated ability drain as authored (validated; zero when absent). */
+  abilityDrainTaken: PF1eAbilities;
+  /** The –1-per-2-points penalty each ability's statistics take (CRB p.555). */
+  abilityDamagePenalty: PF1eAbilities;
   baseAttack: number;
   iterativeAttacks: number[];
   ac: { normal: number; touch: number; flatFooted: number };
@@ -280,6 +310,40 @@ function unwrap(v: unknown, prefer: "value" | "max"): number | undefined {
   return undefined;
 }
 
+/**
+ * Per-ability accumulated damage/drain (CRB p.555). Malformed entries are issues that
+ * contribute zero, and unknown keys are refused — never silently mapped to an ability.
+ */
+function readAbilityAccum(
+  raw: unknown,
+  field: string,
+  c: Collector,
+): PF1eAbilities {
+  const out: PF1eAbilities = { str: 0, dex: 0, con: 0, int: 0, wis: 0, cha: 0 };
+  if (raw === undefined || raw === null) return out;
+  if (!isRecord(raw)) {
+    c.issues.push(
+      `${field}: expected an object of per-ability integers — ignored`,
+    );
+    return out;
+  }
+  for (const [k, v] of Object.entries(raw)) {
+    if (!(PF1E_ABILITY_KEYS as readonly string[]).includes(k)) {
+      c.issues.push(`${field}.${k}: not an ability key — ignored`);
+      continue;
+    }
+    if (v === undefined || v === null) continue;
+    if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) {
+      c.issues.push(
+        `${field}.${k}: ${JSON.stringify(v)} is not a nonnegative whole number — using 0`,
+      );
+      continue;
+    }
+    out[k as PF1eAbilityKey] = v;
+  }
+  return out;
+}
+
 interface Collector {
   issues: string[];
   defaults: string[];
@@ -324,7 +388,11 @@ export function parsePF1eActorSystem(raw: unknown): Result<PF1eActorSystem> {
   if (raw === undefined || raw === null) return okVal({});
   if (!isRecord(raw)) return err("system.pf1e must be an object");
   const o = raw as Record<string, unknown>;
-  if (o.acMode !== undefined && o.acMode !== "published" && o.acMode !== "components")
+  if (
+    o.acMode !== undefined &&
+    o.acMode !== "published" &&
+    o.acMode !== "components"
+  )
     return err("system.pf1e.acMode must be published or components");
   if (
     o.size !== undefined &&
@@ -381,6 +449,38 @@ export function parsePF1eActorSystem(raw: unknown): Result<PF1eActorSystem> {
   }
   if (o.armorClass !== undefined && !isRecord(o.armorClass)) {
     return err("system.pf1e.armorClass must be an object of AC components");
+  }
+  for (const field of ["abilitiesDamage", "abilitiesDrain"] as const) {
+    const v = o[field];
+    if (v === undefined || v === null) continue;
+    if (!isRecord(v)) {
+      return err(
+        `system.pf1e.${field} must be an object of per-ability integers`,
+      );
+    }
+    for (const [k, amount] of Object.entries(v)) {
+      if (!(PF1E_ABILITY_KEYS as readonly string[]).includes(k)) {
+        return err(`system.pf1e.${field}: "${k}" is not an ability`);
+      }
+      if (
+        typeof amount !== "number" ||
+        !Number.isSafeInteger(amount) ||
+        amount < 0
+      ) {
+        return err(
+          `system.pf1e.${field}.${k} must be a nonnegative whole number`,
+        );
+      }
+    }
+  }
+  if (
+    o.hitDice !== undefined &&
+    o.hitDice !== null &&
+    (typeof o.hitDice !== "number" ||
+      !Number.isSafeInteger(o.hitDice) ||
+      o.hitDice < 0)
+  ) {
+    return err("system.pf1e.hitDice must be a nonnegative whole number");
   }
   if (o.saves !== undefined && !isRecord(o.saves)) {
     return err("system.pf1e.saves must be an object with fort/ref/will");
@@ -451,6 +551,26 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     const m = resolved.mods[`ability.${k}`];
     if (m !== undefined) abilities[k] = abilities[k] + m;
   }
+  // 1b. Ability drain and damage (CRB p.555, AoN Rules ID 416). Drain ACTUALLY reduces the
+  //     score, so it applies before the modifiers; damage never touches the score — every two
+  //     full points apply a –1 penalty to the statistics that use that ability's modifier.
+  const abilityDrainTaken = readAbilityAccum(
+    sys.abilitiesDrain,
+    "abilitiesDrain",
+    c,
+  );
+  const abilityDamageTaken = readAbilityAccum(
+    sys.abilitiesDamage,
+    "abilitiesDamage",
+    c,
+  );
+  const conModBeforeDrain = abilityMod(abilities.con);
+  for (const k of PF1E_ABILITY_KEYS) {
+    if (abilityDrainTaken[k] === 0) continue;
+    abilities[k] = Math.max(0, abilities[k] - abilityDrainTaken[k]);
+  }
+  /** Con drain's hit-point effect: Δ modifier × Hit Dice (computed after the drain loop). */
+  const conModDelta = abilityMod(abilities.con) - conModBeforeDrain;
   const mods: PF1eAbilities = {
     str: abilityMod(abilities.str),
     dex: abilityMod(abilities.dex),
@@ -458,6 +578,24 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     int: abilityMod(abilities.int),
     wis: abilityMod(abilities.wis),
     cha: abilityMod(abilities.cha),
+  };
+  const abilityDamagePenalty: PF1eAbilities = {
+    str: Math.floor(abilityDamageTaken.str / 2),
+    dex: Math.floor(abilityDamageTaken.dex / 2),
+    con: Math.floor(abilityDamageTaken.con / 2),
+    int: Math.floor(abilityDamageTaken.int / 2),
+    wis: Math.floor(abilityDamageTaken.wis / 2),
+    cha: Math.floor(abilityDamageTaken.cha / 2),
+  };
+  // Effective modifiers: what every ability-based statistic actually rolls with. `mods`
+  // (the raw modifiers of the drained scores) stays available for the readout below.
+  const eff: PF1eAbilities = {
+    str: mods.str - abilityDamagePenalty.str,
+    dex: mods.dex - abilityDamagePenalty.dex,
+    con: mods.con - abilityDamagePenalty.con,
+    int: mods.int - abilityDamagePenalty.int,
+    wis: mods.wis - abilityDamagePenalty.wis,
+    cha: mods.cha - abilityDamagePenalty.cha,
   };
 
   // 2. Size and base attack bonus.
@@ -520,13 +658,18 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
           fallback: Number.POSITIVE_INFINITY,
         });
   const cappedDex = Number.isFinite(maxDex)
+    ? Math.min(eff.dex, maxDex)
+    : eff.dex;
+  /** The un-penalized Dex contribution, for reconstructing totals a stat block published whole. */
+  const cappedRawDex = Number.isFinite(maxDex)
     ? Math.min(mods.dex, maxDex)
     : mods.dex;
   const flatFooted = resolved.flatFooted;
   const deniedDex = flatFooted || resolved.deniedDexToAc;
-  const authoredTotals = sys.acMode !== "components" && isRecord(sys.acTotals)
-    ? (sys.acTotals as PF1eActorSystem["acTotals"])
-    : null;
+  const authoredTotals =
+    sys.acMode !== "components" && isRecord(sys.acTotals)
+      ? (sys.acTotals as PF1eActorSystem["acTotals"])
+      : null;
   const composedAc = acFromBreakdown({
     armor: armorBonus,
     shield: shieldBonus,
@@ -544,21 +687,30 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     authoredTotals === null || authoredTotals === undefined
       ? composedAc
       : {
-          normal: authoredTotals.normal ?? 10,
+          // Published totals stand, but the Dexterity damage penalty still applies to
+          // normal and touch AC (CRB p.555 lists AC among Dex statistics); flat-footed
+          // already excludes Dex, so it never takes the penalty. Reconstruction
+          // arithmetic subtracts the RAW Dex contribution, then the penalty once.
+          normal: (authoredTotals.normal ?? 10) - abilityDamagePenalty.dex,
           touch:
-            authoredTotals.touch ??
-            Math.max(
-              10,
-              (authoredTotals.normal ?? 10) - cappedDex - dodgeBonus,
-            ),
+            authoredTotals.touch !== undefined
+              ? authoredTotals.touch - abilityDamagePenalty.dex
+              : Math.max(
+                  10,
+                  (authoredTotals.normal ?? 10) -
+                    cappedRawDex -
+                    dodgeBonus -
+                    abilityDamagePenalty.dex,
+                ),
           flatFooted:
-            authoredTotals.flatFooted ??
-            Math.max(
-              10,
-              (authoredTotals.normal ?? 10) -
-                (deniedDex ? 0 : cappedDex) -
-                dodgeBonus,
-            ),
+            authoredTotals.flatFooted !== undefined
+              ? authoredTotals.flatFooted
+              : Math.max(
+                  10,
+                  (authoredTotals.normal ?? 10) -
+                    (deniedDex ? 0 : cappedRawDex) -
+                    dodgeBonus,
+                ),
         };
   const ac = {
     // A general "+N AC" effect applies to all three; `acTouch`/`acFlatFooted` add on top of the
@@ -577,7 +729,10 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     key: keyof PF1eAbilities,
     field: string,
   ): number =>
-    readNumber(base, field, c) + (totalsArePublished ? 0 : mods[key]);
+    // Published totals already contain the original ability modifier, so only the damage
+    // penalty applies on top; component saves take the effective modifier (CRB p.555).
+    readNumber(base, field, c) +
+    (totalsArePublished ? -abilityDamagePenalty[key] : eff[key]);
   const saves = {
     fort:
       abilitySave(savesAuthored.fort, "con", "saves.fort") +
@@ -598,7 +753,8 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
   const initiativeAuthored = readNumber(sys.initiative, "initiative", c);
   const initiativeEffects = resolved.mods.initiative ?? 0;
   // CRB p.178 Initiative: flat-footed denies Dex to AC, not to this Dexterity check.
-  const initiative = mods.dex + initiativeAuthored + initiativeEffects;
+  // Dex damage's penalty applies to it (CRB p.555 lists initiative among Dex statistics).
+  const initiative = eff.dex + initiativeAuthored + initiativeEffects;
 
   // 6. CMB and CMD (A.9): the special size ladder, not the attack one, and CMD borrows the
   //    transferable AC bonuses plus every AC penalty.
@@ -610,16 +766,16 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
   const cmdMisc = readNumber(sys.cmdBonus ?? sys.cmd, "cmdBonus", c);
   const cmb = cmbFrom({
     bab: baseAttack,
-    strMod: mods.str,
-    dexMod: mods.dex,
+    strMod: eff.str,
+    dexMod: eff.dex,
     size,
     misc: cmbMisc + (resolved.mods.cmb ?? 0),
     ...(sys.sizeMod !== undefined ? { sizeModOverride: sys.sizeMod } : {}),
   });
   const cmdParts = cmdFrom({
     bab: baseAttack,
-    strMod: mods.str,
-    dexMod: mods.dex,
+    strMod: eff.str,
+    dexMod: eff.dex,
     size,
     misc: cmdMisc + (resolved.mods.cmd ?? 0),
     acTransfer: resolved.acTransfer,
@@ -646,7 +802,7 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
   const attacks: PF1eDerivedAttack[] = lines.map((a, idx) => {
     const ranged = a.ranged === true || a.rangeIncrementFt !== undefined;
     const natural = a.natural === true || a.secondary === true;
-    const ability = ranged ? mods.dex : mods.str;
+    const ability = ranged ? eff.dex : eff.str;
     const strMult =
       a.twoHanded === true
         ? 1.5
@@ -659,6 +815,13 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
         : ranged
           ? 0
           : Math.floor(ability * strMult);
+    // A stat-block damage line that already contains the Strength contribution cannot be
+    // decomposed, but the roll still relies on Strength: the damage penalty applies flat
+    // (CRB p.555). Ranged damage never relies on Strength, so it takes no penalty.
+    const includedLinePenalty =
+      a.abilityDamageIncluded === true && !ranged
+        ? abilityDamagePenalty.str
+        : 0;
     const flatDamage = readNumber(
       a.damageBonus,
       `attacks[${idx}].damageBonus`,
@@ -667,7 +830,8 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     const effectDamage = resolved.mods.damage ?? 0;
     const ladder = natural ? [baseAttack] : iterativeAttacks;
     const bonus = ability + sizeAttackAc + toHit(ranged);
-    const damageBonus = abilityDamage + flatDamage + effectDamage;
+    const damageBonus =
+      abilityDamage + flatDamage + effectDamage - includedLinePenalty;
     const critMultiplier = readNumber(
       a.critMultiplier,
       `attacks[${idx}].critMultiplier`,
@@ -718,7 +882,7 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
       touchAttack: a.touchAttack === true,
       rangedTouch: a.touchAttack === true && ranged,
       explain:
-        `${bonus >= 0 ? "+" : ""}${bonus} = ${ranged ? `Dex ${fmt(mods.dex)}` : `Str ${fmt(ability)}${strMult !== 1 ? ` ×${strMult}` : ""}`}` +
+        `${bonus >= 0 ? "+" : ""}${bonus} = ${ranged ? `Dex ${fmt(eff.dex)}` : `Str ${fmt(ability)}${strMult !== 1 ? ` ×${strMult}` : ""}`}` +
         `, size ${fmt(sz.attackAc)}${toHit(ranged) !== 0 ? `, effects ${fmt(toHit(ranged))}` : ""}` +
         `; damage ${fmt(damageBonus)}`,
     };
@@ -729,7 +893,9 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
   const combatReflexes = feats.some(
     (f) => f.trim().toLowerCase() === "combat reflexes",
   );
-  const aooPerRound = attacksOfOpportunityPerRound(mods.dex, combatReflexes);
+  // The AoO count is a Dexterity statistic (Combat Reflexes keys on the Dex bonus), so the
+  // effective modifier feeds it; the budget formula itself stays A.10's recorded reading.
+  const aooPerRound = attacksOfOpportunityPerRound(eff.dex, combatReflexes);
   const canTakeAoO = !resolved.cannotAoO && !flatFooted && aooPerRound > 0;
 
   // 9. Movement, hit points, conditions.
@@ -751,13 +917,42 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     { fallback: hpMax },
   );
   const nonlethalDamage = readNumber(sys.nonlethalDamage, "nonlethalDamage", c);
+  // 9b. Constitution damage/drain hit points (CRB p.555): "multiply your total Hit Dice by
+  //     this penalty and subtract that amount from your current and total hit points" (the
+  //     damage penalty), plus drain's Δ modifier × Hit Dice. Both apply only when Hit Dice
+  //     are authored — without them the adjustment is reported, never guessed.
+  const hitDice = readNumber(sys.hitDice, "hitDice", c);
+  const conHpPerDie = conModDelta - abilityDamagePenalty.con;
+  const conHpAdjustment = hitDice * conHpPerDie;
+  const localUnsupported = [...normalized.unsupported];
+  if (conHpPerDie !== 0 && hitDice <= 0) {
+    localUnsupported.push(
+      "hitDice: not authored — the Constitution damage/drain hit-point adjustment cannot be computed; author Hit Dice or adjust hp manually",
+    );
+  }
+  const hpConAdjusted =
+    conHpPerDie !== 0 && hitDice > 0 ? hp + conHpAdjustment : hp;
+  const hpMaxConAdjusted =
+    conHpPerDie !== 0 && hitDice > 0 ? hpMax + conHpAdjustment : hpMax;
   const dr = readNumber(sys.dr, "dr", c);
   const spellResistance = readNumber(sys.spellResistance, "spellResistance", c);
   const authoredConditions = Array.isArray(sys.conditions)
     ? sys.conditions.filter((x): x is string => typeof x === "string")
     : [];
+  // 9c. Ability-damage thresholds (CRB p.555): damage ≥ score ⇒ unconscious until it heals
+  //     below the score; Constitution damage ≥ score kills outright.
+  const thresholdConditions: string[] = [];
+  for (const k of PF1E_ABILITY_KEYS) {
+    if (abilityDamageTaken[k] > 0 && abilityDamageTaken[k] >= abilities[k]) {
+      thresholdConditions.push(k === "con" ? "dead" : "unconscious");
+    }
+  }
   const conditions = [
-    ...new Set([...authoredConditions, ...resolved.conditions]),
+    ...new Set([
+      ...authoredConditions,
+      ...resolved.conditions,
+      ...thresholdConditions,
+    ]),
   ];
 
   // 10. Spellcasting (A.16): DC = 10 + spell level + key ability modifier, per level.
@@ -797,7 +992,8 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
       casting && slotsLeft
         ? spellSaveDc({
             spellLevel: level,
-            keyMod: mods[keyAbility],
+            // Int/Wis/Cha damage penalizes the DCs based on that ability (CRB p.555).
+            keyMod: eff[keyAbility],
             focus: dcBonus,
           }) + (resolved.mods.spellDc ?? 0)
         : null,
@@ -814,7 +1010,10 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     size,
     sizeEntry: sz,
     abilities,
-    abilityMods: mods,
+    abilityMods: eff,
+    abilityDamageTaken,
+    abilityDrainTaken,
+    abilityDamagePenalty,
     baseAttack,
     iterativeAttacks,
     ac,
@@ -828,8 +1027,8 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     canTakeAoO,
     speedFt,
     flySpeedFt,
-    hp,
-    hpMax,
+    hp: hpConAdjusted,
+    hpMax: hpMaxConAdjusted,
     tempHp: health.tempHp,
     energyResistance: health.energyResistance,
     nonlethalDamage,
@@ -859,8 +1058,22 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     spellMode:
       spellsAuthored.mode === "spontaneous" ? "spontaneous" : "prepared",
     explain: {
+      abilities: abilityExplain(
+        abilities,
+        abilityDamageTaken,
+        abilityDrainTaken,
+        abilityDamagePenalty,
+      ),
+      hp:
+        conHpPerDie === 0 || hitDice <= 0
+          ? `${hpConAdjusted} hp (no Constitution adjustment)`
+          : `${hpConAdjusted} hp = authored ${hp} ${conHpAdjustment >= 0 ? "+" : "−"} ${Math.abs(conHpAdjustment)} (Con: ${
+              conModDelta !== 0
+                ? `drain Δ ${conModDelta} × ${hitDice} HD`
+                : "drain 0"
+            }${abilityDamagePenalty.con !== 0 ? `; damage −${abilityDamagePenalty.con} × ${hitDice} HD` : ""})`,
       ac: authoredTotals
-        ? `authored total ${authoredTotals.normal}${acMod !== 0 ? ` + effects ${fmt(acMod)}` : ""} — no components to recompose from`
+        ? `authored total ${authoredTotals.normal}${acMod !== 0 ? ` + effects ${fmt(acMod)}` : ""}${abilityDamagePenalty.dex !== 0 ? ` − Dex damage ${abilityDamagePenalty.dex}` : ""} — no components to recompose from`
         : `10 + armor ${armorBonus} + shield ${shieldBonus} + Dex ${deniedDex ? "0 (denied)" : cappedDex}` +
           ` + natural ${naturalArmor} + size ${fmt(sz.attackAc)} + dodge ${deniedDex ? "0 (flat-footed)" : dodgeBonus}` +
           ` + misc ${acMisc}${acMod !== 0 ? ` + effects ${fmt(acMod)}` : ""}`,
@@ -874,13 +1087,13 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
       flatFooted: `10 + armor ${armorBonus} + shield ${shieldBonus} + natural ${naturalArmor} + size ${fmt(sizeAttackAc)} + misc ${acMisc}`,
       saves: `base + ability (Con/Dex/Wis)${allSaves !== 0 ? ` + ${fmt(allSaves)} all-saves` : ""}`,
       cmb:
-        `BAB ${baseAttack} + ${sz.dexToCmb ? `Dex ${fmt(mods.dex)}` : `Str ${fmt(mods.str)}`}` +
+        `BAB ${baseAttack} + ${sz.dexToCmb ? `Dex ${fmt(eff.dex)}` : `Str ${fmt(eff.str)}`}` +
         ` + size ${fmt(sys.sizeMod ?? sz.cmbCmd)} + misc ${fmt(cmbMisc)}${(resolved.mods.cmb ?? 0) !== 0 ? ` + effects ${fmt(resolved.mods.cmb ?? 0)}` : ""}`,
       cmd:
-        `10 + BAB ${baseAttack} + Str ${fmt(mods.str)} + Dex ${flatFooted ? "0 (flat-footed)" : fmt(mods.dex)}` +
+        `10 + BAB ${baseAttack} + Str ${fmt(eff.str)} + Dex ${flatFooted ? "0 (flat-footed)" : fmt(eff.dex)}` +
         ` + size ${fmt(sys.sizeMod ?? sz.cmbCmd)} + transferable AC ${fmt(resolved.acTransfer)} + AC penalties ${fmt(resolved.acPenalties)}`,
       initiative:
-        `Dex ${fmt(mods.dex)} + authored ${initiativeAuthored}` +
+        `Dex ${fmt(eff.dex)} + authored ${initiativeAuthored}` +
         `${initiativeEffects !== 0 ? ` + effects ${fmt(initiativeEffects)}` : ""}`,
       aoo: `${aooPerRound}/round${combatReflexes ? " (Combat Reflexes)" : ""}${
         flatFooted ? " — none while flat-footed" : ""
@@ -892,13 +1105,48 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     issues: c.issues,
     defaults: c.defaults,
     converted: normalized.converted,
-    unsupported: normalized.unsupported,
+    unsupported: localUnsupported,
     acFromTotals: authoredTotals !== null && authoredTotals !== undefined,
   };
 }
 
 function fmt(n: number): string {
   return `${n >= 0 ? "+" : ""}${n}`;
+}
+
+/**
+ * CRB p.555 (AoN Rules ID 416) readout: drain reduces the score, damage is a
+ * –1-per-2-points penalty on that ability's statistics and never reduces the score itself.
+ */
+function abilityExplain(
+  abilities: PF1eAbilities,
+  damageTaken: PF1eAbilities,
+  drainTaken: PF1eAbilities,
+  penalty: PF1eAbilities,
+): string {
+  const drained = PF1E_ABILITY_KEYS.filter((k) => drainTaken[k] > 0);
+  const damaged = PF1E_ABILITY_KEYS.filter((k) => damageTaken[k] > 0);
+  if (drained.length === 0 && damaged.length === 0)
+    return "scores as authored (no ability damage or drain)";
+  const parts: string[] = [];
+  if (drained.length > 0)
+    parts.push(
+      `drain ${drained.map((k) => `${k.toUpperCase()} −${drainTaken[k]}`).join(", ")} (reduces the score)`,
+    );
+  if (damaged.length > 0)
+    parts.push(
+      `damage ${damaged.map((k) => `${k.toUpperCase()} ${damageTaken[k]}`).join(", ")} → penalties ${damaged
+        .map((k) => `${k.toUpperCase()} −${penalty[k]}`)
+        .join(", ")} (–1 per 2 points; the score is not reduced)`,
+    );
+  const remaining = PF1E_ABILITY_KEYS.filter(
+    (k) => damageTaken[k] > 0 && damageTaken[k] >= abilities[k],
+  );
+  if (remaining.length > 0)
+    parts.push(
+      `threshold: ${remaining.map((k) => (k === "con" ? "dead" : "unconscious")).join(", ")}`,
+    );
+  return `${parts.join("; ")} — CRB p.555`;
 }
 
 /** Feats may be authored as a list or (as in the shipped pack) as a comma string or JSON blob. */

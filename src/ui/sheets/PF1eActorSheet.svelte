@@ -25,7 +25,8 @@
     doc,
     client,
     bus,
-  }: { doc: ActorDocument; client: ClientSync; bus: EventBus<ClientEvents> } = $props();
+  }: { doc: ActorDocument; client: ClientSync; bus: EventBus<ClientEvents> } =
+    $props();
   let tab = $state<
     | "summary"
     | "attributes"
@@ -40,15 +41,22 @@
   const pending = new SvelteSet<string>();
   let view = $derived(pf1eSheetView(doc));
   let d = $derived(view.derived);
-  let editable = $derived(client.user !== null && can(client.user, "update", doc, "actors"));
+  let editable = $derived(
+    client.user !== null && can(client.user, "update", doc, "actors"),
+  );
   let fields = $derived(
-    SHEET_FIELDS.filter(([key]) =>
-      tab === "attributes" ? key.startsWith("abilities.") : !key.startsWith("abilities."),
-    ),
+    SHEET_FIELDS.filter(([key]) => {
+      const isAbilityBlock =
+        key.startsWith("abilities.") ||
+        key.startsWith("abilitiesDamage.") ||
+        key.startsWith("abilitiesDrain.");
+      return tab === "attributes" ? isAbilityBlock : !isAbilityBlock;
+    }),
   );
 
   function applyAcSource(request: AcRequest): void {
-    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
     if (!current) {
       error = "Actor is no longer available.";
       return;
@@ -59,7 +67,8 @@
   }
 
   function updateAttack(edit: AttackEdit): void {
-    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
     if (!current) {
       error = "Actor is no longer available.";
       return;
@@ -70,7 +79,8 @@
   }
 
   function updateDetail(edit: DetailEdit): void {
-    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
     if (!current) {
       error = "Actor is no longer available.";
       return;
@@ -82,7 +92,8 @@
 
   function update(field: SheetField, raw: string): void {
     // Read the latest projected document so a stale UI cannot restore old ownership/data.
-    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
     if (!current) {
       error = "Actor is no longer available.";
       return;
@@ -93,7 +104,8 @@
   }
   onMount(() => {
     const offRejected = bus.on("rejected", (event) => {
-      if (pending.delete(event.txId)) error = `Edit rejected: ${event.detail || event.reason}`;
+      if (pending.delete(event.txId))
+        error = `Edit rejected: ${event.detail || event.reason}`;
     });
     const offOps = bus.on("ops", (event) => {
       if (event.reconciled) pending.delete(event.reconciled);
@@ -158,14 +170,17 @@
       <dt>Spell resistance</dt>
       <dd>{d.spellResistance}</dd>
       <dt>Fast healing / regeneration</dt>
-      <dd>{d.fastHealing} / {d.regeneration} (recorded; recovery is not automated)</dd>
+      <dd>
+        {d.fastHealing} / {d.regeneration} (recorded; recovery is not automated)
+      </dd>
       <dt>Conditions</dt>
       <dd>{d.conditions.join(", ") || "None"}</dd>
     </dl>
     <p class="note">
-      Temporary HP and energy resistance are manually adjudicated records; absorption, source
-      stacking and expiration are not automated. Ability damage is not yet modeled. Derived
-      values are read-only. Editing a score does not roll initiative or resolve combat.
+      Temporary HP and energy resistance are manually adjudicated records;
+      absorption, source stacking and expiration are not automated. Ability
+      damage is not yet modeled. Derived values are read-only. Editing a score
+      does not roll initiative or resolve combat.
     </p>
   {:else if tab === "attributes" || tab === "combat"}
     {#if tab === "combat"}
@@ -196,10 +211,27 @@
           .join(" · ")}
       </p>
       <p>
-        Modifiers: {Object.entries(d.abilityMods)
+        Effective modifiers: {Object.entries(d.abilityMods)
           .map(([key, mod]) => `${key.toUpperCase()} ${mod}`)
           .join(" · ")}
       </p>
+      {#if Object.values(d.abilityDamageTaken).some((n) => n > 0) || Object.values(d.abilityDrainTaken).some((n) => n > 0)}
+        <p class="note" data-pf1e-ability-damage>
+          Ability damage/drain (CRB p.555 — damage never reduces the score; –1
+          per 2 points):<br />
+          {Object.entries(d.abilityDamageTaken)
+            .filter(([, n]) => n > 0)
+            .map(
+              ([key, n]) =>
+                `${key.toUpperCase()} damage ${n} (−${d.abilityDamagePenalty[key as keyof typeof d.abilityDamagePenalty]})`,
+            )
+            .join(" · ")}
+          {Object.entries(d.abilityDrainTaken)
+            .filter(([, n]) => n > 0)
+            .map(([key, n]) => `${key.toUpperCase()} drain ${n}`)
+            .join(" · ")}
+        </p>
+      {/if}
     {:else}
       <h4>Attack readout</h4>
       {#each d.attacks as attack, i (i)}
@@ -210,12 +242,17 @@
         </p>
       {/each}
       <p class="note">
-        Edit authored lines in Weapons. Attack rolls and damage application are not implemented
-        in this slice.
+        Edit authored lines in Weapons. Attack rolls and damage application are
+        not implemented in this slice.
       </p>
     {/if}
   {:else if tab === "weapons"}
-    <PF1eAttackEditor {doc} {editable} derivedAttacks={d.attacks} onEdit={updateAttack} />
+    <PF1eAttackEditor
+      {doc}
+      {editable}
+      derivedAttacks={d.attacks}
+      onEdit={updateAttack}
+    />
   {:else if tab === "armor" || tab === "features" || tab === "monster"}
     <PF1eDetailsEditor
       {doc}
@@ -239,7 +276,8 @@
         {note}
       </p>{/each}
     <details>
-      <summary>Defaults used ({d.defaults.length})</summary>{#each d.defaults as note, i (i)}<p>
+      <summary>Defaults used ({d.defaults.length})</summary
+      >{#each d.defaults as note, i (i)}<p>
           {note}
         </p>{/each}
     </details>

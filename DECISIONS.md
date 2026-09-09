@@ -1979,3 +1979,52 @@ P3+ rule encoding.
 - No code, contracts or tests changed; the three source documents other than I
   are untouched. This closes R01 only — R02 (disputed-rule verification) and
   R03 (intentional variants) remain open.
+
+## D-128 — S02 closed: ability damage and drain are authored accumulators with rule-exact propagation
+
+**Date:** 2026-09-09. **Scope:** S02 final slice; `pf1e/actor.ts` derivation, sheet
+model/Svelte, tests. Source: CRB p.555 "Ability Score Damage, Penalty, and Drain"
+(AoN Rules ID 416), read in full before any code or fixture was written.
+
+- **Authored contract:** `abilitiesDamage`/`abilitiesDrain` are
+  `Partial<Record<PF1eAbilityKey, number>>` (non-negative integers, zero-filled on
+  read; malformed values are issues contributing zero, never a crash), plus
+  `hitDice` (non-negative integer, default 0 — the bestiary pack has no HD data,
+  which is why this is authored at all). Malformed input to `parsePF1eActorSystem`
+  is rejected before any op is submitted.
+- **Damage never reduces the score** (the rule's own headline): it applies
+  `floor(damage/2)` as a penalty via an *effective modifier* (`mods − penalty`)
+  to every ability-based statistic — AC/capped Dex, touch, component saves,
+  initiative, CMB/CMD, attack to-hit and melee ability damage (×1.5/×0.5 rounded),
+  AoO count, spell DCs keyed to the ability. Published save totals and published
+  AC totals (normal/touch) take the penalty on top like effects do; flat-footed
+  AC never does (Dex already excluded). Reconstruction arithmetic under authored
+  totals subtracts the RAW Dex contribution and then the penalty exactly once.
+  Stat-block attack lines flagged `abilityDamageIncluded` lose the flat Str
+  penalty; ranged lines are exempt from Str.
+- **Drain actually reduces the score** (clamp ≥ 0), so every derived statistic
+  follows the new modifier; drain and damage stack (score reduced, then penalty).
+- **Constitution HP:** when `hitDice > 0`, current AND max HP each move by
+  `hitDice × (Con-mod drain delta − Con damage penalty)`; without authored HD the
+  adjustment is an `unsupported` note ("hitDice: not authored"), never a guess.
+  Fort and the dying threshold use effective Con.
+- **Thresholds:** damage ≥ current (drained) score ⇒ `unconscious` joins
+  conditions; Constitution ⇒ `dead`. Natural 1/day healing and penalties-vs-damage
+  (no threshold, floor 1) are runtime/actor-state concerns, not derivation.
+- **Surface:** 13 SHEET_FIELDS entries route through the existing editor op path
+  (first edit materializes only the missing accumulator; structured non-object
+  imports are read-only, matching D-118's resistance policy); the attributes tab
+  shows effective scores/modifiers plus a damage/drain readout with per-ability
+  penalties. New derived fields `abilityDamageTaken`/`abilityDrainTaken`/
+  `abilityDamagePenalty` (zero-filled `PF1eAbilities`), `abilityMods` now returns
+  effective modifiers; `explain.abilities`/`explain.hp` added.
+- **Verification:** 19 new tests (14 derivation fixtures hand-computed from the
+  rule text — including 1-point-no-penalty, Str 3/Dex 5 propagation, drain+damage
+  stacking, Con HP with and without HD, thresholds against the drained score,
+  published totals, spell DCs, included-bonus lines, malformed accumulators,
+  bestiary parity with empty accumulators — and 5 sheet-model op/edit/readout
+  tests). Full suite 924 passed / 3 skipped; typecheck/lint/format/build/size
+  green (dist 2,025,106 raw / 586,250 gzip, was 2,020,346/584,769). S02 is
+  checked off: temp HP (D-121 flow), ER, weapons, armor, features and the
+  conditional monster tab landed in earlier slices; this was the last listed
+  gap. In-journey healing (1/day, penalties) remains a P3+ runtime concern.
