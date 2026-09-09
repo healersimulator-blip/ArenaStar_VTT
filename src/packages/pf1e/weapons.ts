@@ -153,13 +153,13 @@ export interface PF1eWeaponAuthored extends PF1eItemWear {
   naturalSecondary?: boolean;
   /** Unarmed strike: light, nonlethal, provokes from armed targets (AoN ID 131). */
   unarmed?: boolean;
-  /** Touch attack (rays, touch spells): ignores armor, shield, natural armor (A.2). */
+  /** Touch attack (rays, touch spells): ignores armor, shield, natural armor (A.2). Splash weapons derive this on read. */
   touch?: boolean;
   /** Reach weapon: strikes at double natural reach, cannot strike adjacent (A.5). */
   reach?: boolean;
   trip?: boolean;
   disarm?: boolean;
-  /** Splash weapon: grid-intersection targeting and scatter are A04/A.12. */
+  /** Splash weapon (CRB p.202, AoN ID 197): a ranged touch attack that needs no proficiency, never takes precision damage, targets squares via AC 5 and scatters on a miss (A04 encodes the rules). */
   splash?: boolean;
   ammo?: PF1eWeaponAmmo;
   /** Misfire value: a natural roll at or below it auto-misses and breaks the weapon (§2.9b). */
@@ -179,7 +179,7 @@ export interface PF1eWeaponDescriptor extends PF1eItemWear {
   critThreatMin: number;
   critMultiplier: number;
   rangeIncrementFt: number | null;
-  /** 0 ⇒ no ranged use (melee weapons, or a ranged weapon with no increment authored). */
+  /** 0 ⇒ no ranged use (a melee weapon without an increment, or a ranged weapon with none authored); a melee weapon with an increment is thrown at range: 5. */
   maxRangeIncrements: number;
   /** Increments within which a firearm resolves vs touch AC (§2.9); null for non-firearms. */
   firearmTouchIncrements: number | null;
@@ -193,6 +193,7 @@ export interface PF1eWeaponDescriptor extends PF1eItemWear {
   natural: boolean;
   naturalSecondary: boolean;
   unarmed: boolean;
+  /** Derived for splash weapons on read (CRB p.202): the attack resolves against touch AC. */
   touch: boolean;
   reach: boolean;
   trip: boolean;
@@ -515,9 +516,13 @@ export function resolvePF1eWeapon(raw: unknown): PF1eWeaponResolution {
       maxRangeIncrements = 0;
     }
   } else if (weaponClass === "melee") {
-    issues.push(
-      `${where}.rangeIncrementFt on a melee weapon — carried for display, melee has no range increments`,
-    );
+    // A04 (CRB p.182 "The maximum range for a thrown weapon is five range
+    // increments"; CRB p.468 "Some of the weapons listed as melee weapons can
+    // also be used as ranged weapons"): a melee weapon with an authored range
+    // increment — dagger, spear, throwing axe — is thrown when used at range,
+    // so its ranged use follows the thrown maximum of 5 increments. The
+    // descriptor's `class` stays "melee": melee use still ignores increments.
+    maxRangeIncrements = MAX_RANGE_INCREMENTS.thrown;
   }
 
   const enhancementBonus =
@@ -619,7 +624,10 @@ export function resolvePF1eWeapon(raw: unknown): PF1eWeaponResolution {
       natural,
       naturalSecondary,
       unarmed,
-      touch: raw.touch === true,
+      // A splash weapon is a ranged touch attack (CRB p.202, AoN ID 197) —
+      // derived on read, never persisted; an explicit `touch: false` cannot
+      // opt a splash weapon out of its own delivery rule.
+      touch: raw.touch === true || raw.splash === true,
       reach: raw.reach === true,
       trip: raw.trip === true,
       disarm: raw.disarm === true,

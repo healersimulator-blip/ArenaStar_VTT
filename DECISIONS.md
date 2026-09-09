@@ -2515,3 +2515,74 @@ mirrored, not re-decided.
   3 skipped across 121 files; typecheck/lint/touched-file Prettier/build/
   size/build:systems green; dist 2,054,514 raw, byte-identical to D-135 (no
   importer yet), gzip 594,184 in this environment.
+
+## D-137 — A04: range penalties and legality, melee reach, and splash-weapon targeting
+
+**Date:** 2026-09-10. **Scope:** P3/A04. Sources fetched and verified against
+primary texts before encoding: the Range weapon quality with its worked
+dagger example (CRB p.144, quoted via the PRD — "a cumulative –2 penalty for
+each full range increment **(or fraction thereof)** of distance to the target…
+a dagger (with a range of 10 feet) thrown at a target that is 25 feet away
+would incur a –4 penalty"); Ranged Attacks maximum-range text and melee reach
+text (CRB p.182, AoN Rules ID 131 — already fetched for A02/A03); Throw Splash
+Weapon verbatim (CRB p.202, AoN Rules ID 197), including the scatter
+clarification example quoted with the rule (a 25-ft throw with a 20-ft
+increment ⇒ the weapon lands 2 squares off), which resolved the one genuinely
+ambiguous phrase ("equal to the range increment of the throw" = the number of
+range increments the throw covered — not the weapon's increment in squares,
+and not the 1d8 result; the Appendix A.12 paraphrase "move that many range
+increments" was garbled and is superseded). Firearm windows were already
+verified in Gap List §2.9 and carried by A01.
+
+- **Range:** `rangeIncrementsSpanned` counts fractions as full increments
+  (ceil), pinned by the dagger example; `rangedAttackRange` returns the −2
+  penalty per increment beyond the first and refuses the attack entirely
+  beyond the weapon's maximum (a refusal, never a bigger penalty — CRB
+  p.182), plus the early/advanced firearm touch-window flag. This is the
+  tactical path only; the strategic engine's §2.8 bugs (range penalty
+  computed only in the firearm branch, no max-range cutoff) are M01's to fix
+  under the separate-resolvers decision — no shared kernel was created, the
+  helpers are simply available to both.
+- **Reach:** `meleeReachLegality` encodes the A.5 bands — normal weapons
+  within natural reach; reach weapons in the open band (natural, double];
+  zero-reach attackers strike only at distance 0 with the provoke rule named
+  in notes. Occupancy, entering squares and the actual AoO are P06's. Natural
+  reach is caller-supplied — no size table was re-derived here.
+- **Splash:** the delivery is a ranged touch attack derived on read in
+  `resolvePF1eWeapon` (authored `touch: false` cannot opt a splash weapon out
+  of its own delivery rule); no nonproficiency penalty (guard in
+  `attackModifierParts`); precision bonus lines are rejected by
+  `resolveDamageRoll` rather than silently dropped; the grid-intersection
+  attack is `resolveSplashIntersectionRoll` against AC 5 — a ranged attack,
+  not touch, with no threat field because no creature is there; the miss
+  scatter is `splashMissScatter`: 1d8 with die 1 toward the thrower and 2–8
+  clockwise (45°-snapped compass in screen coordinates, y-down), moving a
+  number of squares equal to the throw's range-increment count. This is
+  weapon scatter only; D-130's removal of the invented strategic **spell**
+  scatter stands.
+- **A01 correction found while encoding:** a melee weapon with an authored
+  range increment (dagger, spear, throwing axe — exactly how the SRD lists
+  them) had been marked display-only with `maxRangeIncrements = 0`, refusing
+  its ranged use. CRB p.182 ("The maximum range for a thrown weapon is five
+  range increments") and p.468 ("Some of the weapons listed as melee weapons
+  can also be used as ranged weapons") make thrown use real: the derivation
+  now yields 5, the dead-data issue is removed, and `class` stays "melee" so
+  melee use still ignores increments. No persisted shape changed.
+- **Deliberately not encoded:** line of sight, distance measurement and
+  splash-area membership (caller geometry — C01/P03), the
+  occupied-intersection targeting ban (enforced where targets are chosen),
+  splash damage amounts (content), Point-Blank Shot (+1 within 30 ft — A07),
+  and any dice. Nothing imports the A04 helpers yet; A06 wires them into the
+  sheet roll path.
+- **Evidence:** 21 new tests (19 in `pf1eTactical.test.ts`, 2 derivation tests
+  in `pf1eWeapons.test.ts`), hand-computed from the verified texts: the
+  dagger/25-ft ⇒ −4 example, 45-ft alchemist's fire at the 5-increment −8
+  ceiling and 51-ft refusal, firearm touch windows flipping exactly at the
+  1st/5th increment boundary with the penalty still applying, reach dead
+  zones at (5,10] and (10,20], Tiny in-square striking with the provoke note,
+  the full clockwise 1d8 rose from a due-east thrower, the 25-ft/20-ft
+  scatter clarification, the angled-thrower nearest-compass snap, and the
+  −0-vs-0 penalty edge the first run exposed. Full suite 1061 passed /
+  3 skipped across 121 files; typecheck/lint/touched-file Prettier/build/
+  size/build:systems green; dist 2,054,514 raw, byte-identical to D-136 (no
+  importer yet).

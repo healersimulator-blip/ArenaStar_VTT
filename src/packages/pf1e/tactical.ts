@@ -295,10 +295,13 @@ export function attackModifierParts(
 
   // Weapon nonproficiency (CRB p.144): −4. Natural weapons and unarmed strikes
   // are exempt — a creature is proficient with its own attacks, and every
-  // character can throw a punch without a proficiency group.
+  // character can throw a punch without a proficiency group. Splash weapons are
+  // exempt too: "Thrown splash weapons require no weapon proficiency, so you
+  // don't take the –4 nonproficiency penalty" (CRB p.202, AoN Rules ID 197).
   if (
     !weapon.natural &&
     !weapon.unarmed &&
+    weapon.splash !== true &&
     attacker.proficientWith !== undefined &&
     !attacker.proficientWith.includes(weapon.proficiency)
   ) {
@@ -1082,6 +1085,21 @@ export function resolveDamageRoll(input: {
       error: "lethalIntent and nonlethalIntent are mutually exclusive",
     };
   }
+  // "Splash weapons cannot deal precision-based damage (such as sneak attack)"
+  // (CRB p.202, AoN Rules ID 197) — rejected outright, never silently dropped.
+  if (input.weapon.splash === true) {
+    const precision = (input.bonusLines ?? []).filter(
+      (line) => line.precision === true,
+    );
+    if (precision.length > 0) {
+      return {
+        ok: false,
+        error: `splash weapons cannot deal precision-based damage: ${precision
+          .map((line) => line.label)
+          .join(", ")}`,
+      };
+    }
+  }
   if (!Number.isFinite(input.staticDamage)) {
     return {
       ok: false,
@@ -1204,5 +1222,376 @@ export function resolveDamageRoll(input: {
     bonusContributions,
     precisionDropped,
     notes,
+  };
+}
+
+// ======================================================================================
+// A04 — range legality and penalties, melee reach, and splash-weapon targeting
+// (CRB pp.144/182/191/202, AoN Rules IDs 100/131/197). Pure and diceless like
+// everything above: the caller supplies distances (its own geometry — C01 owns
+// measurement), the attack die and the 1d8 scatter die. This is the tactical
+// path only; the strategic engine's own range handling is M01's to reconcile.
+//
+// Verified before encoding:
+// - **Range** (CRB p.144 weapon quality): "Any attack at more than this
+//   distance is penalized for range. Beyond this range, the attack takes a
+//   cumulative –2 penalty for each full range increment (or fraction thereof)
+//   of distance to the target. For example, a dagger (with a range of 10 feet)
+//   thrown at a target that is 25 feet away would incur a –4 penalty. A thrown
+//   weapon has a maximum range of five range increments. A projectile weapon
+//   can shoot to 10 range increments." The worked example pins the fraction
+//   rounding: 25 ft / 10-ft increment = 2.5 increments ⇒ 3 ⇒ two beyond the
+//   first ⇒ −4.
+// - **Ranged Attacks** (CRB p.182, AoN ID 131): "you can shoot or throw at any
+//   target that is within the weapon's maximum range and in line of sight" —
+//   beyond max range there is no attack, not a bigger penalty. Line of sight
+//   is caller geometry (C01).
+// - **Melee reach** (CRB p.182, AoN ID 131): "Some melee weapons have reach…
+//   With a typical reach weapon, you can strike opponents 10 feet away, but you
+//   can't strike adjacent foes (those within 5 feet)" — generalized by A.5:
+//   a reach weapon strikes up to **double** natural reach but never within
+//   natural reach. Tiny-or-smaller attackers (natural reach 0) must enter the
+//   opponent's square to attack, which provokes (A.5; the positional rules are
+//   P06's).
+// - **Throw Splash Weapon** (CRB p.202, AoN Rules ID 197): a ranged **touch**
+//   attack needing no weapon proficiency; a hit deals direct hit damage to the
+//   target and splash damage to all creatures within 5 feet (a Large+ target:
+//   pick one of its squares); targeting a grid intersection instead is a
+//   ranged attack against **AC 5** that splashes every adjacent square and
+//   deals no direct hit damage (and an intersection occupied by a creature
+//   cannot be targeted — that is aiming at the creature); a miss rolls 1d8
+//   (1 = falling short, in a straight line toward the thrower; 2–8 rotating
+//   clockwise around the target), then "count a number of squares in the
+//   indicated direction equal to the range increment of the throw" — the
+//   number of range increments the throw covered, per the rule's own worked
+//   clarification (a 25-ft throw with a 20-ft increment lands 2 squares off).
+// ======================================================================================
+
+/**
+ * The number of range increments a distance spans, fractions counting as a
+ * full increment (CRB p.144's "(or fraction thereof)" and its dagger/25-ft ⇒
+ * −4 example). `null` when the input is unusable (non-positive increment,
+ * negative or non-finite distance) — callers turn that into their own error.
+ */
+export function rangeIncrementsSpanned(
+  distanceFt: number,
+  rangeIncrementFt: number,
+): number | null {
+  if (
+    !Number.isFinite(distanceFt) ||
+    distanceFt < 0 ||
+    !Number.isFinite(rangeIncrementFt) ||
+    rangeIncrementFt <= 0
+  ) {
+    return null;
+  }
+  return Math.ceil(distanceFt / rangeIncrementFt);
+}
+
+export type PF1eRangeAttackResult =
+  | {
+      ok: true;
+      /** Increments the distance spans (fraction ⇒ next whole increment). */
+      increments: number;
+      /** −2 per increment beyond the first (0 within the first). */
+      penalty: number;
+      /**
+       * A firearm resolving against touch AC this attack (early: within the
+       * 1st increment; advanced: within the 5th — §2.9). Never a touch attack
+       * for feat purposes; A07 consumes this only to pick the defense.
+       */
+      withinFirearmTouchWindow: boolean;
+    }
+  | { ok: false; error: string };
+
+/**
+ * Range legality and penalty for one **ranged** attack (CRB pp.144/182): −2
+ * cumulatively per full range increment (or fraction) beyond the first, no
+ * attack at all beyond the weapon's maximum (5 thrown — a melee weapon with an
+ * increment is thrown at range; 10 projectile; 5 early firearm / 10 advanced).
+ * Feed `penalty` into `attackModifierParts`'s `misc` (labeled there) or add it
+ * to the attack bonus; feed `withinFirearmTouchWindow` into the touch/flavor
+ * defense selection. Melee attacks do not call this — `meleeReachLegality` is
+ * their check.
+ */
+export function rangedAttackRange(input: {
+  weapon: Pick<
+    PF1eWeaponDescriptor,
+    "rangeIncrementFt" | "maxRangeIncrements" | "firearmTouchIncrements"
+  >;
+  distanceFt: number;
+}): PF1eRangeAttackResult {
+  if (!Number.isFinite(input.distanceFt) || input.distanceFt < 0) {
+    return {
+      ok: false,
+      error: `distanceFt = ${String(input.distanceFt)} is not a non-negative number`,
+    };
+  }
+  if (
+    input.weapon.maxRangeIncrements <= 0 ||
+    input.weapon.rangeIncrementFt === null
+  ) {
+    return {
+      ok: false,
+      error:
+        "the weapon has no ranged use (no range increment, or no ranged class)",
+    };
+  }
+  const increments = rangeIncrementsSpanned(
+    input.distanceFt,
+    input.weapon.rangeIncrementFt,
+  );
+  // rangeIncrementFt > 0 is guaranteed by the guard above; increments is non-null.
+  if (increments === null) {
+    return {
+      ok: false,
+      error: `distance ${String(input.distanceFt)} ft does not span a usable increment`,
+    };
+  }
+  if (increments > input.weapon.maxRangeIncrements) {
+    return {
+      ok: false,
+      error: `out of range: ${String(input.distanceFt)} ft spans ${increments} increments, the weapon's maximum is ${input.weapon.maxRangeIncrements} (CRB p.182 — no attack beyond maximum range)`,
+    };
+  }
+  const beyond = Math.max(0, increments - 1);
+  return {
+    ok: true,
+    increments,
+    // -2 * 0 would yield -0; keep a clean 0 within the first increment.
+    penalty: beyond === 0 ? 0 : -2 * beyond,
+    withinFirearmTouchWindow:
+      input.weapon.firearmTouchIncrements !== null &&
+      increments <= input.weapon.firearmTouchIncrements,
+  };
+}
+
+/**
+ * Melee strike legality by distance (CRB p.182 + A.5): a normal weapon strikes
+ * within the attacker's natural reach; a reach weapon strikes up to **double**
+ * natural reach but **never** within natural reach (the adjacent dead zone); a
+ * Tiny-or-smaller attacker (natural reach 0) strikes only inside the target's
+ * own square, which provokes — occupancy enforcement is P06's, this only
+ * names the rule. Natural reach itself is caller-supplied from A.5's
+ * space/reach table (5 ft for Small/Medium; tall and long differ for Large+).
+ */
+export function meleeReachLegality(input: {
+  weapon: Pick<PF1eWeaponDescriptor, "reach" | "name">;
+  /** The attacker's natural reach in feet, from A.5's table (caller-derived). */
+  naturalReachFt: number;
+  distanceFt: number;
+}): { canStrike: boolean; refusals: string[]; notes: string[] } {
+  const refusals: string[] = [];
+  const notes: string[] = [];
+  if (
+    !Number.isFinite(input.naturalReachFt) ||
+    input.naturalReachFt < 0 ||
+    !Number.isFinite(input.distanceFt) ||
+    input.distanceFt < 0
+  ) {
+    return {
+      canStrike: false,
+      refusals: [
+        `naturalReachFt ${String(input.naturalReachFt)} and distanceFt ${String(input.distanceFt)} must be non-negative numbers`,
+      ],
+      notes,
+    };
+  }
+  if (input.weapon.reach === true) {
+    const min = input.naturalReachFt;
+    const max = 2 * input.naturalReachFt;
+    if (input.distanceFt > min && input.distanceFt <= max) {
+      return { canStrike: true, refusals, notes };
+    }
+    if (input.distanceFt <= min) {
+      refusals.push(
+        `${input.weapon.name} is a reach weapon — it cannot strike within the attacker's natural reach (${String(min)} ft; CRB p.182)`,
+      );
+    } else {
+      refusals.push(
+        `${input.weapon.name} reaches ${String(max)} ft at most (double natural reach; A.5)`,
+      );
+    }
+    if (min === 0) {
+      notes.push(
+        "a reach weapon with zero natural reach has no legal distance band — no invented rule fills it",
+      );
+    }
+    return { canStrike: false, refusals, notes };
+  }
+  if (input.distanceFt <= input.naturalReachFt) {
+    if (input.naturalReachFt === 0) {
+      notes.push(
+        "natural reach 0 (Tiny or smaller): the attacker strikes from inside the target's square, which provokes an attack of opportunity (A.5; occupancy is P06's concern)",
+      );
+    }
+    return { canStrike: true, refusals, notes };
+  }
+  refusals.push(
+    `${input.weapon.name} strikes within ${String(input.naturalReachFt)} ft of natural reach; the target is ${String(input.distanceFt)} ft away`,
+  );
+  return { canStrike: false, refusals, notes };
+}
+
+/** A splash weapon's grid-intersection attack targets AC 5 (CRB p.202, AoN ID 197). */
+export const SPLASH_GRID_INTERSECTION_AC = 5;
+
+export type PF1eSplashIntersectionResult =
+  | {
+      ok: true;
+      hits: boolean;
+      natural: 1 | 20 | null;
+      margin: number;
+    }
+  | { ok: false; error: string };
+
+/**
+ * Resolve a splash weapon's grid-intersection attack (CRB p.202): a ranged
+ * attack — **not** touch — against AC 5, with the range penalty already inside
+ * `bonus`. There is no creature at an intersection, so there is no threat and
+ * no critical: a hit splashes every square adjacent to the intersection and
+ * deals **no** direct hit damage. An intersection occupied by a creature
+ * cannot be targeted at all ("in this case, you're aiming at the creature") —
+ * the caller's occupancy check, enforced where targets are chosen.
+ */
+export function resolveSplashIntersectionRoll(input: {
+  die: number;
+  bonus: number;
+}): PF1eSplashIntersectionResult {
+  const die = input.die;
+  if (!Number.isInteger(die) || die < 1 || die > 20) {
+    return {
+      ok: false,
+      error: `die = ${String(die)} is not an integer 1–20`,
+    };
+  }
+  if (die === 20) {
+    return {
+      ok: true,
+      hits: true,
+      natural: 20,
+      margin: 20 + input.bonus - SPLASH_GRID_INTERSECTION_AC,
+    };
+  }
+  if (die === 1) {
+    return {
+      ok: true,
+      hits: false,
+      natural: 1,
+      margin: 1 + input.bonus - SPLASH_GRID_INTERSECTION_AC,
+    };
+  }
+  const hits = die + input.bonus >= SPLASH_GRID_INTERSECTION_AC;
+  return {
+    ok: true,
+    hits,
+    natural: null,
+    margin: die + input.bonus - SPLASH_GRID_INTERSECTION_AC,
+  };
+}
+
+/** A point on the battle grid, in whole-square coordinates (screen convention: +x east, +y south). */
+export interface PF1eGridPoint {
+  x: number;
+  y: number;
+}
+
+/** The eight compass steps in clockwise screen order (y grows southward), starting north. */
+const COMPASS_STEPS: readonly { dx: number; dy: number; label: string }[] = [
+  { dx: 0, dy: -1, label: "N" },
+  { dx: 1, dy: -1, label: "NE" },
+  { dx: 1, dy: 0, label: "E" },
+  { dx: 1, dy: 1, label: "SE" },
+  { dx: 0, dy: 1, label: "S" },
+  { dx: -1, dy: 1, label: "SW" },
+  { dx: -1, dy: 0, label: "W" },
+  { dx: -1, dy: -1, label: "NW" },
+];
+
+/**
+ * The compass step nearest the direction from the target toward the thrower
+ * (45° sectors, screen coordinates with +y south). This is scatter die 1's
+ * direction — "falling short (off-target in a straight line toward the
+ * thrower)".
+ */
+function compassIndexToward(dx: number, dy: number): number {
+  const degrees = (Math.atan2(dy, dx) * 180) / Math.PI;
+  const idx = Math.round((degrees + 90) / 45);
+  return ((idx % 8) + 8) % 8;
+}
+
+export type PF1eSplashScatterResult =
+  | {
+      ok: true;
+      /** Where the weapon lands — a square when a creature was targeted, an intersection when one was. */
+      landing: PF1eGridPoint;
+      /** Squares moved from the target — the range increments the throw covered. */
+      squaresMoved: number;
+      /** Compass label of the misdirection step. */
+      direction: string;
+      /** Die 1: the weapon fell short, in a straight line toward the thrower. */
+      fallingShort: boolean;
+    }
+  | { ok: false; error: string };
+
+/**
+ * Resolve a missed splash weapon's scatter (CRB p.202, AoN Rules ID 197): roll
+ * 1d8 — 1 falls short in a straight line toward the thrower, 2–8 rotate
+ * clockwise around the target — then "count a number of squares in the
+ * indicated direction equal to the range increment of the throw": the number
+ * of range increments the throw covered (`rangedAttackRange` returns it), per
+ * the rule's own clarification (a 25-ft throw with a 20-ft increment scatters
+ * 2 squares). The weapon then deals its splash damage to creatures in the
+ * landing square/intersection and all adjacent ones (damage composition is
+ * A03's; area membership is the caller's). Coordinates are whole squares with
+ * the screen convention (+x east, +y south); an intersection-targeted throw
+ * passes intersection coordinates — the geometry is identical. This is the
+ * weapon scatter the Gap List kept; D-130 removed the invented **spell**
+ * scatter, which stays removed.
+ */
+export function splashMissScatter(input: {
+  /** The missed target — the creature's square, or the intersection that was aimed at. */
+  target: PF1eGridPoint;
+  thrower: PF1eGridPoint;
+  /** The rolled 1d8 misdirection die. */
+  die: number;
+  /** The range increments the throw covered — `rangedAttackRange` → `increments`. */
+  throwIncrements: number;
+}): PF1eSplashScatterResult {
+  if (!Number.isInteger(input.die) || input.die < 1 || input.die > 8) {
+    return {
+      ok: false,
+      error: `scatter die = ${String(input.die)} is not an integer 1–8`,
+    };
+  }
+  if (!Number.isInteger(input.throwIncrements) || input.throwIncrements < 1) {
+    return {
+      ok: false,
+      error: `throwIncrements = ${String(input.throwIncrements)} is not an integer ≥ 1`,
+    };
+  }
+  const dx = input.thrower.x - input.target.x;
+  const dy = input.thrower.y - input.target.y;
+  if (dx === 0 && dy === 0) {
+    return {
+      ok: false,
+      error:
+        "the thrower and the target share a square — direction 1 (toward the thrower) is undefined",
+    };
+  }
+  const base = compassIndexToward(dx, dy);
+  const chosen = COMPASS_STEPS[(base + input.die - 1) % 8];
+  if (chosen === undefined) {
+    return { ok: false, error: "compass step resolution failed" };
+  }
+  return {
+    ok: true,
+    landing: {
+      x: input.target.x + chosen.dx * input.throwIncrements,
+      y: input.target.y + chosen.dy * input.throwIncrements,
+    },
+    squaresMoved: input.throwIncrements,
+    direction: chosen.label,
+    fallingShort: input.die === 1,
   };
 }
