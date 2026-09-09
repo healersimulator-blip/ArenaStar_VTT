@@ -25,9 +25,11 @@ import {
   resolveInitiative,
   roundStateDiff,
   checkSurprise,
+  spendCombatantAction,
   startWithSurprise,
   useAttackOfOpportunity,
 } from "../../src/packages/pf1e/combatState";
+import { EMPTY_ACTION_LEDGER } from "../../src/packages/pf1e/actions";
 import { DEFAULT_SECONDS_PER_ROUND } from "../../src/core/worldSettings";
 
 const combatant = (
@@ -98,6 +100,7 @@ describe("round state reads", () => {
       aooMax: 2,
       acted: true,
       surprised: false,
+      actions: EMPTY_ACTION_LEDGER,
       held: null,
     });
     expect(diff["flags.pf1e"]).toEqual({
@@ -105,6 +108,7 @@ describe("round state reads", () => {
       aooMax: 2,
       acted: true,
       surprised: false,
+      actions: EMPTY_ACTION_LEDGER,
       held: null,
     });
     expect(Object.keys(roundStateDiff(readRoundState(combat([]))))).toEqual([
@@ -403,5 +407,155 @@ describe("core's effect ticking still runs through the wrapper", () => {
     const after = cur.combatants[0];
     if (!after) throw new Error("setup");
     expect(activeEffects(cur)).toEqual([]);
+  });
+});
+
+/** Narrow an applied combat mutation; refused spends fail the test with their reason. */
+function applied(
+  result: { ok: true; value: CombatDocument } | { ok: false; error: string },
+): CombatDocument {
+  if (!result.ok) throw new Error(result.error);
+  return result.value;
+}
+
+describe("action budget wiring (T05, CRB p.181)", () => {
+  test("the active combatant's budget resets at the start of their turn, reservation included", () => {
+    const c = combat([combatant("a", 15), combatant("b", 10)], 1, 0, {
+      pf1e: { v: 1, phase: "rounds" },
+    });
+    // b spends its standard now (out of turn, e.g. bookkeeping ahead of time)…
+    const spentStd = spendCombatantAction(c, "b", { kind: "standard" });
+    expect(spentStd.ok).toBe(true);
+    // …and used an immediate action off-turn, reserving next turn's swift.
+    const withImmediate = applied(
+      spendCombatantAction(applied(spentStd), "b", {
+        kind: "immediate",
+        onTurn: false,
+      }),
+    );
+    // a's turn ends: b's turn STARTS, so the budget resets — the off-turn standard is
+    // gone and the reservation converted into "swift already used".
+    const one = pf1eNextTurn(withImmediate);
+    expect(currentCombatant(one.combat)?._id).toBe("b");
+    const b = one.combat.combatants.find((x) => x._id === "b");
+    const after = readCombatantState(b ?? combatant("b", 10)).actions;
+    expect(after.standardUsed).toBe(false);
+    expect(after.swiftReserved).toBe(false);
+    expect(after.swiftUsed).toBe(true);
+    // And a later advance does not disturb b's ledger again.
+    const two = pf1eNextTurn(one.combat);
+    const bLater = two.combat.combatants.find((x) => x._id === "b");
+    expect(readCombatantState(bLater ?? combatant("b", 10)).actions).toEqual(
+      after,
+    );
+  });
+
+  test("a pending full-round action survives the turn boundary to be completed", () => {
+    const c = combat([combatant("a", 15), combatant("b", 10)], 1, 0, {
+      pf1e: { v: 1, phase: "rounds" },
+    });
+    const started = applied(
+      spendCombatantAction(c, "a", {
+        kind: "start-full-round",
+        action: "cast-spell",
+      }),
+    );
+    const back = spendCombatantAction(started, "a", {
+      kind: "complete-full-round",
+    });
+    expect(back.ok).toBe(false); // the starting standard is spent this turn
+    // two advances: b's turn, then the round wraps back to a's fresh turn
+    const next = pf1eNextTurn(pf1eNextTurn(started).combat);
+    expect(currentCombatant(next.combat)?._id).toBe("a");
+    const aNext = next.combat.combatants.find((x) => x._id === "a");
+    const ledger = readCombatantState(aNext ?? combatant("a", 15)).actions;
+    expect(ledger.fullRoundPending).toBe("cast-spell");
+    expect(ledger.standardUsed).toBe(false); // fresh standard for the completion
+    const done = spendCombatantAction(next.combat, "a", {
+      kind: "complete-full-round",
+    });
+    expect(done.ok).toBe(true);
+  });
+
+  test("spendCombatantAction refuses unknown combatants and refused spends, mutating nothing", () => {
+    const c = combat([combatant("a", 15)], 1, 0, {
+      pf1e: { v: 1, phase: "rounds" },
+    });
+    const before = structuredClone(c);
+    expect(spendCombatantAction(c, "nope", { kind: "swift" }).ok).toBe(false);
+    const twice = spendCombatantAction(
+      applied(spendCombatantAction(c, "a", { kind: "swift" })),
+      "a",
+      { kind: "swift" },
+    );
+    expect(twice.ok).toBe(false);
+    if (!twice.ok) expect(twice.error).toContain("swift action already used");
+    expect(c).toEqual(before); // refusals and misses never write
+  });
+
+  test("combat started through startWithSurprise gives the first actor a fresh ledger", () => {
+    const dirty = combatant("a", 0, {
+      pf1e: {
+        aooUsed: 1,
+        aooMax: 1,
+        acted: false,
+        surprised: false,
+        actions: {
+          standardUsed: true,
+          moveUsed: true,
+          swiftUsed: true,
+          swiftReserved: true,
+          fiveFootStepUsed: true,
+          movementFt: 30,
+          fullRoundPending: "cast-spell",
+          restriction: "single-standard-or-move",
+        },
+      },
+    });
+    const started = startWithSurprise(combat([dirty, combatant("b", 5)]), {
+      initiative: [
+        { combatantId: "a", value: 15, dexMod: 2 },
+        { combatantId: "b", value: 5, dexMod: 0 },
+      ],
+    });
+    const a = started.combat.combatants.find((x) => x._id === "a");
+    expect(readCombatantState(a ?? dirty).acted).toBe(true);
+    // Everything resets — except the pending full-round action, which by rule survives
+    // to be completed with this turn's standard action (CRB p.185).
+    expect(readCombatantState(a ?? dirty).actions).toEqual({
+      ...EMPTY_ACTION_LEDGER,
+      fullRoundPending: "cast-spell",
+      swiftUsed: true, // the dirty swiftReserved converted per CRB p.183
+    });
+  });
+
+  test("after the surprise round, the first regular actor is no longer flat-footed", () => {
+    const c = combat([
+      combatant("a1", 15),
+      combatant("a2", 11),
+      combatant("d1", 4),
+    ]);
+    const started = startWithSurprise(c, {
+      initiative: [
+        { combatantId: "a1", value: 15, dexMod: 5 },
+        { combatantId: "a2", value: 11, dexMod: 3 },
+        { combatantId: "d1", value: 4, dexMod: -1 },
+      ],
+      targets: ["d1"],
+      stealth: { a1: 17, a2: 16 },
+      perception: { d1: 12 },
+    });
+    expect(started.state.phase).toBe("surprise");
+    const two = pf1eNextTurn(pf1eNextTurn(started.combat).combat);
+    expect(two.state.phase).toBe("rounds");
+    const a1 = two.combat.combatants.find((x) => x._id === "a1");
+    // a1's own first regular turn is starting — that IS the flat-footed transition.
+    expect(readCombatantState(a1 ?? combatant("a1", 15)).acted).toBe(true);
+    expect(
+      isFlatFootedByRound(two.combat, a1 ?? combatant("a1", 15)).flatFooted,
+    ).toBe(false);
+    expect(readCombatantState(a1 ?? combatant("a1", 15)).actions).toEqual(
+      EMPTY_ACTION_LEDGER,
+    );
   });
 });

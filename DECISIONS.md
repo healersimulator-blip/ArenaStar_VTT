@@ -2162,3 +2162,58 @@ deviations carry correction paths into P5/P8 and DEVIATIONS.md now indexes them.
   section, conflict, minimal change and approval state, plus a rejected-inventions list
   and a pointer to Gap List §10.2 for the standing strategic-scale trade-offs (AoO
   budget, published saves, size ladder) that keep their P8 unification phases.
+
+## D-131 — T05: the PF1e action economy is authored data + a per-turn budget, visible in the tracker
+
+**Date:** 2026-09-09. **Scope:** T05. Sources verified before any code: Table 7-2
+"Actions in Combat" and the Action Types text (CRB p.181–182, AoN Rules ID 128),
+Start/Complete Full-Round Action (CRB p.185), the immediate/swift rule (CRB p.183),
+the 5-foot-step/movement lock (CRB p.189), and swift-actions-in-surprise-rounds
+(a swift may be taken "anytime you would normally be allowed to take a free action").
+
+- **The Gap List's A.6 transcription was wrong and is replaced** (the T05 "verified
+  table" did not exist until now): run was transcribed "no" (table: **yes**),
+  mount/dismount "yes" (table: **no**), and rows like "snipe", "remove curse" and
+  "draw a weapon and move" were invented. Appendix A.6 now carries the verified
+  Table 7-2 rows with the footnotes (charge/withdraw as standard actions when
+  restricted, the BAB +1 draw rules, combat maneuvers substituting for attacks) and
+  the restricted-activity paragraph. The invented rows must not return.
+- **Shared data:** `packages/pf1e/actions.ts` exports `PF1E_ACTIONS` (all Table 7-2
+  rows: id/name/category/provokes/note, ids stable for the UI and tests) and
+  `NON_SPLITTABLE_FULL_ROUND` (full attack, charge, run, withdraw — CRB p.185).
+- **Budget engine (pure, no dice):** a per-combatant `PF1eActionLedger` under
+  `combatant.flags.pf1e.actions` — standard/move/swift slots, an off-turn-immediate
+  `swiftReserved` flag, 5-ft-step and movement tracking, a surviving
+  `fullRoundPending`, and a `restriction` ("single-standard-or-move" for surprise/
+  staggered/slowed). `actionRefusal` returns the rule reason (the UI shows it as a
+  tooltip; P3+/P6 action execution will use it as the legality gate), `spendAction`
+  applies. Encoded rules: standard+move OR full-round per round; move may substitute
+  for standard (two moves legal, two standards never); restricted = one standard OR
+  one move — spending either consumes both — with free and swift actions unaffected,
+  full-round refused but **start/complete allowed** (CRB p.181/185); one swift per
+  turn; an off-turn immediate reserves and then consumes the next turn's swift; any
+  movement blocks the 5-foot step and vice versa; a started full-round action
+  survives the turn boundary to be completed with the next standard.
+- **Wiring:** `readCombatantState` defaults the ledger defensively;
+  `pf1eNextTurn` resets the active combatant's ledger at turn start (reservation →
+  "swift used", pending survives); `startWithSurprise` and the surprise→round-1
+  transition give the first actor a fresh ledger (the latter now also marks
+  `acted: true` — previously the first regular actor stayed flat-footed during their
+  own turn, an adjacent bug this wiring exposed); `spendCombatantAction` applies a
+  spend to a whole CombatDocument.
+- **Visible:** the combat tracker shows the active combatant's chips (STD/MOVE/
+  SWIFT/5-ft, moved-ft, pending) plus spend buttons (standard, move, move-as-standard,
+  swift, full-round, 5-ft step, start/complete full-round) disabled with the refusal
+  reason as tooltip, and an off-turn "Immediate" button on non-active rows — only for
+  encounters with at least one PF1e-linked actor (same detection as the initiative
+  roller), so generic combats never get PF1e flags. `ui/combat/actionBudget.ts` holds
+  the pure glue (detection, budget view, permission-gated spend) and is unit-tested
+  without a browser.
+- **Verification:** 20 new tests (11 table/budget fixtures hand-checked against CRB
+  p.181–185/189, 5 wiring fixtures including the reservation conversion and pending
+  survival across the round wrap, 4 panel-helper tests including permission refusal).
+  Full suite 944 passed / 3 skipped; typecheck/lint/format/build/size green
+  (dist 2,035,684 raw / 588,837 gzip, was 2,025,106/586,250). Interrupt execution
+  (readied/immediate resolution) stays in P6 as the TODO states; setting the
+  restriction from the surprise round lands with T03's tracker wiring, and from
+  conditions (staggered) with the condition library.

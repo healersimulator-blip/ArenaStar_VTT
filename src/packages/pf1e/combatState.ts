@@ -29,6 +29,13 @@ import {
   nextTurn,
 } from "../../core/combat";
 import { DEFAULT_SECONDS_PER_ROUND } from "../../core/worldSettings";
+import {
+  readActionLedger,
+  spendAction,
+  startOfTurnLedger,
+  type PF1eActionLedger,
+  type PF1eActionSpend,
+} from "./actions";
 
 /** One combatant's entry under `combatant.flags.pf1e`. */
 export type PF1eCombatantState = {
@@ -42,6 +49,8 @@ export type PF1eCombatantState = {
   acted: boolean;
   /** Set while a surprise round caught this combatant unaware. */
   surprised: boolean;
+  /** Per-turn action budget (T05: standard/move/swift/full-round, 5-ft step, movement). */
+  actions: PF1eActionLedger;
 };
 
 export type PF1eHeldAction = {
@@ -190,6 +199,7 @@ export function readCombatantState(
         : 0,
     acted: raw.acted === true,
     surprised: raw.surprised === true,
+    actions: readActionLedger(raw.actions),
     held:
       kind === "charge" ||
       kind === "attack" ||
@@ -406,17 +416,15 @@ export function startWithSurprise(
   }
 
   const started = startCombat({ ...combat, combatants: withInitiative });
-  const combatants = started.combat.combatants.map((c) =>
-    c._id === (currentCombatant(started.combat)?._id ?? "")
-      ? {
-          ...c,
-          flags: {
-            ...asRecord(c.flags),
-            [SCOPE]: { ...readCombatantState(c), acted: true },
-          },
-        }
-      : c,
-  );
+  const combatants = started.combat.combatants.map((c) => {
+    if (c._id !== (currentCombatant(started.combat)?._id ?? "")) return c;
+    const cs = readCombatantState(c);
+    return withCombatantState(c, {
+      ...cs,
+      acted: true,
+      actions: startOfTurnLedger(cs.actions),
+    });
+  });
   const roundsState: PF1eRoundState = {
     ...base,
     phase: "rounds",
@@ -474,6 +482,16 @@ export function pf1eNextTurn(
     }
     // Surprise round over: everyone is now in the initiative order, round 1 begins.
     const started = startCombat(combat);
+    const firstRegular = currentCombatant(started.combat)?._id ?? "";
+    const roundOne = started.combat.combatants.map((c) => {
+      if (c._id !== firstRegular) return c;
+      const cs = readCombatantState(c);
+      return withCombatantState(c, {
+        ...cs,
+        acted: true, // your own turn starting is the flat-footed transition (A.1)
+        actions: startOfTurnLedger(cs.actions),
+      });
+    });
     const afterSurprise: PF1eRoundState = {
       ...state,
       phase: "rounds",
@@ -481,7 +499,10 @@ export function pf1eNextTurn(
       roundRolled: false,
     };
     return {
-      combat: withRoundState(started.combat, afterSurprise),
+      combat: withRoundState(
+        { ...started.combat, combatants: roundOne },
+        afterSurprise,
+      ),
       state: afterSurprise,
       hooks: ["combat:turn:end", ...started.hooks],
       expired: [],
@@ -511,6 +532,7 @@ export function pf1eNextTurn(
       let aooUsed = cs.aooUsed;
       let held = cs.held;
       let acted = cs.acted;
+      let actions = cs.actions;
       if (active && c._id === active._id && aooUsed !== 0) {
         aooUsed = 0; // A.10: the budget comes back at the start of your turn
         changed = true;
@@ -532,8 +554,18 @@ export function pf1eNextTurn(
         acted = true; // no longer flat-footed "until your first turn" (A.1)
         changed = true;
       }
+      if (active && c._id === active._id) {
+        // T05: the action budget resets at the start of your turn; an off-turn immediate
+        // action's reservation converts into "swift already used"; a pending full-round
+        // action survives to be completed with this turn's standard action.
+        const reset = startOfTurnLedger(actions);
+        if (!sameLedger(reset, actions)) {
+          actions = reset;
+          changed = true;
+        }
+      }
       if (!changed) return c;
-      return withCombatantState(c, { ...cs, aooUsed, held, acted });
+      return withCombatantState(c, { ...cs, aooUsed, held, acted, actions });
     });
   }
 
@@ -637,6 +669,45 @@ export function holdAction(
     ...(note !== undefined ? { note } : {}),
   };
   return withCombatantState(combatant, { ...cs, held });
+}
+
+/** Field-wise ledger equality (the reset builds a fresh object every time). */
+function sameLedger(a: PF1eActionLedger, b: PF1eActionLedger): boolean {
+  return (
+    a.standardUsed === b.standardUsed &&
+    a.moveUsed === b.moveUsed &&
+    a.swiftUsed === b.swiftUsed &&
+    a.swiftReserved === b.swiftReserved &&
+    a.fiveFootStepUsed === b.fiveFootStepUsed &&
+    a.movementFt === b.movementFt &&
+    a.fullRoundPending === b.fullRoundPending &&
+    a.restriction === b.restriction
+  );
+}
+
+/**
+ * Spend from one combatant's action budget (T05). Pure: returns the combat whose
+ * combatant carries the updated ledger, or the refusal reason — the UI/host turns the
+ * result into a `combats` update op.
+ */
+export function spendCombatantAction(
+  combat: CombatDocument,
+  combatantId: string,
+  spend: PF1eActionSpend,
+): Result<CombatDocument> {
+  const target = combat.combatants.find((c) => c._id === combatantId);
+  if (!target) return err("combatant is not part of this encounter");
+  const cs = readCombatantState(target);
+  const next = spendAction(cs.actions, spend);
+  if (!next.ok) return err(next.error);
+  return okVal({
+    ...combat,
+    combatants: combat.combatants.map((c) =>
+      c._id === combatantId
+        ? withCombatantState(c, { ...cs, actions: next.value })
+        : c,
+    ),
+  });
 }
 
 /** Is this combatant flat-footed right now for round-structural reasons (A.1 surprise / no turn yet)? */

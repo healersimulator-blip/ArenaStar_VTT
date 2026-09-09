@@ -801,32 +801,59 @@ Colossal 30/30 · 30/20. Tiny/Dim/Fine: 4/25/100 per square, must enter an oppon
 square to attack (provokes), never flank, never threaten. Large+ with a reach weapon:
 strikes up to double natural reach, **cannot** strike within its natural reach.
 
-**A.6 Table: Actions in Combat** (provoke column, as transcribed from the SRD page) —
-standard actions: attack (no), full attack (n/a, full-round), use a special ability (no),
-cast a spell (yes — unless the spell's casting time is 1 free/swift action), use an
-activated magic item — spell completion / spell trigger while on the defensive (yes),
-activate item: command word / use activated / stored knowledge / continuous (no), use a
-skill as standard (yes if it's a check you retry or that needs concentration; the
-stand-up-from-prone-type skill uses vary), complex standard action (yes), snipe (yes),
-remove curse (yes), total defense (no), verbal component only spell-like ability (no…
-spell-like abilities work like arcane spellcasting: they **provoke** unless the ability
-says otherwise). Move actions: draw a weapon (**no** — and it becomes a free action if
-your BAB is +1 or higher), draw a weapon and move (yes), sheathe a weapon (yes), move a
-5-foot step (no), move your speed (yes), full speed as a move action (yes),
-double movement (yes), stop above ground/power (no), direct or redirect a spell (no),
-pick a lock (yes), load a light/crossbow-type weapon (yes), load a heavy firearm or
-siege weapon (yes), mount or dismount a steed (yes), retrieve a stored item (yes),
-store a retrieved item (yes), stand up (yes), control a mount (no), use skill as a move
-action (yes or no depending on the skill), run (see below). Full-round: full attack (no),
-fight defensively (no), run (no), use a special ability (no), cast a spell with a
-full-round casting time (yes), withdraw (no for the first 5 feet of movement, yes for the
-rest — and you lose all Dex/dodge bonuses and take a −4 AC penalty until the start of your
-next turn), use a completed full-round action (no). Free actions: cast a quickened spell
-(no), speak or make a gesture (no), drop an item you're holding (no), stop concentrating on
-a spell (no), use a feat that explicitly requires no action (no). Swift/immediate: one
-swift per turn (an immediate action can be taken outside your turn, and then your next turn
-has no swift action). Restriction: any action that would be "one standard + one move" may be
-two move actions instead; you can never take two standard actions in a round.
+**A.6 Table: Actions in Combat** (Table 7-2, CRB p.182 — re-verified against AoN Rules
+ID 128 on 2026-09-09 for T05/D-131; the 2026-09-07 transcription had wrong provoke
+flags — run was "no", mount/dismount "yes" — and invented rows like "snipe", "remove
+curse" and "draw a weapon and move", and is replaced wholesale by the verified table
+below). The provoke column answers "does the **action itself** provoke" — moving out of
+a threatened square usually provokes regardless of the action (table footnote 1).
+
+- **Standard actions** (provoke?): attack (melee) **no** · attack (ranged) **yes** ·
+  attack (unarmed) **yes** · activate a magic item other than a potion or oil **no** ·
+  aid another **maybe** (provokes if the aided action provokes) · cast a spell
+  (1-standard-action casting time) **yes** · channel energy **no** · concentration to
+  maintain an active spell **no** · dismiss a spell **no** · draw a hidden weapon
+  (Sleight of Hand) **no** · drink a potion or apply an oil **yes** · escape a grapple
+  **no** · feint **no** · light a torch with a tindertwig **yes** · lower spell
+  resistance **no** · read a scroll **yes** · ready **no** · stabilize a dying friend
+  (Heal) **yes** · total defense **no** · use extraordinary ability **no** · use skill
+  that takes 1 action **usually** · use spell-like ability **yes** · use supernatural
+  ability **no**.
+- **Move actions:** move **yes** · control a frightened mount **yes** · direct or
+  redirect an active spell **no** · draw a weapon **no** (BAB +1: combine with a
+  regular move; Two-Weapon Fighting draws two light/one-handed weapons) · load a hand
+  or light crossbow **yes** · open or close a door **no** · mount/dismount a steed
+  **no** · move a heavy object **yes** · pick up an item **yes** · sheathe a weapon
+  **yes** · stand up from prone **yes** · ready or drop a shield **no** · retrieve a
+  stored item **yes**.
+- **Full-round actions:** full attack **no** · charge **no** (may be taken as a
+  standard action when limited to a single action — then only up to your speed, and no
+  weapon draw without Quick Draw; +2 attack / −2 AC until your next turn, verified
+  D-129) · deliver coup de grâce **yes** · escape from a net **yes** · extinguish
+  flames **no** · light a torch **yes** · load a heavy or repeating crossbow **yes** ·
+  lock or unlock a weapon in a locked gauntlet **yes** · prepare to throw a splash
+  weapon **yes** · run **yes** · use skill that takes 1 round **usually** · use a touch
+  spell on up to six friends **yes** · withdraw **no** (the first 5 ft never provoke,
+  the rest of the movement does; you lose Dex/dodge to AC and take −4 AC until your
+  next turn; may also be taken as a standard action when limited to a single action).
+- **Free actions:** cease concentration on a spell **no** · drop an item **no** · drop
+  to the floor **no** · prepare spell components to cast a spell **no** (unless the
+  component is extremely large or awkward) · speak **no**.
+- **Swift:** cast a quickened spell **no** — one swift per turn.
+- **Immediate:** e.g. cast *feather fall* **no** — usable off-turn; then your next turn
+  has no swift action.
+- **No action:** delay **no** · 5-foot step **no**.
+- **Action type varies:** perform a combat maneuver **yes** (many substitute for a
+  melee attack — usable in an attack, charge or full attack, or as an AoO) · use feat
+  **varies**.
+- **Action types (CRB p.181):** a normal round = one standard + one move, **or** one
+  full-round action, plus one swift and any number of free actions; a move action may
+  always substitute for the standard; **restricted activity** (surprise round,
+  staggered, slowed) = a single standard OR a single move action, plus free and swift
+  actions as normal — no full-round action, but a full-round action may be **started
+  or completed** with a standard action (CRB p.185; full attack, charge, run and
+  withdraw can never be split); swift actions are legal in surprise rounds because a
+  swift may be taken anytime you could take a free action.
 
 **A.7 Movement** — 1 square = 5 ft; **5-10-5** diagonals by default (`ctx.grid.diagonals`
 supports "555", "5105", "euclidean"); difficult terrain = ×2 per square (×4 double-doubled,
