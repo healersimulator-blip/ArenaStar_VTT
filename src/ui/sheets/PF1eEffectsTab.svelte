@@ -9,6 +9,13 @@
     type PF1eActiveEffect,
     type PF1eEffectPayload,
   } from "../../packages/pf1e/effects";
+  import {
+    PF1E_CONDITION_NAMES,
+    conditionRefusalFor,
+    pf1eConditionDef,
+    pf1eConditionRequest,
+  } from "../../packages/pf1e/conditions";
+  import { resolveTacticalEffects } from "../../packages/pf1e/effectOps";
 
   let {
     effects,
@@ -59,6 +66,34 @@
     // optimistically — the projected store refreshes the list.
     editing = null;
   }
+
+  /** E03 quick-apply: the library payload, refused by immunity, never silent. */
+  let conditionName = $state("");
+  let conditionError = $state("");
+  function applyCondition(): void {
+    conditionError = "";
+    const def = pf1eConditionDef(conditionName);
+    if (!def) {
+      conditionError = "Pick a condition first.";
+      return;
+    }
+    const refusal = conditionRefusalFor(def, resolveTacticalEffects(effects));
+    if (refusal) {
+      conditionError = refusal;
+      return;
+    }
+    const request = pf1eConditionRequest(conditionName);
+    if (!request.ok) {
+      conditionError = request.error;
+      return;
+    }
+    onApply({
+      name: request.value.name,
+      payload: request.value.payload,
+      target: "actor",
+    });
+    conditionName = "";
+  }
 </script>
 
 <section aria-label="Effects" data-pf1e-effects>
@@ -99,6 +134,24 @@
   {/if}
 
   {#if editable}
+    <div class="condition-row" data-pf1e-condition-apply>
+      <label>
+        Condition
+        <select bind:value={conditionName} disabled={!editable}>
+          <option value="">— condition —</option>
+          {#each PF1E_CONDITION_NAMES as name (name)}
+            <option value={name}>{name}</option>
+          {/each}
+        </select>
+      </label>
+      <button
+        type="button"
+        disabled={!editable || conditionName === ""}
+        onclick={applyCondition}>Apply condition</button
+      >
+      {#if conditionError}<span class="warn" role="alert">{conditionError}</span
+        >{/if}
+    </div>
     <PF1eEffectEditor
       {editing}
       {editable}
@@ -130,6 +183,20 @@
   .effect-list li.disabled :global(strong),
   .effect-list li.disabled :global(span) {
     opacity: 0.5;
+  }
+  .condition-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    padding: 6px;
+    border: 1px solid #3a4656;
+    border-radius: 6px;
+  }
+  .condition-row label {
+    display: flex;
+    gap: 4px;
+    align-items: center;
   }
   .note {
     color: #9eafc5;

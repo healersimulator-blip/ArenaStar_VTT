@@ -2996,3 +2996,61 @@ condition's mathematics.
   green; dist 2,120,722 raw / 612,628 gzip — +17,317 over D-142, within the
   6 MB budget; e2e at **159 collected** across 28 files (new editor flow spec,
   not executed — no browser binaries, D-119 precedent).
+
+## D-144 — E03: the condition library — 27 canonical conditions as effect payloads, verified against the Conditions text
+
+**Date:** 2026-09-10. **Scope:** P4/E03 (closes E03's mathematical library;
+the two P7-owned HP-state interactions and the geometry-dependent consequences
+stay with their owning phases, recorded per condition). **Sources:** the
+canonical Conditions page was fetched and read in full for this slice — every
+number below is its text, cross-checked against the in-repo A.14 modifier
+transcription (which agrees); no other new research.
+
+- **`src/packages/pf1e/conditions.ts` (new, pure):** 27 condition definitions
+  (the 26 the E03 clause enumerates plus Staggered, which Disabled/Unconscious
+  and the nonlethal path cite): each carries the exact SRD name, a condensed
+  summary quoting its numbers, the mechanical payload builder, `mindAffecting`
+  /`fear` tags, and `notes` for consequences the current contract cannot
+  express — recorded, never silently dropped.
+- **Payloads ride the P0 machinery:** applying a condition is applying an
+  effect payload (`condition` label + typed mods + flags + denies), so the
+  derivation, stacking, suppression and expiry need zero changes. Verified
+  encodings include: Fatigued −2/Exhausted −6 Str&Dex (both deny run/charge);
+  Shaken/Frightened −2 attack+saves and Panicked saves-only (the print does
+  not penalize the panicked attack roll); Stunned −2 AC + denied Dex;
+  Grappled −2 attack/−2 CMB/−4 Dex vs Pinned denied-Dex + −4 AC; Prone −4
+  melee attack; Blinded −2 AC + denied Dex; Entangled −2 attack/−4 Dex +
+  no-run/charge; the helpless family (Helpless/Unconscious/Paralyzed/
+  Petrified/Dying/Stable) all deny Dex to AC; Flat-Footed sets the
+  derivation's own `flatFooted`/`cannotAoO` flags; Dazed/Nauseated/Staggered/
+  Disabled encode their action restrictions as deny tokens (Staggered/
+  Disabled deny only full-round — the move-XOR-standard limit is the ledger's
+  `single-standard-or-move` restriction, which the P7 health path sets).
+- **Two named classifications:** fear penalties (shaken/frightened/panicked/
+  cowering) are typed **morale** — so two fear conditions take the worse
+  instead of stacking, which is the printed fear rule (tested: shaken +
+  frightened ⇒ −2, shaken + sickened ⇒ −4); every other condition penalty is
+  **untyped with its own source string** because the print types nothing
+  there. Fear and Confused tag `mindAffecting`; `conditionRefusalFor` refuses
+  those (and name-matched `immune.conditions`) against a protected target —
+  the E03 mind-affecting immunity hook, surfaced as a visible apply refusal
+  in the Effects tab's new condition quick-apply row.
+- **Not encoded on purpose (per-definition notes):** prone's +4/−4 ranged/
+  melee AC split (no per-range AC mod key — the attacker-side situational
+  seam P06 owns alongside flanking/charge); blinded's 50% total concealment
+  (P5) and Acrobatics DC 10 (P03); helpless-family Dex-0 (−5) statics and the
+  attacker's +4 melee/coup-de-grace bonus (P06 seam); forced flee/panic
+  behaviors (L05 morale); skill-check penalties (no mod keys); grapple/
+  pinned concentration DCs (C03); confused's d% behavior table (GM-owned);
+  Disabled's half speed and 1-damage-after-strenuous-standard (P7).
+- **Evidence:** 20 new tests in `tests/packages/pf1eConditions.test.ts` —
+  coverage + validator survival for all 27, the severity/adjacent
+  discriminating pairs (fatigued/exhausted, shaken/frightened/panicked,
+  stunned/dazed, grappled/pinned, prone/blinded/entangled, the helpless
+  family, Flat-Footed), fear-vs-untyped stacking through the real resolver,
+  derivation integrations (fatigue drops attack+AC by 1; shaken drops all
+  saves by 2; blinded removes Dex from touch/flat-footed; exhaustion outranks
+  fatigue by exactly −2 attack), and the immunity refusals. Full suite
+  **1178 passed / 3 skipped** across 129 files; typecheck, lint,
+  touched-file Prettier, build, size and `build:systems` green; dist
+  2,133,897 raw / 616,537 gzip — +13,175 over D-143, within the 6 MB budget.
