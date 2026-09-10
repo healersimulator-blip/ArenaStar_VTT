@@ -28,7 +28,7 @@
     pf1eSheetView,
     type SheetField,
   } from "./pf1eSheetModel";
-  import { resolveAttackFlow } from "./pf1eResolveFlow";
+  import { resolveAttackFlow, resolveManyshotFlow } from "./pf1eResolveFlow";
   import type { PF1eDefenseChoice } from "../../packages/pf1e/resolve";
   import { validatePF1eFeatSelection } from "../../packages/pf1e/feats";
 
@@ -106,6 +106,7 @@
   let resolveNonlethal = $state(false);
   let resolveVerifiable = $state(false);
   let resolveBusy = $state(false);
+  let manyshotBusy = $state(false);
   let resolveError = $state("");
   let authoredAttacksCount = $derived(
     Array.isArray(view.authored.attacks) ? view.authored.attacks.length : 0,
@@ -191,6 +192,41 @@
       resolveBusy = false;
     }
   }
+  async function resolveManyshotVsTarget(): Promise<void> {
+    resolveError = "";
+    const info = resolveTargetInfo();
+    const line = d.attacks[resolveAttackIndex];
+    const group = attackRolls[resolveAttackIndex];
+    const volley = manyshotRolls(resolveAttackIndex);
+    if (!info || !line || !group || volley.length === 0) {
+      resolveError = "Pick a ranged Manyshot attack and a target.";
+      return;
+    }
+    manyshotBusy = true;
+    try {
+      const outcome = await resolveManyshotFlow(client, client.user, {
+        attackerName: doc.name,
+        line,
+        attackFormulas: volley.map((spec) => spec.formula),
+        damageFormula: group.damage?.formula ?? "0",
+        critDamageFormula: group.critDamage?.formula ?? null,
+        targetName: info.actor.name,
+        targetActor: info.actor,
+        targetDerived: info.derived,
+        defense: resolveDefense,
+        ...(resolveFlanking || resolveCharging
+          ? { situational: { ...(resolveFlanking ? { flanking: true } : {}), ...(resolveCharging ? { charging: true } : {}) } }
+          : {}),
+        ...(resolveNonlethal ? { nonlethalDamage: true } : {}),
+        ...(Array.isArray(view.authored.feats) ? { feats: view.authored.feats as string[] } : {}),
+        ...(resolveVerifiable ? { verifiable: true } : {}),
+      });
+      if (!outcome.ok) resolveError = outcome.error;
+    } finally {
+      manyshotBusy = false;
+    }
+  }
+
   let editable = $derived(
     client.user !== null && can(client.user, "update", doc, "actors"),
   );
@@ -477,11 +513,20 @@
         >
         <button
           type="button"
-          disabled={resolveBusy || !resolveTargetId}
+          disabled={resolveBusy || manyshotBusy || !resolveTargetId}
           onclick={() => void resolveVsTarget()}
           data-pf1e-resolve-attack
           >{resolveBusy ? "Resolving…" : "Attack"}</button
         >
+        {#if manyshotRolls(resolveAttackIndex).length > 0}
+          <button
+            type="button"
+            disabled={resolveBusy || manyshotBusy || !resolveTargetId}
+            onclick={() => void resolveManyshotVsTarget()}
+            data-pf1e-resolve-manyshot
+            >{manyshotBusy ? "Resolving Manyshot…" : `Resolve Manyshot ×${manyshotRolls(resolveAttackIndex).length}`}</button
+          >
+        {/if}
         {#if resolveError}<p class="warn" data-pf1e-resolve-error>
             {resolveError}
           </p>{/if}

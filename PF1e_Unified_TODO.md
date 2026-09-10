@@ -230,7 +230,8 @@ Depends on D06 and R01–R02. Implement actor-based resolution (planned `tactica
 - **UI validation:** the Features tab now reports unmet prerequisites for supported feats without deleting or disabling authored entries (Power Attack, Deadly Aim, Combat Expertise, Weapon Finesse, Improved Critical, Precise Shot, Manyshot and the TWF upgrades).
 - **Scene geometry:** `shootingIntoMeleePenalty` now accepts explicit `targetEngaged` and `nearestFriendlyDistanceFt` facts; non-engaged targets and targets at least 10 ft from the nearest friendly no longer receive the −4/−2 penalty, while Precise Shot still removes it unconditionally. The scene/detection caller still owns producing those facts.
 - **Manyshot resolution:** added pure `pf1eResolveManyshot`, which applies 2–4 host-evaluated arrows in order against one evolving defender state, including per-arrow hit/miss, confirmation, mitigation, HP and nonlethal transitions. It rejects non-ranged attacks and invalid volley sizes before resolving any arrow.
-- **Still open:** wiring the multi-roll flow/card and target-selection UI to `pf1eResolveManyshot`, plus browser acceptance. A07 remains open until those consumers are implemented and verified.
+- **Wired:** `resolveManyshotFlow` now performs host attack/confirmation/damage rolls for every arrow, resolves the ordered volley, emits one public Manyshot card, and writes final HP/nonlethal through the normal authorized sheet path. The Combat tab exposes `Resolve Manyshot ×N` alongside the target/defense controls.
+- **Still open:** browser acceptance. A07 remains open until the browser flow is executed and verified.
 
 ### P3 weapon and equipment descriptors — 2026-09-10 (D-134, A01 closed)
 
