@@ -19,6 +19,7 @@
 import type {
   CombatDocument,
   CombatantDocument,
+  EffectDocument,
   Json,
 } from "../../core/documents";
 import { err, okVal, type Result } from "../../core/result";
@@ -37,6 +38,8 @@ import {
   type PF1eActionLedger,
   type PF1eActionSpend,
 } from "./actions";
+import { readTacticalEffect } from "./effects";
+import { combatantEffectsRecord } from "./effectOps";
 
 /** One combatant's entry under `combatant.flags.pf1e`. */
 export type PF1eCombatantState = {
@@ -521,6 +524,8 @@ export function pf1eNextTurn(
   state: PF1eRoundState;
   hooks: string[];
   expired: Array<{ combatantId: string; effectId: string }>;
+  /** Concentration/sustained effects that lapsed at their owner's turn end (no standard spent). */
+  lapsed: Array<{ combatantId: string; effectId: string }>;
   /** Combatants whose AoO budget just refreshed. */
   aooRefreshed: string[];
   /** Held actions that came due at the start of the new round. */
@@ -557,6 +562,7 @@ export function pf1eNextTurn(
         state: surpriseState,
         hooks: ["combat:turn:end", "combat:turn:start"],
         expired: [],
+        lapsed: [],
         aooRefreshed: [],
         heldDelivered: [],
         clockDeltaSeconds: 0,
@@ -588,6 +594,7 @@ export function pf1eNextTurn(
       state: afterSurprise,
       hooks: ["combat:turn:end", ...started.hooks],
       expired: [],
+      lapsed: [],
       aooRefreshed: started.combat.combatants.map((c) => c._id),
       heldDelivered: [],
       clockDeltaSeconds: state.secondsPerRound,
@@ -605,6 +612,115 @@ export function pf1eNextTurn(
     fullRound: boolean;
   }> = [];
   let combatants = core.combat.combatants;
+
+  // E04 — effect duration boundaries. Core ticks every duration at the owner's
+  // turn end; round-start effects (`ttl.endsOn: "round-start"`, measured in
+  // whole rounds) tick at the round boundary instead, so what core just
+  // consumed for them is restored here and ticked once per wrap — no
+  // double-decrement. Concentration/sustained effects (`concentration: true`)
+  // need the owner's standard action every round (A.16: maintaining a spell is
+  // a standard action); a turn that ends without one lets them lapse.
+  const lapsed: Array<{ combatantId: string; effectId: string }> = [];
+  let expired = core.expired;
+  const owner = currentCombatant(combat);
+  if (owner) {
+    const ownerRoundStart = roundStartEffectIds(owner);
+    const ownerConcentration = concentrationEffectIds(owner);
+    const ownerUnmaintained: string[] =
+      ownerConcentration.length > 0 &&
+      !readCombatantState(owner).actions.standardUsed
+        ? ownerConcentration
+        : [];
+    if (ownerRoundStart.length > 0 || ownerUnmaintained.length > 0) {
+      const inputEffects = combatantEffectsRecord(owner);
+      let post: Record<string, EffectDocument> = combatantEffectsRecord(
+        combatants.find((c) => c._id === owner._id) ?? owner,
+      );
+      if (ownerRoundStart.length > 0) {
+        const restored: Record<string, EffectDocument> = {};
+        for (const [id, doc] of Object.entries(post)) {
+          if (ownerRoundStart.includes(id)) continue; // re-added from the input below
+          restored[id] = doc;
+        }
+        for (const id of ownerRoundStart) {
+          const doc = inputEffects[id];
+          if (doc !== undefined) restored[id] = doc;
+        }
+        post = restored;
+        expired = expired.filter(
+          (e) =>
+            !(
+              e.combatantId === owner._id &&
+              ownerRoundStart.includes(e.effectId)
+            ),
+        );
+      }
+      if (ownerUnmaintained.length > 0) {
+        const kept: Record<string, EffectDocument> = {};
+        for (const [id, doc] of Object.entries(post)) {
+          if (ownerUnmaintained.includes(id)) continue;
+          kept[id] = doc;
+        }
+        post = kept;
+        // Report from the input set: a duration-carrying concentration effect
+        // core just dropped still lapsed (that is the reason it left), so the
+        // expiry record yields to the lapse.
+        for (const id of ownerUnmaintained)
+          lapsed.push({ combatantId: owner._id, effectId: id });
+        expired = expired.filter(
+          (e) =>
+            !(
+              e.combatantId === owner._id &&
+              ownerUnmaintained.includes(e.effectId)
+            ),
+        );
+      }
+      combatants = combatants.map((c) =>
+        c._id === owner._id ? withCoreEffects(c, post) : c,
+      );
+    }
+  }
+  if (wrapped) {
+    combatants = combatants.map((c) => {
+      const ids = roundStartEffectIds(c);
+      if (ids.length === 0) return c;
+      const effects = combatantEffectsRecord(c);
+      const next: Record<string, EffectDocument> = {};
+      let changed = false;
+      for (const [id, doc] of Object.entries(effects)) {
+        if (!ids.includes(id)) {
+          next[id] = doc;
+          continue;
+        }
+        const read = readTacticalEffect(id, doc);
+        if (!read.ok || read.value.durationLeft === null) {
+          next[id] = doc;
+          continue;
+        }
+        const left = read.value.durationLeft - 1;
+        changed = true;
+        if (left <= 0) {
+          expired = [...expired, { combatantId: c._id, effectId: id }];
+          continue; // dropped at the round boundary
+        }
+        next[id] = {
+          ...doc,
+          flags: {
+            ...(doc.flags as object),
+            core: {
+              ...((
+                doc.flags as Record<string, Record<string, unknown>> | undefined
+              )?.core ?? {}),
+              duration: left,
+            },
+          },
+        } as unknown as EffectDocument;
+      }
+      if (!changed) return c;
+      return withCoreEffects(c, next);
+    });
+  }
+
   const active = currentCombatant(core.combat);
 
   if (roundRolled || active) {
@@ -684,7 +800,8 @@ export function pf1eNextTurn(
       clockSeconds: state.clockSeconds + clockDelta,
     },
     hooks: core.hooks,
-    expired: core.expired,
+    expired,
+    lapsed,
     aooRefreshed,
     heldDelivered,
     clockDeltaSeconds: clockDelta,
@@ -693,6 +810,53 @@ export function pf1eNextTurn(
 
 /** A.10: six other combatants acting before your turn makes holding a full-round action. */
 export const HELD_FULL_ROUND_ALLIES = 6;
+
+/**
+ * Write one combatant's `flags.core.effects` map back, leaving other scopes
+ * (including this module's `flags.pf1e` state) untouched — the exact shape
+ * core's `tickEffects`/`activeEffects` read.
+ */
+function withCoreEffects(
+  c: CombatantDocument,
+  effects: Record<string, EffectDocument>,
+): CombatantDocument {
+  return {
+    ...c,
+    flags: {
+      ...(c.flags as object),
+      core: {
+        ...((c.flags as Record<string, Record<string, unknown>> | undefined)
+          ?.core ?? {}),
+        effects: effects as unknown as Record<string, Json>,
+      },
+    },
+  };
+}
+
+/** Effect ids on this combatant whose payload ticks at the round-start boundary and has a duration. */
+function roundStartEffectIds(combatant: CombatantDocument): string[] {
+  const ids: string[] = [];
+  for (const [id, doc] of Object.entries(combatantEffectsRecord(combatant))) {
+    const read = readTacticalEffect(id, doc);
+    if (
+      read.ok &&
+      read.value.payload.ttl?.endsOn === "round-start" &&
+      read.value.durationLeft !== null
+    )
+      ids.push(id);
+  }
+  return ids;
+}
+
+/** Effect ids on this combatant that require the owner's standard action every round. */
+function concentrationEffectIds(combatant: CombatantDocument): string[] {
+  const ids: string[] = [];
+  for (const [id, doc] of Object.entries(combatantEffectsRecord(combatant))) {
+    const read = readTacticalEffect(id, doc);
+    if (read.ok && read.value.payload.concentration === true) ids.push(id);
+  }
+  return ids;
+}
 
 /** Write one combatant's PF1e state back into its flags, leaving other scopes untouched. */
 function withCombatantState(

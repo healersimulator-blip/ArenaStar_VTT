@@ -3054,3 +3054,39 @@ transcription (which agrees); no other new research.
   **1178 passed / 3 skipped** across 129 files; typecheck, lint,
   touched-file Prettier, build, size and `build:systems` green; dist
   2,133,897 raw / 616,537 gzip — +13,175 over D-143, within the 6 MB budget.
+
+## D-145 — 2026-09-10 — P4/E04: turn-boundary durations via restore-and-tick, not a second ticker
+
+- **Context:** A.16 requires concentration to lapse when the caster's turn ends
+  without a spent standard, and round-start effects must expire on round
+  boundaries; core's `nextTurn` already ticks durations at owner turn end, and
+  E01–E03 store all tactical payloads in `flags.core.effects` / `actor.effects`
+  where core can see them.
+- **Decision:** E04 is not a new ticker. `pf1eNextTurn` keeps core as the single
+  engine and repairs its semantics at the two boundary moments:
+  (a) _Round start:_ core ticks `endsOn: "round-start"` payloads at owner turn
+  end — the wrong moment — so `pf1eNextTurn` restores the ending owner's
+  round-start effect documents from the input combat (owner captured before the
+  advance), strips core's expiry records for those ids, and then, on round wrap
+  only, decrements each carrier's `durationLeft` once, dropping at ≤ 0 and
+  writing `flags.core.duration` otherwise. Round-start ids without a remaining
+  duration are inert markers and are never restored or ticked.
+  (b) _Concentration:_ payloads with `concentration: true` are dropped at the
+  owner's turn end when `actions.standardUsed === false`; sustaining (spending
+  the standard) preserves the document at its pre-wrap value until the next
+  wrap tick. Lapsed ids are reported in the new `lapsed` return
+  (`{combatantId, effectId}[]`) and excluded from `expired`, so a lapse never
+  double-reports an effect core already dropped; the surprise round returns
+  `lapsed: []`.
+- **Consequences:** duration semantics now differ by `endsOn` key with a test
+  proving the interleave (own-turn ttl 3 vs round-start ttl 2 on one carrier);
+  per-level conversion (rounds→minutes→hours) is deferred to E05 where the
+  replicated clock lands; `lapsed` is UI-ready but unrendered (E06 owns
+  recompute + icons); core stays untouched (P4 constraint).
+- **Evidence:** 10 new tests in `tests/packages/pf1eTurnBoundaries.test.ts`
+  (timeline, core-equivalence on effect boundaries, inert marker, sustain,
+  lapse, combined sustain+round-start, surprise short-circuit, derivation
+  through real `readTacticalEffects`); full suite **1188 passed / 3 skipped**
+  across 131 files; typecheck, lint, touched-file Prettier, build, size and
+  `build:systems` green; dist 2,135,336 raw / 616,970 gzip (+1,439 over
+  D-144, within the 6 MB budget).
