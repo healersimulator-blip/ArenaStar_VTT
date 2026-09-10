@@ -3,6 +3,7 @@
   import { SvelteSet } from "svelte/reactivity";
   import {
     pf1eAttackRollGroups,
+    pf1eManyshotRollSpecs,
     pf1eInitiativeRollSpec,
     pf1eSaveRollSpecs,
     type PF1eRollSpec,
@@ -29,6 +30,7 @@
   } from "./pf1eSheetModel";
   import { resolveAttackFlow } from "./pf1eResolveFlow";
   import type { PF1eDefenseChoice } from "../../packages/pf1e/resolve";
+  import { validatePF1eFeatSelection } from "../../packages/pf1e/feats";
 
   let {
     doc,
@@ -50,6 +52,15 @@
   const pending = new SvelteSet<string>();
   let view = $derived(pf1eSheetView(doc));
   let d = $derived(view.derived);
+  let featWarnings = $derived(
+    validatePF1eFeatSelection(
+      Array.isArray(view.authored.feats) ? view.authored.feats : [],
+      {
+        bab: view.authored.baseAttack,
+        abilities: view.authored.abilities,
+      },
+    ),
+  );
   let attackRolls = $derived(
     pf1eAttackRollGroups(d, {
       authoredAttacksCount: Array.isArray(view.authored.attacks)
@@ -76,6 +87,13 @@
   }
   function rollAll(specs: readonly PF1eRollSpec[]): void {
     for (const spec of specs) rollSpec(spec);
+  }
+  function manyshotRolls(index: number): PF1eRollSpec[] {
+    return pf1eManyshotRollSpecs(
+      d,
+      index,
+      Array.isArray(view.authored.feats) ? view.authored.feats : [],
+    );
   }
 
   // A06b — resolve one attack against a target actor: public rolls, the
@@ -384,6 +402,14 @@
                 >Full attack</button
               >
             {/if}
+            {#if manyshotRolls(i).length > 0}
+              <button
+                type="button"
+                data-pf1e-manyshot
+                onclick={() => rollAll(manyshotRolls(i))}
+                >Manyshot ×{manyshotRolls(i).length}</button
+              >
+            {/if}
             {#if group.damage}
               <button type="button" onclick={() => rollSpec(group.damage)}
                 >Damage</button
@@ -492,6 +518,13 @@
       publishedAc={d.acFromTotals}
       onEdit={updateDetail}
     />
+    {#if tab === "features" && featWarnings.length > 0}
+      <aside class="warn" data-pf1e-feat-warnings>
+        <strong>Prerequisite warnings</strong>
+        {#each featWarnings as warning (warning)}<p>{warning}</p>{/each}
+        <p class="note">Authored feats are retained; warnings do not silently remove them.</p>
+      </aside>
+    {/if}
     {#if tab === "armor" && editable}
       <PF1eAcConversion {doc} user={client.user} onApply={applyAcSource} />
     {/if}

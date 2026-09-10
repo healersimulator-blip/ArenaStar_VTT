@@ -3,6 +3,7 @@ import { derivePF1eActor } from "../../src/packages/pf1e/actor";
 import {
   fmtSigned,
   pf1eAttackRollGroups,
+  pf1eManyshotRollSpecs,
   pf1eInitiativeRollSpec,
   pf1eSaveRollSpecs,
 } from "../../src/packages/pf1e/rollData";
@@ -183,6 +184,27 @@ describe("attack roll groups (A06 — the sheet roll bridge)", () => {
     expect(groups[0]?.attack.flavor).toBe(
       "Unarmed strike +2 — authored published totals — no components to recompose",
     );
+  });
+});
+
+describe("Manyshot roll bridge (A07)", () => {
+  test("posts one same-bonus roll per arrow with the feat penalty", () => {
+    const archer = derivePF1eActor({
+      system: {
+        abilities: { dex: 18 },
+        baseAttack: 11,
+        feats: ["Manyshot"],
+        attacks: [{ name: "Longbow", ranged: true, damageDice: "1d8" }],
+      },
+    });
+    const specs = pf1eManyshotRollSpecs(archer, 0, ["Manyshot"]);
+    expect(specs).toHaveLength(3);
+    expect(specs.map((spec) => spec.formula)).toEqual([
+      "1d20 + 11",
+      "1d20 + 11",
+      "1d20 + 11",
+    ]);
+    expect(specs[0]?.notes[0]).toContain("standard-action volley");
   });
 });
 

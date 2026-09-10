@@ -24,6 +24,7 @@
  */
 
 import type { PF1eDerived, PF1eDerivedAttack } from "./actor";
+import { manyshotPlan } from "./feats";
 
 /** What a roll button rolls and how its chat card reads. */
 export interface PF1eRollSpec {
@@ -243,6 +244,35 @@ export function pf1eAttackRollGroups(
       notes,
     };
   });
+}
+
+/**
+ * Build the Manyshot standard-action volley for one derived ranged line.
+ * Each arrow is a separate host-evaluated roll at the same first-attack bonus;
+ * damage is deliberately not bundled because the target/precision rider rules
+ * belong to the resolution consumer.
+ */
+export function pf1eManyshotRollSpecs(
+  derived: PF1eDerived,
+  lineIndex: number,
+  feats?: readonly string[] | undefined,
+): PF1eRollSpec[] {
+  const line = derived.attacks[lineIndex];
+  if (!line) return [];
+  const plan = manyshotPlan({
+    feats,
+    bab: Math.trunc(derived.baseAttack),
+    ranged: line.ranged,
+  });
+  if (!plan.ok) return [];
+  const bonus = (line.attackBonuses[0] ?? derived.baseAttack) + plan.attackPenalty;
+  return Array.from({ length: plan.arrows }, (_, index) => ({
+    kind: "attack" as const,
+    label: `${line.name} Manyshot arrow ${index + 1}`,
+    formula: `1d20 ${bonus >= 0 ? `+ ${bonus}` : `- ${Math.abs(bonus)}`}`,
+    flavor: `${line.name} Manyshot arrow ${index + 1}/${plan.arrows} ${fmtSigned(bonus)} — same first attack bonus, −4 Manyshot penalty (CRB Manyshot)`,
+    notes: ["standard-action volley; resolve each arrow separately"],
+  }));
 }
 
 /** The three saving throws as roll specs (d20 + derived total). */
