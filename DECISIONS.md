@@ -2586,3 +2586,87 @@ verified in Gap List §2.9 and carried by A01.
   3 skipped across 121 files; typecheck/lint/touched-file Prettier/build/
   size/build:systems green; dist 2,054,514 raw, byte-identical to D-136 (no
   importer yet).
+
+## D-138 — A05: defensive mitigation — DR, energy resistance/immunity/vulnerability, object hardness
+
+**Date:** 2026-09-10. **Scope:** P3/A05. Sources fetched and verified verbatim
+before encoding: Damage Reduction + Overcoming DR (CRB p.561, AoN Rules ID
+424), Energy Resistance (CRB p.563, AoN Rules ID 429), Energy Immunity and
+Vulnerability (CRB p.563 / Bestiary UMR "Vulnerabilities", AoN), Smashing an
+Object (CRB p.173, AoN Rules ID 126), DR/epic (Bestiary p.299 UMR + Mythic
+Adventures glossary, both ways confirmed by the Paizo FAQ), and the Paizo
+rules-forum answer on DR vs nonlethal damage. R02/D-129's precision-is-reduced
+ruling stands; the Gap List's own §2.10 column ("precision damage… never
+reduced by DR") is wrong against its A.17 correction and is superseded.
+
+- **`src/packages/pf1e/mitigation.ts` (new, pure):** the defender-side half of
+  the damage path, consuming A03's result as typed components — physical
+  (weapon + precision, one combined DR total per attack) and energy (by type,
+  DR-immune, ER-mitigated). `drAttackFacts` builds the attack facts from a
+  weapon with an optional launcher context (ammunition); `drBypasses` encodes
+  the ladder; `applyMitigation` resolves everything with labeled notes for the
+  chat breakdown; `damageComponentsFromRoll` is the A03 seam.
+- **Bypass ladder exactly:** +1 magic (the launcher's bonus makes ammunition
+  magic — "treated as a magic weapon", nothing more; its alignment transfers;
+  the ammunition's own enhancement feeds the ladder, the launcher's never
+  does); +3 cold iron/silver; +4 adamantine with the explicit "does not give
+  the ability to ignore hardness" caveat; +5 alignment; epic = enhancement
+  ≥ +6 OR total effective ≥ +6 (special-ability equivalents count only for
+  epic — a +5 flaming weapon bypasses DR/epic but not DR/cold iron). Bypass
+  lists are OR; strings split on " or " so stat-block forms like "piercing or
+  slashing" work; unknown tokens never bypass and are named in notes. Multiple
+  DR entries never stack — the best applies in the situation.
+- **Riders:** DR completely negating the physical damage negates injury
+  poison, stunning and injury-based disease (`physicalDamageNegated`); touch
+  attacks, energy riders and energy drains are never DR-negated — the caller
+  models energy riders as energy components, which DR skips by rule.
+- **Two disputed points, decided and named:**
+  1. **Vulnerability before resistance/hardness.** PF1e print is silent —
+     3.5's "apply the resistance before the vulnerability" frost-giant
+     paragraph was dropped in the Pathfinder glossary. The Paizo developer
+     rulings (the Iron Gods robot answer: "determine the total amount of
+     damage the creature WOULD take… first thing you do is apply the
+     vulnerability") direct vulnerability-first; encoded as ×1.5 (floored) →
+     energy resistance → object halvings → hardness. The dropped 3.5 order is
+     recorded here, not encoded; a consumer wanting it must ask.
+  2. **DR applies to nonlethal damage** (Paizo rules forum: "DR makes no
+     consideration whether the damage is lethal or not"), including negating
+     A03's minimum 1-point nonlethal. The strategic engine's
+     `combatEngine.ts` comment "DR never applies to nonlethal damage" is
+     wrong against this and stays untouched here — M01 owns the strategic
+     repair. Which bucket DR eats first in a mixed lethal/nonlethal attack is
+     unspecified in print ("GM fiat"); the resolver takes lethal first and
+     names the choice in the result notes.
+- **Objects (CRB p.173):** hardness subtracts once per attack from the
+  post-halving total; energy attacks and ranged-weapon damage halve (floored)
+  **before** hardness; objects are immune to nonlethal damage (dropped) and to
+  critical hits (attack-side: callers must not confirm crits against objects —
+  documented, not enforced); an actual adamantine weapon ignores hardness, the
+  +4 enhancement equivalent does not (CRB p.561's table footnote).
+- **A03 additive extensions:** `PF1eBonusDamageLine.energyType` (an energy
+  rider — flaming); `bonusContributions` carry `precision`/`energyType`; the
+  result exposes `weaponContribution` final buckets (post minimum/clamp) so
+  the physical component needs no re-derivation. Also superseded: Appendix
+  A.17's line "DR does negate ability damage/drain, energy damage dealt along
+  with an attack (riders), touch attacks, and force effects" had the polarity
+  backwards — the verbatim CRB text says DR does **not** negate touch
+  attacks, energy riders or energy drains; the encoding follows the verbatim.
+- **Deliberately not encoded:** spell resistance (C02), regeneration/fast
+  healing and their suppression (H03), temporary-HP absorption (P4/P7
+  bookkeeping), saving-throw halves (C02), protection-from-energy pools, the
+  natural-weapons-of-a-DR-creature counting as magic/epic (caller authoring),
+  and any strategic-loop change (M01). Nothing imports mitigation.ts yet;
+  A06 wires it into the sheet roll path and chat breakdown.
+- **Evidence:** 22 new tests in `tests/packages/pf1eMitigation.test.ts`,
+  hand-computed from the verified texts: every ladder boundary, the
+  +5-flaming-is-epic-but-not-cold-iron discrimination, ammunition transfer in
+  both directions (launcher magic yes, launcher ladder no, own enhancement
+  yes), rider negation, best-of-multiple-DR, per-type ER spanning components,
+  the vulnerability order with the 30-fire/10-resist ⇒ 35 worked case and the
+  25 ⇒ 37 floor, object halvings, adamantine-vs-+4 hardness, nonlethal object
+  immunity, the A03→A05 seam end-to-end (19 physical + 6 fire vs DR 10/— ⇒
+  15), and validation refusals for malformed components/DR/hardness. One A03
+  test was updated for the two new contribution fields. Full suite 1083
+  passed / 3 skipped across 122 files; typecheck/lint/touched-file Prettier/
+  build/size/build:systems green; dist 2,054,514 raw, byte-identical to
+  D-137 (no importer yet).

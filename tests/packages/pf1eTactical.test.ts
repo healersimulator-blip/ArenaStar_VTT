@@ -696,8 +696,20 @@ describe("multiplying damage (CRB p.179, AoN Rules ID 100)", () => {
     expect(crit).toMatchObject({ ok: true, lethal: 18 + 6 + 9 });
     if (crit.ok) {
       expect(crit.bonusContributions).toEqual([
-        { label: "flaming 1d6 fire", amount: 6, nonlethal: false },
-        { label: "sneak attack 2d6", amount: 9, nonlethal: false },
+        {
+          label: "flaming 1d6 fire",
+          amount: 6,
+          nonlethal: false,
+          precision: false,
+          energyType: null,
+        },
+        {
+          label: "sneak attack 2d6",
+          amount: 9,
+          nonlethal: false,
+          precision: true,
+          energyType: null,
+        },
       ]);
     }
   });

@@ -103,6 +103,7 @@ import {
   type PF1eSize,
 } from "./rulesTables";
 import type { AcBreakdown } from "./rulesTables";
+import type { PF1eEnergyType } from "./healthState";
 import {
   brokenWeaponAdjustments,
   type PF1eWeaponDescriptor,
@@ -762,6 +763,12 @@ export interface PF1eBonusDamageLine {
   precision?: boolean;
   /** The line is nonlethal regardless of the weapon's damage bucket. */
   nonlethal?: boolean;
+  /**
+   * Energy rider (flaming's fire, a shocking weapon's electricity): energy
+   * damage ignores DR entirely and is mitigated by energy resistance instead
+   * (CRB p.561 — A05 consumes this).
+   */
+  energyType?: PF1eEnergyType;
 }
 
 /**
@@ -1042,11 +1049,15 @@ export type PF1eDamageRollResult =
       lethal: number;
       /** Final nonlethal damage (the weapon's full nonlethal damage, or the 1-point minimum). */
       nonlethal: number;
+      /** The weapon damage's own final buckets (post minimum/clamp) — A05 builds its physical component from these. */
+      weaponContribution: { lethal: number; nonlethal: number };
       /** Retained bonus-line contributions, labeled — the chat breakdown for extra damage. */
       bonusContributions: {
         label: string;
         amount: number;
         nonlethal: boolean;
+        precision: boolean;
+        energyType: PF1eEnergyType | null;
       }[];
       /** Precision lines dropped by defender immunity. */
       precisionDropped: string[];
@@ -1164,6 +1175,8 @@ export function resolveDamageRoll(input: {
     label: string;
     amount: number;
     nonlethal: boolean;
+    precision: boolean;
+    energyType: PF1eEnergyType | null;
   }[] = [];
   const precisionDropped: string[] = [];
   for (const line of input.bonusLines ?? []) {
@@ -1179,6 +1192,8 @@ export function resolveDamageRoll(input: {
       label: line.label,
       amount: line.roll,
       nonlethal: nonlethalLine,
+      precision: line.precision === true,
+      energyType: line.energyType ?? null,
     });
     if (nonlethalLine) nonlethal += line.roll;
     else lethal += line.roll;
@@ -1198,6 +1213,7 @@ export function resolveDamageRoll(input: {
       weaponDamage,
       lethal: 0,
       nonlethal: 1,
+      weaponContribution: { lethal: 0, nonlethal: 1 },
       bonusContributions,
       precisionDropped,
       notes: [
@@ -1213,12 +1229,16 @@ export function resolveDamageRoll(input: {
     if (lethal < 0) lethal = 0;
     if (nonlethal < 0) nonlethal = 0;
   }
+  const weaponContribution = weaponNonlethal
+    ? { lethal: 0, nonlethal: Math.max(0, weaponDamage) }
+    : { lethal: Math.max(0, weaponDamage), nonlethal: 0 };
   return {
     ok: true,
     multiplier,
     weaponDamage,
     lethal,
     nonlethal,
+    weaponContribution,
     bonusContributions,
     precisionDropped,
     notes,
