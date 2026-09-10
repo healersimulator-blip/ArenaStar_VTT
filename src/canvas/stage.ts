@@ -6,7 +6,15 @@
  * transform (scale + pan). Rendering is ticker-driven; render() forces a frame
  * for deterministic tests.
  */
-import { Application, Assets, Container, Graphics, Sprite, Text, Texture } from "pixi.js";
+import {
+  Application,
+  Assets,
+  Container,
+  Graphics,
+  Sprite,
+  Text,
+  Texture,
+} from "pixi.js";
 // file:// and CSP-restricted contexts forbid unsafe-eval; this side-effect
 // import swaps Pixi's Function()-based fast paths for eval-free ones (D-058).
 import "pixi.js/unsafe-eval";
@@ -91,11 +99,78 @@ export interface Stage {
   /** Fit the camera to a scene rect (§9 scene load). */
   fit(width: number, height: number): void;
   setCamera(camera: Camera): void;
-  syncTokens(tokens: readonly TokenDocument[]): void;
+  /**
+   * Sync tactical tokens; `badges` (E06, D-147) optionally carries the condition/effect chips
+   * per token id — structural {code, tint} chips so core canvas never imports a package.
+   */
+  syncTokens(
+    tokens: readonly TokenDocument[],
+    badges?: ReadonlyMap<string, readonly { code: string; tint: number }[]>,
+  ): void;
   /** Rubber-band selection rectangle in world coords (null clears). */
-  setMarquee(a: { x: number; y: number } | null, b?: { x: number; y: number }): void;
+  setMarquee(
+    a: { x: number; y: number } | null,
+    b?: { x: number; y: number },
+  ): void;
   render(): void;
   destroy(): void;
+}
+
+/**
+ * E06 (D-147): condition/effect chips above a token. At most MAX_TOKEN_CHIPS render; the rest
+ * fold into a "+N" chip. Chips rebuild only when the badge signature changes, so refreshes
+ * (camera pan, unrelated doc updates) never churn Pixi display objects.
+ */
+const MAX_TOKEN_CHIPS = 3;
+
+type BadgeChip = { code: string; tint: number };
+
+const badgeChips = new Map<string, string>();
+
+function syncTokenBadges(
+  tokenId: string,
+  view: Container,
+  tokenWidth: number,
+  badges: readonly BadgeChip[] | undefined,
+): void {
+  const signature = badges?.map((b) => `${b.code}:${b.tint}`).join("|") ?? "";
+  if (badgeChips.get(tokenId) === signature) return;
+  badgeChips.set(tokenId, signature);
+  const existing = view.getChildByLabel("badges");
+  if (existing) existing.destroy({ children: true });
+  if (!badges || badges.length === 0) return;
+  const chips = new Container();
+  chips.label = "badges";
+  const shown = badges.slice(0, MAX_TOKEN_CHIPS);
+  const overflow = badges.length - shown.length;
+  let x = 0;
+  for (const badge of shown) {
+    const width = 8 + badge.code.length * 6.5;
+    const bg = new Graphics();
+    bg.roundRect(x, -7, width, 13, 4)
+      .fill({ color: 0x14171c, alpha: 0.92 })
+      .stroke({ width: 1, color: badge.tint });
+    const text = new Text({
+      text: badge.code,
+      style: { fontSize: 9, fill: badge.tint, fontFamily: "sans-serif" },
+    });
+    text.anchor.set(0, 0.5);
+    text.position.set(x + 4, -0.5);
+    chips.addChild(bg, text);
+    x += width + 3;
+  }
+  if (overflow > 0) {
+    const more = new Text({
+      text: `+${overflow}`,
+      style: { fontSize: 9, fill: 0xb0b0b0, fontFamily: "sans-serif" },
+    });
+    more.anchor.set(0, 0.5);
+    more.position.set(x + 2, -0.5);
+    chips.addChild(more);
+  }
+  chips.x = Math.max(0, (tokenWidth - x) / 2);
+  chips.y = 0;
+  view.addChild(chips);
 }
 
 export async function createStage(options: StageOptions): Promise<Stage> {
@@ -212,7 +287,10 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       bgFill.clear().rect(0, 0, viewport.width, viewport.height).fill(color);
       if (bgSprite) bgSprite.tint = color;
     },
-    async setBackgroundImage(bytes: Uint8Array, mime = "image/png"): Promise<void> {
+    async setBackgroundImage(
+      bytes: Uint8Array,
+      mime = "image/png",
+    ): Promise<void> {
       const blob = new Blob([new Uint8Array(bytes)], { type: mime });
       const url = URL.createObjectURL(blob);
       const texture = (await Assets.load(url)) as Texture;
@@ -246,7 +324,11 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     },
     getTilesLayer(options?: TilesLayerOptions): TilesLayer {
       if (!tilesLayer) {
-        tilesLayer = new TilesLayerImpl(tilesBelowLayer, tilesAboveLayer, options ?? {});
+        tilesLayer = new TilesLayerImpl(
+          tilesBelowLayer,
+          tilesAboveLayer,
+          options ?? {},
+        );
       }
       return tilesLayer;
     },
@@ -273,7 +355,10 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       state.camera = { ...camera };
       applyCamera();
     },
-    syncTokens(tokens: readonly TokenDocument[]): void {
+    syncTokens(
+      tokens: readonly TokenDocument[],
+      badges?: ReadonlyMap<string, readonly { code: string; tint: number }[]>,
+    ): void {
       const seen = new Set<string>();
       for (const token of tokens) {
         seen.add(token._id);
@@ -283,7 +368,10 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           view = new Container();
           const body = new Graphics();
           body.label = "body";
-          const label = new Text({ text: token.name, style: { fontSize: 12, fill: 0xffffff } });
+          const label = new Text({
+            text: token.name,
+            style: { fontSize: 12, fill: 0xffffff },
+          });
           label.anchor.set(0.5);
           label.y = rect.height / 2 + 10;
           view.addChild(body, label);
@@ -302,8 +390,10 @@ export async function createStage(options: StageOptions): Promise<Stage> {
             .fill({ color: 0x2b3138, alpha: 0.9 })
             .stroke({ width: 2, color: dispositionColor(token.disposition) });
         }
-        const label = view.children.find((c) => c instanceof Text) as Text | undefined;
+        const label = view.children.find((c) => c instanceof Text) as
+          Text | undefined;
         if (label && label.text !== token.name) label.text = token.name;
+        syncTokenBadges(token._id, view, rect.width, badges?.get(token._id));
       }
       for (const [id, view] of tokenViews) {
         if (!seen.has(id)) {
@@ -311,6 +401,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           view.destroy({ children: true });
           tokenViews.delete(id);
           tokenTargets.delete(id);
+          badgeChips.delete(id);
         }
       }
     },
@@ -401,7 +492,10 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       if (Math.abs(dx) < 0.25 && Math.abs(dy) < 0.25) {
         view.position.set(target.x, target.y);
       } else {
-        view.position.set(view.position.x + dx * 0.25, view.position.y + dy * 0.25);
+        view.position.set(
+          view.position.x + dx * 0.25,
+          view.position.y + dy * 0.25,
+        );
       }
     }
     const cam = state.camera;
@@ -418,7 +512,11 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     gridGraphics.clear();
     if (grid.type === "gridless") return;
     if (grid.type === "hex") {
-      gridGraphics.setStrokeStyle({ width: 1 / cam.scale, color: 0x5c6672, alpha: 0.35 });
+      gridGraphics.setStrokeStyle({
+        width: 1 / cam.scale,
+        color: 0x5c6672,
+        alpha: 0.35,
+      });
       const hexes = hexesInView(grid, world);
       for (const hex of hexes) {
         const center = hexCenter(grid, hex.q, hex.r);
@@ -437,7 +535,11 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     }
     const square: SquareGrid = grid;
     const lines = squareGridLines(square, world);
-    gridGraphics.setStrokeStyle({ width: 1 / cam.scale, color: 0x5c6672, alpha: 0.35 });
+    gridGraphics.setStrokeStyle({
+      width: 1 / cam.scale,
+      color: 0x5c6672,
+      alpha: 0.35,
+    });
     const y0 = world.y - 1 / cam.scale;
     const y1 = world.y + world.height + 1 / cam.scale;
     for (const x of lines.verticals) gridGraphics.moveTo(x, y0).lineTo(x, y1);

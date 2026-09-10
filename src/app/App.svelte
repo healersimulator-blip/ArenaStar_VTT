@@ -4,6 +4,7 @@
   import { DEFAULT_SCENE_ID, makeToken, type HostApp } from "./hostBoot";
   import { createStage, type Stage } from "../canvas/stage";
   import { tokenRect } from "../canvas/tokens";
+  import { tokenBadgesMap } from "../packages/pf1e/tokenBadges";
   import { SvelteMap } from "svelte/reactivity";
   // static import: a dynamic import("pixi.js") would inline a SECOND copy of
   // pixi into the single-file bundle (+290 KB, D-083)
@@ -475,7 +476,16 @@
     worldName = current.meta.name;
     seq = current.gm.client.store.seq;
     tokenCount = scene?.tokens.length ?? 0;
-    view.syncTokens(scene?.tokens ?? []);
+    const tokens = scene?.tokens ?? [];
+    // E06 (D-147): condition/effect chips derive on read from the client replica, so apply,
+    // suppress and expiry all re-render the badges with no invalidation step.
+    view.syncTokens(
+      tokens,
+      tokenBadgesMap(tokens, {
+        actors: current.gm.client.store.getAll("actors") as ActorDocument[],
+        combats: current.gm.client.store.getAll("combats") as CombatDocument[],
+      }),
+    );
     // §9 tiles: roofs fade over tokens with vision (D-083)
     const occupied = (scene?.tokens ?? [])
       .filter((t) => t.vision)

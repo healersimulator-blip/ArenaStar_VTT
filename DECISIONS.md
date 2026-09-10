@@ -3128,3 +3128,34 @@ transcription (which agrees); no other new research.
   skipped** across 132 files; typecheck, lint, touched-file Prettier, build, size and
   `build:systems` green; dist 2,139,571 raw / 618,239 gzip (+4,235 over D-145, within the
   6 MB budget).
+
+## D-147 — 2026-09-10 — P4/E06: token condition badges and read-only recompute; initiative stays frozen
+
+- **Context:** E06 asks for UI/roll statistics to recompute on effect changes, token condition
+  icons, proof that expiry restores base values, and an initiative-policy check before any
+  re-sort. Derivation is already on-read (`deriveFromDocuments`, D-112: never persist derived
+  totals), so "recompute on change" needs no listener — only consumers that read the replica
+  every frame, and proof.
+- **Decision:** token badges are a pure read-side model (`tokenBadgesFor`/`tokenBadgesMap` in
+  the pf1e package) consumed by the canvas stage's `syncTokens` as structural
+  `{code, tint}` chips (core canvas never imports the package). Badge sources are the two E01
+  homes — the combatant linked by `tokenId` (combat copy wins id collisions; an under-way
+  encounter with `round ≥ 1` wins the claim, matching the E01 linked-combatant rule) and the
+  token's `actorId` embedded effects — filtered to validated, non-suppressed documents, with
+  E03 conditions sorted first under their SRD label. Chip abbreviation ("Flat-Footed" → "FF")
+  and tint are deterministic, so badges don't flicker between refreshes; the renderer caps at
+  3 chips + "+N" and rebuilds only when the chip signature changes. Initiative policy (R02):
+  order is frozen when the encounter starts; effect apply/expire/recompute never re-sorts and
+  never rewrites initiative values — the D-145/E04 tracker mutates only round state, action
+  ledgers and effect documents, and the E06 test pins array order + initiative across a real
+  expiry transition.
+- **Consequences:** P4 is complete (E01–E06). Recompute-on-effect-change is structural: any
+  future consumer that reads the replica (roll panels, sheets) inherits it for free. Badge
+  icons remain text chips until an asset pipeline exists (P5 seam); hover/detail UI for chips
+  is deferred with it. Browser e2e remains collected-not-executed (D-119).
+- **Evidence:** 10 new tests in `tests/packages/pf1eTokenBadges.test.ts` (chip codes/tints,
+  record-level collect incl. suppressed + unparseable, both homes, collision + encounter
+  preference, condition ordering, the real apply→expire→base-restore round trip with
+  initiative stability, map shape). Full suite **1219 passed / 3 skipped** across 133 files;
+  typecheck, lint, touched-file Prettier, build, size and `build:systems` green; dist
+  2,141,938 raw / 619,453 gzip (+2,367 over D-146, within the 6 MB budget).
