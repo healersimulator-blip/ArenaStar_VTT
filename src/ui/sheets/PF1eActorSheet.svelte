@@ -18,6 +18,7 @@
   import { can } from "../../core/permissions";
   import {
     SHEET_FIELDS,
+    isPF1eActor,
     sheetRecord,
     pf1eDetailEdit,
     type DetailEdit,
@@ -26,6 +27,8 @@
     pf1eSheetView,
     type SheetField,
   } from "./pf1eSheetModel";
+  import { resolveAttackFlow } from "./pf1eResolveFlow";
+  import type { PF1eDefenseChoice } from "../../packages/pf1e/resolve";
 
   let {
     doc,
@@ -73,6 +76,102 @@
   }
   function rollAll(specs: readonly PF1eRollSpec[]): void {
     for (const spec of specs) rollSpec(spec);
+  }
+
+  // A06b — resolve one attack against a target actor: public rolls, the
+  // resolution card, and HP writes through the sheet's own op path.
+  let resolveTargetId = $state("");
+  let resolveAttackIndex = $state(0);
+  let resolveDefense = $state<PF1eDefenseChoice>("normal");
+  let resolveFlanking = $state(false);
+  let resolveCharging = $state(false);
+  let resolveNonlethal = $state(false);
+  let resolveVerifiable = $state(false);
+  let resolveBusy = $state(false);
+  let resolveError = $state("");
+  let authoredAttacksCount = $derived(
+    Array.isArray(view.authored.attacks) ? view.authored.attacks.length : 0,
+  );
+
+  function pf1eTargetActors(): ActorDocument[] {
+    return (client.store.getAll("actors") as readonly ActorDocument[]).filter(
+      (a) => a._id !== doc._id && isPF1eActor(a),
+    );
+  }
+
+  function resolveTargetInfo(): {
+    actor: ActorDocument;
+    derived: ReturnType<typeof pf1eSheetView>["derived"];
+  } | null {
+    if (!resolveTargetId) return null;
+    const actor = client.store.get("actors", resolveTargetId) as
+      ActorDocument | undefined;
+    if (!actor) return null;
+    return { actor, derived: pf1eSheetView(actor).derived };
+  }
+
+  /** The defense dropdown label, with the picked target's derived AC appended. */
+  function defenseOptionLabel(kind: PF1eDefenseChoice): string {
+    const name =
+      kind === "normal" ? "Normal" : kind === "touch" ? "Touch" : "Flat-footed";
+    const info = resolveTargetInfo();
+    if (!info) return name;
+    const ac =
+      kind === "normal"
+        ? info.derived.ac.normal
+        : kind === "touch"
+          ? info.derived.ac.touch
+          : info.derived.ac.flatFooted;
+    return `${name} ${String(ac)}`;
+  }
+
+  async function resolveVsTarget(): Promise<void> {
+    resolveError = "";
+    const info = resolveTargetInfo();
+    const group = attackRolls[resolveAttackIndex];
+    const line = d.attacks[resolveAttackIndex];
+    if (!info || !group || !line) {
+      resolveError = "Pick an attack and a target.";
+      return;
+    }
+    resolveBusy = true;
+    try {
+      const outcome = await resolveAttackFlow(client, client.user, {
+        attackerName: doc.name,
+        line,
+        iterative: 0,
+        attackFormula: group.attack.formula,
+        damageFormula: group.damage?.formula ?? "0",
+        critDamageFormula: group.critDamage?.formula ?? null,
+        targetName: info.actor.name,
+        targetActor: info.actor,
+        targetDerived: info.derived,
+        defense: resolveDefense,
+        ...(resolveFlanking || resolveCharging
+          ? {
+              situational: {
+                ...(resolveFlanking ? { flanking: true } : {}),
+                ...(resolveCharging ? { charging: true } : {}),
+              },
+            }
+          : {}),
+        ...(resolveNonlethal ? { nonlethalDamage: true } : {}),
+        // Only the derived unarmed fallback (no authored attack lines) counts
+        // as the unarmed strike for the natural nonlethal bucket and IUS waiver.
+        ...(authoredAttacksCount === 0 ? { unarmed: true } : {}),
+        ...(Array.isArray(view.authored.feats)
+          ? { feats: view.authored.feats as string[] }
+          : {}),
+        ...(group.provokes ? { provokes: true } : {}),
+        ...(resolveVerifiable ? { verifiable: true } : {}),
+      });
+      if (!outcome.ok) resolveError = outcome.error;
+      else if (outcome.hpWriteError !== null) {
+        resolveError = outcome.hpWriteError;
+      }
+    } finally {
+      resolveBusy = false;
+    }
   }
   let editable = $derived(
     client.user !== null && can(client.user, "update", doc, "actors"),
@@ -301,9 +400,70 @@
           {/if}
         </div>
       {/each}
+      <h4>Resolve vs target</h4>
+      <div class="resolve" data-pf1e-resolve>
+        <label
+          >Attack
+          <select bind:value={resolveAttackIndex}>
+            {#each attackRolls as group, i (i)}
+              <option value={i}>{group.label} {group.attack.formula}</option>
+            {/each}
+          </select>
+        </label>
+        <label
+          >Target
+          <select bind:value={resolveTargetId} data-pf1e-resolve-target>
+            <option value="">— pick a target —</option>
+            {#each pf1eTargetActors() as target (target._id)}
+              <option value={target._id}>{target.name}</option>
+            {/each}
+          </select>
+        </label>
+        <label
+          >Defense
+          <select bind:value={resolveDefense} data-pf1e-resolve-defense>
+            <option value="normal">{defenseOptionLabel("normal")}</option>
+            <option value="touch">{defenseOptionLabel("touch")}</option>
+            <option value="flatFooted"
+              >{defenseOptionLabel("flatFooted")}</option
+            >
+          </select>
+        </label>
+        <label
+          ><input type="checkbox" bind:checked={resolveFlanking} /> Flanking +2</label
+        >
+        <label
+          ><input type="checkbox" bind:checked={resolveCharging} /> Charge +2</label
+        >
+        <label
+          ><input
+            type="checkbox"
+            bind:checked={resolveNonlethal}
+            data-pf1e-resolve-nonlethal
+          /> Nonlethal (−4 with a lethal weapon)</label
+        >
+        <label
+          ><input
+            type="checkbox"
+            bind:checked={resolveVerifiable}
+            data-pf1e-resolve-verifiable
+          /> Commit-reveal rolls (verifiable)</label
+        >
+        <button
+          type="button"
+          disabled={resolveBusy || !resolveTargetId}
+          onclick={() => void resolveVsTarget()}
+          data-pf1e-resolve-attack
+          >{resolveBusy ? "Resolving…" : "Attack"}</button
+        >
+        {#if resolveError}<p class="warn" data-pf1e-resolve-error>
+            {resolveError}
+          </p>{/if}
+      </div>
       <p class="note">
-        Rolls post to chat with their breakdown; damage application to a target
-        and interrupt resolution are the next slice (P3/A06b, P6).
+        Rolls post to chat with their breakdown; resolution rolls attack (+
+        confirmation on a threat) and damage publicly and writes hp through the
+        sheet's op path. The AoO interrupt queue is P6.
       </p>
       <h4>Saves & checks</h4>
       <div class="rolls">
@@ -388,6 +548,20 @@
     margin: 8px 0;
   }
   header span,
+  .resolve {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    padding: 6px;
+    border: 1px solid #3a4656;
+    border-radius: 6px;
+  }
+  .resolve label {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+  }
   .attack-line {
     border-top: 1px solid #2a3547;
     padding-top: 4px;

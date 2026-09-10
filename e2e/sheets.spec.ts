@@ -739,3 +739,126 @@ test("PF1e sheet roll buttons post attacks, damage and saves to chat with their 
 
   expect(runtimeErrors).toEqual([]);
 });
+
+test("PF1e resolve-vs-target posts public rolls, a resolution card and hp writes (A06b)", async ({
+  page,
+}) => {
+  const runtimeErrors: string[] = [];
+  page.on("pageerror", (error) => runtimeErrors.push(error.message));
+  const { strToU8, zipSync } = await import("fflate");
+  const { surfaceCallArg } = await import("./lib");
+  const manifest = {
+    id: "pf-resolve-fixture",
+    name: "PF Resolve Fixture",
+    version: "1.0.0",
+    type: "data",
+    packs: [{ name: "fighters", type: "actors", file: "packs/fighters.json" }],
+  };
+  const pack = {
+    name: "fighters",
+    type: "actors",
+    entries: [
+      {
+        id: "pf-striker",
+        name: "PF Striker",
+        data: {
+          type: "actor",
+          name: "PF Striker",
+          system: {
+            pf1e: {
+              abilities: { str: 16, dex: 14, con: 14 },
+              baseAttack: 6,
+              hp: 30,
+              hpMax: 30,
+              attacks: [
+                {
+                  name: "Longsword",
+                  damageDice: "1d8",
+                  damageBonus: 1,
+                  damageType: "slashing",
+                  critThreatMin: 19,
+                  critMultiplier: 2,
+                },
+              ],
+            },
+          },
+          items: [],
+          effects: [],
+        },
+      },
+      {
+        id: "pf-dummy",
+        name: "PF Dummy",
+        data: {
+          type: "actor",
+          name: "PF Dummy",
+          system: {
+            pf1e: {
+              abilities: { dex: 14, con: 12 },
+              hp: 12,
+              hpMax: 12,
+              armorClass: { armor: 4 },
+            },
+          },
+          items: [],
+          effects: [],
+        },
+      },
+    ],
+  };
+  const zip = zipSync({
+    "manifest.json": strToU8(JSON.stringify(manifest)),
+    "packs/fighters.json": strToU8(JSON.stringify(pack)),
+  });
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  expect(
+    await surfaceCallArg<{ ok: boolean }>(
+      page,
+      "app",
+      "importPackageZip",
+      Array.from(zip),
+    ),
+  ).toMatchObject({ ok: true });
+  await page.click('[data-tab="compendia"]');
+  await page
+    .locator('[data-entry-id="pf-striker"] [data-entry-import]')
+    .click();
+  await page.locator('[data-entry-id="pf-dummy"] [data-entry-import]').click();
+  await page.click('[data-tab="actors"]');
+  await page
+    .locator("#sheet-list .sheet-row")
+    .filter({ hasText: "PF Striker" })
+    .click();
+  const sheet = page.locator("#sheets [data-pf1e-sheet]");
+  await sheet.getByRole("button", { name: "combat", exact: true }).click();
+
+  // The resolve panel lists the other PF1e actor and its derived AC trio
+  // (10 + Dex 2 + armor 4 = 16 normal, 12 touch, 14 flat-footed).
+  const resolve = sheet.locator("[data-pf1e-resolve]");
+  await expect(resolve).toBeVisible();
+  const targetSelect = resolve.locator("[data-pf1e-resolve-target]");
+  await targetSelect.selectOption({ label: "PF Dummy" });
+  const defenseSelect = resolve.locator("[data-pf1e-resolve-defense]");
+  await expect(defenseSelect).toContainText("Normal 16");
+  await expect(defenseSelect).toContainText("Touch 12");
+  await expect(defenseSelect).toContainText("Flat-footed 14");
+
+  // Resolve: the attack rollcard posts publicly with its breakdown, then the
+  // resolution card names the target, the defense and the verdict.
+  await resolve.locator("[data-pf1e-resolve-attack]").click();
+  const chat = page.locator("#chat-log");
+  await expect(chat.locator(".rollcard").first()).toContainText("1d20 + 9");
+  const card = page.locator("#chat-log .line", {
+    hasText: "PF Striker: Longsword vs PF Dummy",
+  });
+  await expect(card).toHaveCount(1);
+  const text = (await card.textContent()) ?? "";
+  expect(text).toMatch(/hits\.|misses\.|CRITS!/);
+  // A hit (or crit) also rolls damage and writes hp through the op path: the
+  // card must then carry the before → after line for the 12-HP dummy.
+  if (/hits\.|CRITS!/.test(text)) {
+    expect(text).toMatch(/PF Dummy 12 → \d+ HP/);
+  }
+  expect(runtimeErrors).toEqual([]);
+});

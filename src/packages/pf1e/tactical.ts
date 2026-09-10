@@ -221,6 +221,57 @@ export interface PF1eSituationalModifiers {
   squeezing?: boolean | undefined;
 }
 
+/**
+ * The situational attack modifiers as labeled parts (Gap-List-verified
+ * values): flanking +2 (§2.2), charge +2 (the −2 AC half is the defender's),
+ * invisible attacker +2 (A.8), squeezing −4 (A.7). Exported because the A06
+ * resolve flow adds the same deltas on top of a derived attack line, and the
+ * numbers must live in exactly one place.
+ */
+export function situationalAttackParts(
+  situational?: PF1eSituationalModifiers | undefined,
+): PF1eModifierPart[] {
+  if (situational === undefined) return [];
+  const parts: PF1eModifierPart[] = [];
+  if (situational.flanking === true)
+    parts.push({ label: "flanking", value: 2 });
+  if (situational.charging === true) parts.push({ label: "charge", value: 2 });
+  if (situational.attackerInvisible === true)
+    parts.push({ label: "invisible attacker", value: 2 });
+  if (situational.squeezing === true)
+    parts.push({ label: "squeezing", value: -4 });
+  return parts;
+}
+
+/**
+ * The CRB p.191 damage-intent swap penalty as one labeled part, or null when
+ * no swap is happening. Lethal damage with a nonlethal weapon ("including an
+ * unarmed strike") is −4 — Improved Unarmed Strike waives it for unarmed
+ * strikes only (AoN ID 131), never for a sap or whip. Nonlethal damage with a
+ * lethal weapon is −4 and no feat waives it. Exported for the A06 resolve
+ * flow, which feeds derived attack lines (no weapon descriptor) through the
+ * same rule.
+ */
+export function damageIntentPenaltyPart(input: {
+  weaponNonlethal: boolean;
+  unarmed?: boolean | undefined;
+  improvedUnarmedStrike?: boolean | undefined;
+  lethalIntent?: boolean | undefined;
+  nonlethalIntent?: boolean | undefined;
+}): PF1eModifierPart | null {
+  if (
+    input.weaponNonlethal &&
+    input.lethalIntent === true &&
+    !(input.unarmed === true && input.improvedUnarmedStrike === true)
+  ) {
+    return { label: "lethal damage with a nonlethal weapon", value: -4 };
+  }
+  if (!input.weaponNonlethal && input.nonlethalIntent === true) {
+    return { label: "nonlethal damage with a lethal weapon", value: -4 };
+  }
+  return null;
+}
+
 export interface PF1eAttackModifierInput {
   attacker: PF1eAttackActor;
   weapon: PF1eWeaponDescriptor;
@@ -348,31 +399,18 @@ export function attackModifierParts(
     parts.push({ label: "secondary natural attack", value: -5 });
   }
 
-  // Lethal damage with a nonlethal weapon (CRB p.191, AoN ID 172): −4 — the
-  // rule covers every nonlethal weapon, "including an unarmed strike". IUS
-  // waives it for unarmed strikes only (AoN ID 131), never for a sap/whip.
-  if (
-    weapon.nonlethal === true &&
-    input.lethalIntent === true &&
-    !(
-      weapon.unarmed === true &&
-      feats.includes(PF1E_FEAT_IMPROVED_UNARMED_STRIKE)
-    )
-  ) {
-    parts.push({ label: "lethal damage with a nonlethal weapon", value: -4 });
-  }
+  const intentPenalty = damageIntentPenaltyPart({
+    weaponNonlethal: weapon.nonlethal === true,
+    ...(weapon.unarmed === true ? { unarmed: true } : {}),
+    ...(feats.includes(PF1E_FEAT_IMPROVED_UNARMED_STRIKE)
+      ? { improvedUnarmedStrike: true }
+      : {}),
+    ...(input.lethalIntent === true ? { lethalIntent: true } : {}),
+    ...(input.nonlethalIntent === true ? { nonlethalIntent: true } : {}),
+  });
+  if (intentPenalty !== null) parts.push(intentPenalty);
 
-  // Nonlethal damage with a lethal weapon (CRB p.191): −4. No feat waives it.
-  if (weapon.nonlethal !== true && input.nonlethalIntent === true) {
-    parts.push({ label: "nonlethal damage with a lethal weapon", value: -4 });
-  }
-
-  const sit = input.situational;
-  if (sit?.flanking === true) parts.push({ label: "flanking", value: 2 });
-  if (sit?.charging === true) parts.push({ label: "charge", value: 2 });
-  if (sit?.attackerInvisible === true)
-    parts.push({ label: "invisible attacker", value: 2 });
-  if (sit?.squeezing === true) parts.push({ label: "squeezing", value: -4 });
+  parts.push(...situationalAttackParts(input.situational));
 
   if (input.shootingIntoMelee !== undefined && mode === "ranged") {
     const penalty = shootingIntoMeleePenalty({

@@ -2740,3 +2740,87 @@ entry records wiring decisions, not fresh rules research.
   formatted; the legacy core/sync/chat/e2e files keep touched-lines-only
   patches), build, size and `build:systems` green; dist 2,059,693 raw /
   595,828 gzip — +5,179 bytes over D-138, within the 6 MB budget.
+
+## D-140 — A06b: attack resolution — defense selection, confirmation, mitigation, HP writes, the Verify chip
+
+**Date:** 2026-09-10. **Scope:** P3/A06, second slice (closes A06). Sources
+fetched and verified verbatim before encoding: Injury and Death (CRB p.189–190,
+AoN Rules IDs 164–168 — disabled at **exactly** 0 HP; negative-but-not-≥Con ⇒
+unconscious and dying, losing 1 HP per round; dead when the negative total
+equals the Constitution score) and Nonlethal Damage (CRB p.191, AoN Rules
+ID 172 — nonlethal is never deducted from hit points; equal to current HP ⇒
+staggered, exceeding ⇒ unconscious; nonlethal already at **total maximum** HP
+⇒ all further nonlethal is treated as lethal, with the explicit regeneration
+exception; both −4 damage-intent swaps). Everything else composes layers
+already verified in D-135/D-136/D-138 — no other new rule research.
+
+- **`src/packages/pf1e/resolve.ts` (new, pure, diceless):** `pf1eResolveAttack`
+  composes A02's `resolveAttackRoll` (defense picked from the derived AC trio,
+  a touch attack forcing touch), A03's `confirmCritical` (a threat without
+  `confirmDie` is a caller error, never a rules state; a multiplier below 2
+  downgrades a confirmed threat to a normal hit, matching D-139), the
+  minimum-damage rule (a sub-1 total deals 1 point of **nonlethal**, even on a
+  lethal-intent hit), A05's `applyMitigation` through `damageComponentsFromRoll`
+  (one physical weapon component — a derived line carries no riders), and the
+  HP arithmetic: lethal subtracts, nonlethal accumulates with the max-HP
+  conversion (regeneration suppresses it). Condition annotations — dead at
+  −Con, dying, disabled at exactly 0, unconscious/staggered from nonlethal —
+  are notes only; P7 owns the writes. `pf1eResolvePrepare` is the exported
+  first half (bonus/defense/A02 roll) the chat flow orchestrates with, and
+  `pf1eResolveAttack` runs the same code, so the halves cannot disagree.
+- **The situational/intent numbers live once:** `tactical.ts` now exports
+  `situationalAttackParts` (flanking/charge/invisible +2, squeezing −4) and
+  `damageIntentPenaltyPart` (the CRB p.191 −4 swaps, IUS waiving the unarmed
+  lethal one only), with `attackModifierParts` refactored onto them — a pure
+  extraction; all 76 A02/A03 tests pass unchanged. The resolve layer consumes
+  the same helpers on top of a derived attack line.
+- **`src/ui/sheets/pf1eResolveFlow.ts` (new):** the orchestration — every die
+  is a public host-evaluated roll (`client.roll`, or `client.rollVerified`
+  when verifiable), found back in the replica by `flags.core.rollId` with the
+  natural d20 face read from the message's dice terms; a threat rolls the
+  confirmation at the effective bonus; a hit rolls the damage formula (the
+  D-139 crit-formula groups on a confirmed crit, chosen by the same exported
+  `confirmCritical` the resolver runs). The resolution card is an ordinary
+  `messages` create op whose content uses the chat's `[[total|formula]]` chips;
+  HP writes go through `pf1eSheetEdit` ("hp"/"nonlethalDamage") so ownership
+  and validation are the sheet's own path — a resolver without target
+  ownership narrates but cannot write, and the card says so.
+- **The Verify chip (the plan's "where the GM opted in"):** implemented as the
+  resolving user's commit-reveal toggle in the resolve panel; when on, the
+  attack rides `rollVerified` and the card carries the `verifyCommitRoll`
+  verdict ("✓ verified" / "⚠ verification FAILED"), omitted when crypto was
+  unavailable (the silent plain-roll fallback). A world-level GM setting can
+  replace the toggle later without any protocol change.
+- **Unarmed natural bucket:** the derived unarmed fallback's `damageType`
+  string ("bludgeoning") does not say nonlethal, but an unarmed strike deals
+  nonlethal by default (AoN ID 131) — the flow passes `unarmed: true` for the
+  fallback (authoredAttacksCount 0), which makes nonlethal the natural bucket,
+  so toggling to lethal takes the −4 (waived with IUS) instead of the reverse.
+- **Deliberately not encoded:** defender critical-hit immunity and energy
+  immunity/vulnerability (no authored actor fields exist — E03/P4 own the
+  condition side; A05's flags light up when authoring lands), DR bypass facts
+  beyond the mundane default (derived attack lines carry no weapon descriptor —
+  `attackFacts` is the seam for the Weapons-tab/A07 wiring), precision/energy
+  riders, resolving full-attack iteratives against a target as one sequence
+  (each attack resolves individually), dying/stable bookkeeping (P7) and the
+  AoO interrupt queue (P6 — the provocation is a note on the card and the
+  sheet badge, exactly the "preliminary prompt" A06 asks for).
+- **Evidence:** 20 new tests in `tests/packages/pf1eResolve.test.ts` — the
+  plan §6.2 discriminating fixtures all land: the 22/16/17 AC trio (total 19
+  misses normal, hits touch and flat-footed), flanked 18-vs-AC-19 misses and
+  19 hits (with the dropped/doubled-flank controls), and the min-damage
+  fixture (1d6−10 ⇒ 1 nonlethal, DR bypassed via the damage type, unconscious
+  when nonlethal exceeds current HP; the equals-case staggers) — plus the
+  confirmation boundary, the multiplier-<2 downgrade, the max-HP conversion
+  and its regeneration exception, dead-at-−Con, the IUS waiver matrix, the
+  object halving and validation refusals. 9 new tests in
+  `tests/ui/pf1eResolveFlow.test.ts` drive the flow through a fake client:
+  hit/miss/confirmed-crit (asserting the D-139 crit formula is the one
+  rolled)/unconfirmed-threat/rejected HP write/the commit-reveal Verify chip
+  (a legitimately verifiable record built from the exported seed machinery)
+  and the pure helpers. One new e2e specification (resolve-vs-target with a
+  two-actor fixture; 27 tests collected in `e2e/sheets.spec.ts` across 3
+  projects, not executed — no browser binaries, D-119 precedent). Full suite
+  **1125 passed / 3 skipped** across 126 files; typecheck, lint, touched-file
+  Prettier, build, size and `build:systems` green; dist 2,080,869 raw /
+  602,541 gzip — +21,176 over D-139, within the 6 MB budget. A07 remains.
