@@ -109,6 +109,12 @@ import {
   type PF1eWeaponDescriptor,
   type PF1eWeaponProficiency,
 } from "./weapons";
+import {
+  featAttackParts,
+  featDamageParts,
+  hasPF1eFeat,
+  offHandAttackCount,
+} from "./feats";
 
 /** Feat ids this layer recognizes. A07 generalizes feat handling; these are the three A02's rules name. */
 export const PF1E_FEAT_TWO_WEAPON_FIGHTING = "two-weapon-fighting";
@@ -156,8 +162,14 @@ export function twfPenalties(input: {
 export function shootingIntoMeleePenalty(input: {
   sizeCategoriesLarger?: number | undefined;
   preciseShot?: boolean | undefined;
+  /** Geometry supplied by the scene query: the target must actually be engaged. */
+  targetEngaged?: boolean | undefined;
+  /** Distance from the nearest friendly creature in feet. Ten feet or more avoids the penalty. */
+  nearestFriendlyDistanceFt?: number | undefined;
 }): number {
   if (input.preciseShot === true) return 0;
+  if (input.targetEngaged === false) return 0;
+  if ((input.nearestFriendlyDistanceFt ?? 0) >= 10) return 0;
   const larger = input.sizeCategoriesLarger ?? 0;
   if (larger >= 3) return 0;
   if (larger === 2) return -2;
@@ -296,10 +308,21 @@ export interface PF1eAttackModifierInput {
     | {
         /** Target size categories larger than the friendly characters it is engaged with. */
         sizeCategoriesLarger?: number | undefined;
+        targetEngaged?: boolean | undefined;
+        nearestFriendlyDistanceFt?: number | undefined;
       }
     | undefined;
   /** Untyped caller-supplied modifier, labeled as given. */
   misc?: number | undefined;
+  /** A07 stance toggles; feats are never activated implicitly. */
+  powerAttack?: boolean | undefined;
+  deadlyAim?: boolean | undefined;
+  combatExpertise?: boolean | undefined;
+  fightingDefensively?: boolean | undefined;
+  pointBlankShot?: boolean | undefined;
+  distanceFt?: number | undefined;
+  /** Explicitly selected Weapon Finesse stat substitution. */
+  weaponFinesse?: boolean | undefined;
 }
 
 export interface PF1eAttackModifierResult {
@@ -324,11 +347,18 @@ export function attackModifierParts(
   const mode =
     input.mode ??
     (weapon.class === "melee" || weapon.natural ? "melee" : "ranged");
+  const finesse =
+    input.weaponFinesse === true &&
+    !weapon.natural &&
+    !weapon.unarmed &&
+    weapon.handedness === "light" &&
+    hasPF1eFeat(feats, "Weapon Finesse");
+  const usesDex = mode === "ranged" || finesse;
   const parts: PF1eModifierPart[] = [
     { label: "BAB", value: Math.trunc(attacker.bab) },
     {
-      label: mode === "melee" ? "Str" : "Dex",
-      value: mode === "melee" ? attacker.strMod : attacker.dexMod,
+      label: usesDex ? "Dex" : "Str",
+      value: usesDex ? attacker.dexMod : attacker.strMod,
     },
     {
       label: "size",
@@ -412,10 +442,32 @@ export function attackModifierParts(
 
   parts.push(...situationalAttackParts(input.situational));
 
+  parts.push(
+    ...featAttackParts({
+      feats,
+      bab: attacker.bab,
+      ranged: mode === "ranged",
+      ...(weapon.name ? { weaponName: weapon.name } : {}),
+      weaponFinesseEligible: weapon.handedness === "light",
+      powerAttack: input.powerAttack,
+      deadlyAim: input.deadlyAim,
+      combatExpertise: input.combatExpertise,
+      fightingDefensively: input.fightingDefensively,
+      pointBlankShot: input.pointBlankShot,
+      distanceFt: input.distanceFt,
+    }),
+  );
+
   if (input.shootingIntoMelee !== undefined && mode === "ranged") {
     const penalty = shootingIntoMeleePenalty({
       ...(input.shootingIntoMelee.sizeCategoriesLarger !== undefined
         ? { sizeCategoriesLarger: input.shootingIntoMelee.sizeCategoriesLarger }
+        : {}),
+      ...(input.shootingIntoMelee.targetEngaged !== undefined
+        ? { targetEngaged: input.shootingIntoMelee.targetEngaged }
+        : {}),
+      ...(input.shootingIntoMelee.nearestFriendlyDistanceFt !== undefined
+        ? { nearestFriendlyDistanceFt: input.shootingIntoMelee.nearestFriendlyDistanceFt }
         : {}),
       preciseShot: feats.includes(PF1E_FEAT_PRECISE_SHOT),
     });
@@ -471,6 +523,13 @@ export interface PF1eFullAttackInput {
   situational?: PF1eSituationalModifiers | undefined;
   shootingIntoMelee?: { sizeCategoriesLarger?: number | undefined } | undefined;
   misc?: number | undefined;
+  powerAttack?: boolean | undefined;
+  deadlyAim?: boolean | undefined;
+  combatExpertise?: boolean | undefined;
+  fightingDefensively?: boolean | undefined;
+  pointBlankShot?: boolean | undefined;
+  distanceFt?: number | undefined;
+  weaponFinesse?: boolean | undefined;
 }
 
 /**
@@ -521,6 +580,13 @@ export function fullAttackPlan(input: PF1eFullAttackInput): {
     situational: input.situational,
     shootingIntoMelee: input.shootingIntoMelee,
     misc: input.misc,
+    powerAttack: input.powerAttack,
+    deadlyAim: input.deadlyAim,
+    combatExpertise: input.combatExpertise,
+    fightingDefensively: input.fightingDefensively,
+    pointBlankShot: input.pointBlankShot,
+    distanceFt: input.distanceFt,
+    weaponFinesse: input.weaponFinesse,
   });
   const primaryFlat = primaryParts.total - primaryParts.bab;
   const ladder = weapon.natural
@@ -554,12 +620,22 @@ export function fullAttackPlan(input: PF1eFullAttackInput): {
       situational: input.situational,
       shootingIntoMelee: input.shootingIntoMelee,
       misc: input.misc,
+      powerAttack: input.powerAttack,
+      deadlyAim: input.deadlyAim,
+      combatExpertise: input.combatExpertise,
+      fightingDefensively: input.fightingDefensively,
+      pointBlankShot: input.pointBlankShot,
+      distanceFt: input.distanceFt,
+      weaponFinesse: input.weaponFinesse,
     });
     attacks.push({
       name: input.offHandWeapon.name,
       hand: "off-hand",
       weapon: input.offHandWeapon,
-      attackBonuses: [offParts.total],
+      attackBonuses: Array.from(
+        { length: offHandAttackCount(feats) },
+        (_, index) => offParts.total - index * 5,
+      ),
       parts: offParts.parts,
       notes: offParts.notes,
       provokes:
@@ -583,12 +659,22 @@ export function fullAttackPlan(input: PF1eFullAttackInput): {
       situational: input.situational,
       shootingIntoMelee: input.shootingIntoMelee,
       misc: input.misc,
+      powerAttack: input.powerAttack,
+      deadlyAim: input.deadlyAim,
+      combatExpertise: input.combatExpertise,
+      fightingDefensively: input.fightingDefensively,
+      pointBlankShot: input.pointBlankShot,
+      distanceFt: input.distanceFt,
+      weaponFinesse: input.weaponFinesse,
     });
     attacks.push({
       name: `${weapon.name} (off-hand head)`,
       hand: "off-hand",
       weapon,
-      attackBonuses: [offParts.total],
+      attackBonuses: Array.from(
+        { length: offHandAttackCount(feats) },
+        (_, index) => offParts.total - index * 5,
+      ),
       parts: offParts.parts,
       notes: offParts.notes,
       provokes: false,
@@ -624,6 +710,13 @@ export function fullAttackPlan(input: PF1eFullAttackInput): {
       naturalAsSecondary: asSecondary,
       situational: input.situational,
       misc: input.misc,
+      powerAttack: input.powerAttack,
+      deadlyAim: input.deadlyAim,
+      combatExpertise: input.combatExpertise,
+      fightingDefensively: input.fightingDefensively,
+      pointBlankShot: input.pointBlankShot,
+      distanceFt: input.distanceFt,
+      weaponFinesse: input.weaponFinesse,
     });
     attacks.push({
       name: natural.name,
@@ -650,6 +743,13 @@ export function fullAttackPlan(input: PF1eFullAttackInput): {
       naturalAsSecondary: false,
       situational: input.situational,
       misc: input.misc,
+      powerAttack: input.powerAttack,
+      deadlyAim: input.deadlyAim,
+      combatExpertise: input.combatExpertise,
+      fightingDefensively: input.fightingDefensively,
+      pointBlankShot: input.pointBlankShot,
+      distanceFt: input.distanceFt,
+      weaponFinesse: input.weaponFinesse,
     });
     const rebuiltFlat = rebuilt.total - rebuilt.bab;
     const primary = attacks[0];
@@ -988,6 +1088,10 @@ export interface PF1eDamageModifierInput {
    * static modifier ("roll the damage with all modifiers multiple times").
    */
   misc?: number | undefined;
+  powerAttack?: boolean | undefined;
+  deadlyAim?: boolean | undefined;
+  pointBlankShot?: boolean | undefined;
+  distanceFt?: number | undefined;
 }
 
 /**
@@ -1068,6 +1172,22 @@ export function damageModifierParts(input: PF1eDamageModifierInput): {
   if (input.misc !== undefined && input.misc !== 0) {
     parts.push({ label: "misc", value: input.misc });
   }
+
+  parts.push(
+    ...featDamageParts({
+      feats: attacker.feats,
+      bab: attacker.bab,
+      ranged: mode === "ranged",
+      weaponName: weapon.name,
+      hand,
+      twoHanded:
+        weapon.handedness === "two-handed" || input.wieldingTwoHanded === true,
+      powerAttack: input.powerAttack,
+      deadlyAim: input.deadlyAim,
+      pointBlankShot: input.pointBlankShot,
+      distanceFt: input.distanceFt,
+    }),
+  );
 
   return {
     parts,
