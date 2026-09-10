@@ -9,7 +9,13 @@
     client,
     bus,
     actorId,
-  }: { client: ClientSync; bus: EventBus<ClientEvents>; actorId: string } = $props();
+    initialTab = "summary",
+  }: {
+    client: ClientSync;
+    bus: EventBus<ClientEvents>;
+    actorId: string;
+    initialTab?: string;
+  } = $props();
   let actor = $state<ActorDocument | null>(null);
 
   // Window payload/client changes replace the subscription as well as its content.
@@ -23,7 +29,12 @@
 
 {#if actor}
   {#key actor._id}
-    <PF1eActorSheet doc={actor} {client} {bus} />
+    <PF1eActorSheet
+      doc={actor}
+      {client}
+      {bus}
+      initialTab={initialTab as never}
+    />
   {/key}
 {:else}
   <p role="status">

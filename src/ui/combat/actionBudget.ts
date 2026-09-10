@@ -19,6 +19,11 @@ import {
   type PF1eActionLedger,
   type PF1eActionSpend,
 } from "../../packages/pf1e/actions";
+import {
+  combinedTacticalEffects,
+  deniedActionTokens,
+  resolveTacticalEffects,
+} from "../../packages/pf1e/effectOps";
 
 /**
  * An encounter runs the PF1e action economy when at least one combatant links a PF1e
@@ -39,6 +44,8 @@ export function isPf1eEncounter(
 /** Why each spend the panel offers would be refused right now (null = allowed). */
 export interface CombatantBudget {
   ledger: PF1eActionLedger;
+  /** Deny tokens resolved from the combatant's active effects (E01), for the tooltip. */
+  denied: ReadonlySet<string>;
   refusals: {
     standard: string | null;
     move: string | null;
@@ -52,29 +59,66 @@ export interface CombatantBudget {
   };
 }
 
+/**
+ * The deny tokens for one combatant: its linked PF1e actor's effects, read through the
+ * same combined homes (actor-embedded + combatant-referenced) the sheet derives from.
+ * Non-PF1e combatants (no actor, or a generic one) are never denied.
+ */
+export function deniedActionsForCombatant(
+  combat: CombatDocument,
+  combatantId: string,
+  actors: readonly ActorDocument[],
+): ReadonlySet<string> {
+  const member = combat.combatants.find((c) => c._id === combatantId);
+  const actorId = member?.actorId;
+  const actor = actorId ? actors.find((a) => a._id === actorId) : undefined;
+  if (!member || !actor || !isPF1eActor(actor)) return new Set<string>();
+  const combined = combinedTacticalEffects(actor, combat, combatantId);
+  return deniedActionTokens(resolveTacticalEffects(combined.effects));
+}
+
 /** The budget view for one combatant's current turn. */
 export function combatantBudget(
   combat: CombatDocument,
   combatantId: string,
+  actors: readonly ActorDocument[] = [],
 ): CombatantBudget | null {
   const member = combat.combatants.find((c) => c._id === combatantId);
   if (!member) return null;
   const ledger = readCombatantState(member).actions;
+  const denied = deniedActionsForCombatant(combat, combatantId, actors);
   return {
     ledger,
+    denied,
     refusals: {
-      standard: actionRefusal(ledger, { kind: "standard" }),
-      move: actionRefusal(ledger, { kind: "move" }),
-      moveAsStandard: actionRefusal(ledger, { kind: "move", asStandard: true }),
-      swift: actionRefusal(ledger, { kind: "swift" }),
-      fullRound: actionRefusal(ledger, { kind: "full-round" }),
-      fiveFootStep: actionRefusal(ledger, { kind: "five-foot-step" }),
-      startFullRound: actionRefusal(ledger, {
-        kind: "start-full-round",
-        action: "full-round",
-      }),
-      completeFullRound: actionRefusal(ledger, { kind: "complete-full-round" }),
-      immediate: actionRefusal(ledger, { kind: "immediate", onTurn: false }),
+      standard: actionRefusal(ledger, { kind: "standard" }, denied),
+      move: actionRefusal(ledger, { kind: "move" }, denied),
+      moveAsStandard: actionRefusal(
+        ledger,
+        { kind: "move", asStandard: true },
+        denied,
+      ),
+      swift: actionRefusal(ledger, { kind: "swift" }, denied),
+      fullRound: actionRefusal(ledger, { kind: "full-round" }, denied),
+      fiveFootStep: actionRefusal(ledger, { kind: "five-foot-step" }, denied),
+      startFullRound: actionRefusal(
+        ledger,
+        {
+          kind: "start-full-round",
+          action: "full-round",
+        },
+        denied,
+      ),
+      completeFullRound: actionRefusal(
+        ledger,
+        { kind: "complete-full-round" },
+        denied,
+      ),
+      immediate: actionRefusal(
+        ledger,
+        { kind: "immediate", onTurn: false },
+        denied,
+      ),
     },
   };
 }
@@ -83,12 +127,14 @@ export function combatantBudget(
  * Spend from one combatant's budget, authorized against the encounter's update
  * permission. Returns the updated combat (the panel submits it with only its
  * combatants changed) plus the hook to fire, or the refusal/permission error.
+ * `actors` feeds the effect-deny gate (E01); omit it for non-PF1e encounters.
  */
 export function spendCombatantActionAuthorized(
   combat: CombatDocument,
   combatantId: string,
   spend: PF1eActionSpend,
   user: PermissionUser | null,
+  actors: readonly ActorDocument[] = [],
 ): { combat: CombatDocument | null; hooks: string[]; error: string | null } {
   if (!user || !can(user, "update", combat, "combats"))
     return {
@@ -96,7 +142,8 @@ export function spendCombatantActionAuthorized(
       hooks: [],
       error: "You cannot update this encounter.",
     };
-  const result = spendCombatantAction(combat, combatantId, spend);
+  const denied = deniedActionsForCombatant(combat, combatantId, actors);
+  const result = spendCombatantAction(combat, combatantId, spend, denied);
   if (!result.ok)
     return {
       combat: null,

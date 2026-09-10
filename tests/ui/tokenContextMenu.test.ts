@@ -85,6 +85,7 @@ describe("token context menu model (T01)", () => {
     if (heroEntry) heroEntry.initiative = 17;
 
     const inEncounter = tokenContextMenuModel({
+      actors: [],
       combat: c,
       scene: scene([hero, lurker]),
       token: hero,
@@ -94,15 +95,19 @@ describe("token context menu model (T01)", () => {
       ["initiative", "Initiative: 17"],
       ["remove-combatant", "Remove from encounter"],
       ["toggle-hidden", "Hide token"],
+      // E02: no PF1e actor on this fixture token — the entry exists but explains why.
+      ["apply-effect", "Apply effect…"],
     ]);
     // display entry stays "disabled" (informational); the actionable ones are enabled
+    // (apply-effect stays disabled here — the fixture token links no PF1e actor)
     expect(
       inEncounter.entries
-        .filter((e) => e.id !== "initiative")
+        .filter((e) => e.id !== "initiative" && e.id !== "apply-effect")
         .every((e) => !e.disabled),
     ).toBe(true);
 
     const outsider = tokenContextMenuModel({
+      actors: [],
       combat: c,
       scene: scene([hero, lurker]),
       token: lurker,
@@ -116,6 +121,7 @@ describe("token context menu model (T01)", () => {
   test("no encounter degrades to an explained disabled add entry", () => {
     const hero = token("hero");
     const model = tokenContextMenuModel({
+      actors: [],
       combat: null,
       scene: scene([hero]),
       token: hero,
@@ -130,6 +136,7 @@ describe("token context menu model (T01)", () => {
     const hero = token("hero");
     const c = combatWith([hero]);
     const model = tokenContextMenuModel({
+      actors: [],
       combat: c,
       scene: scene([hero]),
       token: hero,
@@ -137,6 +144,7 @@ describe("token context menu model (T01)", () => {
     });
     const privateCombat = { ...c, ownership: { default: 0 } } as CombatDocument;
     const denied = tokenContextMenuModel({
+      actors: [],
       combat: privateCombat,
       scene: scene([hero]),
       token: hero,
@@ -166,6 +174,7 @@ describe("token context menu actions (T01)", () => {
     const c = combatWith([hero]);
     let n = 0;
     const added = applyTokenMenuEntry({
+      actors: [],
       combat: c,
       scene: scene([hero, lurker]),
       token: lurker,
@@ -177,6 +186,7 @@ describe("token context menu actions (T01)", () => {
     expect(added.transition?.combat.combatants).toHaveLength(2);
     // adding a token that is already in is a no-op transition
     const again = applyTokenMenuEntry({
+      actors: [],
       combat: added.transition?.combat ?? c,
       scene: scene([hero, lurker]),
       token: lurker,
@@ -193,6 +203,7 @@ describe("token context menu actions (T01)", () => {
     const lurker = token("lurker");
     const c = combatWith([hero, lurker]);
     const removed = applyTokenMenuEntry({
+      actors: [],
       combat: c,
       scene: scene([hero, lurker]),
       token: lurker,
@@ -210,6 +221,7 @@ describe("token context menu actions (T01)", () => {
     const hero = token("hero");
     const s = scene([hero]);
     const hidden = applyTokenMenuEntry({
+      actors: [],
       combat: null,
       scene: s,
       token: hero,
@@ -230,6 +242,7 @@ describe("token context menu actions (T01)", () => {
       diff: { hidden: true },
     });
     const shown = applyTokenMenuEntry({
+      actors: [],
       combat: null,
       scene: s,
       token: { ...hero, hidden: true },
@@ -248,6 +261,7 @@ describe("token context menu actions (T01)", () => {
     const c = combatWith([hero]);
     expect(
       applyTokenMenuEntry({
+        actors: [],
         combat: c,
         scene: scene([hero]),
         token: hero,
@@ -258,6 +272,7 @@ describe("token context menu actions (T01)", () => {
     ).toContain("informational");
     expect(
       applyTokenMenuEntry({
+        actors: [],
         combat: c,
         scene: scene([hero]),
         token: hero,

@@ -8,9 +8,15 @@ import { isPF1eActor } from "./pf1eSheetModel";
 
 type SheetClient = Pick<ClientSync, "store" | "user">;
 
-export function readablePF1eActor(client: SheetClient, actorId: string): ActorDocument | null {
+export function readablePF1eActor(
+  client: SheetClient,
+  actorId: string,
+): ActorDocument | null {
   const actor = client.store.get("actors", actorId);
-  return actor && isPF1eActor(actor) && client.user && can(client.user, "read", actor, "actors")
+  return actor &&
+    isPF1eActor(actor) &&
+    client.user &&
+    can(client.user, "read", actor, "actors")
     ? actor
     : null;
 }
@@ -21,6 +27,8 @@ export function openPF1eSheetWindow(
   client: SheetClient,
   actorId: string,
   bounds?: WindowBounds,
+  /** E02: open directly on a sheet tab, e.g. "effects" from the token menu. */
+  tab?: string,
 ): boolean {
   if (!readablePF1eActor(client, actorId)) return false;
   if (bounds) manager.setBounds(bounds);
@@ -29,7 +37,7 @@ export function openPF1eSheetWindow(
     // Names live in the reactive body, not stale window chrome after a revocation.
     title: "PF1e actor sheet",
     kind: "pf1e-sheet",
-    data: { actorId },
+    data: { actorId, ...(tab !== undefined ? { tab } : {}) },
     x: 32 + (manager.list().length % 5) * 24,
     y: 32 + (manager.list().length % 5) * 24,
     width: 480,

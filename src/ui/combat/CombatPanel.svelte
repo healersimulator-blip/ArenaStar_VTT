@@ -58,6 +58,11 @@
   } from "../../packages/pf1e/combatState";
   import type { PF1eActionSpend } from "../../packages/pf1e/actions";
   import {
+    advanceClockOnRoundOf,
+    worldSettingsFrom,
+  } from "../../core/worldSettings";
+  import { wrapAdvanceOps } from "../../packages/pf1e/worldClock";
+  import {
     selectedTokens,
     editSelectedRoster,
     type TokenSelection,
@@ -213,6 +218,27 @@
     ]);
   }
 
+  /** §10 "next turn". PF1e encounters route through pf1eNextTurn; when its transition wraps a
+   * round it also reports clockDeltaSeconds, and this is where the replicated world clock
+   * (E05, D-146) advances by it — if the world has advance-clock-on-round enabled. */
+  function advanceTurn(): void {
+    if (!combat) return;
+    const snapshot = $state.snapshot(combat);
+    if (!pf1e) {
+      push(nextTurn(snapshot));
+      return;
+    }
+    const result = pf1eNextTurn(snapshot);
+    push(result);
+    if (result.clockDeltaSeconds > 0) {
+      const settingsDocs = client.store.getAll("settings");
+      if (advanceClockOnRoundOf(worldSettingsFrom(settingsDocs))) {
+        const ops = wrapAdvanceOps(settingsDocs, result.clockDeltaSeconds);
+        if (ops.length > 0) client.submit(ops);
+      }
+    }
+  }
+
   function beginCombat(): void {
     refresh();
     if (!combat) {
@@ -335,6 +361,7 @@
       id,
       spendKind,
       client.user,
+      client.store.getAll("actors") as readonly ActorDocument[],
     );
     error = result.error ?? "";
     if (!result.combat) return;
@@ -503,13 +530,7 @@
       <button
         id="combat-next"
         type="button"
-        onclick={() =>
-          combat &&
-          push(
-            pf1e
-              ? pf1eNextTurn($state.snapshot(combat))
-              : nextTurn($state.snapshot(combat)),
-          )}
+        onclick={advanceTurn}
         aria-label="Next turn">▶</button
       >
       <button id="combat-init" type="button" onclick={() => rollInitiative()}
@@ -541,7 +562,7 @@
       >
     </div>
     {#if pf1e && current}
-      {@const budget = combatantBudget(combat, current._id)}
+      {@const budget = combatantBudget(combat, current._id, actors)}
       {#if budget}
         <div class="budget" data-action-budget={current._id}>
           <span class="budget-title">{current.name} actions:</span>

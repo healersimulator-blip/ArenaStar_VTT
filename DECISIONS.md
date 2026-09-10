@@ -2824,3 +2824,338 @@ already verified in D-135/D-136/D-138 — no other new rule research.
   **1125 passed / 3 skipped** across 126 files; typecheck, lint, touched-file
   Prettier, build, size and `build:systems` green; dist 2,080,869 raw /
   602,541 gzip — +21,176 over D-139, within the 6 MB budget. A07 remains.
+
+## D-141 — A07 slice: supported feat/stance modifiers, Weapon Finesse, and Manyshot (modifier slice landed)
+
+**Date:** 2026-09-09/10 (code landed on the merged branch; this entry backfills the
+V11 record the slice was missing — the checklist progress block existed without its
+decision). **Scope:** P3/A07, first slice (A07 stays open for the remaining feat
+set and browser acceptance). Sources: the A.15 stance transcription (total defense
++4 dodge/1 round/can't attack or take AoOs) and AoN ID 131 for Weapon Finesse's
+stat swap; everything else composes D-134's weapon descriptors and D-135's attack
+layer — no new primary-text research.
+
+- **`src/packages/pf1e/feats.ts` (new, pure):** normalization plus modifier helpers
+  for explicit Power Attack/Deadly Aim (including handedness scaling on the −1/−2
+  ladder), Combat Expertise, fighting defensively/total defense, weapon-scoped
+  Weapon Focus/Specialization/Improved Critical, Weapon Finesse's stat selection,
+  Point-Blank Shot's 30-foot boundary, and Improved/Greater TWF off-hand attack
+  counts. `manyshotPlan` gates the feat/ranged/BAB requirement and returns the
+  standard-action arrow count (2–4) with the −4 volley penalty.
+- **Wired into `tactical.ts` only when the caller activates a stance** — no feat is
+  silently activated from authored content; prerequisites not represented in the
+  actor contract stay caller-owned. Weapon Finesse applies to eligible light melee
+  weapons; the TWF upgrades lay out additional off-hand attacks.
+- **Manyshot resolution:** `pf1eManyshotRollSpecs` exposes one same-bonus roll per
+  arrow; pure `pf1eResolveManyshot` applies 2–4 host-evaluated arrows in order
+  against one evolving defender state (per-arrow hit/miss, confirmation,
+  mitigation, HP and nonlethal transitions), refusing non-ranged attacks and
+  invalid volley sizes before resolving any arrow. `resolveManyshotFlow` emits one
+  public card and writes final HP/nonlethal through the normal authorized sheet
+  path; the Combat tab renders the Manyshot button when the feat and the derived
+  ranged line qualify.
+- **UI validation:** the Features tab reports unmet prerequisites for supported
+  feats without deleting or disabling authored entries. `shootingIntoMeleePenalty`
+  now accepts explicit `targetEngaged`/`nearestFriendlyDistanceFt` facts (the
+  caller owns producing them); Precise Shot still removes the penalty
+  unconditionally.
+- **Evidence (re-verified on the merged HEAD before this backfill):** full suite
+  **1135 passed / 3 skipped** across 126 files; typecheck, lint, build and size
+  green; dist 2,089,293 raw / 604,442 gzip — within the 6 MB budget. A07 remains
+  open: browser acceptance plus the feats whose consumers live in later slices
+  (Multiattack's natural-secondary reduction note in D-135, Gun Training's
+  broken-misfire variant noted in D-134).
+
+## D-142 — E01: the effect apply/persist path — two homes, the derivation bridge, and the denies/boosts consumers
+
+**Date:** 2026-09-10. **Scope:** P4/E01 (closes E01 at the logic level; browser
+acceptance pending per the D-119 precedent). No new primary-text research: the
+stacking/penalty/suppression mathematics is P0's `resolveEffects`, the tick
+machinery is core `combat.ts`, and the one preset magnitude (Bull's Strength +4
+enhancement, 1 min/level) was verified in R02/D-129. Durations count 1 round =
+6 s ⇒ minute = 10 ticks, hour = 100 (A.1), as `ttlToTicks` already encoded.
+
+- **`src/packages/pf1e/effectOps.ts` (new, pure):** the one sanctioned place that
+  turns a `PF1eEffectPayload` into documents and Ops for both homes the core
+  badge/tick code already reads — **actor-embedded** (`actor.effects`, the
+  out-of-combat home) and **combatant-referenced** (`combatant.flags.core.effects`,
+  what `core/combat.ts` ticks at the owner's turn end and what the CombatPanel
+  badges). `buildEffectDoc` validates (`validateEffectPayload`), keeps `changes`
+  empty (D-112) and seeds `flags.core.duration` via `effectFlagsFor`; apply/
+  suppress/restore/remove helpers return Ops for `ClientSync.submit` with the same
+  client-side permission gates as the sheet path (`update` on the actor / on the
+  encounter), duplicate-id refusal, a 50-effect cap and named errors.
+- **The derivation bridge:** `combinedTacticalEffects(actor, combat, combatantId)`
+  merges both homes, with the **combatant copy winning an id collision** — it is
+  the instance the tick decrements, so it is the live truth; the embedded twin is
+  shadowed, not deleted. `pf1eSheetView` now takes an optional `{ combat,
+combatantId }` ctx (the component resolves the linked combatant through
+  `linkedCombatantId`, preferring an active encounter), so sheet numbers and
+  badges can no longer disagree.
+- **Expiry stays free** (P0's read-on-read design, now proven end-to-end): the
+  acceptance test applies a 2-round effect through the real op, starts the
+  encounter and advances turns — the owner's turn-end tick consumes the owner's
+  duration only (the other combatant's turn never touches it), expiry drops the
+  effect, and `derivePF1eActor` returns the base numbers with no undo write.
+- **Action denies gain a consumer:** `actionRefusal`/`spendAction`/
+  `spendCombatantAction` accept the deny token set; a token refuses a spend when
+  it names the spend's action id ("charge", "full-attack", "cast-spell") or its
+  kind. `actionBudget.ts` computes it per combatant from the linked actor's
+  combined effects (`deniedActionsForCombatant`) and the tracker's budget chips
+  and spend path both pass it. Tokens without a consumer yet ("aoo", P6's
+  interrupt queue) are inert but preserved in the set.
+- **Damage boosts gain a consumer:** `PF1eAttackRollContext.effectBoosts` (fed
+  from `ResolvedEffects.boosts` + the new parallel `boostSources` attribution)
+  appends `NdS`/static rider terms to every attack line's damage roll with a
+  named note, and adds the caveat note to the crit roll — riders are **never
+  multiplied on a critical** (CRB p.179 via D-136), so the crit formula is
+  unchanged.
+- **`src/ui/sheets/PF1eEffectsTab.svelte` (new):** the minimal apply surface — a
+  typed, validated form (name, condition label, one mod row from the closed
+  `PF1E_MOD_KEYS`/`PF1E_BONUS_TYPES` lists, ttl unit/value/per-level, and the
+  home: actor vs. combatant when linked), the R02-verified Bull's Strength
+  preset, and suppress/enable/remove per listed effect. The open-ended editor
+  (free-form keys, boosts/grants/immunities authoring) remains E02; the condition
+  _library_ remains E03 — this tab deliberately encodes no condition numbers.
+- **Deliberately not encoded:** per-level conversion against a replicated world
+  clock and round-start expiry differences (E04/E05 — `endsOn` is carried but both
+  boundaries tick as core ticks today), concentration/sustained enforcement (E04),
+  condition math (E03), token condition icons (E06), and combatant-effect
+  attribution in the resolve flow's cards.
+- **Evidence:** 14 new tests in `tests/packages/pf1eEffectOps.test.ts` (doc
+  shaping + validation refusals, the stacking fixture through the real apply path,
+  permission/duplicate/cap refusals, the core-shape combatant write read back
+  through `activeEffects`, the expiry-revert acceptance, collision precedence,
+  ctx'd sheet view, deny gating through ledger and spend, boost/crit formula
+  shapes). Full suite **1149 passed / 3 skipped** across 127 files; typecheck,
+  lint, touched-file Prettier, build, size and `build:systems` green; dist
+  2,103,405 raw / 607,994 gzip — +14,112 over the pre-slice build, within the
+  6 MB budget. Browser acceptance of the Effects tab is collected-not-executed in
+  this environment (no browser binaries, D-119 precedent).
+
+## D-143 — E02: the custom effect editor — full payload authoring, in-place edits, and token application
+
+**Date:** 2026-09-10. **Scope:** P4/E02 (closes E02 at the logic level; browser
+acceptance pending per the D-119 precedent). No new primary-text research: the
+payload contract, validation and stacking are P0's (`effects.ts`), the
+persistence/authorization mechanics are D-142's (`effectOps.ts`), and the SRD
+condition _names_ in the picker are presentation data — E03 still owns every
+condition's mathematics.
+
+- **On "open-ended stat keys" (the plan sketch) — resolved against the P0
+  contract:** `PF1E_MOD_KEYS` stays closed ("the closed list is what makes typos
+  loud") because a mod key the derivation cannot consume would be a silent no-op
+  that looks loaded. Custom buffs remain first-class through the free-form name,
+  condition label, deny/grant tokens, damage boosts and stacking group; widening
+  the mechanical key list is a deliberate contract change (derivation consumers
+  first), never an editor option.
+- **`src/ui/sheets/pf1eEffectEditorModel.ts` (new, pure):** `EffectForm` covering
+  the whole `flags.pf1e` payload — typed mod rows (key/type/value/per-mod source,
+  N rows), boost rows (dice/sides/flat/energy/precision), deny and grant token
+  lists (comma/space parsed, lowercased), the immunity block
+  (mind-affecting/conditions/energy/DR), structural flags (flat-footed, denied
+  Dex, no AoO), stacking group, concentration, ttl (unit/value/per-level/
+  ends-on) and the effect origin (kind/id/level/DC). `buildEffectRequest`
+  assembles the request with empty-numbers-are-absent, garbage-numbers-are-named-
+  errors semantics — it never guesses a zero — and the request revalidates
+  through `validateEffectPayload` inside `buildEffectDoc` before any write.
+  `formFromEffect` round-trips a validated effect back into the form (tested:
+  form → request → doc → read → form is fact-preserving both ways).
+- **In-place edits:** `pf1eEditActorEffect` / `pf1eEditCombatantEffect` keep the
+  effect id and its suppression state, swap the validated payload/name/icon, and
+  re-seed `flags.core.duration` from the edited ttl — an edit is a new agreement
+  on how long the effect lasts, not a resume of the old countdown. The sheet
+  routes an edit to the effect's current home (combatant map wins when present,
+  the same precedence as the read side).
+- **`src/ui/sheets/PF1eEffectEditor.svelte` (new):** the full authoring surface,
+  embedded in the Effects tab (replacing E01's minimal one-row form): condition
+  picker as an SRD-names datalist (display only), suggested deny tokens, add/
+  remove rows for mods and boosts, the actor-vs-combatant home select (locked
+  during an edit — the home is where the effect lives, not a field), and
+  read-only rendering without ownership. Player permissions ride the same
+  `can(user, "update", actor, "actors")` gate as every sheet edit.
+- **Token application (the T01 deferral resolved):** the token context menu gains
+  **"Apply effect…"** — shown for tokens linking a PF1e actor, enabled by actor
+  ownership, and returning `openEffectEditorActorId` so App opens that actor's
+  sheet directly on the Effects tab (`openPF1eSheetWindow` gained an optional
+  tab, threaded through the window data to `PF1eActorSheet`'s new `initialTab`).
+  Non-PF1e/unlinked tokens keep the entry disabled with the reason visible —
+  the menu stays honest about what it is looking at.
+- **Deliberately not encoded:** condition mechanics behind the picker (E03),
+  turn-end/round-start expiry differences and the world clock (E04/E05 —
+  `endsOn` is authored and carried, both boundaries tick as core ticks today),
+  token condition icons (E06), effect templates/favorites, and mass application
+  to a selection (a later P4 polish once E03 lands the math).
+- **Evidence:** 9 new tests in `tests/ui/pf1eEffectEditor.test.ts` (full-payload
+  assembly + core doc shaping, absent-vs-garbage numerics, token parsing, the
+  two-way round-trip, the closed-key/condition-picker presentation contract,
+  edit id/suppression/duration semantics, permission and unknown-id refusals,
+  the menu entry's ownership gating and the returned actor id) + the extended
+  token-menu fixtures. Full suite **1158 passed / 3 skipped** across 128 files;
+  typecheck, lint, touched-file Prettier, build, size and `build:systems`
+  green; dist 2,120,722 raw / 612,628 gzip — +17,317 over D-142, within the
+  6 MB budget; e2e at **159 collected** across 28 files (new editor flow spec,
+  not executed — no browser binaries, D-119 precedent).
+
+## D-144 — E03: the condition library — 27 canonical conditions as effect payloads, verified against the Conditions text
+
+**Date:** 2026-09-10. **Scope:** P4/E03 (closes E03's mathematical library;
+the two P7-owned HP-state interactions and the geometry-dependent consequences
+stay with their owning phases, recorded per condition). **Sources:** the
+canonical Conditions page was fetched and read in full for this slice — every
+number below is its text, cross-checked against the in-repo A.14 modifier
+transcription (which agrees); no other new research.
+
+- **`src/packages/pf1e/conditions.ts` (new, pure):** 27 condition definitions
+  (the 26 the E03 clause enumerates plus Staggered, which Disabled/Unconscious
+  and the nonlethal path cite): each carries the exact SRD name, a condensed
+  summary quoting its numbers, the mechanical payload builder, `mindAffecting`
+  /`fear` tags, and `notes` for consequences the current contract cannot
+  express — recorded, never silently dropped.
+- **Payloads ride the P0 machinery:** applying a condition is applying an
+  effect payload (`condition` label + typed mods + flags + denies), so the
+  derivation, stacking, suppression and expiry need zero changes. Verified
+  encodings include: Fatigued −2/Exhausted −6 Str&Dex (both deny run/charge);
+  Shaken/Frightened −2 attack+saves and Panicked saves-only (the print does
+  not penalize the panicked attack roll); Stunned −2 AC + denied Dex;
+  Grappled −2 attack/−2 CMB/−4 Dex vs Pinned denied-Dex + −4 AC; Prone −4
+  melee attack; Blinded −2 AC + denied Dex; Entangled −2 attack/−4 Dex +
+  no-run/charge; the helpless family (Helpless/Unconscious/Paralyzed/
+  Petrified/Dying/Stable) all deny Dex to AC; Flat-Footed sets the
+  derivation's own `flatFooted`/`cannotAoO` flags; Dazed/Nauseated/Staggered/
+  Disabled encode their action restrictions as deny tokens (Staggered/
+  Disabled deny only full-round — the move-XOR-standard limit is the ledger's
+  `single-standard-or-move` restriction, which the P7 health path sets).
+- **Two named classifications:** fear penalties (shaken/frightened/panicked/
+  cowering) are typed **morale** — so two fear conditions take the worse
+  instead of stacking, which is the printed fear rule (tested: shaken +
+  frightened ⇒ −2, shaken + sickened ⇒ −4); every other condition penalty is
+  **untyped with its own source string** because the print types nothing
+  there. Fear and Confused tag `mindAffecting`; `conditionRefusalFor` refuses
+  those (and name-matched `immune.conditions`) against a protected target —
+  the E03 mind-affecting immunity hook, surfaced as a visible apply refusal
+  in the Effects tab's new condition quick-apply row.
+- **Not encoded on purpose (per-definition notes):** prone's +4/−4 ranged/
+  melee AC split (no per-range AC mod key — the attacker-side situational
+  seam P06 owns alongside flanking/charge); blinded's 50% total concealment
+  (P5) and Acrobatics DC 10 (P03); helpless-family Dex-0 (−5) statics and the
+  attacker's +4 melee/coup-de-grace bonus (P06 seam); forced flee/panic
+  behaviors (L05 morale); skill-check penalties (no mod keys); grapple/
+  pinned concentration DCs (C03); confused's d% behavior table (GM-owned);
+  Disabled's half speed and 1-damage-after-strenuous-standard (P7).
+- **Evidence:** 20 new tests in `tests/packages/pf1eConditions.test.ts` —
+  coverage + validator survival for all 27, the severity/adjacent
+  discriminating pairs (fatigued/exhausted, shaken/frightened/panicked,
+  stunned/dazed, grappled/pinned, prone/blinded/entangled, the helpless
+  family, Flat-Footed), fear-vs-untyped stacking through the real resolver,
+  derivation integrations (fatigue drops attack+AC by 1; shaken drops all
+  saves by 2; blinded removes Dex from touch/flat-footed; exhaustion outranks
+  fatigue by exactly −2 attack), and the immunity refusals. Full suite
+  **1178 passed / 3 skipped** across 129 files; typecheck, lint,
+  touched-file Prettier, build, size and `build:systems` green; dist
+  2,133,897 raw / 616,537 gzip — +13,175 over D-143, within the 6 MB budget.
+
+## D-145 — 2026-09-10 — P4/E04: turn-boundary durations via restore-and-tick, not a second ticker
+
+- **Context:** A.16 requires concentration to lapse when the caster's turn ends
+  without a spent standard, and round-start effects must expire on round
+  boundaries; core's `nextTurn` already ticks durations at owner turn end, and
+  E01–E03 store all tactical payloads in `flags.core.effects` / `actor.effects`
+  where core can see them.
+- **Decision:** E04 is not a new ticker. `pf1eNextTurn` keeps core as the single
+  engine and repairs its semantics at the two boundary moments:
+  (a) _Round start:_ core ticks `endsOn: "round-start"` payloads at owner turn
+  end — the wrong moment — so `pf1eNextTurn` restores the ending owner's
+  round-start effect documents from the input combat (owner captured before the
+  advance), strips core's expiry records for those ids, and then, on round wrap
+  only, decrements each carrier's `durationLeft` once, dropping at ≤ 0 and
+  writing `flags.core.duration` otherwise. Round-start ids without a remaining
+  duration are inert markers and are never restored or ticked.
+  (b) _Concentration:_ payloads with `concentration: true` are dropped at the
+  owner's turn end when `actions.standardUsed === false`; sustaining (spending
+  the standard) preserves the document at its pre-wrap value until the next
+  wrap tick. Lapsed ids are reported in the new `lapsed` return
+  (`{combatantId, effectId}[]`) and excluded from `expired`, so a lapse never
+  double-reports an effect core already dropped; the surprise round returns
+  `lapsed: []`.
+- **Consequences:** duration semantics now differ by `endsOn` key with a test
+  proving the interleave (own-turn ttl 3 vs round-start ttl 2 on one carrier);
+  per-level conversion (rounds→minutes→hours) is deferred to E05 where the
+  replicated clock lands; `lapsed` is UI-ready but unrendered (E06 owns
+  recompute + icons); core stays untouched (P4 constraint).
+- **Evidence:** 10 new tests in `tests/packages/pf1eTurnBoundaries.test.ts`
+  (timeline, core-equivalence on effect boundaries, inert marker, sustain,
+  lapse, combined sustain+round-start, surprise short-circuit, derivation
+  through real `readTacticalEffects`); full suite **1188 passed / 3 skipped**
+  across 131 files; typecheck, lint, touched-file Prettier, build, size and
+  `build:systems` green; dist 2,135,336 raw / 616,970 gzip (+1,439 over
+  D-144, within the 6 MB budget).
+
+## D-146 — 2026-09-10 — P4/E05: the replicated world clock and clock-counted durations
+
+- **Context:** §10 forbids putting the clock on the local `WorldsRecord` (D-113): a clock a
+  player cannot see is not a clock their durations tick against. The tracker already kept a
+  per-combat `clockSeconds` on the round state and `pf1eNextTurn` reported a
+  `clockDeltaSeconds` per wrap (E04), but nothing wrote a world-level time, and day-long (and
+  out-of-combat) durations had no consumer at all.
+- **Decision:** the world clock is the `clockSeconds` key of the replicated `world-settings`
+  document — the same seam, merge and projection every rule option uses — written only through
+  `worldSettingsOps`, from exactly two places: the combat tracker's round wrap
+  (`wrapAdvanceOps`, gated on `advanceClockOnRound`) and the GM's settings-window time controls
+  (+1 min/+1 h/+1 day scaled to the world's duration ladder; reset rewinds to 0 and sweeps
+  nothing). Durations join it by anchoring: applying an effect with the clock in scope stamps
+  `appliedAtClock` on the `flags.pf1e` payload (validator allow-listed and round-tripped), and
+  `pf1eClockSweepOps` removes anchored, clock-counted payloads — round/minute/hour (whose
+  per-turn ticks remain the turn engine's in-combat consumer, E04) and `day` (defined as
+  2 400 rounds = 24 of the landed 100-round hours; the clock is its only consumer) — from both
+  effect homes when `now ≥ anchor + ttlSeconds`. The sweep only removes; it never rewrites
+  `flags.core.duration`, so the turn engine and the clock can never double-decrement one
+  effect. Unanchored (pre-E05) payloads are never swept: the sweep refuses to guess an anchor.
+  Instant/concentration/permanent are not clock-counted (an instant is over, concentration
+  lapses on maintenance per A.16/E04, permanent never ends).
+- **Consequences:** a GM advancing time out of combat ends buffs in the same measure combat
+  rounds would; joining clients read the clock through the normal settings merge with no new
+  protocol. The ladder stays the landed abstraction (1 min = 10 rounds, 1 h = 100 rounds,
+  1 day = 2 400 rounds × the configured `secondsPerRound`) rather than real-clock units.
+  Calendar dates, real-time tickers and per-level _display_ conversion remain open (P5/E06+
+  seams); the E04 "per-level conversion" deferral is closed by this ladder.
+- **Evidence:** 21 new tests in `tests/packages/pf1eWorldClock.test.ts` (read/normalize/joiner
+  merge, op shapes incl. create-from-empty and no-op, wrap→clock integration through a real
+  `pf1eNextTurn` round wrap, tick ladder with per-level and configured rounds, anchor
+  stamping through `buildEffectDoc` and the authorized apply ops, minute/per-level/day
+  boundaries, legacy/non-counted survival, both sweep homes with unparseable-effect
+  preservation, the validator range rule, readout format). Full suite **1209 passed / 3
+  skipped** across 132 files; typecheck, lint, touched-file Prettier, build, size and
+  `build:systems` green; dist 2,139,571 raw / 618,239 gzip (+4,235 over D-145, within the
+  6 MB budget).
+
+## D-147 — 2026-09-10 — P4/E06: token condition badges and read-only recompute; initiative stays frozen
+
+- **Context:** E06 asks for UI/roll statistics to recompute on effect changes, token condition
+  icons, proof that expiry restores base values, and an initiative-policy check before any
+  re-sort. Derivation is already on-read (`deriveFromDocuments`, D-112: never persist derived
+  totals), so "recompute on change" needs no listener — only consumers that read the replica
+  every frame, and proof.
+- **Decision:** token badges are a pure read-side model (`tokenBadgesFor`/`tokenBadgesMap` in
+  the pf1e package) consumed by the canvas stage's `syncTokens` as structural
+  `{code, tint}` chips (core canvas never imports the package). Badge sources are the two E01
+  homes — the combatant linked by `tokenId` (combat copy wins id collisions; an under-way
+  encounter with `round ≥ 1` wins the claim, matching the E01 linked-combatant rule) and the
+  token's `actorId` embedded effects — filtered to validated, non-suppressed documents, with
+  E03 conditions sorted first under their SRD label. Chip abbreviation ("Flat-Footed" → "FF")
+  and tint are deterministic, so badges don't flicker between refreshes; the renderer caps at
+  3 chips + "+N" and rebuilds only when the chip signature changes. Initiative policy (R02):
+  order is frozen when the encounter starts; effect apply/expire/recompute never re-sorts and
+  never rewrites initiative values — the D-145/E04 tracker mutates only round state, action
+  ledgers and effect documents, and the E06 test pins array order + initiative across a real
+  expiry transition.
+- **Consequences:** P4 is complete (E01–E06). Recompute-on-effect-change is structural: any
+  future consumer that reads the replica (roll panels, sheets) inherits it for free. Badge
+  icons remain text chips until an asset pipeline exists (P5 seam); hover/detail UI for chips
+  is deferred with it. Browser e2e remains collected-not-executed (D-119).
+- **Evidence:** 10 new tests in `tests/packages/pf1eTokenBadges.test.ts` (chip codes/tints,
+  record-level collect incl. suppressed + unparseable, both homes, collision + encounter
+  preference, condition ordering, the real apply→expire→base-restore round trip with
+  initiative stability, map shape). Full suite **1219 passed / 3 skipped** across 133 files;
+  typecheck, lint, touched-file Prettier, build, size and `build:systems` green; dist
+  2,141,938 raw / 619,453 gzip (+2,367 over D-146, within the 6 MB budget).

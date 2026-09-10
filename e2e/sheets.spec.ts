@@ -1,5 +1,11 @@
 import { test, expect, type Page } from "@playwright/test";
-import { entry, hostCall, playerCall, waitForSurface, manualFragment } from "./lib";
+import {
+  entry,
+  hostCall,
+  playerCall,
+  waitForSurface,
+  manualFragment,
+} from "./lib";
 
 // Real WebRTC peers, with the same manual invite exchange used by normal UI.
 async function connectSheetPlayer(host: Page, player: Page): Promise<string> {
@@ -12,12 +18,18 @@ async function connectSheetPlayer(host: Page, player: Page): Promise<string> {
   await expect
     .poll(() => player.locator("#offer-out").inputValue(), { timeout: 20_000 })
     .not.toBe("");
-  await host.fill("#peer-code", await player.locator("#offer-out").inputValue());
+  await host.fill(
+    "#peer-code",
+    await player.locator("#offer-out").inputValue(),
+  );
   await host.click("#code-apply");
   await expect
     .poll(() => host.locator("#share-out").inputValue(), { timeout: 20_000 })
     .not.toBe("");
-  await player.fill("#answer-input", await host.locator("#share-out").inputValue());
+  await player.fill(
+    "#answer-input",
+    await host.locator("#share-out").inputValue(),
+  );
   await player.click("#answer-apply");
   await expect
     .poll(() => player.locator("#pstatus").textContent(), { timeout: 20_000 })
@@ -45,13 +57,17 @@ test.describe("sheets (§10 M1)", () => {
     await host.fill("#sheet-name", "Hero");
     await host.locator("#sheet-name").dispatchEvent("change");
     await expect
-      .poll(() => player.locator("#sheet-list .sheet-row").count(), { timeout: 15_000 })
+      .poll(() => player.locator("#sheet-list .sheet-row").count(), {
+        timeout: 15_000,
+      })
       .toBe(0); // default:0 → omitted from the player's projection
 
     // ── GM: assign it to the player (visibility crossing → materializes) ──
     await host.selectOption("#assign-owner", playerId);
     await expect
-      .poll(() => player.locator("#sheet-list .sheet-row").count(), { timeout: 15_000 })
+      .poll(() => player.locator("#sheet-list .sheet-row").count(), {
+        timeout: 15_000,
+      })
       .toBe(1);
     await expect(player.locator("#sheet-list .doc-name")).toHaveText("Hero");
 
@@ -63,7 +79,9 @@ test.describe("sheets (§10 M1)", () => {
     await hp.fill("7");
     await hp.dispatchEvent("change");
     await expect
-      .poll(() => host.locator(".sys-field[data-key='hp']").inputValue(), { timeout: 15_000 })
+      .poll(() => host.locator(".sys-field[data-key='hp']").inputValue(), {
+        timeout: 15_000,
+      })
       .toBe("7");
 
     // ── enforcement: a second, unassigned actor never reaches the player ──
@@ -73,7 +91,9 @@ test.describe("sheets (§10 M1)", () => {
     await expect(player.locator("#sheet-list .sheet-row")).toHaveCount(1);
 
     // authoritative seq advanced through all of it
-    await expect.poll(() => hostCall<number>(host, "seq")).toBeGreaterThanOrEqual(6);
+    await expect
+      .poll(() => hostCall<number>(host, "seq"))
+      .toBeGreaterThanOrEqual(6);
 
     await hostCtx.close();
     await playerCtx.close();
@@ -122,7 +142,14 @@ test("PF1e compendium actor opens an authored sheet and recomputes after edits",
         data: {
           type: "actor",
           name: "Published Warrior",
-          system: { pf1e: { abilities: { dex: 16 }, ac: 22, touchAc: 16, flatFootedAc: 17 } },
+          system: {
+            pf1e: {
+              abilities: { dex: 16 },
+              ac: 22,
+              touchAc: 16,
+              flatFootedAc: 17,
+            },
+          },
           items: [],
           effects: [],
         },
@@ -136,12 +163,22 @@ test("PF1e compendium actor opens an authored sheet and recomputes after edits",
   await page.goto(entry + "?e2e=1");
   await waitForSurface(page, "app");
   expect(
-    await surfaceCallArg<{ ok: boolean }>(page, "app", "importPackageZip", Array.from(zip)),
+    await surfaceCallArg<{ ok: boolean }>(
+      page,
+      "app",
+      "importPackageZip",
+      Array.from(zip),
+    ),
   ).toMatchObject({ ok: true });
   await page.click('[data-tab="compendia"]');
-  await page.locator('[data-entry-id="pf-fighter"] [data-entry-import]').click();
+  await page
+    .locator('[data-entry-id="pf-fighter"] [data-entry-import]')
+    .click();
   await page.click('[data-tab="actors"]');
-  await page.locator("#sheet-list .sheet-row").filter({ hasText: "PF Fighter" }).click();
+  await page
+    .locator("#sheet-list .sheet-row")
+    .filter({ hasText: "PF Fighter" })
+    .click();
   const sheet = page.locator("#sheets [data-pf1e-sheet]");
   await expect(sheet.locator("[data-pf1e-ac]")).toHaveText("18 / 13 / 15");
   // Never expose the nested system object as a generic [object Object] text input.
@@ -160,7 +197,9 @@ test("PF1e compendium actor opens an authored sheet and recomputes after edits",
   await expect(sheet).toContainText("7 / 20");
 
   // New P1 editors author data, while the summary continues to derive its totals.
-  await expect(sheet.getByRole("button", { name: "monster", exact: true })).toHaveCount(0);
+  await expect(
+    sheet.getByRole("button", { name: "monster", exact: true }),
+  ).toHaveCount(0);
   await sheet.getByRole("button", { name: "armor", exact: true }).click();
   const armor = sheet.locator('[data-pf1e-detail="armor.armorBonus"]');
   await expect(armor).toHaveValue("5");
@@ -197,19 +236,29 @@ test("PF1e compendium actor opens an authored sheet and recomputes after edits",
   await attackRow.locator('[data-attack-field="name"]').fill("Longsword");
   await attackRow.locator('[data-attack-field="name"]').dispatchEvent("change");
   await attackRow.locator('[data-attack-field="damageDice"]').fill("1d8");
-  await attackRow.locator('[data-attack-field="damageDice"]').dispatchEvent("change");
+  await attackRow
+    .locator('[data-attack-field="damageDice"]')
+    .dispatchEvent("change");
   await attackRow.locator('[data-attack-field="damageBonus"]').fill("2");
-  await attackRow.locator('[data-attack-field="damageBonus"]').dispatchEvent("change");
+  await attackRow
+    .locator('[data-attack-field="damageBonus"]')
+    .dispatchEvent("change");
   await attackRow.locator('[data-attack-field="twoHanded"]').check();
-  await expect(sheet.locator("[data-derived-attack]")).toContainText("Longsword");
+  await expect(sheet.locator("[data-derived-attack]")).toContainText(
+    "Longsword",
+  );
   await expect(sheet.locator("[data-derived-attack]")).toContainText("1d8 +6");
   await attackRow.locator('[data-attack-field="damageDice"]').fill("1d8+99");
-  await attackRow.locator('[data-attack-field="damageDice"]').dispatchEvent("change");
+  await attackRow
+    .locator('[data-attack-field="damageDice"]')
+    .dispatchEvent("change");
   await expect(sheet.getByRole("alert")).toContainText("Use NdM");
   await expect(sheet.locator("[data-derived-attack]")).toContainText("1d8 +6");
   await attackRow.locator("[data-remove-attack]").click();
   await expect(sheet.locator("[data-pf1e-attack-row]")).toHaveCount(0);
-  await expect(sheet.locator("[data-derived-attack]")).toContainText("Unarmed strike");
+  await expect(sheet.locator("[data-derived-attack]")).toContainText(
+    "Unarmed strike",
+  );
   await sheet.getByRole("button", { name: "summary", exact: true }).click();
 
   // Popout and sidebar share the projected actor, not a stale copy captured at open.
@@ -221,7 +270,9 @@ test("PF1e compendium actor opens an authored sheet and recomputes after edits",
   await expect(window).toHaveCount(1);
   await page.locator("#sheet-name").fill("Renamed PF Fighter");
   await page.locator("#sheet-name").dispatchEvent("change");
-  await expect(window.getByRole("heading", { name: "Renamed PF Fighter" })).toBeVisible();
+  await expect(
+    window.getByRole("heading", { name: "Renamed PF Fighter" }),
+  ).toBeVisible();
   await window.getByRole("button", { name: "combat", exact: true }).click();
   const popupHp = window.locator('[data-pf1e-field="hp"]');
   await popupHp.fill("9");
@@ -230,11 +281,15 @@ test("PF1e compendium actor opens an authored sheet and recomputes after edits",
   const tempHp = window.locator('[data-pf1e-field="tempHp"]');
   await tempHp.fill("8");
   await tempHp.dispatchEvent("change");
-  const fireResistance = window.locator('[data-pf1e-field="energyResistance.fire"]');
+  const fireResistance = window.locator(
+    '[data-pf1e-field="energyResistance.fire"]',
+  );
   await fireResistance.fill("10");
   await fireResistance.dispatchEvent("change");
   await expect(sheet.locator("[data-temp-hp]")).toContainText("8");
-  await expect(sheet.locator("[data-energy-resistance]")).toContainText("fire 10");
+  await expect(sheet.locator("[data-energy-resistance]")).toContainText(
+    "fire 10",
+  );
   await expect(sheet).toContainText("9 / 20");
   await window.locator("[data-window-min]").click();
   await page.locator("[data-open-pf1e-sheet]").click();
@@ -249,7 +304,9 @@ test("PF1e compendium actor opens an authored sheet and recomputes after edits",
   await page
     .locator('[data-entry-id="pf-fighter"]')
     .dragTo(canvas, { targetPosition: { x: 160, y: 160 } });
-  await expect.poll(() => hostCall<number>(page, "tokenCount")).toBe(before + 1);
+  await expect
+    .poll(() => hostCall<number>(page, "tokenCount"))
+    .toBe(before + 1);
   await canvas.dblclick({ position: { x: 160, y: 160 } });
   await expect(window).toHaveCount(1);
   await expect(window.locator("[data-pf1e-ac]")).toHaveText("18 / 13 / 15");
@@ -257,9 +314,14 @@ test("PF1e compendium actor opens an authored sheet and recomputes after edits",
 
   // Published totals need an explicit preview, not an inferred component breakdown.
   await page.click('[data-tab="compendia"]');
-  await page.locator('[data-entry-id="pf-published"] [data-entry-import]').click();
+  await page
+    .locator('[data-entry-id="pf-published"] [data-entry-import]')
+    .click();
   await page.click('[data-tab="actors"]');
-  await page.locator("#sheet-list .sheet-row").filter({ hasText: "Published Warrior" }).click();
+  await page
+    .locator("#sheet-list .sheet-row")
+    .filter({ hasText: "Published Warrior" })
+    .click();
   await expect(sheet.locator("[data-pf1e-ac]")).toHaveText("22 / 16 / 17");
   await sheet.getByRole("button", { name: "armor", exact: true }).click();
   await sheet.locator("[data-ac-conversion] summary").click();
@@ -285,14 +347,20 @@ test("PF1e compendium actor opens an authored sheet and recomputes after edits",
   await window.locator("[data-window-close]").click();
   await sheet.locator("[data-apply-ac-source]").click();
   await expect(sheet.getByRole("alert")).toContainText("changed");
-  await expect(sheet.locator('[data-pf1e-detail="armor.armorBonus"]')).toBeDisabled();
+  await expect(
+    sheet.locator('[data-pf1e-detail="armor.armorBonus"]'),
+  ).toBeDisabled();
   await sheet.locator("[data-preview-components]").click();
   await sheet.locator("[data-apply-ac-source]").click();
-  await expect(sheet.locator('[data-pf1e-detail="armor.armorBonus"]')).toBeEnabled();
+  await expect(
+    sheet.locator('[data-pf1e-detail="armor.armorBonus"]'),
+  ).toBeEnabled();
   await sheet.locator("[data-preview-published]").click();
   await expect(sheet.locator("[data-ac-after]")).toHaveText("22 / 16 / 17");
   await sheet.locator("[data-apply-ac-source]").click();
-  await expect(sheet.locator('[data-pf1e-detail="armor.armorBonus"]')).toBeDisabled();
+  await expect(
+    sheet.locator('[data-pf1e-detail="armor.armorBonus"]'),
+  ).toBeDisabled();
   // The token dragged above has its own linked PF Fighter (Dex 16), not the selected actor.
   await page.click('[data-tab="combat"]');
   await page.click("#combat-start");
@@ -317,13 +385,20 @@ async function importShippedCore(page: Page): Promise<void> {
   const { zipSync } = await import("fflate");
   const { surfaceCallArg } = await import("./lib");
   const files = Object.fromEntries(
-    ["manifest.json", "packs/bestiary.json", "packs/spells.json"].map((path) => [
-      path,
-      readFileSync(new URL(`../systems/pf1e-core/${path}`, import.meta.url)),
-    ]),
+    ["manifest.json", "packs/bestiary.json", "packs/spells.json"].map(
+      (path) => [
+        path,
+        readFileSync(new URL(`../systems/pf1e-core/${path}`, import.meta.url)),
+      ],
+    ),
   );
   expect(
-    await surfaceCallArg(page, "app", "importPackageZip", Array.from(zipSync(files))),
+    await surfaceCallArg(
+      page,
+      "app",
+      "importPackageZip",
+      Array.from(zipSync(files)),
+    ),
   ).toMatchObject({ ok: true });
 }
 
@@ -335,23 +410,33 @@ test("all shipped bestiary sheets match the shared derivation and open Weapons w
   const { readFileSync } = await import("node:fs");
   const { derivePF1eActor } = await import("../src/packages/pf1e/actor");
   const pack = JSON.parse(
-    readFileSync(new URL("../systems/pf1e-core/packs/bestiary.json", import.meta.url), "utf8"),
+    readFileSync(
+      new URL("../systems/pf1e-core/packs/bestiary.json", import.meta.url),
+      "utf8",
+    ),
   );
   await page.goto(entry + "?e2e=1");
   await waitForSurface(page, "app");
   await importShippedCore(page);
   for (const item of pack.entries) {
     await page.click('[data-tab="compendia"]');
-    await page.locator(`[data-entry-id="${item.id}"] [data-entry-import]`).click();
+    await page
+      .locator(`[data-entry-id="${item.id}"] [data-entry-import]`)
+      .click();
     await page.click('[data-tab="actors"]');
-    await page.locator("#sheet-list .sheet-row").filter({ hasText: item.name }).click();
+    await page
+      .locator("#sheet-list .sheet-row")
+      .filter({ hasText: item.name })
+      .click();
     const sheet = page.locator("#sheets [data-pf1e-sheet]");
     const d = derivePF1eActor({ system: item.data.system.pf1e });
     await expect(sheet.locator("[data-pf1e-ac]")).toHaveText(
       `${d.ac.normal} / ${d.ac.touch} / ${d.ac.flatFooted}`,
     );
     await sheet.getByRole("button", { name: "weapons", exact: true }).click();
-    await expect(sheet.locator("[data-derived-attack]")).toHaveCount(d.attacks.length);
+    await expect(sheet.locator("[data-derived-attack]")).toHaveCount(
+      d.attacks.length,
+    );
     await expect(sheet.locator("[data-add-attack]")).toBeEnabled();
     await sheet.getByRole("button", { name: "summary", exact: true }).click();
   }
@@ -378,7 +463,10 @@ test("owned PF1e token opens a live player sheet and revocation removes private 
       .dragTo(canvas, { targetPosition: { x: 160, y: 160 } });
     await expect.poll(() => hostCall<number>(host, "tokenCount")).toBe(1);
     await host.click('[data-tab="actors"]');
-    await host.locator("#sheet-list .sheet-row").filter({ hasText: "Heavy Infantry" }).click();
+    await host
+      .locator("#sheet-list .sheet-row")
+      .filter({ hasText: "Heavy Infantry" })
+      .click();
     await host.selectOption("#assign-owner", playerId);
     await expect(player.locator("#sheet-list .sheet-row")).toHaveCount(1);
     await player.locator("#sheet-list .sheet-row").click();
@@ -394,14 +482,22 @@ test("owned PF1e token opens a live player sheet and revocation removes private 
       width: el.clientWidth,
       height: el.clientHeight,
     }));
-    const camera = fitRect({ x: 0, y: 0, width: 2000, height: 1500 }, viewport, 24);
-    await playerCanvas.dblclick({ position: worldToScreen(camera, pos.x, pos.y) });
+    const camera = fitRect(
+      { x: 0, y: 0, width: 2000, height: 1500 },
+      viewport,
+      24,
+    );
+    await playerCanvas.dblclick({
+      position: worldToScreen(camera, pos.x, pos.y),
+    });
     const window = player.locator('[data-window^="pf1e-sheet:"]');
     await expect(window.locator("[data-pf1e-ac]")).toHaveText("16 / 11 / 16");
     await window.getByRole("button", { name: "combat", exact: true }).click();
     await window.locator('[data-pf1e-field="hp"]').fill("7");
     await window.locator('[data-pf1e-field="hp"]').dispatchEvent("change");
-    await expect(host.locator("#sheets [data-pf1e-sheet]")).toContainText("7 / 0");
+    await expect(host.locator("#sheets [data-pf1e-sheet]")).toContainText(
+      "7 / 0",
+    );
     await expect(sidebar).toContainText("7 / 0");
     await host.fill("#sheet-name", "Private renamed infantry");
     await host.locator("#sheet-name").dispatchEvent("change");
@@ -412,7 +508,9 @@ test("owned PF1e token opens a live player sheet and revocation removes private 
     await host.click("#gm-perms");
     const perms = host.locator('[data-window="permissions"]');
     await perms.locator("[data-perm-coll]").selectOption("actors");
-    await perms.locator("[data-perm-doc]").selectOption({ label: "Private renamed infantry" });
+    await perms
+      .locator("[data-perm-doc]")
+      .selectOption({ label: "Private renamed infantry" });
     const playerName = (
       await perms
         .locator(`[data-perm-users] tr[data-user="${playerId}"] td`)
@@ -486,16 +584,22 @@ test("PF1e equal-total initiative roll-offs persist in the tracker across rounds
     "Heavy Cavalry",
     "Heavy Infantry",
   ]);
-  const receipts = await page.locator("[data-initiative-receipt] pre").allTextContents();
+  const receipts = await page
+    .locator("[data-initiative-receipt] pre")
+    .allTextContents();
   expect(receipts.map((raw) => JSON.parse(raw))).toMatchObject([
     { die: 10, total: 10, modifier: 0, tiePolicy: "pf1e", tieRolls: [20] },
     { die: 10, total: 10, modifier: 0, tiePolicy: "pf1e", tieRolls: [1] },
   ]);
   await page.click("#combat-next");
-  await expect(page.locator(".combat .order li.active .name")).toHaveText("Heavy Infantry");
+  await expect(page.locator(".combat .order li.active .name")).toHaveText(
+    "Heavy Infantry",
+  );
   await page.click("#combat-next");
   await expect(page.locator(".combat .round")).toContainText("Round 2");
-  await expect(page.locator(".combat .order li.active .name")).toHaveText("Heavy Cavalry");
+  await expect(page.locator(".combat .order li.active .name")).toHaveText(
+    "Heavy Cavalry",
+  );
   expect(errors).toEqual([]);
 });
 
@@ -528,7 +632,9 @@ test("canvas selection creates scoped rosters, adds/removes members and rolls on
   await page.mouse.up();
   expect(await hostCall<number>(page, "seq")).toBe(seq); // selection is not a move/write
   await page.click('[data-tab="combat"]');
-  await expect(page.locator("[data-combat-selection]")).toContainText("2 selected");
+  await expect(page.locator("[data-combat-selection]")).toContainText(
+    "2 selected",
+  );
   await expect(page.locator("[data-selected-token-names]")).toHaveText(
     "Heavy Infantry, Heavy Cavalry",
   );
@@ -543,7 +649,8 @@ test("canvas selection creates scoped rosters, adds/removes members and rolls on
       const old = Math.random;
       Math.random = () => ((dice.shift() ?? NaN) - 0.5) / 20;
       try {
-        const button = document.querySelector<HTMLButtonElement>("#combat-init");
+        const button =
+          document.querySelector<HTMLButtonElement>("#combat-init");
         if (!button) throw new Error("No roll control");
         button.click();
         return dice.length;
@@ -554,12 +661,20 @@ test("canvas selection creates scoped rosters, adds/removes members and rolls on
     expect(unused).toBe(0);
   }
   await roll([4, 12]);
-  await expect(page.locator(".combat .order li.active .name")).toHaveText("Heavy Cavalry");
-  const before = await page.locator("[data-initiative-receipt] pre").allTextContents();
+  await expect(page.locator(".combat .order li.active .name")).toHaveText(
+    "Heavy Cavalry",
+  );
+  const before = await page
+    .locator("[data-initiative-receipt] pre")
+    .allTextContents();
   await canvas.click({ position: { x: 360, y: 160 } });
-  await expect(page.locator("[data-combat-selection]")).toContainText("1 selected");
+  await expect(page.locator("[data-combat-selection]")).toContainText(
+    "1 selected",
+  );
   await page.click("#combat-init");
-  await expect(page.locator(".combat [role=alert]")).toContainText("not in this encounter");
+  await expect(page.locator(".combat [role=alert]")).toContainText(
+    "not in this encounter",
+  );
   await page.click("[data-add-selected]");
   await page.click("[data-add-selected]"); // idempotent
   await expect(page.locator(".combat .order li")).toHaveCount(3);
@@ -570,16 +685,24 @@ test("canvas selection creates scoped rosters, adds/removes members and rolls on
   const infantry = page
     .locator(".combat .order li")
     .filter({ has: page.locator(".name", { hasText: "Heavy Infantry" }) });
-  expect(await cavalry.locator("[data-initiative-receipt] pre").textContent()).toBe(before[0]);
-  expect(await infantry.locator("[data-initiative-receipt] pre").textContent()).toBe(before[1]);
-  await expect(page.locator(".combat .order li.active .name")).toHaveText("Heavy Cavalry");
+  expect(
+    await cavalry.locator("[data-initiative-receipt] pre").textContent(),
+  ).toBe(before[0]);
+  expect(
+    await infantry.locator("[data-initiative-receipt] pre").textContent(),
+  ).toBe(before[1]);
+  await expect(page.locator(".combat .order li.active .name")).toHaveText(
+    "Heavy Cavalry",
+  );
   await roll([12]); // selected Bombard ties unselected Cavalry: accepted, no extra dice
   await expect(page.locator(".combat .order .name")).toHaveText([
     "Heavy Cavalry",
     "Siege Bombard",
     "Heavy Infantry",
   ]);
-  expect(await cavalry.locator("[data-initiative-receipt] pre").textContent()).toBe(before[0]);
+  expect(
+    await cavalry.locator("[data-initiative-receipt] pre").textContent(),
+  ).toBe(before[0]);
   await canvas.click({ position: { x: 160, y: 160 } });
   await page.click("[data-remove-selected]");
   await expect(page.locator(".combat .order .name")).toHaveText([
@@ -588,19 +711,29 @@ test("canvas selection creates scoped rosters, adds/removes members and rolls on
   ]);
   await canvas.click({ position: { x: 260, y: 160 } });
   await page.click("[data-remove-selected]");
-  await expect(page.locator(".combat .order .name")).toHaveText(["Siege Bombard"]);
-  await expect(page.locator(".combat .order li.active .name")).toHaveText("Siege Bombard");
+  await expect(page.locator(".combat .order .name")).toHaveText([
+    "Siege Bombard",
+  ]);
+  await expect(page.locator(".combat .order li.active .name")).toHaveText(
+    "Siege Bombard",
+  );
   await expect(page.locator(".combat .round")).toContainText("Round 1");
   await canvas.click({ position: { x: 360, y: 160 } });
   await page.click("[data-remove-selected]");
   await expect(page.locator(".combat .order li")).toHaveCount(0);
-  await expect(page.locator(".combat .round")).toHaveText("Round 1 · No combatants");
+  await expect(page.locator(".combat .round")).toHaveText(
+    "Round 1 · No combatants",
+  );
   await page.click("#scene-add");
   await page.locator(".scenenav [data-scene]").nth(1).click();
-  await expect(page.locator("[data-combat-selection]")).toContainText("0 selected");
+  await expect(page.locator("[data-combat-selection]")).toContainText(
+    "0 selected",
+  );
   await expect(page.locator("[data-encounter-select] option")).toHaveCount(1);
   await page.locator(".scenenav [data-scene]").first().click();
-  await expect(page.locator("[data-combat-selection]")).toContainText("0 selected");
+  await expect(page.locator("[data-combat-selection]")).toContainText(
+    "0 selected",
+  );
   await page.click("[data-encounter-create]"); // empty selection falls back to all three scene tokens
   await page.click("#combat-start");
   await expect(page.locator(".combat .order li")).toHaveCount(3);
@@ -624,7 +757,9 @@ test("deleting a selected token never broadens encounter creation to remaining t
   await expect.poll(() => hostCall<number>(page, "tokenCount")).toBe(2);
   await canvas.click({ position: { x: 260, y: 160 } });
   await page.click('[data-tab="combat"]');
-  await expect(page.locator("[data-combat-selection]")).toContainText("1 selected");
+  await expect(page.locator("[data-combat-selection]")).toContainText(
+    "1 selected",
+  );
   await page.click("#gm-undo"); // remove the last imported actor + token, not the first
   await expect.poll(() => hostCall<number>(page, "tokenCount")).toBe(1);
   await expect(page.locator(".combat [role=status]")).toContainText("deleted");
@@ -632,9 +767,13 @@ test("deleting a selected token never broadens encounter creation to remaining t
   await expect(page.locator(".combat [role=alert]")).toContainText("deleted");
   await expect(page.locator("[data-encounter-select] option")).toHaveCount(1);
   await page.click("[data-clear-combat-selection]");
-  await expect(page.locator("[data-combat-selection]")).toContainText("0 selected");
+  await expect(page.locator("[data-combat-selection]")).toContainText(
+    "0 selected",
+  );
   await page.click("#combat-start");
-  await expect(page.locator(".combat .order .name")).toHaveText(["Heavy Infantry"]);
+  await expect(page.locator(".combat .order .name")).toHaveText([
+    "Heavy Infantry",
+  ]);
 });
 
 test("PF1e sheet roll buttons post attacks, damage and saves to chat with their breakdown (A06)", async ({
@@ -860,5 +999,104 @@ test("PF1e resolve-vs-target posts public rolls, a resolution card and hp writes
   if (/hits\.|CRITS!/.test(text)) {
     expect(text).toMatch(/PF Dummy 12 → \d+ HP/);
   }
+  expect(runtimeErrors).toEqual([]);
+});
+
+test("PF1e effect editor applies, edits, suppresses and reverts live numbers (E02)", async ({
+  page,
+}) => {
+  const runtimeErrors: string[] = [];
+  page.on("pageerror", (error) => runtimeErrors.push(error.message));
+  const { strToU8, zipSync } = await import("fflate");
+  const { surfaceCallArg } = await import("./lib");
+  const manifest = {
+    id: "pf-effects-fixture",
+    name: "PF Effects Fixture",
+    version: "1.0.0",
+    type: "data",
+    packs: [{ name: "heroes", type: "actors", file: "packs/heroes.json" }],
+  };
+  const pack = {
+    name: "heroes",
+    type: "actors",
+    entries: [
+      {
+        id: "pf-hero",
+        name: "PF Hero",
+        data: {
+          type: "actor",
+          name: "PF Hero",
+          system: {
+            pf1e: { abilities: { str: 12 }, hp: 20, hpMax: 20 },
+          },
+          items: [],
+          effects: [],
+        },
+      },
+    ],
+  };
+  const zip = zipSync({
+    "manifest.json": strToU8(JSON.stringify(manifest)),
+    "packs/heroes.json": strToU8(JSON.stringify(pack)),
+  });
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  expect(
+    await surfaceCallArg<{ ok: boolean }>(
+      page,
+      "app",
+      "importPackageZip",
+      Array.from(zip),
+    ),
+  ).toMatchObject({ ok: true });
+  await page.click('[data-tab="compendia"]');
+  await page.locator('[data-entry-id="pf-hero"] [data-entry-import]').click();
+  await page.click('[data-tab="actors"]');
+  await page
+    .locator("#sheet-list .sheet-row")
+    .filter({ hasText: "PF Hero" })
+    .click();
+  const sheet = page.locator("#sheets [data-pf1e-sheet]");
+  await sheet.getByRole("button", { name: "effects", exact: true }).click();
+
+  // Baseline: STR 12. Apply +4 enhancement through the editor form.
+  const editor = sheet.locator("[data-pf1e-effect-editor]");
+  await editor.locator("[data-pf1e-effect-name]").fill("Bull's Strength");
+  const modRow = editor.locator("[data-pf1e-effect-mod]").first();
+  await modRow.getByLabel("Stat").selectOption("ability.str");
+  await modRow.getByLabel("Bonus type").selectOption("enhancement");
+  await modRow.getByLabel("Value").fill("4");
+  await editor.locator("[data-pf1e-effect-submit]").click();
+  await expect(sheet.locator("[data-pf1e-effective-scores]")).toContainText(
+    "STR 16",
+  );
+  const listed = sheet.locator("[data-pf1e-effect]");
+  await expect(listed).toHaveCount(1);
+  await expect(listed.first()).toContainText("Bull's Strength");
+
+  // Edit in place: +6 — the derivation follows without a new row.
+  await listed.first().locator("[data-pf1e-effect-edit]").click();
+  await modRow.getByLabel("Value").fill("6");
+  await editor.locator("[data-pf1e-effect-submit]").click();
+  await expect(sheet.locator("[data-pf1e-effective-scores]")).toContainText(
+    "STR 18",
+  );
+
+  // Suppress: authored 12 shows through again; re-enable restores.
+  await listed.first().getByRole("button", { name: "Suppress" }).click();
+  await expect(sheet.locator("[data-pf1e-effective-scores]")).toContainText(
+    "STR 12",
+  );
+  await listed.first().getByRole("button", { name: "Enable" }).click();
+  await expect(sheet.locator("[data-pf1e-effective-scores]")).toContainText(
+    "STR 18",
+  );
+
+  // Remove: fully back to the authored actor.
+  await listed.first().getByRole("button", { name: "Remove" }).click();
+  await expect(sheet.locator("[data-pf1e-effective-scores]")).toContainText(
+    "STR 12",
+  );
+  await expect(sheet.locator("[data-pf1e-effect]")).toHaveCount(0);
   expect(runtimeErrors).toEqual([]);
 });

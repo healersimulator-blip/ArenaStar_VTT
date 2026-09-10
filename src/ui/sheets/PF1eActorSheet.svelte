@@ -16,10 +16,12 @@
   import PF1eAttackEditor from "./PF1eAttackEditor.svelte";
   import { pf1eAttackEdit, type AttackEdit } from "./pf1eAttackEditor";
   import PF1eDetailsEditor from "./PF1eDetailsEditor.svelte";
+  import PF1eEffectsTab from "./PF1eEffectsTab.svelte";
   import { can } from "../../core/permissions";
   import {
     SHEET_FIELDS,
     isPF1eActor,
+    linkedCombatantId,
     sheetRecord,
     pf1eDetailEdit,
     type DetailEdit,
@@ -28,30 +30,70 @@
     pf1eSheetView,
     type SheetField,
   } from "./pf1eSheetModel";
+  import {
+    pf1eApplyActorEffect,
+    pf1eApplyCombatantEffect,
+    pf1eEditActorEffect,
+    pf1eEditCombatantEffect,
+    pf1eRemoveActorEffect,
+    pf1eRemoveCombatantEffect,
+    pf1eSetActorEffectDisabled,
+    pf1eSetCombatantEffectDisabled,
+  } from "../../packages/pf1e/effectOps";
+  import { resolveTacticalEffects } from "../../packages/pf1e/effectOps";
+  import type { CombatDocument, CombatantDocument } from "../../core/documents";
   import { resolveAttackFlow, resolveManyshotFlow } from "./pf1eResolveFlow";
   import type { PF1eDefenseChoice } from "../../packages/pf1e/resolve";
   import { validatePF1eFeatSelection } from "../../packages/pf1e/feats";
-
-  let {
-    doc,
-    client,
-    bus,
-  }: { doc: ActorDocument; client: ClientSync; bus: EventBus<ClientEvents> } =
-    $props();
-  let tab = $state<
+  type TabName =
     | "summary"
     | "attributes"
     | "combat"
     | "weapons"
     | "armor"
     | "features"
+    | "effects"
     | "monster"
-    | "details"
-  >("summary");
+    | "details";
+
+  let {
+    doc,
+    client,
+    bus,
+    initialTab = "summary",
+  }: {
+    doc: ActorDocument;
+    client: ClientSync;
+    bus: EventBus<ClientEvents>;
+    /** E02: token-menu "Apply effect…" opens the sheet directly on this tab. */
+    initialTab?: TabName;
+  } = $props();
+  let tab = $state<TabName>(initialTab);
   let error = $state("");
   const pending = new SvelteSet<string>();
-  let view = $derived(pf1eSheetView(doc));
+  // E01: when this actor fights inside an encounter, its combatant's timed
+  // effects (`flags.core.effects`) ride the derivation (id collision → the
+  // ticking combatant copy wins).
+  let linked = $derived(
+    linkedCombatantId(
+      doc._id,
+      client.store.getAll("combats") as readonly CombatDocument[],
+    ),
+  );
+  let view = $derived(
+    pf1eSheetView(doc, {
+      combat: linked.combat,
+      combatantId: linked.combatantId,
+    }),
+  );
   let d = $derived(view.derived);
+  let resolvedEffects = $derived(resolveTacticalEffects(view.effects));
+  let effectBoosts = $derived(
+    resolvedEffects.boosts.map((boost, i) => ({
+      boost,
+      from: resolvedEffects.boostSources[i] ?? "effect",
+    })),
+  );
   let featWarnings = $derived(
     validatePF1eFeatSelection(
       Array.isArray(view.authored.feats) ? view.authored.feats : [],
@@ -76,6 +118,7 @@
                 (a as Record<string, unknown>).secondary === true),
           )
         : false,
+      effectBoosts,
     }),
   );
   let saveRolls = $derived(pf1eSaveRollSpecs(d));
@@ -215,10 +258,17 @@
         targetDerived: info.derived,
         defense: resolveDefense,
         ...(resolveFlanking || resolveCharging
-          ? { situational: { ...(resolveFlanking ? { flanking: true } : {}), ...(resolveCharging ? { charging: true } : {}) } }
+          ? {
+              situational: {
+                ...(resolveFlanking ? { flanking: true } : {}),
+                ...(resolveCharging ? { charging: true } : {}),
+              },
+            }
           : {}),
         ...(resolveNonlethal ? { nonlethalDamage: true } : {}),
-        ...(Array.isArray(view.authored.feats) ? { feats: view.authored.feats as string[] } : {}),
+        ...(Array.isArray(view.authored.feats)
+          ? { feats: view.authored.feats as string[] }
+          : {}),
         ...(resolveVerifiable ? { verifiable: true } : {}),
       });
       if (!outcome.ok) resolveError = outcome.error;
@@ -276,6 +326,148 @@
     if (result.ops.length) pending.add(client.submit(result.ops));
   }
 
+  // E01/E02 — the effect apply/edit/toggle/remove handlers. Both homes resolve
+  // fresh documents from the projected store, so a stale tab cannot write over
+  // a replica that moved on; the ops go through ClientSync like every edit.
+  function linkedCombatantDoc(): {
+    combat: CombatDocument;
+    member: CombatantDocument;
+  } | null {
+    if (!linked.combat || !linked.combatantId) return null;
+    const combat = client.store.get("combats", linked.combat._id) as
+      CombatDocument | undefined;
+    const member = combat?.combatants.find(
+      (c) => c._id === linked.combatantId,
+    ) as CombatantDocument | undefined;
+    return combat && member ? { combat, member } : null;
+  }
+
+  function combatantEffectIds(member: CombatantDocument): Set<string> {
+    const core = (
+      member.flags as Record<string, Record<string, unknown>> | undefined
+    )?.core;
+    const effects = core?.effects;
+    return effects !== null &&
+      typeof effects === "object" &&
+      !Array.isArray(effects)
+      ? new Set(Object.keys(effects as object))
+      : new Set<string>();
+  }
+
+  function applyEffect(request: {
+    name: string;
+    icon?: string;
+    payload: Parameters<typeof pf1eApplyActorEffect>[2]["payload"];
+    target: "actor" | "combatant";
+    effectId?: string;
+  }): void {
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) {
+      error = "Actor is no longer available.";
+      return;
+    }
+    const linkedNow = linkedCombatantDoc();
+
+    // E02 edit mode: the effect's current home decides which edit op runs.
+    if (request.effectId !== undefined) {
+      if (
+        linkedNow &&
+        combatantEffectIds(linkedNow.member).has(request.effectId)
+      ) {
+        const result = pf1eEditCombatantEffect(
+          linkedNow.combat,
+          client.user,
+          linkedNow.member._id,
+          request.effectId,
+          request,
+        );
+        error = result.error ?? "";
+        if (result.ops.length) pending.add(client.submit(result.ops));
+        return;
+      }
+      const result = pf1eEditActorEffect(
+        current,
+        client.user,
+        request.effectId,
+        request,
+      );
+      error = result.error ?? "";
+      if (result.ops.length) pending.add(client.submit(result.ops));
+      return;
+    }
+
+    if (request.target === "combatant" && linkedNow) {
+      const result = pf1eApplyCombatantEffect(
+        linkedNow.combat,
+        client.user,
+        linkedNow.member._id,
+        request,
+      );
+      error = result.error ?? "";
+      if (result.ops.length) pending.add(client.submit(result.ops));
+      return;
+    }
+    const result = pf1eApplyActorEffect(current, client.user, request);
+    error = result.error ?? "";
+    if (result.ops.length) pending.add(client.submit(result.ops));
+  }
+
+  function toggleEffect(effectId: string, disabled: boolean): void {
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) {
+      error = "Actor is no longer available.";
+      return;
+    }
+    // The combatant home wins when it holds this id (the ticking instance).
+    const linkedNow = linkedCombatantDoc();
+    if (linkedNow && combatantEffectIds(linkedNow.member).has(effectId)) {
+      const result = pf1eSetCombatantEffectDisabled(
+        linkedNow.combat,
+        client.user,
+        linkedNow.member._id,
+        effectId,
+        disabled,
+      );
+      error = result.error ?? "";
+      if (result.ops.length) pending.add(client.submit(result.ops));
+      return;
+    }
+    const result = pf1eSetActorEffectDisabled(
+      current,
+      client.user,
+      effectId,
+      disabled,
+    );
+    error = result.error ?? "";
+    if (result.ops.length) pending.add(client.submit(result.ops));
+  }
+
+  function removeEffect(effectId: string): void {
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) {
+      error = "Actor is no longer available.";
+      return;
+    }
+    const linkedNow = linkedCombatantDoc();
+    if (linkedNow && combatantEffectIds(linkedNow.member).has(effectId)) {
+      const result = pf1eRemoveCombatantEffect(
+        linkedNow.combat,
+        client.user,
+        linkedNow.member._id,
+        effectId,
+      );
+      error = result.error ?? "";
+      if (result.ops.length) pending.add(client.submit(result.ops));
+      return;
+    }
+    const result = pf1eRemoveActorEffect(current, client.user, effectId);
+    error = result.error ?? "";
+    if (result.ops.length) pending.add(client.submit(result.ops));
+  }
+
   function update(field: SheetField, raw: string): void {
     // Read the latest projected document so a stale UI cannot restore old ownership/data.
     const current = client.store.get("actors", doc._id) as
@@ -309,7 +501,7 @@
     <span>PF1e · {d.size}</span>
   </header>
   <nav aria-label="PF1e sheet tabs">
-    {#each ["summary", "attributes", "combat", "weapons", "armor", "features", ...(sheetRecord(view.authored.creature) ? ["monster"] : []), "details"] as name (name)}
+    {#each ["summary", "attributes", "combat", "weapons", "armor", "features", "effects", ...(sheetRecord(view.authored.creature) ? ["monster"] : []), "details"] as name (name)}
       <button
         type="button"
         class:active={tab === name}
@@ -391,7 +583,7 @@
       </label>
     {/each}
     {#if tab === "attributes"}
-      <p>
+      <p data-pf1e-effective-scores>
         Effective scores: {Object.entries(d.abilities)
           .map(([key, score]) => `${key.toUpperCase()} ${score}`)
           .join(" · ")}
@@ -524,7 +716,9 @@
             disabled={resolveBusy || manyshotBusy || !resolveTargetId}
             onclick={() => void resolveManyshotVsTarget()}
             data-pf1e-resolve-manyshot
-            >{manyshotBusy ? "Resolving Manyshot…" : `Resolve Manyshot ×${manyshotRolls(resolveAttackIndex).length}`}</button
+            >{manyshotBusy
+              ? "Resolving Manyshot…"
+              : `Resolve Manyshot ×${manyshotRolls(resolveAttackIndex).length}`}</button
           >
         {/if}
         {#if resolveError}<p class="warn" data-pf1e-resolve-error>
@@ -567,12 +761,24 @@
       <aside class="warn" data-pf1e-feat-warnings>
         <strong>Prerequisite warnings</strong>
         {#each featWarnings as warning (warning)}<p>{warning}</p>{/each}
-        <p class="note">Authored feats are retained; warnings do not silently remove them.</p>
+        <p class="note">
+          Authored feats are retained; warnings do not silently remove them.
+        </p>
       </aside>
     {/if}
     {#if tab === "armor" && editable}
       <PF1eAcConversion {doc} user={client.user} onApply={applyAcSource} />
     {/if}
+  {:else if tab === "effects"}
+    <PF1eEffectsTab
+      effects={view.effects}
+      effectErrors={view.effectErrors}
+      {editable}
+      linkedCombatant={linked.combat !== null && linked.combatantId !== null}
+      onApply={applyEffect}
+      onToggle={toggleEffect}
+      onRemove={removeEffect}
+    />
   {:else}
     <h4>Calculation breakdown</h4>
     <dl>

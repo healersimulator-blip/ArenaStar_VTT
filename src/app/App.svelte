@@ -4,6 +4,7 @@
   import { DEFAULT_SCENE_ID, makeToken, type HostApp } from "./hostBoot";
   import { createStage, type Stage } from "../canvas/stage";
   import { tokenRect } from "../canvas/tokens";
+  import { tokenBadgesMap } from "../packages/pf1e/tokenBadges";
   import { SvelteMap } from "svelte/reactivity";
   // static import: a dynamic import("pixi.js") would inline a SECOND copy of
   // pixi into the single-file bundle (+290 KB, D-083)
@@ -61,6 +62,7 @@
   import { SheetPanel } from "../ui/sheets";
   import { startHostShare, type HostShare } from "./hostShare";
   import type {
+    ActorDocument,
     CombatDocument,
     SceneDocument,
     SceneGrid,
@@ -159,10 +161,12 @@
     tokenMenu = null;
   }
 
-  /** Apply one T01 menu entry: roster transitions go through the combat update path,
-   *  token visibility through its own op; the canvas menu closes either way. */
+  /** Apply one T01/E02 menu entry: roster transitions go through the combat update
+   *  path, token visibility through its own op, and "apply-effect" opens the
+   *  actor's sheet on the Effects tab; the canvas menu closes either way. */
   function runTokenMenuEntry(
-    entryId: "add-combatant" | "remove-combatant" | "toggle-hidden",
+    entryId:
+      "add-combatant" | "remove-combatant" | "toggle-hidden" | "apply-effect",
   ): void {
     if (!tokenMenu || !app) return;
     const scene = activeScene();
@@ -180,6 +184,7 @@
       scene,
       token,
       user: app.gm.client.user,
+      actors: app.gm.client.store.getAll("actors") as readonly ActorDocument[],
       entryId,
       nextId: () => globalThis.crypto.randomUUID(),
     });
@@ -211,6 +216,8 @@
       ]);
     }
     closeTokenMenu();
+    if (result.openEffectEditorActorId !== null)
+      openActorSheet(result.openEffectEditorActorId, "effects");
   }
 
   function activeScene(): SceneDocument | null {
@@ -245,7 +252,7 @@
     });
   }
 
-  function openActorSheet(actorId: string): void {
+  function openActorSheet(actorId: string, tab?: string): void {
     if (!app) return;
     const rect = canvasHost?.getBoundingClientRect();
     openPF1eSheetWindow(
@@ -253,6 +260,7 @@
       app.gm.client,
       actorId,
       rect ? { width: rect.width, height: rect.height } : undefined,
+      tab,
     );
   }
 
@@ -468,7 +476,16 @@
     worldName = current.meta.name;
     seq = current.gm.client.store.seq;
     tokenCount = scene?.tokens.length ?? 0;
-    view.syncTokens(scene?.tokens ?? []);
+    const tokens = scene?.tokens ?? [];
+    // E06 (D-147): condition/effect chips derive on read from the client replica, so apply,
+    // suppress and expiry all re-render the badges with no invalidation step.
+    view.syncTokens(
+      tokens,
+      tokenBadgesMap(tokens, {
+        actors: current.gm.client.store.getAll("actors") as ActorDocument[],
+        combats: current.gm.client.store.getAll("combats") as CombatDocument[],
+      }),
+    );
     // §9 tiles: roofs fade over tokens with vision (D-083)
     const occupied = (scene?.tokens ?? [])
       .filter((t) => t.vision)
@@ -1424,6 +1441,8 @@
                 scene: menuScene,
                 token: menuToken,
                 user: app?.gm.client.user ?? null,
+                actors: (app?.gm.client.store.getAll("actors") ??
+                  []) as readonly ActorDocument[],
               })}
               <div
                 class="token-menu"
@@ -1453,7 +1472,8 @@
                           entry.id as
                             | "add-combatant"
                             | "remove-combatant"
-                            | "toggle-hidden",
+                            | "toggle-hidden"
+                            | "apply-effect",
                         )}>{entry.label}</button
                     >
                   {/if}

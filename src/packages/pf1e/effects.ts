@@ -142,6 +142,13 @@ export type PF1eEffectPayload = {
   source?: PF1eEffectSource;
   /** Effects sharing a group (e.g. "rage") contribute once between them, best only. */
   stackGroup?: string;
+  /**
+   * World clock (seconds) when the effect was applied — the anchor every clock-counted
+   * duration (`round`/`minute`/`hour`/`day`, E05) counts from. Absent on effects applied
+   * before E05 or without a world clock in scope; unanchored effects are never
+   * clock-swept (the turn engine stays their only consumer).
+   */
+  appliedAtClock?: number;
 };
 
 /** A validated effect, ready for the derivation to read. */
@@ -201,6 +208,7 @@ export function validateEffectPayload(raw: unknown): Result<PF1eEffectPayload> {
     "ttl",
     "source",
     "stackGroup",
+    "appliedAtClock",
   ];
   for (const key of Object.keys(obj)) {
     if (!known.includes(key)) return err(`pf1e effect: unknown field "${key}"`);
@@ -348,6 +356,11 @@ export function validateEffectPayload(raw: unknown): Result<PF1eEffectPayload> {
     ...(typeof obj.stackGroup === "string" && obj.stackGroup !== ""
       ? { stackGroup: obj.stackGroup }
       : {}),
+    ...(typeof obj.appliedAtClock === "number" &&
+    Number.isFinite(obj.appliedAtClock) &&
+    obj.appliedAtClock >= 0
+      ? { appliedAtClock: Math.trunc(obj.appliedAtClock) }
+      : {}),
   });
 }
 
@@ -476,11 +489,19 @@ export function ttlToTicks(
 export function effectFlagsFor(
   payload: PF1eEffectPayload,
   casterLevel = payload.source?.level ?? 1,
+  clock?: { worldClockSeconds?: number } | undefined,
 ): { core: Record<string, Json>; pf1e: PF1eEffectPayload } {
   const ticks = ttlToTicks(payload.ttl, casterLevel);
+  const anchored =
+    clock !== undefined &&
+    typeof clock.worldClockSeconds === "number" &&
+    Number.isFinite(clock.worldClockSeconds) &&
+    clock.worldClockSeconds >= 0
+      ? { ...payload, appliedAtClock: Math.trunc(clock.worldClockSeconds) }
+      : payload;
   return {
     core: ticks !== null ? { duration: ticks } : {},
-    pf1e: payload,
+    pf1e: anchored,
   };
 }
 
@@ -498,6 +519,8 @@ export interface ResolvedEffects {
   acTransfer: number;
   acPenalties: number;
   boosts: readonly PF1eDamageBoost[];
+  /** Parallel to `boosts`: the effect name each boost came from (breakdown attribution). */
+  boostSources: readonly string[];
   denies: ReadonlySet<string>;
   grants: ReadonlySet<string>;
   immuneMindAffecting: boolean;
@@ -531,6 +554,7 @@ export function resolveEffects(
   const active = effects.filter((e) => !e.disabled);
   const mods: AttributedMod[] = [];
   const boosts: PF1eDamageBoost[] = [];
+  const boostSources: string[] = [];
   const denies = new Set<string>();
   const grants = new Set<string>();
   const immuneConditions = new Set<string>();
@@ -547,7 +571,10 @@ export function resolveEffects(
     const p = e.payload;
     for (const m of p.mods ?? [])
       mods.push({ ...m, from: e.id, stackGroup: p.stackGroup ?? null });
-    for (const b of p.boosts ?? []) boosts.push(b);
+    for (const b of p.boosts ?? []) {
+      boosts.push(b);
+      boostSources.push(e.name);
+    }
     for (const d of p.denies ?? []) denies.add(d);
     for (const g of p.grants ?? []) grants.add(g);
     if (p.immune?.mindAffecting === true) immuneMindAffecting = true;
@@ -573,6 +600,7 @@ export function resolveEffects(
     acTransfer: 0,
     acPenalties: 0,
     boosts,
+    boostSources,
     denies: denies.size > 0 ? denies : EMPTY_SET,
     grants: grants.size > 0 ? grants : EMPTY_SET,
     immuneMindAffecting,
