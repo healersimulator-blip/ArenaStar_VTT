@@ -776,11 +776,12 @@ export function spendCombatantAction(
   combat: CombatDocument,
   combatantId: string,
   spend: PF1eActionSpend,
+  denied?: ReadonlySet<string>,
 ): Result<CombatDocument> {
   const target = combat.combatants.find((c) => c._id === combatantId);
   if (!target) return err("combatant is not part of this encounter");
   const cs = readCombatantState(target);
-  const next = spendAction(cs.actions, spend);
+  const next = spendAction(cs.actions, spend, denied);
   if (!next.ok) return err(next.error);
   return okVal({
     ...combat,

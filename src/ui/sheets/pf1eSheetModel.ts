@@ -1,10 +1,15 @@
 /** P1 sheet adapter: no rules arithmetic and no local store writes. */
-import type { ActorDocument, BaseDocument, Json } from "../../core/documents";
+import type {
+  ActorDocument,
+  BaseDocument,
+  CombatDocument,
+  Json,
+} from "../../core/documents";
 import type { PermissionUser } from "../../core/ownership";
 import type { Op } from "../../core/ops";
 import { can } from "../../core/permissions";
 import { deriveFromDocuments } from "../../packages/pf1e/actor";
-import { readTacticalEffects } from "../../packages/pf1e/effects";
+import { combinedTacticalEffects } from "../../packages/pf1e/effectOps";
 import { normalizePF1eSystem } from "../../packages/pf1e/statBlock";
 
 export function isPF1eActor(doc: BaseDocument): doc is ActorDocument {
@@ -59,15 +64,48 @@ export const SHEET_FIELDS = [
 ] as const;
 export type SheetField = (typeof SHEET_FIELDS)[number][0];
 
-export function pf1eSheetView(actor: ActorDocument) {
-  const effects = readTacticalEffects(
-    actor.effects.map((e) => [e._id, e] as const),
+/**
+ * Optional encounter context (E01): when the actor fights in an encounter, its
+ * combatant's `flags.core.effects` ride the derivation (they tick at the owner's
+ * turn end, so they are the live truth on an id collision with an embedded copy).
+ */
+export interface PF1eSheetContext {
+  combat?: CombatDocument | null;
+  combatantId?: string | null;
+}
+
+export function pf1eSheetView(actor: ActorDocument, ctx?: PF1eSheetContext) {
+  const effects = combinedTacticalEffects(
+    actor,
+    ctx?.combat ?? null,
+    ctx?.combatantId ?? null,
   );
   return {
     authored: normalizePF1eSystem(actor.system.pf1e).system,
     derived: deriveFromDocuments({ actor, effects: effects.effects }),
     effectErrors: effects.rejected.map((e) => `${e.id}: ${e.error}`),
+    /** Active effect list for the Effects tab (embedded + referenced, collision-safe). */
+    effects: effects.effects,
   };
+}
+
+/**
+ * The combatant (if any) through which this actor currently fights, preferring an
+ * active encounter (round ≥ 1) when several reference the same actor.
+ */
+export function linkedCombatantId(
+  actorId: string,
+  combats: readonly CombatDocument[],
+): { combat: CombatDocument | null; combatantId: string | null } {
+  let fallback: { combat: CombatDocument; combatantId: string } | null = null;
+  for (const combat of combats) {
+    for (const member of combat.combatants) {
+      if (member.actorId !== actorId) continue;
+      if (combat.round >= 1) return { combat, combatantId: member._id };
+      fallback ??= { combat, combatantId: member._id };
+    }
+  }
+  return fallback ?? { combat: null, combatantId: null };
 }
 
 export function authoredNumber(

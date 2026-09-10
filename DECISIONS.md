@@ -2824,3 +2824,111 @@ already verified in D-135/D-136/D-138 — no other new rule research.
   **1125 passed / 3 skipped** across 126 files; typecheck, lint, touched-file
   Prettier, build, size and `build:systems` green; dist 2,080,869 raw /
   602,541 gzip — +21,176 over D-139, within the 6 MB budget. A07 remains.
+
+## D-141 — A07 slice: supported feat/stance modifiers, Weapon Finesse, and Manyshot (modifier slice landed)
+
+**Date:** 2026-09-09/10 (code landed on the merged branch; this entry backfills the
+V11 record the slice was missing — the checklist progress block existed without its
+decision). **Scope:** P3/A07, first slice (A07 stays open for the remaining feat
+set and browser acceptance). Sources: the A.15 stance transcription (total defense
++4 dodge/1 round/can't attack or take AoOs) and AoN ID 131 for Weapon Finesse's
+stat swap; everything else composes D-134's weapon descriptors and D-135's attack
+layer — no new primary-text research.
+
+- **`src/packages/pf1e/feats.ts` (new, pure):** normalization plus modifier helpers
+  for explicit Power Attack/Deadly Aim (including handedness scaling on the −1/−2
+  ladder), Combat Expertise, fighting defensively/total defense, weapon-scoped
+  Weapon Focus/Specialization/Improved Critical, Weapon Finesse's stat selection,
+  Point-Blank Shot's 30-foot boundary, and Improved/Greater TWF off-hand attack
+  counts. `manyshotPlan` gates the feat/ranged/BAB requirement and returns the
+  standard-action arrow count (2–4) with the −4 volley penalty.
+- **Wired into `tactical.ts` only when the caller activates a stance** — no feat is
+  silently activated from authored content; prerequisites not represented in the
+  actor contract stay caller-owned. Weapon Finesse applies to eligible light melee
+  weapons; the TWF upgrades lay out additional off-hand attacks.
+- **Manyshot resolution:** `pf1eManyshotRollSpecs` exposes one same-bonus roll per
+  arrow; pure `pf1eResolveManyshot` applies 2–4 host-evaluated arrows in order
+  against one evolving defender state (per-arrow hit/miss, confirmation,
+  mitigation, HP and nonlethal transitions), refusing non-ranged attacks and
+  invalid volley sizes before resolving any arrow. `resolveManyshotFlow` emits one
+  public card and writes final HP/nonlethal through the normal authorized sheet
+  path; the Combat tab renders the Manyshot button when the feat and the derived
+  ranged line qualify.
+- **UI validation:** the Features tab reports unmet prerequisites for supported
+  feats without deleting or disabling authored entries. `shootingIntoMeleePenalty`
+  now accepts explicit `targetEngaged`/`nearestFriendlyDistanceFt` facts (the
+  caller owns producing them); Precise Shot still removes the penalty
+  unconditionally.
+- **Evidence (re-verified on the merged HEAD before this backfill):** full suite
+  **1135 passed / 3 skipped** across 126 files; typecheck, lint, build and size
+  green; dist 2,089,293 raw / 604,442 gzip — within the 6 MB budget. A07 remains
+  open: browser acceptance plus the feats whose consumers live in later slices
+  (Multiattack's natural-secondary reduction note in D-135, Gun Training's
+  broken-misfire variant noted in D-134).
+
+## D-142 — E01: the effect apply/persist path — two homes, the derivation bridge, and the denies/boosts consumers
+
+**Date:** 2026-09-10. **Scope:** P4/E01 (closes E01 at the logic level; browser
+acceptance pending per the D-119 precedent). No new primary-text research: the
+stacking/penalty/suppression mathematics is P0's `resolveEffects`, the tick
+machinery is core `combat.ts`, and the one preset magnitude (Bull's Strength +4
+enhancement, 1 min/level) was verified in R02/D-129. Durations count 1 round =
+6 s ⇒ minute = 10 ticks, hour = 100 (A.1), as `ttlToTicks` already encoded.
+
+- **`src/packages/pf1e/effectOps.ts` (new, pure):** the one sanctioned place that
+  turns a `PF1eEffectPayload` into documents and Ops for both homes the core
+  badge/tick code already reads — **actor-embedded** (`actor.effects`, the
+  out-of-combat home) and **combatant-referenced** (`combatant.flags.core.effects`,
+  what `core/combat.ts` ticks at the owner's turn end and what the CombatPanel
+  badges). `buildEffectDoc` validates (`validateEffectPayload`), keeps `changes`
+  empty (D-112) and seeds `flags.core.duration` via `effectFlagsFor`; apply/
+  suppress/restore/remove helpers return Ops for `ClientSync.submit` with the same
+  client-side permission gates as the sheet path (`update` on the actor / on the
+  encounter), duplicate-id refusal, a 50-effect cap and named errors.
+- **The derivation bridge:** `combinedTacticalEffects(actor, combat, combatantId)`
+  merges both homes, with the **combatant copy winning an id collision** — it is
+  the instance the tick decrements, so it is the live truth; the embedded twin is
+  shadowed, not deleted. `pf1eSheetView` now takes an optional `{ combat,
+combatantId }` ctx (the component resolves the linked combatant through
+  `linkedCombatantId`, preferring an active encounter), so sheet numbers and
+  badges can no longer disagree.
+- **Expiry stays free** (P0's read-on-read design, now proven end-to-end): the
+  acceptance test applies a 2-round effect through the real op, starts the
+  encounter and advances turns — the owner's turn-end tick consumes the owner's
+  duration only (the other combatant's turn never touches it), expiry drops the
+  effect, and `derivePF1eActor` returns the base numbers with no undo write.
+- **Action denies gain a consumer:** `actionRefusal`/`spendAction`/
+  `spendCombatantAction` accept the deny token set; a token refuses a spend when
+  it names the spend's action id ("charge", "full-attack", "cast-spell") or its
+  kind. `actionBudget.ts` computes it per combatant from the linked actor's
+  combined effects (`deniedActionsForCombatant`) and the tracker's budget chips
+  and spend path both pass it. Tokens without a consumer yet ("aoo", P6's
+  interrupt queue) are inert but preserved in the set.
+- **Damage boosts gain a consumer:** `PF1eAttackRollContext.effectBoosts` (fed
+  from `ResolvedEffects.boosts` + the new parallel `boostSources` attribution)
+  appends `NdS`/static rider terms to every attack line's damage roll with a
+  named note, and adds the caveat note to the crit roll — riders are **never
+  multiplied on a critical** (CRB p.179 via D-136), so the crit formula is
+  unchanged.
+- **`src/ui/sheets/PF1eEffectsTab.svelte` (new):** the minimal apply surface — a
+  typed, validated form (name, condition label, one mod row from the closed
+  `PF1E_MOD_KEYS`/`PF1E_BONUS_TYPES` lists, ttl unit/value/per-level, and the
+  home: actor vs. combatant when linked), the R02-verified Bull's Strength
+  preset, and suppress/enable/remove per listed effect. The open-ended editor
+  (free-form keys, boosts/grants/immunities authoring) remains E02; the condition
+  _library_ remains E03 — this tab deliberately encodes no condition numbers.
+- **Deliberately not encoded:** per-level conversion against a replicated world
+  clock and round-start expiry differences (E04/E05 — `endsOn` is carried but both
+  boundaries tick as core ticks today), concentration/sustained enforcement (E04),
+  condition math (E03), token condition icons (E06), and combatant-effect
+  attribution in the resolve flow's cards.
+- **Evidence:** 14 new tests in `tests/packages/pf1eEffectOps.test.ts` (doc
+  shaping + validation refusals, the stacking fixture through the real apply path,
+  permission/duplicate/cap refusals, the core-shape combatant write read back
+  through `activeEffects`, the expiry-revert acceptance, collision precedence,
+  ctx'd sheet view, deny gating through ledger and spend, boost/crit formula
+  shapes). Full suite **1149 passed / 3 skipped** across 127 files; typecheck,
+  lint, touched-file Prettier, build, size and `build:systems` green; dist
+  2,103,405 raw / 607,994 gzip — +14,112 over the pre-slice build, within the
+  6 MB budget. Browser acceptance of the Effects tab is collected-not-executed in
+  this environment (no browser binaries, D-119 precedent).

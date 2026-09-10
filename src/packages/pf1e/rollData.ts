@@ -25,6 +25,7 @@
 
 import type { PF1eDerived, PF1eDerivedAttack } from "./actor";
 import { manyshotPlan } from "./feats";
+import type { PF1eDamageBoost } from "./effects";
 
 /** What a roll button rolls and how its chat card reads. */
 export interface PF1eRollSpec {
@@ -59,6 +60,18 @@ export interface PF1eAttackRollGroup {
   notes: string[];
 }
 
+/**
+ * One effect-carried damage boost (`flags.pf1e.boosts`), attributed to its effect
+ * name for the breakdown line. Riders are never multiplied on a critical
+ * (D-136: base dice + static multiply; bonus/precision/energy dice do not), so
+ * they extend only the normal damage roll.
+ */
+export interface PF1eEffectBoostContext {
+  boost: PF1eDamageBoost;
+  /** The effect's display name (attribution for the notes line). */
+  from: string;
+}
+
 /** Author context the unarmed-provoke rule needs; the sheet supplies it from authored data. */
 export interface PF1eAttackRollContext {
   /** How many attack lines were authored (`system.pf1e.attacks[]`); 0 ⇒ the lines shown are the unarmed fallback. */
@@ -67,6 +80,8 @@ export interface PF1eAttackRollContext {
   feats?: readonly string[] | undefined;
   /** Whether any derived line is a natural attack — a creature with natural weapons counts as armed. */
   hasNaturalAttacks?: boolean | undefined;
+  /** Active effect damage boosts (E01) appended to every line's damage roll. */
+  effectBoosts?: readonly PF1eEffectBoostContext[] | undefined;
 }
 
 /** "+3" / "−2" / "0" for display text (the formula itself uses ASCII -). */
@@ -201,6 +216,35 @@ export function pf1eAttackRollGroups(
     if (line.critThreatMin < 20) {
       notes.push(`threat range ${line.critThreatMin}–20`);
     }
+    // Effect-carried damage boosts (E01): riders extend the normal damage
+    // roll and are named in its notes; they are never multiplied on a
+    // critical (CRB p.179 — extra damage dice are not multiplied).
+    const boosts = context?.effectBoosts ?? [];
+    const boostTerms: string[] = [];
+    const boostNotes: string[] = [];
+    for (const { boost, from } of boosts) {
+      const parts: string[] = [];
+      if (boost.dice !== undefined && boost.sides !== undefined)
+        parts.push(`${boost.dice}d${boost.sides}`);
+      if (boost.bonus !== undefined && boost.bonus !== 0)
+        parts.push(String(boost.bonus));
+      if (parts.length === 0) continue;
+      boostTerms.push(parts.join(" + "));
+      const tag = boost.precision
+        ? " precision"
+        : boost.energy
+          ? ` ${boost.energy}`
+          : "";
+      boostNotes.push(`+${parts.join(" + ")}${tag} damage (${from})`);
+    }
+    const dmgWithBoosts =
+      dmg === null
+        ? boostTerms.length > 0
+          ? boostTerms.join(" + ")
+          : null
+        : boostTerms.length > 0
+          ? `${dmg} + ${boostTerms.join(" + ")}`
+          : dmg;
     // The provoke rule (CRB p.182): the derived fallback line is an unarmed
     // strike; without IUS or natural weapons the attacker is not armed. An
     // explicitly authored line named "unarmed" gets the advisory note —
@@ -221,14 +265,14 @@ export function pf1eAttackRollGroups(
       attack,
       fullAttack,
       damage:
-        dmg === null
+        dmgWithBoosts === null
           ? null
           : {
               kind: "damage" as const,
               label: line.name,
-              formula: dmg,
+              formula: dmgWithBoosts,
               flavor: `${line.name} damage — ${line.explain}`,
-              notes: [],
+              notes: boostNotes,
             },
       critDamage:
         crit.formula === null
@@ -238,7 +282,10 @@ export function pf1eAttackRollGroups(
               label: `${line.name} ×${line.critMultiplier}`,
               formula: crit.formula,
               flavor: `${line.name} critical ×${line.critMultiplier} — weapon damage rolled ${line.critMultiplier} times with all modifiers (CRB p.179)`,
-              notes: [],
+              notes:
+                boostNotes.length > 0
+                  ? ["effect damage bonuses are not multiplied on a critical"]
+                  : [],
             },
       provokes,
       notes,
@@ -265,7 +312,8 @@ export function pf1eManyshotRollSpecs(
     ranged: line.ranged,
   });
   if (!plan.ok) return [];
-  const bonus = (line.attackBonuses[0] ?? derived.baseAttack) + plan.attackPenalty;
+  const bonus =
+    (line.attackBonuses[0] ?? derived.baseAttack) + plan.attackPenalty;
   return Array.from({ length: plan.arrows }, (_, index) => ({
     kind: "attack" as const,
     label: `${line.name} Manyshot arrow ${index + 1}`,

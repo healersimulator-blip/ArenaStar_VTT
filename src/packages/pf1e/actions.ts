@@ -498,12 +498,25 @@ function restrictedSpent(ledger: PF1eActionLedger): boolean {
 /**
  * Why this spend is illegal right now, or null when it is allowed. Pure — the UI uses
  * this to disable buttons with the reason as a tooltip, and P3+/P6 action execution
- * will use it as the legality gate.
+ * will use it as the legality gate. `denied` carries the deny tokens resolved from the
+ * combatant's active effects (E01): a token refuses a spend when it names the spend's
+ * action id or its kind.
  */
 export function actionRefusal(
   ledger: PF1eActionLedger,
   spend: PF1eActionSpend,
+  denied?: ReadonlySet<string>,
 ): string | null {
+  if (denied && denied.size > 0) {
+    const action =
+      "action" in spend && typeof spend.action === "string"
+        ? spend.action
+        : null;
+    if (action !== null && denied.has(action))
+      return `an active effect denies this action (${action})`;
+    if (denied.has(spend.kind))
+      return `an active effect denies this action (${spend.kind})`;
+  }
   const restricted = ledger.restriction === "single-standard-or-move";
   switch (spend.kind) {
     case "free":
@@ -575,8 +588,9 @@ export function actionRefusal(
 export function spendAction(
   ledger: PF1eActionLedger,
   spend: PF1eActionSpend,
+  denied?: ReadonlySet<string>,
 ): Result<PF1eActionLedger> {
-  const refusal = actionRefusal(ledger, spend);
+  const refusal = actionRefusal(ledger, spend, denied);
   if (refusal !== null) return err(refusal);
   const next: PF1eActionLedger = { ...ledger };
   switch (spend.kind) {

@@ -335,6 +335,7 @@
       id,
       spendKind,
       client.user,
+      client.store.getAll("actors") as readonly ActorDocument[],
     );
     error = result.error ?? "";
     if (!result.combat) return;
@@ -541,7 +542,7 @@
       >
     </div>
     {#if pf1e && current}
-      {@const budget = combatantBudget(combat, current._id)}
+      {@const budget = combatantBudget(combat, current._id, actors)}
       {#if budget}
         <div class="budget" data-action-budget={current._id}>
           <span class="budget-title">{current.name} actions:</span>

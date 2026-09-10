@@ -498,6 +498,8 @@ export interface ResolvedEffects {
   acTransfer: number;
   acPenalties: number;
   boosts: readonly PF1eDamageBoost[];
+  /** Parallel to `boosts`: the effect name each boost came from (breakdown attribution). */
+  boostSources: readonly string[];
   denies: ReadonlySet<string>;
   grants: ReadonlySet<string>;
   immuneMindAffecting: boolean;
@@ -531,6 +533,7 @@ export function resolveEffects(
   const active = effects.filter((e) => !e.disabled);
   const mods: AttributedMod[] = [];
   const boosts: PF1eDamageBoost[] = [];
+  const boostSources: string[] = [];
   const denies = new Set<string>();
   const grants = new Set<string>();
   const immuneConditions = new Set<string>();
@@ -547,7 +550,10 @@ export function resolveEffects(
     const p = e.payload;
     for (const m of p.mods ?? [])
       mods.push({ ...m, from: e.id, stackGroup: p.stackGroup ?? null });
-    for (const b of p.boosts ?? []) boosts.push(b);
+    for (const b of p.boosts ?? []) {
+      boosts.push(b);
+      boostSources.push(e.name);
+    }
     for (const d of p.denies ?? []) denies.add(d);
     for (const g of p.grants ?? []) grants.add(g);
     if (p.immune?.mindAffecting === true) immuneMindAffecting = true;
@@ -573,6 +579,7 @@ export function resolveEffects(
     acTransfer: 0,
     acPenalties: 0,
     boosts,
+    boostSources,
     denies: denies.size > 0 ? denies : EMPTY_SET,
     grants: grants.size > 0 ? grants : EMPTY_SET,
     immuneMindAffecting,
