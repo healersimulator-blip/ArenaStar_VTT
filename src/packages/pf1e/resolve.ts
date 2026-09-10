@@ -538,3 +538,73 @@ export function pf1eResolveAttack(
     provokes: input.provokes === true,
   };
 }
+
+/**
+ * Resolve a Manyshot volley against one target. Manyshot is a standard-action
+ * volley: every arrow uses the same first attack bonus and −4 penalty, while
+ * damage is applied in order to the same defender state. The caller supplies
+ * host-evaluated attack/confirmation faces and damage totals for each arrow.
+ * Precision/extra-dice rider allocation is deliberately not inferred here;
+ * callers must supply each arrow's already-correct damage total.
+ */
+export interface PF1eManyshotArrow {
+  die: number;
+  confirmDie?: number | undefined;
+  damageTotal: number;
+}
+
+export type PF1eManyshotResult =
+  | { ok: false; error: string }
+  | {
+      ok: true;
+      arrows: Extract<PF1eResolveResult, { ok: true }>[];
+      finalHp: number;
+      finalNonlethal: number;
+    };
+
+export function pf1eResolveManyshot(input: {
+  attack: PF1eResolveAttack;
+  arrows: readonly PF1eManyshotArrow[];
+  defense: PF1eDefenseChoice;
+  defender: PF1eResolveDefender;
+  situational?: PF1eSituationalModifiers | undefined;
+  nonlethalDamage?: boolean | undefined;
+  unarmed?: boolean | undefined;
+  feats?: readonly string[] | undefined;
+  attackFacts?: PF1eDrAttackFacts | undefined;
+  provokes?: boolean | undefined;
+}): PF1eManyshotResult {
+  if (input.attack.ranged !== true) {
+    return { ok: false, error: "Manyshot requires a ranged attack" };
+  }
+  if (input.arrows.length < 2 || input.arrows.length > 4) {
+    return { ok: false, error: "Manyshot requires between 2 and 4 arrows" };
+  }
+  let defender = { ...input.defender };
+  const results: Extract<PF1eResolveResult, { ok: true }>[] = [];
+  for (const arrow of input.arrows) {
+    const resolved = pf1eResolveAttack({
+      attack: input.attack,
+      die: arrow.die,
+      ...(arrow.confirmDie === undefined ? {} : { confirmDie: arrow.confirmDie }),
+      damageTotal: arrow.damageTotal,
+      defense: input.defense,
+      defender,
+      ...(input.situational === undefined ? {} : { situational: input.situational }),
+      ...(input.nonlethalDamage === undefined ? {} : { nonlethalDamage: input.nonlethalDamage }),
+      ...(input.unarmed === undefined ? {} : { unarmed: input.unarmed }),
+      ...(input.feats === undefined ? {} : { feats: input.feats }),
+      ...(input.attackFacts === undefined ? {} : { attackFacts: input.attackFacts }),
+      ...(input.provokes === undefined ? {} : { provokes: input.provokes }),
+    });
+    if (!resolved.ok) return resolved;
+    results.push(resolved);
+    defender = { ...defender, hp: resolved.hp.after, nonlethalDamage: resolved.nonlethal.after };
+  }
+  return {
+    ok: true,
+    arrows: results,
+    finalHp: defender.hp,
+    finalNonlethal: defender.nonlethalDamage,
+  };
+}
