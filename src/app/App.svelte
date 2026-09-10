@@ -61,6 +61,7 @@
   import { SheetPanel } from "../ui/sheets";
   import { startHostShare, type HostShare } from "./hostShare";
   import type {
+    ActorDocument,
     CombatDocument,
     SceneDocument,
     SceneGrid,
@@ -159,10 +160,12 @@
     tokenMenu = null;
   }
 
-  /** Apply one T01 menu entry: roster transitions go through the combat update path,
-   *  token visibility through its own op; the canvas menu closes either way. */
+  /** Apply one T01/E02 menu entry: roster transitions go through the combat update
+   *  path, token visibility through its own op, and "apply-effect" opens the
+   *  actor's sheet on the Effects tab; the canvas menu closes either way. */
   function runTokenMenuEntry(
-    entryId: "add-combatant" | "remove-combatant" | "toggle-hidden",
+    entryId:
+      "add-combatant" | "remove-combatant" | "toggle-hidden" | "apply-effect",
   ): void {
     if (!tokenMenu || !app) return;
     const scene = activeScene();
@@ -180,6 +183,7 @@
       scene,
       token,
       user: app.gm.client.user,
+      actors: app.gm.client.store.getAll("actors") as readonly ActorDocument[],
       entryId,
       nextId: () => globalThis.crypto.randomUUID(),
     });
@@ -211,6 +215,8 @@
       ]);
     }
     closeTokenMenu();
+    if (result.openEffectEditorActorId !== null)
+      openActorSheet(result.openEffectEditorActorId, "effects");
   }
 
   function activeScene(): SceneDocument | null {
@@ -245,7 +251,7 @@
     });
   }
 
-  function openActorSheet(actorId: string): void {
+  function openActorSheet(actorId: string, tab?: string): void {
     if (!app) return;
     const rect = canvasHost?.getBoundingClientRect();
     openPF1eSheetWindow(
@@ -253,6 +259,7 @@
       app.gm.client,
       actorId,
       rect ? { width: rect.width, height: rect.height } : undefined,
+      tab,
     );
   }
 
@@ -1424,6 +1431,8 @@
                 scene: menuScene,
                 token: menuToken,
                 user: app?.gm.client.user ?? null,
+                actors: (app?.gm.client.store.getAll("actors") ??
+                  []) as readonly ActorDocument[],
               })}
               <div
                 class="token-menu"
@@ -1453,7 +1462,8 @@
                           entry.id as
                             | "add-combatant"
                             | "remove-combatant"
-                            | "toggle-hidden",
+                            | "toggle-hidden"
+                            | "apply-effect",
                         )}>{entry.label}</button
                     >
                   {/if}

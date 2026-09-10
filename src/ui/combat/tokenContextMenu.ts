@@ -10,6 +10,7 @@
  * deliberately absent — they mount only when P4/P5 handlers exist.
  */
 import type {
+  ActorDocument,
   CombatDocument,
   SceneDocument,
   TokenDocument,
@@ -17,11 +18,16 @@ import type {
 import type { PermissionUser } from "../../core/ownership";
 import { can } from "../../core/permissions";
 import type { Op } from "../../core/ops";
+import { isPF1eActor } from "../sheets/pf1eSheetModel";
 import { editSelectedRoster } from "./tokenSelection";
 import type { CombatTransition } from "../../core/combat";
 
 export type TokenMenuEntryId =
-  "initiative" | "add-combatant" | "remove-combatant" | "toggle-hidden";
+  | "initiative"
+  | "add-combatant"
+  | "remove-combatant"
+  | "toggle-hidden"
+  | "apply-effect";
 
 export interface TokenMenuEntry {
   id: TokenMenuEntryId;
@@ -55,19 +61,30 @@ export function tokenCombatant(
 /**
  * The menu for one token against the active encounter. `user` gates the mutating
  * entries; read-only state (initiative, hidden) is always shown so the menu is
- * honest about what the GM is looking at.
+ * honest about what the GM is looking at. `actors` backs the E02 "Apply effect…"
+ * entry — shown only when the token links a PF1e actor (T01 deferred effect
+ * actions until a P4 handler existed; `effectOps.ts` is that handler).
  */
 export function tokenContextMenuModel(input: {
   combat: CombatDocument | null;
   scene: SceneDocument;
   token: TokenDocument;
   user: PermissionUser | null;
+  actors: readonly ActorDocument[];
 }): TokenMenuModel {
-  const { combat, scene, token, user } = input;
+  const { combat, scene, token, user, actors } = input;
   const member = tokenCombatant(combat, token);
   const canUpdateEncounter =
     combat !== null && user !== null && can(user, "update", combat, "combats");
   const canUpdateScene = user !== null && can(user, "update", scene, "scenes");
+  const linkedActor = token.actorId
+    ? actors.find((a) => a._id === token.actorId)
+    : undefined;
+  const actorIsPF1e = linkedActor !== undefined && isPF1eActor(linkedActor);
+  const canEditActor =
+    linkedActor !== undefined &&
+    user !== null &&
+    can(user, "update", linkedActor, "actors");
   const entries: TokenMenuEntry[] = [];
 
   if (!combat) {
@@ -123,6 +140,24 @@ export function tokenContextMenuModel(input: {
     reason: canUpdateScene ? null : "You cannot update this scene.",
   });
 
+  // E02 token application: the entry opens the actor's sheet on the Effects
+  // tab (no op here) — the editor owns both persistence homes.
+  if (linkedActor === undefined || !actorIsPF1e) {
+    entries.push({
+      id: "apply-effect",
+      label: "Apply effect…",
+      disabled: true,
+      reason: "This token has no PF1e actor.",
+    });
+  } else {
+    entries.push({
+      id: "apply-effect",
+      label: "Apply effect…",
+      disabled: !canEditActor,
+      reason: canEditActor ? null : "You cannot update this actor.",
+    });
+  }
+
   return { title: token.name, entries };
 }
 
@@ -152,11 +187,23 @@ export function applyTokenMenuEntry(input: {
   scene: SceneDocument;
   token: TokenDocument;
   user: PermissionUser | null;
+  actors: readonly ActorDocument[];
   entryId: TokenMenuEntryId;
   nextId: () => string;
-}): { transition: CombatTransition | null; ops: Op[]; error: string | null } {
-  const { combat, scene, token, user, entryId, nextId } = input;
-  const fail = (error: string) => ({ transition: null, ops: [], error });
+}): {
+  transition: CombatTransition | null;
+  ops: Op[];
+  error: string | null;
+  /** E02: set for "apply-effect" — the caller opens this actor's Effects tab. */
+  openEffectEditorActorId: string | null;
+} {
+  const { combat, scene, token, user, actors, entryId, nextId } = input;
+  const fail = (error: string) => ({
+    transition: null,
+    ops: [],
+    error,
+    openEffectEditorActorId: null,
+  });
 
   if (entryId === "toggle-hidden") {
     if (!user || !can(user, "update", scene, "scenes"))
@@ -165,6 +212,23 @@ export function applyTokenMenuEntry(input: {
       transition: null,
       ops: [toggleTokenHiddenOp(scene, token)],
       error: null,
+      openEffectEditorActorId: null,
+    };
+  }
+
+  if (entryId === "apply-effect") {
+    const linkedActor = token.actorId
+      ? actors.find((a) => a._id === token.actorId)
+      : undefined;
+    if (!linkedActor || !isPF1eActor(linkedActor))
+      return fail("This token has no PF1e actor.");
+    if (!user || !can(user, "update", linkedActor, "actors"))
+      return fail("You cannot update this actor.");
+    return {
+      transition: null,
+      ops: [],
+      error: null,
+      openEffectEditorActorId: linkedActor._id,
     };
   }
 
@@ -184,5 +248,10 @@ export function applyTokenMenuEntry(input: {
     nextId,
   );
   if (result.error) return fail(result.error);
-  return { transition: result.transition, ops: [], error: null };
+  return {
+    transition: result.transition,
+    ops: [],
+    error: null,
+    openEffectEditorActorId: null,
+  };
 }

@@ -33,6 +33,8 @@
   import {
     pf1eApplyActorEffect,
     pf1eApplyCombatantEffect,
+    pf1eEditActorEffect,
+    pf1eEditCombatantEffect,
     pf1eRemoveActorEffect,
     pf1eRemoveCombatantEffect,
     pf1eSetActorEffectDisabled,
@@ -43,24 +45,30 @@
   import { resolveAttackFlow, resolveManyshotFlow } from "./pf1eResolveFlow";
   import type { PF1eDefenseChoice } from "../../packages/pf1e/resolve";
   import { validatePF1eFeatSelection } from "../../packages/pf1e/feats";
-
-  let {
-    doc,
-    client,
-    bus,
-  }: { doc: ActorDocument; client: ClientSync; bus: EventBus<ClientEvents> } =
-    $props();
-  let tab = $state<
+  type TabName =
     | "summary"
     | "attributes"
     | "combat"
     | "weapons"
     | "armor"
     | "features"
-    | "monster"
     | "effects"
-    | "details"
-  >("summary");
+    | "monster"
+    | "details";
+
+  let {
+    doc,
+    client,
+    bus,
+    initialTab = "summary",
+  }: {
+    doc: ActorDocument;
+    client: ClientSync;
+    bus: EventBus<ClientEvents>;
+    /** E02: token-menu "Apply effect…" opens the sheet directly on this tab. */
+    initialTab?: TabName;
+  } = $props();
+  let tab = $state<TabName>(initialTab);
   let error = $state("");
   const pending = new SvelteSet<string>();
   // E01: when this actor fights inside an encounter, its combatant's timed
@@ -318,13 +326,40 @@
     if (result.ops.length) pending.add(client.submit(result.ops));
   }
 
-  // E01 — the effect apply/toggle/remove handlers. Both homes resolve fresh
-  // documents from the projected store, so a stale tab cannot write over a
-  // replica that moved on; the ops go through ClientSync like every edit.
+  // E01/E02 — the effect apply/edit/toggle/remove handlers. Both homes resolve
+  // fresh documents from the projected store, so a stale tab cannot write over
+  // a replica that moved on; the ops go through ClientSync like every edit.
+  function linkedCombatantDoc(): {
+    combat: CombatDocument;
+    member: CombatantDocument;
+  } | null {
+    if (!linked.combat || !linked.combatantId) return null;
+    const combat = client.store.get("combats", linked.combat._id) as
+      CombatDocument | undefined;
+    const member = combat?.combatants.find(
+      (c) => c._id === linked.combatantId,
+    ) as CombatantDocument | undefined;
+    return combat && member ? { combat, member } : null;
+  }
+
+  function combatantEffectIds(member: CombatantDocument): Set<string> {
+    const core = (
+      member.flags as Record<string, Record<string, unknown>> | undefined
+    )?.core;
+    const effects = core?.effects;
+    return effects !== null &&
+      typeof effects === "object" &&
+      !Array.isArray(effects)
+      ? new Set(Object.keys(effects as object))
+      : new Set<string>();
+  }
+
   function applyEffect(request: {
     name: string;
+    icon?: string;
     payload: Parameters<typeof pf1eApplyActorEffect>[2]["payload"];
     target: "actor" | "combatant";
+    effectId?: string;
   }): void {
     const current = client.store.get("actors", doc._id) as
       ActorDocument | undefined;
@@ -332,27 +367,48 @@
       error = "Actor is no longer available.";
       return;
     }
-    if (request.target === "combatant" && linked.combat && linked.combatantId) {
-      const combat = client.store.get("combats", linked.combat._id) as
-        CombatDocument | undefined;
-      if (!combat) {
-        error = "Encounter is no longer available.";
+    const linkedNow = linkedCombatantDoc();
+
+    // E02 edit mode: the effect's current home decides which edit op runs.
+    if (request.effectId !== undefined) {
+      if (
+        linkedNow &&
+        combatantEffectIds(linkedNow.member).has(request.effectId)
+      ) {
+        const result = pf1eEditCombatantEffect(
+          linkedNow.combat,
+          client.user,
+          linkedNow.member._id,
+          request.effectId,
+          request,
+        );
+        error = result.error ?? "";
+        if (result.ops.length) pending.add(client.submit(result.ops));
         return;
       }
-      const result = pf1eApplyCombatantEffect(
-        combat,
+      const result = pf1eEditActorEffect(
+        current,
         client.user,
-        linked.combatantId,
-        { name: request.name, payload: request.payload },
+        request.effectId,
+        request,
       );
       error = result.error ?? "";
       if (result.ops.length) pending.add(client.submit(result.ops));
       return;
     }
-    const result = pf1eApplyActorEffect(current, client.user, {
-      name: request.name,
-      payload: request.payload,
-    });
+
+    if (request.target === "combatant" && linkedNow) {
+      const result = pf1eApplyCombatantEffect(
+        linkedNow.combat,
+        client.user,
+        linkedNow.member._id,
+        request,
+      );
+      error = result.error ?? "";
+      if (result.ops.length) pending.add(client.submit(result.ops));
+      return;
+    }
+    const result = pf1eApplyActorEffect(current, client.user, request);
     error = result.error ?? "";
     if (result.ops.length) pending.add(client.submit(result.ops));
   }
@@ -365,34 +421,18 @@
       return;
     }
     // The combatant home wins when it holds this id (the ticking instance).
-    if (linked.combat && linked.combatantId) {
-      const combat = client.store.get("combats", linked.combat._id) as
-        CombatDocument | undefined;
-      const member = combat?.combatants.find(
-        (c) => c._id === linked.combatantId,
-      ) as CombatantDocument | undefined;
-      const flags = (
-        member?.flags as Record<string, Record<string, unknown>> | undefined
-      )?.core;
-      if (
-        combat &&
-        member &&
-        flags &&
-        typeof flags.effects === "object" &&
-        flags.effects !== null &&
-        effectId in (flags.effects as object)
-      ) {
-        const result = pf1eSetCombatantEffectDisabled(
-          combat,
-          client.user,
-          member._id,
-          effectId,
-          disabled,
-        );
-        error = result.error ?? "";
-        if (result.ops.length) pending.add(client.submit(result.ops));
-        return;
-      }
+    const linkedNow = linkedCombatantDoc();
+    if (linkedNow && combatantEffectIds(linkedNow.member).has(effectId)) {
+      const result = pf1eSetCombatantEffectDisabled(
+        linkedNow.combat,
+        client.user,
+        linkedNow.member._id,
+        effectId,
+        disabled,
+      );
+      error = result.error ?? "";
+      if (result.ops.length) pending.add(client.submit(result.ops));
+      return;
     }
     const result = pf1eSetActorEffectDisabled(
       current,
@@ -411,33 +451,17 @@
       error = "Actor is no longer available.";
       return;
     }
-    if (linked.combat && linked.combatantId) {
-      const combat = client.store.get("combats", linked.combat._id) as
-        CombatDocument | undefined;
-      const member = combat?.combatants.find(
-        (c) => c._id === linked.combatantId,
-      ) as CombatantDocument | undefined;
-      const flags = (
-        member?.flags as Record<string, Record<string, unknown>> | undefined
-      )?.core;
-      if (
-        combat &&
-        member &&
-        flags &&
-        typeof flags.effects === "object" &&
-        flags.effects !== null &&
-        effectId in (flags.effects as object)
-      ) {
-        const result = pf1eRemoveCombatantEffect(
-          combat,
-          client.user,
-          member._id,
-          effectId,
-        );
-        error = result.error ?? "";
-        if (result.ops.length) pending.add(client.submit(result.ops));
-        return;
-      }
+    const linkedNow = linkedCombatantDoc();
+    if (linkedNow && combatantEffectIds(linkedNow.member).has(effectId)) {
+      const result = pf1eRemoveCombatantEffect(
+        linkedNow.combat,
+        client.user,
+        linkedNow.member._id,
+        effectId,
+      );
+      error = result.error ?? "";
+      if (result.ops.length) pending.add(client.submit(result.ops));
+      return;
     }
     const result = pf1eRemoveActorEffect(current, client.user, effectId);
     error = result.error ?? "";
@@ -559,7 +583,7 @@
       </label>
     {/each}
     {#if tab === "attributes"}
-      <p>
+      <p data-pf1e-effective-scores>
         Effective scores: {Object.entries(d.abilities)
           .map(([key, score]) => `${key.toUpperCase()} ${score}`)
           .join(" · ")}

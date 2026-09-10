@@ -48,7 +48,10 @@
   export function bindWindow(
     el: HTMLElement,
     params: { manager: WindowManager; id: string },
-  ): { update(p: { manager: WindowManager; id: string }): void; destroy(): void } {
+  ): {
+    update(p: { manager: WindowManager; id: string }): void;
+    destroy(): void;
+  } {
     let p = params;
     const apply = (): void => {
       const w = p.manager.get(p.id);
@@ -141,7 +144,14 @@
       </header>
       <div class="wm-body">
         {#if win.kind === "pf1e-sheet" && win.data}
-          <PF1eSheetWindow {client} {bus} actorId={win.data.actorId ?? ""} />
+          <PF1eSheetWindow
+            {client}
+            {bus}
+            actorId={win.data.actorId ?? ""}
+            initialTab={typeof win.data.tab === "string"
+              ? win.data.tab
+              : "summary"}
+          />
         {:else if win.kind === "permissions"}
           <PermissionsPanel {client} {bus} />
         {:else if win.kind === "macros"}
@@ -158,7 +168,11 @@
           <GmExtrasPanel {client} {bus} {sceneId} {packages} />
         {/if}
       </div>
-      <div class="wm-resize" onpointerdown={(e) => startResize(e, win)} title="Resize"></div>
+      <div
+        class="wm-resize"
+        onpointerdown={(e) => startResize(e, win)}
+        title="Resize"
+      ></div>
     </section>
   {/each}
 </div>

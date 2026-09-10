@@ -2932,3 +2932,67 @@ combatantId }` ctx (the component resolves the linked combatant through
   2,103,405 raw / 607,994 gzip — +14,112 over the pre-slice build, within the
   6 MB budget. Browser acceptance of the Effects tab is collected-not-executed in
   this environment (no browser binaries, D-119 precedent).
+
+## D-143 — E02: the custom effect editor — full payload authoring, in-place edits, and token application
+
+**Date:** 2026-09-10. **Scope:** P4/E02 (closes E02 at the logic level; browser
+acceptance pending per the D-119 precedent). No new primary-text research: the
+payload contract, validation and stacking are P0's (`effects.ts`), the
+persistence/authorization mechanics are D-142's (`effectOps.ts`), and the SRD
+condition _names_ in the picker are presentation data — E03 still owns every
+condition's mathematics.
+
+- **On "open-ended stat keys" (the plan sketch) — resolved against the P0
+  contract:** `PF1E_MOD_KEYS` stays closed ("the closed list is what makes typos
+  loud") because a mod key the derivation cannot consume would be a silent no-op
+  that looks loaded. Custom buffs remain first-class through the free-form name,
+  condition label, deny/grant tokens, damage boosts and stacking group; widening
+  the mechanical key list is a deliberate contract change (derivation consumers
+  first), never an editor option.
+- **`src/ui/sheets/pf1eEffectEditorModel.ts` (new, pure):** `EffectForm` covering
+  the whole `flags.pf1e` payload — typed mod rows (key/type/value/per-mod source,
+  N rows), boost rows (dice/sides/flat/energy/precision), deny and grant token
+  lists (comma/space parsed, lowercased), the immunity block
+  (mind-affecting/conditions/energy/DR), structural flags (flat-footed, denied
+  Dex, no AoO), stacking group, concentration, ttl (unit/value/per-level/
+  ends-on) and the effect origin (kind/id/level/DC). `buildEffectRequest`
+  assembles the request with empty-numbers-are-absent, garbage-numbers-are-named-
+  errors semantics — it never guesses a zero — and the request revalidates
+  through `validateEffectPayload` inside `buildEffectDoc` before any write.
+  `formFromEffect` round-trips a validated effect back into the form (tested:
+  form → request → doc → read → form is fact-preserving both ways).
+- **In-place edits:** `pf1eEditActorEffect` / `pf1eEditCombatantEffect` keep the
+  effect id and its suppression state, swap the validated payload/name/icon, and
+  re-seed `flags.core.duration` from the edited ttl — an edit is a new agreement
+  on how long the effect lasts, not a resume of the old countdown. The sheet
+  routes an edit to the effect's current home (combatant map wins when present,
+  the same precedence as the read side).
+- **`src/ui/sheets/PF1eEffectEditor.svelte` (new):** the full authoring surface,
+  embedded in the Effects tab (replacing E01's minimal one-row form): condition
+  picker as an SRD-names datalist (display only), suggested deny tokens, add/
+  remove rows for mods and boosts, the actor-vs-combatant home select (locked
+  during an edit — the home is where the effect lives, not a field), and
+  read-only rendering without ownership. Player permissions ride the same
+  `can(user, "update", actor, "actors")` gate as every sheet edit.
+- **Token application (the T01 deferral resolved):** the token context menu gains
+  **"Apply effect…"** — shown for tokens linking a PF1e actor, enabled by actor
+  ownership, and returning `openEffectEditorActorId` so App opens that actor's
+  sheet directly on the Effects tab (`openPF1eSheetWindow` gained an optional
+  tab, threaded through the window data to `PF1eActorSheet`'s new `initialTab`).
+  Non-PF1e/unlinked tokens keep the entry disabled with the reason visible —
+  the menu stays honest about what it is looking at.
+- **Deliberately not encoded:** condition mechanics behind the picker (E03),
+  turn-end/round-start expiry differences and the world clock (E04/E05 —
+  `endsOn` is authored and carried, both boundaries tick as core ticks today),
+  token condition icons (E06), effect templates/favorites, and mass application
+  to a selection (a later P4 polish once E03 lands the math).
+- **Evidence:** 9 new tests in `tests/ui/pf1eEffectEditor.test.ts` (full-payload
+  assembly + core doc shaping, absent-vs-garbage numerics, token parsing, the
+  two-way round-trip, the closed-key/condition-picker presentation contract,
+  edit id/suppression/duration semantics, permission and unknown-id refusals,
+  the menu entry's ownership gating and the returned actor id) + the extended
+  token-menu fixtures. Full suite **1158 passed / 3 skipped** across 128 files;
+  typecheck, lint, touched-file Prettier, build, size and `build:systems`
+  green; dist 2,120,722 raw / 612,628 gzip — +17,317 over D-142, within the
+  6 MB budget; e2e at **159 collected** across 28 files (new editor flow spec,
+  not executed — no browser binaries, D-119 precedent).

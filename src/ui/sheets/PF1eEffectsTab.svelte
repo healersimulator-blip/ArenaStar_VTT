@@ -1,23 +1,13 @@
 <!--
-  P4/E01 — the effect apply/persist surface. Minimal by design: the *custom editor*
-  (open-ended keys, boosts, grants, immunities, per-level + endsOn) is E02; this tab
-  proves the two persistence homes end-to-end with a typed, validated form. All state
-  changes are Ops computed by `pf1eEffectOps` and submitted by the parent sheet, so
-  host authorization stays decisive.
+  P4 — the effect surface: the list (suppress/enable/remove/edit) plus the E02
+  custom editor. All state changes are Ops computed by `pf1eEffectOps` and
+  submitted by the parent sheet, so host authorization stays decisive.
 -->
 <script lang="ts">
   import {
-    PF1E_BONUS_TYPES,
-    type PF1eBonusType,
-  } from "../../packages/pf1e/rulesTables";
-  import {
-    PF1E_MOD_KEYS,
-    PF1E_TTL_UNITS,
     describeEffect,
     type PF1eActiveEffect,
     type PF1eEffectPayload,
-    type PF1eModKey,
-    type PF1eTtl,
   } from "../../packages/pf1e/effects";
 
   let {
@@ -36,59 +26,38 @@
     linkedCombatant: boolean;
     onApply: (request: {
       name: string;
+      icon?: string;
       payload: PF1eEffectPayload;
       target: "actor" | "combatant";
+      effectId?: string;
     }) => void;
     onToggle: (effectId: string, disabled: boolean) => void;
     onRemove: (effectId: string) => void;
   } = $props();
 
-  let name = $state("");
-  let condition = $state("");
-  let modKey = $state<PF1eModKey>("ability.str");
-  let modType = $state<PF1eBonusType>("enhancement");
-  let modValue = $state(4);
-  let useTtl = $state(true);
-  let ttlUnit = $state<PF1eTtl["unit"]>("minute");
-  let ttlValue = $state(1);
-  let ttlPerLevel = $state(false);
-  let target = $state<"actor" | "combatant">("actor");
+  import PF1eEffectEditor from "./PF1eEffectEditor.svelte";
 
-  function submit(): void {
-    const mods =
-      modValue === 0
-        ? undefined
-        : [{ key: modKey, type: modType, value: modValue }];
-    const ttl: PF1eTtl | undefined =
-      useTtl &&
-      (ttlUnit === "round" || ttlUnit === "minute" || ttlUnit === "hour")
-        ? {
-            unit: ttlUnit,
-            value: Math.max(1, Math.trunc(ttlValue)),
-            ...(ttlPerLevel ? { perLevel: true } : {}),
-          }
-        : undefined;
-    const payload: PF1eEffectPayload = {
-      ...(mods ? { mods } : {}),
-      ...(condition.trim() ? { condition: condition.trim() } : {}),
-      ...(ttl ? { ttl } : {}),
-    };
-    onApply({ name: name.trim(), payload, target });
-    name = "";
-    condition = "";
+  /** The effect loaded into the editor for an in-place edit (null = apply mode). */
+  let editing = $state<PF1eActiveEffect | null>(null);
+  const editId = $derived(editing?.id ?? null);
+
+  function startEdit(effect: PF1eActiveEffect): void {
+    editing = effect;
   }
-
-  /** The one preset (R02-verified): Bull's Strength, +4 enhancement Str, 1 min/level. */
-  function applyBullsStrength(): void {
-    onApply({
-      name: "Bull's Strength",
-      payload: {
-        mods: [{ key: "ability.str", type: "enhancement", value: 4 }],
-        ttl: { unit: "minute", value: 1, perLevel: true },
-        source: { kind: "spell", level: 2 },
-      },
-      target: linkedCombatant ? "combatant" : "actor",
-    });
+  function cancelEdit(): void {
+    editing = null;
+  }
+  function submitEdit(request: {
+    name: string;
+    icon?: string;
+    payload: PF1eEffectPayload;
+    target: "actor" | "combatant";
+    effectId?: string;
+  }): void {
+    onApply(request);
+    // Stay in edit mode only if the parent refused; a successful apply clears
+    // optimistically — the projected store refreshes the list.
+    editing = null;
   }
 </script>
 
@@ -106,7 +75,7 @@
   {:else}
     <ul class="effect-list">
       {#each effects as e (e.id)}
-        <li class:disabled={e.disabled}>
+        <li class:disabled={e.disabled} data-pf1e-effect={e.id}>
           <strong>{e.name}</strong>
           <span class="note">{describeEffect(e)}</span>
           {#if e.payload.ttl?.perLevel}
@@ -116,6 +85,12 @@
             <button type="button" onclick={() => onToggle(e.id, !e.disabled)}
               >{e.disabled ? "Enable" : "Suppress"}</button
             >
+            <button
+              type="button"
+              data-pf1e-effect-edit
+              onclick={() => (editId === e.id ? cancelEdit() : startEdit(e))}
+              >{editId === e.id ? "Close" : "Edit"}</button
+            >
             <button type="button" onclick={() => onRemove(e.id)}>Remove</button>
           {/if}
         </li>
@@ -124,82 +99,13 @@
   {/if}
 
   {#if editable}
-    <h4>Apply an effect</h4>
-    <form
-      class="apply"
-      onsubmit={(event) => {
-        event.preventDefault();
-        submit();
-      }}
-    >
-      <label
-        >Name <input
-          required
-          maxlength={80}
-          bind:value={name}
-          placeholder="Bless"
-        /></label
-      >
-      <label
-        >Condition <input
-          maxlength={40}
-          bind:value={condition}
-          placeholder="optional label"
-        /></label
-      >
-      <label
-        >Stat
-        <select bind:value={modKey}>
-          {#each PF1E_MOD_KEYS as key (key)}
-            <option value={key}>{key}</option>
-          {/each}
-        </select>
-      </label>
-      <label
-        >Type
-        <select bind:value={modType}>
-          {#each PF1E_BONUS_TYPES as t (t)}
-            <option value={t}>{t}</option>
-          {/each}
-        </select>
-      </label>
-      <label>Value <input type="number" step="1" bind:value={modValue} /></label
-      >
-      <label>Expires <input type="checkbox" bind:checked={useTtl} /></label>
-      {#if useTtl}
-        <label
-          >Unit
-          <select bind:value={ttlUnit}>
-            {#each PF1E_TTL_UNITS.filter((u) => u !== "instant") as u (u)}
-              <option value={u}>{u}</option>
-            {/each}
-          </select>
-        </label>
-        <label
-          >Every <input
-            type="number"
-            min="1"
-            step="1"
-            bind:value={ttlValue}
-          /></label
-        >
-        <label
-          >per level <input type="checkbox" bind:checked={ttlPerLevel} /></label
-        >
-      {/if}
-      {#if linkedCombatant}
-        <label
-          >Home
-          <select bind:value={target}>
-            <option value="actor">actor (until removed)</option>
-            <option value="combatant">combatant (ticks in combat)</option>
-          </select>
-        </label>
-      {/if}
-      <button type="submit" disabled={name.trim() === ""}>Apply</button>
-      <button type="button" onclick={applyBullsStrength}>Bull's Strength</button
-      >
-    </form>
+    <PF1eEffectEditor
+      {editing}
+      {editable}
+      {linkedCombatant}
+      onSubmit={submitEdit}
+      onCancelEdit={cancelEdit}
+    />
     <p class="note">
       Different bonus types add; the same type keeps the best. A suppressed
       effect changes nothing until re-enabled.
@@ -224,20 +130,6 @@
   .effect-list li.disabled :global(strong),
   .effect-list li.disabled :global(span) {
     opacity: 0.5;
-  }
-  .apply {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    align-items: center;
-    padding: 6px;
-    border: 1px solid #3a4656;
-    border-radius: 6px;
-  }
-  .apply label {
-    display: flex;
-    gap: 4px;
-    align-items: center;
   }
   .note {
     color: #9eafc5;

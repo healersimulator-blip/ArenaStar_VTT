@@ -177,6 +177,34 @@ export function pf1eRemoveActorEffect(
   };
 }
 
+/**
+ * Edit an existing actor-embedded effect in place: same id and suppression
+ * state, new validated payload (and name/icon). The duration is re-seeded from
+ * the edited ttl — an edit is a new agreement on how long the effect lasts, not
+ * a resume of the old countdown.
+ */
+export function pf1eEditActorEffect(
+  actor: ActorDocument,
+  user: PermissionUser | null,
+  effectId: string,
+  request: PF1eEffectRequest,
+): { ops: Array<Record<string, Json>>; error: string | null } {
+  const fail = (error: string) => ({ ops: [], error });
+  if (!user || !can(user, "update", actor, "actors"))
+    return fail("You do not own this PF1e actor.");
+  if (!Array.isArray(actor.effects))
+    return fail("This actor's effect list is malformed.");
+  if (!actor.effects.some((e) => e._id === effectId))
+    return fail("That effect is not on this actor.");
+  const doc = buildEffectDoc(request);
+  if (!doc.ok) return fail(doc.error);
+  return mapActorEffects(actor, user, effectId, (e) => ({
+    ...doc.value,
+    _id: e._id,
+    disabled: e.disabled,
+  }));
+}
+
 function mapActorEffects(
   actor: ActorDocument,
   user: PermissionUser | null,
@@ -271,6 +299,49 @@ export function pf1eApplyCombatantEffect(
   if (effects[doc.value._id] !== undefined)
     return fail(`An effect with id "${doc.value._id}" already exists here.`);
   effects[doc.value._id] = doc.value;
+  const next = withCombatantEffects(combat, combatantId, effects);
+  if (!next) return fail("combatant is not part of this encounter");
+  return {
+    combat: next,
+    ops: [
+      {
+        kind: "update",
+        ref: { coll: "combats", id: combat._id },
+        diff: { combatants: next.combatants as unknown as Json[] },
+      },
+    ],
+    error: null,
+  };
+}
+
+/** Toggle (suppress/restore) or remove one combatant-referenced effect. */
+export function pf1eEditCombatantEffect(
+  combat: CombatDocument,
+  user: PermissionUser | null,
+  combatantId: string,
+  effectId: string,
+  request: PF1eEffectRequest,
+): {
+  combat: CombatDocument | null;
+  ops: Array<Record<string, Json>>;
+  error: string | null;
+} {
+  const fail = (error: string) => ({ combat: null, ops: [], error });
+  if (!user || !can(user, "update", combat, "combats"))
+    return fail("You cannot update this encounter.");
+  const member = combat.combatants.find((c) => c._id === combatantId);
+  if (!member) return fail("combatant is not part of this encounter");
+  const effects = combatantEffectsRecord(member);
+  const existing = effects[effectId];
+  if (existing === undefined)
+    return fail("That effect is not on this combatant.");
+  const doc = buildEffectDoc(request);
+  if (!doc.ok) return fail(doc.error);
+  effects[effectId] = {
+    ...doc.value,
+    _id: effectId,
+    disabled: existing.disabled,
+  };
   const next = withCombatantEffects(combat, combatantId, effects);
   if (!next) return fail("combatant is not part of this encounter");
   return {
