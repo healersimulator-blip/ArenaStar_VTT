@@ -490,3 +490,54 @@ describe("armor and item-wear descriptors (A01)", () => {
     expect(sunderVerdict({ hpMax: 20, hpAfter }).destroyed).toBe(false);
   });
 });
+
+describe("ranged-use derivations (A04)", () => {
+  test("a melee weapon with an authored increment is thrown at range: max 5 increments, no issue (CRB pp.182/468)", () => {
+    const dagger = resolvePF1eWeapon({
+      name: "Dagger",
+      class: "melee",
+      handedness: "light",
+      proficiency: "simple",
+      damageDice: "1d4",
+      damageType: "piercing",
+      rangeIncrementFt: 10,
+    });
+    expect(dagger.ok).toBe(true);
+    expect(dagger.issues).toEqual([]);
+    expect(dagger.weapon.class).toBe("melee");
+    expect(dagger.weapon.maxRangeIncrements).toBe(5);
+    // A melee weapon without an increment still has no ranged use.
+    const sword = resolvePF1eWeapon({
+      name: "Longsword",
+      class: "melee",
+      handedness: "one-handed",
+      damageDice: "1d8",
+    });
+    expect(sword.weapon.maxRangeIncrements).toBe(0);
+  });
+
+  test("a splash weapon derives its ranged touch delivery — an authored touch:false cannot opt out (CRB p.202)", () => {
+    const fire = resolvePF1eWeapon({
+      name: "Alchemist's fire",
+      class: "thrown",
+      handedness: "light",
+      damageDice: "1d6",
+      damageType: "fire",
+      rangeIncrementFt: 10,
+      splash: true,
+      touch: false,
+    });
+    expect(fire.weapon.splash).toBe(true);
+    expect(fire.weapon.touch).toBe(true);
+    expect(fire.weapon.maxRangeIncrements).toBe(5);
+    // A non-splash weapon keeps its authored touch flag exactly.
+    const ray = resolvePF1eWeapon({
+      name: "Ray of frost",
+      class: "melee",
+      damageDice: "1d3",
+      touch: true,
+    });
+    expect(ray.weapon.touch).toBe(true);
+    expect(ray.weapon.splash).toBe(false);
+  });
+});

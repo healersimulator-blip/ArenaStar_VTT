@@ -164,6 +164,9 @@
           <span class="author">{userName(message.author)}</span>
           <span class="total">{message.roll.total}</span>
           <span class="formula">= {message.roll.formula}</span>
+          {#if message.flavor}
+            <span class="flavor">{message.flavor}</span>
+          {/if}
           {#if message.rollMode === "gmroll"}<span class="tag">gm</span>{/if}
           {#if message.whisper.length > 0}
             <span class="tag">🔒 {message.whisper.map(userName).join(", ")}</span>
@@ -279,6 +282,11 @@
   }
   .rollcard .formula {
     color: #8b93a3;
+  }
+  .rollcard .flavor {
+    display: block;
+    color: #9eafc5;
+    font-size: 11px;
   }
   .tag {
     margin-left: auto;

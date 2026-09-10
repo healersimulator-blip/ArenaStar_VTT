@@ -383,6 +383,32 @@ describe("HostSync ⇄ ClientSync over InMemoryTransport (§2, §5, §6.4)", () 
     expect((other.store.get("messages", gmroll._id) as MessageDocument).roll).toBeNull(); // redacted
   });
 
+  test("roll flavor rides the wire and lands on the roll card (§11, A06)", async () => {
+    const h = await setup();
+    const { client } = await h.addPlayer(PLAYER_ID, "Rex");
+
+    client.roll(
+      "1d20 + 9",
+      "roll",
+      undefined,
+      "Longsword +9 = BAB 6 + Str +3, size +0",
+    );
+    await flushMicrotasks();
+    const card = h.gm.store.getAll("messages")[0] as MessageDocument;
+    expect(card.roll?.total).toBe(15); // rng 0.25 → die 6
+    expect(card.flavor).toBe("Longsword +9 = BAB 6 + Str +3, size +0");
+
+    // A missing flavor stays an empty string, and an oversized one is capped.
+    client.roll("1d6");
+    await flushMicrotasks();
+    const plain = h.gm.store.getAll("messages")[1] as MessageDocument;
+    expect(plain.flavor).toBe("");
+    client.roll("1d6", "roll", undefined, "x".repeat(400));
+    await flushMicrotasks();
+    const capped = h.gm.store.getAll("messages")[2] as MessageDocument;
+    expect(capped.flavor.length).toBe(300);
+  });
+
   test("ephemeral relays player→player and never touches store or OpLog (§5)", async () => {
     const h = await setup();
     const { client } = await h.addPlayer(PLAYER_ID, "Rex");

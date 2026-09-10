@@ -2424,3 +2424,403 @@ Gap List and are only assembled here.
   right). Full suite 1008 passed / 3 skipped across 121 files; typecheck/lint/
   touched-file formatting/build/size green; dist 2,054,514 raw / 591,568 gzip
   (unchanged — nothing imports tactical.ts yet; A06 wires it into the sheet).
+
+## D-136 — A03: damage and critical arithmetic — confirmation, multipliers, Str rules, minimums, immunities
+
+**Date:** 2026-09-10. **Scope:** P3/A03. Sources fetched and verified against
+primary texts before encoding: Damage — minimum damage, Strength bonus,
+Multiplying Damage (CRB p.179, AoN Rules ID 100); Attack — Critical Hits
+(CRB p.182, AoN Rules ID 131); Nonlethal Damage (CRB p.191, AoN Rules ID 172);
+Magic Weapons (CRB p.468, AoN Rules ID 377); Broken (AoN Rules ID 413, already
+carried by A01); the rogue's Precision Damage & Critical Hits sidebar
+(d20pfsrd, quoting the Bestiary creature-type traits); Improved Critical /
+keen stacking ("this effect doesn't stack with any other effect that expands
+the threat range"). The strategic engine's already-fixed §2.3 semantics
+(confirm die 20 confirms / 1 fails; minimum applied to the final result) were
+mirrored, not re-decided.
+
+- **`tactical.ts` stays pure and diceless.** A03 is added to the same file the
+  A02 layer lives in, and the callers still supply every rolled value: the
+  confirmation d20, one weapon-dice sum per damage roll, and each bonus line's
+  rolled sum. No RNG, no ModelPool, no DOM — the plan's PR-D damage half as a
+  set of total helpers rather than one fat `damageRoll` closure.
+- **Criticals.** `effectiveCritThreatMin`: a broken weapon threatens on a
+  natural 20 only, and an expansion cannot re-widen it (order matters — broken
+  first, doubling second); otherwise a single doubling re-anchors the range at
+  2×min−21 (20→19–20, 19–20→17–20, 18–20→15–20). The doubling is one boolean
+  because the verified stacking text forbids two. `confirmCritical`: the
+  confirmation is an attack roll with the same modifiers — natural 20 always
+  confirms, natural 1 never does, otherwise die+bonus ≥ AC ("it doesn't need
+  to come up 20 again").
+- **Multipliers add.** `combinedDamageMultiplier` implements "each multiplier
+  works off the original, unmultiplied damage": 1 + Σ(m−1), so ×2+×2=×3,
+  ×3+×2=×4, and the ×3 lance under a ×3 spirited charge with a ×3 weapon crit
+  is ×5. A broken weapon's confirmed crit is ×2 regardless of its authored
+  multiplier. A defender immune to critical hits contributes no crit
+  multiplier — but outside multipliers (a mounted charge is not a critical)
+  still apply. Extra multipliers must be integers ≥ 2; garbage is rejected,
+  never guessed.
+- **The damage split the Gap List demanded (§2.4) is explicit.**
+  `resolveDamageRoll` takes one roll per multiplier step plus the static stack
+  (`damageModifierParts` total, or a stat-block line's derived bonus) and the
+  bonus lines separately: base dice and every static modifier are multiplied
+  ("roll the damage with all modifiers multiple times and total the results" —
+  Str, enhancement, Power-Attack-style misc all multiply), while precision
+  damage and extra damage dice (flaming) are added exactly once. The
+  base-vs-precision split is carried on the result so A05's DR resolver can
+  apply "precision damage is never reduced by DR" without re-deriving it.
+- **Strength rules exactly (CRB p.179).** One-handed ×1; two-handed wield ×1½
+  with bonuses rounded down — a light weapon or unarmed strike never gains the
+  increase however it is held; off-hand and secondary natural attacks ×½ (the
+  sole natural attack is ×1½ via A02's `oneAndHalfStr` flag, overriding the
+  secondary classification); Strength **penalties are never multiplied** — the
+  entire penalty applies off-hand, and two-handed wielding does not deepen it.
+  Ranged Str is full for thrown weapons, for a melee weapon with a range
+  increment (its only ranged use is being thrown), and for the authored sling
+  exception; penalty-only for a non-composite bow; none for everything else —
+  a composite bow's rating is authored flat damage, never guessed here.
+  Enhancement adds to damage (magic weapons apply to attack and damage;
+  special-ability equivalents modify neither, AoN ID 377).
+- **Buckets, minimum, and immunities.** Weapon damage lands nonlethal when the
+  weapon is nonlethal (unarmed, saps) unless an intent flips it; the minimum
+  rule converts a total result below 1 into 1 point of nonlethal damage
+  (mirroring the strategic §2.3 fix, applied to the whole hit so bonus dice
+  can legitimately lift a 0-weapon-total hit above the minimum); a negative
+  bucket against a positive rider is clamped with a note (damage never heals).
+  Crit immunity and precision immunity are **separate** defender flags per the
+  Bestiary traits — a swarm takes sneak attack but no extra crit damage; an
+  elemental takes neither; a confirmed crit against a crit-immune defender
+  deals normal (×1) damage with an explicit note.
+- **Rule correction found while encoding:** A02's −4 lethal-swap guard fired
+  only for unarmed strikes. CRB p.191 (AoN ID 172) covers every nonlethal
+  weapon — "a weapon that deals nonlethal damage, including an unarmed
+  strike" — and IUS waives it for unarmed strikes only, never a sap. The guard
+  now covers all nonlethal weapons; the mirror `nonlethalIntent` (−4 with a
+  lethal weapon; no core feat waives it) was added symmetrically and threaded
+  through `fullAttackPlan`. One A02 test label was updated; its behavior was
+  and is unchanged.
+- **Deliberately not encoded:** DR/ER/hardness (A05 consumes the carried
+  split), range penalties and splash scatter (A04), Improved Critical / Power
+  Attack / fighting defensively wiring (A07 — `threatRangeExpanded` and `misc`
+  are the seams), charge multipliers (P06/P08 supply `extraMultipliers`), and
+  any dice. Nothing imports the damage layer yet; A06 wires it into the sheet
+  roll buttons and chat breakdown.
+- **Evidence:** 32 new tests named after the SRD headings (confirmation
+  extremes, doubling re-anchors, additive multipliers, one-roll-per-step
+  validation, Str ladder with penalty cases, sling/bow rules, minimum damage,
+  both swap directions with the IUS-only exemption, swarm-vs-elemental
+  immunity discrimination, and the SRD's own worked flaming-longsword
+  composition). The two initial failures were test arithmetic (a missed third
+  static application; a one-roll ×2 crit), not code. Full suite 1040 passed /
+  3 skipped across 121 files; typecheck/lint/touched-file Prettier/build/
+  size/build:systems green; dist 2,054,514 raw, byte-identical to D-135 (no
+  importer yet), gzip 594,184 in this environment.
+
+## D-137 — A04: range penalties and legality, melee reach, and splash-weapon targeting
+
+**Date:** 2026-09-10. **Scope:** P3/A04. Sources fetched and verified against
+primary texts before encoding: the Range weapon quality with its worked
+dagger example (CRB p.144, quoted via the PRD — "a cumulative –2 penalty for
+each full range increment **(or fraction thereof)** of distance to the target…
+a dagger (with a range of 10 feet) thrown at a target that is 25 feet away
+would incur a –4 penalty"); Ranged Attacks maximum-range text and melee reach
+text (CRB p.182, AoN Rules ID 131 — already fetched for A02/A03); Throw Splash
+Weapon verbatim (CRB p.202, AoN Rules ID 197), including the scatter
+clarification example quoted with the rule (a 25-ft throw with a 20-ft
+increment ⇒ the weapon lands 2 squares off), which resolved the one genuinely
+ambiguous phrase ("equal to the range increment of the throw" = the number of
+range increments the throw covered — not the weapon's increment in squares,
+and not the 1d8 result; the Appendix A.12 paraphrase "move that many range
+increments" was garbled and is superseded). Firearm windows were already
+verified in Gap List §2.9 and carried by A01.
+
+- **Range:** `rangeIncrementsSpanned` counts fractions as full increments
+  (ceil), pinned by the dagger example; `rangedAttackRange` returns the −2
+  penalty per increment beyond the first and refuses the attack entirely
+  beyond the weapon's maximum (a refusal, never a bigger penalty — CRB
+  p.182), plus the early/advanced firearm touch-window flag. This is the
+  tactical path only; the strategic engine's §2.8 bugs (range penalty
+  computed only in the firearm branch, no max-range cutoff) are M01's to fix
+  under the separate-resolvers decision — no shared kernel was created, the
+  helpers are simply available to both.
+- **Reach:** `meleeReachLegality` encodes the A.5 bands — normal weapons
+  within natural reach; reach weapons in the open band (natural, double];
+  zero-reach attackers strike only at distance 0 with the provoke rule named
+  in notes. Occupancy, entering squares and the actual AoO are P06's. Natural
+  reach is caller-supplied — no size table was re-derived here.
+- **Splash:** the delivery is a ranged touch attack derived on read in
+  `resolvePF1eWeapon` (authored `touch: false` cannot opt a splash weapon out
+  of its own delivery rule); no nonproficiency penalty (guard in
+  `attackModifierParts`); precision bonus lines are rejected by
+  `resolveDamageRoll` rather than silently dropped; the grid-intersection
+  attack is `resolveSplashIntersectionRoll` against AC 5 — a ranged attack,
+  not touch, with no threat field because no creature is there; the miss
+  scatter is `splashMissScatter`: 1d8 with die 1 toward the thrower and 2–8
+  clockwise (45°-snapped compass in screen coordinates, y-down), moving a
+  number of squares equal to the throw's range-increment count. This is
+  weapon scatter only; D-130's removal of the invented strategic **spell**
+  scatter stands.
+- **A01 correction found while encoding:** a melee weapon with an authored
+  range increment (dagger, spear, throwing axe — exactly how the SRD lists
+  them) had been marked display-only with `maxRangeIncrements = 0`, refusing
+  its ranged use. CRB p.182 ("The maximum range for a thrown weapon is five
+  range increments") and p.468 ("Some of the weapons listed as melee weapons
+  can also be used as ranged weapons") make thrown use real: the derivation
+  now yields 5, the dead-data issue is removed, and `class` stays "melee" so
+  melee use still ignores increments. No persisted shape changed.
+- **Deliberately not encoded:** line of sight, distance measurement and
+  splash-area membership (caller geometry — C01/P03), the
+  occupied-intersection targeting ban (enforced where targets are chosen),
+  splash damage amounts (content), Point-Blank Shot (+1 within 30 ft — A07),
+  and any dice. Nothing imports the A04 helpers yet; A06 wires them into the
+  sheet roll path.
+- **Evidence:** 21 new tests (19 in `pf1eTactical.test.ts`, 2 derivation tests
+  in `pf1eWeapons.test.ts`), hand-computed from the verified texts: the
+  dagger/25-ft ⇒ −4 example, 45-ft alchemist's fire at the 5-increment −8
+  ceiling and 51-ft refusal, firearm touch windows flipping exactly at the
+  1st/5th increment boundary with the penalty still applying, reach dead
+  zones at (5,10] and (10,20], Tiny in-square striking with the provoke note,
+  the full clockwise 1d8 rose from a due-east thrower, the 25-ft/20-ft
+  scatter clarification, the angled-thrower nearest-compass snap, and the
+  −0-vs-0 penalty edge the first run exposed. Full suite 1061 passed /
+  3 skipped across 121 files; typecheck/lint/touched-file Prettier/build/
+  size/build:systems green; dist 2,054,514 raw, byte-identical to D-136 (no
+  importer yet).
+
+## D-138 — A05: defensive mitigation — DR, energy resistance/immunity/vulnerability, object hardness
+
+**Date:** 2026-09-10. **Scope:** P3/A05. Sources fetched and verified verbatim
+before encoding: Damage Reduction + Overcoming DR (CRB p.561, AoN Rules ID
+424), Energy Resistance (CRB p.563, AoN Rules ID 429), Energy Immunity and
+Vulnerability (CRB p.563 / Bestiary UMR "Vulnerabilities", AoN), Smashing an
+Object (CRB p.173, AoN Rules ID 126), DR/epic (Bestiary p.299 UMR + Mythic
+Adventures glossary, both ways confirmed by the Paizo FAQ), and the Paizo
+rules-forum answer on DR vs nonlethal damage. R02/D-129's precision-is-reduced
+ruling stands; the Gap List's own §2.10 column ("precision damage… never
+reduced by DR") is wrong against its A.17 correction and is superseded.
+
+- **`src/packages/pf1e/mitigation.ts` (new, pure):** the defender-side half of
+  the damage path, consuming A03's result as typed components — physical
+  (weapon + precision, one combined DR total per attack) and energy (by type,
+  DR-immune, ER-mitigated). `drAttackFacts` builds the attack facts from a
+  weapon with an optional launcher context (ammunition); `drBypasses` encodes
+  the ladder; `applyMitigation` resolves everything with labeled notes for the
+  chat breakdown; `damageComponentsFromRoll` is the A03 seam.
+- **Bypass ladder exactly:** +1 magic (the launcher's bonus makes ammunition
+  magic — "treated as a magic weapon", nothing more; its alignment transfers;
+  the ammunition's own enhancement feeds the ladder, the launcher's never
+  does); +3 cold iron/silver; +4 adamantine with the explicit "does not give
+  the ability to ignore hardness" caveat; +5 alignment; epic = enhancement
+  ≥ +6 OR total effective ≥ +6 (special-ability equivalents count only for
+  epic — a +5 flaming weapon bypasses DR/epic but not DR/cold iron). Bypass
+  lists are OR; strings split on " or " so stat-block forms like "piercing or
+  slashing" work; unknown tokens never bypass and are named in notes. Multiple
+  DR entries never stack — the best applies in the situation.
+- **Riders:** DR completely negating the physical damage negates injury
+  poison, stunning and injury-based disease (`physicalDamageNegated`); touch
+  attacks, energy riders and energy drains are never DR-negated — the caller
+  models energy riders as energy components, which DR skips by rule.
+- **Two disputed points, decided and named:**
+  1. **Vulnerability before resistance/hardness.** PF1e print is silent —
+     3.5's "apply the resistance before the vulnerability" frost-giant
+     paragraph was dropped in the Pathfinder glossary. The Paizo developer
+     rulings (the Iron Gods robot answer: "determine the total amount of
+     damage the creature WOULD take… first thing you do is apply the
+     vulnerability") direct vulnerability-first; encoded as ×1.5 (floored) →
+     energy resistance → object halvings → hardness. The dropped 3.5 order is
+     recorded here, not encoded; a consumer wanting it must ask.
+  2. **DR applies to nonlethal damage** (Paizo rules forum: "DR makes no
+     consideration whether the damage is lethal or not"), including negating
+     A03's minimum 1-point nonlethal. The strategic engine's
+     `combatEngine.ts` comment "DR never applies to nonlethal damage" is
+     wrong against this and stays untouched here — M01 owns the strategic
+     repair. Which bucket DR eats first in a mixed lethal/nonlethal attack is
+     unspecified in print ("GM fiat"); the resolver takes lethal first and
+     names the choice in the result notes.
+- **Objects (CRB p.173):** hardness subtracts once per attack from the
+  post-halving total; energy attacks and ranged-weapon damage halve (floored)
+  **before** hardness; objects are immune to nonlethal damage (dropped) and to
+  critical hits (attack-side: callers must not confirm crits against objects —
+  documented, not enforced); an actual adamantine weapon ignores hardness, the
+  +4 enhancement equivalent does not (CRB p.561's table footnote).
+- **A03 additive extensions:** `PF1eBonusDamageLine.energyType` (an energy
+  rider — flaming); `bonusContributions` carry `precision`/`energyType`; the
+  result exposes `weaponContribution` final buckets (post minimum/clamp) so
+  the physical component needs no re-derivation. Also superseded: Appendix
+  A.17's line "DR does negate ability damage/drain, energy damage dealt along
+  with an attack (riders), touch attacks, and force effects" had the polarity
+  backwards — the verbatim CRB text says DR does **not** negate touch
+  attacks, energy riders or energy drains; the encoding follows the verbatim.
+- **Deliberately not encoded:** spell resistance (C02), regeneration/fast
+  healing and their suppression (H03), temporary-HP absorption (P4/P7
+  bookkeeping), saving-throw halves (C02), protection-from-energy pools, the
+  natural-weapons-of-a-DR-creature counting as magic/epic (caller authoring),
+  and any strategic-loop change (M01). Nothing imports mitigation.ts yet;
+  A06 wires it into the sheet roll path and chat breakdown.
+- **Evidence:** 22 new tests in `tests/packages/pf1eMitigation.test.ts`,
+  hand-computed from the verified texts: every ladder boundary, the
+  +5-flaming-is-epic-but-not-cold-iron discrimination, ammunition transfer in
+  both directions (launcher magic yes, launcher ladder no, own enhancement
+  yes), rider negation, best-of-multiple-DR, per-type ER spanning components,
+  the vulnerability order with the 30-fire/10-resist ⇒ 35 worked case and the
+  25 ⇒ 37 floor, object halvings, adamantine-vs-+4 hardness, nonlethal object
+  immunity, the A03→A05 seam end-to-end (19 physical + 6 fire vs DR 10/— ⇒
+  15), and validation refusals for malformed components/DR/hardness. One A03
+  test was updated for the two new contribution fields. Full suite 1083
+  passed / 3 skipped across 122 files; typecheck/lint/touched-file Prettier/
+  build/size/build:systems green; dist 2,054,514 raw, byte-identical to
+  D-137 (no importer yet).
+
+## D-139 — A06a: the sheet roll bridge — roll specs, flavor-on-roll, sheet roll buttons
+
+**Date:** 2026-09-10. **Scope:** P3/A06, first slice. No new rule texts were
+needed: every number is `derivePF1eActor`'s existing derivation (D-121/D-125)
+and the one formula re-encoded here — the critical-damage group expansion —
+rests on the already-verified CRB p.179 text ("roll the damage multiple times
+and total the results") recorded in D-136/A.3. The AoN unarmed "provoke"
+wording (ID 131, verified in D-135) supplies the unarmed-provoke flag. This
+entry records wiring decisions, not fresh rules research.
+
+- **`src/packages/pf1e/rollData.ts` (new, pure, diceless):** `pf1eAttackRollGroups`
+  turns each derived attack line into a roll group — standard attack, one spec
+  per full-attack iterative ("(attack 2)" suffix when the ladder has more than
+  one), damage, crit damage — plus `pf1eSaveRollSpecs` (Fort/Ref/Will at the
+  derived totals) and `pf1eInitiativeRollSpec`. The buttons can never disagree
+  with the sheet readout because both read the same derivation; the A02–A05
+  resolver layers are deliberately NOT consulted for button totals — their
+  importer is the authoritative attack-resolution flow (A06b), where a chosen
+  defense and rider context exist to resolve against. Unparseable explain
+  strings fall back to a verbatim-flavor note rather than a guessed formula.
+- **Critical-damage formula:** N groups of "dice + static" joined
+  (`1d8 + 4 + 1d8 + 4`), never `(1d8 + 4) × 2` — the host engine has no
+  multiplication grouping and the printed rule is per-step rolling with all
+  modifiers. Dice-less ×N lines flatten to one baked number (each step adds the
+  static stack; "8" reads cleaner than "4 + 4"). A multiplier below 2 is the
+  resolver's clamped domain and is refused with a note, never guessed. Threat
+  ranges narrower/wider than 20 surface as a note, since the confirm roll
+  itself is A06b resolution. Bonus-dice and precision riders are not part of a
+  derived line and so cannot be silently multiplied here — they enter in A06b
+  where the A03 result structure exists.
+- **Unarmed provoke (AoN ID 131 via D-135):** the derived unarmed fallback
+  (authoredAttacksCount 0) flags `provokes` unless Improved Unarmed Strike or
+  natural attacks exist; authored unarmed-named lines get an advisory note
+  only, because authored damage dice imply a statted stat block whose provocation
+  the author owns. The context (feats/hasNaturalAttacks/authoredAttacksCount)
+  is supplied by the sheet from authored data — no core shape extension (D-113).
+- **Flavor rides the existing roll protocol, not a new message:** `RollMsg.flavor?`
+  (optional string, PROTOCOL.md updated) passes through `ClientSync.roll` /
+  `rollVerified` as a fourth optional parameter; the host slices it to 300
+  characters on both the plain and commit-reveal paths (a 300-char breakdown is
+  far beyond any derived explain string; the cap bounds a hostile client
+  pushing a wall of text into replicated chat). The pendingRolls entry carries
+  the full unsliced flavor so the reveal cannot truncate twice. ChatPanel
+  renders `.flavor` as a small breakdown line under the total — an 8-line
+  touched-lines-only patch; the legacy file is not prettier-reformatted.
+- **Sheet buttons (PF1eActorSheet Combat tab):** per attack line — Attack
+  (standard), Full Attack (posts every iterative as its own public card),
+  Damage, Crit; saves row (Fort/Ref/Will); an Initiative button next to the
+  derived readout. All posts are public chat rolls through the existing
+  seeded/commit-reveal machinery; no new permission surface.
+- **Deliberately not in this slice (A06b/P6 own them):** defense selection and
+  the A02 hit resolution, A03 confirmation arithmetic, A05 mitigation, HP
+  application, the _Verify_ chip via `rollVerified`, targeting, AoO interrupt
+  prompts and full-attack sequencing beyond posting each iterative. Nothing
+  here applies damage or writes HP.
+- **Evidence:** 12 new tests in `tests/packages/pf1eRollData.test.ts`
+  (iterative ladder, ×2 and ×4 crit group expansion, dice-less ×N, refused
+  multiplier <2, threat note, unarmed-provoke context matrix, verbatim-fallback,
+  saves/initiative) plus 1 host flavor test (plain path cap at 300, riding the
+  deterministic rng). One new e2e specification
+  ("PF1e sheet roll buttons post attacks, damage and saves to chat with their
+  breakdown (A06)") with a BAB 6/Str 16 fixture asserting the +9 attack card
+  with breakdown, 1d8+4 damage, ×2 crit as 1d8+4+1d8+4 and the Fort save —
+  collected across 3 projects (24 tests in the file), not executed (no
+  browser binaries, D-119 precedent). Full suite **1096 passed / 3 skipped**
+  across 124 files; typecheck, lint, touched-file Prettier (new files
+  formatted; the legacy core/sync/chat/e2e files keep touched-lines-only
+  patches), build, size and `build:systems` green; dist 2,059,693 raw /
+  595,828 gzip — +5,179 bytes over D-138, within the 6 MB budget.
+
+## D-140 — A06b: attack resolution — defense selection, confirmation, mitigation, HP writes, the Verify chip
+
+**Date:** 2026-09-10. **Scope:** P3/A06, second slice (closes A06). Sources
+fetched and verified verbatim before encoding: Injury and Death (CRB p.189–190,
+AoN Rules IDs 164–168 — disabled at **exactly** 0 HP; negative-but-not-≥Con ⇒
+unconscious and dying, losing 1 HP per round; dead when the negative total
+equals the Constitution score) and Nonlethal Damage (CRB p.191, AoN Rules
+ID 172 — nonlethal is never deducted from hit points; equal to current HP ⇒
+staggered, exceeding ⇒ unconscious; nonlethal already at **total maximum** HP
+⇒ all further nonlethal is treated as lethal, with the explicit regeneration
+exception; both −4 damage-intent swaps). Everything else composes layers
+already verified in D-135/D-136/D-138 — no other new rule research.
+
+- **`src/packages/pf1e/resolve.ts` (new, pure, diceless):** `pf1eResolveAttack`
+  composes A02's `resolveAttackRoll` (defense picked from the derived AC trio,
+  a touch attack forcing touch), A03's `confirmCritical` (a threat without
+  `confirmDie` is a caller error, never a rules state; a multiplier below 2
+  downgrades a confirmed threat to a normal hit, matching D-139), the
+  minimum-damage rule (a sub-1 total deals 1 point of **nonlethal**, even on a
+  lethal-intent hit), A05's `applyMitigation` through `damageComponentsFromRoll`
+  (one physical weapon component — a derived line carries no riders), and the
+  HP arithmetic: lethal subtracts, nonlethal accumulates with the max-HP
+  conversion (regeneration suppresses it). Condition annotations — dead at
+  −Con, dying, disabled at exactly 0, unconscious/staggered from nonlethal —
+  are notes only; P7 owns the writes. `pf1eResolvePrepare` is the exported
+  first half (bonus/defense/A02 roll) the chat flow orchestrates with, and
+  `pf1eResolveAttack` runs the same code, so the halves cannot disagree.
+- **The situational/intent numbers live once:** `tactical.ts` now exports
+  `situationalAttackParts` (flanking/charge/invisible +2, squeezing −4) and
+  `damageIntentPenaltyPart` (the CRB p.191 −4 swaps, IUS waiving the unarmed
+  lethal one only), with `attackModifierParts` refactored onto them — a pure
+  extraction; all 76 A02/A03 tests pass unchanged. The resolve layer consumes
+  the same helpers on top of a derived attack line.
+- **`src/ui/sheets/pf1eResolveFlow.ts` (new):** the orchestration — every die
+  is a public host-evaluated roll (`client.roll`, or `client.rollVerified`
+  when verifiable), found back in the replica by `flags.core.rollId` with the
+  natural d20 face read from the message's dice terms; a threat rolls the
+  confirmation at the effective bonus; a hit rolls the damage formula (the
+  D-139 crit-formula groups on a confirmed crit, chosen by the same exported
+  `confirmCritical` the resolver runs). The resolution card is an ordinary
+  `messages` create op whose content uses the chat's `[[total|formula]]` chips;
+  HP writes go through `pf1eSheetEdit` ("hp"/"nonlethalDamage") so ownership
+  and validation are the sheet's own path — a resolver without target
+  ownership narrates but cannot write, and the card says so.
+- **The Verify chip (the plan's "where the GM opted in"):** implemented as the
+  resolving user's commit-reveal toggle in the resolve panel; when on, the
+  attack rides `rollVerified` and the card carries the `verifyCommitRoll`
+  verdict ("✓ verified" / "⚠ verification FAILED"), omitted when crypto was
+  unavailable (the silent plain-roll fallback). A world-level GM setting can
+  replace the toggle later without any protocol change.
+- **Unarmed natural bucket:** the derived unarmed fallback's `damageType`
+  string ("bludgeoning") does not say nonlethal, but an unarmed strike deals
+  nonlethal by default (AoN ID 131) — the flow passes `unarmed: true` for the
+  fallback (authoredAttacksCount 0), which makes nonlethal the natural bucket,
+  so toggling to lethal takes the −4 (waived with IUS) instead of the reverse.
+- **Deliberately not encoded:** defender critical-hit immunity and energy
+  immunity/vulnerability (no authored actor fields exist — E03/P4 own the
+  condition side; A05's flags light up when authoring lands), DR bypass facts
+  beyond the mundane default (derived attack lines carry no weapon descriptor —
+  `attackFacts` is the seam for the Weapons-tab/A07 wiring), precision/energy
+  riders, resolving full-attack iteratives against a target as one sequence
+  (each attack resolves individually), dying/stable bookkeeping (P7) and the
+  AoO interrupt queue (P6 — the provocation is a note on the card and the
+  sheet badge, exactly the "preliminary prompt" A06 asks for).
+- **Evidence:** 20 new tests in `tests/packages/pf1eResolve.test.ts` — the
+  plan §6.2 discriminating fixtures all land: the 22/16/17 AC trio (total 19
+  misses normal, hits touch and flat-footed), flanked 18-vs-AC-19 misses and
+  19 hits (with the dropped/doubled-flank controls), and the min-damage
+  fixture (1d6−10 ⇒ 1 nonlethal, DR bypassed via the damage type, unconscious
+  when nonlethal exceeds current HP; the equals-case staggers) — plus the
+  confirmation boundary, the multiplier-<2 downgrade, the max-HP conversion
+  and its regeneration exception, dead-at-−Con, the IUS waiver matrix, the
+  object halving and validation refusals. 9 new tests in
+  `tests/ui/pf1eResolveFlow.test.ts` drive the flow through a fake client:
+  hit/miss/confirmed-crit (asserting the D-139 crit formula is the one
+  rolled)/unconfirmed-threat/rejected HP write/the commit-reveal Verify chip
+  (a legitimately verifiable record built from the exported seed machinery)
+  and the pure helpers. One new e2e specification (resolve-vs-target with a
+  two-actor fixture; 27 tests collected in `e2e/sheets.spec.ts` across 3
+  projects, not executed — no browser binaries, D-119 precedent). Full suite
+  **1125 passed / 3 skipped** across 126 files; typecheck, lint, touched-file
+  Prettier, build, size and `build:systems` green; dist 2,080,869 raw /
+  602,541 gzip — +21,176 over D-139, within the 6 MB budget. A07 remains.

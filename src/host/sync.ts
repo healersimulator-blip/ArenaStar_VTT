@@ -840,6 +840,7 @@ export class HostSync {
         rollData: msg.rollData,
         mode: msg.mode,
         to: msg.to,
+        flavor: msg.flavor,
         commit: msg.commit,
         seedHost,
         ts: this.now(),
@@ -870,7 +871,8 @@ export class HostSync {
         seedHost: null,
       },
       rollMode: msg.mode,
-      flavor: "",
+      // A06: an optional breakdown line ("+10 = BAB 6 + Str +3") rides the roll.
+      flavor: typeof msg.flavor === "string" ? msg.flavor.slice(0, 300) : "",
     };
     this.commitOps(
       [{ kind: "create", coll: "messages", data: message }],
@@ -890,6 +892,7 @@ export class HostSync {
       rollData: Record<string, Json> | undefined;
       mode: RollMsg["mode"];
       to: UserId[] | undefined;
+      flavor: string | undefined;
       commit: string;
       seedHost: string;
       ts: number;
@@ -945,7 +948,7 @@ export class HostSync {
           commit: pending.commit,
         },
         rollMode: pending.mode,
-        flavor: "",
+        flavor: typeof pending.flavor === "string" ? pending.flavor.slice(0, 300) : "",
       };
       this.commitOps(
         [{ kind: "create", coll: "messages", data: message }],

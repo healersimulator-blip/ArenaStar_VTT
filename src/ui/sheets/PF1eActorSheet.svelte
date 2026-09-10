@@ -1,6 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
+  import {
+    pf1eAttackRollGroups,
+    pf1eInitiativeRollSpec,
+    pf1eSaveRollSpecs,
+    type PF1eRollSpec,
+  } from "../../packages/pf1e/rollData";
   import type { ActorDocument } from "../../core/documents";
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
@@ -12,6 +18,7 @@
   import { can } from "../../core/permissions";
   import {
     SHEET_FIELDS,
+    isPF1eActor,
     sheetRecord,
     pf1eDetailEdit,
     type DetailEdit,
@@ -20,6 +27,8 @@
     pf1eSheetView,
     type SheetField,
   } from "./pf1eSheetModel";
+  import { resolveAttackFlow } from "./pf1eResolveFlow";
+  import type { PF1eDefenseChoice } from "../../packages/pf1e/resolve";
 
   let {
     doc,
@@ -41,6 +50,129 @@
   const pending = new SvelteSet<string>();
   let view = $derived(pf1eSheetView(doc));
   let d = $derived(view.derived);
+  let attackRolls = $derived(
+    pf1eAttackRollGroups(d, {
+      authoredAttacksCount: Array.isArray(view.authored.attacks)
+        ? view.authored.attacks.length
+        : 0,
+      feats: Array.isArray(view.authored.feats) ? view.authored.feats : [],
+      hasNaturalAttacks: Array.isArray(view.authored.attacks)
+        ? view.authored.attacks.some(
+            (a) =>
+              typeof a === "object" &&
+              a !== null &&
+              ((a as Record<string, unknown>).natural === true ||
+                (a as Record<string, unknown>).secondary === true),
+          )
+        : false,
+    }),
+  );
+  let saveRolls = $derived(pf1eSaveRollSpecs(d));
+  let initiativeRoll = $derived(pf1eInitiativeRollSpec(d));
+  function rollSpec(spec: PF1eRollSpec): void {
+    // §11: the host evaluates the formula and posts the card; the flavor line
+    // is the breakdown ("Longsword +10 = BAB 6 + Str +3, size +0").
+    client.roll(spec.formula, "roll", undefined, spec.flavor);
+  }
+  function rollAll(specs: readonly PF1eRollSpec[]): void {
+    for (const spec of specs) rollSpec(spec);
+  }
+
+  // A06b — resolve one attack against a target actor: public rolls, the
+  // resolution card, and HP writes through the sheet's own op path.
+  let resolveTargetId = $state("");
+  let resolveAttackIndex = $state(0);
+  let resolveDefense = $state<PF1eDefenseChoice>("normal");
+  let resolveFlanking = $state(false);
+  let resolveCharging = $state(false);
+  let resolveNonlethal = $state(false);
+  let resolveVerifiable = $state(false);
+  let resolveBusy = $state(false);
+  let resolveError = $state("");
+  let authoredAttacksCount = $derived(
+    Array.isArray(view.authored.attacks) ? view.authored.attacks.length : 0,
+  );
+
+  function pf1eTargetActors(): ActorDocument[] {
+    return (client.store.getAll("actors") as readonly ActorDocument[]).filter(
+      (a) => a._id !== doc._id && isPF1eActor(a),
+    );
+  }
+
+  function resolveTargetInfo(): {
+    actor: ActorDocument;
+    derived: ReturnType<typeof pf1eSheetView>["derived"];
+  } | null {
+    if (!resolveTargetId) return null;
+    const actor = client.store.get("actors", resolveTargetId) as
+      ActorDocument | undefined;
+    if (!actor) return null;
+    return { actor, derived: pf1eSheetView(actor).derived };
+  }
+
+  /** The defense dropdown label, with the picked target's derived AC appended. */
+  function defenseOptionLabel(kind: PF1eDefenseChoice): string {
+    const name =
+      kind === "normal" ? "Normal" : kind === "touch" ? "Touch" : "Flat-footed";
+    const info = resolveTargetInfo();
+    if (!info) return name;
+    const ac =
+      kind === "normal"
+        ? info.derived.ac.normal
+        : kind === "touch"
+          ? info.derived.ac.touch
+          : info.derived.ac.flatFooted;
+    return `${name} ${String(ac)}`;
+  }
+
+  async function resolveVsTarget(): Promise<void> {
+    resolveError = "";
+    const info = resolveTargetInfo();
+    const group = attackRolls[resolveAttackIndex];
+    const line = d.attacks[resolveAttackIndex];
+    if (!info || !group || !line) {
+      resolveError = "Pick an attack and a target.";
+      return;
+    }
+    resolveBusy = true;
+    try {
+      const outcome = await resolveAttackFlow(client, client.user, {
+        attackerName: doc.name,
+        line,
+        iterative: 0,
+        attackFormula: group.attack.formula,
+        damageFormula: group.damage?.formula ?? "0",
+        critDamageFormula: group.critDamage?.formula ?? null,
+        targetName: info.actor.name,
+        targetActor: info.actor,
+        targetDerived: info.derived,
+        defense: resolveDefense,
+        ...(resolveFlanking || resolveCharging
+          ? {
+              situational: {
+                ...(resolveFlanking ? { flanking: true } : {}),
+                ...(resolveCharging ? { charging: true } : {}),
+              },
+            }
+          : {}),
+        ...(resolveNonlethal ? { nonlethalDamage: true } : {}),
+        // Only the derived unarmed fallback (no authored attack lines) counts
+        // as the unarmed strike for the natural nonlethal bucket and IUS waiver.
+        ...(authoredAttacksCount === 0 ? { unarmed: true } : {}),
+        ...(Array.isArray(view.authored.feats)
+          ? { feats: view.authored.feats as string[] }
+          : {}),
+        ...(group.provokes ? { provokes: true } : {}),
+        ...(resolveVerifiable ? { verifiable: true } : {}),
+      });
+      if (!outcome.ok) resolveError = outcome.error;
+      else if (outcome.hpWriteError !== null) {
+        resolveError = outcome.hpWriteError;
+      }
+    } finally {
+      resolveBusy = false;
+    }
+  }
   let editable = $derived(
     client.user !== null && can(client.user, "update", doc, "actors"),
   );
@@ -233,18 +365,117 @@
         </p>
       {/if}
     {:else}
-      <h4>Attack readout</h4>
-      {#each d.attacks as attack, i (i)}
-        <p>
-          <strong>{attack.name}</strong>
-          {attack.attackBonuses.join(" / ")} · {attack.damageDice ?? "—"}
-          {attack.damageBonus >= 0 ? "+" : ""}{attack.damageBonus} · {attack.critThreatMin}–20/×{attack.critMultiplier}
-        </p>
+      <h4>Attacks</h4>
+      {#each attackRolls as group, i (i)}
+        <div class="attack-line" data-pf1e-attack={group.label}>
+          <p>
+            <strong>{group.label}</strong>
+            {group.attack.formula}
+            {#if group.provokes}<span class="warn" data-pf1e-provokes
+                >⚠ provokes an AoO</span
+              >{/if}
+          </p>
+          <div class="rolls">
+            <button type="button" onclick={() => rollSpec(group.attack)}
+              >Attack</button
+            >
+            {#if group.fullAttack.length > 1}
+              <button type="button" onclick={() => rollAll(group.fullAttack)}
+                >Full attack</button
+              >
+            {/if}
+            {#if group.damage}
+              <button type="button" onclick={() => rollSpec(group.damage)}
+                >Damage</button
+              >
+            {/if}
+            {#if group.critDamage}
+              <button type="button" onclick={() => rollSpec(group.critDamage)}
+                >Crit ×{d.attacks[i]?.critMultiplier}</button
+              >
+            {/if}
+          </div>
+          {#if group.notes.length > 0}
+            <p class="note">{group.notes.join(" · ")}</p>
+          {/if}
+        </div>
       {/each}
+      <h4>Resolve vs target</h4>
+      <div class="resolve" data-pf1e-resolve>
+        <label
+          >Attack
+          <select bind:value={resolveAttackIndex}>
+            {#each attackRolls as group, i (i)}
+              <option value={i}>{group.label} {group.attack.formula}</option>
+            {/each}
+          </select>
+        </label>
+        <label
+          >Target
+          <select bind:value={resolveTargetId} data-pf1e-resolve-target>
+            <option value="">— pick a target —</option>
+            {#each pf1eTargetActors() as target (target._id)}
+              <option value={target._id}>{target.name}</option>
+            {/each}
+          </select>
+        </label>
+        <label
+          >Defense
+          <select bind:value={resolveDefense} data-pf1e-resolve-defense>
+            <option value="normal">{defenseOptionLabel("normal")}</option>
+            <option value="touch">{defenseOptionLabel("touch")}</option>
+            <option value="flatFooted"
+              >{defenseOptionLabel("flatFooted")}</option
+            >
+          </select>
+        </label>
+        <label
+          ><input type="checkbox" bind:checked={resolveFlanking} /> Flanking +2</label
+        >
+        <label
+          ><input type="checkbox" bind:checked={resolveCharging} /> Charge +2</label
+        >
+        <label
+          ><input
+            type="checkbox"
+            bind:checked={resolveNonlethal}
+            data-pf1e-resolve-nonlethal
+          /> Nonlethal (−4 with a lethal weapon)</label
+        >
+        <label
+          ><input
+            type="checkbox"
+            bind:checked={resolveVerifiable}
+            data-pf1e-resolve-verifiable
+          /> Commit-reveal rolls (verifiable)</label
+        >
+        <button
+          type="button"
+          disabled={resolveBusy || !resolveTargetId}
+          onclick={() => void resolveVsTarget()}
+          data-pf1e-resolve-attack
+          >{resolveBusy ? "Resolving…" : "Attack"}</button
+        >
+        {#if resolveError}<p class="warn" data-pf1e-resolve-error>
+            {resolveError}
+          </p>{/if}
+      </div>
       <p class="note">
-        Edit authored lines in Weapons. Attack rolls and damage application are
-        not implemented in this slice.
+        Rolls post to chat with their breakdown; resolution rolls attack (+
+        confirmation on a threat) and damage publicly and writes hp through the
+        sheet's op path. The AoO interrupt queue is P6.
       </p>
+      <h4>Saves & checks</h4>
+      <div class="rolls">
+        {#each saveRolls as spec (spec.label)}
+          <button type="button" onclick={() => rollSpec(spec)}
+            >{spec.label} {spec.formula}</button
+          >
+        {/each}
+        <button type="button" onclick={() => rollSpec(initiativeRoll)}
+          >{initiativeRoll.label} {initiativeRoll.formula}</button
+        >
+      </div>
     {/if}
   {:else if tab === "weapons"}
     <PF1eAttackEditor
@@ -317,6 +548,32 @@
     margin: 8px 0;
   }
   header span,
+  .resolve {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    padding: 6px;
+    border: 1px solid #3a4656;
+    border-radius: 6px;
+  }
+  .resolve label {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+  }
+  .attack-line {
+    border-top: 1px solid #2a3547;
+    padding-top: 4px;
+  }
+  .rolls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .warn {
+    color: #d9a441;
+  }
   .note {
     color: #9eafc5;
   }
