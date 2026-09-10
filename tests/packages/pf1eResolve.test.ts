@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   pf1eResolveAttack,
+  pf1eResolveManyshot,
   type PF1eResolveAttackInput,
   type PF1eResolveDefender,
 } from "../../src/packages/pf1e/resolve";
@@ -445,5 +446,42 @@ describe("pf1eResolveAttack — attack resolution (A06b)", () => {
     expect(
       resolve({ defender: { ...trioDefender, nonlethalDamage: -1 } }),
     ).toMatchObject({ ok: false });
+  });
+});
+
+describe("pf1eResolveManyshot — ordered volley damage", () => {
+  test("applies each arrow to the same target state in order", () => {
+    const result = pf1eResolveManyshot({
+      attack: { ...sword, ranged: true },
+      arrows: [
+        { die: 10, damageTotal: 6 },
+        { die: 10, damageTotal: 7 },
+      ],
+      defense: "normal",
+      defender: { ...trioDefender, hp: 20 },
+    });
+    expect(result).toMatchObject({ ok: true, finalHp: 7, finalNonlethal: 0 });
+    if (result.ok) {
+      expect(result.arrows.map((arrow) => arrow.hp.after)).toEqual([14, 7]);
+    }
+  });
+
+  test("rejects non-ranged and out-of-range volley sizes before resolving dice", () => {
+    expect(
+      pf1eResolveManyshot({
+        attack: sword,
+        arrows: [{ die: 10, damageTotal: 1 }, { die: 10, damageTotal: 1 }],
+        defense: "normal",
+        defender: trioDefender,
+      }),
+    ).toEqual({ ok: false, error: "Manyshot requires a ranged attack" });
+    expect(
+      pf1eResolveManyshot({
+        attack: { ...sword, ranged: true },
+        arrows: [{ die: 10, damageTotal: 1 }],
+        defense: "normal",
+        defender: trioDefender,
+      }),
+    ).toEqual({ ok: false, error: "Manyshot requires between 2 and 4 arrows" });
   });
 });

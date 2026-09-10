@@ -34,6 +34,7 @@ import type {
 } from "../../packages/pf1e/resolve";
 import {
   pf1eResolveAttack,
+  pf1eResolveManyshot,
   pf1eResolvePrepare,
 } from "../../packages/pf1e/resolve";
 import { fmtSigned } from "../../packages/pf1e/rollData";
@@ -403,4 +404,157 @@ export async function resolveAttackFlow(
   client.submit([{ kind: "create", coll: "messages", data: cardMessage }]);
   if (ops.length > 0) client.submit(ops);
   return { ok: true, result, hpWriteError };
+}
+
+/** Parameters for the multi-arrow Manyshot flow. */
+export interface ResolveManyshotFlowParams {
+  attackerName: string;
+  line: PF1eDerivedAttack;
+  attackFormulas: readonly string[];
+  damageFormula: string;
+  critDamageFormula: string | null;
+  targetName: string;
+  targetActor: ActorDocument;
+  targetDerived: PF1eDerived;
+  defense: PF1eDefenseChoice;
+  situational?: PF1eSituationalModifiers | undefined;
+  nonlethalDamage?: boolean | undefined;
+  feats?: readonly string[] | undefined;
+  verifiable?: boolean | undefined;
+}
+
+/**
+ * Host-roll and resolve a complete Manyshot volley. Unlike calling the single
+ * attack flow repeatedly, this keeps one evolving defender state and emits one
+ * public card plus one final pair of HP Ops.
+ */
+export async function resolveManyshotFlow(
+  client: ResolveFlowClient,
+  user: PermissionUser | null,
+  params: ResolveManyshotFlowParams,
+): Promise<
+  | { ok: true; results: Extract<PF1eResolveResult, { ok: true }>[]; hpWriteError: string | null }
+  | { ok: false; error: string }
+> {
+  if (params.attackFormulas.length < 2 || params.attackFormulas.length > 4)
+    return { ok: false, error: "Manyshot requires between 2 and 4 attack formulas" };
+  if (!params.line.ranged) return { ok: false, error: "Manyshot requires a ranged attack" };
+
+  const defender = resolveDefenderFromDerived(params.targetName, params.targetDerived);
+  const arrows: { die: number; confirmDie?: number; damageTotal: number }[] = [];
+  let currentDefender = { ...defender };
+  const roll = async (formula: string, flavor: string) => {
+    const id = params.verifiable
+      ? await client.rollVerified(formula, "roll", undefined, flavor)
+      : client.roll(formula, "roll", undefined, flavor);
+    const message = await awaitRollMessage(client, id);
+    return message === null ? null : message;
+  };
+
+  for (let index = 0; index < params.attackFormulas.length; index += 1) {
+    const formula = params.attackFormulas[index];
+    if (formula === undefined) return { ok: false, error: "missing Manyshot attack formula" };
+    const attack = await roll(formula, `${params.line.name} Manyshot arrow ${index + 1}`);
+    if (attack === null) return { ok: false, error: "Manyshot attack roll did not arrive" };
+    const die = dieFaceOf(attack);
+    if (die === null) return { ok: false, error: "could not read a Manyshot attack d20" };
+    const bonus = (params.line.attackBonuses[0] ?? params.line.attackBonus) - 4;
+    const prepare = pf1eResolvePrepare({
+      attack: {
+        label: params.line.name,
+        bonus,
+        critThreatMin: params.line.critThreatMin,
+        critMultiplier: params.line.critMultiplier,
+        ...(params.line.touchAttack ? { touchAttack: true } : {}),
+        ranged: true,
+        damageType: params.line.damageType,
+      },
+      defense: params.defense,
+      defender: currentDefender,
+      die,
+      ...(params.situational ? { situational: params.situational } : {}),
+      ...(params.nonlethalDamage === undefined ? {} : { nonlethalDamage: params.nonlethalDamage }),
+      ...(params.feats === undefined ? {} : { feats: params.feats }),
+    });
+    if (!prepare.ok) return { ok: false, error: prepare.error };
+    let confirmDie: number | undefined;
+    if (prepare.roll.hits && prepare.roll.threat) {
+      const confirmation = await roll(
+        `1d20 ${prepare.attackBonus >= 0 ? `+ ${prepare.attackBonus}` : `- ${Math.abs(prepare.attackBonus)}`}`,
+        `${params.line.name} Manyshot arrow ${index + 1} confirmation`,
+      );
+      if (confirmation === null) return { ok: false, error: "Manyshot confirmation roll did not arrive" };
+      confirmDie = dieFaceOf(confirmation) ?? undefined;
+      if (confirmDie === undefined) return { ok: false, error: "could not read a Manyshot confirmation d20" };
+    }
+    let damageTotal = 0;
+    if (prepare.roll.hits) {
+      const damage = await roll(
+        prepare.roll.threat && confirmDie !== undefined ? params.critDamageFormula ?? params.damageFormula : params.damageFormula,
+        `${params.line.name} Manyshot arrow ${index + 1} damage`,
+      );
+      if (damage === null || damage.roll === null || typeof damage.roll.total !== "number")
+        return { ok: false, error: "Manyshot damage roll did not arrive" };
+      damageTotal = damage.roll.total;
+    }
+    const one = pf1eResolveManyshot({
+      attack: {
+        label: params.line.name,
+        bonus,
+        critThreatMin: params.line.critThreatMin,
+        critMultiplier: params.line.critMultiplier,
+        ranged: true,
+        damageType: params.line.damageType,
+      },
+      arrows: [{ die, ...(confirmDie === undefined ? {} : { confirmDie }), damageTotal }],
+      defense: params.defense,
+      defender: currentDefender,
+      ...(params.situational ? { situational: params.situational } : {}),
+      ...(params.nonlethalDamage === undefined ? {} : { nonlethalDamage: params.nonlethalDamage }),
+      ...(params.feats === undefined ? {} : { feats: params.feats }),
+    });
+    if (!one.ok) return one;
+    const result = one.arrows[0];
+    if (!result) return { ok: false, error: "Manyshot produced no arrow result" };
+    arrows.push({ die, ...(confirmDie === undefined ? {} : { confirmDie }), damageTotal });
+    currentDefender = { ...currentDefender, hp: result.hp.after, nonlethalDamage: result.nonlethal.after };
+  }
+
+  const resolved = pf1eResolveManyshot({
+    attack: {
+      label: params.line.name,
+      bonus: (params.line.attackBonuses[0] ?? params.line.attackBonus) - 4,
+      critThreatMin: params.line.critThreatMin,
+      critMultiplier: params.line.critMultiplier,
+      ranged: true,
+      damageType: params.line.damageType,
+    },
+    arrows,
+    defense: params.defense,
+    defender,
+    ...(params.situational ? { situational: params.situational } : {}),
+    ...(params.nonlethalDamage === undefined ? {} : { nonlethalDamage: params.nonlethalDamage }),
+    ...(params.feats === undefined ? {} : { feats: params.feats }),
+  });
+  if (!resolved.ok) return resolved;
+  const final = resolved.arrows[resolved.arrows.length - 1];
+  let hpWriteError: string | null = null;
+  const ops: Op[] = [];
+  if (final && final.hp.after !== defender.hp) {
+    const edit = pf1eSheetEdit(params.targetActor, user, "hp", String(resolved.finalHp));
+    if (edit.error) hpWriteError = edit.error;
+    else ops.push(...edit.ops);
+  }
+  if (final && final.nonlethal.after !== defender.nonlethalDamage) {
+    const edit = pf1eSheetEdit(params.targetActor, user, "nonlethalDamage", String(resolved.finalNonlethal));
+    if (edit.error && hpWriteError === null) hpWriteError = edit.error;
+    else if (!edit.error) ops.push(...edit.ops);
+  }
+  client.submit([{ kind: "create", coll: "messages", data: {
+    _id: globalThis.crypto.randomUUID(), type: "message", name: `${params.attackerName} Manyshot`,
+    ownership: { default: 1 }, flags: {}, system: {}, author: user?.id ?? "", whisper: [], roll: null,
+    flavor: "Manyshot resolution", content: `${params.attackerName}: ${params.line.name} Manyshot against ${params.targetName}\n${resolved.arrows.map((arrow, index) => `Arrow ${index + 1}: ${arrow.outcome}, ${arrow.damage?.dealt ?? 0} damage`).join("\n")}\nHP ${defender.hp} → ${resolved.finalHp}.`,
+  } as MessageDocument }]);
+  if (ops.length) client.submit(ops);
+  return { ok: true, results: resolved.arrows, hpWriteError };
 }

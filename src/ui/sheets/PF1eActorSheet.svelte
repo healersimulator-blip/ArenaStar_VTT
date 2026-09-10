@@ -3,6 +3,7 @@
   import { SvelteSet } from "svelte/reactivity";
   import {
     pf1eAttackRollGroups,
+    pf1eManyshotRollSpecs,
     pf1eInitiativeRollSpec,
     pf1eSaveRollSpecs,
     type PF1eRollSpec,
@@ -27,8 +28,9 @@
     pf1eSheetView,
     type SheetField,
   } from "./pf1eSheetModel";
-  import { resolveAttackFlow } from "./pf1eResolveFlow";
+  import { resolveAttackFlow, resolveManyshotFlow } from "./pf1eResolveFlow";
   import type { PF1eDefenseChoice } from "../../packages/pf1e/resolve";
+  import { validatePF1eFeatSelection } from "../../packages/pf1e/feats";
 
   let {
     doc,
@@ -50,6 +52,15 @@
   const pending = new SvelteSet<string>();
   let view = $derived(pf1eSheetView(doc));
   let d = $derived(view.derived);
+  let featWarnings = $derived(
+    validatePF1eFeatSelection(
+      Array.isArray(view.authored.feats) ? view.authored.feats : [],
+      {
+        bab: view.authored.baseAttack,
+        abilities: view.authored.abilities,
+      },
+    ),
+  );
   let attackRolls = $derived(
     pf1eAttackRollGroups(d, {
       authoredAttacksCount: Array.isArray(view.authored.attacks)
@@ -77,6 +88,13 @@
   function rollAll(specs: readonly PF1eRollSpec[]): void {
     for (const spec of specs) rollSpec(spec);
   }
+  function manyshotRolls(index: number): PF1eRollSpec[] {
+    return pf1eManyshotRollSpecs(
+      d,
+      index,
+      Array.isArray(view.authored.feats) ? view.authored.feats : [],
+    );
+  }
 
   // A06b — resolve one attack against a target actor: public rolls, the
   // resolution card, and HP writes through the sheet's own op path.
@@ -88,6 +106,7 @@
   let resolveNonlethal = $state(false);
   let resolveVerifiable = $state(false);
   let resolveBusy = $state(false);
+  let manyshotBusy = $state(false);
   let resolveError = $state("");
   let authoredAttacksCount = $derived(
     Array.isArray(view.authored.attacks) ? view.authored.attacks.length : 0,
@@ -173,6 +192,41 @@
       resolveBusy = false;
     }
   }
+  async function resolveManyshotVsTarget(): Promise<void> {
+    resolveError = "";
+    const info = resolveTargetInfo();
+    const line = d.attacks[resolveAttackIndex];
+    const group = attackRolls[resolveAttackIndex];
+    const volley = manyshotRolls(resolveAttackIndex);
+    if (!info || !line || !group || volley.length === 0) {
+      resolveError = "Pick a ranged Manyshot attack and a target.";
+      return;
+    }
+    manyshotBusy = true;
+    try {
+      const outcome = await resolveManyshotFlow(client, client.user, {
+        attackerName: doc.name,
+        line,
+        attackFormulas: volley.map((spec) => spec.formula),
+        damageFormula: group.damage?.formula ?? "0",
+        critDamageFormula: group.critDamage?.formula ?? null,
+        targetName: info.actor.name,
+        targetActor: info.actor,
+        targetDerived: info.derived,
+        defense: resolveDefense,
+        ...(resolveFlanking || resolveCharging
+          ? { situational: { ...(resolveFlanking ? { flanking: true } : {}), ...(resolveCharging ? { charging: true } : {}) } }
+          : {}),
+        ...(resolveNonlethal ? { nonlethalDamage: true } : {}),
+        ...(Array.isArray(view.authored.feats) ? { feats: view.authored.feats as string[] } : {}),
+        ...(resolveVerifiable ? { verifiable: true } : {}),
+      });
+      if (!outcome.ok) resolveError = outcome.error;
+    } finally {
+      manyshotBusy = false;
+    }
+  }
+
   let editable = $derived(
     client.user !== null && can(client.user, "update", doc, "actors"),
   );
@@ -384,6 +438,14 @@
                 >Full attack</button
               >
             {/if}
+            {#if manyshotRolls(i).length > 0}
+              <button
+                type="button"
+                data-pf1e-manyshot
+                onclick={() => rollAll(manyshotRolls(i))}
+                >Manyshot ×{manyshotRolls(i).length}</button
+              >
+            {/if}
             {#if group.damage}
               <button type="button" onclick={() => rollSpec(group.damage)}
                 >Damage</button
@@ -451,11 +513,20 @@
         >
         <button
           type="button"
-          disabled={resolveBusy || !resolveTargetId}
+          disabled={resolveBusy || manyshotBusy || !resolveTargetId}
           onclick={() => void resolveVsTarget()}
           data-pf1e-resolve-attack
           >{resolveBusy ? "Resolving…" : "Attack"}</button
         >
+        {#if manyshotRolls(resolveAttackIndex).length > 0}
+          <button
+            type="button"
+            disabled={resolveBusy || manyshotBusy || !resolveTargetId}
+            onclick={() => void resolveManyshotVsTarget()}
+            data-pf1e-resolve-manyshot
+            >{manyshotBusy ? "Resolving Manyshot…" : `Resolve Manyshot ×${manyshotRolls(resolveAttackIndex).length}`}</button
+          >
+        {/if}
         {#if resolveError}<p class="warn" data-pf1e-resolve-error>
             {resolveError}
           </p>{/if}
@@ -492,6 +563,13 @@
       publishedAc={d.acFromTotals}
       onEdit={updateDetail}
     />
+    {#if tab === "features" && featWarnings.length > 0}
+      <aside class="warn" data-pf1e-feat-warnings>
+        <strong>Prerequisite warnings</strong>
+        {#each featWarnings as warning (warning)}<p>{warning}</p>{/each}
+        <p class="note">Authored feats are retained; warnings do not silently remove them.</p>
+      </aside>
+    {/if}
     {#if tab === "armor" && editable}
       <PF1eAcConversion {doc} user={client.user} onApply={applyAcSource} />
     {/if}

@@ -167,6 +167,9 @@ describe("shooting or throwing into a melee (CRB p.182)", () => {
     expect(shootingIntoMeleePenalty({ sizeCategoriesLarger: 3 })).toBe(0);
     expect(shootingIntoMeleePenalty({ sizeCategoriesLarger: 5 })).toBe(0);
     expect(shootingIntoMeleePenalty({ preciseShot: true })).toBe(0);
+    expect(shootingIntoMeleePenalty({ targetEngaged: false })).toBe(0);
+    expect(shootingIntoMeleePenalty({ nearestFriendlyDistanceFt: 10 })).toBe(0);
+    expect(shootingIntoMeleePenalty({ targetEngaged: true, nearestFriendlyDistanceFt: 5 })).toBe(-4);
   });
 
   test("the penalty reaches the modifier stack only for ranged attacks", () => {
