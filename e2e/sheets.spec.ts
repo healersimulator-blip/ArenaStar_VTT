@@ -636,3 +636,106 @@ test("deleting a selected token never broadens encounter creation to remaining t
   await page.click("#combat-start");
   await expect(page.locator(".combat .order .name")).toHaveText(["Heavy Infantry"]);
 });
+
+test("PF1e sheet roll buttons post attacks, damage and saves to chat with their breakdown (A06)", async ({
+  page,
+}) => {
+  const runtimeErrors: string[] = [];
+  page.on("pageerror", (error) => runtimeErrors.push(error.message));
+  const { strToU8, zipSync } = await import("fflate");
+  const { surfaceCallArg } = await import("./lib");
+  const manifest = {
+    id: "pf-roll-fixture",
+    name: "PF Roll Fixture",
+    version: "1.0.0",
+    type: "data",
+    packs: [{ name: "fighters", type: "actors", file: "packs/fighters.json" }],
+  };
+  const pack = {
+    name: "fighters",
+    type: "actors",
+    entries: [
+      {
+        id: "pf-roller",
+        name: "PF Roller",
+        data: {
+          type: "actor",
+          name: "PF Roller",
+          system: {
+            pf1e: {
+              abilities: { str: 16, dex: 14, con: 14 },
+              baseAttack: 6,
+              saves: { fort: 8, ref: 5, will: 2 },
+              attacks: [
+                {
+                  name: "Longsword",
+                  damageDice: "1d8",
+                  damageBonus: 1,
+                  damageType: "slashing",
+                  critThreatMin: 19,
+                  critMultiplier: 2,
+                },
+              ],
+            },
+          },
+          items: [],
+          effects: [],
+        },
+      },
+    ],
+  };
+  const zip = zipSync({
+    "manifest.json": strToU8(JSON.stringify(manifest)),
+    "packs/fighters.json": strToU8(JSON.stringify(pack)),
+  });
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  expect(
+    await surfaceCallArg<{ ok: boolean }>(
+      page,
+      "app",
+      "importPackageZip",
+      Array.from(zip),
+    ),
+  ).toMatchObject({ ok: true });
+  await page.click('[data-tab="compendia"]');
+  await page.locator('[data-entry-id="pf-roller"] [data-entry-import]').click();
+  await page.click('[data-tab="actors"]');
+  await page
+    .locator("#sheet-list .sheet-row")
+    .filter({ hasText: "PF Roller" })
+    .click();
+  const sheet = page.locator("#sheets [data-pf1e-sheet]");
+  await sheet.getByRole("button", { name: "combat", exact: true }).click();
+
+  // The authored line rolls at BAB 6 + Str 3 (+9) and threatens 19–20; the
+  // unarmed fallback is absent, so nothing provokes.
+  const group = sheet.locator('[data-pf1e-attack="Longsword"]');
+  await expect(group).toContainText("1d20 + 9");
+  await expect(group.locator("[data-pf1e-provokes]")).toHaveCount(0);
+  await expect(group).toContainText("threat range 19–20");
+
+  // Attack: one public roll card with the breakdown flavor line.
+  const chat = page.locator("#chat-log .rollcard");
+  await group.getByRole("button", { name: "Attack", exact: true }).click();
+  await expect(chat).toHaveCount(1);
+  await expect(chat.first()).toContainText("1d20 + 9");
+  await expect(chat.first().locator(".flavor")).toContainText(
+    "Longsword +9 = BAB 6 + Str +3, size +0",
+  );
+
+  // Damage and crit: dice + static per multiplier step (CRB p.179).
+  await group.getByRole("button", { name: "Damage", exact: true }).click();
+  await expect(chat).toHaveCount(2);
+  await expect(chat.nth(1)).toContainText("1d8 + 4");
+  await group.getByRole("button", { name: "Crit ×2", exact: true }).click();
+  await expect(chat).toHaveCount(3);
+  await expect(chat.nth(2)).toContainText("1d8 + 4 + 1d8 + 4");
+
+  // Saves roll at their derived totals (authored base + ability).
+  await sheet.getByRole("button", { name: "Fortitude 1d20 + 10" }).click();
+  await expect(chat).toHaveCount(4);
+  await expect(chat.nth(3).locator(".flavor")).toContainText("Fortitude +10");
+
+  expect(runtimeErrors).toEqual([]);
+});

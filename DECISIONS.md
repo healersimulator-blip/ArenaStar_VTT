@@ -2670,3 +2670,73 @@ reduced by DR") is wrong against its A.17 correction and is superseded.
   passed / 3 skipped across 122 files; typecheck/lint/touched-file Prettier/
   build/size/build:systems green; dist 2,054,514 raw, byte-identical to
   D-137 (no importer yet).
+
+## D-139 — A06a: the sheet roll bridge — roll specs, flavor-on-roll, sheet roll buttons
+
+**Date:** 2026-09-10. **Scope:** P3/A06, first slice. No new rule texts were
+needed: every number is `derivePF1eActor`'s existing derivation (D-121/D-125)
+and the one formula re-encoded here — the critical-damage group expansion —
+rests on the already-verified CRB p.179 text ("roll the damage multiple times
+and total the results") recorded in D-136/A.3. The AoN unarmed "provoke"
+wording (ID 131, verified in D-135) supplies the unarmed-provoke flag. This
+entry records wiring decisions, not fresh rules research.
+
+- **`src/packages/pf1e/rollData.ts` (new, pure, diceless):** `pf1eAttackRollGroups`
+  turns each derived attack line into a roll group — standard attack, one spec
+  per full-attack iterative ("(attack 2)" suffix when the ladder has more than
+  one), damage, crit damage — plus `pf1eSaveRollSpecs` (Fort/Ref/Will at the
+  derived totals) and `pf1eInitiativeRollSpec`. The buttons can never disagree
+  with the sheet readout because both read the same derivation; the A02–A05
+  resolver layers are deliberately NOT consulted for button totals — their
+  importer is the authoritative attack-resolution flow (A06b), where a chosen
+  defense and rider context exist to resolve against. Unparseable explain
+  strings fall back to a verbatim-flavor note rather than a guessed formula.
+- **Critical-damage formula:** N groups of "dice + static" joined
+  (`1d8 + 4 + 1d8 + 4`), never `(1d8 + 4) × 2` — the host engine has no
+  multiplication grouping and the printed rule is per-step rolling with all
+  modifiers. Dice-less ×N lines flatten to one baked number (each step adds the
+  static stack; "8" reads cleaner than "4 + 4"). A multiplier below 2 is the
+  resolver's clamped domain and is refused with a note, never guessed. Threat
+  ranges narrower/wider than 20 surface as a note, since the confirm roll
+  itself is A06b resolution. Bonus-dice and precision riders are not part of a
+  derived line and so cannot be silently multiplied here — they enter in A06b
+  where the A03 result structure exists.
+- **Unarmed provoke (AoN ID 131 via D-135):** the derived unarmed fallback
+  (authoredAttacksCount 0) flags `provokes` unless Improved Unarmed Strike or
+  natural attacks exist; authored unarmed-named lines get an advisory note
+  only, because authored damage dice imply a statted stat block whose provocation
+  the author owns. The context (feats/hasNaturalAttacks/authoredAttacksCount)
+  is supplied by the sheet from authored data — no core shape extension (D-113).
+- **Flavor rides the existing roll protocol, not a new message:** `RollMsg.flavor?`
+  (optional string, PROTOCOL.md updated) passes through `ClientSync.roll` /
+  `rollVerified` as a fourth optional parameter; the host slices it to 300
+  characters on both the plain and commit-reveal paths (a 300-char breakdown is
+  far beyond any derived explain string; the cap bounds a hostile client
+  pushing a wall of text into replicated chat). The pendingRolls entry carries
+  the full unsliced flavor so the reveal cannot truncate twice. ChatPanel
+  renders `.flavor` as a small breakdown line under the total — an 8-line
+  touched-lines-only patch; the legacy file is not prettier-reformatted.
+- **Sheet buttons (PF1eActorSheet Combat tab):** per attack line — Attack
+  (standard), Full Attack (posts every iterative as its own public card),
+  Damage, Crit; saves row (Fort/Ref/Will); an Initiative button next to the
+  derived readout. All posts are public chat rolls through the existing
+  seeded/commit-reveal machinery; no new permission surface.
+- **Deliberately not in this slice (A06b/P6 own them):** defense selection and
+  the A02 hit resolution, A03 confirmation arithmetic, A05 mitigation, HP
+  application, the _Verify_ chip via `rollVerified`, targeting, AoO interrupt
+  prompts and full-attack sequencing beyond posting each iterative. Nothing
+  here applies damage or writes HP.
+- **Evidence:** 12 new tests in `tests/packages/pf1eRollData.test.ts`
+  (iterative ladder, ×2 and ×4 crit group expansion, dice-less ×N, refused
+  multiplier <2, threat note, unarmed-provoke context matrix, verbatim-fallback,
+  saves/initiative) plus 1 host flavor test (plain path cap at 300, riding the
+  deterministic rng). One new e2e specification
+  ("PF1e sheet roll buttons post attacks, damage and saves to chat with their
+  breakdown (A06)") with a BAB 6/Str 16 fixture asserting the +9 attack card
+  with breakdown, 1d8+4 damage, ×2 crit as 1d8+4+1d8+4 and the Fort save —
+  collected across 3 projects (24 tests in the file), not executed (no
+  browser binaries, D-119 precedent). Full suite **1096 passed / 3 skipped**
+  across 124 files; typecheck, lint, touched-file Prettier (new files
+  formatted; the legacy core/sync/chat/e2e files keep touched-lines-only
+  patches), build, size and `build:systems` green; dist 2,059,693 raw /
+  595,828 gzip — +5,179 bytes over D-138, within the 6 MB budget.

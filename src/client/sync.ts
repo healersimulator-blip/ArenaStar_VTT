@@ -231,9 +231,21 @@ export class ClientSync {
     this.send({ kind: "audio.cmd", ...cmd });
   }
 
-  roll(formula: string, mode: RollMode = "roll", to?: UserId[]): string {
+  roll(
+    formula: string,
+    mode: RollMode = "roll",
+    to?: UserId[],
+    flavor?: string,
+  ): string {
     const rollId = globalThis.crypto.randomUUID();
-    this.send({ kind: "roll", rollId, formula, mode, ...(to ? { to } : {}) });
+    this.send({
+      kind: "roll",
+      rollId,
+      formula,
+      mode,
+      ...(to ? { to } : {}),
+      ...(flavor !== undefined && flavor !== "" ? { flavor } : {}),
+    });
     return rollId;
   }
 
@@ -242,7 +254,12 @@ export class ClientSync {
    * challenge with the reveal. Falls back to a plain roll when crypto is
    * unavailable — chat never blocks.
    */
-  async rollVerified(formula: string, mode: RollMode = "roll", to?: UserId[]): Promise<string> {
+  async rollVerified(
+    formula: string,
+    mode: RollMode = "roll",
+    to?: UserId[],
+    flavor?: string,
+  ): Promise<string> {
     let seedClient: string;
     let commit: string;
     try {
@@ -258,7 +275,15 @@ export class ClientSync {
       const first = this.committedRolls.keys().next().value;
       if (typeof first === "string") this.committedRolls.delete(first);
     }
-    this.send({ kind: "roll", rollId, formula, mode, commit, ...(to ? { to } : {}) });
+    this.send({
+      kind: "roll",
+      rollId,
+      formula,
+      mode,
+      commit,
+      ...(to ? { to } : {}),
+      ...(flavor !== undefined && flavor !== "" ? { flavor } : {}),
+    });
     return rollId;
   }
 

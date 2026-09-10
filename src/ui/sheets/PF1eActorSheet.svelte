@@ -1,6 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
+  import {
+    pf1eAttackRollGroups,
+    pf1eInitiativeRollSpec,
+    pf1eSaveRollSpecs,
+    type PF1eRollSpec,
+  } from "../../packages/pf1e/rollData";
   import type { ActorDocument } from "../../core/documents";
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
@@ -41,6 +47,33 @@
   const pending = new SvelteSet<string>();
   let view = $derived(pf1eSheetView(doc));
   let d = $derived(view.derived);
+  let attackRolls = $derived(
+    pf1eAttackRollGroups(d, {
+      authoredAttacksCount: Array.isArray(view.authored.attacks)
+        ? view.authored.attacks.length
+        : 0,
+      feats: Array.isArray(view.authored.feats) ? view.authored.feats : [],
+      hasNaturalAttacks: Array.isArray(view.authored.attacks)
+        ? view.authored.attacks.some(
+            (a) =>
+              typeof a === "object" &&
+              a !== null &&
+              ((a as Record<string, unknown>).natural === true ||
+                (a as Record<string, unknown>).secondary === true),
+          )
+        : false,
+    }),
+  );
+  let saveRolls = $derived(pf1eSaveRollSpecs(d));
+  let initiativeRoll = $derived(pf1eInitiativeRollSpec(d));
+  function rollSpec(spec: PF1eRollSpec): void {
+    // §11: the host evaluates the formula and posts the card; the flavor line
+    // is the breakdown ("Longsword +10 = BAB 6 + Str +3, size +0").
+    client.roll(spec.formula, "roll", undefined, spec.flavor);
+  }
+  function rollAll(specs: readonly PF1eRollSpec[]): void {
+    for (const spec of specs) rollSpec(spec);
+  }
   let editable = $derived(
     client.user !== null && can(client.user, "update", doc, "actors"),
   );
@@ -233,18 +266,56 @@
         </p>
       {/if}
     {:else}
-      <h4>Attack readout</h4>
-      {#each d.attacks as attack, i (i)}
-        <p>
-          <strong>{attack.name}</strong>
-          {attack.attackBonuses.join(" / ")} · {attack.damageDice ?? "—"}
-          {attack.damageBonus >= 0 ? "+" : ""}{attack.damageBonus} · {attack.critThreatMin}–20/×{attack.critMultiplier}
-        </p>
+      <h4>Attacks</h4>
+      {#each attackRolls as group, i (i)}
+        <div class="attack-line" data-pf1e-attack={group.label}>
+          <p>
+            <strong>{group.label}</strong>
+            {group.attack.formula}
+            {#if group.provokes}<span class="warn" data-pf1e-provokes
+                >⚠ provokes an AoO</span
+              >{/if}
+          </p>
+          <div class="rolls">
+            <button type="button" onclick={() => rollSpec(group.attack)}
+              >Attack</button
+            >
+            {#if group.fullAttack.length > 1}
+              <button type="button" onclick={() => rollAll(group.fullAttack)}
+                >Full attack</button
+              >
+            {/if}
+            {#if group.damage}
+              <button type="button" onclick={() => rollSpec(group.damage)}
+                >Damage</button
+              >
+            {/if}
+            {#if group.critDamage}
+              <button type="button" onclick={() => rollSpec(group.critDamage)}
+                >Crit ×{d.attacks[i]?.critMultiplier}</button
+              >
+            {/if}
+          </div>
+          {#if group.notes.length > 0}
+            <p class="note">{group.notes.join(" · ")}</p>
+          {/if}
+        </div>
       {/each}
       <p class="note">
-        Edit authored lines in Weapons. Attack rolls and damage application are
-        not implemented in this slice.
+        Rolls post to chat with their breakdown; damage application to a target
+        and interrupt resolution are the next slice (P3/A06b, P6).
       </p>
+      <h4>Saves & checks</h4>
+      <div class="rolls">
+        {#each saveRolls as spec (spec.label)}
+          <button type="button" onclick={() => rollSpec(spec)}
+            >{spec.label} {spec.formula}</button
+          >
+        {/each}
+        <button type="button" onclick={() => rollSpec(initiativeRoll)}
+          >{initiativeRoll.label} {initiativeRoll.formula}</button
+        >
+      </div>
     {/if}
   {:else if tab === "weapons"}
     <PF1eAttackEditor
@@ -317,6 +388,18 @@
     margin: 8px 0;
   }
   header span,
+  .attack-line {
+    border-top: 1px solid #2a3547;
+    padding-top: 4px;
+  }
+  .rolls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .warn {
+    color: #d9a441;
+  }
   .note {
     color: #9eafc5;
   }

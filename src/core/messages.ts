@@ -90,6 +90,8 @@ export interface RollMsg {
   mode: RollMode;
   /** Whisper targets (§10). */
   to?: UserId[];
+  /** Optional breakdown line rendered on the roll card (A06). */
+  flavor?: string;
   /** §11 commit-reveal: SHA-256 hex of the client seed (optional path). */
   commit?: string;
 }

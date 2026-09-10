@@ -66,6 +66,7 @@ interface RollMsg {
   rollData?: Record<string, Json>;
   mode: RollMode;
   to?: UserId[];
+  flavor?: string; // optional breakdown line rendered on the roll card (A06)
 }
 ```
 
@@ -178,7 +179,14 @@ continues without a catch-up burst.
 
 ```ts
 type SimControlAction =
-  "pause" | "resume" | "rate" | "advance" | "next" | "undoTurn" | "mode" | "start";
+  | "pause"
+  | "resume"
+  | "rate"
+  | "advance"
+  | "next"
+  | "undoTurn"
+  | "mode"
+  | "start";
 interface SimControlMsg {
   kind: "sim.control";
   action: SimControlAction;
