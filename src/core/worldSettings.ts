@@ -31,6 +31,13 @@ export interface CoreWorldSettings {
   secondsPerRound?: number;
   /** Whether the round clock advances at all when a round wraps (off = "theater time" campaigns). */
   advanceClockOnRound?: boolean;
+  /**
+   * The replicated world clock in elapsed seconds (E05, D-146). Lives here — not on the local
+   * `WorldsRecord` (D-113) — so every replica, including a freshly joined player, reads the
+   * same time their buffs expire against. Written only through ops (GM time controls, the
+   * combat tracker's round wrap); never local-only state.
+   */
+  clockSeconds?: number;
   /** Anything a package defines; never stripped by core. Absent means "unset", not `undefined`. */
   [key: string]: Json;
 }
@@ -134,6 +141,16 @@ export function validateWorldSettingsPatch(patch: Record<string, unknown>): {
         return {
           ok: false,
           error: "detectionMultiplier must be a positive number",
+          clean: {},
+        };
+      }
+    }
+    if (key === "clockSeconds") {
+      const n = typeof value === "number" ? value : NaN;
+      if (!Number.isFinite(n) || n < 0 || n > 3_153_600_000) {
+        return {
+          ok: false,
+          error: "clockSeconds must be between 0 and 3153600000",
           clean: {},
         };
       }

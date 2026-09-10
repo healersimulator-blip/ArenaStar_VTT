@@ -3090,3 +3090,41 @@ transcription (which agrees); no other new research.
   across 131 files; typecheck, lint, touched-file Prettier, build, size and
   `build:systems` green; dist 2,135,336 raw / 616,970 gzip (+1,439 over
   D-144, within the 6 MB budget).
+
+## D-146 — 2026-09-10 — P4/E05: the replicated world clock and clock-counted durations
+
+- **Context:** §10 forbids putting the clock on the local `WorldsRecord` (D-113): a clock a
+  player cannot see is not a clock their durations tick against. The tracker already kept a
+  per-combat `clockSeconds` on the round state and `pf1eNextTurn` reported a
+  `clockDeltaSeconds` per wrap (E04), but nothing wrote a world-level time, and day-long (and
+  out-of-combat) durations had no consumer at all.
+- **Decision:** the world clock is the `clockSeconds` key of the replicated `world-settings`
+  document — the same seam, merge and projection every rule option uses — written only through
+  `worldSettingsOps`, from exactly two places: the combat tracker's round wrap
+  (`wrapAdvanceOps`, gated on `advanceClockOnRound`) and the GM's settings-window time controls
+  (+1 min/+1 h/+1 day scaled to the world's duration ladder; reset rewinds to 0 and sweeps
+  nothing). Durations join it by anchoring: applying an effect with the clock in scope stamps
+  `appliedAtClock` on the `flags.pf1e` payload (validator allow-listed and round-tripped), and
+  `pf1eClockSweepOps` removes anchored, clock-counted payloads — round/minute/hour (whose
+  per-turn ticks remain the turn engine's in-combat consumer, E04) and `day` (defined as
+  2 400 rounds = 24 of the landed 100-round hours; the clock is its only consumer) — from both
+  effect homes when `now ≥ anchor + ttlSeconds`. The sweep only removes; it never rewrites
+  `flags.core.duration`, so the turn engine and the clock can never double-decrement one
+  effect. Unanchored (pre-E05) payloads are never swept: the sweep refuses to guess an anchor.
+  Instant/concentration/permanent are not clock-counted (an instant is over, concentration
+  lapses on maintenance per A.16/E04, permanent never ends).
+- **Consequences:** a GM advancing time out of combat ends buffs in the same measure combat
+  rounds would; joining clients read the clock through the normal settings merge with no new
+  protocol. The ladder stays the landed abstraction (1 min = 10 rounds, 1 h = 100 rounds,
+  1 day = 2 400 rounds × the configured `secondsPerRound`) rather than real-clock units.
+  Calendar dates, real-time tickers and per-level _display_ conversion remain open (P5/E06+
+  seams); the E04 "per-level conversion" deferral is closed by this ladder.
+- **Evidence:** 21 new tests in `tests/packages/pf1eWorldClock.test.ts` (read/normalize/joiner
+  merge, op shapes incl. create-from-empty and no-op, wrap→clock integration through a real
+  `pf1eNextTurn` round wrap, tick ladder with per-level and configured rounds, anchor
+  stamping through `buildEffectDoc` and the authorized apply ops, minute/per-level/day
+  boundaries, legacy/non-counted survival, both sweep homes with unparseable-effect
+  preservation, the validator range rule, readout format). Full suite **1209 passed / 3
+  skipped** across 132 files; typecheck, lint, touched-file Prettier, build, size and
+  `build:systems` green; dist 2,139,571 raw / 618,239 gzip (+4,235 over D-145, within the
+  6 MB budget).

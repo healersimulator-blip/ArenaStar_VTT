@@ -64,6 +64,12 @@ export interface PF1eEffectRequest {
   payload: PF1eEffectPayload;
   /** Caster/effect level for per-level durations (defaults to the payload's source level). */
   casterLevel?: number;
+  /**
+   * The replicated world clock (seconds, E05) at apply time; stamped onto the payload as
+   * `appliedAtClock` so clock-counted durations (round/minute/hour/day) can be swept when
+   * the GM advances time past their end. Omitted = unanchored (never clock-swept).
+   */
+  worldClockSeconds?: number;
   /** Explicit effect id; a fresh one is generated when omitted. */
   id?: string;
 }
@@ -91,6 +97,9 @@ export function buildEffectDoc(
     flags: effectFlagsFor(
       payload.value,
       request.casterLevel,
+      request.worldClockSeconds !== undefined
+        ? { worldClockSeconds: request.worldClockSeconds }
+        : undefined,
     ) as unknown as FlagStoreLike,
     system: {},
     changes: [],
@@ -247,7 +256,8 @@ export function combatantEffectsRecord(
   return out;
 }
 
-function withCombatantEffects(
+/** Replace one combatant's effect record; null when the id is not in the encounter. */
+export function withCombatantEffects(
   combat: CombatDocument,
   combatantId: string,
   effects: Record<string, EffectDocument>,

@@ -17,6 +17,14 @@
     worldSettingsFrom,
     worldSettingsOps,
   } from "../../core/worldSettings";
+  import {
+    TICKS_PER_DAY,
+    advanceWorldClockOps,
+    formatWorldClock,
+    pf1eClockSweepOps,
+    readWorldClock,
+    setWorldClockOps,
+  } from "../../packages/pf1e/worldClock";
 
   let {
     client,
@@ -40,6 +48,8 @@
     detectionMultiplier: number;
     advanceClockOnRound: boolean;
   }
+  /** E05 (D-146): the replicated world clock, seconds. */
+  let clockSeconds = $state(0);
   const DEFAULT_RULES: RulesOptions = {
     secondsPerRound: 6,
     detectionMultiplier: 1,
@@ -55,18 +65,52 @@
     sceneId = active?._id ?? "";
     grid = active ? { ...active.grid } : null;
     scale =
-      (active?.flags as { core?: { scale?: unknown } } | undefined)?.core?.scale === "strategic"
+      (active?.flags as { core?: { scale?: unknown } } | undefined)?.core
+        ?.scale === "strategic"
         ? "strategic"
         : "tactical";
-    const settings = worldSettingsFrom(client.store.getAll("settings"));
+    const settingsDocs = client.store.getAll("settings");
+    const settings = worldSettingsFrom(settingsDocs);
+    clockSeconds = readWorldClock(settingsDocs);
     rules = {
       secondsPerRound: secondsPerRoundOf(settings),
       detectionMultiplier:
-        typeof settings.detectionMultiplier === "number" && settings.detectionMultiplier > 0
+        typeof settings.detectionMultiplier === "number" &&
+        settings.detectionMultiplier > 0
           ? settings.detectionMultiplier
           : DEFAULT_RULES.detectionMultiplier,
       advanceClockOnRound: advanceClockOnRoundOf(settings),
     };
+  }
+
+  /**
+   * E05 (D-146): GM out-of-combat time controls. Advancing the replicated clock also sweeps
+   * clock-counted effect durations (round/minute/hour/day anchored at apply) from both effect
+   * homes, so out-of-combat time passing ends buffs exactly as combat rounds would; the deltas
+   * follow this world's duration ladder (a "1 minute" button advances what a 1-minute duration
+   * means here). Reset rewinds to 0 and sweeps nothing (a backward jump expires nothing).
+   */
+  function changeClock(unit: "minute" | "hour" | "day" | "reset"): void {
+    const settingsDocs = client.store.getAll("settings");
+    const settings = worldSettingsFrom(settingsDocs);
+    const spr = secondsPerRoundOf(settings);
+    if (unit === "reset") {
+      const reset = setWorldClockOps(settingsDocs, 0);
+      if (reset.length > 0) client.submit(reset);
+      return;
+    }
+    const ticks =
+      unit === "minute" ? 10 : unit === "hour" ? 100 : TICKS_PER_DAY;
+    const delta = ticks * spr;
+    const ops = advanceWorldClockOps(settingsDocs, delta);
+    if (ops.length === 0) return;
+    const sweep = pf1eClockSweepOps(
+      client.store.getAll("actors") as never,
+      client.store.getAll("combats") as never,
+      readWorldClock(settingsDocs) + delta,
+      spr,
+    );
+    client.submit([...ops, ...sweep.ops]);
   }
 
   /** Submit a rules-option patch, creating the world's settings document on first edit. */
@@ -74,7 +118,10 @@
     const checked = validateWorldSettingsPatch({ ...patch });
     rulesError = checked.error ?? "";
     if (!checked.ok) return;
-    const ops = worldSettingsOps(client.store.getAll("settings"), checked.clean);
+    const ops = worldSettingsOps(
+      client.store.getAll("settings"),
+      checked.clean,
+    );
     if (ops.length === 0) return;
     client.submit(ops);
   }
@@ -87,14 +134,21 @@
     if (!scene) return;
     const flags = {
       ...scene.flags,
-      core: { ...((scene.flags as { core?: object } | undefined)?.core ?? {}), scale: next },
+      core: {
+        ...((scene.flags as { core?: object } | undefined)?.core ?? {}),
+        scale: next,
+      },
     };
-    client.submit([{ kind: "update", ref: { coll: "scenes", id: sceneId }, diff: { flags } }]);
+    client.submit([
+      { kind: "update", ref: { coll: "scenes", id: sceneId }, diff: { flags } },
+    ]);
   }
 
   function apply(): void {
     if (!grid || !sceneId) return;
-    client.submit([{ kind: "update", ref: { coll: "scenes", id: sceneId }, diff: { grid } }]);
+    client.submit([
+      { kind: "update", ref: { coll: "scenes", id: sceneId }, diff: { grid } },
+    ]);
   }
 
   onMount(() => {
@@ -118,7 +172,8 @@
           data-scene-scale
           value={scale}
           onchange={(e) => {
-            scale = (e.target as HTMLSelectElement).value as "tactical" | "strategic";
+            scale = (e.target as HTMLSelectElement).value as
+              "tactical" | "strategic";
             applyScale(scale);
           }}
         >
@@ -154,7 +209,8 @@
           onchange={(e) => {
             grid = {
               ...grid,
-              hexLayout: (e.target as HTMLSelectElement).value as SceneGrid["hexLayout"],
+              hexLayout: (e.target as HTMLSelectElement)
+                .value as SceneGrid["hexLayout"],
             };
             apply();
           }}
@@ -175,7 +231,10 @@
           max="400"
           value={grid.size}
           onchange={(e) => {
-            grid = { ...grid, size: Number((e.target as HTMLInputElement).value) };
+            grid = {
+              ...grid,
+              size: Number((e.target as HTMLInputElement).value),
+            };
             apply();
           }}
         />
@@ -188,7 +247,10 @@
           min="1"
           value={grid.distance}
           onchange={(e) => {
-            grid = { ...grid, distance: Number((e.target as HTMLInputElement).value) };
+            grid = {
+              ...grid,
+              distance: Number((e.target as HTMLInputElement).value),
+            };
             apply();
           }}
         />
@@ -213,7 +275,8 @@
           onchange={(e) => {
             grid = {
               ...grid,
-              diagonals: (e.target as HTMLSelectElement).value as SceneGrid["diagonals"],
+              diagonals: (e.target as HTMLSelectElement)
+                .value as SceneGrid["diagonals"],
             };
             apply();
           }}
@@ -237,7 +300,10 @@
         max="3600"
         value={rules.secondsPerRound}
         onchange={(e) => {
-          rules = { ...rules, secondsPerRound: Number((e.target as HTMLInputElement).value) };
+          rules = {
+            ...rules,
+            secondsPerRound: Number((e.target as HTMLInputElement).value),
+          };
           applyRules({ secondsPerRound: rules.secondsPerRound });
         }}
       />
@@ -266,17 +332,46 @@
         type="checkbox"
         checked={rules.advanceClockOnRound}
         onchange={(e) => {
-          rules = { ...rules, advanceClockOnRound: (e.target as HTMLInputElement).checked };
+          rules = {
+            ...rules,
+            advanceClockOnRound: (e.target as HTMLInputElement).checked,
+          };
           applyRules({ advanceClockOnRound: rules.advanceClockOnRound });
         }}
       />
     </label>
   </div>
   <p class="hint">
-    Stored as a replicated <code>settings</code> document, so players see the clock their durations
-    tick against.
+    Stored as a replicated <code>settings</code> document, so players see the clock
+    their durations tick against.
   </p>
   {#if rulesError}<p class="error" data-world-error>{rulesError}</p>{/if}
+
+  <h4>World clock</h4>
+  <div class="row" data-world-clock-row>
+    <span class="clock" data-clock-readout
+      >{formatWorldClock(clockSeconds)}</span
+    >
+    <button
+      data-clock-minute
+      type="button"
+      onclick={() => changeClock("minute")}>+1 min</button
+    >
+    <button data-clock-hour type="button" onclick={() => changeClock("hour")}
+      >+1 h</button
+    >
+    <button data-clock-day type="button" onclick={() => changeClock("day")}
+      >+1 day</button
+    >
+    <button data-clock-reset type="button" onclick={() => changeClock("reset")}
+      >Reset</button
+    >
+  </div>
+  <p class="hint">
+    Out-of-combat time. Advancing it ends clock-counted effect durations
+    (round/minute/hour/day) in the same measure the combat tracker uses; effects
+    applied before the clock existed are never swept.
+  </p>
 
   <h4>Keybindings</h4>
   <table class="keys">
