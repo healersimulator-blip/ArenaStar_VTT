@@ -37,6 +37,12 @@
     type PF1eSpellbookEdit,
   } from "./pf1eSpellbook";
   import {
+    resolveCastFlow,
+    type PF1eCastFlowParams,
+  } from "./pf1eCastFlow";
+  import type { PF1eSaveSeverity, PF1eSaveType } from "../../packages/pf1e/casting";
+  import type { PF1eEnergyType } from "../../packages/pf1e/healthState";
+  import {
     pf1eApplyActorEffect,
     pf1eApplyCombatantEffect,
     pf1eEditActorEffect,
@@ -103,6 +109,20 @@
   let prepareName = $state("");
   let prepareLevel = $state("1");
   let prepareSlotLevel = $state("");
+  // P5/C02 (D-156): the tactical cast panel's state.
+  let castTargetId = $state("");
+  let castName = $state("");
+  let castLevel = $state("1");
+  let castSlot = $state("");
+  let castPreparedIndex = $state<number | null>(null);
+  let castSaveType = $state<PF1eSaveType>("ref");
+  let castSeverity = $state<PF1eSaveSeverity>("half");
+  let castDamage = $state("");
+  let castEnergy = $state("");
+  let castSrOvercome = $state(false);
+  let castBusy = $state(false);
+  let castError = $state("");
+  let castWarning = $state("");
   let resolvedEffects = $derived(resolveTacticalEffects(view.effects));
   let effectBoosts = $derived(
     resolvedEffects.boosts.map((boost, i) => ({
@@ -371,6 +391,89 @@
     if (!error) prepareName = "";
   }
 
+  function fillCastFromPrepared(index: number): void {
+    const row = spellbook.prepared[index];
+    if (!row) return;
+    castPreparedIndex = index;
+    castName = row.name;
+    castLevel = String(row.level);
+    castSlot = row.slotLevel === row.level ? "" : String(row.slotLevel);
+  }
+
+  async function castAtTarget(): Promise<void> {
+    castError = "";
+    castWarning = "";
+    const target = castTargetId
+      ? (client.store.get("actors", castTargetId) as ActorDocument | undefined)
+      : undefined;
+    if (!target) {
+      castError = "Pick a target.";
+      return;
+    }
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) {
+      castError = "Actor is no longer available.";
+      return;
+    }
+    // Fresh derivation for both parties, so DCs, saves and SR are live.
+    const casterView = pf1eSheetView(current, {
+      combat: linked.combat,
+      combatantId: linked.combatantId,
+    });
+    const targetView = pf1eSheetView(target);
+    let level = Number.parseInt(castLevel, 10);
+    let slotLevel = castSlot === "" ? level : Number.parseInt(castSlot, 10);
+    let name = castName.trim();
+    // A picked prepared row pins the spell's identity (name/level/slot).
+    if (d.spellMode === "prepared" && castPreparedIndex !== null) {
+      const preparedRow = spellbook.prepared[castPreparedIndex];
+      if (preparedRow) {
+        name = preparedRow.name;
+        level = preparedRow.level;
+        slotLevel = preparedRow.slotLevel;
+      }
+    }
+    if (name === "") name = `Level ${level} spell`;
+    const spell: PF1eCastFlowParams["spell"] = { name, level };
+    if (slotLevel !== level) spell.slotLevel = slotLevel;
+    if (d.spellMode === "prepared" && castPreparedIndex !== null)
+      spell.preparedIndex = castPreparedIndex;
+    const authored: PF1eCastFlowParams["authored"] = {
+      saveType: castSaveType,
+      severity: castSeverity,
+      damageFormula: castDamage.trim(),
+    };
+    if (castEnergy !== "")
+      authored.energyType = castEnergy as PF1eEnergyType;
+    castBusy = true;
+    try {
+      const outcome = await resolveCastFlow(client, client.user, {
+        casterActor: current,
+        casterDerived: casterView.derived,
+        spell,
+        authored,
+        targetName: target.name,
+        targetActor: target,
+        targetDerived: targetView.derived,
+        targetFeats: Array.isArray(targetView.authored.feats)
+          ? (targetView.authored.feats as string[])
+          : [],
+        combat: linked.combat,
+        ...(castSrOvercome ? { srOvercomeByCaller: true } : {}),
+      });
+      if (!outcome.ok) {
+        castError = outcome.error;
+      } else {
+        const bits: string[] = [...outcome.warnings];
+        if (outcome.hpWriteError !== null) bits.push(outcome.hpWriteError);
+        castWarning = bits.join(" · ");
+      }
+    } finally {
+      castBusy = false;
+    }
+  }
+
   // E01/E02 — the effect apply/edit/toggle/remove handlers. Both homes resolve
   // fresh documents from the projected store, so a stale tab cannot write over
   // a replica that moved on; the ops go through ClientSync like every edit.
@@ -554,6 +657,8 @@
           tab = name as typeof tab;
           error = "";
           spellbookWarning = "";
+          castError = "";
+          castWarning = "";
         }}>{name}</button
       >
     {/each}
@@ -944,6 +1049,14 @@
                 {#if editable}
                   <button
                     type="button"
+                    data-cast-prepared={index}
+                    disabled={row.expended}
+                    onclick={() => fillCastFromPrepared(index)}
+                  >
+                    Cast
+                  </button>
+                  <button
+                    type="button"
                     data-prepared-remove={index}
                     onclick={() =>
                       updateSpellbook({ kind: "preparedRemove", index })}
@@ -956,10 +1069,127 @@
           </ul>
         {/if}
       {/if}
+      <h4>Cast at a target</h4>
+      {#if castError}<p role="alert" data-cast-error>{castError}</p>{/if}
+      {#if castWarning}<p class="note" data-cast-warning>{castWarning}</p>{/if}
+      <form
+        aria-label="Cast a spell at a target"
+        onsubmit={(event) => {
+          event.preventDefault();
+          void castAtTarget();
+        }}
+      >
+        {#if d.spellMode === "prepared" && castPreparedIndex !== null}
+          <p class="note" data-cast-prepared-row>
+            Casting prepared row #{castPreparedIndex + 1}{#if spellbook.prepared[castPreparedIndex]}
+              — {spellbook.prepared[castPreparedIndex].name}{/if}: name, level
+            and slot are pinned to it.
+            <button
+              type="button"
+              data-cast-clear-row
+              onclick={() => {
+                castPreparedIndex = null;
+              }}>Clear</button
+            >
+          </p>
+        {/if}
+        <label
+          >Spell
+          <input
+            value={castName}
+            oninput={(e) => (castName = e.currentTarget.value)}
+            data-cast-name
+            placeholder={d.spellMode === "spontaneous"
+              ? "Spell name"
+              : "Pick a prepared row, or name a spell"}
+          />
+        </label>
+        <label
+          >Spell level
+          <select bind:value={castLevel} data-cast-level>
+            {#each Array.from({ length: 10 }, (_, i) => i) as lvl (lvl)}
+              <option value={String(lvl)}>{lvl}</option>
+            {/each}
+          </select>
+        </label>
+        <label
+          >Slot
+          <select bind:value={castSlot} data-cast-slot>
+            <option value="">Same as spell level</option>
+            {#each Array.from({ length: 10 }, (_, i) => i) as lvl (lvl)}
+              <option value={String(lvl)}>{lvl}</option>
+            {/each}
+          </select>
+        </label>
+        <label
+          >Target
+          <select bind:value={castTargetId} data-cast-target>
+            <option value="">—</option>
+            {#each pf1eTargetActors() as target (target._id)}
+              <option value={target._id}>{target.name}</option>
+            {/each}
+          </select>
+        </label>
+        <label
+          >Save
+          <select bind:value={castSaveType} data-cast-save>
+            <option value="fort">Fortitude</option>
+            <option value="ref">Reflex</option>
+            <option value="will">Will</option>
+          </select>
+        </label>
+        <label
+          >Severity
+          <select bind:value={castSeverity} data-cast-severity>
+            <option value="half">Half</option>
+            <option value="negates">Negates</option>
+            <option value="none">None (no save)</option>
+            <option value="partial">Partial</option>
+            <option value="disbelief">Disbelief</option>
+          </select>
+        </label>
+        <label
+          >Damage
+          <input
+            value={castDamage}
+            oninput={(e) => (castDamage = e.currentTarget.value)}
+            data-cast-damage
+            placeholder="NdM, or empty for no damage"
+          />
+        </label>
+        <label
+          >Energy
+          <select bind:value={castEnergy} data-cast-energy>
+            <option value="">Untyped</option>
+            <option value="acid">Acid</option>
+            <option value="cold">Cold</option>
+            <option value="electricity">Electricity</option>
+            <option value="fire">Fire</option>
+            <option value="sonic">Sonic</option>
+          </select>
+        </label>
+        <label
+          ><input
+            type="checkbox"
+            bind:checked={castSrOvercome}
+            data-cast-sr-overcome
+          />
+          SR already overcome this round (manual adjudication)</label
+        >
+        <button
+          type="submit"
+          data-cast-submit
+          disabled={castBusy || castTargetId === ""}
+          >{castBusy ? "Casting…" : "Cast"}</button
+        >
+      </form>
       <p class="note">
         Spending and preparation are daily state; resting/recovery automation
-        arrives with P7. Overuse is warned, not blocked (C04). Casting a spell
-        from this list arrives with the casting flow (C02).
+        arrives with P7. Overuse is warned, not blocked (C04). Casting spends
+        the slot and expends the prepared row, rolls the target's save and any
+        SR check host-side, and writes the target's HP. Casting legality,
+        components and concentration (C03) and area/target-count payloads (C05)
+        are not yet part of this single-target flow.
       </p>
     </section>
   {:else if tab === "effects"}

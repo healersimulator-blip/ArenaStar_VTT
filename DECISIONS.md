@@ -3808,3 +3808,61 @@ C02 casting flow, which will also become the preview overlay's consumer (D-154).
 automation is P7; until then Restore is the GM's manual daily reset. Spontaneous casters spend
 through the same manual controls for now (`spendSpontaneousSlot`'s lowest-sufficient-slot escalation
 awaits the cast flow). Cone/line stay refused under C01b. **C04 is checked.**
+
+## D-156 — 2026-09-11 — P5/C02 closed: the tactical cast flow — validation-first, damage→SR→save, round-scoped SR ledger
+
+**Context.** D-149 encoded C02's arithmetic as pure functions in `src/packages/pf1e/casting.ts`
+(spell DC, save outcomes with Evasion/Improved Evasion, spell-resistance checks, energy resistance
+inside `resolveSpellTarget`) and its close-out named exactly what C02 still needed: chosen-target
+selection, the round-scoped resistance bookkeeping (then only a caller-supplied flag), and the
+casting UI. D-152/D-155 meanwhile shipped the slot ledger and spellbook sheet that a cast must spend.
+D-156 is the slice that wires the three together in the product — **zero new rule encoding**; every
+rules claim reuses D-149's layer.
+
+**What landed.**
+
+- **`src/packages/pf1e/srLedger.ts` (new, pure).** The round-scoped SR ledger C02 asks for under
+  "target-specific resistance bookkeeping". The combat document's `flags.pf1e.srOvercome` blob maps
+  `"casterId:targetId" → round`; four exported helpers own all access — `srOvercomeKey`,
+  `srAlreadyOvercome` (true iff the recorded round equals the current round), `srOvercomeDiff`
+  (minimal diff writing only the changed key, deletes never emit a spurious write), and
+  `srOvercomeBlobFromFlags` (defensive read). Consequences: an overcome SR is **not re-rolled for
+  the rest of the round**, a new round re-rolls, out of combat every cast rolls, and the GM's
+  per-cast `srOvercomeByCaller` forces a fresh roll.
+- **`src/ui/sheets/pf1eCastFlow.ts` (new).** `resolveCastFlow(client, user, params)` — the
+  single-target cast orchestrator, shaped like `pf1eResolveFlow`'s attack flow. Hard orderings,
+  each pinned by a test: (1) slot and prepared validation runs **before any roll** — a refused cast
+  posts nothing and spends nothing; (2) rolls happen damage → SR check → save, each through the host
+  roll service; (3) submission creates the card op first, then the state writes (slot/prepared
+  spends, HP write, SR-ledger diff) as one batched op. DC comes from the caster's derived
+  `spellSaveDc[level]` — null (no slots granted at that level) is a named refusal, not a silent
+  zero. Severity is the full `PF1E_SAVE_SEVERITIES` set; Evasion/Improved Evasion read the target's
+  authored feats via `hasPF1eFeat`; ER filters into `resolveSpellTarget`'s defender block.
+  `castResolutionCardContent` renders the card: "X casts Spell (level N) at Y — DC d.",
+  `[[total|formula]]` chips, the HP-transition line ("PF Ogre 20 → 15 HP.") and ⚠ warning lines.
+- **Sheet wiring (`PF1eActorSheet.svelte`).** The Spells tab gains a cast panel (save type,
+  severity, damage formula, energy type, SR-override checkbox, target picker over
+  `pf1eTargetActors`) and a per-prepared-row Cast button that pins the panel to that row — the row's
+  name, level and slot ride with it, and a successful cast expends the row. Over-budget casting
+  stays warn-not-refuse per C04/D-155: the warning surfaces in the panel, the ledger row and the
+  card. `pf1eResolveFlow.awaitRollMessage` accepts the cast-flow client via its structural
+  `{ store }` shape rather than a shared interface, so the attack flow stays untouched.
+
+**Verification.** 18 new unit tests — 4 in `tests/packages/pf1eSrLedger.test.ts` (key format,
+same-round reuse, round rollover, delete-free diffs) and 14 in `tests/ui/pf1eCastFlow.test.ts`
+(validation-before-rolls, roll order, DC-null refusal, all five severities, Evasion/Improved
+Evasion, ER halving + floor, SR reuse/re-roll/override, card content). Full suite **1416 passed /
+3 skipped** across 141 files (+18 over D-155); typecheck and lint green; touched-file Prettier
+applied. **Chromium e2e 82/82** (+3 in `e2e/pf1e_cast_flow.spec.ts`): a harmless over-budget cast
+spends 5→6 of 5 with ledger + panel + card warnings, expends the prepared row, disables its Cast
+button and posts the no-save card; a 2d6 damaging cast lands the ogre's HP inside the roll range
+with the transition line and the summary reading `1st 6/5`; named refusals (no target, bad dice)
+spend nothing. dist **2,198,130 raw / 641,330 gzip** (+12,727 / +3,490 over D-155, within the
+6 MB budget).
+
+**Scope boundaries.** One chosen target per cast — area payloads and multi-target casts are C05's
+profile-driven job (the preview overlay from D-154 is their future consumer). Components,
+concentration, touch/holding, multi-round and metamagic timing are C03; D-150's legality helpers
+are not yet wired into the cast path. Cast rolls are not commit/reveal — the damage/SR/save dice
+are single-shot host rolls like the card chips. Resting/recovery remains manual (P7). **C02 is
+checked.**

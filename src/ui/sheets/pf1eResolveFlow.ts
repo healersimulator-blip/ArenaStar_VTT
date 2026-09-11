@@ -102,7 +102,7 @@ export function resolveDefenderFromDerived(
 
 /** Wait for the host-evaluated roll message carrying our rollId to replicate. */
 export async function awaitRollMessage(
-  client: ResolveFlowClient,
+  client: { readonly store: { getAll(coll: "messages"): readonly unknown[] } },
   rollId: string,
   timeoutMs = 10_000,
 ): Promise<MessageDocument | null> {

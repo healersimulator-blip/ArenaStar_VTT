@@ -409,6 +409,56 @@ Depends on P3 and D06; keep core EffectDocument unchanged.
 
 Depends on effects, attacks, action foundations and verified rule fixtures. Tactical targeting and strategic spell resolution remain independent implementations using common spell data.
 
+### P5 progress — 2026-09-11, tactical casting/save flow slice (D-156, C02 closed)
+
+- **The cast flow.** `src/ui/sheets/pf1eCastFlow.ts` (new) orchestrates one
+  chosen-target cast end to end on top of D-149's pure layer (`casting.ts`):
+  `resolveCastFlow(client, user, params)` validates slot and prepared state
+  **before any roll is made**, rolls damage → SR check → save in that order
+  (each via the host roll service), posts a single `cast resolution` card,
+  then submits the card op first and the state writes (slot/prepared/HP, plus
+  the SR ledger) as one batched op. DC comes from the caster's derived
+  `spellSaveDc[level]` (null → named refusal, no roll); severity is the full
+  `PF1E_SAVE_SEVERITIES` set (negates/half/partial/disbelief/none); Evasion
+  and Improved Evasion read from the target's authored feats through
+  `hasPF1eFeat`; per-type ER feeds `resolveSpellTarget`'s defender block; SR
+  uses `spellResistanceCheck` (no natural-roll auto outcomes by design). The
+  card text names caster, spell, level, target and DC, carries
+  `[[total|formula]]` chips, an HP-transition line ("PF Ogre 20 → 15 HP."),
+  and ⚠ lines for over-budget or otherwise-warned effects.
+- **Target-specific resistance bookkeeping.** `src/packages/pf1e/srLedger.ts`
+  (new, pure) keeps the round-scoped SR ledger on the combat document:
+  `flags.pf1e.srOvercome` maps `"casterId:targetId" → round`, so a caster who
+  overcame a target's SR this round does not re-roll it on later casts this
+  round; a new round re-rolls; outside combat every cast rolls. The GM can
+  force a re-roll per cast (`srOvercomeByCaller`). All reads/writes go
+  through the four pure helpers (`srOvercomeKey`/`srAlreadyOvercome`/
+  `srOvercomeDiff`/`srOvercomeBlobFromFlags`).
+- **The sheet wiring.** `PF1eActorSheet.svelte` gains a cast panel on the
+  Spells tab (save type, severity, damage formula, energy type, SR-override
+  checkbox, target picker) plus a per-prepared-row Cast button that pins the
+  panel to that row — name, level and slot ride the prepared row, and a
+  successful cast expends it. Over-budget casting stays warn-not-refuse per
+  C04, with the warning shown in the panel, the ledger row and the card.
+- **Executed browser proof:** 3 new tests in `e2e/pf1e_cast_flow.spec.ts`
+  (Chromium, **82/82** overall): a harmless over-budget cast spends the slot
+  (5→6 of 5), expends the prepared row, disables its Cast button, pins the
+  panel, warns in ledger + panel, and posts the no-save card; a damaging cast
+  rolls host dice, lands the target's HP within the 2d6 range with the
+  transition line, and the summary reads `1st 6/5`; refusals (no target, bad
+  dice) are named and spend nothing. Rules arithmetic stays pinned by 18 new
+  unit tests — 4 in `tests/packages/pf1eSrLedger.test.ts`, 14 in
+  `tests/ui/pf1eCastFlow.test.ts` (validation order, roll order, DC null
+  refusal, all severities, Evasion/Improved Evasion, ER halving + floor, SR
+  reuse/re-roll/override, card content).
+- **Still open for P5:** multi-target and area casts ride C05's
+  profile/pack-driven payloads (one chosen target per cast today);
+  components, concentration, touch/holding, multi-round and metamagic timing
+  are C03; resting/recovery stays manual (P7).
+- **Evidence:** unit **1416 passed / 3 skipped** across 141 files; typecheck
+  /lint/touched-file Prettier green; dist **2,198,130 raw / 641,330 gzip**;
+  Chromium e2e **82/82** (+3).
+
 ### P5 progress — 2026-09-11, persisted slot ledger + spellbook sheet slice (D-155, C04 closed)
 
 - **The daily state now rides the actor document.** D-152 shipped the pure
@@ -483,9 +533,9 @@ Clear/State` drive the loop in Chromium (75/75): the burst that is exactly
   C02 casting UI.
 
 - [x] **C01 — Add pure grid targeting + canvas preview overlay:** burst, cone, line, emanation, spread/cylinder where supported; scene distance/units/diagonals, affected-token highlighting, walls/line of effect and cover. (I P5; G §4.10; B §4.4) — **done 2026-09-11 (D-148 pure layer + D-154 overlay):** burst/emanation/cylinder/spread with 5-10-5 counting, far-corner inclusion, scene grid bridging, wall line-of-effect; `pf1eAreaPreviewModel` is the single seam, rendered by `AreaPreviewLayer` (controls holder) with affected-token highlight rings, browser-tested in Chromium. Cone/line stay refused under their named C01b issue (contested square-grid discretization — transcribe-before-encoding, R01); cover as a targeting _modifier_ is P04's positional defenses (the preview respects walls via LoE, which is C01's ask).
-- [ ] **C02 — Implement tactical casting/save flow:** chosen targets, DC from spell level/key ability/focus, Fort/Ref/Will, save-negates/half/no-save distinctions, Evasion/Improved Evasion, per-type damage/ER and SR without natural-roll auto outcomes. Respect target-specific resistance bookkeeping. (I P5; G §2.11/Appendix A.16; M Task 5)
+- [x] **C02 — Implement tactical casting/save flow:** chosen targets, DC from spell level/key ability/focus, Fort/Ref/Will, save-negates/half/no-save distinctions, Evasion/Improved Evasion, per-type damage/ER and SR without natural-roll auto outcomes. Respect target-specific resistance bookkeeping. (I P5; G §2.11/Appendix A.16; M Task 5) — **done 2026-09-11 (D-149 rules layer + D-156 flow and UI):** D-149 encoded DC/saves/ER/SR/evasion as pure functions (`casting.ts`); D-156 wires them into the product: `resolveCastFlow` in `src/ui/sheets/pf1eCastFlow.ts` validates slot/prepared state before any roll, rolls damage → SR check → save in order, posts a host card with the HP-transition line, then writes slot/prepared/HP in one batched submit. The round-scoped SR ledger (`src/packages/pf1e/srLedger.ts`, `flags.pf1e.srOvercome` on the combat doc, GM override flag) is the target-specific resistance bookkeeping. One chosen target per cast; area payloads and multiple simultaneous targets ride C05's profile-driven cast, components/concentration/touch-charge timing ride C03.
 - [ ] **C03 — Implement concentration/components and timing:** defensive casting versus taking-damage checks, spell loss, threatened casting, armor spell failure, verbal/somatic/material/focus requirements, touch/held charge, multi-round casting, swift/quickened/metamagic timing. Validate dubious source restrictions under R02. (I P5; G §4.10; B §4.4)
-- [x] **C04 — Add level 0–9 spellbook/preparation/slot readouts**, prepared versus spontaneous data and bonus slots; MVP overuse produces warnings, not hard enforcement. (I P5; B §6.2) — **done 2026-09-11 (D-152 rules layer + D-155 persistence and UI):** the 0–9 readout with Table 1-3 bonus slots and prepared/spontaneous data shipped in D-152; D-155 persists the daily state on the actor (`system.pf1e.spells.slotsUsed`, `.prepared`, both validated), adds the sheet's Spells tab (Spend/Restore per granted level, prepare/expend/remove rows) built on the tested `spendSlot`/`reviewPreparation`/`slotLedgerView` layer, and keeps overuse as warnings rather than refusals. Cast→spend coupling arrives with the C02 casting flow.
+- [x] **C04 — Add level 0–9 spellbook/preparation/slot readouts**, prepared versus spontaneous data and bonus slots; MVP overuse produces warnings, not hard enforcement. (I P5; B §6.2) — **done 2026-09-11 (D-152 rules layer + D-155 persistence and UI):** the 0–9 readout with Table 1-3 bonus slots and prepared/spontaneous data shipped in D-152; D-155 persists the daily state on the actor (`system.pf1e.spells.slotsUsed`, `.prepared`, both validated), adds the sheet's Spells tab (Spend/Restore per granted level, prepare/expend/remove rows) built on the tested `spendSlot`/`reviewPreparation`/`slotLedgerView` layer, and keeps overuse as warnings rather than refusals. Cast→spend coupling landed with D-156's casting flow.
 - [ ] **C05 — Replace hardcoded strategic Fireball with profile/pack-driven cast payloads** for location, shape, range, radius, CL, DC, dice and targets; use the agreed 20-ft Fireball. Remove or explicitly document scatter under R03 and keep spatial membership/ranges consistent if displacement remains. (G §5; I P5; M Task 5)
 - [ ] **C06 — Connect Stealth/Perception to host detection and ambush state:** verified distance/environment/cover modifiers, spatial queries and hidden-target legality; distinguish presence detection from locating/seeing a target. (B §§4.2, 6, 9; G §4.5–4.6)
 - [ ] **C07 — Add verified sensory-mode behavior** for normal/low-light/darkvision, scent, tremorsense, blindsight and true seeing, with appropriate ranges, lighting/LOS/concealment exceptions and faction projection. Avoid treating distinct senses as interchangeable. (B §§4.2, 10)
