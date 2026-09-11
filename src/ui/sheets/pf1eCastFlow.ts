@@ -17,7 +17,11 @@
  * 5. the slot spend and prepared-spell expense reuse the D-155 spellbook edit
  *    builders, so ownership, validation and diff shape are that module's;
  * 6. the HP write goes through `pf1eSheetEdit` — a resolver without
- *    permission narrates but cannot write.
+ *    permission narrates but cannot write;
+ * 7. touch spells (D-158) ride the same wire: the touch attack is part of the
+ *    casting, a missed melee touch holds the charge on the actor document,
+ *    and `resolveTouchDelivery` delivers it through the shared effect
+ *    pipeline (`runSpellEffect`) that both paths consume.
  */
 import type { Op } from "../../core/ops";
 import type { PermissionUser } from "../../core/ownership";
@@ -57,9 +61,15 @@ import {
   srOvercomeBlobFromFlags,
   srOvercomeDiff,
 } from "../../packages/pf1e/srLedger";
-import { pf1eSheetEdit, sheetRecord } from "./pf1eSheetModel";
+import {
+  heldChargeDiff,
+  heldChargeFromSystem,
+  resolveTouchAttack,
+} from "../../packages/pf1e/touchSpell";
+import { pf1eSheetEdit, sheetRecord, isPF1eActor } from "./pf1eSheetModel";
 import { pf1eSpellbookEdit } from "./pf1eSpellbook";
 import { awaitRollMessage, dieFaceOf } from "./pf1eResolveFlow";
+import { can } from "../../core/permissions";
 
 /** The structural slice of ClientSync the flow needs (tests fake exactly this). */
 export interface CastFlowClient {
@@ -103,6 +113,13 @@ export interface PF1eCastFlowParams {
    * the gate entirely, exactly as before D-157.
    */
   gate?: PF1eCastGateInput;
+  /**
+   * Touch delivery (D-158): the touch attempt rides the casting ("you cast
+   * the spell and then touch the subject"). `"melee"` misses hold the
+   * charge; `"ranged"` misses spend the spell ("ranged touch attacks cannot
+   * be held"). Absent = a normal, non-touch spell.
+   */
+  touch?: "melee" | "ranged";
 }
 
 /**
@@ -165,6 +182,8 @@ export type PF1eCastFlowOutcome =
       ok: true;
       /** A ruined spell still spends its slot but produces no effect rolls. */
       lost: false;
+      /** True only on the held-charge variant below. */
+      held: false;
       dc: number;
       sr: PF1eSrResult;
       result: Extract<PF1eSpellTargetResult, { ok: true }>;
@@ -173,13 +192,27 @@ export type PF1eCastFlowOutcome =
       /** Narration from the C03a gate's checks (empty without a gate). */
       gateNotes: string[];
       hpWriteError: string | null;
+      /** The touch attack that delivered the spell, when one was declared. */
+      touch?: { kind: "melee" | "ranged"; total: number; hit: boolean; threat: boolean };
     }
   | {
       ok: true;
       /** The gate ruined the spell: slot spent, no effect, the card says why. */
       lost: true;
+      held: false;
       warnings: string[];
       gateNotes: string[];
+      touch?: { kind: "melee" | "ranged"; total: number; hit: boolean; threat: boolean };
+    }
+  | {
+      ok: true;
+      lost: false;
+      /** The melee touch missed: the spell is spent and the charge held. */
+      held: true;
+      warnings: string[];
+      gateNotes: string[];
+      touch: { kind: "melee"; total: number; hit: false; threat: boolean };
+      touchAc: number;
     }
   | { ok: false; error: string };
 
@@ -196,6 +229,212 @@ function preparedRowAt(
   if (!Array.isArray(prepared)) return null;
   const row = prepared[index];
   return sheetRecord(row);
+}
+
+/** The effect pipeline's inputs: everything after the touch has landed. */
+interface SpellEffectInput {
+  casterActor: ActorDocument;
+  casterDerived: PF1eDerived;
+  spellName: string;
+  authored: {
+    saveType: PF1eSaveType;
+    severity: PF1eSaveSeverity;
+    damageFormula: string;
+    energyType?: PF1eEnergyType;
+  };
+  dc: number;
+  targetName: string;
+  targetActor: ActorDocument;
+  targetDerived: PF1eDerived;
+  targetFeats?: readonly string[];
+  combat?: CombatDocument | null | undefined;
+  srOvercomeByCaller?: boolean;
+}
+
+type SpellEffectResult =
+  | {
+      ok: true;
+      /** State writes (SR ledger + HP), to be batched by the caller. */
+      ops: Op[];
+      sr: PF1eSrResult;
+      saveBonus: number;
+      saveTotal: number | null;
+      result: Extract<PF1eSpellTargetResult, { ok: true }>;
+      hpWriteError: string | null;
+    }
+  | { ok: false; error: string };
+
+/**
+ * The shared effect pipeline (D-158 extraction of the D-156 body): damage
+ * roll → SR check → saving throw → authoritative composition → SR-ledger and
+ * HP writes. Used by both the cast flow and held-charge delivery, so the two
+ * cannot drift apart.
+ */
+async function runSpellEffect(
+  client: CastFlowClient,
+  user: PermissionUser | null,
+  input: SpellEffectInput,
+): Promise<SpellEffectResult> {
+  const fail = (error: string): SpellEffectResult => ({ ok: false, error });
+  const ops: Op[] = [];
+  const { authored, casterDerived, spellName } = input;
+
+  let damageTotal = 0;
+  if (authored.damageFormula !== "") {
+    const match = DAMAGE_FORMULA.exec(authored.damageFormula.trim());
+    if (!match)
+      return fail(
+        `Damage "${authored.damageFormula}": use NdM with 1–100 dice and 2–1000 sides, or leave empty for a spell that deals no damage.`,
+      );
+    const dice = Number(match[1]);
+    const sides = Number(match[2]);
+    if (!(dice >= 1 && dice <= 100 && sides >= 2 && sides <= 1000))
+      return fail("Damage dice must be NdM with 1–100 dice and 2–1000 sides.");
+    const rollId = client.roll(
+      authored.damageFormula,
+      "roll",
+      undefined,
+      `${spellName} damage`,
+    );
+    const message = await awaitRollMessage(client, rollId);
+    if (
+      message === null ||
+      message.roll === null ||
+      typeof message.roll.total !== "number"
+    )
+      return fail("The damage roll message carries no total.");
+    damageTotal = Math.max(0, Math.trunc(message.roll.total));
+  }
+
+  // ── spell resistance (once per round per target; no natural-die cases) ───
+  const spellResistance = input.targetDerived.spellResistance;
+  const round =
+    input.combat && input.combat.round >= 1 ? input.combat.round : null;
+  const blob =
+    input.combat !== null && input.combat !== undefined
+      ? srOvercomeBlobFromFlags(input.combat.flags)
+      : null;
+  const reused =
+    input.srOvercomeByCaller === true ||
+    (round !== null &&
+      blob !== null &&
+      srAlreadyOvercome(
+        blob,
+        input.casterActor._id,
+        input.targetActor._id,
+        round,
+      ));
+  let sr: PF1eSrResult = {
+    resisted: false,
+    total: null,
+    reused: false,
+    issues: [],
+  };
+  if (spellResistance > 0) {
+    if (reused) {
+      sr = { resisted: false, total: null, reused: true, issues: [] };
+    } else {
+      const rollId = client.roll(
+        "1d20",
+        "roll",
+        undefined,
+        `${spellName} caster level check vs SR ${spellResistance}`,
+      );
+      const message = await awaitRollMessage(client, rollId);
+      if (message === null) return fail("The SR check roll never replicated.");
+      const srDie = dieFaceOf(message);
+      if (srDie === null)
+        return fail("Could not read the SR check's d20 face.");
+      sr = spellResistanceCheck({
+        die: srDie,
+        casterLevel: casterDerived.spellCasterLevel,
+        spellResistance,
+      });
+      if (sr.issues.length > 0)
+        return fail(
+          sr.issues.map((i) => `${i.field}: ${i.message}`).join("; "),
+        );
+    }
+  }
+
+  // ── the saving throw (only when the spell allows one and SR did not block) ─
+  let saveDie: number | undefined;
+  let saveTotal: number | null = null;
+  const allowsSave = authored.severity !== "none" && !sr.resisted;
+  const saveBonus =
+    authored.saveType === "fort"
+      ? input.targetDerived.saves.fort
+      : authored.saveType === "ref"
+        ? input.targetDerived.saves.ref
+        : input.targetDerived.saves.will;
+  if (allowsSave) {
+    const rollId = client.roll(
+      "1d20",
+      "roll",
+      undefined,
+      `${input.targetName} ${authored.saveType} save vs ${spellName}`,
+    );
+    const message = await awaitRollMessage(client, rollId);
+    if (message === null) return fail("The saving throw never replicated.");
+    const face = dieFaceOf(message);
+    if (face === null)
+      return fail("Could not read the saving throw's d20 face.");
+    saveDie = face;
+    saveTotal = face + saveBonus;
+  }
+
+  // ── the authoritative composition (D-149 pipeline, unmodified) ───────────
+  const energyResistance = Object.fromEntries(
+    Object.entries(input.targetDerived.energyResistance).filter(
+      ([, v]) => v > 0,
+    ),
+  );
+  const target = resolveSpellTarget({
+    damage: damageTotal,
+    ...(authored.energyType !== undefined
+      ? { energyType: authored.energyType }
+      : {}),
+    severity: authored.severity,
+    saveType: authored.saveType,
+    dc: input.dc,
+    saveBonus,
+    ...(saveDie !== undefined ? { saveDie } : {}),
+    evasion: hasPF1eFeat(input.targetFeats, "Evasion"),
+    improvedEvasion: hasPF1eFeat(input.targetFeats, "Improved Evasion"),
+    defender:
+      Object.keys(energyResistance).length > 0 ? { energyResistance } : {},
+    ...(spellResistance > 0 ? { sr } : {}),
+  });
+  if (!target.ok) return fail(target.error);
+
+  // The round-scoped SR ledger rides the combat document's flags.
+  if (
+    sr.resisted === false &&
+    sr.reused === false &&
+    sr.total !== null &&
+    round !== null
+  ) {
+    ops.push({
+      kind: "update",
+      ref: { coll: "combats", id: (input.combat as CombatDocument)._id },
+      diff: srOvercomeDiff(
+        input.casterActor._id,
+        input.targetActor._id,
+        round,
+      ),
+    });
+  }
+
+  // ── the HP write (permission-checked; a refused write is narrated) ────────
+  let hpWriteError: string | null = null;
+  if (target.dealt > 0) {
+    const after = input.targetDerived.hp - target.dealt;
+    const edit = pf1eSheetEdit(input.targetActor, user, "hp", String(after));
+    if (edit.error !== null) hpWriteError = edit.error;
+    else ops.push(...edit.ops);
+  }
+
+  return { ok: true, ops, sr, saveBonus, saveTotal, result: target, hpWriteError };
 }
 
 /**
@@ -457,164 +696,179 @@ export async function resolveCastFlow(
       };
       client.submit([{ kind: "create", coll: "messages", data: cardMessage }]);
       if (ops.length > 0) client.submit(ops);
-      return { ok: true, lost: true, warnings, gateNotes };
+      return { ok: true, lost: true, held: false, warnings, gateNotes };
     }
   }
 
-  let damageTotal = 0;
-  if (authored.damageFormula !== "") {
-    const match = DAMAGE_FORMULA.exec(authored.damageFormula.trim());
-    if (!match)
-      return fail(
-        `Damage "${authored.damageFormula}": use NdM with 1–100 dice and 2–1000 sides, or leave empty for a spell that deals no damage.`,
-      );
-    const dice = Number(match[1]);
-    const sides = Number(match[2]);
-    if (!(dice >= 1 && dice <= 100 && sides >= 2 && sides <= 1000))
-      return fail("Damage dice must be NdM with 1–100 dice and 2–1000 sides.");
-    const rollId = client.roll(
-      authored.damageFormula,
-      "roll",
-      undefined,
-      `${spell.name} damage`,
+  // ── held-charge dissipation (D-158): "If you cast another spell, the
+  //    touch spell dissipates." Clearing first also lets a new touch spell's
+  //    held charge replace it when this cast misses below ───────────────────
+  const priorCharge = heldChargeFromSystem(
+    params.casterActor.system as Record<string, unknown>,
+  );
+  if (priorCharge !== null) {
+    ops.push({
+      kind: "update",
+      ref: { coll: "actors", id: params.casterActor._id },
+      diff: heldChargeDiff(null),
+    });
+    warnings.push(
+      `the held ${priorCharge.name} charge dissipates as ${spell.name} is cast`,
     );
-    const message = await awaitRollMessage(client, rollId);
-    if (
-      message === null ||
-      message.roll === null ||
-      typeof message.roll.total !== "number"
-    )
-      return fail("The damage roll message carries no total.");
-    damageTotal = Math.max(0, Math.trunc(message.roll.total));
   }
 
-  // ── spell resistance (once per round per target; no natural-die cases) ───
-  const spellResistance = params.targetDerived.spellResistance;
-  const round =
-    params.combat && params.combat.round >= 1 ? params.combat.round : null;
-  const blob =
-    params.combat !== null && params.combat !== undefined
-      ? srOvercomeBlobFromFlags(params.combat.flags)
-      : null;
-  const reused =
-    params.srOvercomeByCaller === true ||
-    (round !== null &&
-      blob !== null &&
-      srAlreadyOvercome(
-        blob,
-        params.casterActor._id,
-        params.targetActor._id,
-        round,
-      ));
-  let sr: PF1eSrResult = {
-    resisted: false,
-    total: null,
-    reused: false,
-    issues: [],
-  };
-  if (spellResistance > 0) {
-    if (reused) {
-      sr = { resisted: false, total: null, reused: true, issues: [] };
-    } else {
-      const rollId = client.roll(
-        "1d20",
-        "roll",
-        undefined,
-        `${spell.name} caster level check vs SR ${spellResistance}`,
-      );
-      const message = await awaitRollMessage(client, rollId);
-      if (message === null) return fail("The SR check roll never replicated.");
-      const srDie = dieFaceOf(message);
-      if (srDie === null)
-        return fail("Could not read the SR check's d20 face.");
-      sr = spellResistanceCheck({
-        die: srDie,
-        casterLevel: casterDerived.spellCasterLevel,
-        spellResistance,
-      });
-      if (sr.issues.length > 0)
-        return fail(
-          sr.issues.map((i) => `${i.field}: ${i.message}`).join("; "),
-        );
-    }
-  }
-
-  // ── the saving throw (only when the spell allows one and SR did not block) ─
-  let saveDie: number | undefined;
-  let saveTotal: number | null = null;
-  const allowsSave = authored.severity !== "none" && !sr.resisted;
-  const saveBonus =
-    authored.saveType === "fort"
-      ? params.targetDerived.saves.fort
-      : authored.saveType === "ref"
-        ? params.targetDerived.saves.ref
-        : params.targetDerived.saves.will;
-  if (allowsSave) {
+  // ── touch delivery (D-158): the touch attempt is part of the casting ────
+  let touchSummary:
+    | { kind: "melee" | "ranged"; total: number; hit: boolean; threat: boolean }
+    | undefined;
+  let touchCardLine: string | null = null;
+  if (params.touch !== undefined) {
+    const melee = params.touch === "melee";
+    const touchAbility = melee
+      ? casterDerived.abilityMods.str
+      : casterDerived.abilityMods.dex;
+    const touchBonus =
+      casterDerived.baseAttack + touchAbility + casterDerived.sizeEntry.attackAc;
     const rollId = client.roll(
       "1d20",
       "roll",
       undefined,
-      `${params.targetName} ${authored.saveType} save vs ${spell.name}`,
+      `${spell.name} ${melee ? "melee" : "ranged"} touch attack`,
     );
     const message = await awaitRollMessage(client, rollId);
-    if (message === null) return fail("The saving throw never replicated.");
+    if (message === null) return fail("The touch attack never replicated.");
     const face = dieFaceOf(message);
     if (face === null)
-      return fail("Could not read the saving throw's d20 face.");
-    saveDie = face;
-    saveTotal = face + saveBonus;
-  }
-
-  // ── the authoritative composition (D-149 pipeline, unmodified) ───────────
-  const energyResistance = Object.fromEntries(
-    Object.entries(params.targetDerived.energyResistance).filter(
-      ([, v]) => v > 0,
-    ),
-  );
-  const target = resolveSpellTarget({
-    damage: damageTotal,
-    ...(authored.energyType !== undefined
-      ? { energyType: authored.energyType }
-      : {}),
-    severity: authored.severity,
-    saveType: authored.saveType,
-    dc,
-    saveBonus,
-    ...(saveDie !== undefined ? { saveDie } : {}),
-    evasion: hasPF1eFeat(params.targetFeats, "Evasion"),
-    improvedEvasion: hasPF1eFeat(params.targetFeats, "Improved Evasion"),
-    defender:
-      Object.keys(energyResistance).length > 0 ? { energyResistance } : {},
-    ...(spellResistance > 0 ? { sr } : {}),
-  });
-  if (!target.ok) return fail(target.error);
-
-  // The round-scoped SR ledger rides the combat document's flags.
-  if (
-    sr.resisted === false &&
-    sr.reused === false &&
-    sr.total !== null &&
-    round !== null
-  ) {
-    ops.push({
-      kind: "update",
-      ref: { coll: "combats", id: (params.combat as CombatDocument)._id },
-      diff: srOvercomeDiff(
-        params.casterActor._id,
-        params.targetActor._id,
-        round,
-      ),
+      return fail("Could not read the touch attack's d20 face.");
+    const touch = resolveTouchAttack({
+      die: face,
+      bonus: touchBonus,
+      touchAc: params.targetDerived.ac.touch,
     });
+    if (!touch.ok) return fail(touch.error ?? "The touch attack was malformed.");
+    touchSummary = { kind: params.touch, total: touch.total, hit: touch.hit, threat: touch.threat };
+    touchCardLine = `${melee ? "Melee" : "Ranged"} touch attack [[${touch.total}|1d20 ${touchBonus >= 0 ? `+ ${touchBonus}` : `- ${Math.abs(touchBonus)}`}]] vs touch AC ${params.targetDerived.ac.touch} — ${touch.hit ? (touch.threat ? "HIT (threatens a critical)" : "hit") : "MISS"}.`;
+    if (!touch.hit) {
+      if (melee) {
+        // "If you don't discharge the spell in the round when you cast the
+        // spell, you can hold the charge."
+        ops.push({
+          kind: "update",
+          ref: { coll: "actors", id: params.casterActor._id },
+          diff: heldChargeDiff({
+            name: spell.name,
+            level: spell.level,
+            ...(slotLevel !== spell.level ? { slotLevel } : {}),
+            damageFormula: authored.damageFormula,
+            saveType: authored.saveType,
+            severity: authored.severity,
+            ...(authored.energyType !== undefined
+              ? { energyType: authored.energyType }
+              : {}),
+          }),
+        });
+        const card = castTouchMissCardContent(
+          {
+            casterName: params.casterActor.name,
+            spellName: spell.name,
+            spellLevel: spell.level,
+            targetName: params.targetName,
+          },
+          touchCardLine,
+          true,
+          warnings,
+          gateNotes,
+        );
+        const cardMessage: MessageDocument = {
+          _id: globalThis.crypto.randomUUID(),
+          type: "message",
+          name: card.name,
+          ownership: { default: 1 },
+          flags: {},
+          system: {},
+          author: user?.id ?? "",
+          content: card.content,
+          whisper: [],
+          roll: null,
+          flavor: "cast resolution",
+        };
+        client.submit([
+          { kind: "create", coll: "messages", data: cardMessage },
+        ]);
+        if (ops.length > 0) client.submit(ops);
+        return {
+          ok: true,
+          lost: false,
+          held: true,
+          warnings,
+          gateNotes,
+          touch: { ...touchSummary, kind: "melee", hit: false },
+          touchAc: params.targetDerived.ac.touch,
+        };
+      }
+      // "Unless otherwise noted, ranged touch attacks cannot be held."
+      warnings.push(
+        "the ranged touch attack missed — a ranged touch attack cannot be held, so the spell is spent",
+      );
+      const card = castTouchMissCardContent(
+        {
+          casterName: params.casterActor.name,
+          spellName: spell.name,
+          spellLevel: spell.level,
+          targetName: params.targetName,
+        },
+        touchCardLine,
+        false,
+        warnings,
+        gateNotes,
+      );
+      const cardMessage: MessageDocument = {
+        _id: globalThis.crypto.randomUUID(),
+        type: "message",
+        name: card.name,
+        ownership: { default: 1 },
+        flags: {},
+        system: {},
+        author: user?.id ?? "",
+        content: card.content,
+        whisper: [],
+        roll: null,
+        flavor: "cast resolution",
+      };
+      client.submit([{ kind: "create", coll: "messages", data: cardMessage }]);
+      if (ops.length > 0) client.submit(ops);
+      return {
+        ok: true,
+        lost: true,
+        held: false,
+        warnings,
+        gateNotes,
+        touch: touchSummary,
+      };
+    }
   }
 
-  // ── the HP write (permission-checked; a refused write is narrated) ────────
-  let hpWriteError: string | null = null;
-  if (target.dealt > 0) {
-    const after = params.targetDerived.hp - target.dealt;
-    const edit = pf1eSheetEdit(params.targetActor, user, "hp", String(after));
-    if (edit.error !== null) hpWriteError = edit.error;
-    else ops.push(...edit.ops);
-  }
+  // ── the effect pipeline (damage → SR → save → composition → HP write) ────
+  const effect = await runSpellEffect(client, user, {
+    casterActor: params.casterActor,
+    casterDerived,
+    spellName: spell.name,
+    authored,
+    dc,
+    targetName: params.targetName,
+    targetActor: params.targetActor,
+    targetDerived: params.targetDerived,
+    ...(params.targetFeats !== undefined
+      ? { targetFeats: params.targetFeats }
+      : {}),
+    combat: params.combat,
+    ...(params.srOvercomeByCaller !== undefined
+      ? { srOvercomeByCaller: params.srOvercomeByCaller }
+      : {}),
+  });
+  if (!effect.ok) return fail(effect.error);
+  ops.push(...effect.ops);
+  const { sr, saveBonus, saveTotal, result: target, hpWriteError } = effect;
 
   // ── the resolution card (public narrative, §11 chips) ─────────────────────
   const card = castResolutionCardContent(
@@ -634,6 +888,7 @@ export async function resolveCastFlow(
     warnings,
     hpWriteError,
     gateNotes,
+    touchCardLine,
   );
   const cardMessage: MessageDocument = {
     _id: globalThis.crypto.randomUUID(),
@@ -653,12 +908,248 @@ export async function resolveCastFlow(
   return {
     ok: true,
     lost: false,
+    held: false,
     dc,
     sr,
     result: target,
     warnings,
     gateNotes,
     hpWriteError,
+    ...(touchSummary !== undefined ? { touch: touchSummary } : {}),
+  };
+}
+
+/** The delivery of a held charge (D-158, "Holding the Charge"). */
+export interface PF1eTouchDeliveryParams {
+  casterActor: ActorDocument;
+  casterDerived: PF1eDerived;
+  targetName: string;
+  targetActor: ActorDocument;
+  targetDerived: PF1eDerived;
+  /** The target's authored feats/features (Evasion is read, never activated). */
+  targetFeats?: readonly string[];
+  /** The active encounter; the round-scoped SR ledger rides its flags. */
+  combat?: CombatDocument | null;
+  /** Manual GM adjudication that SR was already overcome this round. */
+  srOvercomeByCaller?: boolean;
+}
+
+export type PF1eTouchDeliveryOutcome =
+  | {
+      ok: true;
+      /** The touch attack landed and the held spell took effect. */
+      delivered: true;
+      dc: number;
+      sr: PF1eSrResult;
+      result: Extract<PF1eSpellTargetResult, { ok: true }>;
+      hpWriteError: string | null;
+      touch: { total: number; hit: true; threat: boolean };
+    }
+  | {
+      ok: true;
+      /** The touch missed; the charge is still held. */
+      delivered: false;
+      chargeName: string;
+      touch: { total: number; hit: false; threat: boolean };
+      touchAc: number;
+    }
+  | { ok: false; error: string };
+
+/**
+ * Deliver a held touch-spell charge with a melee touch attack. "You can
+ * continue to make touch attacks round after round." A miss keeps the charge;
+ * a hit runs the same effect pipeline as the cast and clears the charge.
+ */
+export async function resolveTouchDelivery(
+  client: CastFlowClient,
+  user: PermissionUser | null,
+  params: PF1eTouchDeliveryParams,
+): Promise<PF1eTouchDeliveryOutcome> {
+  const fail = (error: string): PF1eTouchDeliveryOutcome => ({
+    ok: false,
+    error,
+  });
+  if (!isPF1eActor(params.casterActor) || !user || !can(user, "update", params.casterActor, "actors"))
+    return fail("You do not have permission to act for this caster.");
+  const charge = heldChargeFromSystem(
+    params.casterActor.system as Record<string, unknown>,
+  );
+  if (charge === null) return fail("There is no held charge to deliver.");
+  if (!(PF1E_SAVE_SEVERITIES as readonly string[]).includes(charge.severity))
+    return fail(`The held charge's severity "${charge.severity}" is unknown.`);
+  if (
+    charge.energyType !== undefined &&
+    !(PF1E_ENERGY_TYPES as readonly string[]).includes(charge.energyType)
+  )
+    return fail(`The held charge's energy type "${charge.energyType}" is unknown.`);
+  const dc = params.casterDerived.spellSaveDc[charge.level];
+  if (dc === null || dc === undefined)
+    return fail(
+      `No DC for the held ${charge.name}: the caster has no slots at level ${charge.level} now.`,
+    );
+
+  // The delivery touch attack: BAB + Str + size vs the target's touch AC.
+  const touchBonus =
+    params.casterDerived.baseAttack +
+    params.casterDerived.abilityMods.str +
+    params.casterDerived.sizeEntry.attackAc;
+  const rollId = client.roll(
+    "1d20",
+    "roll",
+    undefined,
+    `${charge.name} touch attack (held charge)`,
+  );
+  const message = await awaitRollMessage(client, rollId);
+  if (message === null) return fail("The touch attack never replicated.");
+  const face = dieFaceOf(message);
+  if (face === null)
+    return fail("Could not read the touch attack's d20 face.");
+  const touch = resolveTouchAttack({
+    die: face,
+    bonus: touchBonus,
+    touchAc: params.targetDerived.ac.touch,
+  });
+  if (!touch.ok) return fail(touch.error ?? "The touch attack was malformed.");
+  const touchLine = `Melee touch attack [[${touch.total}|1d20 ${touchBonus >= 0 ? `+ ${touchBonus}` : `- ${Math.abs(touchBonus)}`}]] vs touch AC ${params.targetDerived.ac.touch} — ${touch.hit ? (touch.threat ? "HIT (threatens a critical)" : "hit") : "MISS"}.`;
+
+  if (!touch.hit) {
+    // Still holding the charge; nothing is spent, nothing is cleared.
+    const card = castHeldDeliveryMissContent(
+      {
+        casterName: params.casterActor.name,
+        spellName: charge.name,
+        spellLevel: charge.level,
+        targetName: params.targetName,
+      },
+      touchLine,
+    );
+    const cardMessage: MessageDocument = {
+      _id: globalThis.crypto.randomUUID(),
+      type: "message",
+      name: card.name,
+      ownership: { default: 1 },
+      flags: {},
+      system: {},
+      author: user?.id ?? "",
+      content: card.content,
+      whisper: [],
+      roll: null,
+      flavor: "cast resolution",
+    };
+    client.submit([{ kind: "create", coll: "messages", data: cardMessage }]);
+    return {
+      ok: true,
+      delivered: false,
+      chargeName: charge.name,
+      touch: { total: touch.total, hit: false, threat: touch.threat },
+      touchAc: params.targetDerived.ac.touch,
+    };
+  }
+
+  // The touch landed: the held spell takes effect and the charge clears.
+  const authored: PF1eCastFlowParams["authored"] = {
+    saveType: charge.saveType,
+    severity: charge.severity as PF1eSaveSeverity,
+    damageFormula: charge.damageFormula,
+    ...(charge.energyType !== undefined
+      ? { energyType: charge.energyType as PF1eEnergyType }
+      : {}),
+  };
+  const effect = await runSpellEffect(client, user, {
+    casterActor: params.casterActor,
+    casterDerived: params.casterDerived,
+    spellName: charge.name,
+    authored,
+    dc,
+    targetName: params.targetName,
+    targetActor: params.targetActor,
+    targetDerived: params.targetDerived,
+    ...(params.targetFeats !== undefined
+      ? { targetFeats: params.targetFeats }
+      : {}),
+    combat: params.combat,
+    ...(params.srOvercomeByCaller !== undefined
+      ? { srOvercomeByCaller: params.srOvercomeByCaller }
+      : {}),
+  });
+  if (!effect.ok) return fail(effect.error);
+  const ops: Op[] = [...effect.ops];
+  ops.push({
+    kind: "update",
+    ref: { coll: "actors", id: params.casterActor._id },
+    diff: heldChargeDiff(null),
+  });
+  const slotLevel = charge.slotLevel ?? charge.level;
+  const card = castResolutionCardContent(
+    {
+      casterName: params.casterActor.name,
+      spellName: charge.name,
+      spellLevel: charge.level,
+      slotLevel,
+      targetName: params.targetName,
+      damageFormula: charge.damageFormula,
+      saveType: charge.saveType,
+      severity: authored.severity,
+      hpBefore: params.targetDerived.hp,
+      hpAfter: params.targetDerived.hp - effect.result.dealt,
+      delivered: true,
+    },
+    {
+      dc,
+      sr: effect.sr,
+      saveBonus: effect.saveBonus,
+      saveTotal: effect.saveTotal,
+      result: effect.result,
+    },
+    [],
+    effect.hpWriteError,
+    [],
+    touchLine,
+  );
+  const cardMessage: MessageDocument = {
+    _id: globalThis.crypto.randomUUID(),
+    type: "message",
+    name: card.name,
+    ownership: { default: 1 },
+    flags: {},
+    system: {},
+    author: user?.id ?? "",
+    content: card.content,
+    whisper: [],
+    roll: null,
+    flavor: "cast resolution",
+  };
+  client.submit([{ kind: "create", coll: "messages", data: cardMessage }]);
+  if (ops.length > 0) client.submit(ops);
+  return {
+    ok: true,
+    delivered: true,
+    dc,
+    sr: effect.sr,
+    result: effect.result,
+    hpWriteError: effect.hpWriteError,
+    touch: { total: touch.total, hit: true, threat: touch.threat },
+  };
+}
+
+/** The card when a held charge's delivery attempt misses. */
+export function castHeldDeliveryMissContent(
+  ctx: {
+    casterName: string;
+    spellName: string;
+    spellLevel: number;
+    targetName: string;
+  },
+  touchLine: string,
+): { name: string; content: string } {
+  const lines: string[] = [
+    `${ctx.casterName} tries to deliver the held ${ctx.spellName} (level ${ctx.spellLevel}) at ${ctx.targetName}.`,
+    touchLine,
+    "The charge is still held.",
+  ];
+  return {
+    name: `${ctx.spellName} delivery miss`,
+    content: lines.join("\n"),
   };
 }
 
@@ -675,6 +1166,8 @@ export function castResolutionCardContent(
     severity: PF1eSaveSeverity;
     hpBefore: number;
     hpAfter: number;
+    /** D-158: a delivered held charge narrates differently from a fresh cast. */
+    delivered?: boolean;
   },
   res: {
     dc: number;
@@ -686,6 +1179,7 @@ export function castResolutionCardContent(
   warnings: string[],
   hpWriteError: string | null,
   gateNotes: readonly string[] = [],
+  touchLine: string | null = null,
 ): { name: string; content: string } {
   const lines: string[] = [];
   const slotNote =
@@ -693,9 +1187,12 @@ export function castResolutionCardContent(
       ? `level ${ctx.spellLevel}`
       : `level ${ctx.spellLevel} cast at slot ${ctx.slotLevel}`;
   lines.push(
-    `${ctx.casterName} casts ${ctx.spellName} (${slotNote}) at ${ctx.targetName} — DC ${res.dc}.`,
+    ctx.delivered === true
+      ? `${ctx.casterName} delivers the held ${ctx.spellName} (${slotNote}) at ${ctx.targetName} — DC ${res.dc}.`
+      : `${ctx.casterName} casts ${ctx.spellName} (${slotNote}) at ${ctx.targetName} — DC ${res.dc}.`,
   );
   for (const note of gateNotes) lines.push(`⚠ ${note}`);
+  if (touchLine !== null) lines.push(touchLine);
   if (res.sr.reused) {
     lines.push("Spell resistance was already overcome this round — no check.");
   } else if (res.sr.total !== null) {
@@ -762,4 +1259,35 @@ export function castLostCardContent(
   for (const note of gateNotes) lines.push(note);
   for (const warning of warnings) lines.push(`⚠ ${warning}`);
   return { name: `${ctx.spellName} lost`, content: lines.join("\n") };
+}
+
+/**
+ * The card for a missed touch attack (D-158). For a melee touch the charge is
+ * held ("you can hold the charge indefinitely"); for a ranged touch the spell
+ * is simply spent ("ranged touch attacks cannot be held").
+ */
+export function castTouchMissCardContent(
+  ctx: {
+    casterName: string;
+    spellName: string;
+    spellLevel: number;
+    targetName: string;
+  },
+  touchLine: string | null,
+  held: boolean,
+  warnings: readonly string[],
+  gateNotes: readonly string[] = [],
+): { name: string; content: string } {
+  const lines: string[] = [
+    `${ctx.casterName} casts ${ctx.spellName} (level ${ctx.spellLevel}) at ${ctx.targetName}.`,
+  ];
+  for (const note of gateNotes) lines.push(`⚠ ${note}`);
+  if (touchLine !== null) lines.push(touchLine);
+  lines.push(
+    held
+      ? "The charge is held — deliver it with a touch attack; it dissipates if another spell is cast."
+      : "The spell is spent to no effect.",
+  );
+  for (const warning of warnings) lines.push(`⚠ ${warning}`);
+  return { name: `${ctx.spellName} touch miss`, content: lines.join("\n") };
 }

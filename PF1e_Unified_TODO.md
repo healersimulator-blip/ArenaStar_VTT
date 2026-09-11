@@ -409,6 +409,50 @@ Depends on P3 and D06; keep core EffectDocument unchanged.
 
 Depends on effects, attacks, action foundations and verified rule fixtures. Tactical targeting and strategic spell resolution remain independent implementations using common spell data.
 
+### P5 progress — 2026-09-11, touch spells and held charges ride the actor document (D-158, C03 partial)
+
+- **The C03 touch half is now live.** R02 transcribed the CRB "Cast a Spell"
+  touch section first (touch spells in combat, touch attacks, holding the
+  charge, ranged touch); `src/packages/pf1e/touchSpell.ts` encodes it as pure
+  functions — `resolveTouchAttack` (d20 + BAB + the matching ability mod +
+  size attack bonus versus derived touch AC: full AC minus armour, shield and
+  natural armor; critical-threat confirmation stays out of slice), and
+  `PF1eHeldCharge` with a null-tolerant `heldChargeFromSystem` reader.
+- **The charge rides the actor document.** `system.pf1e.heldCharge` is an
+  optional authored field (name, level, damage formula, save type/severity);
+  casting a touch-range spell that misses holds the charge, and **any later
+  cast dissipates it** with a warning on the card — both paths are tested.
+  A miss costs the slot and posts a card naming the held charge; a hit runs
+  the shared damage→SR→save→HP pipeline under a touch-attack line.
+- **Delivery is its own flow.** `resolveTouchDelivery` re-reads the freshest
+  documents, refuses when the caster's DC for the charge's level is
+  unavailable or ownership fails, rolls the touch attack against the same
+  derived touch AC, and on a hit delivers the full pipeline and clears the
+  charge; a miss keeps it. The sheet shows a held-charge panel with Deliver
+  (needs a target) and Dismiss handlers.
+- **Store-roundtrip repair found by the e2e pass.** Clearing the charge must
+  emit the repo's `-=` delete marker (`{"-=system.pf1e.heldCharge": null}`)
+  — `applyDiff` writes a literal `null` otherwise, which fails the actor's
+  re-parse and blanks the whole derived block (slots readout gone, DCs null).
+  The parser now also treats `heldCharge: null` as absent, and a new
+  write→clear→re-parse regression test pins the round-trip.
+- **Executed browser proof:** `e2e/pf1e_touch.spec.ts` (Chromium, **85/85**
+  overall): casting another spell dissipates an authored Chill Touch charge
+  with the warning and the panel gone; a touch cast of Shocking Grasp spends
+  the slot, posts the melee-touch line against touch AC 9, then conditionally
+  delivers the held charge or keeps the panel. Rules arithmetic stays pinned
+  by 20 new unit tests (9 in `tests/packages/pf1eTouchSpell.test.ts`
+  including the store round-trip, 11 in `tests/ui/pf1eTouchFlow.test.ts`
+  covering both flows and the ownership/DC refusals).
+- **Still open for C03 (stays unchecked):** critical-threat confirmation on
+  touch attacks, unarmed/natural-weapon delivery, the six-friends full-round
+  touch, multi-target touch spells (Chill Touch's extra charges), attacks of
+  opportunity against ranged touch casters, multi-round casting,
+  swift/quickened/metamagic timing, and the remaining Table 9-1 UI triggers.
+- **Evidence:** unit **1453 passed / 3 skipped** across 144 files; typecheck
+  /lint/touched-file Prettier green; dist **2,217,984 raw / 645,780 gzip**;
+  Chromium e2e **85/85** (+2).
+
 ### P5 progress — 2026-09-11, the C03a casting gate wired into the cast path (D-157, C03 partial)
 
 - **The D-150 layer is now product-reachable.** D-150 encoded C03's pre-save

@@ -38,9 +38,14 @@
   } from "./pf1eSpellbook";
   import {
     resolveCastFlow,
+    resolveTouchDelivery,
     type PF1eCastFlowParams,
     type PF1eConcentrationDeclaration,
   } from "./pf1eCastFlow";
+  import {
+    heldChargeDiff,
+    heldChargeFromSystem,
+  } from "../../packages/pf1e/touchSpell";
   import type { PF1eSaveSeverity, PF1eSaveType } from "../../packages/pf1e/casting";
   import type { PF1eCastingTime } from "../../packages/pf1e/concentration";
   import type { PF1eEnergyType } from "../../packages/pf1e/healthState";
@@ -108,6 +113,10 @@
   // P5/C04 (D-155): persisted slot ledger + prepared list, spend/prepare Ops.
   let spellbook = $derived(pf1eSpellbookView(doc, d));
   let spellbookWarning = $state("");
+  // P5/C03 (D-158): a held touch-spell charge lives on the actor document.
+  let heldCharge = $derived(
+    heldChargeFromSystem(doc.system as Record<string, unknown>),
+  );
   let prepareName = $state("");
   let prepareLevel = $state("1");
   let prepareSlotLevel = $state("");
@@ -123,6 +132,8 @@
   let castDamage = $state("");
   let castEnergy = $state("");
   let castSrOvercome = $state(false);
+  // Touch delivery (D-158): "", "melee" or "ranged".
+  let castTouch = $state("");
   // C03a gate (D-157): components line + the GM-declared situation.
   let castComponents = $state("");
   let castTime = $state("standard");
@@ -498,6 +509,9 @@
           : [],
         combat: linked.combat,
         ...(castSrOvercome ? { srOvercomeByCaller: true } : {}),
+        ...(castTouch !== ""
+          ? { touch: castTouch as "melee" | "ranged" }
+          : {}),
         ...(gateComponents !== ""
           ? {
               gate: {
@@ -518,6 +532,9 @@
       });
       if (!outcome.ok) {
         castError = outcome.error;
+      } else if (outcome.held) {
+        castWarning =
+          "the touch attack missed — the charge is held; deliver it below";
       } else if (outcome.lost) {
         castWarning = [...outcome.gateNotes, ...outcome.warnings].join(" · ");
       } else {
@@ -528,6 +545,77 @@
     } finally {
       castBusy = false;
     }
+  }
+
+  // D-158 — deliver or dissipate a held touch-spell charge. The delivery
+  // re-reads the freshest documents, so a stale tab cannot overwrite state.
+  async function deliverHeldCharge(): Promise<void> {
+    castError = "";
+    castWarning = "";
+    const target = castTargetId
+      ? (client.store.get("actors", castTargetId) as ActorDocument | undefined)
+      : undefined;
+    if (!target) {
+      castError = "Pick a target to deliver the held charge.";
+      return;
+    }
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) {
+      castError = "Actor is no longer available.";
+      return;
+    }
+    const casterView = pf1eSheetView(current, {
+      combat: linked.combat,
+      combatantId: linked.combatantId,
+    });
+    const targetView = pf1eSheetView(target);
+    castBusy = true;
+    try {
+      const outcome = await resolveTouchDelivery(client, client.user, {
+        casterActor: current,
+        casterDerived: casterView.derived,
+        targetName: target.name,
+        targetActor: target,
+        targetDerived: targetView.derived,
+        targetFeats: Array.isArray(targetView.authored.feats)
+          ? (targetView.authored.feats as string[])
+          : [],
+        combat: linked.combat,
+        ...(castSrOvercome ? { srOvercomeByCaller: true } : {}),
+      });
+      if (!outcome.ok) {
+        castError = outcome.error;
+      } else if (!outcome.delivered) {
+        castWarning =
+          "the delivery missed — the charge is still held";
+      } else if (outcome.hpWriteError !== null) {
+        castWarning = outcome.hpWriteError;
+      }
+    } finally {
+      castBusy = false;
+    }
+  }
+
+  function dismissHeldCharge(): void {
+    castError = "";
+    castWarning = "";
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) return;
+    if (!isPF1eActor(current) || !client.user || !can(client.user, "update", current, "actors")) {
+      castError = "You do not have permission to act for this caster.";
+      return;
+    }
+    pending.add(
+      client.submit([
+        {
+          kind: "update",
+          ref: { coll: "actors", id: current._id },
+          diff: heldChargeDiff(null),
+        },
+      ]),
+    );
   }
 
   // E01/E02 — the effect apply/edit/toggle/remove handlers. Both homes resolve
@@ -1234,6 +1322,14 @@
             <option value="sonic">Sonic</option>
           </select>
         </label>
+        <label
+          >Touch spell
+          <select bind:value={castTouch} data-cast-touch>
+            <option value="">No touch attack</option>
+            <option value="melee">Melee touch attack</option>
+            <option value="ranged">Ranged touch attack</option>
+          </select>
+        </label>
         <fieldset data-cast-gate>
           <legend>Casting gate (components &amp; concentration)</legend>
           <label
@@ -1326,6 +1422,29 @@
           >{castBusy ? "Casting…" : "Cast"}</button
         >
       </form>
+      {#if heldCharge !== null}
+        <section class="held-charge" data-held-charge>
+          <p>
+            Holding the charge: <strong>{heldCharge.name}</strong> (level
+            {heldCharge.level}) — deliver it with a melee touch attack, or it
+            dissipates when another spell is cast.
+          </p>
+          <button
+            type="button"
+            data-held-deliver
+            disabled={castBusy || castTargetId === ""}
+            onclick={() => {
+              void deliverHeldCharge();
+            }}>{castBusy ? "Delivering…" : "Deliver touch"}</button
+          >
+          <button
+            type="button"
+            data-held-dismiss
+            disabled={castBusy}
+            onclick={dismissHeldCharge}>Dissipate</button
+          >
+        </section>
+      {/if}
       <p class="note">
         Spending and preparation are daily state; resting/recovery automation
         arrives with P7. Overuse is warned, not blocked (C04). Casting spends
@@ -1334,9 +1453,11 @@
         line runs the C03a gate (D-157): legality, armour arcane spell failure
         (arcane tradition, authored <code>armor.spellFailure</code>), deafened
         spoilage and declared concentration checks — a failed check loses the
-        spell and still spends it. Touch/held charges, multi-round casting and
-        metamagic timing (C03 remainder) and area/target-count payloads (C05)
-        are not yet part of this single-target flow.
+        spell and still spends it. A Touch spell (D-158) rolls the touch
+        attack as part of the cast; a missed melee touch holds the charge for
+        later delivery, a missed ranged touch spends the spell. Multi-round
+        casting and metamagic timing (C03 remainder) and area/target-count
+        payloads (C05) are not yet part of this single-target flow.
       </p>
     </section>
   {:else if tab === "effects"}

@@ -256,6 +256,7 @@ describe("P5/C03a casting gate in the cast flow (D-157)", () => {
     if (!res.ok) return;
     expect(res.lost).toBe(false);
     if (res.lost) return;
+    if (res.held) return;
     // d100 first, then the effect roll.
     expect(client.formulas).toEqual(["1d100", "1d6"]);
     expect(res.result.dealt).toBe(6);
@@ -362,6 +363,7 @@ describe("P5/C03a casting gate in the cast flow (D-157)", () => {
     if (!res.ok) return;
     expect(res.lost).toBe(false);
     if (res.lost) return;
+    if (res.held) return;
     expect(client.formulas).toEqual(["1d20", "1d6"]);
     expect(res.result.dealt).toBe(5);
   });

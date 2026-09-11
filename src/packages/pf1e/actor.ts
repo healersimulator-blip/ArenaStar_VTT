@@ -178,6 +178,20 @@ export interface PF1eActorSystem extends PF1eHealthAuthored {
   initiative?: number;
   attacks?: PF1eAttackEntry[];
   spells?: PF1eSpellsAuthored;
+  /**
+   * A held touch-spell charge (D-158, "Holding the Charge"): written when a
+   * melee touch attack misses on the round of casting, cleared when the
+   * charge is delivered, dissipates when another spell is cast.
+   */
+  heldCharge?: {
+    name: string;
+    level: number;
+    slotLevel?: number;
+    damageFormula?: string;
+    saveType?: "fort" | "ref" | "will";
+    severity?: string;
+    energyType?: string;
+  };
   feats?: string[];
   traits?: string[];
   conditions?: string[];
@@ -544,6 +558,40 @@ export function parsePF1eActorSystem(raw: unknown): Result<PF1eActorSystem> {
           );
       }
     }
+  }
+  if (o.heldCharge !== undefined && o.heldCharge !== null) {
+    if (!isRecord(o.heldCharge))
+      return err("system.pf1e.heldCharge must be an object");
+    const hc = o.heldCharge as Record<string, unknown>;
+    if (typeof hc.name !== "string" || hc.name.trim() === "")
+      return err("heldCharge needs a non-empty name");
+    if (hc.name.length > 120)
+      return err("heldCharge names are at most 120 characters");
+    if (!Number.isInteger(hc.level) || (hc.level as number) < 0 || (hc.level as number) > 9)
+      return err("heldCharge level must be an integer 0–9");
+    if (
+      hc.slotLevel !== undefined &&
+      (!Number.isInteger(hc.slotLevel) ||
+        (hc.slotLevel as number) < 0 ||
+        (hc.slotLevel as number) > 9)
+    )
+      return err("heldCharge slotLevel must be an integer 0–9");
+    if (
+      hc.damageFormula !== undefined &&
+      typeof hc.damageFormula !== "string"
+    )
+      return err("heldCharge damageFormula must be a string");
+    if (
+      hc.saveType !== undefined &&
+      hc.saveType !== "fort" &&
+      hc.saveType !== "ref" &&
+      hc.saveType !== "will"
+    )
+      return err('heldCharge saveType must be "fort", "ref" or "will"');
+    if (hc.severity !== undefined && typeof hc.severity !== "string")
+      return err("heldCharge severity must be a string");
+    if (hc.energyType !== undefined && typeof hc.energyType !== "string")
+      return err("heldCharge energyType must be a string");
   }
   if (o.armorClass !== undefined && !isRecord(o.armorClass)) {
     return err("system.pf1e.armorClass must be an object of AC components");

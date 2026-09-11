@@ -3927,3 +3927,76 @@ remaining Table 9-1 situations in the UI (the pure layer supports all eleven). P
 exemptions (bard light armour, mithral) and shield ASF have no authoring surface yet; caster
 state is the GM's per-cast declaration, not yet derived from conditions. Area/multi-target
 payloads remain C05.
+
+## D-158 — 2026-09-11 — P5/C03 partial: touch spells and held charges ride the actor document
+
+**Context.** C03's pre-save gate (components/concentration) landed product-reachable in D-157;
+its touch-spell half — "touch/held charge" — was still a pure-layer aspiration. Per R02 the
+CRB "Cast a Spell" touch section was transcribed before encoding: a touch-range spell is cast
+and then delivered by an attack roll (melee touch: BAB + Str mod + size attack bonus; ranged
+touch: BAB + Dex mod + size attack bonus) against the target's touch AC — full AC minus
+armour, shield and natural-armor bonuses; missing a melee touch cast **holds the charge** on
+the caster indefinitely ("you can hold the charge indefinitely"); holding a charge while
+casting another spell **dissipates** the held spell; a successful touch runs the spell's
+normal resolution; ranged touch attacks resolve as part of the spell and cannot be held.
+
+**Decisions.**
+
+- **Pure layer first** (`src/packages/pf1e/touchSpell.ts`): `resolveTouchAttack` computes the
+  bonus and reports hit/miss/natural-20 for the flows to consume — critical *confirmation* is
+  deliberately deferred (no second roll yet), so a natural 20 is simply a hit with a flag.
+  `PF1eHeldCharge` is the persisted shape: spell name, level, damage formula, save type and
+  severity — everything the delivery flow needs to re-run resolution without the original
+  prepared row. `heldChargeFromSystem` is null-tolerant and returns `null` for absent or
+  malformed blocks.
+- **The charge is authored actor state**: `system.pf1e.heldCharge`, validated in
+  `parsePF1eActorSystem` like the rest of the spells block. This keeps it replicated, joiner-
+  visible and GM-authoritative with no new machinery — the same home the D-155 slot ledger
+  uses.
+- **Cast-flow integration** (`resolveCastFlow` in `src/ui/sheets/pf1eCastFlow.ts`): a new
+  optional `touch` param (`"melee" | "ranged"`) routes touch-range casts through the attack
+  branch before the shared effect pipeline. On a melee miss the slot is spent, the charge is
+  written, and the card names it; on a ranged miss the spell is lost (ranged touch cannot be
+  held). On a hit, the existing damage→SR→save→HP pipeline runs under a touch-attack line —
+  the pipeline itself was extracted into a private `runSpellEffect` shared by casting and
+  delivery (refactor covered unchanged by all pre-existing flow tests).
+- **Dissipation is unconditional and ordered:** any cast first deletes an existing held
+  charge (delete op + warning on the card), then proceeds — matching "if you cast another
+  spell, the touch spell dissipates."
+- **`resolveTouchDelivery` is a separate entry point**, not a cast: it re-reads the freshest
+  documents (the charge may have been delivered/dismissed since the sheet rendered), refuses
+  on ownership or when the caster's DC for the charge's level is unavailable, rolls the touch
+  attack, and on a hit runs the shared pipeline then clears the charge. A miss spends nothing
+  and keeps the charge.
+- **Sheet UI** (`PF1eActorSheet.svelte`): a touch-mode select in the cast panel, a held-charge
+  panel (`data-held-charge`) with Deliver (requires a selected target) and Dismiss buttons;
+  handlers re-derive the freshest docs before acting so two open sheets cannot stale-write.
+
+**The store-roundtrip repair (the e2e pass caught it).** Clearing a charge with
+`{"system.pf1e.heldCharge": null}` is wrong for this store: `applyDiff` writes the literal
+`null` (only the `-=` delete-marker prefix removes keys), and the next `parsePF1eActorSystem`
+rejects `heldCharge: null` ("must be an object") — which blanks the actor's *entire* derived
+block (casting off, all DCs null, "No slots authored", the Spells tab button vanishes while
+stale tab content lingers). The fix is two-layer, both required: `heldChargeDiff(null)` emits
+`{"-=system.pf1e.heldCharge": null}` (the repo's delete convention), and the parser treats a
+literal `heldCharge: null` as absent. A new regression test runs
+write→clear→`applyDiff`→re-parse to pin the round-trip. **Rule of thumb for future slices:**
+deletions always use the `-=` marker, and parsers should treat `null` as absent defensively.
+
+**Verification.** 20 new unit tests — 9 in `tests/packages/pf1eTouchSpell.test.ts` (attack
+bonus composition, touch AC derivation, miss/hit/nat-20, charge parse tolerances, diff shapes
+including the store round-trip) and 11 in `tests/ui/pf1eTouchFlow.test.ts` (touch cast
+miss-holds / hit-resolves / ranged-miss-loses, dissipation ordering and warnings, delivery
+hit-delivers-and-clears / miss-keeps, ownership and DC refusals, stranger cannot deliver).
+Full suite **1453 passed / 3 skipped** across 144 files (+21 over D-157); typecheck and lint
+green; touched-file Prettier applied. **Chromium e2e 85/85** (+2) via `e2e/pf1e_touch.spec.ts`:
+dissipation is deterministic (authored Chill Touch → cast Magic Missile → warning + panel
+gone); the touch-cast test spends the slot, asserts the touch-AC line, then conditionally
+delivers or keeps the charge based on the card text (no dice seeding available). dist
+**2,217,984 raw / 645,780 gzip** (+11,624 / +2,500 over D-157, within the 6 MB budget).
+
+**Scope boundaries.** C03 stays open. Still missing: critical-threat confirmation on touch
+attacks, unarmed/natural-weapon delivery while holding a charge, touching allies (one friend
+standard / six friends full-round), multi-charge touch spells (Chill Touch), attacks of
+opportunity against ranged-touch casters, multi-round casting, swift/quickened/metamagic
+timing, and the remaining Table 9-1 UI triggers.

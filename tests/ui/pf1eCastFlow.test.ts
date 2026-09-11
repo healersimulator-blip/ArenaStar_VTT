@@ -172,6 +172,7 @@ describe("P5/C02 tactical cast flow (D-156)", () => {
     if (!res.ok) return;
     expect(res.lost).toBe(false);
     if (res.lost) return;
+    if (res.held) return;
     expect(res.dc).toBe(14); // 10 + level 1 + Int +3
     expect(res.result.dealt).toBe(7);
     expect(res.result.passed).toBe(false);
@@ -232,6 +233,7 @@ describe("P5/C02 tactical cast flow (D-156)", () => {
     if (!res.ok) return;
     expect(res.lost).toBe(false);
     if (res.lost) return;
+    if (res.held) return;
     expect(res.result.passed).toBe(true);
     expect(res.result.dealt).toBe(5); // floor(11/2)
   });
@@ -250,6 +252,7 @@ describe("P5/C02 tactical cast flow (D-156)", () => {
     if (!res.ok) return;
     expect(res.lost).toBe(false);
     if (res.lost) return;
+    if (res.held) return;
     expect(client.formulas).toEqual(["2d6"]); // no save roll
     expect(res.result.dealt).toBe(8);
   });
@@ -274,6 +277,7 @@ describe("P5/C02 tactical cast flow (D-156)", () => {
     if (!res.ok) return;
     expect(res.lost).toBe(false);
     if (res.lost) return;
+    if (res.held) return;
     expect(res.sr.resisted).toBe(true);
     expect(res.result.dealt).toBe(0);
     // A resisted target gets no saving throw.
@@ -305,6 +309,7 @@ describe("P5/C02 tactical cast flow (D-156)", () => {
     if (!r1.ok) return;
     expect(r1.lost).toBe(false);
     if (r1.lost) return;
+    if (r1.held) return;
     expect(r1.sr.resisted).toBe(false);
     expect(r1.sr.reused).toBe(false);
     // The ledger write rides the combat document.
@@ -337,6 +342,7 @@ describe("P5/C02 tactical cast flow (D-156)", () => {
     if (!r2.ok) return;
     expect(r2.lost).toBe(false);
     if (r2.lost) return;
+    if (r2.held) return;
     expect(r2.sr.reused).toBe(true);
     expect(second.formulas).toEqual(["2d6", "1d20"]); // damage + save only
   });
@@ -359,6 +365,7 @@ describe("P5/C02 tactical cast flow (D-156)", () => {
     if (!res.ok) return;
     expect(res.lost).toBe(false);
     if (res.lost) return;
+    if (res.held) return;
     expect(res.sr.reused).toBe(false);
     // damage + SR + save
     expect(client.formulas).toEqual(["2d6", "1d20", "1d20"]);
@@ -370,7 +377,7 @@ describe("P5/C02 tactical cast flow (D-156)", () => {
     one.script = [{ die: 3, total: 4 }, { die: 1 }];
     const r1 = await resolveCastFlow(one, owner, params());
     expect(r1.ok).toBe(true);
-    if (!r1.ok || r1.lost) return;
+    if (!r1.ok || r1.lost || r1.held) return;
     expect(r1.result.passed).toBe(false);
 
     const twenty = new FakeClient();
@@ -386,7 +393,7 @@ describe("P5/C02 tactical cast flow (D-156)", () => {
       }),
     );
     expect(r2.ok).toBe(true);
-    if (!r2.ok || r2.lost) return;
+    if (!r2.ok || r2.lost || r2.held) return;
     expect(r2.result.passed).toBe(true);
   });
 
@@ -415,6 +422,7 @@ describe("P5/C02 tactical cast flow (D-156)", () => {
     if (!res.ok) return;
     expect(res.lost).toBe(false);
     if (res.lost) return;
+    if (res.held) return;
     expect(res.result.dealt).toBe(7); // 12 - 5
     expect(res.result.erApplied).toEqual({ fire: 5 });
   });
@@ -437,6 +445,7 @@ describe("P5/C02 tactical cast flow (D-156)", () => {
     if (!res.ok) return;
     expect(res.lost).toBe(false);
     if (res.lost) return;
+    if (res.held) return;
     expect(res.result.passed).toBe(true);
     expect(res.result.dealt).toBe(0);
 
@@ -457,7 +466,9 @@ describe("P5/C02 tactical cast flow (D-156)", () => {
     expect(resFort.ok).toBe(true);
     if (!resFort.ok) return;
     expect(resFort.lost).toBe(false);
-    if (resFort.lost) return;    expect(resFort.result.dealt).toBe(5); // floor(11/2), not 0
+    if (resFort.lost) return;
+    if (resFort.held) return;
+    expect(resFort.result.dealt).toBe(5); // floor(11/2), not 0
   });
 
   test("Improved Evasion halves even a failed Reflex save", async () => {
@@ -477,6 +488,7 @@ describe("P5/C02 tactical cast flow (D-156)", () => {
     if (!res.ok) return;
     expect(res.lost).toBe(false);
     if (res.lost) return;
+    if (res.held) return;
     expect(res.result.passed).toBe(false);
     expect(res.result.dealt).toBe(5); // half despite the failed save
   });
@@ -533,6 +545,7 @@ describe("P5/C02 tactical cast flow (D-156)", () => {
     if (!res.ok) return;
     expect(res.lost).toBe(false);
     if (res.lost) return;
+    if (res.held) return;
     expect(res.warnings.join(" ")).toMatch(/over budget/i);
   });
 });
