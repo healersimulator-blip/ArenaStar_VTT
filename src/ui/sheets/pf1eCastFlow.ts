@@ -21,7 +21,10 @@
  * 7. touch spells (D-158) ride the same wire: the touch attack is part of the
  *    casting, a missed melee touch holds the charge on the actor document,
  *    and `resolveTouchDelivery` delivers it through the shared effect
- *    pipeline (`runSpellEffect`) that both paths consume.
+ *    pipeline (`runSpellEffect`) that both paths consume. D-159 extends it:
+ *    willing targets are auto-touched (no attack roll), a natural 20
+ *    threatens and the confirmation roll rides all the same modifiers; a
+ *    confirmed critical doubles the rolled damage (×2) before SR/save.
  */
 import type { Op } from "../../core/ops";
 import type { PermissionUser } from "../../core/ownership";
@@ -62,9 +65,11 @@ import {
   srOvercomeDiff,
 } from "../../packages/pf1e/srLedger";
 import {
+  criticalDamageTotal,
   heldChargeDiff,
   heldChargeFromSystem,
   resolveTouchAttack,
+  touchCriticalNeedsConfirmation,
 } from "../../packages/pf1e/touchSpell";
 import { pf1eSheetEdit, sheetRecord, isPF1eActor } from "./pf1eSheetModel";
 import { pf1eSpellbookEdit } from "./pf1eSpellbook";
@@ -120,6 +125,12 @@ export interface PF1eCastFlowParams {
    * be held"). Absent = a normal, non-touch spell.
    */
   touch?: "melee" | "ranged";
+  /**
+   * The GM declares the target willing (or the caster touching themselves):
+   * "You can automatically touch one friend or use the spell on yourself"
+   * (D-159) — the touch attack is skipped entirely. Ignored without `touch`.
+   */
+  willing?: boolean;
 }
 
 /**
@@ -177,6 +188,19 @@ function armorSpellFailureOf(actor: ActorDocument): number | null {
   return chance;
 }
 
+/** The declared touch attempt on the cast card (D-158, extended by D-159). */
+export interface PF1eCastTouchSummary {
+  kind: "melee" | "ranged";
+  /** The touch attack's total; null for a willing auto-touch (no roll). */
+  total: number | null;
+  hit: boolean;
+  threat: boolean;
+  /** Willing auto-touch — "you can automatically touch one friend". */
+  auto?: boolean;
+  /** A confirmed critical hit; the rolled damage was doubled (×2). */
+  critical?: boolean;
+}
+
 export type PF1eCastFlowOutcome =
   | {
       ok: true;
@@ -193,7 +217,7 @@ export type PF1eCastFlowOutcome =
       gateNotes: string[];
       hpWriteError: string | null;
       /** The touch attack that delivered the spell, when one was declared. */
-      touch?: { kind: "melee" | "ranged"; total: number; hit: boolean; threat: boolean };
+      touch?: PF1eCastTouchSummary;
     }
   | {
       ok: true;
@@ -202,7 +226,7 @@ export type PF1eCastFlowOutcome =
       held: false;
       warnings: string[];
       gateNotes: string[];
-      touch?: { kind: "melee" | "ranged"; total: number; hit: boolean; threat: boolean };
+      touch?: PF1eCastTouchSummary;
     }
   | {
       ok: true;
@@ -211,7 +235,7 @@ export type PF1eCastFlowOutcome =
       held: true;
       warnings: string[];
       gateNotes: string[];
-      touch: { kind: "melee"; total: number; hit: false; threat: boolean };
+      touch: PF1eCastTouchSummary & { kind: "melee"; hit: false };
       touchAc: number;
     }
   | { ok: false; error: string };
@@ -249,6 +273,11 @@ interface SpellEffectInput {
   targetFeats?: readonly string[];
   combat?: CombatDocument | null | undefined;
   srOvercomeByCaller?: boolean;
+  /**
+   * A confirmed critical hit (D-159): the rolled damage total is doubled
+   * (×2, Rules ID 131) before SR/save/energy-resistance composition.
+   */
+  critical?: boolean;
 }
 
 type SpellEffectResult =
@@ -304,6 +333,7 @@ async function runSpellEffect(
     )
       return fail("The damage roll message carries no total.");
     damageTotal = Math.max(0, Math.trunc(message.roll.total));
+    if (input.critical === true) damageTotal = criticalDamageTotal(damageTotal);
   }
 
   // ── spell resistance (once per round per target; no natural-die cases) ───
@@ -717,11 +747,11 @@ export async function resolveCastFlow(
     );
   }
 
-  // ── touch delivery (D-158): the touch attempt is part of the casting ────
-  let touchSummary:
-    | { kind: "melee" | "ranged"; total: number; hit: boolean; threat: boolean }
-    | undefined;
+  // ── touch delivery (D-158, extended by D-159): the touch attempt is part ─
+  // ── of the casting; willing targets are auto-touched, a natural 20 threatens ─
+  let touchSummary: PF1eCastTouchSummary | undefined;
   let touchCardLine: string | null = null;
+  let touchCritical = false;
   if (params.touch !== undefined) {
     const melee = params.touch === "melee";
     const touchAbility = melee
@@ -729,26 +759,72 @@ export async function resolveCastFlow(
       : casterDerived.abilityMods.dex;
     const touchBonus =
       casterDerived.baseAttack + touchAbility + casterDerived.sizeEntry.attackAc;
-    const rollId = client.roll(
-      "1d20",
-      "roll",
-      undefined,
-      `${spell.name} ${melee ? "melee" : "ranged"} touch attack`,
-    );
-    const message = await awaitRollMessage(client, rollId);
-    if (message === null) return fail("The touch attack never replicated.");
-    const face = dieFaceOf(message);
-    if (face === null)
-      return fail("Could not read the touch attack's d20 face.");
-    const touch = resolveTouchAttack({
-      die: face,
-      bonus: touchBonus,
-      touchAc: params.targetDerived.ac.touch,
-    });
-    if (!touch.ok) return fail(touch.error ?? "The touch attack was malformed.");
-    touchSummary = { kind: params.touch, total: touch.total, hit: touch.hit, threat: touch.threat };
-    touchCardLine = `${melee ? "Melee" : "Ranged"} touch attack [[${touch.total}|1d20 ${touchBonus >= 0 ? `+ ${touchBonus}` : `- ${Math.abs(touchBonus)}`}]] vs touch AC ${params.targetDerived.ac.touch} — ${touch.hit ? (touch.threat ? "HIT (threatens a critical)" : "hit") : "MISS"}.`;
-    if (!touch.hit) {
+    const touchBonusStr =
+      touchBonus >= 0 ? `+ ${touchBonus}` : `- ${Math.abs(touchBonus)}`;
+    if (params.willing === true) {
+      // "You can automatically touch one friend or use the spell on
+      // yourself" — no attack roll is made at all.
+      touchSummary = {
+        kind: params.touch,
+        total: null,
+        hit: true,
+        threat: false,
+        auto: true,
+      };
+      touchCardLine = `${melee ? "Melee" : "Ranged"} touch: ${params.casterActor.name} touches the willing ${params.targetName} automatically — no attack roll is needed.`;
+    } else {
+      const rollId = client.roll(
+        "1d20",
+        "roll",
+        undefined,
+        `${spell.name} ${melee ? "melee" : "ranged"} touch attack`,
+      );
+      const message = await awaitRollMessage(client, rollId);
+      if (message === null) return fail("The touch attack never replicated.");
+      const face = dieFaceOf(message);
+      if (face === null)
+        return fail("Could not read the touch attack's d20 face.");
+      const touch = resolveTouchAttack({
+        die: face,
+        bonus: touchBonus,
+        touchAc: params.targetDerived.ac.touch,
+      });
+      if (!touch.ok) return fail(touch.error ?? "The touch attack was malformed.");
+      touchSummary = { kind: params.touch, total: touch.total, hit: touch.hit, threat: touch.threat };
+      touchCardLine = `${melee ? "Melee" : "Ranged"} touch attack [[${touch.total}|1d20 ${touchBonusStr}]] vs touch AC ${params.targetDerived.ac.touch} — ${touch.hit ? (touch.threat ? "HIT (threatens a critical)" : "hit") : "MISS"}.`;
+      if (touch.hit && touch.threat) {
+        if (touchCriticalNeedsConfirmation(true, authored.damageFormula !== "")) {
+          // "another attack roll with all the same modifiers as the attack
+          // roll you just made" (Rules ID 131), against the same touch AC.
+          const confId = client.roll(
+            "1d20",
+            "roll",
+            undefined,
+            `${spell.name} critical confirmation`,
+          );
+          const confMessage = await awaitRollMessage(client, confId);
+          if (confMessage === null)
+            return fail("The critical confirmation never replicated.");
+          const confFace = dieFaceOf(confMessage);
+          if (confFace === null)
+            return fail("Could not read the confirmation's d20 face.");
+          const conf = resolveTouchAttack({
+            die: confFace,
+            bonus: touchBonus,
+            touchAc: params.targetDerived.ac.touch,
+          });
+          if (!conf.ok)
+            return fail(conf.error ?? "The confirmation roll was malformed.");
+          touchCritical = conf.hit;
+          touchSummary = { ...touchSummary, critical: conf.hit };
+          touchCardLine += ` Critical confirmation [[${conf.total}|1d20 ${touchBonusStr}]] — ${conf.hit ? "CRITICAL HIT (damage doubled)." : "not confirmed (regular hit)."}`;
+        } else {
+          touchCardLine +=
+            " A touch spell that deals no damage cannot score a critical hit.";
+        }
+      }
+    }
+    if (touchSummary !== undefined && touchSummary.hit === false) {
       if (melee) {
         // "If you don't discharge the spell in the round when you cast the
         // spell, you can hold the charge."
@@ -865,6 +941,7 @@ export async function resolveCastFlow(
     ...(params.srOvercomeByCaller !== undefined
       ? { srOvercomeByCaller: params.srOvercomeByCaller }
       : {}),
+    ...(touchCritical ? { critical: true } : {}),
   });
   if (!effect.ok) return fail(effect.error);
   ops.push(...effect.ops);
@@ -932,6 +1009,11 @@ export interface PF1eTouchDeliveryParams {
   combat?: CombatDocument | null;
   /** Manual GM adjudication that SR was already overcome this round. */
   srOvercomeByCaller?: boolean;
+  /**
+   * The GM declares the target willing: "You can touch one friend as a
+   * standard action" (D-159) — no attack roll, the charge discharges.
+   */
+  willing?: boolean;
 }
 
 export type PF1eTouchDeliveryOutcome =
@@ -943,7 +1025,8 @@ export type PF1eTouchDeliveryOutcome =
       sr: PF1eSrResult;
       result: Extract<PF1eSpellTargetResult, { ok: true }>;
       hpWriteError: string | null;
-      touch: { total: number; hit: true; threat: boolean };
+      /** Total is null for a willing auto-touch (no roll was made). */
+      touch: { total: number | null; hit: true; threat: boolean; auto?: boolean; critical?: boolean };
     }
   | {
       ok: true;
@@ -988,31 +1071,72 @@ export async function resolveTouchDelivery(
       `No DC for the held ${charge.name}: the caster has no slots at level ${charge.level} now.`,
     );
 
-  // The delivery touch attack: BAB + Str + size vs the target's touch AC.
+  // The delivery touch attack (D-159): willing targets are auto-touched
+  // ("You can touch one friend as a standard action"); a natural 20 threatens
+  // and the confirmation rides all the same modifiers against the touch AC.
   const touchBonus =
     params.casterDerived.baseAttack +
     params.casterDerived.abilityMods.str +
     params.casterDerived.sizeEntry.attackAc;
-  const rollId = client.roll(
-    "1d20",
-    "roll",
-    undefined,
-    `${charge.name} touch attack (held charge)`,
-  );
-  const message = await awaitRollMessage(client, rollId);
-  if (message === null) return fail("The touch attack never replicated.");
-  const face = dieFaceOf(message);
-  if (face === null)
-    return fail("Could not read the touch attack's d20 face.");
-  const touch = resolveTouchAttack({
-    die: face,
-    bonus: touchBonus,
-    touchAc: params.targetDerived.ac.touch,
-  });
-  if (!touch.ok) return fail(touch.error ?? "The touch attack was malformed.");
-  const touchLine = `Melee touch attack [[${touch.total}|1d20 ${touchBonus >= 0 ? `+ ${touchBonus}` : `- ${Math.abs(touchBonus)}`}]] vs touch AC ${params.targetDerived.ac.touch} — ${touch.hit ? (touch.threat ? "HIT (threatens a critical)" : "hit") : "MISS"}.`;
+  const touchBonusStr =
+    touchBonus >= 0 ? `+ ${touchBonus}` : `- ${Math.abs(touchBonus)}`;
+  let deliveryTouch: { total: number; hit: boolean; threat: boolean } | null =
+    null;
+  let deliveryCritical = false;
+  let touchLine: string;
+  if (params.willing === true) {
+    touchLine = `Melee touch: ${params.casterActor.name} touches the willing ${params.targetName} automatically — no attack roll is needed.`;
+  } else {
+    const rollId = client.roll(
+      "1d20",
+      "roll",
+      undefined,
+      `${charge.name} touch attack (held charge)`,
+    );
+    const message = await awaitRollMessage(client, rollId);
+    if (message === null) return fail("The touch attack never replicated.");
+    const face = dieFaceOf(message);
+    if (face === null)
+      return fail("Could not read the touch attack's d20 face.");
+    const touch = resolveTouchAttack({
+      die: face,
+      bonus: touchBonus,
+      touchAc: params.targetDerived.ac.touch,
+    });
+    if (!touch.ok) return fail(touch.error ?? "The touch attack was malformed.");
+    deliveryTouch = { total: touch.total, hit: touch.hit, threat: touch.threat };
+    touchLine = `Melee touch attack [[${touch.total}|1d20 ${touchBonusStr}]] vs touch AC ${params.targetDerived.ac.touch} — ${touch.hit ? (touch.threat ? "HIT (threatens a critical)" : "hit") : "MISS"}.`;
+    if (touch.hit && touch.threat) {
+      if (touchCriticalNeedsConfirmation(true, charge.damageFormula !== "")) {
+        const confId = client.roll(
+          "1d20",
+          "roll",
+          undefined,
+          `${charge.name} critical confirmation (held charge)`,
+        );
+        const confMessage = await awaitRollMessage(client, confId);
+        if (confMessage === null)
+          return fail("The critical confirmation never replicated.");
+        const confFace = dieFaceOf(confMessage);
+        if (confFace === null)
+          return fail("Could not read the confirmation's d20 face.");
+        const conf = resolveTouchAttack({
+          die: confFace,
+          bonus: touchBonus,
+          touchAc: params.targetDerived.ac.touch,
+        });
+        if (!conf.ok)
+          return fail(conf.error ?? "The confirmation roll was malformed.");
+        deliveryCritical = conf.hit;
+        touchLine += ` Critical confirmation [[${conf.total}|1d20 ${touchBonusStr}]] — ${conf.hit ? "CRITICAL HIT (damage doubled)." : "not confirmed (regular hit)."}`;
+      } else {
+        touchLine +=
+          " A touch spell that deals no damage cannot score a critical hit.";
+      }
+    }
+  }
 
-  if (!touch.hit) {
+  if (deliveryTouch !== null && deliveryTouch.hit === false) {
     // Still holding the charge; nothing is spent, nothing is cleared.
     const card = castHeldDeliveryMissContent(
       {
@@ -1041,7 +1165,11 @@ export async function resolveTouchDelivery(
       ok: true,
       delivered: false,
       chargeName: charge.name,
-      touch: { total: touch.total, hit: false, threat: touch.threat },
+      touch: {
+        total: deliveryTouch.total,
+        hit: false,
+        threat: deliveryTouch.threat,
+      },
       touchAc: params.targetDerived.ac.touch,
     };
   }
@@ -1071,6 +1199,7 @@ export async function resolveTouchDelivery(
     ...(params.srOvercomeByCaller !== undefined
       ? { srOvercomeByCaller: params.srOvercomeByCaller }
       : {}),
+    ...(deliveryCritical ? { critical: true } : {}),
   });
   if (!effect.ok) return fail(effect.error);
   const ops: Op[] = [...effect.ops];
@@ -1128,7 +1257,13 @@ export async function resolveTouchDelivery(
     sr: effect.sr,
     result: effect.result,
     hpWriteError: effect.hpWriteError,
-    touch: { total: touch.total, hit: true, threat: touch.threat },
+    touch: {
+      total: deliveryTouch === null ? null : deliveryTouch.total,
+      hit: true,
+      threat: deliveryTouch === null ? false : deliveryTouch.threat,
+      ...(deliveryTouch === null ? { auto: true } : {}),
+      ...(deliveryCritical ? { critical: true } : {}),
+    },
   };
 }
 

@@ -206,4 +206,58 @@ test.describe("PF1e touch spells: held charges ride the actor document (§7/P5 C
     }
     expect(errors).toEqual([]);
   });
+
+  test("willing targets are auto-touched at delivery and at cast (D-159)", async ({
+    page,
+  }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    await page.goto(entry + "?e2e=1");
+    await waitForSurface(page, "app");
+    await importFixture(page);
+
+    const sheet = page.locator("#sheets [data-pf1e-sheet]");
+    await sheet.getByRole("button", { name: "spells", exact: true }).click();
+    const book = sheet.locator("[data-pf1e-spellbook]");
+
+    // 1. The authored Chill Touch charge is auto-touched onto a willing
+    //    friend: no attack roll, the charge discharges.
+    await expect(book.locator("[data-held-charge]")).toContainText(
+      "Chill Touch",
+    );
+    await book.locator("[data-cast-target]").selectOption({ label: "PF Ogre" });
+    await book.locator("[data-held-autotouch]").click();
+    await expect(book.locator("[data-held-charge]")).toHaveCount(0);
+
+    await page.click('[data-tab="chat"]');
+    let chat = await page.locator("#chat-log").textContent();
+    expect(chat).toMatch(/touches the willing PF Ogre automatically/);
+    expect(chat).not.toMatch(/Melee touch attack \d+/);
+
+    // 2. A touch cast against a willing target skips the attack too, and a
+    //    hit auto-touch holds no charge.
+    await page.click('[data-tab="actors"]');
+    await page
+      .locator("#sheet-list .sheet-row")
+      .filter({ hasText: "PF Wizard" })
+      .click();
+    await sheet.getByRole("button", { name: "spells", exact: true }).click();
+    await book.locator('[data-cast-prepared="1"]').click();
+    await book.locator("[data-cast-touch]").selectOption("melee");
+    await book.locator("[data-cast-willing]").check();
+    await book.locator("[data-cast-severity]").selectOption("none");
+    await book.locator("[data-cast-damage]").fill("");
+    await book.locator("[data-cast-target]").selectOption({ label: "PF Ogre" });
+    await book.locator("[data-cast-submit]").click();
+
+    await expect(book.locator("[data-held-charge]")).toHaveCount(0);
+    await page.click('[data-tab="chat"]');
+    chat = await page.locator("#chat-log").textContent();
+    expect(chat).toContain("casts Shocking Grasp");
+    expect(chat).toMatch(
+      /touches the willing PF Ogre automatically — no attack roll is needed/,
+    );
+    expect(chat).not.toMatch(/Melee touch attack \d+ vs touch AC/);
+    expect(errors).toEqual([]);
+  });
 });

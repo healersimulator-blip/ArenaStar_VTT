@@ -10,8 +10,19 @@
  * - "Touching an opponent with a touch spell is considered to be an armed
  *   attack and therefore does not provoke attacks of opportunity."
  * - "You can score critical hits with either type of attack as long as the
- *   spell deals damage." (Critical confirmation is not encoded in this slice;
- *   the threat face is reported for the table.)
+ *   spell deals damage." D-159 encodes the confirmation: CRB "Critical Hits"
+ *   (R02, Rules ID 131 "Attack", pg. 182) — "you immediately make an attempt
+ *   to 'confirm' the critical hit—another attack roll with all the same
+ *   modifiers as the attack roll you just made. If the confirmation roll also
+ *   results in a hit against the target's AC, your original hit is a critical
+ *   hit. ... If the confirmation roll is a miss, then your hit is just a
+ *   regular hit." and "the threat range for a critical hit on an attack roll
+ *   is 20, and the multiplier is ×2." The CRB also exempts precision damage
+ *   and extra dice from special abilities; neither exists in this product's
+ *   authored spell damage, so ×2 of the rolled total is exact.
+ * - "You can automatically touch one friend or use the spell on yourself, but
+ *   to touch an opponent, you must succeed on an attack roll." (D-159: the
+ *   flows take a `willing` declaration and skip the attack roll entirely.)
  * - "Your opponent's AC against a touch attack does not include any armor
  *   bonus, shield bonus, or natural armor bonus. His size modifier, Dexterity
  *   modifier, and deflection bonus (if any) all apply normally." — the sheet
@@ -25,10 +36,9 @@
  *   and do[es] not require a separate action"; "Unless otherwise noted,
  *   ranged touch attacks cannot be held until a later turn."
  *
- * Out of this slice (documented): critical confirmation, unarmed/natural
- * delivery of a held charge, touching up to six friends as a full-round
- * action, multi-touch spells (one charge per level), and attacks of
- * opportunity against ranged touch casters.
+ * Out of this slice (documented): unarmed/natural delivery of a held charge,
+ * touching up to six friends as a full-round action, multi-touch spells (one
+ * charge per level), and attacks of opportunity against ranged touch casters.
  */
 import type { Json } from "../../core/documents";
 
@@ -76,6 +86,30 @@ export function resolveTouchAttack(
     threat: input.die === 20,
     hit: total >= input.touchAc,
   };
+}
+
+/**
+ * Whether a touch attack needs a critical confirmation roll (D-159). A threat
+ * confirms only for damage-dealing spells: Rules ID 133 — "You can score
+ * critical hits with either type of attack as long as the spell deals
+ * damage." The confirmation roll itself is "another attack roll with all the
+ * same modifiers" (Rules ID 131), so the flows reuse `resolveTouchAttack`.
+ */
+export function touchCriticalNeedsConfirmation(
+  threat: boolean,
+  dealsDamage: boolean,
+): boolean {
+  return threat && dealsDamage;
+}
+
+/**
+ * The confirmed critical's damage: "roll your damage more than once, with all
+ * your usual bonuses, and add the rolls together" with the touch-spell
+ * multiplier ×2 (Rules ID 131). Authored spell damage carries no precision
+ * dice or special-ability dice, so doubling the rolled total is exact.
+ */
+export function criticalDamageTotal(baseTotal: number): number {
+  return baseTotal * 2;
 }
 
 /* ------------------------------------------------------------------ *

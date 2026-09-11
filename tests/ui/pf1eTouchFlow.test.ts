@@ -450,3 +450,173 @@ describe("P5/C03 held-charge delivery (D-158)", () => {
     expect(client.formulas).toEqual([]);
   });
 });
+
+describe("P5/C03 critical confirmation and willing auto-touch (D-159)", () => {
+  const chargedWizard = (damageFormula: string) =>
+    touchWizard({
+      heldCharge: {
+        name: "Shocking Grasp",
+        level: 1,
+        damageFormula,
+        saveType: "ref",
+        severity: "none",
+      },
+    });
+
+  test("a confirmed critical doubles the rolled damage", async () => {
+    const client = new FakeClient();
+    // Touch d20 20 → 23, threat and hit; confirmation 10 → 13, confirmed;
+    // damage 5 doubled to 10.
+    client.script = [{ die: 20 }, { die: 10 }, { die: 5, total: 5 }];
+    const caster = touchWizard();
+    const res = await resolveCastFlow(
+      client,
+      owner,
+      castParams(caster, { touch: "melee" }),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok || res.lost || res.held) return;
+    expect(res.touch).toEqual({
+      kind: "melee",
+      total: 23,
+      hit: true,
+      threat: true,
+      critical: true,
+    });
+    expect(res.result.dealt).toBe(10);
+    expect(client.formulas).toEqual(["1d20", "1d20", "1d6"]);
+    expect(cardContent(client)).toMatch(/CRITICAL HIT \(damage doubled\)/);
+  });
+
+  test("an unconfirmed threat is a regular hit", async () => {
+    const client = new FakeClient();
+    // Touch d20 20 → threat; confirmation 1 + 3 = 4 vs touch AC 9 → miss.
+    client.script = [{ die: 20 }, { die: 1 }, { die: 5, total: 5 }];
+    const caster = touchWizard();
+    const res = await resolveCastFlow(
+      client,
+      owner,
+      castParams(caster, { touch: "melee" }),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok || res.lost || res.held) return;
+    expect(res.touch).toEqual({
+      kind: "melee",
+      total: 23,
+      hit: true,
+      threat: true,
+      critical: false,
+    });
+    expect(res.result.dealt).toBe(5);
+    expect(cardContent(client)).toMatch(/not confirmed \(regular hit\)/);
+  });
+
+  test("a threat with a damageless touch spell skips the confirmation", async () => {
+    const client = new FakeClient();
+    // Only the touch die is rolled — "critical hits ... as long as the
+    // spell deals damage."
+    client.script = [{ die: 20 }];
+    const caster = touchWizard();
+    const res = await resolveCastFlow(
+      client,
+      owner,
+      castParams(caster, {
+        touch: "melee",
+        authored: { saveType: "ref", severity: "none", damageFormula: "" },
+      }),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok || res.lost || res.held) return;
+    expect(client.formulas).toEqual(["1d20"]);
+    expect(res.result.dealt).toBe(0);
+    expect(cardContent(client)).toMatch(/cannot score a critical hit/);
+  });
+
+  test("a willing target is touched automatically at cast time", async () => {
+    const client = new FakeClient();
+    client.script = [{ die: 5, total: 5 }]; // only the damage roll
+    const caster = touchWizard();
+    const res = await resolveCastFlow(
+      client,
+      owner,
+      castParams(caster, { touch: "melee", willing: true }),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok || res.lost || res.held) return;
+    expect(res.touch).toEqual({
+      kind: "melee",
+      total: null,
+      hit: true,
+      threat: false,
+      auto: true,
+    });
+    expect(client.formulas).toEqual(["1d6"]);
+    expect(res.result.dealt).toBe(5);
+    expect(cardContent(client)).toMatch(/automatically — no attack roll/);
+  });
+
+  test("delivery: a willing friend takes the charge without an attack roll", async () => {
+    const client = new FakeClient();
+    client.script = [{ die: 5, total: 5 }]; // only the damage roll
+    const caster = chargedWizard("1d6");
+    const res = await resolveTouchDelivery(
+      client,
+      owner,
+      deliveryParams(caster, { willing: true }),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok || !res.delivered) return;
+    expect(res.touch).toEqual({
+      total: null,
+      hit: true,
+      threat: false,
+      auto: true,
+    });
+    expect(client.formulas).toEqual(["1d6"]);
+    expect(res.result.dealt).toBe(5);
+    const clear = stateOps(client).find((op) => {
+      if (op.kind !== "update") return false;
+      const diff = op.diff as Record<string, unknown>;
+      return "-=system.pf1e.heldCharge" in diff;
+    });
+    expect(clear).toBeDefined();
+    expect(cardContent(client)).toMatch(/automatically — no attack roll/);
+  });
+
+  test("delivery: a confirmed critical doubles the charge damage", async () => {
+    const client = new FakeClient();
+    client.script = [{ die: 20 }, { die: 15 }, { die: 5, total: 5 }];
+    const caster = chargedWizard("1d6");
+    const res = await resolveTouchDelivery(
+      client,
+      owner,
+      deliveryParams(caster),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok || !res.delivered) return;
+    expect(res.touch).toEqual({
+      total: 23,
+      hit: true,
+      threat: true,
+      critical: true,
+    });
+    expect(res.result.dealt).toBe(10);
+    expect(client.formulas).toEqual(["1d20", "1d20", "1d6"]);
+  });
+
+  test("delivery: a damageless charge's threat skips the confirmation", async () => {
+    const client = new FakeClient();
+    client.script = [{ die: 20 }];
+    const caster = chargedWizard("");
+    const res = await resolveTouchDelivery(
+      client,
+      owner,
+      deliveryParams(caster),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok || !res.delivered) return;
+    expect(client.formulas).toEqual(["1d20"]);
+    expect(res.result.dealt).toBe(0);
+    expect(cardContent(client)).toMatch(/cannot score a critical hit/);
+  });
+});

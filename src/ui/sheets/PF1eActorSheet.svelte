@@ -134,6 +134,8 @@
   let castSrOvercome = $state(false);
   // Touch delivery (D-158): "", "melee" or "ranged".
   let castTouch = $state("");
+  // D-159: the GM declares the target willing — the touch is automatic.
+  let castWilling = $state(false);
   // C03a gate (D-157): components line + the GM-declared situation.
   let castComponents = $state("");
   let castTime = $state("standard");
@@ -512,6 +514,7 @@
         ...(castTouch !== ""
           ? { touch: castTouch as "melee" | "ranged" }
           : {}),
+        ...(castTouch !== "" && castWilling ? { willing: true } : {}),
         ...(gateComponents !== ""
           ? {
               gate: {
@@ -549,7 +552,7 @@
 
   // D-158 — deliver or dissipate a held touch-spell charge. The delivery
   // re-reads the freshest documents, so a stale tab cannot overwrite state.
-  async function deliverHeldCharge(): Promise<void> {
+  async function deliverHeldCharge(willing: boolean): Promise<void> {
     castError = "";
     castWarning = "";
     const target = castTargetId
@@ -583,6 +586,7 @@
           : [],
         combat: linked.combat,
         ...(castSrOvercome ? { srOvercomeByCaller: true } : {}),
+        ...(willing ? { willing: true } : {}),
       });
       if (!outcome.ok) {
         castError = outcome.error;
@@ -1330,6 +1334,15 @@
             <option value="ranged">Ranged touch attack</option>
           </select>
         </label>
+        {#if castTouch !== ""}
+          <label
+            ><input
+              type="checkbox"
+              bind:checked={castWilling}
+              data-cast-willing
+            /> Willing target (automatic touch, no attack roll)</label
+          >
+        {/if}
         <fieldset data-cast-gate>
           <legend>Casting gate (components &amp; concentration)</legend>
           <label
@@ -1426,16 +1439,25 @@
         <section class="held-charge" data-held-charge>
           <p>
             Holding the charge: <strong>{heldCharge.name}</strong> (level
-            {heldCharge.level}) — deliver it with a melee touch attack, or it
-            dissipates when another spell is cast.
+            {heldCharge.level}) — deliver it with a melee touch attack, touch a
+            willing friend automatically, or it dissipates when another spell
+            is cast.
           </p>
           <button
             type="button"
             data-held-deliver
             disabled={castBusy || castTargetId === ""}
             onclick={() => {
-              void deliverHeldCharge();
+              void deliverHeldCharge(false);
             }}>{castBusy ? "Delivering…" : "Deliver touch"}</button
+          >
+          <button
+            type="button"
+            data-held-autotouch
+            disabled={castBusy || castTargetId === ""}
+            onclick={() => {
+              void deliverHeldCharge(true);
+            }}>Auto-touch (willing)</button
           >
           <button
             type="button"

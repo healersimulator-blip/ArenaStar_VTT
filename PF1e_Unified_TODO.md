@@ -409,6 +409,48 @@ Depends on P3 and D06; keep core EffectDocument unchanged.
 
 Depends on effects, attacks, action foundations and verified rule fixtures. Tactical targeting and strategic spell resolution remain independent implementations using common spell data.
 
+### P5 progress — 2026-09-11, touch criticals confirm and willing targets auto-touch (D-159, C03 partial)
+
+- **Critical confirmation is live on touch attacks.** R02 transcribed the CRB
+  "Critical Hits" section (Rules ID 131, "Attack", pg. 182) first: a natural
+  20 threatens; confirming is "another attack roll with all the same
+  modifiers as the attack roll you just made" against the same touch AC; the
+  multiplier is ×2 ("roll your damage more than once ... and add the rolls
+  together"). Both the cast-time touch attack and the held-charge delivery
+  roll the confirmation on a threat — but only when the spell deals damage
+  ("as long as the spell deals damage", Rules ID 133), and the doubled total
+  feeds the shared pipeline before SR/save/energy resistance. An
+  unconfirmed threat stays a regular hit.
+- **Willing targets are auto-touched.** "You can automatically touch one
+  friend or use the spell on yourself" (Rules ID 133) and "You can touch one
+  friend as a standard action" while holding the charge: both flows take a
+  `willing` declaration and skip the attack roll entirely — no dice, the
+  effect resolves (or the charge discharges) directly. The sheet gains a
+  willing checkbox in the cast panel and an Auto-touch button on the
+  held-charge panel next to Deliver/Dissipate.
+- **Pure layer pins the rulings:** `touchCriticalNeedsConfirmation` (threat ∧
+  damage-dealing) and `criticalDamageTotal` (×2) in
+  `src/packages/pf1e/touchSpell.ts`; the confirmation roll itself reuses
+  `resolveTouchAttack` since it carries all the same modifiers.
+- **Executed browser proof:** a 3rd test in `e2e/pf1e_touch.spec.ts`
+  (Chromium, **86/86** overall), fully deterministic because no dice are
+  involved: the authored Chill Touch charge is auto-touched onto a willing
+  ogre (panel gone, card narrates the automatic touch, no touch-attack chip),
+  then a melee touch cast of Shocking Grasp with the willing checkbox skips
+  the attack too and holds no charge. Random-die paths (threat/confirmation
+  branches) stay pinned by 9 new unit tests — 7 in
+  `tests/ui/pf1eTouchFlow.test.ts` (confirmed crit doubles damage, threat
+  unconfirmed stays regular, damageless threat skips confirmation, willing
+  cast and delivery) and 2 pure-layer tests.
+- **Still open for C03 (stays unchecked):** unarmed/natural-weapon delivery
+  of a held charge, touching up to six friends as a full-round action,
+  multi-charge touch spells (Chill Touch's extra charges), attacks of
+  opportunity against ranged-touch casters, multi-round casting,
+  swift/quickened/metamagic timing, and the remaining Table 9-1 UI triggers.
+- **Evidence:** unit **1462 passed / 3 skipped** across 144 files; typecheck
+  /lint/touched-file Prettier green; dist **2,220,480 raw / 646,400 gzip**;
+  Chromium e2e **86/86** (+1).
+
 ### P5 progress — 2026-09-11, touch spells and held charges ride the actor document (D-158, C03 partial)
 
 - **The C03 touch half is now live.** R02 transcribed the CRB "Cast a Spell"

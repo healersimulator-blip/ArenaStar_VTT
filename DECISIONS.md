@@ -4000,3 +4000,60 @@ attacks, unarmed/natural-weapon delivery while holding a charge, touching allies
 standard / six friends full-round), multi-charge touch spells (Chill Touch), attacks of
 opportunity against ranged-touch casters, multi-round casting, swift/quickened/metamagic
 timing, and the remaining Table 9-1 UI triggers.
+
+## D-159 — 2026-09-11 — P5/C03 partial: touch criticals confirm and willing targets auto-touch
+
+**Context.** D-158 shipped touch spells and held charges with the threat *face* reported but
+confirmation deferred, and every touch — even onto a willing ally — rode an attack roll. Both
+gaps were explicitly documented in the D-158 scope boundaries; this slice closes them.
+
+**Decisions.**
+
+- **R02 first.** Transcribed before encoding: CRB "Critical Hits" (Rules ID 131, "Attack",
+  pg. 182) — a natural 20 threatens; confirming is "another attack roll with all the same
+  modifiers as the attack roll you just made"; if the confirmation misses the attack is "just a
+  regular hit"; threat range 20, multiplier ×2 ("roll your damage more than once ... and add
+  the rolls together"); precision and special-ability dice are exempt from multiplication.
+  Rules ID 133 supplies the touch-specific limits: criticals only "as long as the spell deals
+  damage"; "You can automatically touch one friend or use the spell on yourself"; holding the
+  charge, "You can touch one friend as a standard action."
+- **Pure layer pins the rulings** (`src/packages/pf1e/touchSpell.ts`):
+  `touchCriticalNeedsConfirmation(threat, dealsDamage)` and `criticalDamageTotal(base)` (×2).
+  The confirmation computation itself reuses `resolveTouchAttack` — it is exactly "all the same
+  modifiers" against the same touch AC, so there is no second attack model to drift.
+- **Flow integration** (`pf1eCastFlow.ts`): both the cast-time touch branch and
+  `resolveTouchDelivery` roll the confirmation on a hit-threat when the damage formula is
+  non-empty; the doubled total enters the shared `runSpellEffect` pipeline (new optional
+  `critical` input) before SR/save/energy-resistance composition, so saving-throw reductions
+  apply to doubled damage as normal. A damageless threat posts a card note instead of rolling.
+  Cards append "CRITICAL HIT (damage doubled)" or "not confirmed (regular hit)".
+- **Willing auto-touch**: both flows take an optional `willing` declaration (GM's call, like
+  every other table-side declaration in this sheet): no attack roll at all — the outcome
+  reports `total: null, auto: true` and the card narrates the automatic touch. This is the
+  correct reading of the CRB for allies/self and removes a false failure mode (you cannot miss
+  touching a willing friend).
+- **Sheet UI**: a "Willing target" checkbox appears in the cast panel whenever a touch mode is
+  selected (`data-cast-willing`); the held-charge panel gains an Auto-touch button next to
+  Deliver/Dissipate (`data-held-autotouch`), both disabled until a target is selected.
+- **Outcome types widened deliberately**: `PF1eCastTouchSummary` (named type shared by all
+  three cast-outcome variants) carries nullable `total` plus optional `auto`/`critical`; the
+  delivery outcome's delivered variant does the same. Consumers pattern-match, so the widening
+  is compile-checked everywhere (the Svelte sheet reads only warnings).
+
+**Verification.** 9 new unit tests — 7 in `tests/ui/pf1eTouchFlow.test.ts` (confirmed critical
+doubles the rolled damage; unconfirmed threat is a regular hit; damageless threat rolls no
+confirmation; willing cast and willing delivery skip the attack roll, deliver, and clear the
+charge) and 2 pure-layer tests (`touchCriticalNeedsConfirmation` truth table; ×2). Full suite
+**1462 passed / 3 skipped** across 144 files (+9 over D-158); typecheck and lint green;
+touched authored-file Prettier applied (`pf1eCastFlow.ts` predates this authoring and keeps its
+existing formatting). **Chromium e2e 86/86** (+1): the new test is fully deterministic — no
+dice are in play: the authored Chill Touch charge is auto-touched onto the willing ogre, then a
+willing melee-touch cast of Shocking Grasp skips the attack and holds no charge; both cards
+assert the automatic-touch narration and the absence of any touch-attack chip. dist
+**2,220,480 raw / 646,400 gzip** (+2,500 / +620 over D-158, within the 6 MB budget).
+
+**Scope boundaries.** C03 stays open. Still missing: unarmed/natural-weapon delivery of a held
+charge, touching up to six friends as a full-round action, multi-charge touch spells, attacks
+of opportunity against ranged-touch casters, multi-round casting, swift/quickened/metamagic
+timing (the Quickened Spell text, Rules ID 158, is transcribed-ready for that slice), and the
+remaining Table 9-1 UI triggers.

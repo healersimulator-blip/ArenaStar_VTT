@@ -2,9 +2,11 @@ import { describe, expect, test } from "vitest";
 import { applyDiff } from "../../src/core/diff";
 import { parsePF1eActorSystem } from "../../src/packages/pf1e/actor";
 import {
+  criticalDamageTotal,
   heldChargeDiff,
   heldChargeFromSystem,
   resolveTouchAttack,
+  touchCriticalNeedsConfirmation,
   type PF1eHeldCharge,
 } from "../../src/packages/pf1e/touchSpell";
 
@@ -145,5 +147,20 @@ describe("P5/C03 held-charge persistence (D-158)", () => {
       saveType: "ref",
       severity: "none",
     });
+  });
+});
+
+describe("P5/C03 critical confirmation — pure layer (D-159)", () => {
+  test("confirmation is needed only for threats by damage-dealing spells", () => {
+    expect(touchCriticalNeedsConfirmation(true, true)).toBe(true);
+    expect(touchCriticalNeedsConfirmation(true, false)).toBe(false);
+    expect(touchCriticalNeedsConfirmation(false, true)).toBe(false);
+    expect(touchCriticalNeedsConfirmation(false, false)).toBe(false);
+  });
+
+  test("the confirmed touch critical's multiplier is x2", () => {
+    expect(criticalDamageTotal(7)).toBe(14);
+    expect(criticalDamageTotal(1)).toBe(2);
+    expect(criticalDamageTotal(0)).toBe(0);
   });
 });
