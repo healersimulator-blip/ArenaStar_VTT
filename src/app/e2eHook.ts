@@ -431,6 +431,27 @@ export interface GmFogSurface {
     strengths: number[];
     allyLists: Record<string, string[]>;
   };
+  /** P5/C01 (D-154): resolve an area against the active scene and show the preview overlay. */
+  pf1eAreaPreviewShow(spec: {
+    kind: string;
+    originCol: number;
+    originRow: number;
+    radiusFt: number;
+  }): {
+    ok: boolean;
+    issues: Array<{ field: string; message: string }>;
+    cells: number;
+    affectedTokenIds: string[];
+    label: string;
+  };
+  /** P5/C01 (D-154): clear the preview overlay. */
+  pf1eAreaPreviewClear(): void;
+  /** P5/C01 (D-154): what the overlay layer actually drew last. */
+  pf1eAreaPreviewState(): {
+    visible: boolean;
+    rectsDrawn: number;
+    highlights: number;
+  };
 }
 
 export interface RulesPackageSmokeResult {

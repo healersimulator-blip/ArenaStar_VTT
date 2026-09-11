@@ -5,6 +5,12 @@
   import { createStage, type Stage } from "../canvas/stage";
   import { tokenRect } from "../canvas/tokens";
   import { tokenBadgesMap } from "../packages/pf1e/tokenBadges";
+  import {
+    pf1eAreaPreviewModel,
+    type PF1eAreaPreviewModel,
+  } from "../packages/pf1e/areaPreview";
+  import type { PF1eAreaKind, PF1eAreaSpec } from "../packages/pf1e/targeting";
+  import { sightSegments } from "../canvas/vision";
   import { SvelteMap } from "svelte/reactivity";
   // static import: a dynamic import("pixi.js") would inline a SECOND copy of
   // pixi into the single-file bundle (+290 KB, D-083)
@@ -119,6 +125,10 @@
     controller?.clearSelection();
     tokenSelection = { sceneId: activeScene()?._id ?? null, ids: [] };
   }
+  // P5/C01 (D-154): the PF1e area preview is local caster UI state — it is
+  // computed from the replica on demand and never replicated.
+  let pf1ePreview: PF1eAreaPreviewModel | null = null;
+  let pf1ePreviewSceneId: string | null = null;
   /** §9 tile textures by asset hash/URL (session cache; blob URLs stay alive).
    * SvelteMap satisfies the reactive-state lint rule; used as a plain cache. */
   let tileTextureCache: SvelteMap<string, Promise<unknown>> | null = null;
@@ -465,6 +475,58 @@
     stage.getStrategicFogLayer().sync(rects, cam);
   }
 
+  /** P5/C01 (D-154): draw the PF1e area preview from its local model. */
+  function syncPF1eAreaPreview(): void {
+    if (!stage) return;
+    const layer = stage.getAreaPreviewLayer();
+    if (pf1ePreview && pf1ePreview.ok) {
+      layer.sync(pf1ePreview.rects, pf1ePreview.highlightRects, stage.camera);
+    } else {
+      layer.sync([], [], stage.camera);
+    }
+  }
+
+  /**
+   * P5/C01 (D-154): resolve an area spec against the active scene (grid,
+   * tokens, wall LoE) and show the overlay. Returns the resolved model so
+   * callers can surface the named issues. The casting flow (C02 UI) is the
+   * in-product consumer; every refusal is an issue, never a guess.
+   */
+  function showPF1eAreaPreview(spec: PF1eAreaSpec): PF1eAreaPreviewModel {
+    const scene = activeScene();
+    if (!scene) {
+      pf1ePreview = null;
+      pf1ePreviewSceneId = null;
+      syncPF1eAreaPreview();
+      return {
+        ok: false,
+        issues: [{ field: "scene", message: "no active scene" }],
+        cells: 0,
+        rects: [],
+        affectedTokenIds: [],
+        highlightRects: [],
+        label: "",
+      };
+    }
+    pf1ePreview = pf1eAreaPreviewModel(
+      {
+        grid: scene.grid,
+        tokens: scene.tokens,
+        segments: sightSegments(scene.walls),
+      },
+      spec,
+    );
+    pf1ePreviewSceneId = scene._id;
+    syncPF1eAreaPreview();
+    return pf1ePreview;
+  }
+
+  function clearPF1eAreaPreview(): void {
+    pf1ePreview = null;
+    pf1ePreviewSceneId = null;
+    syncPF1eAreaPreview();
+  }
+
   /** Re-render tokens + background from the GM client replica (never host internals). */
   function refresh(): void {
     storeVersion++;
@@ -473,6 +535,11 @@
     if (!current || !view) return;
     const scene = activeScene();
     if (tokenSelection.sceneId !== (scene?._id ?? null)) clearTokenSelection();
+    // A preview belongs to the scene it was resolved against; switching scenes
+    // clears it rather than repainting stale cells.
+    if (pf1ePreviewSceneId !== null && pf1ePreviewSceneId !== (scene?._id ?? null))
+      clearPF1eAreaPreview();
+    syncPF1eAreaPreview();
     worldName = current.meta.name;
     seq = current.gm.client.store.seq;
     tokenCount = scene?.tokens.length ?? 0;
@@ -966,6 +1033,29 @@
         fogTimer = globalThis.setInterval(syncStrategicFog, 300);
         installGmFogE2e({
           rectCount: () => view.getStrategicFogLayer().rectCount,
+          pf1eAreaPreviewShow: (spec) => {
+            const model = showPF1eAreaPreview({
+              kind: spec.kind as PF1eAreaKind,
+              origin: { col: spec.originCol, row: spec.originRow },
+              radiusFt: spec.radiusFt,
+            });
+            return {
+              ok: model.ok,
+              issues: model.issues.map((i) => ({ ...i })),
+              cells: model.cells,
+              affectedTokenIds: [...model.affectedTokenIds],
+              label: model.label,
+            };
+          },
+          pf1eAreaPreviewClear: () => clearPF1eAreaPreview(),
+          pf1eAreaPreviewState: () => {
+            const layer = view.getAreaPreviewLayer();
+            return {
+              visible: pf1ePreview !== null && pf1ePreview.ok,
+              rectsDrawn: layer.rectCount,
+              highlights: layer.highlightCount,
+            };
+          },
           sceneScale: () => {
             const scene = activeScene();
             const flags = scene?.flags as

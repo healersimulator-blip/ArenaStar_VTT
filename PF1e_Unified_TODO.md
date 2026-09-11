@@ -409,7 +409,36 @@ Depends on P3 and D06; keep core EffectDocument unchanged.
 
 Depends on effects, attacks, action foundations and verified rule fixtures. Tactical targeting and strategic spell resolution remain independent implementations using common spell data.
 
-- [ ] **C01 — Add pure grid targeting + canvas preview overlay:** burst, cone, line, emanation, spread/cylinder where supported; scene distance/units/diagonals, affected-token highlighting, walls/line of effect and cover. (I P5; G §4.10; B §4.4)
+### P5 progress — 2026-09-11, canvas preview overlay slice (D-154, C01 closed)
+
+- **One seam for the overlay:** `src/packages/pf1e/areaPreview.ts` (new, pure)
+  composes D-148's targeting into `pf1eAreaPreviewModel` — scene grid +
+  tokens + wall segments in, world-space cell rects + affected token ids +
+  highlight rects + label out, or `ok: false` with named issues. The canvas
+  layer, any future casting UI and the e2e surfaces all consume this one
+  function; nothing re-derives the chain.
+- **The overlay itself:** `src/canvas/layers/AreaPreviewLayer.ts` draws the
+  cell fills and a highlight ring per affected token, version-keyed, with
+  `rectCount`/`highlightCount` readbacks. It rides the controls holder —
+  local caster UI, never a replicated document — so the §9 `LAYER_ORDER`
+  constant and the `canvasSmoke` layer-order assertion stay untouched.
+  `App.svelte` owns the preview state; a scene switch clears it rather than
+  repainting stale cells.
+- **Surfaces + executed browser proof:** `GmFogSurface.pf1eAreaPreviewShow/
+Clear/State` drive the loop in Chromium (75/75): the burst that is exactly
+  the added token's 2×2 draws 4 rects + 1 highlight, a refused cone is
+  reported and never drawn, clear empties the overlay, zero page errors.
+- **Cone/line still refused, now visibly:** the model returns the named C01b
+  issue for them; their square-grid discretization stays contested
+  (transcribe-before-encoding, R01). Cover _modifiers_ remain P04; the
+  preview's wall respect is the LoE C01 asks for.
+- **Evidence:** 7 new tests in `tests/packages/pf1eAreaPreview.test.ts`; full
+  suite **1383 passed / 3 skipped** across 138 files; typecheck/lint/
+  touched-file Prettier green; dist **2,173,082 raw / 629,122 gzip**;
+  Chromium e2e **75/75**. The preview's in-product consumer arrives with the
+  C02 casting UI.
+
+- [x] **C01 — Add pure grid targeting + canvas preview overlay:** burst, cone, line, emanation, spread/cylinder where supported; scene distance/units/diagonals, affected-token highlighting, walls/line of effect and cover. (I P5; G §4.10; B §4.4) — **done 2026-09-11 (D-148 pure layer + D-154 overlay):** burst/emanation/cylinder/spread with 5-10-5 counting, far-corner inclusion, scene grid bridging, wall line-of-effect; `pf1eAreaPreviewModel` is the single seam, rendered by `AreaPreviewLayer` (controls holder) with affected-token highlight rings, browser-tested in Chromium. Cone/line stay refused under their named C01b issue (contested square-grid discretization — transcribe-before-encoding, R01); cover as a targeting _modifier_ is P04's positional defenses (the preview respects walls via LoE, which is C01's ask).
 - [ ] **C02 — Implement tactical casting/save flow:** chosen targets, DC from spell level/key ability/focus, Fort/Ref/Will, save-negates/half/no-save distinctions, Evasion/Improved Evasion, per-type damage/ER and SR without natural-roll auto outcomes. Respect target-specific resistance bookkeeping. (I P5; G §2.11/Appendix A.16; M Task 5)
 - [ ] **C03 — Implement concentration/components and timing:** defensive casting versus taking-damage checks, spell loss, threatened casting, armor spell failure, verbal/somatic/material/focus requirements, touch/held charge, multi-round casting, swift/quickened/metamagic timing. Validate dubious source restrictions under R02. (I P5; G §4.10; B §4.4)
 - [ ] **C04 — Add level 0–9 spellbook/preparation/slot readouts**, prepared versus spontaneous data and bonus slots; MVP overuse produces warnings, not hard enforcement. (I P5; B §6.2)

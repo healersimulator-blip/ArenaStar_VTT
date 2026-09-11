@@ -3680,3 +3680,65 @@ D-082 already records the sandbox's firefox ICE limitation). Their **Chromium
 acceptance half is now executed and green**, which this decision records; the
 boxes stay `[ ]` pending Firefox/WebKit runs in an environment that can fetch
 those binaries.
+
+## D-154 — 2026-09-11 — P5/C01 closed: the PF1e area canvas preview overlay, and one seam for it
+
+**Context.** D-148 landed the pure grid targeting (burst/emanation/cylinder/spread,
+5-10-5 counting, far-corner inclusion, wall LoE, scene-grid bridging) with the
+comment on `cellRect` promising "for the canvas preview overlay" — but the overlay
+itself, and the affected-token highlighting C01 asks for, did not exist. This slice
+delivers them and closes C01, with cone/line staying refused under their C01b named
+issue (below).
+
+**One seam, not three re-wirings.** `src/packages/pf1e/areaPreview.ts` (new, pure,
+diceless, Pixi-free) is the single composition `pf1eAreaPreviewModel`: scene grid →
+`pf1eAreaGridFromScene` → `resolveAreaCells` (walls arrive as caller-supplied
+`segments`, so the pf1e package never imports a WallDocument) → `areaPreviewRects`
+draw list + `affectedTokens` read. It returns world-space cell rects, affected token
+ids, token **highlight rects** and a UI label — or `ok: false` with the named issues
+(metric scene, refused shape, non-intersection origin, caps). The canvas layer, any
+future casting UI and the e2e surfaces all consume this one function; nothing
+re-derives the chain.
+
+**The layer rides the controls holder.** `src/canvas/layers/AreaPreviewLayer.ts`
+draws the cells (orange fill + stroke) and a ring around each affected token,
+version-keyed like `StrategicFogLayer`, with `rectCount`/`highlightCount` readbacks.
+It lives in the controls container: the preview is local caster UI state, not a
+replicated document, and the §9 `LAYER_ORDER` constant stays verbatim (the
+`canvasSmoke` layer-order assertion is unchanged). `App.svelte` owns the preview
+state: `showPF1eAreaPreview(spec)` resolves against the active scene's grid/tokens/
+`sightSegments(walls)`; a scene switch clears the preview rather than repainting
+stale cells; every `refresh()` re-syncs through the version key.
+
+**Surfaces:** `GmFogSurface.pf1eAreaPreviewShow/Clear/State` (the App-installed
+surface, which alone can reach the stage). Show returns the resolved model so
+callers surface the named issues; state reports what the layer actually drew.
+`e2e/pf1e_targeting.spec.ts` drives the full loop in Chromium: burst-on-the-token's-
+2×2 draws 4 rects + 1 highlight, a refused cone is reported and never drawn, clear
+empties the overlay, zero page errors.
+
+**Cone and line remain refused (C01b), now visibly.** `pf1eAreaPreviewModel` returns
+`ok: false, issues: [{field: "kind", … "cone and line are C01b"}]` for them — the
+D-148 position is unchanged: their square-grid discretization is contested (the
+published cone templates disagree; the designer's own answer is "just pick one"),
+so encoding either would be inventing a rule. C01's "where supported" wording covers
+the shipped subset; C01b needs a canonical transcription decision (R01 discipline)
+before any geometry exists.
+
+**Verification.** 7 new unit tests in `tests/packages/pf1eAreaPreview.test.ts`
+(composition: world rects for the hand-derived 5-ft burst, in/out token highlights,
+the D-148 wall fixture forwarded through the model, metric/cone/non-intersection
+refusals). Full suite **1383 passed / 3 skipped** across 138 files (+7/+1);
+typecheck, lint, touched-file Prettier green. **Chromium e2e 75/75** (was 74, +1
+overlay spec). dist **2,173,082 raw / 629,122 gzip** (+2,809 over D-153, within the
+6 MB budget).
+
+**C01 is checked.** Landed: burst/emanation/cylinder/spread targeting, scene
+distance/units/diagonals bridging, wall line-of-effect, canvas preview overlay,
+affected-token highlighting. Open under C01's umbrella, named rather than dropped:
+cone/line shapes (C01b, refused with a named issue) and "cover" as a targeting
+_modifier_ (soft/partial cover bonuses belong to P04's positional defenses; the
+preview respects walls via LoE, which is what C01's "walls/line of effect" asks).
+The preview's in-product consumer arrives with the C02 casting UI; until then the
+overlay is reachable through the documented surface, and its state machine
+(show/refuse/clear/scene-switch) is browser-tested.

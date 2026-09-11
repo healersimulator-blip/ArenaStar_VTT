@@ -42,6 +42,8 @@ import type { EffectsLayer } from "./layers/EffectsLayer";
 import { EffectsLayer as EffectsLayerImpl } from "./layers/EffectsLayer";
 import type { TilesLayer, TilesLayerOptions } from "./layers/TilesLayer";
 import { TilesLayer as TilesLayerImpl } from "./layers/TilesLayer";
+import type { AreaPreviewLayer } from "./layers/AreaPreviewLayer";
+import { AreaPreviewLayer as AreaPreviewLayerImpl } from "./layers/AreaPreviewLayer";
 
 /** §9 verbatim layer order (§9A models sit between Tokens and Tiles(above)). */
 export const LAYER_ORDER = [
@@ -94,6 +96,8 @@ export interface Stage {
   setGrid(grid: GridSpec | null): void;
   /** §9 templates overlay (cone/circle/ray/rect). */
   getTemplatesLayer(): TemplatesLayer;
+  /** P5/C01 (D-154) PF1e area preview overlay — caster UI in the controls holder. */
+  getAreaPreviewLayer(): AreaPreviewLayer;
   /** §9 drawings (freehand/poly/rect/text). */
   getDrawingsLayer(): DrawingsLayer;
   /** Fit the camera to a scene rect (§9 scene load). */
@@ -214,6 +218,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   let strategicFogLayer: StrategicFogLayerImpl | null = null;
   let effectsLayer: EffectsLayerImpl | null = null;
   let tilesLayer: TilesLayerImpl | null = null;
+  let areaPreviewLayer: AreaPreviewLayerImpl | null = null;
 
   // ── §9 placeholders (Drawings/Templates) + Walls + Lighting ─────────────────
   const drawingsHolder = new Container();
@@ -347,6 +352,15 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       }
       return drawingsLayer;
     },
+    getAreaPreviewLayer(): AreaPreviewLayer {
+      if (!areaPreviewLayer) {
+        areaPreviewLayer = new AreaPreviewLayerImpl();
+        // Caster-facing UI, not a replicated document: it rides the controls
+        // holder so the §9 layer stack above tokens stays untouched.
+        controlsLayer.addChild(areaPreviewLayer.container);
+      }
+      return areaPreviewLayer;
+    },
     fit(width: number, height: number): void {
       state.camera = fitRect({ x: 0, y: 0, width, height }, viewport, 24);
       applyCamera();
@@ -455,6 +469,8 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       app.render();
     },
     destroy(): void {
+      areaPreviewLayer?.destroy();
+      areaPreviewLayer = null;
       effectsLayer?.destroy();
       effectsLayer = null;
       tilesLayer?.destroy();
