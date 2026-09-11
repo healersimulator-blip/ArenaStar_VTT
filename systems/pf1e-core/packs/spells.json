@@ -32,7 +32,7 @@
             "dicePerCasterLevel": true,
             "maxDice": 10,
             "damageType": "fire",
-            "notes": "Sim default DC 16 assumes a 5th-level slot and +1 casting stat; the real DC is 10 + spell level + casting ability modifier."
+            "notes": "The sim derives the save DC as 10 + spell level + casting ability modifier (spellSaveDc); it does not read a hard-coded DC. radiusFeet, saveType, halfOnSave and the dice are the fields the mass-battle order consumes."
           }
         },
         "effects": []

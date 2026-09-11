@@ -3159,3 +3159,427 @@ transcription (which agrees); no other new research.
   initiative stability, map shape). Full suite **1219 passed / 3 skipped** across 133 files;
   typecheck, lint, touched-file Prettier, build, size and `build:systems` green; dist
   2,141,938 raw / 619,453 gzip (+2,367 over D-146, within the 6 MB budget).
+
+## D-148 — 2026-09-11 — P5/C01a: pure grid targeting for area spells, and the two shapes refused
+
+- **Context:** C01 asks for "pure grid targeting + canvas preview overlay: burst, cone, line,
+  emanation, spread/cylinder where supported; scene distance/units/diagonals, affected-token
+  highlighting, walls/line of effect and cover". Nothing in `src/` read scene grid metadata for
+  PF1e areas, and the Gap List has **no appendix table for spell shapes** — exactly the
+  transcribe-before-fixtures gap R01 filed for TWF/Charge. So the rules had to be verified
+  before any fixture could exist.
+- **Verified sources (transcribed 2026-09-11):** Archives of Nethys Rules ID 212 "Aiming a
+  Spell" (CRB pp.214–216), cross-checked against d20pfsrd.com/magic and d20srd.org. The
+  load-bearing sentences: the point of origin "is always a grid intersection"; count
+  "intersection to intersection" where "every second diagonal counts as 2 squares of
+  distance"; "if the far edge of a square is within the spell's area, anything within that
+  square is within the spell's area. If the spell's area only touches the near edge of a
+  square, however, anything within that square is unaffected"; a burst "can't affect creatures
+  with total cover from its point of origin (its effects don't extend around corners)"; a
+  cylinder "ignores any obstructions within its area"; a spread "can turn corners … count
+  around walls, not through them. As with movement, do not trace diagonals across corners";
+  and the larger-creature rule that a "centered on you" burst measures "from the edge of the
+  creature's space".
+- **Decision:** `src/packages/pf1e/targeting.ts` — pure math in **cell coordinates** (the
+  canvas/host layer converts world units; no Pixi import). Area counting reuses the existing
+  `cellDistance` from `src/canvas/grid/measure.ts` rather than adding a second distance
+  kernel, and every size comes from caller-supplied `PF1eAreaGrid {cellSize, feetPerCell,
+diagonals}` (P01: scene metadata, not hardcoded 5/15/30). The inclusion rule is implemented
+  as **distance to the cell's far corner**, which is the only reading that reproduces the
+  published templates: at a 5-ft. radius it yields exactly the four cells sharing the origin
+  corner (a 10-ft. square), and at 15 ft it yields the canonical 24-cell burst (rows of
+  2/4/6/6/4/2). Both are hand-derived fixtures, not captured outputs (V01). Spread is Dijkstra
+  over `(cell, diagonal-parity)` with orthogonal steps at 1 and diagonal steps at 1/2
+  alternating, which reproduces `ortho + diag + floor(diag/2)` exactly — the cost of the path
+  actually travelled, as the rule requires; the four cells around the origin intersection are
+  seeded at cost 1 because the effect starts at the intersection, matching the 5-ft. burst's
+  2×2. LoE is a 5-probe (4 corners + centre) test where **any** unblocked probe wins, since
+  total cover means no line reaches the square; the "hole of at least 1 square foot does not
+  block" clause needs no special case because this model authors such a barrier as two
+  segments with a gap.
+- **The cylinder/LoE conflict, reconciled explicitly:** AoN 212 says both that a cylinder
+  "ignores any obstructions within its area" and that a cylinder "affects only an area … to
+  which it has line of effect from its origin (… a cylinder's circle …)". The encoded reading:
+  the caster must have LoE to the **point of origin** (`hasLineOfEffectToOrigin`), after which
+  the cylinder fills its whole circle — so per-cell LoE is not applied to cylinders, and is
+  applied to burst/emanation. A fixture pins the difference against one wall: the burst loses
+  every cell behind it, the cylinder keeps all of them.
+- **Refused on purpose — cone and line (C01b).** Both have a grid discretization the rules
+  text does not settle, so encoding either would be inventing a rule:
+  - **Cone:** "a quarter-circle … starts from any corner of your square and widens out as it
+    goes", but the published templates disagree (1/2/3 rows vs 2/4/6 rows for a 15-ft. cone)
+    and the rules designer's own resolution is "Cones can't be perfect on a square grid. Just
+    pick one, drop it on the map so its origin point is the corner of one of the caster's
+    squares, and that's what area the spell effects" (Sean K Reynolds, Paizo forums).
+  - **Line:** "affects all creatures in squares through which the line passes", but a
+    zero-width line drawn along a grid line or an exact diagonal only grazes shared edges,
+    while the published template is a 5-ft.-wide corridor — the two readings differ on every
+    axis-aligned and 45° cast.
+    C01b must fix a named template from a canonical figure first. `resolveAreaCells` returns a
+    named `kind` issue pointing at C01b rather than guessing. C01's own wording ("where
+    supported") permits shipping the subset.
+- **The scene bridge, and a bug wiring it to a real scene exposed:** `pf1eAreaGridFromScene`
+  maps `SceneGrid` → `PF1eAreaGrid` and pins the diagonal rule to `PF1E_AREA_DIAGONALS`
+  ("5105"). The first draft let the scene's `SceneGrid.diagonals` drive area counting, which
+  is wrong: that setting configures the VTT **ruler**, and this repository's default scene
+  ships `diagonals: "555"` (`hostBoot.ts:178`), so a GM retuning the ruler would have silently
+  changed which squares a fireball covers. AoN 212 states 5-10-5 as a rule of spell areas, so
+  the scene supplies cell size and feet-per-cell while the counting rule stays the rules'. The
+  pure module keeps `diagonals` as a field (general, testable); the bridge is where the
+  decision lives. Metric scenes get a named `grid.units` issue rather than an invented
+  conversion.
+- **Wired to the existing Playwright surface, not left dormant.** `AppSurface.pf1eArea(spec)`
+  in `src/app/e2eHook.ts` resolves an area against the **live** scene — its grid metadata, its
+  sight-blocking walls (via the existing `sightSegments`, since AoN 212 makes LoE "like line
+  of sight … except that it isn't blocked by fog, darkness") and its tokens — returning cells,
+  affected token ids, preview-rect count and named issues. This is the seam the canvas
+  overlay/highlighting will read, so the browser spec asserts the real scene→cells→tokens path
+  instead of a re-implementation.
+- **Consequences:** C01 stays **open** — this is the C01a pure-geometry slice plus its browser
+  seam. Remaining: the Pixi preview overlay and the visible affected-token highlight, and
+  cone/line after their templates are transcribed. Unlike D-135's `tactical.ts`, this module
+  is **not** dormant: `e2eHook.ts` imports it, so it is now in the bundle (dist +5,587 bytes
+  over D-147). C02 (casting/save flow) is the next consumer.
+- **Evidence:** 36 new tests in `tests/packages/pf1eTargeting.test.ts`, each named after the
+  rule it pins (intersection-only origin, 5-10-5 diagonal counting, the far-edge/near-edge
+  pair, the 24-cell 15-ft. burst, emanation≡burst≡cylinder shape, burst total cover vs the
+  cylinder exemption, LoE-to-origin placement, spread turning a corner at a derived path cost
+  of 5 vs 9, no diagonals across corners, a 10-ft-grid recomputation for P01, the
+  ruler-vs-rules bridge, token footprints/Large touch, centered-on-you bonus, named-issue
+  garbage handling, the maxCells cap, labels, and the exact supported-shape list). Plus
+  `e2e/pf1e_targeting.spec.ts` (4 tests × 3 projects) driving the live scene. Full suite
+  **1255 passed / 3 skipped** across 134 files (+36 tests, +1 file over D-147); typecheck,
+  lint, touched-file Prettier, build, size and `build:systems` green; dist 2,147,525 raw /
+  621,553 gzip (+5,587 over D-147 — the module is now bundled, within the 6 MB budget); e2e
+  **171 collected across 29 files** (was 159/28), still not executed (D-119 precedent —
+  `cdn.playwright.dev` returns `ECONNRESET` and no browser binary exists on this machine).
+
+## D-149 — 2026-09-11 — P5/C02: tactical spell saves and spell resistance, without the natural-die house rule
+
+- **Context:** C02 asks for "tactical casting/save flow: chosen targets, DC from spell level/key
+  ability/focus, Fort/Ref/Will, save-negates/half/no-save distinctions, Evasion/Improved
+  Evasion, per-type damage/ER and SR without natural-roll auto outcomes. Respect target-specific
+  resistance bookkeeping" (Gap List A.16). The strategic engine already resolved spell damage in
+  `src/packages/pf1e/spells.ts`, but it does so with a house rule — its SR check short-circuits on
+  `if (srRoll !== 20)`, which gives a caster-level check the automatic-success-on-20 property that
+  belongs to attack rolls and saving throws, not to SR. That is DEVIATIONS D-1's family, and it was
+  to be removed in P5. Fixing it in place would have meant changing the strategic engine's numbers,
+  so the tactical flow needed its own resolver.
+- **Verified sources (transcribed 2026-09-11):** Archives of Nethys Rules ID 230 "Saving Throw"
+  for the automatic outcomes — "A natural 1 (the d20 comes up 1) on a saving throw is always a
+  failure… A natural 20 (the d20 comes up 20) is always a success" — and for voluntary surrender:
+  "A creature can voluntarily forego a saving throw and willingly accept a spell's result. Even a
+  character with a special resistance to magic can suppress this quality." The DC formula from the
+  magic overview: "10 + the level of the spell + your bonus for the relevant ability… A spell's
+  level can vary depending on your class. Always use the spell level applicable to your class." The
+  severity keywords verbatim: **Negates** "no effect on a subject that makes a successful saving
+  throw"; **Partial** "a successful saving throw means that some lesser effect occurs"; **Half**
+  "a successful saving throw halves the damage taken (round down)"; **None** "No saving throw is
+  allowed"; **Disbelief** "lets the subject ignore the spell's effect"; **(object)** objects save
+  only if magical or attended, else the holder's bonus if greater, and "A magic item's saving throw
+  bonuses are each equal to 2 + 1/2 the item's caster level". SR from the universal monster rules:
+  the caster makes "a caster level check (1d20 + caster level). If the result equals or exceeds the
+  creature's spell resistance, the spell works normally, although the creature is still allowed a
+  saving throw" — resistance is overcome once per spell per round.
+- **Decision:** `src/packages/pf1e/casting.ts` — pure, diceless (the caller supplies every die
+  face), no Pixi, no `Math.random`. `spellSaveDc` implements 10 + level + ability modifier, with
+  `focusBonus` an explicit caller input rather than a school lookup: Spell Focus is a feat, A07 does
+  not author it, and D-141 forbids silently activating feats from authored content.
+  `resolveSpellSave` makes natural 1 always fail and natural 20 always succeed, and reads no die at
+  all when the save was voluntarily foregone. `spellSaveOutcome` maps the five SRD severities to a
+  multiplier, with Evasion/Improved Evasion applied only to **Reflex half** — the definition of
+  Evasion is an attack "that normally allows a Reflex saving throw for half damage", so it does
+  nothing to a Fortitude-half or a Reflex-negates spell, and one fixture pins that a Fort-half
+  success with Improved Evasion still takes half.
+- **SR has no natural-die special cases, deliberately:** `spellResistanceCheck` compares
+  `1d20 + caster level` against SR and nothing else. A natural 20 from a 5th-level caster does not
+  reach SR 30, and a natural 1 from a 20th-level caster still overcomes SR 10. Both are fixtures.
+  This is the contrast that motivated the slice, and `spells.ts` is **not** changed by it, so
+  DEVIATIONS **D-1 remains live** and now records a known divergence between the strategic and
+  tactical paths rather than a single house rule.
+- **Ordering, named rather than incidental:** the save halves first (`Math.floor`, per "round
+  down"), then energy mitigation runs on what the creature actually takes. That order matters
+  because A.17 spends energy resistance once per attack per type against damage that is actually
+  dealt — halving afterwards would let a creature apply resistance to damage the save had already
+  removed. DR is never applied to spell damage (CRB p.561 scopes it to weapons and natural
+  attacks), and one fixture pins that a 20/— DR creature takes a full untyped spell.
+- **One pipeline, not two:** the energy half of A05's `applyMitigation` (immunity → vulnerability
+  +50% floor → resistance spent once per type) was extracted into an exported
+  `applyEnergyMitigation(components, defender)` in `mitigation.ts`, and `applyMitigation` now calls
+  it. Spells cannot reuse `applyMitigation` itself — that function is weapon-shaped and requires
+  `PF1eDrAttackFacts` (enhancement, material, alignment, damage type), and inventing weapon facts to
+  model a fireball would be fabricating input. The extraction is behaviour-preserving: the existing
+  22 mitigation fixtures pass unchanged, and a new fixture drives the extracted helper directly
+  with two fire components to prove resistance is spent once across both.
+- **Partial and Disbelief are not given a number.** Both return `kind: "lesser"` with an
+  explanatory note and multiplier 1, because the rule text says "some lesser effect occurs" and
+  "lets the subject ignore the spell's effect" without quantifying either; a multiplier here would
+  be invented. Objects are resolved by `magicItemSaveBonus` (2 + floor(CL/2)) and `objectSaveBonus`
+  (the holder's bonus when better; **no save at all** for an unattended mundane object).
+- **Not a barrel export:** `src/packages/pf1e/` has no `index.ts` and the TODO never asks for one —
+  every consumer in this repo imports the module directly, so `casting.ts` follows that convention.
+- **Still open for C02:** chosen-target selection and the round-scoped resistance bookkeeping
+  (`alreadyOvercomeThisRound` is currently a caller-supplied flag, not a tracked store), plus the
+  casting UI itself. C02 stays unchecked.
+- **Evidence:** 34 new unit tests in `tests/packages/pf1eCasting.test.ts`, including the two SR
+  fixtures that would fail under the strategic engine's rule; `e2e/pf1e_casting.spec.ts` (5 tests ×
+  3 projects) drives `AppSurface.pf1eCastResolve`, which runs the **real** bundled chain authored
+  `system.pf1e` → `deriveFromDocuments` → save total → `spellSaveDc` → `resolveSpellTarget` →
+  `applyEnergyMitigation`, so the browser path asserts wiring rather than re-implementing the rules.
+  Full suite **1289 passed / 3 skipped** across 134 files (+34 tests); typecheck, lint, touched-file
+  Prettier, build, size and `build:systems` green; dist **2,153,859 raw / 623,545 gzip** (+6,334
+  over D-148, within the 6 MB budget); e2e **186 collected across 30 files** (was 171/29), still
+  collected-not-executed per D-119.
+
+## D-150 — 2026-09-11 — P5/C03a: casting legality, components, arcane spell failure and concentration
+
+- **Context:** C03 asks for "concentration/components and timing: defensive casting versus
+  taking-damage checks, spell loss, threatened casting, armor spell failure, verbal/somatic/
+  material/focus requirements, touch/held charge, multi-round casting, swift/quickened/metamagic
+  timing". Nothing in `src/` answered "may this caster cast this spell right now, and does it
+  survive?" — the strategic engine cast unconditionally and the tactical C02 resolver started at
+  the saving throw, after the casting had already succeeded. The Gap List has no appendix table for
+  concentration DCs, so the rules were verified before encoding (R02).
+- **Verified sources (transcribed 2026-09-11):** Archives of Nethys Rules ID 203 / CRB pp.206–208,
+  Table 9-1 "Concentration Check DCs", verbatim: cast defensively "15 + double spell level";
+  injured while casting "10 + damage dealt + spell level"; continuous damage "10 + 1/2 damage dealt
+  - spell level"; a non-damaging spell "DC of the spell + spell level"; grappled or pinned "10 +
+    grappler's CMB + spell level"; vigorous/violent/extremely violent motion 10/15/20 + spell level;
+    wind with rain or sleet 5 + spell level; wind with hail and debris 10 + spell level; entangled
+    15 + spell level. Plus: "you roll d20 and add your caster level and the ability score modifier
+    used to determine bonus spells of the same type"; "If you fail the check, you lose the spell just
+    as if you had cast it to no effect"; "Pinned creatures can only cast spells that do not have
+    somatic components"; and, for grappling, casting is allowed "provided its casting time is no more
+    than 1 standard action, it has no somatic component, and you have in hand any material components
+    or focuses you might need". Spell Failure (CRB p.208): "might fail if you're wearing armor while
+    casting a spell with somatic components". From the Armor table: "The number in the Arcane Spell
+    Failure Chance column … is the percentage chance that the spell fails and is ruined. If the spell
+    lacks a somatic component, however, it can be cast with no chance of arcane spell failure";
+    "Shields: If a character is wearing armor and using a shield, add the two numbers together to get
+    a single arcane spell failure chance"; "A spellcaster who has been deafened has a 20% chance to
+    spoil any spell with a verbal component". Component text: "To cast a spell, you must be able to
+    speak (if the spell has a verbal component), gesture (if it has a somatic component), and
+    manipulate the material components or focus (if any)"; a somatic component needs "at least one
+    hand free"; and "If the Components line includes F/DF or M/DF, the arcane version of the spell has
+    a focus component or a material component (the abbreviation before the slash) and the divine
+    version has a divine focus component (the abbreviation after the slash)".
+- **Decision:** `src/packages/pf1e/concentration.ts` — pure and diceless. `parseSpellComponents`
+  returns **per-tradition segments** rather than a flat code list, so `M/DF` resolves to M for an
+  arcane caster and DF for a divine one instead of both casters needing both. `checkCastingLegality`
+  returns named refusals (cannot speak / no free hand / components not in hand / pinned /
+  grappling) rather than a boolean, because the table has to say _why_. `arcaneSpellFailureChance`
+  resolves each item **before** summing, so an exemption (bard light armour, mithral, Arcane Armour
+  Training) is per item — the Paizo-clarified reading — and returns chance 0 with `applies: false`
+  for a spell with no somatic component. `resolveConcentration` takes one die **per trigger**, since
+  several checks can apply to one casting and each is a separate roll; any single failure loses the
+  spell, and all checks are still evaluated and reported so the table can show which one failed.
+- **Table 7-2 is read, not re-encoded.** `castingAction` resolves casting times through the existing
+  `pf1eActionById` in `actions.ts` ("cast-spell" ⇒ standard/provokes yes; "cast-quickened" ⇒
+  swift/provokes no), which already carries the verified provoke column, so a free- or swift-action
+  spell inherits "doesn't incur an attack of opportunity" from the same row the action ledger uses.
+  Metamagic for a sorcerer or bard moves a 1-standard-action spell to a full-round action, and Quicken
+  Spell overrides that back to swift.
+- **Refused rather than guessed:** Table 7-2 lists only "Cast a spell (1 standard action casting
+  time)", so a full-round or longer casting time returns `provokes: null` with a note instead of an
+  inherited `yes`. `featBonus` (Combat Casting +4) and item exemptions are caller inputs, not
+  inferred from authored content (D-141), and casting times arrive as a caller-assigned bucket
+  because PF1e casting times are free text this module declines to parse.
+- **One assumption, named:** the continuous-damage row reads "10 + 1/2 damage dealt + spell level"
+  with no rounding rule stated. This floors it, following Pathfinder's general round-down convention
+  — that is an assumption, not a transcribed sentence, and is flagged in the code comment and here
+  for R03 review rather than presented as verified.
+- **Still open for C03:** touch spells and holding the charge, multi-round casting completion, the
+  prepared-caster metamagic cost, and the actual attack-of-opportunity trigger that makes "injured
+  while casting" happen (that is P06's interrupt queue — this slice takes the damage as an input).
+  No casting UI. **C03 stays unchecked.**
+- **Evidence:** 29 new unit tests in `tests/packages/pf1eConcentration.test.ts`, including the
+  level-9 cast-defensively DC (33) that pins the doubling against "15 + spell level", and the
+  two-check case where casting defensively passes but the injury check fails;
+  `e2e/pf1e_concentration.spec.ts` (5 tests × 3 projects) drives `AppSurface.pf1eCastAttempt`, which
+  derives deafened/grappled/pinned from the **authored actor document** through
+  `deriveFromDocuments` before running the gate, so the browser path proves real data reaches the
+  legality rules. Full suite **1318 passed / 3 skipped** across 135 files (+29 tests, +1 file over
+  D-149); typecheck, lint, touched-file Prettier, build, size and `build:systems` green; dist
+  **2,162,913 raw / 626,059 gzip** (+9,054 over D-149, within the 6 MB budget); e2e **201 collected
+  across 31 files** (was 186/30), still collected-not-executed per D-119.
+
+## D-151 — 2026-09-11 — P5/C05a: pack-driven cast payloads, and both live DEVIATIONS closed
+
+- **Context:** DEVIATIONS carried exactly two live entries and P5 owned both. **D-1** was the
+  strategic spell _scatter step_ — every model inside a template was unconditionally moved 5 ft away
+  from the epicenter and took no damage if the step left the radius. No SRD rule lets a creature step
+  out of a `fireball` before saving; D-130 decided "remove", not "make it a toggle". **D-2** was the
+  reference system's hard-coded Fireball order (`massBattlePf1e.ts`), whose `radius: 15` and `dc: 16`
+  disagreed with the content pack it claimed to fire. C05 asks for "profile/pack-driven cast payloads
+  for location, shape, range, radius, CL, DC, dice and targets".
+- **Verified sources (transcribed 2026-09-11):** Fireball, CRB p.283, cross-checked across
+  pathfinder.d20srd.org, d20pfsrd.com, roll20's compendium and legacy.aonprd.com: "School evocation
+  [fire]; **Level sorcerer/wizard 3**"; "Casting Time 1 standard action"; "Components V, S, M (a ball
+  of bat guano and sulfur)"; "Range **long (400 ft. + 40 ft./level)**"; "Area **20-ft.-radius
+  spread**"; "Saving Throw **Reflex half**; Spell Resistance **yes**"; and "1d6 points of fire damage
+  per caster level (**maximum 10d6**)". Class levels elsewhere: bloodrager 3 / magus 3 / sorcerer-
+  wizard 3, and oracle (flame mystery) 3.
+- **Decision:** `src/packages/pf1e/spellPacks.ts` — `parsePackSpellOrder({entry, casterLevel})` reads
+  the `system.massBattle` block a content pack ships and returns a validated payload, so radius,
+  shape, save type, half/negates, evasion applicability and the dice all come from the pack instead of
+  a literal at the call site. It resolves "1d6 per caster level (maximum 10d6)" from
+  `dicePerCasterLevel` + `maxDice`, and it **cross-checks the sim block against the spell's own
+  Saving Throw line**: a pack saying "Reflex half" while driving `halfOnSave: false`, or flagging
+  `evasion` on a spell that is not Reflex half, is reported as a content bug rather than silently
+  resolved. The save DC is deliberately **not** derived from the pack's class table — it is
+  `spellSaveDc` from `casting.ts`, so the strategic and tactical paths now share one DC formula and
+  cannot drift.
+- **Three rules fixes fell out of reading the strategic resolver closely, each now pinned by a
+  fixture:** (1) the scatter block is deleted and `modelsScattered` removed from the metrics — a
+  model resolves the save in the square it occupies, and the fixture puts one 14.5 ft from the
+  epicenter of a 15-ft blast, exactly where the old step would have pushed it to 15.5 ft and reported
+  it as having escaped; (2) `if (srRoll !== 20 && srTotal < targetSr)` became `if (srTotal <
+targetSr)` — a caster level check has no automatic success on a 20, and this was the divergence
+  D-149 recorded between the strategic and tactical paths; (3) Evasion was being applied to _any_
+  save type and _any_ severity, so a Fortitude-half spell was negated outright by it — it is now gated
+  on `saveType === "ref" && halfOnSave`, and `halfOnSave: false` negates on a success instead of
+  halving.
+- **The pack's own Fireball entry is wrong, and is reported rather than silently absorbed.**
+  `systems/pf1e-core/packs/spells.json` carries `level.wizard: 5` against CRB p.283's
+  "sorcerer/wizard 3", `range: "100 ft. + 50 ft./level"` against "long (400 ft. + 40 ft./level)", and a
+  `target` line ("one creature or object per caster level; no two may be more than 30 ft. apart") that
+  an area spell does not have. Secondary sources also indicate Fireball is **not** on the alchemist or
+  investigator list, which the pack lists at 5. Only the `massBattle.notes` field was edited, because
+  it described the sim's old hard-coded DC 16 and was therefore made false by this change; the level,
+  range and target fields were **left alone** on purpose — correcting a combined `sorcererWitch` key
+  and deleting class entries needs the whole class list verified against primary text, and the
+  negative claims ("not on the alchemist list") are only supported by secondary sources this turn.
+  This is safe precisely because nothing reads the pack's `level` table: the DC comes from
+  `spellSaveDc` with a caller-supplied spell level. **Open content bug, tracked in the TODO.**
+- **Packs stay content, not code.** Nothing in `src/` reads `systems/**` at runtime, so
+  `PF1E_PACK_FIREBALL_MASS_BATTLE` mirrors the shipped block for the reference system and
+  `tests/packages/pf1eSpellPacks.test.ts` asserts the mirror against the real file — reading it the
+  same way `pf1eActor.test.ts` reads the bestiary. That test caught genuine drift on its first run:
+  the mirror omitted `notes`. The test now asserts `notes` is the _only_ omission rather than
+  loosening the comparison, since `notes` is prose for a pack author and not a sim input.
+- **Each fix was mutation-checked, and the first D-2 guard did not work.** Re-running green tests
+  proves nothing about whether they would catch a regression, so all four changes were reverted one
+  at a time and the suite re-run. Three failed immediately as intended: restoring `srRoll !== 20`
+  gives `srBlocked` 0 instead of 1; restoring the scatter step empties `affectedModels` for the model
+  at 14.5 ft; restoring the old Evasion branch gives 0 instead of 6 on the Fortitude-half case and 6
+  instead of 0 on the negates case. **Restoring the hard-coded `radius: 15` / `dc: 16` at the call
+  site left the suite fully green** — the pack-parity test only pins the mirror constant, not the
+  order that is actually built. A first attempt at a call-site guard also passed under the mutation,
+  because it asserted the _reported_ cast parameters while the mutated code still reported the pack
+  values and only the resolution used the literal. What actually catches it is an outcome
+  discriminator: a third model at (10, 27), 17 ft from the epicenter, is inside the pack's 20-ft
+  spread but outside a 15-ft literal, so `modelsTargeted` is 3 with pack data and 2 with the
+  hardcode. That is now asserted in `tests/packages/massBattlePf1e.test.ts`, and the mutation fails
+  it with `expected 2 to be 3`.
+- **Formatting discipline corrected in the same pass.** This repo is _not_ uniformly Prettier-
+  formatted — `pnpm format` is a manual script, not a gate, and many files (all of `e2e/`, both
+  mass-battle test files, `DEVIATIONS.md`, `spells.json`) are unclean at HEAD. Running
+  `prettier --write` on those files reformatted hundreds of untouched lines; that was reverted and
+  the edits re-applied in each file's existing style. The rule this leaves behind: **check
+  `git show HEAD:<file> | prettier --check --stdin-filepath <file>` first, and only format files that
+  were already clean.** Verified afterwards by diffing deletions — every deleted line in
+  `spells.ts` (25) and `massBattlePf1e.ts` (13) is a line this change replaces, and the appended
+  tests show 0 deletions.
+- **Evidence:** 16 new tests (11 in `tests/packages/pf1eSpellPacks.test.ts`, 4 added to
+  `pf1eSpells.test.ts`, whose first test was also renamed — it advertised the scatter it no longer
+  does, and 1 in `massBattlePf1e.test.ts`); full suite **1334 passed / 3 skipped** across 136 files
+  (+16 tests, +1 file over D-150); typecheck, lint, build, size and `build:systems` green.
+  `dist/index.html` is byte-identical to D-150 (2,162,913 raw / 626,059 gzip) **because
+  `massBattlePf1e.ts` is not in the app bundle** — verified, not assumed: `grep -c massBattle
+dist/index.html` returns 0. It ships in the rules artifact instead, verified by unpacking:
+  `rules.js` grew 46.7 kB → **55.1 kB**, contains the new "no massBattle block" message and the
+  `radiusFeet` mirror, and no longer contains `modelsScattered` or `srRoll`.
+  `dist/packages/pf1e-core-1.0.0.zip` was unpacked and its `packs/spells.json` confirmed to carry
+  radius 20 and the corrected note. The existing `e2e/pf1e_mass_battles.spec.ts` imports and
+  activates that exact zip in a real browser Worker and asserts `packCount === 2`, so the edited pack
+  and the edited rules bundle are both covered on the browser side at the load-and-activate level;
+  the spell resolution itself is covered by unit tests and is **not** browser-executed here (D-119).
+  **C05 stays unchecked** — location, range and targets are still a fixed demo origin rather than
+  order-driven, and only `circle` is wired.
+
+## D-152 — Spell slots, bonus spells and prepared/spontaneous bookkeeping (P5/C04, 2026-09-11)
+
+**Context.** C04 asks for "level 0–9 spellbook/preparation/slot readouts, prepared versus spontaneous
+data and bonus slots; MVP overuse produces warnings, not hard enforcement". Before this slice the
+repo had **no bonus-spell computation at all** (`grep -rn bonusSpell src/` → 0 hits) and the only
+slot data was `PF1eDerived.spellSlots`, which `actor.ts:973–985` fills with the **authored** budget
+verbatim — no Table 1-3 bonuses, no minimum-ability check, no ledger, and nothing in `src/ui/` read
+it (`grep -rn spellSlots src/` matched only `actor.ts`).
+
+**Rules verified against primary text before encoding (R02).**
+
+- **CRB Table 1-3, "Ability Modifiers and Bonus Spells"** (p.17; verified 2026-09-11 against
+  d20pfsrd.com/basics-ability-scores/ability-scores/, cross-checked against the dandwiki PFSRD
+  mirror and the Kingmaker wiki). All 23 rows transcribed into
+  `PF1E_BONUS_SPELL_TABLE`. Two properties of the table are easy to get wrong from its shape and are
+  the reason it is written out rather than computed: **0th-level spells never receive a bonus spell
+  at any score** (the "Bonus Spells per Day" columns start at 1st), and **the progression is not
+  linear** — 20–21 grants 2/1/1/1/1, not 2 at every level. Scores 1 through 9 all read "Can't cast
+  spells tied to this ability". The table ends with "etc. . ." above 45, so **46+ is reported as out
+  of range rather than extrapolated** — inventing a 46th row would be a fabricated fixture (V01).
+- **Minimum ability score** — CRB, Wizard: "To learn, prepare, or cast a spell, the wizard must have
+  an Intelligence score equal to at least **10 + the spell level**." Generalised to any spellcasting
+  ability (Int wizard/magus/alchemist; Wis cleric/druid/ranger/inquisitor; Cha bard/paladin/
+  sorcerer), which is how the class write-ups state it. Encoded as `minimumAbilityScore`.
+- **A bonus is usable only where the class already grants the slot** — the CRB's own gloss: "he can
+  only use the 1st-level bonus spell because as a 1st-level wizard he only has access to 1st-level
+  spells." So a bonus at a level with no slots is a **warning**, never a granted slot.
+- **Ability damage does not cost bonus spells; ability drain does** (CRB p.555, already implemented
+  in `actor.ts:549–556`): drain _actually reduces the score_, damage applies only a −1 penalty per
+  two full points to statistics using the modifier. Table 1-3 is a **score** table, so the readout
+  takes `derived.abilities[keyAbility]` — which `actor.ts` has already drain-adjusted but never
+  damage-adjusted — and must not. Pinned both ways by a fixture (drain 6 ⇒ Int 12 loses 3rd/4th;
+  damage 6 ⇒ still 18, warnings empty). Writing this test first produced a **wrong expectation, not a
+  wrong implementation**: `abilitiesDamage` returned 18 and the test failed. The rule, not the code,
+  was corrected.
+
+**What landed.**
+
+- **`src/packages/pf1e/spellSlots.ts` (new, pure, no repo imports).** `bonusSpellsForAbility` (Table
+  1-3), `minimumAbilityScore`, `resolveSpellSlotBudget` (authored budget + bonuses + castability +
+  warnings), `emptySlotLedger`/`spendSlot`, `spendSpontaneousSlot` (lowest sufficient slot, escalates
+  when a level is exhausted), `reviewPreparation`/`expendPrepared`, and the readout layer
+  `slotLevelLabel`/`slotLedgerView`. Every over-budget path returns **`allowed: true` plus a
+  `warning`** — nothing refuses a cast, per C04.
+- **`pf1eSpellSlotReadout(derived)` in `src/ui/sheets/pf1eSheetModel.ts`** — a thin adapter that maps
+  a `PF1eDerived` onto the budget. This file's stated rule is "no rules arithmetic" and it keeps it:
+  Table 1-3, the minimum score and the warnings all live in the package. It truncates the derived
+  0–10 slot array at 9 because C04 scopes the readout to **levels 0–9**; level 10 is not silently
+  widened in, and a fixture asserts a 10th-level slot stays out.
+- **Sheet readout** in the summary tab of `PF1eActorSheet.svelte`, under Spell resistance:
+  `<dd data-pf1e-spell-slots>` renders `0th 0/4 · 1st 0/5 · 2nd 0/4 · 3rd 0/3 · 4th 0/2 (INT 18,
+prepared)`, and each budget warning renders as `data-pf1e-spell-slot-warning`.
+- **`AppSurface.pf1eSpellSlots({system})` in `src/app/e2eHook.ts`** plus
+  `e2e/pf1e_spell_slots.spec.ts` (7 tests). The surface calls the **same** `pf1eSpellSlotReadout` the
+  sheet renders rather than a copy, so the browser path proves the sheet's own code reaches the rules.
+
+**Every rule claim was mutation-checked.** Re-running green tests says nothing about whether they
+would catch a regression, so five mutations were applied one at a time and the suite re-run: making
+the 20–21 row linear (**2 failed**), shifting the row so 0th level gets the 1st-level bonus (**9
+failed**), turning overuse into a hard refusal (**2 failed**), ignoring bonuses entirely (**8
+failed**), and dropping the no-slots-for-bonus warning (**1 failed**). Restored baseline: 36/36.
+
+**Evidence.** 42 new tests (36 in `tests/packages/pf1eSpellSlots.test.ts`, 6 added to
+`tests/ui/pf1eSheetModel.test.ts`, which went 13 → 19); full suite **1376 passed / 3 skipped** across
+137 files (+42 tests, +1 file over D-151); typecheck, lint, build, size and `build:systems` green.
+dist **2,169,035 raw / 627,929 gzip** (+6,122 / +1,870 over D-151, within the 6 MB budget);
+`rules.js` unchanged at **55.1 kB**; e2e **222 collected across 32 files** (was 201/31), still
+collected-not-executed per D-119. Prettier status audited per file against HEAD — **no file flipped**
+except `PF1eActorSheet.svelte`, where the "flip" is an artifact of the check and not a formatting
+regression: this repo has no Svelte parser, so `prettier --check <file>.svelte` exits 2 with "No
+parser could be inferred", while the `git show HEAD:<f> | prettier --check --stdin-filepath` form
+silently no-ops and exits 0. **Prettier does not apply to Svelte files here**; `pnpm lint`
+(`svelte/require-each-key` caught the one real issue) is what covers them.
+DEVIATIONS.md is unchanged: 2 rows, both **CLOSED (D-151)**, none live.
+
+**What is deliberately not shipped, and why C04 stays unchecked.** The bundle confirms the boundary
+rather than leaving it assumed: `grep -c "Spell slots (0th-9th)" dist/index.html` → 1 and
+`grep -c "is below the required"` → 1, but `grep -c "no slots granted at that level"` → 0,
+`"which grants no slots"` → 0 and `"no unspent slot at level"` → 0. The **readout** path ships; the
+**spending and preparation** path (`spendSlot`, `spendSpontaneousSlot`, `reviewPreparation`,
+`expendPrepared`) is tree-shaken out because nothing in `src/` calls it yet. So C04's "overuse
+produces warnings, not hard enforcement" is implemented and mutation-tested as a data layer but is
+**not observable in the product** — no cast decrements a slot. Two pieces of the item also remain
+unbuilt: a **rendered spellbook/prepared list** (there is no authored prepared-spell list on the
+actor document at all, so this needs a schema field plus validation and an editor, not just markup),
+and wiring the ledger to actual casting. **C04 stays `[ ]`.**

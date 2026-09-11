@@ -377,71 +377,43 @@ export type PF1eMitigationResult =
  * first component of that type, and DR against a mixed lethal/nonlethal total
  * comes off the lethal bucket first.
  */
-export function applyMitigation(
-  input: PF1eMitigationInput,
-): PF1eMitigationResult {
-  const notes: string[] = [];
-  // --- validation: components -------------------------------------------------
-  for (const component of input.components) {
-    if (!Number.isInteger(component.amount) || component.amount < 0) {
-      return {
-        ok: false,
-        error: `damage component "${component.label}" amount ${String(component.amount)} is not a non-negative integer`,
-      };
-    }
-    if (
-      component.kind === "energy" &&
-      (component.energyType === undefined ||
-        !(PF1E_ENERGY_TYPES as readonly string[]).includes(
-          component.energyType,
-        ))
-    ) {
-      return {
-        ok: false,
-        error: `energy component "${component.label}" has no supported energyType`,
-      };
-    }
-    if (component.kind !== "physical" && component.kind !== "energy") {
-      return {
-        ok: false,
-        error: `damage component "${component.label}" kind must be "physical" or "energy"`,
-      };
-    }
-  }
-  const defender = input.defender;
-  for (const entry of defender.dr ?? []) {
-    if (!Number.isInteger(entry.value) || entry.value < 0) {
-      return {
-        ok: false,
-        error: `DR entry value ${String(entry.value)} is not a non-negative integer`,
-      };
-    }
-  }
-  if (
-    defender.object !== undefined &&
-    (!Number.isInteger(defender.object.hardness) ||
-      defender.object.hardness < 0)
-  ) {
-    return {
-      ok: false,
-      error: `object hardness ${String(defender.object.hardness)} is not a non-negative integer`,
-    };
-  }
+/** One damage component after the shared energy pipeline. */
+export interface PF1eWorkingDamage {
+  label: string;
+  amount: number;
+  kind: "physical" | "energy";
+  energyType: PF1eEnergyType | null;
+  nonlethal: boolean;
+  precision: boolean;
+}
 
+export interface PF1eEnergyMitigationResult {
+  components: PF1eWorkingDamage[];
+  erApplied: Partial<Record<PF1eEnergyType, number>>;
+  notes: string[];
+}
+
+/**
+ * The energy half of damage mitigation, shared by weapon attacks
+ * (`applyMitigation`) and spells (C02 `casting.ts`) so the two paths cannot
+ * drift. Order is D-138's: energy immunity drops the component → vulnerability
+ * +50% (floor) → energy resistance, spent once per attack per type.
+ *
+ * Energy damage ignores DR entirely (CRB p.561), so this needs no weapon
+ * facts — which is exactly why a spell can use it without inventing a weapon
+ * descriptor. Components are assumed already validated by the caller.
+ */
+export function applyEnergyMitigation(
+  components: readonly PF1eDamageComponent[],
+  defender: PF1eMitigationDefender,
+): PF1eEnergyMitigationResult {
+  const notes: string[] = [];
   // --- energy immunity: dropped entirely --------------------------------------
   const immuneEnergy = new Set(defender.immuneEnergy ?? []);
   const vulnerableEnergy = new Set(defender.vulnerableEnergy ?? []);
 
-  type Working = {
-    label: string;
-    amount: number;
-    kind: "physical" | "energy";
-    energyType: PF1eEnergyType | null;
-    nonlethal: boolean;
-    precision: boolean;
-  };
-  const working: Working[] = [];
-  for (const component of input.components) {
+  const working: PF1eWorkingDamage[] = [];
+  for (const component of components) {
     if (component.amount === 0) continue;
     const energyType =
       component.kind === "energy" ? (component.energyType ?? null) : null;
@@ -497,6 +469,67 @@ export function applyMitigation(
     const used = pool - remaining;
     if (used > 0) erApplied[type] = used;
   }
+  return { components: working, erApplied, notes };
+}
+
+export function applyMitigation(
+  input: PF1eMitigationInput,
+): PF1eMitigationResult {
+  const notes: string[] = [];
+  // --- validation: components -------------------------------------------------
+  for (const component of input.components) {
+    if (!Number.isInteger(component.amount) || component.amount < 0) {
+      return {
+        ok: false,
+        error: `damage component "${component.label}" amount ${String(component.amount)} is not a non-negative integer`,
+      };
+    }
+    if (
+      component.kind === "energy" &&
+      (component.energyType === undefined ||
+        !(PF1E_ENERGY_TYPES as readonly string[]).includes(
+          component.energyType,
+        ))
+    ) {
+      return {
+        ok: false,
+        error: `energy component "${component.label}" has no supported energyType`,
+      };
+    }
+    if (component.kind !== "physical" && component.kind !== "energy") {
+      return {
+        ok: false,
+        error: `damage component "${component.label}" kind must be "physical" or "energy"`,
+      };
+    }
+  }
+  const defender = input.defender;
+  for (const entry of defender.dr ?? []) {
+    if (!Number.isInteger(entry.value) || entry.value < 0) {
+      return {
+        ok: false,
+        error: `DR entry value ${String(entry.value)} is not a non-negative integer`,
+      };
+    }
+  }
+  if (
+    defender.object !== undefined &&
+    (!Number.isInteger(defender.object.hardness) ||
+      defender.object.hardness < 0)
+  ) {
+    return {
+      ok: false,
+      error: `object hardness ${String(defender.object.hardness)} is not a non-negative integer`,
+    };
+  }
+
+  // --- shared energy pipeline (immunity → vulnerability → resistance) ---------
+  // Extracted so spells (C02 casting.ts) and weapon attacks use one
+  // implementation; energy ignores DR, so no weapon facts are needed here.
+  const energy = applyEnergyMitigation(input.components, defender);
+  const working = energy.components;
+  const erApplied = energy.erApplied;
+  notes.push(...energy.notes);
 
   // --- objects: immune to nonlethal; energy and ranged damage halve ------------
   const isObject = defender.object !== undefined;

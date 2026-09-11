@@ -1,6 +1,6 @@
 /**
  * Pathfinder 1e Mass Battles Reference System ("pf1e-mass-battles").
- * Integrates d20 attack routines, DR/SR, spatial envelopment, AOE spell scatter,
+ * Integrates d20 attack routines, DR/SR, spatial envelopment, pack-driven AOE spells,
  * player hero participation, and detailed combat analytics.
  */
 import type { RulesContext, RulesModule, UnitView } from "../core/rules";
@@ -17,9 +17,22 @@ import {
 } from "./pf1e/combatEngine";
 import { calculatePF1eEnvelopment } from "./pf1e/envelopment";
 import { resolvePF1eAOESpell } from "./pf1e/spells";
+import { PF1E_PACK_FIREBALL_MASS_BATTLE, parsePackSpellOrder } from "./pf1e/spellPacks";
+import { spellSaveDc } from "./pf1e/casting";
 import { applyHeroLeadershipAuras, applyHeroCleaveOverkill } from "./pf1e/heroBridge";
 import { PF1eBattleAnalyticsCollector } from "./pf1e/analytics";
 import { SpatialGrid } from "../core/spatialGrid";
+
+/**
+ * The reference system's demo caster, named rather than buried in a literal: a 5th-level
+ * wizard with Intelligence 18 (+4) casting Fireball, a 3rd-level spell (CRB p.283). The DC
+ * is computed by the same `spellSaveDc` the tactical engine uses, so the strategic and
+ * tactical paths cannot drift apart.
+ */
+const DEMO_CASTER_LEVEL = 5;
+const DEMO_SPELL_LEVEL = 3;
+const DEMO_KEY_ABILITY_MOD = 4;
+const DEMO_SPELL_ORIGIN = { x: 10, y: 10 } as const;
 
 export function createMassBattlePf1e(): RulesModule {
   const registry = new PF1eProfileRegistry();
@@ -153,25 +166,44 @@ export function createMassBattlePf1e(): RulesModule {
         });
       }
 
-      // Resolve AOE Spells
+      // Resolve AOE Spells. The payload comes from the pack's `massBattle` block rather
+      // than a literal here, which is what DEVIATIONS D-2 asked P5 to do.
+      const packSpell = parsePackSpellOrder({ entry: PF1E_PACK_FIREBALL_MASS_BATTLE, casterLevel: DEMO_CASTER_LEVEL });
+      const { dc: packDc, issues: dcIssues } = spellSaveDc({ spellLevel: DEMO_SPELL_LEVEL, keyAbilityMod: DEMO_KEY_ABILITY_MOD });
+      const packIssues = [...packSpell.issues, ...dcIssues];
+
       for (const unit of units) {
         const queue = orders.get(unit.id);
         const order = queue?.active ?? queue?.pending[0];
         if (!order || order.kind !== "custom" || order.type !== "spell_aoe") continue;
 
+        if (!packSpell.ok || packSpell.order === null || dcIssues.length > 0) {
+          emit({
+            subPhase: "spell",
+            type: "spell",
+            unitId: unit.id,
+            text: `${unit.name} could not cast: ${packIssues.map((i) => i.message).join("; ")}`,
+            data: {},
+          });
+          continue;
+        }
+
         const spellRes = resolvePF1eAOESpell({
           pool,
           grid,
           spell: {
-            spellName: "Fireball",
-            shape: "circle",
-            x: 10,
-            y: 10,
-            radius: 15,
-            dc: 16,
-            damageDiceCount: 6,
-            damageDiceSides: 6,
-            saveType: "ref",
+            spellName: packSpell.order.spellName,
+            shape: packSpell.order.shape,
+            x: DEMO_SPELL_ORIGIN.x,
+            y: DEMO_SPELL_ORIGIN.y,
+            radius: packSpell.order.radius,
+            dc: packDc,
+            damageDiceCount: packSpell.order.damageDiceCount,
+            damageDiceSides: packSpell.order.damageDiceSides,
+            saveType: packSpell.order.saveType,
+            halfOnSave: packSpell.order.halfOnSave,
+            evasion: packSpell.order.evasionApplies,
+            casterLevel: DEMO_CASTER_LEVEL,
           },
           rng: forkRng(rng, unitIndex(unit), 2),
         });
@@ -182,8 +214,18 @@ export function createMassBattlePf1e(): RulesModule {
           subPhase: "spell",
           type: "spell",
           unitId: unit.id,
-          text: `${unit.name} casts Fireball: ${spellRes.metrics.damageDealt} damage, ${spellRes.metrics.killsCount} kills`,
-          data: spellRes.metrics as unknown as Record<string, import("../core/documents").Json>,
+          text: `${unit.name} casts ${packSpell.order.spellName} (${packSpell.order.radius} ft, DC ${packDc}): ${spellRes.metrics.damageDealt} damage, ${spellRes.metrics.killsCount} kills`,
+          // The cast parameters are part of the event, not just the outcome: they are what
+          // makes "this order came from the pack" observable to a GM and to a test.
+          data: {
+            ...(spellRes.metrics as unknown as Record<string, import("../core/documents").Json>),
+            spellName: packSpell.order.spellName,
+            spellRadius: packSpell.order.radius,
+            spellDc: packDc,
+            spellLevel: DEMO_SPELL_LEVEL,
+            casterLevel: DEMO_CASTER_LEVEL,
+            spellDice: `${packSpell.order.damageDiceCount}d${packSpell.order.damageDiceSides}`,
+          },
         });
       }
     },

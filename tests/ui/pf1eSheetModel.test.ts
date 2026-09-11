@@ -7,6 +7,7 @@ import {
   isPF1eActor,
   pf1eSheetEdit,
   pf1eSheetView,
+  pf1eSpellSlotReadout,
 } from "../../src/ui/sheets/pf1eSheetModel";
 
 const owner = { id: "player", role: "PLAYER" as const };
@@ -229,5 +230,84 @@ describe("ability damage/drain authoring (CRB p.555, S02 slice)", () => {
     expect(d.abilityDrainTaken).toEqual(d.abilityDamageTaken);
     expect(d.abilityDamagePenalty).toEqual(d.abilityDamageTaken);
     expect(d.explain.abilities).toContain("no ability damage or drain");
+  });
+});
+
+describe("PF1e spell slot readout (P5/C04)", () => {
+  const wizard = (pf1e: Record<string, Json> = {}) =>
+    actor({
+      abilities: { int: 18 },
+      spells: {
+        keyAbility: "int",
+        mode: "prepared",
+        casterLevel: 5,
+        slotsPerDay: { 0: 4, 1: 4, 2: 3, 3: 2, 4: 1 },
+      },
+      ...pf1e,
+    });
+
+  test("adds the Table 1-3 bonuses to the authored budget for levels 0-9", () => {
+    const readout = pf1eSpellSlotReadout(pf1eSheetView(wizard()).derived);
+    expect(readout.ok).toBe(true);
+    expect(readout.keyAbility).toBe("int");
+    expect(readout.keyAbilityScore).toBe(18);
+    expect(readout.mode).toBe("prepared");
+    // Intelligence 18 grants 1/1/1/1 at 1st-4th; 0th never receives a bonus.
+    expect(readout.view.summary).toBe(
+      "0th 0/4 · 1st 0/5 · 2nd 0/4 · 3rd 0/3 · 4th 0/2",
+    );
+    expect(readout.view.grantedLevels).toEqual([4, 3, 2, 1, 0]);
+    expect(readout.view.warnings).toEqual([]);
+  });
+
+  test("reads the effective score, so ability drain shows up in castability", () => {
+    // CRB p.555: drain actually reduces the score, so it costs bonus spells and
+    // castability. Intelligence 18 drained to 12 can no longer cast 3rd or 4th.
+    const readout = pf1eSpellSlotReadout(
+      pf1eSheetView(wizard({ abilitiesDrain: { int: 6 } })).derived,
+    );
+    expect(readout.keyAbilityScore).toBe(12);
+    expect(readout.view.warnings.join(" | ")).toMatch(
+      /below the required 13.*below the required 14/s,
+    );
+  });
+
+  test("ability damage does not reduce the score, so it costs no bonus spells", () => {
+    // The other half of CRB p.555: damage applies a -1 penalty per two full points
+    // to statistics using the modifier, and never touches the score itself. Table
+    // 1-3 is a score table, so the readout must be unchanged by damage.
+    const undamaged = pf1eSpellSlotReadout(pf1eSheetView(wizard()).derived);
+    const damaged = pf1eSpellSlotReadout(
+      pf1eSheetView(wizard({ abilitiesDamage: { int: 6 } })).derived,
+    );
+    expect(damaged.keyAbilityScore).toBe(18);
+    expect(damaged.view.summary).toBe(undamaged.view.summary);
+    expect(damaged.view.warnings).toEqual([]);
+  });
+
+  test("a non-caster reads as None rather than as a broken budget", () => {
+    const readout = pf1eSpellSlotReadout(
+      pf1eSheetView(actor({ abilities: { str: 16 } })).derived,
+    );
+    expect(readout.view.grantedLevels).toEqual([]);
+    expect(readout.view.summary).toBe("None");
+    expect(readout.issues).toEqual([]);
+  });
+
+  test("covers 0-9 only: a 10th-level slot is not silently widened into the readout", () => {
+    const readout = pf1eSpellSlotReadout(
+      pf1eSheetView(
+        wizard({ spells: { keyAbility: "int", slotsPerDay: { 0: 4, 10: 2 } } }),
+      ).derived,
+    );
+    expect(readout.view.rows).toHaveLength(10);
+    expect(readout.view.grantedLevels).toEqual([0]);
+    expect(readout.view.summary).toBe("0th 0/4");
+  });
+
+  test("spends nothing: the readout reports zero spent at every level", () => {
+    const readout = pf1eSpellSlotReadout(pf1eSheetView(wizard()).derived);
+    expect(readout.view.rows.every((row) => row.spent === 0)).toBe(true);
+    expect(readout.view.rows.every((row) => !row.over)).toBe(true);
   });
 });
