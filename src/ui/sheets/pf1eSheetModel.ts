@@ -9,7 +9,17 @@ import type { PermissionUser } from "../../core/ownership";
 import type { Op } from "../../core/ops";
 import { can } from "../../core/permissions";
 import { deriveFromDocuments } from "../../packages/pf1e/actor";
+import type { PF1eAbilityKey, PF1eDerived } from "../../packages/pf1e/actor";
 import { combinedTacticalEffects } from "../../packages/pf1e/effectOps";
+import {
+  PF1E_SLOT_LEVEL_COUNT,
+  resolveSpellSlotBudget,
+  slotLedgerView,
+} from "../../packages/pf1e/spellSlots";
+import type {
+  PF1eSlotIssue,
+  PF1eSlotLedgerView,
+} from "../../packages/pf1e/spellSlots";
 import { normalizePF1eSystem } from "../../packages/pf1e/statBlock";
 
 export function isPF1eActor(doc: BaseDocument): doc is ActorDocument {
@@ -86,6 +96,49 @@ export function pf1eSheetView(actor: ActorDocument, ctx?: PF1eSheetContext) {
     effectErrors: effects.rejected.map((e) => `${e.id}: ${e.error}`),
     /** Active effect list for the Effects tab (embedded + referenced, collision-safe). */
     effects: effects.effects,
+  };
+}
+
+export interface PF1eSpellSlotReadout {
+  view: PF1eSlotLedgerView;
+  mode: "prepared" | "spontaneous";
+  keyAbility: PF1eAbilityKey;
+  /** Null when the actor does not cast, in which case castability is unknown. */
+  keyAbilityScore: number | null;
+  ok: boolean;
+  issues: PF1eSlotIssue[];
+}
+
+/**
+ * P5/C04 — the summary tab's level 0–9 spell slot readout.
+ *
+ * This file's rule is no rules arithmetic, and this keeps it: Table 1-3, the
+ * `10 + spell level` minimum and the over-budget warnings all live in
+ * `packages/pf1e/spellSlots`, which is unit-tested there. This only maps a derived
+ * actor onto that budget. C04 covers levels 0–9, so the derived 0–10 slot array is
+ * truncated at 9 rather than widened.
+ *
+ * Nothing is spent here — the sheet is a readout. Overuse is reported by the ledger
+ * as a warning rather than refused (C04: warnings, not hard enforcement).
+ */
+export function pf1eSpellSlotReadout(
+  derived: PF1eDerived,
+): PF1eSpellSlotReadout {
+  const keyAbility = derived.spellKeyAbility;
+  const keyAbilityScore = derived.casting
+    ? (derived.abilities[keyAbility] ?? null)
+    : null;
+  const budget = resolveSpellSlotBudget({
+    baseSlots: derived.spellSlots.slice(0, PF1E_SLOT_LEVEL_COUNT),
+    keyAbilityScore,
+  });
+  return {
+    view: slotLedgerView(budget, null),
+    mode: derived.spellMode,
+    keyAbility,
+    keyAbilityScore,
+    ok: budget.ok,
+    issues: budget.issues,
   };
 }
 

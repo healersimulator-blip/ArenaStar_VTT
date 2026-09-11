@@ -18,6 +18,12 @@ export interface PF1eSpellOrder {
   damageDiceCount: number;
   damageDiceSides: number;
   saveType: "ref" | "fort" | "will";
+  /**
+   * True when a successful save halves the damage (the usual "Reflex half"); false when a
+   * successful save negates the effect entirely. Defaults to true so pre-existing callers
+   * keep their behaviour.
+   */
+  halfOnSave?: boolean;
   evasion?: boolean;
   improvedEvasion?: boolean;
   casterIdx?: number;
@@ -28,7 +34,6 @@ export interface PF1eSpellOrder {
 
 export interface PF1eSpellMetrics {
   modelsTargeted: number;
-  modelsScattered: number;
   savesPassed: number;
   savesFailed: number;
   srBlocked: number;
@@ -75,7 +80,6 @@ export function resolvePF1eAOESpell(opts: PF1eSpellOptions): PF1eSpellResult {
 
   const metrics: PF1eSpellMetrics = {
     modelsTargeted: 0,
-    modelsScattered: 0,
     savesPassed: 0,
     savesFailed: 0,
     srBlocked: 0,
@@ -144,30 +148,17 @@ export function resolvePF1eAOESpell(opts: PF1eSpellOptions): PF1eSpellResult {
     if (highFidelity && targetSr > 0) {
       const srRoll = rng.d(20);
       const srTotal = srRoll + casterLevel + spellPenetration;
-      if (srRoll !== 20 && srTotal < targetSr) {
+      // A caster level check has no natural-die special cases: "if the result equals or
+      // exceeds the creature's spell resistance, the spell works normally". The old
+      // `srRoll !== 20` short-circuit was the DEVIATIONS D-1 house rule.
+      if (srTotal < targetSr) {
         metrics.srBlocked++;
         continue; // Spell resisted by target SR!
       }
     }
 
-    // 5ft Reflex Scatter step away from epicenter
-    let finalX = mx;
-    let finalY = my;
-    if (dist > 0.01) {
-      const step = 1.0; // 5ft grid step
-      finalX = mx + (dx / dist) * step;
-      finalY = my + (dy / dist) * step;
-      pool.x[idx] = finalX;
-      pool.y[idx] = finalY;
-      metrics.modelsScattered++;
-    }
-
-    // Re-check distance after scatter
-    const newDist = Math.sqrt((finalX - spell.x) ** 2 + (finalY - spell.y) ** 2);
-    if (newDist > spell.radius) {
-      continue; // Model successfully scattered out of blast!
-    }
-
+    // DEVIATIONS D-1 (removed, D-130/D-151): a model resolves the save in the square it
+    // occupies. Nothing in the SRD lets a creature step out of an area before saving.
     affectedModels.push(idx);
 
     // Roll Saving Throw
@@ -185,12 +176,18 @@ export function resolvePF1eAOESpell(opts: PF1eSpellOptions): PF1eSpellResult {
       damage += rng.d(spell.damageDiceSides);
     }
 
-    // Apply Evasion / Improved Evasion logic
+    // Save outcome. "Half" halves on a success and rounds down; a spell that is not
+    // half-on-save is negated entirely. Evasion is defined against "an attack that normally
+    // allows a Reflex saving throw for half damage", so it does nothing to a Fortitude save
+    // or to a negates spell.
+    const halfOnSave = spell.halfOnSave !== false;
+    const reflexHalf = spell.saveType === "ref" && halfOnSave;
     if (savePassed) {
-      if (spell.evasion || spell.improvedEvasion) damage = 0;
+      if (!halfOnSave) damage = 0;
+      else if (reflexHalf && (spell.evasion === true || spell.improvedEvasion === true)) damage = 0;
       else damage = Math.floor(damage / 2);
-    } else {
-      if (spell.improvedEvasion) damage = Math.floor(damage / 2);
+    } else if (reflexHalf && spell.improvedEvasion === true) {
+      damage = Math.floor(damage / 2);
     }
 
     metrics.damageDealt += damage;

@@ -28,6 +28,7 @@
     authoredNumber,
     pf1eSheetEdit,
     pf1eSheetView,
+    pf1eSpellSlotReadout,
     type SheetField,
   } from "./pf1eSheetModel";
   import {
@@ -87,6 +88,7 @@
     }),
   );
   let d = $derived(view.derived);
+  let slotReadout = $derived(pf1eSpellSlotReadout(d));
   let resolvedEffects = $derived(resolveTacticalEffects(view.effects));
   let effectBoosts = $derived(
     resolvedEffects.boosts.map((boost, i) => ({
@@ -547,6 +549,18 @@
       <dd>{d.dr} / {d.drBypass.join(", ") || "—"}</dd>
       <dt>Spell resistance</dt>
       <dd>{d.spellResistance}</dd>
+      <dt>Spell slots (0th-9th)</dt>
+      <dd data-pf1e-spell-slots>
+        {#if slotReadout.view.grantedLevels.length === 0}
+          None &mdash; no slots authored for any level
+        {:else}
+          {slotReadout.view.summary}
+          <span class="note"
+            >({slotReadout.keyAbility.toUpperCase()} {slotReadout.keyAbilityScore ??
+              "?"}, {slotReadout.mode})</span
+          >
+        {/if}
+      </dd>
       <dt>Fast healing / regeneration</dt>
       <dd>
         {d.fastHealing} / {d.regeneration} (recorded; recovery is not automated)
@@ -554,6 +568,9 @@
       <dt>Conditions</dt>
       <dd>{d.conditions.join(", ") || "None"}</dd>
     </dl>
+    {#each slotReadout.view.warnings as warning (warning)}
+      <p class="note" data-pf1e-spell-slot-warning>{warning}</p>
+    {/each}
     <p class="note">
       Temporary HP and energy resistance are manually adjudicated records;
       absorption, source stacking and expiration are not automated. Ability

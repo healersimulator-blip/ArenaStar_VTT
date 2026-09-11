@@ -6,6 +6,32 @@ import type { LoopbackResult } from "../net/webrtc";
 import type { HostApp } from "./hostBoot";
 import type { PlayerApp } from "./joinBoot";
 import type { HostShare } from "./hostShare";
+import { sightSegments } from "../canvas/vision/wallSight";
+import {
+  affectedTokens,
+  areaPreviewRects,
+  cellKey,
+  pf1eAreaGridFromScene,
+  resolveAreaCells,
+  type PF1eAreaKind,
+  type PF1eAreaIssue,
+} from "../packages/pf1e/targeting";
+import { deriveFromDocuments } from "../packages/pf1e/actor";
+import { pf1eSpellSlotReadout } from "../ui/sheets/pf1eSheetModel";
+import {
+  resolveCastingAttempt,
+  type PF1eCastingTime,
+  type PF1eConcentrationTrigger,
+  type PF1eSpellTradition,
+} from "../packages/pf1e/concentration";
+import {
+  resolveSpellTarget,
+  spellResistanceCheck,
+  spellSaveDc,
+  type PF1eSaveSeverity,
+  type PF1eSaveType,
+} from "../packages/pf1e/casting";
+import type { PF1eEnergyType } from "../packages/pf1e/healthState";
 
 export interface CanvasSmokeResult {
   ok: boolean;
@@ -78,6 +104,123 @@ export interface AppSurface {
   importPackageZip(bytes: number[]): Promise<{ ok: boolean; error?: string }>;
   activatePackage(id: string): Promise<{ ok: boolean; error?: string }>;
   deactivatePackage(): Promise<{ ok: boolean; error?: string }>;
+  /**
+   * P5/C01: resolve a PF1e area against the **live** scene — its grid metadata,
+   * its sight-blocking walls and its tokens — through the same pure module the
+   * unit tests exercise. This is the seam the canvas preview overlay and
+   * affected-token highlighting will read, so the browser spec asserts the real
+   * scene→cells→tokens path rather than a re-implementation.
+   */
+  pf1eArea(spec: {
+    kind: string;
+    originCol: number;
+    originRow: number;
+    radiusFt: number;
+  }): {
+    ok: boolean;
+    cellSize: number;
+    feetPerCell: number;
+    diagonals: string;
+    cells: number;
+    cellKeys: string[];
+    affectedTokenIds: string[];
+    previewRects: number;
+    issues: Array<{ field: string; message: string }>;
+  };
+  /**
+   * P5/C02: resolve one spell save through the **real** bundled chain —
+   * authored `system.pf1e` → `deriveFromDocuments` save totals → DC → save →
+   * severity → energy mitigation. The caller supplies the die faces (the
+   * resolver is diceless), so the browser spec asserts the wiring, not a
+   * re-implementation of the rules.
+   */
+  pf1eCastResolve(spec: {
+    system: Record<string, unknown>;
+    attributes?: Record<string, unknown>;
+    damage: number;
+    energyType?: string;
+    severity: string;
+    saveType: string;
+    spellLevel: number;
+    keyAbilityMod: number;
+    saveDie: number;
+    casterLevel?: number;
+    spellResistance?: number;
+    srDie?: number;
+    energyResistance?: Record<string, number>;
+  }): {
+    ok: boolean;
+    error: string | null;
+    dc: number;
+    saveBonus: number;
+    resisted: boolean;
+    passed: boolean;
+    automatic: string | null;
+    dealt: number;
+    notes: string[];
+  };
+  /**
+   * P5/C03: run the pre-save casting gate. The caster's deafened/grappled/pinned
+   * state comes from the **authored actor document** via `deriveFromDocuments`, not
+   * from the spec, so the browser path proves real data reaches the rules.
+   */
+  pf1eCastAttempt(spec: {
+    system: Record<string, unknown>;
+    components: string;
+    tradition: string;
+    castingTime: string;
+    spellLevel: number;
+    casterLevel: number;
+    keyAbilityMod: number;
+    armorChance?: number;
+    shieldChance?: number;
+    arcaneDie?: number;
+    deafenedDie?: number;
+    canSpeak?: boolean;
+    hasFreeHand?: boolean;
+    componentsInHand?: boolean;
+    castingDefensively?: boolean;
+    concentrationDie?: number;
+    injury?: number;
+    injuryDie?: number;
+  }): {
+    ok: boolean;
+    error: string | null;
+    outcome: string;
+    legal: boolean;
+    reasons: string[];
+    conditions: string[];
+    asfChance: number;
+    asfFailed: boolean | null;
+    deafenedFailed: boolean | null;
+    concentrationDc: number | null;
+    concentrationTotal: number | null;
+    concentrationPassed: boolean | null;
+    notes: string[];
+  };
+  /**
+   * P5/C04: the summary tab's level 0-9 spell slot readout. Runs the same
+   * `pf1eSpellSlotReadout` adapter the sheet renders, so the browser path proves
+   * the sheet's own code reaches the rules rather than a copy of it.
+   */
+  pf1eSpellSlots(spec: { system: Record<string, unknown> }): {
+    summary: string;
+    grantedLevels: number[];
+    rows: {
+      level: number;
+      label: string;
+      text: string;
+      over: boolean;
+      total: number | null;
+      spent: number;
+    }[];
+    warnings: string[];
+    mode: "prepared" | "spontaneous";
+    keyAbility: string;
+    keyAbilityScore: number | null;
+    ok: boolean;
+    issues: string[];
+  };
 }
 
 export interface PlayerSurface {
@@ -432,6 +575,210 @@ function appSurface(app: HostApp): AppSurface {
       const scenes = client.store.getAll("scenes");
       return ((scenes.find((sc) => sc.active) ?? scenes[0])?.grid.size ??
         null) as number | null;
+    },
+    pf1eArea: (spec) => {
+      const s = scene();
+      const fail = (issues: PF1eAreaIssue[]) => ({
+        ok: false,
+        cellSize: 0,
+        feetPerCell: 0,
+        diagonals: "",
+        cells: 0,
+        cellKeys: [] as string[],
+        affectedTokenIds: [] as string[],
+        previewRects: 0,
+        issues,
+      });
+      if (!s) return fail([{ field: "scene", message: "no active scene" }]);
+      const { grid, issues } = pf1eAreaGridFromScene(s.grid);
+      if (issues.length > 0) return fail(issues);
+      // Solid barriers only — LoE is "like line of sight … except that it isn't
+      // blocked by fog, darkness", so the sight axis is the right one (AoN 212).
+      const segments = sightSegments(s.walls);
+      const res = resolveAreaCells(
+        {
+          kind: spec.kind as PF1eAreaKind,
+          origin: { col: spec.originCol, row: spec.originRow },
+          radiusFt: spec.radiusFt,
+        },
+        grid,
+        { segments },
+      );
+      const hit = affectedTokens(res.cells, s.tokens, grid);
+      return {
+        ok: res.issues.length === 0,
+        cellSize: grid.cellSize,
+        feetPerCell: grid.feetPerCell,
+        diagonals: grid.diagonals,
+        cells: res.cells.length,
+        cellKeys: res.cells.map(cellKey),
+        affectedTokenIds: hit.map((t) => t._id),
+        previewRects: areaPreviewRects(res.cells, grid).length,
+        issues: res.issues,
+      };
+    },
+    pf1eCastResolve: (spec) => {
+      const blank = {
+        ok: false,
+        error: "" as string | null,
+        dc: 0,
+        saveBonus: 0,
+        resisted: false,
+        passed: false,
+        automatic: null as string | null,
+        dealt: 0,
+        notes: [] as string[],
+      };
+      const derived = deriveFromDocuments({
+        actor: { system: spec.system, attributes: spec.attributes },
+      });
+      const saveBonus =
+        spec.saveType === "fort"
+          ? derived.saves.fort
+          : spec.saveType === "ref"
+            ? derived.saves.ref
+            : derived.saves.will;
+      const { dc, issues } = spellSaveDc({
+        spellLevel: spec.spellLevel,
+        keyAbilityMod: spec.keyAbilityMod,
+      });
+      if (issues.length > 0) {
+        return {
+          ...blank,
+          error: issues.map((i) => `${i.field}: ${i.message}`).join("; "),
+        };
+      }
+      const sr = spellResistanceCheck({
+        die: spec.srDie,
+        casterLevel: spec.casterLevel ?? 0,
+        spellResistance: spec.spellResistance ?? 0,
+      });
+      if (sr.issues.length > 0) {
+        return {
+          ...blank,
+          dc,
+          saveBonus,
+          error: sr.issues[0]?.message ?? "sr",
+        };
+      }
+      const res = resolveSpellTarget({
+        damage: spec.damage,
+        energyType: spec.energyType as PF1eEnergyType | undefined,
+        severity: spec.severity as PF1eSaveSeverity,
+        saveType: spec.saveType as PF1eSaveType,
+        dc,
+        saveBonus,
+        saveDie: spec.saveDie,
+        sr,
+        defender:
+          spec.energyResistance === undefined
+            ? {}
+            : {
+                energyResistance: spec.energyResistance as Partial<
+                  Record<PF1eEnergyType, number>
+                >,
+              },
+      });
+      if (!res.ok) return { ...blank, dc, saveBonus, error: res.error };
+      return {
+        ok: true,
+        error: null,
+        dc,
+        saveBonus,
+        resisted: res.resisted,
+        passed: res.passed,
+        automatic: res.automatic,
+        dealt: res.dealt,
+        notes: res.notes,
+      };
+    },
+    pf1eCastAttempt: (spec) => {
+      const derived = deriveFromDocuments({ actor: { system: spec.system } });
+      const conditions = derived.conditions;
+      const triggers: PF1eConcentrationTrigger[] = [];
+      if (
+        spec.castingDefensively === true &&
+        spec.concentrationDie !== undefined
+      ) {
+        triggers.push({
+          situation: "castDefensively",
+          die: spec.concentrationDie,
+        });
+      }
+      if (spec.injury !== undefined && spec.injuryDie !== undefined) {
+        triggers.push({
+          situation: "injured",
+          damage: spec.injury,
+          die: spec.injuryDie,
+        });
+      }
+      const res = resolveCastingAttempt({
+        components: spec.components,
+        tradition: spec.tradition as PF1eSpellTradition,
+        castingTime: spec.castingTime as PF1eCastingTime,
+        spellLevel: spec.spellLevel,
+        casterLevel: spec.casterLevel,
+        keyAbilityMod: spec.keyAbilityMod,
+        caster: {
+          canSpeak: spec.canSpeak !== false,
+          hasFreeHand: spec.hasFreeHand !== false,
+          componentsInHand: spec.componentsInHand !== false,
+          deafened: conditions.includes("deafened"),
+          grappled: conditions.includes("grappled"),
+          pinned: conditions.includes("pinned"),
+        },
+        armor:
+          spec.armorChance === undefined
+            ? undefined
+            : { chance: spec.armorChance },
+        shield:
+          spec.shieldChance === undefined
+            ? undefined
+            : { chance: spec.shieldChance },
+        arcaneDie: spec.arcaneDie,
+        deafenedDie: spec.deafenedDie,
+        triggers,
+      });
+      const first = res.concentration.checks[0];
+      return {
+        ok: res.ok,
+        error: res.error,
+        outcome: res.outcome,
+        legal: res.legal,
+        reasons: res.reasons,
+        conditions,
+        asfChance: res.asfChance,
+        asfFailed: res.asfFailed,
+        deafenedFailed: res.deafenedFailed,
+        concentrationDc: first ? first.dc : null,
+        concentrationTotal: first ? first.total : null,
+        concentrationPassed: first ? first.passed : null,
+        notes: res.notes,
+      };
+    },
+    pf1eSpellSlots: (spec) => {
+      const derived = deriveFromDocuments({ actor: { system: spec.system } });
+      const readout = pf1eSpellSlotReadout(derived);
+      return {
+        summary: readout.view.summary,
+        grantedLevels: readout.view.grantedLevels,
+        rows: readout.view.rows.map((row) => ({
+          level: row.level,
+          label: row.label,
+          text: row.text,
+          over: row.over,
+          total: row.total,
+          spent: row.spent,
+        })),
+        warnings: readout.view.warnings,
+        mode: readout.mode,
+        keyAbility: readout.keyAbility,
+        keyAbilityScore: readout.keyAbilityScore,
+        ok: readout.ok,
+        issues: readout.issues.map(
+          (issue) => `${issue.field}: ${issue.message}`,
+        ),
+      };
     },
   };
 }
