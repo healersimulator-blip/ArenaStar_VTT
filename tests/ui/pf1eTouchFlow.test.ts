@@ -166,7 +166,7 @@ describe("P5/C03 touch spells in the cast flow (D-158)", () => {
       castParams(caster, { touch: "melee" }),
     );
     expect(res.ok).toBe(true);
-    if (!res.ok || res.lost || res.held) return;
+    if (!res.ok || res.lost || res.held || res.pending) return;
     expect(res.touch).toEqual({
       kind: "melee",
       total: 9,
@@ -241,7 +241,7 @@ describe("P5/C03 touch spells in the cast flow (D-158)", () => {
       castParams(caster, { touch: "melee" }),
     );
     expect(res.ok).toBe(true);
-    if (!res.ok || res.lost || res.held) return;
+    if (!res.ok || res.lost || res.held || res.pending) return;
     expect(res.touch?.threat).toBe(true);
     expect(cardContent(client)).toMatch(/threatens a critical/i);
   });
@@ -295,7 +295,7 @@ describe("P5/C03 touch spells in the cast flow (D-158)", () => {
       }),
     );
     expect(res.ok).toBe(true);
-    if (!res.ok || res.lost || res.held) return;
+    if (!res.ok || res.lost || res.held || res.pending) return;
     expect(res.touch).toEqual({
       kind: "ranged",
       total: 11,
@@ -475,7 +475,7 @@ describe("P5/C03 critical confirmation and willing auto-touch (D-159)", () => {
       castParams(caster, { touch: "melee" }),
     );
     expect(res.ok).toBe(true);
-    if (!res.ok || res.lost || res.held) return;
+    if (!res.ok || res.lost || res.held || res.pending) return;
     expect(res.touch).toEqual({
       kind: "melee",
       total: 23,
@@ -499,7 +499,7 @@ describe("P5/C03 critical confirmation and willing auto-touch (D-159)", () => {
       castParams(caster, { touch: "melee" }),
     );
     expect(res.ok).toBe(true);
-    if (!res.ok || res.lost || res.held) return;
+    if (!res.ok || res.lost || res.held || res.pending) return;
     expect(res.touch).toEqual({
       kind: "melee",
       total: 23,
@@ -526,7 +526,7 @@ describe("P5/C03 critical confirmation and willing auto-touch (D-159)", () => {
       }),
     );
     expect(res.ok).toBe(true);
-    if (!res.ok || res.lost || res.held) return;
+    if (!res.ok || res.lost || res.held || res.pending) return;
     expect(client.formulas).toEqual(["1d20"]);
     expect(res.result.dealt).toBe(0);
     expect(cardContent(client)).toMatch(/cannot score a critical hit/);
@@ -542,7 +542,7 @@ describe("P5/C03 critical confirmation and willing auto-touch (D-159)", () => {
       castParams(caster, { touch: "melee", willing: true }),
     );
     expect(res.ok).toBe(true);
-    if (!res.ok || res.lost || res.held) return;
+    if (!res.ok || res.lost || res.held || res.pending) return;
     expect(res.touch).toEqual({
       kind: "melee",
       total: null,

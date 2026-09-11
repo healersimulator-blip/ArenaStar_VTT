@@ -38,6 +38,8 @@
   } from "./pf1eSpellbook";
   import {
     resolveCastFlow,
+    resolvePendingCompletion,
+    resolvePendingDisruption,
     resolveTouchDelivery,
     type PF1eCastFlowParams,
     type PF1eConcentrationDeclaration,
@@ -46,6 +48,10 @@
     heldChargeDiff,
     heldChargeFromSystem,
   } from "../../packages/pf1e/touchSpell";
+  import {
+    pendingCastDiff,
+    pendingCastFromSystem,
+  } from "../../packages/pf1e/pendingCast";
   import type { PF1eSaveSeverity, PF1eSaveType } from "../../packages/pf1e/casting";
   import type { PF1eCastingTime } from "../../packages/pf1e/concentration";
   import type { PF1eEnergyType } from "../../packages/pf1e/healthState";
@@ -117,6 +123,11 @@
   let heldCharge = $derived(
     heldChargeFromSystem(doc.system as Record<string, unknown>),
   );
+  // P5/C03 (D-161): a multi-round casting begun but not yet completed.
+  let pendingCast = $derived(
+    pendingCastFromSystem(doc.system as Record<string, unknown>),
+  );
+  let pendingDisruptDamage = $state("");
   let prepareName = $state("");
   let prepareLevel = $state("1");
   let prepareSlotLevel = $state("");
@@ -545,6 +556,7 @@
           : [],
         combat: linked.combat,
         ...(castSrOvercome ? { srOvercomeByCaller: true } : {}),
+        castingTime: castTime as PF1eCastingTime,
         ...(castTouch !== ""
           ? { touch: castTouch as "melee" | "ranged" }
           : {}),
@@ -569,6 +581,9 @@
       });
       if (!outcome.ok) {
         castError = outcome.error;
+      } else if (outcome.pending) {
+        castWarning =
+          "the casting has begun — it comes into effect just before your next turn";
       } else if (outcome.held) {
         castWarning =
           "the touch attack missed — the charge is held; deliver it below";
@@ -651,6 +666,122 @@
           kind: "update",
           ref: { coll: "actors", id: current._id },
           diff: heldChargeDiff(null),
+        },
+      ]),
+    );
+  }
+
+  // D-161 — complete a pending multi-round casting. The effect rides the
+  // original target, so we resolve it from the stored targetId rather than
+  // the current cast-target select.
+  async function completePendingCast(): Promise<void> {
+    castError = "";
+    castWarning = "";
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) {
+      castError = "Actor is no longer available.";
+      return;
+    }
+    const pending = pendingCastFromSystem(
+      current.system as Record<string, unknown>,
+    );
+    if (!pending) {
+      castError = "There is no pending casting to complete.";
+      return;
+    }
+    const target = client.store.get("actors", pending.targetId) as
+      ActorDocument | undefined;
+    if (!target) {
+      castError =
+        "The spell's original target is gone — lose the casting instead.";
+      return;
+    }
+    const casterView = pf1eSheetView(current, {
+      combat: linked.combat,
+      combatantId: linked.combatantId,
+    });
+    const targetView = pf1eSheetView(target);
+    castBusy = true;
+    try {
+      const outcome = await resolvePendingCompletion(client, client.user, {
+        casterActor: current,
+        casterDerived: casterView.derived,
+        targetName: target.name,
+        targetActor: target,
+        targetDerived: targetView.derived,
+        targetFeats: Array.isArray(targetView.authored.feats)
+          ? (targetView.authored.feats as string[])
+          : [],
+        combat: linked.combat,
+        ...(castSrOvercome ? { srOvercomeByCaller: true } : {}),
+      });
+      if (!outcome.ok) {
+        castError = outcome.error;
+      } else if (outcome.hpWriteError !== null) {
+        castWarning = outcome.hpWriteError;
+      }
+    } finally {
+      castBusy = false;
+    }
+  }
+
+  // D-161 — damage taken while a multi-round casting is in progress forces a
+  // concentration check (DC 10 + damage + spell level).
+  async function checkPendingDisruption(): Promise<void> {
+    castError = "";
+    castWarning = "";
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) {
+      castError = "Actor is no longer available.";
+      return;
+    }
+    const casterView = pf1eSheetView(current, {
+      combat: linked.combat,
+      combatantId: linked.combatantId,
+    });
+    const damage = Math.max(0, Math.trunc(Number(pendingDisruptDamage) || 0));
+    castBusy = true;
+    try {
+      const outcome = await resolvePendingDisruption(client, client.user, {
+        casterActor: current,
+        casterDerived: casterView.derived,
+        damage,
+      });
+      if (!outcome.ok) {
+        castError = outcome.error;
+      } else {
+        castWarning = outcome.lost
+          ? `the concentration check failed (${outcome.total} vs DC ${outcome.dc}) — the pending ${outcome.spellName} is lost`
+          : `concentration held (${outcome.total} vs DC ${outcome.dc}) — the casting continues`;
+      }
+    } finally {
+      castBusy = false;
+    }
+  }
+
+  // D-161 — the GM forfeits the pending casting outright.
+  function abandonPendingCast(): void {
+    castError = "";
+    castWarning = "";
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) return;
+    if (
+      !isPF1eActor(current) ||
+      !client.user ||
+      !can(client.user, "update", current, "actors")
+    ) {
+      castError = "You do not have permission to act for this caster.";
+      return;
+    }
+    pending.add(
+      client.submit([
+        {
+          kind: "update",
+          ref: { coll: "actors", id: current._id },
+          diff: pendingCastDiff(null),
         },
       ]),
     );
@@ -1575,6 +1706,47 @@
             data-held-dismiss
             disabled={castBusy}
             onclick={dismissHeldCharge}>Dissipate</button
+          >
+        </section>
+      {/if}
+      {#if pendingCast !== null}
+        <section class="held-charge" data-pending-cast>
+          <p>
+            Pending casting: <strong>{pendingCast.name}</strong> (level
+            {pendingCast.level}) — it comes into effect just before your next
+            turn; if concentration breaks before then, the spell is lost.
+          </p>
+          <button
+            type="button"
+            data-pending-complete
+            disabled={castBusy}
+            onclick={() => {
+              void completePendingCast();
+            }}>{castBusy ? "Completing…" : "Complete the casting"}</button
+          >
+          <label
+            >Interruption damage
+            <input
+              value={pendingDisruptDamage}
+              oninput={(e) => (pendingDisruptDamage = e.currentTarget.value)}
+              data-pending-disrupt-damage
+              placeholder="0"
+              size="4"
+            /></label
+          >
+          <button
+            type="button"
+            data-pending-disrupt
+            disabled={castBusy}
+            onclick={() => {
+              void checkPendingDisruption();
+            }}>Concentration check</button
+          >
+          <button
+            type="button"
+            data-pending-abandon
+            disabled={castBusy}
+            onclick={abandonPendingCast}>Lose the spell</button
           >
         </section>
       {/if}

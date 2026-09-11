@@ -25,6 +25,11 @@
  *    willing targets are auto-touched (no attack roll), a natural 20
  *    threatens and the confirmation roll rides all the same modifiers; a
  *    confirmed critical doubles the rolled damage (×2) before SR/save.
+ *    D-161 adds multi-round casting: `castingTime: "longer"` begins the
+ *    spell now (slot + prepared row spent, effect rides
+ *    `system.pf1e.pendingCast`), `resolvePendingCompletion` fires it just
+ *    before the caster's next turn, and `resolvePendingDisruption` resolves
+ *    damage taken mid-casting (DC 10 + damage + spell level).
  */
 import type { Op } from "../../core/ops";
 import type { PermissionUser } from "../../core/ownership";
@@ -64,6 +69,10 @@ import {
   srOvercomeBlobFromFlags,
   srOvercomeDiff,
 } from "../../packages/pf1e/srLedger";
+import {
+  pendingCastDiff,
+  pendingCastFromSystem,
+} from "../../packages/pf1e/pendingCast";
 import {
   criticalDamageTotal,
   heldChargeDiff,
@@ -131,6 +140,13 @@ export interface PF1eCastFlowParams {
    * (D-159) — the touch attack is skipped entirely. Ignored without `touch`.
    */
   willing?: boolean;
+  /**
+   * The casting time the GM declares (D-161). `"longer"` (1 round or more)
+   * begins the casting now — the slot and prepared row are spent, the effect
+   * is deferred to just before the caster's next turn and rides the actor
+   * document as `pendingCast` (Rules ID 147). Absent = an immediate cast.
+   */
+  castingTime?: PF1eCastingTime;
 }
 
 /**
@@ -208,6 +224,8 @@ export type PF1eCastFlowOutcome =
       lost: false;
       /** True only on the held-charge variant below. */
       held: false;
+      /** True only on the pending variant below. */
+      pending?: undefined;
       dc: number;
       sr: PF1eSrResult;
       result: Extract<PF1eSpellTargetResult, { ok: true }>;
@@ -224,6 +242,7 @@ export type PF1eCastFlowOutcome =
       /** The gate ruined the spell: slot spent, no effect, the card says why. */
       lost: true;
       held: false;
+      pending?: undefined;
       warnings: string[];
       gateNotes: string[];
       touch?: PF1eCastTouchSummary;
@@ -233,10 +252,25 @@ export type PF1eCastFlowOutcome =
       lost: false;
       /** The melee touch missed: the spell is spent and the charge held. */
       held: true;
+      pending?: undefined;
       warnings: string[];
       gateNotes: string[];
       touch: PF1eCastTouchSummary & { kind: "melee"; hit: false };
       touchAc: number;
+    }
+  | {
+      ok: true;
+      lost: false;
+      held: false;
+      /**
+       * Multi-round casting (D-161): the spell began; slot and prepared row
+       * are spent, the effect rides `system.pf1e.pendingCast` until just
+       * before the caster's next turn.
+       */
+      pending: true;
+      pendingSpell: { name: string; level: number };
+      warnings: string[];
+      gateNotes: string[];
     }
   | { ok: false; error: string };
 
@@ -745,6 +779,84 @@ export async function resolveCastFlow(
     warnings.push(
       `the held ${priorCharge.name} charge dissipates as ${spell.name} is cast`,
     );
+  }
+
+  // ── multi-round casting (D-161): a spell whose casting time is 1 round ──
+  // ── or longer begins now; the effect comes into effect "just before the ──
+  // ── beginning of your turn in the round after you began casting" ─────────
+  if (params.castingTime === "longer") {
+    if (params.touch !== undefined)
+      return fail(
+        "Touch delivery is not modeled for spells with a casting time of 1 round or more.",
+      );
+    const priorPending = pendingCastFromSystem(
+      params.casterActor.system as Record<string, unknown>,
+    );
+    if (priorPending !== null) {
+      // Concentration maintains one multi-round casting at a time: beginning
+      // another spell forfeits the one in progress ("If you lose
+      // concentration after starting the spell and before it is complete,
+      // you lose the spell.").
+      ops.push({
+        kind: "update",
+        ref: { coll: "actors", id: params.casterActor._id },
+        diff: pendingCastDiff(null),
+      });
+      warnings.push(
+        `the pending ${priorPending.name} is lost as ${spell.name} begins`,
+      );
+    }
+    ops.push({
+      kind: "update",
+      ref: { coll: "actors", id: params.casterActor._id },
+      diff: pendingCastDiff({
+        name: spell.name,
+        level: spell.level,
+        ...(slotLevel !== spell.level ? { slotLevel } : {}),
+        damageFormula: authored.damageFormula,
+        saveType: authored.saveType,
+        severity: authored.severity,
+        ...(authored.energyType !== undefined
+          ? { energyType: authored.energyType }
+          : {}),
+        targetId: params.targetActor._id,
+      }),
+    });
+    const card = pendingCastCardContent(
+      {
+        casterName: params.casterActor.name,
+        spellName: spell.name,
+        spellLevel: spell.level,
+        slotLevel,
+        targetName: params.targetName,
+      },
+      warnings,
+      gateNotes,
+    );
+    const cardMessage: MessageDocument = {
+      _id: globalThis.crypto.randomUUID(),
+      type: "message",
+      name: card.name,
+      ownership: { default: 1 },
+      flags: {},
+      system: {},
+      author: user?.id ?? "",
+      content: card.content,
+      whisper: [],
+      roll: null,
+      flavor: "cast resolution",
+    };
+    client.submit([{ kind: "create", coll: "messages", data: cardMessage }]);
+    if (ops.length > 0) client.submit(ops);
+    return {
+      ok: true,
+      lost: false,
+      held: false,
+      pending: true,
+      pendingSpell: { name: spell.name, level: spell.level },
+      warnings,
+      gateNotes,
+    };
   }
 
   // ── touch delivery (D-158, extended by D-159): the touch attempt is part ─
@@ -1267,6 +1379,41 @@ export async function resolveTouchDelivery(
   };
 }
 
+/** The card when a multi-round casting begins (D-161). */
+export function pendingCastCardContent(
+  ctx: {
+    casterName: string;
+    spellName: string;
+    spellLevel: number;
+    slotLevel: number;
+    targetName: string;
+  },
+  warnings: readonly string[],
+  gateNotes: readonly string[] = [],
+): { name: string; content: string } {
+  const slotNote =
+    ctx.slotLevel === ctx.spellLevel
+      ? `level ${ctx.spellLevel}`
+      : `level ${ctx.spellLevel} cast at slot ${ctx.slotLevel}`;
+  const lines: string[] = [
+    `${ctx.casterName} begins casting ${ctx.spellName} (${slotNote}) at ${ctx.targetName} — it comes into effect just before their next turn.`,
+  ];
+  for (const note of gateNotes) lines.push(`⚠ ${note}`);
+  for (const warning of warnings) lines.push(`⚠ ${warning}`);
+  return { name: `${ctx.spellName} begun`, content: lines.join("\n") };
+}
+
+/** The card when a pending casting is lost to broken concentration (D-161). */
+export function pendingLostCardContent(
+  ctx: { casterName: string; spellName: string; spellLevel: number },
+  reason: string,
+): { name: string; content: string } {
+  return {
+    name: `${ctx.spellName} lost`,
+    content: `${ctx.casterName} loses ${ctx.spellName} (level ${ctx.spellLevel}) before it completes — ${reason}. The slot and preparation were already spent.`,
+  };
+}
+
 /** The card when a held charge's delivery attempt misses. */
 export function castHeldDeliveryMissContent(
   ctx: {
@@ -1303,6 +1450,8 @@ export function castResolutionCardContent(
     hpAfter: number;
     /** D-158: a delivered held charge narrates differently from a fresh cast. */
     delivered?: boolean;
+    /** D-161: a completed multi-round casting narrates its deferred timing. */
+    pendingCompleted?: boolean;
   },
   res: {
     dc: number;
@@ -1322,9 +1471,11 @@ export function castResolutionCardContent(
       ? `level ${ctx.spellLevel}`
       : `level ${ctx.spellLevel} cast at slot ${ctx.slotLevel}`;
   lines.push(
-    ctx.delivered === true
-      ? `${ctx.casterName} delivers the held ${ctx.spellName} (${slotNote}) at ${ctx.targetName} — DC ${res.dc}.`
-      : `${ctx.casterName} casts ${ctx.spellName} (${slotNote}) at ${ctx.targetName} — DC ${res.dc}.`,
+    ctx.pendingCompleted === true
+      ? `${ctx.casterName} completes ${ctx.spellName} (${slotNote}) at ${ctx.targetName} — the casting began before this turn — DC ${res.dc}.`
+      : ctx.delivered === true
+        ? `${ctx.casterName} delivers the held ${ctx.spellName} (${slotNote}) at ${ctx.targetName} — DC ${res.dc}.`
+        : `${ctx.casterName} casts ${ctx.spellName} (${slotNote}) at ${ctx.targetName} — DC ${res.dc}.`,
   );
   for (const note of gateNotes) lines.push(`⚠ ${note}`);
   if (touchLine !== null) lines.push(touchLine);
@@ -1425,4 +1576,262 @@ export function castTouchMissCardContent(
   );
   for (const warning of warnings) lines.push(`⚠ ${warning}`);
   return { name: `${ctx.spellName} touch miss`, content: lines.join("\n") };
+}
+
+/* ------------------------------------------------------------------ *
+ * P5/C03 multi-round casting (D-161): completion and disruption.
+ * ------------------------------------------------------------------ */
+
+export interface PF1ePendingCompletionParams {
+  casterActor: ActorDocument;
+  casterDerived: PF1eDerived;
+  /** The target the casting was begun against; must still match. */
+  targetName: string;
+  targetActor: ActorDocument;
+  targetDerived: PF1eDerived;
+  targetFeats?: readonly string[];
+  combat?: CombatDocument | null;
+  srOvercomeByCaller?: boolean;
+}
+
+export type PF1ePendingCompletionOutcome =
+  | {
+      ok: true;
+      completed: true;
+      dc: number;
+      sr: PF1eSrResult;
+      result: Extract<PF1eSpellTargetResult, { ok: true }>;
+      hpWriteError: string | null;
+    }
+  | { ok: false; error: string };
+
+/**
+ * Complete a pending multi-round casting: "It comes into effect just before
+ * the beginning of your turn in the round after you began casting the
+ * spell." The slot and prepared row were spent when the casting began, so
+ * this only runs the effect pipeline against the original target and clears
+ * the pending state.
+ */
+export async function resolvePendingCompletion(
+  client: CastFlowClient,
+  user: PermissionUser | null,
+  params: PF1ePendingCompletionParams,
+): Promise<PF1ePendingCompletionOutcome> {
+  const fail = (error: string): PF1ePendingCompletionOutcome => ({
+    ok: false,
+    error,
+  });
+  if (
+    !isPF1eActor(params.casterActor) ||
+    !user ||
+    !can(user, "update", params.casterActor, "actors")
+  )
+    return fail("You do not have permission to act for this caster.");
+  const pending = pendingCastFromSystem(
+    params.casterActor.system as Record<string, unknown>,
+  );
+  if (pending === null) return fail("There is no pending casting to complete.");
+  if (pending.targetId !== params.targetActor._id)
+    return fail(
+      `The ${pending.name} was begun at a different target — complete it there or lose the spell.`,
+    );
+  if (!(PF1E_SAVE_SEVERITIES as readonly string[]).includes(pending.severity))
+    return fail(`The pending spell's severity "${pending.severity}" is unknown.`);
+  if (
+    pending.energyType !== undefined &&
+    !(PF1E_ENERGY_TYPES as readonly string[]).includes(pending.energyType)
+  )
+    return fail(
+      `The pending spell's energy type "${pending.energyType}" is unknown.`,
+    );
+  const dc = params.casterDerived.spellSaveDc[pending.level];
+  if (dc === null || dc === undefined)
+    return fail(
+      `No DC for the pending ${pending.name}: the caster has no slots at level ${pending.level} now.`,
+    );
+
+  const authored: PF1eCastFlowParams["authored"] = {
+    saveType: pending.saveType,
+    severity: pending.severity as PF1eSaveSeverity,
+    damageFormula: pending.damageFormula,
+    ...(pending.energyType !== undefined
+      ? { energyType: pending.energyType as PF1eEnergyType }
+      : {}),
+  };
+  const effect = await runSpellEffect(client, user, {
+    casterActor: params.casterActor,
+    casterDerived: params.casterDerived,
+    spellName: pending.name,
+    authored,
+    dc,
+    targetName: params.targetName,
+    targetActor: params.targetActor,
+    targetDerived: params.targetDerived,
+    ...(params.targetFeats !== undefined
+      ? { targetFeats: params.targetFeats }
+      : {}),
+    combat: params.combat,
+    ...(params.srOvercomeByCaller !== undefined
+      ? { srOvercomeByCaller: params.srOvercomeByCaller }
+      : {}),
+  });
+  if (!effect.ok) return fail(effect.error);
+  const ops: Op[] = [...effect.ops];
+  ops.push({
+    kind: "update",
+    ref: { coll: "actors", id: params.casterActor._id },
+    diff: pendingCastDiff(null),
+  });
+  const slotLevel = pending.slotLevel ?? pending.level;
+  const card = castResolutionCardContent(
+    {
+      casterName: params.casterActor.name,
+      spellName: pending.name,
+      spellLevel: pending.level,
+      slotLevel,
+      targetName: params.targetName,
+      damageFormula: pending.damageFormula,
+      saveType: pending.saveType,
+      severity: authored.severity,
+      hpBefore: params.targetDerived.hp,
+      hpAfter: params.targetDerived.hp - effect.result.dealt,
+      pendingCompleted: true,
+    },
+    {
+      dc,
+      sr: effect.sr,
+      saveBonus: effect.saveBonus,
+      saveTotal: effect.saveTotal,
+      result: effect.result,
+    },
+    [],
+    effect.hpWriteError,
+  );
+  const cardMessage: MessageDocument = {
+    _id: globalThis.crypto.randomUUID(),
+    type: "message",
+    name: card.name,
+    ownership: { default: 1 },
+    flags: {},
+    system: {},
+    author: user?.id ?? "",
+    content: card.content,
+    whisper: [],
+    roll: null,
+    flavor: "cast resolution",
+  };
+  client.submit([{ kind: "create", coll: "messages", data: cardMessage }]);
+  if (ops.length > 0) client.submit(ops);
+  return {
+    ok: true,
+    completed: true,
+    dc,
+    sr: effect.sr,
+    result: effect.result,
+    hpWriteError: effect.hpWriteError,
+  };
+}
+
+export interface PF1ePendingDisruptionParams {
+  casterActor: ActorDocument;
+  casterDerived: PF1eDerived;
+  /** The damage the GM says interrupted the casting. */
+  damage: number;
+}
+
+export type PF1ePendingDisruptionOutcome =
+  | {
+      ok: true;
+      /** False when the concentration check passed and the casting continues. */
+      lost: boolean;
+      dc: number;
+      total: number;
+      spellName: string;
+    }
+  | { ok: false; error: string };
+
+/**
+ * Resolve damage taken while a multi-round casting is in progress: "If you
+ * start casting a spell but something interferes with your concentration,
+ * you must make a concentration check or lose the spell" (Rules ID 133) —
+ * DC 10 + damage taken + spell level, the same DC as an injured caster
+ * (Table 9-1). Failure loses the spell; success keeps it pending.
+ */
+export async function resolvePendingDisruption(
+  client: CastFlowClient,
+  user: PermissionUser | null,
+  params: PF1ePendingDisruptionParams,
+): Promise<PF1ePendingDisruptionOutcome> {
+  const fail = (error: string): PF1ePendingDisruptionOutcome => ({
+    ok: false,
+    error,
+  });
+  if (
+    !isPF1eActor(params.casterActor) ||
+    !user ||
+    !can(user, "update", params.casterActor, "actors")
+  )
+    return fail("You do not have permission to act for this caster.");
+  const pending = pendingCastFromSystem(
+    params.casterActor.system as Record<string, unknown>,
+  );
+  if (pending === null) return fail("There is no pending casting to disrupt.");
+  if (!Number.isInteger(params.damage) || params.damage < 0)
+    return fail("The interruption damage must be a whole number of hit points.");
+  const dc = 10 + params.damage + pending.level;
+  const rollId = client.roll(
+    "1d20",
+    "roll",
+    undefined,
+    `${pending.name} concentration (interrupted while casting)`,
+  );
+  const message = await awaitRollMessage(client, rollId);
+  if (message === null)
+    return fail("The concentration check never replicated.");
+  const face = dieFaceOf(message);
+  if (face === null)
+    return fail("Could not read the concentration check's d20 face.");
+  const bonus =
+    params.casterDerived.spellCasterLevel +
+    params.casterDerived.abilityMods[params.casterDerived.spellKeyAbility] +
+    params.casterDerived.concentration;
+  const total = face + bonus;
+  const lost = total < dc;
+  const ops: Op[] = [];
+  if (lost) {
+    ops.push({
+      kind: "update",
+      ref: { coll: "actors", id: params.casterActor._id },
+      diff: pendingCastDiff(null),
+    });
+  }
+  const card = lost
+    ? pendingLostCardContent(
+        {
+          casterName: params.casterActor.name,
+          spellName: pending.name,
+          spellLevel: pending.level,
+        },
+        `the concentration check [[${total}|1d20 ${bonus >= 0 ? `+ ${bonus}` : `- ${Math.abs(bonus)}`}]] failed against DC ${dc} after taking ${params.damage} damage`,
+      )
+    : {
+        name: `${pending.name} held`,
+        content: `${params.casterActor.name} keeps concentrating on ${pending.name} — concentration [[${total}|1d20 ${bonus >= 0 ? `+ ${bonus}` : `- ${Math.abs(bonus)}`}]] vs DC ${dc} passed despite ${params.damage} damage.`,
+      };
+  const cardMessage: MessageDocument = {
+    _id: globalThis.crypto.randomUUID(),
+    type: "message",
+    name: card.name,
+    ownership: { default: 1 },
+    flags: {},
+    system: {},
+    author: user?.id ?? "",
+    content: card.content,
+    whisper: [],
+    roll: null,
+    flavor: "cast resolution",
+  };
+  client.submit([{ kind: "create", coll: "messages", data: cardMessage }]);
+  if (ops.length > 0) client.submit(ops);
+  return { ok: true, lost, dc, total, spellName: pending.name };
 }

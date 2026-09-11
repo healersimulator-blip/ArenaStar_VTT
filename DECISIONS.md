@@ -4101,3 +4101,66 @@ total of 9 (always passes, spell lands); continuous damage 60 is DC 41 against a
 swift/quickened/metamagic timing, unarmed/natural-weapon delivery of a held charge, touching
 up to six friends as a full-round action, multi-charge touch spells, and attacks of
 opportunity against ranged-touch casters.
+
+## D-161 — 2026-09-11 — P5/C03 partial: multi-round casting — begin, disrupt, complete
+
+**Context.** With the gate (D-157), the full Table 9-1 surface (D-160) and the touch half
+(D-158/D-159) live, C03's remaining headline was its *timing* half: spells whose casting time
+is 1 round or longer. This slice encodes the begin/disrupt/complete lifecycle.
+
+**Decisions.**
+
+- **R02 first.** Transcribed before encoding: Rules ID 147 ("Cast a Spell", full-round action,
+  CRB pg. 187) — a 1-round spell is a full-round action; "It comes into effect just before the
+  beginning of your turn in the round after you began casting the spell"; "If you lose
+  concentration after starting the spell and before it is complete, you lose the spell"; AoOs
+  provoke only at the begin. Rules ID 133's Concentration text supplies the spend-at-begin
+  ruling: a lost spell "counts against your daily limit of spells even though you did not cast
+  it successfully" — the slot and prepared row are therefore spent when the casting **begins**,
+  not when it completes.
+- **The pending casting rides the actor document** (`system.pf1e.pendingCast`, validated in
+  `parsePF1eActorSystem` like its D-158 sibling): spell name/level/slot level, the authored
+  effect (damage formula, save type/severity, energy type) and — critically — the `targetId`
+  the casting was begun at. New pure module `src/packages/pf1e/pendingCast.ts` with the
+  null-tolerant reader and the diff builder. The D-158 round-trip lesson is applied up front:
+  `pendingCastDiff(null)` emits the `-=` delete marker, the parser treats a literal `null` as
+  absent, and the write→clear→`applyDiff`→re-parse regression test ships with the slice.
+- **The cast flow gains a `pending` outcome.** `resolveCastFlow` with `castingTime: "longer"`
+  runs the gate normally, spends the slot and prepared row, writes the pending state, posts a
+  "begins casting" card, and returns without rolling a single die — the effect is deferred.
+  Beginning a second long casting forfeits the first (concentration maintains one spell); the
+  existing held-charge dissipation still runs, so beginning any spell consumes a held charge.
+  Touch spells refuse the longer casting time by name (out of slice). The outcome union gained
+  a fourth ok variant; the other three carry `pending?: undefined` markers and every consumer
+  guard was widened compile-checked.
+- **Completion and disruption are their own flows.** `resolvePendingCompletion` re-reads the
+  freshest documents, refuses when the stored `targetId` no longer matches the presented target
+  (the spell lands where it was aimed or is lost — no retargeting), runs the shared
+  `runSpellEffect` pipeline with the stored authored data, and clears the pending state.
+  `resolvePendingDisruption` resolves the GM-declared interruption damage with one host d20:
+  DC 10 + damage + spell level — the same Table 9-1 row as an injured caster — failure loses
+  the spell (named card, state cleared, slot already spent), success keeps it pending.
+- **Sheet UI**: a pending-cast panel mirrors the held-charge panel — Complete the casting, an
+  interruption-damage input with a Concentration check button, and Lose the spell — all
+  re-deriving the freshest documents before acting.
+
+**Verification.** 19 new unit tests — 7 pure layer (parse tolerances, diff shapes, the store
+round-trip, schema accept/reject including the literal-null-as-absent case) and 12 flow
+(begin spends and writes and rolls nothing; replacing forfeits the old pending; held charge
+dissipates at begin; touch+longer refused by name; illegal gate refuses before any spend;
+completion runs the pipeline at DC and clears; completion refuses absent/mismatched-target/
+stranger; disruption fail loses, pass holds, nothing-pending refuses). Full suite **1488 passed
+/ 3 skipped** across 146 files (+19 over D-160); typecheck and lint green; touched authored-
+file Prettier applied. **Chromium e2e 88/88** (+1): the new test is fully deterministic —
+severity-none casts with no damage dice, and the disruption declaration (100 damage → DC 111
+vs best-case +8) is unwinnable: Magic Missile begins (slot + prepared row spent, effect
+deferred), the check loses it with the slot still spent, then Shield begins and completes at
+the original target. dist **2,234,110 raw / 648,810 gzip** (+10,640 / +1,640 over D-160,
+within the 6 MB budget).
+
+**Scope boundaries.** C03 stays open. Still missing: swift/quickened/metamagic timing
+(Quickened Spell text transcribed-ready), unarmed/natural-weapon delivery of a held charge,
+touching up to six friends as a full-round action, multi-charge touch spells, and attacks of
+opportunity against ranged-touch casters. Minute-plus castings reuse this machinery as-is (the
+GM judges the completion either way); casting while mounted and AoO *resolution* at the begin
+(narrated, not resolved) are documented deferrals.

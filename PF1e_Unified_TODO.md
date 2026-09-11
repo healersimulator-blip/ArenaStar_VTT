@@ -409,6 +409,50 @@ Depends on P3 and D06; keep core EffectDocument unchanged.
 
 Depends on effects, attacks, action foundations and verified rule fixtures. Tactical targeting and strategic spell resolution remain independent implementations using common spell data.
 
+### P5 progress — 2026-09-11, multi-round casting: begin, disrupt, complete (D-161, C03 partial)
+
+- **The C03 timing half is now live.** R02 transcribed the full-round "Cast
+  a Spell" rule first (Rules ID 147, CRB pg. 187): "A spell that takes one
+  round to cast is a full-round action. It comes into effect just before the
+  beginning of your turn in the round after you began casting the spell";
+  "If you lose concentration after starting the spell and before it is
+  complete, you lose the spell" — plus Rules ID 133's concentration text,
+  which is why the slot and prepared row are spent when the casting
+  **begins** ("it counts against your daily limit ... even though you did
+  not cast it successfully").
+- **The pending casting rides the actor document** (`system.pf1e.pendingCast`,
+  new pure module `src/packages/pf1e/pendingCast.ts`): spell name/level/
+  effect data plus the target it was begun at. Beginning a second long
+  casting forfeits the first; beginning any cast still dissipates a held
+  charge. Clearing uses the `-=` delete marker from day one, and the parser
+  treats a literal `null` as absent — the D-158 round-trip lesson applied
+  up front, with the write→clear→re-parse regression test included.
+- **Two new flows** consume the shared `runSpellEffect` pipeline:
+  `resolvePendingCompletion` fires the effect at the **original target**
+  (a different target is a named refusal) just before the caster's next
+  turn, and `resolvePendingDisruption` resolves damage taken mid-casting —
+  DC 10 + damage + spell level, the same table row as an injured caster.
+  The sheet gains a pending-cast panel: Complete the casting, an
+  interruption-damage input with a Concentration check button, and Lose the
+  spell.
+- **Executed browser proof:** `e2e/pf1e_pending_cast.spec.ts` (Chromium,
+  **88/88** overall), fully deterministic — every cast is severity-none
+  with no damage dice, and the disruption declaration (100 damage → DC 111
+  vs a best-case +8) is unwinnable: Magic Missile begins (slot and prepared
+  row spent, effect deferred), the check loses it with the slot still
+  spent, then Shield begins and completes at the original target. Rules
+  arithmetic stays pinned by 19 new unit tests (7 pure layer including the
+  store round-trip, 12 flow: begin/replace/dissipate/touch-refusal/
+  gate-refusal, completion pipeline + target-id and permission refusals,
+  disruption pass/fail/none-pending).
+- **Still open for C03 (stays unchecked):** swift/quickened/metamagic
+  timing, unarmed/natural-weapon delivery of a held charge, touching up to
+  six friends as a full-round action, multi-charge touch spells (Chill
+  Touch), and attacks of opportunity against ranged-touch casters.
+- **Evidence:** unit **1488 passed / 3 skipped** across 146 files; typecheck
+  /lint/touched-file Prettier green; dist **2,234,110 raw / 648,810 gzip**;
+  Chromium e2e **88/88** (+1).
+
 ### P5 progress — 2026-09-11, the full Table 9-1 concentration surface (D-160, C03 partial)
 
 - **All eleven Table 9-1 situations are now reachable in the product.** D-150

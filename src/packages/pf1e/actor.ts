@@ -192,6 +192,22 @@ export interface PF1eActorSystem extends PF1eHealthAuthored {
     severity?: string;
     energyType?: string;
   };
+  /**
+   * A multi-round casting begun but not yet completed (D-161, Rules ID 147):
+   * "It comes into effect just before the beginning of your turn in the
+   * round after you began casting the spell." The slot and prepared row are
+   * spent when the casting begins; clearing uses the store's `-=` marker.
+   */
+  pendingCast?: {
+    name: string;
+    level: number;
+    slotLevel?: number;
+    damageFormula?: string;
+    saveType?: "fort" | "ref" | "will";
+    severity?: string;
+    energyType?: string;
+    targetId?: string;
+  };
   feats?: string[];
   traits?: string[];
   conditions?: string[];
@@ -592,6 +608,42 @@ export function parsePF1eActorSystem(raw: unknown): Result<PF1eActorSystem> {
       return err("heldCharge severity must be a string");
     if (hc.energyType !== undefined && typeof hc.energyType !== "string")
       return err("heldCharge energyType must be a string");
+  }
+  if (o.pendingCast !== undefined && o.pendingCast !== null) {
+    if (!isRecord(o.pendingCast))
+      return err("system.pf1e.pendingCast must be an object");
+    const pc = o.pendingCast as Record<string, unknown>;
+    if (typeof pc.name !== "string" || pc.name.trim() === "")
+      return err("pendingCast needs a non-empty name");
+    if (pc.name.length > 120)
+      return err("pendingCast names are at most 120 characters");
+    if (!Number.isInteger(pc.level) || (pc.level as number) < 0 || (pc.level as number) > 9)
+      return err("pendingCast level must be an integer 0–9");
+    if (
+      pc.slotLevel !== undefined &&
+      (!Number.isInteger(pc.slotLevel) ||
+        (pc.slotLevel as number) < 0 ||
+        (pc.slotLevel as number) > 9)
+    )
+      return err("pendingCast slotLevel must be an integer 0–9");
+    if (
+      pc.damageFormula !== undefined &&
+      typeof pc.damageFormula !== "string"
+    )
+      return err("pendingCast damageFormula must be a string");
+    if (
+      pc.saveType !== undefined &&
+      pc.saveType !== "fort" &&
+      pc.saveType !== "ref" &&
+      pc.saveType !== "will"
+    )
+      return err('pendingCast saveType must be "fort", "ref" or "will"');
+    if (pc.severity !== undefined && typeof pc.severity !== "string")
+      return err("pendingCast severity must be a string");
+    if (pc.energyType !== undefined && typeof pc.energyType !== "string")
+      return err("pendingCast energyType must be a string");
+    if (pc.targetId !== undefined && typeof pc.targetId !== "string")
+      return err("pendingCast targetId must be a string");
   }
   if (o.armorClass !== undefined && !isRecord(o.armorClass)) {
     return err("system.pf1e.armorClass must be an object of AC components");
