@@ -766,6 +766,37 @@ describe("ability damage and drain (CRB p.555)", () => {
     expect(parsePF1eActorSystem({ hitDice: 6 }).ok).toBe(true);
   });
 
+  test("spells.tradition and prepared components validate structurally (D-157)", () => {
+    expect(parsePF1eActorSystem({ spells: { tradition: "arcane" } }).ok).toBe(
+      true,
+    );
+    expect(parsePF1eActorSystem({ spells: { tradition: "divine" } }).ok).toBe(
+      true,
+    );
+    expect(parsePF1eActorSystem({ spells: { tradition: "psychic" } }).ok).toBe(
+      false,
+    );
+    expect(
+      parsePF1eActorSystem({
+        spells: {
+          prepared: [{ name: "Shield", level: 1, components: "V, S" }],
+        },
+      }).ok,
+    ).toBe(true);
+    expect(
+      parsePF1eActorSystem({
+        spells: { prepared: [{ name: "Shield", level: 1, components: 7 }] },
+      }).ok,
+    ).toBe(false);
+    expect(
+      parsePF1eActorSystem({
+        spells: {
+          prepared: [{ name: "Shield", level: 1, components: "V".repeat(121) }],
+        },
+      }).ok,
+    ).toBe(false);
+  });
+
   test("every bestiary block derives identically with zero damage/drain fields added", () => {
     const pack = JSON.parse(
       readFileSync(

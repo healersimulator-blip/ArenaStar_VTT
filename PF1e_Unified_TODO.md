@@ -409,6 +409,55 @@ Depends on P3 and D06; keep core EffectDocument unchanged.
 
 Depends on effects, attacks, action foundations and verified rule fixtures. Tactical targeting and strategic spell resolution remain independent implementations using common spell data.
 
+### P5 progress — 2026-09-11, the C03a casting gate wired into the cast path (D-157, C03 partial)
+
+- **The D-150 layer is now product-reachable.** D-150 encoded C03's pre-save
+  gate as pure functions (`concentration.ts`: component parsing with
+  per-tradition `M/DF` resolution, named legality refusals, per-item arcane
+  spell failure, deafened spoilage, Table 9-1 concentration) but nothing in
+  the product called it. D-157 wires it into the D-156 cast flow with **zero
+  new rule encoding** — `resolveCastFlow` gains an optional `gate` input and
+  delegates every ruling to `resolveCastingAttempt`.
+- **Ordering preserved.** The gate's diceless half (component parse +
+  legality) runs in the validation block: an illegal casting is refused by
+  name **before any die rolls and spends nothing**. The dice half (d100 for
+  armour failure when it applies, d100 for deafened spoilage, one d20 per
+  declared concentration trigger) rolls after slot/prepared bookkeeping and
+  before the effect rolls. A ruined spell still spends its slot and prepared
+  row — "you lose the spell just as if you had cast it to no effect" — posts
+  a `Spell lost` card naming the failed check, and skips damage/SR/save/HP.
+- **Authoring.** Prepared rows gain an optional `components` line and the
+  spells block an optional `tradition` ("arcane" | "divine", both validated);
+  the prepare form authors the line, the row displays it, and a pinned row
+  prefills the cast panel's gate. Armour failure reads the authored
+  `armor.spellFailure` for arcane casters only (a spell without a somatic
+  component is exempt, per the table); the concentration check adds the
+  derived `concentration` bonus and key ability modifier to caster level.
+- **The sheet panel** gains the gate fieldset: components line, casting time,
+  cannot speak / no free hand / components not in hand / deafened /
+  grappling / pinned, casting defensively, and injured-while-casting with
+  the damage taken. Of Table 9-1's eleven situations these two cover the headline C03
+  cases; the rest remain available in the pure layer.
+- **Executed browser proof:** a 4th test in `e2e/pf1e_cast_flow.spec.ts`
+  (Chromium, **83/83** overall): a silenced caster's V/S cast is refused with
+  the named reason, no slot spent, no prepared expense, no card; the same
+  cast with the voice restored passes the gate silently and lands. The first
+  cast-flow test now also rides the gate's pass path via the prepared row's
+  components line. Rules arithmetic stays pinned by 15 new unit tests in
+  `tests/ui/pf1eCastGate.test.ts` (legality refusals, malformed lines, ASF
+  ruin/pass/no-somatic/divine-exempt, deafened spoilage both ways, defensive
+  casting pass/fail, injured trigger DC, `M/DF` tradition split, empty-line
+  gate skip) plus one schema test.
+- **Still open for C03 (stays unchecked):** touch/held charges, multi-round
+  casting, swift/quickened/metamagic timing, threatened-casting attacks of
+  opportunity, the remaining Table 9-1 UI triggers, per-item ASF exemptions
+  and shield ASF authoring, and condition-driven caster state (the panel's
+  checkboxes are the GM's declaration). C05's profile-driven payloads remain
+  the area/multi-target path.
+- **Evidence:** unit **1432 passed / 3 skipped** across 142 files; typecheck
+  /lint/touched-file Prettier green; dist **2,206,360 raw / 643,280 gzip**;
+  Chromium e2e **83/83** (+1).
+
 ### P5 progress — 2026-09-11, tactical casting/save flow slice (D-156, C02 closed)
 
 - **The cast flow.** `src/ui/sheets/pf1eCastFlow.ts` (new) orchestrates one

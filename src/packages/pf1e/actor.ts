@@ -113,6 +113,13 @@ export interface PF1eAttackEntry {
 export interface PF1eSpellsAuthored {
   keyAbility?: PF1eAbilityKey;
   casterLevel?: number;
+  /**
+   * Which component-resolution tradition the caster's spells use (D-157):
+   * `M/DF` lines resolve to M for arcane casters and DF for divine ones, and
+   * arcane spell failure from armour only applies to arcane casting.
+   * Defaults to `"arcane"` at the point of use when absent.
+   */
+  tradition?: "arcane" | "divine";
   /** Extra flat bonus on save DCs (focus item, special). */
   dcBonus?: number;
   casterLevelBonus?: number;
@@ -135,6 +142,12 @@ export interface PF1eSpellsAuthored {
     level: number;
     slotLevel?: number;
     expended?: boolean;
+    /**
+     * The spell's Components line, e.g. "V, S, M/DF" (D-157). Drives the
+     * C03a casting gate (legality, arcane spell failure, deafened spoilage,
+     * concentration). Absent/empty means the cast flow skips the gate.
+     */
+    components?: string;
   }>;
 }
 
@@ -459,6 +472,15 @@ export function parsePF1eActorSystem(raw: unknown): Result<PF1eActorSystem> {
         `system.pf1e.spells.mode ${JSON.stringify(s.mode)} must be "prepared" or "spontaneous"`,
       );
     }
+    if (
+      s.tradition !== undefined &&
+      s.tradition !== "arcane" &&
+      s.tradition !== "divine"
+    ) {
+      return err(
+        `system.pf1e.spells.tradition ${JSON.stringify(s.tradition)} must be "arcane" or "divine"`,
+      );
+    }
     if (s.slotsUsed !== undefined) {
       if (!isRecord(s.slotsUsed))
         return err("system.pf1e.spells.slotsUsed must be an object");
@@ -511,6 +533,14 @@ export function parsePF1eActorSystem(raw: unknown): Result<PF1eActorSystem> {
         if (entry.expended !== undefined && typeof entry.expended !== "boolean")
           return err(
             `prepared spell "${entry.name}": expended must be a boolean`,
+          );
+        if (
+          entry.components !== undefined &&
+          (typeof entry.components !== "string" ||
+            entry.components.length > 120)
+        )
+          return err(
+            `prepared spell "${entry.name}": components must be a string of at most 120 characters`,
           );
       }
     }

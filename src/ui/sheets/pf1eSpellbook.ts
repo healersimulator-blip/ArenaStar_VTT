@@ -40,6 +40,8 @@ export interface PF1ePreparedRow {
   level: number;
   slotLevel: number;
   expended: boolean;
+  /** The spell's Components line (D-157); "" when not authored. */
+  components: string;
 }
 
 export interface PF1eSpellbookView {
@@ -99,6 +101,7 @@ function preparedRows(spells: Record<string, Json> | null): PF1ePreparedRow[] {
         ? (rec.slotLevel as number)
         : (rec.level as number),
       expended: rec.expended === true,
+      components: typeof rec.components === "string" ? rec.components : "",
     });
   }
   return out;
@@ -146,7 +149,14 @@ function preparedByLevel(rows: PF1ePreparedRow[]): number[] | null {
 export type PF1eSpellbookEdit =
   | { kind: "spend"; level: number }
   | { kind: "restore"; level: number }
-  | { kind: "prepare"; name: string; level: number; slotLevel?: number }
+  | {
+      kind: "prepare";
+      name: string;
+      level: number;
+      slotLevel?: number;
+      /** Components line (D-157); empty/absent = no C03a gate for this row. */
+      components?: string;
+    }
   | { kind: "preparedRemove"; index: number }
   | { kind: "preparedToggle"; index: number };
 
@@ -224,8 +234,12 @@ export function pf1eSpellbookEdit(
       return fail(
         `At most ${MAX_PREPARED_SPELLS} prepared spells are supported.`,
       );
+    const components = (edit.components ?? "").trim();
+    if (components.length > 120)
+      return fail("Components lines are at most 120 characters.");
     const row: Record<string, Json> = { name, level: edit.level };
     if (edit.slotLevel !== undefined) row.slotLevel = edit.slotLevel;
+    if (components !== "") row.components = components;
     const next = [...rawPrepared(spells), row];
     return {
       ops: [

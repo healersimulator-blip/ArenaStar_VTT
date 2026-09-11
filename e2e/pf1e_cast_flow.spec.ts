@@ -28,7 +28,8 @@ const wizardSystem = {
       slotsPerDay: { 0: 4, 1: 4 },
       slotsUsed: { 1: 5 },
       prepared: [
-        { name: "Magic Missile", level: 1 },
+        // The Components line rides the prepared row and pins the C03a gate.
+        { name: "Magic Missile", level: 1, components: "V, S" },
         { name: "Shield", level: 1 },
       ],
     },
@@ -196,6 +197,61 @@ test.describe("PF1e cast flow: the Spells tab casts through the store (§7/P5 C0
     await sheet.getByRole("button", { name: "summary", exact: true }).click();
     await expect(sheet.locator("[data-pf1e-spell-slots]")).toContainText(
       "1st 6/5",
+    );
+    expect(errors).toEqual([]);
+  });
+
+  test("the C03a gate: a caster who cannot speak is refused and spends nothing (D-157)", async ({
+    page,
+  }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    await page.goto(entry + "?e2e=1");
+    await waitForSurface(page, "app");
+    await importFixture(page);
+
+    const sheet = page.locator("#sheets [data-pf1e-sheet]");
+    await sheet.getByRole("button", { name: "spells", exact: true }).click();
+    const book = sheet.locator("[data-pf1e-spellbook]");
+    const row1 = book.locator('[data-spell-slot-level="1"]');
+
+    // The prepared row's Components line pins the cast panel's gate.
+    await book.locator('[data-cast-prepared="0"]').click();
+    await expect(book.locator("[data-cast-components]")).toHaveValue("V, S");
+    await book.locator("[data-cast-severity]").selectOption("none");
+    await book.locator("[data-cast-damage]").fill("");
+    await book.locator("[data-cast-target]").selectOption({ label: "PF Ogre" });
+
+    // A verbal component needs a strong voice: refuse, diceless, spendless.
+    await book.locator("[data-cast-cannot-speak]").check();
+    await book.locator("[data-cast-submit]").click();
+    await expect(book.locator("[data-cast-error]")).toContainText(
+      /cannot speak/i,
+    );
+    await expect(row1.locator("[data-slot-spent]")).toHaveText("5");
+    await expect(book.locator('[data-prepared-row="0"]')).not.toContainText(
+      "expended",
+    );
+    await page.click('[data-tab="chat"]');
+    await expect(page.locator("#chat-log")).not.toContainText(
+      "casts Magic Missile",
+    );
+
+    // Same cast, voice restored: the gate passes silently and the spell lands.
+    await page.click('[data-tab="actors"]');
+    await page
+      .locator("#sheet-list .sheet-row")
+      .filter({ hasText: "PF Wizard" })
+      .click();
+    await sheet.getByRole("button", { name: "spells", exact: true }).click();
+    await book.locator('[data-cast-prepared="0"]').click();
+    await book.locator("[data-cast-severity]").selectOption("none");
+    await book.locator("[data-cast-damage]").fill("");
+    await book.locator("[data-cast-target]").selectOption({ label: "PF Ogre" });
+    await book.locator("[data-cast-submit]").click();
+    await expect(row1.locator("[data-slot-spent]")).toHaveText("6");
+    await expect(book.locator('[data-prepared-row="0"]')).toContainText(
+      "expended",
     );
     expect(errors).toEqual([]);
   });

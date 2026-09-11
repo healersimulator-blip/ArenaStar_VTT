@@ -39,8 +39,10 @@
   import {
     resolveCastFlow,
     type PF1eCastFlowParams,
+    type PF1eConcentrationDeclaration,
   } from "./pf1eCastFlow";
   import type { PF1eSaveSeverity, PF1eSaveType } from "../../packages/pf1e/casting";
+  import type { PF1eCastingTime } from "../../packages/pf1e/concentration";
   import type { PF1eEnergyType } from "../../packages/pf1e/healthState";
   import {
     pf1eApplyActorEffect,
@@ -109,6 +111,7 @@
   let prepareName = $state("");
   let prepareLevel = $state("1");
   let prepareSlotLevel = $state("");
+  let prepareComponents = $state("");
   // P5/C02 (D-156): the tactical cast panel's state.
   let castTargetId = $state("");
   let castName = $state("");
@@ -120,6 +123,18 @@
   let castDamage = $state("");
   let castEnergy = $state("");
   let castSrOvercome = $state(false);
+  // C03a gate (D-157): components line + the GM-declared situation.
+  let castComponents = $state("");
+  let castTime = $state("standard");
+  let castCannotSpeak = $state(false);
+  let castNoFreeHand = $state(false);
+  let castNoComponentsInHand = $state(false);
+  let castDeafened = $state(false);
+  let castGrappled = $state(false);
+  let castPinned = $state(false);
+  let castDefensively = $state(false);
+  let castInjured = $state(false);
+  let castInjuredDamage = $state("");
   let castBusy = $state(false);
   let castError = $state("");
   let castWarning = $state("");
@@ -387,8 +402,19 @@
       prepareSlotLevel === ""
         ? undefined
         : Number.parseInt(prepareSlotLevel, 10);
-    updateSpellbook({ kind: "prepare", name: prepareName, level, slotLevel });
-    if (!error) prepareName = "";
+    const components =
+      prepareComponents.trim() === "" ? undefined : prepareComponents.trim();
+    updateSpellbook({
+      kind: "prepare",
+      name: prepareName,
+      level,
+      slotLevel,
+      components,
+    });
+    if (!error) {
+      prepareName = "";
+      prepareComponents = "";
+    }
   }
 
   function fillCastFromPrepared(index: number): void {
@@ -398,6 +424,8 @@
     castName = row.name;
     castLevel = String(row.level);
     castSlot = row.slotLevel === row.level ? "" : String(row.slotLevel);
+    // A prepared row's Components line pins the C03a gate for this cast.
+    castComponents = row.components;
   }
 
   async function castAtTarget(): Promise<void> {
@@ -446,6 +474,15 @@
     };
     if (castEnergy !== "")
       authored.energyType = castEnergy as PF1eEnergyType;
+    // The C03a gate (D-157) runs whenever a Components line is declared.
+    const gateComponents = castComponents.trim();
+    const declarations: PF1eConcentrationDeclaration[] = [];
+    if (castDefensively) declarations.push({ situation: "castDefensively" });
+    if (castInjured)
+      declarations.push({
+        situation: "injured",
+        damage: Math.max(0, Math.trunc(Number(castInjuredDamage) || 0)),
+      });
     castBusy = true;
     try {
       const outcome = await resolveCastFlow(client, client.user, {
@@ -461,11 +498,30 @@
           : [],
         combat: linked.combat,
         ...(castSrOvercome ? { srOvercomeByCaller: true } : {}),
+        ...(gateComponents !== ""
+          ? {
+              gate: {
+                components: gateComponents,
+                caster: {
+                  canSpeak: !castCannotSpeak,
+                  hasFreeHand: !castNoFreeHand,
+                  componentsInHand: !castNoComponentsInHand,
+                  deafened: castDeafened,
+                  grappled: castGrappled,
+                  pinned: castPinned,
+                },
+                castingTime: castTime as PF1eCastingTime,
+                declarations,
+              },
+            }
+          : {}),
       });
       if (!outcome.ok) {
         castError = outcome.error;
+      } else if (outcome.lost) {
+        castWarning = [...outcome.gateNotes, ...outcome.warnings].join(" · ");
       } else {
-        const bits: string[] = [...outcome.warnings];
+        const bits: string[] = [...outcome.gateNotes, ...outcome.warnings];
         if (outcome.hpWriteError !== null) bits.push(outcome.hpWriteError);
         castWarning = bits.join(" · ");
       }
@@ -1026,6 +1082,16 @@
                 {/each}
               </select>
             </label>
+            <label
+              >Components
+              <input
+                name="components"
+                value={prepareComponents}
+                oninput={(e) => (prepareComponents = e.currentTarget.value)}
+                placeholder="e.g. V, S, M/DF"
+                data-prepare-components
+              />
+            </label>
             <button type="submit" data-prepare-submit>Prepare</button>
           </form>
         {/if}
@@ -1044,7 +1110,7 @@
                     onchange={() =>
                       updateSpellbook({ kind: "preparedToggle", index })}
                   />
-                  {row.name} · level {row.level}{#if row.slotLevel !== row.level} (cast at {row.slotLevel}){/if}{#if row.expended} — expended{/if}
+                  {row.name} · level {row.level}{#if row.slotLevel !== row.level} (cast at {row.slotLevel}){/if}{#if row.components !== ""} · {row.components}{/if}{#if row.expended} — expended{/if}
                 </label>
                 {#if editable}
                   <button
@@ -1168,6 +1234,83 @@
             <option value="sonic">Sonic</option>
           </select>
         </label>
+        <fieldset data-cast-gate>
+          <legend>Casting gate (components &amp; concentration)</legend>
+          <label
+            >Components
+            <input
+              value={castComponents}
+              oninput={(e) => (castComponents = e.currentTarget.value)}
+              placeholder="e.g. V, S, M/DF — empty skips the gate"
+              data-cast-components
+            />
+          </label>
+          <label
+            >Casting time
+            <select bind:value={castTime} data-cast-time>
+              <option value="free">Free action</option>
+              <option value="swift">Swift action</option>
+              <option value="standard">Standard action</option>
+              <option value="full-round">Full-round action</option>
+              <option value="longer">Longer (1 round+)</option>
+            </select>
+          </label>
+          <label
+            ><input
+              type="checkbox"
+              bind:checked={castCannotSpeak}
+              data-cast-cannot-speak
+            />
+            Cannot speak</label
+          >
+          <label
+            ><input
+              type="checkbox"
+              bind:checked={castNoFreeHand}
+              data-cast-no-free-hand
+            />
+            No free hand</label
+          >
+          <label
+            ><input
+              type="checkbox"
+              bind:checked={castNoComponentsInHand}
+              data-cast-no-components-in-hand
+            />
+            Components not in hand</label
+          >
+          <label
+            ><input type="checkbox" bind:checked={castDeafened} data-cast-deafened />
+            Deafened</label
+          >
+          <label
+            ><input type="checkbox" bind:checked={castGrappled} data-cast-grappled />
+            Grappling</label
+          >
+          <label
+            ><input type="checkbox" bind:checked={castPinned} data-cast-pinned />
+            Pinned</label
+          >
+          <label
+            ><input
+              type="checkbox"
+              bind:checked={castDefensively}
+              data-cast-defensively
+            />
+            Casting defensively (DC 15 + 2× spell level)</label
+          >
+          <label
+            ><input type="checkbox" bind:checked={castInjured} data-cast-injured />
+            Injured while casting — damage taken
+            <input
+              value={castInjuredDamage}
+              oninput={(e) => (castInjuredDamage = e.currentTarget.value)}
+              data-cast-injured-damage
+              placeholder="0"
+              size="4"
+            /></label
+          >
+        </fieldset>
         <label
           ><input
             type="checkbox"
@@ -1187,8 +1330,12 @@
         Spending and preparation are daily state; resting/recovery automation
         arrives with P7. Overuse is warned, not blocked (C04). Casting spends
         the slot and expends the prepared row, rolls the target's save and any
-        SR check host-side, and writes the target's HP. Casting legality,
-        components and concentration (C03) and area/target-count payloads (C05)
+        SR check host-side, and writes the target's HP. A declared Components
+        line runs the C03a gate (D-157): legality, armour arcane spell failure
+        (arcane tradition, authored <code>armor.spellFailure</code>), deafened
+        spoilage and declared concentration checks — a failed check loses the
+        spell and still spends it. Touch/held charges, multi-round casting and
+        metamagic timing (C03 remainder) and area/target-count payloads (C05)
         are not yet part of this single-target flow.
       </p>
     </section>

@@ -42,6 +42,17 @@ import {
 } from "../../packages/pf1e/healthState";
 import { hasPF1eFeat } from "../../packages/pf1e/feats";
 import {
+  arcaneSpellFailureChance,
+  checkCastingLegality,
+  componentNeeds,
+  parseSpellComponents,
+  resolveCastingAttempt,
+  type PF1eCasterState,
+  type PF1eCastingTime,
+  type PF1eConcentrationTrigger,
+  type PF1eSpellTradition,
+} from "../../packages/pf1e/concentration";
+import {
   srAlreadyOvercome,
   srOvercomeBlobFromFlags,
   srOvercomeDiff,
@@ -85,17 +96,90 @@ export interface PF1eCastFlowParams {
   combat?: CombatDocument | null;
   /** Manual GM adjudication that SR was already overcome this round. */
   srOvercomeByCaller?: boolean;
+  /**
+   * The C03a pre-save gate (D-157): components/legality, arcane spell
+   * failure, deafened spoilage and concentration, resolved through D-150's
+   * `resolveCastingAttempt`. Absent (or an empty `components` line) skips
+   * the gate entirely, exactly as before D-157.
+   */
+  gate?: PF1eCastGateInput;
+}
+
+/**
+ * A concentration trigger as the caller declares it — without the die, which
+ * the flow rolls on the host (one d20 per trigger, like every other die).
+ */
+export type PF1eConcentrationDeclaration =
+  | { situation: "castDefensively" }
+  | { situation: "injured"; damage: number }
+  | { situation: "continuousDamage"; damage: number }
+  | { situation: "nonDamagingSpell"; spellDc: number }
+  | { situation: "grappledOrPinned"; grapplerCmb: number }
+  | {
+      situation:
+        | "vigorousMotion"
+        | "violentMotion"
+        | "extremelyViolentMotion"
+        | "windRainSleet"
+        | "windHailDebris"
+        | "entangled";
+    };
+
+export interface PF1eCastGateInput {
+  /** The spell's Components line, e.g. "V, S, M/DF". */
+  components: string;
+  /** The situation the GM declares for this casting. */
+  caster: PF1eCasterState;
+  castingTime: PF1eCastingTime;
+  /** Concentration triggers to resolve; each gets its own host d20. */
+  declarations?: readonly PF1eConcentrationDeclaration[];
+}
+
+/** The caster's authored tradition: "arcane" unless the actor says divine. */
+function spellsTraditionOf(actor: ActorDocument): PF1eSpellTradition {
+  const pf1e = sheetRecord((actor.system as Record<string, unknown>).pf1e);
+  const spells = pf1e ? sheetRecord(pf1e.spells) : null;
+  return spells?.tradition === "divine" ? "divine" : "arcane";
+}
+
+/**
+ * The authored armour's arcane spell failure percentage, or null when absent
+ * or out of range (a refused value is not a guessed one).
+ */
+function armorSpellFailureOf(actor: ActorDocument): number | null {
+  const pf1e = sheetRecord((actor.system as Record<string, unknown>).pf1e);
+  const armor = pf1e ? sheetRecord(pf1e.armor) : null;
+  const chance = armor?.spellFailure;
+  if (
+    typeof chance !== "number" ||
+    !Number.isFinite(chance) ||
+    chance < 0 ||
+    chance > 100
+  )
+    return null;
+  return chance;
 }
 
 export type PF1eCastFlowOutcome =
   | {
       ok: true;
+      /** A ruined spell still spends its slot but produces no effect rolls. */
+      lost: false;
       dc: number;
       sr: PF1eSrResult;
       result: Extract<PF1eSpellTargetResult, { ok: true }>;
       /** Over-budget slot spends and similar MVP warnings (allowed, reported). */
       warnings: string[];
+      /** Narration from the C03a gate's checks (empty without a gate). */
+      gateNotes: string[];
       hpWriteError: string | null;
+    }
+  | {
+      ok: true;
+      /** The gate ruined the spell: slot spent, no effect, the card says why. */
+      lost: true;
+      warnings: string[];
+      gateNotes: string[];
     }
   | { ok: false; error: string };
 
@@ -153,6 +237,34 @@ export async function resolveCastFlow(
   )
     return fail(`Unknown energy type "${String(authored.energyType)}".`);
 
+  // ── the C03a gate, diceless half (D-157): an illegal casting is refused
+  //    before any die rolls and spends nothing ──────────────────────────────
+  const gate = params.gate;
+  const gateActive = gate !== undefined && gate.components.trim() !== "";
+  let gateTradition: PF1eSpellTradition = "arcane";
+  let gateNeedsSomatic = false;
+  if (gateActive && gate !== undefined) {
+    gateTradition = spellsTraditionOf(params.casterActor);
+    const parsed = parseSpellComponents(gate.components);
+    if (!parsed.ok)
+      return fail(
+        `Components "${gate.components}": ${parsed.issues
+          .map((i) => `${i.field}: ${i.message}`)
+          .join("; ")}`,
+      );
+    const needs = componentNeeds(parsed.segments, gateTradition);
+    gateNeedsSomatic = needs.codes.includes("S");
+    const legality = checkCastingLegality({
+      needs,
+      caster: gate.caster,
+      castingTime: gate.castingTime,
+    });
+    if (!legality.legal)
+      return fail(
+        `Cannot cast "${spell.name}": ${legality.reasons.join("; ")}.`,
+      );
+  }
+
   // ── the daily bookkeeping, validated BEFORE any die is rolled so a refused
   //    cast publishes nothing: slot spend + prepared expense (D-155 builders) ──
   const warnings: string[] = [];
@@ -177,6 +289,176 @@ export async function resolveCastFlow(
     });
     if (expend.error !== null) return fail(expend.error);
     ops.push(...expend.ops);
+  }
+
+  // ── the C03a gate, dice half (D-157): arcane spell failure, deafened
+  //    spoilage and concentration. A ruined spell still spends its slot —
+  //    "you lose the spell just as if you had cast it to no effect" ─────────
+  let gateNotes: string[] = [];
+  if (gateActive && gate !== undefined) {
+    const armorChance = armorSpellFailureOf(params.casterActor);
+    const gearInput =
+      gateTradition === "arcane" && armorChance !== null
+        ? { armor: { chance: armorChance } }
+        : {};
+    const asf = arcaneSpellFailureChance({
+      ...gearInput,
+      hasSomatic: gateNeedsSomatic,
+    });
+    if (asf.issues.length > 0)
+      return fail(asf.issues.map((i) => `${i.field}: ${i.message}`).join("; "));
+    let arcaneDie: number | undefined;
+    if (asf.applies) {
+      const rollId = client.roll(
+        "1d100",
+        "roll",
+        undefined,
+        `${spell.name} arcane spell failure (${asf.chance}%)`,
+      );
+      const message = await awaitRollMessage(client, rollId);
+      if (message === null)
+        return fail("The arcane spell failure roll never replicated.");
+      const face = dieFaceOf(message);
+      if (face === null)
+        return fail("Could not read the arcane spell failure d100 face.");
+      arcaneDie = face;
+    }
+    let deafenedDie: number | undefined;
+    if (gate.caster.deafened === true) {
+      // Parsing already succeeded above, so this cannot fail here.
+      const needs = componentNeeds(
+        parseSpellComponents(gate.components).segments,
+        gateTradition,
+      );
+      if (needs.mustSpeak) {
+        const rollId = client.roll(
+          "1d100",
+          "roll",
+          undefined,
+          `${spell.name} deafened spoilage (20%)`,
+        );
+        const message = await awaitRollMessage(client, rollId);
+        if (message === null)
+          return fail("The deafened spoilage roll never replicated.");
+        const face = dieFaceOf(message);
+        if (face === null)
+          return fail("Could not read the deafened spoilage d100 face.");
+        deafenedDie = face;
+      }
+    }
+    const triggers: PF1eConcentrationTrigger[] = [];
+    for (const declaration of gate.declarations ?? []) {
+      const rollId = client.roll(
+        "1d20",
+        "roll",
+        undefined,
+        `${spell.name} concentration (${declaration.situation})`,
+      );
+      const message = await awaitRollMessage(client, rollId);
+      if (message === null)
+        return fail(
+          `The concentration roll (${declaration.situation}) never replicated.`,
+        );
+      const face = dieFaceOf(message);
+      if (face === null)
+        return fail(
+          `Could not read the concentration d20 face (${declaration.situation}).`,
+        );
+      switch (declaration.situation) {
+        case "injured":
+          triggers.push({
+            situation: "injured",
+            damage: declaration.damage,
+            die: face,
+          });
+          break;
+        case "continuousDamage":
+          triggers.push({
+            situation: "continuousDamage",
+            damage: declaration.damage,
+            die: face,
+          });
+          break;
+        case "nonDamagingSpell":
+          triggers.push({
+            situation: "nonDamagingSpell",
+            spellDc: declaration.spellDc,
+            die: face,
+          });
+          break;
+        case "grappledOrPinned":
+          triggers.push({
+            situation: "grappledOrPinned",
+            grapplerCmb: declaration.grapplerCmb,
+            die: face,
+          });
+          break;
+        case "vigorousMotion":
+          triggers.push({ situation: "vigorousMotion", die: face });
+          break;
+        case "violentMotion":
+          triggers.push({ situation: "violentMotion", die: face });
+          break;
+        case "extremelyViolentMotion":
+          triggers.push({ situation: "extremelyViolentMotion", die: face });
+          break;
+        case "windRainSleet":
+          triggers.push({ situation: "windRainSleet", die: face });
+          break;
+        case "windHailDebris":
+          triggers.push({ situation: "windHailDebris", die: face });
+          break;
+        case "entangled":
+          triggers.push({ situation: "entangled", die: face });
+          break;
+        case "castDefensively":
+          triggers.push({ situation: "castDefensively", die: face });
+          break;
+      }
+    }
+    const attempt = resolveCastingAttempt({
+      components: gate.components,
+      tradition: gateTradition,
+      caster: gate.caster,
+      castingTime: gate.castingTime,
+      spellLevel: spell.level,
+      ...gearInput,
+      ...(arcaneDie !== undefined ? { arcaneDie } : {}),
+      ...(deafenedDie !== undefined ? { deafenedDie } : {}),
+      triggers,
+      casterLevel: casterDerived.spellCasterLevel,
+      keyAbilityMod: casterDerived.abilityMods[casterDerived.spellKeyAbility],
+      featBonus: casterDerived.concentration,
+    });
+    if (!attempt.ok) return fail(attempt.error ?? "The casting gate refused.");
+    gateNotes = [...attempt.notes];
+    if (attempt.outcome === "lost") {
+      const card = castLostCardContent(
+        {
+          casterName: params.casterActor.name,
+          spellName: spell.name,
+          spellLevel: spell.level,
+        },
+        gateNotes,
+        warnings,
+      );
+      const cardMessage: MessageDocument = {
+        _id: globalThis.crypto.randomUUID(),
+        type: "message",
+        name: card.name,
+        ownership: { default: 1 },
+        flags: {},
+        system: {},
+        author: user?.id ?? "",
+        content: card.content,
+        whisper: [],
+        roll: null,
+        flavor: "cast resolution",
+      };
+      client.submit([{ kind: "create", coll: "messages", data: cardMessage }]);
+      if (ops.length > 0) client.submit(ops);
+      return { ok: true, lost: true, warnings, gateNotes };
+    }
   }
 
   let damageTotal = 0;
@@ -351,6 +633,7 @@ export async function resolveCastFlow(
     { dc, sr, saveBonus, saveTotal, result: target },
     warnings,
     hpWriteError,
+    gateNotes,
   );
   const cardMessage: MessageDocument = {
     _id: globalThis.crypto.randomUUID(),
@@ -369,10 +652,12 @@ export async function resolveCastFlow(
   if (ops.length > 0) client.submit(ops);
   return {
     ok: true,
+    lost: false,
     dc,
     sr,
     result: target,
     warnings,
+    gateNotes,
     hpWriteError,
   };
 }
@@ -400,6 +685,7 @@ export function castResolutionCardContent(
   },
   warnings: string[],
   hpWriteError: string | null,
+  gateNotes: readonly string[] = [],
 ): { name: string; content: string } {
   const lines: string[] = [];
   const slotNote =
@@ -409,6 +695,7 @@ export function castResolutionCardContent(
   lines.push(
     `${ctx.casterName} casts ${ctx.spellName} (${slotNote}) at ${ctx.targetName} — DC ${res.dc}.`,
   );
+  for (const note of gateNotes) lines.push(`⚠ ${note}`);
   if (res.sr.reused) {
     lines.push("Spell resistance was already overcome this round — no check.");
   } else if (res.sr.total !== null) {
@@ -458,4 +745,21 @@ export function castResolutionCardContent(
   for (const warning of warnings) lines.push(`⚠ ${warning}`);
   if (hpWriteError !== null) lines.push(`⚠ HP write rejected: ${hpWriteError}`);
   return { name: `${ctx.spellName} cast`, content: lines.join("\n") };
+}
+
+/**
+ * The card for a ruined spell (D-157): the slot is spent, the spell is lost
+ * "as if cast to no effect", and the table reads which check did it.
+ */
+export function castLostCardContent(
+  ctx: { casterName: string; spellName: string; spellLevel: number },
+  gateNotes: readonly string[],
+  warnings: readonly string[],
+): { name: string; content: string } {
+  const lines: string[] = [
+    `${ctx.casterName} loses ${ctx.spellName} (level ${ctx.spellLevel}) — the spell is ruined and spent to no effect.`,
+  ];
+  for (const note of gateNotes) lines.push(note);
+  for (const warning of warnings) lines.push(`⚠ ${warning}`);
+  return { name: `${ctx.spellName} lost`, content: lines.join("\n") };
 }

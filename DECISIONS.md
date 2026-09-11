@@ -3866,3 +3866,64 @@ concentration, touch/holding, multi-round and metamagic timing are C03; D-150's 
 are not yet wired into the cast path. Cast rolls are not commit/reveal — the damage/SR/save dice
 are single-shot host rolls like the card chips. Resting/recovery remains manual (P7). **C02 is
 checked.**
+
+## D-157 — 2026-09-11 — P5/C03 partial: the C03a casting gate wired into the cast path
+
+**Context.** D-150 encoded C03's pre-save gate as pure functions — component parsing with
+per-tradition `M/DF` resolution, named legality refusals (cannot speak / no free hand /
+components not in hand / pinned / grappling), per-item arcane spell failure, deafened spoilage,
+Table 9-1 concentration DCs and `resolveCastingAttempt` as the orchestrator — but nothing in
+`src/` called any of it: the layer was tree-shaken exactly as the slot ledger was before D-155.
+D-157 is the wiring slice: **zero new rule encoding**, every ruling delegates to D-150's layer.
+
+**What landed.**
+
+- **Schema (`src/packages/pf1e/actor.ts`).** Prepared rows gain an optional `components` line
+  (string ≤ 120 chars; deep parsing happens at cast time with named refusals) and the spells
+  block an optional `tradition` (`"arcane" | "divine"`, validated). Both are additive — every
+  existing actor and fixture stays valid, and a row without a line reads as gateless.
+- **The flow (`src/ui/sheets/pf1eCastFlow.ts`).** `PF1eCastFlowParams` gains an optional
+  `gate: PF1eCastGateInput` (components line, GM-declared caster state, casting time, and
+  die-less concentration declarations). Hard orderings, each test-pinned:
+  1. the gate's diceless half runs in the validation block — a malformed line or an illegal
+     casting (silence vs V, no free hand vs S, pinned vs S, grappling vs >1-standard-action
+     times, components not in hand vs M/F/DF) is refused by name **before any roll and spends
+     nothing**;
+  2. the dice half rolls after slot/prepared bookkeeping and before the effect rolls: one d100
+     for arcane spell failure when `armor.spellFailure` applies (arcane tradition only, a
+     somatic-less spell exempt), one d100 for deafened spoilage of a verbal component, one d20
+     per declared concentration trigger — all through the host roll service;
+  3. `resolveCastingAttempt` consumes the dice and returns the authoritative outcome. A ruined
+     spell (`lost`) still spends its slot and prepared row — "you lose the spell just as if you
+     had cast it to no effect" — posts a `Spell lost` card naming the failed check, and skips
+     damage/SR/save/HP entirely; a surviving cast continues unchanged, carrying `gateNotes`.
+- **The concentration bonus** composes from what derivation already exposes: caster level +
+  key ability modifier (`abilityMods[spellKeyAbility]`) + the authored `concentration` bonus
+  with effect mods — no new derived field.
+- **Sheet wiring (`PF1eActorSheet.svelte`, `pf1eSpellbook.ts`).** The prepare form authors the
+  components line (validated ≤ 120 chars); prepared rows display it; the row's Cast button
+  prefills the panel's gate; the cast panel gains the gate fieldset — components, casting time
+  (free/swift/standard/full-round/longer), cannot-speak / no-free-hand / components-not-in-hand
+  / deafened / grappling / pinned checkboxes, casting-defensively, and injured-while-casting
+  with a damage-taken input. An empty components line skips the gate, so every pre-D-157 cast
+  behaves exactly as before.
+
+**Verification.** 16 new unit tests — 15 in `tests/ui/pf1eCastGate.test.ts` (named legality
+refusals roll nothing and spend nothing; malformed line refused; ASF ruin spends the slot and
+posts the lost card with no effect rolls; ASF pass continues d100→damage; somatic-less and
+divine casters get no ASF roll; deafened spoilage both ways; defensive casting DC 17 pass/fail;
+injured trigger DC 10+damage+level; `M/DF` divine reading needs the focus in hand; empty line
+skips the gate) and one schema test (tradition + prepared components validation). Full suite
+**1432 passed / 3 skipped** across 142 files (+16 over D-156); typecheck and lint green;
+touched-file Prettier applied. **Chromium e2e 83/83** (+1): a silenced caster's V/S cast is
+refused by name with no spend and no card, then the same cast with the voice restored passes
+the gate silently and lands; the first cast-flow test now rides the gate's pass path through
+the prepared row's components line. dist **2,206,360 raw / 643,280 gzip** (+8,230 / +1,950
+over D-156, within the 6 MB budget).
+
+**Scope boundaries.** C03 stays open. Still missing: touch/held charges, multi-round casting,
+swift/quickened/metamagic timing, threatened-casting attacks of opportunity, and the nine
+remaining Table 9-1 situations in the UI (the pure layer supports all eleven). Per-item ASF
+exemptions (bard light armour, mithral) and shield ASF have no authoring surface yet; caster
+state is the GM's per-cast declaration, not yet derived from conditions. Area/multi-target
+payloads remain C05.
