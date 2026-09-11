@@ -420,3 +420,111 @@ describe("P5/C03a casting gate in the cast flow (D-157)", () => {
     expect(client.formulas).toEqual([]);
   });
 });
+
+describe("P5/C03 Table 9-1 concentration triggers in the gate (D-160)", () => {
+  // Wizard: CL 5, Int +3 → concentration +8; spell level 1.
+
+  async function castWith(
+    declarations: PF1eCastFlowParams["gate"] extends infer G
+      ? G extends { declarations?: infer D }
+        ? D
+        : never
+      : never,
+    script: Array<{ die?: number; total?: number }>,
+  ) {
+    const client = new FakeClient();
+    client.script = script;
+    const p = params(client);
+    if (p.gate) p.gate.declarations = declarations;
+    const res = await resolveCastFlow(client, owner, p);
+    return { client, res };
+  }
+
+  test("a failed vigorous-motion check loses the spell", async () => {
+    // DC 11; d20 1 + 8 = 9 → fail.
+    const { client, res } = await castWith(
+      [{ situation: "vigorousMotion" }],
+      [{ die: 1 }],
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.lost).toBe(true);
+    expect(client.formulas).toEqual(["1d20"]);
+    expect(res.gateNotes.join(" ")).toMatch(
+      /concentration failed on vigorousMotion \(9 vs DC 11\)/,
+    );
+  });
+
+  test("a passed violent-motion check lets the spell land", async () => {
+    // DC 16; d20 10 + 8 = 18 → pass.
+    const { client, res } = await castWith(
+      [{ situation: "violentMotion" }],
+      [{ die: 10 }],
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.lost).toBe(false);
+    expect(client.formulas).toEqual(["1d20"]);
+  });
+
+  test("continuous damage uses half the damage in the DC", async () => {
+    // damage 12 → DC 10 + 6 + 1 = 17; d20 8 + 8 = 16 → fail.
+    const { res } = await castWith(
+      [{ situation: "continuousDamage", damage: 12 }],
+      [{ die: 8 }],
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.lost).toBe(true);
+    expect(res.gateNotes.join(" ")).toMatch(/16 vs DC 17/);
+  });
+
+  test("a distracting non-damaging spell adds its DC to the spell level", async () => {
+    // spell DC 15 → 16; d20 12 + 8 = 20 → pass.
+    const { res } = await castWith(
+      [{ situation: "nonDamagingSpell", spellDc: 15 }],
+      [{ die: 12 }],
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.lost).toBe(false);
+  });
+
+  test("grappling uses the grappler's CMB in the DC", async () => {
+    // CMB 12 → DC 10 + 12 + 1 = 23; d20 20 + 8 = 28 → pass.
+    const { res } = await castWith(
+      [{ situation: "grappledOrPinned", grapplerCmb: 12 }],
+      [{ die: 20 }],
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.lost).toBe(false);
+  });
+
+  test("wind and entangled triggers each get their own d20", async () => {
+    // windHailDebris DC 11 (pass: 5+8=13), entangled DC 16 (fail: 2+8=10).
+    const { client, res } = await castWith(
+      [{ situation: "windHailDebris" }, { situation: "entangled" }],
+      [{ die: 5 }, { die: 2 }],
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.lost).toBe(true);
+    expect(client.formulas).toEqual(["1d20", "1d20"]);
+    expect(res.gateNotes.join(" ")).toMatch(
+      /concentration failed on entangled \(10 vs DC 16\)/,
+    );
+  });
+
+  test("a lost concentration check still spends the slot", async () => {
+    const { client, res } = await castWith(
+      [{ situation: "extremelyViolentMotion" }],
+      [{ die: 1 }], // DC 21; 1+8=9 → fail
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.lost).toBe(true);
+    const updates = stateOps(client).filter((op) => op.kind === "update");
+    expect(updates.length).toBeGreaterThan(0);
+  });
+});

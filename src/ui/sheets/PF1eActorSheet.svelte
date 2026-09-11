@@ -148,6 +148,16 @@
   let castDefensively = $state(false);
   let castInjured = $state(false);
   let castInjuredDamage = $state("");
+  // D-160: the remaining Table 9-1 concentration situations (GM declares).
+  let castMotion = $state("");
+  let castWeather = $state("");
+  let castEntangled = $state(false);
+  let castContinuous = $state(false);
+  let castContinuousAmount = $state("");
+  let castNonDamaging = $state(false);
+  let castNonDamagingDc = $state("");
+  let castGrappleCheck = $state(false);
+  let castGrappleCmb = $state("");
   let castBusy = $state(false);
   let castError = $state("");
   let castWarning = $state("");
@@ -495,6 +505,30 @@
       declarations.push({
         situation: "injured",
         damage: Math.max(0, Math.trunc(Number(castInjuredDamage) || 0)),
+      });
+    if (
+      castMotion === "vigorousMotion" ||
+      castMotion === "violentMotion" ||
+      castMotion === "extremelyViolentMotion"
+    )
+      declarations.push({ situation: castMotion });
+    if (castWeather === "windRainSleet" || castWeather === "windHailDebris")
+      declarations.push({ situation: castWeather });
+    if (castEntangled) declarations.push({ situation: "entangled" });
+    if (castContinuous)
+      declarations.push({
+        situation: "continuousDamage",
+        damage: Math.max(0, Math.trunc(Number(castContinuousAmount) || 0)),
+      });
+    if (castNonDamaging)
+      declarations.push({
+        situation: "nonDamagingSpell",
+        spellDc: Math.max(0, Math.trunc(Number(castNonDamagingDc) || 0)),
+      });
+    if (castGrappleCheck)
+      declarations.push({
+        situation: "grappledOrPinned",
+        grapplerCmb: Math.max(0, Math.trunc(Number(castGrappleCmb) || 0)),
       });
     castBusy = true;
     try {
@@ -1418,6 +1452,83 @@
               placeholder="0"
               size="4"
             /></label
+          >
+          <label
+            >Motion
+            <select bind:value={castMotion} data-cast-motion>
+              <option value="">Steady ground</option>
+              <option value="vigorousMotion">Vigorous motion (DC 10 + level)</option>
+              <option value="violentMotion">Violent motion (DC 15 + level)</option>
+              <option value="extremelyViolentMotion"
+                >Extremely violent motion (DC 20 + level)</option
+              >
+            </select>
+          </label>
+          <label
+            >Weather
+            <select bind:value={castWeather} data-cast-weather>
+              <option value="">Calm</option>
+              <option value="windRainSleet">Windy rain or sleet (DC 5 + level)</option>
+              <option value="windHailDebris"
+                >Windy hail or dust/debris (DC 10 + level)</option
+              >
+            </select>
+          </label>
+          <label
+            ><input
+              type="checkbox"
+              bind:checked={castEntangled}
+              data-cast-entangled
+            />
+            Entangled (DC 15 + spell level)</label
+          >
+          <label
+            ><input
+              type="checkbox"
+              bind:checked={castContinuous}
+              data-cast-continuous
+            />
+            Taking continuous damage — amount
+            <input
+              value={castContinuousAmount}
+              oninput={(e) => (castContinuousAmount = e.currentTarget.value)}
+              data-cast-continuous-amount
+              placeholder="0"
+              size="4"
+            />
+            (DC 10 + half + level)</label
+          >
+          <label
+            ><input
+              type="checkbox"
+              bind:checked={castNonDamaging}
+              data-cast-nondamaging
+            />
+            Distracted by a non-damaging spell — its DC
+            <input
+              value={castNonDamagingDc}
+              oninput={(e) => (castNonDamagingDc = e.currentTarget.value)}
+              data-cast-nondamaging-dc
+              placeholder="10"
+              size="4"
+            />
+            (DC spell DC + level)</label
+          >
+          <label
+            ><input
+              type="checkbox"
+              bind:checked={castGrappleCheck}
+              data-cast-grapple-check
+            />
+            Concentrating while grappled or pinned — grappler's CMB
+            <input
+              value={castGrappleCmb}
+              oninput={(e) => (castGrappleCmb = e.currentTarget.value)}
+              data-cast-grapple-cmb
+              placeholder="0"
+              size="4"
+            />
+            (DC 10 + CMB + level)</label
           >
         </fieldset>
         <label

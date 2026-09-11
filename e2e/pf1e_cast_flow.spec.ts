@@ -256,6 +256,61 @@ test.describe("PF1e cast flow: the Spells tab casts through the store (§7/P5 C0
     expect(errors).toEqual([]);
   });
 
+  test("Table 9-1 concentration triggers: pass and fail both land deterministically (D-160)", async ({
+    page,
+  }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    await page.goto(entry + "?e2e=1");
+    await waitForSurface(page, "app");
+    await importFixture(page);
+
+    const sheet = page.locator("#sheets [data-pf1e-sheet]");
+    await sheet.getByRole("button", { name: "spells", exact: true }).click();
+    const book = sheet.locator("[data-pf1e-spellbook]");
+    const row1 = book.locator('[data-spell-slot-level="1"]');
+
+    // The new Table 9-1 surfaces are present in the gate fieldset.
+    await expect(book.locator("[data-cast-motion]")).toHaveCount(1);
+    await expect(book.locator("[data-cast-weather]")).toHaveCount(1);
+    await expect(book.locator("[data-cast-continuous]")).toHaveCount(1);
+
+    // 1. Windy rain/sleet is DC 5 + level = 6 here; the wizard's worst
+    //    concentration total is 1 + 8 = 9, so the check ALWAYS passes and
+    //    the spell lands.
+    await book.locator("[data-cast-name]").fill("Breeze");
+    await book.locator("[data-cast-components]").fill("V, S");
+    await book.locator("[data-cast-severity]").selectOption("none");
+    await book.locator("[data-cast-damage]").fill("");
+    await book.locator("[data-cast-weather]").selectOption("windRainSleet");
+    await book.locator("[data-cast-target]").selectOption({ label: "PF Ogre" });
+    await book.locator("[data-cast-submit]").click();
+    await expect(row1.locator("[data-slot-spent]")).toHaveText("6");
+
+    // 2. Continuous damage 60 → DC 10 + 30 + 1 = 41, above any possible
+    //    total (max 28): the check ALWAYS fails and the spell is lost —
+    //    but the slot is still spent ("as if cast to no effect").
+    await book.locator("[data-cast-name]").fill("Overload");
+    await book.locator("[data-cast-components]").fill("V, S");
+    await book.locator("[data-cast-severity]").selectOption("none");
+    await book.locator("[data-cast-damage]").fill("");
+    await book.locator("[data-cast-motion]").selectOption("");
+    await book.locator("[data-cast-weather]").selectOption("");
+    await book.locator("[data-cast-continuous]").check();
+    await book.locator("[data-cast-continuous-amount]").fill("60");
+    await book.locator("[data-cast-target]").selectOption({ label: "PF Ogre" });
+    await book.locator("[data-cast-submit]").click();
+    await expect(row1.locator("[data-slot-spent]")).toHaveText("7");
+
+    await page.click('[data-tab="chat"]');
+    const chat = await page.locator("#chat-log").textContent();
+    expect(chat).toContain("casts Breeze");
+    expect(chat).toContain("loses Overload");
+    expect(chat).toMatch(/concentration failed on continuousDamage/);
+    expect(chat).toMatch(/vs DC 41/);
+    expect(errors).toEqual([]);
+  });
+
   test("refusals are named and spend nothing: no target, bad dice", async ({
     page,
   }) => {

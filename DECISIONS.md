@@ -4057,3 +4057,47 @@ charge, touching up to six friends as a full-round action, multi-charge touch sp
 of opportunity against ranged-touch casters, multi-round casting, swift/quickened/metamagic
 timing (the Quickened Spell text, Rules ID 158, is transcribed-ready for that slice), and the
 remaining Table 9-1 UI triggers.
+
+## D-160 — 2026-09-11 — P5/C03 partial: the full Table 9-1 concentration surface in the cast panel
+
+**Context.** D-150 encoded all eleven Table 9-1 concentration situations as pure functions
+(`concentration.ts`); D-157 wired the gate into the cast flow with a `declarations` array that
+already accepted every situation type. The sheet, however, only exposed two triggers — casting
+defensively and injured-while-casting. The remaining eight situations were reachable in tests
+but not at any table. This slice is pure UI wiring: **zero new rule encoding**, the same posture
+as D-157's gate wiring.
+
+**Decisions.**
+
+- **Eight new GM-declared surfaces** in the cast panel's gate fieldset
+  (`PF1eActorSheet.svelte`): a motion select (vigorous DC 10+level / violent DC 15+level /
+  extremely violent DC 20+level), a weather select (windy rain or sleet DC 5+level / windy hail
+  or dust/debris DC 10+level), an entangled checkbox (DC 15+level), and three checkbox+value
+  rows — continuous damage with the damage amount (DC 10 + half + level), a distracting
+  non-damaging spell with its DC (DC spell DC + level), and concentrating while grappled or
+  pinned with the grappler's CMB (DC 10 + CMB + level). The declaration builder appends each
+  enabled situation to the existing `declarations` array; the flow's existing switch turns each
+  into a trigger with its own host d20.
+- **Mutually exclusive situations stay exclusive in the UI**: motion is one select (you ride
+  one mount or earthquake, not several); weather likewise. The free combinations (entangled +
+  motion + weather + damage + distraction + grappling simultaneously) remain allowed, matching
+  the table's per-distraction structure.
+- **No schema, no flow, no pure-layer changes** — the only edited product file is the sheet;
+  everything downstream (DC math, single-failure-ruins, slot spent as if cast to no effect,
+  named `Spell lost` card) was already tested.
+
+**Verification.** 7 new flow tests in `tests/ui/pf1eCastGate.test.ts`: one per new DC formula
+(vigorous fail 9 vs DC 11; violent pass 18 vs DC 16; continuous damage 12 → 16 vs DC 17 fail;
+non-damaging spell DC 15 → pass; grappling CMB 12 → 28 vs DC 23 pass; wind+entangled two-die
+cast where entangled fails 10 vs DC 16) plus the lost-cast slot-spend assertion. Full suite
+**1469 passed / 3 skipped** across 144 files (+7 over D-159); typecheck and lint green;
+touched authored-file Prettier applied. **Chromium e2e 87/87** (+1): both directions of the
+new surface are deterministic — windy rain/sleet is DC 6 against a worst-case concentration
+total of 9 (always passes, spell lands); continuous damage 60 is DC 41 against a best-case 28
+(always fails: `concentration failed on continuousDamage … vs DC 41`, slot still spent). dist
+**2,223,470 raw / 647,170 gzip** (+2,990 / +770 over D-159, within the 6 MB budget).
+
+**Scope boundaries.** C03 stays open. Still missing: multi-round casting,
+swift/quickened/metamagic timing, unarmed/natural-weapon delivery of a held charge, touching
+up to six friends as a full-round action, multi-charge touch spells, and attacks of
+opportunity against ranged-touch casters.

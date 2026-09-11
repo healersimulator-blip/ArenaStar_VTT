@@ -409,6 +409,40 @@ Depends on P3 and D06; keep core EffectDocument unchanged.
 
 Depends on effects, attacks, action foundations and verified rule fixtures. Tactical targeting and strategic spell resolution remain independent implementations using common spell data.
 
+### P5 progress — 2026-09-11, the full Table 9-1 concentration surface (D-160, C03 partial)
+
+- **All eleven Table 9-1 situations are now reachable in the product.** D-150
+  encoded the whole table as pure functions and D-157 wired the gate into the
+  cast flow, but the sheet only exposed two triggers (casting defensively,
+  injured while casting). D-160 adds the remaining eight surfaces — **zero
+  new rule encoding**, exactly D-157's posture: a motion select (vigorous /
+  violent / extremely violent motion), a weather select (windy rain or sleet
+  / windy hail or dust and debris), an entangled checkbox, and three
+  checkbox-plus-value rows (continuous damage with the amount, a distracting
+  non-damaging spell with its DC, and concentrating while grappled or pinned
+  with the grappler's CMB). Each declared situation gets its own host d20
+  through the already-tested `resolveConcentration` DC table.
+- **Outcomes unchanged**: any failed check ruins the spell — slot and
+  prepared row spent, `Spell lost` card naming the failed situation and its
+  total vs DC, no effect rolls; passed checks are silent and the cast
+  proceeds through the normal damage→SR→save pipeline.
+- **Executed browser proof:** a 5th test in `e2e/pf1e_cast_flow.spec.ts`
+  (Chromium, **87/87** overall) with both directions deterministic: windy
+  rain/sleet (DC 6 vs a worst-case total of 9) always passes and the spell
+  lands; continuous damage 60 (DC 41 vs a best-case total of 28) always
+  fails and the card names the failed check while the slot is still spent.
+  Rules arithmetic stays pinned by 7 new flow tests in
+  `tests/ui/pf1eCastGate.test.ts` (one per DC formula plus a two-trigger
+  cast proving each gets its own die, and a lost-cast slot-spend check).
+- **Still open for C03 (stays unchecked):** multi-round casting,
+  swift/quickened/metamagic timing, unarmed/natural-weapon delivery of a
+  held charge, touching up to six friends as a full-round action,
+  multi-charge touch spells (Chill Touch), and attacks of opportunity
+  against ranged-touch casters.
+- **Evidence:** unit **1469 passed / 3 skipped** across 144 files; typecheck
+  /lint/touched-file Prettier green; dist **2,223,470 raw / 647,170 gzip**;
+  Chromium e2e **87/87** (+1).
+
 ### P5 progress — 2026-09-11, touch criticals confirm and willing targets auto-touch (D-159, C03 partial)
 
 - **Critical confirmation is live on touch attacks.** R02 transcribed the CRB
