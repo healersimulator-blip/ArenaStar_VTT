@@ -787,6 +787,11 @@
       <PF1eAcConversion {doc} user={client.user} onApply={applyAcSource} />
     {/if}
   {:else if tab === "effects"}
+    <p class="note" data-pf1e-effective-scores>
+      Effective scores: {Object.entries(d.abilities)
+        .map(([key, score]) => `${key.toUpperCase()} ${score}`)
+        .join(" · ")}
+    </p>
     <PF1eEffectsTab
       effects={view.effects}
       effectErrors={view.effectErrors}

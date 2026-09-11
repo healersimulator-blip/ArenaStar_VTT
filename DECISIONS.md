@@ -3583,3 +3583,100 @@ produces warnings, not hard enforcement" is implemented and mutation-tested as a
 unbuilt: a **rendered spellbook/prepared list** (there is no authored prepared-spell list on the
 actor document at all, so this needs a schema field plus validation and an editor, not just markup),
 and wiring the ledger to actual casting. **C04 stays `[ ]`.**
+
+## D-153 — First executed full-Chromium e2e pass: five latent failures found, three product repairs (S01/S04/N01/N02 browser half, 2026-09-11)
+
+**Context.** Every slice from D-119 onward recorded its browser specs as
+"collected, not executed": the Playwright browser CDN (`cdn.playwright.dev` →
+`storage.googleapis.com`) is unreachable from the sandbox, and Debian mirrors
+are closed too, so no Chromium existed to run them. This slice got a real
+browser running — `@sparticuz/chromium@152.0.0` (npm, the D-119 precedent)
+extracted to `/tmp/chromium`, with its three missing shared libraries
+(`libnspr4.so`, `libnss3.so`, `libnssutil3.so`) inflated from the package's own
+`al2023.tar.br` into `LD_LIBRARY_PATH` — and ran the **whole collected e2e
+suite on Chromium: 74/74 passing**, after repairing what the run exposed. No
+security-bypass flags; `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` is the documented
+override path (README), default pinned-browser behavior unchanged.
+
+**Why this matters:** five of the "collected" specs were **wrong or uncovered
+real bugs** — exactly the risk the collection-only convention carried. Three
+were product bugs unit tests could not see; three were spec bugs (one spec had
+both).
+
+**Product repairs (the browser saw what Node could not):**
+
+1. **The E02 effect editor crashed on every typed number.** All eight numeric
+   inputs in `PF1eEffectEditor.svelte` used `bind:value` on `type="number"`,
+   which Svelte 5 coerces to `number` — then `buildEffectRequest`'s
+   `row.value.trim()` threw `e.trim is not a function` (observed as a page
+   error; the form silently kept its values, no effect applied, no visible
+   error). The model's contract is string-in ("empty numerics are absent,
+   garbage numerics are named errors"), so the fix is at the binding: each
+   numeric input now stores `e.currentTarget.value` verbatim via `oninput`.
+   The model-level unit tests all fed strings, which is why they never caught
+   it; the fix is pinned by the E02 browser spec executing for the first time.
+2. **The PF1e pre-start initiative gate was unreachable.** D-132 routes PF1e
+   encounter starts through `startWithSurprise`, which requires initiative
+   rolled and ties resolved **before** Start ("Roll initiative before starting
+   a PF1e encounter."). But every roll control (`#combat-init`, Roll all, Roll
+   hidden) rendered only in the running branch — a pre-created PF1e encounter
+   could never satisfy its own gate (the create-and-start shortcut bypasses it,
+   which is how the gap stayed hidden). `rollInitiative` needs only a selected
+   encounter, not a running one, so the pre-start branch now renders the same
+   three controls for `combat && pf1e` (exclusive branches, so the `#combat-init`
+   id is never duplicated in the DOM), with a one-line note that PF1e starts
+   are surprise-aware. No rules change — the gate D-132 designed is now
+   reachable.
+3. **Effective scores were invisible where effects are edited.** The E02
+   acceptance reads the live ability scores back after apply/suppress/remove,
+   but `data-pf1e-effective-scores` rendered only on the attributes tab while
+   the editor lives on the effects tab. The effects tab now carries the same
+   read-only effective-scores line, so applying a buff shows the numbers move
+   without tab-switching — the E02 intent ("recompute-on-effect-change is
+   structural") made visible.
+
+**Spec repairs (written against assumptions, not against a running app):**
+
+4. **A06/A06b roll-card specs** asserted `#chat-log .rollcard` while driving
+   the sheet **embedded in the sidebar** — but `ChatPanel` mounts only when the
+   chat tab is active, and switching to it unmounts the sheets panel. The
+   product's real flow is the floating sheet window; the specs now open the
+   sheet via `[data-open-pf1e-sheet]`, activate the chat tab, and drive
+   `.wm-window [data-pf1e-sheet]`. Both pass — including the A06b hp write
+   (`PF Dummy 12 → N HP`) through the op path.
+5. **The N01/N02 join spec** called `armySnapshot`, `factionOwnership` and the
+   GM-side `simCount` on the **app** surface; they live on the **gm** surface
+   (`GmFogSurface`, installed at `?e2e=1` boot). Added a `gmCall` helper
+   mirroring `gmextras.spec.ts` and switched the three calls. The spec now
+   **executes end-to-end**: import/activate both shipped zips, manual-signaling
+   joiner adopts the announced PF1e schema, 10-model campaign reaches the
+   player replica (snapshot + delta), resolved turn advances `simVersion`, zero
+   page errors on either peer.
+6. **The §1.8 package spec** expected `rulesBoot` to flip to `package`
+   immediately after `activatePackage`; activation is persist-only and the
+   SimWorker rules slot resolves at boot (D-087/D-110 reload-based switching —
+   `packages.spec.ts` has always modeled the reload). The spec now reboots
+   after activate and after deactivate, and both reads report the right source.
+
+**Also fixed while running the join spec:** `dist/packages/*.zip` is wiped by
+`pnpm build`, so `build:systems` must run **after** `build` (the `test:e2e`
+script order); running them out of order reproduces "zip missing".
+
+**Verification and evidence.** Full unit suite **1376 passed / 3 skipped**
+across 137 files (unchanged — no unit behavior moved); typecheck, lint and
+touched-file Prettier green; `pnpm build` + `pnpm size`: dist **2,170,273 raw
+/ 628,118 gzip** (+1,238 over D-152, within the 6 MB budget);
+`build:systems` emits both zips (rules.js unchanged at 55.1 kB). **Chromium
+152 e2e: 74/74 passing in 3.8 min**, including every previously
+collected-but-unexecuted PF1e spec: sheets (24 incl. A06/A06b/E02 and the
+scoped-roster flow — which additionally needed the pre-start roll, since D-132
+gates PF1e starts), windows, combat, the N01/N02 join, casting/concentration/
+targeting/spell-slots and the §1.8 package flow.
+
+**What stays unchecked and why.** Per the D-119 convention, S01/S04 and
+N01/N02 need the **full supported-browser matrix**, and Firefox/WebKit cannot
+be downloaded here (the Playwright CDN and all Debian mirrors are blocked;
+D-082 already records the sandbox's firefox ICE limitation). Their **Chromium
+acceptance half is now executed and green**, which this decision records; the
+boxes stay `[ ]` pending Firefox/WebKit runs in an environment that can fetch
+those binaries.

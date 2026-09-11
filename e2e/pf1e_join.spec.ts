@@ -66,6 +66,17 @@ const playerCall = <T>(page: Page, method: string): Promise<T> =>
     return fn() as T;
   }, method);
 
+/** armySnapshot/factionOwnership/simCount live on the gm surface, not app. */
+const gmCall = <T>(page: Page, method: string): Promise<T> =>
+  page.evaluate((m) => {
+    const surface = (
+      globalThis as { __vttE2E?: { gm?: Record<string, () => T> } }
+    ).__vttE2E;
+    const fn = surface?.gm?.[m];
+    if (typeof fn !== "function") throw new Error(`gm surface missing: ${m}`);
+    return fn() as T;
+  }, method);
+
 const waitForHost = (page: Page): Promise<void> =>
   expect
     .poll(() =>
@@ -223,7 +234,7 @@ test.describe("PF1e multiplayer join (N01/N02)", () => {
       }
       await expect
         .poll(() =>
-          appCall<ArmySnapshot>(host, "armySnapshot").then((s) => s.armies),
+          gmCall<ArmySnapshot>(host, "armySnapshot").then((s) => s.armies),
         )
         .toBe(2);
 
@@ -249,7 +260,7 @@ test.describe("PF1e multiplayer join (N01/N02)", () => {
         .selectOption("2"); // OBSERVER → §5A strategic frames for this faction
       await expect
         .poll(() =>
-          appCall<Record<string, Record<string, number>>>(
+          gmCall<Record<string, Record<string, number>>>(
             host,
             "factionOwnership",
           ).then((o) => o[factionDocId as string]?.[playerUserId] ?? 0),
@@ -262,7 +273,7 @@ test.describe("PF1e multiplayer join (N01/N02)", () => {
       await expect(win.locator("#campaign-start")).toBeEnabled();
       await host.click("#campaign-start");
       await expect
-        .poll(() => appCall<number | null>(host, "simCount"), {
+        .poll(() => gmCall<number | null>(host, "simCount"), {
           timeout: 20_000,
         })
         .toBe(10);

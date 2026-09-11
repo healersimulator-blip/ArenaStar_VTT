@@ -735,6 +735,9 @@ test("canvas selection creates scoped rosters, adds/removes members and rolls on
     "0 selected",
   );
   await page.click("[data-encounter-create]"); // empty selection falls back to all three scene tokens
+  // PF1e encounters start through the surprise-aware transition (D-132): the
+  // pre-start roll controls roll the fresh roster, then Start is legal.
+  await roll([2, 19, 10]);
   await page.click("#combat-start");
   await expect(page.locator(".combat .order li")).toHaveCount(3);
   expect(errors).toEqual([]);
@@ -844,7 +847,12 @@ test("PF1e sheet roll buttons post attacks, damage and saves to chat with their 
     .locator("#sheet-list .sheet-row")
     .filter({ hasText: "PF Roller" })
     .click();
-  const sheet = page.locator("#sheets [data-pf1e-sheet]");
+  // Roll cards land in the sidebar chat panel, and only one sidebar tab body
+  // is mounted at a time — so the sheet must float in a window while chat is
+  // the active tab.
+  await page.click("[data-open-pf1e-sheet]");
+  await page.click('[data-tab="chat"]');
+  const sheet = page.locator(".wm-window [data-pf1e-sheet]");
   await sheet.getByRole("button", { name: "combat", exact: true }).click();
 
   // The authored line rolls at BAB 6 + Str 3 (+9) and threatens 19–20; the
@@ -969,7 +977,12 @@ test("PF1e resolve-vs-target posts public rolls, a resolution card and hp writes
     .locator("#sheet-list .sheet-row")
     .filter({ hasText: "PF Striker" })
     .click();
-  const sheet = page.locator("#sheets [data-pf1e-sheet]");
+  // The resolution cards land in the sidebar chat panel, and only one sidebar
+  // tab body is mounted at a time — so the sheet floats in a window while chat
+  // is the active tab.
+  await page.click("[data-open-pf1e-sheet]");
+  await page.click('[data-tab="chat"]');
+  const sheet = page.locator(".wm-window [data-pf1e-sheet]");
   await sheet.getByRole("button", { name: "combat", exact: true }).click();
 
   // The resolve panel lists the other PF1e actor and its derived AC trio

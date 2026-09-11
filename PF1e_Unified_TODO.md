@@ -66,6 +66,26 @@ Can proceed alongside sheet work; required before claiming multiplayer mass-batt
 - **Browser half collected, not executed:** `e2e/pf1e_join.spec.ts` drives import/activate → reload → PF1e rules boot → manual-signaling joiner adopting the identical announced schema → 10-model campaign + resolved turn reaching the player's replica with zero page errors. Playwright collects it across 3 projects, but no browser binaries exist in this environment, so N01/N02 stay unchecked pending executed browser acceptance (Chromium first, then the Firefox/WebKit matrix), matching the D-119 precedent.
 - **Evidence:** 905 unit/integration tests passed / 3 skipped (116 files + 1 skipped); typecheck, lint, touched-file Prettier pass; build 2,020,346 bytes raw / 584,769 gzip; `build:systems` emits both PF1e packages. Live package switching stays reload-based (D-087/D-110); the re-announce path is the protocol-level resync for future hot switching.
 
+### Multiplayer progress — 2026-09-11, executed Chromium browser half (D-153)
+
+- **The browser half of N01/N02 is now executed, not collected:** the first
+  full-Chromium run of the suite (74/74) drives `e2e/pf1e_join.spec.ts`
+  end-to-end — both shipped zips import and activate, a manual-signaling
+  joiner adopts the announced PF1e schema (identical sceneId/schema/version),
+  the GM's two-faction 10-model campaign reaches the player replica through
+  BOTH the snapshot and the delta path, faction OBSERVER projection grants
+  land, and a resolved turn advances the joiner's `simVersion` with zero page
+  errors on either peer.
+- **The spec itself was repaired, not just run:** it called `armySnapshot`,
+  `factionOwnership` and the GM-side `simCount` on the app surface; they live
+  on the gm surface (`GmFogSurface`). A `gmCall` helper mirroring
+  `gmextras.spec.ts` replaced the three `appCall` sites. Also: `dist/packages`
+  is wiped by `pnpm build`, so `build:systems` must follow `build` (the
+  `test:e2e` script order).
+- **Still open:** Firefox/WebKit matrix runs — the Playwright CDN and Debian
+  mirrors are unreachable in this environment (D-082 precedent). N01/N02 stay
+  unchecked pending that, per the D-119 convention.
+
 ## 3. P1 — Playable actor and monster sheets
 
 Depends on D06. Primary surfaces: `PF1eActorSheet.svelte`, `SheetPanel.svelte`, `WindowHost.svelte`, token interactions.
@@ -130,6 +150,32 @@ Depends on D06. Primary surfaces: `PF1eActorSheet.svelte`, `SheetPanel.svelte`, 
 - **Sheet surface:** 13 new fields route through the existing op editor (first edit materializes only the missing accumulator; structured imports are read-only per the D-118 policy); the attributes tab shows effective scores/modifiers and a damage/drain readout with per-ability penalties, plus new derived `abilityDamageTaken`/`abilityDrainTaken`/`abilityDamagePenalty` and `explain.abilities`/`explain.hp`.
 - **Evidence:** 19 new tests (hand-computed fixtures from the rule text; bestiary parity with empty accumulators). 924 passed / 3 skipped across 117 files; typecheck/lint/format/build/size green; dist 2,025,106 raw / 586,250 gzip. **S02 is now checked off** — temp HP, ER, weapons, armor, features and the conditional monster tab landed in earlier slices and this was the last listed gap.
 - **Still open:** in-journey ability healing (1/day, penalties-vs-damage floor 1), and S01/S04 full supported-browser acceptance pending Firefox/WebKit.
+
+### P1 progress — 2026-09-11, executed Chromium acceptance for S01/S04 (D-153)
+
+- **S01/S04 Chromium acceptance now executed:** the first full-Chromium e2e
+  run (74/74) executes every previously collected sheet scenario — the four
+  D-119 flows plus the later-added A06/A06b/E02 and scoped-roster specs —
+  against the built `dist/index.html` over `file://`, with zero page errors in
+  the PF1e flows. Compendium import → token drag → double-click → floating
+  window → live edit → ownership crossings are all browser-verified.
+- **Two product repairs were needed to get there (both invisible to Node
+  tests):** the E02 effect editor's eight numeric inputs used `bind:value` on
+  `type="number"`, which Svelte 5 coerces to a number, so `row.value.trim()`
+  threw `e.trim is not a function` on every typed value and no effect ever
+  applied through the form — they now store the raw string via `oninput`,
+  keeping the model's string contract. And the effective-scores readout
+  (`data-pf1e-effective-scores`) rendered only on the attributes tab, so the
+  effects tab — where E02 applies/suppresses/removes — could not show the
+  live numbers moving; the effects tab now carries the same read-only line.
+- **The A06/A06b roll-card specs were corrected to the real product flow:**
+  `ChatPanel` mounts only on the chat sidebar tab, which unmounts the embedded
+  sheet, so the specs now open the sheet via `[data-open-pf1e-sheet]` and
+  drive the floating `.wm-window [data-pf1e-sheet]` while chat stays visible.
+  A06b's hp write (`PF Dummy 12 → N HP`) through the op path is asserted live.
+- **Still open:** S01/S04 full supported-browser acceptance remains pending
+  Firefox/WebKit (blocked: the Playwright CDN and Debian mirrors are
+  unreachable in this environment — D-082/D-119 precedent).
 
 ## 4. P2 — Initiative, encounter selection and action foundations
 
@@ -209,6 +255,26 @@ Depends on P1 for the approved sheet-before-tracker flow and on R02 for disputed
 - **Active removal allowed:** remove the active member immediately, including multi-remove or the last remaining member. If needed, move the current pointer to the next surviving member in the old order, wrapping without incrementing the round. Never tick effects or emit turn-start/end hooks as a side effect of a roster edit. Empty running encounters retain the round and show “No combatants.” Manual initiative edits already work on active/non-active members.
 - **Selected tie no longer blocks:** accept the selected results and preserve stable cross-selection tie order, without rerolling/replacing unselected results. Mark affected selected receipts `crossSelectionTie: "stable-order"`; Roll all remains an optional full tie-resolution operation. This supersedes D-124's rejection policy.
 - **Evidence:** 900 unit/integration tests passed / 3 skipped; 15 Chromium browser tests passed. Core-adapter tests cover next surviving successor, wrap, multiple/last removal, no implicit ticks and accepted partial ties. Browser and host/GM/player tests cover removal of active/last members. Typecheck/lint/edited-code formatting/build/size passed; HTML 2,018,848 bytes raw, gzip 584,394. No additional battle rules or browser-matrix coverage claimed.
+
+### P2 tracker reachability repair — 2026-09-11 (D-153, scoped-roster spec executed)
+
+- **The D-132 initiative gate is now satisfiable:** D-132 routes PF1e starts
+  through `startWithSurprise` and refuses to Start until initiative is rolled
+  and ties are resolved — but every roll control rendered only in the running
+  branch, so a pre-created PF1e encounter could never satisfy its own gate
+  (the create-and-start shortcut bypasses it, which hid the gap). The
+  pre-start branch now renders the same three controls (Roll init / Roll all /
+  Roll hidden) for `combat && pf1e`, with a note that PF1e starts are
+  surprise-aware. `rollInitiative` needs only a selected encounter, so no
+  rules or handler changes — the branches are mutually exclusive, the
+  `#combat-init` id is never duplicated.
+- **The scoped-roster browser spec (D-124) now executes green:** marquee
+  selection → scoped 2-member start → selected-only rolls → receipt
+  preservation across adds → cross-selection tie acceptance → remove-selected
+  down to zero → scene-switch isolation → empty-selection create falling back
+  to all scene tokens. The final step rolls initiative through the new
+  pre-start control before Start, matching the D-132 gate instead of the
+  pre-D-132 behavior the spec was written against.
 
 ## 5. P3 — Tactical attack, damage and equipment mechanics
 
