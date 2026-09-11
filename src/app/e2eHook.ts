@@ -17,7 +17,7 @@ import {
   type PF1eAreaIssue,
 } from "../packages/pf1e/targeting";
 import { deriveFromDocuments } from "../packages/pf1e/actor";
-import { pf1eSpellSlotReadout } from "../ui/sheets/pf1eSheetModel";
+import { pf1eSpellSlotReadout, sheetRecord } from "../ui/sheets/pf1eSheetModel";
 import {
   resolveCastingAttempt,
   type PF1eCastingTime,
@@ -779,7 +779,17 @@ function appSurface(app: HostApp): AppSurface {
     },
     pf1eSpellSlots: (spec) => {
       const derived = deriveFromDocuments({ actor: { system: spec.system } });
-      const readout = pf1eSpellSlotReadout(derived);
+      // D-155: the persisted ledger (`slotsUsed`) and prepared list ride the same
+      // adapter the sheet renders, so the browser path proves their projection too.
+      const pf1e = spec.system.pf1e;
+      const authoredSpells =
+        pf1e && typeof pf1e === "object" && !Array.isArray(pf1e)
+          ? (pf1e as Record<string, unknown>).spells
+          : null;
+      const readout = pf1eSpellSlotReadout(
+        derived,
+        sheetRecord(authoredSpells),
+      );
       return {
         summary: readout.view.summary,
         grantedLevels: readout.view.grantedLevels,

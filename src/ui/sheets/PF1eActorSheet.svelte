@@ -32,6 +32,11 @@
     type SheetField,
   } from "./pf1eSheetModel";
   import {
+    pf1eSpellbookEdit,
+    pf1eSpellbookView,
+    type PF1eSpellbookEdit,
+  } from "./pf1eSpellbook";
+  import {
     pf1eApplyActorEffect,
     pf1eApplyCombatantEffect,
     pf1eEditActorEffect,
@@ -53,6 +58,7 @@
     | "weapons"
     | "armor"
     | "features"
+    | "spells"
     | "effects"
     | "monster"
     | "details";
@@ -88,7 +94,15 @@
     }),
   );
   let d = $derived(view.derived);
-  let slotReadout = $derived(pf1eSpellSlotReadout(d));
+  let slotReadout = $derived(
+    pf1eSpellSlotReadout(d, sheetRecord(view.authored.spells)),
+  );
+  // P5/C04 (D-155): persisted slot ledger + prepared list, spend/prepare Ops.
+  let spellbook = $derived(pf1eSpellbookView(doc, d));
+  let spellbookWarning = $state("");
+  let prepareName = $state("");
+  let prepareLevel = $state("1");
+  let prepareSlotLevel = $state("");
   let resolvedEffects = $derived(resolveTacticalEffects(view.effects));
   let effectBoosts = $derived(
     resolvedEffects.boosts.map((boost, i) => ({
@@ -328,6 +342,35 @@
     if (result.ops.length) pending.add(client.submit(result.ops));
   }
 
+  function updateSpellbook(edit: PF1eSpellbookEdit): void {
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) {
+      error = "Actor is no longer available.";
+      return;
+    }
+    // Re-derive from the freshest copy so dotted diffs hit the live document.
+    const derived = pf1eSheetView(current, {
+      combat: linked.combat,
+      combatantId: linked.combatantId,
+    }).derived;
+    const result = pf1eSpellbookEdit(current, derived, client.user, edit);
+    error = result.error ?? "";
+    spellbookWarning = result.warning ?? "";
+    if (result.ops.length) pending.add(client.submit(result.ops));
+  }
+
+  function prepareSpell(event: Event): void {
+    event.preventDefault();
+    const level = Number.parseInt(prepareLevel, 10);
+    const slotLevel =
+      prepareSlotLevel === ""
+        ? undefined
+        : Number.parseInt(prepareSlotLevel, 10);
+    updateSpellbook({ kind: "prepare", name: prepareName, level, slotLevel });
+    if (!error) prepareName = "";
+  }
+
   // E01/E02 — the effect apply/edit/toggle/remove handlers. Both homes resolve
   // fresh documents from the projected store, so a stale tab cannot write over
   // a replica that moved on; the ops go through ClientSync like every edit.
@@ -503,13 +546,14 @@
     <span>PF1e · {d.size}</span>
   </header>
   <nav aria-label="PF1e sheet tabs">
-    {#each ["summary", "attributes", "combat", "weapons", "armor", "features", "effects", ...(sheetRecord(view.authored.creature) ? ["monster"] : []), "details"] as name (name)}
+    {#each ["summary", "attributes", "combat", "weapons", "armor", "features", ...(d.casting ? ["spells"] : []), "effects", ...(sheetRecord(view.authored.creature) ? ["monster"] : []), "details"] as name (name)}
       <button
         type="button"
         class:active={tab === name}
         onclick={() => {
           tab = name as typeof tab;
           error = "";
+          spellbookWarning = "";
         }}>{name}</button
       >
     {/each}
@@ -786,6 +830,138 @@
     {#if tab === "armor" && editable}
       <PF1eAcConversion {doc} user={client.user} onApply={applyAcSource} />
     {/if}
+  {:else if tab === "spells"}
+    <section class="spellbook" aria-label="Spellbook" data-pf1e-spellbook>
+      <h4>
+        Spell slots · {spellbook.mode} · keyed to {d.spellKeyAbility.toUpperCase()}
+      </h4>
+      {#if spellbookWarning}<p role="alert" data-spellbook-warning>{spellbookWarning}</p>{/if}
+      {#if spellbook.ledger.grantedLevels.length === 0}
+        <p class="note">No slots authored for any level.</p>
+      {:else}
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Level</th>
+              <th scope="col">Base</th>
+              <th scope="col">Total</th>
+              <th scope="col">Spent</th>
+              <th scope="col">Remaining</th>
+              {#if editable}<th scope="col">Actions</th>{/if}
+            </tr>
+          </thead>
+          <tbody>
+            {#each spellbook.ledger.rows.filter((row) => row.total !== null) as row (row.level)}
+              <tr data-spell-slot-level={row.level}>
+                <td>{row.label}</td>
+                <td>{spellbook.budget.levels[row.level]?.base ?? "—"}</td>
+                <td data-slot-total>{row.total}</td>
+                <td data-slot-spent>{row.spent}</td>
+                <td data-slot-remaining>{(row.total ?? 0) - row.spent}</td>
+                {#if editable}
+                  <td>
+                    <button
+                      type="button"
+                      data-slot-spend={row.level}
+                      onclick={() => updateSpellbook({ kind: "spend", level: row.level })}
+                    >
+                      Spend
+                    </button>
+                    <button
+                      type="button"
+                      data-slot-restore={row.level}
+                      disabled={row.spent <= 0}
+                      onclick={() => updateSpellbook({ kind: "restore", level: row.level })}
+                    >
+                      Restore
+                    </button>
+                  </td>
+                {/if}
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+      {#each spellbook.ledger.warnings as warning (warning)}
+        <p class="note" data-slot-warning>{warning}</p>
+      {/each}
+      {#if spellbook.mode === "prepared"}
+        <h4>Prepared spells</h4>
+        {#each spellbook.preparationWarnings as warning (warning)}
+          <p class="note" data-prep-warning>{warning}</p>
+        {/each}
+        {#if editable}
+          <form
+            aria-label="Prepare a spell"
+            onsubmit={(event) => prepareSpell(event)}
+          >
+            <label
+              >Name
+              <input
+                name="name"
+                value={prepareName}
+                oninput={(e) => (prepareName = e.currentTarget.value)}
+                data-prepare-name
+              />
+            </label>
+            <label
+              >Spell level
+              <select bind:value={prepareLevel} data-prepare-level>
+                {#each Array.from({ length: 10 }, (_, i) => i) as level (level)}
+                  <option value={String(level)}>{level}</option>
+                {/each}
+              </select>
+            </label>
+            <label
+              >Cast slot
+              <select bind:value={prepareSlotLevel} data-prepare-slot>
+                <option value="">Same as spell level</option>
+                {#each Array.from({ length: 10 }, (_, i) => i) as level (level)}
+                  <option value={String(level)}>{level}</option>
+                {/each}
+              </select>
+            </label>
+            <button type="submit" data-prepare-submit>Prepare</button>
+          </form>
+        {/if}
+        {#if spellbook.prepared.length === 0}
+          <p class="note" data-prepared-empty>Nothing prepared yet.</p>
+        {:else}
+          <ul>
+            {#each spellbook.prepared as row, index (`${row.name}#${index}`)}
+              <li data-prepared-row={index}>
+                <label
+                  ><input
+                    type="checkbox"
+                    checked={row.expended}
+                    disabled={!editable}
+                    data-prepared-expended={index}
+                    onchange={() =>
+                      updateSpellbook({ kind: "preparedToggle", index })}
+                  />
+                  {row.name} · level {row.level}{#if row.slotLevel !== row.level} (cast at {row.slotLevel}){/if}{#if row.expended} — expended{/if}
+                </label>
+                {#if editable}
+                  <button
+                    type="button"
+                    data-prepared-remove={index}
+                    onclick={() =>
+                      updateSpellbook({ kind: "preparedRemove", index })}
+                  >
+                    Remove
+                  </button>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      {/if}
+      <p class="note">
+        Spending and preparation are daily state; resting/recovery automation
+        arrives with P7. Overuse is warned, not blocked (C04). Casting a spell
+        from this list arrives with the casting flow (C02).
+      </p>
+    </section>
   {:else if tab === "effects"}
     <p class="note" data-pf1e-effective-scores>
       Effective scores: {Object.entries(d.abilities)

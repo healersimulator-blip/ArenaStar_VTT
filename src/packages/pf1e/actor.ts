@@ -118,9 +118,28 @@ export interface PF1eSpellsAuthored {
   casterLevelBonus?: number;
   concentrationBonus?: number;
   mode?: "prepared" | "spontaneous";
-  /** Slots per day by spell level (0–10). Consumption is P5 — this is the authored budget. */
+  /** Slots per day by spell level (0–10). This is the authored budget. */
   slotsPerDay?: Partial<Record<number, number>>;
+  /**
+   * Slots already spent today (levels 0–9) — daily ledger STATE, not derived
+   * data (D-155). Resting/resetting is manual until recovery lands (P7).
+   */
+  slotsUsed?: Partial<Record<number, number>>;
+  /**
+   * A prepared caster's current preparation (D-155): each entry names the
+   * spell, the level it was prepared at, the slot it fills (defaults to its
+   * level) and whether it has been expended. Spontaneous casters keep no list.
+   */
+  prepared?: Array<{
+    name: string;
+    level: number;
+    slotLevel?: number;
+    expended?: boolean;
+  }>;
 }
+
+/** Cap on the authored prepared-spell list (a defense against malformed packs). */
+export const MAX_PREPARED_SPELLS = 200;
 
 /** Everything a PF1e actor document may author under `system.pf1e`. */
 export interface PF1eActorSystem extends PF1eHealthAuthored {
@@ -439,6 +458,61 @@ export function parsePF1eActorSystem(raw: unknown): Result<PF1eActorSystem> {
       return err(
         `system.pf1e.spells.mode ${JSON.stringify(s.mode)} must be "prepared" or "spontaneous"`,
       );
+    }
+    if (s.slotsUsed !== undefined) {
+      if (!isRecord(s.slotsUsed))
+        return err("system.pf1e.spells.slotsUsed must be an object");
+      for (const [k, v] of Object.entries(
+        s.slotsUsed as Record<string, unknown>,
+      )) {
+        const level = Number(k);
+        if (!Number.isInteger(level) || level < 0 || level > 9)
+          return err(
+            `system.pf1e.spells.slotsUsed level "${k}" must be an integer 0–9`,
+          );
+        if (typeof v !== "number" || !Number.isInteger(v) || v < 0)
+          return err(
+            `system.pf1e.spells.slotsUsed["${k}"] must be a non-negative integer`,
+          );
+      }
+    }
+    if (s.prepared !== undefined) {
+      if (!Array.isArray(s.prepared))
+        return err("system.pf1e.spells.prepared must be an array");
+      if (s.prepared.length > MAX_PREPARED_SPELLS)
+        return err(
+          `system.pf1e.spells.prepared supports at most ${MAX_PREPARED_SPELLS} entries`,
+        );
+      for (const p of s.prepared) {
+        if (!isRecord(p))
+          return err("system.pf1e.spells.prepared entries must be objects");
+        const entry = p as Record<string, unknown>;
+        if (typeof entry.name !== "string" || entry.name.trim() === "")
+          return err("prepared spells need a non-empty name");
+        if (entry.name.length > 120)
+          return err("prepared spell names are at most 120 characters");
+        if (
+          !Number.isInteger(entry.level) ||
+          (entry.level as number) < 0 ||
+          (entry.level as number) > 9
+        )
+          return err(
+            `prepared spell "${entry.name}": level must be an integer 0–9`,
+          );
+        if (
+          entry.slotLevel !== undefined &&
+          (!Number.isInteger(entry.slotLevel) ||
+            (entry.slotLevel as number) < 0 ||
+            (entry.slotLevel as number) > 9)
+        )
+          return err(
+            `prepared spell "${entry.name}": slotLevel must be an integer 0–9`,
+          );
+        if (entry.expended !== undefined && typeof entry.expended !== "boolean")
+          return err(
+            `prepared spell "${entry.name}": expended must be a boolean`,
+          );
+      }
     }
   }
   if (o.armorClass !== undefined && !isRecord(o.armorClass)) {

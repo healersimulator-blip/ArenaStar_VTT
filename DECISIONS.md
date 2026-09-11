@@ -3742,3 +3742,69 @@ preview respects walls via LoE, which is what C01's "walls/line of effect" asks)
 The preview's in-product consumer arrives with the C02 casting UI; until then the
 overlay is reachable through the documented surface, and its state machine
 (show/refuse/clear/scene-switch) is browser-tested.
+
+## D-155 — 2026-09-11 — P5/C04 closed: persisted slot ledger + prepared list, and the sheet's Spells tab
+
+**Context.** D-152 shipped C04's rules layer — Table 1-3 bonus spells, the `10 + spell level`
+minimum, `spendSlot`/`spendSpontaneousSlot`/`reviewPreparation`/`expendPrepared`/`slotLedgerView`,
+all pure and mutation-checked — but left it tree-shaken: nothing in `src/` called the ledger, there
+was no authored prepared list on the actor document at all, and the sheet only rendered a
+spent-always-zero readout. D-152's own close-out named exactly what C04 still needed: a schema field
+plus validation for the daily state, an editor for it, and observability in the product. D-155 is
+that slice: **persistence + UI, with zero new rule encoding** — every rules claim reuses D-152's
+verified layer.
+
+**What landed.**
+
+- **Schema (`src/packages/pf1e/actor.ts`).** `PF1eSpellsAuthored` gains two daily-state fields,
+  validated in the same `o.spells` block that guards the rest of `system.pf1e`:
+  `slotsUsed?: Partial<Record<number, number>>` (keys integers 0–9, values non-negative integers —
+  the per-level spent ledger) and `prepared?: Array<{ name; level; slotLevel?; expended? }>`
+  (name 1–120 chars, level/slotLevel integers 0–9, list capped at the new
+  `MAX_PREPARED_SPELLS = 200`, a malformed-pack defense matching `MAX_SHEET_ATTACKS`). Both are
+  optional: every existing actor and fixture stays valid, and a caster with no daily state reads as
+  all-unspent/nothing-prepared.
+- **`src/ui/sheets/pf1eSpellbook.ts` (new).** The spellbook surface, following the Weapons-tab
+  contract (D-117) and the `pf1eAttackEdit` shape:
+  - `pf1eSpellbookView(actor, derived)` maps the authored block onto D-152's layer —
+    `slotLedgerView(budget, ledger, preparedByLevel)` for the 0–9 rows (Table 1-3 totals included),
+    the resolved budget for the base/bonus split, the normalized prepared rows, and
+    `reviewPreparation(...).warnings` for prepared casters.
+  - `pf1eSpellbookEdit(actor, derived, user, edit)` returns `{ops, error, warning}` for
+    `spend`/`restore`/`prepare`/`preparedRemove`/`preparedToggle`. Ownership-gated
+    (`isPF1eActor` + `can(user, "update", actor, "actors")`); spends write the dotted
+    `system.pf1e.spells.slotsUsed.<level>` path when the ledger exists (preserving sibling levels)
+    and materialize the full ten-level object on first spend; prepared operations replace the array
+    whole. Over-budget spending goes through D-152's `spendSlot`, which returns `allowed: true` plus
+    a `warning` — the edit is written and the warning surfaced, never refused (C04's "warnings, not
+    hard enforcement"). Restore clamps at zero as a no-op; prepared-list operations are refused for
+    spontaneous casters with a named error.
+- **Spells tab (`PF1eActorSheet.svelte`).** A casting-only `spells` tab (hidden for non-casters):
+  per-granted-level rows with base/total/spent/remaining and Spend/Restore buttons, the prepare form
+  (name, spell level 0–9, optional cast slot), per-row expend checkbox and remove button, the
+  preparation warnings and a warning area for over-budget spends. The summary tab's
+  `data-pf1e-spell-slots` readout now threads the authored block through the same
+  `pf1eSpellSlotReadout` adapter (new optional `spells` parameter), so both homes read one ledger.
+- **e2e surface parity (`src/app/e2eHook.ts`).** `pf1eSpellSlots(spec)` now passes the authored
+  `spells` block into `pf1eSpellSlotReadout`, so the browser path proves the persisted-ledger
+  projection through the sheet's own adapter, not a copy.
+
+**Verification.** 15 new unit tests in `tests/ui/pf1eSpellbook.test.ts` (dotted-diff shape and
+sibling preservation, first-spend materialization, restore clamp/no-op, over-budget warn-not-refuse,
+out-of-range and malformed-input named errors, prepared append/toggle/remove array replacement,
+spontaneous refusal, ownership denial, ledger + prepared-count projection, over-preparation
+warning). Full suite **1398 passed / 3 skipped** across 139 files (+15/+1 over D-154); typecheck and
+lint green; touched-file Prettier applied. **Chromium e2e 79/79** (was 75, +4 new): 4 new tests in
+`e2e/pf1e_spellbook.spec.ts` — adapter projection of `slotsUsed`/prepared counts, over-budget
+projection as a warning, a full store round-trip (spend×2 → restore → overuse to 6-of-5 with the
+visible warning → prepare → expend → remove → summary reading `1st 6/5`), and a non-caster with no
+tab; zero page errors. dist **2,185,403 raw / 637,840 gzip** (+12,321 / +8,718 over D-154, within
+the 6 MB budget). D-152's tree-shake gap is closed: `"no slots granted at that level"` and
+`"which grants no slots"` now each grep to 1 in `dist/index.html` (both were 0) — the ledger layer
+is reachable from the product.
+
+**Scope boundaries.** Casting a spell does not yet decrement a slot — that coupling belongs to the
+C02 casting flow, which will also become the preview overlay's consumer (D-154). Resting/recovery
+automation is P7; until then Restore is the GM's manual daily reset. Spontaneous casters spend
+through the same manual controls for now (`spendSpontaneousSlot`'s lowest-sufficient-slot escalation
+awaits the cast flow). Cone/line stay refused under C01b. **C04 is checked.**

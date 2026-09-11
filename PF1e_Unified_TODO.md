@@ -409,6 +409,50 @@ Depends on P3 and D06; keep core EffectDocument unchanged.
 
 Depends on effects, attacks, action foundations and verified rule fixtures. Tactical targeting and strategic spell resolution remain independent implementations using common spell data.
 
+### P5 progress — 2026-09-11, persisted slot ledger + spellbook sheet slice (D-155, C04 closed)
+
+- **The daily state now rides the actor document.** D-152 shipped the pure
+  ledger (`spendSlot`, `reviewPreparation`, `slotLedgerView`, Table 1-3
+  bonuses, `10 + spell level` minimum) but nothing consumed it. D-155 adds
+  the authored schema it was missing: `system.pf1e.spells.slotsUsed`
+  (level→spent integers, keys validated 0–9, non-negative) and
+  `system.pf1e.spells.prepared` (name/level/optional `slotLevel`/`expended`
+  rows, capped at `MAX_PREPARED_SPELLS` 200), validated in the same actor
+  block that guards the rest of `system.pf1e`.
+- **One edit surface, one read surface.** `src/ui/sheets/pf1eSpellbook.ts`
+  (new) follows the Weapons-tab contract (D-117): `pf1eSpellbookView` maps
+  the actor + derivation onto `slotLedgerView`/`reviewPreparation`, and
+  `pf1eSpellbookEdit` builds ownership-gated Ops — dotted
+  `slotsUsed.<level>` writes that preserve siblings (full materialization on
+  first spend), array replacement for the prepared list, named errors, and
+  over-budget spends written with a warning rather than refused (C04's
+  "warnings, not hard enforcement"). Restore clamps at zero as a no-op;
+  spontaneous casters get no prepared list.
+- **The Spells tab.** `PF1eActorSheet.svelte` gains a casting-only `spells`
+  tab: per-granted-level base/total/spent/remaining rows with Spend/Restore,
+  the prepare form (name, spell level, optional cast slot), expend-toggle +
+  remove per prepared row, and the preparation warnings. The summary tab's
+  slot readout now projects the persisted ledger through the same
+  `pf1eSpellSlotReadout` adapter the e2e surface calls.
+- **Executed browser proof:** 4 new tests in `e2e/pf1e_spellbook.spec.ts`
+  (Chromium, 79/79 overall): the adapter projects authored `slotsUsed`/
+  prepared counts and over-budget warnings; a full store round-trip —
+  spend×2, restore, overuse to 6 of 5 with the visible warning, prepare,
+  expend, remove, and the summary reading `1st 6/5`; a non-caster shows no
+  tab; zero page errors. Rules arithmetic stays pinned by
+  `tests/packages/pf1eSpellSlots.test.ts`, edit builders by 15 new tests in
+  `tests/ui/pf1eSpellbook.test.ts`.
+- **Still open for P5:** cast→spend coupling and chosen targets arrive with
+  the C02 casting UI (the preview overlay's consumer); resting/recovery
+  automation is P7 — until then Restore is the manual reset. Cone/line stay
+  refused under C01b.
+- **Evidence:** unit **1398 passed / 3 skipped** across 139 files; typecheck
+  /lint/touched-file Prettier green; dist **2,185,403 raw / 637,840 gzip**;
+  Chromium e2e **79/79**. D-152's tree-shake gap closed in the bundle:
+  `"no slots granted at that level"` and `"which grants no slots"` now each
+  grep to 1 in `dist/index.html` (both were 0), so the ledger layer is
+  reachable from the product, not just the tests.
+
 ### P5 progress — 2026-09-11, canvas preview overlay slice (D-154, C01 closed)
 
 - **One seam for the overlay:** `src/packages/pf1e/areaPreview.ts` (new, pure)
@@ -441,7 +485,7 @@ Clear/State` drive the loop in Chromium (75/75): the burst that is exactly
 - [x] **C01 — Add pure grid targeting + canvas preview overlay:** burst, cone, line, emanation, spread/cylinder where supported; scene distance/units/diagonals, affected-token highlighting, walls/line of effect and cover. (I P5; G §4.10; B §4.4) — **done 2026-09-11 (D-148 pure layer + D-154 overlay):** burst/emanation/cylinder/spread with 5-10-5 counting, far-corner inclusion, scene grid bridging, wall line-of-effect; `pf1eAreaPreviewModel` is the single seam, rendered by `AreaPreviewLayer` (controls holder) with affected-token highlight rings, browser-tested in Chromium. Cone/line stay refused under their named C01b issue (contested square-grid discretization — transcribe-before-encoding, R01); cover as a targeting _modifier_ is P04's positional defenses (the preview respects walls via LoE, which is C01's ask).
 - [ ] **C02 — Implement tactical casting/save flow:** chosen targets, DC from spell level/key ability/focus, Fort/Ref/Will, save-negates/half/no-save distinctions, Evasion/Improved Evasion, per-type damage/ER and SR without natural-roll auto outcomes. Respect target-specific resistance bookkeeping. (I P5; G §2.11/Appendix A.16; M Task 5)
 - [ ] **C03 — Implement concentration/components and timing:** defensive casting versus taking-damage checks, spell loss, threatened casting, armor spell failure, verbal/somatic/material/focus requirements, touch/held charge, multi-round casting, swift/quickened/metamagic timing. Validate dubious source restrictions under R02. (I P5; G §4.10; B §4.4)
-- [ ] **C04 — Add level 0–9 spellbook/preparation/slot readouts**, prepared versus spontaneous data and bonus slots; MVP overuse produces warnings, not hard enforcement. (I P5; B §6.2)
+- [x] **C04 — Add level 0–9 spellbook/preparation/slot readouts**, prepared versus spontaneous data and bonus slots; MVP overuse produces warnings, not hard enforcement. (I P5; B §6.2) — **done 2026-09-11 (D-152 rules layer + D-155 persistence and UI):** the 0–9 readout with Table 1-3 bonus slots and prepared/spontaneous data shipped in D-152; D-155 persists the daily state on the actor (`system.pf1e.spells.slotsUsed`, `.prepared`, both validated), adds the sheet's Spells tab (Spend/Restore per granted level, prepare/expend/remove rows) built on the tested `spendSlot`/`reviewPreparation`/`slotLedgerView` layer, and keeps overuse as warnings rather than refusals. Cast→spend coupling arrives with the C02 casting flow.
 - [ ] **C05 — Replace hardcoded strategic Fireball with profile/pack-driven cast payloads** for location, shape, range, radius, CL, DC, dice and targets; use the agreed 20-ft Fireball. Remove or explicitly document scatter under R03 and keep spatial membership/ranges consistent if displacement remains. (G §5; I P5; M Task 5)
 - [ ] **C06 — Connect Stealth/Perception to host detection and ambush state:** verified distance/environment/cover modifiers, spatial queries and hidden-target legality; distinguish presence detection from locating/seeing a target. (B §§4.2, 6, 9; G §4.5–4.6)
 - [ ] **C07 — Add verified sensory-mode behavior** for normal/low-light/darkvision, scent, tremorsense, blindsight and true seeing, with appropriate ranges, lighting/LOS/concealment exceptions and faction projection. Avoid treating distinct senses as interchangeable. (B §§4.2, 10)
