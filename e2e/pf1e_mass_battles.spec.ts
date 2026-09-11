@@ -144,6 +144,12 @@ test.describe("Pathfinder 1e packages (§1.8 browser half)", () => {
       );
       expect(activated, activated.error ?? "").toEqual({ ok: true });
 
+      // Activation is persist-only: the SimWorker rules slot is resolved from
+      // the world's `activeRulesPackage` at boot (D-087/D-110 reload-based
+      // switching), so reboot before reading `rulesBoot`.
+      await page.reload();
+      await waitForApp(page);
+
       const boot = await appCall<{
         source: string;
         packageId: string | null;
@@ -168,6 +174,8 @@ test.describe("Pathfinder 1e packages (§1.8 browser half)", () => {
         "deactivatePackage",
       );
       expect(deactivated, deactivated.error ?? "").toEqual({ ok: true });
+      await page.reload();
+      await waitForApp(page);
       expect(
         (await appCall<Record<string, string>>(page, "rulesBoot")).source,
       ).toBe("builtin");

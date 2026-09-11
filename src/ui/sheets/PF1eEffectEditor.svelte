@@ -170,7 +170,8 @@
           type="number"
           step="1"
           disabled={!editable}
-          bind:value={row.value}
+          value={row.value}
+          oninput={(e) => (row.value = e.currentTarget.value)}
           placeholder="±value"
           aria-label="Value"
         />
@@ -207,7 +208,8 @@
           step="1"
           min="1"
           disabled={!editable}
-          bind:value={row.dice}
+          value={row.dice}
+          oninput={(e) => (row.dice = e.currentTarget.value)}
           placeholder="dice"
           aria-label="Dice"
         />
@@ -217,7 +219,8 @@
           step="1"
           min="2"
           disabled={!editable}
-          bind:value={row.sides}
+          value={row.sides}
+          oninput={(e) => (row.sides = e.currentTarget.value)}
           placeholder="sides"
           aria-label="Die size"
         />
@@ -225,7 +228,8 @@
           type="number"
           step="1"
           disabled={!editable}
-          bind:value={row.bonus}
+          value={row.bonus}
+          oninput={(e) => (row.bonus = e.currentTarget.value)}
           placeholder="flat"
           aria-label="Flat bonus"
         />
@@ -348,7 +352,8 @@
           step="1"
           min="0"
           disabled={!editable}
-          bind:value={form.immuneDr}
+          value={form.immuneDr}
+          oninput={(e) => (form.immuneDr = e.currentTarget.value)}
           class="num"
         />
       </label>
@@ -375,7 +380,8 @@
             min="1"
             step="1"
             disabled={!editable}
-            bind:value={form.ttlValue}
+            value={form.ttlValue}
+            oninput={(e) => (form.ttlValue = e.currentTarget.value)}
             class="num"
           />
         </label>
@@ -427,7 +433,8 @@
           type="number"
           step="1"
           disabled={!editable}
-          bind:value={form.sourceLevel}
+          value={form.sourceLevel}
+          oninput={(e) => (form.sourceLevel = e.currentTarget.value)}
           class="num"
         /></label
       >
@@ -437,7 +444,8 @@
           type="number"
           step="1"
           disabled={!editable}
-          bind:value={form.sourceDc}
+          value={form.sourceDc}
+          oninput={(e) => (form.sourceDc = e.currentTarget.value)}
           class="num"
         /></label
       >

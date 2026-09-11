@@ -3583,3 +3583,584 @@ produces warnings, not hard enforcement" is implemented and mutation-tested as a
 unbuilt: a **rendered spellbook/prepared list** (there is no authored prepared-spell list on the
 actor document at all, so this needs a schema field plus validation and an editor, not just markup),
 and wiring the ledger to actual casting. **C04 stays `[ ]`.**
+
+## D-153 — First executed full-Chromium e2e pass: five latent failures found, three product repairs (S01/S04/N01/N02 browser half, 2026-09-11)
+
+**Context.** Every slice from D-119 onward recorded its browser specs as
+"collected, not executed": the Playwright browser CDN (`cdn.playwright.dev` →
+`storage.googleapis.com`) is unreachable from the sandbox, and Debian mirrors
+are closed too, so no Chromium existed to run them. This slice got a real
+browser running — `@sparticuz/chromium@152.0.0` (npm, the D-119 precedent)
+extracted to `/tmp/chromium`, with its three missing shared libraries
+(`libnspr4.so`, `libnss3.so`, `libnssutil3.so`) inflated from the package's own
+`al2023.tar.br` into `LD_LIBRARY_PATH` — and ran the **whole collected e2e
+suite on Chromium: 74/74 passing**, after repairing what the run exposed. No
+security-bypass flags; `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` is the documented
+override path (README), default pinned-browser behavior unchanged.
+
+**Why this matters:** five of the "collected" specs were **wrong or uncovered
+real bugs** — exactly the risk the collection-only convention carried. Three
+were product bugs unit tests could not see; three were spec bugs (one spec had
+both).
+
+**Product repairs (the browser saw what Node could not):**
+
+1. **The E02 effect editor crashed on every typed number.** All eight numeric
+   inputs in `PF1eEffectEditor.svelte` used `bind:value` on `type="number"`,
+   which Svelte 5 coerces to `number` — then `buildEffectRequest`'s
+   `row.value.trim()` threw `e.trim is not a function` (observed as a page
+   error; the form silently kept its values, no effect applied, no visible
+   error). The model's contract is string-in ("empty numerics are absent,
+   garbage numerics are named errors"), so the fix is at the binding: each
+   numeric input now stores `e.currentTarget.value` verbatim via `oninput`.
+   The model-level unit tests all fed strings, which is why they never caught
+   it; the fix is pinned by the E02 browser spec executing for the first time.
+2. **The PF1e pre-start initiative gate was unreachable.** D-132 routes PF1e
+   encounter starts through `startWithSurprise`, which requires initiative
+   rolled and ties resolved **before** Start ("Roll initiative before starting
+   a PF1e encounter."). But every roll control (`#combat-init`, Roll all, Roll
+   hidden) rendered only in the running branch — a pre-created PF1e encounter
+   could never satisfy its own gate (the create-and-start shortcut bypasses it,
+   which is how the gap stayed hidden). `rollInitiative` needs only a selected
+   encounter, not a running one, so the pre-start branch now renders the same
+   three controls for `combat && pf1e` (exclusive branches, so the `#combat-init`
+   id is never duplicated in the DOM), with a one-line note that PF1e starts
+   are surprise-aware. No rules change — the gate D-132 designed is now
+   reachable.
+3. **Effective scores were invisible where effects are edited.** The E02
+   acceptance reads the live ability scores back after apply/suppress/remove,
+   but `data-pf1e-effective-scores` rendered only on the attributes tab while
+   the editor lives on the effects tab. The effects tab now carries the same
+   read-only effective-scores line, so applying a buff shows the numbers move
+   without tab-switching — the E02 intent ("recompute-on-effect-change is
+   structural") made visible.
+
+**Spec repairs (written against assumptions, not against a running app):**
+
+4. **A06/A06b roll-card specs** asserted `#chat-log .rollcard` while driving
+   the sheet **embedded in the sidebar** — but `ChatPanel` mounts only when the
+   chat tab is active, and switching to it unmounts the sheets panel. The
+   product's real flow is the floating sheet window; the specs now open the
+   sheet via `[data-open-pf1e-sheet]`, activate the chat tab, and drive
+   `.wm-window [data-pf1e-sheet]`. Both pass — including the A06b hp write
+   (`PF Dummy 12 → N HP`) through the op path.
+5. **The N01/N02 join spec** called `armySnapshot`, `factionOwnership` and the
+   GM-side `simCount` on the **app** surface; they live on the **gm** surface
+   (`GmFogSurface`, installed at `?e2e=1` boot). Added a `gmCall` helper
+   mirroring `gmextras.spec.ts` and switched the three calls. The spec now
+   **executes end-to-end**: import/activate both shipped zips, manual-signaling
+   joiner adopts the announced PF1e schema, 10-model campaign reaches the
+   player replica (snapshot + delta), resolved turn advances `simVersion`, zero
+   page errors on either peer.
+6. **The §1.8 package spec** expected `rulesBoot` to flip to `package`
+   immediately after `activatePackage`; activation is persist-only and the
+   SimWorker rules slot resolves at boot (D-087/D-110 reload-based switching —
+   `packages.spec.ts` has always modeled the reload). The spec now reboots
+   after activate and after deactivate, and both reads report the right source.
+
+**Also fixed while running the join spec:** `dist/packages/*.zip` is wiped by
+`pnpm build`, so `build:systems` must run **after** `build` (the `test:e2e`
+script order); running them out of order reproduces "zip missing".
+
+**Verification and evidence.** Full unit suite **1376 passed / 3 skipped**
+across 137 files (unchanged — no unit behavior moved); typecheck, lint and
+touched-file Prettier green; `pnpm build` + `pnpm size`: dist **2,170,273 raw
+/ 628,118 gzip** (+1,238 over D-152, within the 6 MB budget);
+`build:systems` emits both zips (rules.js unchanged at 55.1 kB). **Chromium
+152 e2e: 74/74 passing in 3.8 min**, including every previously
+collected-but-unexecuted PF1e spec: sheets (24 incl. A06/A06b/E02 and the
+scoped-roster flow — which additionally needed the pre-start roll, since D-132
+gates PF1e starts), windows, combat, the N01/N02 join, casting/concentration/
+targeting/spell-slots and the §1.8 package flow.
+
+**What stays unchecked and why.** Per the D-119 convention, S01/S04 and
+N01/N02 need the **full supported-browser matrix**, and Firefox/WebKit cannot
+be downloaded here (the Playwright CDN and all Debian mirrors are blocked;
+D-082 already records the sandbox's firefox ICE limitation). Their **Chromium
+acceptance half is now executed and green**, which this decision records; the
+boxes stay `[ ]` pending Firefox/WebKit runs in an environment that can fetch
+those binaries.
+
+## D-154 — 2026-09-11 — P5/C01 closed: the PF1e area canvas preview overlay, and one seam for it
+
+**Context.** D-148 landed the pure grid targeting (burst/emanation/cylinder/spread,
+5-10-5 counting, far-corner inclusion, wall LoE, scene-grid bridging) with the
+comment on `cellRect` promising "for the canvas preview overlay" — but the overlay
+itself, and the affected-token highlighting C01 asks for, did not exist. This slice
+delivers them and closes C01, with cone/line staying refused under their C01b named
+issue (below).
+
+**One seam, not three re-wirings.** `src/packages/pf1e/areaPreview.ts` (new, pure,
+diceless, Pixi-free) is the single composition `pf1eAreaPreviewModel`: scene grid →
+`pf1eAreaGridFromScene` → `resolveAreaCells` (walls arrive as caller-supplied
+`segments`, so the pf1e package never imports a WallDocument) → `areaPreviewRects`
+draw list + `affectedTokens` read. It returns world-space cell rects, affected token
+ids, token **highlight rects** and a UI label — or `ok: false` with the named issues
+(metric scene, refused shape, non-intersection origin, caps). The canvas layer, any
+future casting UI and the e2e surfaces all consume this one function; nothing
+re-derives the chain.
+
+**The layer rides the controls holder.** `src/canvas/layers/AreaPreviewLayer.ts`
+draws the cells (orange fill + stroke) and a ring around each affected token,
+version-keyed like `StrategicFogLayer`, with `rectCount`/`highlightCount` readbacks.
+It lives in the controls container: the preview is local caster UI state, not a
+replicated document, and the §9 `LAYER_ORDER` constant stays verbatim (the
+`canvasSmoke` layer-order assertion is unchanged). `App.svelte` owns the preview
+state: `showPF1eAreaPreview(spec)` resolves against the active scene's grid/tokens/
+`sightSegments(walls)`; a scene switch clears the preview rather than repainting
+stale cells; every `refresh()` re-syncs through the version key.
+
+**Surfaces:** `GmFogSurface.pf1eAreaPreviewShow/Clear/State` (the App-installed
+surface, which alone can reach the stage). Show returns the resolved model so
+callers surface the named issues; state reports what the layer actually drew.
+`e2e/pf1e_targeting.spec.ts` drives the full loop in Chromium: burst-on-the-token's-
+2×2 draws 4 rects + 1 highlight, a refused cone is reported and never drawn, clear
+empties the overlay, zero page errors.
+
+**Cone and line remain refused (C01b), now visibly.** `pf1eAreaPreviewModel` returns
+`ok: false, issues: [{field: "kind", … "cone and line are C01b"}]` for them — the
+D-148 position is unchanged: their square-grid discretization is contested (the
+published cone templates disagree; the designer's own answer is "just pick one"),
+so encoding either would be inventing a rule. C01's "where supported" wording covers
+the shipped subset; C01b needs a canonical transcription decision (R01 discipline)
+before any geometry exists.
+
+**Verification.** 7 new unit tests in `tests/packages/pf1eAreaPreview.test.ts`
+(composition: world rects for the hand-derived 5-ft burst, in/out token highlights,
+the D-148 wall fixture forwarded through the model, metric/cone/non-intersection
+refusals). Full suite **1383 passed / 3 skipped** across 138 files (+7/+1);
+typecheck, lint, touched-file Prettier green. **Chromium e2e 75/75** (was 74, +1
+overlay spec). dist **2,173,082 raw / 629,122 gzip** (+2,809 over D-153, within the
+6 MB budget).
+
+**C01 is checked.** Landed: burst/emanation/cylinder/spread targeting, scene
+distance/units/diagonals bridging, wall line-of-effect, canvas preview overlay,
+affected-token highlighting. Open under C01's umbrella, named rather than dropped:
+cone/line shapes (C01b, refused with a named issue) and "cover" as a targeting
+_modifier_ (soft/partial cover bonuses belong to P04's positional defenses; the
+preview respects walls via LoE, which is what C01's "walls/line of effect" asks).
+The preview's in-product consumer arrives with the C02 casting UI; until then the
+overlay is reachable through the documented surface, and its state machine
+(show/refuse/clear/scene-switch) is browser-tested.
+
+## D-155 — 2026-09-11 — P5/C04 closed: persisted slot ledger + prepared list, and the sheet's Spells tab
+
+**Context.** D-152 shipped C04's rules layer — Table 1-3 bonus spells, the `10 + spell level`
+minimum, `spendSlot`/`spendSpontaneousSlot`/`reviewPreparation`/`expendPrepared`/`slotLedgerView`,
+all pure and mutation-checked — but left it tree-shaken: nothing in `src/` called the ledger, there
+was no authored prepared list on the actor document at all, and the sheet only rendered a
+spent-always-zero readout. D-152's own close-out named exactly what C04 still needed: a schema field
+plus validation for the daily state, an editor for it, and observability in the product. D-155 is
+that slice: **persistence + UI, with zero new rule encoding** — every rules claim reuses D-152's
+verified layer.
+
+**What landed.**
+
+- **Schema (`src/packages/pf1e/actor.ts`).** `PF1eSpellsAuthored` gains two daily-state fields,
+  validated in the same `o.spells` block that guards the rest of `system.pf1e`:
+  `slotsUsed?: Partial<Record<number, number>>` (keys integers 0–9, values non-negative integers —
+  the per-level spent ledger) and `prepared?: Array<{ name; level; slotLevel?; expended? }>`
+  (name 1–120 chars, level/slotLevel integers 0–9, list capped at the new
+  `MAX_PREPARED_SPELLS = 200`, a malformed-pack defense matching `MAX_SHEET_ATTACKS`). Both are
+  optional: every existing actor and fixture stays valid, and a caster with no daily state reads as
+  all-unspent/nothing-prepared.
+- **`src/ui/sheets/pf1eSpellbook.ts` (new).** The spellbook surface, following the Weapons-tab
+  contract (D-117) and the `pf1eAttackEdit` shape:
+  - `pf1eSpellbookView(actor, derived)` maps the authored block onto D-152's layer —
+    `slotLedgerView(budget, ledger, preparedByLevel)` for the 0–9 rows (Table 1-3 totals included),
+    the resolved budget for the base/bonus split, the normalized prepared rows, and
+    `reviewPreparation(...).warnings` for prepared casters.
+  - `pf1eSpellbookEdit(actor, derived, user, edit)` returns `{ops, error, warning}` for
+    `spend`/`restore`/`prepare`/`preparedRemove`/`preparedToggle`. Ownership-gated
+    (`isPF1eActor` + `can(user, "update", actor, "actors")`); spends write the dotted
+    `system.pf1e.spells.slotsUsed.<level>` path when the ledger exists (preserving sibling levels)
+    and materialize the full ten-level object on first spend; prepared operations replace the array
+    whole. Over-budget spending goes through D-152's `spendSlot`, which returns `allowed: true` plus
+    a `warning` — the edit is written and the warning surfaced, never refused (C04's "warnings, not
+    hard enforcement"). Restore clamps at zero as a no-op; prepared-list operations are refused for
+    spontaneous casters with a named error.
+- **Spells tab (`PF1eActorSheet.svelte`).** A casting-only `spells` tab (hidden for non-casters):
+  per-granted-level rows with base/total/spent/remaining and Spend/Restore buttons, the prepare form
+  (name, spell level 0–9, optional cast slot), per-row expend checkbox and remove button, the
+  preparation warnings and a warning area for over-budget spends. The summary tab's
+  `data-pf1e-spell-slots` readout now threads the authored block through the same
+  `pf1eSpellSlotReadout` adapter (new optional `spells` parameter), so both homes read one ledger.
+- **e2e surface parity (`src/app/e2eHook.ts`).** `pf1eSpellSlots(spec)` now passes the authored
+  `spells` block into `pf1eSpellSlotReadout`, so the browser path proves the persisted-ledger
+  projection through the sheet's own adapter, not a copy.
+
+**Verification.** 15 new unit tests in `tests/ui/pf1eSpellbook.test.ts` (dotted-diff shape and
+sibling preservation, first-spend materialization, restore clamp/no-op, over-budget warn-not-refuse,
+out-of-range and malformed-input named errors, prepared append/toggle/remove array replacement,
+spontaneous refusal, ownership denial, ledger + prepared-count projection, over-preparation
+warning). Full suite **1398 passed / 3 skipped** across 139 files (+15/+1 over D-154); typecheck and
+lint green; touched-file Prettier applied. **Chromium e2e 79/79** (was 75, +4 new): 4 new tests in
+`e2e/pf1e_spellbook.spec.ts` — adapter projection of `slotsUsed`/prepared counts, over-budget
+projection as a warning, a full store round-trip (spend×2 → restore → overuse to 6-of-5 with the
+visible warning → prepare → expend → remove → summary reading `1st 6/5`), and a non-caster with no
+tab; zero page errors. dist **2,185,403 raw / 637,840 gzip** (+12,321 / +8,718 over D-154, within
+the 6 MB budget). D-152's tree-shake gap is closed: `"no slots granted at that level"` and
+`"which grants no slots"` now each grep to 1 in `dist/index.html` (both were 0) — the ledger layer
+is reachable from the product.
+
+**Scope boundaries.** Casting a spell does not yet decrement a slot — that coupling belongs to the
+C02 casting flow, which will also become the preview overlay's consumer (D-154). Resting/recovery
+automation is P7; until then Restore is the GM's manual daily reset. Spontaneous casters spend
+through the same manual controls for now (`spendSpontaneousSlot`'s lowest-sufficient-slot escalation
+awaits the cast flow). Cone/line stay refused under C01b. **C04 is checked.**
+
+## D-156 — 2026-09-11 — P5/C02 closed: the tactical cast flow — validation-first, damage→SR→save, round-scoped SR ledger
+
+**Context.** D-149 encoded C02's arithmetic as pure functions in `src/packages/pf1e/casting.ts`
+(spell DC, save outcomes with Evasion/Improved Evasion, spell-resistance checks, energy resistance
+inside `resolveSpellTarget`) and its close-out named exactly what C02 still needed: chosen-target
+selection, the round-scoped resistance bookkeeping (then only a caller-supplied flag), and the
+casting UI. D-152/D-155 meanwhile shipped the slot ledger and spellbook sheet that a cast must spend.
+D-156 is the slice that wires the three together in the product — **zero new rule encoding**; every
+rules claim reuses D-149's layer.
+
+**What landed.**
+
+- **`src/packages/pf1e/srLedger.ts` (new, pure).** The round-scoped SR ledger C02 asks for under
+  "target-specific resistance bookkeeping". The combat document's `flags.pf1e.srOvercome` blob maps
+  `"casterId:targetId" → round`; four exported helpers own all access — `srOvercomeKey`,
+  `srAlreadyOvercome` (true iff the recorded round equals the current round), `srOvercomeDiff`
+  (minimal diff writing only the changed key, deletes never emit a spurious write), and
+  `srOvercomeBlobFromFlags` (defensive read). Consequences: an overcome SR is **not re-rolled for
+  the rest of the round**, a new round re-rolls, out of combat every cast rolls, and the GM's
+  per-cast `srOvercomeByCaller` forces a fresh roll.
+- **`src/ui/sheets/pf1eCastFlow.ts` (new).** `resolveCastFlow(client, user, params)` — the
+  single-target cast orchestrator, shaped like `pf1eResolveFlow`'s attack flow. Hard orderings,
+  each pinned by a test: (1) slot and prepared validation runs **before any roll** — a refused cast
+  posts nothing and spends nothing; (2) rolls happen damage → SR check → save, each through the host
+  roll service; (3) submission creates the card op first, then the state writes (slot/prepared
+  spends, HP write, SR-ledger diff) as one batched op. DC comes from the caster's derived
+  `spellSaveDc[level]` — null (no slots granted at that level) is a named refusal, not a silent
+  zero. Severity is the full `PF1E_SAVE_SEVERITIES` set; Evasion/Improved Evasion read the target's
+  authored feats via `hasPF1eFeat`; ER filters into `resolveSpellTarget`'s defender block.
+  `castResolutionCardContent` renders the card: "X casts Spell (level N) at Y — DC d.",
+  `[[total|formula]]` chips, the HP-transition line ("PF Ogre 20 → 15 HP.") and ⚠ warning lines.
+- **Sheet wiring (`PF1eActorSheet.svelte`).** The Spells tab gains a cast panel (save type,
+  severity, damage formula, energy type, SR-override checkbox, target picker over
+  `pf1eTargetActors`) and a per-prepared-row Cast button that pins the panel to that row — the row's
+  name, level and slot ride with it, and a successful cast expends the row. Over-budget casting
+  stays warn-not-refuse per C04/D-155: the warning surfaces in the panel, the ledger row and the
+  card. `pf1eResolveFlow.awaitRollMessage` accepts the cast-flow client via its structural
+  `{ store }` shape rather than a shared interface, so the attack flow stays untouched.
+
+**Verification.** 18 new unit tests — 4 in `tests/packages/pf1eSrLedger.test.ts` (key format,
+same-round reuse, round rollover, delete-free diffs) and 14 in `tests/ui/pf1eCastFlow.test.ts`
+(validation-before-rolls, roll order, DC-null refusal, all five severities, Evasion/Improved
+Evasion, ER halving + floor, SR reuse/re-roll/override, card content). Full suite **1416 passed /
+3 skipped** across 141 files (+18 over D-155); typecheck and lint green; touched-file Prettier
+applied. **Chromium e2e 82/82** (+3 in `e2e/pf1e_cast_flow.spec.ts`): a harmless over-budget cast
+spends 5→6 of 5 with ledger + panel + card warnings, expends the prepared row, disables its Cast
+button and posts the no-save card; a 2d6 damaging cast lands the ogre's HP inside the roll range
+with the transition line and the summary reading `1st 6/5`; named refusals (no target, bad dice)
+spend nothing. dist **2,198,130 raw / 641,330 gzip** (+12,727 / +3,490 over D-155, within the
+6 MB budget).
+
+**Scope boundaries.** One chosen target per cast — area payloads and multi-target casts are C05's
+profile-driven job (the preview overlay from D-154 is their future consumer). Components,
+concentration, touch/holding, multi-round and metamagic timing are C03; D-150's legality helpers
+are not yet wired into the cast path. Cast rolls are not commit/reveal — the damage/SR/save dice
+are single-shot host rolls like the card chips. Resting/recovery remains manual (P7). **C02 is
+checked.**
+
+## D-157 — 2026-09-11 — P5/C03 partial: the C03a casting gate wired into the cast path
+
+**Context.** D-150 encoded C03's pre-save gate as pure functions — component parsing with
+per-tradition `M/DF` resolution, named legality refusals (cannot speak / no free hand /
+components not in hand / pinned / grappling), per-item arcane spell failure, deafened spoilage,
+Table 9-1 concentration DCs and `resolveCastingAttempt` as the orchestrator — but nothing in
+`src/` called any of it: the layer was tree-shaken exactly as the slot ledger was before D-155.
+D-157 is the wiring slice: **zero new rule encoding**, every ruling delegates to D-150's layer.
+
+**What landed.**
+
+- **Schema (`src/packages/pf1e/actor.ts`).** Prepared rows gain an optional `components` line
+  (string ≤ 120 chars; deep parsing happens at cast time with named refusals) and the spells
+  block an optional `tradition` (`"arcane" | "divine"`, validated). Both are additive — every
+  existing actor and fixture stays valid, and a row without a line reads as gateless.
+- **The flow (`src/ui/sheets/pf1eCastFlow.ts`).** `PF1eCastFlowParams` gains an optional
+  `gate: PF1eCastGateInput` (components line, GM-declared caster state, casting time, and
+  die-less concentration declarations). Hard orderings, each test-pinned:
+  1. the gate's diceless half runs in the validation block — a malformed line or an illegal
+     casting (silence vs V, no free hand vs S, pinned vs S, grappling vs >1-standard-action
+     times, components not in hand vs M/F/DF) is refused by name **before any roll and spends
+     nothing**;
+  2. the dice half rolls after slot/prepared bookkeeping and before the effect rolls: one d100
+     for arcane spell failure when `armor.spellFailure` applies (arcane tradition only, a
+     somatic-less spell exempt), one d100 for deafened spoilage of a verbal component, one d20
+     per declared concentration trigger — all through the host roll service;
+  3. `resolveCastingAttempt` consumes the dice and returns the authoritative outcome. A ruined
+     spell (`lost`) still spends its slot and prepared row — "you lose the spell just as if you
+     had cast it to no effect" — posts a `Spell lost` card naming the failed check, and skips
+     damage/SR/save/HP entirely; a surviving cast continues unchanged, carrying `gateNotes`.
+- **The concentration bonus** composes from what derivation already exposes: caster level +
+  key ability modifier (`abilityMods[spellKeyAbility]`) + the authored `concentration` bonus
+  with effect mods — no new derived field.
+- **Sheet wiring (`PF1eActorSheet.svelte`, `pf1eSpellbook.ts`).** The prepare form authors the
+  components line (validated ≤ 120 chars); prepared rows display it; the row's Cast button
+  prefills the panel's gate; the cast panel gains the gate fieldset — components, casting time
+  (free/swift/standard/full-round/longer), cannot-speak / no-free-hand / components-not-in-hand
+  / deafened / grappling / pinned checkboxes, casting-defensively, and injured-while-casting
+  with a damage-taken input. An empty components line skips the gate, so every pre-D-157 cast
+  behaves exactly as before.
+
+**Verification.** 16 new unit tests — 15 in `tests/ui/pf1eCastGate.test.ts` (named legality
+refusals roll nothing and spend nothing; malformed line refused; ASF ruin spends the slot and
+posts the lost card with no effect rolls; ASF pass continues d100→damage; somatic-less and
+divine casters get no ASF roll; deafened spoilage both ways; defensive casting DC 17 pass/fail;
+injured trigger DC 10+damage+level; `M/DF` divine reading needs the focus in hand; empty line
+skips the gate) and one schema test (tradition + prepared components validation). Full suite
+**1432 passed / 3 skipped** across 142 files (+16 over D-156); typecheck and lint green;
+touched-file Prettier applied. **Chromium e2e 83/83** (+1): a silenced caster's V/S cast is
+refused by name with no spend and no card, then the same cast with the voice restored passes
+the gate silently and lands; the first cast-flow test now rides the gate's pass path through
+the prepared row's components line. dist **2,206,360 raw / 643,280 gzip** (+8,230 / +1,950
+over D-156, within the 6 MB budget).
+
+**Scope boundaries.** C03 stays open. Still missing: touch/held charges, multi-round casting,
+swift/quickened/metamagic timing, threatened-casting attacks of opportunity, and the nine
+remaining Table 9-1 situations in the UI (the pure layer supports all eleven). Per-item ASF
+exemptions (bard light armour, mithral) and shield ASF have no authoring surface yet; caster
+state is the GM's per-cast declaration, not yet derived from conditions. Area/multi-target
+payloads remain C05.
+
+## D-158 — 2026-09-11 — P5/C03 partial: touch spells and held charges ride the actor document
+
+**Context.** C03's pre-save gate (components/concentration) landed product-reachable in D-157;
+its touch-spell half — "touch/held charge" — was still a pure-layer aspiration. Per R02 the
+CRB "Cast a Spell" touch section was transcribed before encoding: a touch-range spell is cast
+and then delivered by an attack roll (melee touch: BAB + Str mod + size attack bonus; ranged
+touch: BAB + Dex mod + size attack bonus) against the target's touch AC — full AC minus
+armour, shield and natural-armor bonuses; missing a melee touch cast **holds the charge** on
+the caster indefinitely ("you can hold the charge indefinitely"); holding a charge while
+casting another spell **dissipates** the held spell; a successful touch runs the spell's
+normal resolution; ranged touch attacks resolve as part of the spell and cannot be held.
+
+**Decisions.**
+
+- **Pure layer first** (`src/packages/pf1e/touchSpell.ts`): `resolveTouchAttack` computes the
+  bonus and reports hit/miss/natural-20 for the flows to consume — critical *confirmation* is
+  deliberately deferred (no second roll yet), so a natural 20 is simply a hit with a flag.
+  `PF1eHeldCharge` is the persisted shape: spell name, level, damage formula, save type and
+  severity — everything the delivery flow needs to re-run resolution without the original
+  prepared row. `heldChargeFromSystem` is null-tolerant and returns `null` for absent or
+  malformed blocks.
+- **The charge is authored actor state**: `system.pf1e.heldCharge`, validated in
+  `parsePF1eActorSystem` like the rest of the spells block. This keeps it replicated, joiner-
+  visible and GM-authoritative with no new machinery — the same home the D-155 slot ledger
+  uses.
+- **Cast-flow integration** (`resolveCastFlow` in `src/ui/sheets/pf1eCastFlow.ts`): a new
+  optional `touch` param (`"melee" | "ranged"`) routes touch-range casts through the attack
+  branch before the shared effect pipeline. On a melee miss the slot is spent, the charge is
+  written, and the card names it; on a ranged miss the spell is lost (ranged touch cannot be
+  held). On a hit, the existing damage→SR→save→HP pipeline runs under a touch-attack line —
+  the pipeline itself was extracted into a private `runSpellEffect` shared by casting and
+  delivery (refactor covered unchanged by all pre-existing flow tests).
+- **Dissipation is unconditional and ordered:** any cast first deletes an existing held
+  charge (delete op + warning on the card), then proceeds — matching "if you cast another
+  spell, the touch spell dissipates."
+- **`resolveTouchDelivery` is a separate entry point**, not a cast: it re-reads the freshest
+  documents (the charge may have been delivered/dismissed since the sheet rendered), refuses
+  on ownership or when the caster's DC for the charge's level is unavailable, rolls the touch
+  attack, and on a hit runs the shared pipeline then clears the charge. A miss spends nothing
+  and keeps the charge.
+- **Sheet UI** (`PF1eActorSheet.svelte`): a touch-mode select in the cast panel, a held-charge
+  panel (`data-held-charge`) with Deliver (requires a selected target) and Dismiss buttons;
+  handlers re-derive the freshest docs before acting so two open sheets cannot stale-write.
+
+**The store-roundtrip repair (the e2e pass caught it).** Clearing a charge with
+`{"system.pf1e.heldCharge": null}` is wrong for this store: `applyDiff` writes the literal
+`null` (only the `-=` delete-marker prefix removes keys), and the next `parsePF1eActorSystem`
+rejects `heldCharge: null` ("must be an object") — which blanks the actor's *entire* derived
+block (casting off, all DCs null, "No slots authored", the Spells tab button vanishes while
+stale tab content lingers). The fix is two-layer, both required: `heldChargeDiff(null)` emits
+`{"-=system.pf1e.heldCharge": null}` (the repo's delete convention), and the parser treats a
+literal `heldCharge: null` as absent. A new regression test runs
+write→clear→`applyDiff`→re-parse to pin the round-trip. **Rule of thumb for future slices:**
+deletions always use the `-=` marker, and parsers should treat `null` as absent defensively.
+
+**Verification.** 20 new unit tests — 9 in `tests/packages/pf1eTouchSpell.test.ts` (attack
+bonus composition, touch AC derivation, miss/hit/nat-20, charge parse tolerances, diff shapes
+including the store round-trip) and 11 in `tests/ui/pf1eTouchFlow.test.ts` (touch cast
+miss-holds / hit-resolves / ranged-miss-loses, dissipation ordering and warnings, delivery
+hit-delivers-and-clears / miss-keeps, ownership and DC refusals, stranger cannot deliver).
+Full suite **1453 passed / 3 skipped** across 144 files (+21 over D-157); typecheck and lint
+green; touched-file Prettier applied. **Chromium e2e 85/85** (+2) via `e2e/pf1e_touch.spec.ts`:
+dissipation is deterministic (authored Chill Touch → cast Magic Missile → warning + panel
+gone); the touch-cast test spends the slot, asserts the touch-AC line, then conditionally
+delivers or keeps the charge based on the card text (no dice seeding available). dist
+**2,217,984 raw / 645,780 gzip** (+11,624 / +2,500 over D-157, within the 6 MB budget).
+
+**Scope boundaries.** C03 stays open. Still missing: critical-threat confirmation on touch
+attacks, unarmed/natural-weapon delivery while holding a charge, touching allies (one friend
+standard / six friends full-round), multi-charge touch spells (Chill Touch), attacks of
+opportunity against ranged-touch casters, multi-round casting, swift/quickened/metamagic
+timing, and the remaining Table 9-1 UI triggers.
+
+## D-159 — 2026-09-11 — P5/C03 partial: touch criticals confirm and willing targets auto-touch
+
+**Context.** D-158 shipped touch spells and held charges with the threat *face* reported but
+confirmation deferred, and every touch — even onto a willing ally — rode an attack roll. Both
+gaps were explicitly documented in the D-158 scope boundaries; this slice closes them.
+
+**Decisions.**
+
+- **R02 first.** Transcribed before encoding: CRB "Critical Hits" (Rules ID 131, "Attack",
+  pg. 182) — a natural 20 threatens; confirming is "another attack roll with all the same
+  modifiers as the attack roll you just made"; if the confirmation misses the attack is "just a
+  regular hit"; threat range 20, multiplier ×2 ("roll your damage more than once ... and add
+  the rolls together"); precision and special-ability dice are exempt from multiplication.
+  Rules ID 133 supplies the touch-specific limits: criticals only "as long as the spell deals
+  damage"; "You can automatically touch one friend or use the spell on yourself"; holding the
+  charge, "You can touch one friend as a standard action."
+- **Pure layer pins the rulings** (`src/packages/pf1e/touchSpell.ts`):
+  `touchCriticalNeedsConfirmation(threat, dealsDamage)` and `criticalDamageTotal(base)` (×2).
+  The confirmation computation itself reuses `resolveTouchAttack` — it is exactly "all the same
+  modifiers" against the same touch AC, so there is no second attack model to drift.
+- **Flow integration** (`pf1eCastFlow.ts`): both the cast-time touch branch and
+  `resolveTouchDelivery` roll the confirmation on a hit-threat when the damage formula is
+  non-empty; the doubled total enters the shared `runSpellEffect` pipeline (new optional
+  `critical` input) before SR/save/energy-resistance composition, so saving-throw reductions
+  apply to doubled damage as normal. A damageless threat posts a card note instead of rolling.
+  Cards append "CRITICAL HIT (damage doubled)" or "not confirmed (regular hit)".
+- **Willing auto-touch**: both flows take an optional `willing` declaration (GM's call, like
+  every other table-side declaration in this sheet): no attack roll at all — the outcome
+  reports `total: null, auto: true` and the card narrates the automatic touch. This is the
+  correct reading of the CRB for allies/self and removes a false failure mode (you cannot miss
+  touching a willing friend).
+- **Sheet UI**: a "Willing target" checkbox appears in the cast panel whenever a touch mode is
+  selected (`data-cast-willing`); the held-charge panel gains an Auto-touch button next to
+  Deliver/Dissipate (`data-held-autotouch`), both disabled until a target is selected.
+- **Outcome types widened deliberately**: `PF1eCastTouchSummary` (named type shared by all
+  three cast-outcome variants) carries nullable `total` plus optional `auto`/`critical`; the
+  delivery outcome's delivered variant does the same. Consumers pattern-match, so the widening
+  is compile-checked everywhere (the Svelte sheet reads only warnings).
+
+**Verification.** 9 new unit tests — 7 in `tests/ui/pf1eTouchFlow.test.ts` (confirmed critical
+doubles the rolled damage; unconfirmed threat is a regular hit; damageless threat rolls no
+confirmation; willing cast and willing delivery skip the attack roll, deliver, and clear the
+charge) and 2 pure-layer tests (`touchCriticalNeedsConfirmation` truth table; ×2). Full suite
+**1462 passed / 3 skipped** across 144 files (+9 over D-158); typecheck and lint green;
+touched authored-file Prettier applied (`pf1eCastFlow.ts` predates this authoring and keeps its
+existing formatting). **Chromium e2e 86/86** (+1): the new test is fully deterministic — no
+dice are in play: the authored Chill Touch charge is auto-touched onto the willing ogre, then a
+willing melee-touch cast of Shocking Grasp skips the attack and holds no charge; both cards
+assert the automatic-touch narration and the absence of any touch-attack chip. dist
+**2,220,480 raw / 646,400 gzip** (+2,500 / +620 over D-158, within the 6 MB budget).
+
+**Scope boundaries.** C03 stays open. Still missing: unarmed/natural-weapon delivery of a held
+charge, touching up to six friends as a full-round action, multi-charge touch spells, attacks
+of opportunity against ranged-touch casters, multi-round casting, swift/quickened/metamagic
+timing (the Quickened Spell text, Rules ID 158, is transcribed-ready for that slice), and the
+remaining Table 9-1 UI triggers.
+
+## D-160 — 2026-09-11 — P5/C03 partial: the full Table 9-1 concentration surface in the cast panel
+
+**Context.** D-150 encoded all eleven Table 9-1 concentration situations as pure functions
+(`concentration.ts`); D-157 wired the gate into the cast flow with a `declarations` array that
+already accepted every situation type. The sheet, however, only exposed two triggers — casting
+defensively and injured-while-casting. The remaining eight situations were reachable in tests
+but not at any table. This slice is pure UI wiring: **zero new rule encoding**, the same posture
+as D-157's gate wiring.
+
+**Decisions.**
+
+- **Eight new GM-declared surfaces** in the cast panel's gate fieldset
+  (`PF1eActorSheet.svelte`): a motion select (vigorous DC 10+level / violent DC 15+level /
+  extremely violent DC 20+level), a weather select (windy rain or sleet DC 5+level / windy hail
+  or dust/debris DC 10+level), an entangled checkbox (DC 15+level), and three checkbox+value
+  rows — continuous damage with the damage amount (DC 10 + half + level), a distracting
+  non-damaging spell with its DC (DC spell DC + level), and concentrating while grappled or
+  pinned with the grappler's CMB (DC 10 + CMB + level). The declaration builder appends each
+  enabled situation to the existing `declarations` array; the flow's existing switch turns each
+  into a trigger with its own host d20.
+- **Mutually exclusive situations stay exclusive in the UI**: motion is one select (you ride
+  one mount or earthquake, not several); weather likewise. The free combinations (entangled +
+  motion + weather + damage + distraction + grappling simultaneously) remain allowed, matching
+  the table's per-distraction structure.
+- **No schema, no flow, no pure-layer changes** — the only edited product file is the sheet;
+  everything downstream (DC math, single-failure-ruins, slot spent as if cast to no effect,
+  named `Spell lost` card) was already tested.
+
+**Verification.** 7 new flow tests in `tests/ui/pf1eCastGate.test.ts`: one per new DC formula
+(vigorous fail 9 vs DC 11; violent pass 18 vs DC 16; continuous damage 12 → 16 vs DC 17 fail;
+non-damaging spell DC 15 → pass; grappling CMB 12 → 28 vs DC 23 pass; wind+entangled two-die
+cast where entangled fails 10 vs DC 16) plus the lost-cast slot-spend assertion. Full suite
+**1469 passed / 3 skipped** across 144 files (+7 over D-159); typecheck and lint green;
+touched authored-file Prettier applied. **Chromium e2e 87/87** (+1): both directions of the
+new surface are deterministic — windy rain/sleet is DC 6 against a worst-case concentration
+total of 9 (always passes, spell lands); continuous damage 60 is DC 41 against a best-case 28
+(always fails: `concentration failed on continuousDamage … vs DC 41`, slot still spent). dist
+**2,223,470 raw / 647,170 gzip** (+2,990 / +770 over D-159, within the 6 MB budget).
+
+**Scope boundaries.** C03 stays open. Still missing: multi-round casting,
+swift/quickened/metamagic timing, unarmed/natural-weapon delivery of a held charge, touching
+up to six friends as a full-round action, multi-charge touch spells, and attacks of
+opportunity against ranged-touch casters.
+
+## D-161 — 2026-09-11 — P5/C03 partial: multi-round casting — begin, disrupt, complete
+
+**Context.** With the gate (D-157), the full Table 9-1 surface (D-160) and the touch half
+(D-158/D-159) live, C03's remaining headline was its *timing* half: spells whose casting time
+is 1 round or longer. This slice encodes the begin/disrupt/complete lifecycle.
+
+**Decisions.**
+
+- **R02 first.** Transcribed before encoding: Rules ID 147 ("Cast a Spell", full-round action,
+  CRB pg. 187) — a 1-round spell is a full-round action; "It comes into effect just before the
+  beginning of your turn in the round after you began casting the spell"; "If you lose
+  concentration after starting the spell and before it is complete, you lose the spell"; AoOs
+  provoke only at the begin. Rules ID 133's Concentration text supplies the spend-at-begin
+  ruling: a lost spell "counts against your daily limit of spells even though you did not cast
+  it successfully" — the slot and prepared row are therefore spent when the casting **begins**,
+  not when it completes.
+- **The pending casting rides the actor document** (`system.pf1e.pendingCast`, validated in
+  `parsePF1eActorSystem` like its D-158 sibling): spell name/level/slot level, the authored
+  effect (damage formula, save type/severity, energy type) and — critically — the `targetId`
+  the casting was begun at. New pure module `src/packages/pf1e/pendingCast.ts` with the
+  null-tolerant reader and the diff builder. The D-158 round-trip lesson is applied up front:
+  `pendingCastDiff(null)` emits the `-=` delete marker, the parser treats a literal `null` as
+  absent, and the write→clear→`applyDiff`→re-parse regression test ships with the slice.
+- **The cast flow gains a `pending` outcome.** `resolveCastFlow` with `castingTime: "longer"`
+  runs the gate normally, spends the slot and prepared row, writes the pending state, posts a
+  "begins casting" card, and returns without rolling a single die — the effect is deferred.
+  Beginning a second long casting forfeits the first (concentration maintains one spell); the
+  existing held-charge dissipation still runs, so beginning any spell consumes a held charge.
+  Touch spells refuse the longer casting time by name (out of slice). The outcome union gained
+  a fourth ok variant; the other three carry `pending?: undefined` markers and every consumer
+  guard was widened compile-checked.
+- **Completion and disruption are their own flows.** `resolvePendingCompletion` re-reads the
+  freshest documents, refuses when the stored `targetId` no longer matches the presented target
+  (the spell lands where it was aimed or is lost — no retargeting), runs the shared
+  `runSpellEffect` pipeline with the stored authored data, and clears the pending state.
+  `resolvePendingDisruption` resolves the GM-declared interruption damage with one host d20:
+  DC 10 + damage + spell level — the same Table 9-1 row as an injured caster — failure loses
+  the spell (named card, state cleared, slot already spent), success keeps it pending.
+- **Sheet UI**: a pending-cast panel mirrors the held-charge panel — Complete the casting, an
+  interruption-damage input with a Concentration check button, and Lose the spell — all
+  re-deriving the freshest documents before acting.
+
+**Verification.** 19 new unit tests — 7 pure layer (parse tolerances, diff shapes, the store
+round-trip, schema accept/reject including the literal-null-as-absent case) and 12 flow
+(begin spends and writes and rolls nothing; replacing forfeits the old pending; held charge
+dissipates at begin; touch+longer refused by name; illegal gate refuses before any spend;
+completion runs the pipeline at DC and clears; completion refuses absent/mismatched-target/
+stranger; disruption fail loses, pass holds, nothing-pending refuses). Full suite **1488 passed
+/ 3 skipped** across 146 files (+19 over D-160); typecheck and lint green; touched authored-
+file Prettier applied. **Chromium e2e 88/88** (+1): the new test is fully deterministic —
+severity-none casts with no damage dice, and the disruption declaration (100 damage → DC 111
+vs best-case +8) is unwinnable: Magic Missile begins (slot + prepared row spent, effect
+deferred), the check loses it with the slot still spent, then Shield begins and completes at
+the original target. dist **2,234,110 raw / 648,810 gzip** (+10,640 / +1,640 over D-160,
+within the 6 MB budget).
+
+**Scope boundaries.** C03 stays open. Still missing: swift/quickened/metamagic timing
+(Quickened Spell text transcribed-ready), unarmed/natural-weapon delivery of a held charge,
+touching up to six friends as a full-round action, multi-charge touch spells, and attacks of
+opportunity against ranged-touch casters. Minute-plus castings reuse this machinery as-is (the
+GM judges the completion either way); casting while mounted and AoO *resolution* at the begin
+(narrated, not resolved) are documented deferrals.

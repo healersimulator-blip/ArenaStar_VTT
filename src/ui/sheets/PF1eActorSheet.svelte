@@ -32,6 +32,30 @@
     type SheetField,
   } from "./pf1eSheetModel";
   import {
+    pf1eSpellbookEdit,
+    pf1eSpellbookView,
+    type PF1eSpellbookEdit,
+  } from "./pf1eSpellbook";
+  import {
+    resolveCastFlow,
+    resolvePendingCompletion,
+    resolvePendingDisruption,
+    resolveTouchDelivery,
+    type PF1eCastFlowParams,
+    type PF1eConcentrationDeclaration,
+  } from "./pf1eCastFlow";
+  import {
+    heldChargeDiff,
+    heldChargeFromSystem,
+  } from "../../packages/pf1e/touchSpell";
+  import {
+    pendingCastDiff,
+    pendingCastFromSystem,
+  } from "../../packages/pf1e/pendingCast";
+  import type { PF1eSaveSeverity, PF1eSaveType } from "../../packages/pf1e/casting";
+  import type { PF1eCastingTime } from "../../packages/pf1e/concentration";
+  import type { PF1eEnergyType } from "../../packages/pf1e/healthState";
+  import {
     pf1eApplyActorEffect,
     pf1eApplyCombatantEffect,
     pf1eEditActorEffect,
@@ -53,6 +77,7 @@
     | "weapons"
     | "armor"
     | "features"
+    | "spells"
     | "effects"
     | "monster"
     | "details";
@@ -88,7 +113,65 @@
     }),
   );
   let d = $derived(view.derived);
-  let slotReadout = $derived(pf1eSpellSlotReadout(d));
+  let slotReadout = $derived(
+    pf1eSpellSlotReadout(d, sheetRecord(view.authored.spells)),
+  );
+  // P5/C04 (D-155): persisted slot ledger + prepared list, spend/prepare Ops.
+  let spellbook = $derived(pf1eSpellbookView(doc, d));
+  let spellbookWarning = $state("");
+  // P5/C03 (D-158): a held touch-spell charge lives on the actor document.
+  let heldCharge = $derived(
+    heldChargeFromSystem(doc.system as Record<string, unknown>),
+  );
+  // P5/C03 (D-161): a multi-round casting begun but not yet completed.
+  let pendingCast = $derived(
+    pendingCastFromSystem(doc.system as Record<string, unknown>),
+  );
+  let pendingDisruptDamage = $state("");
+  let prepareName = $state("");
+  let prepareLevel = $state("1");
+  let prepareSlotLevel = $state("");
+  let prepareComponents = $state("");
+  // P5/C02 (D-156): the tactical cast panel's state.
+  let castTargetId = $state("");
+  let castName = $state("");
+  let castLevel = $state("1");
+  let castSlot = $state("");
+  let castPreparedIndex = $state<number | null>(null);
+  let castSaveType = $state<PF1eSaveType>("ref");
+  let castSeverity = $state<PF1eSaveSeverity>("half");
+  let castDamage = $state("");
+  let castEnergy = $state("");
+  let castSrOvercome = $state(false);
+  // Touch delivery (D-158): "", "melee" or "ranged".
+  let castTouch = $state("");
+  // D-159: the GM declares the target willing — the touch is automatic.
+  let castWilling = $state(false);
+  // C03a gate (D-157): components line + the GM-declared situation.
+  let castComponents = $state("");
+  let castTime = $state("standard");
+  let castCannotSpeak = $state(false);
+  let castNoFreeHand = $state(false);
+  let castNoComponentsInHand = $state(false);
+  let castDeafened = $state(false);
+  let castGrappled = $state(false);
+  let castPinned = $state(false);
+  let castDefensively = $state(false);
+  let castInjured = $state(false);
+  let castInjuredDamage = $state("");
+  // D-160: the remaining Table 9-1 concentration situations (GM declares).
+  let castMotion = $state("");
+  let castWeather = $state("");
+  let castEntangled = $state(false);
+  let castContinuous = $state(false);
+  let castContinuousAmount = $state("");
+  let castNonDamaging = $state(false);
+  let castNonDamagingDc = $state("");
+  let castGrappleCheck = $state(false);
+  let castGrappleCmb = $state("");
+  let castBusy = $state(false);
+  let castError = $state("");
+  let castWarning = $state("");
   let resolvedEffects = $derived(resolveTacticalEffects(view.effects));
   let effectBoosts = $derived(
     resolvedEffects.boosts.map((boost, i) => ({
@@ -328,6 +411,382 @@
     if (result.ops.length) pending.add(client.submit(result.ops));
   }
 
+  function updateSpellbook(edit: PF1eSpellbookEdit): void {
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) {
+      error = "Actor is no longer available.";
+      return;
+    }
+    // Re-derive from the freshest copy so dotted diffs hit the live document.
+    const derived = pf1eSheetView(current, {
+      combat: linked.combat,
+      combatantId: linked.combatantId,
+    }).derived;
+    const result = pf1eSpellbookEdit(current, derived, client.user, edit);
+    error = result.error ?? "";
+    spellbookWarning = result.warning ?? "";
+    if (result.ops.length) pending.add(client.submit(result.ops));
+  }
+
+  function prepareSpell(event: Event): void {
+    event.preventDefault();
+    const level = Number.parseInt(prepareLevel, 10);
+    const slotLevel =
+      prepareSlotLevel === ""
+        ? undefined
+        : Number.parseInt(prepareSlotLevel, 10);
+    const components =
+      prepareComponents.trim() === "" ? undefined : prepareComponents.trim();
+    updateSpellbook({
+      kind: "prepare",
+      name: prepareName,
+      level,
+      slotLevel,
+      components,
+    });
+    if (!error) {
+      prepareName = "";
+      prepareComponents = "";
+    }
+  }
+
+  function fillCastFromPrepared(index: number): void {
+    const row = spellbook.prepared[index];
+    if (!row) return;
+    castPreparedIndex = index;
+    castName = row.name;
+    castLevel = String(row.level);
+    castSlot = row.slotLevel === row.level ? "" : String(row.slotLevel);
+    // A prepared row's Components line pins the C03a gate for this cast.
+    castComponents = row.components;
+  }
+
+  async function castAtTarget(): Promise<void> {
+    castError = "";
+    castWarning = "";
+    const target = castTargetId
+      ? (client.store.get("actors", castTargetId) as ActorDocument | undefined)
+      : undefined;
+    if (!target) {
+      castError = "Pick a target.";
+      return;
+    }
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) {
+      castError = "Actor is no longer available.";
+      return;
+    }
+    // Fresh derivation for both parties, so DCs, saves and SR are live.
+    const casterView = pf1eSheetView(current, {
+      combat: linked.combat,
+      combatantId: linked.combatantId,
+    });
+    const targetView = pf1eSheetView(target);
+    let level = Number.parseInt(castLevel, 10);
+    let slotLevel = castSlot === "" ? level : Number.parseInt(castSlot, 10);
+    let name = castName.trim();
+    // A picked prepared row pins the spell's identity (name/level/slot).
+    if (d.spellMode === "prepared" && castPreparedIndex !== null) {
+      const preparedRow = spellbook.prepared[castPreparedIndex];
+      if (preparedRow) {
+        name = preparedRow.name;
+        level = preparedRow.level;
+        slotLevel = preparedRow.slotLevel;
+      }
+    }
+    if (name === "") name = `Level ${level} spell`;
+    const spell: PF1eCastFlowParams["spell"] = { name, level };
+    if (slotLevel !== level) spell.slotLevel = slotLevel;
+    if (d.spellMode === "prepared" && castPreparedIndex !== null)
+      spell.preparedIndex = castPreparedIndex;
+    const authored: PF1eCastFlowParams["authored"] = {
+      saveType: castSaveType,
+      severity: castSeverity,
+      damageFormula: castDamage.trim(),
+    };
+    if (castEnergy !== "")
+      authored.energyType = castEnergy as PF1eEnergyType;
+    // The C03a gate (D-157) runs whenever a Components line is declared.
+    const gateComponents = castComponents.trim();
+    const declarations: PF1eConcentrationDeclaration[] = [];
+    if (castDefensively) declarations.push({ situation: "castDefensively" });
+    if (castInjured)
+      declarations.push({
+        situation: "injured",
+        damage: Math.max(0, Math.trunc(Number(castInjuredDamage) || 0)),
+      });
+    if (
+      castMotion === "vigorousMotion" ||
+      castMotion === "violentMotion" ||
+      castMotion === "extremelyViolentMotion"
+    )
+      declarations.push({ situation: castMotion });
+    if (castWeather === "windRainSleet" || castWeather === "windHailDebris")
+      declarations.push({ situation: castWeather });
+    if (castEntangled) declarations.push({ situation: "entangled" });
+    if (castContinuous)
+      declarations.push({
+        situation: "continuousDamage",
+        damage: Math.max(0, Math.trunc(Number(castContinuousAmount) || 0)),
+      });
+    if (castNonDamaging)
+      declarations.push({
+        situation: "nonDamagingSpell",
+        spellDc: Math.max(0, Math.trunc(Number(castNonDamagingDc) || 0)),
+      });
+    if (castGrappleCheck)
+      declarations.push({
+        situation: "grappledOrPinned",
+        grapplerCmb: Math.max(0, Math.trunc(Number(castGrappleCmb) || 0)),
+      });
+    castBusy = true;
+    try {
+      const outcome = await resolveCastFlow(client, client.user, {
+        casterActor: current,
+        casterDerived: casterView.derived,
+        spell,
+        authored,
+        targetName: target.name,
+        targetActor: target,
+        targetDerived: targetView.derived,
+        targetFeats: Array.isArray(targetView.authored.feats)
+          ? (targetView.authored.feats as string[])
+          : [],
+        combat: linked.combat,
+        ...(castSrOvercome ? { srOvercomeByCaller: true } : {}),
+        castingTime: castTime as PF1eCastingTime,
+        ...(castTouch !== ""
+          ? { touch: castTouch as "melee" | "ranged" }
+          : {}),
+        ...(castTouch !== "" && castWilling ? { willing: true } : {}),
+        ...(gateComponents !== ""
+          ? {
+              gate: {
+                components: gateComponents,
+                caster: {
+                  canSpeak: !castCannotSpeak,
+                  hasFreeHand: !castNoFreeHand,
+                  componentsInHand: !castNoComponentsInHand,
+                  deafened: castDeafened,
+                  grappled: castGrappled,
+                  pinned: castPinned,
+                },
+                castingTime: castTime as PF1eCastingTime,
+                declarations,
+              },
+            }
+          : {}),
+      });
+      if (!outcome.ok) {
+        castError = outcome.error;
+      } else if (outcome.pending) {
+        castWarning =
+          "the casting has begun — it comes into effect just before your next turn";
+      } else if (outcome.held) {
+        castWarning =
+          "the touch attack missed — the charge is held; deliver it below";
+      } else if (outcome.lost) {
+        castWarning = [...outcome.gateNotes, ...outcome.warnings].join(" · ");
+      } else {
+        const bits: string[] = [...outcome.gateNotes, ...outcome.warnings];
+        if (outcome.hpWriteError !== null) bits.push(outcome.hpWriteError);
+        castWarning = bits.join(" · ");
+      }
+    } finally {
+      castBusy = false;
+    }
+  }
+
+  // D-158 — deliver or dissipate a held touch-spell charge. The delivery
+  // re-reads the freshest documents, so a stale tab cannot overwrite state.
+  async function deliverHeldCharge(willing: boolean): Promise<void> {
+    castError = "";
+    castWarning = "";
+    const target = castTargetId
+      ? (client.store.get("actors", castTargetId) as ActorDocument | undefined)
+      : undefined;
+    if (!target) {
+      castError = "Pick a target to deliver the held charge.";
+      return;
+    }
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) {
+      castError = "Actor is no longer available.";
+      return;
+    }
+    const casterView = pf1eSheetView(current, {
+      combat: linked.combat,
+      combatantId: linked.combatantId,
+    });
+    const targetView = pf1eSheetView(target);
+    castBusy = true;
+    try {
+      const outcome = await resolveTouchDelivery(client, client.user, {
+        casterActor: current,
+        casterDerived: casterView.derived,
+        targetName: target.name,
+        targetActor: target,
+        targetDerived: targetView.derived,
+        targetFeats: Array.isArray(targetView.authored.feats)
+          ? (targetView.authored.feats as string[])
+          : [],
+        combat: linked.combat,
+        ...(castSrOvercome ? { srOvercomeByCaller: true } : {}),
+        ...(willing ? { willing: true } : {}),
+      });
+      if (!outcome.ok) {
+        castError = outcome.error;
+      } else if (!outcome.delivered) {
+        castWarning =
+          "the delivery missed — the charge is still held";
+      } else if (outcome.hpWriteError !== null) {
+        castWarning = outcome.hpWriteError;
+      }
+    } finally {
+      castBusy = false;
+    }
+  }
+
+  function dismissHeldCharge(): void {
+    castError = "";
+    castWarning = "";
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) return;
+    if (!isPF1eActor(current) || !client.user || !can(client.user, "update", current, "actors")) {
+      castError = "You do not have permission to act for this caster.";
+      return;
+    }
+    pending.add(
+      client.submit([
+        {
+          kind: "update",
+          ref: { coll: "actors", id: current._id },
+          diff: heldChargeDiff(null),
+        },
+      ]),
+    );
+  }
+
+  // D-161 — complete a pending multi-round casting. The effect rides the
+  // original target, so we resolve it from the stored targetId rather than
+  // the current cast-target select.
+  async function completePendingCast(): Promise<void> {
+    castError = "";
+    castWarning = "";
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) {
+      castError = "Actor is no longer available.";
+      return;
+    }
+    const pending = pendingCastFromSystem(
+      current.system as Record<string, unknown>,
+    );
+    if (!pending) {
+      castError = "There is no pending casting to complete.";
+      return;
+    }
+    const target = client.store.get("actors", pending.targetId) as
+      ActorDocument | undefined;
+    if (!target) {
+      castError =
+        "The spell's original target is gone — lose the casting instead.";
+      return;
+    }
+    const casterView = pf1eSheetView(current, {
+      combat: linked.combat,
+      combatantId: linked.combatantId,
+    });
+    const targetView = pf1eSheetView(target);
+    castBusy = true;
+    try {
+      const outcome = await resolvePendingCompletion(client, client.user, {
+        casterActor: current,
+        casterDerived: casterView.derived,
+        targetName: target.name,
+        targetActor: target,
+        targetDerived: targetView.derived,
+        targetFeats: Array.isArray(targetView.authored.feats)
+          ? (targetView.authored.feats as string[])
+          : [],
+        combat: linked.combat,
+        ...(castSrOvercome ? { srOvercomeByCaller: true } : {}),
+      });
+      if (!outcome.ok) {
+        castError = outcome.error;
+      } else if (outcome.hpWriteError !== null) {
+        castWarning = outcome.hpWriteError;
+      }
+    } finally {
+      castBusy = false;
+    }
+  }
+
+  // D-161 — damage taken while a multi-round casting is in progress forces a
+  // concentration check (DC 10 + damage + spell level).
+  async function checkPendingDisruption(): Promise<void> {
+    castError = "";
+    castWarning = "";
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) {
+      castError = "Actor is no longer available.";
+      return;
+    }
+    const casterView = pf1eSheetView(current, {
+      combat: linked.combat,
+      combatantId: linked.combatantId,
+    });
+    const damage = Math.max(0, Math.trunc(Number(pendingDisruptDamage) || 0));
+    castBusy = true;
+    try {
+      const outcome = await resolvePendingDisruption(client, client.user, {
+        casterActor: current,
+        casterDerived: casterView.derived,
+        damage,
+      });
+      if (!outcome.ok) {
+        castError = outcome.error;
+      } else {
+        castWarning = outcome.lost
+          ? `the concentration check failed (${outcome.total} vs DC ${outcome.dc}) — the pending ${outcome.spellName} is lost`
+          : `concentration held (${outcome.total} vs DC ${outcome.dc}) — the casting continues`;
+      }
+    } finally {
+      castBusy = false;
+    }
+  }
+
+  // D-161 — the GM forfeits the pending casting outright.
+  function abandonPendingCast(): void {
+    castError = "";
+    castWarning = "";
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) return;
+    if (
+      !isPF1eActor(current) ||
+      !client.user ||
+      !can(client.user, "update", current, "actors")
+    ) {
+      castError = "You do not have permission to act for this caster.";
+      return;
+    }
+    pending.add(
+      client.submit([
+        {
+          kind: "update",
+          ref: { coll: "actors", id: current._id },
+          diff: pendingCastDiff(null),
+        },
+      ]),
+    );
+  }
+
   // E01/E02 — the effect apply/edit/toggle/remove handlers. Both homes resolve
   // fresh documents from the projected store, so a stale tab cannot write over
   // a replica that moved on; the ops go through ClientSync like every edit.
@@ -503,13 +962,16 @@
     <span>PF1e · {d.size}</span>
   </header>
   <nav aria-label="PF1e sheet tabs">
-    {#each ["summary", "attributes", "combat", "weapons", "armor", "features", "effects", ...(sheetRecord(view.authored.creature) ? ["monster"] : []), "details"] as name (name)}
+    {#each ["summary", "attributes", "combat", "weapons", "armor", "features", ...(d.casting ? ["spells"] : []), "effects", ...(sheetRecord(view.authored.creature) ? ["monster"] : []), "details"] as name (name)}
       <button
         type="button"
         class:active={tab === name}
         onclick={() => {
           tab = name as typeof tab;
           error = "";
+          spellbookWarning = "";
+          castError = "";
+          castWarning = "";
         }}>{name}</button
       >
     {/each}
@@ -786,7 +1248,529 @@
     {#if tab === "armor" && editable}
       <PF1eAcConversion {doc} user={client.user} onApply={applyAcSource} />
     {/if}
+  {:else if tab === "spells"}
+    <section class="spellbook" aria-label="Spellbook" data-pf1e-spellbook>
+      <h4>
+        Spell slots · {spellbook.mode} · keyed to {d.spellKeyAbility.toUpperCase()}
+      </h4>
+      {#if spellbookWarning}<p role="alert" data-spellbook-warning>{spellbookWarning}</p>{/if}
+      {#if spellbook.ledger.grantedLevels.length === 0}
+        <p class="note">No slots authored for any level.</p>
+      {:else}
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Level</th>
+              <th scope="col">Base</th>
+              <th scope="col">Total</th>
+              <th scope="col">Spent</th>
+              <th scope="col">Remaining</th>
+              {#if editable}<th scope="col">Actions</th>{/if}
+            </tr>
+          </thead>
+          <tbody>
+            {#each spellbook.ledger.rows.filter((row) => row.total !== null) as row (row.level)}
+              <tr data-spell-slot-level={row.level}>
+                <td>{row.label}</td>
+                <td>{spellbook.budget.levels[row.level]?.base ?? "—"}</td>
+                <td data-slot-total>{row.total}</td>
+                <td data-slot-spent>{row.spent}</td>
+                <td data-slot-remaining>{(row.total ?? 0) - row.spent}</td>
+                {#if editable}
+                  <td>
+                    <button
+                      type="button"
+                      data-slot-spend={row.level}
+                      onclick={() => updateSpellbook({ kind: "spend", level: row.level })}
+                    >
+                      Spend
+                    </button>
+                    <button
+                      type="button"
+                      data-slot-restore={row.level}
+                      disabled={row.spent <= 0}
+                      onclick={() => updateSpellbook({ kind: "restore", level: row.level })}
+                    >
+                      Restore
+                    </button>
+                  </td>
+                {/if}
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+      {#each spellbook.ledger.warnings as warning (warning)}
+        <p class="note" data-slot-warning>{warning}</p>
+      {/each}
+      {#if spellbook.mode === "prepared"}
+        <h4>Prepared spells</h4>
+        {#each spellbook.preparationWarnings as warning (warning)}
+          <p class="note" data-prep-warning>{warning}</p>
+        {/each}
+        {#if editable}
+          <form
+            aria-label="Prepare a spell"
+            onsubmit={(event) => prepareSpell(event)}
+          >
+            <label
+              >Name
+              <input
+                name="name"
+                value={prepareName}
+                oninput={(e) => (prepareName = e.currentTarget.value)}
+                data-prepare-name
+              />
+            </label>
+            <label
+              >Spell level
+              <select bind:value={prepareLevel} data-prepare-level>
+                {#each Array.from({ length: 10 }, (_, i) => i) as level (level)}
+                  <option value={String(level)}>{level}</option>
+                {/each}
+              </select>
+            </label>
+            <label
+              >Cast slot
+              <select bind:value={prepareSlotLevel} data-prepare-slot>
+                <option value="">Same as spell level</option>
+                {#each Array.from({ length: 10 }, (_, i) => i) as level (level)}
+                  <option value={String(level)}>{level}</option>
+                {/each}
+              </select>
+            </label>
+            <label
+              >Components
+              <input
+                name="components"
+                value={prepareComponents}
+                oninput={(e) => (prepareComponents = e.currentTarget.value)}
+                placeholder="e.g. V, S, M/DF"
+                data-prepare-components
+              />
+            </label>
+            <button type="submit" data-prepare-submit>Prepare</button>
+          </form>
+        {/if}
+        {#if spellbook.prepared.length === 0}
+          <p class="note" data-prepared-empty>Nothing prepared yet.</p>
+        {:else}
+          <ul>
+            {#each spellbook.prepared as row, index (`${row.name}#${index}`)}
+              <li data-prepared-row={index}>
+                <label
+                  ><input
+                    type="checkbox"
+                    checked={row.expended}
+                    disabled={!editable}
+                    data-prepared-expended={index}
+                    onchange={() =>
+                      updateSpellbook({ kind: "preparedToggle", index })}
+                  />
+                  {row.name} · level {row.level}{#if row.slotLevel !== row.level} (cast at {row.slotLevel}){/if}{#if row.components !== ""} · {row.components}{/if}{#if row.expended} — expended{/if}
+                </label>
+                {#if editable}
+                  <button
+                    type="button"
+                    data-cast-prepared={index}
+                    disabled={row.expended}
+                    onclick={() => fillCastFromPrepared(index)}
+                  >
+                    Cast
+                  </button>
+                  <button
+                    type="button"
+                    data-prepared-remove={index}
+                    onclick={() =>
+                      updateSpellbook({ kind: "preparedRemove", index })}
+                  >
+                    Remove
+                  </button>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      {/if}
+      <h4>Cast at a target</h4>
+      {#if castError}<p role="alert" data-cast-error>{castError}</p>{/if}
+      {#if castWarning}<p class="note" data-cast-warning>{castWarning}</p>{/if}
+      <form
+        aria-label="Cast a spell at a target"
+        onsubmit={(event) => {
+          event.preventDefault();
+          void castAtTarget();
+        }}
+      >
+        {#if d.spellMode === "prepared" && castPreparedIndex !== null}
+          <p class="note" data-cast-prepared-row>
+            Casting prepared row #{castPreparedIndex + 1}{#if spellbook.prepared[castPreparedIndex]}
+              — {spellbook.prepared[castPreparedIndex].name}{/if}: name, level
+            and slot are pinned to it.
+            <button
+              type="button"
+              data-cast-clear-row
+              onclick={() => {
+                castPreparedIndex = null;
+              }}>Clear</button
+            >
+          </p>
+        {/if}
+        <label
+          >Spell
+          <input
+            value={castName}
+            oninput={(e) => (castName = e.currentTarget.value)}
+            data-cast-name
+            placeholder={d.spellMode === "spontaneous"
+              ? "Spell name"
+              : "Pick a prepared row, or name a spell"}
+          />
+        </label>
+        <label
+          >Spell level
+          <select bind:value={castLevel} data-cast-level>
+            {#each Array.from({ length: 10 }, (_, i) => i) as lvl (lvl)}
+              <option value={String(lvl)}>{lvl}</option>
+            {/each}
+          </select>
+        </label>
+        <label
+          >Slot
+          <select bind:value={castSlot} data-cast-slot>
+            <option value="">Same as spell level</option>
+            {#each Array.from({ length: 10 }, (_, i) => i) as lvl (lvl)}
+              <option value={String(lvl)}>{lvl}</option>
+            {/each}
+          </select>
+        </label>
+        <label
+          >Target
+          <select bind:value={castTargetId} data-cast-target>
+            <option value="">—</option>
+            {#each pf1eTargetActors() as target (target._id)}
+              <option value={target._id}>{target.name}</option>
+            {/each}
+          </select>
+        </label>
+        <label
+          >Save
+          <select bind:value={castSaveType} data-cast-save>
+            <option value="fort">Fortitude</option>
+            <option value="ref">Reflex</option>
+            <option value="will">Will</option>
+          </select>
+        </label>
+        <label
+          >Severity
+          <select bind:value={castSeverity} data-cast-severity>
+            <option value="half">Half</option>
+            <option value="negates">Negates</option>
+            <option value="none">None (no save)</option>
+            <option value="partial">Partial</option>
+            <option value="disbelief">Disbelief</option>
+          </select>
+        </label>
+        <label
+          >Damage
+          <input
+            value={castDamage}
+            oninput={(e) => (castDamage = e.currentTarget.value)}
+            data-cast-damage
+            placeholder="NdM, or empty for no damage"
+          />
+        </label>
+        <label
+          >Energy
+          <select bind:value={castEnergy} data-cast-energy>
+            <option value="">Untyped</option>
+            <option value="acid">Acid</option>
+            <option value="cold">Cold</option>
+            <option value="electricity">Electricity</option>
+            <option value="fire">Fire</option>
+            <option value="sonic">Sonic</option>
+          </select>
+        </label>
+        <label
+          >Touch spell
+          <select bind:value={castTouch} data-cast-touch>
+            <option value="">No touch attack</option>
+            <option value="melee">Melee touch attack</option>
+            <option value="ranged">Ranged touch attack</option>
+          </select>
+        </label>
+        {#if castTouch !== ""}
+          <label
+            ><input
+              type="checkbox"
+              bind:checked={castWilling}
+              data-cast-willing
+            /> Willing target (automatic touch, no attack roll)</label
+          >
+        {/if}
+        <fieldset data-cast-gate>
+          <legend>Casting gate (components &amp; concentration)</legend>
+          <label
+            >Components
+            <input
+              value={castComponents}
+              oninput={(e) => (castComponents = e.currentTarget.value)}
+              placeholder="e.g. V, S, M/DF — empty skips the gate"
+              data-cast-components
+            />
+          </label>
+          <label
+            >Casting time
+            <select bind:value={castTime} data-cast-time>
+              <option value="free">Free action</option>
+              <option value="swift">Swift action</option>
+              <option value="standard">Standard action</option>
+              <option value="full-round">Full-round action</option>
+              <option value="longer">Longer (1 round+)</option>
+            </select>
+          </label>
+          <label
+            ><input
+              type="checkbox"
+              bind:checked={castCannotSpeak}
+              data-cast-cannot-speak
+            />
+            Cannot speak</label
+          >
+          <label
+            ><input
+              type="checkbox"
+              bind:checked={castNoFreeHand}
+              data-cast-no-free-hand
+            />
+            No free hand</label
+          >
+          <label
+            ><input
+              type="checkbox"
+              bind:checked={castNoComponentsInHand}
+              data-cast-no-components-in-hand
+            />
+            Components not in hand</label
+          >
+          <label
+            ><input type="checkbox" bind:checked={castDeafened} data-cast-deafened />
+            Deafened</label
+          >
+          <label
+            ><input type="checkbox" bind:checked={castGrappled} data-cast-grappled />
+            Grappling</label
+          >
+          <label
+            ><input type="checkbox" bind:checked={castPinned} data-cast-pinned />
+            Pinned</label
+          >
+          <label
+            ><input
+              type="checkbox"
+              bind:checked={castDefensively}
+              data-cast-defensively
+            />
+            Casting defensively (DC 15 + 2× spell level)</label
+          >
+          <label
+            ><input type="checkbox" bind:checked={castInjured} data-cast-injured />
+            Injured while casting — damage taken
+            <input
+              value={castInjuredDamage}
+              oninput={(e) => (castInjuredDamage = e.currentTarget.value)}
+              data-cast-injured-damage
+              placeholder="0"
+              size="4"
+            /></label
+          >
+          <label
+            >Motion
+            <select bind:value={castMotion} data-cast-motion>
+              <option value="">Steady ground</option>
+              <option value="vigorousMotion">Vigorous motion (DC 10 + level)</option>
+              <option value="violentMotion">Violent motion (DC 15 + level)</option>
+              <option value="extremelyViolentMotion"
+                >Extremely violent motion (DC 20 + level)</option
+              >
+            </select>
+          </label>
+          <label
+            >Weather
+            <select bind:value={castWeather} data-cast-weather>
+              <option value="">Calm</option>
+              <option value="windRainSleet">Windy rain or sleet (DC 5 + level)</option>
+              <option value="windHailDebris"
+                >Windy hail or dust/debris (DC 10 + level)</option
+              >
+            </select>
+          </label>
+          <label
+            ><input
+              type="checkbox"
+              bind:checked={castEntangled}
+              data-cast-entangled
+            />
+            Entangled (DC 15 + spell level)</label
+          >
+          <label
+            ><input
+              type="checkbox"
+              bind:checked={castContinuous}
+              data-cast-continuous
+            />
+            Taking continuous damage — amount
+            <input
+              value={castContinuousAmount}
+              oninput={(e) => (castContinuousAmount = e.currentTarget.value)}
+              data-cast-continuous-amount
+              placeholder="0"
+              size="4"
+            />
+            (DC 10 + half + level)</label
+          >
+          <label
+            ><input
+              type="checkbox"
+              bind:checked={castNonDamaging}
+              data-cast-nondamaging
+            />
+            Distracted by a non-damaging spell — its DC
+            <input
+              value={castNonDamagingDc}
+              oninput={(e) => (castNonDamagingDc = e.currentTarget.value)}
+              data-cast-nondamaging-dc
+              placeholder="10"
+              size="4"
+            />
+            (DC spell DC + level)</label
+          >
+          <label
+            ><input
+              type="checkbox"
+              bind:checked={castGrappleCheck}
+              data-cast-grapple-check
+            />
+            Concentrating while grappled or pinned — grappler's CMB
+            <input
+              value={castGrappleCmb}
+              oninput={(e) => (castGrappleCmb = e.currentTarget.value)}
+              data-cast-grapple-cmb
+              placeholder="0"
+              size="4"
+            />
+            (DC 10 + CMB + level)</label
+          >
+        </fieldset>
+        <label
+          ><input
+            type="checkbox"
+            bind:checked={castSrOvercome}
+            data-cast-sr-overcome
+          />
+          SR already overcome this round (manual adjudication)</label
+        >
+        <button
+          type="submit"
+          data-cast-submit
+          disabled={castBusy || castTargetId === ""}
+          >{castBusy ? "Casting…" : "Cast"}</button
+        >
+      </form>
+      {#if heldCharge !== null}
+        <section class="held-charge" data-held-charge>
+          <p>
+            Holding the charge: <strong>{heldCharge.name}</strong> (level
+            {heldCharge.level}) — deliver it with a melee touch attack, touch a
+            willing friend automatically, or it dissipates when another spell
+            is cast.
+          </p>
+          <button
+            type="button"
+            data-held-deliver
+            disabled={castBusy || castTargetId === ""}
+            onclick={() => {
+              void deliverHeldCharge(false);
+            }}>{castBusy ? "Delivering…" : "Deliver touch"}</button
+          >
+          <button
+            type="button"
+            data-held-autotouch
+            disabled={castBusy || castTargetId === ""}
+            onclick={() => {
+              void deliverHeldCharge(true);
+            }}>Auto-touch (willing)</button
+          >
+          <button
+            type="button"
+            data-held-dismiss
+            disabled={castBusy}
+            onclick={dismissHeldCharge}>Dissipate</button
+          >
+        </section>
+      {/if}
+      {#if pendingCast !== null}
+        <section class="held-charge" data-pending-cast>
+          <p>
+            Pending casting: <strong>{pendingCast.name}</strong> (level
+            {pendingCast.level}) — it comes into effect just before your next
+            turn; if concentration breaks before then, the spell is lost.
+          </p>
+          <button
+            type="button"
+            data-pending-complete
+            disabled={castBusy}
+            onclick={() => {
+              void completePendingCast();
+            }}>{castBusy ? "Completing…" : "Complete the casting"}</button
+          >
+          <label
+            >Interruption damage
+            <input
+              value={pendingDisruptDamage}
+              oninput={(e) => (pendingDisruptDamage = e.currentTarget.value)}
+              data-pending-disrupt-damage
+              placeholder="0"
+              size="4"
+            /></label
+          >
+          <button
+            type="button"
+            data-pending-disrupt
+            disabled={castBusy}
+            onclick={() => {
+              void checkPendingDisruption();
+            }}>Concentration check</button
+          >
+          <button
+            type="button"
+            data-pending-abandon
+            disabled={castBusy}
+            onclick={abandonPendingCast}>Lose the spell</button
+          >
+        </section>
+      {/if}
+      <p class="note">
+        Spending and preparation are daily state; resting/recovery automation
+        arrives with P7. Overuse is warned, not blocked (C04). Casting spends
+        the slot and expends the prepared row, rolls the target's save and any
+        SR check host-side, and writes the target's HP. A declared Components
+        line runs the C03a gate (D-157): legality, armour arcane spell failure
+        (arcane tradition, authored <code>armor.spellFailure</code>), deafened
+        spoilage and declared concentration checks — a failed check loses the
+        spell and still spends it. A Touch spell (D-158) rolls the touch
+        attack as part of the cast; a missed melee touch holds the charge for
+        later delivery, a missed ranged touch spends the spell. Multi-round
+        casting and metamagic timing (C03 remainder) and area/target-count
+        payloads (C05) are not yet part of this single-target flow.
+      </p>
+    </section>
   {:else if tab === "effects"}
+    <p class="note" data-pf1e-effective-scores>
+      Effective scores: {Object.entries(d.abilities)
+        .map(([key, score]) => `${key.toUpperCase()} ${score}`)
+        .join(" · ")}
+    </p>
     <PF1eEffectsTab
       effects={view.effects}
       effectErrors={view.effectErrors}

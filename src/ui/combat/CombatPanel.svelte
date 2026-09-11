@@ -484,6 +484,28 @@
       Start combat ({combat?.combatants.length ?? tokens.length} combatants)
     </button>
     {#if combat && pf1e}
+      <div class="prestart-rolls" data-prestart-rolls>
+        <button id="combat-init" type="button" onclick={() => rollInitiative()}
+          >{selection.ids.length
+            ? `Roll selected (${selection.ids.length})`
+            : "Roll init"}</button
+        >
+        {#if selection.ids.length}<button
+          data-roll-all-initiative
+          type="button"
+          onclick={() => rollInitiative(true)}>Roll all</button
+        >{/if}
+        <button
+          data-roll-hidden-initiative
+          type="button"
+          title="Roll initiative for hidden combatants only (GM). Real order, GM-only receipts, no public breakdown."
+          onclick={() => rollHidden()}>Roll hidden</button
+        >
+        <small
+          >PF1e encounters start through the surprise-aware transition: roll
+          initiative (and resolve ties) before Start.</small
+        >
+      </div>
       <div class="unaware" data-unaware-setup>
         <span class="budget-title"
           >Surprise setup — mark who starts unaware (CRB p.178):</span
@@ -847,6 +869,13 @@
   }
   .init {
     width: 3.5em;
+  }
+  .prestart-rolls {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+    font-size: 12px;
   }
   .unaware {
     display: flex;

@@ -110,7 +110,7 @@ export interface PF1eSpellSlotReadout {
 }
 
 /**
- * P5/C04 — the summary tab's level 0–9 spell slot readout.
+ * P5/C04 — the sheet's level 0–9 spell slot readout (D-155).
  *
  * This file's rule is no rules arithmetic, and this keeps it: Table 1-3, the
  * `10 + spell level` minimum and the over-budget warnings all live in
@@ -120,9 +120,12 @@ export interface PF1eSpellSlotReadout {
  *
  * Nothing is spent here — the sheet is a readout. Overuse is reported by the ledger
  * as a warning rather than refused (C04: warnings, not hard enforcement).
+ * When the actor's authored `spells` block is passed, the persisted ledger
+ * (`slotsUsed`) and prepared counts are projected onto the rows.
  */
 export function pf1eSpellSlotReadout(
   derived: PF1eDerived,
+  spells?: Record<string, Json> | null,
 ): PF1eSpellSlotReadout {
   const keyAbility = derived.spellKeyAbility;
   const keyAbilityScore = derived.casting
@@ -132,8 +135,37 @@ export function pf1eSpellSlotReadout(
     baseSlots: derived.spellSlots.slice(0, PF1E_SLOT_LEVEL_COUNT),
     keyAbilityScore,
   });
+  const used = spells ? sheetRecord(spells.slotsUsed) : null;
+  const spent = new Array<number>(PF1E_SLOT_LEVEL_COUNT).fill(0);
+  if (used) {
+    for (let level = 0; level < PF1E_SLOT_LEVEL_COUNT; level += 1) {
+      const v = used[level];
+      if (typeof v === "number" && Number.isInteger(v) && v >= 0)
+        spent[level] = v;
+    }
+  }
+  const prepared = spells?.prepared;
+  const preparedByLevel = new Array<number>(PF1E_SLOT_LEVEL_COUNT).fill(0);
+  let hasPrepared = false;
+  if (Array.isArray(prepared)) {
+    for (const entry of prepared) {
+      const rec = sheetRecord(entry);
+      if (!rec || typeof rec.level !== "number") continue;
+      const slotLevel = Number.isInteger(rec.slotLevel)
+        ? (rec.slotLevel as number)
+        : rec.level;
+      if (slotLevel >= 0 && slotLevel < PF1E_SLOT_LEVEL_COUNT) {
+        preparedByLevel[slotLevel] = (preparedByLevel[slotLevel] ?? 0) + 1;
+        hasPrepared = true;
+      }
+    }
+  }
   return {
-    view: slotLedgerView(budget, null),
+    view: slotLedgerView(
+      budget,
+      { spent },
+      hasPrepared ? preparedByLevel : null,
+    ),
     mode: derived.spellMode,
     keyAbility,
     keyAbilityScore,

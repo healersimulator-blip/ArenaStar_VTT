@@ -113,14 +113,46 @@ export interface PF1eAttackEntry {
 export interface PF1eSpellsAuthored {
   keyAbility?: PF1eAbilityKey;
   casterLevel?: number;
+  /**
+   * Which component-resolution tradition the caster's spells use (D-157):
+   * `M/DF` lines resolve to M for arcane casters and DF for divine ones, and
+   * arcane spell failure from armour only applies to arcane casting.
+   * Defaults to `"arcane"` at the point of use when absent.
+   */
+  tradition?: "arcane" | "divine";
   /** Extra flat bonus on save DCs (focus item, special). */
   dcBonus?: number;
   casterLevelBonus?: number;
   concentrationBonus?: number;
   mode?: "prepared" | "spontaneous";
-  /** Slots per day by spell level (0–10). Consumption is P5 — this is the authored budget. */
+  /** Slots per day by spell level (0–10). This is the authored budget. */
   slotsPerDay?: Partial<Record<number, number>>;
+  /**
+   * Slots already spent today (levels 0–9) — daily ledger STATE, not derived
+   * data (D-155). Resting/resetting is manual until recovery lands (P7).
+   */
+  slotsUsed?: Partial<Record<number, number>>;
+  /**
+   * A prepared caster's current preparation (D-155): each entry names the
+   * spell, the level it was prepared at, the slot it fills (defaults to its
+   * level) and whether it has been expended. Spontaneous casters keep no list.
+   */
+  prepared?: Array<{
+    name: string;
+    level: number;
+    slotLevel?: number;
+    expended?: boolean;
+    /**
+     * The spell's Components line, e.g. "V, S, M/DF" (D-157). Drives the
+     * C03a casting gate (legality, arcane spell failure, deafened spoilage,
+     * concentration). Absent/empty means the cast flow skips the gate.
+     */
+    components?: string;
+  }>;
 }
+
+/** Cap on the authored prepared-spell list (a defense against malformed packs). */
+export const MAX_PREPARED_SPELLS = 200;
 
 /** Everything a PF1e actor document may author under `system.pf1e`. */
 export interface PF1eActorSystem extends PF1eHealthAuthored {
@@ -146,6 +178,36 @@ export interface PF1eActorSystem extends PF1eHealthAuthored {
   initiative?: number;
   attacks?: PF1eAttackEntry[];
   spells?: PF1eSpellsAuthored;
+  /**
+   * A held touch-spell charge (D-158, "Holding the Charge"): written when a
+   * melee touch attack misses on the round of casting, cleared when the
+   * charge is delivered, dissipates when another spell is cast.
+   */
+  heldCharge?: {
+    name: string;
+    level: number;
+    slotLevel?: number;
+    damageFormula?: string;
+    saveType?: "fort" | "ref" | "will";
+    severity?: string;
+    energyType?: string;
+  };
+  /**
+   * A multi-round casting begun but not yet completed (D-161, Rules ID 147):
+   * "It comes into effect just before the beginning of your turn in the
+   * round after you began casting the spell." The slot and prepared row are
+   * spent when the casting begins; clearing uses the store's `-=` marker.
+   */
+  pendingCast?: {
+    name: string;
+    level: number;
+    slotLevel?: number;
+    damageFormula?: string;
+    saveType?: "fort" | "ref" | "will";
+    severity?: string;
+    energyType?: string;
+    targetId?: string;
+  };
   feats?: string[];
   traits?: string[];
   conditions?: string[];
@@ -440,6 +502,148 @@ export function parsePF1eActorSystem(raw: unknown): Result<PF1eActorSystem> {
         `system.pf1e.spells.mode ${JSON.stringify(s.mode)} must be "prepared" or "spontaneous"`,
       );
     }
+    if (
+      s.tradition !== undefined &&
+      s.tradition !== "arcane" &&
+      s.tradition !== "divine"
+    ) {
+      return err(
+        `system.pf1e.spells.tradition ${JSON.stringify(s.tradition)} must be "arcane" or "divine"`,
+      );
+    }
+    if (s.slotsUsed !== undefined) {
+      if (!isRecord(s.slotsUsed))
+        return err("system.pf1e.spells.slotsUsed must be an object");
+      for (const [k, v] of Object.entries(
+        s.slotsUsed as Record<string, unknown>,
+      )) {
+        const level = Number(k);
+        if (!Number.isInteger(level) || level < 0 || level > 9)
+          return err(
+            `system.pf1e.spells.slotsUsed level "${k}" must be an integer 0–9`,
+          );
+        if (typeof v !== "number" || !Number.isInteger(v) || v < 0)
+          return err(
+            `system.pf1e.spells.slotsUsed["${k}"] must be a non-negative integer`,
+          );
+      }
+    }
+    if (s.prepared !== undefined) {
+      if (!Array.isArray(s.prepared))
+        return err("system.pf1e.spells.prepared must be an array");
+      if (s.prepared.length > MAX_PREPARED_SPELLS)
+        return err(
+          `system.pf1e.spells.prepared supports at most ${MAX_PREPARED_SPELLS} entries`,
+        );
+      for (const p of s.prepared) {
+        if (!isRecord(p))
+          return err("system.pf1e.spells.prepared entries must be objects");
+        const entry = p as Record<string, unknown>;
+        if (typeof entry.name !== "string" || entry.name.trim() === "")
+          return err("prepared spells need a non-empty name");
+        if (entry.name.length > 120)
+          return err("prepared spell names are at most 120 characters");
+        if (
+          !Number.isInteger(entry.level) ||
+          (entry.level as number) < 0 ||
+          (entry.level as number) > 9
+        )
+          return err(
+            `prepared spell "${entry.name}": level must be an integer 0–9`,
+          );
+        if (
+          entry.slotLevel !== undefined &&
+          (!Number.isInteger(entry.slotLevel) ||
+            (entry.slotLevel as number) < 0 ||
+            (entry.slotLevel as number) > 9)
+        )
+          return err(
+            `prepared spell "${entry.name}": slotLevel must be an integer 0–9`,
+          );
+        if (entry.expended !== undefined && typeof entry.expended !== "boolean")
+          return err(
+            `prepared spell "${entry.name}": expended must be a boolean`,
+          );
+        if (
+          entry.components !== undefined &&
+          (typeof entry.components !== "string" ||
+            entry.components.length > 120)
+        )
+          return err(
+            `prepared spell "${entry.name}": components must be a string of at most 120 characters`,
+          );
+      }
+    }
+  }
+  if (o.heldCharge !== undefined && o.heldCharge !== null) {
+    if (!isRecord(o.heldCharge))
+      return err("system.pf1e.heldCharge must be an object");
+    const hc = o.heldCharge as Record<string, unknown>;
+    if (typeof hc.name !== "string" || hc.name.trim() === "")
+      return err("heldCharge needs a non-empty name");
+    if (hc.name.length > 120)
+      return err("heldCharge names are at most 120 characters");
+    if (!Number.isInteger(hc.level) || (hc.level as number) < 0 || (hc.level as number) > 9)
+      return err("heldCharge level must be an integer 0–9");
+    if (
+      hc.slotLevel !== undefined &&
+      (!Number.isInteger(hc.slotLevel) ||
+        (hc.slotLevel as number) < 0 ||
+        (hc.slotLevel as number) > 9)
+    )
+      return err("heldCharge slotLevel must be an integer 0–9");
+    if (
+      hc.damageFormula !== undefined &&
+      typeof hc.damageFormula !== "string"
+    )
+      return err("heldCharge damageFormula must be a string");
+    if (
+      hc.saveType !== undefined &&
+      hc.saveType !== "fort" &&
+      hc.saveType !== "ref" &&
+      hc.saveType !== "will"
+    )
+      return err('heldCharge saveType must be "fort", "ref" or "will"');
+    if (hc.severity !== undefined && typeof hc.severity !== "string")
+      return err("heldCharge severity must be a string");
+    if (hc.energyType !== undefined && typeof hc.energyType !== "string")
+      return err("heldCharge energyType must be a string");
+  }
+  if (o.pendingCast !== undefined && o.pendingCast !== null) {
+    if (!isRecord(o.pendingCast))
+      return err("system.pf1e.pendingCast must be an object");
+    const pc = o.pendingCast as Record<string, unknown>;
+    if (typeof pc.name !== "string" || pc.name.trim() === "")
+      return err("pendingCast needs a non-empty name");
+    if (pc.name.length > 120)
+      return err("pendingCast names are at most 120 characters");
+    if (!Number.isInteger(pc.level) || (pc.level as number) < 0 || (pc.level as number) > 9)
+      return err("pendingCast level must be an integer 0–9");
+    if (
+      pc.slotLevel !== undefined &&
+      (!Number.isInteger(pc.slotLevel) ||
+        (pc.slotLevel as number) < 0 ||
+        (pc.slotLevel as number) > 9)
+    )
+      return err("pendingCast slotLevel must be an integer 0–9");
+    if (
+      pc.damageFormula !== undefined &&
+      typeof pc.damageFormula !== "string"
+    )
+      return err("pendingCast damageFormula must be a string");
+    if (
+      pc.saveType !== undefined &&
+      pc.saveType !== "fort" &&
+      pc.saveType !== "ref" &&
+      pc.saveType !== "will"
+    )
+      return err('pendingCast saveType must be "fort", "ref" or "will"');
+    if (pc.severity !== undefined && typeof pc.severity !== "string")
+      return err("pendingCast severity must be a string");
+    if (pc.energyType !== undefined && typeof pc.energyType !== "string")
+      return err("pendingCast energyType must be a string");
+    if (pc.targetId !== undefined && typeof pc.targetId !== "string")
+      return err("pendingCast targetId must be a string");
   }
   if (o.armorClass !== undefined && !isRecord(o.armorClass)) {
     return err("system.pf1e.armorClass must be an object of AC components");

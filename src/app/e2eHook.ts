@@ -17,7 +17,7 @@ import {
   type PF1eAreaIssue,
 } from "../packages/pf1e/targeting";
 import { deriveFromDocuments } from "../packages/pf1e/actor";
-import { pf1eSpellSlotReadout } from "../ui/sheets/pf1eSheetModel";
+import { pf1eSpellSlotReadout, sheetRecord } from "../ui/sheets/pf1eSheetModel";
 import {
   resolveCastingAttempt,
   type PF1eCastingTime,
@@ -431,6 +431,27 @@ export interface GmFogSurface {
     strengths: number[];
     allyLists: Record<string, string[]>;
   };
+  /** P5/C01 (D-154): resolve an area against the active scene and show the preview overlay. */
+  pf1eAreaPreviewShow(spec: {
+    kind: string;
+    originCol: number;
+    originRow: number;
+    radiusFt: number;
+  }): {
+    ok: boolean;
+    issues: Array<{ field: string; message: string }>;
+    cells: number;
+    affectedTokenIds: string[];
+    label: string;
+  };
+  /** P5/C01 (D-154): clear the preview overlay. */
+  pf1eAreaPreviewClear(): void;
+  /** P5/C01 (D-154): what the overlay layer actually drew last. */
+  pf1eAreaPreviewState(): {
+    visible: boolean;
+    rectsDrawn: number;
+    highlights: number;
+  };
 }
 
 export interface RulesPackageSmokeResult {
@@ -758,7 +779,17 @@ function appSurface(app: HostApp): AppSurface {
     },
     pf1eSpellSlots: (spec) => {
       const derived = deriveFromDocuments({ actor: { system: spec.system } });
-      const readout = pf1eSpellSlotReadout(derived);
+      // D-155: the persisted ledger (`slotsUsed`) and prepared list ride the same
+      // adapter the sheet renders, so the browser path proves their projection too.
+      const pf1e = spec.system.pf1e;
+      const authoredSpells =
+        pf1e && typeof pf1e === "object" && !Array.isArray(pf1e)
+          ? (pf1e as Record<string, unknown>).spells
+          : null;
+      const readout = pf1eSpellSlotReadout(
+        derived,
+        sheetRecord(authoredSpells),
+      );
       return {
         summary: readout.view.summary,
         grantedLevels: readout.view.grantedLevels,
