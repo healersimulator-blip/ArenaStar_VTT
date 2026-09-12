@@ -60,8 +60,8 @@
   import {
     delayTo,
     readyCombatant,
-    resolveReady,
   } from "../../packages/pf1e/readyDelay";
+  import { resolveReadiedAction } from "./pf1eReadyAction";
   import type { PF1eActionSpend } from "../../packages/pf1e/actions";
   import {
     advanceClockOnRoundOf,
@@ -454,23 +454,28 @@
     push(result.value);
   }
 
-  function doFireReady(readiedId: string): void {
+  async function doFireReady(readiedId: string): Promise<void> {
     refresh();
     if (!combat || !pf1e) return;
     const triggererId = fireTarget || current?._id || "";
-    const result = resolveReady(
-      $state.snapshot(combat),
-      readiedId,
-      triggererId,
-    );
-    error = result.ok ? "" : result.error;
-    if (!result.ok) return;
+    const outcome = await resolveReadiedAction({
+      client,
+      user: client.user,
+      combat: $state.snapshot(combat),
+      readiedCombatantId: readiedId,
+      triggererCombatantId: triggererId,
+    });
+    error = outcome.error ?? "";
+    if (!outcome.ok || outcome.combat === null) return;
     const name =
-      combat.combatants.find((c) => c._id === readiedId)?.name ?? readiedId;
-    firedNote = `${name}'s readied ${result.value.action.kind} action fires — resolve it now (trigger: ${result.value.trigger.kind}).`;
+      outcome.combat.combatants.find((c) => c._id === readiedId)?.name ??
+      readiedId;
+    firedNote = outcome.resolved
+      ? `${name}'s readied ${outcome.action?.kind ?? "action"} action fires — ${outcome.lines.join(" ")}`
+      : outcome.lines.join(" ");
     fireFor = null;
     fireTarget = "";
-    push(result.value);
+    push({ combat: outcome.combat, hooks: outcome.hooks, expired: [] });
   }
 
   onMount(() => {

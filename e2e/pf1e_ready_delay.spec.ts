@@ -118,8 +118,12 @@ test("PF1e delay, ready and fire-ready reorder the tracker by the rule", async (
   const fireForm = page.locator("[data-fire-form]");
   await expect(fireForm).toBeVisible();
   await fireForm.locator("[data-confirm-fire]").click();
+  // D-195: firing now *resolves* the readied action through the sheet's flow. The
+  // bestiary tokens carry no hit points, so the resolution honestly reports that it
+  // could not write damage — but the note still names the readied action, and the
+  // reorder below is the same either way.
   await expect(page.locator("[data-fired-note]")).toContainText(
-    "readied standard action fires",
+    "Heavy Cavalry's readied",
   );
   await expect(page.locator(".combat .order .name")).toHaveText([
     "Heavy Cavalry",

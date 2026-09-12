@@ -132,7 +132,7 @@ export interface ActionAooResolutionInput {
   verifiable?: boolean;
 }
 
-const actorOf = (
+export const actorOf = (
   tokenId: string,
   tokens: readonly AooTokenRef[],
   actors: readonly ActorDocument[],
@@ -144,7 +144,7 @@ const actorOf = (
 };
 
 /** Feat names as authored — the derivation and the roll groups read the same list. */
-function featsOf(actor: ActorDocument): string[] {
+export function featsOf(actor: ActorDocument): string[] {
   const pf1e = (actor.system as { pf1e?: { feats?: unknown } } | undefined)
     ?.pf1e;
   const feats = pf1e?.feats;
@@ -159,14 +159,14 @@ function featsOf(actor: ActorDocument): string[] {
 }
 
 /** How many attack lines the actor authored (0 ⇒ the lines shown are the unarmed fallback). */
-function authoredAttackCount(actor: ActorDocument): number {
+export function authoredAttackCount(actor: ActorDocument): number {
   const pf1e = (actor.system as { pf1e?: { attacks?: unknown } } | undefined)
     ?.pf1e;
   return Array.isArray(pf1e?.attacks) ? pf1e.attacks.length : 0;
 }
 
 /** Derive one creature with its conditions (both effect homes), for attack and defense. */
-function derivedFor(
+export function derivedFor(
   actor: ActorDocument,
   combat: CombatDocument | null,
   combatantId: string | null,
@@ -180,9 +180,9 @@ function derivedFor(
 /**
  * The reactor's melee attack. "An attack of opportunity is a single melee attack": a
  * creature whose every line is ranged cannot make one, so this returns null and the caller
- * reports the skip.
+ * reports the skip. A readied attack (D-195) uses the same primary-melee default.
  */
-function meleeLine(derived: PF1eDerived): PF1eDerivedAttack | null {
+export function meleeLine(derived: PF1eDerived): PF1eDerivedAttack | null {
   return derived.attacks.find((line) => !line.ranged) ?? null;
 }
 

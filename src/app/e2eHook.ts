@@ -10,6 +10,7 @@ import type {
   Json,
   TokenDocument,
 } from "../core/documents";
+import type { FlatDiff } from "../core/ops";
 import type { PlayerApp } from "./joinBoot";
 import type { HostShare } from "./hostShare";
 import { sightSegments } from "../canvas/vision/wallSight";
@@ -41,9 +42,13 @@ import {
   castProvokes,
   resolveActionProvokes,
 } from "../ui/combat/pf1eActionProvoke";
+import { resolveReadiedAction } from "../ui/combat/pf1eReadyAction";
 import { autoResolveAoosOf } from "../packages/pf1e/aooSettings";
 import { selectedEncounter } from "../ui/combat/encounters";
-import { readCombatantState } from "../packages/pf1e/combatState";
+import {
+  readCombatantState,
+  withCombatantState,
+} from "../packages/pf1e/combatState";
 import {
   validateWorldSettingsPatch,
   worldSettingsFrom,
@@ -466,6 +471,29 @@ export interface AppSurface {
     provokes: Array<{ actionId?: string; trigger?: { kind: string } }>;
     lines: string[];
     damage: number;
+  }>;
+  /**
+   * P07 (D-195): fire one readied action end to end. The hook authors the ready on the
+   * readied combatant (a standard attack, trigger scoped to the triggerer), then runs
+   * `resolveReadiedAction` against a **real booted host** — the ready is spent, the
+   * initiative moves to `triggerer + 1`, the attack rolls through the sheet's flow and
+   * the HP write lands — and submits the reordered combat.
+   */
+  pf1eReadyFire(spec: {
+    /** The scene token whose combatant readied the action. */
+    readiedTokenId: string;
+    /** The scene token whose action triggers the ready (the target of the readied attack). */
+    triggererTokenId: string;
+  }): Promise<{
+    ok: boolean;
+    error: string | null;
+    lines: string[];
+    damage: number;
+    resolved: boolean;
+    /** The readied combatant's initiative after the fire (triggerer + 1). */
+    initiative: number | null;
+    /** True when the ready flag was cleared by the fire. */
+    readyCleared: boolean;
   }>;
   /**
    * P5/C03: run the pre-save casting gate. The caster's deafened/grappled/pinned
@@ -1531,6 +1559,97 @@ function appSurface(app: HostApp): AppSurface {
         ),
         lines: resolution.lines,
         damage: resolution.damage,
+      };
+    },
+    pf1eReadyFire: async (spec) => {
+      const combat = client.store
+        .getAll("combats")
+        .find((c) => c.combatants.some((k) => k.tokenId === spec.readiedTokenId));
+      const readied = combat?.combatants.find(
+        (k) => k.tokenId === spec.readiedTokenId,
+      );
+      const triggerer = combat?.combatants.find(
+        (k) => k.tokenId === spec.triggererTokenId,
+      );
+      if (!combat || !readied || !triggerer) {
+        return {
+          ok: false,
+          error: "the readied combatant or triggerer is not in the encounter",
+          lines: [],
+          damage: 0,
+          resolved: false,
+          initiative: null,
+          readyCleared: false,
+        };
+      }
+      // Author the ready (a standard attack scoped to the triggerer) through the same
+      // combatant-state writer the tracker uses, then submit it before resolving.
+      const authored = withCombatantState(readied, {
+        ...readCombatantState(readied),
+        ready: {
+          action: { kind: "standard", action: "attack" },
+          trigger: { kind: "attack", targetId: triggerer._id },
+          sinceRound: combat.round,
+        },
+      });
+      const readyCombat: CombatDocument = {
+        ...combat,
+        combatants: combat.combatants.map((c) =>
+          c._id === readied._id ? authored : c,
+        ),
+      };
+      client.submit([
+        {
+          kind: "update",
+          ref: { coll: "combats", id: readyCombat._id },
+          diff: {
+            combatants: readyCombat.combatants,
+          } as unknown as FlatDiff,
+        },
+      ]);
+
+      const outcome = await resolveReadiedAction({
+        client,
+        user: client.user,
+        combat: readyCombat,
+        readiedCombatantId: readied._id,
+        triggererCombatantId: triggerer._id,
+      });
+      if (!outcome.ok || outcome.combat === null) {
+        return {
+          ok: false,
+          error: outcome.error,
+          lines: [],
+          damage: 0,
+          resolved: false,
+          initiative: null,
+          readyCleared: false,
+        };
+      }
+      client.submit([
+        {
+          kind: "update",
+          ref: { coll: "combats", id: outcome.combat._id },
+          diff: {
+            round: outcome.combat.round,
+            turn: outcome.combat.turn,
+            combatants: outcome.combat.combatants,
+            flags: outcome.combat.flags,
+          } as unknown as FlatDiff,
+        },
+      ]);
+      const after = outcome.combat.combatants.find(
+        (c) => c._id === readied._id,
+      );
+      return {
+        ok: true,
+        error: null,
+        lines: outcome.lines,
+        damage: outcome.damage,
+        resolved: outcome.resolved,
+        initiative: after?.initiative ?? null,
+        readyCleared:
+          after === undefined || readCombatantState(after).ready === null,
       };
     },
     pf1eTacticalEncounter: (spec) => {
