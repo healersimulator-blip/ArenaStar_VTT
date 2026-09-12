@@ -409,6 +409,382 @@ Depends on P3 and D06; keep core EffectDocument unchanged.
 
 Depends on effects, attacks, action foundations and verified rule fixtures. Tactical targeting and strategic spell resolution remain independent implementations using common spell data.
 
+### P4 progress — 2026-09-12, M07: hero Cleave becomes the SRD feat — cascade deleted (D-178)
+
+- **D-178 — Cleave is a real extra attack; the overkill cascade is gone.** The
+  rejected D-130 model — `applyHeroCleaveOverkill` force-killing
+  `defenders[0]` and splashing a literal `damageDealt: 25` — is deleted.
+  SRD Cleave now resolves: the hero's lead model makes **one extra attack
+  at full BAB against the first adjacent living defender** (`attackers[0]`
+  swings; adjacency = scene grid distance in feet; `maxIterativeAttacks: 1`
+  caps even a BAB-9 iterative routine at one swing), and takes the feat's
+  **−2 AC penalty** until the round's reseed wipes it. Cleave metrics
+  merge into the engagement's totals before `recordCombat`/the melee
+  event; dice ride a fresh per-unit fork (phase 3) for replayability.
+  Gating stays `isHeroUnit` until actor feat data exists.
+- **Evidence:** BAB-9 probe — hero adjacent ⇒ 3 attacks + AC 12;
+  non-hero ⇒ 2/AC 14; defender 30 ft out ⇒ 2/AC 14 (adjacency +
+  no-penalty probes); mutation (cap removed) red; cascade test deleted
+  with the function (+1/−1 tests); full suite **1574 passed / 3 skipped**
+  across 148 files; lint/build green; dist **2,251,732 raw / 644,927
+  gzip**; `rules.js` **131,585 B** (down — the deleted cascade was
+  bigger); e2e 276/36. Closes R03's "SRD Cleave = second attack at full
+  BAB vs an adjacent foe, −2 AC".
+
+### P4 progress — 2026-09-12, M04/P01: envelopment reach fixed, FLANKED expires (D-177)
+
+- **D-177 — two Gap List §5 envelopment defects closed.** (1) The reach
+  constant was `1.5` fed to a **feet**-based spatial query — a 1.5-ft
+  radius that engaged almost nothing. The default is now the SRD natural
+  reach of a Medium creature, **5 ft** ("Most creatures of Medium or
+  smaller size have a reach of only 5 feet"), and the mass-battle call
+  site passes the scene's `grid.distance` (fallback 5), the same
+  scene-derived value the movement budget uses (P01). (2) The
+  `PF1E_STATUS_FLANKED` bit was set on enveloped defenders and never
+  cleared, so one envelopment lasted the rest of the battle;
+  `resolveTurn` now clears it first thing each round and melee
+  recomputes it from post-movement geometry. The bit-2 alias with core
+  `pinned` is the documented §2.13 status-column collision, untouched.
+- **Evidence:** envelopment suite rewritten around feet (5 ft engages,
+  6 ft does not); module test proves FLANKED lands in round 1 and expires
+  in round 2 once the attackers are out of reach; two mutations red;
+  full suite **1574 passed / 3 skipped** across 148 files; lint/build
+  green; dist **2,251,732 raw / 644,927 gzip**; `rules.js` **132,127 B**;
+  e2e 276/36. Per-size/reach-weapon reach and real flanking angles stay
+  in P02.
+
+### P4 progress — 2026-09-12, M06 begins: fast healing & regeneration execute (D-176)
+
+- **D-176 — the heal sub-phase.** Fast healing and regeneration — SRD
+  universal monster abilities, "regains the listed number of Hit Points at
+  the start of its turn" — now run once per mass-battle turn: a new `heal`
+  sub-phase right after seeding and before any damage resolves. Units
+  author the abilities via stats (`fastHealing: 3`, `regeneration: 5`);
+  healing is capped at the effective maximum (`hpMax − lethalDmg`), skips
+  dead models, is booked into analytics' `damageHealed` counter (first
+  caller for `recordHealing`), and emits a `heal` event with
+  `{ healed, revived }`. The previously test-only `resolvePF1eHealing`
+  engine is now consumed by `resolveTurn`. Regeneration's suppress-types
+  and can't-die clause stay tactical-layer concerns.
+- **Evidence:** 3 new tests (heal + max cap; regeneration capped by lethal
+  damage; ability-less/dead never heal; stat carriage with clamp/floor);
+  two mutations red; two existing subPhase-list assertions updated; full
+  suite **1571 passed / 3 skipped** across 148 files; lint/build green;
+  dist **2,251,732 raw / 644,927 gzip**; `rules.js` **131,975 B**; e2e
+  276/36.
+
+### P4 progress — 2026-09-12, M05: retreat orders execute (D-175)
+
+- **D-175 — Withdraw.** The last no-op order kind, `retreat`, now moves:
+  a retreat order is the SRD Withdraw action ("full-round action … move
+  up to double your speed"), executed as travel toward `order.toward`
+  within a **double-speed** budget (infantry 40 ft). It reuses the
+  D-173/D-174 machinery — wall clipping, whole-unit translation,
+  `arrive` events — with `pace: "retreat"` and verb "retreats".
+  `validateOrder` now rejects retreats whose destination is NaN/missing.
+  The SRD's no-AoO-on-leaving-square clause is deliberately out of scope:
+  mass battle has no AoO economy yet (P06).
+- **Evidence:** 2 new tests (full 2× budget lands 40 ft out with the
+  formation intact; a nearer rally point stops short of budget; a
+  move-blocking wall clips the retreat with `blockedByWall`; NaN
+  validation); mutation (paceMul 2→1) red; full suite **1568 passed /
+  3 skipped** across 148 files; lint/build green; dist **2,251,732 raw /
+  644,927 gzip**; `rules.js` **129,487 B**; e2e 276/36.
+
+### P4 progress — 2026-09-12, M05 movement meets the wall contract (D-174)
+
+- **D-174 — formations cannot march through movement-blocking walls.** D-173
+  made movement real; this stops it passing through walls the scene authors
+  as move-blocking (§0 contract bit 0 — previously unconsumed). New
+  `firstMoveBlock` in `core/detection.ts` (with `WALL_MOVE_BIT`) finds the
+  earliest wall crossing using the same strict convention as LOS; the move
+  loop clips the leg there, stops an epsilon short of the wall (so next
+  turn's segment cannot start *on* the wall and slip through), spends the
+  rest of the budget, and never attempts waypoints beyond the wall —
+  routing around is P03 pathfinding, not wall-clipping. Events report
+  `blockedByWall` and the distance actually traveled; a zero-distance block
+  still reports. Sight-only walls never block movement — pinned by test.
+- **Evidence:** 2 new tests (move-wall stop at 24.999 with `blockedByWall`;
+  sight-only wall passes the full budget; wall past the first waypoint
+  clips the second leg, later waypoints skipped); two mutation checks red;
+  full suite **1566 passed / 3 skipped** across 148 files; lint/build
+  green; dist **2,251,732 raw / 644,927 gzip**; `rules.js` **129,030 B**;
+  e2e 276/36. Process note in D-174: a mid-slice `git checkout` reverted
+  `detection.ts` to HEAD and discarded the uncommitted D-166
+  `hasLineOfEffect`; it was reconstructed and re-verified — mutation
+  restores use file backups only.
+
+### P5/P4 progress — 2026-09-12, M05 begins: move orders execute (D-173)
+
+- **D-173 — formations march.** Move orders are no longer silently dropped:
+  the anchor walks the waypoint path within the movement budget and every
+  living model translates by the same delta (the §12 reference model —
+  spacing and membership survive); dead models stay put. Pace multipliers
+  are R02'd from the CRB (march 1×, charge "up to twice your speed", run
+  "up to four times your speed in a straight line"); the budget is move
+  points × `ctx.grid.distance` (scene metadata per P01). Movement runs
+  before the grid rebuild, so auras/cleave/envelopment/spells all see
+  post-move positions. NaN waypoints are refused by name.
+- **Slice boundary (recorded, not skipped):** terrain cost and obstacle
+  legality (P03), charge's straight-line/target rules, movement-triggered
+  AoOs (P06), `retreat` execution, shoot and morale sub-phases — all still
+  named in M05.
+- **Evidence:** 4 new tests (budget stop with spacing preserved, 40/80/160
+  ft cavalry paces, exact waypoint-budget exhaustion, dead-left-behind +
+  all-dead no-op, NaN refusal); two mutation checks red; full suite **1564
+  passed / 3 skipped** across 148 files; typecheck/lint/build green; dist
+  **2,251,732 raw / 644,927 gzip**; `rules.js` **127,268 B** (+2.5); e2e
+  276/36.
+
+### P5/P8 progress — 2026-09-11, M07 closes: heroBridge radii fixed, Leadership feat R02'd (D-172)
+
+- **D-172 — heroBridge converged on its documented intent.** The aura passed
+  `radius / 5` and cleave a literal `1.5` to `SpatialGrid.queryPoint`,
+  assuming grid cells — the API takes feet (D-170's threat query proved it),
+  so the documented 30-ft aura reached 6 ft and "adjacent" cleave was
+  1.5 ft. Both now pass feet; tests pin the real geometry (20 ft/30-ft-edge
+  buffed, 31 ft not; cleave reaches 4 ft, stops before 7 ft). Both mutation
+  checks red. This was a bug fix, not a deviation: the old tests (2 ft/1 ft
+  probes) pinned nothing.
+- **R02 closed the aura-source question.** The SRD Leadership feat
+  (d20pfsrd, CRB) grants a cohort + followers and Leadership-score tables —
+  **no aura exists in the feat**, so the Gap List's "aura radius from feat
+  data" is untranscribable by construction. The mass-battle aura (+2
+  morale to Fort/Will within 30 ft) is the work plan's own mechanic (Task 7
+  / Combat_Resolver_5 parity) and stays at the documented defaults.
+- **Still known-wrong (future slice):** the cleave call's literal
+  `damageDealt: 25` and the overkill-cascade model (rejected as a non-rule
+  in D-130 — SRD Cleave is one extra attack at full BAB); needs a hero
+  attack routine, Gap List §5.
+- **Evidence:** full suite **1560 passed / 3 skipped** (unchanged count;
+  heroBridge tests rewritten in place), typecheck/lint green.
+
+### P5/P8 progress — 2026-09-11, hero identity, metric sources and a real cone spell (D-169…D-171)
+
+- **D-169 — hero identity (M07 remainder).** `isHeroUnit` now also answers
+  yes when the unit id is bound in `ctx.leaderActors` — the M07 data path
+  identifies a hero exactly where D-168's caster inputs arrive. Aura and
+  Cleave call sites pass the map through. Mutation-checked (dropping the
+  clause reds the aura test). **Still pinned:** aura radius/bonus remain
+  fixed defaults (Leadership feat text untranscribable — AoN FeatDisplay
+  dead end, recorded).
+- **D-170 — metric sources (M11).** Defensive-cast AoO is finally armed in
+  mass battles: the module builds the 5-ft threat list around the casting
+  anchor and passes `casterIdx`/`casterAdjacentEnemies`/`registry`, so a
+  threatened caster who fails DC 15 + 2×level provokes for real;
+  `resolvePF1eAoO` returns `{executed, hits, totalDamage}` and the counters
+  ride `PF1eSpellMetrics` → `recordSpell` → report/CSV. Dead combat-side
+  `srBlocked` deleted (SR never applies to melee; the summary field stays,
+  fed by spells). The analytics collector moved to module lifetime, so
+  `forecast()` returns real per-army totals from `generateReport()`
+  (SimWorker-restart caveat named in code), and the CSV export is actually
+  RFC-4180 now (comma/quote/newline fields get quoted — the Gap List named
+  the corruption). **Refused with reason:**
+  `cmbSuccesses`/`damageHealed` have no mass-battle mechanic to source them
+  (fields kept, initialized). Mutation-checked twice.
+- **D-171 — Burning Hands ships (real cone spell).** R02-transcribed from
+  CRB pg. 251 (15-ft cone-shaped burst, 1d4/level max 5d4 fire, Reflex
+  half, SR yes): pack entry + mirror + parity test, and a module registry
+  `PF1E_MASS_SPELLS` (fireball 3 / burning-hands 1, verified levels per
+  D-151 precedent). Orders select the spell via `data.spell` (absent =
+  fireball, so every existing order is unchanged); unknown ids are refused
+  by name at issue and resolve. Parity + parse + module tests; mutation
+  checks caught disabling selection and raising the mirrored cap.
+- **Flagged, not changed (deviation territory):** `heroBridge`'s
+  aura/cleave `queryPoint` radii treat feet as grid cells — the committed
+  baseline is pinned by its own tests and needs a proposal. LoE "1 sq. ft.
+  hole" and spread-around-corner pathing also remain refused-with-reason
+  (aperture authoring / D-151 pinned membership, see D-171 record).
+- **Evidence:** full suite **1560 passed / 3 skipped** across 148 files
+  (+10 tests); typecheck, lint, build green; dist **2,251,732 raw /
+  644,927 gzip** (within budget); `rules.js` **121.9 kB (124,800 B)**
+  (+7.3 — Burning Hands mirror + registry); e2e 276 collected / 36 files.
+
+### P5/P8 progress — 2026-09-11, strategic spells see walls, shapes, targets' owners and hero actors (D-165…D-168)
+
+- **All four D-164 "still open" items landed as four small slices,** each
+  R02-first where new text was needed, each mutation-checked.
+- **D-165 — per-unit hit attribution (M11 piece).** The resolver reports
+  `perModel` outcomes (damage/killed/save per model); the module emits
+  `hitsByUnit` (`modelsHit`/`damageDealt`/`kills` per owning unit, caster's
+  friendly fire included) and the new `recordSpellKills` books the
+  advertised `deathsCount` on the unit that LOST models — that field had no
+  event source anywhere until now.
+- **D-166 — line of effect.** D-164's "no wall data in strategic
+  RulesContext" was wrong — `RulesContext.walls` is populated at every
+  production site; the module just ignored it. Now: `hasLineOfEffect`
+  (core/detection, sight-bit walls), a named `no_line_of_effect` refusal
+  when the caster can't reach the designated point ("You must have a clear
+  line of effect to the point of origin of any spell you cast", CRB p.214),
+  and per-model cover skips reported as `modelsBlockedByCover` ("can't
+  affect creatures with total cover from its point of origin").
+- **D-167 — cone/line on the strategic layer (C01b refusal stands for
+  tactical cells).** R02 transcribed the CRB pp.213–214 shape texts; the
+  continuous-feet resolver maps them to their geometry: cone = quarter-
+  circle (≤45° off the aim, out to the length), line = corridor (5 ft
+  default width), both shooting away FROM the caster — so cone/line orders
+  carry `{dirX, dirY}` instead of `{x, y}`, range categories apply to
+  circles only, and the pack schema gains `widthFeet`. No pack content
+  changes: capability + parser + resolver + module tested via an injectable
+  `spellEntry` seam until a cone/line spell ships.
+- **D-168 — M07 piece: leader actors feed caster inputs.**
+  `collectLeaderActors` (core/rules) resolves unit→leader token→actor at
+  both production sites (`RulesContext.leaderActors` is now keyed by unit
+  id — §12 contract change, zero prior consumers verified); the module runs
+  the same `deriveFromDocuments` the tactical cast flow uses, so a hero's
+  authored CL/key ability/Spell Penetration override the unit-stats profile
+  (leader actor > unit stats > compiled defaults; non-caster actors fall
+  back). Cost: rules.js 59.4 → 117.5 kB (shared derivation, not a second
+  parser); app bundle +500 raw bytes.
+- **Evidence:** +18 tests — full suite **1550 passed / 3 skipped** across
+  148 files (+18 over D-164); typecheck/lint green; Prettier per the D-151
+  rule (rules.ts/turnChannel.ts/armyModel.ts clean at HEAD and kept clean;
+  the dirty-at-HEAD files keep their native style, diffs semantic only);
+  dist **2,251,735 raw / 644,927 gzip(-c)** (+500 over D-164 — core
+  collector only); `build:systems` rules.js **117.5 kB**; e2e **276 listed
+  / 36 files**, collect-only. Five mutation reverts, five reds, restored.
+- **Still open:** M07's remainder (hero identity beyond casting inputs;
+  leadership auras still fixed radius/bonus), M11's remaining
+  unincremented metric fields beyond `deathsCount`, the "1 sq. ft. hole"
+  LoE exception (needs aperture authoring), spread-around-corner pathing,
+  and a real cone/line spell in the pack.
+
+### P5 progress — 2026-09-11, order- and profile-driven strategic Fireball (D-164, C05 closed)
+
+- **C05's remainder closed.** Location, range and targets were the fixed demo
+  origin and demo caster constants after D-151; every input is now
+  order-driven, profile-driven or pack-driven. R02 first: AoN Rules ID 227
+  "Range" (CRB pg. 213) transcribed verbatim — range is "the maximum
+  distance at which you can designate the spell's point of origin", and the
+  close/medium/long formulas ("25 feet … +5 feet for every two full caster
+  levels", "100 feet + 10 feet per caster level", "400 feet + 40 feet per
+  caster level").
+- **Location:** the `spell_aoe` order's `data` carries `{ x, y }` — the
+  designated point of origin, required and finite. `validateOrder` names the
+  error at issue; `resolveTurn` refuses `bad_order` at resolve. No fixed
+  fallback: `DEMO_SPELL_ORIGIN` deleted.
+- **Range:** the `massBattle` block gains `rangeCategory` (Fireball ships
+  `long`); `spellRangeFeet` implements the ID-227 formulas; a cast is
+  refused `out_of_range` when the epicenter is farther than the range from
+  the casting unit's anchor (first living model) — inclusive at the limit.
+- **CL/DC inputs:** `rawProfileFromUnit` now carries `castingStatMod` and
+  `spellPenetration` with the existing `casterLevel`, so the caster's
+  compiled profile drives the dice (1d6/CL capped 10d6), the DC
+  (`spellSaveDc`, same function as tactical) and SR penetration; missing
+  stats fall back to the documented compiled defaults, never a call-site
+  constant. `DEMO_CASTER_LEVEL`/`DEMO_KEY_ABILITY_MOD` deleted. Spell level
+  stays the verified constant 3 (CRB p.283) until the pack's known-bug
+  `level` table is repaired wholesale.
+- **Targets:** an Area spell's targeting input *is* the designated point;
+  membership stays D-151's spatial check and keeps rules-correct friendly
+  fire — an enemies-only filter would be a house rule. The emitted spell
+  event reports `epicenterX/epicenterY`, `rangeCategory`, `rangeFeet`;
+  refusals emit named `spellRefused` events
+  (`bad_order | no_caster_profile | no_living_caster | pack_issue |
+  out_of_range`).
+- **Two verified pack prose repairs:** Fireball's `range` field now reads
+  "long (400 ft. + 40 ft./level)" and the spurious `target` line is
+  deleted, both against D-151's four-source CRB p.283 transcription (inert
+  fields, but they contradicted the enforced payload).
+- **Mutation-checked per the D-151 rule:** reverting the fixed origin, the
+  constant CL, the range check, the close-range "every two FULL levels"
+  formula, or the deploySeed wiring each breaks its own test (five reverts,
+  five reds, all restored).
+- **Still open:** cone/line shapes (C01b refusal stands), anchor↔epicenter
+  LoS (no wall data in strategic `RulesContext`), per-unit hit attribution
+  (M11/P8), hero-actor CL/key-mod inputs (M07/P8), the `level` table
+  repair.
+- **Evidence:** 12 new/extended tests — `tests/packages/massBattlePf1e.test.ts`
+  8, `pf1eSpellPacks.test.ts` 16 (incl. the ID-227 formula table and
+  pack↔mirror `rangeCategory` parity), `pf1eDeploySeed.test.ts` 9; full
+  suite **1532 passed / 3 skipped** across 148 files (+12 over D-163);
+  typecheck/lint green (Prettier per the D-151 rule: the two touched
+  files clean at HEAD stay prettier-clean; the four dirty-at-HEAD files
+  keep their native style, diffs semantic only); dist **2,251,235 raw /
+  644,704 gzip(-c)** — byte-identical raw to D-163, no app-bundled file
+  touched (the package ships via `build:systems`: rules.js **59.3 kB**,
+  was 55.1 kB); e2e **276 listed / 36 files**, collect-only (D-119
+  precedent).
+
+### P5 progress — 2026-09-11, swift/quickened timing rides the action ledger (D-163, C03 partial)
+
+- **The timing half of C03 is now live.** R02 transcribed Rules ID 157
+  ("Swift Actions") and ID 158 ("Cast a Quickened Spell"), both CRB pg.
+  188: one single swift action per turn; quickened spells and spells
+  designated free/swift cast as a swift action; only one such spell per
+  round; it does not count against the one-spell-per-round limit and never
+  provokes.
+- **The D-131 ledger is the gate:** a swift- or free-time cast, or a
+  GM-declared quickened one, spends the caster combatant's
+  `flags.pf1e.actions` swift action through the same pure
+  `actionRefusal`/`spendCombatantAction` path the tracker uses — named
+  refusals when the swift is spent or reserved, nothing rolled or
+  published on refusal, the spend batched with the cast's own ops.
+- **The card narrates the timing** ("quickened swift action — does not
+  provoke … does not count against the one-spell-per-round limit"); the
+  sheet gains the Quickened checkbox and passes the linked combatant id.
+- **Quickening a 1-round+ casting is refused by name** from the ID 158
+  text; the Quicken Spell feat body (+4 slot cost) did not render from AoN
+  this pass, so the slot adjustment stays the GM's pick.
+- **Still open for C03 (stays unchecked):** only attacks of opportunity
+  against ranged-touch casters remain (trigger transcribed; resolution
+  rides P06's interrupt queue).
+- **Evidence:** 8 new flow tests in `tests/ui/pf1eSwiftCasting.test.ts`
+  (swift/free spend, second-swift and swift-reserved refusals, quickened
+  spend + narration, longer-refusal, no-encounter and unknown-combatant
+  passthroughs). Full suite **1520 passed / 3 skipped** across 147 files;
+  typecheck/lint green (Prettier per the D-151 rule: the two touched
+  files clean at HEAD stay prettier-clean; the four dirty-at-HEAD files
+  keep their native style, diffs semantic only); dist **2,251,235 raw /
+  647,311 gzip**; e2e +1 collected deterministic test (92 unique specs,
+  276 across projects), not executed — no browser binaries, Playwright CDN
+  unreachable (D-082/D-119 precedent).
+
+### P5 progress — 2026-09-11, held-charge consumers: multi-touch charges, six-friend touches, weapon release (D-162, C03 partial)
+
+- **Three of the five remaining C03 consumers landed.** R02 transcribed
+  first: Rules ID 133's "Holding the Charge" paragraph verbatim (one friend
+  standard / up to six friends full-round; the unarmed/natural release is a
+  **normal** attack, the caster "isn't considered armed", hit = weapon
+  damage + discharge, miss = still holding), Rules ID 229's multi-target
+  touch no-hold text, and Chill Touch's "up to one time per level" as the
+  multi-charge oracle.
+- **Charges ride the actor document** (`PF1eHeldCharge.charges`, validated
+  1–50, malformed counts read as the single-charge default): a missed melee
+  touch cast can hold N deliveries; every successful delivery — touch
+  attack, willing auto-touch, ally touch or weapon release — consumes one;
+  the last clears with the `−=` marker, and the write→clear→re-parse
+  round-trip is pinned.
+- **`resolveChargeAllyTouches`** touches 1–6 willing allies with one button:
+  no attack rolls, each ally runs the shared damage→SR→save pipeline in
+  order, one combined charge write, one summary card; named refusals for
+  zero / more than six / duplicates / more allies than charges.
+- **`resolveChargeWeaponRelease`** discharges through an authored attack
+  line: the line's bonus vs the target's **normal** AC (never touch —
+  test-pinned with an armored target), a natural 20 threatens and the
+  confirmation doubles the weapon damage only, and one combined HP write
+  applies weapon + spell damage (new `skipHpWrite` pipeline option); a miss
+  keeps the charge. The card narrates the not-considered-armed / provokes
+  note — AoO *resolution* stays with P06.
+- **Sheet:** cast-panel charges input (melee touch only), delivery count on
+  the held-charge panel, release-weapon select + button, and the checkbox
+  ally list for the full-round action.
+- **Still open for C03 (stays unchecked):** swift/quickened/metamagic
+  timing (the action ledger already models the swift bucket) and attacks of
+  opportunity against ranged-touch casters (trigger transcribed, resolution
+  rides P06's interrupt queue). The ID 229 spell-specific no-hold flag is a
+  GM call, not modeled data.
+- **Evidence:** 24 new unit tests (6 pure charge arithmetic/schema/
+  round-trip; 18 flow — cast-miss holds all charges, refusals spend
+  nothing, delivery decrement/clear, two-ally per-target rolls and HP
+  writes, release combined HP write / normal-AC pin / crit weapon-only
+  doubling / dice-less lines). Full suite **1512 passed / 3 skipped**
+  across 146 files; typecheck/lint/touched-file Prettier green; dist
+  **2,249,739 raw / 646,914 gzip**; e2e +3 collected in
+  `e2e/pf1e_touch.spec.ts` (91 unique specs, 273 across projects) — not
+  executed: no browser binaries in this environment and the Playwright CDN
+  is unreachable (D-082/D-119 precedent).
+
 ### P5 progress — 2026-09-11, multi-round casting: begin, disrupt, complete (D-161, C03 partial)
 
 - **The C03 timing half is now live.** R02 transcribed the full-round "Cast
@@ -749,7 +1125,7 @@ Clear/State` drive the loop in Chromium (75/75): the burst that is exactly
 - [x] **C02 — Implement tactical casting/save flow:** chosen targets, DC from spell level/key ability/focus, Fort/Ref/Will, save-negates/half/no-save distinctions, Evasion/Improved Evasion, per-type damage/ER and SR without natural-roll auto outcomes. Respect target-specific resistance bookkeeping. (I P5; G §2.11/Appendix A.16; M Task 5) — **done 2026-09-11 (D-149 rules layer + D-156 flow and UI):** D-149 encoded DC/saves/ER/SR/evasion as pure functions (`casting.ts`); D-156 wires them into the product: `resolveCastFlow` in `src/ui/sheets/pf1eCastFlow.ts` validates slot/prepared state before any roll, rolls damage → SR check → save in order, posts a host card with the HP-transition line, then writes slot/prepared/HP in one batched submit. The round-scoped SR ledger (`src/packages/pf1e/srLedger.ts`, `flags.pf1e.srOvercome` on the combat doc, GM override flag) is the target-specific resistance bookkeeping. One chosen target per cast; area payloads and multiple simultaneous targets ride C05's profile-driven cast, components/concentration/touch-charge timing ride C03.
 - [ ] **C03 — Implement concentration/components and timing:** defensive casting versus taking-damage checks, spell loss, threatened casting, armor spell failure, verbal/somatic/material/focus requirements, touch/held charge, multi-round casting, swift/quickened/metamagic timing. Validate dubious source restrictions under R02. (I P5; G §4.10; B §4.4)
 - [x] **C04 — Add level 0–9 spellbook/preparation/slot readouts**, prepared versus spontaneous data and bonus slots; MVP overuse produces warnings, not hard enforcement. (I P5; B §6.2) — **done 2026-09-11 (D-152 rules layer + D-155 persistence and UI):** the 0–9 readout with Table 1-3 bonus slots and prepared/spontaneous data shipped in D-152; D-155 persists the daily state on the actor (`system.pf1e.spells.slotsUsed`, `.prepared`, both validated), adds the sheet's Spells tab (Spend/Restore per granted level, prepare/expend/remove rows) built on the tested `spendSlot`/`reviewPreparation`/`slotLedgerView` layer, and keeps overuse as warnings rather than refusals. Cast→spend coupling landed with D-156's casting flow.
-- [ ] **C05 — Replace hardcoded strategic Fireball with profile/pack-driven cast payloads** for location, shape, range, radius, CL, DC, dice and targets; use the agreed 20-ft Fireball. Remove or explicitly document scatter under R03 and keep spatial membership/ranges consistent if displacement remains. (G §5; I P5; M Task 5)
+- [x] **C05 — Replace hardcoded strategic Fireball with profile/pack-driven cast payloads** for location, shape, range, radius, CL, DC, dice and targets; use the agreed 20-ft Fireball. Remove or explicitly document scatter under R03 and keep spatial membership/ranges consistent if displacement remains. (G §5; I P5; M Task 5) — **done 2026-09-11 (D-151 payload half + D-164 location/range/targets):** the payload (shape, radius, dice, saves, range category) comes from the pack's `massBattle` block; scatter deleted and membership is the spatial distance check with friendly fire intact (D-151); the point of origin rides the order (`{x,y}`, validated at issue and refused by name at resolve), range is enforced from the casting unit's anchor against the ID-227 category formulas, and caster level / DC key modifier ride the caster's compiled profile (D-164). Cone/line stay the C01b named refusal.
 - [ ] **C06 — Connect Stealth/Perception to host detection and ambush state:** verified distance/environment/cover modifiers, spatial queries and hidden-target legality; distinguish presence detection from locating/seeing a target. (B §§4.2, 6, 9; G §4.5–4.6)
 - [ ] **C07 — Add verified sensory-mode behavior** for normal/low-light/darkvision, scent, tremorsense, blindsight and true seeing, with appropriate ranges, lighting/LOS/concealment exceptions and faction projection. Avoid treating distinct senses as interchangeable. (B §§4.2, 10)
 - [ ] **C08 — Define and document mass stealth aggregation** (unit-level policy and entry-triggered checks) rather than per-model all-pairs checks; test ambush/flat-footed effects and scale cost. (B §§4.2, 7)
@@ -829,7 +1205,7 @@ Clear/State` drive the loop in Chromium (75/75): the burst that is exactly
 
 Depends on P2–P5. Complete action costs and modifiers together with their legal execution.
 
-- [ ] **P01 — Normalize scene/model/feet conversions** across deploy spacing, envelopment reach, aura radii and spells. Use scene grid metadata, not incompatible hardcoded 1.5/5/15/30 constants. (G §2.15; B §6.1)
+- [ ] **P01 — Normalize scene/model/feet conversions** across deploy spacing, envelopment reach, aura radii and spells. Use scene grid metadata, not incompatible hardcoded 1.5/5/15/30 constants. (G §2.15; B §6.1) — **partial 2026-09-12 (D-177):** envelopment reach now rides the scene's grid distance in feet (the 1.5 constant is gone); deploy spacing and the fixed leadership-aura radius remain.
 - [ ] **P02 — Implement space/reach/threat geometry:** token footprints, size/tall/long reach, reach-weapon dead zones, tiny-creature occupancy/zero reach, diagonals and threatened-square highlighting. (G §4.5; I P6)
 - [ ] **P03 — Implement movement legality and cost:** terrain multipliers, obstacles/occupied squares/allies, squeezing, minimum movement, run/withdraw, legal ending squares, 5-foot steps and charge path/action restrictions. (I P6; G §3/§4.5)
 - [ ] **P04 — Implement positional defenses/modifiers:** corner-based soft/partial/standard/improved/total cover, concealment non-stacking, invisibility/denied Dex, helplessness, higher ground, opposite-border flanking and threatening-ally requirements. Use independently verified fixtures. (I P3/P6; G §4.6)
@@ -857,20 +1233,20 @@ Split into reviewable sub-slices. Depends on the relevant tactical data/effect/s
 - [ ] **M01 — Bring strategic attack/damage rules up to the verified data contract:** outstanding G §2.4–2.10 (crit/bonus dice, ranged Dex/size, handedness/enhancement, range/firearms and defender mitigation) using independent sim loops; add scale-specific fixtures, not a cross-scale equality gate. (G §§2, 5; I P8)
 - [ ] **M02 — Reconcile strategic compile differences** in AoO budget, CMB/CMD special size and save bases/modifiers using verified shared tables; keep legacy/stat-block conversion differences explicit and measure changed fixtures. (G §10.2; I P8)
 - [ ] **M03 — Fix condition/status bit collisions** with a budgeted separate column or safe allocation; update manifest, codec, spatial filters, compaction and joiner tests so prone/flanked never masquerade as hidden/pinned. (G §2.13; I P8; B §4.5)
-- [ ] **M04 — Replace heuristic engagement with scale-appropriate contact/reach/flanking geometry** and clear/recompute stale FLANKED bits each turn; handle envelopment movement and document any non-SRD bonuses. (G §2.2/§5; M Task 4)
-- [ ] **M05 — Execute declared movement/shoot/melee/spell order phases** rather than accepting no-op move/hold/retreat/custom orders; implement range/terrain/charge/withdraw/run and movement-triggered AoOs. Decide adopted morale behavior explicitly; a broader morale subsystem is deferred below. (G §5; M Tasks 3–5)
-- [ ] **M06 — Complete strategic SR/save, nonlethal, healing and regeneration paths** with correct counters and model lifecycle handling; retain independently seeded deterministic resolution. (G §2.11–2.12/§5; I P5/P7/P8)
+- [ ] **M04 — Replace heuristic engagement with scale-appropriate contact/reach/flanking geometry** and clear/recompute stale FLANKED bits each turn; handle envelopment movement and document any non-SRD bonuses. (G §2.2/§5; M Task 4) — **partial 2026-09-12 (D-177):** envelopment reach is now measured in feet with a scene-derived default (the SRD 5-ft natural reach replacing the 1.5-unit error), and the stale FLANKED bit is cleared and recomputed every round instead of lingering forever. Open: per-size/reach-weapon reach and true flanking angles (P02), envelopment movement, bonus documentation.
+- [ ] **M05 — Execute declared movement/shoot/melee/spell order phases** rather than accepting no-op move/hold/retreat/custom orders; implement range/terrain/charge/withdraw/run and movement-triggered AoOs. Decide adopted morale behavior explicitly; a broader morale subsystem is deferred below. (G §5; M Tasks 3–5) — **partial 2026-09-12 (D-173/D-174/D-175):** move orders execute as formation movement within a pace-scaled budget (march 1× / charge 2× / run 4×, R02'd from the CRB; move points × scene grid distance; dead left behind; phases see post-move positions), movement is clipped at movement-blocking walls (§0 bit 0; `blockedByWall` reported; waypoints beyond a wall are never attempted), and retreat orders execute as SRD Withdraw — double speed toward `order.toward`, same wall clipping, `pace: "retreat"`. Open: terrain cost and obstacle routing (P03), charge/run restrictions beyond distance, movement-triggered AoOs (P06), shoot and morale sub-phases.
+- [ ] **M06 — Complete strategic SR/save, nonlethal, healing and regeneration paths** with correct counters and model lifecycle handling; retain independently seeded deterministic resolution. (G §2.11–2.12/§5; I P5/P7/P8) — **partial 2026-09-12 (D-176):** fast healing and regeneration now execute once per turn in a `heal` sub-phase (SRD "at the start of its turn"; capped at the effective maximum; living models only; `damageHealed` finally booked), authored via unit stats and consumed through the tested `resolvePF1eHealing` engine. Open: regeneration suppress-types/can't-die semantics at the strategic layer, and any remaining strategic nonlethal pathing.
 
 ### Player hero bridge
 
-- [ ] **M07 — Produce real hero identity and actor inputs:** `leaderTokenId` → actor → profile/`isHeroUnit`; populate `RulesContext.leaderActors` at production construction sites instead of empty maps or fixture IDs. (G §4.12/§5; I P8; M Task 7)
+- [ ] **M07 — Produce real hero identity and actor inputs:** `leaderTokenId` → actor → profile/`isHeroUnit`; populate `RulesContext.leaderActors` at production construction sites instead of empty maps or fixture IDs. (G §4.12/§5; I P8; M Task 7) — **partial 2026-09-11 (D-168/D-169):** `collectLeaderActors` populates `leaderActors` (keyed by unit id) at both production sites; the strategic caster's CL/key-mod/Spell Penetration ride the leader actor via the shared tactical derivation; and `isHeroUnit` now also recognizes the leader-actor binding (unit id present in `leaderActors`), so a bound unit radiates the leadership aura and, since D-178, cleaves per the SRD feat — one extra attack at full BAB against an adjacent enemy, with the −2 AC penalty. Open: leadership auras use the work plan's fixed radius/bonus (R02 in D-172 proved the SRD Leadership feat has no aura to author from); `heroBridge`'s query radii were unit errors, corrected in D-172. The cleave's literal `damageDealt: 25` and the rejected overkill-cascade model were **deleted in D-178** (Gap List §5 closed for cleave).
 - [ ] **M08 — Implement bidirectional position/HP/condition sync** between hero documents and model slots; snapshot/lock inputs for advance and reconcile worker results through atomic authorized Ops, with movement-during-turn race tests. (B §§4.1, 7; G §4.12; M Task 7)
 - [ ] **M09 — Fix aura application/removal and stacking:** radius/bonuses from feat/class data, spatially eligible allies only, no per-model/per-turn accumulation into base stats; leaving formation or losing the leader removes benefits. (G §5; B §4.1; M Task 7)
 - [ ] **M10 — Wire hero melee/casting/direct targeting and approved cleave behavior** into normal player controls and reports. Treat bodyguard/rank shielding/duels as separately scoped extensions below, not hidden requirements for initial bridge delivery. (I P8; M Task 7; B §4.1)
 
 ### Analytics and battle UI
 
-- [ ] **M11 — Populate all advertised metrics at their real event sources:** attacks/hits/misses/percentage, damage dealt/taken/overkill, threats/confirms, kills/deaths/remaining, DR absorbed/SR blocked, saves, AoO executed/hits, CMB success, healing/regeneration/channel-energy counts. Specifically close the six unincremented fields identified by I P8. (M Task 6; G §5; I P8)
+- [ ] **M11 — Populate all advertised metrics at their real event sources:** attacks/hits/misses/percentage, damage dealt/taken/overkill, threats/confirms, kills/deaths/remaining, DR absorbed/SR blocked, saves, AoO executed/hits, CMB success, healing/regeneration/channel-energy counts. Specifically close the six unincremented fields identified by I P8. (M Task 6; G §5; I P8) — **partial 2026-09-11 (D-165/D-170):** strategic spells attribute hits per owning unit on the spell event (`hitsByUnit`) and book `deathsCount` on the unit that lost models; defensive-cast AoO is now armed in mass battles, so `aooExecuted`/`aooHits` have a real source (threat list → `resolvePF1eAoO` → `PF1eSpellMetrics` → `recordSpell`); the dead combat-side `srBlocked` was deleted (summary field stays, fed by spells); the collector lives for the module's lifetime, so `forecast()` returns real `generateReport()` totals. Open/refused-with-reason: `cmbSuccesses` has no mass-battle mechanic to source it (no maneuvers) — field kept, initialized. Update 2026-09-12 (D-176): `damageHealed` now has a real source — the heal sub-phase books fast-healing/regeneration via `recordHealing`.
 - [ ] **M12 — Call `generateReport()` from actual turn resolution**, reconcile per-model/per-unit totals into TurnReport summaries, and test resets/aggregation/attribution rather than collector-only fixtures. (M Task 6; G §5)
 - [ ] **M13 — Implement RFC-4180 CSV escaping** for commas, quotes and newlines with round-trip tests. (M Tasks 6/8; I P8)
 - [ ] **M14 — Mount ArmyWindow, PF1eBattleAnalysis and TurnReportTimeline** in normal WindowHost navigation, not just e2eHook; reactive analysis/table/report readback and CSV export must work after real turns. (G §1.7; I P8; M Task 8)

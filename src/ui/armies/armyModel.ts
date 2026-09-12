@@ -17,6 +17,7 @@ import type {
 import type { SimEvent, TurnReport } from "../../core/sim";
 import type { Op } from "../../core/ops";
 import type { DocumentStore } from "../../core/store";
+import { collectLeaderActors } from "../../core/rules";
 import type {
   RulesContext,
   RulesGridContext,
@@ -417,7 +418,19 @@ export function rulesContextFromStore(
     walls,
     factions: store.getAll("factions") as FactionDocument[],
     armies: store.getAll("armies") as ArmyDocument[],
-    leaderActors: {},
+    // M07: same convention as the host TurnChannel — leader actors keyed by unit id.
+    leaderActors: collectLeaderActors({
+      units: (store.getAll("armies") as ArmyDocument[]).flatMap((a) =>
+        a.units.map((u) => ({
+          id: u._id,
+          leaderTokenId: u.leaderTokenId ?? null,
+        })),
+      ),
+      tokens: scene?.tokens,
+      getActor: (actorId) =>
+        store.get("actors", actorId) as unknown as
+          import("../../core/documents").Json | undefined,
+    }),
     // Absent means "read the world": the replicated settings doc is the authority (D-113), and an
     // explicit argument only overrides it for callers that are simulating a context (tests, e2e).
     worldSettings: (worldSettings ??

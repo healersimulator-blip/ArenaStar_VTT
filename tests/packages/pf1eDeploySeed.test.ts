@@ -180,6 +180,40 @@ describe("Deploy seeding (§1.3)", () => {
     expect(raw.armorBonus).toBe(3);
     expect(raw.ac).toBeUndefined(); // derived, not typed
   });
+
+  test("caster stats ride the unit's profile (C05): casterLevel, castingStatMod, spellPenetration", () => {
+    const units = [unit("u-a", { stats: { casterLevel: 5, castingStatMod: 4, spellPenetration: 2 } })];
+    const profiles = buildUnitProfiles(units, new PF1eProfileRegistry());
+    const profile = profiles.byUnitId.get("u-a");
+    expect(profile).toBeDefined();
+    expect(profile?.casterLevel).toBe(5);
+    expect(profile?.castingStatMod).toBe(4);
+    expect(profile?.spellPenetration).toBe(2);
+
+    // A unit without caster stats keeps the compiled defaults rather than zeroes.
+    const plain = buildUnitProfiles([unit("u-b")], new PF1eProfileRegistry()).byUnitId.get("u-b");
+    expect(plain?.casterLevel).toBeGreaterThan(0);
+  });
+
+  test("fast healing and regeneration stats ride the unit's profile (M06/D-176)", () => {
+    const trolls = buildUnitProfiles(
+      [unit("u-t", { stats: { fastHealing: 3, regeneration: 5 } })],
+      new PF1eProfileRegistry(),
+    ).byUnitId.get("u-t");
+    expect(trolls?.fastHealingVal).toBe(3);
+    expect(trolls?.regenerationVal).toBe(5);
+
+    // Absent abilities compile to zero; fractional/negative input never reaches the pool.
+    const none = buildUnitProfiles([unit("u-n")], new PF1eProfileRegistry()).byUnitId.get("u-n");
+    expect(none?.fastHealingVal).toBe(0);
+    expect(none?.regenerationVal).toBe(0);
+    const clamped = buildUnitProfiles(
+      [unit("u-c", { stats: { fastHealing: -2, regeneration: 5.9 } })],
+      new PF1eProfileRegistry(),
+    ).byUnitId.get("u-c");
+    expect(clamped?.fastHealingVal).toBe(0);
+    expect(clamped?.regenerationVal).toBe(5);
+  });
 });
 
 describe("Deterministic resolution (§1.5)", () => {

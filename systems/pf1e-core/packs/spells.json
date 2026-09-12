@@ -15,8 +15,7 @@
           "descriptors": ["fire"],
           "components": { "verbal": true, "somatic": true, "material": "a ball of bat guano and sulfur" },
           "castingTime": "1 standard",
-          "range": "100 ft. + 50 ft./level",
-          "target": "one creature or object per caster level; no two may be more than 30 ft. apart",
+          "range": "long (400 ft. + 40 ft./level)",
           "area": "20-ft.-radius spread",
           "duration": "instantaneous",
           "savingThrow": "Reflex half",
@@ -24,6 +23,7 @@
           "massBattle": {
             "shape": "circle",
             "radiusFeet": 20,
+            "rangeCategory": "long",
             "saveType": "ref",
             "halfOnSave": true,
             "evasion": true,
@@ -33,6 +33,41 @@
             "maxDice": 10,
             "damageType": "fire",
             "notes": "The sim derives the save DC as 10 + spell level + casting ability modifier (spellSaveDc); it does not read a hard-coded DC. radiusFeet, saveType, halfOnSave and the dice are the fields the mass-battle order consumes."
+          }
+        },
+        "effects": []
+      }
+    },
+    {
+      "id": "burning-hands",
+      "name": "Burning Hands",
+      "keywords": ["evocation", "fire", "aoe"],
+      "data": {
+        "type": "item",
+        "name": "Burning Hands",
+        "system": {
+          "level": { "adept": 1, "arcanist": 1, "bloodrager": 1, "magus": 1, "occultist": 1, "shaman": 1, "sorcererWitch": 1, "wizard": 1 },
+          "school": "evocation",
+          "descriptors": ["fire"],
+          "components": { "verbal": true, "somatic": true },
+          "castingTime": "1 standard",
+          "range": "15 ft.",
+          "area": "cone-shaped burst",
+          "duration": "instantaneous",
+          "savingThrow": "Reflex half",
+          "spellResistance": true,
+          "massBattle": {
+            "shape": "cone",
+            "radiusFeet": 15,
+            "saveType": "ref",
+            "halfOnSave": true,
+            "evasion": true,
+            "damageDiceCount": 1,
+            "damageDiceSides": 4,
+            "dicePerCasterLevel": true,
+            "maxDice": 5,
+            "damageType": "fire",
+            "notes": "Transcribed from PRPG Core Rulebook pg. 251 (R02): 15-ft cone-shaped burst, 1d4 fire per caster level (maximum 5d4), Reflex half, SR yes. A cone starts at the caster and widens out; it does not designate a remote point of origin, so there is no rangeCategory. Evasion applies because the spell is Reflex half."
           }
         },
         "effects": []

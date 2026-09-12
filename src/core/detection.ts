@@ -15,6 +15,9 @@ import type { Vec2 } from "../core/strategic";
 /** Sight restriction bit (§0 RulesWallsContext convention). */
 export const WALL_SIGHT_BIT = 1 << 1;
 
+/** Movement restriction bit (§0 RulesWallsContext convention: move|sight|sound|light). */
+export const WALL_MOVE_BIT = 1 << 0;
+
 export interface DetectionSource {
   anchor: Vec2;
   factionId: DocId;
@@ -63,6 +66,63 @@ function segmentsIntersect(
   const d3 = (dx - cx) * (ay - cy) - (dy - cy) * (ax - cx);
   const d4 = (dx - cx) * (by - cy) - (dy - cy) * (bx - cx);
   return d1 * d2 < 0 && d3 * d4 < 0;
+}
+
+/**
+ * True when no sight-blocking wall crosses the segment a→b. This is the §0 wall contract
+ * (bit 1 of `restriction` = sight) reused by the spell layers: CRB p.214's line of effect
+ * is "like line of sight … except that it's not blocked by fog, darkness, and other
+ * factors that limit normal sight", and the sim authors such factors as non-sight walls.
+ */
+export function hasLineOfEffect(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  walls: RulesWallsContext,
+): boolean {
+  for (let i = 0; i < walls.x1.length; i++) {
+    if (((walls.restriction[i] ?? 0) & WALL_SIGHT_BIT) === 0) continue;
+    if (segmentsIntersect(ax, ay, bx, by, walls.x1[i] ?? 0, walls.y1[i] ?? 0, walls.x2[i] ?? 0, walls.y2[i] ?? 0)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * The earliest crossing of the segment a→b with any movement-blocking wall (bit 0 of
+ * `restriction`, the §0 wall contract), as a fraction t ∈ (0,1) along a→b — or null when
+ * the path is clear. Uses the same strict-crossing convention as the LOS test above
+ * (grazing a wall endpoint does not block). Movement resolution stops the mover at the
+ * returned fraction; it never routes around the wall (pathfinding is out of scope).
+ */
+export function firstMoveBlock(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  walls: RulesWallsContext,
+): number | null {
+  const rx = bx - ax;
+  const ry = by - ay;
+  let best: number | null = null;
+  for (let i = 0; i < walls.x1.length; i++) {
+    if (((walls.restriction[i] ?? 0) & WALL_MOVE_BIT) === 0) continue;
+    const cx = walls.x1[i] ?? 0;
+    const cy = walls.y1[i] ?? 0;
+    const dx = walls.x2[i] ?? 0;
+    const dy = walls.y2[i] ?? 0;
+    const wx = dx - cx;
+    const wy = dy - cy;
+    const denom = rx * wy - ry * wx;
+    if (denom === 0) continue; // parallel — never crosses
+    const t = ((cx - ax) * wy - (cy - ay) * wx) / denom;
+    const s = ((cx - ax) * ry - (cy - ay) * rx) / denom;
+    if (t <= 0 || t >= 1 || s <= 0 || s >= 1) continue;
+    if (best === null || t < best) best = t;
+  }
+  return best;
 }
 
 export class DetectionGrid {

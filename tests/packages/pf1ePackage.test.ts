@@ -315,8 +315,21 @@ describe("PF1e package manifests + packs (§1.1)", () => {
       maxDice: 10,
     });
     expect(fireball?.data.system["savingThrow"]).toBe("Reflex half");
+    // CRB pg. 251 (R02, D-171): 15-ft cone-shaped burst, 1d4/level capped at 5d4, Reflex half.
+    const burningHands = raw.entries.find((e) => e.id === "burning-hands");
+    expect(burningHands).toBeDefined();
+    expect(burningHands?.data.system["massBattle"]).toMatchObject({
+      shape: "cone",
+      radiusFeet: 15,
+      saveType: "ref",
+      damageDiceCount: 1,
+      damageDiceSides: 4,
+      maxDice: 5,
+    });
+    expect(burningHands?.data.system["savingThrow"]).toBe("Reflex half");
     expect(raw.entries.map((e) => e.id)).toEqual([
       "fireball",
+      "burning-hands",
       "magic-missile",
       "shield",
       "true-strike",
@@ -337,7 +350,7 @@ describe("the built rules.js (D-086 single-file constraint)", () => {
     const loaded = await importRulesModule(rulesSource);
     if (!loaded.ok) throw new Error(loaded.error);
     expect(loaded.value.info.version).toBe(battlesManifest.version);
-    expect(loaded.value.info.subPhases).toEqual(["move", "shoot", "melee", "spell", "morale"]);
+    expect(loaded.value.info.subPhases).toEqual(["move", "heal", "shoot", "melee", "spell", "morale"]);
     expect(loaded.value.module.schema.modelColumns).toEqual({
       ...battlesManifest.rules?.modelColumns,
     });
@@ -411,7 +424,8 @@ describe("activating PF1e in a world (§1.1 acceptance, no browser)", () => {
     // data-only package: installed, indexed, and NOT activatable as rules
     const packs = await app.packages.compendia();
     expect(packs.map((p) => p.pack.name).sort()).toEqual(["PF1e Bestiary", "PF1e Spells"]);
-    expect(packs.reduce((n, p) => n + p.pack.entries.length, 0)).toBe(10);
+    // Bestiary 6 + spells 5 (fireball, burning-hands, magic-missile, shield, true-strike).
+    expect(packs.reduce((n, p) => n + p.pack.entries.length, 0)).toBe(11);
 
     const activated = await app.packages.activate("pf1e-mass-battles");
     expect(activated.ok ? null : activated.error).toBeNull();

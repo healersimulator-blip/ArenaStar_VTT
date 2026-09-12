@@ -22,12 +22,36 @@ export const PF1E_PACK_SAVE_TYPES = ["ref", "fort", "will"] as const;
 export type PF1ePackSaveType = (typeof PF1E_PACK_SAVE_TYPES)[number];
 
 /**
+ * The standard range categories (CRB p.213, "Range"): a spell's range is "the maximum
+ * distance from you that the spell's effect can occur, as well as the maximum distance
+ * at which you can designate the spell's point of origin". Personal, touch and unlimited
+ * ranges have no point of origin to designate, and "range expressed in feet" spells would
+ * need their own field — none of those ship a massBattle block today.
+ */
+export const PF1E_PACK_SPELL_RANGES = ["close", "medium", "long"] as const;
+export type PF1ePackSpellRange = (typeof PF1E_PACK_SPELL_RANGES)[number];
+
+/**
  * The `system.massBattle` block a pack ships on a spell. Fields mirror the shipped
  * `pf1e-core` pack so a pack author can read one and know the other.
  */
 export interface PF1ePackSpellMassBattle {
   shape: PF1ePackSpellShape;
+  /**
+   * Circle: the radius ("20-ft.-radius spread"). Cone: the cone's length — the spell's
+   * own Range entry, since a cone "shoots away from you" (CRB p.214). Line: the line's
+   * length, likewise ("extends to the limit of its range").
+   */
   radiusFeet: number;
+  /**
+   * The spell's standard range category (CRB p.213); feet are derived at caster level.
+   * Required only for `circle` — the shape where the caster designates a remote point of
+   * origin. Cones and lines start at the caster and reach exactly their length, so they
+   * carry no category; one authored on them is ignored.
+   */
+  rangeCategory?: PF1ePackSpellRange | undefined;
+  /** Line shape only: corridor width in feet (CRB p.214's published lines are 5 ft wide). */
+  widthFeet?: number | undefined;
   saveType: PF1ePackSaveType;
   halfOnSave: boolean;
   /** True when Evasion/Improved Evasion can apply — the spell must be Reflex half. */
@@ -44,7 +68,12 @@ export interface PF1ePackSpellMassBattle {
 export interface PF1ePackSpellOrder {
   spellName: string;
   shape: PF1ePackSpellShape;
+  /** Circle radius, or cone/line length (see `PF1ePackSpellMassBattle.radiusFeet`). */
   radius: number;
+  /** The pack's range category (circle shapes); null for cone/line, which start at the caster. */
+  rangeCategory: PF1ePackSpellRange | null;
+  /** Line corridor width in feet; null except for line shapes. */
+  widthFeet: number | null;
   saveType: PF1ePackSaveType;
   halfOnSave: boolean;
   evasionApplies: boolean;
@@ -139,6 +168,33 @@ export function parsePackSpellOrder(input: {
       message: `${spellName}: radius ${String(radiusFeet)} is not a positive number of feet`,
     });
   }
+  // Only the circle shape designates a remote point of origin, so only it needs a range
+  // category to check that designation against (CRB p.213). Cones and lines "shoot away
+  // from you" (CRB p.214) and reach exactly their length.
+  const rangeCategory = mb.rangeCategory;
+  if (
+    shape === "circle" &&
+    !(PF1E_PACK_SPELL_RANGES as readonly string[]).includes(
+      String(rangeCategory),
+    )
+  ) {
+    issues.push({
+      field: "massBattle.rangeCategory",
+      message: `${spellName}: rangeCategory "${String(rangeCategory)}" is not one of ${PF1E_PACK_SPELL_RANGES.join(", ")}`,
+    });
+  }
+  const widthFeet = mb.widthFeet;
+  if (
+    shape === "line" &&
+    (typeof widthFeet !== "number" ||
+      !Number.isFinite(widthFeet) ||
+      widthFeet <= 0)
+  ) {
+    issues.push({
+      field: "massBattle.widthFeet",
+      message: `${spellName}: widthFeet ${String(widthFeet)} is not a positive number of feet`,
+    });
+  }
   const saveType = mb.saveType;
   if (!(PF1E_PACK_SAVE_TYPES as readonly string[]).includes(String(saveType))) {
     issues.push({
@@ -222,6 +278,9 @@ export function parsePackSpellOrder(input: {
       spellName,
       shape: shape as PF1ePackSpellShape,
       radius: radiusFeet as number,
+      rangeCategory:
+        shape === "circle" ? (rangeCategory as PF1ePackSpellRange) : null,
+      widthFeet: shape === "line" ? (widthFeet as number) : null,
       saveType: saveType as PF1ePackSaveType,
       halfOnSave,
       evasionApplies: evasion,
@@ -235,13 +294,40 @@ export function parsePackSpellOrder(input: {
 }
 
 /**
+ * Resolve a standard range category to feet at a caster level (CRB p.213, "Range"):
+ *
+ * - **Close**: "The spell reaches as far as 25 feet away from you. The maximum range
+ *   increases by 5 feet for every two full caster levels."
+ * - **Medium**: "The spell reaches as far as 100 feet + 10 feet per caster level."
+ * - **Long**: "The spell reaches as far as 400 feet + 40 feet per caster level."
+ */
+export function spellRangeFeet(
+  rangeCategory: PF1ePackSpellRange,
+  casterLevel: number,
+): number {
+  const level = Math.max(1, Math.floor(casterLevel));
+  switch (rangeCategory) {
+    case "close":
+      return 25 + 5 * Math.floor(level / 2);
+    case "medium":
+      return 100 + 10 * level;
+    case "long":
+      return 400 + 40 * level;
+    default: {
+      const never: never = rangeCategory;
+      throw new Error(`unknown range category: ${String(never)}`);
+    }
+  }
+}
+
+/**
  * The `massBattle` block of the shipped `pf1e-core` Fireball, mirrored here because the
  * reference system cannot read `systems/**` at runtime. Asserted against the real file by
  * `tests/packages/pf1eSpellPacks.test.ts`, so drift fails a test instead of silently
  * diverging.
  *
- * Values are the pack's: 20-ft.-radius spread, Reflex half, 1d6/level capped at 10d6
- * (CRB p.283).
+ * Values are the pack's: 20-ft.-radius spread, long range (400 ft. + 40 ft./level),
+ * Reflex half, 1d6/level capped at 10d6 (CRB p.283).
  */
 export const PF1E_PACK_FIREBALL_MASS_BATTLE: Readonly<Record<string, unknown>> =
   Object.freeze({
@@ -252,6 +338,7 @@ export const PF1E_PACK_FIREBALL_MASS_BATTLE: Readonly<Record<string, unknown>> =
       massBattle: Object.freeze({
         shape: "circle",
         radiusFeet: 20,
+        rangeCategory: "long",
         saveType: "ref",
         halfOnSave: true,
         evasion: true,
@@ -263,3 +350,34 @@ export const PF1E_PACK_FIREBALL_MASS_BATTLE: Readonly<Record<string, unknown>> =
       }),
     }),
   });
+
+/**
+ * The `massBattle` block of the shipped `pf1e-core` Burning Hands, mirrored here for the
+ * same reason as Fireball (the reference system cannot read `systems/**` at runtime).
+ * Asserted against the real file by `tests/packages/pf1eSpellPacks.test.ts`.
+ *
+ * Values are the pack's: 15-ft cone-shaped burst, Reflex half, SR yes, 1d4/level fire
+ * capped at 5d4 (CRB pg. 251, R02-transcribed D-171). A cone shoots away from the
+ * caster, so there is no range category (CRB pp.213-214).
+ */
+export const PF1E_PACK_BURNING_HANDS_MASS_BATTLE: Readonly<
+  Record<string, unknown>
+> = Object.freeze({
+  name: "Burning Hands",
+  system: Object.freeze({
+    savingThrow: "Reflex half",
+    spellResistance: true,
+    massBattle: Object.freeze({
+      shape: "cone",
+      radiusFeet: 15,
+      saveType: "ref",
+      halfOnSave: true,
+      evasion: true,
+      damageDiceCount: 1,
+      damageDiceSides: 4,
+      dicePerCasterLevel: true,
+      maxDice: 5,
+      damageType: "fire",
+    }),
+  }),
+});

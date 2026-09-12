@@ -22,7 +22,12 @@ export interface PF1eEnvelopmentResult {
 export const PF1E_STATUS_FLANKED = 1 << 2;
 
 export function calculatePF1eEnvelopment(opts: PF1eEnvelopmentOptions): PF1eEnvelopmentResult {
-  const { pool, grid, attackerUnitIdx, defenderUnitIdx, reach = 1.5 } = opts;
+  // `reach` is in FEET (SpatialGrid.queryPoint takes feet), defaulting to the SRD
+  // natural reach of a Medium creature: "Most creatures of Medium or smaller size
+  // have a reach of only 5 feet" (SRD Combat, Reach Weapons) — one grid square.
+  // The old `1.5` was a unit error (Gap List §5, P01). Per-size/reach-weapon reach
+  // is P02's geometry work.
+  const { pool, grid, attackerUnitIdx, defenderUnitIdx, reach = 5 } = opts;
 
   const contactPairs: Array<[number, number]> = [];
   const flankingSet = new Set<number>();

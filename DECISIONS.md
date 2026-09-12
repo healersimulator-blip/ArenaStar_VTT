@@ -4164,3 +4164,813 @@ touching up to six friends as a full-round action, multi-charge touch spells, an
 opportunity against ranged-touch casters. Minute-plus castings reuse this machinery as-is (the
 GM judges the completion either way); casting while mounted and AoO *resolution* at the begin
 (narrated, not resolved) are documented deferrals.
+
+## D-162 — 2026-09-11 — P5/C03 partial: the held-charge consumers — multi-touch charges, six-friend touches, and weapon release
+
+**Context.** With the gate (D-157), Table 9-1 surface (D-160), touch criticals
+and willing auto-touch (D-158/D-159) and multi-round casting (D-161) live,
+C03's remaining touch half was its *consumers*: what a caster can do with a
+held charge besides one touch attack per round. This slice closes three of
+the five listed remainders: multi-charge touch spells, touching up to six
+friends as a full-round action, and unarmed/natural-weapon delivery.
+
+**Decisions.**
+
+- **R02 first.** Transcribed before encoding, all from the same CRB chapter:
+  Rules ID 133 ("Cast a Spell", CRB pg. 183, "Holding the Charge", verbatim):
+  "You can touch one friend as a standard action or up to six friends as a
+  full-round action. Alternatively, you may make a normal unarmed attack (or
+  an attack with a natural weapon) while holding a charge. In this case, you
+  aren't considered armed and you provoke attacks of opportunity as normal
+  for the attack. If your unarmed attack or natural weapon attack normally
+  doesn't provoke attacks of opportunity, neither does this attack. If the
+  attack hits, you deal normal damage for your unarmed attack or natural
+  weapon and the spell discharges. If the attack misses, you are still
+  holding the charge." Rules ID 229 ("Duration", CRB pg. 215): "Some touch
+  spells allow you to touch multiple targets as part of the spell. You can't
+  hold the charge of such a spell; you must touch all targets of the spell in
+  the same round that you finish casting the spell." And the spell that
+  motivates multi-charge bookkeeping — Chill Touch (CRB pg. 255): "You can
+  use this melee touch attack up to one time per level."
+- **Charges are persisted actor state, like the charge itself.**
+  `PF1eHeldCharge` gains optional `charges` (integer 1–50; the cap is an
+  authoring bound, not a rule — spell counts scale with caster level). The
+  schema names the error for anything else; the reader treats a malformed
+  count as the single-charge default rather than rejecting the actor. The
+  write→clear→`applyDiff`→re-parse round-trip regression ships with the
+  slice, per the D-158 lesson.
+- **Every successful delivery consumes exactly one charge** — touch attack
+  (`resolveTouchDelivery`), willing auto-touch, ally touch, or weapon
+  release. `consumeHeldCharge`/`consumeHeldCharges` are the pure arithmetic;
+  a multi-charge spell keeps holding `charges − n` (the card narrates
+  "Charges remaining"), the last one clears the path with the `−=` marker.
+  Misses spend nothing. `resolveCastFlow` gained a `charges` param, refused
+  by name for ranged-touch and non-touch casts before any die rolls.
+- **The six-friend flow is its own entry point**
+  (`resolveChargeAllyTouches`): 1–6 willing targets (named refusals for
+  zero, more than six, duplicates, more allies than charges, missing DC,
+  missing permission), each touched automatically — "You can automatically
+  touch one friend" needs no roll — each running the shared
+  `runSpellEffect` pipeline in order (own damage roll, SR check and save),
+  then one combined charge write and one summary card. One friend as a
+  standard action remains the existing `willing` delivery.
+- **The weapon release is a NORMAL attack, not a touch attack**
+  (`resolveChargeWeaponRelease`): the selected authored line's attack bonus
+  against the target's **normal** AC — pinned by a test with an armored
+  target where the roll hits touch AC 9 and misses normal AC 13. On a hit
+  the weapon deals its normal damage (host roll + static bonus; a natural 20
+  threatens and the confirmation doubles the **weapon** damage only — the spell
+  resolves once, on its own save/SR terms) and the spell discharges through
+  the shared pipeline with a new `skipHpWrite` option, so ONE combined HP
+  write applies weapon + spell damage. On a miss the charge is kept. The
+  card narrates "not considered armed, provokes as normal" — resolving those
+  attacks of opportunity stays with P6's interrupt queue.
+- **Sheet wiring** (`PF1eActorSheet.svelte`): the cast panel gains a charges
+  input (melee touch only); the held-charge panel shows the delivery count,
+  a release-weapon select over the authored attack lines with a "Release
+  through attack" button, and the full-round ally touch — a checkbox list of
+  PF1e actors plus one button. The panel's stale-state guards are unchanged:
+  every flow re-reads the freshest documents before acting.
+
+**Verification.** 24 new unit tests — 6 pure in
+`tests/packages/pf1eTouchSpell.test.ts` (multi-charge round-trip, malformed
+counts read as the default, single-delivery decrement, bulk consumption,
+schema accept/reject, the multi-charge write→clear round-trip) and 18 flow
+in `tests/ui/pf1eTouchFlow.test.ts` (cast-miss holds all declared charges;
+charges refused for ranged/non-touch and outside 1–50 with nothing spent;
+delivery decrements/keeps/clears exactly; misses keep every charge; the
+two-ally touch rolls damage+save per ally in order and writes both HP
+totals; the last allies fully discharge; the named limits — zero/seven/
+duplicate/too-many; no-charge and no-permission refusals; the release's
+single combined HP write, normal-AC pinning, confirmed/unconfirmed crits
+doubling the weapon only, dice-less lines, multi-charge keeps, malformed
+weapon refusals). Full suite **1512 passed / 3 skipped** across 146 files
+(+24 over D-161); typecheck and lint green; touched-file Prettier applied.
+**Chromium e2e collected, not executed** (+3 in `e2e/pf1e_touch.spec.ts`,
+91 unique specs): no browser binaries exist in this environment and the
+Playwright CDN is unreachable (D-082/D-119 precedent) — the two die-less
+tests (multi-charge decrement, six-friend discharge) are fully
+deterministic; the release test branches on its card like the D-158 touch
+cast test. dist **2,249,739 raw / 646,914 gzip** (+15,629 / −1,906
+recompression over D-161, within the 6 MB budget).
+
+**Scope boundaries.** C03 stays open. Still missing: swift/quickened/
+metamagic timing, and attacks of opportunity against ranged-touch casters
+(the trigger text — "Ranged touch attacks provoke an attack of opportunity,
+even if the spell that causes the attacks was cast defensively", Rules ID
+133 — is transcribed-ready; both remain with P6's interrupt queue and the
+action ledger). The ID 229 spell-specific "can't hold a multi-target touch
+spell" restriction is not modeled as data; it is a GM call on which spells
+may be held at all. The weapon release consumes the authored line's derived
+bonus; the unarmed-fallback line (no authored attacks) is refused by name
+rather than inventing a Medium 1d3 default.
+
+## D-163 — 2026-09-11 — P5/C03 partial: swift and quickened casting ride the turn's swift action
+
+**Context.** D-162 closed three of the five remaining C03 consumers; the
+timing half — "swift/quickened/metamagic timing" — was next, with the Rules
+ID 158 text already flagged transcribed-ready by D-159. This slice wires it
+into the cast flow through the D-131 action ledger.
+
+**Decisions.**
+
+- **R02 first.** Transcribed before encoding, both from CRB pg. 188: Rules
+  ID 157 ("Swift Actions") — "You can perform one swift action per turn
+  without affecting your ability to perform other actions. ... You can,
+  however, perform only one single swift action per turn, regardless of what
+  other actions you take"; and Rules ID 158 ("Cast a Quickened Spell") —
+  "You can cast a quickened spell (see the Quicken Spell feat), or any spell
+  whose casting time is designated as a free or swift action, as a swift
+  action. Only one such spell can be cast in any round, and such spells
+  don't count toward your normal limit of one spell per round. Casting a
+  spell as a swift action doesn't incur an attack of opportunity." The
+  Quicken Spell feat body itself (the +4-level slot cost, the
+  beyond-full-round exclusion) did not render from AoN this pass; the slot
+  cost therefore stays GM-side (the cast panel already picks the slot
+  level), and the multi-round exclusion is derived from the transcribed ID
+  158 text — a quickened spell comes into effect as a swift action this
+  round, so `quickened` + `castingTime: "longer"` is refused by name.
+- **The ledger IS the "only one such spell in any round" gate.** A swift- or
+  free-time cast, or a GM-declared quickened one, spends the caster
+  combatant's per-turn swift action (`flags.pf1e.actions`) through the same
+  pure `actionRefusal`/`spendCombatantAction` path the tracker panel uses —
+  the refusal names why (swift already used; an off-turn immediate reserved
+  it). The spend lands as the CombatPanel's own `combatants` update shape,
+  batched with the cast's other ops, so a refused cast spends nothing and
+  publishes nothing. Without a linked combatant the usage stays the GM's
+  call (no silent invention); effect deny-tokens against the swift spend
+  remain the panel's gate.
+- **The card narrates the timing**: quickened casts read "cast as a
+  quickened swift action — does not provoke attacks of opportunity and does
+  not count against the one-spell-per-round limit"; swift/free casts read
+  the same note without the quickened clause. The "doesn't count toward the
+  one-spell-per-round limit" half is satisfied by construction: the flow
+  never touches the ledger's standard slot.
+- **Sheet wiring**: a "Quickened" checkbox in the cast panel
+  (`data-cast-quickened`); the linked combatant id now rides the cast-flow
+  params. Everything else — gate, touch, multi-round, held charges —
+  composes with the timing unchanged.
+
+**Verification.** 8 new flow tests in `tests/ui/pf1eSwiftCasting.test.ts`:
+the swift cast spends the ledger (and a free-time cast does too — ID 158's
+"designated as a free or swift action"); the second swift spell and a
+swift-reserved turn are both refused with nothing spent or rolled; the
+quickened cast spends and narrates both timing clauses; quickening a
+1-round+ casting is refused; no encounter or an unknown combatant casts on
+without a ledger write. Full suite **1520 passed / 3 skipped** across 147
+files (+8 over D-162); typecheck and lint green; touched-file Prettier
+applied. **Chromium e2e collected, not executed** (+1 deterministic test in
+`e2e/pf1e_touch.spec.ts`: a die-less quickened cast asserts the timing
+narration; 92 unique specs, 276 across projects) — no browser binaries in
+this environment, Playwright CDN unreachable (D-082/D-119 precedent). dist
+**2,251,235 raw / 647,311 gzip** (+1,496 over D-162, within the 6 MB
+budget).
+
+**Scope boundaries.** C03 stays open on its last remainder: attacks of
+opportunity against ranged-touch casters — the trigger text ("Ranged touch
+attacks provoke an attack of opportunity, even if the spell that causes the
+attacks was cast defensively", Rules ID 133) is transcribed; resolution
+waits on P06's interrupt queue. Other metamagic feats (the feat bodies
+beyond Quicken) are not encoded; the Quicken Spell +4 slot adjustment is
+the GM's slot pick until the feat text is transcribed. The tracker panel's
+own swift-spend button and the cast flow write the same ledger, so a swift
+cast is visible in the budget immediately.
+
+## D-164 — 2026-09-11 — P5/C05 closed: the strategic Fireball is order- and profile-driven end to end
+
+**Context.** D-151 made the strategic Fireball pack-driven for shape, radius,
+DC formula and dice, and deleted the scatter deviation — but location, range
+and targets were still the fixed demo origin `{x: 10, y: 10}`, and caster
+level / key-ability modifier were demo constants. C05 asked for
+profile/pack-driven payloads for location, shape, range, radius, CL, DC,
+dice and targets. This slice closes the remainder.
+
+**Decisions.**
+
+- **R02 first.** Transcribed before encoding, from AoN Rules ID 227 "Range"
+  (CRB pg. 213): "A spell's range is the maximum distance from you that the
+  spell's effect can occur, **as well as the maximum distance at which you
+  can designate the spell's point of origin.** If any portion of the spell's
+  area would extend beyond this range, that area is wasted." — plus the
+  standard categories verbatim: **Close** "as far as 25 feet away from you.
+  The maximum range increases by 5 feet for every two full caster levels";
+  **Medium** "as far as 100 feet + 10 feet per caster level"; **Long** "as
+  far as 400 feet + 40 feet per caster level". Fireball's own "Range long
+  (400 ft. + 40 ft./level)" was already D-151's four-source CRB p.283
+  transcription.
+- **Location is order-driven.** The `spell_aoe` custom order's `data` now
+  carries `{ x, y }` — the point of origin the GM chose, in feet. Both
+  coordinates are required and must be finite; `validateOrder` names the
+  error at issue time (`spell_aoe: order data needs finite numeric x and y`)
+  and `resolveTurn` refuses a malformed order at resolve time
+  (`refusal: "bad_order"`) rather than re-anchoring on a fixed spot. The
+  `DEMO_SPELL_ORIGIN` constant is deleted.
+- **Range is pack-driven and enforced.** The `massBattle` block gains
+  `rangeCategory: "close" | "medium" | "long"` (shipped Fireball: `long`);
+  `spellRangeFeet(category, casterLevel)` resolves it with the ID 227
+  formulas (close `25 + 5*floor(CL/2)`, medium `100 + 10*CL`, long
+  `400 + 40*CL`). The cast is refused with a named `out_of_range` event when
+  the point of origin is farther from the casting unit's anchor (first
+  living model) than the range — exactly "the maximum distance at which you
+  can designate the spell's point of origin"; the limit is inclusive. Area
+  cells that extend past range "waste" onto an empty battlefield, so the
+  wasted-area clause needs no extra machinery. Personal/touch/unlimited
+  ranges have no point of origin to designate and "range expressed in feet"
+  spells would need their own field — none ship a `massBattle` block today,
+  so the category union covers everything currently authored.
+- **CL and the DC's key modifier are profile-driven.** `rawProfileFromUnit`
+  now carries `castingStatMod` and `spellPenetration` from unit stats
+  (alongside the existing `casterLevel`), so the casting unit's own compiled
+  profile supplies caster level (dice scale with it), the DC modifier
+  (`spellSaveDc`, same function as the tactical path) and spell penetration.
+  Missing stats fall back to the documented compiled defaults in
+  `compilePF1eProfile` (CL 1, key modifier +3) — never to a call-site
+  constant. The demo constants `DEMO_CASTER_LEVEL` and `DEMO_KEY_ABILITY_MOD`
+  are deleted.
+- **Targets = the designated point, membership stays spatial.** A fireball's
+  area affects every creature in it (CRB p.283 — an Area spell, no Target
+  line), so the order's targeting input *is* the point of origin and the
+  membership rule stays D-151's distance check — including friendly fire.
+  Inventing an enemies-only filter would be a house rule needing a
+  DEVIATIONS proposal; none is filed. `validateOrder` already accepts the
+  targeting payload, and the emitted spell event reports
+  `epicenterX/epicenterY`, `rangeCategory` and `rangeFeet` alongside the
+  D-151 parameters so the payload is observable.
+- **Refusals are named events, not silent skips.** `resolveTurn` emits
+  `spellRefused` with `data.refusal` one of `bad_order`,
+  `no_caster_profile`, `no_living_caster`, `pack_issue`, `out_of_range` —
+  a GM always sees why a cast did not happen.
+- **Spell level stays a named verified constant (`FIREBALL_SPELL_LEVEL = 3`).**
+  The pack's `level` table still carries the known CRB-disagreement (5) with
+  a mangled key structure; repairing it needs the whole class list verified
+  against primary text, which is not done. Nothing reads the table; the DC
+  keeps using the D-151-verified 3.
+- **Two verified prose repairs in the pack (content, not code):** Fireball's
+  free-text `range` field now reads "long (400 ft. + 40 ft./level)" and the
+  spurious `target` line ("one creature or object per caster level…") is
+  deleted — both fixed against D-151's four-source CRB p.283 transcription
+  (the stat block has Range/Area and no Target line). They were inert
+  (nothing reads them) but contradicted the payload the sim now enforces.
+- **Tests are outcome discriminators, per the D-151 rule.** Reverting each
+  fix was verified to break a specific test: the fixed origin (2 tests:
+  relocated epicenter targets 1 model instead of 3; boundary cast moves),
+  the constant CL (CL 7 ⇒ 7d6/DC 15/680 ft), the range check (690 ft >
+  600 ft must refuse; 600 ft exactly must cast), the close-range formula
+  ("every two FULL caster levels": CL 3 ⇒ 30 ft, not 40), and the
+  deploySeed wiring (DC 17 requires the profile's +4, not the default +3).
+  New coverage: 7 tests in `massBattlePf1e.test.ts` (8 total), 4 in
+  `pf1eSpellPacks.test.ts` (16 total) incl. the ID-227 formula table, 1 in
+  `pf1eDeploySeed.test.ts` (9 total). Pack↔mirror parity asserts
+  `rangeCategory: "long"`.
+- **Deliberately out of scope:** cone/line area shapes remain the C01b
+  named refusal (grid discretization unsettled); LOS/wall checks between
+  anchor and epicenter (the strategic layer has no wall data in
+  `RulesContext` today); per-unit hit attribution in metrics (M11/P8);
+  hero-actor inputs for CL/key modifier (M07 — unit stats are the source
+  until P8 wires actors); the inert `level` table repair.
+
+**Alternatives considered.** Enemies-only membership (rejected: house rule
+against the Area line; would need a filed deviation). Epicenter clamped to
+max range instead of refused (rejected: "the maximum distance at which you
+can designate" is a designation limit — clamping would silently retarget the
+cast). Spell level from the pack's level table (rejected: known content bug,
+mangled keys, and class selection is not modelled at this layer yet).
+
+**Evidence.** 12 new/extended tests; targeted runs green, then mutation-
+checked (five reverts, five reds, all restored). Full suite, typecheck,
+lint, build, size and `build:systems` green (numbers in the TODO entry).
+Prettier per the D-151 rule: the two touched files clean at HEAD
+(`spellPacks.ts`, `pf1eSpellPacks.test.ts`) stay prettier-clean; the four
+dirty-at-HEAD files keep their native style, so their diffs are semantic
+only. `pf1e-mass-battles` remains a reference RulesModule —
+not in the app bundle (`dist/index.html` greps 0 for `massBattle`), shipped
+via `build:systems`.
+
+## D-165 — 2026-09-11 — P5/C05+: strategic spell hits are attributed per owning unit (M11 piece)
+
+**Context.** D-164 closed C05's payload inputs, but the spell's *outcome* was
+still only caster-side: the analytics collector never learned which units
+lost models (its advertised `deathsCount` had no event source anywhere), and
+the emitted event carried no per-unit breakdown.
+
+**Decisions.**
+
+- **The resolver reports per-model outcomes.** `resolvePF1eAOESpell` adds
+  `perModel: { idx, damageDealt, killed, savePassed }[]` alongside
+  `affectedModels` — the post-save damage, death and save outcome for every
+  model the area reached. The resolver stays unit-agnostic: attribution is
+  the caller's job, because only the caller sees `modelRange`.
+- **The module attributes per owning unit.** `massBattlePf1e.ts` maps each
+  outcome index to its unit and emits `hitsByUnit` on the spell event:
+  `{ modelsHit, damageDealt, kills }` per unit, caster included — friendly
+  fire is rules-correct for an Area spell, so the caster's own losses appear
+  here too. The per-unit breakdown reconstructs the aggregates exactly
+  (asserted, not assumed).
+- **`deathsCount` finally lands on the dying side.** New
+  `PF1eBattleAnalyticsCollector.recordSpellKills(targetUnitId, deaths)`
+  increments the advertised-but-never-written `deathsCount` for each unit
+  that lost models; `recordSpell` keeps booking `killsCount` on the caster.
+  No new summary fields were invented — `modelsHit`/damage-by-target ride
+  the event data until the report schema grows them (M11's other fields
+  remain their own slices).
+- **Evidence:** 3 new tests (analytics ledger, resolver per-model
+  reconstruction, module attribution incl. friendly fire); mutation check —
+  deleting the `perModel` push breaks both downstream tests (red, restored).
+
+**Alternatives considered.** Giving the resolver a units list and doing the
+attribution internally (rejected: it would couple the spatial engine to
+strategic document shapes); adding `modelsHit`/`damageTaken` summary fields
+(deferred: M11 advertises specific fields and `deathsCount` was the one
+this slice could honestly close).
+
+## D-166 — 2026-09-11 — P5/C05+: line of effect — walls now gate strategic spells
+
+**Context.** D-164 noted "no wall data in strategic `RulesContext`" as the
+reason LoS was skipped. That note was wrong: `RulesContext.walls`
+(`RulesWallsContext`, §0 restriction bits) is populated at every production
+construction site (`TurnChannel.rulesCtx`, `rulesContextFromStore`); the
+module simply ignored `_ctx`. This slice consumes it.
+
+**Decisions.**
+
+- **R02 basis (already transcribed in D-148's chunk reads, restated from
+  CRB p.214 verbatim):** "You must have a clear line of effect to any target
+  that you cast a spell on or to any space in which you wish to create an
+  effect. **You must have a clear line of effect to the point of origin of
+  any spell you cast.** A burst, cone, cylinder, or emanation spell affects
+  only an area, creature, or object to which it has line of effect from its
+  origin." Line of effect "is canceled by a solid barrier. It's like line of
+  sight for ranged weapons, except that it's not blocked by fog, darkness,
+  and other factors that limit normal sight" — which the sim authors as
+  non-sight walls (§0 bit convention: bit 1 of `restriction` = sight).
+- **Shared helper.** `hasLineOfEffect(ax, ay, bx, by, walls)` exported from
+  `core/detection.ts`, reusing its proven `segmentsIntersect` and the sight
+  bit; the detection grid keeps its cached private copy.
+- **Two gates, both named.** (1) Designation: the module refuses a cast
+  `no_line_of_effect` when a sight-blocking wall crosses caster-anchor →
+  point of origin. (2) Membership: the resolver skips (and reports as
+  `modelsBlockedByCover`) any in-area model that has no line of effect from
+  the origin — "It can't affect creatures with total cover from its point
+  of origin". Absent walls keep the historic open-field behaviour, so every
+  pre-existing fixture passes unchanged.
+- **Evidence:** 3 new tests (module refusal + clear-shot control, module
+  cover skip with per-unit breakdown, resolver-level cover pair); mutation
+  checks — deleting either gate breaks its test (red, restored).
+
+**Deliberately out of scope.** The "hole of at least 1 square foot"
+exception (would need wall thickness/aperture authoring the sim does not
+have); spread-around-corner pathing for Fireball's *spread* keyword
+(D-151 already pinned distance-based membership; noted there).
+
+## D-167 — 2026-09-11 — P5/C05+: cone and line areas resolve on the strategic layer
+
+**Context.** C01b refused cone/line *cell discretization* on the tactical
+grid — the published templates genuinely disagree there. The strategic
+resolver is a different layer: it works in continuous feet, where the shapes
+have one unambiguous geometric reading. This slice wires that reading; the
+C01b refusal stands untouched for tactical cells.
+
+**Decisions.**
+
+- **R02 first.** Transcribed before encoding, from AoN Rules ID 212 / CRB
+  pp.213–214 ("Spell Descriptions", Area): **Cone** — "A cone-shaped spell
+  shoots away from you in a quarter-circle in the direction you designate.
+  It starts from any corner of your square and widens out as it goes. Most
+  cones are either bursts or emanations … and thus won't go around
+  corners." **Line** — "A line-shaped spell shoots away from you in a line
+  in the direction you designate. It starts from any corner of your square
+  and extends to the limit of its range or until it strikes a barrier that
+  blocks line of effect. A line-shaped spell affects all creatures in
+  squares through which the line passes." Plus the LoE clause quoted in
+  D-166 and the burst clause "It can't affect creatures with total cover
+  from its point of origin".
+- **Continuous membership, hand-derived from the text.** Cone: within the
+  length *and* within 45° of the aim (quarter-circle ⇒ `perp ≤ proj`,
+  `proj ≥ 0`). Line: projection within `[0, length]`, perpendicular offset
+  within half the corridor width (`widthFeet`, default 5 — the published
+  5-ft-wide lines). Both originate at the caster: **cones and lines take no
+  point of origin**, so the order payload carries `{ dirX, dirY }` for them
+  (finite, non-zero) and `{ x, y }` for circles; `validateOrder` and the
+  resolve-time refusal both name the requirement per shape. The range
+  category and the designation LoE check apply to circles only; a cone/line
+  reaches exactly its length, and D-166's origin→model LoE handles the
+  "until it strikes a barrier" clause for both.
+- **Pack schema.** `massBattle.rangeCategory` becomes circle-only (required
+  there, ignored on cone/line — a cone's Range line *is* its length,
+  expressed in feet); `massBattle.widthFeet` joins for lines (named content
+  bug if missing/invalid). `parsePackSpellOrder` carries both through
+  (`rangeCategory: null` / `widthFeet: null` where not applicable). No pack
+  file changes: no shipped spell is a cone or line yet — the capability,
+  parser and resolver are tested with synthetic entries and an injectable
+  `createMassBattlePf1e({ spellEntry })` seam; the mirror and parity test
+  are untouched.
+- **Friendly fire stands.** The caster's own model sits inside its own
+  cone/line (they start at the caster), and the area still affects every
+  model in it regardless of faction — asserted in the cone test.
+- **Evidence:** 9 new tests (parser: cone/line/width/circle-range cases;
+  resolver: cone quarter-circle and line corridor fixtures with in/edge/out
+  models each; module: cone cast from the anchor, direction validation at
+  issue and resolve); mutation checks — degrading the cone to a circle and
+  doubling the corridor width each break their test (red, restored).
+
+**Alternatives considered.** Emitting cone/line from the designated point
+instead of the caster (rejected: "shoots away from you … starts from any
+corner of your square"); porting the tactical C01b refusal to the strategic
+layer (rejected: the refusal exists because *cell counting* is unsettled,
+and this layer counts no cells).
+
+## D-168 — 2026-09-11 — P8/M07 piece: leader actors feed the strategic caster inputs
+
+**Context.** M07: "Produce real hero identity and actor inputs:
+`leaderTokenId` → actor → profile; populate `RulesContext.leaderActors` at
+production construction sites instead of empty maps." Until now every
+construction site passed `leaderActors: {}` and the strategic caster used
+unit stats only.
+
+**Decisions.**
+
+- **Contract fix, zero-consumer verified first.** `RulesContext.leaderActors`
+  is now **keyed by unit id** (value: the leader actor's full document
+  JSON). The docstring previously said "key = actorId", but a grep proved
+  zero consumers anywhere in `src/` — the module reading it is the first —
+  and unit-id keying is what a RulesModule can look up from a `UnitView`
+  (units carry `leaderTokenId`, not an actor id). Recorded here because it
+  is a §12 contract change.
+- **Shared collector.** `collectLeaderActors({ units, tokens, getActor })`
+  in `core/rules.ts` resolves unit → leader token → `token.actorId` → actor
+  document, skipping silently when any hop is missing. Both production
+  sites use it: `TurnChannel.rulesCtx()` and `rulesContextFromStore`
+  (client-side validate/forecast context). The e2e hook keeps `{}`.
+- **Consumption reuses the tactical derivation — one source of truth.**
+  `casterInputsFromLeaderActor(actorJson)` runs `deriveFromDocuments` on the
+  actor's `system` and returns `{ casterLevel: spellCasterLevel,
+  keyAbilityMod: abilityMods[spellKeyAbility], spellPenetration: authored }`
+  — the same numbers the sheet's cast flow uses, so a hero's strategic and
+  tactical casts cannot drift. Returns null when the document is missing,
+  unparseable, or not a caster (`spellCasterLevel` 0, i.e. no authored
+  spells block with a positive CL); the caller then keeps the unit-stats
+  profile. **Precedence: leader actor > unit stats > compiled defaults** —
+  documented at the call site.
+- **Cost, named.** The module now imports `pf1e/actor`, so the shared
+  derivation rides into the `pf1e-mass-battles` artifact: rules.js
+  59.4 → 117.5 kB. Accepted rather than re-implementing a second actor
+  parser (which would be exactly the drift this slice removes). The app
+  bundle moves +500 raw bytes (core collector only).
+- **Evidence:** 5 new tests (host populate: token→actor→document by unit id,
+  non-leader unit excluded; module override CL 9/Int 20 ⇒ 9d6/DC 18/760 ft
+  over unit-stats CL 5; non-caster actor falls back; helper unit tests incl.
+  garbage and key-ability cases); mutation checks — removing the override
+  and the populate each break their test (red, restored).
+
+**Still open for M07 proper:** hero identity beyond casting inputs
+(`isHeroUnit` still reads `type: "hero"`/`stats.hero`), the remaining
+leader-actor consumers (leadership auras still use a fixed radius/bonus),
+and the other five M11 unincremented metric fields beyond `deathsCount`.
+
+## D-169 — 2026-09-11 — P8/M07 piece: hero identity includes the M07 leader-actor binding
+
+**Context.** M07: "Produce real hero identity and actor inputs." D-168 wired
+the leader actor's *caster inputs*; the identity half was still missing —
+`isHeroUnit` recognized only `type: "hero"` and `stats.hero`, so an ordinary
+infantry unit bound to a player's leader actor got none of the hero treatment
+(no leadership aura).
+
+**Decisions.**
+
+- **Identity = unit property OR data-path binding.** `isHeroUnit(unit,
+  ctx.leaderActors)` is now also true when `unit.id in leaderActors` — the
+  M07 data path identifies the hero, exactly like D-168's caster inputs. No
+  magic profile id, no token lookup at resolve time; the map is already
+  keyed by unit id at the two production construction sites (D-168).
+- **Both hero call sites consume it.** The leadership-aura loop and the
+  Cleave-overkill path pass `ctx.leaderActors` through, so a bound unit's
+  anchor model radiates the aura and its overkill cleaves.
+
+**Evidence.** Test: 2-model infantry unit, no hero markers; with
+`leaderActors: { u0: actorDoc }` the non-anchor ally reads Fort/Will +2 (the
+aura's morale bonus) while the anchor stays unbuffed; with `{}` neither is
+buffed. Mutation check — dropping the `unit.id in leaderActors` clause turns
+the test red (restored).
+
+**Still pinned:** aura radius 30 ft / bonus +2 remain fixed defaults — the
+Leadership feat text could not be transcribed (AoN FeatDisplay pages serve no
+rule body to the fetcher; recorded as a dead end), so authored radius/bonus
+stay out of scope until a source exists.
+
+## D-170 — 2026-09-11 — P8/M11 piece: metric sources — defensive-cast AoO wired, dead SR field removed, forecast reports real totals
+
+**Context.** Gap List §Analytics named six metric fields with no production
+source: `PF1eCombatMetrics.srBlocked/aooExecuted/aooHits/cmbSuccesses` and
+`UnitAnalyticsSummary.deathsCount/damageHealed`. D-165 closed `deathsCount`.
+Additionally `generateReport()` had no caller (forecast returned empty rows)
+and the CSV export was unquoted.
+
+**Decisions.**
+
+- **`aooExecuted`/`aooHits` now have their real source.** The only AoO path
+  in the codebase is the defensive-cast one (`resolvePF1eAoO`, sole caller
+  `spells.ts`), which the mass-battle module never armed: it passed neither
+  `casterIdx` nor `casterAdjacentEnemies`, and not even the `registry` the
+  gate requires — so no cast was ever defensive. Now the module builds the
+  threat list itself (living models of other units within 5 ft reach of the
+  casting anchor; coordinates are feet, `SpatialGrid.queryPoint` radius is
+  feet) and passes `casterIdx` + `casterAdjacentEnemies` + `registry`.
+  `resolvePF1eAoO` returns `{ executed, hits, totalDamage }`; a swing counts
+  as executed even on a miss, matching the "attack of opportunity taken"
+  meaning. This is a behavior change in the rules-correct direction: a
+  threatened caster who fails DC 15 + 2×level now actually provokes.
+- **Spell metrics carry the counters.** `PF1eSpellMetrics.aooExecuted/
+  aooHits` are incremented in the defensive-cast block and rolled into the
+  unit ledger by `recordSpell`, so they reach `generateReport` and the CSV.
+- **Dead combat-side `srBlocked` removed.** SR never applies to melee
+  attacks — the field was initialized and never written. It is deleted from
+  `PF1eCombatMetrics` and `recordCombat`. The *summary* field
+  `srBlocked` stays: it is fed by the spell side (`recordSpell`), where SR
+  genuinely applies.
+- **Collector hoisted to module lifetime; forecast answers.** The analytics
+  collector is created once in `createMassBattlePf1e`'s closure (not per
+  turn), and `forecast()` returns per-army rows and totals from
+  `generateReport()` filtered to the army's units. Caveat stated in code:
+  accumulation covers one module instance — a SimWorker restart begins a
+  fresh ledger.
+- **CSV export is actually RFC-4180 now.** The Gap List named it: a comma in
+  a unit name corrupted every column after it despite the work plan's
+  "RFC-4180" claim. Every field now goes through an encoder that wraps
+  fields containing a comma, quote, or line break in double quotes and
+  doubles embedded quotes.
+- **Refused with reason (kept as fields):** `cmbSuccesses` and
+  `damageHealed` have no mass-battle mechanic to source them — mass battles
+  resolve neither combat maneuvers nor a healing phase. The fields remain
+  initialized; inventing a source would violate "no invented mechanics".
+
+**Evidence.** Deterministic test: caster anchor within 5 ft of an enemy,
+CL 1 / key mod −8 so the DC-21 check can never succeed, caster AC 40 so the
+provoked swing always misses — asserts `concentrationFailed 1`,
+`aooExecuted 1`, `aooHits 0`, spell not interrupted, and forecast rows/data
+carrying the same totals; analytics unit test covers the `recordSpell`
+rollup; a CSV test proves a unit id with a comma and embedded quotes stays
+quoted without corrupting the column count. Mutation checks — dropping the
+module's threat wiring and dropping the `recordSpell` rollup each turn tests
+red (restored). The shared spell battlefield's nearest enemy moved 12 ft →
+16 ft from the caster so pre-defensive-casting tests stay unprovoked; the
+D-170 test builds its own adjacent-enemy field.
+
+## D-171 — 2026-09-11 — P5/C05+: Burning Hands ships — a real cone spell in the pack, selectable per order
+
+**Context.** The cone/line machinery (D-167) ran only on a synthetic test
+entry; the pack carried no cone spell and the module fired exactly one spell
+(the Fireball constant). Gap List: "no real cone/line spell in the pack."
+
+**R02 transcription (aonprd.com/SpellDisplay.aspx?ItemName=Burning%20Hands,
+CRB pg. 251).** "Burning Hands … School evocation [fire]; Level … sorcerer 1,
+… wizard 1 … Casting Time 1 standard action; Components V, S … Range 15 ft.;
+Area cone-shaped burst; Duration instantaneous; Saving Throw Reflex half;
+Spell Resistance yes. A cone of searing flame shoots from your fingertips.
+Any creature in the area of the flames takes 1d4 points of fire damage per
+caster level (maximum 5d4)."
+
+**Decisions.**
+
+- **Pack entry.** `burning-hands` added to `systems/pf1e-core/packs/
+  spells.json`: cone, `radiusFeet` 15, 1d4 (`damageDiceSides` 4),
+  `dicePerCasterLevel` with `maxDice` 5, Reflex half, `evasion` true
+  (Reflex-half spell), SR true, `damageType` fire, no `rangeCategory` — a
+  cone starts at the caster, so there is no designated point to range-check
+  (CRB pp.213–214, as encoded in D-167).
+- **Mirror + parity.** `PF1E_PACK_BURNING_HANDS_MASS_BATTLE` mirrors the
+  block (reference system cannot read `systems/**`), asserted against the
+  real file by the same parity pattern as Fireball — drift fails a test.
+- **Module spell registry.** `PF1E_MASS_SPELLS = { fireball: {entry, level
+  3}, "burning-hands": {entry, level 1} }` — levels are the R02-verified CRB
+  constants (D-151 precedent: the pack's `level` tables are not read). An
+  order selects the spell by id in `data.spell`; absent means `fireball`
+  (every existing order unchanged). Shape, payload validation, pack parse,
+  DC level and the emitted event (`spellId`) are all per selected spell.
+  Unknown ids are refused by name (`unknown_spell`) at both validate and
+  resolve time. `opts.spellEntry` now overrides the default spell's entry —
+  the existing cone-injection test seam keeps working.
+
+**Evidence.** Parity + parse tests (cone payload, no range category, 1d4 →
+2d4 → 5d4 cap at CL ≥ 5); module tests (CL 5 cast: 5d4, DC 15, level 1,
+cone from the caster covering caster + one enemy; CL 2 → 2d4; default still
+fireball; circle payload on the cone refused; unknown id refused by name at
+issue and resolve). Mutation checks — disabling `data.spell` selection and
+raising the mirrored cap each turn tests red (restored). Full suite green.
+
+**Flagged, not changed here:** LoE "1 sq. ft. hole" and spread-around-corner
+pathing remain refused-with-reason (aperture authoring / D-151 pinned
+membership). The `heroBridge` radii flag (`radius / 5`, `1.5` treating feet
+as grid cells) was taken up in D-172: it proved a bug fix against the code's
+own documented intent, not deviation territory — the old tests pinned
+nothing (2 ft / 1 ft probes).
+
+## D-172 — 2026-09-11 — P8/M07 closure: heroBridge radii converged on their documented intent; Leadership feat R02 closes the aura-source question
+
+**Context.** D-170/D-171 flagged `heroBridge`'s spatial queries: the
+leadership aura passed `radius / 5` and the cleave adjacency a literal
+`1.5`, both assuming `SpatialGrid.queryPoint` takes grid cells — it takes
+**feet** (model coordinates are feet; the radius is compared against
+feet-squared, as D-170's threat query established). The result: the
+documented 30-ft aura reached 6 ft, and "adjacent" cleave reach was 1.5 ft.
+Open since D-169: whether the aura radius/bonus could ever come from the
+Leadership feat (Gap List §4.12: "aura radius from feat data").
+
+**R02 transcription (d20pfsrd.com/feats/general-feats/leadership, CRB).**
+"Leadership … Prerequisite: Character level 7th. Benefits: This feat enables
+you to attract a loyal cohort and a number of devoted subordinates who assist
+you." The feat defines a Leadership score (level + Cha modifier), a
+cohort-level/followers table, and reputation modifiers — **nothing else**.
+There is no aura in the SRD Leadership feat, so "aura radius from feat data"
+is untranscribable because it does not exist. The mass-battle "Leadership
+Aura" (+2 morale to Fort/Will of friendly models within 30 ft) is the work
+plan's own mechanic (Task 7 "Player Hero Control: … Leadership Auras",
+Combat_Resolver_5 feature parity) — an intentional strategic-layer design,
+recorded here rather than as a deviation because the work plan *is* the spec
+for Task 7 and no SRD rule is contradicted (the feat simply has nothing to
+say about auras).
+
+**Decisions.**
+
+- **Bug fix, not deviation: converge on documented intent.** The code's own
+  docstrings say "default 30ft" (aura) and "Query adjacent models within 5ft
+  reach" (cleave); the implementation contradicted both. The aura now passes
+  `radius` unconverted, and cleave queries 5 ft. Radius/bonus stay the
+  work-plan defaults (30 ft / +2) — there is no authorable source for them
+  in the SRD.
+- **Tests now pin the real geometry.** The old probes (ally at 2 ft, cleave
+  target at 1 ft) passed at any radius ≥ 2 ft and therefore pinned nothing;
+  the suite now asserts an ally at 20 ft buffed, one exactly at 30 ft
+  buffed (the edge is inclusive), one at 31 ft excluded, cleave reaching a
+  model 4 ft away and stopping before one at 7 ft. Mutation checks —
+  restoring `radius / 5` and `1.5` respectively — each red the suite
+  (restored).
+
+**Known wrong, deliberately untouched (future slice):** the module's cleave
+call still passes a literal `damageDealt: 25` and the overkill-cascade model
+itself was rejected as a non-rule in D-130 (SRD Cleave is one extra attack
+at full BAB against an adjacent foe, not carried-over damage). Replacing it
+needs a hero attack routine and interacts with P06's interrupt/attack
+infrastructure — Gap List §5 holds the requirement.
+
+## D-173 — 2026-09-12 — P4/M05 first slice: move orders execute — formations march within a pace-scaled budget
+
+**Context.** Gap List §5: "PF1e `resolveTurn` has no move/shoot/morale
+sub-phase at all (subPhases are declared but unused) — orders other than
+`attack`/`custom:spell_aoe` do nothing." Move orders were accepted by
+`validateOrder` and then silently dropped. M05's full scope (terrain,
+charge/withdraw semantics, shoot, morale, movement-triggered AoOs) is a
+multi-slice item; this slice makes movement itself real.
+
+**R02 (d20pfsrd "Combat", CRB; cross-checked legacy.aonprd.com CRB combat).**
+Speed: "If you use two move actions in a round (sometimes called a 'double
+move' action), you can move up to double your speed. If you spend the entire
+round running, you can move up to quadruple your speed (or triple if you are
+in heavy armor)." Run: "You can run as a full-round action. … When you run,
+you can move up to four times your speed in a straight line." Charge:
+"Charging is a special full-round action that allows you to move up to twice
+your speed and attack during the action."
+
+**Decisions.**
+
+- **Formation movement, mirroring the §12 reference package.** The anchor
+  (first living model) walks the ordered waypoint path up to the movement
+  budget; every other living model is translated by the same delta, so
+  spacing and unit membership survive intact. Dead models stay where they
+  fell; a unit with no living models emits nothing. The turn's single order
+  already guarantees a unit moves OR attacks/casts, never both.
+- **Pace → distance from the SRD.** `march` = 1× (the round's move),
+  `charge` = 2× ("up to twice your speed"), `run` = 4× ("up to four times
+  your speed"). Charge's attack requirements and Run's straight-line/armor
+  clauses are combat-mechanic concerns deferred to later M05 slices with the
+  distances recorded here; this slice executes only the distances.
+- **Budget is scene-metadata-driven (P01's direction).** Move points ×
+  `ctx.grid.distance` feet per cell — the scene grid supplies the cell size
+  rather than a hard-coded 5. The move-point values themselves are the
+  schema's own mass-battle abstraction (work-plan unit types), not SRD
+  speeds; the schema is the module's content.
+- **Phase ordering.** Movement runs before `grid.rebuild`, so every spatial
+  consumer of the same turn (auras, cleave adjacency, envelopment, spell
+  threats and ranges) sees post-move positions. `validateOrder` also
+  rejects NaN waypoints by name now.
+
+**Slice boundary (recorded, not silently skipped):** no terrain cost or
+wall/obstacle legality (P03 scope), no charge straight-line/target rules,
+no movement-triggered AoOs (P06), no `retreat` execution, no shoot or
+morale sub-phases — all still named in M05.
+
+**Evidence.** Tests: infantry 4 pts × 5 ft stops at 20 ft on a long path
+with formation spacing preserved and an un-ordered unit untouched; cavalry
+march/charge/run land exactly at 40/80/160 ft; a waypoint consumes the
+whole budget at its exact point; dead models are left behind and an
+all-dead unit never emits; NaN waypoints refused at issue. Mutation checks
+— flattening all pace multipliers to 1 and letting dead models translate —
+each red the suite (restored). Full suite 1564 passed / 3 skipped; rules.js
+127,268 B (+2.5 kB for the move phase).
+
+## D-174 — 2026-09-12 — P4/M05: movement cannot pass through movement-blocking walls
+
+**Context.** D-173 made move orders real — and thereby let formations march
+through walls the scene authors as movement-blocking. The §0 wall contract
+(`RulesWallsContext`: bit i of `restriction` = move|sight|sound|light) was
+already honored for sight (LOS/detection, spell line of effect); bit 0 had
+no consumer. Full movement *legality* (terrain cost, pathfinding, occupied
+squares) remains P03's scope; this slice enforces the hard walls the scene
+already authors.
+
+**Decisions.**
+
+- **`core/detection.ts` owns the wall geometry.** New `WALL_MOVE_BIT`
+  (1<<0) and `firstMoveBlock(ax, ay, bx, by, walls)`: the earliest crossing
+  of a segment with any movement-blocking wall, as a fraction t ∈ (0,1)
+  along the segment, or null when clear. Same strict-crossing convention as
+  the LOS test (grazing a wall endpoint does not block; parallel segments
+  never cross), so wall behavior is consistent across sight and movement.
+- **The move loop clips each leg at the first blocking wall.** The
+  formation stops `MOVE_BLOCK_EPSILON` (0.001 ft) short of the wall — the
+  epsilon matters: the strict crossing test excludes t = 0, so stopping
+  exactly on the wall would let next turn's segment start *on* it and pass
+  through. The remaining budget is spent (the unit already acted) and later
+  waypoints are not attempted — they lie beyond the wall, and routing
+  around obstacles is pathfinding (P03), not wall-clipping. The event
+  reports `blockedByWall: true` and the distance actually traveled
+  (accumulated steps; identical to the D-173 budget-spent figure whenever
+  no wall intervenes, so the earlier tests are unchanged). A zero-distance
+  block — a wall exactly in front — still emits, so a GM sees the march go
+  nowhere instead of hearing nothing.
+- **Sight-only walls never block movement.** Bit 1 restricts sight; the
+  distinction is pinned by test rather than assumed.
+
+**Evidence.** Tests: infantry marching 10→90 ft stops at 24.999 when a
+move-blocking wall stands at x=25 (distance 15, `blockedByWall`); the same
+wall authored sight-only lets the full 20-ft budget land; a wall past the
+first waypoint clips the second leg at 21.999 and the third waypoint is
+never attempted. Mutation checks — disabling the clip entirely and swapping
+the restriction bit to sight — each red the suite (restored). Full suite
+1566 passed / 3 skipped; rules.js 129,030 B.
+
+**Process note.** Mid-slice, a `git checkout` of `detection.ts` reverted
+the file to HEAD and silently discarded this session's uncommitted D-166
+additions (`hasLineOfEffect`), breaking 17 tests before the cause was
+spotted. The file was reconstructed from the session's own transcripts and
+re-verified by the D-166 tests. Lesson recorded: never `git checkout`
+files with uncommitted session work; mutation restores use file backups.
+
+## D-175 — 2026-09-12 — P4/M05: retreat orders execute — SRD Withdraw, double speed toward the rally point
+
+**Decision.** The last previously no-op mass-battle order kind, `retreat`, now moves the unit toward `order.toward` with a **double-speed** travel budget — the SRD Withdraw action.
+
+**R02 transcription (SRD "Withdraw").** d20pfsrd.com/Gamemastering/Combat:
+
+> "Withdrawing from melee combat is a full-round action. When you withdraw, you can move up to double your speed. The square you start out in is not considered threatened by any opponent you can see, and therefore visible enemies do not get attacks of opportunity against you when you move from that square."
+
+**Implementation notes.**
+- `validateOrder` now rejects `retreat` with NaN/missing `toward` coordinates (previously unvalidated); `move` keeps its NaN-rejection.
+- Retreat reuses the D-173/174 movement machinery with `paceMul = 2` (infantry 40 ft): path = `[order.toward]`, wall clipping (`firstMoveBlock`, `MOVE_BLOCK_EPSILON`), full unit translation, same `arrive` event with `pace: "retreat"` and event verb "retreats". No facing write (no orientation semantics for retreat).
+- Retreat's AoO immunity on leaving the starting square is deliberately **not** modeled — mass battle has no AoO economy yet (P06). Charge/run movement restrictions and terrain costs likewise remain M05 remainder.
+
+**Verification.** Tests (module suite 29 passed): retreat reaches a rally point 40 ft away (full double budget, pace "retreat", formation intact); rally point nearer than budget stops at it; a blocking wall shortens retreat (blockedByWall); `validateOrder` NaN rejection. Mutation (paceMul 2→1) red. Full gates: 1568 passed / 3 skipped (148 files); typecheck/lint/build clean; dist/index.html 2,251,732 B (gzip 644,927 B); systems/pf1e-mass-battles/rules.js 129,487 B; e2e collects 276 tests / 36 files.
+
+## D-176 — 2026-09-12 — P4/M06 first slice: fast healing & regeneration execute in mass battle turns
+
+**Decision.** The mass-battle module now runs a once-per-turn **heal sub-phase**: units whose profiles carry SRD fast healing or regeneration heal the listed amount each turn, booked into analytics and emitted as events. This consumes the previously dead `resolvePF1eHealing` engine (which only ran in a test) and the declared-but-never-incremented `damageHealed` counter.
+
+**R02 transcription (SRD Universal Monster Rules).** d20pfsrd/starjammer-compatible SRD text:
+
+> **Fast Healing (Ex)** — "The creature regains the listed number of Hit Points at the start of its turn. Unless otherwise noted, the creature can never exceed its maximum Hit Points. … Fast healing continues to function until a creature dies, at which point the effects of fast healing end immediately."
+> **Regeneration (Ex)** — "The creature regains Hit Points at the start of its turn, as with fast healing, but it can't die as long as its regeneration is still functioning…"
+
+**Implementation notes.**
+- `rawProfileFromUnit` now carries `fastHealing` / `regeneration` unit-stat numbers into the compiled profile (clamped ≥ 0, floored), so armies can author both abilities; pre-created profiles (e.g. the troll with `regenerationVal: 5`) already had the field.
+- Placement: immediately after `seedPF1ePool` — the first moment the pool carries interned profile indices — and before melee/spell damage, so healed hit points enter the round's exchanges. Only living models heal (SRD: ends at death); healing is capped at the effective maximum (`hpMax − lethalDmg`).
+- Events: `{ subPhase: "heal", type: "heal", data: { healed, revived } }`, emitted only when a unit actually healed; `"heal"` added to the module's declared `subPhases` between "move" and "shoot" (matching execution order; all consumers treat subPhases as opaque strings). `analytics.recordHealing` finally has a caller. Regeneration's suppress-damage-types, can't-die clause and reviving-unconscious-models semantics are tactical-layer concerns (`resolvePF1eHealing` already models the lethal-damage cap); suppression by fire/acid damage types is not representable at the strategic layer yet.
+- SRD's "at the start of its turn" is honored as once-per-turn before any damage resolution; the module has no initiative-granular ordering within a round.
+
+**Verification.** Tests: fast healing heals 3 (11→14) and caps at max (20 stays 20); regeneration 5 with lethal damage 5 caps at the effective max (10→15); ability-less units and dead models never heal (no event); `rawProfileFromUnit` carriage incl. clamp/floor. Mutations (heal step disabled; carriage dropped) each red; restores byte-identical via backups. Two existing subPhase-list assertions updated for the new phase. Full gates: **1571 passed / 3 skipped** (148 files); typecheck/lint/build clean; dist/index.html 2,251,732 B (gzip 644,927 B); rules.js **131,975 B**; e2e collects 276 tests / 36 files.
+
+## D-177 — 2026-09-12 — P4/M04+P01 slice: envelopment reach is feet, and FLANKED expires each round
+
+**Decision.** Two Gap List §5 defects in the envelopment engine are fixed: the reach constant's unit error and the never-expiring FLANKED bit.
+
+**R02 transcription (SRD Combat).** "Most creatures of Medium or smaller size have a reach of only 5 feet. This means that they can make melee attacks only against creatures up to 5 feet (1 square) away" (d20pfsrd Combat, Reach Weapons); a creature threatens "all squares adjacent to your space".
+
+**Fixes.**
+- `calculatePF1eEnvelopment`'s default `reach` was `1.5` passed into `SpatialGrid.queryPoint`, which takes **feet** — a 1.5-ft radius that engaged almost nothing (the inherited unit error Gap List §5 / P01 name). The default is now **5 ft**, the SRD natural reach of a Medium creature; `queryPoint` is radius-inclusive, so an adjacent square's center at exactly 5 ft engages while 6 ft does not. Per-size reach, reach weapons and flanking angles remain P02 scope.
+- The mass-battle melee call site passes `reach: cellFeet` — the scene's authored `grid.distance` (fallback 5) — the same scene-derived value the movement budget uses (P01: scene metadata, not constants).
+- `PF1E_STATUS_FLANKED` (bit 2) was set on enveloped defenders and never cleared, so a single envelopment lasted the rest of the battle (Gap List §5: "sets the bit and never expires it"). `resolveTurn` now clears the bit across the pool first thing each round; the melee sub-phase recomputes it from current geometry after movement. The bit-2 alias with core `ModelStatus.pinned` is the documented §2.13 status-column collision, untouched by this slice.
+
+**Verification.** Envelopment suite rewritten around feet semantics (5 ft engages, 6 ft does not; enveloped defenders carry the bit). New module test: two attackers 3 ft from a defender ⇒ FLANKED after round 1; attackers beyond reach ⇒ bit expired after round 2. Mutations (default reach back to 1.5; clear disabled) each red; restores byte-identical via backups. Full gates: **1574 passed / 3 skipped** (148 files); typecheck/lint/build clean; dist/index.html 2,251,732 B (gzip 644,927 B); rules.js **132,127 B**; e2e collects 276 tests / 36 files.
+
+## D-178 — 2026-09-12 — P4/M07 closure piece: hero Cleave is now one real extra attack — the overkill cascade is deleted
+
+**Decision.** The mass-battle hero cleave no longer force-kills a model and splashes literal damage. It is now the SRD Cleave feat resolved as a real attack: one extra melee attack at full BAB against an adjacent enemy. The rejected overkill-cascade model (D-130, Gap List §5, flagged again in D-172/M07) is deleted from the codebase.
+
+**What was wrong.** `applyHeroCleaveOverkill` ran once per hero unit per engagement with a literal `damageDealt: 25`: it set `defenders[0]` to 0 hp and the dead bit *unconditionally* (outside any attack roll), then carried "excess" damage into adjacent enemies — a mass-battle rule that exists nowhere in the SRD and a steady one free kill per hero per turn.
+
+**Fix.**
+- SRD Cleave (R02, d20pfsrd Cleave feat): "Benefit: Once per round, when you make a melee attack, you can make one additional attack at your full attack bonus against a creature adjacent to you. Normal: You can only make one additional attack per round with the Cleave feat. Penalty: You take a −2 penalty to your Armor Class until your next turn when using Cleave." Both clauses are implemented: the extra attack, and the −2 AC applied to the hero model's `ac` column when the cleave swings. Because seeding rewrites `ac` from the profile at the start of every round, the penalty is naturally wiped before the hero's next round — enemy units resolved later in the same round attack against the reduced AC. This completes the R03 resolution text ("SRD Cleave = second attack at full BAB vs an adjacent foe, −2 AC").
+- `resolvePF1eAttacks` gains `maxIterativeAttacks?` so a caller can cap how many of an attacker's BAB iterative swings actually land — the cleave passes `1`, so a BAB 9 hero swings exactly one extra attack, not a second full routine. The name is deliberately about the iterative routine only, not effects outside it (Haste's extra attack, Vital Strike's damage dice).
+- The melee call site: the hero's lead model (`attackers[0]`) cleaves the first living defender model within `cellFeet` (scene grid distance, feet — D-177's reach source; `queryPoint` already excludes dead/hidden). Cleave metrics merge into the engagement's `combatRes.metrics` before `recordCombat` and the melee event, so analytics and the GM-facing event carry the combined totals. RNG rides a fresh per-unit fork (`phase 3`), keeping seeded turns replayable.
+- Gating stays `isHeroUnit` (unit type / stats.hero / leader-actor binding) until actor feat data exists — same gate as the leadership aura; documented in the code.
+- `applyHeroCleaveOverkill`, its option/result types and its unit test are removed; `heroBridge.ts` keeps the leadership aura only.
+
+**Verification.** New module test pins the rule with a BAB-9 probe (normal routine iterates twice): hero adjacent ⇒ 3 total attacks and the hero's AC drops to 12 (the −2 penalty); non-hero ⇒ 2 attacks, AC 14; hero with the defender 30 ft away ⇒ 2 attacks, AC 14 (adjacency requirement, no penalty). Mutation (attack cap removed ⇒ cleave would grant a full second iterative) red; restore byte-identical via backup. Full gates: **1574 passed / 3 skipped** (148 files; +1 test, −1 deleted cascade test); typecheck/lint/build clean; dist/index.html 2,251,732 B (gzip 644,927 B); rules.js **131,585 B** (down from 132,127 — the deleted cascade was larger than its replacement); e2e collects 276 tests / 36 files.

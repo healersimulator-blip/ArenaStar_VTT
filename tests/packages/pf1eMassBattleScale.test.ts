@@ -237,6 +237,7 @@ describe("PF1e 10k scale gate (§1.8, runner-level budgets)", () => {
       expect(last.report.rulesVersion).toBe("1.0.0");
       expect(last.report.subPhases).toEqual([
         "move",
+        "heal",
         "shoot",
         "melee",
         "spell",
