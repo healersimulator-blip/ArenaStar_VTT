@@ -79,8 +79,14 @@ export interface PF1eActionOpportunityInput {
    */
   trigger?: PF1eAoOTrigger;
   isEnemy?: (a: string, b: string) => boolean;
-  /** Token id → ledger. An absent entry means \"nothing spent yet, one opportunity\". */
+  /** Token id → ledger. An absent entry means "nothing spent yet, one opportunity". */
   ledgers?: Record<string, PF1eOpportunityLedger>;
+  /**
+   * An existing queue to append to. Two provokes from one action — the cast and its
+   * ranged touch — are two opportunities on one queue (D-191), so the second call hands
+   * this the first call's queue rather than starting a fresh one and losing the dedupe.
+   */
+  queue?: PF1eInterruptQueue;
   /** The turn the queue is labelled with (the queue is turn-local, D-184). */
   turn?: number;
 }
@@ -265,7 +271,7 @@ export function pf1eActionOpportunities(
     at: { x: cell.col * areaGrid.cellSize, y: cell.row * areaGrid.cellSize },
   });
 
-  let queue = createInterruptQueue(turn, "action");
+  let queue = input.queue ?? createInterruptQueue(turn, "action");
   const queued: PF1eInterrupt[] = [];
   for (const reactor of eligible) {
     const result = queueAoOs(queue, {

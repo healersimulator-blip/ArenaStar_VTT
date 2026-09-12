@@ -76,6 +76,9 @@
   import { resolveAttackFlow, resolveManyshotFlow } from "./pf1eResolveFlow";
   import type { PF1eDefenseChoice } from "../../packages/pf1e/resolve";
   import { validatePF1eFeatSelection } from "../../packages/pf1e/feats";
+  import { autoResolveAoosOf } from "../../packages/pf1e/aooSettings";
+  import { worldSettingsFrom } from "../../core/worldSettings";
+  import { castProvokes, resolveCastProvokes } from "../combat/pf1eCastProvoke";
   type TabName =
     | "summary"
     | "attributes"
@@ -556,6 +559,37 @@
       });
     castBusy = true;
     try {
+      // D-191: the casting provoke resolves (or reports) before the spell lands — the
+      // attack interrupts the cast (AoN 102), and its damage feeds the cast gate's
+      // `injured` concentration check (10 + damage + level, AoN 133).
+      let provokeNotes: string[] = [];
+      const casterCombatant =
+        linked.combat !== null && linked.combatantId !== null
+          ? (linked.combat.combatants.find(
+              (c) => c._id === linked.combatantId,
+            ) ?? null)
+          : null;
+      const provokes = castProvokes({
+        castingTime: castTime as PF1eCastingTime,
+        quickened: castQuickened,
+        defensively: castDefensively,
+        ...(castTouch !== "" ? { touch: castTouch as "melee" | "ranged" } : {}),
+      });
+      if (provokes.length > 0 && casterCombatant?.tokenId !== null && casterCombatant?.tokenId !== undefined) {
+        const provoke = await resolveCastProvokes({
+          client,
+          user: client.user,
+          provokerTokenId: casterCombatant.tokenId,
+          provokes,
+          autoResolve: autoResolveAoosOf(
+            worldSettingsFrom(client.store.getAll("settings")),
+          ),
+          combat: linked.combat,
+        });
+        provokeNotes = provoke.lines;
+        if (provoke.damage > 0)
+          declarations.push({ situation: "injured", damage: provoke.damage });
+      }
       const outcome = await resolveCastFlow(client, client.user, {
         casterActor: current,
         casterDerived: casterView.derived,
@@ -619,6 +653,14 @@
         const bits: string[] = [...outcome.gateNotes, ...outcome.warnings];
         if (outcome.hpWriteError !== null) bits.push(outcome.hpWriteError);
         castWarning = bits.join(" · ");
+      }
+      // D-191: the provoke's own lines ride alongside whatever the cast reported —
+      // the attack happened before the spell, so the GM reads both in one place.
+      if (provokeNotes.length > 0) {
+        castWarning =
+          castWarning === ""
+            ? provokeNotes.join(" · ")
+            : `${provokeNotes.join(" · ")} · ${castWarning}`;
       }
     } finally {
       castBusy = false;

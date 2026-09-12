@@ -581,11 +581,18 @@ test.describe("PF1e auto-resolved attacks of opportunity (D-186)", () => {
       toRow: 0,
       enemiesOf: { goblin: ["fighter"] },
     });
-    expect(res.entries[0]?.ledgerError).toBe(
-      "Attack of opportunity refused: no opportunities left (1/1).",
-    );
-    expect(res.entries[0]?.used).toBeNull();
-    expect(res.entries[0]?.line).toContain("the ledger was not written:");
+    // D-191: the budget is read *before* any die is rolled, so a spent reactor is
+    // skipped with the seat's own refusal wording — no attack is made and nothing is
+    // written, which is what keeps the second provoke of a ranged-touch spell from
+    // rolling an attack the reactor lacks the budget for.
+    expect(res.entries).toEqual([]);
+    expect(res.skipped).toEqual([
+      {
+        reactorId: "fighter",
+        provokerId: "goblin",
+        reason: "no opportunities left (1/1)",
+      },
+    ]);
   });
 
   test("a ranged-only reactor forgoes the opportunity instead of attacking", async ({
@@ -875,6 +882,25 @@ const actionOpportunity = (
     return app.pf1eActionOpportunity(s);
   }, spec);
 
+interface CastProvokeResult {
+  provokes: Array<{ actionId?: string; trigger?: { kind: string } }>;
+  lines: string[];
+  damage: number;
+}
+
+const castProvoke = (
+  page: import("@playwright/test").Page,
+  spec: Record<string, unknown>,
+) =>
+  page.evaluate((s) => {
+    const e2e = (globalThis as { __vttE2E?: Record<string, unknown> }).__vttE2E;
+    const app = e2e?.app as
+      { pf1eCastProvoke: (x: unknown) => Promise<CastProvokeResult> }
+      | undefined;
+    if (!app) throw new Error("app surface missing");
+    return app.pf1eCastProvoke(s);
+  }, spec);
+
 test.describe("PF1e action-trigger attacks of opportunity (§9/P6 P06, D-190)", () => {
   test("casting in a threatened square queues the reactor, in the square the caster occupies", async ({
     page,
@@ -943,5 +969,106 @@ test.describe("PF1e action-trigger attacks of opportunity (§9/P6 P06, D-190)", 
         square: { x: 0, y: 0 },
       },
     ]);
+  });
+});
+
+test.describe("PF1e cast provoke (D-191)", () => {
+  test("a cast provokes and auto-resolves before the spell lands", async ({
+    page,
+  }) => {
+    await sceneWith(page, [
+      { id: "wizard", col: 0, row: 0 },
+      { id: "fighter", col: 0, row: 1 },
+    ]);
+    const encounter = await tacticalEncounter(page, {
+      stats: { wizard: GOBLIN_STATS, fighter: FIGHTER_STATS },
+      initiatives: { wizard: 5, fighter: 20 },
+      combatantFlags: {
+        wizard: { acted: true },
+        fighter: { acted: true, aooMax: 1 },
+      },
+    });
+    expect(encounter).toMatchObject({ ok: true, combatants: 2 });
+
+    const res = await castProvoke(page, {
+      provokerId: "wizard",
+      castingTime: "standard",
+    });
+    expect(res.provokes).toEqual([{ actionId: "cast-spell" }]);
+    // One provoke, resolved through the host: the attack line plus the named
+    // assumption (the scene's tokens carry no disposition, so hostility is assumed).
+    expect(
+      res.lines.some((l) => l.includes("1/1 opportunities this round")),
+    ).toBe(true);
+    expect(res.lines.some((l) => l.includes("hostility assumed"))).toBe(true);
+    // The reactor spent its one opportunity whether it connected or not.
+    await expect
+      .poll(async () => (await combatantState(page, "fighter"))?.aooUsed)
+      .toBe(1);
+    // The reported damage is exactly the hit points the write took off.
+    if (res.damage > 0) {
+      await expect
+        .poll(async () => (await combatantState(page, "wizard"))?.hp)
+        .toBe(12 - res.damage);
+    }
+  });
+
+  test("the cast and its ranged touch share one queue — a 1/round reactor takes only the first", async ({
+    page,
+  }) => {
+    await sceneWith(page, [
+      { id: "wizard", col: 0, row: 0 },
+      { id: "fighter", col: 0, row: 1 },
+    ]);
+    await tacticalEncounter(page, {
+      stats: { wizard: GOBLIN_STATS, fighter: FIGHTER_STATS },
+      initiatives: { wizard: 5, fighter: 20 },
+      combatantFlags: {
+        wizard: { acted: true },
+        fighter: { acted: true, aooMax: 1 },
+      },
+    });
+
+    const res = await castProvoke(page, {
+      provokerId: "wizard",
+      castingTime: "standard",
+      touch: "ranged",
+    });
+    expect(res.provokes).toEqual([
+      { actionId: "cast-spell" },
+      { trigger: { kind: "ranged-touch" } },
+    ]);
+    // Two provokes, one opportunity per round: the touch is refused by the budget
+    // gate before any die is rolled — the shared queue is what makes them agree.
+    expect(
+      res.lines.some((l) => l.includes("no opportunities left (1/1)")),
+    ).toBe(true);
+    await expect
+      .poll(async () => (await combatantState(page, "fighter"))?.aooUsed)
+      .toBe(1);
+  });
+
+  test("a swift cast provokes nothing and spends nothing", async ({ page }) => {
+    await sceneWith(page, [
+      { id: "wizard", col: 0, row: 0 },
+      { id: "fighter", col: 0, row: 1 },
+    ]);
+    await tacticalEncounter(page, {
+      stats: { wizard: GOBLIN_STATS, fighter: FIGHTER_STATS },
+      initiatives: { wizard: 5, fighter: 20 },
+      combatantFlags: {
+        wizard: { acted: true },
+        fighter: { acted: true, aooMax: 1 },
+      },
+    });
+
+    const res = await castProvoke(page, {
+      provokerId: "wizard",
+      castingTime: "swift",
+    });
+    expect(res.provokes).toEqual([]);
+    expect(res.lines).toEqual([]);
+    expect(res.damage).toBe(0);
+    expect((await combatantState(page, "fighter"))?.aooUsed).toBe(0);
   });
 });

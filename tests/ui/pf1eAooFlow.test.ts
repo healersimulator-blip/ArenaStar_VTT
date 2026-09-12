@@ -460,7 +460,7 @@ describe("resolveMovementOpportunities — the auto-resolved attack of opportuni
     expect(client.formulas).toEqual(["1d20 + 9"]);
   });
 
-  test("an exhausted ledger reports the seat's reason and leaves the budget alone", async () => {
+  test("an exhausted ledger is refused before any die is rolled — one per round is a gate", async () => {
     const client = new FakeClient();
     client.script = [{ die: 11, total: 20 }, { total: 7 }];
     const fixture = input([interrupt(0, "t-fighter")]);
@@ -473,15 +473,20 @@ describe("resolveMovementOpportunities — the auto-resolved attack of opportuni
       combatant("c-goblin", "t-goblin", "goblin", 10, { acted: true }),
     ]);
     const resolution = await resolveMovementOpportunities(client, gm, fixture);
-    const entry = resolution.entries[0];
-    expect(entry?.outcome).toBe("hit");
-    expect(entry?.ledgerError).toBe(
-      "Attack of opportunity refused: no opportunities left (1/1).",
-    );
-    expect(entry?.used).toBeNull();
-    expect(entry?.line).toContain("the ledger was not written:");
-    // The attack still happened — the queue said the reaction was available.
-    expect(client.submitted).toHaveLength(2);
+    // D-191: the budget is read before the roll, so a spent reactor is skipped — no
+    // attack is made and nothing is written, which is what keeps the two provokes of a
+    // ranged-touch spell (cast + touch) from rolling a second attack the reactor lacks
+    // the budget for.
+    expect(resolution.entries).toHaveLength(0);
+    expect(resolution.skipped).toEqual([
+      {
+        reactorId: "t-fighter",
+        provokerId: "t-goblin",
+        reason: "no opportunities left (1/1)",
+      },
+    ]);
+    expect(client.submitted).toHaveLength(0);
+    expect(client.formulas).toEqual([]);
   });
 
   test("a reactor that is not a combatant resolves the attack but cannot spend", async () => {
@@ -749,6 +754,67 @@ describe("resolveActionOpportunities — the action trigger shares the movement 
     expect(resolution.entries).toHaveLength(0);
     expect(resolution.skipped[0]?.reason).toContain("no melee attack line");
     expect(client.submitted).toHaveLength(0);
+  });
+
+  test("two provokes for one reactor roll once — the second is refused by the budget gate", async () => {
+    // A ranged-touch spell provokes twice (cast + touch). A reactor with 1/round takes
+    // only the first; the second entry is refused before any die is rolled.
+    const client = new FakeClient();
+    client.script = [{ die: 11, total: 20 }, { total: 7 }];
+    const resolution = await resolveActionOpportunities(
+      client,
+      gm,
+      actionInput([
+        actionInterrupt(0, "t-fighter"),
+        { ...actionInterrupt(1, "t-fighter"), actionId: "action:1:goblin:ranged-touch" },
+      ]),
+    );
+    expect(resolution.entries).toHaveLength(1);
+    expect(resolution.entries[0]?.used).toBe(1);
+    expect(resolution.skipped).toEqual([
+      {
+        reactorId: "t-fighter",
+        provokerId: "t-goblin",
+        reason: "no opportunities left (1/1)",
+      },
+    ]);
+    // Exactly one attack was rolled — the second provoke never produced a d20.
+    expect(client.formulas.filter((f) => f.includes("d20"))).toHaveLength(1);
+  });
+
+  test("Combat Reflexes (two per round) lets one reactor take both provokes", async () => {
+    const client = new FakeClient();
+    client.script = [
+      { die: 11, total: 20 },
+      { total: 7 },
+      { die: 11, total: 20 },
+      { total: 7 },
+    ];
+    const fixture = actionInput([
+      actionInterrupt(0, "t-fighter"),
+      { ...actionInterrupt(1, "t-fighter"), actionId: "action:1:goblin:ranged-touch" },
+    ]);
+    // Combat Reflexes is authored on the actor — that is what the budget derives from
+    // (D-183's `aooPerRound`); the encounter ledger's `aooMax` is only the fallback.
+    fixture.actors = [
+      fighter({
+        abilities: { str: 16, dex: 12, con: 14 },
+        feats: ["Combat Reflexes"],
+      }),
+      goblin(),
+    ];
+    fixture.combat = combat([
+      combatant("c-fighter", "t-fighter", "fighter", 20, {
+        aooUsed: 0,
+        aooMax: 1,
+        acted: true,
+      }),
+      combatant("c-goblin", "t-goblin", "goblin", 10, { acted: true }),
+    ]);
+    const resolution = await resolveActionOpportunities(client, gm, fixture);
+    expect(resolution.entries).toHaveLength(2);
+    expect(resolution.skipped).toEqual([]);
+    expect(resolution.entries[1]?.used).toBe(2);
   });
 });
 

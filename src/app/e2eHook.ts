@@ -37,6 +37,11 @@ import {
   resolveActionOpportunities,
   resolveMovementOpportunities,
 } from "../ui/combat/pf1eAooFlow";
+import {
+  castProvokes,
+  resolveCastProvokes,
+} from "../ui/combat/pf1eCastProvoke";
+import { autoResolveAoosOf } from "../packages/pf1e/aooSettings";
 import { selectedEncounter } from "../ui/combat/encounters";
 import { readCombatantState } from "../packages/pf1e/combatState";
 import {
@@ -441,6 +446,26 @@ export interface AppSurface {
       line: string;
     }>;
     skipped: Array<{ reactorId: string; provokerId: string; reason: string }>;
+  }>;
+  /**
+   * P06 (D-191): the cast provoke, end to end. The declared cast's facts decide which
+   * triggers it earns (`castProvokes`), then the sheet's glue (`resolveCastProvokes`)
+   * reads the active scene and the actor documents out of the store, builds the action
+   * opportunity with the encounter's ledgers, and auto-resolves (or reports) it — the
+   * cast and its ranged touch sharing one queue, so a 1/round reactor is refused on the
+   * second provoke before any die is rolled. The cast itself is not submitted: the
+   * provoke resolves *before* the spell lands.
+   */
+  pf1eCastProvoke(spec: {
+    provokerId: string;
+    castingTime?: string;
+    quickened?: boolean;
+    defensively?: boolean;
+    touch?: "melee" | "ranged";
+  }): Promise<{
+    provokes: Array<{ actionId?: string; trigger?: { kind: string } }>;
+    lines: string[];
+    damage: number;
   }>;
   /**
    * P5/C03: run the pre-save casting gate. The caster's deafened/grappled/pinned
@@ -1460,6 +1485,47 @@ function appSurface(app: HostApp): AppSurface {
           line: e.line,
         })),
         skipped: resolution.skipped.map((k) => ({ ...k })),
+      };
+    },
+    pf1eCastProvoke: async (spec) => {
+      const s = scene();
+      const provokes = castProvokes({
+        ...(spec.castingTime !== undefined
+          ? { castingTime: spec.castingTime as PF1eCastingTime }
+          : {}),
+        ...(spec.quickened !== undefined ? { quickened: spec.quickened } : {}),
+        ...(spec.defensively !== undefined
+          ? { defensively: spec.defensively }
+          : {}),
+        ...(spec.touch !== undefined ? { touch: spec.touch } : {}),
+      });
+      const combats = client.store.getAll("combats");
+      const activeScene =
+        client.store.getAll("scenes").find((sc) => sc.active) ?? s ?? null;
+      const combat =
+        activeScene === null
+          ? null
+          : selectedEncounter(combats, activeScene, "scene-1");
+      const settings = worldSettingsFrom(client.store.getAll("settings"));
+      const autoResolve = autoResolveAoosOf({
+        autoResolveAoos: settings.autoResolveAoos,
+      });
+      const resolution = await resolveCastProvokes({
+        client,
+        user: client.user,
+        provokerTokenId: spec.provokerId,
+        provokes,
+        autoResolve,
+        combat,
+      });
+      return {
+        provokes: provokes.map((p) =>
+          "actionId" in p
+            ? { actionId: p.actionId }
+            : { trigger: { kind: p.trigger.kind } },
+        ),
+        lines: resolution.lines,
+        damage: resolution.damage,
       };
     },
     pf1eTacticalEncounter: (spec) => {

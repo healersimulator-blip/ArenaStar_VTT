@@ -59,6 +59,7 @@ import { pf1eAttackRollGroups } from "../../packages/pf1e/rollData";
 import type { PF1eActionOpportunityResult } from "../../packages/pf1e/actionOpportunity";
 import type { PF1eMovementOpportunityResult } from "../../packages/pf1e/tacticalOpportunity";
 import {
+  attackOfOpportunityBudget,
   combatantForToken,
   spendAttackOfOpportunityAuthorized,
 } from "./actionBudget";
@@ -403,6 +404,28 @@ async function resolveQueuedInterrupts(
       currentCombat,
       interrupt.provokerId,
     );
+    // D-191: the budget gate is read *before* any die is rolled, not after. A ranged-touch
+    // spell provokes twice (the cast and the touch — two distinct actions), so the same
+    // reactor can appear twice on one queue; \"you can only make one attack of opportunity
+    // per round\" means the second entry must be refused here, where the first spend is
+    // already reflected in `currentCombat`, rather than rolled and then refused on the
+    // ledger write. The seam already filtered the first pass, so for the movement path
+    // this guard only ever fires on a stale or shared queue.
+    if (reactorCombatant !== null) {
+      const budget = attackOfOpportunityBudget(
+        currentCombat,
+        reactorCombatant._id,
+        input.actors,
+      );
+      if (budget !== null && !budget.canTake) {
+        skipped.push({
+          reactorId: interrupt.reactorId,
+          provokerId: interrupt.provokerId,
+          reason: budget.reason ?? "no opportunities left",
+        });
+        continue;
+      }
+    }
     const reactorDerived = derivedFor(
       reactor,
       currentCombat,
