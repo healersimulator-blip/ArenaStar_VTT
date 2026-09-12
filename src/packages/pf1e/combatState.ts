@@ -49,6 +49,10 @@ export type PF1eCombatantState = {
   aooMax: number;
   /** Held action, if any (A.10 "Hold the Charge"). */
   held: PF1eHeldAction | null;
+  /** Readied action, if any (P07/G §4.11 "Ready"): a prepared standard/move/swift/free action that
+   *  fires just before a declared trigger. Cleared when it fires, or lost at the combatant's next
+   *  turn if the trigger never came (re-ready allowed). */
+  ready: PF1eReadiedAction | null;
   /** Has had a turn yet this combat? While false the combatant is flat-footed (A.1). */
   acted: boolean;
   /** Set while a surprise round caught this combatant unaware. */
@@ -63,6 +67,37 @@ export type PF1eHeldAction = {
   since: number;
   /** Friendly turns taken before the holder's next turn; 6+ makes holding a full-round action. */
   alliesBefore: number;
+  note?: string;
+};
+
+/**
+ * The condition a readied action waits for. The trigger kinds are the SRD's named examples
+ * (CRB p.203, AoN 201); `custom` carries the GM's own wording. A trigger is *not* evaluated by
+ * this module — matching a trigger to an event is the caller's (GM/UI) decision, exactly as the
+ * rules leave it: "the trigger… is whatever you specify". `readyDelay.ts` only stores it and
+ * enforces that it can fire once, before the triggerer, and then is spent.
+ */
+export type PF1eReadyTrigger = {
+  kind: "attack" | "move" | "cast" | "custom";
+  /** Optional named target (a combatant id) the trigger is scoped to. */
+  targetId?: string;
+  /** Free-text condition, shown to the GM ("…when the orc moves into the doorway"). */
+  note?: string;
+};
+
+/**
+ * A readied action under `combatant.flags.pf1e.ready`. `action` is what fires on the trigger —
+ * the SRD limits it to a standard, move, swift, or free action, never a full-round action. The
+ * standard action used to *declare* the ready is spent up front (`readyCombatant`); the readied
+ * action itself costs nothing further when it fires.
+ */
+export type PF1eReadiedAction = {
+  /** The prepared action, restricted to standard/move/swift/free. */
+  action: PF1eActionSpend;
+  trigger: PF1eReadyTrigger;
+  /** Round the ready was declared (mirrors `combat.round`); an unspent ready is lost when this
+   *  combatant's next turn starts with `sinceRound < combat.round`. */
+  sinceRound: number;
   note?: string;
 };
 
@@ -222,6 +257,51 @@ export function readCombatantState(
             ...(typeof held.note === "string" ? { note: held.note } : {}),
           }
         : null,
+    ready: readReady(raw.ready),
+  };
+}
+
+/**
+ * Defensive read of a stored ready action: an unparseable or half-written `flags.pf1e.ready`
+ * degrades to null (no ready), never throws — same contract as `readActionLedger`.
+ */
+function readReady(raw: unknown): PF1eReadiedAction | null {
+  const r = asRecord(raw);
+  const action = asRecord(r.action);
+  const trigger = asRecord(r.trigger);
+  const actionKind = action.kind;
+  const legalAction =
+    actionKind === "standard" ||
+    actionKind === "move" ||
+    actionKind === "swift" ||
+    actionKind === "free";
+  const triggerKind = trigger.kind;
+  const legalTrigger =
+    triggerKind === "attack" ||
+    triggerKind === "move" ||
+    triggerKind === "cast" ||
+    triggerKind === "custom";
+  if (!legalAction || !legalTrigger) return null;
+  return {
+    action: {
+      kind: actionKind,
+      ...(typeof action.action === "string" ? { action: action.action } : {}),
+      ...(actionKind === "move" && action.asStandard === true
+        ? { asStandard: true }
+        : {}),
+    } as PF1eActionSpend,
+    trigger: {
+      kind: triggerKind,
+      ...(typeof trigger.targetId === "string"
+        ? { targetId: trigger.targetId }
+        : {}),
+      ...(typeof trigger.note === "string" ? { note: trigger.note } : {}),
+    },
+    sinceRound:
+      typeof r.sinceRound === "number" && Number.isFinite(r.sinceRound)
+        ? Math.trunc(r.sinceRound)
+        : 0,
+    ...(typeof r.note === "string" ? { note: r.note } : {}),
   };
 }
 
@@ -731,6 +811,7 @@ export function pf1eNextTurn(
       let held = cs.held;
       let acted = cs.acted;
       let actions = cs.actions;
+      let ready = cs.ready;
       if (active && c._id === active._id && aooUsed !== 0) {
         aooUsed = 0; // A.10: the budget comes back at the start of your turn
         changed = true;
@@ -761,9 +842,24 @@ export function pf1eNextTurn(
           actions = reset;
           changed = true;
         }
+        // P07: an unspent ready is lost when this combatant's next turn comes around —
+        // the trigger never fired, so the readied action is gone (re-ready allowed, AoN 201).
+        // Compared against the *advanced* round: readying happens on your turn, so your next
+        // turn is always at least one round later.
+        if (ready !== null && ready.sinceRound < core.combat.round) {
+          ready = null;
+          changed = true;
+        }
       }
       if (!changed) return c;
-      return withCombatantState(c, { ...cs, aooUsed, held, acted, actions });
+      return withCombatantState(c, {
+        ...cs,
+        aooUsed,
+        held,
+        acted,
+        actions,
+        ready,
+      });
     });
   }
 
@@ -859,7 +955,7 @@ function concentrationEffectIds(combatant: CombatantDocument): string[] {
 }
 
 /** Write one combatant's PF1e state back into its flags, leaving other scopes untouched. */
-function withCombatantState(
+export function withCombatantState(
   c: CombatantDocument,
   state: PF1eCombatantState,
 ): CombatantDocument {
