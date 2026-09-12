@@ -53,7 +53,7 @@ describe("GM-tab boot (§2/§8/§14)", () => {
     expect(client.store.get("scenes", DEFAULT_SCENE_ID)?.name).toBe("Scene 1");
     expect(client.store.get("users", "gm")?.role).toBe("GM");
     await app.persister.drain();
-    app.close();
+    await app.close();
   });
 
   test("add token + move via the GM CLIENT (never host internals) round-trips", async () => {
@@ -103,7 +103,7 @@ describe("GM-tab boot (§2/§8/§14)", () => {
     expect(token).toMatchObject({ x: 400, y: 300 });
 
     await app.persister.drain();
-    app.close();
+    await app.close();
   });
 
   test("reload: reboots into the SAME world, replays the oplog tail (§8)", async () => {
@@ -118,7 +118,7 @@ describe("GM-tab boot (§2/§8/§14)", () => {
     ]);
     await settle();
     await first.persister.drain();
-    first.close();
+    await first.close();
 
     const second = await boot(); // no worldId → most recent world
     expect(second.worldId).toBe(worldId);
@@ -126,7 +126,7 @@ describe("GM-tab boot (§2/§8/§14)", () => {
     expect(second.store.seq).toBe(first.store.seq);
     expect(second.gm.client.store.get("scenes", DEFAULT_SCENE_ID)?.name).toBe("Renamed Scene");
     await second.persister.drain();
-    second.close();
+    await second.close();
   });
 
   test("map import → manifest + scene.img; bytes stream back over the loopback (§7)", async () => {
@@ -147,6 +147,6 @@ describe("GM-tab boot (§2/§8/§14)", () => {
     const bytes = await app.gm.fetcher.request(hash, "scene"); // loopback fetch
     expect([...bytes]).toEqual([1, 2, 3, 4]);
     await app.persister.drain();
-    app.close();
+    await app.close();
   });
 });

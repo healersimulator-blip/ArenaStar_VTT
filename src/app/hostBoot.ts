@@ -154,7 +154,15 @@ export interface HostApp {
     /** §5A turn/sim channel for the default scene (drives sim.control). */
     readonly channel: TurnChannel;
   };
-  close(): void;
+  /**
+   * Stop live writes and settle persistence. Awaitable because `close()` runs
+   * the persister's FINAL flush (§8 write-behind batches documents on a
+   * ~500 ms timer): a caller that replaces the world rows next — the §8
+   * world.zip restore — must not race that flush, or the last batched write
+   * lands after the restore's delete and resurrects documents the archive
+   * does not contain (D-179). Callers that only tear down may `void` it.
+   */
+  close(): Promise<void>;
 }
 
 function sceneDoc(): SceneDocument {
@@ -665,13 +673,18 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
     assets,
     pipeline,
     gm: { client: gmClient, bus: gmBus, cache, fetcher, channel },
-    close(): void {
+    async close(): Promise<void> {
       removeLifecycle();
       runner.terminate();
       gmClient.close();
       host.removeSession("gm");
       assets.close();
-      void persister.close();
+      // Awaited, not `void`: this is the final documents flush. Returning
+      // before it settles lets a subsequent world-row replacement (the §8
+      // world.zip import) interleave with it — the batched write of a document
+      // created after the export commits AFTER the restore's delete+put, so
+      // the reloaded world carries a token the archive never had.
+      await persister.close();
     },
   };
 }

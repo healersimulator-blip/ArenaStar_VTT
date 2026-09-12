@@ -76,7 +76,7 @@ describe("sheets: reactive editing + ownership (§10 M1)", () => {
       pump.stop();
       playerApp.close();
       await hostApp.persister.flush();
-      hostApp.close();
+      await hostApp.close();
     }
   });
 });

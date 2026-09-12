@@ -653,7 +653,10 @@
     if (!file) return;
     try {
       const { db, root } = app;
-      app.close(); // stop live writes; import replaces the world rows
+      // AWAITED: close() settles the persister's final batched flush. Importing
+      // before it lands lets that flush write a post-export document on top of
+      // the restore, so the reload boots a world the archive never contained.
+      await app.close(); // stop live writes; import replaces the world rows
       const imported = await importWorldZip({ db, root, file });
       console.info(
         `vtt: imported world ${imported.name} at seq ${imported.seq}`,

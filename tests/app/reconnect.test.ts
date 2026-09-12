@@ -95,7 +95,7 @@ describe("GM crash & recovery (§6.5/§14)", () => {
     const seqAtCrash = hostApp.store.seq;
     share.close();
     await hostApp.persister.flush();
-    hostApp.close();
+    await hostApp.close();
 
     // player sees the drop ("Host disconnected" equivalent)
     await new Promise((r) => setTimeout(r, 300));
@@ -138,6 +138,6 @@ describe("GM crash & recovery (§6.5/§14)", () => {
     pump.stop();
     playerApp.close();
     await hostApp2.persister.flush();
-    hostApp2.close();
+    await hostApp2.close();
   }, 20_000);
 });
