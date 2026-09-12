@@ -120,7 +120,7 @@ Status codes: ✅ faithful · 🟡 partial · 🔴 wrong (implemented but contra
 | 4. Injury & Death (dying, stable, nonlethal, temp HP) | 🔴 5% | `spells.ts` heal path only | `dying.ts` | `pf1eDying.test.ts` (new) |
 | 5. Movement, Position & Distance | ⚪ 0% | nothing PF1e (only `massBattleBasic`'s `move` order) | `movement.ts`, `grid.ts` | `pf1eMovement.test.ts` (new) |
 | 6. Big & Little Creatures (space, reach) | 🔴 5% | `envelopment.ts` (reach hard-coded `1.5`) | `grid.ts` + Appendix A.5 table | `pf1eEnvelopment.test.ts` (extend) |
-| 7. Combat Modifiers (cover, concealment, flanking, helpless) | 🔴 15% | flanking only, and wrong (`combatEngine.ts:176`) | `cover.ts`, `bonuses.ts` | `pf1eCover.test.ts` (new) |
+| 7. Combat Modifiers (cover, concealment, flanking, helpless) | 🔴 25% | flanking only — the +2 lands on the attack roll and not on AC (2.2 ✅), and since D-181 it is *derived* from AoN 183's geometry (`flanking.ts`: opposite borders/corners, threatening ally, 0-ft reach) instead of a hand-ticked checkbox; cover, concealment, invisibility and helplessness are still absent | `cover.ts`, `bonuses.ts`, `flanking.ts` ✅ + `threatPreview.ts` ✅ | `pf1eCover.test.ts` (new); `pf1eFlanking.test.ts` ✅, `pf1eThreatPreview.test.ts` ✅, `pf1e_flanking.spec.ts` ✅ |
 | 8. Special Attacks (maneuvers, charge, TWF, splash, mounted) | 🟡 25% | `combatEngine.ts:437` (4 of 10 maneuvers) | `maneuvers.ts`, `weapons.ts` | `pf1eManeuvers.test.ts` (new) |
 | 9. Special Initiative Actions (delay, ready) | 🟡 20% | `combat.ts:176` delay flag; no ready | `turnStateMachine.ts` + interrupt queue | `pf1eReady.test.ts` (new) |
 
@@ -306,7 +306,7 @@ means cutting per-unit cost, not adding a perf knob to the test.
 | # | SRD rule | Current behaviour | Fix |
 |---|---|---|---|
 | 2.1 ✅ | Flat-footed AC = 10 + armor + shield + natural + misc (no Dex, no dodge) | `targetAcType:"flatFooted"` looks up a **non-existent** column `pool.sys["flatFooted"]` and falls back to the **attacker's** `profile.ac` (`combatEngine.ts:175`) | Add a real `flatFootedAc` column (or derive `ac/touchAc/flatFootedAc` from one bonus breakdown in `schema.ts:compilePF1eProfile`) and select by key with an explicit error on unknown keys. |
-| 2.2 ✅ | Flanking = **+2 on the attack roll** only | +2 to-hit (`:206`) *and* −2 to AC (`:176`) — double-counted | Keep the +2; remove the AC penalty; set/clear the `FLANKED` bit from geometry instead of trusting a caller flag. |
+| 2.2 ✅ | Flanking = **+2 on the attack roll** only | +2 to-hit (`:206`) *and* −2 to AC (`:176`) — double-counted | Keep the +2; remove the AC penalty; set/clear the `FLANKED` bit from geometry instead of trusting a caller flag. **D-181:** the geometry now exists (`flanking.ts` + `threatPreview.ts`, browser-tested); the tactical appliers still take a caller flag because no sheet flow carries token positions, and the strategic bit is blocked on §5's deploy-spacing prerequisite. |
 | 2.3 ✅ | Minimum damage: penalties below 1 ⇒ **1 point of nonlethal** | `Math.max(1, …)` (`:248`, `:420`, `:503`) — always 1 *lethal* | Return `{lethal, nonlethal}`; the nonlethal bucket feeds 2.12. |
 | 2.4 | Multiplying damage: only base weapon dice + Str-type bonuses are multiplied; **precision and bonus dice are not** | Crit multiplier is applied by looping dice rolls and re-adding `damageMod`, and `elementalType` bonus dice are never rolled at all | Split damage into `{baseDice, staticMod, bonusDice[]}`; multiply first two only; add bonus dice once (with `Math.max(1, …)` per the SRD). |
 | 2.5 | Threat range (19–20, 18–20 …) and multipliers ×2/×3/×4 | single `critThreatMin` from the profile, no Improved Critical / expanded-range sources, no ×4 auto-threat for firearms | Threat range as data on the weapon + feat modifiers; `d20 >= threatMin && hit` ⇒ confirm. |
@@ -471,10 +471,15 @@ Faithful hero-level combat means the full chapter. Ordered as it should be built
    squares), `src/core/detection.ts` (LOS reuse).
 6. **Cover/concealment/flanking/helpless.** +4/+2 cover, improved cover +8/+4, total
    cover blocks attacks and AoOs, soft cover; concealment 20%/50% miss chance (non-stacking),
-   invisibility (no Dex, +40 Stealth while stationary/+20 while moving), flanking (+2,
-   only threatening allies, 0-ft reach can't flank), helpless (Dex 0 → −5, melee −4,
-   coup de grace full-round auto-crit + Fort DC 10+damage or die).
-   Files: `src/packages/pf1e/cover.ts`.
+   invisibility (no Dex, +40 Stealth while stationary/+20 while moving), ~~flanking (+2,
+   only threatening allies, 0-ft reach can't flank)~~ ✅ **D-181**: `flanking.ts` encodes
+   AoN 183 as written — the centre-to-centre line test across opposite borders *including
+   their corners*, the multi-square "any square it occupies" exception, threatening allies
+   only (read through P02's `threatenedCells`, so reach per size/shape/reach-weapon decides
+   it), and the 0-ft-reach exclusion from both AoN 183 and Table 8-4 — with `threatPreview.ts`
+   as the scene seam and `pf1e_flanking.spec.ts` proving it in Chromium; helpless
+   (Dex 0 → −5, melee −4, coup de grace full-round auto-crit + Fort DC 10+damage or die).
+   Files: `src/packages/pf1e/cover.ts`; `flanking.ts` + `threatPreview.ts` landed.
 7. **Attacks & damage.** Full `attack.ts` (see §3) replacing the inline math in
    `combatEngine.ts:147-315`; shooting into melee −4 (Precise Shot), thrown/projectile
    max increments, touch spells & held charge, natural primary/secondary attacks,
@@ -536,7 +541,20 @@ kernel per model-pair**, with a documented, measured approximation budget.
 - **Engagement:** replace `envelopment.ts` "≥2 attackers within 1.5 units ⇒ flanked"
   with real contact geometry — threatened square adjacency, facing, reach per size,
   flanking angle (opposite borders/corners), and a per-round `FLANKED` set/clear
-  (`envelopment.ts` currently sets the bit and never expires it).
+  (`envelopment.ts` currently sets the bit and never expires it). **Status: three of the
+  five pieces have landed, and the fourth is blocked on P01.** Per-round set/clear is D-177;
+  reach per size is D-180 (each unit's own natural reach, from its leader actor's size and
+  body form); the flanking angle rule is D-181's `flanking.ts`, which encodes AoN 183
+  exactly and is browser-tested at the tactical scale. It is **not** wired into
+  `envelopment.ts`, because at this scale models are points in feet and can share a cell —
+  `massBattlePf1e.ts` hashes on `new SpatialGrid(5)` while `src/sim/deploy.ts` spaces
+  formations at **4 ft** by default — so a flanker can sit inside the space it flanks and
+  the centre-to-centre line has no opposite borders to cross. Applying the test to that
+  layout would decide flanking from geometry the rules never describe, and inventing an
+  angle heuristic instead is exactly what R03 rejects. **Prerequisite: P01's deploy-spacing
+  remainder** (spacing riding the scene grid, one model per cell), after which
+  `envelopment.ts` calls `resolveFlanking` with each unit's footprint and reach. Threatened
+  square adjacency and facing remain open with it.
 - **Movement/orders:** PF1e `resolveTurn` has **no move/shoot/morale sub-phase at all**
   (subPhases are declared but unused) — orders other than `attack`/`custom:spell_aoe`
   do nothing. Need: move (speed × 5-ft cells, terrain cost from `ctx.grid`/walls),
@@ -795,11 +813,22 @@ precision/bonus dice; multiple multipliers **add** (×2 and ×2 ⇒ ×3, not ×4
 Fine +8/−8 attack·AC… Colossal −8/+8. CMB/CMD special size:
 Fine −8, Dim −4, Tiny −2, Small −1, Medium +0, Large +1, Huge +2, Garg +4, Colossal +8.
 
-**A.5 Space & natural reach**: Fine 1½ ft/0, Dim 1 ft/0, Tiny 2½ ft/0, Small 5/5,
+**A.5 Space & natural reach** (Table 8-4: Creature Size and Scale — re-verified against
+AoN Rules ID 179 on 2026-09-12 for P02/D-180: the earlier transcription had Fine at
+"1½ ft" where the table prints **½ ft**, and the encoded *square* columns ran one short
+for Colossal — 30 ft is 6 squares, not the 5 a "+1 per category" ladder suggests):
+Fine ½ ft/0, Dim 1 ft/0, Tiny 2½ ft/0, Small 5/5,
 Medium 5/5, Large tall 10/10 · long 10/5, Huge 15/15 · 15/10, Gargantuan 20/20 · 20/15,
 Colossal 30/30 · 30/20. Tiny/Dim/Fine: 4/25/100 per square, must enter an opponent's
 square to attack (provokes), never flank, never threaten. Large+ with a reach weapon:
-strikes up to double natural reach, **cannot** strike within its natural reach.
+strikes up to double natural reach, **cannot** strike within its natural reach — and
+Small/Medium with one strike at 10 ft but "can't strike adjacent foes (those within 5
+feet)" (AoN 131), i.e. the same band `(natural, 2 × natural]`. As 5-ft squares
+(Fine/Dim/Tiny/Small/Medium/Large/Huge/Gargantuan/Colossal): space
+0/0/0/1/1/4/9/16/**36**, tall reach 0/0/0/1/1/2/3/4/**6**, long reach —/—/—/—/—/1/2/3/4
+(the long column exists only for the four multi-square sizes). Distance is counted
+"the first diagonal counts as 1 square, the second counts as 2 squares" (AoN 175), which
+is what makes a Medium reach weapon threaten 12 squares and not the 16 a 5-5-5 ruler gives.
 
 **A.6 Table: Actions in Combat** (Table 7-2, CRB p.182 — re-verified against AoN Rules
 ID 128 on 2026-09-09 for T05/D-131; the 2026-09-07 transcription had wrong provoke

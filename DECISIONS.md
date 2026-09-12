@@ -4974,3 +4974,147 @@ files with uncommitted session work; mutation restores use file backups.
 - `applyHeroCleaveOverkill`, its option/result types and its unit test are removed; `heroBridge.ts` keeps the leadership aura only.
 
 **Verification.** New module test pins the rule with a BAB-9 probe (normal routine iterates twice): hero adjacent ⇒ 3 total attacks and the hero's AC drops to 12 (the −2 penalty); non-hero ⇒ 2 attacks, AC 14; hero with the defender 30 ft away ⇒ 2 attacks, AC 14 (adjacency requirement, no penalty). Mutation (attack cap removed ⇒ cleave would grant a full second iterative) red; restore byte-identical via backup. Full gates: **1574 passed / 3 skipped** (148 files; +1 test, −1 deleted cascade test); typecheck/lint/build clean; dist/index.html 2,251,732 B (gzip 644,927 B); rules.js **131,585 B** (down from 132,127 — the deleted cascade was larger than its replacement); e2e collects 276 tests / 36 files.
+
+## D-179 — 2026-09-12 — Executed Chromium acceptance at 92/92: one real §8 restore race fixed, three spec defects repaired
+
+**Context.** The whole collected suite was executed on Chromium at its current
+size — **92/92, twice** (276 tests / 36 files across the three projects; D-153's
+pass was 74/74 before D-154…D-178 added 18 specs). Same browser route as D-153:
+`@sparticuz/chromium@152.0.0` (npm) → Chromium 152.0.7977.0 with the `al2023`
+libraries on `LD_LIBRARY_PATH`, driven through the documented
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` override; the Playwright CDN is still
+unreachable and no security-bypass flags are added. The first run was 89/92, and
+the three failures plus one intermittent fourth were all worth more than a
+green tick: one was a **real product race** the Node suite could not reach.
+
+**Product fix — `HostApp.close()` fire-and-forgot the persister's final flush.**
+§8 persistence batches document writes (~500 ms) and `HostPersister.close()`
+runs one FINAL flush (`await this.flushing; await this.flush()`). `hostBoot`'s
+`close()` discarded it (`void persister.close()`) and returned `void`, while
+`App.importWorld` immediately replaced every world row with the archive's and
+reloaded. A document dirtied after the export could therefore commit AFTER the
+restore's `delete(range)` + `put(docs)` transaction — and because tokens are
+embedded in the scene document, the drifted scene (3 tokens) was written back
+over the restored one (2), with `worlds.flushedSeq` drifted too. The reload then
+booted a world the archive never contained.
+
+- **Fix:** `close(): Promise<void>` that awaits `persister.close()`; `importWorld`
+  awaits it before `importWorldZip`; `Root.svelte`'s teardown-only path keeps the
+  fire-and-forget form but says so explicitly (`void app?.close()`). 19 test call
+  sites now await. Teardown semantics are unchanged — only awaitable.
+- **Why Node never saw it:** `tests/host/worldFile.test.ts`'s restore test calls
+  `await drifted.persister.flush()` before closing, so the dirty-write window was
+  never open. The browser opened it by clicking "add token" and importing
+  immediately. Observed as `worldfile.spec.ts` polling tokenCount 2 and timing
+  out on 3 — intermittently, only under 2-worker load.
+
+**Spec repairs (all three written against assumptions, never executed).**
+
+1. **`pf1e_touch` ally picks keyed on ids that cannot exist.** The D-162
+   full-round-touch spec selected `[data-ally-touch-pick="pf-ogre"]`, but that
+   attribute carries the imported **actor `_id`** (`importEntryOp` mints
+   `actor-<hash>`) — a compendium entry carries no `_id` by contract (D-090), so
+   the locator could never match and the test timed out at 30 s while the
+   checkboxes were visibly rendered. Now picks by visible label and asserts
+   exactly one pick row per ally.
+2. **`pf1e_touch` weapon release — two defects plus a wrong discriminator.**
+   (a) It read `#chat-log` once immediately after the click, but the card is a
+   `create` op submitted only after the attack roll replicates. (b) Its miss
+   branch matched `release miss` — the card's *name* — and `#chat-log` renders
+   `content`, never `name`, so a miss could never pass however long it waited.
+   (c) It expected the held-charge panel to disappear on a hit, but this fixture
+   holds TWO charges: a hit leaves one (and the plural "N deliveries" element
+   renders only above 1), a miss leaves two — both keep the panel. A shared
+   `chatAfter(page, waitFor, occurrences)` helper now waits on the accumulated
+   log (occurrence form because the discharging delivery card has no unique text
+   at all — `pf1eCastFlow.ts:1461` appends "Charges remaining" only when a charge
+   survives), the branch is read from rendered content, and the state assertion
+   is `[data-held-charge]` count 1 + `[data-held-charges]` count `released ? 0 : 1`.
+   The same helper replaced **all nine** single-snapshot log reads in the file,
+   including the one that had already flaked twice under parallel workers.
+3. **`dice3d` demanded a capability the environment does not have.** It asserted
+   `settled >= 1`, which requires a WebGL context; `showDice3D` returns
+   immediately when `new WebGLRenderer()` cannot get one ("chat never blocks") —
+   the documented degradation, and the correct product behaviour. This Chromium
+   build has no WebGL at all (`webgl` and `webgl2` both null, unchanged by
+   `--enable-unsafe-swiftshader --use-angle=swiftshader`). The spec now probes
+   the same capability the product checks and, when it is absent, asserts the
+   degradation path for real instead of skipping: `loads`/`rolls` incremented,
+   `settled === 0`, `disposed === false`, the determined values still recorded
+   (3 dice, total intact — they are captured before the renderer is attempted),
+   no `[data-dice3d-canvas]` in the DOM, and the chat card's rendered total equal
+   to the overlay's `lastTotal`, which is §11's "the animation never chooses the
+   outcome" verified with no animation at all. On a WebGL-capable browser the
+   original settle/dispose assertions run unchanged.
+
+**Verification.** Mutation checks, all red, all restored from file backups (the
+D-174 lesson): `void persister.close()` restored → the new Node test fails
+`expected [ 't-1', 't-2' ] to deeply equal [ 't-1', 't-2', 't-3' ]`; `released`
+inverted → the release spec fails, so the charge-count assertion is load-bearing;
+`expect(degraded.settled).toBe(1)` → dice3d fails Expected 1 / Received 0, which
+proves the degradation branch executes rather than passing vacuously. New Node
+test `tests/host/worldFile.test.ts` → "close() settles the final flush before a
+restore replaces the rows": the drift is left dirty, `close()` is awaited, and the
+**documents store is read directly** — a re-boot would replay the oplog tail and
+hide the difference — before the restore lands back on the export point.
+
+**Evidence.** Unit **1575 passed / 3 skipped** across 148 files (+1); typecheck
+and lint green; `e2e/pf1e_touch.spec.ts` Prettier-clean (clean at HEAD, so it
+stays; every other touched file was dirty at HEAD and keeps its native style per
+the D-151 rule, diffs semantic only); build **2,251,755 raw / 647,474 gzip**
+(+23 B, budget 6 MB); `build:systems` unchanged (`rules.js` 131,588 B — no rules
+touched); Chromium e2e **92/92 twice**, `--repeat-each=8` on
+worldfile+touch+dice3d **72/72**, `--repeat-each=20` on the random-branch release
+spec **20/20**. **Still open:** the Firefox/WebKit matrix (Playwright CDN and
+Debian mirrors unreachable — D-082/D-119/D-153 precedent), so N01/N02 and
+S01/S04 stay unchecked. C03 stays unchecked for its one remaining consumer (AoO
+against ranged-touch casters, which rides P06's interrupt queue) — but its D-162
+browser specs now execute green rather than merely collecting.
+
+## D-180 — 2026-09-12 — P6/P02 first slice: space/reach/threat geometry lands, and the strategic battle reads a unit's own reach
+
+**Decision.** P02's geometry is now a pure layer — `src/packages/pf1e/geometry.ts` — with a live consumer: the mass-battle module derives each unit's natural reach from its bound leader actor's size instead of assuming one grid cell for everybody, and the tactical derivation authors Table 8-4's tall/long body form. The canvas threatened-square overlay (Gap List §4.5's `src/canvas/layers/*`) and a tactical-scale consumer follow, on the D-148→D-154 staging (pure layer first, preview seam and overlay second). **P02 stays unchecked** with three named remainders, listed under Evidence.
+
+**R02 transcription (re-verified 2026-09-12 against Archives of Nethys; quoted in full at the head of `geometry.ts`).**
+- **AoN 179** (CRB p.194, "Big and Little Creatures in Combat" + Table 8-4): "Creatures that take up less than 1 square of space typically have a natural reach of 0 feet, meaning they can't reach into adjacent squares. They must enter an opponent's square to attack in melee. This provokes an attack of opportunity from the opponent. … Since they have no natural reach, they do not threaten the squares around them. You can move past them without provoking attacks of opportunity. They also can't flank an enemy." / "Unlike when someone uses a reach weapon, a creature with greater than normal natural reach (more than 5 feet) still threatens squares adjacent to it." / "Large or larger creatures using reach weapons can strike up to double their natural reach but can't strike at their natural reach or less." Table 8-4 prints **two** natural-reach columns for the four multi-square sizes — Large 10/5, Huge 15/10, Gargantuan 20/15, Colossal 30/20 — and one figure each for Fine through Medium, so body shape is only ever a question for Large and larger.
+- **AoN 102** (CRB p.180): "You threaten all squares into which you can make a melee attack, even when it is not your turn. Generally, that means everything in all squares adjacent to your space (including diagonally)." Plus "Small and Medium creatures wielding reach weapons threaten more squares than a typical creature."
+- **AoN 131** (CRB p.182): "With a typical reach weapon, you can strike opponents 10 feet away, but you can't strike adjacent foes (those within 5 feet)" — the Small/Medium half of the band AoN 179 states for Large+, so `reachWeaponBand` is **one** rule, `(natural, 2 × natural]`, not two.
+- **AoN 175** (CRB p.192): "distance is measured assuming that 1 square equals 5 feet", and "the first diagonal counts as 1 square, the second counts as 2 squares, the third counts as 1, the fourth as 2, and so on" — pinned as `PF1E_DISTANCE_DIAGONALS = "5105"`, deliberately **not** the scene's `diagonals` ruler setting, for the reason D-148 recorded for spell areas: the scene owns the scale, the rules own the counting. This is what makes a Medium reach weapon threaten exactly **12** squares (four 10-ft orthogonal, eight knight's-move) and *not* the four diagonal corners, which 5-10-5 puts at 15 ft.
+- **AoN 176** (CRB p.193): "A Fine, Diminutive, or Tiny creature can move into or through an occupied square. The creature provokes attacks of opportunity when doing so." Read as an occupancy fact only — the movement legality around it is P03's.
+
+**Two data bugs the re-verification found, both fixed and pinned by tests.**
+1. **A.5's transcription had Fine at "1½ ft".** Table 8-4 prints **½ ft**, and `rulesTables.ts` had faithfully encoded the typo (`spaceFeet: 1.5`), which the actor readout then printed as "1.5 ft space". Corrected to `0.5`, and the Gap List's A.5 text is fixed with a re-verification note — the A.6 precedent for a transcription that a later read proved wrong.
+2. **Colossal's square columns were one short.** `spaceSquares: 25` / `reachSquares: 5` continue a "+1 per category" ladder (Large 2, Huge 3, Gargantuan 4, Colossal 5) that Table 8-4 does not support: Colossal is 30 ft across and reaches 30 ft, which is **6** squares on a side (36 occupied) and **6** squares of reach. So a Colossal creature had a 25-ft space and 25-ft reach instead of 30/30 — and because every per-attack `reachSquares` default and `meleeReachLegality`'s caller-supplied reach read that column, it could not strike a target the table says it reaches. Both columns are now derived from the table's own feet ÷ 5, with the division documented in the field so the ladder is not re-guessed by eye.
+
+**What landed.**
+- **`geometry.ts`** (pure, no Pixi/scene/document access): `naturalReachSquares`/`naturalReachFt` (both Table 8-4 columns), `normalizeReachShape`, `footprintSide`/`footprintCells` (1×1 to Medium — a sub-square creature still occupies the one square it is in, since a footprint of zero cells could never be located — then 2×2, 3×3, 4×4, 6×6), `squareDistance`/`squareDistanceFt` (5-10-5), `footprintDistance`/`footprintDistanceFt` (nearest occupied square, **0 when two spaces share a square** — the Tiny-creature-inside-its-target's-square case `meleeReachLegality` resolves at distance 0; `+Infinity` for an empty footprint rather than a guessed number), `reachWeaponBand`, `threatenedCells`, and `occupancy` (Table 8-4's sub-square facts read from A.5, never restated). A creature's own squares are never threatened — its space is not a square *adjacent* to its space — and striking into your own square is legality, not threat.
+- **`rulesTables.ts`**: Table 8-4's long column transcribed as `longReachSquares` (Large 1, Huge 2, Gargantuan 3, Colossal 4; **null** for Fine through Medium, which print one figure — null, never a copy of the first).
+- **`actor.ts`**: `system.pf1e.reachShape` is authored, validated (`parsePF1eActorSystem` rejects a third value by name) and derived: `PF1eDerived.reachShape` + `reachFeet`, which is the producer `meleeReachLegality`'s "caller-derived from A.5's space/reach table" comment asked for. Tall is the default because it is the column the table prints first and because "these values are typical"; a shape authored on a size with one printed figure is **reported** ("does not apply to a Medium creature") and changes nothing, rather than silently shortening its reach. Per-attack `reachSquares` defaults now read the shape, an authored per-attack reach still outranks it, and the readout prints feet ("10 ft space, 5 ft natural reach (long)") instead of a unitless square count.
+- **`massBattlePf1e.ts`**: `reachSquaresFromLeaderActor` reads the size through the existing M07 seam (`ctx.leaderActors`, keyed by unit id). Envelopment now passes the **attacking** unit's own reach, so a Large unit contacts the rank two squares out instead of stopping one model short; and the caster-threat query — which hard-coded `5` — now asks each enemy at **its own** reach, querying at the widest reach present and filtering by distance, because threat is the threatening creature's property (AoN 102), not the caster's and not a constant. A unit with no bound actor keeps the one-cell default, so an army deployed without actor data resolves exactly as it did before this slice.
+- **Deliberate non-choice:** the strategic scale keeps reach in *squares × the scene's cell feet* rather than absolute feet. On the shipped 5-ft grid the two are identical; on a hypothetical 10-ft grid, absolute feet would leave no unit able to engage anything (deploy spacing is grid-derived), so this stays D-177's scale-relative reading, now per size — the same strategic-vs-tactical trade-off family §10.2 records. The tactical layer keeps absolute feet, because that is the unit AoN 131/179 and `meleeReachLegality` speak in.
+- **Not encoded, on purpose:** flanking angles (P04), the interrupt queue (P06), squeeze/difficult terrain/move-through/5-ft-step hooks (P03), and "unarmed threatens nothing" as a flag — AoN 102 states it as reach, so an unarmed caller passes 0.
+
+**Verification.** Fixtures were derived **before** the module was run: the four small cases by hand from AoN 175's sentence (Medium 8 adjacent squares; Medium-with-reach-weapon 12; Large long 12; Large tall 28) and the larger counts from an independent path-walking implementation of that same sentence, which reproduces all four hand-derived numbers — so no fixture is this module's own output. Two fixtures were caught wrong by that cross-check and corrected (the Large reach-weapon cells, which measure from the near edge of the 2×2 space, and a mixed diagonal offset). Five mutation checks, all red, all restored from fresh backups with `grep -c MUTATION` verified 0: tall/long columns swapped (9 tests red), threat counted on the ruler's `"555"` diagonals (8 red), Colossal reach back to the ladder's 5 (6 red across three files), caster threat back to one cell for everybody (1 red), envelopment reach back to `cellFeet` (1 red).
+
+**Evidence.** Unit **1621 passed / 3 skipped** across 148 files (+46 tests: 32 geometry, 7 actor, 4 rules-table, 3 mass-battle); typecheck and lint green; build **2,253,202 raw / 647,879 gzip** (+1,447 B, budget 6 MB); `rules.js` **133.1 kB** (+1.5 kB — geometry is bundled into the mass-battles rules entry, which is where its consumer lives). Chromium e2e **92/92** (2.5 m): the derivation change alters what the sheet reads out, so the browser suite ran as well, not only the unit gates. Prettier: `geometry.ts`, `actor.ts`, `rulesTables.ts` and the two clean-at-HEAD test files formatted; `massBattlePf1e.ts` and the envelopment/mass-battle tests were dirty at HEAD and keep their native style per the D-151 rule. **Still open (P02's remainders):** (1) threatened-square **highlighting** — the canvas draw list and overlay, following this pure layer exactly as D-154's `areaPreview.ts` followed D-148's targeting; (2) a **tactical** consumer — nothing in the sheet flows carries token positions yet, so `meleeReachLegality` has a producer for `naturalReachFt` but still no caller, and A04's `shootingIntoMeleePenalty` still receives its `targetEngaged`/`nearestFriendlyDistanceFt` facts from nobody (`threatenedCells` + `footprintDistanceFt` are the primitives that will feed them, with P04); (3) **content** — `systems/pf1e-core/packs/bestiary.json` authors no `size` field at all, so every shipped creature derives Medium and no pack data exercises the new columns yet.
+
+## D-181 — 2026-09-12 — P6/P04 first slice: flanking is AoN 183's line test, plus the scene seam that reads it
+
+**Decision.** P04's flanking clause is now a pure rule — `src/packages/pf1e/flanking.ts` — with a scene seam (`src/packages/pf1e/threatPreview.ts`) and a live app surface (`e2eHook.pf1ePlaceTokens` / `pf1eThreat`), browser-tested in Chromium. It consumes P02's geometry (`threatenedCells`, `occupancy`) and leaves the existing **+2 appliers untouched**: `tactical.ts`'s `situational.flanking` part and `resolvePF1eAttacks`' `isFlanked` already put the bonus on the attack roll and not on AC (Gap List §2.2), which is what the rule says, so this slice supplies the *fact* they were being handed by a checkbox. The strategic `envelopment.ts` FLANKED bit is deliberately **not** switched over to it — see the non-choice below. **P04 stays unchecked**: cover, concealment, invisibility, helplessness and higher ground are all still open, and flanking itself has no position-aware tactical consumer yet.
+
+**R02 transcription (re-verified 2026-09-12; AoN Rules ID 183, CRB p.197, "Flanking" — quoted in full at the head of `flanking.ts`).** "When making a melee attack, you get a +2 flanking bonus if your opponent is threatened by another enemy character or creature on its opposite border or opposite corner. When in doubt about whether two characters flank an opponent in the middle, trace an imaginary line between the two attackers' centers. If the line passes through opposite borders of the opponent's space (including corners of those borders), then the opponent is flanked. *Exception*: If a flanker takes up more than 1 square, it gets the flanking bonus if any square it occupies counts for flanking. Only a creature or character that threatens the defender can help an attacker get a flanking bonus. Creatures with a reach of 0 feet can't flank an opponent."
+
+**Every clause, and how it is encoded.**
+- **The line test** — `segmentFlanks`. Endpoints are cell *centers*, the defender's space is the bounding box of its occupied cells, and "opposite borders" is left+right or top+bottom of that box. Crossings are decided in **doubled cell coordinates** (every center an odd integer, every border an even one, so a center can never lie on a border) with the crossing ordinate compared as a rational — no floating-point tolerance anywhere, and corner contact counts for both borders meeting there, which is the parenthetical.
+- **The multi-square exception** — `footprintsFlank` tries every occupied square of each flanker against every occupied square of the other and succeeds if *any* pair counts. This is load-bearing, not decorative: a fixture in `pf1eFlanking.test.ts` has a Large 2×2 attacker whose footprint-centre line misses the far border while its (1,−1) square runs exactly corner-to-corner through the defender's space.
+- **Threatening ally** — `threatensSpace` asks P02's `threatenedCells` and tests it against *any* square of the defender's space, so reach per size, the tall/long body form and the reach-weapon band all decide it, and a Large defender is threatened from any of its four squares.
+- **0-foot reach can't flank** — `canFlank` refuses on an authored reach of 0 **and** on Table 8-4's `occupancy().cannotFlank` sizes: the rules state the same exclusion twice (AoN 183 by reach, AoN 179 by size), and an unarmed Medium creature hits the first while a Tiny creature with data claiming 5 ft of reach hits the second.
+- **A segment running along a border crosses nothing.** That is the case where a flanker shares the defender's cell, and it is *named* in the module header rather than quietly decided: the rule describes no such configuration, and calling collinearity a flank would be an invented fill.
+
+**The scene seam.** `threatPreview.ts` is the single composition D-154's staging asks for — scene grid → `tokenCells` → `naturalReachSquares` → `threatenedCells` → `occupancy` → `resolveFlanking` — so the canvas overlay, the sheet and the e2e surfaces read one model instead of re-wiring the chain each. It reports `issues` (fatal: unusable scene grid, a token that covers no square) separately from `defaults` (announced assumptions: an unresolved size → Medium, per `sizeEntry`'s contract), because a model that refused to answer whenever an actor was still loading would be useless, and one that assumed silently would be lying. Each entry carries `threatRects` — P02's deferred threatened-square **draw list**, so that remainder now has its model layer and only the canvas layer/overlay is left. Hostility is a caller input (`isEnemy`): AoN 183 asks for "another **enemy** creature", and `TokenDocument.disposition` is read for an outline colour and nothing else in this codebase, so the seam does not invent a faction model — without a predicate it reports every qualifying pair and says so in `defaults`.
+
+**Deliberate non-choice: the strategic FLANKED bit stays as it is.** Gap List §5 asks for `envelopment.ts`'s "≥2 attackers in contact ⇒ flanked" to be replaced with real flanking geometry, and the tactical rule now exists to replace it with — but at that scale models are *points in feet* and can share a cell: `massBattlePf1e.ts:110` builds `new SpatialGrid(5)` while `src/sim/deploy.ts` defaults formation spacing to **4 ft**, under one cell. Converting those points to 5-ft squares makes the line test decide flanking from a layout the rules never describe (several models per square, flankers collinear with the space they flank), and it would silently change what 10k-model battles pin. So the prerequisite is **P01's named deploy-spacing remainder** — spacing riding the scene grid, one model per cell — after which `envelopment.ts` can call `resolveFlanking` with each unit's footprint and reach. Recorded in Gap List §5 and in TODO P01 rather than papered over with an angle heuristic of my own invention.
+
+**Verification.** Fixtures were cross-checked against **two independent implementations** of the same sentence before being written down: an exact-rational (`fractions.Fraction`) solver and a dense-sampling solver, neither sharing this module's doubled-integer arithmetic. All three agreed on **52,947 configurations** (1×1, 2×2 and 3×3 defenders at five origins; 1×1 and 2×2 flankers swept over a 9×9 neighbourhood), and the maps they print are the canonical ones — for an attacker due east of a Medium defender the qualifying allies are due west, and the two cells two squares out on either diagonal, and nothing else. Two of my hand-picked fixtures were wrong and were corrected by that check: the defender's western *diagonal* neighbours do **not** flank an eastern attacker (their lines leave through a corner and an adjacent border), and the extended-diagonal case needs an ally that actually threatens — a Huge creature at 15 ft, not a Medium one two squares out. Mutation checks, all restored from fresh backups with `grep -c MUTATION` verified 0: in `flanking.ts` — opposite-borders `||`→`&&` (6 red), corner contact made exclusive (4 red), Table 8-4's can't-flank ignored (1 red), reach-0 allowed to flank (1 red), the multi-square exception reduced to first-cell-only (2 red), the threatening-ally requirement dropped (1 red), the bonus made unconditional (2 red), the attacker's own threat no longer required (1 red); in `threatPreview.ts` — hostility filter dropped (1 red), authored reach ignored (1 red), the `flanked` flag ignored (4 red), a square-less token rounded into a cell (1 red), the size default made fatal (13 red), the reach-weapon band ignored (1 red). Two mutations were neutral and are recorded as such rather than claimed: `resolveFlanking`'s `ally.id === attacker.id` guard (two squares of one footprint can only bracket a space that footprint covers, and P02 never counts a creature's own squares as threatened — the guard is a belt on that rule, and the Huge-straddling test asserts both paths) and the seam's per-token threat memoization (bookkeeping, not behaviour).
+
+**Evidence.** Unit **1670 passed / 3 skipped** across 152 files (+49: 27 flanking, 16 seam, 6 app-surface); typecheck and lint green; build **2,260,417 raw / 650,644 gzip** (+7,215 B raw, budget 6 MB); `rules.js` **133.1 kB unchanged** — the flanking modules are tactical and are not part of the mass-battles rules entry. Chromium e2e **97/97** (5.8 m), up from 92/92 with five new specs (`e2e/pf1e_flanking.spec.ts`): opposite-border flanking resolved from the live scene and its actor documents, a crowd on one side flanking nobody, a Large creature flanked across its four squares, a Tiny creature threatening nothing and helping nobody, and hostility narrowing the report. The browser had to be rebuilt first — this sandbox lost its Chromium and only the npm registry is reachable, so `@sparticuz/chromium@152.0.0` supplied the binary and the three missing shared objects (`libnspr4`, `libnss3`, `libnssutil3` — 44 versioned symbols) were compiled locally as stubs; `webrtc.spec.ts`'s DTLS loopback and the TLS specs still pass, so the stubs are not standing in for crypto Chromium actually uses, and nothing about this is committed — it is an environment artifact, recorded here so the 97/97 is readable. Prettier: the five new files formatted, and `e2eHook.ts` (clean at HEAD) formatted with my additions; no unrelated reformatting. **Still open (P04's remainders):** cover (corner-based soft/partial/standard/improved/total), concealment's non-stacking miss chances, invisibility and denied Dex, helplessness and coup de grâce, higher ground; the canvas overlay that draws `threatRects`; a position-aware tactical consumer, so `PF1eActorSheet.svelte`'s hand-ticked `resolveFlanking` checkbox can become a derived fact with a manual override; and the strategic switch described above, behind P01's deploy spacing.
