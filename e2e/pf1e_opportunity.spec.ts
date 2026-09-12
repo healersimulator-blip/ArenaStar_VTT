@@ -882,23 +882,23 @@ const actionOpportunity = (
     return app.pf1eActionOpportunity(s);
   }, spec);
 
-interface CastProvokeResult {
+interface ActionProvokeResult {
   provokes: Array<{ actionId?: string; trigger?: { kind: string } }>;
   lines: string[];
   damage: number;
 }
 
-const castProvoke = (
+const actionProvoke = (
   page: import("@playwright/test").Page,
   spec: Record<string, unknown>,
 ) =>
   page.evaluate((s) => {
     const e2e = (globalThis as { __vttE2E?: Record<string, unknown> }).__vttE2E;
     const app = e2e?.app as
-      { pf1eCastProvoke: (x: unknown) => Promise<CastProvokeResult> }
+      { pf1eActionProvoke: (x: unknown) => Promise<ActionProvokeResult> }
       | undefined;
     if (!app) throw new Error("app surface missing");
-    return app.pf1eCastProvoke(s);
+    return app.pf1eActionProvoke(s);
   }, spec);
 
 test.describe("PF1e action-trigger attacks of opportunity (§9/P6 P06, D-190)", () => {
@@ -972,7 +972,7 @@ test.describe("PF1e action-trigger attacks of opportunity (§9/P6 P06, D-190)", 
   });
 });
 
-test.describe("PF1e cast provoke (D-191)", () => {
+test.describe("PF1e action provoke (D-191/D-192)", () => {
   test("a cast provokes and auto-resolves before the spell lands", async ({
     page,
   }) => {
@@ -990,7 +990,7 @@ test.describe("PF1e cast provoke (D-191)", () => {
     });
     expect(encounter).toMatchObject({ ok: true, combatants: 2 });
 
-    const res = await castProvoke(page, {
+    const res = await actionProvoke(page, {
       provokerId: "wizard",
       castingTime: "standard",
     });
@@ -1029,7 +1029,7 @@ test.describe("PF1e cast provoke (D-191)", () => {
       },
     });
 
-    const res = await castProvoke(page, {
+    const res = await actionProvoke(page, {
       provokerId: "wizard",
       castingTime: "standard",
       touch: "ranged",
@@ -1062,7 +1062,7 @@ test.describe("PF1e cast provoke (D-191)", () => {
       },
     });
 
-    const res = await castProvoke(page, {
+    const res = await actionProvoke(page, {
       provokerId: "wizard",
       castingTime: "swift",
     });
@@ -1070,5 +1070,41 @@ test.describe("PF1e cast provoke (D-191)", () => {
     expect(res.lines).toEqual([]);
     expect(res.damage).toBe(0);
     expect((await combatantState(page, "fighter"))?.aooUsed).toBe(0);
+  });
+
+  test("a ranged attack provokes on the attack-ranged row and auto-resolves before the shot", async ({
+    page,
+  }) => {
+    await sceneWith(page, [
+      { id: "archer", col: 0, row: 0 },
+      { id: "fighter", col: 0, row: 1 },
+    ]);
+    await tacticalEncounter(page, {
+      stats: { archer: GOBLIN_STATS, fighter: FIGHTER_STATS },
+      initiatives: { archer: 5, fighter: 20 },
+      combatantFlags: {
+        archer: { acted: true },
+        fighter: { acted: true, aooMax: 1 },
+      },
+    });
+
+    const res = await actionProvoke(page, {
+      provokerId: "archer",
+      actionId: "attack-ranged",
+    });
+    expect(res.provokes).toEqual([{ actionId: "attack-ranged" }]);
+    // One provoke, resolved through the host: the reactor strikes the shooter before
+    // the shot, and spends its one opportunity whether it connected or not.
+    expect(
+      res.lines.some((l) => l.includes("1/1 opportunities this round")),
+    ).toBe(true);
+    await expect
+      .poll(async () => (await combatantState(page, "fighter"))?.aooUsed)
+      .toBe(1);
+    if (res.damage > 0) {
+      await expect
+        .poll(async () => (await combatantState(page, "archer"))?.hp)
+        .toBe(12 - res.damage);
+    }
   });
 });

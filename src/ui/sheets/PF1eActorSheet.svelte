@@ -78,7 +78,11 @@
   import { validatePF1eFeatSelection } from "../../packages/pf1e/feats";
   import { autoResolveAoosOf } from "../../packages/pf1e/aooSettings";
   import { worldSettingsFrom } from "../../core/worldSettings";
-  import { castProvokes, resolveCastProvokes } from "../combat/pf1eCastProvoke";
+  import {
+    castProvokes,
+    rangedAttackProvokes,
+    resolveActionProvokes,
+  } from "../combat/pf1eActionProvoke";
   type TabName =
     | "summary"
     | "attributes"
@@ -115,6 +119,17 @@
       client.store.getAll("combats") as readonly CombatDocument[],
     ),
   );
+  // The provoking action's scene token: this actor's combatant, when it fights inside an
+  // encounter (D-191's cast path and D-192's ranged path both read it).
+  function provokerTokenId(): string | null {
+    const combatant =
+      linked.combat !== null && linked.combatantId !== null
+        ? (linked.combat.combatants.find(
+            (c) => c._id === linked.combatantId,
+          ) ?? null)
+        : null;
+    return combatant?.tokenId ?? null;
+  }
   let view = $derived(
     pf1eSheetView(doc, {
       combat: linked.combat,
@@ -253,6 +268,7 @@
   let resolveBusy = $state(false);
   let manyshotBusy = $state(false);
   let resolveError = $state("");
+  let resolveWarning = $state("");
   let authoredAttacksCount = $derived(
     Array.isArray(view.authored.attacks) ? view.authored.attacks.length : 0,
   );
@@ -291,6 +307,7 @@
 
   async function resolveVsTarget(): Promise<void> {
     resolveError = "";
+    resolveWarning = "";
     const info = resolveTargetInfo();
     const group = attackRolls[resolveAttackIndex];
     const line = d.attacks[resolveAttackIndex];
@@ -300,6 +317,25 @@
     }
     resolveBusy = true;
     try {
+      // D-192: a ranged attack made while threatened provokes before the shot
+      // (Table 7-2 attack-ranged); the interrupt resolves first, then the shot.
+      if (line.ranged === true) {
+        const tokenId = provokerTokenId();
+        if (tokenId !== null) {
+          const provoke = await resolveActionProvokes({
+            client,
+            user: client.user,
+            provokerTokenId: tokenId,
+            provokes: rangedAttackProvokes(),
+            autoResolve: autoResolveAoosOf(
+              worldSettingsFrom(client.store.getAll("settings")),
+            ),
+            combat: linked.combat,
+          });
+          if (provoke.lines.length > 0)
+            resolveWarning = provoke.lines.join(" · ");
+        }
+      }
       const outcome = await resolveAttackFlow(client, client.user, {
         attackerName: doc.name,
         line,
@@ -339,6 +375,7 @@
   }
   async function resolveManyshotVsTarget(): Promise<void> {
     resolveError = "";
+    resolveWarning = "";
     const info = resolveTargetInfo();
     const line = d.attacks[resolveAttackIndex];
     const group = attackRolls[resolveAttackIndex];
@@ -349,6 +386,23 @@
     }
     manyshotBusy = true;
     try {
+      // A Manyshot volley is a ranged attack: it provokes the same interrupt
+      // before the arrows fly (Table 7-2 attack-ranged, D-192).
+      const tokenId = provokerTokenId();
+      if (tokenId !== null) {
+        const provoke = await resolveActionProvokes({
+          client,
+          user: client.user,
+          provokerTokenId: tokenId,
+          provokes: rangedAttackProvokes(),
+          autoResolve: autoResolveAoosOf(
+            worldSettingsFrom(client.store.getAll("settings")),
+          ),
+          combat: linked.combat,
+        });
+        if (provoke.lines.length > 0)
+          resolveWarning = provoke.lines.join(" · ");
+      }
       const outcome = await resolveManyshotFlow(client, client.user, {
         attackerName: doc.name,
         line,
@@ -563,23 +617,18 @@
       // attack interrupts the cast (AoN 102), and its damage feeds the cast gate's
       // `injured` concentration check (10 + damage + level, AoN 133).
       let provokeNotes: string[] = [];
-      const casterCombatant =
-        linked.combat !== null && linked.combatantId !== null
-          ? (linked.combat.combatants.find(
-              (c) => c._id === linked.combatantId,
-            ) ?? null)
-          : null;
+      const tokenId = provokerTokenId();
       const provokes = castProvokes({
         castingTime: castTime as PF1eCastingTime,
         quickened: castQuickened,
         defensively: castDefensively,
         ...(castTouch !== "" ? { touch: castTouch as "melee" | "ranged" } : {}),
       });
-      if (provokes.length > 0 && casterCombatant?.tokenId !== null && casterCombatant?.tokenId !== undefined) {
-        const provoke = await resolveCastProvokes({
+      if (provokes.length > 0 && tokenId !== null) {
+        const provoke = await resolveActionProvokes({
           client,
           user: client.user,
-          provokerTokenId: casterCombatant.tokenId,
+          provokerTokenId: tokenId,
           provokes,
           autoResolve: autoResolveAoosOf(
             worldSettingsFrom(client.store.getAll("settings")),
@@ -1411,11 +1460,15 @@
         {#if resolveError}<p class="warn" data-pf1e-resolve-error>
             {resolveError}
           </p>{/if}
+        {#if resolveWarning}<p class="note" data-pf1e-resolve-warning>
+            {resolveWarning}
+          </p>{/if}
       </div>
       <p class="note">
         Rolls post to chat with their breakdown; resolution rolls attack (+
         confirmation on a threat) and damage publicly and writes hp through the
-        sheet's op path. The AoO interrupt queue is P6.
+        sheet's op path. A ranged attack made while threatened provokes first
+        (Table 7-2 attack-ranged, D-192).
       </p>
       <h4>Saves & checks</h4>
       <div class="rolls">

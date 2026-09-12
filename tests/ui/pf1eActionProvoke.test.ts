@@ -1,8 +1,9 @@
 /**
- * P06/D-191 — the cast provoke: which triggers a declared cast earns (Table 7-2's
- * `cast-spell`, AoN 133's ranged touch), and the sheet-scoped glue that resolves or reports
- * them through the action seam. Fixtures follow `pf1eAooFlow.test.ts`: a `grid.size` of
- * 100 world units, a token's `x`/`y` its centre, and a Medium token at `(col + 0.5) * 100`.
+ * P06/D-191/D-192 — the action provoke: which triggers a declared cast or a ranged attack
+ * earns (Table 7-2's `cast-spell`/`attack-ranged`, AoN 133's ranged touch), and the
+ * sheet-scoped glue that resolves or reports them through the action seam. Fixtures follow
+ * `pf1eAooFlow.test.ts`: a `grid.size` of 100 world units, a token's `x`/`y` its centre,
+ * and a Medium token at `(col + 0.5) * 100`.
  */
 import { describe, expect, test } from "vitest";
 import type {
@@ -17,9 +18,10 @@ import type { Op } from "../../src/core/ops";
 import {
   castProvokes,
   provokeDamageTaken,
-  resolveCastProvokes,
-  type CastProvokeClient,
-} from "../../src/ui/combat/pf1eCastProvoke";
+  rangedAttackProvokes,
+  resolveActionProvokes,
+  type ActionProvokeClient,
+} from "../../src/ui/combat/pf1eActionProvoke";
 import type { OpportunityResolution } from "../../src/ui/combat/pf1eAooFlow";
 
 const gm = { id: "gm", role: "GM" as const };
@@ -68,6 +70,12 @@ describe("castProvokes — which triggers a declared cast earns", () => {
     expect(castProvokes({ castingTime: "standard", touch: "melee" })).toEqual([
       { actionId: "cast-spell" },
     ]);
+  });
+});
+
+describe("rangedAttackProvokes — Table 7-2's attack-ranged row (D-192)", () => {
+  test("a ranged attack is exactly one provoke, on the attack-ranged row", () => {
+    expect(rangedAttackProvokes()).toEqual([{ actionId: "attack-ranged" }]);
   });
 });
 
@@ -283,7 +291,7 @@ function combat(fighterAoo: { used: number; max: number }): CombatDocument {
 }
 
 /** Fake client: scripted roll totals, real message shapes, recorded submits. */
-class FakeClient implements CastProvokeClient {
+class FakeClient implements ActionProvokeClient {
   messages: MessageDocument[] = [];
   submitted: Op[][] = [];
   formulas: string[] = [];
@@ -304,7 +312,7 @@ class FakeClient implements CastProvokeClient {
       if (coll === "actors") return this.actors;
       return [];
     },
-  } as CastProvokeClient["store"];
+  } as ActionProvokeClient["store"];
 
   roll(formula: string): string {
     this.formulas.push(formula);
@@ -362,7 +370,7 @@ class FakeClient implements CastProvokeClient {
   }
 }
 
-describe("resolveCastProvokes — the sheet-scoped glue (D-191)", () => {
+describe("resolveActionProvokes — the sheet-scoped glue (D-191)", () => {
   test("an auto-resolved cast provoke rolls the attack and returns the caster's damage", async () => {
     const scene_ = scene([
       token("wizard", "a-wizard", 0, 0, "friendly"),
@@ -371,7 +379,7 @@ describe("resolveCastProvokes — the sheet-scoped glue (D-191)", () => {
     const client = new FakeClient(scene_, [fighter(), wizard()]);
     // 11 + 9 = 20 vs AC 16 hits; the longsword deals 1d8 (4) + 3 = 7, no DR.
     client.script = [{ die: 11, total: 20 }, { total: 7 }];
-    const result = await resolveCastProvokes({
+    const result = await resolveActionProvokes({
       client,
       user: gm,
       provokerTokenId: "wizard",
@@ -394,7 +402,7 @@ describe("resolveCastProvokes — the sheet-scoped glue (D-191)", () => {
       token("fighter", "a-fighter", 0, 8),
     ]);
     const client = new FakeClient(scene_, [fighter(), wizard()]);
-    const result = await resolveCastProvokes({
+    const result = await resolveActionProvokes({
       client,
       user: gm,
       provokerTokenId: "wizard",
@@ -413,7 +421,7 @@ describe("resolveCastProvokes — the sheet-scoped glue (D-191)", () => {
       token("fighter", "a-fighter", 0, 1),
     ]);
     const client = new FakeClient(scene_, [fighter(), wizard()]);
-    const result = await resolveCastProvokes({
+    const result = await resolveActionProvokes({
       client,
       user: gm,
       provokerTokenId: "wizard",
@@ -436,7 +444,7 @@ describe("resolveCastProvokes — the sheet-scoped glue (D-191)", () => {
     ]);
     const client = new FakeClient(scene_, [fighter(), wizard()]);
     client.script = [{ die: 11, total: 20 }, { total: 7 }];
-    const result = await resolveCastProvokes({
+    const result = await resolveActionProvokes({
       client,
       user: gm,
       provokerTokenId: "wizard",
@@ -453,5 +461,25 @@ describe("resolveCastProvokes — the sheet-scoped glue (D-191)", () => {
       result.lines.some((l) => l.includes("no opportunities left (1/1)")),
     ).toBe(true);
     expect(result.damage).toBe(7);
+  });
+
+  test("a ranged attack resolves through the attack-ranged row and returns the shooter's damage", async () => {
+    const scene_ = scene([
+      token("archer", "a-wizard", 0, 0, "friendly"),
+      token("fighter", "a-fighter", 0, 1),
+    ]);
+    const client = new FakeClient(scene_, [fighter(), { ...wizard(), _id: "a-wizard", name: "Archer" }]);
+    client.script = [{ die: 11, total: 20 }, { total: 7 }];
+    const result = await resolveActionProvokes({
+      client,
+      user: gm,
+      provokerTokenId: "archer",
+      provokes: rangedAttackProvokes(),
+      autoResolve: true,
+      combat: combat({ used: 0, max: 1 }),
+    });
+    expect(result.damage).toBe(7);
+    expect(result.lines[0]).toContain("Fighter hits Archer");
+    expect(client.submitted).toHaveLength(3);
   });
 });

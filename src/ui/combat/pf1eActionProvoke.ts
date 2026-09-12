@@ -1,10 +1,11 @@
 /**
- * P06/D-191 — the **cast provoke**: the attacks of opportunity a declared casting earns,
- * resolved (or reported) through the same action seam and the same resolver the movement
- * path uses. This is the sheet-scoped glue D-190 left named: the cast and attack flows
- * know only the caster, the target and the linked combat, so *this* module reads the scene
- * facts out of the store, builds the action opportunity with `pf1eActionOpportunities`,
- * and either resolves the queue (`resolveActionOpportunities`) or reports its lines.
+ * P06/D-191/D-192 — the **action provoke**: the attacks of opportunity a provoking
+ * *action* (casting a spell, making a ranged or ranged-touch attack) earns, resolved (or
+ * reported) through the same action seam and the same resolver the movement path uses.
+ * This is the sheet-scoped glue D-190 left named: the cast and attack flows know only the
+ * actor, the target and the linked combat, so *this* module reads the scene facts out of
+ * the store, builds the action opportunity with `pf1eActionOpportunities`, and either
+ * resolves the queue (`resolveActionOpportunities`) or reports its lines.
  *
  * The rules it encodes, quoted in `interrupts.ts`:
  *   • Table 7-2's `cast-spell` row — casting provokes an attack of opportunity (AoN 102,
@@ -19,13 +20,17 @@
  *     level) or lose the spell." The resolution's damage to the caster is returned so the
  *     caller feeds it into the cast gate's `injured` declaration (whose `concentrationDc`
  *     is exactly that formula).
+ *   • Table 7-2's `attack-ranged` row (D-192) — making a ranged attack while threatened
+ *     provokes, resolved *before* the attack (the interrupt), with no concentration check
+ *     on the damage: the shot still goes through whatever the reactor's strike did.
  *
  * The module is the *decision and the report*, not the Svelte handler: it returns lines
  * and damage, and the sheet only reads the scene, calls it, and threads the damage into
- * the gate it already builds. The two provokes of a ranged-touch spell share one queue
- * (the `queue` input of `pf1eActionOpportunities`), so a reactor with one per round is
- * refused on the second provoke *before any die is rolled* — the resolver's D-191 budget
- * gate, which reads the spend the first provoke already wrote into the combat.
+ * the gate it already builds (the cast) or the warning it already shows (the shot). The
+ * two provokes of a ranged-touch spell share one queue (the `queue` input of
+ * `pf1eActionOpportunities`), so a reactor with one per round is refused on the second
+ * provoke *before any die is rolled* — the resolver's D-191 budget gate, which reads the
+ * spend the first provoke already wrote into the combat.
  */
 import type {
   ActorDocument,
@@ -54,7 +59,7 @@ import {
 } from "./pf1eAooFlow";
 
 /** The store reads this module needs — a superset of the resolver's minimal client. */
-export interface CastProvokeClient {
+export interface ActionProvokeClient {
   roll(formula: string, mode?: "roll", to?: string[], flavor?: string): string;
   rollVerified(
     formula: string,
@@ -71,7 +76,7 @@ export interface CastProvokeClient {
 }
 
 /** One provoking trigger a declared cast earns, in the order the rules resolve them. */
-export type PF1eCastProvoke =
+export type PF1eActionProvoke =
   | { actionId: string }
   | { trigger: PF1eAoOTrigger };
 
@@ -86,8 +91,8 @@ export function castProvokes(input: {
   quickened?: boolean;
   defensively?: boolean;
   touch?: "melee" | "ranged";
-}): readonly PF1eCastProvoke[] {
-  const provokes: PF1eCastProvoke[] = [];
+}): readonly PF1eActionProvoke[] {
+  const provokes: PF1eActionProvoke[] = [];
   const swift =
     input.quickened === true ||
     input.castingTime === "swift" ||
@@ -100,8 +105,18 @@ export function castProvokes(input: {
 }
 
 /**
- * The damage one resolution dealt to the provoker (the caster), which the caller feeds
- * into the cast gate's `injured` declaration — `concentrationDc` turns it into
+ * The trigger a ranged attack earns: Table 7-2's `attack-ranged` row provokes (yes) — a
+ * ranged attack made while threatened draws an attack of opportunity, resolved before the
+ * shot (the interrupt rule). A melee line is the caller's `attack-melee` (provokes: no),
+ * so no helper is needed for it; the unarmed provoke is the resolver's own P6 note.
+ */
+export function rangedAttackProvokes(): readonly PF1eActionProvoke[] {
+  return [{ actionId: "attack-ranged" }];
+}
+
+/**
+ * The damage one resolution dealt to the provoker, which the cast caller feeds into the
+ * cast gate's `injured` declaration — `concentrationDc` turns it into
  * `10 + damage + level` (AoN 133). Zero when the attacks missed or no reactor struck.
  */
 export function provokeDamageTaken(
@@ -115,30 +130,30 @@ export function provokeDamageTaken(
   return total;
 }
 
-export interface CastProvokeResolution {
+export interface ActionProvokeResolution {
   /** The log lines: resolved attacks, skips, forgoes, and any named assumption. */
   lines: string[];
-  /** The damage the provoked attacks dealt to the caster — feeds the concentration DC. */
+  /** The damage the provoked attacks dealt to the provoker — feeds the concentration DC. */
   damage: number;
 }
 
 /**
- * Read the scene facts, build the action opportunity for every provoke a cast earns, and
- * resolve (world auto-resolve on + an encounter) or report the queue. Pure of dice and
- * Pixi; the sheet passes its client and the facts it already holds.
+ * Read the scene facts, build the action opportunity for every provoke an action earns,
+ * and resolve (world auto-resolve on + an encounter) or report the queue. Pure of dice
+ * and Pixi; the sheet passes its client and the facts it already holds.
  */
-export async function resolveCastProvokes(input: {
-  client: CastProvokeClient;
+export async function resolveActionProvokes(input: {
+  client: ActionProvokeClient;
   user: PermissionUser | null;
-  /** The caster's scene token id (from the linked combatant). */
+  /** The provoker's scene token id (from the linked combatant). */
   provokerTokenId: string;
-  /** What the cast provokes, from `castProvokes`. Empty = nothing to do. */
-  provokes: readonly PF1eCastProvoke[];
+  /** What the action provokes, from `castProvokes`/`rangedAttackProvokes`. Empty = nothing. */
+  provokes: readonly PF1eActionProvoke[];
   /** The world option (`aooSettings.autoResolveAoosOf`), read by the caller. */
   autoResolve: boolean;
-  /** The caster's encounter (the linked combat); null = report only, no spend. */
+  /** The provoker's encounter (the linked combat); null = report only, no spend. */
   combat: CombatDocument | null;
-}): Promise<CastProvokeResolution> {
+}): Promise<ActionProvokeResolution> {
   if (input.provokes.length === 0) return { lines: [], damage: 0 };
 
   const scenes = input.client.store.getAll("scenes");

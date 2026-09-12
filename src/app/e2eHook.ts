@@ -39,8 +39,8 @@ import {
 } from "../ui/combat/pf1eAooFlow";
 import {
   castProvokes,
-  resolveCastProvokes,
-} from "../ui/combat/pf1eCastProvoke";
+  resolveActionProvokes,
+} from "../ui/combat/pf1eActionProvoke";
 import { autoResolveAoosOf } from "../packages/pf1e/aooSettings";
 import { selectedEncounter } from "../ui/combat/encounters";
 import { readCombatantState } from "../packages/pf1e/combatState";
@@ -448,16 +448,16 @@ export interface AppSurface {
     skipped: Array<{ reactorId: string; provokerId: string; reason: string }>;
   }>;
   /**
-   * P06 (D-191): the cast provoke, end to end. The declared cast's facts decide which
-   * triggers it earns (`castProvokes`), then the sheet's glue (`resolveCastProvokes`)
-   * reads the active scene and the actor documents out of the store, builds the action
-   * opportunity with the encounter's ledgers, and auto-resolves (or reports) it — the
-   * cast and its ranged touch sharing one queue, so a 1/round reactor is refused on the
-   * second provoke before any die is rolled. The cast itself is not submitted: the
-   * provoke resolves *before* the spell lands.
+   * P06 (D-191/D-192): the action provoke, end to end. Either an explicit Table 7-2
+   * `actionId` (e.g. `attack-ranged`) or the declared cast's facts decide which triggers
+   * the action earns, then the sheet's glue (`resolveActionProvokes`) reads the active
+   * scene and the actor documents out of the store, builds the action opportunity with
+   * the encounter's ledgers, and auto-resolves (or reports) it. The action itself is not
+   * submitted: the provoke resolves *before* the spell lands or the shot flies.
    */
-  pf1eCastProvoke(spec: {
+  pf1eActionProvoke(spec: {
     provokerId: string;
+    actionId?: string;
     castingTime?: string;
     quickened?: boolean;
     defensively?: boolean;
@@ -1487,18 +1487,23 @@ function appSurface(app: HostApp): AppSurface {
         skipped: resolution.skipped.map((k) => ({ ...k })),
       };
     },
-    pf1eCastProvoke: async (spec) => {
+    pf1eActionProvoke: async (spec) => {
       const s = scene();
-      const provokes = castProvokes({
-        ...(spec.castingTime !== undefined
-          ? { castingTime: spec.castingTime as PF1eCastingTime }
-          : {}),
-        ...(spec.quickened !== undefined ? { quickened: spec.quickened } : {}),
-        ...(spec.defensively !== undefined
-          ? { defensively: spec.defensively }
-          : {}),
-        ...(spec.touch !== undefined ? { touch: spec.touch } : {}),
-      });
+      const provokes =
+        spec.actionId !== undefined
+          ? [{ actionId: spec.actionId }]
+          : castProvokes({
+              ...(spec.castingTime !== undefined
+                ? { castingTime: spec.castingTime as PF1eCastingTime }
+                : {}),
+              ...(spec.quickened !== undefined
+                ? { quickened: spec.quickened }
+                : {}),
+              ...(spec.defensively !== undefined
+                ? { defensively: spec.defensively }
+                : {}),
+              ...(spec.touch !== undefined ? { touch: spec.touch } : {}),
+            });
       const combats = client.store.getAll("combats");
       const activeScene =
         client.store.getAll("scenes").find((sc) => sc.active) ?? s ?? null;
@@ -1510,7 +1515,7 @@ function appSurface(app: HostApp): AppSurface {
       const autoResolve = autoResolveAoosOf({
         autoResolveAoos: settings.autoResolveAoos,
       });
-      const resolution = await resolveCastProvokes({
+      const resolution = await resolveActionProvokes({
         client,
         user: client.user,
         provokerTokenId: spec.provokerId,
