@@ -53,10 +53,31 @@ export interface PF1eSizeEntry {
   readonly cmbCmd: number;
   /** Space in feet across (A.5). */
   readonly spaceFeet: number;
-  /** Space as 5-ft squares of side (Medium 1, Large 2×2 = 4 occupied squares, …). */
+  /**
+   * Space as 5-ft squares of side (Medium 1, Large 2×2 = 4 occupied squares, …) —
+   * `spaceFeet / 5`, squared. The side does **not** step by one per size category:
+   * Colossal is 30 ft across, so 6×6 = 36 occupied squares (Table 8-4, AoN 179).
+   * 0 means "less than 1 square of space" (Fine, Diminutive, Tiny), which is a
+   * capacity fact — see `perSquare` and `geometry.occupancy()` — not a footprint
+   * of zero cells.
+   */
   readonly spaceSquares: number;
-  /** Natural reach in 5-ft squares; 0 = must enter an opponent's square to attack (A.5). */
+  /**
+   * Natural reach in 5-ft squares; 0 = must enter an opponent's square to attack (A.5).
+   * This is Table 8-4's **tall** column (AoN Rules ID 179, CRB p.194) — the figure the
+   * table prints for Small/Medium, which have no tall/long distinction — in 5-ft squares,
+   * i.e. the table's feet ÷ 5: Large 10 ft = 2, Huge 15 ft = 3, Gargantuan 20 ft = 4 and
+   * Colossal 30 ft = **6**, not the 5 a "+1 per category" ladder would suggest.
+   */
   readonly reachSquares: number;
+  /**
+   * Table 8-4's **long** column in 5-ft squares, or null where the table prints no long
+   * row: "Large (long) 10 ft. space / 5 ft. reach", "Huge (long) 15/10", "Gargantuan
+   * (long) 20/15", "Colossal (long) 30/20" (AoN 179). Fine through Medium have a single
+   * reach figure, so body shape only distinguishes creatures that "take up more than
+   * 1 square" — it is never a licence to invent a second number for them.
+   */
+  readonly longReachSquares: number | null;
   /** How many of these fit in one 5-ft square (A.5: Tiny 4, Diminutive 25, Fine 100). */
   readonly perSquare: number;
   /** Large+ can use reach weapons, but then cannot strike within its natural reach (A.5). */
@@ -72,9 +93,10 @@ const SIZES: readonly PF1eSizeEntry[] = [
     size: "Fine",
     attackAc: 8,
     cmbCmd: -8,
-    spaceFeet: 1.5,
+    spaceFeet: 0.5,
     spaceSquares: 0,
     reachSquares: 0,
+    longReachSquares: null,
     perSquare: 100,
     reachWeapon: false,
     dexToCmb: true,
@@ -87,6 +109,7 @@ const SIZES: readonly PF1eSizeEntry[] = [
     spaceFeet: 1,
     spaceSquares: 0,
     reachSquares: 0,
+    longReachSquares: null,
     perSquare: 25,
     reachWeapon: false,
     dexToCmb: true,
@@ -99,6 +122,7 @@ const SIZES: readonly PF1eSizeEntry[] = [
     spaceFeet: 2.5,
     spaceSquares: 0,
     reachSquares: 0,
+    longReachSquares: null,
     perSquare: 4,
     reachWeapon: false,
     dexToCmb: true,
@@ -111,6 +135,7 @@ const SIZES: readonly PF1eSizeEntry[] = [
     spaceFeet: 5,
     spaceSquares: 1,
     reachSquares: 1,
+    longReachSquares: null,
     perSquare: 1,
     reachWeapon: false,
     dexToCmb: false,
@@ -123,6 +148,7 @@ const SIZES: readonly PF1eSizeEntry[] = [
     spaceFeet: 5,
     spaceSquares: 1,
     reachSquares: 1,
+    longReachSquares: null,
     perSquare: 1,
     reachWeapon: false,
     dexToCmb: false,
@@ -135,6 +161,7 @@ const SIZES: readonly PF1eSizeEntry[] = [
     spaceFeet: 10,
     spaceSquares: 4,
     reachSquares: 2,
+    longReachSquares: 1,
     perSquare: 1,
     reachWeapon: true,
     dexToCmb: false,
@@ -147,6 +174,7 @@ const SIZES: readonly PF1eSizeEntry[] = [
     spaceFeet: 15,
     spaceSquares: 9,
     reachSquares: 3,
+    longReachSquares: 2,
     perSquare: 1,
     reachWeapon: true,
     dexToCmb: false,
@@ -159,6 +187,7 @@ const SIZES: readonly PF1eSizeEntry[] = [
     spaceFeet: 20,
     spaceSquares: 16,
     reachSquares: 4,
+    longReachSquares: 3,
     perSquare: 1,
     reachWeapon: true,
     dexToCmb: false,
@@ -169,8 +198,9 @@ const SIZES: readonly PF1eSizeEntry[] = [
     attackAc: -8,
     cmbCmd: 8,
     spaceFeet: 30,
-    spaceSquares: 25,
-    reachSquares: 5,
+    spaceSquares: 36,
+    reachSquares: 6,
+    longReachSquares: 4,
     perSquare: 1,
     reachWeapon: true,
     dexToCmb: false,

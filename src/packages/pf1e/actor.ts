@@ -28,6 +28,12 @@ import {
   type PF1eBonusType,
   type PF1eSize,
 } from "./rulesTables";
+import {
+  naturalReachFt,
+  naturalReachSquares,
+  normalizeReachShape,
+  type PF1eReachShape,
+} from "./geometry";
 // The corrected unarmed ladder (P3/A01): Medium is 1d3 per AoN Rules ID 131, not the 1d2
 // this module previously carried. Import, never duplicate.
 import { UNARMED_STRIKE_DAMAGE_BY_SIZE } from "./weapons";
@@ -157,6 +163,14 @@ export const MAX_PREPARED_SPELLS = 200;
 /** Everything a PF1e actor document may author under `system.pf1e`. */
 export interface PF1eActorSystem extends PF1eHealthAuthored {
   size?: string;
+  /**
+   * Table 8-4's body form — "tall" or "long" — which selects the natural-reach column
+   * for Large and larger creatures ("Large (tall) · 10 ft. · 10 ft." beside "Large
+   * (long) · 10 ft. · 5 ft.", AoN Rules ID 179). Absent means tall, the figure the table
+   * prints first; for Fine through Medium it names no second number and is reported as
+   * not applying rather than silently changing their 5 ft (or 0 ft) of reach.
+   */
+  reachShape?: string;
   speedFt?: number;
   landSpeedFt?: number;
   climbSpeedFt?: number;
@@ -290,6 +304,14 @@ export interface PF1eDerived extends Pick<
 > {
   size: PF1eSize;
   sizeEntry: ReturnType<typeof sizeEntry>;
+  /** Table 8-4's body form: authored, or "tall" — the column the table prints first. */
+  reachShape: PF1eReachShape;
+  /**
+   * Natural reach in feet for that body form (Table 8-4, AoN Rules ID 179). This is the
+   * figure `meleeReachLegality` asks its caller to derive: 5 ft for Small and Medium, 0
+   * for Tiny and smaller, and 10 or 5 ft for a Large creature depending on its shape.
+   */
+  reachFeet: number;
   /** Scores after effects and drain — drain reduces the score (CRB p.555). */
   abilities: PF1eAbilities;
   /** Effective modifiers every ability-based statistic uses: mod(score) − damage penalty. */
@@ -464,6 +486,16 @@ export function parsePF1eActorSystem(raw: unknown): Result<PF1eActorSystem> {
   ) {
     return err(
       `system.pf1e.size ${JSON.stringify(o.size)} is not a PF1e size category`,
+    );
+  }
+  if (
+    o.reachShape !== undefined &&
+    o.reachShape !== null &&
+    o.reachShape !== "" &&
+    normalizeReachShape(o.reachShape) === null
+  ) {
+    return err(
+      `system.pf1e.reachShape ${JSON.stringify(o.reachShape)} is neither "tall" nor "long"`,
     );
   }
   if (o.attacks !== undefined && !Array.isArray(o.attacks)) {
@@ -828,6 +860,39 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     c.defaults.push("size: not authored — using Medium");
   }
   const sz = sizeEntry(size);
+  // Table 8-4 prints two natural-reach columns for the sizes that take up more than one
+  // square (AoN Rules ID 179), and which one applies is a fact about the creature's body,
+  // so it is authored. Tall is the default because it is the figure the table prints
+  // first, and because "These values are typical for creatures of the indicated size" —
+  // an absent field takes the typical reading rather than inventing the shorter one.
+  const authoredShape = normalizeReachShape(sys.reachShape);
+  const reachShape: PF1eReachShape = authoredShape ?? "tall";
+  if (
+    authoredShape === null &&
+    typeof sys.reachShape === "string" &&
+    sys.reachShape.trim() !== ""
+  ) {
+    c.issues.push(
+      `reachShape ${JSON.stringify(sys.reachShape)} is neither "tall" nor "long" — using tall`,
+    );
+  } else if (
+    sys.reachShape !== undefined &&
+    sys.reachShape !== null &&
+    typeof sys.reachShape !== "string"
+  ) {
+    c.issues.push(
+      `reachShape ${JSON.stringify(sys.reachShape)} is not a string — using tall`,
+    );
+  } else if (sz.longReachSquares !== null && authoredShape === null) {
+    c.defaults.push("reachShape: not authored — using Table 8-4's tall column");
+  }
+  if (sz.longReachSquares === null && authoredShape !== null) {
+    c.issues.push(
+      `reachShape ${JSON.stringify(authoredShape)} does not apply to a ${size} creature — Table 8-4 prints one reach figure for it, so its reach is unchanged`,
+    );
+  }
+  // Natural reach in feet for that body form — the unit `meleeReachLegality` asks for.
+  const reachFeet = naturalReachFt(size, reachShape);
   // A stat block that only published `sizeMod` keeps that number for attack/AC *and* CMB/CMD — the
   // SRD wants the special size ladder there (A.4), which is the recorded strategic deviation.
   const sizeAttackAc = sys.sizeMod ?? sz.attackAc;
@@ -1091,7 +1156,7 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
       reachSquares:
         a.reachSquares !== undefined
           ? readNumber(a.reachSquares, `attacks[${idx}].reachSquares`, c)
-          : sz.reachSquares,
+          : naturalReachSquares(size, reachShape),
       touchAttack: a.touchAttack === true,
       rangedTouch: a.touchAttack === true && ranged,
       explain:
@@ -1222,6 +1287,8 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
   return {
     size,
     sizeEntry: sz,
+    reachShape,
+    reachFeet,
     abilities,
     abilityMods: eff,
     abilityDamageTaken,
@@ -1311,7 +1378,9 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
       aoo: `${aooPerRound}/round${combatReflexes ? " (Combat Reflexes)" : ""}${
         flatFooted ? " — none while flat-footed" : ""
       }`,
-      speed: `${speedFt} ft; ${sz.spaceFeet} ft space, ${sz.reachSquares} reach`,
+      speed: `${speedFt} ft; ${sz.spaceFeet} ft space, ${reachFeet} ft natural reach${
+        sz.longReachSquares !== null && reachShape === "long" ? " (long)" : ""
+      }`,
     },
     effectBreakdown: resolved.breakdown,
     effects,

@@ -67,6 +67,50 @@ describe("size ladder (A.4/A.5)", () => {
     expect(sizeEntry("Fine").perSquare).toBe(100);
   });
 
+  test("Table 8-4's space column in feet: 1/2, 1, 2-1/2, 5, 5, 10, 15, 20, 30 (AoN 179)", () => {
+    // Re-verified against AoN Rules ID 179 on 2026-09-12 (P02): the A.5
+    // transcription had Fine at "1½ ft", which the table does not print — a Fine
+    // creature is 1/2 ft across, and 100 of them fit in a square.
+    expect(sizeEntry("Fine").spaceFeet).toBe(0.5);
+    expect(sizeEntry("Diminutive").spaceFeet).toBe(1);
+    expect(sizeEntry("Tiny").spaceFeet).toBe(2.5);
+    expect(sizeEntry("Small").spaceFeet).toBe(5);
+    expect(sizeEntry("Medium").spaceFeet).toBe(5);
+    expect(sizeEntry("Huge").spaceFeet).toBe(15);
+    expect(sizeEntry("Gargantuan").spaceFeet).toBe(20);
+    expect(sizeEntry("Colossal").spaceFeet).toBe(30);
+  });
+
+  test("space and reach in squares are the feet column ÷ 5, so Colossal is 6 and not the ladder's 5", () => {
+    // 30 ft across is six 5-ft squares on a side (36 occupied), and 30 ft of tall
+    // reach is six squares. Large 2, Huge 3, Gargantuan 4 and then 5 would be a
+    // "+1 per category" guess the table does not support (P02, D-180).
+    expect(sizeEntry("Colossal").spaceSquares).toBe(36);
+    expect(sizeEntry("Colossal").reachSquares).toBe(6);
+    expect(sizeEntry("Gargantuan").spaceSquares).toBe(16);
+    expect(sizeEntry("Huge").spaceSquares).toBe(9);
+  });
+
+  test("Table 8-4 prints a long column only for the four multi-square sizes", () => {
+    // "Large (long) · 10 ft. · 5 ft.", "Huge (long) · 15 ft. · 10 ft.",
+    // "Gargantuan (long) · 20 ft. · 15 ft.", "Colossal (long) · 30 ft. · 20 ft."
+    expect(sizeEntry("Large").longReachSquares).toBe(1);
+    expect(sizeEntry("Huge").longReachSquares).toBe(2);
+    expect(sizeEntry("Gargantuan").longReachSquares).toBe(3);
+    expect(sizeEntry("Colossal").longReachSquares).toBe(4);
+    // Fine through Medium print one reach figure for both body forms, so there is
+    // no second number to read — null, never a copy of the first.
+    for (const size of [
+      "Fine",
+      "Diminutive",
+      "Tiny",
+      "Small",
+      "Medium",
+    ] as const) {
+      expect(sizeEntry(size).longReachSquares, size).toBeNull();
+    }
+  });
+
   test("sizeSteps counts categories, sign showing which is larger", () => {
     expect(sizeSteps("Large", "Medium")).toBe(1);
     expect(sizeSteps("Medium", "Colossal")).toBe(-4);
