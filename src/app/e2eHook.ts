@@ -3,7 +3,8 @@
  * drive the real bundled modules (WebRTC loopback, §14). Inert otherwise.
  */
 import type { LoopbackResult } from "../net/webrtc";
-import type { HostApp } from "./hostBoot";
+import { makeToken, type HostApp } from "./hostBoot";
+import type { ActorDocument, TokenDocument } from "../core/documents";
 import type { PlayerApp } from "./joinBoot";
 import type { HostShare } from "./hostShare";
 import { sightSegments } from "../canvas/vision/wallSight";
@@ -17,6 +18,8 @@ import {
   type PF1eAreaIssue,
 } from "../packages/pf1e/targeting";
 import { deriveFromDocuments } from "../packages/pf1e/actor";
+import { footprintSide } from "../packages/pf1e/geometry";
+import { pf1eThreatModel } from "../packages/pf1e/threatPreview";
 import { pf1eSpellSlotReadout, sheetRecord } from "../ui/sheets/pf1eSheetModel";
 import {
   resolveCastingAttempt,
@@ -126,6 +129,51 @@ export interface AppSurface {
     affectedTokenIds: string[];
     previewRects: number;
     issues: Array<{ field: string; message: string }>;
+  };
+  /**
+   * P04 (D-181): place tokens on the live scene through the **real op path** —
+   * `gm.client.submit` → oplog → store — so `pf1eThreat` resolves the same scene
+   * document a GM's drag would have produced. Each entry may name a size, which
+   * is authored onto a real actor document the token is linked to, so the threat
+   * facts arrive via `deriveFromDocuments` rather than from this spec.
+   */
+  pf1ePlaceTokens(
+    tokens: Array<{ id: string; col: number; row: number; size?: string }>,
+  ): { ok: boolean; placed: number; cellSize: number };
+  /**
+   * P04 (D-181): resolve the active scene's threatened squares and AoN 183's
+   * flanking facts through the same pure seam the unit tests exercise —
+   * scene grid → `tokenCells` → `threatenedCells` → `resolveFlanking`. Creature
+   * facts come from each token's linked actor document, so the browser spec
+   * asserts the wiring and not a re-implementation of the rule. `enemiesOf`
+   * states hostility (defender id → its enemies), which geometry cannot know;
+   * without it every pair is reported and the model says so in `defaults`.
+   */
+  pf1eThreat(spec?: { enemiesOf?: Record<string, string[]> }): {
+    ok: boolean;
+    cellSize: number;
+    feetPerCell: number;
+    tokens: number;
+    entries: Array<{
+      tokenId: string;
+      size: string;
+      cells: string[];
+      reachSquares: number;
+      reachFt: number;
+      threatensNothing: boolean;
+      cannotFlank: boolean;
+      threatKeys: string[];
+      threatRects: number;
+    }>;
+    flanking: Array<{
+      attackerId: string;
+      defenderId: string;
+      helperIds: string[];
+      bonus: number;
+    }>;
+    flankedTokenIds: string[];
+    issues: Array<{ field: string; message: string }>;
+    defaults: Array<{ field: string; message: string }>;
   };
   /**
    * P5/C02: resolve one spell save through the **real** bundled chain —
@@ -636,6 +684,138 @@ function appSurface(app: HostApp): AppSurface {
         affectedTokenIds: hit.map((t) => t._id),
         previewRects: areaPreviewRects(res.cells, grid).length,
         issues: res.issues,
+      };
+    },
+    pf1ePlaceTokens: (tokens) => {
+      const s = scene();
+      if (!s) return { ok: false, placed: 0, cellSize: 0 };
+      const cellSize = s.grid.size > 0 ? s.grid.size : 100;
+      const ops: Parameters<typeof client.submit>[0] = [];
+      for (const t of tokens) {
+        const side = footprintSide(t.size ?? "Medium");
+        const actorId = `a-${t.id}`;
+        // Typed locals: the size is authored data the model has to read back
+        // through `deriveFromDocuments`, not something this call hands it.
+        const actorDoc: ActorDocument = {
+          _id: actorId,
+          type: "actor",
+          name: `${t.id} (actor)`,
+          ownership: { default: 3 },
+          flags: {},
+          system: { pf1e: { size: t.size ?? "Medium" } },
+          items: [],
+          effects: [],
+        };
+        ops.push({ kind: "create", coll: "actors", data: actorDoc });
+        const tokenDoc: TokenDocument = {
+          ...makeToken(
+            t.id,
+            (t.col + side / 2) * cellSize,
+            (t.row + side / 2) * cellSize,
+            t.id,
+          ),
+          width: side * cellSize,
+          height: side * cellSize,
+          actorId,
+        };
+        ops.push({
+          kind: "create",
+          coll: "tokens",
+          parent: { coll: "scenes", id: s._id },
+          data: tokenDoc,
+        });
+      }
+      client.submit(ops);
+      return { ok: true, placed: tokens.length, cellSize };
+    },
+    pf1eThreat: (spec) => {
+      const s = scene();
+      const blank = {
+        ok: false,
+        cellSize: 0,
+        feetPerCell: 0,
+        tokens: 0,
+        entries: [] as Array<{
+          tokenId: string;
+          size: string;
+          cells: string[];
+          reachSquares: number;
+          reachFt: number;
+          threatensNothing: boolean;
+          cannotFlank: boolean;
+          threatKeys: string[];
+          threatRects: number;
+        }>,
+        flanking: [] as Array<{
+          attackerId: string;
+          defenderId: string;
+          helperIds: string[];
+          bonus: number;
+        }>,
+        flankedTokenIds: [] as string[],
+        issues: [] as Array<{ field: string; message: string }>,
+        defaults: [] as Array<{ field: string; message: string }>,
+      };
+      if (!s) {
+        return {
+          ...blank,
+          issues: [{ field: "scene", message: "no active scene" }],
+        };
+      }
+      const actors = client.store.getAll("actors");
+      const enemiesOf = spec?.enemiesOf ?? null;
+      const model = pf1eThreatModel({
+        grid: s.grid,
+        tokens: s.tokens.map((t) => {
+          const actor = t.actorId
+            ? (actors.find((a) => a._id === t.actorId) ?? null)
+            : null;
+          const derived = actor
+            ? deriveFromDocuments({ actor: { system: actor.system } })
+            : null;
+          return {
+            _id: t._id,
+            x: t.x,
+            y: t.y,
+            width: t.width,
+            height: t.height,
+            ...(derived
+              ? { size: derived.size, shape: derived.reachShape }
+              : {}),
+          };
+        }),
+        ...(enemiesOf
+          ? {
+              isEnemy: (a: string, b: string) =>
+                (enemiesOf[b] ?? []).includes(a),
+            }
+          : {}),
+      });
+      return {
+        ok: model.ok,
+        cellSize: s.grid.size,
+        feetPerCell: s.grid.distance,
+        tokens: s.tokens.length,
+        entries: model.entries.map((e) => ({
+          tokenId: e.tokenId,
+          size: e.size,
+          cells: [...e.cells],
+          reachSquares: e.reachSquares,
+          reachFt: e.reachFt,
+          threatensNothing: e.threatensNothing,
+          cannotFlank: e.cannotFlank,
+          threatKeys: [...e.threatKeys],
+          threatRects: e.threatRects.length,
+        })),
+        flanking: model.flanking.map((f) => ({
+          attackerId: f.attackerId,
+          defenderId: f.defenderId,
+          helperIds: [...f.helperIds],
+          bonus: f.bonus,
+        })),
+        flankedTokenIds: [...model.flankedTokenIds],
+        issues: model.issues.map((i) => ({ ...i })),
+        defaults: model.defaults.map((i) => ({ ...i })),
       };
     },
     pf1eCastResolve: (spec) => {

@@ -77,6 +77,108 @@ describe("derivation is total", () => {
   });
 });
 
+describe("P02 — natural reach derived from Table 8-4 (AoN Rules ID 179, D-180)", () => {
+  test("a Medium creature reaches 5 ft and the table prints no body form for it", () => {
+    const d = derivePF1eActor({});
+    expect(d.reachFeet).toBe(5);
+    expect(d.reachShape).toBe("tall");
+    expect(d.attacks[0]?.reachSquares).toBe(1);
+    // no "reachShape: not authored" note: Small and Medium have one printed figure,
+    // so there is nothing the author left out.
+    expect(d.defaults.join("\n")).not.toContain("reachShape");
+    expect(d.issues).toEqual([]);
+  });
+
+  test("a Large creature reaches 10 ft tall, 5 ft long, and says which column was used", () => {
+    const tall = derivePF1eActor({ system: { size: "Large" } });
+    expect(tall.reachFeet).toBe(10);
+    expect(tall.reachShape).toBe("tall");
+    expect(tall.attacks[0]?.reachSquares).toBe(2);
+    expect(tall.defaults.join("\n")).toContain("reachShape: not authored");
+    expect(tall.explain.speed).toContain("10 ft space, 10 ft natural reach");
+
+    const long = derivePF1eActor({
+      system: { size: "Large", reachShape: "long" },
+    });
+    expect(long.reachFeet).toBe(5);
+    expect(long.reachShape).toBe("long");
+    expect(long.attacks[0]?.reachSquares).toBe(1);
+    expect(long.issues).toEqual([]);
+    expect(long.explain.speed).toContain(
+      "10 ft space, 5 ft natural reach (long)",
+    );
+  });
+
+  test("the rest of Table 8-4: Huge 15/10, Gargantuan 20/15, Colossal 30/20", () => {
+    const reach = (size: string, shape?: string) =>
+      derivePF1eActor({
+        system: shape === undefined ? { size } : { size, reachShape: shape },
+      }).reachFeet;
+    expect(reach("Huge")).toBe(15);
+    expect(reach("Huge", "long")).toBe(10);
+    expect(reach("Gargantuan")).toBe(20);
+    expect(reach("Gargantuan", "long")).toBe(15);
+    expect(reach("Colossal")).toBe(30);
+    expect(reach("Colossal", "long")).toBe(20);
+    // Colossal reach is 30 ft = six squares, not the five a "+1 per category" ladder gives.
+    expect(
+      derivePF1eActor({ system: { size: "Colossal" } }).attacks[0]
+        ?.reachSquares,
+    ).toBe(6);
+  });
+
+  test("Tiny and smaller reach 0 ft — they must enter an opponent's square (AoN 179)", () => {
+    for (const size of ["Tiny", "Diminutive", "Fine"] as const) {
+      const d = derivePF1eActor({ system: { size } });
+      expect(d.reachFeet, size).toBe(0);
+      expect(d.attacks[0]?.reachSquares, size).toBe(0);
+      expect(d.explain.speed, size).toContain("0 ft natural reach");
+      // one printed figure, so nothing was left unauthored
+      expect(d.defaults.join("\n"), size).not.toContain("reachShape");
+    }
+    // Fine is 1/2 ft across, not the "1½ ft" the A.5 transcription once carried.
+    expect(
+      derivePF1eActor({ system: { size: "Fine" } }).explain.speed,
+    ).toContain("0.5 ft space");
+  });
+
+  test("a body form on a size the table prints one figure for is reported, and changes nothing", () => {
+    const d = derivePF1eActor({
+      system: { size: "Medium", reachShape: "long" },
+    });
+    expect(d.reachFeet).toBe(5);
+    expect(d.issues.join("\n")).toContain(
+      "does not apply to a Medium creature",
+    );
+  });
+
+  test("a malformed body form is an issue naming the field, and a rejected block says why", () => {
+    const d = derivePF1eActor({
+      system: { size: "Large", reachShape: "wide" },
+    });
+    expect(d.reachShape).toBe("tall");
+    expect(d.reachFeet).toBe(10);
+    expect(d.issues.join("\n")).toContain(
+      'reachShape "wide" is neither "tall" nor "long"',
+    );
+
+    expect(parsePF1eActorSystem({ reachShape: "sideways" }).ok).toBe(false);
+    expect(parsePF1eActorSystem({ reachShape: " long " }).ok).toBe(true);
+  });
+
+  test("an authored per-attack reach still outranks the derived body form", () => {
+    const d = derivePF1eActor({
+      system: {
+        size: "Large",
+        reachShape: "long",
+        attacks: [{ name: "tongue", damageDice: "1d4", reachSquares: 3 }],
+      },
+    });
+    expect(d.reachFeet).toBe(5); // the creature's natural reach
+    expect(d.attacks[0]?.reachSquares).toBe(3); // the attack's own authored reach
+  });
+});
+
 describe("component sheet (A.2/A.3)", () => {
   const fighter = {
     size: "Medium",

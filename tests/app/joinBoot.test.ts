@@ -90,7 +90,7 @@ describe("player join (§2/§6.4/§5)", () => {
       pump.stop();
       playerApp.close();
       await hostApp.persister.flush();
-      hostApp.close();
+      await hostApp.close();
     }
   });
 
@@ -111,7 +111,7 @@ describe("player join (§2/§6.4/§5)", () => {
       pump.stop();
       playerApp.close();
       await hostApp.persister.flush();
-      hostApp.close();
+      await hostApp.close();
     }
   });
 
@@ -130,7 +130,7 @@ describe("player join (§2/§6.4/§5)", () => {
       pump.stop();
       playerApp.close();
       await hostApp.persister.flush();
-      hostApp.close();
+      await hostApp.close();
     }
   });
 });

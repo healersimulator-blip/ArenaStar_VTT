@@ -1,7 +1,13 @@
 import "fake-indexeddb/auto";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { beforeEach, describe, expect, test } from "vitest";
-import { deleteAsset, deleteWorldData, listAssets, openVttDb } from "../../src/storage/idb";
+import {
+  deleteAsset,
+  deleteWorldData,
+  getAllDocumentRecords,
+  listAssets,
+  openVttDb,
+} from "../../src/storage/idb";
 import { MemDirHandle } from "../../src/storage/opfs";
 import {
   exportWorldZip,
@@ -123,7 +129,7 @@ describe("world.zip export/import (§8)", () => {
     expect(assetFiles.length).toBeGreaterThanOrEqual(3);
     const worldId = app.worldId;
     const seqAtExport = meta.seq;
-    app.close();
+    await app.close();
 
     // ── keep mutating AFTER the export (world drifts ahead) ──
     const drifted = await boot(root);
@@ -134,7 +140,7 @@ describe("world.zip export/import (§8)", () => {
     ]);
     await settle();
     await drifted.persister.flush();
-    drifted.close();
+    await drifted.close();
 
     // ── import = restore to the export point ──
     expect(files.get(`checkpoints/${DEFAULT_SCENE_ID}/1.pool`)).toBeDefined();
@@ -167,7 +173,7 @@ describe("world.zip export/import (§8)", () => {
     const bytes = await restored.gm.fetcher.request(hash, "scene");
     expect([...bytes]).toEqual([1, 2, 3, 4]);
     await restored.persister.flush();
-    restored.close();
+    await restored.close();
   });
 
   test("import into a database that has never seen the world", async () => {
@@ -186,7 +192,7 @@ describe("world.zip export/import (§8)", () => {
     const archive = new Uint8Array(
       await (await exportWorldZip({ db, worldId, root, persister: app.persister })).arrayBuffer(),
     );
-    app.close();
+    await app.close();
 
     // simulate a brand-new host machine: wipe every trace of the world
     await deleteWorldData(db, worldId);
@@ -200,7 +206,7 @@ describe("world.zip export/import (§8)", () => {
     expect(fresh.worldId).toBe(worldId);
     expect(fresh.gm.client.store.get("scenes", DEFAULT_SCENE_ID)?.tokens.length).toBe(1);
     await fresh.persister.flush();
-    fresh.close();
+    await fresh.close();
   });
 
   test("rejects corrupt archives with explicit errors", async () => {
@@ -225,5 +231,64 @@ describe("world.zip export/import (§8)", () => {
       "assets.json": strToU8("[]"),
     });
     await expect(importWorldZip({ db, file: noDocs })).rejects.toThrow(/missing documents\.json/);
+  });
+  /**
+   * D-179 regression — the restore must win over the persister's final flush.
+   *
+   * §8 persistence batches document writes (~500 ms) and `HostPersister.close()`
+   * runs one FINAL flush. `App.importWorld` calls `close()` and then replaces
+   * every world row with the archive's, so a `close()` that returns before that
+   * flush settles lets it commit AFTER the restore's delete+put: the drifted
+   * scene document (tokens are embedded in it) is written back over the
+   * restored one, and the rebooted world carries a token the archive never
+   * contained. In the browser that surfaced as `worldfile.spec.ts` polling
+   * tokenCount 2 and timing out on 3 — intermittently, only under load.
+   */
+  test("close() settles the final flush before a restore replaces the rows", async () => {
+    const root = new MemDirHandle();
+    await HostPersister.createWorld(db, {
+      worldId: "w-restore-race",
+      name: "Restore Race",
+      system: "mass-battle-basic",
+      systemVersion: "1.0.0",
+    });
+    const app = await boot(root, "w-restore-race");
+    const worldId = app.worldId;
+    await addToken(app, token("t-1", 100, 100));
+    await addToken(app, token("t-2", 400, 300));
+    const archive = new Uint8Array(
+      await (await exportWorldZip({ db, worldId, root, persister: app.persister })).arrayBuffer(),
+    );
+    const meta = JSON.parse(
+      strFromU8(parseZip(archive).get("world.json") as Uint8Array),
+    ) as WorldFileMeta;
+
+    /** The persisted scene row's token ids — the documents store, not a boot. */
+    const storedTokens = async (): Promise<string[]> => {
+      const rows = await getAllDocumentRecords(db, worldId);
+      const scene = rows.find((r) => r.coll === "scenes" && r.id === DEFAULT_SCENE_ID);
+      const doc = scene?.doc as { tokens?: Array<{ _id: string }> } | undefined;
+      return (doc?.tokens ?? []).map((t) => t._id).sort();
+    };
+
+    // Drift past the export point and leave the write DIRTY: the batch has not
+    // run and nothing drains it, so this is the exact window the import raced.
+    await addToken(app, token("t-3", 900, 900));
+    expect(await storedTokens()).toEqual(["t-1", "t-2"]);
+
+    // The fix: close() resolves only once that last flush has committed.
+    await app.close();
+    expect(await storedTokens()).toEqual(["t-1", "t-2", "t-3"]);
+
+    // Nothing is in flight now, so the restore is the last writer.
+    const imported = await importWorldZip({ db, file: archive, root });
+    expect(imported).toMatchObject({ worldId, seq: meta.seq });
+
+    const restored = await boot(root, worldId);
+    expect(restored.store.seq).toBe(meta.seq);
+    const scene = restored.gm.client.store.get("scenes", DEFAULT_SCENE_ID);
+    expect(scene?.tokens.map((t) => t._id).sort()).toEqual(["t-1", "t-2"]);
+    await restored.persister.flush();
+    await restored.close();
   });
 });

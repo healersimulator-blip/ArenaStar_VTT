@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { entry, waitForSurface, surfaceCallArg } from "./lib";
 
 /**
@@ -12,6 +12,62 @@ import { entry, waitForSurface, surfaceCallArg } from "./lib";
  * prepared Shocking Grasp and an authored held Chill Touch charge; the ogre's
  * Dex 8 gives it touch AC 9.
  */
+
+/** Count non-overlapping matches of `pattern` in `text`. */
+const countMatches = (text: string, pattern: string | RegExp): number =>
+  typeof pattern === "string"
+    ? text.split(pattern).length - 1
+    : (
+        text.match(
+          pattern.flags.includes("g")
+            ? pattern
+            : new RegExp(pattern.source, pattern.flags + "g"),
+        ) ?? []
+      ).length;
+
+/**
+ * Read the chat log once `waitFor` has landed in it `occurrences` times.
+ *
+ * Every card in these flows is a `create` op submitted only AFTER its rolls
+ * replicate, so a single `textContent()` snapshot taken right after a click
+ * races the op and sees just the roll card — a load-dependent flake, not a
+ * product failure. Waiting on the log is what makes the branch reads below
+ * deterministic under any worker count. The count form matters because the log
+ * accumulates across a test's several casts, and some cards carry no unique
+ * text at all (the discharging delivery omits its "Charges remaining" line).
+ */
+const chatAfter = async (
+  page: Page,
+  waitFor: string | RegExp,
+  occurrences = 1,
+): Promise<string> => {
+  await page.click('[data-tab="chat"]');
+  const log = page.locator("#chat-log");
+  await expect
+    .poll(async () => countMatches((await log.textContent()) ?? "", waitFor), {
+      timeout: 10_000,
+    })
+    .toBeGreaterThanOrEqual(occurrences);
+  return (await log.textContent()) ?? "";
+};
+
+/**
+ * Check one willing-ally pick by its visible label.
+ *
+ * The row's `data-ally-touch-pick` value is the imported **actor `_id`**
+ * (`importEntryOp` mints `actor-<hash>`), never the compendium entry id the
+ * fixture authored — a pack entry carries no `_id` by contract (D-090). The
+ * visible name is the only stable handle, so the attribute is asserted
+ * separately as "exactly one pick row per ally".
+ */
+const checkAllyPick = async (book: Locator, name: string): Promise<void> => {
+  const row = book
+    .locator("[data-held-ally-list] label")
+    .filter({ hasText: name });
+  await expect(row).toHaveCount(1);
+  await expect(row.locator("[data-ally-touch-pick]")).toHaveCount(1);
+  await row.locator('input[type="checkbox"]').check();
+};
 
 const wizardSystem = {
   pf1e: {
@@ -161,11 +217,9 @@ test.describe("PF1e touch spells: held charges ride the actor document (§7/P5 C
     );
 
     // The card narrates the touch attack; which branch landed is random.
-    await page.click('[data-tab="chat"]');
-    const chat = await page.locator("#chat-log").textContent();
-    expect(chat).toContain("casts Shocking Grasp");
+    const chat = await chatAfter(page, "casts Shocking Grasp");
     expect(chat).toMatch(/Melee touch attack \d+ vs touch AC 9/);
-    const held = chat?.includes("The charge is held");
+    const held = chat.includes("The charge is held");
 
     // Back to the sheet: the held-charge panel matches the card.
     await page.click('[data-tab="actors"]');
@@ -183,10 +237,11 @@ test.describe("PF1e touch spells: held charges ride the actor document (§7/P5 C
         .locator("[data-cast-target]")
         .selectOption({ label: "PF Ogre" });
       await book.locator("[data-held-deliver]").click();
-      await page.click('[data-tab="chat"]');
-      const delivery = await page.locator("#chat-log").textContent();
-      const delivered = delivery?.includes("delivers the held Shocking Grasp");
-      expect(delivery).toMatch(/delivers the held Shocking Grasp|still held/);
+      const delivery = await chatAfter(
+        page,
+        /delivers the held Shocking Grasp|The charge is still held/,
+      );
+      const delivered = delivery.includes("delivers the held Shocking Grasp");
       await page.click('[data-tab="actors"]');
       await page
         .locator("#sheet-list .sheet-row")
@@ -229,9 +284,10 @@ test.describe("PF1e touch spells: held charges ride the actor document (§7/P5 C
     await book.locator("[data-held-autotouch]").click();
     await expect(book.locator("[data-held-charge]")).toHaveCount(0);
 
-    await page.click('[data-tab="chat"]');
-    let chat = await page.locator("#chat-log").textContent();
-    expect(chat).toMatch(/touches the willing PF Ogre automatically/);
+    const chat = await chatAfter(
+      page,
+      "touches the willing PF Ogre automatically",
+    );
     expect(chat).not.toMatch(/Melee touch attack \d+/);
 
     // 2. A touch cast against a willing target skips the attack too, and a
@@ -251,13 +307,11 @@ test.describe("PF1e touch spells: held charges ride the actor document (§7/P5 C
     await book.locator("[data-cast-submit]").click();
 
     await expect(book.locator("[data-held-charge]")).toHaveCount(0);
-    await page.click('[data-tab="chat"]');
-    chat = await page.locator("#chat-log").textContent();
-    expect(chat).toContain("casts Shocking Grasp");
-    expect(chat).toMatch(
+    const castChat = await chatAfter(page, "casts Shocking Grasp");
+    expect(castChat).toMatch(
       /touches the willing PF Ogre automatically — no attack roll is needed/,
     );
-    expect(chat).not.toMatch(/Melee touch attack \d+ vs touch AC/);
+    expect(castChat).not.toMatch(/Melee touch attack \d+ vs touch AC/);
     expect(errors).toEqual([]);
   });
 });
@@ -384,10 +438,8 @@ test.describe("PF1e held-charge consumers (§7/P5 C03, D-162)", () => {
     await expect(book.locator("[data-held-charge]")).toContainText(
       "Chill Touch",
     );
-    await page.click('[data-tab="chat"]');
-    let chat = await page.locator("#chat-log").textContent();
+    const chat = await chatAfter(page, "Charges remaining: 1");
     expect(chat).toMatch(/touches the willing PF Ogre automatically/);
-    expect(chat).toMatch(/Charges remaining: 1/);
 
     // Second delivery consumes the last charge and clears the panel.
     await page.click('[data-tab="actors"]');
@@ -399,11 +451,13 @@ test.describe("PF1e held-charge consumers (§7/P5 C03, D-162)", () => {
     await book.locator("[data-cast-target]").selectOption({ label: "PF Ogre" });
     await book.locator("[data-held-autotouch]").click();
     await expect(book.locator("[data-held-charge]")).toHaveCount(0);
-    await page.click('[data-tab="chat"]');
-    chat = await page.locator("#chat-log").textContent();
+    // The discharging delivery card carries NO "Charges remaining" line (that
+    // line is appended only when a charge survives), so the second delivery is
+    // recognised by a second delivery narration in the accumulated log.
+    const finalChat = await chatAfter(page, "delivers the held Chill Touch", 2);
     // Exactly one "Charges remaining" line — the first delivery's. The log
     // accumulates, so the second (discharging) card adds none.
-    const remainingLines = chat?.match(/Charges remaining/g) ?? [];
+    const remainingLines = finalChat.match(/Charges remaining/g) ?? [];
     expect(remainingLines.length).toBe(1);
     expect(errors).toEqual([]);
   });
@@ -426,15 +480,13 @@ test.describe("PF1e held-charge consumers (§7/P5 C03, D-162)", () => {
 
     // Pick both allies and touch them in one full-round action — die-less,
     // so the whole flow is deterministic.
-    await book.locator('[data-ally-touch-pick="pf-ogre"]').check();
-    await book.locator('[data-ally-touch-pick="pf-acolyte"]').check();
+    await checkAllyPick(book, "PF Ogre");
+    await checkAllyPick(book, "PF Acolyte");
     await book.locator("[data-held-ally-touch]").click();
 
     // Both charges were consumed: the panel is gone.
     await expect(book.locator("[data-held-charge]")).toHaveCount(0);
-    await page.click('[data-tab="chat"]');
-    const chat = await page.locator("#chat-log").textContent();
-    expect(chat).toMatch(/touches 2 willing allies/);
+    const chat = await chatAfter(page, "touches 2 willing allies");
     expect(chat).toMatch(/full-round action/);
     expect(chat).toContain("PF Ogre");
     expect(chat).toContain("PF Acolyte");
@@ -462,13 +514,17 @@ test.describe("PF1e held-charge consumers (§7/P5 C03, D-162)", () => {
     await book.locator("[data-cast-target]").selectOption({ label: "PF Ogre" });
     await book.locator("[data-held-release]").click();
 
-    // The attack die is random: branch on the card's own narration.
-    await page.click('[data-tab="chat"]');
-    const chat = await page.locator("#chat-log").textContent();
-    expect(chat).toMatch(/releases the held Chill Touch|release miss/);
-    expect(chat).toMatch(/Dagger attack \d+ vs AC/);
+    // The attack die is random: branch on the card's own narration. The card
+    // is a create op submitted AFTER the attack roll replicates, so wait for
+    // its attack line rather than snapshotting the log once — a single
+    // textContent() read races the op and sees only the roll card.
+    const chat = await chatAfter(page, /Dagger attack \d+ vs AC/);
+    // #chat-log renders a card's `content`, never its `name`, so the miss
+    // branch is recognised by its narration ("The attack misses"), not by the
+    // card name "release miss" — which the log never shows.
+    expect(chat).toMatch(/releases the held Chill Touch|The attack misses/);
     expect(chat).toMatch(/not considered armed/);
-    const released = chat?.includes("releases the held Chill Touch") ?? false;
+    const released = chat.includes("releases the held Chill Touch");
 
     await page.click('[data-tab="actors"]');
     await page
@@ -476,8 +532,11 @@ test.describe("PF1e held-charge consumers (§7/P5 C03, D-162)", () => {
       .filter({ hasText: "PF Wizard" })
       .click();
     await sheet.getByRole("button", { name: "spells", exact: true }).click();
-    // A hit consumed the single charge; a miss keeps the panel.
-    await expect(book.locator("[data-held-charge]")).toHaveCount(
+    // This fixture holds TWO charges, so both branches keep the panel: a hit
+    // consumes one — the plural "N deliveries" element renders only above 1 —
+    // and a miss consumes none.
+    await expect(book.locator("[data-held-charge]")).toHaveCount(1);
+    await expect(book.locator("[data-held-charges]")).toHaveCount(
       released ? 0 : 1,
     );
     expect(errors).toEqual([]);
@@ -505,9 +564,7 @@ test.describe("PF1e held-charge consumers (§7/P5 C03, D-162)", () => {
     await book.locator("[data-cast-quickened]").check();
     await book.locator("[data-cast-submit]").click();
 
-    await page.click('[data-tab="chat"]');
-    const chat = await page.locator("#chat-log").textContent();
-    expect(chat).toContain("casts Magic Missile");
+    const chat = await chatAfter(page, "casts Magic Missile");
     expect(chat).toMatch(/quickened swift action/);
     expect(chat).toMatch(/does not provoke attacks of opportunity/);
     expect(errors).toEqual([]);

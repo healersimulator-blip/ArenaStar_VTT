@@ -41,7 +41,7 @@ describe("chat rolls (§10/§11, host-resolved)", () => {
       expect(messages[0]?.content).toContain("vs AC, damage");
     } finally {
       await app.persister.flush();
-      app.close();
+      await app.close();
     }
   });
 
@@ -61,7 +61,7 @@ describe("chat rolls (§10/§11, host-resolved)", () => {
       expect(mine?.content).toMatch(/\[\[\d+\|1d20\+3\]\]/);
     } finally {
       await app.persister.flush();
-      app.close();
+      await app.close();
     }
   });
 
@@ -114,7 +114,7 @@ describe("chat rolls (§10/§11, host-resolved)", () => {
       void scene;
     } finally {
       await app.persister.flush();
-      app.close();
+      await app.close();
     }
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { createMassBattlePf1e, casterInputsFromLeaderActor, PF1E_MASS_SPELLS, DEFAULT_MASS_SPELL_ID, type MassBattlePf1eOptions } from "../../src/packages/massBattlePf1e";
+import { createMassBattlePf1e, casterInputsFromLeaderActor, reachSquaresFromLeaderActor, PF1E_MASS_SPELLS, DEFAULT_MASS_SPELL_ID, type MassBattlePf1eOptions } from "../../src/packages/massBattlePf1e";
 import { PF1E_STATUS_FLANKED } from "../../src/packages/pf1e/envelopment";
 import { PF1E_MODEL_SCHEMA } from "../../src/packages/pf1e/schema";
 import { createModelPool, allocModel } from "../../src/sim/pool";
@@ -503,6 +503,37 @@ describe("createMassBattlePf1e System Package (§12 / Task 9)", () => {
     expect((pool.status[2] ?? 0) & PF1E_STATUS_FLANKED).toBe(0);
   });
 
+  test("a Large unit reaches two squares, so it envelops a defender a Medium unit cannot touch (P02/D-180)", () => {
+    // Table 8-4 (AoN Rules ID 179): creatures taking more than one square "typically have
+    // a natural reach of 10 feet or more, meaning that they can reach targets even if they
+    // aren't in adjacent squares". Until now every unit reached exactly one grid cell
+    // (D-177), which stopped a giant one model short. Two attackers on one defender is what
+    // sets FLANKED, so the bit is the observable: the defender 10 ft out is contacted by
+    // BOTH attackers only when the unit's bound leader actor says Large.
+    const run = (leaderActors: RulesContext["leaderActors"]) => {
+      const rules = createMassBattlePf1e();
+      const pool = createModelPool(8, PF1E_MODEL_SCHEMA);
+      const sys = { ac: 16, touchAc: 12, fort: 4, ref: 2, will: 1, sr: 0, drType: 0, drVal: 0, profileIdx: 1 };
+      allocModel(pool, { id: 1, unitIdx: 0, x: 0, y: 0, hp: 30, hpMax: 30, sys: { ...sys } });
+      allocModel(pool, { id: 2, unitIdx: 0, x: 6, y: 0, hp: 30, hpMax: 30, sys: { ...sys } });
+      allocModel(pool, { id: 3, unitIdx: 1, x: 10, y: 0, hp: 30, hpMax: 30, sys: { ...sys, profileIdx: 2 } });
+      const units: UnitView[] = [
+        { id: "u0", armyId: "a0", factionId: "f0", type: "infantry", name: "Red", profile: {}, stats: { bab: 4, strMod: 2, ac: 16 }, orders: null, formation: "line", sceneId: "scene-1", modelRange: [0, 2], leaderTokenId: null },
+        { id: "u1", armyId: "a1", factionId: "f1", type: "infantry", name: "Blue", profile: {}, stats: { bab: 4, strMod: 2, ac: 16 }, orders: null, formation: "line", sceneId: "scene-1", modelRange: [2, 3], leaderTokenId: null },
+      ];
+      const orders = new Map<string, OrderQueue>();
+      orders.set("u0", { issuedBy: "gm", issuedTurn: 1, pending: [], active: { kind: "attack", targetUnitId: "u1" } });
+      rules.resolveTurn({ ...spellCtx(), leaderActors }, pool, units, orders, new XoshiroPRNG(7), () => {});
+      return (pool.status[2] ?? 0) & PF1E_STATUS_FLANKED;
+    };
+
+    expect(run({ u0: { _id: "actor-giant", system: { pf1e: { size: "Large" } } } })).not.toBe(0);
+    // A Medium leader actor reaches 5 ft: only the near attacker contacts, so no envelopment.
+    expect(run({ u0: { _id: "actor-man", system: { pf1e: { size: "Medium" } } } })).toBe(0);
+    // No bound actor at all: D-177's one-cell default, unchanged behaviour.
+    expect(run({})).toBe(0);
+  });
+
   test("hero cleave is one extra attack against an adjacent enemy (M07/D-178)", () => {
     // SRD Cleave: "one extra melee attack at your full attack bonus against a foe
     // adjacent to you … You take a −2 penalty to your Armor Class until your next
@@ -670,6 +701,41 @@ describe("createMassBattlePf1e System Package (§12 / Task 9)", () => {
     expect(events.some((e) => e.subPhase === "spell" && e.type === "spell")).toBe(false);
   });
 
+  test("a Large enemy threatens the caster two squares out, so the cast becomes defensive (P02/D-180)", () => {
+    // The D-170 battlefield, except the threatening Blue model stands 10 ft from the
+    // caster's anchor at (10,10) instead of 2 ft. Threat is the *enemy's* reach, not the
+    // caster's and not a constant (AoN 102: "You threaten all squares into which you can
+    // make a melee attack"; AoN 179 gives a Large creature 10 ft of it), so with no size
+    // data the one-cell default leaves this cast unprovoked — and binding a Large actor to
+    // the Blue unit makes it defensive: DC 15 + 2×3 = 21 against a CL-1 caster with a −8
+    // key modifier always fails, provoking exactly one swing. AC 40 keeps that swing a miss,
+    // so the spell still resolves; the only thing that changed is who could reach the caster.
+    const run = (leaderActors: RulesContext["leaderActors"]) => {
+      const rules = createMassBattlePf1e();
+      const pool = createModelPool(20, PF1E_MODEL_SCHEMA);
+      allocModel(pool, { id: 1, unitIdx: 0, x: 10, y: 10, hp: 60, hpMax: 60, sys: { ac: 16, touchAc: 12, fort: 4, ref: 2, will: 1, sr: 0, drType: 0, drVal: 0, profileIdx: 1 } });
+      allocModel(pool, { id: 2, unitIdx: 1, x: 20, y: 10, hp: 30, hpMax: 30, sys: { ac: 14, touchAc: 10, fort: 3, ref: 1, will: 0, sr: 0, drType: 0, drVal: 0, profileIdx: 2 } });
+      const units = spellUnits({ casterLevel: 1, castingStatMod: -8, ac: 40 });
+      const orders = new Map<string, OrderQueue>();
+      orders.set("u0", { issuedBy: "u0", issuedTurn: 1, pending: [], active: { kind: "custom", type: "spell_aoe", data: { x: 10, y: 25 } } });
+      const events: SimEvent[] = [];
+      rules.resolveTurn({ ...spellCtx(), leaderActors }, pool, units, orders, new XoshiroPRNG(1234), (ev) => events.push(ev));
+      const cast = events.find((e) => e.subPhase === "spell" && e.type === "spell");
+      expect(cast, "the spell must still resolve").toBeDefined();
+      return cast?.data as Record<string, unknown>;
+    };
+
+    const unthreatened = run({});
+    expect(unthreatened.concentrationFailed).toBe(0);
+    expect(unthreatened.aooExecuted).toBe(0);
+
+    const threatened = run({ u1: { _id: "actor-giant", system: { pf1e: { size: "Large" } } } });
+    expect(threatened.concentrationFailed).toBe(1);
+    expect(threatened.aooExecuted).toBe(1);
+    expect(threatened.aooHits).toBe(0); // AC 40: the swing misses
+    expect(threatened.spellInterrupted).toBe(false);
+  });
+
   test("a bound leader actor overrides the caster level and DC modifier (M07/D-168)", () => {
     // The unit stats say CL 5 / +4, but the leader actor is a 9th-level Int-20 caster:
     // the actor's authored numbers must win — dice 9d6, DC 18, long range 760 ft.
@@ -711,6 +777,23 @@ describe("createMassBattlePf1e System Package (§12 / Task 9)", () => {
     expect(
       casterInputsFromLeaderActor({ system: { pf1e: { spells: { casterLevel: 7, keyAbility: "wis" }, spellPenetration: 2, abilities: { wis: 18 } } } }),
     ).toEqual({ casterLevel: 7, keyAbilityMod: 4, spellPenetration: 2 });
+  });
+
+  test("reachSquaresFromLeaderActor reads Table 8-4's reach from the actor's authored size (P02/D-180)", () => {
+    expect(reachSquaresFromLeaderActor(null)).toBeNull();
+    expect(reachSquaresFromLeaderActor("giant")).toBeNull();
+    expect(reachSquaresFromLeaderActor({ system: null })).toBeNull();
+    // No size authored ⇒ the derivation's Medium default, one square — never a guess.
+    expect(reachSquaresFromLeaderActor({ system: { pf1e: { abilities: { str: 18 } } } })).toBe(1);
+    expect(reachSquaresFromLeaderActor({ system: { pf1e: { size: "Medium" } } })).toBe(1);
+    expect(reachSquaresFromLeaderActor({ system: { pf1e: { size: "Small" } } })).toBe(1);
+    expect(reachSquaresFromLeaderActor({ system: { pf1e: { size: "Large" } } })).toBe(2);
+    expect(reachSquaresFromLeaderActor({ system: { pf1e: { size: "Huge" } } })).toBe(3);
+    expect(reachSquaresFromLeaderActor({ system: { pf1e: { size: "Gargantuan" } } })).toBe(4);
+    // Colossal is 30 ft of reach = six squares, not the five a "+1 per size" ladder gives.
+    expect(reachSquaresFromLeaderActor({ system: { pf1e: { size: "Colossal" } } })).toBe(6);
+    // A junk size is Medium, exactly as the tactical derivation reads it.
+    expect(reachSquaresFromLeaderActor({ system: { pf1e: { size: "Huge!" } } })).toBe(1);
   });
 
   test("a cone order aims from the caster: direction-driven, no range designation (D-167)", () => {

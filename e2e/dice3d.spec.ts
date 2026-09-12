@@ -33,6 +33,20 @@ test.describe("3D dice (§11)", () => {
     const before = await gmCall<{ loads: number; rolls: number; settled: number }>(page, "dice3d");
     expect(before.loads).toBe(0); // three.js not parsed before the first roll
 
+    // The same capability the overlay itself checks: `showDice3D` returns
+    // immediately when `new WebGLRenderer()` cannot get a context, so the chat
+    // card never blocks on the animation (dice3d.ts). A browser build without
+    // WebGL has nothing to settle, so that half is asserted through its
+    // documented degradation path instead of being demanded anyway.
+    const webgl = await page.evaluate(() => {
+      try {
+        const c = document.createElement("canvas");
+        return c.getContext("webgl2") !== null || c.getContext("webgl") !== null;
+      } catch {
+        return false;
+      }
+    });
+
     // /roll 2d6 + 1d20 through the chat box (host-crypto resolution)
     await page.fill("#chat-input", "/roll 2d6 + 1d20");
     await page.click("#chat-send");
@@ -42,6 +56,28 @@ test.describe("3D dice (§11)", () => {
       .poll(() => gmCall<{ loads: number; rolls: number }>(page, "dice3d").then((s) => s.loads))
       .toBe(1);
     await expect.poll(() => gmCall<{ rolls: number }>(page, "dice3d").then((s) => s.rolls)).toBe(1);
+
+    if (!webgl) {
+      // Degradation path: the determined values are still recorded BEFORE the
+      // renderer is attempted, no canvas is ever appended, nothing is left to
+      // dispose, and the chat card carries the same total the overlay saw —
+      // the §11 invariant "the animation never chooses the outcome" holds
+      // with no animation at all.
+      const degraded = await gmCall<{
+        settled: number;
+        lastValues: number[];
+        lastTotal: number | null;
+        disposed: boolean;
+      }>(page, "dice3d");
+      expect(degraded.settled).toBe(0);
+      expect(degraded.disposed).toBe(false);
+      expect(degraded.lastValues).toHaveLength(3);
+      expect(await page.locator("[data-dice3d-canvas]").count()).toBe(0);
+      const card = page.locator("#chat-log .rollcard");
+      await expect(card).toHaveCount(1);
+      expect(Number(await card.locator(".total").textContent())).toBe(degraded.lastTotal);
+      return;
+    }
 
     // settled values: 2×d6 (1..6) + 1×d20 (1..20), and d6+d6+d20 == total
     const stats = await gmCall<{

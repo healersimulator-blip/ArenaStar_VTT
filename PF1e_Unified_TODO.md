@@ -1205,10 +1205,10 @@ Clear/State` drive the loop in Chromium (75/75): the burst that is exactly
 
 Depends on P2–P5. Complete action costs and modifiers together with their legal execution.
 
-- [ ] **P01 — Normalize scene/model/feet conversions** across deploy spacing, envelopment reach, aura radii and spells. Use scene grid metadata, not incompatible hardcoded 1.5/5/15/30 constants. (G §2.15; B §6.1) — **partial 2026-09-12 (D-177):** envelopment reach now rides the scene's grid distance in feet (the 1.5 constant is gone); deploy spacing and the fixed leadership-aura radius remain.
-- [ ] **P02 — Implement space/reach/threat geometry:** token footprints, size/tall/long reach, reach-weapon dead zones, tiny-creature occupancy/zero reach, diagonals and threatened-square highlighting. (G §4.5; I P6)
+- [ ] **P01 — Normalize scene/model/feet conversions** across deploy spacing, envelopment reach, aura radii and spells. Use scene grid metadata, not incompatible hardcoded 1.5/5/15/30 constants. (G §2.15; B §6.1) — **partial 2026-09-12 (D-177):** envelopment reach now rides the scene's grid distance in feet (the 1.5 constant is gone); deploy spacing and the fixed leadership-aura radius remain. Deploy spacing is now also the named prerequisite for strategic flanking (D-181): `flanking.ts` encodes AoN 183's line test, which is undefined for `deploy.ts`'s default 4-ft spacing because those points share 5-ft cells, so `envelopment.ts` keeps its contact rule until spacing rides the grid (G §5).
+- [ ] **P02 — Implement space/reach/threat geometry:** token footprints, size/tall/long reach, reach-weapon dead zones, tiny-creature occupancy/zero reach, diagonals and threatened-square highlighting. (G §4.5; I P6) — **partial 2026-09-12 (D-180):** `pf1e/geometry.ts` is the pure layer — footprints (1×1 to 6×6), Table 8-4's tall **and** long natural reach, the reach-weapon band `(natural, 2×natural]`, 5-10-5 square and footprint distances, threatened squares and sub-square occupancy — and it is consumed: the mass battle reads each unit's own reach from its bound leader actor (envelopment contact, and who threatens a caster at *its* reach, not a constant 5), while `system.pf1e.reachShape` makes the tall/long column authorable and derived (`reachFeet`, the producer `meleeReachLegality` asked for). Two A.5 data bugs fixed on re-verification: Fine's space was 1½ ft (table: ½ ft) and Colossal's square columns were one short (30 ft = 6 squares of space and reach, not 5). **Remaining:** threatened-square highlighting on the canvas (G §4.5's `src/canvas/layers/*`, on the D-148→D-154 staging) — since D-181 the *draw list* exists (`threatPreview.ts` returns per-token `threatRects` in world feet, composed from `threatenedCells`), so what is left is the layer and the trigger, a tactical consumer — no sheet flow carries token positions yet, so `meleeReachLegality` has a producer but no caller and A04's `shootingIntoMeleePenalty` still gets its `targetEngaged`/`nearestFriendlyDistanceFt` facts from nobody — and pack content, since `bestiary.json` authors no `size` at all.
 - [ ] **P03 — Implement movement legality and cost:** terrain multipliers, obstacles/occupied squares/allies, squeezing, minimum movement, run/withdraw, legal ending squares, 5-foot steps and charge path/action restrictions. (I P6; G §3/§4.5)
-- [ ] **P04 — Implement positional defenses/modifiers:** corner-based soft/partial/standard/improved/total cover, concealment non-stacking, invisibility/denied Dex, helplessness, higher ground, opposite-border flanking and threatening-ally requirements. Use independently verified fixtures. (I P3/P6; G §4.6)
+- [ ] **P04 — Implement positional defenses/modifiers:** corner-based soft/partial/standard/improved/total cover, concealment non-stacking, invisibility/denied Dex, helplessness, higher ground, opposite-border flanking and threatening-ally requirements. Use independently verified fixtures. (I P3/P6; G §4.6) — **partial 2026-09-12 (D-181):** flanking is done, as a pure rule and a scene seam. `pf1e/flanking.ts` encodes AoN 183 clause by clause — the centre-to-centre line test across **opposite borders including their corners** (exact doubled-integer arithmetic, no tolerance), the multi-square exception ("any square it occupies counts", load-bearing in a fixture where the footprint's own centre line misses), the threatening-ally requirement read through P02's `threatenedCells` (so per-size reach, tall/long and the reach-weapon band all decide it), and the 0-ft-reach exclusion from both AoN 183 and Table 8-4's `cannotFlank`. `threatPreview.ts` composes it with the scene (tokens → footprints → threat draw lists → flanking pairs), keeping fatal `issues` separate from announced `defaults` and leaving hostility to the caller (`isEnemy`), and `e2eHook.pf1eThreat`/`pf1ePlaceTokens` exercise it in Chromium through the real op path and real actor documents. Fixtures were cross-checked against two independent solvers (exact-rational and dense-sampling) over 52,947 configurations before being written down, and corrected twice by them. **Remaining:** cover, concealment, invisibility/denied Dex, helplessness, higher ground; the canvas overlay that draws the seam's `threatRects` (P02's highlighting remainder now has its model layer); a position-aware tactical consumer, so `PF1eActorSheet.svelte`'s hand-ticked `resolveFlanking` checkbox can become a derived fact with a manual override; and the strategic `envelopment.ts` FLANKED bit, which cannot adopt the line test until P01's deploy spacing rides the scene grid.
 - [ ] **P05 — Complete maneuver checks and aftermath:** bull rush, trip, disarm, sunder, grapple/maintain/pin/escape/tie-up, overrun, dirty trick, drag, reposition, steal; aid another/feint separately. Include special CMB/CMD size, Tiny Dex substitution, legality/limbs/free hands, size limits, improved/greater feat exceptions, attack substitution, failed-check consequences and item hardness/HP. Verify I's ambiguous “reverse” rather than inventing a maneuver. (I P6; G §4.8/Appendix A.9)
 - [ ] **P06 — Implement authoritative interrupt queue** before movement/action Ops commit: AoO trigger table, verified budgets and owner-turn reset, one opportunity per triggering action, exclusions, damage effects on maneuvers/casting, and ready-before-trigger ordering. UI prompts alone are not completion. (I P6; G §2.14/§4.11)
 - [ ] **P07 — Complete delay/ready execution and UI:** triggers, interrupt resolution, initiative adjustment, unused/lost actions and re-ready; prevent extra-turn/action exploits. (G §4.11; I P2/P6)
@@ -1233,7 +1233,7 @@ Split into reviewable sub-slices. Depends on the relevant tactical data/effect/s
 - [ ] **M01 — Bring strategic attack/damage rules up to the verified data contract:** outstanding G §2.4–2.10 (crit/bonus dice, ranged Dex/size, handedness/enhancement, range/firearms and defender mitigation) using independent sim loops; add scale-specific fixtures, not a cross-scale equality gate. (G §§2, 5; I P8)
 - [ ] **M02 — Reconcile strategic compile differences** in AoO budget, CMB/CMD special size and save bases/modifiers using verified shared tables; keep legacy/stat-block conversion differences explicit and measure changed fixtures. (G §10.2; I P8)
 - [ ] **M03 — Fix condition/status bit collisions** with a budgeted separate column or safe allocation; update manifest, codec, spatial filters, compaction and joiner tests so prone/flanked never masquerade as hidden/pinned. (G §2.13; I P8; B §4.5)
-- [ ] **M04 — Replace heuristic engagement with scale-appropriate contact/reach/flanking geometry** and clear/recompute stale FLANKED bits each turn; handle envelopment movement and document any non-SRD bonuses. (G §2.2/§5; M Task 4) — **partial 2026-09-12 (D-177):** envelopment reach is now measured in feet with a scene-derived default (the SRD 5-ft natural reach replacing the 1.5-unit error), and the stale FLANKED bit is cleared and recomputed every round instead of lingering forever. Open: per-size/reach-weapon reach and true flanking angles (P02), envelopment movement, bonus documentation.
+- [ ] **M04 — Replace heuristic engagement with scale-appropriate contact/reach/flanking geometry** and clear/recompute stale FLANKED bits each turn; handle envelopment movement and document any non-SRD bonuses. (G §2.2/§5; M Task 4) — **partial 2026-09-12 (D-177):** envelopment reach is now measured in feet with a scene-derived default (the SRD 5-ft natural reach replacing the 1.5-unit error), and the stale FLANKED bit is cleared and recomputed every round instead of lingering forever. Open: envelopment movement and bonus documentation. Per-size/reach-weapon reach landed in D-180 and the true flanking rule in D-181 (`flanking.ts`: opposite borders/corners, threatening ally, 0-ft reach can't flank), but `envelopment.ts` still sets FLANKED on ≥2 attackers in contact: adopting the line test needs P01's deploy spacing on the scene grid first, since 4-ft-spaced points share 5-ft cells and AoN 183 has no answer for a flanker inside the space it flanks (G §5).
 - [ ] **M05 — Execute declared movement/shoot/melee/spell order phases** rather than accepting no-op move/hold/retreat/custom orders; implement range/terrain/charge/withdraw/run and movement-triggered AoOs. Decide adopted morale behavior explicitly; a broader morale subsystem is deferred below. (G §5; M Tasks 3–5) — **partial 2026-09-12 (D-173/D-174/D-175):** move orders execute as formation movement within a pace-scaled budget (march 1× / charge 2× / run 4×, R02'd from the CRB; move points × scene grid distance; dead left behind; phases see post-move positions), movement is clipped at movement-blocking walls (§0 bit 0; `blockedByWall` reported; waypoints beyond a wall are never attempted), and retreat orders execute as SRD Withdraw — double speed toward `order.toward`, same wall clipping, `pace: "retreat"`. Open: terrain cost and obstacle routing (P03), charge/run restrictions beyond distance, movement-triggered AoOs (P06), shoot and morale sub-phases.
 - [ ] **M06 — Complete strategic SR/save, nonlethal, healing and regeneration paths** with correct counters and model lifecycle handling; retain independently seeded deterministic resolution. (G §2.11–2.12/§5; I P5/P7/P8) — **partial 2026-09-12 (D-176):** fast healing and regeneration now execute once per turn in a `heal` sub-phase (SRD "at the start of its turn"; capped at the effective maximum; living models only; `damageHealed` finally booked), authored via unit stats and consumed through the tested `resolvePF1eHealing` engine. Open: regeneration suppress-types/can't-die semantics at the strategic layer, and any remaining strategic nonlethal pathing.
 
@@ -1248,7 +1248,7 @@ Split into reviewable sub-slices. Depends on the relevant tactical data/effect/s
 
 - [ ] **M11 — Populate all advertised metrics at their real event sources:** attacks/hits/misses/percentage, damage dealt/taken/overkill, threats/confirms, kills/deaths/remaining, DR absorbed/SR blocked, saves, AoO executed/hits, CMB success, healing/regeneration/channel-energy counts. Specifically close the six unincremented fields identified by I P8. (M Task 6; G §5; I P8) — **partial 2026-09-11 (D-165/D-170):** strategic spells attribute hits per owning unit on the spell event (`hitsByUnit`) and book `deathsCount` on the unit that lost models; defensive-cast AoO is now armed in mass battles, so `aooExecuted`/`aooHits` have a real source (threat list → `resolvePF1eAoO` → `PF1eSpellMetrics` → `recordSpell`); the dead combat-side `srBlocked` was deleted (summary field stays, fed by spells); the collector lives for the module's lifetime, so `forecast()` returns real `generateReport()` totals. Open/refused-with-reason: `cmbSuccesses` has no mass-battle mechanic to source it (no maneuvers) — field kept, initialized. Update 2026-09-12 (D-176): `damageHealed` now has a real source — the heal sub-phase books fast-healing/regeneration via `recordHealing`.
 - [ ] **M12 — Call `generateReport()` from actual turn resolution**, reconcile per-model/per-unit totals into TurnReport summaries, and test resets/aggregation/attribution rather than collector-only fixtures. (M Task 6; G §5)
-- [ ] **M13 — Implement RFC-4180 CSV escaping** for commas, quotes and newlines with round-trip tests. (M Tasks 6/8; I P8)
+- [x] **M13 — Implement RFC-4180 CSV escaping** for commas, quotes and newlines with round-trip tests. (M Tasks 6/8; I P8) — **landed 2026-09-10 (D-170); ticked 2026-09-12 after a code audit (D-179)**: the escaping shipped with D-170 and the box was simply never flipped. `analytics.ts:csvField` and `armyModel.ts:eventsToCsv` both quote any field containing `" , \n \r` with embedded quotes doubled, and both are pinned: `tests/packages/pf1eAnalytics.test.ts` ("a comma or quote in a unit id cannot corrupt the CSV" — `'2nd Battalion, "Iron" Guard'` survives with the header's column count intact) and `tests/ui/armyModel.test.ts` ("CSV export quotes RFC-4180 style"). Remaining literalism, stated rather than hidden: the tests pin the encoded output plus a column-count check, not a parse-back through an independent CSV reader.
 - [ ] **M14 — Mount ArmyWindow, PF1eBattleAnalysis and TurnReportTimeline** in normal WindowHost navigation, not just e2eHook; reactive analysis/table/report readback and CSV export must work after real turns. (G §1.7; I P8; M Task 8)
 
 ### Data and content
@@ -1271,6 +1271,71 @@ Split into reviewable sub-slices. Depends on the relevant tactical data/effect/s
 - [ ] **V09 — Generate rules-coverage dashboard** from test `@srd` headings (proposed `scripts/coverage.mjs`), with implemented/tested/deviated/deferred rows and links to this checklist. (G §7.6; I P8)
 - [ ] **V10 — Run and report quality checks per slice:** `pnpm test`, `pnpm typecheck`, `pnpm lint`, touched-file Prettier check; `pnpm build` + `pnpm size` for UI, `pnpm build:systems` for rules/packs, and actual browser tests where binaries are available. Test collection (`playwright test --list`) is not a passing browser run. Respect https/file boot and supported browser matrix. (I §§5, 7; M §3; README)
 - [ ] **V11 — Keep decisions/deviations and checklist synchronized** in the same reviewable phase slice; record changed contracts, verified rule citations, measured budgets and test evidence. No drive-by platform refactors or dormant rule toggles. (I §2/§5)
+
+### Verification progress — 2026-09-12, executed Chromium acceptance at 92/92 (D-179)
+
+- **V10's browser half executed at the current suite size:** the whole collected
+  suite ran on Chromium — **92/92, twice** (276 tests / 36 files across the three
+  projects; D-153's executed pass was 74/74, before D-154…D-178 added 18 specs).
+  Same route as D-153: `@sparticuz/chromium@152.0.0` → Chromium 152.0.7977.0 with
+  the `al2023` libraries, driven through the documented
+  `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` override; the Playwright CDN is still
+  unreachable and no security-bypass flags are added. The first run was 89/92.
+- **One real product race found and fixed (§8 platform, not a PF1e rule).**
+  `HostApp.close()` discarded the persister's FINAL batched flush
+  (`void persister.close()`) and returned `void`, while `App.importWorld` replaced
+  every world row immediately afterwards and reloaded. A document dirtied after
+  the export could therefore commit AFTER the restore's delete+put — and since
+  tokens are embedded in the scene document, the drifted scene (3 tokens) was
+  written back over the restored one (2), `worlds.flushedSeq` with it, so the
+  reload booted a world the archive never contained. `close()` is now
+  `Promise<void>` and the import awaits it; teardown-only callers keep the
+  fire-and-forget form explicitly. Pinned by a new Node test that leaves the drift
+  dirty, awaits `close()`, and reads the **documents store directly** — a re-boot
+  would replay the oplog tail and hide the difference. Mutation-red with the old
+  `void`. Node never saw it because the existing restore test flushes manually
+  before closing, so the window was never open.
+- **C03's D-162 browser specs now execute green** (collected after D-153, so they
+  had never run). The full-round ally-touch spec keyed `data-ally-touch-pick` on
+  compendium entry ids, which are never actor `_id`s (`importEntryOp` mints
+  `actor-<hash>`; entries carry no `_id`, D-090) — an unmatchable locator timing
+  out at 30 s while the checkboxes were visibly rendered. The weapon-release spec
+  read `#chat-log` once, racing the card's `create` op, then branched on
+  `release miss` — a card *name*, which the log never renders (it renders
+  `content`), so a miss could never pass at any wait length — and expected the
+  held-charge panel to clear on a hit although this fixture holds two charges. All
+  nine single-snapshot log reads in the file now wait on the accumulated log
+  through one helper (occurrence-counting, because the discharging delivery card
+  carries no unique text: `pf1eCastFlow.ts:1461` appends "Charges remaining" only
+  when a charge survives). **C03 stays unchecked** for its one remaining consumer:
+  AoO against ranged-touch casters, which rides P06's interrupt queue.
+- **`dice3d` no longer demands a capability the environment does not have.** It
+  asserted `settled >= 1`, which requires a WebGL context; `showDice3D` returns
+  immediately when `new WebGLRenderer()` cannot get one ("chat never blocks") —
+  the documented degradation and the correct product behaviour. This Chromium
+  build has no WebGL at all (`webgl` and `webgl2` both null, unchanged by
+  `--enable-unsafe-swiftshader --use-angle=swiftshader`). The spec now probes the
+  same capability the product checks and, when it is absent, asserts the
+  degradation path for real rather than skipping: `loads`/`rolls` incremented,
+  `settled === 0`, `disposed === false`, the determined values still recorded
+  (they are captured before the renderer is attempted), no `[data-dice3d-canvas]`
+  in the DOM, and the chat card's rendered total equal to the overlay's
+  `lastTotal` — §11's "the animation never chooses the outcome" verified with no
+  animation. Where WebGL exists, the original settle/dispose assertions run
+  unchanged.
+- **Evidence:** unit **1575 passed / 3 skipped** across 148 files (+1); typecheck
+  and lint green; `e2e/pf1e_touch.spec.ts` Prettier-clean (clean at HEAD, so it
+  stays; every other touched file was dirty at HEAD and keeps its native style per
+  the D-151 rule, diffs semantic only); build **2,251,755 raw / 647,474 gzip**
+  (+23 B, budget 6 MB); `build:systems` unchanged (`rules.js` 131,588 B — no rules
+  touched); three mutation checks red and restored from file backups; Chromium
+  `--repeat-each=8` on worldfile+touch+dice3d **72/72** and `--repeat-each=20` on
+  the random-branch release spec **20/20**.
+- **Still open:** the Firefox/WebKit matrix (Playwright CDN and Debian mirrors
+  unreachable — D-082/D-119/D-153 precedent), so **N01/N02 and S01/S04 stay
+  unchecked** and V10 remains a per-slice gate rather than a closed item.
+  V01/V02/V09 are untouched: no `tests/packages/pf1eFixtures.json`, no
+  100k-iteration probability oracles, no `scripts/coverage.mjs`.
 
 ## 12. Deferred / expanded-system backlog — retained from the sources
 

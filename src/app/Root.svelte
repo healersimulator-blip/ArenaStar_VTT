@@ -55,7 +55,9 @@
   }
 
   onMount(() => {
-    return () => app?.close();
+    // Teardown only: nothing replaces the world rows here, so the final flush
+    // does not have to be awaited (D-179) — but it must not be left implicit.
+    return () => void app?.close();
   });
 </script>
 

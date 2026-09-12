@@ -17,6 +17,7 @@ import {
   type PF1eRng,
 } from "./pf1e/combatEngine";
 import { calculatePF1eEnvelopment, PF1E_STATUS_FLANKED } from "./pf1e/envelopment";
+import { naturalReachSquares } from "./pf1e/geometry";
 import { resolvePF1eAOESpell } from "./pf1e/spells";
 import {
   PF1E_PACK_FIREBALL_MASS_BATTLE,
@@ -175,6 +176,19 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
       // not constants), with the standard 5-ft fallback. Drives both the movement budget
       // (D-173) and envelopment reach (D-177).
       const cellFeet = Number.isFinite(ctx.grid.distance) && ctx.grid.distance > 0 ? ctx.grid.distance : 5;
+
+      // ── natural reach per unit, in feet at this scale (P02, D-180). Table 8-4's reach
+      // is a per-size figure, not a constant: "Creatures that take up more than 1 square
+      // typically have a natural reach of 10 feet or more, meaning that they can reach
+      // targets even if they aren't in adjacent squares" (AoN Rules ID 179). Reach is
+      // carried in **squares** and multiplied by the scene's cell feet, so D-177's
+      // scale-relative reading survives — one square of reach is `cellFeet` whether the
+      // scene says 5 ft or 10 ft. The size comes from the unit's bound leader actor (the
+      // M07 seam); a unit with none keeps the one-square Medium default, so an army
+      // deployed without actor data resolves exactly as it did before.
+      const reachFeetByUnitIdx = units.map(
+        (u) => (reachSquaresFromLeaderActor(ctx.leaderActors[u.id]) ?? 1) * cellFeet,
+      );
 
       // ── flanking bits expire each round (M04, D-177). The envelopment engine sets
       // FLANKED on surrounded defenders, but nothing ever cleared it, so a bit set once
@@ -361,16 +375,16 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
         const targetUnitIdx = units.indexOf(targetUnit);
         const attackerUnitIdx = units.indexOf(unit);
 
-        // Calculate Spatial Envelopment. Reach is the scene's cell size in feet — the
-        // 5-ft natural reach of a Medium creature on the standard grid (SRD Combat,
-        // "Reach Weapons"), sourced from scene metadata per P01/D-177 rather than a
-        // hardcoded constant.
+        // Calculate Spatial Envelopment. Reach is the **attacking unit's** natural reach
+        // in feet: one grid cell for a Medium-sized unit on the scene's grid (P01/D-177),
+        // two cells for a Large one and six for a Colossal one (Table 8-4, AoN 179) — a
+        // giant now engages the rank behind the front instead of stopping one model short.
         const envRes = calculatePF1eEnvelopment({
           pool,
           grid,
           attackerUnitIdx,
           defenderUnitIdx: targetUnitIdx,
-          reach: cellFeet,
+          reach: reachFeetByUnitIdx[attackerUnitIdx] ?? cellFeet,
         });
 
         // Collect attacker and defender model indices
@@ -505,14 +519,22 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
         }
 
         // A caster who fails the defensive-cast check provokes — so the spell resolver
-        // needs to know who threatens the anchor. A Medium creature threatens the squares
-        // within its reach, i.e. 5 ft (CRB: reach / attacks of opportunity); coordinates
-        // here are in feet, so the query radius is 5. Only living models of other units
-        // can threaten (queryPoint already skips dead/hidden models).
+        // needs to know who threatens the anchor. Each enemy threatens at **its own**
+        // natural reach, never at the caster's and never at a constant: "You threaten all
+        // squares into which you can make a melee attack" (AoN Rules ID 102), and a Large
+        // or larger creature has "a natural reach of 10 feet or more" (AoN 179). So the
+        // query runs at the widest reach any unit present has and then keeps only the
+        // models whose own unit reach covers the distance. Coordinates are feet; only
+        // living models of other units can threaten (queryPoint skips dead/hidden).
         const casterAdjacentEnemies: number[] = [];
-        for (const n of grid.queryPoint(anchor.x, anchor.y, 5, pool)) {
+        const widestReachFt = reachFeetByUnitIdx.reduce((m, r) => Math.max(m, r), cellFeet);
+        for (const n of grid.queryPoint(anchor.x, anchor.y, widestReachFt, pool)) {
           const idx = n.index;
-          if (pool.unitIdx[idx] === pool.unitIdx[anchor.idx]) continue;
+          const threatUnitIdx = pool.unitIdx[idx];
+          if (threatUnitIdx === pool.unitIdx[anchor.idx]) continue;
+          const threatReachFt =
+            threatUnitIdx === undefined ? cellFeet : (reachFeetByUnitIdx[threatUnitIdx] ?? cellFeet);
+          if (Math.sqrt(n.dist2) > threatReachFt) continue;
           casterAdjacentEnemies.push(idx);
         }
 
@@ -750,6 +772,33 @@ function parseSpellAoePayload(shape: string, data: unknown): SpellAoePayload {
     return { ok: false, message: "order data needs finite numeric x and y (the point of origin, in feet)" };
   }
   return { ok: true, x: rec.x, y: rec.y, dirX: 0, dirY: 0 };
+}
+
+/**
+ * P02 seam — a unit's natural reach in **squares**, read from its bound leader actor
+ * (`RulesContext.leaderActors`, keyed by unit id, resolved by `collectLeaderActors`).
+ * Table 8-4's reach column is a per-size figure (AoN Rules ID 179), and the leader
+ * actor's authored `system.pf1e.size` is the only unambiguous size the strategic scale
+ * has: a unit profile's `sizeMod` cannot be inverted, because the recorded strategic
+ * deviation lets one authored number serve both A.4 ladders — `+1` reads as Small on the
+ * attack/AC ladder and as Large on the CMB/CMD one.
+ *
+ * Returns null when the document is missing or unparseable, and the caller keeps the
+ * one-square Medium default D-177 established — a guessed size would silently change
+ * who can engage whom. Body shape (Table 8-4's long column) is not read here: nothing
+ * authors it at this scale yet, so the table's tall figure stands.
+ */
+export function reachSquaresFromLeaderActor(actorJson: unknown): number | null {
+  const doc = typeof actorJson === "object" && actorJson !== null && !Array.isArray(actorJson)
+    ? (actorJson as Record<string, unknown>)
+    : null;
+  if (doc === null) return null;
+  const system = typeof doc.system === "object" && doc.system !== null && !Array.isArray(doc.system)
+    ? (doc.system as Record<string, unknown>)
+    : null;
+  if (system === null) return null;
+  const derived = deriveFromDocuments({ actor: { system } });
+  return naturalReachSquares(derived.size);
 }
 
 /**
