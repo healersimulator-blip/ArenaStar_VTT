@@ -56,8 +56,10 @@ import {
   type PF1eInterrupt,
 } from "../../packages/pf1e/interrupts";
 import { pf1eAttackRollGroups } from "../../packages/pf1e/rollData";
+import type { PF1eActionOpportunityResult } from "../../packages/pf1e/actionOpportunity";
 import type { PF1eMovementOpportunityResult } from "../../packages/pf1e/tacticalOpportunity";
 import {
+  attackOfOpportunityBudget,
   combatantForToken,
   spendAttackOfOpportunityAuthorized,
 } from "./actionBudget";
@@ -72,10 +74,11 @@ export interface AooTokenRef {
   actorId?: string | null;
 }
 
-export interface MovementAooResolutionEntry {
+export interface OpportunityResolutionEntry {
   reactorId: string;
   provokerId: string;
-  /** The square the provoker was attacked in (world units), from the queue's trigger. */
+  /** The square the provoker was attacked in (world units), from the queue's trigger:
+   *  the walked-out square for a move, the occupied square for a provoking action. */
   square: { x: number; y: number } | null;
   combatantId: string | null;
   attackName: string;
@@ -98,8 +101,8 @@ export interface MovementAooResolutionEntry {
   line: string;
 }
 
-export interface MovementAooResolution {
-  entries: readonly MovementAooResolutionEntry[];
+export interface OpportunityResolution {
+  entries: readonly OpportunityResolutionEntry[];
   /** Reactors the flow could not resolve, each with the reason — never a silent drop. */
   skipped: readonly { reactorId: string; provokerId: string; reason: string }[];
   /** True when there is no encounter, so nothing was resolved (see the module header). */
@@ -118,7 +121,18 @@ export interface MovementAooResolutionInput {
   verifiable?: boolean;
 }
 
-const actorOf = (
+/** The action-trigger twin of `MovementAooResolutionInput` (D-190). */
+export interface ActionAooResolutionInput {
+  opportunity: PF1eActionOpportunityResult;
+  combat: CombatDocument | null;
+  actors: readonly ActorDocument[];
+  /** The scene's tokens, for token → actor resolution. */
+  tokens: readonly AooTokenRef[];
+  /** Commit-reveal rolls (the sheet's Verify option); off by default like the sheet's. */
+  verifiable?: boolean;
+}
+
+export const actorOf = (
   tokenId: string,
   tokens: readonly AooTokenRef[],
   actors: readonly ActorDocument[],
@@ -130,7 +144,7 @@ const actorOf = (
 };
 
 /** Feat names as authored — the derivation and the roll groups read the same list. */
-function featsOf(actor: ActorDocument): string[] {
+export function featsOf(actor: ActorDocument): string[] {
   const pf1e = (actor.system as { pf1e?: { feats?: unknown } } | undefined)
     ?.pf1e;
   const feats = pf1e?.feats;
@@ -145,14 +159,14 @@ function featsOf(actor: ActorDocument): string[] {
 }
 
 /** How many attack lines the actor authored (0 ⇒ the lines shown are the unarmed fallback). */
-function authoredAttackCount(actor: ActorDocument): number {
+export function authoredAttackCount(actor: ActorDocument): number {
   const pf1e = (actor.system as { pf1e?: { attacks?: unknown } } | undefined)
     ?.pf1e;
   return Array.isArray(pf1e?.attacks) ? pf1e.attacks.length : 0;
 }
 
 /** Derive one creature with its conditions (both effect homes), for attack and defense. */
-function derivedFor(
+export function derivedFor(
   actor: ActorDocument,
   combat: CombatDocument | null,
   combatantId: string | null,
@@ -166,9 +180,9 @@ function derivedFor(
 /**
  * The reactor's melee attack. "An attack of opportunity is a single melee attack": a
  * creature whose every line is ranged cannot make one, so this returns null and the caller
- * reports the skip.
+ * reports the skip. A readied attack (D-195) uses the same primary-melee default.
  */
-function meleeLine(derived: PF1eDerived): PF1eDerivedAttack | null {
+export function meleeLine(derived: PF1eDerived): PF1eDerivedAttack | null {
   return derived.attacks.find((line) => !line.ranged) ?? null;
 }
 
@@ -178,7 +192,8 @@ function meleeLine(derived: PF1eDerived): PF1eDerivedAttack | null {
  * spend a per-round budget against), and if not, which lines does the table read?
  *
  * It lives here rather than in the Svelte handler so the toggle's behaviour is testable
- * without a browser: the handler is then only "ask, hold, resolve, report, commit".
+ * without a browser: the handler is then only "ask, hold, resolve, report, commit" — and,
+ * since D-188, "refuse while a decision is already open" (`"busy"`).
  */
 export type HeldMoveMode =
   /** The app resolves the queue itself, right now, and commits when it is done (D-186). */
@@ -186,7 +201,13 @@ export type HeldMoveMode =
   /** The move is held and the table is asked, per reactor (D-187). */
   | "prompt"
   /** Nobody can spend anything here: report the queue's lines and let the move proceed. */
-  | "report";
+  | "report"
+  /**
+   * D-188: the seam is already holding (`"prompt"`) or resolving (`"resolving"`) a move,
+   * so this one is refused by name instead of replacing — and losing — the first decision.
+   * The caller reports `lines` and cancels the move without touching the held one.
+   */
+  | "busy";
 
 export interface HeldMovePlan {
   mode: HeldMoveMode;
@@ -194,6 +215,8 @@ export interface HeldMovePlan {
   autoResolve: boolean;
   /** The lines to report; empty for `"auto"` and `"prompt"` (they have their own). */
   lines: string[];
+  /** Non-null exactly when `mode === "busy"`: the named reason the move was refused. */
+  busyReason: string | null;
 }
 
 export function planHeldMove(input: {
@@ -204,34 +227,67 @@ export function planHeldMove(input: {
   hasEncounter: boolean;
   /** True when the caller had to assume hostility — named, never silent (D-185). */
   hostilityAssumed?: boolean;
+  /**
+   * D-188: the seam's current state — a prompt is open (`"prompt"`) or an auto-resolution
+   * is in flight (`"resolving"`). While either is true, a move that would hold or resolve
+   * is refused rather than replacing the first decision. A move that only *reports* (no
+   * encounter to spend against) is not refused: there is nothing to hold or lose.
+   */
+  held?: "prompt" | "resolving" | null;
 }): HeldMovePlan {
   const assumption =
     input.hostilityAssumed === true
       ? ["(hostility assumed — tokens without a disposition)"]
       : [];
-  if (input.autoResolve && input.hasEncounter)
-    return { mode: "auto", autoResolve: true, lines: [] };
-  if (
-    !input.autoResolve &&
-    input.hasEncounter &&
-    input.opportunity.queued.length > 0
-  )
-    // The world turned auto-resolution off and there is a ledger to spend: hold the move
-    // and ask. The prompt shows the seam's own lines per reactor (D-187).
-    return { mode: "prompt", autoResolve: false, lines: [] };
-  const lines = input.opportunity.reactors.map((r) => r.line);
-  if (input.autoResolve && !input.hasEncounter) {
-    // The option asked for auto-resolution and there is nothing to spend: saying so is
-    // the difference between "the table resolves this" and "the app silently did not".
-    lines.push(
-      "(no encounter — the AoO budget is per round and per combatant, so these were left to the table)",
-    );
+  const base: HeldMovePlan = (() => {
+    if (input.autoResolve && input.hasEncounter)
+      return { mode: "auto", autoResolve: true, lines: [], busyReason: null };
+    if (
+      !input.autoResolve &&
+      input.hasEncounter &&
+      input.opportunity.queued.length > 0
+    )
+      // The world turned auto-resolution off and there is a ledger to spend: hold the move
+      // and ask. The prompt shows the seam's own lines per reactor (D-187).
+      return {
+        mode: "prompt",
+        autoResolve: false,
+        lines: [],
+        busyReason: null,
+      };
+    const lines = input.opportunity.reactors.map((r) => r.line);
+    if (input.autoResolve && !input.hasEncounter) {
+      // The option asked for auto-resolution and there is nothing to spend: saying so is
+      // the difference between "the table resolves this" and "the app silently did not".
+      lines.push(
+        "(no encounter — the AoO budget is per round and per combatant, so these were left to the table)",
+      );
+    }
+    return {
+      mode: "report",
+      autoResolve: false,
+      lines: lines.concat(assumption),
+      busyReason: null,
+    };
+  })();
+
+  // One seam, one decision at a time. A move that would hold or resolve while a decision
+  // is already open is refused: the GM's first answer cannot be silently replaced by a
+  // second drag, and two auto-resolutions cannot interleave their rolls and ledger spends.
+  const held = input.held ?? null;
+  if (held !== null && (base.mode === "auto" || base.mode === "prompt")) {
+    const reason =
+      held === "prompt"
+        ? "an attack of opportunity is already pending — answer it before another move provokes"
+        : "an attack of opportunity is already being resolved — try the move again when it is done";
+    return {
+      mode: "busy",
+      autoResolve: false,
+      lines: [reason],
+      busyReason: reason,
+    };
   }
-  return {
-    mode: "report",
-    autoResolve: false,
-    lines: lines.concat(assumption),
-  };
+  return base;
 }
 
 /**
@@ -239,7 +295,7 @@ export function planHeldMove(input: {
  * skip with its reason, the first hard error, and the caller's named assumption.
  */
 export function resolutionLines(
-  resolution: MovementAooResolution,
+  resolution: OpportunityResolution,
   opts: { hostilityAssumed?: boolean } = {},
 ): string[] {
   const lines = resolution.entries.map((e) => e.line);
@@ -260,14 +316,41 @@ export async function resolveMovementOpportunities(
   client: ResolveFlowClient,
   user: PermissionUser | null,
   input: MovementAooResolutionInput,
-): Promise<MovementAooResolution> {
+): Promise<OpportunityResolution> {
+  return resolveQueuedInterrupts(client, user, input.opportunity.queued, input);
+}
+
+/** Resolve every queued opportunity for one provoking action (D-190), same core. */
+export async function resolveActionOpportunities(
+  client: ResolveFlowClient,
+  user: PermissionUser | null,
+  input: ActionAooResolutionInput,
+): Promise<OpportunityResolution> {
+  return resolveQueuedInterrupts(client, user, input.opportunity.queued, input);
+}
+
+/**
+ * The resolution core both seams share: order the queue, roll each reaction through the
+ * sheet's own attack flow, spend the reactor's ledger hit-or-miss, and report. The trigger
+ * kind only changes the logged square — the attack is a single melee attack either way.
+ */
+async function resolveQueuedInterrupts(
+  client: ResolveFlowClient,
+  user: PermissionUser | null,
+  queued: readonly PF1eInterrupt[],
+  input: {
+    combat: CombatDocument | null;
+    actors: readonly ActorDocument[];
+    tokens: readonly AooTokenRef[];
+    verifiable?: boolean;
+  },
+): Promise<OpportunityResolution> {
   const skipped: Array<{
     reactorId: string;
     provokerId: string;
     reason: string;
   }> = [];
-  const entries: MovementAooResolutionEntry[] = [];
-  const queued = input.opportunity.queued;
+  const entries: OpportunityResolutionEntry[] = [];
   if (queued.length === 0)
     return { entries, skipped, needsEncounter: false, error: null };
   if (input.combat === null) {
@@ -321,6 +404,28 @@ export async function resolveMovementOpportunities(
       currentCombat,
       interrupt.provokerId,
     );
+    // D-191: the budget gate is read *before* any die is rolled, not after. A ranged-touch
+    // spell provokes twice (the cast and the touch — two distinct actions), so the same
+    // reactor can appear twice on one queue; \"you can only make one attack of opportunity
+    // per round\" means the second entry must be refused here, where the first spend is
+    // already reflected in `currentCombat`, rather than rolled and then refused on the
+    // ledger write. The seam already filtered the first pass, so for the movement path
+    // this guard only ever fires on a stale or shared queue.
+    if (reactorCombatant !== null) {
+      const budget = attackOfOpportunityBudget(
+        currentCombat,
+        reactorCombatant._id,
+        input.actors,
+      );
+      if (budget !== null && !budget.canTake) {
+        skipped.push({
+          reactorId: interrupt.reactorId,
+          provokerId: interrupt.provokerId,
+          reason: budget.reason ?? "no opportunities left",
+        });
+        continue;
+      }
+    }
     const reactorDerived = derivedFor(
       reactor,
       currentCombat,
@@ -433,7 +538,7 @@ export async function resolveMovementOpportunities(
     entries.push({
       reactorId: interrupt.reactorId,
       provokerId: interrupt.provokerId,
-      square: interrupt.trigger.left ?? null,
+      square: interrupt.trigger.left ?? interrupt.trigger.at ?? null,
       combatantId: reactorCombatant?._id ?? null,
       attackName: line.name,
       outcome: result.outcome,

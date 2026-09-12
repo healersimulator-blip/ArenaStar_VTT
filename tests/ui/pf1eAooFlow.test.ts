@@ -7,6 +7,7 @@ import type {
 } from "../../src/core/documents";
 import type { Op } from "../../src/core/ops";
 import type { PF1eInterrupt } from "../../src/packages/pf1e/interrupts";
+import type { PF1eActionOpportunityResult } from "../../src/packages/pf1e/actionOpportunity";
 import type { PF1eMovementOpportunityResult } from "../../src/packages/pf1e/tacticalOpportunity";
 import {
   autoResolveAoosIsAuthored,
@@ -16,7 +17,9 @@ import type { ResolveFlowClient } from "../../src/ui/sheets/pf1eResolveFlow";
 import {
   planHeldMove,
   resolutionLines,
+  resolveActionOpportunities,
   resolveMovementOpportunities,
+  type ActionAooResolutionInput,
   type MovementAooResolutionInput,
 } from "../../src/ui/combat/pf1eAooFlow";
 
@@ -154,6 +157,29 @@ function interrupt(
   };
 }
 
+/** A provoking-action interrupt: the provoker is attacked in the square it occupied. */
+function actionInterrupt(
+  sequence: number,
+  reactorId: string,
+  provokerId = "t-goblin",
+): PF1eInterrupt {
+  return {
+    id: `1:action:${reactorId}:${provokerId}:cast-spell:${sequence}`,
+    kind: "attack-of-opportunity",
+    reactorId,
+    provokerId,
+    actionId: "cast-spell:1:goblin",
+    trigger: {
+      kind: "provoking-action",
+      actionId: "cast-spell",
+      at: { x: 0, y: 0 },
+    },
+    turn: 1,
+    substep: "action",
+    sequence,
+  };
+}
+
 /**
  * The seam's result: the queue the flow resolves, and the reactor lines D-185's report
  * shows (that wording is the seam's — `reactors[].line`).
@@ -283,6 +309,53 @@ function input(
   };
 }
 
+/** The action seam's result, shaped the way `pf1eActionOpportunities` returns it. */
+function actionOpportunity(
+  queued: PF1eInterrupt[],
+): PF1eActionOpportunityResult {
+  return {
+    ok: true,
+    issues: [],
+    defaults: [],
+    grid: null,
+    refusal: null,
+    trigger: { kind: "provoking-action", actionId: "cast-spell" },
+    squares: ["0,0"],
+    rects: [{ x: 0, y: 0, size: 100 }],
+    reactors: queued.map((q) => ({
+      tokenId: q.reactorId,
+      cell: "0,0",
+      rect: { x: 0, y: 0, size: 100 },
+      used: 0,
+      max: 1,
+      line: `${q.reactorId.replace("t-", "")} may strike goblin as it acts (0,0)`,
+    })),
+    refused: [],
+    queue: { turn: 1, substep: "action", interrupts: [...queued] },
+    queued,
+  };
+}
+
+function actionInput(
+  queued: PF1eInterrupt[],
+  overrides: Partial<ActionAooResolutionInput> = {},
+): ActionAooResolutionInput {
+  return {
+    opportunity: actionOpportunity(queued),
+    combat: combat([
+      combatant("c-fighter", "t-fighter", "fighter", 20, {
+        aooUsed: 0,
+        aooMax: 1,
+        acted: true,
+      }),
+      combatant("c-goblin", "t-goblin", "goblin", 10, { acted: true }),
+    ]),
+    actors: [fighter(), goblin()],
+    tokens,
+    ...overrides,
+  };
+}
+
 describe("aooSettings — the auto-resolve world option (D-186)", () => {
   test("defaults to on, is off only when the world says so, and reports authorship", () => {
     expect(autoResolveAoosOf({})).toBe(true);
@@ -387,7 +460,7 @@ describe("resolveMovementOpportunities — the auto-resolved attack of opportuni
     expect(client.formulas).toEqual(["1d20 + 9"]);
   });
 
-  test("an exhausted ledger reports the seat's reason and leaves the budget alone", async () => {
+  test("an exhausted ledger is refused before any die is rolled — one per round is a gate", async () => {
     const client = new FakeClient();
     client.script = [{ die: 11, total: 20 }, { total: 7 }];
     const fixture = input([interrupt(0, "t-fighter")]);
@@ -400,15 +473,20 @@ describe("resolveMovementOpportunities — the auto-resolved attack of opportuni
       combatant("c-goblin", "t-goblin", "goblin", 10, { acted: true }),
     ]);
     const resolution = await resolveMovementOpportunities(client, gm, fixture);
-    const entry = resolution.entries[0];
-    expect(entry?.outcome).toBe("hit");
-    expect(entry?.ledgerError).toBe(
-      "Attack of opportunity refused: no opportunities left (1/1).",
-    );
-    expect(entry?.used).toBeNull();
-    expect(entry?.line).toContain("the ledger was not written:");
-    // The attack still happened — the queue said the reaction was available.
-    expect(client.submitted).toHaveLength(2);
+    // D-191: the budget is read before the roll, so a spent reactor is skipped — no
+    // attack is made and nothing is written, which is what keeps the two provokes of a
+    // ranged-touch spell (cast + touch) from rolling a second attack the reactor lacks
+    // the budget for.
+    expect(resolution.entries).toHaveLength(0);
+    expect(resolution.skipped).toEqual([
+      {
+        reactorId: "t-fighter",
+        provokerId: "t-goblin",
+        reason: "no opportunities left (1/1)",
+      },
+    ]);
+    expect(client.submitted).toHaveLength(0);
+    expect(client.formulas).toEqual([]);
   });
 
   test("a reactor that is not a combatant resolves the attack but cannot spend", async () => {
@@ -606,6 +684,140 @@ describe("resolveMovementOpportunities — the auto-resolved attack of opportuni
   });
 });
 
+describe("resolveActionOpportunities — the action trigger shares the movement core (D-190)", () => {
+  test("a cast-spell trigger rolls through the sheet's flow and reports the occupied square", async () => {
+    const client = new FakeClient();
+    // 11 + 9 = 20 vs AC 16 hits; the mundane longsword eats DR 5/magic: 7 − 5 = 2.
+    client.script = [{ die: 11, total: 20 }, { total: 7 }];
+    const resolution = await resolveActionOpportunities(
+      client,
+      gm,
+      actionInput([actionInterrupt(0, "t-fighter")]),
+    );
+    expect(resolution).toMatchObject({
+      needsEncounter: false,
+      error: null,
+      skipped: [],
+      entries: [
+        {
+          reactorId: "t-fighter",
+          provokerId: "t-goblin",
+          // The provoker is attacked where it stood — `trigger.at`, not `trigger.left`.
+          square: { x: 0, y: 0 },
+          combatantId: "c-fighter",
+          attackName: "Longsword — attack of opportunity",
+          outcome: "hit",
+          attackTotal: 20,
+          defenseAc: 16,
+          damage: 2,
+          used: 1,
+          max: 1,
+          ledgerError: null,
+        },
+      ],
+    });
+    expect(resolution.entries[0]?.line).toBe(
+      "Fighter hits Goblin for 2 (20 vs AC 16) — 1/1 opportunities this round",
+    );
+    // The same three submits as a movement AoO: the card, the HP write, the ledger.
+    expect(client.submitted).toHaveLength(3);
+  });
+
+  test("no encounter means no auto-resolution, and the caller is told why", async () => {
+    const client = new FakeClient();
+    const resolution = await resolveActionOpportunities(
+      client,
+      gm,
+      actionInput([actionInterrupt(0, "t-fighter")], { combat: null }),
+    );
+    expect(resolution.needsEncounter).toBe(true);
+    expect(resolution.entries).toHaveLength(0);
+    expect(resolution.skipped).toEqual([
+      {
+        reactorId: "t-fighter",
+        provokerId: "t-goblin",
+        reason: "no encounter — the AoO budget is per round and per combatant",
+      },
+    ]);
+  });
+
+  test("a reactor whose only line is ranged skips the action opportunity without spending", async () => {
+    const client = new FakeClient();
+    const resolution = await resolveActionOpportunities(
+      client,
+      gm,
+      actionInput(
+        [actionInterrupt(0, "t-fighter")],
+        { actors: [fighter({ attacks: [{ name: "Longbow", ranged: true }] }), goblin()] },
+      ),
+    );
+    expect(resolution.entries).toHaveLength(0);
+    expect(resolution.skipped[0]?.reason).toContain("no melee attack line");
+    expect(client.submitted).toHaveLength(0);
+  });
+
+  test("two provokes for one reactor roll once — the second is refused by the budget gate", async () => {
+    // A ranged-touch spell provokes twice (cast + touch). A reactor with 1/round takes
+    // only the first; the second entry is refused before any die is rolled.
+    const client = new FakeClient();
+    client.script = [{ die: 11, total: 20 }, { total: 7 }];
+    const resolution = await resolveActionOpportunities(
+      client,
+      gm,
+      actionInput([
+        actionInterrupt(0, "t-fighter"),
+        { ...actionInterrupt(1, "t-fighter"), actionId: "action:1:goblin:ranged-touch" },
+      ]),
+    );
+    expect(resolution.entries).toHaveLength(1);
+    expect(resolution.entries[0]?.used).toBe(1);
+    expect(resolution.skipped).toEqual([
+      {
+        reactorId: "t-fighter",
+        provokerId: "t-goblin",
+        reason: "no opportunities left (1/1)",
+      },
+    ]);
+    // Exactly one attack was rolled — the second provoke never produced a d20.
+    expect(client.formulas.filter((f) => f.includes("d20"))).toHaveLength(1);
+  });
+
+  test("Combat Reflexes (two per round) lets one reactor take both provokes", async () => {
+    const client = new FakeClient();
+    client.script = [
+      { die: 11, total: 20 },
+      { total: 7 },
+      { die: 11, total: 20 },
+      { total: 7 },
+    ];
+    const fixture = actionInput([
+      actionInterrupt(0, "t-fighter"),
+      { ...actionInterrupt(1, "t-fighter"), actionId: "action:1:goblin:ranged-touch" },
+    ]);
+    // Combat Reflexes is authored on the actor — that is what the budget derives from
+    // (D-183's `aooPerRound`); the encounter ledger's `aooMax` is only the fallback.
+    fixture.actors = [
+      fighter({
+        abilities: { str: 16, dex: 12, con: 14 },
+        feats: ["Combat Reflexes"],
+      }),
+      goblin(),
+    ];
+    fixture.combat = combat([
+      combatant("c-fighter", "t-fighter", "fighter", 20, {
+        aooUsed: 0,
+        aooMax: 1,
+        acted: true,
+      }),
+      combatant("c-goblin", "t-goblin", "goblin", 10, { acted: true }),
+    ]);
+    const resolution = await resolveActionOpportunities(client, gm, fixture);
+    expect(resolution.entries).toHaveLength(2);
+    expect(resolution.skipped).toEqual([]);
+    expect(resolution.entries[1]?.used).toBe(2);
+  });
+});
+
 describe("planHeldMove — who resolves the queue (D-186)", () => {
   test("on with an encounter: the app holds the move and resolves, so nothing is reported yet", () => {
     const plan = planHeldMove({
@@ -613,7 +825,12 @@ describe("planHeldMove — who resolves the queue (D-186)", () => {
       autoResolve: true,
       hasEncounter: true,
     });
-    expect(plan).toEqual({ mode: "auto", autoResolve: true, lines: [] });
+    expect(plan).toEqual({
+      mode: "auto",
+      autoResolve: true,
+      lines: [],
+      busyReason: null,
+    });
   });
 
   test("off with an encounter: the move is held and the table is asked (D-187)", () => {
@@ -624,7 +841,12 @@ describe("planHeldMove — who resolves the queue (D-186)", () => {
       hostilityAssumed: true,
     });
     // The prompt carries the seam's lines per reactor, so nothing is reported yet.
-    expect(plan).toEqual({ mode: "prompt", autoResolve: false, lines: [] });
+    expect(plan).toEqual({
+      mode: "prompt",
+      autoResolve: false,
+      lines: [],
+      busyReason: null,
+    });
   });
 
   test("off with no encounter: the queue is reported, since nothing could be spent", () => {
@@ -663,6 +885,73 @@ describe("planHeldMove — who resolves the queue (D-186)", () => {
       "fighter may strike goblin as it leaves (2,0)",
       "(no encounter — the AoO budget is per round and per combatant, so these were left to the table)",
     ]);
+  });
+});
+
+describe("planHeldMove — one decision at a time (D-188)", () => {
+  test("a second provoking move while a prompt is open is refused, not silently replaced", () => {
+    const plan = planHeldMove({
+      opportunity: opportunity([interrupt(0, "t-fighter")]),
+      autoResolve: false,
+      hasEncounter: true,
+      held: "prompt",
+    });
+    expect(plan.mode).toBe("busy");
+    expect(plan.autoResolve).toBe(false);
+    expect(plan.busyReason).toBe(
+      "an attack of opportunity is already pending — answer it before another move provokes",
+    );
+    expect(plan.lines).toEqual([plan.busyReason]);
+  });
+
+  test("a second provoking move while an auto-resolution is in flight is refused too", () => {
+    const plan = planHeldMove({
+      opportunity: opportunity([interrupt(0, "t-fighter")]),
+      autoResolve: true,
+      hasEncounter: true,
+      held: "resolving",
+    });
+    expect(plan.mode).toBe("busy");
+    expect(plan.busyReason).toBe(
+      "an attack of opportunity is already being resolved — try the move again when it is done",
+    );
+  });
+
+  test("the guard also refuses a would-be auto move while a prompt is open", () => {
+    // The world option could have been flipped on between the prompt opening and the second
+    // drag; the seam is still busy either way, so the second move is refused.
+    const plan = planHeldMove({
+      opportunity: opportunity([interrupt(0, "t-fighter")]),
+      autoResolve: true,
+      hasEncounter: true,
+      held: "prompt",
+    });
+    expect(plan.mode).toBe("busy");
+    expect(plan.busyReason).toContain("already pending");
+  });
+
+  test("a move that only reports (no encounter) is not refused while a decision is open", () => {
+    // With no encounter to spend against there is nothing to hold or lose, so the move
+    // proceeds as a report exactly as before D-188.
+    const plan = planHeldMove({
+      opportunity: opportunity([interrupt(0, "t-fighter")]),
+      autoResolve: false,
+      hasEncounter: false,
+      held: "prompt",
+    });
+    expect(plan.mode).toBe("report");
+    expect(plan.busyReason).toBeNull();
+  });
+
+  test("an idle seam (no held state) never reports busy", () => {
+    const plan = planHeldMove({
+      opportunity: opportunity([interrupt(0, "t-fighter")]),
+      autoResolve: false,
+      hasEncounter: true,
+      held: null,
+    });
+    expect(plan.mode).toBe("prompt");
+    expect(plan.busyReason).toBeNull();
   });
 });
 

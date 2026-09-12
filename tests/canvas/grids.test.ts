@@ -12,7 +12,7 @@ import {
   type HexGridSpec,
 } from "../../src/canvas/grid/hex";
 import type { HexLayout } from "../../src/core/documents";
-import { snapPoint, type GridSpec } from "../../src/canvas/grid";
+import { snapPoint, snapTokenCenter, type GridSpec } from "../../src/canvas/grid";
 import { measurePath, measureSegment, type MeasureGrid } from "../../src/canvas/grid/measure";
 import { pointInTemplate, templateShape } from "../../src/canvas/layers/templateGeometry";
 import { drawingBounds } from "../../src/canvas/layers/drawingGeometry";
@@ -127,6 +127,31 @@ describe("snapPoint (§9 grid set)", () => {
 
   test("gridless is identity", () => {
     expect(snapPoint({ type: "gridless" }, 13.7, -4.2)).toEqual({ x: 13.7, y: -4.2 });
+  });
+});
+
+describe("snapTokenCenter (token drag, §10)", () => {
+  test("square snaps a token's centre to the nearest cell centre", () => {
+    const g: GridSpec = { type: "square", size: 100 };
+    // Cell centres are (col*100+50, row*100+50); intersections (multiples of 100)
+    // are the corner the token would straddle if `snapPoint` were used here.
+    expect(snapTokenCenter(g, 450, 50)).toEqual({ x: 450, y: 50 });
+    expect(snapTokenCenter(g, 460, 40)).toEqual({ x: 450, y: 50 }); // near (4,0)'s centre
+    expect(snapTokenCenter(g, 50, 50)).toEqual({ x: 50, y: 50 });
+    expect(snapTokenCenter(g, -50, -50)).toEqual({ x: -50, y: -50 });
+    expect(snapTokenCenter(g, -10, -10)).toEqual({ x: -50, y: -50 });
+  });
+
+  test("hex and gridless delegate like snapPoint", () => {
+    const hex: GridSpec = { type: "hex", size: 20, layout: "oddR" };
+    const center = hexCenter({ type: "hex", size: 20, layout: "oddR" }, 2, 3);
+    const snapped = snapTokenCenter(hex, center.x + 3, center.y - 2);
+    expect(snapped.x).toBeCloseTo(center.x, 9);
+    expect(snapped.y).toBeCloseTo(center.y, 9);
+    expect(snapTokenCenter({ type: "gridless" }, 13.7, -4.2)).toEqual({
+      x: 13.7,
+      y: -4.2,
+    });
   });
 });
 

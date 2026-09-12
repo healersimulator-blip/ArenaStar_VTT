@@ -80,6 +80,10 @@
   import { deriveFromDocuments } from "../packages/pf1e/actor";
   import { autoResolveAoosOf } from "../packages/pf1e/aooSettings";
   import {
+    attackOfOpportunityBudget,
+    combatantForToken,
+  } from "../ui/combat/actionBudget";
+  import {
     planHeldMove,
     resolutionLines,
     resolveMovementOpportunities,
@@ -169,6 +173,13 @@
    */
   let pendingReaction = $state<PendingReaction | null>(null);
   let pendingCommit: (() => void) | null = null;
+  /**
+   * D-188: true for exactly the span of an auto-resolved attack of opportunity, so a
+   * second provoking drag during the rolls is refused by `planHeldMove`'s `"busy"` mode
+   * instead of starting a second resolution. Not reactive: it is read only inside the
+   * drag handler, never rendered.
+   */
+  let resolvingAoos = false;
   let importedTokens = $state<{ name: string; actorId: string; img: string }[]>(
     [],
   );
@@ -1002,6 +1013,26 @@
             const explicit = tokens.every(
               (t) => (dispositionOf.get(t._id) ?? "neutral") !== "neutral",
             );
+            // D-187: the prompt's rows read each reactor's AoO budget off the seam's
+            // `used`/`max`, so the move must hand the encounter's ledgers in — otherwise
+            // every row shows `null` and a reactor that has already spent its opportunity
+            // cannot be refused before the queue is built.
+            const combat = activeCombat();
+            const ledgers: Record<string, { used: number; max: number }> = {};
+            if (combat !== null) {
+              for (const t of scene.tokens) {
+                const combatant = combatantForToken(combat, t._id);
+                if (combatant === null) continue;
+                const budget = attackOfOpportunityBudget(
+                  combat,
+                  combatant._id,
+                  actors,
+                );
+                if (budget !== null) {
+                  ledgers[t._id] = { used: budget.used, max: budget.max };
+                }
+              }
+            }
             const result = pf1eMovementOpportunities({
               grid: scene.grid,
               tokens,
@@ -1012,6 +1043,7 @@
                       dispositionOf.get(a) !== dispositionOf.get(b),
                   }
                 : {}),
+              ...(combat !== null ? { ledgers } : {}),
             });
             if (result.queued.length === 0 && result.refused.length === 0) return;
             const push = (messages: string[], level: "info" | "warn"): void => {
@@ -1023,13 +1055,27 @@
             const settings = worldSettingsFrom(
               current.gm.client.store.getAll("settings"),
             );
-            const combat = activeCombat();
             const plan = planHeldMove({
               opportunity: result,
               autoResolve: autoResolveAoosOf(settings),
               hasEncounter: combat !== null,
               hostilityAssumed: !explicit,
+              // D-188: one seam, one decision at a time — a second provoking move while a
+              // prompt is open or an auto-resolution is in flight is refused, never
+              // silently replacing the first decision.
+              held:
+                pendingReaction !== null
+                  ? "prompt"
+                  : resolvingAoos
+                    ? "resolving"
+                    : null,
             });
+            if (plan.mode === "busy") {
+              // Refuse the move and leave the open decision untouched: the mover stays on
+              // its committed square and the first prompt/commit is exactly as it was.
+              push(plan.lines, "warn");
+              return "cancel";
+            }
             if (plan.mode === "report") {
               // No encounter to spend against: report the queue, as D-185 did.
               push(plan.lines, "warn");
@@ -1057,9 +1103,11 @@
               );
               return "cancel";
             }
-            // Held: the attacks resolve before the mover leaves the square. A re-entrant
-            // drag while this runs is not guarded — the rolls are the latency, and a second
-            // drag during them starts its own resolution.
+            // Held: the attacks resolve before the mover leaves the square. `resolvingAoos`
+            // is set for exactly the span of the resolution, so a re-entrant drag while the
+            // rolls are in flight is refused by `planHeldMove`'s "busy" mode (D-188) instead
+            // of starting a second, interleaved resolution.
+            resolvingAoos = true;
             void resolveMovementOpportunities(
               current.gm.client,
               current.gm.client.user,
@@ -1069,16 +1117,20 @@
                 actors: actors as ActorDocument[],
                 tokens: scene.tokens,
               },
-            ).then((resolution) => {
-              const lines = resolutionLines(resolution, {
-                hostilityAssumed: !explicit,
+            )
+              .then((resolution) => {
+                const lines = resolutionLines(resolution, {
+                  hostilityAssumed: !explicit,
+                });
+                if (lines.length > 0) push(lines, "warn");
+                if (resolution.error !== null) push([resolution.error], "warn");
+                // Committing is what actually moves the token: the attack happened while
+                // the mover was still standing in the square it provoked from.
+                commit();
+              })
+              .finally(() => {
+                resolvingAoos = false;
               });
-              if (lines.length > 0) push(lines, "warn");
-              if (resolution.error !== null) push([resolution.error], "warn");
-              // Committing is what actually moves the token: the attack happened while
-              // the mover was still standing in the square it provoked from.
-              commit();
-            });
             return "cancel";
           },
           stage: view,

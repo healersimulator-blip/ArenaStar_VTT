@@ -104,6 +104,7 @@ describe("round state reads", () => {
       surprised: false,
       actions: EMPTY_ACTION_LEDGER,
       held: null,
+      ready: null,
     });
     expect(diff["flags.pf1e"]).toEqual({
       aooUsed: 1,
@@ -112,6 +113,7 @@ describe("round state reads", () => {
       surprised: false,
       actions: EMPTY_ACTION_LEDGER,
       held: null,
+      ready: null,
     });
     expect(Object.keys(roundStateDiff(readRoundState(combat([]))))).toEqual([
       "flags.pf1e",

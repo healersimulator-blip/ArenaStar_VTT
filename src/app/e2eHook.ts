@@ -10,6 +10,7 @@ import type {
   Json,
   TokenDocument,
 } from "../core/documents";
+import type { FlatDiff } from "../core/ops";
 import type { PlayerApp } from "./joinBoot";
 import type { HostShare } from "./hostShare";
 import { sightSegments } from "../canvas/vision/wallSight";
@@ -26,12 +27,28 @@ import { deriveFromDocuments } from "../packages/pf1e/actor";
 import { footprintSide } from "../packages/pf1e/geometry";
 import { pf1eThreatModel } from "../packages/pf1e/threatPreview";
 import {
+  pf1eActionOpportunities,
+  type PF1eActionOpportunityResult,
+} from "../packages/pf1e/actionOpportunity";
+import {
   pf1eMovementOpportunities,
   type PF1eMovementOpportunityResult,
 } from "../packages/pf1e/tacticalOpportunity";
-import { resolveMovementOpportunities } from "../ui/combat/pf1eAooFlow";
+import {
+  resolveActionOpportunities,
+  resolveMovementOpportunities,
+} from "../ui/combat/pf1eAooFlow";
+import {
+  castProvokes,
+  resolveActionProvokes,
+} from "../ui/combat/pf1eActionProvoke";
+import { resolveReadiedAction } from "../ui/combat/pf1eReadyAction";
+import { autoResolveAoosOf } from "../packages/pf1e/aooSettings";
 import { selectedEncounter } from "../ui/combat/encounters";
-import { readCombatantState } from "../packages/pf1e/combatState";
+import {
+  readCombatantState,
+  withCombatantState,
+} from "../packages/pf1e/combatState";
 import {
   validateWorldSettingsPatch,
   worldSettingsFrom,
@@ -358,6 +375,126 @@ export interface AppSurface {
     issues: Array<{ field: string; message: string }>;
     defaults: Array<{ field: string; message: string }>;
   };
+  /**
+   * P06 (D-190): the attack-of-opportunity verdict for one provoking *action* — casting a
+   * spell, making a ranged attack, or a ranged-touch delivery — through the same pure seam
+   * the movement surface uses. The trigger comes from Table 7-2 (`actionId`) or is stated
+   * outright (`trigger: "ranged-touch"` for AoN 133); `ledgers`/`enemiesOf` mean the same
+   * things they mean for `pf1eOpportunity`.
+   */
+  pf1eActionOpportunity(spec: {
+    provokerId: string;
+    actionId?: string;
+    trigger?: "ranged-touch";
+    ledgers?: Record<string, { used: number; max: number }>;
+    enemiesOf?: Record<string, string[]>;
+  }): {
+    result: PF1eActionOpportunityResult;
+    ok: boolean;
+    refusal: string | null;
+    squares: string[];
+    rects: number;
+    reactors: Array<{
+      tokenId: string;
+      cell: string;
+      used: number | null;
+      max: number | null;
+      line: string;
+    }>;
+    refused: Array<{ tokenId: string; reason: string }>;
+    queued: Array<{
+      reactorId: string;
+      provokerId: string;
+      kind: string;
+      actionId: string | undefined;
+      square: { x: number; y: number } | null;
+    }>;
+    issues: Array<{ field: string; message: string }>;
+    defaults: Array<{ field: string; message: string }>;
+  };
+  /**
+   * P06 (D-190): the whole action-AoO pipeline — the `pf1eActionOpportunity` verdict, then
+   * `resolveActionOpportunities`, which rolls each queued attack through the real resolve
+   * flow and spends the ledger. The action itself is not submitted: the caller resolves
+   * the interrupt *before* the cast/ranged-attack resolves, exactly as the move is held.
+   */
+  pf1eActionOpportunityResolve(spec: {
+    provokerId: string;
+    actionId?: string;
+    trigger?: "ranged-touch";
+    enemiesOf?: Record<string, string[]>;
+    verifiable?: boolean;
+  }): Promise<{
+    ok: boolean;
+    needsEncounter: boolean;
+    error: string | null;
+    queued: Array<{
+      reactorId: string;
+      provokerId: string;
+      kind: string;
+      actionId: string | undefined;
+      square: { x: number; y: number } | null;
+    }>;
+    entries: Array<{
+      reactorId: string;
+      provokerId: string;
+      attackName: string;
+      outcome: string;
+      attackTotal: number;
+      defenseAc: number;
+      damage: number;
+      hpBefore: number;
+      hpAfter: number;
+      used: number | null;
+      max: number | null;
+      ledgerError: string | null;
+      line: string;
+    }>;
+    skipped: Array<{ reactorId: string; provokerId: string; reason: string }>;
+  }>;
+  /**
+   * P06 (D-191/D-192): the action provoke, end to end. Either an explicit Table 7-2
+   * `actionId` (e.g. `attack-ranged`) or the declared cast's facts decide which triggers
+   * the action earns, then the sheet's glue (`resolveActionProvokes`) reads the active
+   * scene and the actor documents out of the store, builds the action opportunity with
+   * the encounter's ledgers, and auto-resolves (or reports) it. The action itself is not
+   * submitted: the provoke resolves *before* the spell lands or the shot flies.
+   */
+  pf1eActionProvoke(spec: {
+    provokerId: string;
+    actionId?: string;
+    castingTime?: string;
+    quickened?: boolean;
+    defensively?: boolean;
+    touch?: "melee" | "ranged";
+  }): Promise<{
+    provokes: Array<{ actionId?: string; trigger?: { kind: string } }>;
+    lines: string[];
+    damage: number;
+  }>;
+  /**
+   * P07 (D-195): fire one readied action end to end. The hook authors the ready on the
+   * readied combatant (a standard attack, trigger scoped to the triggerer), then runs
+   * `resolveReadiedAction` against a **real booted host** — the ready is spent, the
+   * initiative moves to `triggerer + 1`, the attack rolls through the sheet's flow and
+   * the HP write lands — and submits the reordered combat.
+   */
+  pf1eReadyFire(spec: {
+    /** The scene token whose combatant readied the action. */
+    readiedTokenId: string;
+    /** The scene token whose action triggers the ready (the target of the readied attack). */
+    triggererTokenId: string;
+  }): Promise<{
+    ok: boolean;
+    error: string | null;
+    lines: string[];
+    damage: number;
+    resolved: boolean;
+    /** The readied combatant's initiative after the fire (triggerer + 1). */
+    initiative: number | null;
+    /** True when the ready flag was cleared by the fire. */
+    readyCleared: boolean;
+  }>;
   /**
    * P5/C03: run the pre-save casting gate. The caster's deafened/grappled/pinned
    * state comes from the **authored actor document** via `deriveFromDocuments`, not
@@ -806,6 +943,21 @@ function appSurface(app: HostApp): AppSurface {
     queue: { turn: 0, substep: "", interrupts: [] },
     queued: [],
   };
+  /** The action seam's own empty result (D-190), for the surfaces' "no scene" return. */
+  const EMPTY_ACTION_OPPORTUNITY: PF1eActionOpportunityResult = {
+    ok: false,
+    issues: [],
+    defaults: [],
+    grid: null,
+    refusal: null,
+    trigger: null,
+    squares: [],
+    rects: [],
+    reactors: [],
+    refused: [],
+    queue: { turn: 0, substep: "", interrupts: [] },
+    queued: [],
+  };
 
   /**
    * P06 (D-185/D-186): the movement AoO verdict for one token's move, through the same pure
@@ -914,6 +1066,108 @@ function appSurface(app: HostApp): AppSurface {
         provokerId: q.provokerId,
         kind: q.trigger.kind,
         square: q.trigger.left ?? null,
+      })),
+      issues: result.issues.map((i) => ({ ...i })),
+      defaults: result.defaults.map((i) => ({ ...i })),
+      result,
+    };
+  }
+
+  /**
+   * P06 (D-190): the action-trigger verdict for one provoking action, through the same
+   * pure seam the unit tests exercise (`actionTrigger`/`rangedTouchTrigger` → the tokens'
+   * threatened sets → `interrupts.queueAoOs`). The provoker is attacked in the square it
+   * occupies, so the spec names a token, not a walk.
+   */
+  function actionOpportunity(spec: {
+    provokerId: string;
+    actionId?: string;
+    trigger?: "ranged-touch";
+    ledgers?: Record<string, { used: number; max: number }>;
+    enemiesOf?: Record<string, string[]>;
+  }) {
+    const s = scene();
+    const blank = {
+      ok: false,
+      refusal: null as string | null,
+      squares: [] as string[],
+      rects: 0,
+      reactors: [] as Array<{
+        tokenId: string;
+        cell: string;
+        used: number | null;
+        max: number | null;
+        line: string;
+      }>,
+      refused: [] as Array<{ tokenId: string; reason: string }>,
+      queued: [] as Array<{
+        reactorId: string;
+        provokerId: string;
+        kind: string;
+        actionId: string | undefined;
+        square: { x: number; y: number } | null;
+      }>,
+      issues: [] as Array<{ field: string; message: string }>,
+      defaults: [] as Array<{ field: string; message: string }>,
+      result: EMPTY_ACTION_OPPORTUNITY,
+    };
+    if (!s) {
+      return {
+        ...blank,
+        issues: [{ field: "scene", message: "no active scene" }],
+      };
+    }
+    const actors = client.store.getAll("actors");
+    const enemiesOf = spec.enemiesOf ?? null;
+    const result = pf1eActionOpportunities({
+      grid: s.grid,
+      tokens: s.tokens.map((t) => {
+        const actor = t.actorId
+          ? (actors.find((a) => a._id === t.actorId) ?? null)
+          : null;
+        const derived = actor
+          ? deriveFromDocuments({ actor: { system: actor.system } })
+          : null;
+        return {
+          _id: t._id,
+          x: t.x,
+          y: t.y,
+          width: t.width,
+          height: t.height,
+          ...(derived ? { size: derived.size, shape: derived.reachShape } : {}),
+        };
+      }),
+      provoker: { tokenId: spec.provokerId },
+      ...(spec.actionId !== undefined ? { actionId: spec.actionId } : {}),
+      ...(spec.trigger !== undefined
+        ? { trigger: { kind: spec.trigger } }
+        : {}),
+      ...(spec.ledgers ? { ledgers: spec.ledgers } : {}),
+      ...(enemiesOf
+        ? {
+            isEnemy: (a: string, b: string) => (enemiesOf[b] ?? []).includes(a),
+          }
+        : {}),
+    });
+    return {
+      ok: result.ok,
+      refusal: result.refusal,
+      squares: [...result.squares],
+      rects: result.rects.length,
+      reactors: result.reactors.map((r) => ({
+        tokenId: r.tokenId,
+        cell: r.cell,
+        used: r.used,
+        max: r.max,
+        line: r.line,
+      })),
+      refused: result.refused.map((r) => ({ ...r })),
+      queued: result.queued.map((q) => ({
+        reactorId: q.reactorId,
+        provokerId: q.provokerId,
+        kind: q.trigger.kind,
+        actionId: q.trigger.actionId,
+        square: q.trigger.left ?? q.trigger.at ?? null,
       })),
       issues: result.issues.map((i) => ({ ...i })),
       defaults: result.defaults.map((i) => ({ ...i })),
@@ -1204,6 +1458,198 @@ function appSurface(app: HostApp): AppSurface {
           line: e.line,
         })),
         skipped: resolution.skipped.map((k) => ({ ...k })),
+      };
+    },
+    pf1eActionOpportunity: (spec) => actionOpportunity(spec),
+    pf1eActionOpportunityResolve: async (spec) => {
+      const s = scene();
+      const opportunity = actionOpportunity(spec);
+      const combats = client.store.getAll("combats");
+      const activeScene =
+        client.store.getAll("scenes").find((sc) => sc.active) ?? s ?? null;
+      const combat =
+        activeScene === null
+          ? null
+          : selectedEncounter(combats, activeScene, "scene-1");
+      if (!opportunity.ok || opportunity.queued.length === 0) {
+        return {
+          ok: opportunity.ok,
+          needsEncounter: false,
+          error: null,
+          queued: opportunity.queued,
+          entries: [],
+          skipped: [],
+        };
+      }
+      const resolution = await resolveActionOpportunities(
+        client,
+        client.user,
+        {
+          opportunity: opportunity.result,
+          combat,
+          actors: client.store.getAll("actors"),
+          tokens: s?.tokens ?? [],
+          ...(spec.verifiable === true ? { verifiable: true } : {}),
+        },
+      );
+      return {
+        ok: opportunity.ok,
+        needsEncounter: resolution.needsEncounter,
+        error: resolution.error,
+        queued: opportunity.queued,
+        entries: resolution.entries.map((e) => ({
+          reactorId: e.reactorId,
+          provokerId: e.provokerId,
+          attackName: e.attackName,
+          outcome: e.outcome,
+          attackTotal: e.attackTotal,
+          defenseAc: e.defenseAc,
+          damage: e.damage,
+          hpBefore: e.hpBefore,
+          hpAfter: e.hpAfter,
+          used: e.used,
+          max: e.max,
+          ledgerError: e.ledgerError,
+          line: e.line,
+        })),
+        skipped: resolution.skipped.map((k) => ({ ...k })),
+      };
+    },
+    pf1eActionProvoke: async (spec) => {
+      const s = scene();
+      const provokes =
+        spec.actionId !== undefined
+          ? [{ actionId: spec.actionId }]
+          : castProvokes({
+              ...(spec.castingTime !== undefined
+                ? { castingTime: spec.castingTime as PF1eCastingTime }
+                : {}),
+              ...(spec.quickened !== undefined
+                ? { quickened: spec.quickened }
+                : {}),
+              ...(spec.defensively !== undefined
+                ? { defensively: spec.defensively }
+                : {}),
+              ...(spec.touch !== undefined ? { touch: spec.touch } : {}),
+            });
+      const combats = client.store.getAll("combats");
+      const activeScene =
+        client.store.getAll("scenes").find((sc) => sc.active) ?? s ?? null;
+      const combat =
+        activeScene === null
+          ? null
+          : selectedEncounter(combats, activeScene, "scene-1");
+      const settings = worldSettingsFrom(client.store.getAll("settings"));
+      const autoResolve = autoResolveAoosOf({
+        autoResolveAoos: settings.autoResolveAoos,
+      });
+      const resolution = await resolveActionProvokes({
+        client,
+        user: client.user,
+        provokerTokenId: spec.provokerId,
+        provokes,
+        autoResolve,
+        combat,
+      });
+      return {
+        provokes: provokes.map((p) =>
+          "actionId" in p
+            ? { actionId: p.actionId }
+            : { trigger: { kind: p.trigger.kind } },
+        ),
+        lines: resolution.lines,
+        damage: resolution.damage,
+      };
+    },
+    pf1eReadyFire: async (spec) => {
+      const combat = client.store
+        .getAll("combats")
+        .find((c) => c.combatants.some((k) => k.tokenId === spec.readiedTokenId));
+      const readied = combat?.combatants.find(
+        (k) => k.tokenId === spec.readiedTokenId,
+      );
+      const triggerer = combat?.combatants.find(
+        (k) => k.tokenId === spec.triggererTokenId,
+      );
+      if (!combat || !readied || !triggerer) {
+        return {
+          ok: false,
+          error: "the readied combatant or triggerer is not in the encounter",
+          lines: [],
+          damage: 0,
+          resolved: false,
+          initiative: null,
+          readyCleared: false,
+        };
+      }
+      // Author the ready (a standard attack scoped to the triggerer) through the same
+      // combatant-state writer the tracker uses, then submit it before resolving.
+      const authored = withCombatantState(readied, {
+        ...readCombatantState(readied),
+        ready: {
+          action: { kind: "standard", action: "attack" },
+          trigger: { kind: "attack", targetId: triggerer._id },
+          sinceRound: combat.round,
+        },
+      });
+      const readyCombat: CombatDocument = {
+        ...combat,
+        combatants: combat.combatants.map((c) =>
+          c._id === readied._id ? authored : c,
+        ),
+      };
+      client.submit([
+        {
+          kind: "update",
+          ref: { coll: "combats", id: readyCombat._id },
+          diff: {
+            combatants: readyCombat.combatants,
+          } as unknown as FlatDiff,
+        },
+      ]);
+
+      const outcome = await resolveReadiedAction({
+        client,
+        user: client.user,
+        combat: readyCombat,
+        readiedCombatantId: readied._id,
+        triggererCombatantId: triggerer._id,
+      });
+      if (!outcome.ok || outcome.combat === null) {
+        return {
+          ok: false,
+          error: outcome.error,
+          lines: [],
+          damage: 0,
+          resolved: false,
+          initiative: null,
+          readyCleared: false,
+        };
+      }
+      client.submit([
+        {
+          kind: "update",
+          ref: { coll: "combats", id: outcome.combat._id },
+          diff: {
+            round: outcome.combat.round,
+            turn: outcome.combat.turn,
+            combatants: outcome.combat.combatants,
+            flags: outcome.combat.flags,
+          } as unknown as FlatDiff,
+        },
+      ]);
+      const after = outcome.combat.combatants.find(
+        (c) => c._id === readied._id,
+      );
+      return {
+        ok: true,
+        error: null,
+        lines: outcome.lines,
+        damage: outcome.damage,
+        resolved: outcome.resolved,
+        initiative: after?.initiative ?? null,
+        readyCleared:
+          after === undefined || readCombatantState(after).ready === null,
       };
     },
     pf1eTacticalEncounter: (spec) => {

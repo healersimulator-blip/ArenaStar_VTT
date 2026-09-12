@@ -91,9 +91,15 @@
  */
 import type { PF1eCell } from "./targeting";
 import { pf1eActionById, type PF1eProvokes } from "./actions";
+import type { PF1eReadiedAction } from "./combatState";
 
-/** The interrupt kinds the queue speaks. Readied actions are P06's second half (G §4.11). */
-export type PF1eInterruptKind = "attack-of-opportunity";
+/**
+ * The interrupt kinds the queue speaks. A readied action (P07/G §4.11) is a second kind: it
+ * interrupts the *triggering action itself*, so it must resolve before every attack of
+ * opportunity that action provokes — that is the "ready-before-trigger ordering" P06 left open,
+ * and `orderInterrupts` now ranks it.
+ */
+export type PF1eInterruptKind = "attack-of-opportunity" | "readied-action";
 
 export type PF1eAoOTriggerKind =
   "move-out" | "provoking-action" | "ranged-touch";
@@ -104,6 +110,13 @@ export interface PF1eAoOTrigger {
   actionId?: string;
   /** `move-out`: the square (feet) the provoker walked out of. */
   left?: { x: number; y: number };
+  /**
+   * `provoking-action`/`ranged-touch`: the square (feet) the provoker occupied
+   * when it acted. The rules attack the provoker *in place* — \"if an attack of
+   * opportunity is provoked, immediately resolve the attack\" — so the interrupt
+   * carries where it happened, exactly as `left` does for a move.
+   */
+  at?: { x: number; y: number };
   /** `move-out`: true when this square is the exempt start square of a withdraw. */
   withdrawExempt?: boolean;
 }
@@ -123,6 +136,8 @@ export interface PF1eInterrupt {
   substep: string;
   /** Insertion order, kept so the default ordering is the caller's. */
   sequence: number;
+  /** `readied-action` only: the prepared action that fires just before the trigger. */
+  ready?: PF1eReadiedAction;
 }
 
 export interface PF1eInterruptQueue {
@@ -292,6 +307,63 @@ export function queueAoOs(
 }
 
 /**
+ * Put a fired readied action onto the queue. The readied combatant is the reactor (its ready is
+ * what is spent); the creature whose action is being interrupted is the provoker. There is no
+ * budget to spend — the standard action was already paid when the ready was declared — so this
+ * queues a single entry, deduped by combatant (one ready each). `orderInterrupts` then puts it
+ * ahead of every attack of opportunity the triggering action provokes.
+ */
+export function queueReadiedAction(
+  queue: PF1eInterruptQueue,
+  request: {
+    turn: number;
+    substep: string;
+    /** The combatant whose readied action is firing. */
+    reactorId: string;
+    /** The combatant whose action triggered the ready. */
+    provokerId: string;
+    /** The readied action's id (an attack id, a cast id…) for the log and dedupe. */
+    actionId: string;
+    ready: PF1eReadiedAction;
+  },
+): {
+  queue: PF1eInterruptQueue;
+  queued: PF1eInterrupt | null;
+  reason: string | null;
+} {
+  const exists = queue.interrupts.some(
+    (i) => i.kind === "readied-action" && i.reactorId === request.reactorId,
+  );
+  if (exists) {
+    return {
+      queue,
+      queued: null,
+      reason: "this combatant's readied action is already queued",
+    };
+  }
+  const sequence = queue.interrupts.length;
+  const interrupt: PF1eInterrupt = {
+    id: `${request.turn}:${request.substep}:${request.reactorId}:${request.provokerId}:${
+      request.actionId
+    }:${sequence}`,
+    kind: "readied-action",
+    reactorId: request.reactorId,
+    provokerId: request.provokerId,
+    actionId: request.actionId,
+    trigger: { kind: "provoking-action" },
+    turn: request.turn,
+    substep: request.substep,
+    sequence,
+    ready: request.ready,
+  };
+  return {
+    queue: { ...queue, interrupts: [...queue.interrupts, interrupt] },
+    queued: interrupt,
+    reason: null,
+  };
+}
+
+/**
  * Queue the opportunities a *movement* earns (AoN 102's "Moving out of a threatened square
  * usually provokes"). One call per moving creature per move action: the walk's left squares
  * are tested against each reactor's own threat, and a reactor is queued at most once no
@@ -442,21 +514,39 @@ export function actionProvokes(actionId: string): PF1eProvokes | null {
 }
 
 /**
- * Resolution order for the queue: the caller's own insertion order, or — when the caller
- * supplies initiative — higher initiative first with ties in insertion order (the named
- * table convention above, not transcribed text).
+ * Resolution order for the queue: a readied action resolves before every attack of opportunity
+ * (it interrupts the triggering action itself, G §4.11), and within a kind the caller's own
+ * insertion order wins — or, when the caller supplies initiative, higher initiative first with
+ * ties in insertion order (the named table convention above, not transcribed text). The kind
+ * rank is applied first so a readied action can never be overtaken by an opportunity the
+ * triggered action then provokes.
  */
 export function orderInterrupts(
   interrupts: readonly PF1eInterrupt[],
   opts: { initiativeOf?: (reactorId: string) => number } = {},
 ): PF1eInterrupt[] {
   const byInsertion = [...interrupts].sort((a, b) => a.sequence - b.sequence);
-  if (opts.initiativeOf === undefined) return byInsertion;
-  const initiativeOf = opts.initiativeOf;
-  return byInsertion.sort(
-    (a, b) => initiativeOf(b.reactorId) - initiativeOf(a.reactorId),
+  const byKind = byInsertion.sort(
+    (a, b) => INTERRUPT_KIND_RANK[a.kind] - INTERRUPT_KIND_RANK[b.kind],
   );
+  if (opts.initiativeOf === undefined) return byKind;
+  const initiativeOf = opts.initiativeOf;
+  return byKind.sort((a, b) => {
+    const kindDelta = INTERRUPT_KIND_RANK[a.kind] - INTERRUPT_KIND_RANK[b.kind];
+    if (kindDelta !== 0) return kindDelta;
+    return initiativeOf(b.reactorId) - initiativeOf(a.reactorId);
+  });
 }
+
+/**
+ * A readied action resolves before the attack of opportunity the same triggering action
+ * provokes, regardless of initiative — the ready interrupts the trigger, the opportunity
+ * answers it (G §4.11 "ready-before-trigger ordering").
+ */
+const INTERRUPT_KIND_RANK: Record<PF1eInterruptKind, number> = {
+  "readied-action": 0,
+  "attack-of-opportunity": 1,
+};
 
 /** The interrupt that resolves next, or null when the queue is drained. */
 export function nextInterrupt(

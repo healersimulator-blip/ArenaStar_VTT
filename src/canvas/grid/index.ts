@@ -37,7 +37,7 @@ export function squareGridLines(grid: SquareGrid, view: GridViewport): GridLines
   };
 }
 
-/** Nearest grid-intersection snap for a world point (token drag, §10). */
+/** Nearest grid-intersection snap for a world point (rulers/pings, §9). */
 export function snapToGrid(grid: SquareGrid, x: number, y: number): { x: number; y: number } {
   if (grid.size <= 0) throw new Error("snapToGrid: size must be > 0");
   return {
@@ -90,3 +90,38 @@ export function snapPoint(grid: GridSpec, x: number, y: number): { x: number; y:
       return { x, y };
   }
 }
+
+/**
+ * Snap a **token's centre** under any grid: square → the nearest cell **centre**
+ * (a square of side `size` whose centre is `(col*size + size/2, row*size + size/2)`),
+ * hex → nearest hex centre, gridless → unchanged.
+ *
+ * Tokens carry their centre in `x`/`y` (`tokenRect` halves `width`/`height`), so a
+ * drag that snaps the centre to an *intersection* — what `snapPoint` does for
+ * rulers/pings — leaves the token straddling four cells, and the PF1e move walk
+ * (`cellsAlongSegment`) then cuts a diagonal through squares the mover never
+ * entered. Hex has always snapped to hex centres, so this brings square tokens in
+ * line with hex instead of leaving them half a cell off.
+ */
+export function snapTokenCenter(
+  grid: GridSpec,
+  x: number,
+  y: number,
+): { x: number; y: number } {
+  switch (grid.type) {
+    case "square": {
+      const half = grid.size / 2;
+      return {
+        x: normalizeZero(Math.round((x - half) / grid.size) * grid.size + half),
+        y: normalizeZero(Math.round((y - half) / grid.size) * grid.size + half),
+      };
+    }
+    case "hex": {
+      const { q, r } = hexFromPixel(grid, x, y);
+      return hexCenter(grid, q, r);
+    }
+    case "gridless":
+      return { x, y };
+  }
+}
+

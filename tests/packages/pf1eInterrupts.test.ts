@@ -291,3 +291,32 @@ describe("resolution order and draining", () => {
     expect(clearInterrupts(queue2, 2).interrupts).toHaveLength(2); // another turn's are kept
   });
 });
+
+describe("the action trigger carries the square the provoker occupied (D-190)", () => {
+  test("a provoking-action interrupt keeps its `at` square, and a ranged-touch states its own kind", () => {
+    let queue = createInterruptQueue(1, "action");
+    const cast = queueAoOs(queue, {
+      turn: 1,
+      substep: "action",
+      provokerId: "wizard",
+      actionId: "cast-spell:1:wizard",
+      trigger: { kind: "provoking-action", actionId: "cast-spell", at: { x: 0, y: 0 } },
+      reactors: [{ id: "fighter" }],
+    });
+    queue = cast.queue;
+    const touch = queueAoOs(queue, {
+      turn: 1,
+      substep: "action",
+      provokerId: "wizard",
+      actionId: "action:1:wizard:ranged-touch",
+      trigger: { kind: "ranged-touch", at: { x: 0, y: 0 } },
+      reactors: [{ id: "fighter" }],
+    });
+    // Two distinct actions, so the same reactor appears twice (Combat Reflexes).
+    expect(touch.queued).toHaveLength(1);
+    expect(touch.queue.interrupts).toHaveLength(2);
+    expect(touch.queue.interrupts[0]?.trigger.at).toEqual({ x: 0, y: 0 });
+    expect(touch.queue.interrupts[1]?.trigger.kind).toBe("ranged-touch");
+    expect(rangedTouchTrigger()).toEqual({ kind: "ranged-touch" });
+  });
+});
