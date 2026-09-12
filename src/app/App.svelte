@@ -76,6 +76,24 @@
   import type { Op } from "../core/ops";
   import { worldSettingsFrom } from "../core/worldSettings";
   import { installGmFogE2e } from "./e2eHook";
+  import { pf1eMovementOpportunities } from "../packages/pf1e/tacticalOpportunity";
+  import { deriveFromDocuments } from "../packages/pf1e/actor";
+  import { autoResolveAoosOf } from "../packages/pf1e/aooSettings";
+  import {
+    planHeldMove,
+    resolutionLines,
+    resolveMovementOpportunities,
+  } from "../ui/combat/pf1eAooFlow";
+  import {
+    decideReactor,
+    forgoLines,
+    forgoReaction,
+    isSettled,
+    openReaction,
+    opportunityForReactor,
+    pendingRows,
+    type PendingReaction,
+  } from "../ui/combat/pf1eReactionPrompt";
 
   let {
     app = null,
@@ -142,6 +160,15 @@
   let lastRulesVersion = "";
   let lastByType: Record<string, number> = {};
   let notifyLog = $state<{ message: string; level: string }[]>([]);
+  /**
+   * D-187: the held move whose attacks of opportunity are the table's to take. While this
+   * is set the token has *not* moved (the controller restored the render on `"cancel"`),
+   * and `pendingCommit` is the deferred Op that will move it once the prompt settles.
+   * Kept outside `$state` on purpose: a function is not a thing to make reactive, and it
+   * must never be a stale render's value.
+   */
+  let pendingReaction = $state<PendingReaction | null>(null);
+  let pendingCommit: (() => void) | null = null;
   let importedTokens = $state<{ name: string; actorId: string; img: string }[]>(
     [],
   );
@@ -169,6 +196,85 @@
 
   function closeTokenMenu(): void {
     tokenMenu = null;
+  }
+
+  /** Push lines onto the notification stack, newest last, capped like every other writer. */
+  function pushLog(messages: string[], level: "info" | "warn" | "error"): void {
+    if (messages.length === 0) return;
+    notifyLog = [
+      ...notifyLog.slice(-49),
+      ...messages.map((message) => ({ message, level })),
+    ];
+  }
+
+  /** D-187: run the held move. The prompt is cleared first: it owns this commit, once. */
+  function commitHeldMove(): void {
+    const commit = pendingCommit;
+    pendingCommit = null;
+    pendingReaction = null;
+    commit?.();
+  }
+
+  /**
+   * D-187: the GM's answer for one reactor — resolve **that reactor's** queued attacks
+   * through the same flow the automatic path uses (rolls, damage, ledger), report it, and
+   * settle the prompt. When the last row is answered the move commits itself.
+   */
+  async function strikeReaction(reactorId: string): Promise<void> {
+    const pending = pendingReaction;
+    if (!pending || !app) return;
+    const gm = app.gm;
+    const scene = activeScene();
+    if (!scene || scene._id !== pending.sceneId) {
+      // The prompt outlived its scene (a switch, an undo): never resolve against another.
+      pushLog(["the attack of opportunity was dropped — the scene changed"], "warn");
+      pendingReaction = null;
+      pendingCommit = null;
+      return;
+    }
+    const combat =
+      pending.combatId === null
+        ? null
+        : (gm.client.store.get("combats", pending.combatId) ?? null);
+    const resolution = await resolveMovementOpportunities(
+      gm.client,
+      gm.client.user,
+      {
+        opportunity: opportunityForReactor(pending, reactorId),
+        combat,
+        actors: gm.client.store.getAll("actors"),
+        tokens: scene.tokens,
+      },
+    );
+    pushLog(
+      resolutionLines(resolution, {
+        hostilityAssumed: pending.hostilityAssumed,
+      }),
+      "warn",
+    );
+    if (resolution.error !== null) pushLog([resolution.error], "warn");
+    const next = decideReactor(pending, reactorId);
+    if (isSettled(next)) commitHeldMove();
+    else pendingReaction = next;
+  }
+
+  /** D-187: "let it pass" — the opportunity is optional, so one click answers for all. */
+  function forgoReactionPrompt(): void {
+    const pending = pendingReaction;
+    if (!pending) return;
+    pushLog(forgoLines(pending), "info");
+    // Record the answer for every row (the state machine's own settled form) before the
+    // commit clears the prompt, so "who was offered what" survives in one place.
+    pendingReaction = forgoReaction(pending);
+    commitHeldMove();
+  }
+
+  /** D-187: "stay put" — the move is dropped and the token keeps its committed square. */
+  function cancelHeldMove(): void {
+    if (pendingReaction === null) return;
+    pushLog(["the move was cancelled — the token stays put"], "info");
+    pendingReaction = null;
+    pendingCommit = null;
   }
 
   /** Apply one T01/E02 menu entry: roster transitions go through the combat update
@@ -852,6 +958,129 @@
           onTokenActivate: ({ token }) => {
             if (token.actorId) openActorSheet(token.actorId);
           },
+          /**
+           * P06/D-185: the AoO verdict is asked **before** the move Op commits, through the
+           * same pure seam the unit and app suites pin, and reports what it finds.
+           *
+           * D-186: who resolves the queue is a replicated world option
+           * (`autoResolveAoos`, on unless a world turns it off). On, this is no longer only
+           * a report: the move is *held* — `"cancel"` — the queued attacks are resolved
+           * through the sheet's own resolve flow, in resolution order, before the mover
+           * leaves the square, and only then does the deferred `commit` submit the move Op.
+           * Off (or with no encounter to spend a per-round budget against), the same call
+           * builds the queue, reports its lines, and the table resolves them by hand. The
+           * decision itself is `planHeldMove`, so it is unit-tested rather than implied by
+           * this handler.
+           */
+          onTokenMove: ({ view: moved, to, commit }) => {
+            const scene = activeScene();
+            if (!scene) return;
+            const actors = current.gm.client.store.getAll("actors");
+            const tokens = scene.tokens.map((t) => {
+              const actor = t.actorId
+                ? (actors.find((a) => a._id === t.actorId) ?? null)
+                : null;
+              const derived = actor
+                ? deriveFromDocuments({ actor: { system: actor.system } })
+                : null;
+              return {
+                _id: t._id,
+                x: t.x,
+                y: t.y,
+                width: t.width,
+                height: t.height,
+                ...(derived
+                  ? { size: derived.size, shape: derived.reachShape }
+                  : {}),
+              };
+            });
+            // Hostility is a caller fact (the seam never invents one). The scene's own
+            // dispositions are the only side information a token carries, so a pair is
+            // hostile when both sides named a disposition and they differ — and anything
+            // less explicit is reported as an assumption instead of being assumed silently.
+            const dispositionOf = new Map(scene.tokens.map((t) => [t._id, t.disposition]));
+            const explicit = tokens.every(
+              (t) => (dispositionOf.get(t._id) ?? "neutral") !== "neutral",
+            );
+            const result = pf1eMovementOpportunities({
+              grid: scene.grid,
+              tokens,
+              mover: { tokenId: moved.token._id, to },
+              ...(explicit
+                ? {
+                    isEnemy: (a: string, b: string) =>
+                      dispositionOf.get(a) !== dispositionOf.get(b),
+                  }
+                : {}),
+            });
+            if (result.queued.length === 0 && result.refused.length === 0) return;
+            const push = (messages: string[], level: "info" | "warn"): void => {
+              notifyLog = [
+                ...notifyLog.slice(-49),
+                ...messages.map((message) => ({ message, level })),
+              ];
+            };
+            const settings = worldSettingsFrom(
+              current.gm.client.store.getAll("settings"),
+            );
+            const combat = activeCombat();
+            const plan = planHeldMove({
+              opportunity: result,
+              autoResolve: autoResolveAoosOf(settings),
+              hasEncounter: combat !== null,
+              hostilityAssumed: !explicit,
+            });
+            if (plan.mode === "report") {
+              // No encounter to spend against: report the queue, as D-185 did.
+              push(plan.lines, "warn");
+              return;
+            }
+            if (plan.mode === "prompt") {
+              // D-187: the world resolves these by hand. Hold the move and ask — the
+              // attacks happen before the mover leaves the square, so the commit waits.
+              pendingReaction = openReaction({
+                sceneId: scene._id,
+                opportunity: result,
+                combatId: combat?._id ?? null,
+                hostilityAssumed: !explicit,
+              });
+              pendingCommit = commit;
+              push(
+                [
+                  `attack of opportunity available — ${
+                    result.queued.length === 1
+                      ? "1 creature may strike"
+                      : `${result.queued.length} creatures may strike`
+                  } (${result.reactors.map((r) => r.tokenId).join(", ")})`,
+                ],
+                "warn",
+              );
+              return "cancel";
+            }
+            // Held: the attacks resolve before the mover leaves the square. A re-entrant
+            // drag while this runs is not guarded — the rolls are the latency, and a second
+            // drag during them starts its own resolution.
+            void resolveMovementOpportunities(
+              current.gm.client,
+              current.gm.client.user,
+              {
+                opportunity: result,
+                combat,
+                actors: actors as ActorDocument[],
+                tokens: scene.tokens,
+              },
+            ).then((resolution) => {
+              const lines = resolutionLines(resolution, {
+                hostilityAssumed: !explicit,
+              });
+              if (lines.length > 0) push(lines, "warn");
+              if (resolution.error !== null) push([resolution.error], "warn");
+              // Committing is what actually moves the token: the attack happened while
+              // the mover was still standing in the square it provoked from.
+              commit();
+            });
+            return "cancel";
+          },
           stage: view,
           source: domPointerSource(view.app.canvas as HTMLCanvasElement),
           client: {
@@ -1074,6 +1303,16 @@
           reportRulesVersion: () => lastRulesVersion,
           reportByType: () => lastByType,
           notifications: () => [...notifyLog],
+          reaction: () =>
+            pendingReaction === null
+              ? null
+              : {
+                  sceneId: pendingReaction.sceneId,
+                  combatId: pendingReaction.combatId,
+                  hostilityAssumed: pendingReaction.hostilityAssumed,
+                  settled: isSettled(pendingReaction),
+                  rows: pendingRows(pendingReaction),
+                },
           moduleSetting: (key: string) =>
             current.moduleBoot
               ? getSetting(
@@ -1585,6 +1824,41 @@
           onRedo={redo}
           packages={app.packages}
         />
+        {#if pendingReaction}
+          <!--
+            D-187: the held move's queue. Nothing has moved yet — each row is the seam's
+            own line for one reactor, and answering the last row commits the move.
+          -->
+          <div class="reaction-prompt" data-reaction-prompt>
+            <strong>Attack of opportunity?</strong>
+            <span class="hint"
+              >the move is held until every creature is answered</span
+            >
+            {#each pendingRows(pendingReaction) as row (row.reactorId)}
+              <div class="reaction-row" data-reaction-row={row.reactorId}>
+                <span class="line">{row.line}</span>
+                <span class="budget"
+                  >{row.used === null || row.max === null
+                    ? ""
+                    : `${row.used}/${row.max} used`}</span
+                >
+                <button
+                  type="button"
+                  data-reaction-strike={row.reactorId}
+                  onclick={() => void strikeReaction(row.reactorId)}>Strike</button
+                >
+              </div>
+            {/each}
+            <div class="reaction-actions">
+              <button type="button" data-reaction-forgo onclick={forgoReactionPrompt}
+                >Let it pass</button
+              >
+              <button type="button" data-reaction-cancel onclick={cancelHeldMove}
+                >Stay put</button
+              >
+            </div>
+          </div>
+        {/if}
         <div class="notify-stack" aria-live="polite">
           {#each notifyLog.slice(-4) as n, i (n.message + ":" + String(i))}
             <div class="notify" data-notify data-notify-level={n.level}>
@@ -1604,6 +1878,44 @@
     pointer-events: none;
     z-index: 65;
     overflow: visible;
+  }
+  .reaction-prompt {
+    position: fixed;
+    right: 12px;
+    bottom: 96px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    max-width: 360px;
+    background: #262016f2;
+    border: 1px solid #6b5320;
+    border-left: 3px solid #f0c04a;
+    border-radius: 4px;
+    font-size: 12px;
+    z-index: 61;
+    box-shadow: 0 4px 14px #0009;
+  }
+  .reaction-prompt .hint {
+    color: #9aa7bd;
+    font-size: 11px;
+  }
+  .reaction-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .reaction-row .line {
+    flex: 1;
+  }
+  .reaction-row .budget {
+    color: #9aa7bd;
+    font-size: 11px;
+  }
+  .reaction-actions {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
   }
   .notify-stack {
     position: fixed;

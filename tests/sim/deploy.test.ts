@@ -166,6 +166,34 @@ describe("deploySnapshot (§8A)", () => {
       expect(Math.abs(y - 500)).toBeLessThanOrEqual(8);
     }
   });
+
+  test("spacing rides the caller's scene scale so files land one per square (P01)", () => {
+    // Gap List §2.15: the deployer's generic 4-ft default packed several models into a
+    // 5-ft square. `TurnChannel` passes the scene's grid distance (one derivation,
+    // `sceneCellFeet`), and this is the deployer's half of that contract: a 10-ft scene
+    // spaces the line's files 10 ft apart, exactly their own square size.
+    const factions = [faction("f-a")];
+    const units = [unitView(unitDoc("u1", 4, "line", { anchor: { x: 500, y: 500 } }), "f-a")];
+    const snap = deploySnapshot(units, factions, MASS_BATTLE_SCHEMA_COLUMNS, { spacing: 10 });
+    const decoded = decodeSimSnapshot(snap.bytes);
+    const pool = poolFromSnapshot(decoded.snapshot, decoded.maxHpMax, MASS_BATTLE_SCHEMA_COLUMNS);
+    const ys = [0, 1, 2, 3].map((i) => pool.y[i] ?? 0).sort((a, b) => a - b);
+    for (let i = 1; i < ys.length; i++) {
+      expect((ys[i] ?? 0) - (ys[i - 1] ?? 0)).toBeCloseTo(10, 6);
+    }
+    // ...and the offsets themselves are the caller's spacing, not a literal.
+    expect(formationOffsets(4, "line", { spacing: 10 })).toEqual([
+      { x: 0, y: -15, facing: 0 },
+      { x: 0, y: -5, facing: 0 },
+      { x: 0, y: 5, facing: 0 },
+      { x: 0, y: 15, facing: 0 },
+    ]);
+    // default stays 4 ft for callers with no scene (the mass-battle-basic reference)
+    expect(formationOffsets(2, "line", {})).toEqual([
+      { x: 0, y: -2, facing: 0 },
+      { x: 0, y: 2, facing: 0 },
+    ]);
+  });
 });
 
 describe("deploy ↔ pool interop", () => {

@@ -191,7 +191,9 @@ tactical rules core that doesn't exist yet**, then making the sim consume the sa
   `XoshiroPRNG` + `BulkDice` + the `d16/d20/d100` hooks all work), `resolveTargetAc` reads the
   **defender's** profile for flat-footed AC and DR, flanking stops double-counting, minimum damage
   becomes nonlethal, sub-lethal nonlethal accumulates to `UNCONSCIOUS` (and `DEAD` at 0 hp, which is
-  what `compactPool` looks for), `resetTurnAoOs` is finally called, `SimpleRng` is `@deprecated`.
+  what `compactPool` looks for), `resetTurnAoOs` is finally called (this claim was **false for the
+  record it describes** — the function had no caller until D-184 wired it at the top of `resolveTurn`;
+  the sentence is left here as the corrected history, §2.14 has the verified state), `SimpleRng` is `@deprecated`.
 - `massBattlePf1e.ts`: profiles + pool are (re)seeded at the top of every `resolveTurn` — cheap,
   idempotent, and it deliberately runs **before** the leadership aura pass, which currently
   accumulates `ac`/`damage`/`saveBonus` into `unit.stats` once per turn (an aura-creep bug this PR
@@ -319,7 +321,7 @@ means cutting per-unit cost, not adding a perf knob to the test.
 | 2.11 | Spell resistance: caster check = 1d20 + CL vs the target's SR; no auto-success on a natural 20 and no auto-fail on a natural 1; once resisted, that spell has no further effect on that target that round; failing to overcome SR does not expend the spell against *other* targets | `spells.ts:139-145` rolls per model per spell and short-circuits with `if (srRoll !== 20 …)`, i.e. it *does* treat a natural 20 as auto-success (not an SRD rule); `spellPenetration` is added even though nothing caps it at +10/+20 and it is never sourced from a feat; `PF1eCombatMetrics.srBlocked` stays 0 because the spell path has its own metrics object | Keep the per-model roll, drop the nat-20 branch, cache "resisted this round" per (caster, target, spell), feed both metric objects from one `resolveSR()` used by tactical + sim. |
 | 2.12 | Nonlethal & subdual damage tracked separately; staggered at nonlethal ≥ current hp, unconscious beyond; conversion to lethal at hp max | absent (only `lethalDmg` used for the regen path) | `nonlethal` column + the three thresholds; feed 2.3. |
 | 2.13 | Conditions must not collide with the sim's own status flags | `PF1eCondition` bits reuse `1<<0..1<<4`, which are already `ModelStatus.dead/routed/pinned/engaged/hidden` (`src/core/strategic.ts:92-98`); `envelopment.ts` sets `1<<2` (= `pinned`) for flanked; PRONE (`1<<4`) is `hidden`, and `hidden` models are filtered out of every spatial query | Give PF1e conditions their own `u32` column (`status2`) or renumber above bit 8; add a bit-collision unit test. |
-| 2.14 | Attacks of opportunity | `resetTurnAoOs()` (`:326`) has **no caller**, so `aooUsed` only ever increases; `resolvePF1eAoO` fires only from the defensive-casting path in `spells.ts` | Call the reset at turn start; drive AoOs from a trigger table (movement out of a threatened square, provoking standard actions, casting, ranged attacks in reach, standing, etc.) shared by tactical + sim. |
+| 2.14 | Attacks of opportunity | **Strategic side closed 2026-09-12 (D-183/D-184); tactical scene seam landed (D-185).** The budget is the verified one (one per round; `1 + Dex mod` clamped ≥1 with Combat Reflexes — the old `1 + max(0, dexMod)` gave every positive-Dex character two), `resetTurnAoOs()` is *actually* called (at the top of `resolveTurn`, before the march: the `:326`-era claim that it was already called was false — it had no caller until D-184), the trigger table is shared (`interrupts.actionTrigger` reads `actions.ts`'s Table 7-2 rows rather than re-encoding them), and movement AoOs resolve through `interrupts.ts`'s queue with one opportunity per (reactor, action), the named exclusions and the withdraw start-square exemption. `resolvePF1eAoO` still fires only from the defensive-casting path in `spells.ts` for the *action* triggers. | The tactical scene seam now exists too: `pf1e/tacticalOpportunity.ts` decides a dragged token's movement through the same queue, `ui/combat/actionBudget.ts` reads the encounter ledger with the same refusal wording and spends it through an authorized `combats` op, and `e2eHook.pf1eMoveToken`/`pf1eOpportunity` drive both through real Ops (D-185). The canvas controller asks the seam before the move Op commits (`onTokenMove`; the payload's deferred `commit` submits the same Op later), the App **auto-resolves** the queue by default through the sheet's own resolve flow (D-186), spending each reactor's ledger before the move commits, and the option that turns that off is the replicated world setting `autoResolveAoos`. With the option off, the drag is held and the App asks per reactor (D-187): Strike / Let it pass / Stay put, the move committing only once every creature is answered. **Open:** situational modifiers on the provoked attack (cover/prone — P04), the action triggers (ranged-touch, casting) at the tactical scale, and one prompt at a time (a second drag replaces the first, named in D-187); action triggers at either scale (ranged attack in reach, casting — the queue's `rangedTouchTrigger` has no consumer); manœuvre/casting damage effects on a provoked reaction; ready-before-trigger ordering (P07). |
 | 2.15 | `SpatialGrid` scale | world-unit scale is inconsistent: grid cell = 5, deploy `spacing = 4`, `envelopment` reach default `1.5`, hero aura `radius: 30 / 5`, spell radius `15` treated as world units while described as feet | Define one canonical scale (1 model square = 5 ft = 5 world units, from `ctx.grid.distance`) and derive every constant from it. Add a scale unit test. |
 
 ---
@@ -515,8 +517,11 @@ Faithful hero-level combat means the full chapter. Ordered as it should be built
     interrupt *before* the trigger, and moves your initiative; unused ⇒ lost action;
     re-ready allowed).** `src/core/combat.ts:176` `delayCombatant()` only flags the
     combatant as skipped for the round; there is no ready action, no trigger evaluation,
-    and no initiative re-count. Requires an interrupt queue in the tracker
-    (`{turn, substep, interrupts[]}`), which also fixes AoO ordering (§2.14).
+    and no initiative re-count. The interrupt queue this bullet asked for now exists —
+    `pf1e/interrupts.ts` (`{turn, substep, interrupts[]}`, D-184) with AoO ordering, and
+    ready-vs-AoO precedence is still open: `orderInterrupts` keeps the caller's order by
+    default and takes `initiativeOf` for tables that resolve by initiative, but no ready
+    action produces a queue entry yet.
 12. **Turn-channel/hero bridge back to documents.** `syncHeroTokens()`
     (`src/host/turnChannel.ts:918-950`) only copies the unit anchor → leader token (x, y).
     For real dual-scale play: write model HP/conditions/state back onto the hero
@@ -528,6 +533,11 @@ Faithful hero-level combat means the full chapter. Ordered as it should be built
     `src/ui/logistics/LogisticsPanel.svelte:85`, `src/app/e2eHook.ts:1519`; declared at
     `src/core/rules.ts:65`), so `applyHeroLeadershipAuras` reads an always-empty
     `ctx.leaderActors` map and the aura path is effectively dead in production.
+    *(Partial correction 2026-09-12: two of those sites now build the map through
+    `collectLeaderActors` — `src/host/turnChannel.ts:246` and
+    `src/ui/armies/armyModel.ts:422` — so the aura and the per-size reach seam do read real
+    actor documents when a unit has a leader token bound; the logistics/e2e sites and the
+    "write back to the actor document" half of this item remain open.)*
 
 ---
 
@@ -542,25 +552,27 @@ kernel per model-pair**, with a documented, measured approximation budget.
   with real contact geometry — threatened square adjacency, facing, reach per size,
   flanking angle (opposite borders/corners), and a per-round `FLANKED` set/clear
   (`envelopment.ts` currently sets the bit and never expires it). **Status: three of the
-  five pieces have landed, and the fourth is blocked on P01.** Per-round set/clear is D-177;
-  reach per size is D-180 (each unit's own natural reach, from its leader actor's size and
-  body form); the flanking angle rule is D-181's `flanking.ts`, which encodes AoN 183
-  exactly and is browser-tested at the tactical scale. It is **not** wired into
-  `envelopment.ts`, because at this scale models are points in feet and can share a cell —
-  `massBattlePf1e.ts` hashes on `new SpatialGrid(5)` while `src/sim/deploy.ts` spaces
-  formations at **4 ft** by default — so a flanker can sit inside the space it flanks and
-  the centre-to-centre line has no opposite borders to cross. Applying the test to that
-  layout would decide flanking from geometry the rules never describe, and inventing an
-  angle heuristic instead is exactly what R03 rejects. **Prerequisite: P01's deploy-spacing
-  remainder** (spacing riding the scene grid, one model per cell), after which
-  `envelopment.ts` calls `resolveFlanking` with each unit's footprint and reach. Threatened
-  square adjacency and facing remain open with it.
+  five pieces have landed.** Per-round set/clear is D-177; reach per size is D-180 (each
+  unit's own natural reach, from its leader actor's size and body form); the flanking angle
+  rule is D-181's `flanking.ts`, which encodes AoN 183 exactly; and as of D-182 it is the
+  strategic rule too — P01's deploy-spacing remainder landed (spacing riding the scene
+  grid, one model per cell), `massBattlePf1e.ts` builds its hash at the scene's scale
+  instead of a fixed `new SpatialGrid(5)`, and `envelopment.ts` calls `resolveFlanking`
+  with each unit's footprint and reach once per turn, so the invented
+  "≥2 attackers in contact" rule is deleted. That switchover also removed the old engine's
+  query-bound bug (a feet-radius equal to reach cannot see a diagonal contact at
+  `reach × √2`). Threatened square adjacency is exercised through the threatened set;
+  **facing** remains open with it, and `deploy.ts`'s 4-ft default survives only for callers
+  with no scene.
 - **Movement/orders:** PF1e `resolveTurn` has **no move/shoot/morale sub-phase at all**
   (subPhases are declared but unused) — orders other than `attack`/`custom:spell_aoe`
   do nothing. Need: move (speed × 5-ft cells, terrain cost from `ctx.grid`/walls),
   withdraw/charge/run semantics, shoot (range increments, cover, −4 into melee),
   melee (formation/envelopment), morale (per the mass-combat rules you choose to adopt),
-  AoO-of-opportunity on move-through-threat.
+  AoO-of-opportunity on move-through-threat — **the AoO half landed 2026-09-12
+  (D-184)**: a march is walked square by square, the squares it leaves are tested against
+  each enemy model's `threatenedCells`, and the queue resolves (and spends the reactor's
+  budget) *before* the formation translation is written; withdraw exempts the start square.
 - **Hard-coded spell order:** the Fireball block in `massBattlePf1e.ts:146-176` is a
   literal (`x: 10, y: 10, radius: 15, dc: 16, 6d6`) — spells must come from the unit's
   spellbook/profile, and each casting unit needs a `cast` order kind + payload.
@@ -753,11 +765,13 @@ patch is undocumented, which is itself a gap worth closing).
 strategic deviations survive in it, each now visible and each with a fix phase, because changing them
 would move 10 000-model fixtures with no tactical need:
 
-1. **AoO budget.** `maxAoos: 1 + max(0, dexMod)` (schema.ts) vs A.10's *one per round; extra
-   AoOs equal to your Dex bonus only with Combat Reflexes (which also permits AoOs while
-   flat-footed)*. `attacksOfOpportunityPerRound()` encodes the
-   correct rule for the tactical path; the strategic one switches in P8, together with the analytics that
-   let the diff be read as a scale-fidelity trade-off rather than a guess.
+1. ~~**AoO budget.**~~ **Closed 2026-09-12 (D-183).** The deviation was the *deviation's own*
+   fault: the old formula (`1 + (dexMod > 0 ? 1 : 0) + CR·max(0, dexMod)`) gave every
+   positive-Dexterity character two opportunities per round, where A.10's text gives one. Both
+   scales now read the one table: `attacksOfOpportunityPerRound()` (one per round; `1 + Dex mod`,
+   clamped ≥1, with Combat Reflexes) and `schema.ts`'s strategic default `maxAoos: raw.maxAoos ?? 1`
+   — with authored `stats.maxAoos` ingested as-is, so a printed stat block still wins. The
+   tactical `canTakeAoO` gained the feat's own flat-footed exception in the same commit.
 2. **CMB/CMD size.** `sizeMod` (the generic attack/AC ladder) where A.4 mandates the *special* size
    modifier. The tactical path uses the special ladder; a stat block that publishes only `sizeMod` keeps
    it, and `normalizePF1eSystem` records that in `converted` so the difference is visible per document
@@ -943,8 +957,10 @@ whip −4, Greater Steal ⇒ target unaware.
 **A.10 Attacks of opportunity** — **one per round** (verified CRB p.180/Combat Reflexes
 "Normal" text); additional AoOs come **only** with Combat Reflexes: a number of
 additional AoOs per round **equal to your Dex bonus**, and the feat also allows AoOs
-while flat-footed. (The strategic `maxAoos: 1 + max(0, dexMod)` is a known scale
-deviation — §10.2 — not SRD text.) Each opponent gets only one AoO per
+while flat-footed. (The strategic `maxAoos: 1 + max(0, dexMod)` was a known scale
+deviation — §10.2 — and is **corrected** as of 2026-09-12, D-183: both scales read the
+one table, and authored `stats.maxAoos` still wins. The queue that spends the budget is
+D-184's `interrupts.ts`.) Each opponent gets only one AoO per
 triggering action regardless of how many squares/attacks it involves; the budget is per
 round; none while flat-footed (without Combat Reflexes), none with total defense, none
 against a target with cover, none against a target with total concealment, none against

@@ -269,7 +269,13 @@ export function compilePF1eProfile(id: number, raw: RawPF1eProfile): PF1eUnitPro
     casterLevel: raw.casterLevel ?? 1,
     castingStatMod: raw.castingStatMod ?? 3,
     spellPenetration: raw.spellPenetration ?? 0,
-    maxAoos: raw.maxAoos ?? (1 + Math.max(0, dexMod)),
+    // D-183: the Normal line of the Combat Reflexes entry — "A character without this
+    // feat can make only one attack of opportunity per round" (CRB p.119, AoN 102 for the
+    // base rule). The old default was `1 + max(0, dexMod)`, which granted a second
+    // opportunity for having a positive Dexterity bonus and ignored the feat entirely
+    // (Gap List A.10's note). Authored profile data still wins, so a strategic unit that
+    // *is* the feat's owner authors its budget (see `rawProfileFromUnit`).
+    maxAoos: raw.maxAoos ?? 1,
     fastHealingVal: raw.fastHealingVal ?? 0,
     regenerationVal: raw.regenerationVal ?? 0,
     regenerationSuppressFlags: raw.regenerationSuppressFlags ?? (PF1eDamageType.FIRE | PF1eDamageType.ACID),

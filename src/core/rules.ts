@@ -41,6 +41,29 @@ export interface RulesGridContext {
   diagonals: string;
 }
 
+/** The standard square, used when a scene's grid distance is missing or unusable. */
+const DEFAULT_CELL_FEET = 5;
+
+/**
+ * The feet-per-square scale of a scene grid (P01). The scene's authored `distance` when
+ * it is a usable positive number, else the standard 5-ft square.
+ *
+ * This lives next to `RulesGridContext` because it is the derivation both sides of the
+ * sim boundary need: the host deploys formations at this spacing and writes it into
+ * `ctx.grid.distance`, and a system package derives its own cell conversions from the
+ * same number, so the deployer, the spatial hash and the rules cannot disagree about
+ * what a square is (Gap List §2.15's "define one canonical scale"). A `gridless` scene
+ * still interacts with square-based rules, so it gets the standard square rather than a
+ * second convention.
+ */
+export function sceneCellFeet(distance: unknown): number {
+  return typeof distance === "number" &&
+    Number.isFinite(distance) &&
+    distance > 0
+    ? distance
+    : DEFAULT_CELL_FEET;
+}
+
 /** Walls as typed arrays: bit i of restriction = 1<<i for (move|sight|sound|light). */
 export interface RulesWallsContext {
   x1: Float32Array;

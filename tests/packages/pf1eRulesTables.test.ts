@@ -232,17 +232,19 @@ describe("combat manœuvres (A.9)", () => {
   });
 });
 
-describe("attacks of opportunity (A.10)", () => {
-  test("one, plus one more only for a positive Dexterity modifier", () => {
+describe("attacks of opportunity (A.10, re-verified D-183)", () => {
+  test("one per round without the feat, whatever the Dexterity bonus is", () => {
+    // AoN 102: "most characters can only make one per round"; the Combat Reflexes entry's
+    // Normal line repeats it. The old reading granted a second opportunity for a positive
+    // Dexterity bonus, which no fetched text supports.
     expect(attacksOfOpportunityPerRound(-1)).toBe(1);
     expect(attacksOfOpportunityPerRound(0)).toBe(1);
-    expect(attacksOfOpportunityPerRound(1)).toBe(2);
-    // The SRD grants +1 total here, not "+Dex" — the sim's `1 + dexMod` deviation stays recorded.
-    expect(attacksOfOpportunityPerRound(3)).toBe(2);
+    expect(attacksOfOpportunityPerRound(1)).toBe(1);
+    expect(attacksOfOpportunityPerRound(3)).toBe(1);
   });
 
-  test("Combat Reflexes adds one per point of Dexterity modifier", () => {
-    expect(attacksOfOpportunityPerRound(3, true)).toBe(5);
+  test("Combat Reflexes adds the Dexterity bonus, and a negative bonus never lowers the one", () => {
+    expect(attacksOfOpportunityPerRound(3, true)).toBe(4);
     expect(attacksOfOpportunityPerRound(0, true)).toBe(1);
     expect(attacksOfOpportunityPerRound(-1, true)).toBe(1);
   });

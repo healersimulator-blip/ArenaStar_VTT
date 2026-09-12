@@ -318,10 +318,12 @@ describe("effects move the numbers they name", () => {
 });
 
 describe("attacks of opportunity and natural attacks", () => {
-  test("one AoO, one more for a positive Dexterity modifier, and one per point with Combat Reflexes", () => {
+  test("one AoO without the feat, one plus the Dexterity bonus with Combat Reflexes (D-183)", () => {
+    // The feat is what buys extra opportunities: "Normal: A character without this feat
+    // can make only one attack of opportunity per round."
     expect(
       derivePF1eActor({ system: { abilities: { dex: 14 } } }).aooPerRound,
-    ).toBe(2);
+    ).toBe(1);
     expect(
       derivePF1eActor({ system: { abilities: { dex: 10 } } }).aooPerRound,
     ).toBe(1);
@@ -332,7 +334,29 @@ describe("attacks of opportunity and natural attacks", () => {
           feats: ["Improved Critical", "Combat Reflexes"],
         },
       }).aooPerRound,
-    ).toBe(4);
+    ).toBe(3);
+  });
+
+  test("Combat Reflexes also lifts the flat-footed denial, and only it does (D-183)", () => {
+    // "With this feat, you may also make attacks of opportunity while flat-footed."
+    const flat = [asEffect({ flags: { flatFooted: true } })];
+    const noFeat = derivePF1eActor({
+      system: { abilities: { dex: 14 } },
+      effects: flat,
+    });
+    expect(noFeat.canTakeAoO).toBe(false);
+    expect(noFeat.explain.aoo).toContain("none while flat-footed");
+    expect(
+      derivePF1eActor({ system: { abilities: { dex: 14 } } }).canTakeAoO,
+    ).toBe(true);
+
+    const withFeat = derivePF1eActor({
+      system: { abilities: { dex: 14 }, feats: ["Combat Reflexes"] },
+      effects: flat,
+    });
+    expect(withFeat.canTakeAoO).toBe(true);
+    expect(withFeat.explain.aoo).not.toContain("flat-footed");
+    expect(withFeat.aooPerRound).toBe(3);
   });
 
   test("feats authored as the pack writes them (comma string, JSON blob) still count", () => {
@@ -343,14 +367,14 @@ describe("attacks of opportunity and natural attacks", () => {
           feats: "Combat Reflexes, Power Attack",
         },
       }).aooPerRound,
-    ).toBe(6);
+    ).toBe(5);
     const json = derivePF1eActor({
       system: {
         abilities: { dex: 18 },
         feats: '[{"name":"Combat Reflexes"}]',
       } as unknown as Record<string, never>,
     });
-    expect(json.aooPerRound).toBe(6);
+    expect(json.aooPerRound).toBe(5);
   });
 
   test("natural attacks do not iterate, and secondary natural attacks take half Strength", () => {

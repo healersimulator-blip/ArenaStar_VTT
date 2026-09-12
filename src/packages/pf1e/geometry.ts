@@ -109,6 +109,79 @@ import type { PF1eCell } from "./targeting";
 export const FEET_PER_SQUARE = 5;
 
 /**
+ * The square containing a battlefield point, with `cellFeet` the scene's scale
+ * (`sceneCellFeet`). The strategic layer's models are points in feet; this is
+ * the one conversion from that space to `PF1eCell`, so every square-based rule
+ * (threat, flanking) reads the same layout the scene describes.
+ */
+export function cellAt(x: number, y: number, cellFeet: number): PF1eCell {
+  return { col: Math.floor(x / cellFeet), row: Math.floor(y / cellFeet) };
+}
+
+/**
+ * The squares a straight move walks through, from its start square to its end
+ * square inclusive and in travel order (P06: "moving out of a threatened
+ * square" needs the squares on the way, not only the two endpoints — a creature
+ * that walks past a reach weapon provokes from *it* even though the weapon
+ * threatens neither where the move began nor where it ended).
+ *
+ * A **grid walk**, not a geometric sweep: on this grid movement is a sequence
+ * of squares, so the segment between two squares is the staircase a creature
+ * actually steps — the standard integer grid line over the two endpoint cells.
+ * That distinction is load-bearing, not pedantic. A 45° move from one square to
+ * the diagonal neighbour is **one** step (start, destination) and does not put
+ * the creature into the two orthogonally adjacent squares whose shared corner
+ * the line grazes; a geometric traversal would report both of them, and
+ * "moving out of" squares the creature was never in would hand out attacks of
+ * opportunity the table never grants. A shallower line becomes the staircase
+ * the grid line names (which intermediate squares *are* visited is the grid's
+ * discretization of the line, the same one every VTT ruler uses).
+ *
+ * Cells are never repeated; a move that stays inside one square returns that
+ * square alone. Degenerate input (non-finite coordinates, a cell size that is
+ * not a positive finite number) returns an empty list rather than a guessed
+ * path — an empty "squares left" list is the safe answer for a movement rule.
+ */
+export function cellsAlongSegment(
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  cellFeet: number,
+): PF1eCell[] {
+  if (!Number.isFinite(cellFeet) || cellFeet <= 0) return [];
+  const values = [from.x, from.y, to.x, to.y];
+  if (values.some((v) => !Number.isFinite(v))) return [];
+  const c0 = cellAt(from.x, from.y, cellFeet);
+  const c1 = cellAt(to.x, to.y, cellFeet);
+  if (c0.col === c1.col && c0.row === c1.row) return [c0];
+
+  // The canonical all-octant integer grid line between the two cells.
+  const dCol = c1.col - c0.col;
+  const dRow = c1.row - c0.row;
+  const stepCol = Math.sign(dCol);
+  const stepRow = Math.sign(dRow);
+  const absCol = Math.abs(dCol);
+  const absRow = Math.abs(dRow);
+  let col = c0.col;
+  let row = c0.row;
+  let err = absCol - absRow;
+  const out: PF1eCell[] = [{ col, row }];
+  for (let i = 0; i < absCol + absRow + 1; i++) {
+    if (col === c1.col && row === c1.row) break;
+    const e2 = 2 * err;
+    if (e2 > -absRow) {
+      err -= absRow;
+      col += stepCol;
+    }
+    if (e2 < absCol) {
+      err += absCol;
+      row += stepRow;
+    }
+    out.push({ col, row });
+  }
+  return out;
+}
+
+/**
  * The diagonal counting reach and threat are measured with, pinned to 5-10-5
  * because AoN 175 states it as a rule of measuring distance ("the first
  * diagonal counts as 1 square, the second counts as 2 squares … and so on") —

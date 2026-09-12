@@ -180,7 +180,7 @@ const flush = async (): Promise<void> => {
   for (let i = 0; i < 8; i++) await flushMicrotasks();
 };
 
-async function setup(): Promise<{
+async function setup(gridDistance = 5): Promise<{
   host: HostSync;
   channel: TurnChannel;
   gm: ClientSync;
@@ -224,8 +224,12 @@ async function setup(): Promise<{
   host.addSession("gm-peer", gmHostT, gmSessionUser(GM_ID));
 
   // world documents (scene, factions, armies) BEFORE players join
+  const scene = sceneDoc();
+  // The scene is the single source of the feet-per-square scale (P01): a world whose
+  // grid distance is not the 5-ft default must deploy and sim at *its* scale.
+  if (scene.grid) scene.grid.distance = gridDistance;
   host.commitSystem([
-    { kind: "create", coll: "scenes", data: sceneDoc() },
+    { kind: "create", coll: "scenes", data: scene },
     { kind: "create", coll: "factions", data: factionRed() },
     { kind: "create", coll: "factions", data: factionBlue() },
     { kind: "create", coll: "armies", data: armyRed([unit("u-red", "infantry", [10, 20])]) },
@@ -358,6 +362,34 @@ describe("turn channel (§5A steps 1–5, host⇄client e2e in Node)", () => {
     ).summary.distributions;
     expect(dist?.byType?.attrition).toBe(1); // blue supply 0 → one attrition event
     expect(dist?.totals?.attrition).toBe(1);
+  });
+
+  test("deployment and the §12 rules grid ride the scene's grid distance (P01)", async () => {
+    // Gap List §2.15: the deployer spaced formations 4 ft apart while the grid is 5 ft,
+    // so several models shared one square — and the rules that read squares (threat,
+    // AoN 183 flanking) then described geometry the layout never had. The channel now
+    // hands `deploySnapshot` the scene's own distance, and the same derivation fills
+    // `ctx.grid.distance`, so one square means one thing on both sides of the sim
+    // boundary. A 10-ft scene proves the number is the scene's, not a constant.
+    const { channel, gm } = await setup(10);
+    expect(await channel.start("stepwise")).toBe(0); // no initial → §8A deploy
+    await flush();
+    expect(channel.rulesCtx().grid.distance).toBe(10);
+
+    const pool = gm.simReplica;
+    expect(pool).not.toBeNull();
+    if (pool) {
+      // army-blue deploys first (armies sort by _id) as a line of 10: consecutive files
+      // are one square apart — 10 ft on this scene, not 4 ft.
+      expect(Math.abs((pool.y[1] ?? 0) - (pool.y[0] ?? 0))).toBe(10);
+      // ...and nothing shares a square: every file lands on a distinct multiple of 10.
+      expect(((pool.y[1] ?? 0) - (pool.y[0] ?? 0)) % 10).toBe(0);
+      const squares = new Set<number>();
+      for (let i = 0; i < 10; i++) {
+        squares.add((pool.x[i] ?? 0) * 1000 + (pool.y[i] ?? 0));
+      }
+      expect(squares.size).toBe(10);
+    }
   });
 
   test("sim.control start (GM) boots an idle channel with deployment", async () => {

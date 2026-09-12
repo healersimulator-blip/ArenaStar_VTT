@@ -17,7 +17,7 @@ import type {
 import type { SimEvent, TurnReport } from "../../core/sim";
 import type { Op } from "../../core/ops";
 import type { DocumentStore } from "../../core/store";
-import { collectLeaderActors } from "../../core/rules";
+import { collectLeaderActors, sceneCellFeet } from "../../core/rules";
 import type {
   RulesContext,
   RulesGridContext,
@@ -408,7 +408,10 @@ export function rulesContextFromStore(
   const grid: RulesGridContext = {
     type: gridDoc?.type ?? "square",
     size: gridDoc?.size ?? 100,
-    distance: gridDoc?.distance ?? 5,
+    // P01: the same derivation the host channel uses, so the preview and the turn
+    // resolution agree on the grid a scene describes (a `0`/negative distance is
+    // not "authored data wins" — it is a scene with no usable scale).
+    distance: sceneCellFeet(gridDoc?.distance),
     units: gridDoc?.units ?? "ft",
     diagonals: gridDoc?.diagonals ?? "555",
   };

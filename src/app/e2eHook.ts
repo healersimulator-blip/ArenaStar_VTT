@@ -4,7 +4,12 @@
  */
 import type { LoopbackResult } from "../net/webrtc";
 import { makeToken, type HostApp } from "./hostBoot";
-import type { ActorDocument, TokenDocument } from "../core/documents";
+import type {
+  ActorDocument,
+  CombatDocument,
+  Json,
+  TokenDocument,
+} from "../core/documents";
 import type { PlayerApp } from "./joinBoot";
 import type { HostShare } from "./hostShare";
 import { sightSegments } from "../canvas/vision/wallSight";
@@ -20,6 +25,18 @@ import {
 import { deriveFromDocuments } from "../packages/pf1e/actor";
 import { footprintSide } from "../packages/pf1e/geometry";
 import { pf1eThreatModel } from "../packages/pf1e/threatPreview";
+import {
+  pf1eMovementOpportunities,
+  type PF1eMovementOpportunityResult,
+} from "../packages/pf1e/tacticalOpportunity";
+import { resolveMovementOpportunities } from "../ui/combat/pf1eAooFlow";
+import { selectedEncounter } from "../ui/combat/encounters";
+import { readCombatantState } from "../packages/pf1e/combatState";
+import {
+  validateWorldSettingsPatch,
+  worldSettingsFrom,
+  worldSettingsOps,
+} from "../core/worldSettings";
 import { pf1eSpellSlotReadout, sheetRecord } from "../ui/sheets/pf1eSheetModel";
 import {
   resolveCastingAttempt,
@@ -176,12 +193,91 @@ export interface AppSurface {
     defaults: Array<{ field: string; message: string }>;
   };
   /**
+   * D-186: author the scene for the auto-resolved-AoO path the App runs — each named
+   * token's actor gets real `system.pf1e` stats (so `deriveFromDocuments` can produce a
+   * melee line and hit points), and an encounter is created and activated binding the
+   * scene's tokens. This is the GM's own setup (sheet + tracker), not a shortcut inside
+   * the rules: the surfaces under test still read everything back off documents.
+   */
+  pf1eTacticalEncounter(spec: {
+    /** token id → the actor's authored `system.pf1e` block. */
+    stats: Record<string, Record<string, unknown>>;
+    /** token id → initiative; absent means 0. */
+    initiatives?: Record<string, number>;
+    /** token id → `{acted, aooUsed, aooMax}`; `acted` defaults to true. */
+    combatantFlags?: Record<
+      string,
+      { acted?: boolean; aooUsed?: number; aooMax?: number }
+    >;
+  }): { ok: boolean; combatId: string; combatants: number };
+  /** D-186: one combatant's encounter facts, read off the store after the ops echoed. */
+  pf1eCombatantState(tokenId: string): {
+    aooUsed: number;
+    aooMax: number;
+    acted: boolean;
+    hp: number | null;
+  } | null;
+  /**
+   * D-186: write one world rules option through `worldSettingsOps` — the same op the
+   * settings window submits — so a spec can prove the replication path an option takes.
+   */
+  pf1eSetWorldSetting(spec: {
+    key: string;
+    value: string | number | boolean | null;
+  }): { ok: boolean; error: string | null; ops: number };
+  /** D-186: the merged world settings bag as every replica derives it. */
+  pf1eWorldSettings(): Record<string, unknown>;
+  /** D-186: the public chat cards containing `needle`, for the resolution cards. */
+  pf1eCardsContaining(needle: string): { count: number; first: string | null };
+  /**
    * P5/C02: resolve one spell save through the **real** bundled chain —
    * authored `system.pf1e` → `deriveFromDocuments` save totals → DC → save →
    * severity → energy mitigation. The caller supplies the die faces (the
    * resolver is diceless), so the browser spec asserts the wiring, not a
    * re-implementation of the rules.
    */
+  /**
+   * P06 (D-186): the *whole* movement-AoO pipeline the App runs when the world option
+   * `autoResolveAoos` is on — the verdict (`pf1eOpportunity`'s seam), then
+   * `resolveMovementOpportunities`, which rolls each queued attack through the real
+   * resolve flow (the sheet's, through the host's roll protocol) and spends the ledger.
+   * The move itself is not submitted: the App holds it while this runs and commits it
+   * afterwards, so a spec can assert the attack landed before the token moved.
+   */
+  pf1eOpportunityResolve(spec: {
+    moverId: string;
+    toCol: number;
+    toRow: number;
+    withdraw?: boolean;
+    enemiesOf?: Record<string, string[]>;
+    verifiable?: boolean;
+  }): Promise<{
+    ok: boolean;
+    needsEncounter: boolean;
+    error: string | null;
+    queued: Array<{
+      reactorId: string;
+      provokerId: string;
+      kind: string;
+      square: { x: number; y: number } | null;
+    }>;
+    entries: Array<{
+      reactorId: string;
+      provokerId: string;
+      attackName: string;
+      outcome: string;
+      attackTotal: number;
+      defenseAc: number;
+      damage: number;
+      hpBefore: number;
+      hpAfter: number;
+      used: number | null;
+      max: number | null;
+      ledgerError: string | null;
+      line: string;
+    }>;
+    skipped: Array<{ reactorId: string; provokerId: string; reason: string }>;
+  }>;
   pf1eCastResolve(spec: {
     system: Record<string, unknown>;
     attributes?: Record<string, unknown>;
@@ -206,6 +302,61 @@ export interface AppSurface {
     automatic: string | null;
     dealt: number;
     notes: string[];
+  };
+  /**
+   * P06 (D-185): move an existing token through the **real op path** — the same
+   * `update` op a GM's drag submits (`{kind:"update", coll:"tokens", diff:{x,y}}`),
+   * snapped to the scene grid the way `dragTarget` snaps it. Nothing about the
+   * opportunity queue is involved: that is `pf1eOpportunity`'s job, so a spec can
+   * assert the committed move and the decided rule separately.
+   */
+  pf1eMoveToken(spec: { tokenId: string; col: number; row: number }): {
+    ok: boolean;
+    x: number;
+    y: number;
+  };
+  /**
+   * P06 (D-185): the attack-of-opportunity verdict for one token's move, through the
+   * same pure seam the unit tests exercise (`cellsAlongSegment` → the tokens'
+   * threatened sets → `interrupts.queueMovementAoOs`). `ledgers` states each token's
+   * spent budget (`{used, max}`, as `combatState` keeps it) because a scene with no
+   * encounter running has no ledger of its own; `enemiesOf` states hostility the way
+   * `pf1eThreat` does.
+   */
+  pf1eOpportunity(spec: {
+    moverId: string;
+    toCol: number;
+    toRow: number;
+    withdraw?: boolean;
+    ledgers?: Record<string, { used: number; max: number }>;
+    enemiesOf?: Record<string, string[]>;
+  }): {
+    /**
+     * D-187: the seam's own verdict, so a spec can reuse it exactly as the app does (the
+     * manual prompt narrows it per reactor with `opportunityForReactor` before resolving).
+     */
+    result: PF1eMovementOpportunityResult;
+    ok: boolean;
+    refusal: string | null;
+    path: string[];
+    squaresLeft: string[];
+    leftRects: number;
+    reactors: Array<{
+      tokenId: string;
+      cell: string;
+      used: number | null;
+      max: number | null;
+      line: string;
+    }>;
+    refused: Array<{ tokenId: string; reason: string }>;
+    queued: Array<{
+      reactorId: string;
+      provokerId: string;
+      kind: string;
+      square: { x: number; y: number } | null;
+    }>;
+    issues: Array<{ field: string; message: string }>;
+    defaults: Array<{ field: string; message: string }>;
   };
   /**
    * P5/C03: run the pre-save casting gate. The caster's deafened/grappled/pinned
@@ -610,10 +761,166 @@ export async function installShareE2e(share: HostShare): Promise<void> {
   }
 }
 
+/** The movement-opportunity surface plus the raw seam result (see `movementOpportunity`). */
+interface MovementOpportunitySurface {
+  ok: boolean;
+  refusal: string | null;
+  path: string[];
+  squaresLeft: string[];
+  leftRects: number;
+  reactors: Array<{
+    tokenId: string;
+    cell: string;
+    used: number | null;
+    max: number | null;
+    line: string;
+  }>;
+  refused: Array<{ tokenId: string; reason: string }>;
+  queued: Array<{
+    reactorId: string;
+    provokerId: string;
+    kind: string;
+    square: { x: number; y: number } | null;
+  }>;
+  issues: Array<{ field: string; message: string }>;
+  defaults: Array<{ field: string; message: string }>;
+  result: PF1eMovementOpportunityResult;
+}
+
 function appSurface(app: HostApp): AppSurface {
   const client = app.gm.client;
   const scene = () => client.store.get("scenes", "scene-1");
   const firstToken = () => scene()?.tokens[0];
+  /** The seam's own empty result, for the surfaces' "no scene" early return. */
+  const EMPTY_OPPORTUNITY: PF1eMovementOpportunityResult = {
+    ok: false,
+    issues: [],
+    defaults: [],
+    grid: null,
+    refusal: null,
+    path: [],
+    squaresLeft: [],
+    leftRects: [],
+    reactors: [],
+    refused: [],
+    queue: { turn: 0, substep: "", interrupts: [] },
+    queued: [],
+  };
+
+  /**
+   * P06 (D-185/D-186): the movement AoO verdict for one token's move, through the same pure
+   * seam the unit tests exercise (`cellsAlongSegment` → the tokens' threatened sets →
+   * `interrupts.queueMovementAoOs`). Returned with the raw `result`, so the resolve variant
+   * below drives exactly the queue this surface reports.
+   */
+  function movementOpportunity(spec: {
+    moverId: string;
+    toCol: number;
+    toRow: number;
+    withdraw?: boolean;
+    ledgers?: Record<string, { used: number; max: number }>;
+    enemiesOf?: Record<string, string[]>;
+  }): MovementOpportunitySurface {
+    const s = scene();
+    const blank = {
+      ok: false,
+      refusal: null as string | null,
+      path: [] as string[],
+      squaresLeft: [] as string[],
+      leftRects: 0,
+      reactors: [] as Array<{
+        tokenId: string;
+        cell: string;
+        used: number | null;
+        max: number | null;
+        line: string;
+      }>,
+      refused: [] as Array<{ tokenId: string; reason: string }>,
+      queued: [] as Array<{
+        reactorId: string;
+        provokerId: string;
+        kind: string;
+        square: { x: number; y: number } | null;
+      }>,
+      issues: [] as Array<{ field: string; message: string }>,
+      defaults: [] as Array<{ field: string; message: string }>,
+      result: EMPTY_OPPORTUNITY,
+    };
+    if (!s) {
+      return {
+        ...blank,
+        issues: [{ field: "scene", message: "no active scene" }],
+      };
+    }
+    const cellSize = s.grid.size > 0 ? s.grid.size : 100;
+    const moverToken = s.tokens.find((t) => t._id === spec.moverId) ?? null;
+    const moverSide = Math.max(
+      1,
+      Math.round(((moverToken?.width ?? cellSize) || cellSize) / cellSize),
+    );
+    const actors = client.store.getAll("actors");
+    const enemiesOf = spec.enemiesOf ?? null;
+    const result = pf1eMovementOpportunities({
+      grid: s.grid,
+      tokens: s.tokens.map((t) => {
+        const actor = t.actorId
+          ? (actors.find((a) => a._id === t.actorId) ?? null)
+          : null;
+        const derived = actor
+          ? deriveFromDocuments({ actor: { system: actor.system } })
+          : null;
+        return {
+          _id: t._id,
+          x: t.x,
+          y: t.y,
+          width: t.width,
+          height: t.height,
+          ...(derived ? { size: derived.size, shape: derived.reachShape } : {}),
+        };
+      }),
+      // The destination is the anchor cell the spec names, so the queue's walk
+      // starts and ends on the squares a GM's drag would have snapped to.
+      mover: {
+        tokenId: spec.moverId,
+        to: {
+          x: (spec.toCol + moverSide / 2) * cellSize,
+          y: (spec.toRow + moverSide / 2) * cellSize,
+        },
+      },
+      ...(spec.withdraw === true ? { withdraw: true } : {}),
+      ...(spec.ledgers ? { ledgers: spec.ledgers } : {}),
+      ...(enemiesOf
+        ? {
+            isEnemy: (a: string, b: string) => (enemiesOf[b] ?? []).includes(a),
+          }
+        : {}),
+    });
+    return {
+      ok: result.ok,
+      refusal: result.refusal,
+      path: [...result.path],
+      squaresLeft: [...result.squaresLeft],
+      leftRects: result.leftRects.length,
+      reactors: result.reactors.map((r) => ({
+        tokenId: r.tokenId,
+        cell: r.cell,
+        used: r.used,
+        max: r.max,
+        line: r.line,
+      })),
+      refused: result.refused.map((r) => ({ ...r })),
+      queued: result.queued.map((q) => ({
+        reactorId: q.reactorId,
+        provokerId: q.provokerId,
+        kind: q.trigger.kind,
+        square: q.trigger.left ?? null,
+      })),
+      issues: result.issues.map((i) => ({ ...i })),
+      defaults: result.defaults.map((i) => ({ ...i })),
+      result,
+    };
+  }
+
   return {
     worldId: () => app.worldId,
     seq: () => client.store.seq,
@@ -817,6 +1124,204 @@ function appSurface(app: HostApp): AppSurface {
         issues: model.issues.map((i) => ({ ...i })),
         defaults: model.defaults.map((i) => ({ ...i })),
       };
+    },
+    pf1eMoveToken: (spec) => {
+      const s = scene();
+      const token = s?.tokens.find((t) => t._id === spec.tokenId);
+      if (!s || !token) return { ok: false, x: 0, y: 0 };
+      const cellSize = s.grid.size > 0 ? s.grid.size : 100;
+      // Squares this token spans (1 for Medium, 2 for Large, …), so the centre lands
+      // on the same square whether a token was placed by `pf1ePlaceTokens` or moved.
+      const side = Math.max(
+        1,
+        Math.round((token.width || cellSize) / cellSize),
+      );
+      const x = (spec.col + side / 2) * cellSize;
+      const y = (spec.row + side / 2) * cellSize;
+      client.submit([
+        {
+          kind: "update",
+          ref: {
+            coll: "tokens",
+            id: token._id,
+            parent: { coll: "scenes", id: s._id },
+          },
+          diff: { x, y },
+        },
+      ]);
+      return { ok: true, x, y };
+    },
+    pf1eOpportunity: (spec) => movementOpportunity(spec),
+    pf1eOpportunityResolve: async (spec) => {
+      const s = scene();
+      const opportunity = movementOpportunity(spec);
+      const combats = client.store.getAll("combats");
+      const activeScene =
+        client.store.getAll("scenes").find((sc) => sc.active) ?? s ?? null;
+      const combat =
+        activeScene === null
+          ? null
+          : selectedEncounter(combats, activeScene, "scene-1");
+      if (!opportunity.ok || opportunity.queued.length === 0) {
+        return {
+          ok: opportunity.ok,
+          needsEncounter: false,
+          error: null,
+          queued: opportunity.queued,
+          entries: [],
+          skipped: [],
+        };
+      }
+      const resolution = await resolveMovementOpportunities(
+        client,
+        client.user,
+        {
+          opportunity: opportunity.result,
+          combat,
+          actors: client.store.getAll("actors"),
+          tokens: s?.tokens ?? [],
+          ...(spec.verifiable === true ? { verifiable: true } : {}),
+        },
+      );
+      return {
+        ok: opportunity.ok,
+        needsEncounter: resolution.needsEncounter,
+        error: resolution.error,
+        queued: opportunity.queued,
+        entries: resolution.entries.map((e) => ({
+          reactorId: e.reactorId,
+          provokerId: e.provokerId,
+          attackName: e.attackName,
+          outcome: e.outcome,
+          attackTotal: e.attackTotal,
+          defenseAc: e.defenseAc,
+          damage: e.damage,
+          hpBefore: e.hpBefore,
+          hpAfter: e.hpAfter,
+          used: e.used,
+          max: e.max,
+          ledgerError: e.ledgerError,
+          line: e.line,
+        })),
+        skipped: resolution.skipped.map((k) => ({ ...k })),
+      };
+    },
+    pf1eTacticalEncounter: (spec) => {
+      const s = scene();
+      if (!s) return { ok: false, combatId: "", combatants: 0 };
+      const ops: Parameters<typeof client.submit>[0] = [];
+      for (const token of s.tokens) {
+        const stats = spec.stats[token._id];
+        const actorId = token.actorId;
+        if (stats === undefined || actorId === null || actorId === undefined)
+          continue;
+        ops.push({
+          kind: "update",
+          ref: { coll: "actors", id: actorId },
+          diff: { "system.pf1e": stats as unknown as Json },
+        });
+      }
+      const combatId = "combat-1";
+      const combatants = s.tokens.map((t) => {
+        const flags = spec.combatantFlags?.[t._id] ?? {};
+        return {
+          _id: `c-${t._id}`,
+          type: "combatant" as const,
+          name: t.name,
+          ownership: { default: 3 },
+          flags: {
+            pf1e: {
+              acted: flags.acted ?? true,
+              aooUsed: flags.aooUsed ?? 0,
+              aooMax: flags.aooMax ?? 0,
+            },
+          },
+          system: {},
+          tokenId: t._id,
+          actorId: t.actorId ?? null,
+          initiative: spec.initiatives?.[t._id] ?? 0,
+          hidden: false,
+          defeated: false,
+        };
+      });
+      const combatDoc: CombatDocument = {
+        _id: combatId,
+        type: "combat",
+        name: "Fight",
+        ownership: { default: 3 },
+        flags: {
+          core: { sceneId: s._id },
+          // Mid-round: the phase, not the fixture, decides who is flat-footed.
+          pf1e: {
+            phase: "rounds",
+            secondsPerRound: 6,
+            surpriseOrder: [],
+            surpriseTurn: 0,
+            surprised: [],
+            ties: [],
+            clockSeconds: 0,
+            roundRolled: false,
+          },
+        },
+        system: {},
+        round: 1,
+        turn: 0,
+        combatants,
+      } as unknown as CombatDocument;
+      ops.push({ kind: "create", coll: "combats", data: combatDoc });
+      ops.push({
+        kind: "update",
+        ref: { coll: "scenes", id: s._id },
+        diff: { "flags.core": { activeCombatId: combatId } },
+      });
+      client.submit(ops);
+      return { ok: true, combatId, combatants: combatants.length };
+    },
+    pf1eCombatantState: (tokenId) => {
+      const combat = client.store
+        .getAll("combats")
+        .find((c) => c.combatants.some((k) => k.tokenId === tokenId));
+      const combatant = combat?.combatants.find((k) => k.tokenId === tokenId);
+      if (!combatant) return null;
+      const state = readCombatantState(combatant);
+      const token = scene()?.tokens.find((t) => t._id === tokenId) ?? null;
+      const actor =
+        token?.actorId === null || token?.actorId === undefined
+          ? null
+          : (client.store
+              .getAll("actors")
+              .find((a) => a._id === token.actorId) ?? null);
+      const hp =
+        actor === null
+          ? null
+          : deriveFromDocuments({ actor: { system: actor.system } }).hp;
+      return {
+        aooUsed: state.aooUsed,
+        aooMax: state.aooMax,
+        acted: state.acted,
+        hp,
+      };
+    },
+    pf1eSetWorldSetting: (spec) => {
+      const checked = validateWorldSettingsPatch({ [spec.key]: spec.value });
+      if (!checked.ok) return { ok: false, error: checked.error, ops: 0 };
+      const ops = worldSettingsOps(
+        client.store.getAll("settings"),
+        checked.clean,
+      );
+      if (ops.length > 0) client.submit(ops);
+      return { ok: true, error: null, ops: ops.length };
+    },
+    pf1eWorldSettings: () => ({
+      ...worldSettingsFrom(client.store.getAll("settings")),
+    }),
+    pf1eCardsContaining: (needle) => {
+      const hits = client.store
+        .getAll("messages")
+        .filter(
+          (m) => typeof m.content === "string" && m.content.includes(needle),
+        );
+      return { count: hits.length, first: hits[0]?.content ?? null };
     },
     pf1eCastResolve: (spec) => {
       const blank = {

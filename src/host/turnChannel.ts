@@ -23,7 +23,7 @@ import type {
 import type { Op } from "../core/ops";
 import type { DocId, UnitId } from "../core/ids";
 import type { OrderQueue } from "../core/strategic";
-import { collectLeaderActors } from "../core/rules";
+import { collectLeaderActors, sceneCellFeet } from "../core/rules";
 import type { RulesContext, RulesWallsContext, UnitView } from "../core/rules";
 import type {
   RealtimeClockConfig,
@@ -167,6 +167,17 @@ export class TurnChannel {
     return [...this.store.getAll("factions")] as FactionDocument[];
   }
 
+  /**
+   * The scene's feet-per-cell scale (P01). One derivation (`sceneCellFeet`) feeds the
+   * deployment spacing and the §12 rules context, so the models' positions, the rules
+   * module's movement/reach and the flanking pass all speak the same grid.
+   */
+  private cellFeet(): number {
+    return sceneCellFeet(
+      this.store.get("scenes", this.sceneId)?.grid?.distance,
+    );
+  }
+
   /** Stable UnitView list (unitIdx in the runner = position here). */
   unitViews(): UnitView[] {
     const out: UnitView[] = [];
@@ -222,7 +233,10 @@ export class TurnChannel {
       grid: {
         type: gridDoc?.type ?? "square",
         size: gridDoc?.size ?? 100,
-        distance: gridDoc?.distance ?? 5,
+        // P01: the same derivation the deployer and the rules module use, so a scene
+        // whose grid distance is missing/non-positive cannot produce two different
+        // scales on the two sides of the sim boundary.
+        distance: sceneCellFeet(gridDoc?.distance),
         units: gridDoc?.units ?? "ft",
         diagonals: gridDoc?.diagonals ?? "555",
       },
@@ -254,7 +268,13 @@ export class TurnChannel {
     let init = initial;
     let deployRanges: Array<[string, [number, number] | null]> | null = null;
     if (!init) {
-      const deployed = deploySnapshot(units, this.factions(), this.sys);
+      // P01: formations deploy one model per scene square, so the per-model rules the
+      // sim applies on top (threat, flanking at the scene's scale) read a layout the
+      // grid actually describes. A scene with no usable grid distance falls back to the
+      // SRD 5-ft square (`sceneCellFeet`), never to the old generic 4-ft spacing.
+      const deployed = deploySnapshot(units, this.factions(), this.sys, {
+        spacing: this.cellFeet(),
+      });
       if (deployed.ranges.some(([, r]) => r !== null)) {
         init = { bytes: deployed.bytes, maxHpMax: deployed.maxHpMax };
         deployRanges = deployed.ranges;
