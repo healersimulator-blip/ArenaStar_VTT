@@ -178,7 +178,8 @@ function meleeLine(derived: PF1eDerived): PF1eDerivedAttack | null {
  * spend a per-round budget against), and if not, which lines does the table read?
  *
  * It lives here rather than in the Svelte handler so the toggle's behaviour is testable
- * without a browser: the handler is then only "ask, hold, resolve, report, commit".
+ * without a browser: the handler is then only "ask, hold, resolve, report, commit" — and,
+ * since D-188, "refuse while a decision is already open" (`"busy"`).
  */
 export type HeldMoveMode =
   /** The app resolves the queue itself, right now, and commits when it is done (D-186). */
@@ -186,7 +187,13 @@ export type HeldMoveMode =
   /** The move is held and the table is asked, per reactor (D-187). */
   | "prompt"
   /** Nobody can spend anything here: report the queue's lines and let the move proceed. */
-  | "report";
+  | "report"
+  /**
+   * D-188: the seam is already holding (`"prompt"`) or resolving (`"resolving"`) a move,
+   * so this one is refused by name instead of replacing — and losing — the first decision.
+   * The caller reports `lines` and cancels the move without touching the held one.
+   */
+  | "busy";
 
 export interface HeldMovePlan {
   mode: HeldMoveMode;
@@ -194,6 +201,8 @@ export interface HeldMovePlan {
   autoResolve: boolean;
   /** The lines to report; empty for `"auto"` and `"prompt"` (they have their own). */
   lines: string[];
+  /** Non-null exactly when `mode === "busy"`: the named reason the move was refused. */
+  busyReason: string | null;
 }
 
 export function planHeldMove(input: {
@@ -204,34 +213,67 @@ export function planHeldMove(input: {
   hasEncounter: boolean;
   /** True when the caller had to assume hostility — named, never silent (D-185). */
   hostilityAssumed?: boolean;
+  /**
+   * D-188: the seam's current state — a prompt is open (`"prompt"`) or an auto-resolution
+   * is in flight (`"resolving"`). While either is true, a move that would hold or resolve
+   * is refused rather than replacing the first decision. A move that only *reports* (no
+   * encounter to spend against) is not refused: there is nothing to hold or lose.
+   */
+  held?: "prompt" | "resolving" | null;
 }): HeldMovePlan {
   const assumption =
     input.hostilityAssumed === true
       ? ["(hostility assumed — tokens without a disposition)"]
       : [];
-  if (input.autoResolve && input.hasEncounter)
-    return { mode: "auto", autoResolve: true, lines: [] };
-  if (
-    !input.autoResolve &&
-    input.hasEncounter &&
-    input.opportunity.queued.length > 0
-  )
-    // The world turned auto-resolution off and there is a ledger to spend: hold the move
-    // and ask. The prompt shows the seam's own lines per reactor (D-187).
-    return { mode: "prompt", autoResolve: false, lines: [] };
-  const lines = input.opportunity.reactors.map((r) => r.line);
-  if (input.autoResolve && !input.hasEncounter) {
-    // The option asked for auto-resolution and there is nothing to spend: saying so is
-    // the difference between "the table resolves this" and "the app silently did not".
-    lines.push(
-      "(no encounter — the AoO budget is per round and per combatant, so these were left to the table)",
-    );
+  const base: HeldMovePlan = (() => {
+    if (input.autoResolve && input.hasEncounter)
+      return { mode: "auto", autoResolve: true, lines: [], busyReason: null };
+    if (
+      !input.autoResolve &&
+      input.hasEncounter &&
+      input.opportunity.queued.length > 0
+    )
+      // The world turned auto-resolution off and there is a ledger to spend: hold the move
+      // and ask. The prompt shows the seam's own lines per reactor (D-187).
+      return {
+        mode: "prompt",
+        autoResolve: false,
+        lines: [],
+        busyReason: null,
+      };
+    const lines = input.opportunity.reactors.map((r) => r.line);
+    if (input.autoResolve && !input.hasEncounter) {
+      // The option asked for auto-resolution and there is nothing to spend: saying so is
+      // the difference between "the table resolves this" and "the app silently did not".
+      lines.push(
+        "(no encounter — the AoO budget is per round and per combatant, so these were left to the table)",
+      );
+    }
+    return {
+      mode: "report",
+      autoResolve: false,
+      lines: lines.concat(assumption),
+      busyReason: null,
+    };
+  })();
+
+  // One seam, one decision at a time. A move that would hold or resolve while a decision
+  // is already open is refused: the GM's first answer cannot be silently replaced by a
+  // second drag, and two auto-resolutions cannot interleave their rolls and ledger spends.
+  const held = input.held ?? null;
+  if (held !== null && (base.mode === "auto" || base.mode === "prompt")) {
+    const reason =
+      held === "prompt"
+        ? "an attack of opportunity is already pending — answer it before another move provokes"
+        : "an attack of opportunity is already being resolved — try the move again when it is done";
+    return {
+      mode: "busy",
+      autoResolve: false,
+      lines: [reason],
+      busyReason: reason,
+    };
   }
-  return {
-    mode: "report",
-    autoResolve: false,
-    lines: lines.concat(assumption),
-  };
+  return base;
 }
 
 /**

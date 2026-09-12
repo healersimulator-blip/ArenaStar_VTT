@@ -5,7 +5,7 @@ export const entry = "file://" + fileURLToPath(new URL("../dist/index.html", imp
 
 type AnySurface = Record<string, () => unknown>;
 
-export const surfaceCall = <T>(page: Page, surface: "app" | "player", method: string): Promise<T> =>
+export const surfaceCall = <T>(page: Page, surface: "app" | "player" | "gm", method: string): Promise<T> =>
   page.evaluate(
     ({ surface, method }) => {
       const e2e = (globalThis as { __vttE2E?: Record<string, AnySurface | null> }).__vttE2E;
@@ -20,8 +20,11 @@ export const hostCall = <T>(page: Page, method: string): Promise<T> =>
   surfaceCall<T>(page, "app", method);
 export const playerCall = <T>(page: Page, method: string): Promise<T> =>
   surfaceCall<T>(page, "player", method);
+/** GM-host surface (strategic fog, §12 readbacks, reaction prompt) — installed by the host app. */
+export const gmCall = <T>(page: Page, method: string): Promise<T> =>
+  surfaceCall<T>(page, "gm", method);
 
-export async function waitForSurface(page: Page, surface: "app" | "player"): Promise<void> {
+export async function waitForSurface(page: Page, surface: "app" | "player" | "gm"): Promise<void> {
   const deadline = Date.now() + 20_000;
   for (;;) {
     const ok = await page.evaluate(
@@ -38,7 +41,7 @@ export async function waitForSurface(page: Page, surface: "app" | "player"): Pro
 /** Call a one-arg surface method (e.g. cacheHas(hash)). */
 export const surfaceCallArg = <T>(
   page: Page,
-  surface: "app" | "player",
+  surface: "app" | "player" | "gm",
   method: string,
   arg: unknown,
 ): Promise<T> =>

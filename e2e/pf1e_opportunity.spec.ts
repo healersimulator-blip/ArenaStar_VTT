@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { entry, hostCall, waitForSurface } from "./lib";
+import { entry, gmCall, hostCall, waitForSurface } from "./lib";
 
 /**
  * P06/D-185 — attacks of opportunity through the real bundled scene (AoN Rules ID 102,
@@ -13,9 +13,10 @@ import { entry, hostCall, waitForSurface } from "./lib";
  * spec's arguments. The default scene's grid is `{ size: 100, distance: 5, units: "ft" }`,
  * so cell (col, row) is the square whose centre is world `(col*100 + 50, row*100 + 50)`.
  *
- * This is the browser half of the same fixtures the unit suites pin; it is **not** run in
- * this sandbox (no Chromium — D-119/D-182 recorded the environment), so it is authored to
- * be executable rather than reported as passing.
+ * This is the browser half of the same fixtures the unit suites pin. It runs against a
+ * local Chromium supplied by `@sparticuz/chromium` (D-119/D-182 recorded the environment's
+ * CDN/mirror blocks and the `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` route; see DECISIONS.md),
+ * so it is executed, not just collected.
  */
 
 interface OpportunityResult {
@@ -212,22 +213,29 @@ const worldSettings = (page: import("@playwright/test").Page) =>
     return app.pf1eWorldSettings();
   });
 
-/** The prompt's read-only view (the App installs it; the spec clicks the real buttons). */
+/** The prompt's read-only view (the App installs it on the gm surface; the spec clicks the real buttons). */
 const reactionPrompt = (page: import("@playwright/test").Page) =>
   page.evaluate(() => {
     const e2e = (globalThis as { __vttE2E?: Record<string, unknown> }).__vttE2E;
-    const app = e2e?.app as
+    const gm = e2e?.gm as
       | {
           reaction: () => {
             sceneId: string;
             combatId: string | null;
             settled: boolean;
-            rows: Array<{ reactorId: string; cell: string; line: string }>;
+            rows: Array<{
+              reactorId: string;
+              cell: string;
+              line: string;
+              used: number;
+              max: number;
+              queued: number;
+            }>;
           } | null;
         }
       | undefined;
-    if (!app) throw new Error("app surface missing");
-    return app.reaction();
+    if (!gm) throw new Error("gm surface missing");
+    return gm.reaction();
   });
 
 /**
@@ -390,11 +398,9 @@ test.describe("PF1e attacks of opportunity (§9/P6 P06)", () => {
     );
   });
 
-  test("reach comes from the authored actor document, so size decides the queue", async ({
+  test("a Medium creature's 1-square reach does not reach (2,0) from (4,0)", async ({
     page,
   }) => {
-    // Same walk, same square: a Large creature's 2-square reach reaches (2,0) from (4,0),
-    // a Medium creature's 1-square reach does not.
     await sceneWith(page, [
       { id: "goblin", col: 0, row: 0 },
       { id: "guard", col: 4, row: 0, size: "Medium" },
@@ -406,7 +412,11 @@ test.describe("PF1e attacks of opportunity (§9/P6 P06)", () => {
       enemiesOf: { goblin: ["guard"] },
     });
     expect(medium.queued).toEqual([]);
+  });
 
+  test("reach comes from the authored actor document: a Large creature's 2-square reach does reach (2,0) from (4,0)", async ({
+    page,
+  }) => {
     await sceneWith(page, [
       { id: "goblin", col: 0, row: 0 },
       { id: "ogre", col: 4, row: 0, size: "Large" },
@@ -725,7 +735,7 @@ test.describe("PF1e manual reaction prompt (D-187)", () => {
           (await hostCall<{ x: number; y: number }>(page, "tokenPos")).x,
       )
       .toBe(450);
-    const notifications = await hostCall<Array<{ message: string }>>(
+    const notifications = await gmCall<Array<{ message: string }>>(
       page,
       "notifications",
     );
@@ -746,5 +756,84 @@ test.describe("PF1e manual reaction prompt (D-187)", () => {
       await hostCall<{ x: number; y: number } | null>(page, "tokenPos"),
     ).toEqual({ x: 50, y: 50 });
     expect((await combatantState(page, "fighter"))?.aooUsed).toBe(0);
+  });
+});
+
+test.describe("PF1e one decision at a time (D-188)", () => {
+  /**
+   * Prompt mode with three tokens: the goblin's drag provokes only the fighter; a second
+   * drag (the fighter stepping down a row) provokes only goblin2, which must be refused
+   * while the first prompt is open — never silently replacing the first decision.
+   */
+  async function busyScene(
+    page: import("@playwright/test").Page,
+  ): Promise<void> {
+    await sceneWith(page, [
+      { id: "goblin", col: 0, row: 0 },
+      { id: "fighter", col: 3, row: 1 },
+      { id: "goblin2", col: 3, row: 2 },
+    ]);
+    const off = await setWorldSetting(page, {
+      key: "autoResolveAoos",
+      value: false,
+    });
+    expect(off).toMatchObject({ ok: true, ops: 1 });
+    await tacticalEncounter(page, {
+      stats: { goblin: GOBLIN_STATS, fighter: FIGHTER_STATS, goblin2: GOBLIN_STATS },
+      initiatives: { goblin: 5, fighter: 20, goblin2: 10 },
+      combatantFlags: {
+        goblin: { acted: true },
+        fighter: { acted: true, aooMax: 1 },
+        goblin2: { acted: true, aooMax: 1 },
+      },
+    });
+    await expect
+      .poll(async () => (await worldSettings(page)).autoResolveAoos)
+      .toBe(false);
+  }
+
+  test("a second provoking drag while a prompt is open is refused, and the first decision survives", async ({
+    page,
+  }) => {
+    await busyScene(page);
+    // First drag: the goblin walks (0,0)→(4,0). The fighter at (3,1) threatens (2,0) and
+    // (3,0); goblin2 at (3,2) threatens none of the squares left, so exactly one creature
+    // is asked and the move is held.
+    await dragToken(page, centre(0, 0), centre(4, 0));
+    const first = await reactionPrompt(page);
+    expect(first).not.toBeNull();
+    expect(first?.rows).toEqual([
+      expect.objectContaining({ reactorId: "fighter" }),
+    ]);
+    expect(
+      await hostCall<{ x: number; y: number } | null>(page, "tokenPos"),
+    ).toEqual({ x: 50, y: 50 });
+
+    // Second drag: the fighter steps (3,1)→(3,2); goblin2 threatens (3,1), so this move
+    // would provoke — but the prompt is already open, so it is refused, not substituted.
+    await dragToken(page, centre(3, 1), centre(3, 2));
+    const still = await reactionPrompt(page);
+    expect(still).not.toBeNull();
+    // The first decision is untouched: still the goblin-vs-fighter question.
+    expect(still?.rows).toEqual([
+      expect.objectContaining({ reactorId: "fighter" }),
+    ]);
+    const notifications = await gmCall<Array<{ message: string }>>(
+      page,
+      "notifications",
+    );
+    expect(
+      notifications.some((n) => n.message.includes("already pending")),
+    ).toBe(true);
+
+    // Settling the original prompt still moves the goblin — the held move was never lost.
+    await page.locator('[data-reaction-strike="fighter"]').click();
+    await expect
+      .poll(
+        async () =>
+          (await hostCall<{ x: number; y: number }>(page, "tokenPos")).x,
+      )
+      .toBe(450);
+    expect(await reactionPrompt(page)).toBeNull();
   });
 });

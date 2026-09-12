@@ -254,17 +254,24 @@ describe("interaction math (§10)", () => {
     expect(panned).toEqual({ x: 80, y: 110, scale: 2 });
   });
 
-  test("dragTarget snaps to grid intersections when a grid is given", () => {
+  test("dragTarget snaps a token's centre to a cell centre, not an intersection", () => {
     const grid: SquareGrid = { type: "square", size: 100 };
-    // 100+30=130→100 ; 100−60=40→0
-    expect(dragTarget({ x: 100, y: 100 }, { x: 30, y: -60 }, grid)).toEqual({
-      x: 100,
-      y: 0,
+    // A token centred on (100,100) is mid-cell (cell 0,0 spans 0..100; centre 50,50),
+    // so a small nudge must snap its centre to (50,50) — never to an intersection.
+    expect(dragTarget({ x: 50, y: 50 }, { x: 0, y: 0 }, grid)).toEqual({
+      x: 50,
+      y: 50,
     });
-    expect(dragTarget({ x: 100, y: 100 }, { x: 60, y: 60 }, grid)).toEqual({
-      x: 200,
-      y: 200,
+    // 50+400=450 → cell (4,0) centre (450,50); 50−60=−10 → cell (−1,0) centre (−50,50).
+    expect(dragTarget({ x: 50, y: 50 }, { x: 400, y: 0 }, grid)).toEqual({
+      x: 450,
+      y: 50,
     });
+    expect(dragTarget({ x: 50, y: 50 }, { x: -60, y: 0 }, grid)).toEqual({
+      x: -50,
+      y: 50,
+    });
+    // Gridless keeps the raw position.
     expect(dragTarget({ x: 100, y: 100 }, { x: 33, y: 21 }, null)).toEqual({
       x: 133,
       y: 121,
@@ -299,8 +306,8 @@ describe("CanvasController (§10)", () => {
       kind: "update",
       ref: { coll: "tokens", id: "hero", parent: { coll: "scenes", id: "s1" } },
     });
-    // snapped: center+delta = (140,130) → snap → (100,100)
-    if (op?.kind === "update") expect(op.diff).toEqual({ x: 100, y: 100 });
+    // snapped to a cell centre: center+delta = (140,130) → (150,150)
+    if (op?.kind === "update") expect(op.diff).toEqual({ x: 150, y: 150 });
     else throw new Error("expected update op");
 
     // live preview rendered the UNSNAPPED position during the drag
@@ -326,9 +333,10 @@ describe("CanvasController (§10)", () => {
     h.source.down(100, 100);
     h.source.move(140, 130);
     h.source.up(140, 130);
-    // Asked once, with the snapped target the Op will carry.
+    // Asked once, with the snapped target the Op will carry (a cell centre, not
+    // an intersection — the token's x/y is its centre).
     expect(asked).toEqual([
-      { from: { x: 100, y: 100 }, to: { x: 100, y: 100 }, snapped: true },
+      { from: { x: 100, y: 100 }, to: { x: 150, y: 150 }, snapped: true },
     ]);
     expect(h.client.submitted).toHaveLength(1);
 
@@ -364,7 +372,7 @@ describe("CanvasController (§10)", () => {
     commits[0]?.();
     const op = h.client.submitted[0]?.[0];
     if (op?.kind !== "update") throw new Error("expected update op");
-    expect(op.diff).toEqual({ x: 200, y: 200 });
+    expect(op.diff).toEqual({ x: 250, y: 250 });
     expect(op.ref).toMatchObject({ coll: "tokens", id: "hero" });
 
     // Idempotent: a second call (a listener that resolves twice) never double-moves.
@@ -561,7 +569,7 @@ describe("token activation without movement side effects", () => {
     h.source.up(183, 177);
     expect(h.client.submitted).toHaveLength(1);
     expect(h.client.submitted[0]?.[0]).toMatchObject({
-      diff: { x: 200, y: 200 },
+      diff: { x: 150, y: 150 },
     });
     h.source.doubleClick(123, 117);
     expect(activated).toEqual(["a"]); // a drag cannot activate a sheet

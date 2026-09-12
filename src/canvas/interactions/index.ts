@@ -17,7 +17,7 @@
 import type { Camera } from "../camera";
 import { screenToWorld, zoomAt } from "../camera";
 import type { GridSpec } from "../grid";
-import { snapPoint } from "../grid";
+import { snapPoint, snapTokenCenter } from "../grid";
 import { marqueeRect, tokenInMarquee, tokenRect } from "../tokens";
 import type { TokenDocument } from "../../core/documents";
 import type { DocId } from "../../core/ids";
@@ -126,7 +126,9 @@ export function dragTarget(
   const x = token.x + delta.x;
   const y = token.y + delta.y;
   if (!grid) return { x, y };
-  return snapPoint(grid, x, y);
+  // The token's x/y is its centre, so it snaps to a cell centre (never an
+  // intersection — see `snapTokenCenter`); rulers/pings still use `snapPoint`.
+  return snapTokenCenter(grid, x, y);
 }
 
 // ─── Controller ───────────────────────────────────────────────────────────────

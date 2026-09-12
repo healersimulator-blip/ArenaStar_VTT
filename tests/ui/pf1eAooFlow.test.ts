@@ -613,7 +613,12 @@ describe("planHeldMove — who resolves the queue (D-186)", () => {
       autoResolve: true,
       hasEncounter: true,
     });
-    expect(plan).toEqual({ mode: "auto", autoResolve: true, lines: [] });
+    expect(plan).toEqual({
+      mode: "auto",
+      autoResolve: true,
+      lines: [],
+      busyReason: null,
+    });
   });
 
   test("off with an encounter: the move is held and the table is asked (D-187)", () => {
@@ -624,7 +629,12 @@ describe("planHeldMove — who resolves the queue (D-186)", () => {
       hostilityAssumed: true,
     });
     // The prompt carries the seam's lines per reactor, so nothing is reported yet.
-    expect(plan).toEqual({ mode: "prompt", autoResolve: false, lines: [] });
+    expect(plan).toEqual({
+      mode: "prompt",
+      autoResolve: false,
+      lines: [],
+      busyReason: null,
+    });
   });
 
   test("off with no encounter: the queue is reported, since nothing could be spent", () => {
@@ -663,6 +673,73 @@ describe("planHeldMove — who resolves the queue (D-186)", () => {
       "fighter may strike goblin as it leaves (2,0)",
       "(no encounter — the AoO budget is per round and per combatant, so these were left to the table)",
     ]);
+  });
+});
+
+describe("planHeldMove — one decision at a time (D-188)", () => {
+  test("a second provoking move while a prompt is open is refused, not silently replaced", () => {
+    const plan = planHeldMove({
+      opportunity: opportunity([interrupt(0, "t-fighter")]),
+      autoResolve: false,
+      hasEncounter: true,
+      held: "prompt",
+    });
+    expect(plan.mode).toBe("busy");
+    expect(plan.autoResolve).toBe(false);
+    expect(plan.busyReason).toBe(
+      "an attack of opportunity is already pending — answer it before another move provokes",
+    );
+    expect(plan.lines).toEqual([plan.busyReason]);
+  });
+
+  test("a second provoking move while an auto-resolution is in flight is refused too", () => {
+    const plan = planHeldMove({
+      opportunity: opportunity([interrupt(0, "t-fighter")]),
+      autoResolve: true,
+      hasEncounter: true,
+      held: "resolving",
+    });
+    expect(plan.mode).toBe("busy");
+    expect(plan.busyReason).toBe(
+      "an attack of opportunity is already being resolved — try the move again when it is done",
+    );
+  });
+
+  test("the guard also refuses a would-be auto move while a prompt is open", () => {
+    // The world option could have been flipped on between the prompt opening and the second
+    // drag; the seam is still busy either way, so the second move is refused.
+    const plan = planHeldMove({
+      opportunity: opportunity([interrupt(0, "t-fighter")]),
+      autoResolve: true,
+      hasEncounter: true,
+      held: "prompt",
+    });
+    expect(plan.mode).toBe("busy");
+    expect(plan.busyReason).toContain("already pending");
+  });
+
+  test("a move that only reports (no encounter) is not refused while a decision is open", () => {
+    // With no encounter to spend against there is nothing to hold or lose, so the move
+    // proceeds as a report exactly as before D-188.
+    const plan = planHeldMove({
+      opportunity: opportunity([interrupt(0, "t-fighter")]),
+      autoResolve: false,
+      hasEncounter: false,
+      held: "prompt",
+    });
+    expect(plan.mode).toBe("report");
+    expect(plan.busyReason).toBeNull();
+  });
+
+  test("an idle seam (no held state) never reports busy", () => {
+    const plan = planHeldMove({
+      opportunity: opportunity([interrupt(0, "t-fighter")]),
+      autoResolve: false,
+      hasEncounter: true,
+      held: null,
+    });
+    expect(plan.mode).toBe("prompt");
+    expect(plan.busyReason).toBeNull();
   });
 });
 
