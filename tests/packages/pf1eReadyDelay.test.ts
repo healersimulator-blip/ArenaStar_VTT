@@ -14,6 +14,7 @@ import {
 import type {
   CombatDocument,
   CombatantDocument,
+  Json,
 } from "../../src/core/documents";
 import {
   delayTo,
@@ -140,6 +141,56 @@ describe("delayTo — a current combatant moves to a lower count", () => {
       ok: false,
       error: "delay to a whole-number initiative count",
     });
+  });
+
+  test("a delay ticks the delayer's own effect durations and reports expiries", () => {
+    const effect = (id: string, duration: number | null): Json => ({
+      _id: id,
+      type: "effect",
+      name: id,
+      ownership: { default: 1 },
+      flags: { core: { duration } },
+      system: {},
+      changes: [],
+      disabled: false,
+    });
+    const withEffects = (c: CombatantDocument) => ({
+      ...c,
+      flags: {
+        ...(c.flags as object),
+        core: {
+          ...((c.flags as { core?: Record<string, unknown> })?.core ?? {}),
+          effects: {
+            ticked: effect("ticked", 2),
+            untimed: effect("untimed", null),
+          } as unknown as Record<string, Json>,
+        },
+      },
+    });
+    const c = combat([
+      withEffects(combatant("A", 20)),
+      combatant("R", 15),
+      combatant("T", 7),
+    ]);
+    const result = delayTo(c, "A", 2);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const a = result.value.combat.combatants.find((x) => x._id === "A");
+    expect(a).toBeDefined();
+    if (!a) return;
+    const effects = ((
+      a.flags as { core?: { effects?: Record<string, unknown> } }
+    ).core?.effects ?? {}) as Record<
+      string,
+      { flags?: { core?: { duration?: number } } }
+    >;
+    // The timed effect ticked down by one; the undated one persists.
+    expect(effects["ticked"]?.flags?.core?.duration).toBe(1);
+    expect(effects["untimed"]).toBeDefined();
+    // R's effects are untouched by A's delay.
+    expect(
+      result.value.combat.combatants.find((x) => x._id === "R")?.flags,
+    ).toEqual(combatant("R", 15).flags);
   });
 
   test("refuses when the count does not move the combatant later", () => {

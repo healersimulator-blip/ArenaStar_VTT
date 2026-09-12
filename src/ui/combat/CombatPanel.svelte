@@ -55,7 +55,13 @@
     readRoundState,
     startWithSurprise,
     type InitiativeRoll,
+    type PF1eReadyTrigger,
   } from "../../packages/pf1e/combatState";
+  import {
+    delayTo,
+    readyCombatant,
+    resolveReady,
+  } from "../../packages/pf1e/readyDelay";
   import type { PF1eActionSpend } from "../../packages/pf1e/actions";
   import {
     advanceClockOnRoundOf,
@@ -393,6 +399,80 @@
   }
   const effects = $derived(combat ? activeEffects(combat) : []);
 
+  // ---- P07 (D-194): delay / ready controls. --------------------------------
+  // `delayTo`/`readyCombatant`/`resolveReady` are the pure transitions from
+  // `pf1e/readyDelay`; these fields just hold the GM's inline-form input, and the
+  // handlers turn the result into the same `push` every other control uses.
+  let delayFor = $state<string | null>(null);
+  let delayValue = $state("");
+  let readyFor = $state<string | null>(null);
+  let readyAction = $state<"standard" | "move" | "swift" | "free">("standard");
+  let readyTrigger = $state<PF1eReadyTrigger["kind"]>("attack");
+  let readyTarget = $state("");
+  let readyNote = $state("");
+  let fireFor = $state<string | null>(null);
+  let fireTarget = $state("");
+  /** The last fired readied action, so the GM knows to resolve it now. */
+  let firedNote = $state("");
+
+  function doDelay(id: string): void {
+    refresh();
+    if (!combat || !pf1e) return;
+    const result = delayTo($state.snapshot(combat), id, Number(delayValue));
+    error = result.ok ? "" : result.error;
+    if (!result.ok) return;
+    delayFor = null;
+    delayValue = "";
+    push(result.value);
+  }
+
+  function doReady(id: string): void {
+    refresh();
+    if (!combat || !pf1e) return;
+    const action: PF1eActionSpend =
+      readyAction === "move"
+        ? { kind: "move" }
+        : readyAction === "swift"
+          ? { kind: "swift" }
+          : readyAction === "free"
+            ? { kind: "free" }
+            : { kind: "standard", action: "attack" };
+    const trigger: PF1eReadyTrigger = {
+      kind: readyTrigger,
+      ...(readyTarget ? { targetId: readyTarget } : {}),
+      ...(readyNote.trim() ? { note: readyNote.trim() } : {}),
+    };
+    const result = readyCombatant($state.snapshot(combat), id, {
+      action,
+      trigger,
+    });
+    error = result.ok ? "" : result.error;
+    if (!result.ok) return;
+    readyFor = null;
+    readyNote = "";
+    readyTarget = "";
+    push(result.value);
+  }
+
+  function doFireReady(readiedId: string): void {
+    refresh();
+    if (!combat || !pf1e) return;
+    const triggererId = fireTarget || current?._id || "";
+    const result = resolveReady(
+      $state.snapshot(combat),
+      readiedId,
+      triggererId,
+    );
+    error = result.ok ? "" : result.error;
+    if (!result.ok) return;
+    const name =
+      combat.combatants.find((c) => c._id === readiedId)?.name ?? readiedId;
+    firedNote = `${name}'s readied ${result.value.action.kind} action fires — resolve it now (trigger: ${result.value.trigger.kind}).`;
+    fireFor = null;
+    fireTarget = "";
+    push(result.value);
+  }
+
   onMount(() => {
     const offSnapshot = bus.on("snapshot", refresh);
     const offOps = bus.on("ops", refresh);
@@ -444,6 +524,7 @@
     >
   {/if}
   {#if error}<p role="alert">{error}</p>{/if}
+  {#if firedNote}<p role="status" data-fired-note>{firedNote}</p>{/if}
   <label
     >Encounter
     <select
@@ -772,12 +853,14 @@
               </details>
             {/if}
           {/if}
-          <button
-            type="button"
-            title="Manual marker only; does not advance or reschedule a turn. Clears on turn start or round wrap."
-            onclick={() => combat && push(delayCombatant(combat, c._id))}
-            >Mark delayed</button
-          >
+          {#if !pf1e}
+            <button
+              type="button"
+              title="Manual marker only; does not advance or reschedule a turn. Clears on turn start or round wrap."
+              onclick={() => combat && push(delayCombatant(combat, c._id))}
+              >Mark delayed</button
+            >
+          {/if}
           <button
             type="button"
             onclick={() =>
@@ -785,6 +868,44 @@
           >
             {c.defeated ? "Revive" : "Defeat"}
           </button>
+          {#if pf1e && current?._id === c._id && !c.defeated}
+            <button
+              type="button"
+              data-delay={c._id}
+              title="Delay: act later at a lower initiative count — your initiative becomes that count permanently."
+              onclick={() => {
+                delayFor = delayFor === c._id ? null : c._id;
+                delayValue = String(Math.max(0, (c.initiative ?? 0) - 1));
+              }}>Delay</button
+            >
+            <button
+              type="button"
+              data-ready={c._id}
+              title="Ready: spend your standard action to prepare an action with a trigger (does not provoke)."
+              onclick={() => {
+                readyFor = readyFor === c._id ? null : c._id;
+              }}>Ready</button
+            >
+          {/if}
+          {#if pf1e && readCombatantState(c).ready !== null}
+            <span
+              class="effect"
+              data-readied={c._id}
+              title={`Readied ${readCombatantState(c).ready?.action.kind} action — trigger: ${readCombatantState(c).ready?.trigger.kind}${readCombatantState(c).ready?.trigger.note ? ` (${readCombatantState(c).ready?.trigger.note})` : ""}`}
+              >readied</span
+            >
+            {#if current && current._id !== c._id && !c.defeated}
+              <button
+                type="button"
+                data-fire-ready={c._id}
+                title="Fire the readied action now — it resolves just before the chosen combatant's action."
+                onclick={() => {
+                  fireFor = fireFor === c._id ? null : c._id;
+                  fireTarget = current._id;
+                }}>Fire ready</button
+              >
+            {/if}
+          {/if}
           {#if pf1e && current?._id !== c._id}
             <button
               type="button"
@@ -816,6 +937,94 @@
                 : ""}</span
             >
           {/each}
+          {#if pf1e && delayFor === c._id}
+            <div class="row-form" data-delay-form={c._id}>
+              <label
+                >Delay to
+                <input
+                  type="number"
+                  bind:value={delayValue}
+                  aria-label={`Delay ${c.name} to initiative`}
+                /></label
+              >
+              <button
+                type="button"
+                data-confirm-delay={c._id}
+                onclick={() => doDelay(c._id)}>Confirm delay</button
+              >
+              <button type="button" onclick={() => (delayFor = null)}
+                >Cancel</button
+              >
+            </div>
+          {/if}
+          {#if pf1e && readyFor === c._id}
+            <div class="row-form" data-ready-form={c._id}>
+              <label
+                >Action
+                <select bind:value={readyAction} data-ready-action>
+                  <option value="standard">standard</option>
+                  <option value="move">move</option>
+                  <option value="swift">swift</option>
+                  <option value="free">free</option>
+                </select></label
+              >
+              <label
+                >Trigger
+                <select bind:value={readyTrigger} data-ready-trigger>
+                  <option value="attack">attack</option>
+                  <option value="move">move</option>
+                  <option value="cast">cast</option>
+                  <option value="custom">custom</option>
+                </select></label
+              >
+              <label
+                >Target
+                <select bind:value={readyTarget} data-ready-target>
+                  <option value="">anyone</option>
+                  {#each combat.combatants.filter((o) => o._id !== c._id && !o.defeated) as o (o._id)}
+                    <option value={o._id}>{o.name}</option>
+                  {/each}
+                </select></label
+              >
+              <label
+                >Note
+                <input
+                  bind:value={readyNote}
+                  maxlength="120"
+                  placeholder="when the orc enters the doorway"
+                  data-ready-note
+                /></label
+              >
+              <button
+                type="button"
+                data-confirm-ready={c._id}
+                onclick={() => doReady(c._id)}>Confirm ready</button
+              >
+              <button type="button" onclick={() => (readyFor = null)}
+                >Cancel</button
+              >
+            </div>
+          {/if}
+          {#if pf1e && fireFor === c._id}
+            <div class="row-form" data-fire-form={c._id}>
+              <label
+                >Interrupts
+                <select bind:value={fireTarget} data-fire-target>
+                  {#each combat.combatants.filter((o) => o._id !== c._id && !o.defeated) as o (o._id)}
+                    <option value={o._id}>{o.name}</option>
+                  {/each}
+                </select></label
+              >
+              <button
+                type="button"
+                data-confirm-fire={c._id}
+                onclick={() => doFireReady(c._id)}>Fire</button
+              >
+              <button type="button" onclick={() => (fireFor = null)}
+                >Cancel</button
+              >
+            </div>
+          {/if}
         </li>
       {/each}
     </ol>
@@ -852,6 +1061,15 @@
     gap: 4px;
     padding: 2px 4px;
     border-radius: 4px;
+    font-size: 12px;
+    flex-wrap: wrap;
+  }
+  .row-form {
+    flex-basis: 100%;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
     font-size: 12px;
   }
   .order li.active {

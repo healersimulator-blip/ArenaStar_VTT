@@ -254,6 +254,20 @@ function tickEffects(
   return { combatants: next, expired };
 }
 
+/**
+ * End one combatant's turn outside the normal `nextTurn` walk: tick its effect durations and
+ * report what expired. This is the hook a *delay* uses — a combatant that delays ends its turn
+ * on the spot, so its durations tick exactly as they would at a turn boundary, but the round
+ * does not advance and no other combatant is affected (P07/D-194).
+ */
+export function endTurnEffects(
+  combat: CombatDocument,
+  ownerId: string,
+): { combat: CombatDocument; expired: CombatTransition["expired"] } {
+  const tick = tickEffects(combat.combatants, ownerId);
+  return { combat: { ...combat, combatants: tick.combatants }, expired: tick.expired };
+}
+
 /** All active effects across combatants (UI badges). */
 export function activeEffects(combat: CombatDocument): Array<{
   combatantId: string;

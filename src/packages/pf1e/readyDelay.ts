@@ -23,7 +23,12 @@
  */
 import type { CombatDocument, CombatantDocument } from "../../core/documents";
 import { err, okVal, type Result } from "../../core/result";
-import { sortCombatants, currentCombatant } from "../../core/combat";
+import {
+  sortCombatants,
+  currentCombatant,
+  endTurnEffects,
+  type CombatTransition,
+} from "../../core/combat";
 import {
   readCombatantState,
   readRoundState,
@@ -34,11 +39,12 @@ import {
 } from "./combatState";
 import { spendAction, type PF1eActionSpend } from "./actions";
 
-/** One transition's product: the new combat plus the hooks to fire on the global bus. */
-export interface ReadyDelayTransition {
-  combat: CombatDocument;
-  hooks: string[];
-}
+/**
+ * One transition's product. It is exactly core's `CombatTransition` shape — including `expired`,
+ * because a delay ends the delayer's turn on the spot and its effect durations tick — so the
+ * tracker's existing `push` accepts it unchanged.
+ */
+export type ReadyDelayTransition = CombatTransition;
 
 /** A described event a ready might answer (the caller — GM/UI — judges whether it matches). */
 export interface PF1eReadyEvent {
@@ -111,9 +117,22 @@ export function delayTo(
   // Everyone between the old slot and the new slot shifted up one, so the next actor now
   // occupies the combatant's old slot. Pointing `turn` there continues the round exactly
   // once per combatant — the delayer is not revisited this round.
+  const stepped: CombatDocument = {
+    ...combat,
+    turn: oldIndex,
+    combatants: next,
+  };
+  // The delayer's turn ends here: its effect durations tick exactly as they would at a turn
+  // boundary, and the expired ones report the same hook `nextTurn` fires for them.
+  const ended = endTurnEffects(stepped, combatantId);
   return okVal({
-    combat: { ...combat, turn: oldIndex, combatants: next },
-    hooks: ["combat:turn:end", "combat:combatant:delay"],
+    combat: ended.combat,
+    hooks: [
+      "combat:turn:end",
+      "combat:combatant:delay",
+      ...ended.expired.map(() => "combat:effect:expire"),
+    ],
+    expired: ended.expired,
   });
 }
 
@@ -169,6 +188,7 @@ export function readyCombatant(
       ),
     },
     hooks: ["combat:combatant:ready"],
+    expired: [],
   });
 }
 
@@ -255,6 +275,7 @@ export function resolveReady(
   return okVal({
     combat: { ...combat, turn: readyIndex, combatants: next },
     hooks: ["combat:combatant:ready:resolve"],
+    expired: [],
     action: fired.action,
     trigger: fired.trigger,
   });
