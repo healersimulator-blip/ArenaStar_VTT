@@ -10,7 +10,9 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   PF1E_PACK_FIREBALL_MASS_BATTLE,
+  PF1E_PACK_BURNING_HANDS_MASS_BATTLE,
   parsePackSpellOrder,
+  spellRangeFeet,
 } from "../../src/packages/pf1e/spellPacks";
 
 interface PackSpellEntry {
@@ -29,6 +31,7 @@ const pack = JSON.parse(readFileSync(packPath, "utf8")) as {
   entries: PackSpellEntry[];
 };
 const fireball = pack.entries.find((e) => e.id === "fireball");
+const burningHands = pack.entries.find((e) => e.id === "burning-hands");
 
 describe("pack ↔ code parity for the reference Fireball", () => {
   it("the in-code mirror matches the fields the shipped pack actually carries", () => {
@@ -59,6 +62,72 @@ describe("pack ↔ code parity for the reference Fireball", () => {
     expect(mb?.radiusFeet).toBe(20);
     expect(sys?.area).toBe("20-ft.-radius spread");
   });
+
+  it("the pack's range is long, matching CRB p.283 (D-164)", () => {
+    const sys = fireball?.data.system as Record<string, unknown> | undefined;
+    const mb = sys?.massBattle as Record<string, unknown> | undefined;
+    expect(mb?.rangeCategory).toBe("long");
+    expect(sys?.range).toBe("long (400 ft. + 40 ft./level)");
+  });
+});
+
+describe("pack ↔ code parity for the reference Burning Hands (D-171)", () => {
+  it("the in-code mirror matches the fields the shipped pack actually carries", () => {
+    expect(burningHands).toBeDefined();
+    if (!burningHands) return;
+    const sys = burningHands.data.system;
+    const mirror = PF1E_PACK_BURNING_HANDS_MASS_BATTLE.system as Record<
+      string,
+      unknown
+    >;
+    const packMb = sys.massBattle as Record<string, unknown>;
+    const mirrorMb = mirror.massBattle as Record<string, unknown>;
+    // Same contract as Fireball: every field the sim consumes is mirrored; `notes` is
+    // prose and the one deliberate omission — asserted, not assumed.
+    const omitted = Object.keys(packMb).filter((k) => !(k in mirrorMb));
+    expect(omitted).toEqual(["notes"]);
+    const rest = Object.fromEntries(
+      Object.entries(packMb).filter(([k]) => k !== "notes"),
+    );
+    expect(mirrorMb).toEqual(rest);
+    expect(mirror.savingThrow).toBe(sys.savingThrow);
+    expect(mirror.spellResistance).toBe(sys.spellResistance);
+  });
+
+  it("the pack carries the CRB pg. 251 numbers: 15-ft cone, 1d4/level, max 5d4", () => {
+    const sys = burningHands?.data.system as
+      Record<string, unknown> | undefined;
+    const mb = sys?.massBattle as Record<string, unknown> | undefined;
+    expect(mb?.shape).toBe("cone");
+    expect(mb?.radiusFeet).toBe(15);
+    expect(mb?.damageDiceSides).toBe(4);
+    expect(mb?.maxDice).toBe(5);
+    expect(sys?.range).toBe("15 ft.");
+    expect(sys?.area).toBe("cone-shaped burst");
+  });
+
+  it("parses as a caster-origin cone: no range category, dice capped at 5d4", () => {
+    const at = (casterLevel: number) =>
+      parsePackSpellOrder({ entry: burningHands?.data, casterLevel });
+    const r = at(2);
+    expect(r.issues).toEqual([]);
+    expect(r.ok).toBe(true);
+    expect(r.order).toMatchObject({
+      spellName: "Burning Hands",
+      shape: "cone",
+      radius: 15,
+      rangeCategory: null, // a cone shoots away from the caster — no designated point
+      saveType: "ref",
+      halfOnSave: true,
+      evasionApplies: true,
+      damageType: "fire",
+      spellResistance: true,
+    });
+    expect(at(1).order?.damageDiceCount).toBe(1);
+    expect(at(2).order?.damageDiceCount).toBe(2);
+    expect(at(5).order?.damageDiceCount).toBe(5);
+    expect(at(20).order?.damageDiceCount).toBe(5); // "maximum 5d4"
+  });
 });
 
 describe("parsePackSpellOrder", () => {
@@ -70,6 +139,7 @@ describe("parsePackSpellOrder", () => {
       spellName: "Fireball",
       shape: "circle",
       radius: 20, // the pack, not the old hard-coded 15
+      rangeCategory: "long", // CRB p.283: "Range long (400 ft. + 40 ft./level)"
       saveType: "ref",
       halfOnSave: true,
       evasionApplies: true,
@@ -145,6 +215,7 @@ describe("parsePackSpellOrder", () => {
           massBattle: {
             shape: "circle",
             radiusFeet: 10,
+            rangeCategory: "medium",
             saveType: "ref",
             halfOnSave: true,
             damageDiceCount: 1,
@@ -168,6 +239,7 @@ describe("parsePackSpellOrder", () => {
           massBattle: {
             shape: "circle",
             radiusFeet: 10,
+            rangeCategory: "close",
             saveType: "fort",
             halfOnSave: true,
             evasion: true,
@@ -191,6 +263,7 @@ describe("parsePackSpellOrder", () => {
           massBattle: {
             shape: "circle",
             radiusFeet: 10,
+            rangeCategory: "medium",
             saveType: "ref",
             halfOnSave: false, // says "half" but does not halve
             damageDiceCount: 1,
@@ -214,6 +287,7 @@ describe("parsePackSpellOrder", () => {
           massBattle: {
             shape: "circle",
             radiusFeet: 10,
+            rangeCategory: "medium",
             saveType: "will",
             halfOnSave: false,
             damageDiceCount: 1,
@@ -232,5 +306,141 @@ describe("parsePackSpellOrder", () => {
     const r = parsePackSpellOrder({ entry: fireball?.data, casterLevel: 0 });
     expect(r.ok).toBe(false);
     expect(r.issues.map((i) => i.field)).toContain("casterLevel");
+  });
+
+  it("names a range category the sim cannot resolve, or a missing one", () => {
+    const entry = (massBattle: Record<string, unknown>) => ({
+      name: "Ranged",
+      system: { savingThrow: "Reflex half", massBattle },
+    });
+    const base = {
+      shape: "circle",
+      radiusFeet: 10,
+      saveType: "ref",
+      halfOnSave: true,
+      damageDiceCount: 1,
+      damageDiceSides: 6,
+    };
+
+    const wrong = parsePackSpellOrder({
+      entry: entry({ ...base, rangeCategory: "miles" }),
+      casterLevel: 5,
+    });
+    expect(wrong.ok).toBe(false);
+    expect(wrong.issues.map((i) => i.field)).toContain(
+      "massBattle.rangeCategory",
+    );
+
+    const missing = parsePackSpellOrder({
+      entry: entry({ ...base }),
+      casterLevel: 5,
+    });
+    expect(missing.ok).toBe(false);
+    expect(missing.issues.map((i) => i.field)).toContain(
+      "massBattle.rangeCategory",
+    );
+  });
+});
+
+describe("cone/line payloads (D-167)", () => {
+  const coneMb = {
+    shape: "cone",
+    radiusFeet: 15, // the cone's length — the spell's own Range entry (CRB p.214)
+    saveType: "ref",
+    halfOnSave: true,
+    damageDiceCount: 1,
+    damageDiceSides: 6,
+  };
+  const coneEntry = {
+    name: "Burning Spray",
+    system: { savingThrow: "Reflex half", massBattle: coneMb },
+  };
+
+  it("parses a cone without a range category — cones shoot away from the caster", () => {
+    const r = parsePackSpellOrder({ entry: coneEntry, casterLevel: 3 });
+    expect(r.ok).toBe(true);
+    expect(r.order).toMatchObject({
+      shape: "cone",
+      radius: 15,
+      rangeCategory: null,
+      widthFeet: null,
+    });
+  });
+
+  it("parses a line and carries its corridor width", () => {
+    const r = parsePackSpellOrder({
+      entry: {
+        name: "Test Line",
+        system: {
+          savingThrow: "Reflex half",
+          massBattle: {
+            ...coneMb,
+            shape: "line",
+            radiusFeet: 60,
+            widthFeet: 5,
+          },
+        },
+      },
+      casterLevel: 5,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.order).toMatchObject({
+      shape: "line",
+      radius: 60,
+      widthFeet: 5,
+      rangeCategory: null,
+    });
+  });
+
+  it("names a line with no usable corridor width", () => {
+    const r = parsePackSpellOrder({
+      entry: {
+        name: "Wide Line",
+        system: {
+          savingThrow: "Reflex half",
+          massBattle: { ...coneMb, shape: "line" },
+        },
+      },
+      casterLevel: 5,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.issues.map((i) => i.field)).toContain("massBattle.widthFeet");
+  });
+
+  it("still requires a range category for circle shapes", () => {
+    const r = parsePackSpellOrder({
+      entry: {
+        name: "Round",
+        system: {
+          savingThrow: "Reflex half",
+          massBattle: { ...coneMb, shape: "circle" },
+        },
+      },
+      casterLevel: 5,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.issues.map((i) => i.field)).toContain("massBattle.rangeCategory");
+  });
+});
+
+describe("spellRangeFeet — the standard range categories (CRB p.213)", () => {
+  it("close: 25 ft, +5 ft per two full caster levels", () => {
+    expect(spellRangeFeet("close", 1)).toBe(25);
+    expect(spellRangeFeet("close", 2)).toBe(30);
+    expect(spellRangeFeet("close", 3)).toBe(30); // "every two FULL caster levels"
+    expect(spellRangeFeet("close", 5)).toBe(35);
+    expect(spellRangeFeet("close", 10)).toBe(50);
+  });
+
+  it("medium: 100 ft + 10 ft per caster level", () => {
+    expect(spellRangeFeet("medium", 1)).toBe(110);
+    expect(spellRangeFeet("medium", 5)).toBe(150);
+    expect(spellRangeFeet("medium", 10)).toBe(200);
+  });
+
+  it("long: 400 ft + 40 ft per caster level", () => {
+    expect(spellRangeFeet("long", 1)).toBe(440);
+    expect(spellRangeFeet("long", 5)).toBe(600);
+    expect(spellRangeFeet("long", 10)).toBe(800);
   });
 });

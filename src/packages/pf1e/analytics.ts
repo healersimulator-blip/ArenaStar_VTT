@@ -82,7 +82,6 @@ export class PF1eBattleAnalyticsCollector {
     entry.rawDamageDealt += metrics.rawDamageDealt;
     entry.drAbsorbed += metrics.drAbsorbed;
     entry.drBypassed += metrics.drBypassed;
-    entry.srBlocked += metrics.srBlocked;
     entry.netDamageDealt += metrics.netDamageDealt;
     entry.killsCount += metrics.killsCount;
     entry.aooExecuted += metrics.aooExecuted;
@@ -100,6 +99,19 @@ export class PF1eBattleAnalyticsCollector {
     entry.killsCount += metrics.killsCount;
     entry.concentrationPassed += metrics.concentrationPassed;
     entry.concentrationFailed += metrics.concentrationFailed;
+    entry.aooExecuted += metrics.aooExecuted;
+    entry.aooHits += metrics.aooHits;
+  }
+
+  /**
+   * Attribute spell kills to the unit that LOST the models (D-165, M11): `recordSpell`
+   * books `killsCount` on the caster, but `deathsCount` — the advertised field for the
+   * dying side — had no event source at all until now.
+   */
+  recordSpellKills(unitId: string, deaths: number): void {
+    if (deaths <= 0) return;
+    const entry = this.ensureUnit(unitId);
+    entry.deathsCount += deaths;
   }
 
   recordHealing(unitId: string, healed: number): void {
@@ -167,20 +179,83 @@ export class PF1eBattleAnalyticsCollector {
   }
 }
 
+/**
+ * RFC-4180 field encoding: a field containing a comma, double quote, or line break is
+ * wrapped in double quotes and every embedded quote is doubled. Unit ids are authored
+ * names in practice, so an unquoted comma in one corrupts every column after it — the
+ * Gap List called this out despite the work plan's "RFC-4180" claim.
+ */
+function csvField(value: string | number): string {
+  const text = String(value);
+  if (/[",\n\r]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
+}
+
+function csvRow(fields: Array<string | number>): string {
+  return fields.map(csvField).join(",");
+}
+
 export function exportAnalyticsToCsv(report: PF1eBattleReport): string {
   const lines: string[] = [
-    "Unit ID,Attacks,Hits,Misses,Hit %,Misfires,Damage,Kills,Heals,DR Absorbed,DR Bypassed,SR Blocked,Saves Passed,Saves Failed",
+    csvRow([
+      "Unit ID",
+      "Attacks",
+      "Hits",
+      "Misses",
+      "Hit %",
+      "Misfires",
+      "Damage",
+      "Kills",
+      "Heals",
+      "DR Absorbed",
+      "DR Bypassed",
+      "SR Blocked",
+      "Saves Passed",
+      "Saves Failed",
+    ]),
   ];
 
   for (const u of Object.values(report.units)) {
     lines.push(
-      `${u.unitId},${u.totalAttacks},${u.hits},${u.misses},${u.hitPercentage},${u.misfiresCount},${u.netDamageDealt},${u.killsCount},${u.damageHealed},${u.drAbsorbed},${u.drBypassed},${u.srBlocked},${u.savesPassed},${u.savesFailed}`,
+      csvRow([
+        u.unitId,
+        u.totalAttacks,
+        u.hits,
+        u.misses,
+        u.hitPercentage,
+        u.misfiresCount,
+        u.netDamageDealt,
+        u.killsCount,
+        u.damageHealed,
+        u.drAbsorbed,
+        u.drBypassed,
+        u.srBlocked,
+        u.savesPassed,
+        u.savesFailed,
+      ]),
     );
   }
 
   const t = report.totals;
   lines.push(
-    `TOTALS,${t.totalAttacks},${t.hits},${t.misses},${t.hitPercentage},${t.misfiresCount},${t.netDamageDealt},${t.killsCount},${t.damageHealed},${t.drAbsorbed},${t.drBypassed},${t.srBlocked},${t.savesPassed},${t.savesFailed}`,
+    csvRow([
+      "TOTALS",
+      t.totalAttacks,
+      t.hits,
+      t.misses,
+      t.hitPercentage,
+      t.misfiresCount,
+      t.netDamageDealt,
+      t.killsCount,
+      t.damageHealed,
+      t.drAbsorbed,
+      t.drBypassed,
+      t.srBlocked,
+      t.savesPassed,
+      t.savesFailed,
+    ]),
   );
 
   return lines.join("\n");

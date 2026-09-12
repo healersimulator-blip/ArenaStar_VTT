@@ -30,12 +30,25 @@
  *    `system.pf1e.pendingCast`), `resolvePendingCompletion` fires it just
  *    before the caster's next turn, and `resolvePendingDisruption` resolves
  *    damage taken mid-casting (DC 10 + damage + spell level).
+ *    D-162 completes the held-charge consumers: a held charge carries a
+ *    `charges` count for multi-touch spells (Chill Touch holds one per
+ *    caster level), `resolveChargeAllyTouches` touches up to six willing
+ *    allies as a full-round action, and `resolveChargeWeaponRelease`
+ *    discharges through a normal unarmed/natural weapon attack — normal
+ *    attack bonus vs normal AC, weapon damage plus the spell's full
+ *    resolution on a hit, the charge kept on a miss.
+ *    D-163 wires swift/quickened timing (Rules IDs 157/158): a swift- or
+ *    free-time cast, or a GM-declared quickened one, spends the caster
+ *    combatant's per-turn swift action through the D-131 ledger ("only one
+ *    such spell in any round"), is refused by name when the swift action is
+ *    gone, and narrates the no-attack-of-opportunity timing on the card.
  */
 import type { Op } from "../../core/ops";
 import type { PermissionUser } from "../../core/ownership";
 import type {
   ActorDocument,
   CombatDocument,
+  Json,
   MessageDocument,
 } from "../../core/documents";
 import type { PF1eDerived } from "../../packages/pf1e/actor";
@@ -74,7 +87,12 @@ import {
   pendingCastFromSystem,
 } from "../../packages/pf1e/pendingCast";
 import {
+  PF1E_ALLY_TOUCH_MAX,
+  PF1E_HELD_CHARGE_MAX_CHARGES,
+  consumeHeldCharge,
+  consumeHeldCharges,
   criticalDamageTotal,
+  heldChargeCount,
   heldChargeDiff,
   heldChargeFromSystem,
   resolveTouchAttack,
@@ -84,6 +102,11 @@ import { pf1eSheetEdit, sheetRecord, isPF1eActor } from "./pf1eSheetModel";
 import { pf1eSpellbookEdit } from "./pf1eSpellbook";
 import { awaitRollMessage, dieFaceOf } from "./pf1eResolveFlow";
 import { can } from "../../core/permissions";
+import {
+  readCombatantState,
+  spendCombatantAction,
+} from "../../packages/pf1e/combatState";
+import { actionRefusal } from "../../packages/pf1e/actions";
 
 /** The structural slice of ClientSync the flow needs (tests fake exactly this). */
 export interface CastFlowClient {
@@ -147,6 +170,29 @@ export interface PF1eCastFlowParams {
    * document as `pendingCast` (Rules ID 147). Absent = an immediate cast.
    */
   castingTime?: PF1eCastingTime;
+  /**
+   * Charges for a multi-touch spell held on a melee miss (D-162): spells
+   * like Chill Touch deliver "up to one time per level" (CRB pg. 255), so
+   * the held charge carries a count. Ignored unless `touch === "melee"` —
+   * validated and refused by name otherwise (a ranged touch cannot be held).
+   * Absent or 1 = an ordinary single-delivery touch spell.
+   */
+  charges?: number;
+  /**
+   * D-163: the GM declares the spell quickened (Quicken Spell feat). The
+   * casting rides the turn's swift action — "You can cast a quickened spell
+   * ... as a swift action. Only one such spell can be cast in any round, and
+   * such spells don't count toward your normal limit of one spell per round"
+   * (Rules ID 158) — and provokes no attack of opportunity. Refused for a
+   * casting time of 1 round or more.
+   */
+  quickened?: boolean;
+  /**
+   * D-163: the caster's combatant in `combat`, whose per-turn action ledger
+   * (`flags.pf1e.actions`) gates and records the swift-action spend of a
+   * swift/free/quickened cast. Without both, swift usage is the GM's call.
+   */
+  combatantId?: string;
 }
 
 /**
@@ -312,6 +358,12 @@ interface SpellEffectInput {
    * (×2, Rules ID 131) before SR/save/energy-resistance composition.
    */
   critical?: boolean;
+  /**
+   * D-162: the unarmed/natural release adds its weapon damage ON TOP of the
+   * spell's composition, so the flow must not write the spell-only HP — the
+   * caller applies one combined write. The SR-ledger op is still emitted.
+   */
+  skipHpWrite?: boolean;
 }
 
 type SpellEffectResult =
@@ -481,24 +533,28 @@ async function runSpellEffect(
     ops.push({
       kind: "update",
       ref: { coll: "combats", id: (input.combat as CombatDocument)._id },
-      diff: srOvercomeDiff(
-        input.casterActor._id,
-        input.targetActor._id,
-        round,
-      ),
+      diff: srOvercomeDiff(input.casterActor._id, input.targetActor._id, round),
     });
   }
 
   // ── the HP write (permission-checked; a refused write is narrated) ────────
   let hpWriteError: string | null = null;
-  if (target.dealt > 0) {
+  if (target.dealt > 0 && input.skipHpWrite !== true) {
     const after = input.targetDerived.hp - target.dealt;
     const edit = pf1eSheetEdit(input.targetActor, user, "hp", String(after));
     if (edit.error !== null) hpWriteError = edit.error;
     else ops.push(...edit.ops);
   }
 
-  return { ok: true, ops, sr, saveBonus, saveTotal, result: target, hpWriteError };
+  return {
+    ok: true,
+    ops,
+    sr,
+    saveBonus,
+    saveTotal,
+    result: target,
+    hpWriteError,
+  };
 }
 
 /**
@@ -539,6 +595,65 @@ export async function resolveCastFlow(
     !(PF1E_ENERGY_TYPES as readonly string[]).includes(authored.energyType)
   )
     return fail(`Unknown energy type "${String(authored.energyType)}".`);
+  // D-162: charges belong to a held melee touch — nothing else can hold them.
+  if (params.charges !== undefined) {
+    if (params.touch !== "melee")
+      return fail(
+        "Charges apply only to a melee touch spell that can be held; ranged touch attacks cannot be held.",
+      );
+    if (
+      !Number.isInteger(params.charges) ||
+      params.charges < 1 ||
+      params.charges > PF1E_HELD_CHARGE_MAX_CHARGES
+    )
+      return fail(
+        `Charges must be an integer 1–${String(PF1E_HELD_CHARGE_MAX_CHARGES)}.`,
+      );
+  }
+
+  // ── D-163 swift/quickened timing (Rules IDs 157/158): a swift- or free-time
+  //    cast, or a quickened one, rides the turn's swift action — "You can
+  //    perform only one single swift action per turn" — and the ledger is the
+  //    "only one such spell in any round" gate. The spend is computed here
+  //    (before any bookkeeping or die) but lands with the batched ops below. ──
+  if (params.quickened === true && params.castingTime === "longer")
+    return fail(
+      "A quickened spell comes into effect as a swift action this round — it cannot use a casting time of 1 round or more.",
+    );
+  const swiftTiming =
+    params.quickened === true ||
+    params.castingTime === "swift" ||
+    params.castingTime === "free";
+  let swiftSpendCombat: CombatDocument | null = null;
+  if (
+    swiftTiming &&
+    params.combat !== null &&
+    params.combat !== undefined &&
+    params.combatantId !== undefined
+  ) {
+    const member = params.combat.combatants.find(
+      (c) => c._id === params.combatantId,
+    );
+    if (member !== undefined) {
+      const refusal = actionRefusal(readCombatantState(member).actions, {
+        kind: "swift",
+        action: "cast-quickened",
+      });
+      if (refusal !== null)
+        return fail(
+          `Cannot cast "${spell.name}" as a swift action: ${refusal}.`,
+        );
+      const spent = spendCombatantAction(params.combat, params.combatantId, {
+        kind: "swift",
+        action: "cast-quickened",
+      });
+      if (!spent.ok)
+        return fail(
+          `Cannot cast "${spell.name}" as a swift action: ${spent.error}.`,
+        );
+      swiftSpendCombat = spent.value;
+    }
+  }
 
   // ── the C03a gate, diceless half (D-157): an illegal casting is refused
   //    before any die rolls and spends nothing ──────────────────────────────
@@ -572,6 +687,20 @@ export async function resolveCastFlow(
   //    cast publishes nothing: slot spend + prepared expense (D-155 builders) ──
   const warnings: string[] = [];
   const ops: Op[] = [];
+  if (swiftSpendCombat !== null) {
+    ops.push({
+      kind: "update",
+      ref: { coll: "combats", id: swiftSpendCombat._id },
+      diff: { combatants: swiftSpendCombat.combatants as unknown as Json[] },
+    });
+  }
+  if (swiftTiming) {
+    warnings.push(
+      params.quickened === true
+        ? "cast as a quickened swift action — does not provoke attacks of opportunity and does not count against the one-spell-per-round limit"
+        : "cast as a swift action — does not provoke attacks of opportunity",
+    );
+  }
   const spend = pf1eSpellbookEdit(params.casterActor, casterDerived, user, {
     kind: "spend",
     level: slotLevel,
@@ -870,7 +999,9 @@ export async function resolveCastFlow(
       ? casterDerived.abilityMods.str
       : casterDerived.abilityMods.dex;
     const touchBonus =
-      casterDerived.baseAttack + touchAbility + casterDerived.sizeEntry.attackAc;
+      casterDerived.baseAttack +
+      touchAbility +
+      casterDerived.sizeEntry.attackAc;
     const touchBonusStr =
       touchBonus >= 0 ? `+ ${touchBonus}` : `- ${Math.abs(touchBonus)}`;
     if (params.willing === true) {
@@ -901,11 +1032,19 @@ export async function resolveCastFlow(
         bonus: touchBonus,
         touchAc: params.targetDerived.ac.touch,
       });
-      if (!touch.ok) return fail(touch.error ?? "The touch attack was malformed.");
-      touchSummary = { kind: params.touch, total: touch.total, hit: touch.hit, threat: touch.threat };
+      if (!touch.ok)
+        return fail(touch.error ?? "The touch attack was malformed.");
+      touchSummary = {
+        kind: params.touch,
+        total: touch.total,
+        hit: touch.hit,
+        threat: touch.threat,
+      };
       touchCardLine = `${melee ? "Melee" : "Ranged"} touch attack [[${touch.total}|1d20 ${touchBonusStr}]] vs touch AC ${params.targetDerived.ac.touch} — ${touch.hit ? (touch.threat ? "HIT (threatens a critical)" : "hit") : "MISS"}.`;
       if (touch.hit && touch.threat) {
-        if (touchCriticalNeedsConfirmation(true, authored.damageFormula !== "")) {
+        if (
+          touchCriticalNeedsConfirmation(true, authored.damageFormula !== "")
+        ) {
           // "another attack roll with all the same modifiers as the attack
           // roll you just made" (Rules ID 131), against the same touch AC.
           const confId = client.roll(
@@ -953,6 +1092,10 @@ export async function resolveCastFlow(
             ...(authored.energyType !== undefined
               ? { energyType: authored.energyType }
               : {}),
+            // D-162: a multi-touch spell holds its full charge count here.
+            ...(params.charges !== undefined && params.charges > 1
+              ? { charges: params.charges }
+              : {}),
           }),
         });
         const card = castTouchMissCardContent(
@@ -961,6 +1104,9 @@ export async function resolveCastFlow(
             spellName: spell.name,
             spellLevel: spell.level,
             targetName: params.targetName,
+            ...(params.charges !== undefined && params.charges > 1
+              ? { charges: params.charges }
+              : {}),
           },
           touchCardLine,
           true,
@@ -1137,8 +1283,19 @@ export type PF1eTouchDeliveryOutcome =
       sr: PF1eSrResult;
       result: Extract<PF1eSpellTargetResult, { ok: true }>;
       hpWriteError: string | null;
+      /**
+       * D-162: deliveries left on a multi-charge held spell after this touch
+       * consumed one; absent when the last charge discharged.
+       */
+      chargesRemaining?: number;
       /** Total is null for a willing auto-touch (no roll was made). */
-      touch: { total: number | null; hit: true; threat: boolean; auto?: boolean; critical?: boolean };
+      touch: {
+        total: number | null;
+        hit: true;
+        threat: boolean;
+        auto?: boolean;
+        critical?: boolean;
+      };
     }
   | {
       ok: true;
@@ -1164,7 +1321,11 @@ export async function resolveTouchDelivery(
     ok: false,
     error,
   });
-  if (!isPF1eActor(params.casterActor) || !user || !can(user, "update", params.casterActor, "actors"))
+  if (
+    !isPF1eActor(params.casterActor) ||
+    !user ||
+    !can(user, "update", params.casterActor, "actors")
+  )
     return fail("You do not have permission to act for this caster.");
   const charge = heldChargeFromSystem(
     params.casterActor.system as Record<string, unknown>,
@@ -1176,7 +1337,9 @@ export async function resolveTouchDelivery(
     charge.energyType !== undefined &&
     !(PF1E_ENERGY_TYPES as readonly string[]).includes(charge.energyType)
   )
-    return fail(`The held charge's energy type "${charge.energyType}" is unknown.`);
+    return fail(
+      `The held charge's energy type "${charge.energyType}" is unknown.`,
+    );
   const dc = params.casterDerived.spellSaveDc[charge.level];
   if (dc === null || dc === undefined)
     return fail(
@@ -1215,8 +1378,13 @@ export async function resolveTouchDelivery(
       bonus: touchBonus,
       touchAc: params.targetDerived.ac.touch,
     });
-    if (!touch.ok) return fail(touch.error ?? "The touch attack was malformed.");
-    deliveryTouch = { total: touch.total, hit: touch.hit, threat: touch.threat };
+    if (!touch.ok)
+      return fail(touch.error ?? "The touch attack was malformed.");
+    deliveryTouch = {
+      total: touch.total,
+      hit: touch.hit,
+      threat: touch.threat,
+    };
     touchLine = `Melee touch attack [[${touch.total}|1d20 ${touchBonusStr}]] vs touch AC ${params.targetDerived.ac.touch} — ${touch.hit ? (touch.threat ? "HIT (threatens a critical)" : "hit") : "MISS"}.`;
     if (touch.hit && touch.threat) {
       if (touchCriticalNeedsConfirmation(true, charge.damageFormula !== "")) {
@@ -1286,7 +1454,11 @@ export async function resolveTouchDelivery(
     };
   }
 
-  // The touch landed: the held spell takes effect and the charge clears.
+  // The touch landed: the held spell takes effect. D-162: a multi-charge
+  // spell keeps holding `charges − 1`; the last charge clears the path.
+  const afterDelivery = consumeHeldCharge(charge);
+  if (afterDelivery !== null)
+    touchLine += ` Charges remaining: ${String(heldChargeCount(afterDelivery))}.`;
   const authored: PF1eCastFlowParams["authored"] = {
     saveType: charge.saveType,
     severity: charge.severity as PF1eSaveSeverity,
@@ -1318,7 +1490,7 @@ export async function resolveTouchDelivery(
   ops.push({
     kind: "update",
     ref: { coll: "actors", id: params.casterActor._id },
-    diff: heldChargeDiff(null),
+    diff: heldChargeDiff(afterDelivery),
   });
   const slotLevel = charge.slotLevel ?? charge.level;
   const card = castResolutionCardContent(
@@ -1369,6 +1541,9 @@ export async function resolveTouchDelivery(
     sr: effect.sr,
     result: effect.result,
     hpWriteError: effect.hpWriteError,
+    ...(afterDelivery !== null
+      ? { chargesRemaining: heldChargeCount(afterDelivery) }
+      : {}),
     touch: {
       total: deliveryTouch === null ? null : deliveryTouch.total,
       hit: true,
@@ -1558,6 +1733,8 @@ export function castTouchMissCardContent(
     spellName: string;
     spellLevel: number;
     targetName: string;
+    /** D-162: a multi-touch spell holds more than one delivery. */
+    charges?: number;
   },
   touchLine: string | null,
   held: boolean,
@@ -1571,7 +1748,9 @@ export function castTouchMissCardContent(
   if (touchLine !== null) lines.push(touchLine);
   lines.push(
     held
-      ? "The charge is held — deliver it with a touch attack; it dissipates if another spell is cast."
+      ? ctx.charges !== undefined && ctx.charges > 1
+        ? `The charge is held with ${ctx.charges} deliveries remaining — each successful touch consumes one; it dissipates if another spell is cast.`
+        : "The charge is held — deliver it with a touch attack; it dissipates if another spell is cast."
       : "The spell is spent to no effect.",
   );
   for (const warning of warnings) lines.push(`⚠ ${warning}`);
@@ -1636,7 +1815,9 @@ export async function resolvePendingCompletion(
       `The ${pending.name} was begun at a different target — complete it there or lose the spell.`,
     );
   if (!(PF1E_SAVE_SEVERITIES as readonly string[]).includes(pending.severity))
-    return fail(`The pending spell's severity "${pending.severity}" is unknown.`);
+    return fail(
+      `The pending spell's severity "${pending.severity}" is unknown.`,
+    );
   if (
     pending.energyType !== undefined &&
     !(PF1E_ENERGY_TYPES as readonly string[]).includes(pending.energyType)
@@ -1777,7 +1958,9 @@ export async function resolvePendingDisruption(
   );
   if (pending === null) return fail("There is no pending casting to disrupt.");
   if (!Number.isInteger(params.damage) || params.damage < 0)
-    return fail("The interruption damage must be a whole number of hit points.");
+    return fail(
+      "The interruption damage must be a whole number of hit points.",
+    );
   const dc = 10 + params.damage + pending.level;
   const rollId = client.roll(
     "1d20",
@@ -1834,4 +2017,603 @@ export async function resolvePendingDisruption(
   client.submit([{ kind: "create", coll: "messages", data: cardMessage }]);
   if (ops.length > 0) client.submit(ops);
   return { ok: true, lost, dc, total, spellName: pending.name };
+}
+
+/* ------------------------------------------------------------------ *
+ * P5/C03 held-charge consumers (D-162).
+ *
+ * Transcribed before encoding (R02): AoN Rules ID 133 ("Cast a Spell",
+ * CRB pg. 183, "Holding the Charge") — "You can touch one friend as a
+ * standard action or up to six friends as a full-round action.
+ * Alternatively, you may make a normal unarmed attack (or an attack with a
+ * natural weapon) while holding a charge. In this case, you aren't
+ * considered armed and you provoke attacks of opportunity as normal for the
+ * attack. If your unarmed attack or natural weapon attack normally doesn't
+ * provoke attacks of opportunity, neither does this attack. If the attack
+ * hits, you deal normal damage for your unarmed attack or natural weapon
+ * and the spell discharges. If the attack misses, you are still holding
+ * the charge." Multi-charge held spells come from the spell description
+ * (Chill Touch, CRB pg. 255: "You can use this melee touch attack up to
+ * one time per level"); each delivery consumes one charge.
+ * ------------------------------------------------------------------ */
+
+/** One willing target of the full-round ally touch (D-162). */
+export interface PF1eAllyTouchTarget {
+  name: string;
+  actor: ActorDocument;
+  derived: PF1eDerived;
+  feats?: readonly string[];
+}
+
+export interface PF1eAllyTouchesParams {
+  casterActor: ActorDocument;
+  casterDerived: PF1eDerived;
+  /** 1–6 willing targets ("up to six friends as a full-round action"). */
+  targets: readonly PF1eAllyTouchTarget[];
+  combat?: CombatDocument | null;
+  srOvercomeByCaller?: boolean;
+}
+
+export type PF1eAllyTouchesOutcome =
+  | {
+      ok: true;
+      /** Targets actually touched (all of them — willing touches auto-hit). */
+      touched: number;
+      /** Deliveries left afterwards; absent when the spell discharged. */
+      chargesRemaining?: number;
+      spellName: string;
+      perTarget: Array<{ name: string; hpWriteError: string | null }>;
+    }
+  | { ok: false; error: string };
+
+/**
+ * Touch willing allies with a held charge: "You can touch one friend as a
+ * standard action or up to six friends as a full-round action" (Rules ID
+ * 133). No attack rolls — "You can automatically touch one friend" — each
+ * touched ally receives the spell's full resolution (its own damage roll,
+ * SR check and saving throw) and one charge is consumed per ally.
+ */
+export async function resolveChargeAllyTouches(
+  client: CastFlowClient,
+  user: PermissionUser | null,
+  params: PF1eAllyTouchesParams,
+): Promise<PF1eAllyTouchesOutcome> {
+  const fail = (error: string): PF1eAllyTouchesOutcome => ({
+    ok: false,
+    error,
+  });
+  if (
+    !isPF1eActor(params.casterActor) ||
+    !user ||
+    !can(user, "update", params.casterActor, "actors")
+  )
+    return fail("You do not have permission to act for this caster.");
+  const charge = heldChargeFromSystem(
+    params.casterActor.system as Record<string, unknown>,
+  );
+  if (charge === null) return fail("There is no held charge to touch with.");
+  if (params.targets.length === 0)
+    return fail("Pick at least one willing target to touch.");
+  if (params.targets.length > PF1E_ALLY_TOUCH_MAX)
+    return fail(
+      `A full-round action touches up to ${String(PF1E_ALLY_TOUCH_MAX)} friends, not ${String(params.targets.length)}.`,
+    );
+  const seen = new Set<string>();
+  for (const target of params.targets) {
+    if (seen.has(target.actor._id))
+      return fail(`"${target.name}" is listed more than once.`);
+    seen.add(target.actor._id);
+  }
+  const countLeft = heldChargeCount(charge);
+  if (params.targets.length > countLeft)
+    return fail(
+      `The held ${charge.name} has ${String(countLeft)} ${countLeft === 1 ? "delivery" : "deliveries"} left — not enough for ${String(params.targets.length)} allies.`,
+    );
+  if (!(PF1E_SAVE_SEVERITIES as readonly string[]).includes(charge.severity))
+    return fail(`The held charge's severity "${charge.severity}" is unknown.`);
+  if (
+    charge.energyType !== undefined &&
+    !(PF1E_ENERGY_TYPES as readonly string[]).includes(charge.energyType)
+  )
+    return fail(
+      `The held charge's energy type "${charge.energyType}" is unknown.`,
+    );
+  const dc = params.casterDerived.spellSaveDc[charge.level];
+  if (dc === null || dc === undefined)
+    return fail(
+      `No DC for the held ${charge.name}: the caster has no slots at level ${charge.level} now.`,
+    );
+
+  const authored: PF1eCastFlowParams["authored"] = {
+    saveType: charge.saveType,
+    severity: charge.severity as PF1eSaveSeverity,
+    damageFormula: charge.damageFormula,
+    ...(charge.energyType !== undefined
+      ? { energyType: charge.energyType as PF1eEnergyType }
+      : {}),
+  };
+  const ops: Op[] = [];
+  const perTarget: Array<{ name: string; hpWriteError: string | null }> = [];
+  const targetLines: string[] = [];
+  for (const target of params.targets) {
+    const effect = await runSpellEffect(client, user, {
+      casterActor: params.casterActor,
+      casterDerived: params.casterDerived,
+      spellName: charge.name,
+      authored,
+      dc,
+      targetName: target.name,
+      targetActor: target.actor,
+      targetDerived: target.derived,
+      ...(target.feats !== undefined ? { targetFeats: target.feats } : {}),
+      combat: params.combat,
+      ...(params.srOvercomeByCaller !== undefined
+        ? { srOvercomeByCaller: params.srOvercomeByCaller }
+        : {}),
+    });
+    if (!effect.ok) return fail(`${target.name}: ${effect.error}`);
+    ops.push(...effect.ops);
+    perTarget.push({ name: target.name, hpWriteError: effect.hpWriteError });
+    const saveLine =
+      effect.saveTotal === null
+        ? "no save allowed"
+        : `${charge.saveType.toUpperCase()} save ${String(effect.saveTotal)} vs DC ${String(dc)} — ${effect.result.passed ? "passes" : "fails"}`;
+    const hpAfter = target.derived.hp - effect.result.dealt;
+    targetLines.push(
+      `${target.name}: touched automatically; ${saveLine}; ${String(effect.result.dealt)} damage${
+        hpAfter !== target.derived.hp
+          ? ` (${String(target.derived.hp)} → ${String(hpAfter)} HP)`
+          : ""
+      }${effect.hpWriteError !== null ? ` — ⚠ HP write rejected: ${effect.hpWriteError}` : ""}.`,
+    );
+  }
+
+  // Consume one charge per touched ally; the last one clears the path.
+  const afterTouch = consumeHeldCharges(charge, params.targets.length);
+  ops.push({
+    kind: "update",
+    ref: { coll: "actors", id: params.casterActor._id },
+    diff: heldChargeDiff(afterTouch),
+  });
+  const card = chargeAllyTouchesCardContent(
+    {
+      casterName: params.casterActor.name,
+      spellName: charge.name,
+      spellLevel: charge.level,
+    },
+    targetLines,
+    params.targets.length,
+    afterTouch === null ? null : heldChargeCount(afterTouch),
+  );
+  const cardMessage: MessageDocument = {
+    _id: globalThis.crypto.randomUUID(),
+    type: "message",
+    name: card.name,
+    ownership: { default: 1 },
+    flags: {},
+    system: {},
+    author: user?.id ?? "",
+    content: card.content,
+    whisper: [],
+    roll: null,
+    flavor: "cast resolution",
+  };
+  client.submit([{ kind: "create", coll: "messages", data: cardMessage }]);
+  if (ops.length > 0) client.submit(ops);
+  return {
+    ok: true,
+    touched: params.targets.length,
+    ...(afterTouch !== null
+      ? { chargesRemaining: heldChargeCount(afterTouch) }
+      : {}),
+    spellName: charge.name,
+    perTarget,
+  };
+}
+
+/** The card for the full-round willing-ally touch (D-162). */
+export function chargeAllyTouchesCardContent(
+  ctx: { casterName: string; spellName: string; spellLevel: number },
+  targetLines: readonly string[],
+  touched: number,
+  chargesLeft: number | null,
+): { name: string; content: string } {
+  const action = touched === 1 ? "a standard action" : "a full-round action";
+  const lines: string[] = [
+    `${ctx.casterName} touches ${String(touched)} willing ${touched === 1 ? "ally" : "allies"} with the held ${ctx.spellName} (level ${String(ctx.spellLevel)}) as ${action} — no attack roll is needed for a willing target.`,
+    ...targetLines,
+    chargesLeft === null
+      ? "The spell is fully discharged."
+      : `Charges remaining: ${String(chargesLeft)}.`,
+  ];
+  return { name: `${ctx.spellName} ally touches`, content: lines.join("\n") };
+}
+
+/** The weapon used to release a held charge (D-162). */
+export interface PF1eChargeReleaseWeapon {
+  name: string;
+  /** The line's normal attack bonus — the release is a normal attack. */
+  attackBonus: number;
+  /** NdM weapon dice, or "" when the line adds no dice. */
+  damageFormula: string;
+  /** The line's static damage bonus (ability + flat + effect mods). */
+  damageBonus: number;
+}
+
+export interface PF1eChargeReleaseParams {
+  casterActor: ActorDocument;
+  casterDerived: PF1eDerived;
+  targetName: string;
+  targetActor: ActorDocument;
+  targetDerived: PF1eDerived;
+  weapon: PF1eChargeReleaseWeapon;
+  targetFeats?: readonly string[];
+  combat?: CombatDocument | null;
+  srOvercomeByCaller?: boolean;
+}
+
+export type PF1eChargeReleaseOutcome =
+  | {
+      ok: true;
+      /** The attack hit: weapon damage dealt and the spell discharged. */
+      released: true;
+      dc: number;
+      sr: PF1eSrResult;
+      result: Extract<PF1eSpellTargetResult, { ok: true }>;
+      /** The weapon damage applied alongside the spell. */
+      weaponDamage: number;
+      weaponCritical: boolean;
+      hpWriteError: string | null;
+      /** Deliveries left afterwards; absent when the spell discharged. */
+      chargesRemaining?: number;
+      attack: { total: number; hit: true; threat: boolean; critical: boolean };
+    }
+  | {
+      ok: true;
+      /** The attack missed; the charge is still held. */
+      released: false;
+      attack: { total: number; hit: false; threat: false };
+      ac: number;
+    }
+  | { ok: false; error: string };
+
+/**
+ * Release a held charge through a normal unarmed or natural weapon attack:
+ * "you may make a normal unarmed attack (or an attack with a natural weapon)
+ * while holding a charge" (Rules ID 133). The attack rolls against the
+ * target's NORMAL AC with the weapon's normal bonus — it is not a touch
+ * attack — and on a hit deals the weapon's normal damage while the spell
+ * discharges through the shared effect pipeline. A miss keeps the charge.
+ * The caster is not considered armed, so the attack provokes as normal;
+ * resolving those attacks of opportunity belongs to P6's interrupt queue.
+ */
+export async function resolveChargeWeaponRelease(
+  client: CastFlowClient,
+  user: PermissionUser | null,
+  params: PF1eChargeReleaseParams,
+): Promise<PF1eChargeReleaseOutcome> {
+  const fail = (error: string): PF1eChargeReleaseOutcome => ({
+    ok: false,
+    error,
+  });
+  if (
+    !isPF1eActor(params.casterActor) ||
+    !user ||
+    !can(user, "update", params.casterActor, "actors")
+  )
+    return fail("You do not have permission to act for this caster.");
+  const charge = heldChargeFromSystem(
+    params.casterActor.system as Record<string, unknown>,
+  );
+  if (charge === null) return fail("There is no held charge to release.");
+  if (!Number.isInteger(params.weapon.attackBonus))
+    return fail("The release attack bonus must be an integer.");
+  if (!Number.isInteger(params.weapon.damageBonus))
+    return fail("The release damage bonus must be an integer.");
+  const formula = params.weapon.damageFormula.trim();
+  if (formula !== "" && !DAMAGE_FORMULA.test(formula))
+    return fail(
+      `Weapon damage "${params.weapon.damageFormula}": use NdM, or leave empty.`,
+    );
+  if (!(PF1E_SAVE_SEVERITIES as readonly string[]).includes(charge.severity))
+    return fail(`The held charge's severity "${charge.severity}" is unknown.`);
+  if (
+    charge.energyType !== undefined &&
+    !(PF1E_ENERGY_TYPES as readonly string[]).includes(charge.energyType)
+  )
+    return fail(
+      `The held charge's energy type "${charge.energyType}" is unknown.`,
+    );
+  const dc = params.casterDerived.spellSaveDc[charge.level];
+  if (dc === null || dc === undefined)
+    return fail(
+      `No DC for the held ${charge.name}: the caster has no slots at level ${charge.level} now.`,
+    );
+
+  // ── the normal attack against normal AC (never touch AC) ──────────────────
+  const ac = params.targetDerived.ac.normal;
+  const bonusStr =
+    params.weapon.attackBonus >= 0
+      ? `+ ${params.weapon.attackBonus}`
+      : `- ${Math.abs(params.weapon.attackBonus)}`;
+  const rollId = client.roll(
+    "1d20",
+    "roll",
+    undefined,
+    `${charge.name} release via ${params.weapon.name}`,
+  );
+  const message = await awaitRollMessage(client, rollId);
+  if (message === null) return fail("The release attack never replicated.");
+  const face = dieFaceOf(message);
+  if (face === null)
+    return fail("Could not read the release attack's d20 face.");
+  const total = face + params.weapon.attackBonus;
+  const threat = face === 20;
+  const hit = total >= ac;
+  const attackLine = `${params.weapon.name} attack [[${total}|1d20 ${bonusStr}]] vs AC ${String(ac)} — ${hit ? (threat ? "HIT (threatens a critical)" : "hit") : "MISS"}.`;
+
+  if (!hit) {
+    // "If the attack misses, you are still holding the charge."
+    const card = chargeReleaseMissCardContent(
+      {
+        casterName: params.casterActor.name,
+        spellName: charge.name,
+        spellLevel: charge.level,
+        targetName: params.targetName,
+        weaponName: params.weapon.name,
+      },
+      attackLine,
+    );
+    const cardMessage: MessageDocument = {
+      _id: globalThis.crypto.randomUUID(),
+      type: "message",
+      name: card.name,
+      ownership: { default: 1 },
+      flags: {},
+      system: {},
+      author: user?.id ?? "",
+      content: card.content,
+      whisper: [],
+      roll: null,
+      flavor: "cast resolution",
+    };
+    client.submit([{ kind: "create", coll: "messages", data: cardMessage }]);
+    return {
+      ok: true,
+      released: false,
+      attack: { total, hit: false, threat: false },
+      ac,
+    };
+  }
+
+  // ── the hit: confirm a natural 20, then roll the weapon damage ────────────
+  let weaponCritical = false;
+  let attackNarration = attackLine;
+  if (threat) {
+    // "another attack roll with all the same modifiers" (Rules ID 131),
+    // against the same AC. The confirmation doubles the weapon damage only;
+    // the spell resolves once, on its own save/SR terms.
+    const confId = client.roll(
+      "1d20",
+      "roll",
+      undefined,
+      `${charge.name} release critical confirmation`,
+    );
+    const confMessage = await awaitRollMessage(client, confId);
+    if (confMessage === null)
+      return fail("The critical confirmation never replicated.");
+    const confFace = dieFaceOf(confMessage);
+    if (confFace === null)
+      return fail("Could not read the confirmation's d20 face.");
+    const confTotal = confFace + params.weapon.attackBonus;
+    weaponCritical = confTotal >= ac;
+    attackNarration += ` Critical confirmation [[${confTotal}|1d20 ${bonusStr}]] — ${weaponCritical ? "CRITICAL HIT (weapon damage doubled; the spell is not)." : "not confirmed (regular hit)."}`;
+  }
+  let weaponDamage = params.weapon.damageBonus;
+  if (formula !== "") {
+    const dmgId = client.roll(
+      formula,
+      "roll",
+      undefined,
+      `${params.weapon.name} damage (charge release)`,
+    );
+    const dmgMessage = await awaitRollMessage(client, dmgId);
+    if (dmgMessage === null)
+      return fail("The weapon damage roll never replicated.");
+    if (dmgMessage.roll === null || typeof dmgMessage.roll.total !== "number")
+      return fail("The weapon damage roll carries no total.");
+    weaponDamage =
+      Math.max(0, Math.trunc(dmgMessage.roll.total)) +
+      params.weapon.damageBonus;
+  }
+  if (weaponCritical) weaponDamage = criticalDamageTotal(weaponDamage);
+  const weaponLine = `${params.weapon.name} deals [[${weaponDamage}|${formula === "" ? "no dice" : formula}${params.weapon.damageBonus !== 0 || formula === "" ? ` ${params.weapon.damageBonus >= 0 ? `+ ${params.weapon.damageBonus}` : `- ${Math.abs(params.weapon.damageBonus)}`}` : ""}]] damage${weaponCritical ? " (critical ×2)" : ""}.`;
+
+  // ── the spell discharges through the shared pipeline (no spell-only HP write) ──
+  const authored: PF1eCastFlowParams["authored"] = {
+    saveType: charge.saveType,
+    severity: charge.severity as PF1eSaveSeverity,
+    damageFormula: charge.damageFormula,
+    ...(charge.energyType !== undefined
+      ? { energyType: charge.energyType as PF1eEnergyType }
+      : {}),
+  };
+  const effect = await runSpellEffect(client, user, {
+    casterActor: params.casterActor,
+    casterDerived: params.casterDerived,
+    spellName: charge.name,
+    authored,
+    dc,
+    targetName: params.targetName,
+    targetActor: params.targetActor,
+    targetDerived: params.targetDerived,
+    ...(params.targetFeats !== undefined
+      ? { targetFeats: params.targetFeats }
+      : {}),
+    combat: params.combat,
+    ...(params.srOvercomeByCaller !== undefined
+      ? { srOvercomeByCaller: params.srOvercomeByCaller }
+      : {}),
+    skipHpWrite: true,
+  });
+  if (!effect.ok) return fail(effect.error);
+
+  // ── one combined HP write: weapon damage + spell damage ───────────────────
+  const ops: Op[] = [...effect.ops];
+  let hpWriteError: string | null = null;
+  const totalDealt = weaponDamage + effect.result.dealt;
+  if (totalDealt > 0) {
+    const after = params.targetDerived.hp - totalDealt;
+    const edit = pf1eSheetEdit(params.targetActor, user, "hp", String(after));
+    if (edit.error !== null) hpWriteError = edit.error;
+    else ops.push(...edit.ops);
+  }
+
+  // Consume one charge; a multi-charge spell keeps holding the rest.
+  const afterRelease = consumeHeldCharge(charge);
+  ops.push({
+    kind: "update",
+    ref: { coll: "actors", id: params.casterActor._id },
+    diff: heldChargeDiff(afterRelease),
+  });
+  const card = chargeReleaseCardContent(
+    {
+      casterName: params.casterActor.name,
+      spellName: charge.name,
+      spellLevel: charge.level,
+      targetName: params.targetName,
+    },
+    attackNarration,
+    weaponLine,
+    {
+      dc,
+      sr: effect.sr,
+      saveBonus: effect.saveBonus,
+      saveTotal: effect.saveTotal,
+      result: effect.result,
+    },
+    params.targetDerived.hp,
+    params.targetDerived.hp - totalDealt,
+    hpWriteError,
+    afterRelease === null ? null : heldChargeCount(afterRelease),
+  );
+  const cardMessage: MessageDocument = {
+    _id: globalThis.crypto.randomUUID(),
+    type: "message",
+    name: card.name,
+    ownership: { default: 1 },
+    flags: {},
+    system: {},
+    author: user?.id ?? "",
+    content: card.content,
+    whisper: [],
+    roll: null,
+    flavor: "cast resolution",
+  };
+  client.submit([{ kind: "create", coll: "messages", data: cardMessage }]);
+  if (ops.length > 0) client.submit(ops);
+  return {
+    ok: true,
+    released: true,
+    dc,
+    sr: effect.sr,
+    result: effect.result,
+    weaponDamage,
+    weaponCritical,
+    hpWriteError,
+    ...(afterRelease !== null
+      ? { chargesRemaining: heldChargeCount(afterRelease) }
+      : {}),
+    attack: { total, hit: true, threat, critical: weaponCritical },
+  };
+}
+
+/** The card when the release attack misses (D-162). */
+export function chargeReleaseMissCardContent(
+  ctx: {
+    casterName: string;
+    spellName: string;
+    spellLevel: number;
+    targetName: string;
+    weaponName: string;
+  },
+  attackLine: string,
+): { name: string; content: string } {
+  const lines: string[] = [
+    `${ctx.casterName} strikes ${ctx.targetName} with the ${ctx.weaponName} to release the held ${ctx.spellName} (level ${ctx.spellLevel}).`,
+    attackLine,
+    "The attack misses — the caster is not considered armed, so the attack provokes as normal, and the charge is still held.",
+  ];
+  return { name: `${ctx.spellName} release miss`, content: lines.join("\n") };
+}
+
+/** The card when a held charge discharges through a weapon attack (D-162). */
+export function chargeReleaseCardContent(
+  ctx: {
+    casterName: string;
+    spellName: string;
+    spellLevel: number;
+    targetName: string;
+  },
+  attackLine: string,
+  weaponLine: string,
+  res: {
+    dc: number;
+    sr: PF1eSrResult;
+    saveBonus: number;
+    saveTotal: number | null;
+    result: Extract<PF1eSpellTargetResult, { ok: true }>;
+  },
+  hpBefore: number,
+  hpAfter: number,
+  hpWriteError: string | null,
+  chargesLeft: number | null,
+): { name: string; content: string } {
+  const lines: string[] = [
+    `${ctx.casterName} releases the held ${ctx.spellName} (level ${ctx.spellLevel}) through the attack at ${ctx.targetName} — DC ${res.dc}. The caster is not considered armed, so this attack provokes as normal.`,
+    attackLine,
+  ];
+  if (weaponLine !== "") lines.push(weaponLine);
+  if (res.sr.reused) {
+    lines.push("Spell resistance was already overcome this round — no check.");
+  } else if (res.sr.total !== null) {
+    lines.push(
+      `SR check [[${res.sr.total}|1d20 + caster level]] — ${
+        res.sr.resisted
+          ? "RESISTED: the spell does not affect the target"
+          : "overcome"
+      }.`,
+    );
+  }
+  if (res.saveTotal !== null) {
+    const automatic =
+      res.result.automatic === "failure"
+        ? " (natural 1 — always a failure)"
+        : res.result.automatic === "success"
+          ? " (natural 20 — always a success)"
+          : "";
+    lines.push(
+      `Saving throw [[${res.saveTotal}|1d20 ${
+        res.saveBonus >= 0
+          ? `+ ${res.saveBonus}`
+          : `- ${Math.abs(res.saveBonus)}`
+      }]] vs DC ${res.dc} — ${res.result.passed ? "passes" : "fails"}${automatic}.`,
+    );
+  }
+  for (const note of res.result.notes) lines.push(note);
+  if (res.result.dealt > 0)
+    lines.push(
+      `The discharged spell deals ${String(res.result.dealt)} damage.`,
+    );
+  if (hpAfter !== hpBefore)
+    lines.push(
+      `${ctx.targetName} ${String(hpBefore)} → ${String(hpAfter)} HP.`,
+    );
+  if (hpWriteError !== null) lines.push(`⚠ HP write rejected: ${hpWriteError}`);
+  lines.push(
+    chargesLeft === null
+      ? "The spell is fully discharged."
+      : `Charges remaining: ${String(chargesLeft)}.`,
+  );
+  return { name: `${ctx.spellName} released`, content: lines.join("\n") };
 }

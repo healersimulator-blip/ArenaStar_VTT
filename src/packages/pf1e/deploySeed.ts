@@ -60,6 +60,16 @@ export function rawProfileFromUnit(unit: UnitView): RawPF1eProfile {
   if (s["cmd"] !== undefined) raw.cmd = s["cmd"];
   if (s["cmb"] !== undefined) raw.cmb = s["cmb"];
   if (s["casterLevel"] !== undefined) raw.casterLevel = s["casterLevel"];
+  if (s["castingStatMod"] !== undefined) raw.castingStatMod = s["castingStatMod"];
+  if (s["spellPenetration"] !== undefined) raw.spellPenetration = s["spellPenetration"];
+  // SRD universal monster abilities (D-176): fast healing and regeneration are
+  // per-round healing values, carried as plain numbers in the unit's stats.
+  if (typeof s["fastHealing"] === "number" && Number.isFinite(s["fastHealing"])) {
+    raw.fastHealingVal = Math.max(0, Math.floor(s["fastHealing"]));
+  }
+  if (typeof s["regeneration"] === "number" && Number.isFinite(s["regeneration"])) {
+    raw.regenerationVal = Math.max(0, Math.floor(s["regeneration"]));
+  }
   return raw;
 }
 

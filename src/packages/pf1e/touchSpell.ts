@@ -36,9 +36,36 @@
  *   and do[es] not require a separate action"; "Unless otherwise noted,
  *   ranged touch attacks cannot be held until a later turn."
  *
- * Out of this slice (documented): unarmed/natural delivery of a held charge,
- * touching up to six friends as a full-round action, multi-touch spells (one
- * charge per level), and attacks of opportunity against ranged touch casters.
+ * D-162 transcribed the rest of the same "Holding the Charge" paragraph
+ * (AoN Rules ID 133, verbatim): "You can touch one friend as a standard
+ * action or up to six friends as a full-round action. Alternatively, you may
+ * make a normal unarmed attack (or an attack with a natural weapon) while
+ * holding a charge. In this case, you aren't considered armed and you
+ * provoke attacks of opportunity as normal for the attack. If your unarmed
+ * attack or natural weapon attack normally doesn't provoke attacks of
+ * opportunity, neither does this attack. If the attack hits, you deal normal
+ * damage for your unarmed attack or natural weapon and the spell discharges.
+ * If the attack misses, you are still holding the charge." The delivery is
+ * therefore a NORMAL weapon attack against NORMAL AC — not a touch attack —
+ * and on a hit the weapon's damage and the spell's full resolution both land.
+ *
+ * D-162 also transcribed AoN Rules ID 229 ("Duration", CRB pg. 215,
+ * "Touch Spells and Holding the Charge"): "Some touch spells allow you to
+ * touch multiple targets as part of the spell. You can't hold the charge of
+ * such a spell; you must touch all targets of the spell in the same round
+ * that you finish casting the spell." Multi-charge held spells are a
+ * different, per-spell property: Chill Touch (CRB pg. 255) says "You can use
+ * this melee touch attack up to one time per level" — each touch consumes
+ * one of the spell's charges, so a held charge carries a charge count
+ * (`charges`, default 1) and each successful delivery consumes exactly one.
+ * The "touch multiple targets as part of the spell" restriction is a
+ * spell-specific property this contract does not model; it is a GM call on
+ * which spells may be held at all.
+ *
+ * Out of this slice (documented): attacks of opportunity provoked by ranged
+ * touch attacks and by unarmed/natural release attacks (narrated, resolved
+ * once P6's interrupt queue lands), and the spell-specific no-hold flag for
+ * multi-target touch spells (ID 229).
  */
 import type { Json } from "../../core/documents";
 
@@ -116,6 +143,20 @@ export function criticalDamageTotal(baseTotal: number): number {
  * The held charge — persisted on the caster's own actor document.
  * ------------------------------------------------------------------ */
 
+/**
+ * The most charges a held touch spell can carry. Spell-derived counts scale
+ * with caster level ("up to one time per level", Chill Touch, CRB pg. 255);
+ * the cap is an authoring bound, not a rule.
+ */
+export const PF1E_HELD_CHARGE_MAX_CHARGES = 50;
+
+/**
+ * "You can touch one friend as a standard action or up to six friends as a
+ * full-round action" (Rules ID 133) — the full-round action touches at most
+ * six willing targets.
+ */
+export const PF1E_ALLY_TOUCH_MAX = 6;
+
 /** A charge held after a missed melee touch attack ("holding the charge"). */
 export interface PF1eHeldCharge {
   name: string;
@@ -126,6 +167,48 @@ export interface PF1eHeldCharge {
   saveType: "fort" | "ref" | "will";
   severity: string;
   energyType?: string;
+  /**
+   * Remaining touches the held spell can still deliver (D-162). Absent or 1
+   * for ordinary touch spells; a spell like Chill Touch holds one charge per
+   * caster level ("up to one time per level"). Each successful delivery —
+   * touch attack, willing auto-touch or unarmed/natural release — consumes
+   * exactly one charge.
+   */
+  charges?: number;
+}
+
+/** How many touches the held charge can still deliver (default 1). */
+export function heldChargeCount(charge: PF1eHeldCharge): number {
+  const charges = charge.charges;
+  if (!Number.isInteger(charges) || (charges as number) < 1) return 1;
+  return charges as number;
+}
+
+/**
+ * The charge state after one successful delivery (D-162): a multi-charge
+ * spell keeps holding `charges − 1`; the last charge clears to null. The
+ * caller writes the result with `heldChargeDiff`.
+ */
+export function consumeHeldCharge(
+  charge: PF1eHeldCharge,
+): PF1eHeldCharge | null {
+  const left = heldChargeCount(charge) - 1;
+  if (left <= 0) return null;
+  return { ...charge, charges: left };
+}
+
+/**
+ * Consume `count` charges at once (the full-round ally touch, D-162): the
+ * state after touching `count` willing targets, or null when the spell is
+ * fully discharged. Refuses to consume more charges than are held.
+ */
+export function consumeHeldCharges(
+  charge: PF1eHeldCharge,
+  count: number,
+): PF1eHeldCharge | null {
+  const left = heldChargeCount(charge) - count;
+  if (left <= 0) return null;
+  return { ...charge, charges: left };
 }
 
 /** Read the held charge from an actor's system block; null when absent. */
@@ -156,6 +239,14 @@ export function heldChargeFromSystem(
     ...(typeof charge.energyType === "string"
       ? { energyType: charge.energyType }
       : {}),
+    // D-162: a non-integer or out-of-range count reads as the single-charge
+    // default rather than rejecting the actor (a refused value is not a
+    // guessed one; the schema still names the error for authored writes).
+    ...(Number.isInteger(charge.charges) &&
+    (charge.charges as number) >= 1 &&
+    (charge.charges as number) <= PF1E_HELD_CHARGE_MAX_CHARGES
+      ? { charges: charge.charges as number }
+      : {}),
   };
 }
 
@@ -177,6 +268,7 @@ export function heldChargeDiff(
   };
   if (charge.slotLevel !== undefined) value.slotLevel = charge.slotLevel;
   if (charge.energyType !== undefined) value.energyType = charge.energyType;
+  if (charge.charges !== undefined) value.charges = charge.charges;
   return { "system.pf1e.heldCharge": value };
 }
 

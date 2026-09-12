@@ -61,9 +61,36 @@ export interface RulesContext {
   walls: RulesWallsContext;
   factions: readonly FactionDocument[];
   armies: ReadonlyArray<import("./strategic").ArmyDocument>;
-  /** Actor.system (or full doc JSON) for leaders attached to units; key = actorId. */
+  /**
+   * Actor documents (full doc JSON) for leaders attached to units; **key = unit id**, so a
+   * RulesModule looks up `ctx.leaderActors[unit.id]` (M07). Built by
+   * `collectLeaderActors`; empty when no unit has a leader token bound to an actor.
+   */
   leaderActors: Record<DocId, Json>;
   worldSettings: Record<string, Json>;
+}
+
+/**
+ * Collect leader actor documents for hero-led units (M07): unit → its leader token → the
+ * token's actor → the actor document, keyed by unit id. Units without a token, tokens
+ * without an actor and actor ids that resolve to nothing are skipped silently — the
+ * consuming module keeps its unit-stats fallback for them.
+ */
+export function collectLeaderActors(input: {
+  units: ReadonlyArray<{ id: string; leaderTokenId: DocId | null }>;
+  tokens: ReadonlyArray<{ _id: DocId; actorId?: DocId }> | null | undefined;
+  getActor: (actorId: DocId) => Json | null | undefined;
+}): Record<DocId, Json> {
+  const out: Record<DocId, Json> = {};
+  if (!input.tokens) return out;
+  for (const unit of input.units) {
+    if (!unit.leaderTokenId) continue;
+    const token = input.tokens.find((t) => t._id === unit.leaderTokenId);
+    if (!token || !token.actorId) continue;
+    const actor = input.getActor(token.actorId);
+    if (actor !== null && actor !== undefined) out[unit.id] = actor;
+  }
+  return out;
 }
 
 /** Structured-clone view of a Unit handed to the RulesModule. */

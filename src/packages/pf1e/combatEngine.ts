@@ -22,7 +22,6 @@ export interface PF1eCombatMetrics {
   rawDamageDealt: number;
   drAbsorbed: number;
   drBypassed: number;
-  srBlocked: number;
   netDamageDealt: number;
   /** Nonlethal damage dealt (SRD: Minimum Damage / Dealing Nonlethal Damage). */
   nonlethalDealt: number;
@@ -50,6 +49,15 @@ export interface PF1eCombatOptions {
   isFlanked?: boolean;
   /** When true (default), evaluates full PF1e rules: Firearms range/misfires, DR material bypass, and Condition penalties. */
   highFidelity?: boolean;
+  /**
+   * Cap on how many of the profile's BAB **iterative** attacks each attacker model
+   * makes (default: the full routine, e.g. BAB 9 swings twice at 9/+4). This ONLY
+   * truncates the iterative routine — it does not model effects that add or reshape
+   * attacks outside that routine, such as Haste's extra attack or Vital Strike's
+   * standard-action damage dice (D-178). SRD Cleave uses it to swing exactly ONE
+   * extra attack at full BAB rather than a whole second full-attack routine.
+   */
+  maxIterativeAttacks?: number;
 }
 
 export interface PF1eCombatResult {
@@ -198,7 +206,6 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
     rawDamageDealt: 0,
     drAbsorbed: 0,
     drBypassed: 0,
-    srBlocked: 0,
     netDamageDealt: 0,
     nonlethalDealt: 0,
     killsCount: 0,
@@ -222,7 +229,9 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
     const profile = registry.get(profileId);
     if (!profile) continue;
 
+    let attacksTaken = 0;
     for (const attackBonus of profile.iteratives) {
+      if (opts.maxIterativeAttacks !== undefined && attacksTaken >= opts.maxIterativeAttacks) break;
       if (defIdxPtr >= defenders.length) break;
       let targetIdx = defenders[defIdxPtr] ?? 0;
 
@@ -234,6 +243,7 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
       if (defIdxPtr >= defenders.length) break;
 
       metrics.totalAttacks++;
+      attacksTaken++;
 
       const defStatus = pool.status[targetIdx] ?? 0;
 
@@ -583,7 +593,8 @@ export function resolvePF1eAoO(
   adjacentEnemies: number[],
   registry: PF1eProfileRegistry,
   rng: PF1eRng
-): { hits: number; totalDamage: number } {
+): { executed: number; hits: number; totalDamage: number } {
+  let executed = 0;
   let hits = 0;
   let totalDamage = 0;
 
@@ -597,6 +608,8 @@ export function resolvePF1eAoO(
     const used = pool.sys["aooUsed"]?.[enemyIdx] ?? 0;
     if (used >= profile.maxAoos) continue;
 
+    // A swing is taken (M11: "AoO executed"), even when it misses.
+    executed++;
     if (pool.sys["aooUsed"]) {
       pool.sys["aooUsed"][enemyIdx] = used + 1;
     }
@@ -620,5 +633,5 @@ export function resolvePF1eAoO(
     }
   }
 
-  return { hits, totalDamage };
+  return { executed, hits, totalDamage };
 }

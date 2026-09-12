@@ -9,7 +9,7 @@ export interface LeadershipAuraOptions {
   pool: ModelPool;
   grid: SpatialGrid;
   heroModelIdx: number;
-  radius?: number; // default 30ft (6 grid units)
+  radius?: number; // feet (SpatialGrid.queryPoint radii are in world/feet coordinates); default 30
   moraleBonus?: number;
 }
 
@@ -24,7 +24,10 @@ export function applyHeroLeadershipAuras(opts: LeadershipAuraOptions): Leadershi
   const hy = pool.y[heroModelIdx] ?? 0;
   const heroUnitIdx = pool.unitIdx[heroModelIdx];
 
-  const neighbors = grid.queryPoint(hx, hy, radius / 5, pool);
+  // `radius` is already in feet — model coordinates are feet and `queryPoint` compares
+  // against feet-squared, so it goes in unconverted. (D-172: the old `radius / 5`
+  // assumed grid-cell units and shrank the documented 30-ft aura to 6 ft.)
+  const neighbors = grid.queryPoint(hx, hy, radius, pool);
   const buffedModels: number[] = [];
 
   for (const n of neighbors) {
@@ -43,66 +46,4 @@ export function applyHeroLeadershipAuras(opts: LeadershipAuraOptions): Leadershi
   }
 
   return { buffedModels };
-}
-
-export interface CleaveOverkillOptions {
-  pool: ModelPool;
-  grid: SpatialGrid;
-  targetModelIdx: number;
-  damageDealt: number;
-  enemyUnitIdx: number;
-}
-
-export interface CleaveOverkillResult {
-  modelsSlain: number[];
-  cleavedDamage: number;
-}
-
-export function applyHeroCleaveOverkill(opts: CleaveOverkillOptions): CleaveOverkillResult {
-  const { pool, grid, targetModelIdx, damageDealt, enemyUnitIdx } = opts;
-
-  const tx = pool.x[targetModelIdx] ?? 0;
-  const ty = pool.y[targetModelIdx] ?? 0;
-
-  const targetHp = pool.hp[targetModelIdx] ?? 0;
-  const modelsSlain: number[] = [];
-
-  let excessDamage = damageDealt - targetHp;
-
-  // First target takes full damage up to its HP
-  pool.hp[targetModelIdx] = 0;
-  pool.status[targetModelIdx] = (pool.status[targetModelIdx] ?? 0) | ModelStatus.dead;
-  modelsSlain.push(targetModelIdx);
-
-  if (excessDamage <= 0) {
-    return { modelsSlain, cleavedDamage: 0 };
-  }
-
-  const initialCleavedDamage = excessDamage;
-
-  // Query adjacent models within 5ft reach
-  const neighbors = grid.queryPoint(tx, ty, 1.5, pool);
-
-  for (const n of neighbors) {
-    if (excessDamage <= 0) break;
-    const adjacentIdx = n.index;
-    if (adjacentIdx === targetModelIdx) continue;
-    if (pool.unitIdx[adjacentIdx] !== enemyUnitIdx) continue;
-
-    const status = pool.status[adjacentIdx] ?? 0;
-    if ((status & ModelStatus.dead) !== 0) continue;
-
-    const adjHp = pool.hp[adjacentIdx] ?? 0;
-    if (excessDamage >= adjHp) {
-      excessDamage -= adjHp;
-      pool.hp[adjacentIdx] = 0;
-      pool.status[adjacentIdx] = (pool.status[adjacentIdx] ?? 0) | ModelStatus.dead;
-      modelsSlain.push(adjacentIdx);
-    } else {
-      pool.hp[adjacentIdx] = adjHp - excessDamage;
-      excessDamage = 0;
-    }
-  }
-
-  return { modelsSlain, cleavedDamage: initialCleavedDamage - excessDamage };
 }

@@ -38,6 +38,8 @@
   } from "./pf1eSpellbook";
   import {
     resolveCastFlow,
+    resolveChargeAllyTouches,
+    resolveChargeWeaponRelease,
     resolvePendingCompletion,
     resolvePendingDisruption,
     resolveTouchDelivery,
@@ -45,6 +47,7 @@
     type PF1eConcentrationDeclaration,
   } from "./pf1eCastFlow";
   import {
+    heldChargeCount,
     heldChargeDiff,
     heldChargeFromSystem,
   } from "../../packages/pf1e/touchSpell";
@@ -52,7 +55,10 @@
     pendingCastDiff,
     pendingCastFromSystem,
   } from "../../packages/pf1e/pendingCast";
-  import type { PF1eSaveSeverity, PF1eSaveType } from "../../packages/pf1e/casting";
+  import type {
+    PF1eSaveSeverity,
+    PF1eSaveType,
+  } from "../../packages/pf1e/casting";
   import type { PF1eCastingTime } from "../../packages/pf1e/concentration";
   import type { PF1eEnergyType } from "../../packages/pf1e/healthState";
   import {
@@ -147,6 +153,14 @@
   let castTouch = $state("");
   // D-159: the GM declares the target willing — the touch is automatic.
   let castWilling = $state(false);
+  // D-162: charges for a multi-touch spell (Chill Touch holds one per level).
+  let castCharges = $state("1");
+  // D-163: the GM declares the spell quickened — it rides the swift action.
+  let castQuickened = $state(false);
+  // D-162: allies picked for the full-round willing-ally touch.
+  let allyTouchPicks = $state<Record<string, boolean>>({});
+  // D-162: the authored attack line a held charge is released through.
+  let releaseAttackIndex = $state(0);
   // C03a gate (D-157): components line + the GM-declared situation.
   let castComponents = $state("");
   let castTime = $state("standard");
@@ -506,8 +520,7 @@
       severity: castSeverity,
       damageFormula: castDamage.trim(),
     };
-    if (castEnergy !== "")
-      authored.energyType = castEnergy as PF1eEnergyType;
+    if (castEnergy !== "") authored.energyType = castEnergy as PF1eEnergyType;
     // The C03a gate (D-157) runs whenever a Components line is declared.
     const gateComponents = castComponents.trim();
     const declarations: PF1eConcentrationDeclaration[] = [];
@@ -557,10 +570,23 @@
         combat: linked.combat,
         ...(castSrOvercome ? { srOvercomeByCaller: true } : {}),
         castingTime: castTime as PF1eCastingTime,
-        ...(castTouch !== ""
-          ? { touch: castTouch as "melee" | "ranged" }
-          : {}),
+        ...(castTouch !== "" ? { touch: castTouch as "melee" | "ranged" } : {}),
         ...(castTouch !== "" && castWilling ? { willing: true } : {}),
+        // D-162: a melee touch may hold several deliveries (Chill Touch holds
+        // one per level); garbage in the field surfaces the flow's named error.
+        ...(castTouch === "melee" && castCharges.trim() !== ""
+          ? {
+              charges: (() => {
+                const parsed = Number.parseInt(castCharges.trim(), 10);
+                return Number.isNaN(parsed) ? Number.NaN : parsed;
+              })(),
+            }
+          : {}),
+        // D-163: a quickened cast rides the turn's swift action.
+        ...(castQuickened ? { quickened: true } : {}),
+        ...(linked.combatantId !== null && linked.combatantId !== undefined
+          ? { combatantId: linked.combatantId }
+          : {}),
         ...(gateComponents !== ""
           ? {
               gate: {
@@ -640,10 +666,146 @@
       if (!outcome.ok) {
         castError = outcome.error;
       } else if (!outcome.delivered) {
-        castWarning =
-          "the delivery missed — the charge is still held";
+        castWarning = "the delivery missed — the charge is still held";
       } else if (outcome.hpWriteError !== null) {
         castWarning = outcome.hpWriteError;
+      } else if (outcome.chargesRemaining !== undefined) {
+        castWarning = `the charge landed — ${outcome.chargesRemaining} deliveries remain`;
+      }
+    } finally {
+      castBusy = false;
+    }
+  }
+
+  // D-162 — touch willing allies with the held charge: one friend as a
+  // standard action, up to six friends as a full-round action (Rules ID
+  // 133). No attack rolls; each touched ally consumes one charge.
+  async function touchWillingAllies(): Promise<void> {
+    castError = "";
+    castWarning = "";
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) {
+      castError = "Actor is no longer available.";
+      return;
+    }
+    const pickedIds = Object.entries(allyTouchPicks)
+      .filter(([, picked]) => picked)
+      .map(([id]) => id);
+    if (pickedIds.length === 0) {
+      castError = "Pick at least one willing ally to touch.";
+      return;
+    }
+    const targets = [];
+    for (const id of pickedIds) {
+      const target = client.store.get("actors", id) as
+        ActorDocument | undefined;
+      if (!target) continue;
+      const targetView = pf1eSheetView(target);
+      targets.push({
+        name: target.name,
+        actor: target,
+        derived: targetView.derived,
+        feats: Array.isArray(targetView.authored.feats)
+          ? (targetView.authored.feats as string[])
+          : [],
+      });
+    }
+    if (targets.length === 0) {
+      castError = "The picked allies are no longer available.";
+      return;
+    }
+    const casterView = pf1eSheetView(current, {
+      combat: linked.combat,
+      combatantId: linked.combatantId,
+    });
+    castBusy = true;
+    try {
+      const outcome = await resolveChargeAllyTouches(client, client.user, {
+        casterActor: current,
+        casterDerived: casterView.derived,
+        targets,
+        combat: linked.combat,
+        ...(castSrOvercome ? { srOvercomeByCaller: true } : {}),
+      });
+      if (!outcome.ok) {
+        castError = outcome.error;
+      } else {
+        const hpErrors = outcome.perTarget
+          .filter((t) => t.hpWriteError !== null)
+          .map((t) => `${t.name}: ${t.hpWriteError}`);
+        const bits = [
+          outcome.chargesRemaining !== undefined
+            ? `touched ${String(outcome.touched)} ${outcome.touched === 1 ? "ally" : "allies"} — ${String(outcome.chargesRemaining)} deliveries remain`
+            : `touched ${String(outcome.touched)} ${outcome.touched === 1 ? "ally" : "allies"} — the spell is fully discharged`,
+          ...hpErrors,
+        ];
+        castWarning = bits.join(" · ");
+        allyTouchPicks = {};
+      }
+    } finally {
+      castBusy = false;
+    }
+  }
+
+  // D-162 — release the held charge through a normal unarmed or natural
+  // weapon attack: the line's normal bonus vs the target's normal AC; on a
+  // hit the weapon deals its damage and the spell discharges (Rules ID 133).
+  async function releaseHeldChargeThroughAttack(): Promise<void> {
+    castError = "";
+    castWarning = "";
+    const target = castTargetId
+      ? (client.store.get("actors", castTargetId) as ActorDocument | undefined)
+      : undefined;
+    if (!target) {
+      castError = "Pick a target to release the held charge.";
+      return;
+    }
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) {
+      castError = "Actor is no longer available.";
+      return;
+    }
+    const line = d.attacks[releaseAttackIndex];
+    if (!line) {
+      castError =
+        "No authored attack line is available for the release — add an unarmed strike or natural weapon first.";
+      return;
+    }
+    const casterView = pf1eSheetView(current, {
+      combat: linked.combat,
+      combatantId: linked.combatantId,
+    });
+    const targetView = pf1eSheetView(target);
+    castBusy = true;
+    try {
+      const outcome = await resolveChargeWeaponRelease(client, client.user, {
+        casterActor: current,
+        casterDerived: casterView.derived,
+        targetName: target.name,
+        targetActor: target,
+        targetDerived: targetView.derived,
+        weapon: {
+          name: line.name,
+          attackBonus: line.attackBonus,
+          damageFormula: line.damageDice ?? "",
+          damageBonus: line.damageBonus,
+        },
+        targetFeats: Array.isArray(targetView.authored.feats)
+          ? (targetView.authored.feats as string[])
+          : [],
+        combat: linked.combat,
+        ...(castSrOvercome ? { srOvercomeByCaller: true } : {}),
+      });
+      if (!outcome.ok) {
+        castError = outcome.error;
+      } else if (!outcome.released) {
+        castWarning = "the release attack missed — the charge is still held";
+      } else if (outcome.hpWriteError !== null) {
+        castWarning = outcome.hpWriteError;
+      } else if (outcome.chargesRemaining !== undefined) {
+        castWarning = `the charge discharged — ${String(outcome.chargesRemaining)} deliveries remain`;
       }
     } finally {
       castBusy = false;
@@ -656,7 +818,11 @@
     const current = client.store.get("actors", doc._id) as
       ActorDocument | undefined;
     if (!current) return;
-    if (!isPF1eActor(current) || !client.user || !can(client.user, "update", current, "actors")) {
+    if (
+      !isPF1eActor(current) ||
+      !client.user ||
+      !can(client.user, "update", current, "actors")
+    ) {
       castError = "You do not have permission to act for this caster.";
       return;
     }
@@ -1018,8 +1184,8 @@
         {:else}
           {slotReadout.view.summary}
           <span class="note"
-            >({slotReadout.keyAbility.toUpperCase()} {slotReadout.keyAbilityScore ??
-              "?"}, {slotReadout.mode})</span
+            >({slotReadout.keyAbility.toUpperCase()}
+            {slotReadout.keyAbilityScore ?? "?"}, {slotReadout.mode})</span
           >
         {/if}
       </dd>
@@ -1253,7 +1419,9 @@
       <h4>
         Spell slots · {spellbook.mode} · keyed to {d.spellKeyAbility.toUpperCase()}
       </h4>
-      {#if spellbookWarning}<p role="alert" data-spellbook-warning>{spellbookWarning}</p>{/if}
+      {#if spellbookWarning}<p role="alert" data-spellbook-warning>
+          {spellbookWarning}
+        </p>{/if}
       {#if spellbook.ledger.grantedLevels.length === 0}
         <p class="note">No slots authored for any level.</p>
       {:else}
@@ -1281,7 +1449,8 @@
                     <button
                       type="button"
                       data-slot-spend={row.level}
-                      onclick={() => updateSpellbook({ kind: "spend", level: row.level })}
+                      onclick={() =>
+                        updateSpellbook({ kind: "spend", level: row.level })}
                     >
                       Spend
                     </button>
@@ -1289,7 +1458,8 @@
                       type="button"
                       data-slot-restore={row.level}
                       disabled={row.spent <= 0}
-                      onclick={() => updateSpellbook({ kind: "restore", level: row.level })}
+                      onclick={() =>
+                        updateSpellbook({ kind: "restore", level: row.level })}
                     >
                       Restore
                     </button>
@@ -1367,7 +1537,10 @@
                     onchange={() =>
                       updateSpellbook({ kind: "preparedToggle", index })}
                   />
-                  {row.name} · level {row.level}{#if row.slotLevel !== row.level} (cast at {row.slotLevel}){/if}{#if row.components !== ""} · {row.components}{/if}{#if row.expended} — expended{/if}
+                  {row.name} · level {row.level}{#if row.slotLevel !== row.level}
+                    (cast at {row.slotLevel}){/if}{#if row.components !== ""}
+                    · {row.components}{/if}{#if row.expended}
+                    — expended{/if}
                 </label>
                 {#if editable}
                   <button
@@ -1404,7 +1577,8 @@
       >
         {#if d.spellMode === "prepared" && castPreparedIndex !== null}
           <p class="note" data-cast-prepared-row>
-            Casting prepared row #{castPreparedIndex + 1}{#if spellbook.prepared[castPreparedIndex]}
+            Casting prepared row #{castPreparedIndex +
+              1}{#if spellbook.prepared[castPreparedIndex]}
               — {spellbook.prepared[castPreparedIndex].name}{/if}: name, level
             and slot are pinned to it.
             <button
@@ -1508,6 +1682,27 @@
             /> Willing target (automatic touch, no attack roll)</label
           >
         {/if}
+        {#if castTouch === "melee"}
+          <label
+            >Charges held on a miss
+            <input
+              value={castCharges}
+              oninput={(e) => (castCharges = e.currentTarget.value)}
+              data-cast-charges
+              placeholder="1"
+              size="3"
+            />
+            (one per caster level for spells like <em>chill touch</em>)</label
+          >
+        {/if}
+        <label
+          ><input
+            type="checkbox"
+            bind:checked={castQuickened}
+            data-cast-quickened
+          />
+          Quickened (rides the turn's swift action; no attack of opportunity)</label
+        >
         <fieldset data-cast-gate>
           <legend>Casting gate (components &amp; concentration)</legend>
           <label
@@ -1554,15 +1749,27 @@
             Components not in hand</label
           >
           <label
-            ><input type="checkbox" bind:checked={castDeafened} data-cast-deafened />
+            ><input
+              type="checkbox"
+              bind:checked={castDeafened}
+              data-cast-deafened
+            />
             Deafened</label
           >
           <label
-            ><input type="checkbox" bind:checked={castGrappled} data-cast-grappled />
+            ><input
+              type="checkbox"
+              bind:checked={castGrappled}
+              data-cast-grappled
+            />
             Grappling</label
           >
           <label
-            ><input type="checkbox" bind:checked={castPinned} data-cast-pinned />
+            ><input
+              type="checkbox"
+              bind:checked={castPinned}
+              data-cast-pinned
+            />
             Pinned</label
           >
           <label
@@ -1574,7 +1781,11 @@
             Casting defensively (DC 15 + 2× spell level)</label
           >
           <label
-            ><input type="checkbox" bind:checked={castInjured} data-cast-injured />
+            ><input
+              type="checkbox"
+              bind:checked={castInjured}
+              data-cast-injured
+            />
             Injured while casting — damage taken
             <input
               value={castInjuredDamage}
@@ -1588,8 +1799,12 @@
             >Motion
             <select bind:value={castMotion} data-cast-motion>
               <option value="">Steady ground</option>
-              <option value="vigorousMotion">Vigorous motion (DC 10 + level)</option>
-              <option value="violentMotion">Violent motion (DC 15 + level)</option>
+              <option value="vigorousMotion"
+                >Vigorous motion (DC 10 + level)</option
+              >
+              <option value="violentMotion"
+                >Violent motion (DC 15 + level)</option
+              >
               <option value="extremelyViolentMotion"
                 >Extremely violent motion (DC 20 + level)</option
               >
@@ -1599,7 +1814,9 @@
             >Weather
             <select bind:value={castWeather} data-cast-weather>
               <option value="">Calm</option>
-              <option value="windRainSleet">Windy rain or sleet (DC 5 + level)</option>
+              <option value="windRainSleet"
+                >Windy rain or sleet (DC 5 + level)</option
+              >
               <option value="windHailDebris"
                 >Windy hail or dust/debris (DC 10 + level)</option
               >
@@ -1681,9 +1898,12 @@
         <section class="held-charge" data-held-charge>
           <p>
             Holding the charge: <strong>{heldCharge.name}</strong> (level
-            {heldCharge.level}) — deliver it with a melee touch attack, touch a
-            willing friend automatically, or it dissipates when another spell
-            is cast.
+            {heldCharge.level}){#if heldChargeCount(heldCharge) > 1},
+              <strong data-held-charges
+                >{heldChargeCount(heldCharge)} deliveries</strong
+              >{/if}
+            — deliver it with a melee touch attack, touch a willing friend automatically,
+            or it dissipates when another spell is cast.
           </p>
           <button
             type="button"
@@ -1706,6 +1926,69 @@
             data-held-dismiss
             disabled={castBusy}
             onclick={dismissHeldCharge}>Dissipate</button
+          >
+          {#if d.attacks.length > 0}
+            <p class="note">
+              Release through a normal unarmed or natural weapon attack — the
+              line's bonus against the target's normal AC; a hit deals the
+              weapon's damage and discharges the spell, a miss keeps the charge.
+              The caster is not considered armed, so the attack provokes as
+              normal.
+            </p>
+            <label
+              >Weapon
+              <select bind:value={releaseAttackIndex} data-held-release-weapon>
+                {#each d.attacks as attack, i (i)}
+                  <option value={i}
+                    >{attack.name} ({attack.attackBonus >= 0
+                      ? "+"
+                      : ""}{attack.attackBonus})</option
+                  >
+                {/each}
+              </select></label
+            >
+            <button
+              type="button"
+              data-held-release
+              disabled={castBusy || castTargetId === ""}
+              onclick={() => {
+                void releaseHeldChargeThroughAttack();
+              }}>{castBusy ? "Releasing…" : "Release through attack"}</button
+            >
+          {:else}
+            <p class="note">
+              Releasing the charge through an unarmed strike or natural weapon
+              needs an authored attack line.
+            </p>
+          {/if}
+          <p class="note">
+            Touch willing allies: one friend as a standard action (Auto-touch
+            above), or pick up to six friends for one full-round action.
+          </p>
+          <div data-held-ally-list>
+            {#each pf1eTargetActors() as target (target._id)}
+              <label
+                ><input
+                  type="checkbox"
+                  checked={allyTouchPicks[target._id] === true}
+                  onchange={(e) =>
+                    (allyTouchPicks = {
+                      ...allyTouchPicks,
+                      [target._id]: e.currentTarget.checked,
+                    })}
+                  data-ally-touch-pick={target._id}
+                />
+                {target.name}</label
+              >
+            {/each}
+          </div>
+          <button
+            type="button"
+            data-held-ally-touch
+            disabled={castBusy}
+            onclick={() => {
+              void touchWillingAllies();
+            }}>Touch willing allies (full-round)</button
           >
         </section>
       {/if}
@@ -1758,11 +2041,17 @@
         line runs the C03a gate (D-157): legality, armour arcane spell failure
         (arcane tradition, authored <code>armor.spellFailure</code>), deafened
         spoilage and declared concentration checks — a failed check loses the
-        spell and still spends it. A Touch spell (D-158) rolls the touch
-        attack as part of the cast; a missed melee touch holds the charge for
-        later delivery, a missed ranged touch spends the spell. Multi-round
-        casting and metamagic timing (C03 remainder) and area/target-count
-        payloads (C05) are not yet part of this single-target flow.
+        spell and still spends it. A Touch spell (D-158) rolls the touch attack
+        as part of the cast; a missed melee touch holds the charge for later
+        delivery, a missed ranged touch spends the spell. A held charge (D-162)
+        can be delivered by touch, auto-touched onto willing allies (one
+        standard action, or up to six friends as a full-round action), or
+        released through a normal unarmed/natural weapon attack; a multi-touch
+        spell holds one charge per declared count. Swift and quickened casts
+        spend the turn's swift action and never provoke an attack of opportunity
+        (D-163); other metamagic feats, attacks of opportunity against
+        ranged-touch casters and area/target-count payloads (C05) are not yet
+        part of this single-target flow.
       </p>
     </section>
   {:else if tab === "effects"}

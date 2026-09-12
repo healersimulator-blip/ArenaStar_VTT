@@ -23,6 +23,7 @@ import type {
 import type { Op } from "../core/ops";
 import type { DocId, UnitId } from "../core/ids";
 import type { OrderQueue } from "../core/strategic";
+import { collectLeaderActors } from "../core/rules";
 import type { RulesContext, RulesWallsContext, UnitView } from "../core/rules";
 import type {
   RealtimeClockConfig,
@@ -228,7 +229,14 @@ export class TurnChannel {
       walls: wallsCtx,
       factions: this.factions(),
       armies: this.armies(),
-      leaderActors: {},
+      // M07: hero-led units expose their leader actor to the rules (unit id → actor doc).
+      leaderActors: collectLeaderActors({
+        units: this.unitViews(),
+        tokens: scene?.tokens,
+        getActor: (actorId) =>
+          this.store.get("actors", actorId) as unknown as
+            import("../core/documents").Json | undefined,
+      }),
       worldSettings: worldSettingsFrom(this.store.getAll("settings")),
     };
   }

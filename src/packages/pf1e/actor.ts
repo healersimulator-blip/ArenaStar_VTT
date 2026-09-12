@@ -191,6 +191,12 @@ export interface PF1eActorSystem extends PF1eHealthAuthored {
     saveType?: "fort" | "ref" | "will";
     severity?: string;
     energyType?: string;
+    /**
+     * Remaining deliveries for a multi-charge held spell (D-162; Chill Touch
+     * holds one charge per caster level, "up to one time per level", CRB
+     * pg. 255). Absent or 1 for ordinary touch spells.
+     */
+    charges?: number;
   };
   /**
    * A multi-round casting begun but not yet completed (D-161, Rules ID 147):
@@ -583,7 +589,11 @@ export function parsePF1eActorSystem(raw: unknown): Result<PF1eActorSystem> {
       return err("heldCharge needs a non-empty name");
     if (hc.name.length > 120)
       return err("heldCharge names are at most 120 characters");
-    if (!Number.isInteger(hc.level) || (hc.level as number) < 0 || (hc.level as number) > 9)
+    if (
+      !Number.isInteger(hc.level) ||
+      (hc.level as number) < 0 ||
+      (hc.level as number) > 9
+    )
       return err("heldCharge level must be an integer 0–9");
     if (
       hc.slotLevel !== undefined &&
@@ -592,10 +602,7 @@ export function parsePF1eActorSystem(raw: unknown): Result<PF1eActorSystem> {
         (hc.slotLevel as number) > 9)
     )
       return err("heldCharge slotLevel must be an integer 0–9");
-    if (
-      hc.damageFormula !== undefined &&
-      typeof hc.damageFormula !== "string"
-    )
+    if (hc.damageFormula !== undefined && typeof hc.damageFormula !== "string")
       return err("heldCharge damageFormula must be a string");
     if (
       hc.saveType !== undefined &&
@@ -608,6 +615,13 @@ export function parsePF1eActorSystem(raw: unknown): Result<PF1eActorSystem> {
       return err("heldCharge severity must be a string");
     if (hc.energyType !== undefined && typeof hc.energyType !== "string")
       return err("heldCharge energyType must be a string");
+    if (
+      hc.charges !== undefined &&
+      (!Number.isInteger(hc.charges) ||
+        (hc.charges as number) < 1 ||
+        (hc.charges as number) > 50)
+    )
+      return err("heldCharge charges must be an integer 1–50");
   }
   if (o.pendingCast !== undefined && o.pendingCast !== null) {
     if (!isRecord(o.pendingCast))
@@ -617,7 +631,11 @@ export function parsePF1eActorSystem(raw: unknown): Result<PF1eActorSystem> {
       return err("pendingCast needs a non-empty name");
     if (pc.name.length > 120)
       return err("pendingCast names are at most 120 characters");
-    if (!Number.isInteger(pc.level) || (pc.level as number) < 0 || (pc.level as number) > 9)
+    if (
+      !Number.isInteger(pc.level) ||
+      (pc.level as number) < 0 ||
+      (pc.level as number) > 9
+    )
       return err("pendingCast level must be an integer 0–9");
     if (
       pc.slotLevel !== undefined &&
@@ -626,10 +644,7 @@ export function parsePF1eActorSystem(raw: unknown): Result<PF1eActorSystem> {
         (pc.slotLevel as number) > 9)
     )
       return err("pendingCast slotLevel must be an integer 0–9");
-    if (
-      pc.damageFormula !== undefined &&
-      typeof pc.damageFormula !== "string"
-    )
+    if (pc.damageFormula !== undefined && typeof pc.damageFormula !== "string")
       return err("pendingCast damageFormula must be a string");
     if (
       pc.saveType !== undefined &&

@@ -620,3 +620,562 @@ describe("P5/C03 critical confirmation and willing auto-touch (D-159)", () => {
     expect(cardContent(client)).toMatch(/cannot score a critical hit/);
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * P5/C03 held-charge consumers (D-162)
+ * ------------------------------------------------------------------ */
+
+import {
+  resolveChargeAllyTouches,
+  resolveChargeWeaponRelease,
+  type PF1eAllyTouchesParams,
+  type PF1eChargeReleaseParams,
+} from "../../src/ui/sheets/pf1eCastFlow";
+
+/** Ogre wearing a breastplate: normal AC 13 (10 + 4 − 1 Dex), touch AC 9. */
+function armoredOgre(): ActorDocument {
+  return actor("armored-ogre", {
+    abilities: { dex: 8, con: 14 },
+    hp: 20,
+    hpMax: 20,
+    saves: { fort: 2, ref: 0, will: 1 },
+    armor: { armorBonus: 4 },
+  });
+}
+
+/** A touch wizard holding a Chill Touch with the given charge count. */
+function chillWizard(charges?: number): ActorDocument {
+  return touchWizard({
+    heldCharge: {
+      name: "Chill Touch",
+      level: 1,
+      damageFormula: "1d6",
+      saveType: "fort",
+      severity: "half",
+      ...(charges !== undefined ? { charges } : {}),
+    },
+  });
+}
+
+function heldChargeOps(client: FakeClient): Op[] {
+  return stateOps(client).filter((op) => {
+    if (op.kind !== "update") return false;
+    const diff = op.diff as Record<string, unknown>;
+    return (
+      diff["system.pf1e.heldCharge"] !== undefined ||
+      diff["-=system.pf1e.heldCharge"] !== undefined
+    );
+  });
+}
+
+describe("P5/C03 cast flow — multi-touch charges (D-162)", () => {
+  test("a missed melee touch holds every declared charge", async () => {
+    const client = new FakeClient();
+    // Touch d20 1 + 3 = 4 vs touch AC 9 → miss.
+    client.script = [{ die: 1 }];
+    const caster = touchWizard();
+    const res = await resolveCastFlow(
+      client,
+      owner,
+      castParams(caster, { touch: "melee", charges: 4 }),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.held).toBe(true);
+    const write = heldChargeOps(client)[0] as Extract<Op, { kind: "update" }>;
+    const charge = write.diff["system.pf1e.heldCharge"] as Record<
+      string,
+      unknown
+    >;
+    expect(charge.charges).toBe(4);
+    expect(cardContent(client)).toMatch(/4 deliveries remaining/);
+  });
+
+  test("a single charge is not recorded as multi-charge", async () => {
+    const client = new FakeClient();
+    client.script = [{ die: 1 }];
+    const caster = touchWizard();
+    const res = await resolveCastFlow(
+      client,
+      owner,
+      castParams(caster, { touch: "melee", charges: 1 }),
+    );
+    expect(res.ok).toBe(true);
+    const write = heldChargeOps(client)[0] as Extract<Op, { kind: "update" }>;
+    const charge = write.diff["system.pf1e.heldCharge"] as Record<
+      string,
+      unknown
+    >;
+    expect(charge.charges).toBeUndefined();
+  });
+
+  test("charges are refused by name for ranged touch and non-touch casts", async () => {
+    const ranged = new FakeClient();
+    const rangedRes = await resolveCastFlow(
+      ranged,
+      owner,
+      castParams(touchWizard(), { touch: "ranged", charges: 3 }),
+    );
+    expect(rangedRes.ok).toBe(false);
+    if (!rangedRes.ok) expect(rangedRes.error).toMatch(/cannot be held/);
+    expect(ranged.submitted).toEqual([]);
+    expect(ranged.formulas).toEqual([]);
+
+    const plain = new FakeClient();
+    const plainRes = await resolveCastFlow(
+      plain,
+      owner,
+      castParams(touchWizard(), { charges: 3 }),
+    );
+    expect(plainRes.ok).toBe(false);
+    expect(plain.submitted).toEqual([]);
+  });
+
+  test("charge counts outside 1–50 are refused by name", async () => {
+    for (const charges of [0, 51, Number.NaN, 2.5]) {
+      const client = new FakeClient();
+      const res = await resolveCastFlow(
+        client,
+        owner,
+        castParams(touchWizard(), { touch: "melee", charges }),
+      );
+      expect(res.ok).toBe(false);
+      expect(client.submitted).toEqual([]);
+      expect(client.formulas).toEqual([]);
+    }
+  });
+});
+
+describe("P5/C03 held-charge delivery — charge accounting (D-162)", () => {
+  test("a hit consumes one of several charges and keeps holding the rest", async () => {
+    const client = new FakeClient();
+    // Touch d20 10 + 3 = 13 vs touch AC 9 → hit; damage 4; save 5 + 2 = 7 vs 14 fails.
+    client.script = [{ die: 10 }, { die: 4, total: 4 }, { die: 5 }];
+    const caster = chillWizard(3);
+    const res = await resolveTouchDelivery(
+      client,
+      owner,
+      deliveryParams(caster),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.delivered).toBe(true);
+    if (!res.delivered) return;
+    expect(res.chargesRemaining).toBe(2);
+    const writes = heldChargeOps(client);
+    expect(writes).toHaveLength(1);
+    const write = writes[0] as Extract<Op, { kind: "update" }>;
+    const charge = write.diff["system.pf1e.heldCharge"] as Record<
+      string,
+      unknown
+    >;
+    expect(charge.charges).toBe(2);
+    expect(cardContent(client)).toMatch(/Charges remaining: 2/);
+  });
+
+  test("the last charge clears the path exactly as before D-162", async () => {
+    const client = new FakeClient();
+    client.script = [{ die: 10 }, { die: 4, total: 4 }, { die: 5 }];
+    const caster = chillWizard(1);
+    const res = await resolveTouchDelivery(
+      client,
+      owner,
+      deliveryParams(caster),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok || !res.delivered) return;
+    expect(res.chargesRemaining).toBeUndefined();
+    const write = heldChargeOps(client)[0] as Extract<Op, { kind: "update" }>;
+    expect(write.diff["-=system.pf1e.heldCharge"]).toBeNull();
+  });
+
+  test("a missed delivery keeps every charge untouched", async () => {
+    const client = new FakeClient();
+    // Touch d20 1 + 3 = 4 vs touch AC 9 → miss.
+    client.script = [{ die: 1 }];
+    const caster = chillWizard(3);
+    const res = await resolveTouchDelivery(
+      client,
+      owner,
+      deliveryParams(caster),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.delivered).toBe(false);
+    expect(heldChargeOps(client)).toEqual([]);
+  });
+});
+
+describe("P5/C03 touching willing allies with a held charge (D-162)", () => {
+  function allyParams(
+    caster: ActorDocument,
+    targets: ActorDocument[],
+    overrides: Partial<PF1eAllyTouchesParams> = {},
+  ): PF1eAllyTouchesParams {
+    return {
+      casterActor: caster,
+      casterDerived: deriveFromDocuments({ actor: caster }),
+      targets: targets.map((t) => ({
+        name: t.name,
+        actor: t,
+        derived: deriveFromDocuments({ actor: t }),
+      })),
+      ...overrides,
+    };
+  }
+
+  test("two willing allies each take the spell and two charges are consumed", async () => {
+    const client = new FakeClient();
+    // Ally 1: damage 4, save 5 (+2 fort = 7) fails DC 14 → full 4.
+    // Ally 2: damage 3, save 15 (+2 = 17) passes DC 14 → half 1.
+    client.script = [
+      { die: 4, total: 4 },
+      { die: 5 },
+      { die: 3, total: 3 },
+      { die: 15 },
+    ];
+    const caster = chillWizard(3);
+    const allyA = actor("ally-a", { abilities: {}, hp: 20, hpMax: 20 });
+    const allyB = actor("ally-b", { abilities: {}, hp: 12, hpMax: 12 });
+    const res = await resolveChargeAllyTouches(
+      client,
+      owner,
+      allyParams(caster, [allyA, allyB]),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.touched).toBe(2);
+    expect(res.chargesRemaining).toBe(1);
+    // One damage roll and one save per touched ally, in order.
+    expect(client.formulas).toEqual(["1d6", "1d20", "1d6", "1d20"]);
+    // The charge is decremented, not cleared.
+    const write = heldChargeOps(client)[0] as Extract<Op, { kind: "update" }>;
+    expect(
+      (write.diff["system.pf1e.heldCharge"] as Record<string, unknown>).charges,
+    ).toBe(1);
+    // Both allies' HP writes landed: 20 − 4 and 12 − 1.
+    const hpWrites = stateOps(client).filter((op) => {
+      if (op.kind !== "update" || op.ref.coll !== "actors") return false;
+      const diff = op.diff as Record<string, unknown>;
+      return diff["system.pf1e.hp"] !== undefined;
+    });
+    expect(hpWrites).toHaveLength(2);
+    expect(cardContent(client)).toMatch(/full-round action/);
+    expect(cardContent(client)).toMatch(/ally-a/);
+    expect(cardContent(client)).toMatch(/ally-b/);
+    expect(cardContent(client)).toMatch(/Charges remaining: 1/);
+  });
+
+  test("touching the last allies fully discharges the spell", async () => {
+    const client = new FakeClient();
+    client.script = [{ die: 2, total: 2 }, { die: 20 }];
+    const caster = chillWizard(1);
+    const allyA = actor("ally-a", { abilities: {}, hp: 8, hpMax: 8 });
+    const res = await resolveChargeAllyTouches(
+      client,
+      owner,
+      allyParams(caster, [allyA]),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.chargesRemaining).toBeUndefined();
+    const write = heldChargeOps(client)[0] as Extract<Op, { kind: "update" }>;
+    expect(write.diff["-=system.pf1e.heldCharge"]).toBeNull();
+    expect(cardContent(client)).toMatch(/fully discharged/);
+  });
+
+  test("the named limits hold: no targets, more than six, duplicates, too few charges", async () => {
+    const caster = chillWizard(1);
+    const ally = actor("ally-a", { abilities: {}, hp: 8, hpMax: 8 });
+
+    const empty = new FakeClient();
+    const emptyRes = await resolveChargeAllyTouches(
+      empty,
+      owner,
+      allyParams(caster, []),
+    );
+    expect(emptyRes.ok).toBe(false);
+
+    const seven = new FakeClient();
+    const sevenAllies = Array.from({ length: 7 }, (_, i) =>
+      actor(`ally-${i}`, { abilities: {}, hp: 5, hpMax: 5 }),
+    );
+    const sevenRes = await resolveChargeAllyTouches(
+      seven,
+      owner,
+      allyParams(chillWizard(7), sevenAllies),
+    );
+    expect(sevenRes.ok).toBe(false);
+    if (!sevenRes.ok) expect(sevenRes.error).toMatch(/up to 6/);
+
+    const dupe = new FakeClient();
+    const dupeRes = await resolveChargeAllyTouches(
+      dupe,
+      owner,
+      allyParams(caster, [ally, ally]),
+    );
+    expect(dupeRes.ok).toBe(false);
+    if (!dupeRes.ok) expect(dupeRes.error).toMatch(/more than once/);
+
+    const short = new FakeClient();
+    const shortRes = await resolveChargeAllyTouches(
+      short,
+      owner,
+      allyParams(caster, [
+        ally,
+        actor("ally-b", { abilities: {}, hp: 5, hpMax: 5 }),
+      ]),
+    );
+    expect(shortRes.ok).toBe(false);
+    if (!shortRes.ok) expect(shortRes.error).toMatch(/deliver(y|ies) left/);
+
+    // Nothing was rolled or submitted in any refusal.
+    for (const c of [empty, seven, dupe, short]) {
+      expect(c.submitted).toEqual([]);
+      expect(c.formulas).toEqual([]);
+    }
+  });
+
+  test("no held charge and no permission are both named refusals", async () => {
+    const none = new FakeClient();
+    const noneRes = await resolveChargeAllyTouches(
+      none,
+      owner,
+      allyParams(touchWizard(), [
+        actor("ally-a", { abilities: {}, hp: 5, hpMax: 5 }),
+      ]),
+    );
+    expect(noneRes.ok).toBe(false);
+    if (!noneRes.ok) expect(noneRes.error).toMatch(/no held charge/i);
+
+    const denied = new FakeClient();
+    const deniedRes = await resolveChargeAllyTouches(
+      denied,
+      stranger,
+      allyParams(chillWizard(2), [
+        actor("ally-a", { abilities: {}, hp: 5, hpMax: 5 }),
+      ]),
+    );
+    expect(deniedRes.ok).toBe(false);
+    if (!deniedRes.ok) expect(deniedRes.error).toMatch(/permission/);
+    expect(denied.submitted).toEqual([]);
+  });
+});
+
+describe("P5/C03 releasing a held charge through a weapon attack (D-162)", () => {
+  const claw = {
+    name: "Claw",
+    attackBonus: 4,
+    damageFormula: "1d4",
+    damageBonus: 1,
+  };
+
+  function releaseParams(
+    caster: ActorDocument,
+    overrides: Partial<PF1eChargeReleaseParams> = {},
+  ): PF1eChargeReleaseParams {
+    const target = armoredOgre();
+    return {
+      casterActor: caster,
+      casterDerived: deriveFromDocuments({ actor: caster }),
+      targetName: target.name,
+      targetActor: target,
+      targetDerived: deriveFromDocuments({ actor: target }),
+      weapon: claw,
+      ...overrides,
+    };
+  }
+
+  test("a hit deals weapon damage AND discharges the spell in one HP write", async () => {
+    const client = new FakeClient();
+    // Attack d20 10 + 4 = 14 vs normal AC 13 → hit.
+    // Weapon 1d4 = 3 (+1 bonus) = 4; spell 1d6 = 4; save 5 (+2 fort = 7) fails DC 14.
+    client.script = [
+      { die: 10 },
+      { die: 3, total: 3 },
+      { die: 4, total: 4 },
+      { die: 5 },
+    ];
+    const caster = chillWizard();
+    const res = await resolveChargeWeaponRelease(
+      client,
+      owner,
+      releaseParams(caster),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok || !res.released) return;
+    expect(res.weaponDamage).toBe(4);
+    expect(res.weaponCritical).toBe(false);
+    expect(res.result.dealt).toBe(4);
+    expect(client.formulas).toEqual(["1d20", "1d4", "1d6", "1d20"]);
+    // ONE combined HP write: 20 − (4 weapon + 4 spell) = 12.
+    const hpWrites = stateOps(client).filter((op) => {
+      if (op.kind !== "update" || op.ref.coll !== "actors") return false;
+      const diff = op.diff as Record<string, unknown>;
+      return diff["system.pf1e.hp"] !== undefined;
+    });
+    expect(hpWrites).toHaveLength(1);
+    const hpOp = hpWrites[0] as Extract<Op, { kind: "update" }>;
+    expect(hpOp.diff["system.pf1e.hp"]).toBe(12);
+    // The single charge cleared.
+    const chargeOp = heldChargeOps(client)[0] as Extract<
+      Op,
+      { kind: "update" }
+    >;
+    expect(chargeOp.diff["-=system.pf1e.heldCharge"]).toBeNull();
+    expect(cardContent(client)).toMatch(/vs AC 13/);
+    expect(cardContent(client)).toMatch(/not considered armed/);
+  });
+
+  test("the release rolls against normal AC, never touch AC", async () => {
+    const client = new FakeClient();
+    // Attack d20 8 + 4 = 12: hits touch AC 9, misses normal AC 13.
+    client.script = [{ die: 8 }];
+    const res = await resolveChargeWeaponRelease(
+      client,
+      owner,
+      releaseParams(chillWizard()),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.released).toBe(false);
+    if (res.released) return;
+    expect(res.ac).toBe(13);
+    // Nothing but the attack was rolled; the charge is untouched.
+    expect(client.formulas).toEqual(["1d20"]);
+    expect(heldChargeOps(client)).toEqual([]);
+    expect(cardContent(client)).toMatch(/still held/);
+  });
+
+  test("a confirmed critical doubles the weapon damage but not the spell", async () => {
+    const client = new FakeClient();
+    // Attack 20 threatens; confirmation 10 + 4 = 14 vs AC 13 → confirmed.
+    // Weapon 1d4 = 3 (+1) = 4, doubled to 8; spell 1d6 = 2; save fails.
+    client.script = [
+      { die: 20 },
+      { die: 10 },
+      { die: 3, total: 3 },
+      { die: 2, total: 2 },
+      { die: 5 },
+    ];
+    const res = await resolveChargeWeaponRelease(
+      client,
+      owner,
+      releaseParams(chillWizard()),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok || !res.released) return;
+    expect(res.weaponCritical).toBe(true);
+    expect(res.weaponDamage).toBe(8);
+    expect(res.result.dealt).toBe(2);
+    // 20 − (8 + 2) = 10.
+    const hpOp = stateOps(client).find((op) => {
+      if (op.kind !== "update" || op.ref.coll !== "actors") return false;
+      return (
+        (op.diff as Record<string, unknown>)["system.pf1e.hp"] !== undefined
+      );
+    }) as Extract<Op, { kind: "update" }>;
+    expect(hpOp.diff["system.pf1e.hp"]).toBe(10);
+    expect(cardContent(client)).toMatch(/CRITICAL HIT/);
+  });
+
+  test("an unconfirmed threat is a regular hit — the weapon is not doubled", async () => {
+    const client = new FakeClient();
+    // Attack 20 threatens; confirmation 1 + 4 = 5 vs AC 13 → not confirmed.
+    client.script = [
+      { die: 20 },
+      { die: 1 },
+      { die: 3, total: 3 },
+      { die: 2, total: 2 },
+      { die: 5 },
+    ];
+    const res = await resolveChargeWeaponRelease(
+      client,
+      owner,
+      releaseParams(chillWizard()),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok || !res.released) return;
+    expect(res.weaponCritical).toBe(false);
+    expect(res.weaponDamage).toBe(4);
+    expect(cardContent(client)).toMatch(/not confirmed/);
+  });
+
+  test("a weapon line without dice still adds its static bonus", async () => {
+    const client = new FakeClient();
+    client.script = [{ die: 10 }, { die: 4, total: 4 }, { die: 5 }];
+    const res = await resolveChargeWeaponRelease(
+      client,
+      owner,
+      releaseParams(chillWizard(), {
+        weapon: {
+          name: "Slam",
+          attackBonus: 4,
+          damageFormula: "",
+          damageBonus: 2,
+        },
+      }),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok || !res.released) return;
+    expect(res.weaponDamage).toBe(2);
+    // No damage die was rolled for the weapon.
+    expect(client.formulas).toEqual(["1d20", "1d6", "1d20"]);
+  });
+
+  test("a multi-charge release keeps holding the remaining deliveries", async () => {
+    const client = new FakeClient();
+    client.script = [
+      { die: 10 },
+      { die: 3, total: 3 },
+      { die: 4, total: 4 },
+      { die: 5 },
+    ];
+    const res = await resolveChargeWeaponRelease(
+      client,
+      owner,
+      releaseParams(chillWizard(2)),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok || !res.released) return;
+    expect(res.chargesRemaining).toBe(1);
+    const write = heldChargeOps(client)[0] as Extract<Op, { kind: "update" }>;
+    expect(
+      (write.diff["system.pf1e.heldCharge"] as Record<string, unknown>).charges,
+    ).toBe(1);
+  });
+
+  test("malformed weapons and missing charges are named refusals", async () => {
+    const noCharge = new FakeClient();
+    const noChargeRes = await resolveChargeWeaponRelease(
+      noCharge,
+      owner,
+      releaseParams(touchWizard()),
+    );
+    expect(noChargeRes.ok).toBe(false);
+    if (!noChargeRes.ok) expect(noChargeRes.error).toMatch(/no held charge/i);
+
+    const badDice = new FakeClient();
+    const badDiceRes = await resolveChargeWeaponRelease(
+      badDice,
+      owner,
+      releaseParams(chillWizard(), {
+        weapon: { ...claw, damageFormula: "lots" },
+      }),
+    );
+    expect(badDiceRes.ok).toBe(false);
+
+    const denied = new FakeClient();
+    const deniedRes = await resolveChargeWeaponRelease(
+      denied,
+      stranger,
+      releaseParams(chillWizard()),
+    );
+    expect(deniedRes.ok).toBe(false);
+    if (!deniedRes.ok) expect(deniedRes.error).toMatch(/permission/);
+    for (const c of [noCharge, badDice, denied]) {
+      expect(c.submitted).toEqual([]);
+      expect(c.formulas).toEqual([]);
+    }
+  });
+});
