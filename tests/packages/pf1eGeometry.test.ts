@@ -14,6 +14,8 @@
 import { describe, expect, test } from "vitest";
 import {
   FEET_PER_SQUARE,
+  cellAt,
+  cellsAlongSegment,
   footprintCells,
   footprintDistance,
   footprintDistanceFt,
@@ -422,5 +424,110 @@ describe("P02 — occupancy of sub-square creatures (AoN 179 and AoN 176)", () =
       expect(o.threatensNothing, size).toBe(false);
       expect(o.cannotFlank, size).toBe(false);
     }
+  });
+});
+
+describe("cellAt — the strategic layer's point → square conversion (P01)", () => {
+  test("feet are bucketed by the scene's own cell size", () => {
+    // Model positions are points in feet; the square-based rules (threat, AoN 183's
+    // line test) only apply once a point is resolved to the square it stands in.
+    expect(cellAt(0, 0, 5)).toEqual({ col: 0, row: 0 });
+    expect(cellAt(2, 2, 5)).toEqual({ col: 0, row: 0 }); // cell centres are not required
+    expect(cellAt(5, 5, 5)).toEqual({ col: 1, row: 1 });
+    expect(cellAt(9.999, 9.999, 5)).toEqual({ col: 1, row: 1 });
+    expect(cellAt(25, 25, 5)).toEqual({ col: 5, row: 5 });
+  });
+
+  test("negative coordinates floor, so squares west/north of the origin are real squares", () => {
+    // Math.floor, not truncation: a model at −1 ft is inside cell −1, not cell 0 —
+    // truncation would put it in the same square as a model 4 ft away on the other
+    // side of the origin, which is the "two models, one square" degeneracy the
+    // deploy-spacing change (D-182) removes.
+    expect(cellAt(-1, -1, 5)).toEqual({ col: -1, row: -1 });
+    expect(cellAt(-5, -5, 5)).toEqual({ col: -1, row: -1 });
+    expect(cellAt(-0.1, 4.9, 5)).toEqual({ col: -1, row: 0 });
+  });
+
+  test("a scene with a different cell size re-buckets the same points", () => {
+    // The 10-ft scene: the same coordinates are half as many squares, which is
+    // exactly what P01's "one scale per scene" is meant to make explicit.
+    expect(cellAt(9, 9, 10)).toEqual({ col: 0, row: 0 });
+    expect(cellAt(10, 10, 10)).toEqual({ col: 1, row: 1 });
+    expect(cellAt(25, 25, 10)).toEqual({ col: 2, row: 2 });
+  });
+});
+
+describe("cellsAlongSegment — the squares a straight move walks through (P06)", () => {
+  test("a straight run and a straight march list every square stepped through, in order", () => {
+    // 5-ft squares: (0,0) → (20,0) walks columns 1..4 along row 0.
+    expect(cellsAlongSegment({ x: 0, y: 0 }, { x: 20, y: 0 }, 5)).toEqual([
+      { col: 0, row: 0 },
+      { col: 1, row: 0 },
+      { col: 2, row: 0 },
+      { col: 3, row: 0 },
+      { col: 4, row: 0 },
+    ]);
+    expect(cellsAlongSegment({ x: 2, y: 2 }, { x: 2, y: 12 }, 5)).toEqual([
+      { col: 0, row: 0 },
+      { col: 0, row: 1 },
+      { col: 0, row: 2 },
+    ]);
+  });
+
+  test("a diagonal move is a diagonal step — never through the squares it merely grazes", () => {
+    // (2,2) → (12,12) is two 45° diagonal steps on the grid. The geometric line runs
+    // exactly through the corners (5,5) and (10,10), and a sweep would report the two
+    // squares beside each corner; a creature moving diagonally is in neither of them,
+    // so neither can be a threatened square it "left".
+    expect(cellsAlongSegment({ x: 2, y: 2 }, { x: 12, y: 12 }, 5)).toEqual([
+      { col: 0, row: 0 },
+      { col: 1, row: 1 },
+      { col: 2, row: 2 },
+    ]);
+    // A knight's move (2 across, 1 down) has exactly one intermediate square, and it is
+    // the one the grid line names.
+    expect(cellsAlongSegment({ x: 2, y: 2 }, { x: 12, y: 7 }, 5)).toEqual([
+      { col: 0, row: 0 },
+      { col: 1, row: 0 },
+      { col: 2, row: 1 },
+    ]);
+    // The mirror image picks the other intermediate square, symmetrically.
+    expect(cellsAlongSegment({ x: 2, y: 7 }, { x: 12, y: 2 }, 5)).toEqual([
+      { col: 0, row: 1 },
+      { col: 1, row: 1 },
+      { col: 2, row: 0 },
+    ]);
+  });
+
+  test("direction, scale and degenerate input", () => {
+    // Reversing the endpoints reverses the walk.
+    expect(
+      cellsAlongSegment({ x: 12, y: 12 }, { x: 2, y: 2 }, 5).map((c) => `${c.col},${c.row}`),
+    ).toEqual(["2,2", "1,1", "0,0"]);
+    // A 10-ft scene halves the number of squares for the same distance.
+    expect(cellsAlongSegment({ x: 0, y: 0 }, { x: 20, y: 0 }, 10)).toEqual([
+      { col: 0, row: 0 },
+      { col: 1, row: 0 },
+      { col: 2, row: 0 },
+    ]);
+    // Moves that stay inside one square, and moves that are not moves at all.
+    expect(cellsAlongSegment({ x: 1, y: 1 }, { x: 3, y: 4 }, 5)).toEqual([{ col: 0, row: 0 }]);
+    expect(cellsAlongSegment({ x: 1, y: 1 }, { x: 1, y: 1 }, 5)).toEqual([{ col: 0, row: 0 }]);
+    // West and north of the origin floor, exactly as `cellAt` does.
+    expect(cellsAlongSegment({ x: -1, y: -1 }, { x: -12, y: -1 }, 5)).toEqual([
+      { col: -1, row: -1 },
+      { col: -2, row: -1 },
+      { col: -3, row: -1 },
+    ]);
+    // Degenerate scales and coordinates answer with nothing, never a guessed path.
+    expect(cellsAlongSegment({ x: 0, y: 0 }, { x: 5, y: 0 }, 0)).toEqual([]);
+    expect(cellsAlongSegment({ x: 0, y: 0 }, { x: Number.NaN, y: 0 }, 5)).toEqual([]);
+  });
+
+  test("a long march lists each square once, however far it goes", () => {
+    const cells = cellsAlongSegment({ x: 0, y: 0 }, { x: 300, y: 0 }, 5);
+    expect(cells).toHaveLength(61); // 300 ft / 5 ft + the start square
+    expect(cells[60]).toEqual({ col: 60, row: 0 });
+    expect(new Set(cells.map((c) => `${c.col},${c.row}`)).size).toBe(cells.length);
   });
 });

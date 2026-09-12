@@ -9,6 +9,11 @@
  * ({x, y} JSON). Formations: line (ranks of 10), column (files of 4), wedge
  * (triangle); anything else deploys as a line. hp/hpMax 1, sys.ammo 6 — the
  * mass-battle-basic defaults the rules module expects.
+ *
+ * Spacing is the caller's, and `TurnChannel` passes the scene's grid distance
+ * (P01, D-182) so one model lands per square. The generic 4-ft default survives
+ * only for callers that have no scene; the PF1e rules that read squares
+ * (threat, flanking) are documented against that contract.
  */
 import type { DocId, UnitId } from "../core/ids";
 import type { UnitView } from "../core/rules";
@@ -35,7 +40,15 @@ export interface DeployLayout {
 }
 
 export interface DeployOptions {
-  /** World units between neighbouring models (default 4). */
+  /**
+   * World units between neighbouring models. Production passes the **scene's**
+   * grid distance (`sceneCellFeet`) so formations deploy one model per square
+   * (P01): the per-model rules the sim applies on top — threat and AoN 183
+   * flanking — read whole squares, and a layout that packs several models into
+   * one square makes those rules describe geometry the grid never had. The 4-ft
+   * default is the generic deployer's legacy spacing, kept for callers with no
+   * scene (tests, the mass-battle-basic reference system).
+   */
   spacing?: number;
   /** Models per rank in "line" formation (default 10). */
   filesPerRank?: number;

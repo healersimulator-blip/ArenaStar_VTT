@@ -3,7 +3,12 @@
  * Integrates d20 attack routines, DR/SR, spatial envelopment, pack-driven AOE spells,
  * player hero participation, and detailed combat analytics.
  */
-import type { RulesContext, RulesModule, UnitView } from "../core/rules";
+import {
+  sceneCellFeet,
+  type RulesContext,
+  type RulesModule,
+  type UnitView,
+} from "../core/rules";
 import type { PRNG } from "../core/sim";
 import type { ModelPool, Order } from "../core/strategic";
 import { ModelStatus } from "../core/strategic";
@@ -12,12 +17,26 @@ import { PF1E_MODEL_SCHEMA, PF1eProfileRegistry } from "./pf1e/schema";
 import { buildUnitProfiles, seedPF1ePool } from "./pf1e/deploySeed";
 import {
   pf1eRngFromPrng,
+  resetTurnAoOs,
   resolvePF1eAttacks,
   resolvePF1eHealing,
   type PF1eRng,
 } from "./pf1e/combatEngine";
-import { calculatePF1eEnvelopment, PF1E_STATUS_FLANKED } from "./pf1e/envelopment";
-import { naturalReachSquares } from "./pf1e/geometry";
+import { markPF1eFlanking } from "./pf1e/envelopment";
+import {
+  cellAt,
+  cellsAlongSegment,
+  footprintCells,
+  naturalReachSquares,
+  threatenedCells,
+} from "./pf1e/geometry";
+import {
+  aooRefusal,
+  createInterruptQueue,
+  queueMovementAoOs,
+  resolveNextInterrupt,
+} from "./pf1e/interrupts";
+import type { PF1eCell } from "./pf1e/targeting";
 import { resolvePF1eAOESpell } from "./pf1e/spells";
 import {
   PF1E_PACK_FIREBALL_MASS_BATTLE,
@@ -28,7 +47,10 @@ import {
 import { spellSaveDc } from "./pf1e/casting";
 import { applyHeroLeadershipAuras } from "./pf1e/heroBridge";
 import { deriveFromDocuments, parsePF1eActorSystem } from "./pf1e/actor";
-import { PF1eBattleAnalyticsCollector, type UnitAnalyticsSummary } from "./pf1e/analytics";
+import {
+  PF1eBattleAnalyticsCollector,
+  type UnitAnalyticsSummary,
+} from "./pf1e/analytics";
 import { SpatialGrid } from "../core/spatialGrid";
 import { hasLineOfEffect, firstMoveBlock } from "../core/detection";
 
@@ -58,10 +80,17 @@ export interface PF1eMassSpellDef {
  * `data.spell` (default `fireball`). Every entry ships in `pf1e-core/packs/spells.json`;
  * the levels are the verified CRB constants, not the pack's `level` table (D-151).
  */
-export const PF1E_MASS_SPELLS: Readonly<Record<string, PF1eMassSpellDef>> = Object.freeze({
-  fireball: { entry: PF1E_PACK_FIREBALL_MASS_BATTLE, level: FIREBALL_SPELL_LEVEL },
-  "burning-hands": { entry: PF1E_PACK_BURNING_HANDS_MASS_BATTLE, level: BURNING_HANDS_SPELL_LEVEL },
-});
+export const PF1E_MASS_SPELLS: Readonly<Record<string, PF1eMassSpellDef>> =
+  Object.freeze({
+    fireball: {
+      entry: PF1E_PACK_FIREBALL_MASS_BATTLE,
+      level: FIREBALL_SPELL_LEVEL,
+    },
+    "burning-hands": {
+      entry: PF1E_PACK_BURNING_HANDS_MASS_BATTLE,
+      level: BURNING_HANDS_SPELL_LEVEL,
+    },
+  });
 
 /** Orders that omit `data.spell` cast this spell (backwards compatibility). */
 export const DEFAULT_MASS_SPELL_ID = "fireball";
@@ -105,9 +134,21 @@ function payloadSpellId(data: unknown): string {
   return typeof id === "string" && id.length > 0 ? id : DEFAULT_MASS_SPELL_ID;
 }
 
-export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesModule {
+export function createMassBattlePf1e(
+  opts: MassBattlePf1eOptions = {},
+): RulesModule {
   const registry = new PF1eProfileRegistry();
-  const grid = new SpatialGrid(5);
+  // The spatial hash buckets by the **scene's** cell feet (P01, Gap List §2.15): the
+  // old fixed 5 was a second, independent scale constant next to `ctx.grid.distance`,
+  // and the flanking pass below reasons in whole squares of exactly that size. The
+  // hash is re-created below when a scene's grid distance differs from the last turn's.
+  let grid = new SpatialGrid(5);
+  // Strategic turns resolve one at a time, and each drains its interrupt queue before it
+  // returns, so this counter only *labels* the turn's queue — no interrupt outlives its
+  // turn (P06/D-184). `RulesContext` carries no turn number, so the module counts its own
+  // calls; like the analytics collector it is module-lifetime state and resets when a
+  // SimWorker restarts, which costs nothing because each queue is turn-local anyway.
+  let strategicTurn = 0;
   // Campaign-lifetime analytics: one collector per module instance, NOT per turn — that is
   // what lets `forecast` answer with real accumulated totals (M11). Caveat: a SimWorker
   // restart starts a fresh collector, so totals only cover this module instance's turns.
@@ -118,7 +159,10 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
   const spells: Record<string, PF1eMassSpellDef> = { ...PF1E_MASS_SPELLS };
   const defaultDef = spells[DEFAULT_MASS_SPELL_ID];
   if (opts.spellEntry && defaultDef) {
-    spells[DEFAULT_MASS_SPELL_ID] = { entry: opts.spellEntry, level: defaultDef.level };
+    spells[DEFAULT_MASS_SPELL_ID] = {
+      entry: opts.spellEntry,
+      level: defaultDef.level,
+    };
   }
 
   // Each spell's shape decides what a well-formed order looks like, so probe it once at
@@ -130,13 +174,23 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
     spellShapes.set(id, probe.ok && probe.order ? probe.order.shape : "circle");
   }
 
-  const subPhases = ["move", "heal", "shoot", "melee", "spell", "morale"] as const;
+  const subPhases = [
+    "move",
+    "heal",
+    "shoot",
+    "melee",
+    "spell",
+    "morale",
+  ] as const;
 
   const module: RulesModule = {
     schema: {
       version: "1.0.0",
       modelColumns: PF1E_MODEL_SCHEMA,
-      unitTypes: PF1E_UNIT_TYPE_STATS as unknown as Record<string, import("../core/documents").Json>,
+      unitTypes: PF1E_UNIT_TYPE_STATS as unknown as Record<
+        string,
+        import("../core/documents").Json
+      >,
       orderTypes: ["move", "attack", "custom", "hold", "retreat"],
       subPhases: [...subPhases],
     },
@@ -146,7 +200,8 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
         case "move": {
           if (order.path.length === 0) return err("move: empty path");
           for (const p of order.path) {
-            if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return err("move: NaN waypoint");
+            if (!Number.isFinite(p.x) || !Number.isFinite(p.y))
+              return err("move: NaN waypoint");
           }
           return ok;
         }
@@ -155,7 +210,8 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
         case "custom": {
           if (order.type !== "spell_aoe") return ok;
           const spellId = payloadSpellId(order.data);
-          if (!spells[spellId]) return err(`spell_aoe: unknown spell "${spellId}"`);
+          if (!spells[spellId])
+            return err(`spell_aoe: unknown spell "${spellId}"`);
           const shape = spellShapes.get(spellId) ?? "circle";
           const payload = parseSpellAoePayload(shape, order.data);
           return payload.ok ? ok : err(`spell_aoe: ${payload.message}`);
@@ -163,7 +219,8 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
         case "hold":
           return ok;
         case "retreat":
-          return Number.isFinite(order.toward.x) && Number.isFinite(order.toward.y)
+          return Number.isFinite(order.toward.x) &&
+            Number.isFinite(order.toward.y)
             ? ok
             : err("retreat: NaN destination");
         default:
@@ -172,10 +229,16 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
     },
 
     resolveTurn(ctx, pool, units, orders, rng, emit): void {
+      // Label this turn's interrupt queue. Counted at the top, not the end, so an early
+      // return in a later sub-phase can never leave two turns sharing a label.
+      strategicTurn += 1;
+
       // One grid cell in feet — the scene's authored grid distance (P01: scene metadata,
-      // not constants), with the standard 5-ft fallback. Drives both the movement budget
-      // (D-173) and envelopment reach (D-177).
-      const cellFeet = Number.isFinite(ctx.grid.distance) && ctx.grid.distance > 0 ? ctx.grid.distance : 5;
+      // not constants), with the standard 5-ft fallback. Drives the movement budget
+      // (D-173), reach (D-177/D-180), the spatial hash's buckets and the flanking pass
+      // (M04/D-182) — one scale, derived in one place (`sceneCellFeet`).
+      const cellFeet = sceneCellFeet(ctx.grid.distance);
+      if (grid.cellSize !== cellFeet) grid = new SpatialGrid(cellFeet);
 
       // ── natural reach per unit, in feet at this scale (P02, D-180). Table 8-4's reach
       // is a per-size figure, not a constant: "Creatures that take up more than 1 square
@@ -186,20 +249,64 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
       // scene says 5 ft or 10 ft. The size comes from the unit's bound leader actor (the
       // M07 seam); a unit with none keeps the one-square Medium default, so an army
       // deployed without actor data resolves exactly as it did before.
-      const reachFeetByUnitIdx = units.map(
-        (u) => (reachSquaresFromLeaderActor(ctx.leaderActors[u.id]) ?? 1) * cellFeet,
+      const reachSquaresByUnitIdx = units.map(
+        (u) => reachSquaresFromLeaderActor(ctx.leaderActors[u.id]) ?? 1,
+      );
+      const reachFeetByUnitIdx = reachSquaresByUnitIdx.map(
+        (squares) => squares * cellFeet,
+      );
+      const factionByUnitIdx = units.map((u) => u.factionId);
+      const sizeByUnitIdx = units.map((u) =>
+        sizeFromLeaderActor(ctx.leaderActors[u.id]),
       );
 
-      // ── flanking bits expire each round (M04, D-177). The envelopment engine sets
-      // FLANKED on surrounded defenders, but nothing ever cleared it, so a bit set once
-      // lingered for the rest of the battle (Gap List §5). Engagement is recomputed in
-      // the melee sub-phase after movement, so the clear runs first thing in the round.
-      // Bit 2 aliases core `ModelStatus.pinned` — the documented §2.13 status-column
-      // collision; the PF1e module owns it as FLANKED until that column lands.
-      for (let i = 0; i < pool.count; i++) {
-        const st = pool.status[i] ?? 0;
-        if ((st & PF1E_STATUS_FLANKED) !== 0) pool.status[i] = st & ~PF1E_STATUS_FLANKED;
-      }
+      // Profiles + derived pool columns (§1.3/§1.4). Interned from a deterministically
+      // sorted unit list, so `profileIdx` values written into the pool stay valid across
+      // turns, checkpoints and SimWorker restarts. Seeding also refreshes per-turn state:
+      // the AoO budget resets (SRD: your attacks of opportunity refresh at the start of
+      // your turn) and save/AC columns are rewritten before leadership auras are added,
+      // which is what keeps an aura from stacking once per model per turn.
+      const profiles = buildUnitProfiles(units, registry);
+      seedPF1ePool(pool, units, profiles);
+
+      // ── attacks of opportunity (P06, D-183 budget / D-184 queue). Budgets refresh here, at the
+      // top of the turn and before anything moves: seedPF1ePool has just written every
+      // model's `aooUsed` back to 0 (SRD: "your attacks of opportunity refresh at the start
+      // of your turn"), and `resetTurnAoOs` names that reset for the models a unit covers —
+      // the same call the tactical layer's owner-turn reset represents. Budgets must be
+      // fresh *before* the march below, because a unit that provokes while moving is
+      // reacting in the same turn it is spending its own budget in.
+      resetTurnAoOs(pool, livingModelIndices(pool, units));
+
+      // Threat at this scale: a model threatens the squares a melee attack of its reach can
+      // enter (AoN 102, "you threaten all squares into which you can make a melee attack"),
+      // read through the one `threatenedCells` both scales use — the same function the
+      // tactical layer reaches through `combatState`, so "does leaving this square
+      // provoke?" has a single answer per scale.
+      const leaderModelIdx = (unitId: string): number => {
+        const unit = units.find((u) => u.id === unitId);
+        const [start, end] = unit?.modelRange ?? [0, 0];
+        for (let i = start; i < end && i < pool.count; i++) {
+          if (((pool.status[i] ?? 0) & ModelStatus.dead) === 0) return i;
+        }
+        return -1;
+      };
+      const threatenedByModel = (modelIdx: number): PF1eCell[] => {
+        const unitIdx = pool.unitIdx[modelIdx] ?? 0;
+        const size = sizeByUnitIdx[unitIdx];
+        const origin = cellAt(
+          pool.x[modelIdx] ?? 0,
+          pool.y[modelIdx] ?? 0,
+          cellFeet,
+        );
+        // Reach is carried in squares (D-180) and the footprint comes from the leader
+        // actor's size — the M07 seam's own reading, never a second size table.
+        return threatenedCells({
+          footprint: footprintCells(origin, size),
+          reachSquares: reachSquaresByUnitIdx[unitIdx] ?? 1,
+        });
+      };
+      let interruptQueue = createInterruptQueue(strategicTurn, "turn");
 
       // ── move sub-phase (M05, D-173/D-175). A unit with a move or retreat order spends
       // its turn moving as a formation: the anchor (first living model) walks the ordered
@@ -219,8 +326,10 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
       for (const unit of units) {
         const queue = orders.get(unit.id);
         const order = queue?.active ?? queue?.pending[0];
-        if (!order || (order.kind !== "move" && order.kind !== "retreat")) continue;
-        const typeStats = PF1E_UNIT_TYPE_STATS[unit.type as keyof typeof PF1E_UNIT_TYPE_STATS];
+        if (!order || (order.kind !== "move" && order.kind !== "retreat"))
+          continue;
+        const typeStats =
+          PF1E_UNIT_TYPE_STATS[unit.type as keyof typeof PF1E_UNIT_TYPE_STATS];
         const movePoints = typeStats?.move ?? 0;
         if (movePoints <= 0) continue;
         const anchor = anchorPosition(pool, unit);
@@ -255,7 +364,8 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
           // crossing (D-174): the formation stops just short of the wall and the rest of
           // the budget is spent — the sim never routes around obstacles (P03's job).
           const block = firstMoveBlock(cx, cy, wp.x, wp.y, ctx.walls);
-          const traversable = block === null ? d : Math.max(0, block * d - MOVE_BLOCK_EPSILON);
+          const traversable =
+            block === null ? d : Math.max(0, block * d - MOVE_BLOCK_EPSILON);
           const step = Math.min(remaining, traversable);
           if (step > 0) {
             cx += ((wp.x - cx) / d) * step;
@@ -276,12 +386,159 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
         // A wall-blocked unit reports even a zero-distance attempt, so the GM sees why
         // the march went nowhere; otherwise a no-op move stays silent.
         if (dx === 0 && dy === 0 && !hitWall) continue;
+
+        // ── attacks of opportunity against the march (P06, D-184). The walk is taken from
+        // the grid walk itself (`cellsAlongSegment`) rather than from the continuous
+        // displacement, so the interrupted squares are *squares* and the phantom
+        // "grazed" square of a diagonal never provokes. A withdraw (order kind
+        // `retreat`, SRD: "You can move up to double your speed … The square you start
+        // out in is not considered threatened by any opponent you can see") exempts the
+        // start square and nothing else; the sim has no visibility model, so every
+        // enemy is treated as seen and the exemption applies to all of them.
+        const walked = cellsAlongSegment(anchor, { x: cx, y: cy }, cellFeet);
+        const moverIdx = leaderModelIdx(unit.id);
+        const moverUnitIdx = pool.unitIdx[moverIdx] ?? 0;
+        if (moverIdx >= 0 && walked.length > 1) {
+          const reactors: Array<{
+            id: string;
+            name: string;
+            threatens: (cell: PF1eCell) => boolean;
+            modelIdx: number;
+          }> = [];
+          for (const other of units) {
+            if (other.id === unit.id) continue;
+            const otherLeader = leaderModelIdx(other.id);
+            if (otherLeader < 0) continue;
+            // Enemies only, on the same relation the flanking pass uses (M04/D-182): a
+            // different faction. An ally — and the mover's own unit — never reacts.
+            const otherUnitIdx = pool.unitIdx[otherLeader] ?? 0;
+            if (
+              (factionByUnitIdx[otherUnitIdx] ?? null) ===
+              (factionByUnitIdx[moverUnitIdx] ?? null)
+            ) {
+              continue;
+            }
+            // Threat is per model, but a unit moves as a formation: any living model of the
+            // unit can take the opportunity, so the unit threatens what its members threaten.
+            const otherStart = other.modelRange?.[0] ?? 0;
+            const otherEnd = other.modelRange?.[1] ?? 0;
+            let threatenedSet: Set<string> | null = null;
+            // The model that actually reacts: the first living member whose reach covers a
+            // square the march left (so the budget is spent on a model that could strike).
+            let threatModel: number | null = null;
+            for (let i = otherStart; i < otherEnd && i < pool.count; i++) {
+              if (((pool.status[i] ?? 0) & ModelStatus.dead) !== 0) continue;
+              const cells = threatenedByModel(i);
+              if (cells.length === 0) continue;
+              if (threatenedSet === null) threatenedSet = new Set<string>();
+              for (const c of cells) threatenedSet.add(`${c.col},${c.row}`);
+              if (threatModel === null) threatModel = i;
+            }
+            if (threatenedSet === null || threatModel === null) continue;
+            const set = threatenedSet;
+            reactors.push({
+              id: other.id,
+              name: other.name,
+              modelIdx: threatModel,
+              threatens: (cell) => set.has(`${cell.col},${cell.row}`),
+            });
+          }
+          const result = queueMovementAoOs(interruptQueue, {
+            turn: strategicTurn,
+            substep: "move",
+            moverId: unit.id,
+            actionId: `move:${strategicTurn}:${unit.id}`,
+            path: walked,
+            ...(order.kind === "retreat" ? { withdraw: true } : {}),
+            cellFeet,
+            reactors,
+          });
+          interruptQueue = result.queue;
+          // The opportunity interrupts the march: it resolves where the provoker stood,
+          // before the rest of the move is committed. Movement in the sim is a formation
+          // translation applied below, so the queue is drained before that write — which is
+          // what makes the ordering rule true here rather than merely asserted.
+          while (true) {
+            const popped = resolveNextInterrupt(interruptQueue, {
+              initiativeOf: (id) => -leaderModelIdx(id),
+            });
+            interruptQueue = popped.queue;
+            const interrupt = popped.interrupt;
+            if (interrupt === null) break;
+            const reactor = reactors.find((r) => r.id === interrupt.reactorId);
+            if (reactor === undefined) continue;
+            const provokerIdx = moverIdx;
+            const used = pool.sys["aooUsed"]?.[reactor.modelIdx] ?? 0;
+            const refusal = aooRefusal({
+              used,
+              budgetMax: pool.sys["aooMax"]?.[reactor.modelIdx] ?? 1,
+            });
+            if (refusal !== null) {
+              // Say why the reaction did not happen rather than dropping it silently: a
+              // spent budget and a legal opportunity look identical in the log otherwise.
+              emit({
+                subPhase: "move",
+                type: "opportunity-refused",
+                unitId: reactor.id,
+                targetUnitId: unit.id,
+                at: {
+                  x: pool.x[provokerIdx] ?? 0,
+                  y: pool.y[provokerIdx] ?? 0,
+                },
+                text: `${reactor.name} forgoes the attack of opportunity — ${refusal}`,
+                data: {
+                  kind: "attack-of-opportunity",
+                  reactorId: reactor.id,
+                  reason: refusal,
+                },
+              });
+              continue;
+            }
+            // Spend first: the budget is per round and the opportunity is being taken now.
+            const column = pool.sys["aooUsed"];
+            if (column !== undefined) column[reactor.modelIdx] = used + 1;
+            const res = resolvePF1eAttacks({
+              pool,
+              attackers: [reactor.modelIdx],
+              defenders: [provokerIdx],
+              registry: profiles.registry,
+              rng: forkRng(rng, unitIndex(unit), 4),
+            });
+            const damage = res.metrics.netDamageDealt;
+            emit({
+              subPhase: "move",
+              type: "opportunity",
+              unitId: reactor.id,
+              targetUnitId: unit.id,
+              at: { x: pool.x[provokerIdx] ?? 0, y: pool.y[provokerIdx] ?? 0 },
+              text: `${reactor.name} strikes ${unit.name} as it leaves the threatened square`,
+              data: {
+                kind: "attack-of-opportunity",
+                reactorId: reactor.id,
+                provokerId: unit.id,
+                feetMoved: Math.round(Math.hypot(dx, dy) * 100) / 100,
+                squaresLeft: result.squaresLeft.length,
+                // The square the opportunity happened in — where the provoker was
+                // attacked, not where this march ends (P06's ordering rule).
+                square: interrupt.trigger.left ?? null,
+                ...(res.metrics.hits > 0
+                  ? {
+                      hits: res.metrics.hits,
+                      damage: Math.round(damage * 100) / 100,
+                    }
+                  : {}),
+              },
+            });
+          }
+        }
+
         const [start, end] = unit.modelRange ?? [0, 0];
         for (let i = start; i < end && i < pool.count; i++) {
           if (((pool.status[i] ?? 0) & ModelStatus.dead) !== 0) continue;
           pool.x[i] = (pool.x[i] ?? 0) + dx;
           pool.y[i] = (pool.y[i] ?? 0) + dy;
-          if (order.kind === "move" && order.facing !== undefined) pool.rot[i] = order.facing;
+          if (order.kind === "move" && order.facing !== undefined)
+            pool.rot[i] = order.facing;
         }
         const paceLabel = order.kind === "retreat" ? "retreat" : order.pace;
         const verb =
@@ -312,15 +569,6 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
 
       grid.rebuild(pool);
 
-      // Profiles + derived pool columns (§1.3/§1.4). Interned from a deterministically
-      // sorted unit list, so `profileIdx` values written into the pool stay valid across
-      // turns, checkpoints and SimWorker restarts. Seeding also refreshes per-turn state:
-      // the AoO budget resets (SRD: your attacks of opportunity refresh at the start of
-      // your turn) and save/AC columns are rewritten before leadership auras are added,
-      // which is what keeps an aura from stacking once per model per turn.
-      const profiles = buildUnitProfiles(units, registry);
-      seedPF1ePool(pool, units, profiles);
-
       // ── heal sub-phase (M06, D-176). SRD Universal Monster Rules (R02): a creature
       // with fast healing "regains the listed number of Hit Points at the start of its
       // turn … can never exceed its maximum Hit Points", and regeneration heals "as
@@ -331,7 +579,11 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
       // dies". The healed total is booked into analytics' damageHealed (M11).
       for (const unit of units) {
         const profile = profiles.byUnitId.get(unit.id);
-        if (!profile || (profile.fastHealingVal <= 0 && profile.regenerationVal <= 0)) continue;
+        if (
+          !profile ||
+          (profile.fastHealingVal <= 0 && profile.regenerationVal <= 0)
+        )
+          continue;
         const [start, end] = unit.modelRange ?? [0, 0];
         const living: number[] = [];
         for (let i = start; i < end && i < pool.count; i++) {
@@ -346,7 +598,10 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
             type: "heal",
             unitId: unit.id,
             text: `${unit.name} heals ${healRes.totalHealed} hit points (${profile.regenerationVal > 0 ? "regeneration" : "fast healing"})`,
-            data: { healed: healRes.totalHealed, revived: healRes.revivedCount },
+            data: {
+              healed: healRes.totalHealed,
+              revived: healRes.revivedCount,
+            },
           });
         }
       }
@@ -360,10 +615,33 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
         if (!isHeroUnit(unit, ctx.leaderActors)) continue;
         const anchor = unit.modelRange?.[0];
         if (anchor === undefined) continue;
-        applyHeroLeadershipAuras({ pool, grid, heroModelIdx: anchor, radius: 30, moraleBonus: 2 });
+        applyHeroLeadershipAuras({
+          pool,
+          grid,
+          heroModelIdx: anchor,
+          radius: 30,
+          moraleBonus: 2,
+        });
       }
 
-      // Resolve Melee Engagements & Envelopment
+      // ── flanking (M04, D-182). AoN 183's line test, not the old "≥2 attackers in
+      // contact" heuristic: every living model's FLANKED bit is cleared and recomputed
+      // once per turn from the post-movement layout, so a defender flanked by two
+      // enemies on opposite borders — from any units, not just the one it is being
+      // attacked by this round — carries the bit, and a stale bit can never survive a
+      // round in which the geometry stopped supporting it. The melee sub-phase then
+      // reads the per-defender bit through `resolvePF1eAttacks`, exactly as the
+      // tactical scale reads it. Runs after movement, before any engagement resolves.
+      markPF1eFlanking({
+        pool,
+        grid,
+        cellFeet,
+        factionByUnitIdx,
+        reachSquaresByUnitIdx,
+        sizeByUnitIdx,
+      });
+
+      // Resolve Melee Engagements
       for (const unit of units) {
         const queue = orders.get(unit.id);
         const order = queue?.active ?? queue?.pending[0];
@@ -373,19 +651,6 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
         if (!targetUnit) continue;
 
         const targetUnitIdx = units.indexOf(targetUnit);
-        const attackerUnitIdx = units.indexOf(unit);
-
-        // Calculate Spatial Envelopment. Reach is the **attacking unit's** natural reach
-        // in feet: one grid cell for a Medium-sized unit on the scene's grid (P01/D-177),
-        // two cells for a Large one and six for a Colossal one (Table 8-4, AoN 179) — a
-        // giant now engages the rank behind the front instead of stopping one model short.
-        const envRes = calculatePF1eEnvelopment({
-          pool,
-          grid,
-          attackerUnitIdx,
-          defenderUnitIdx: targetUnitIdx,
-          reach: reachFeetByUnitIdx[attackerUnitIdx] ?? cellFeet,
-        });
 
         // Collect attacker and defender model indices
         const [aStart, aEnd] = unit.modelRange ?? [0, 0];
@@ -393,12 +658,14 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
 
         const attackers: number[] = [];
         for (let i = aStart; i < aEnd && i < pool.count; i++) {
-          if (((pool.status[i] ?? 0) & ModelStatus.dead) === 0) attackers.push(i);
+          if (((pool.status[i] ?? 0) & ModelStatus.dead) === 0)
+            attackers.push(i);
         }
 
         const defenders: number[] = [];
         for (let i = dStart; i < dEnd && i < pool.count; i++) {
-          if (((pool.status[i] ?? 0) & ModelStatus.dead) === 0) defenders.push(i);
+          if (((pool.status[i] ?? 0) & ModelStatus.dead) === 0)
+            defenders.push(i);
         }
 
         // Resolve PF1e Attack Loop. Dice come from the turn PRNG forked per unit
@@ -409,7 +676,6 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
           defenders,
           registry,
           rng: forkRng(rng, unitIndex(unit), 1),
-          isFlanked: envRes.envelopedDefenders.length > 0,
         });
 
         // Hero Cleave (D-178). Once per hero *unit* per engagement, SRD Cleave grants
@@ -424,7 +690,12 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
           const heroIdx = attackers[0];
           if (heroIdx !== undefined) {
             const adjacentEnemy = grid
-              .queryPoint(pool.x[heroIdx] ?? 0, pool.y[heroIdx] ?? 0, cellFeet, pool)
+              .queryPoint(
+                pool.x[heroIdx] ?? 0,
+                pool.y[heroIdx] ?? 0,
+                cellFeet,
+                pool,
+              )
               .find((n) => pool.unitIdx[n.index] === targetUnitIdx)?.index;
             if (adjacentEnemy !== undefined) {
               const cleaveRes = resolvePF1eAttacks({
@@ -433,10 +704,12 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
                 defenders: [adjacentEnemy],
                 registry,
                 rng: forkRng(rng, unitIndex(unit), 3),
-                isFlanked: envRes.envelopedDefenders.length > 0,
                 maxIterativeAttacks: 1,
               });
-              const merged = combatRes.metrics as unknown as Record<string, number>;
+              const merged = combatRes.metrics as unknown as Record<
+                string,
+                number
+              >;
               for (const [key, value] of Object.entries(cleaveRes.metrics)) {
                 merged[key] = (merged[key] ?? 0) + (value as number);
               }
@@ -445,7 +718,8 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
               // profile every round before melee, so the penalty is naturally wiped at
               // the start of the hero's next round — meanwhile enemy units resolved
               // later THIS round attack against the reduced AC.
-              if (pool.sys["ac"]) pool.sys["ac"][heroIdx] = (pool.sys["ac"][heroIdx] ?? 0) - 2;
+              if (pool.sys["ac"])
+                pool.sys["ac"][heroIdx] = (pool.sys["ac"][heroIdx] ?? 0) - 2;
             }
           }
         }
@@ -458,7 +732,10 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
           unitId: unit.id,
           targetUnitId: targetUnit.id,
           text: `${unit.name} attacks ${targetUnit.name}: ${combatRes.metrics.hits} hits, ${combatRes.metrics.netDamageDealt} damage, ${combatRes.metrics.killsCount} kills`,
-          data: combatRes.metrics as unknown as Record<string, import("../core/documents").Json>,
+          data: combatRes.metrics as unknown as Record<
+            string,
+            import("../core/documents").Json
+          >,
         });
       }
 
@@ -470,10 +747,17 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
       for (const unit of units) {
         const queue = orders.get(unit.id);
         const order = queue?.active ?? queue?.pending[0];
-        if (!order || order.kind !== "custom" || order.type !== "spell_aoe") continue;
+        if (!order || order.kind !== "custom" || order.type !== "spell_aoe")
+          continue;
 
         const refusal = (kind: string, reason: string): void => {
-          emit({ subPhase: "spell", type: "spellRefused", unitId: unit.id, text: `${unit.name} cannot cast: ${reason}`, data: { refusal: kind, reason } });
+          emit({
+            subPhase: "spell",
+            type: "spellRefused",
+            unitId: unit.id,
+            text: `${unit.name} cannot cast: ${reason}`,
+            data: { refusal: kind, reason },
+          });
         };
 
         // 0. Spell selection (D-171): the order names the pack entry it casts in
@@ -481,14 +765,20 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
         const spellId = payloadSpellId(order.data);
         const spellDef = spells[spellId];
         if (!spellDef) {
-          refusal("unknown_spell", `spell "${spellId}" is not in the mass-battle spell registry`);
+          refusal(
+            "unknown_spell",
+            `spell "${spellId}" is not in the mass-battle spell registry`,
+          );
           continue;
         }
 
         // 1. Location is order-driven: the payload carries the point of origin (circle)
         // or the aim direction (cone/line — those shoot away from the caster, CRB p.214).
         // The shape is the selected spell's, probed once at creation.
-        const payload = parseSpellAoePayload(spellShapes.get(spellId) ?? "circle", order.data);
+        const payload = parseSpellAoePayload(
+          spellShapes.get(spellId) ?? "circle",
+          order.data,
+        );
         if (!payload.ok) {
           refusal("bad_order", payload.message);
           continue;
@@ -499,15 +789,22 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
         // constant at the call site.
         const profile = profiles.byUnitId.get(unit.id);
         if (!profile) {
-          refusal("no_caster_profile", "the casting unit has no compiled profile");
+          refusal(
+            "no_caster_profile",
+            "the casting unit has no compiled profile",
+          );
           continue;
         }
         // 2b. M07: a leader actor bound to the unit outranks the unit-stats profile —
         // its authored caster level and key ability are the caster's real ones.
-        const heroInputs = casterInputsFromLeaderActor(ctx.leaderActors[unit.id]);
+        const heroInputs = casterInputsFromLeaderActor(
+          ctx.leaderActors[unit.id],
+        );
         const casterLevel = heroInputs?.casterLevel ?? profile.casterLevel;
-        const keyAbilityMod = heroInputs?.keyAbilityMod ?? profile.castingStatMod;
-        const spellPenetration = heroInputs?.spellPenetration ?? profile.spellPenetration;
+        const keyAbilityMod =
+          heroInputs?.keyAbilityMod ?? profile.castingStatMod;
+        const spellPenetration =
+          heroInputs?.spellPenetration ?? profile.spellPenetration;
 
         // 3. Range is measured from the casting unit's anchor (first living model): a
         // spell's range is "the maximum distance at which you can designate the spell's
@@ -527,22 +824,38 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
         // models whose own unit reach covers the distance. Coordinates are feet; only
         // living models of other units can threaten (queryPoint skips dead/hidden).
         const casterAdjacentEnemies: number[] = [];
-        const widestReachFt = reachFeetByUnitIdx.reduce((m, r) => Math.max(m, r), cellFeet);
-        for (const n of grid.queryPoint(anchor.x, anchor.y, widestReachFt, pool)) {
+        const widestReachFt = reachFeetByUnitIdx.reduce(
+          (m, r) => Math.max(m, r),
+          cellFeet,
+        );
+        for (const n of grid.queryPoint(
+          anchor.x,
+          anchor.y,
+          widestReachFt,
+          pool,
+        )) {
           const idx = n.index;
           const threatUnitIdx = pool.unitIdx[idx];
           if (threatUnitIdx === pool.unitIdx[anchor.idx]) continue;
           const threatReachFt =
-            threatUnitIdx === undefined ? cellFeet : (reachFeetByUnitIdx[threatUnitIdx] ?? cellFeet);
+            threatUnitIdx === undefined
+              ? cellFeet
+              : (reachFeetByUnitIdx[threatUnitIdx] ?? cellFeet);
           if (Math.sqrt(n.dist2) > threatReachFt) continue;
           casterAdjacentEnemies.push(idx);
         }
 
         // 4. The pack payload is built at the caster's actual level — "1d6 per caster
         // level (maximum 10d6)" resolves against it — from the selected spell's entry.
-        const packSpell = parsePackSpellOrder({ entry: spellDef.entry, casterLevel });
+        const packSpell = parsePackSpellOrder({
+          entry: spellDef.entry,
+          casterLevel,
+        });
         if (!packSpell.ok || packSpell.order === null) {
-          refusal("pack_issue", packSpell.issues.map((i) => i.message).join("; "));
+          refusal(
+            "pack_issue",
+            packSpell.issues.map((i) => i.message).join("; "),
+          );
           continue;
         }
 
@@ -550,32 +863,50 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
         // point, so only it is checked against the range category and the designation
         // line of effect (CRB pp.213–214).
         const origin =
-          packSpell.order.shape === "circle" ? { x: payload.x, y: payload.y } : { x: anchor.x, y: anchor.y };
+          packSpell.order.shape === "circle"
+            ? { x: payload.x, y: payload.y }
+            : { x: anchor.x, y: anchor.y };
         const rangeFeet =
-          packSpell.order.rangeCategory !== null ? spellRangeFeet(packSpell.order.rangeCategory, casterLevel) : null;
+          packSpell.order.rangeCategory !== null
+            ? spellRangeFeet(packSpell.order.rangeCategory, casterLevel)
+            : null;
         if (packSpell.order.shape === "circle") {
           if (rangeFeet === null) {
-            refusal("pack_issue", `${packSpell.order.spellName}: circle shape without a range category`);
+            refusal(
+              "pack_issue",
+              `${packSpell.order.spellName}: circle shape without a range category`,
+            );
             continue;
           }
           const distFeet = Math.hypot(origin.x - anchor.x, origin.y - anchor.y);
           if (distFeet > rangeFeet) {
-            refusal("out_of_range", `${packSpell.order.spellName}: the point of origin at ${Math.round(distFeet)} ft is beyond the ${packSpell.order.rangeCategory} range of ${rangeFeet} ft at caster level ${casterLevel}`);
+            refusal(
+              "out_of_range",
+              `${packSpell.order.spellName}: the point of origin at ${Math.round(distFeet)} ft is beyond the ${packSpell.order.rangeCategory} range of ${rangeFeet} ft at caster level ${casterLevel}`,
+            );
             continue;
           }
 
           // 4b. "You must have a clear line of effect to the point of origin of any
           // spell you cast" (CRB p.214). A sight-blocking wall between the caster and
           // the designated point refuses the cast outright.
-          if (!hasLineOfEffect(anchor.x, anchor.y, origin.x, origin.y, ctx.walls)) {
-            refusal("no_line_of_effect", `${packSpell.order.spellName}: no line of effect from the caster to the point of origin at (${origin.x}, ${origin.y})`);
+          if (
+            !hasLineOfEffect(anchor.x, anchor.y, origin.x, origin.y, ctx.walls)
+          ) {
+            refusal(
+              "no_line_of_effect",
+              `${packSpell.order.spellName}: no line of effect from the caster to the point of origin at (${origin.x}, ${origin.y})`,
+            );
             continue;
           }
         }
 
         // 5. DC from the same formula the tactical engine uses, with the caster's own
         // key-ability modifier and the selected spell's verified level.
-        const { dc: packDc, issues: dcIssues } = spellSaveDc({ spellLevel: spellDef.level, keyAbilityMod });
+        const { dc: packDc, issues: dcIssues } = spellSaveDc({
+          spellLevel: spellDef.level,
+          keyAbilityMod,
+        });
         if (dcIssues.length > 0) {
           refusal("pack_issue", dcIssues.map((i) => i.message).join("; "));
           continue;
@@ -593,7 +924,9 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
             radius: packSpell.order.radius,
             dirX: payload.dirX,
             dirY: payload.dirY,
-            ...(packSpell.order.widthFeet !== null ? { widthFeet: packSpell.order.widthFeet } : {}),
+            ...(packSpell.order.widthFeet !== null
+              ? { widthFeet: packSpell.order.widthFeet }
+              : {}),
             dc: packDc,
             spellLevel: spellDef.level,
             damageDiceCount: packSpell.order.damageDiceCount,
@@ -618,14 +951,25 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
         // fire is rules-correct for an Area spell), so the outcome is booked per owning
         // unit — the event carries the breakdown, and `deathsCount` finally lands on the
         // unit that lost models rather than on the caster.
-        const hitsByUnit = new Map<string, { modelsHit: number; damageDealt: number; kills: number }>();
+        const hitsByUnit = new Map<
+          string,
+          { modelsHit: number; damageDealt: number; kills: number }
+        >();
         for (const outcome of spellRes.perModel) {
           const owner = units.find((u) => {
             const [start, end] = u.modelRange ?? [0, 0];
-            return outcome.idx >= start && outcome.idx < end && outcome.idx < pool.count;
+            return (
+              outcome.idx >= start &&
+              outcome.idx < end &&
+              outcome.idx < pool.count
+            );
           });
           if (!owner) continue;
-          const bucket = hitsByUnit.get(owner.id) ?? { modelsHit: 0, damageDealt: 0, kills: 0 };
+          const bucket = hitsByUnit.get(owner.id) ?? {
+            modelsHit: 0,
+            damageDealt: 0,
+            kills: 0,
+          };
           bucket.modelsHit += 1;
           bucket.damageDealt += outcome.damageDealt;
           bucket.kills += outcome.killed ? 1 : 0;
@@ -646,7 +990,10 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
           // makes "this order came from the pack and the profile" observable to a GM and
           // to a test.
           data: {
-            ...(spellRes.metrics as unknown as Record<string, import("../core/documents").Json>),
+            ...(spellRes.metrics as unknown as Record<
+              string,
+              import("../core/documents").Json
+            >),
             spellName: packSpell.order.spellName,
             spellId,
             spellRadius: packSpell.order.radius,
@@ -661,18 +1008,27 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
             rangeFeet,
             // Per-unit breakdown: { modelsHit, damageDealt, kills } for every unit whose
             // models were in the area, caster included.
-            hitsByUnit: Object.fromEntries(hitsByUnit) as unknown as import("../core/documents").Json,
+            hitsByUnit: Object.fromEntries(
+              hitsByUnit,
+            ) as unknown as import("../core/documents").Json,
           },
         });
       }
     },
 
     tick(ctx, pool, units, orders, rng, emit, dtSeconds): void {
-      void ctx; void pool; void units; void orders; void rng; void emit; void dtSeconds;
+      void ctx;
+      void pool;
+      void units;
+      void orders;
+      void rng;
+      void emit;
+      void dtSeconds;
     },
 
     detection(ctx, unit): number {
-      void ctx; void unit;
+      void ctx;
+      void unit;
       return 6;
     },
 
@@ -683,7 +1039,9 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
       // units — a SimWorker restart begins fresh accumulation (M11).
       const report = analytics.generateReport();
       const armyUnitIds = new Set(army.units.map((u) => u.id));
-      const armyUnits = Object.values(report.units).filter((u) => armyUnitIds.has(u.unitId));
+      const armyUnits = Object.values(report.units).filter((u) =>
+        armyUnitIds.has(u.unitId),
+      );
       const sum = (pick: (u: UnitAnalyticsSummary) => number): number =>
         armyUnits.reduce((acc, u) => acc + pick(u), 0);
       const totalAttacks = sum((u) => u.totalAttacks);
@@ -691,7 +1049,10 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
       const netDamageDealt = sum((u) => u.netDamageDealt);
       const deathsCount = sum((u) => u.deathsCount);
       const rows = armyUnits
-        .map((u) => ({ label: `${u.unitId}: net damage`, value: u.netDamageDealt }))
+        .map((u) => ({
+          label: `${u.unitId}: net damage`,
+          value: u.netDamageDealt,
+        }))
         .sort((a, b) => b.value - a.value);
       return {
         summary: `PF1e Army ${army.name}: ${totalAttacks} attacks, ${killsCount} kills, ${netDamageDealt} net damage${deathsCount > 0 ? `, ${deathsCount} models lost` : ""}`,
@@ -699,7 +1060,10 @@ export function createMassBattlePf1e(opts: MassBattlePf1eOptions = {}): RulesMod
         data: {
           totalAttacks,
           hits: sum((u) => u.hits),
-          hitPercentage: totalAttacks > 0 ? Math.round((sum((u) => u.hits) / totalAttacks) * 100) : 0,
+          hitPercentage:
+            totalAttacks > 0
+              ? Math.round((sum((u) => u.hits) / totalAttacks) * 100)
+              : 0,
           netDamageDealt,
           killsCount,
           deathsCount,
@@ -729,6 +1093,25 @@ function unitIndex(unit: UnitView): number {
 }
 
 /** Fork a sub-stream per (unit, phase) so the melee and spell loops stay independent. */
+/**
+ * Every living model a unit currently covers, by pool index — the index list the
+ * per-turn AoO reset takes. Dead models are skipped: they take no opportunities, and
+ * excluding them keeps the reset's own write count proportional to the living army.
+ */
+function livingModelIndices(
+  pool: ModelPool,
+  units: readonly UnitView[],
+): number[] {
+  const out: number[] = [];
+  for (const unit of units) {
+    const [start, end] = unit.modelRange ?? [0, 0];
+    for (let i = start; i < end && i < pool.count; i++) {
+      if (((pool.status[i] ?? 0) & ModelStatus.dead) === 0) out.push(i);
+    }
+  }
+  return out;
+}
+
 function forkRng(rng: PRNG, unitHash: number, phase: number): PF1eRng {
   return pf1eRngFromPrng(rng.fork(((unitHash << 4) | phase) >>> 0));
 }
@@ -739,15 +1122,21 @@ function forkRng(rng: PRNG, unitHash: number, phase: number): PF1eRng {
  * actor — which `collectLeaderActors` has already resolved into `ctx.leaderActors`
  * (keyed by unit id). Not a magic profile id: ids are assigned by content.
  */
-function isHeroUnit(unit: UnitView, leaderActors: Readonly<Record<string, unknown>>): boolean {
-  return unit.type === "hero" || unit.stats["hero"] === 1 || unit.id in leaderActors;
+function isHeroUnit(
+  unit: UnitView,
+  leaderActors: Readonly<Record<string, unknown>>,
+): boolean {
+  return (
+    unit.type === "hero" || unit.stats["hero"] === 1 || unit.id in leaderActors
+  );
 }
 
 type SpellAoePayload =
   | { ok: true; x: number; y: number; dirX: number; dirY: number }
   | { ok: false; message: string };
 
-const finiteNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+const finiteNum = (v: unknown): v is number =>
+  typeof v === "number" && Number.isFinite(v);
 
 /**
  * The `spell_aoe` order's `data`, per shape (CRB p.214):
@@ -758,18 +1147,36 @@ const finiteNum = (v: unknown): v is number => typeof v === "number" && Number.i
  * Anything else is a named error rather than a silent fallback.
  */
 function parseSpellAoePayload(shape: string, data: unknown): SpellAoePayload {
-  const rec = typeof data === "object" && data !== null && !Array.isArray(data) ? (data as Record<string, unknown>) : null;
+  const rec =
+    typeof data === "object" && data !== null && !Array.isArray(data)
+      ? (data as Record<string, unknown>)
+      : null;
   if (rec === null) {
-    return { ok: false, message: "order data must be an object like { x: 10, y: 10 } (circle) or { dirX: 1, dirY: 0 } (cone/line)" };
+    return {
+      ok: false,
+      message:
+        "order data must be an object like { x: 10, y: 10 } (circle) or { dirX: 1, dirY: 0 } (cone/line)",
+    };
   }
   if (shape === "cone" || shape === "line") {
-    if (!finiteNum(rec.dirX) || !finiteNum(rec.dirY) || (rec.dirX === 0 && rec.dirY === 0)) {
-      return { ok: false, message: `order data needs finite, non-zero dirX and dirY — the direction the ${shape} shoots` };
+    if (
+      !finiteNum(rec.dirX) ||
+      !finiteNum(rec.dirY) ||
+      (rec.dirX === 0 && rec.dirY === 0)
+    ) {
+      return {
+        ok: false,
+        message: `order data needs finite, non-zero dirX and dirY — the direction the ${shape} shoots`,
+      };
     }
     return { ok: true, x: 0, y: 0, dirX: rec.dirX, dirY: rec.dirY };
   }
   if (!finiteNum(rec.x) || !finiteNum(rec.y)) {
-    return { ok: false, message: "order data needs finite numeric x and y (the point of origin, in feet)" };
+    return {
+      ok: false,
+      message:
+        "order data needs finite numeric x and y (the point of origin, in feet)",
+    };
   }
   return { ok: true, x: rec.x, y: rec.y, dirX: 0, dirY: 0 };
 }
@@ -789,16 +1196,48 @@ function parseSpellAoePayload(shape: string, data: unknown): SpellAoePayload {
  * authors it at this scale yet, so the table's tall figure stands.
  */
 export function reachSquaresFromLeaderActor(actorJson: unknown): number | null {
-  const doc = typeof actorJson === "object" && actorJson !== null && !Array.isArray(actorJson)
-    ? (actorJson as Record<string, unknown>)
-    : null;
+  const doc =
+    typeof actorJson === "object" &&
+    actorJson !== null &&
+    !Array.isArray(actorJson)
+      ? (actorJson as Record<string, unknown>)
+      : null;
   if (doc === null) return null;
-  const system = typeof doc.system === "object" && doc.system !== null && !Array.isArray(doc.system)
-    ? (doc.system as Record<string, unknown>)
-    : null;
+  const system =
+    typeof doc.system === "object" &&
+    doc.system !== null &&
+    !Array.isArray(doc.system)
+      ? (doc.system as Record<string, unknown>)
+      : null;
   if (system === null) return null;
   const derived = deriveFromDocuments({ actor: { system } });
   return naturalReachSquares(derived.size);
+}
+
+/**
+ * The same seam's size half (D-182): Table 8-4's sub-square "can't flank" exclusion
+ * needs the authored size itself, not just its reach column. Returns null for a missing
+ * or unparseable document, and `canFlank` then treats the model as the Medium default —
+ * the same direction `reachSquaresFromLeaderActor` takes, so a unit without actor data
+ * is never excluded from a rule on the strength of absent data.
+ */
+export function sizeFromLeaderActor(actorJson: unknown): string | null {
+  const doc =
+    typeof actorJson === "object" &&
+    actorJson !== null &&
+    !Array.isArray(actorJson)
+      ? (actorJson as Record<string, unknown>)
+      : null;
+  if (doc === null) return null;
+  const system =
+    typeof doc.system === "object" &&
+    doc.system !== null &&
+    !Array.isArray(doc.system)
+      ? (doc.system as Record<string, unknown>)
+      : null;
+  if (system === null) return null;
+  const derived = deriveFromDocuments({ actor: { system } });
+  return derived.size ?? null;
 }
 
 /**
@@ -808,16 +1247,24 @@ export function reachSquaresFromLeaderActor(actorJson: unknown): number | null {
  * Returns null — and the caller keeps the unit-stats profile — when the document is
  * missing, unparseable, or the actor is not a caster (`spellCasterLevel` 0).
  */
-export function casterInputsFromLeaderActor(
-  actorJson: unknown,
-): { casterLevel: number; keyAbilityMod: number; spellPenetration: number } | null {
-  const doc = typeof actorJson === "object" && actorJson !== null && !Array.isArray(actorJson)
-    ? (actorJson as Record<string, unknown>)
-    : null;
+export function casterInputsFromLeaderActor(actorJson: unknown): {
+  casterLevel: number;
+  keyAbilityMod: number;
+  spellPenetration: number;
+} | null {
+  const doc =
+    typeof actorJson === "object" &&
+    actorJson !== null &&
+    !Array.isArray(actorJson)
+      ? (actorJson as Record<string, unknown>)
+      : null;
   if (doc === null) return null;
-  const system = typeof doc.system === "object" && doc.system !== null && !Array.isArray(doc.system)
-    ? (doc.system as Record<string, unknown>)
-    : null;
+  const system =
+    typeof doc.system === "object" &&
+    doc.system !== null &&
+    !Array.isArray(doc.system)
+      ? (doc.system as Record<string, unknown>)
+      : null;
   if (system === null) return null;
   const derived = deriveFromDocuments({ actor: { system } });
   if (derived.spellCasterLevel <= 0) return null;
@@ -825,7 +1272,7 @@ export function casterInputsFromLeaderActor(
   return {
     casterLevel: derived.spellCasterLevel,
     keyAbilityMod: derived.abilityMods[derived.spellKeyAbility],
-    spellPenetration: parsed.ok ? parsed.value.spellPenetration ?? 0 : 0,
+    spellPenetration: parsed.ok ? (parsed.value.spellPenetration ?? 0) : 0,
   };
 }
 
@@ -834,7 +1281,10 @@ export function casterInputsFromLeaderActor(
  * The index matters for M11: it is the caster a threatened enemy swings at (defensive
  * casting AoO), not just the point range is measured from.
  */
-function anchorPosition(pool: ModelPool, unit: UnitView): { idx: number; x: number; y: number } | null {
+function anchorPosition(
+  pool: ModelPool,
+  unit: UnitView,
+): { idx: number; x: number; y: number } | null {
   const [start, end] = unit.modelRange ?? [0, 0];
   for (let i = start; i < end && i < pool.count; i++) {
     if (((pool.status[i] ?? 0) & ModelStatus.dead) === 0) {

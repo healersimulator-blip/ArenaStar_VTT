@@ -474,17 +474,20 @@ describe("createMassBattlePf1e System Package (§12 / Task 9)", () => {
     expect(events.some((e) => e.subPhase === "heal")).toBe(false);
   });
 
-  test("envelopment reach is measured in feet and the FLANKED bit expires each round (M04/D-177)", () => {
-    // SRD Combat: Medium creatures have a 5-ft natural reach, so the envelopment query
-    // runs in feet (SpatialGrid), and the FLANKED bit it sets is recomputed every
-    // round — it no longer lingers for the rest of the battle (Gap List §5).
+  test("the FLANKED bit follows AoN 183's line test and is recomputed each round (M04/D-182)", () => {
+    // SRD/AoN 183: "you get a +2 flanking bonus if your opponent is threatened by another
+    // enemy character or creature on its opposite border or opposite corner". The models
+    // stand one per 5-ft square (the scene's grid distance, P01), so the bit is the
+    // observable: two enemies east and west of the lone defender are on opposite borders,
+    // and the bit is recomputed from the layout every round instead of lingering
+    // (Gap List §5).
     const rules = createMassBattlePf1e();
     const ctx = spellCtx();
     const sys = { ac: 16, touchAc: 12, fort: 4, ref: 2, will: 1, sr: 0, drType: 0, drVal: 0, profileIdx: 1 };
     const pool = createModelPool(8, PF1E_MODEL_SCHEMA);
-    allocModel(pool, { id: 1, unitIdx: 0, x: 0, y: 0, hp: 30, hpMax: 30, sys: { ...sys } });
-    allocModel(pool, { id: 2, unitIdx: 0, x: 6, y: 0, hp: 30, hpMax: 30, sys: { ...sys } });
-    allocModel(pool, { id: 3, unitIdx: 1, x: 3, y: 0, hp: 30, hpMax: 30, sys: { ...sys } });
+    allocModel(pool, { id: 1, unitIdx: 0, x: 20, y: 25, hp: 30, hpMax: 30, sys: { ...sys } });
+    allocModel(pool, { id: 2, unitIdx: 0, x: 30, y: 25, hp: 30, hpMax: 30, sys: { ...sys } });
+    allocModel(pool, { id: 3, unitIdx: 1, x: 25, y: 25, hp: 30, hpMax: 30, sys: { ...sys } });
     const units: UnitView[] = [
       { id: "u0", armyId: "a0", factionId: "f0", type: "infantry", name: "Red", profile: {}, stats: { bab: 4, strMod: 2, ac: 16 }, orders: null, formation: "line", sceneId: "scene-1", modelRange: [0, 2], leaderTokenId: null },
       { id: "u1", armyId: "a1", factionId: "f1", type: "infantry", name: "Blue", profile: {}, stats: { bab: 4, strMod: 2, ac: 16 }, orders: null, formation: "line", sceneId: "scene-1", modelRange: [2, 3], leaderTokenId: null },
@@ -492,31 +495,62 @@ describe("createMassBattlePf1e System Package (§12 / Task 9)", () => {
     const orders = new Map<string, OrderQueue>();
     orders.set("u0", { issuedBy: "gm", issuedTurn: 1, pending: [], active: { kind: "attack", targetUnitId: "u1" } });
 
-    // Round 1: both attackers stand 3 ft from the lone defender ⇒ enveloped ⇒ FLANKED.
+    // Round 1: west + east enemies ⇒ opposite borders ⇒ FLANKED.
     rules.resolveTurn(ctx, pool, units, orders, new XoshiroPRNG(7), () => {});
     expect((pool.status[2] ?? 0) & PF1E_STATUS_FLANKED).not.toBe(0);
 
-    // Round 2: the attackers are beyond natural reach ⇒ no engagement ⇒ the bit expires.
+    // Round 2: both attackers step to the defender's west side ⇒ same border, no flank.
+    pool.x[0] = 15;
+    pool.x[1] = 20;
+    rules.resolveTurn(ctx, pool, units, orders, new XoshiroPRNG(7), () => {});
+    expect((pool.status[2] ?? 0) & PF1E_STATUS_FLANKED).toBe(0);
+
+    // Round 3: back on opposite borders, then the attackers leave reach entirely — a bit
+    // that was set is cleared by the next round's recomputation, never left behind.
+    pool.x[0] = 20;
+    pool.x[1] = 30;
+    rules.resolveTurn(ctx, pool, units, orders, new XoshiroPRNG(7), () => {});
+    expect((pool.status[2] ?? 0) & PF1E_STATUS_FLANKED).not.toBe(0);
     pool.x[0] = -50;
     pool.x[1] = -50;
     rules.resolveTurn(ctx, pool, units, orders, new XoshiroPRNG(7), () => {});
     expect((pool.status[2] ?? 0) & PF1E_STATUS_FLANKED).toBe(0);
   });
 
-  test("a Large unit reaches two squares, so it envelops a defender a Medium unit cannot touch (P02/D-180)", () => {
+  test("two attackers on the same side no longer flank — the heuristic's false positive is gone (M04/D-182)", () => {
+    // The old rule was "≥2 attackers in contact ⇒ flanked" (Gap List §5). Adjacent
+    // same-side attackers were enough, which the SRD rule never says: the line between
+    // two attackers standing north of the defender runs along the defender's border
+    // instead of crossing opposite borders.
+    const rules = createMassBattlePf1e();
+    const sys = { ac: 16, touchAc: 12, fort: 4, ref: 2, will: 1, sr: 0, drType: 0, drVal: 0, profileIdx: 1 };
+    const pool = createModelPool(8, PF1E_MODEL_SCHEMA);
+    allocModel(pool, { id: 1, unitIdx: 0, x: 20, y: 20, hp: 30, hpMax: 30, sys: { ...sys } });
+    allocModel(pool, { id: 2, unitIdx: 0, x: 30, y: 20, hp: 30, hpMax: 30, sys: { ...sys } });
+    allocModel(pool, { id: 3, unitIdx: 1, x: 25, y: 25, hp: 30, hpMax: 30, sys: { ...sys } });
+    const units: UnitView[] = [
+      { id: "u0", armyId: "a0", factionId: "f0", type: "infantry", name: "Red", profile: {}, stats: { bab: 4, strMod: 2, ac: 16 }, orders: null, formation: "line", sceneId: "scene-1", modelRange: [0, 2], leaderTokenId: null },
+      { id: "u1", armyId: "a1", factionId: "f1", type: "infantry", name: "Blue", profile: {}, stats: { bab: 4, strMod: 2, ac: 16 }, orders: null, formation: "line", sceneId: "scene-1", modelRange: [2, 3], leaderTokenId: null },
+    ];
+    const orders = new Map<string, OrderQueue>();
+    orders.set("u0", { issuedBy: "gm", issuedTurn: 1, pending: [], active: { kind: "attack", targetUnitId: "u1" } });
+    rules.resolveTurn(spellCtx(), pool, units, orders, new XoshiroPRNG(7), () => {});
+    expect((pool.status[2] ?? 0) & PF1E_STATUS_FLANKED).toBe(0);
+  });
+
+  test("a Large unit reaches two squares, so a pair the Medium line cannot form flanks (P02/D-180)", () => {
     // Table 8-4 (AoN Rules ID 179): creatures taking more than one square "typically have
     // a natural reach of 10 feet or more, meaning that they can reach targets even if they
-    // aren't in adjacent squares". Until now every unit reached exactly one grid cell
-    // (D-177), which stopped a giant one model short. Two attackers on one defender is what
-    // sets FLANKED, so the bit is the observable: the defender 10 ft out is contacted by
-    // BOTH attackers only when the unit's bound leader actor says Large.
+    // aren't in adjacent squares". The threatening-ally requirement is read through each
+    // unit's own reach, so the east enemy two squares away only completes the pair when the
+    // unit's bound leader actor says Large.
     const run = (leaderActors: RulesContext["leaderActors"]) => {
       const rules = createMassBattlePf1e();
       const pool = createModelPool(8, PF1E_MODEL_SCHEMA);
       const sys = { ac: 16, touchAc: 12, fort: 4, ref: 2, will: 1, sr: 0, drType: 0, drVal: 0, profileIdx: 1 };
-      allocModel(pool, { id: 1, unitIdx: 0, x: 0, y: 0, hp: 30, hpMax: 30, sys: { ...sys } });
-      allocModel(pool, { id: 2, unitIdx: 0, x: 6, y: 0, hp: 30, hpMax: 30, sys: { ...sys } });
-      allocModel(pool, { id: 3, unitIdx: 1, x: 10, y: 0, hp: 30, hpMax: 30, sys: { ...sys, profileIdx: 2 } });
+      allocModel(pool, { id: 1, unitIdx: 0, x: 20, y: 25, hp: 30, hpMax: 30, sys: { ...sys } }); // west, adjacent
+      allocModel(pool, { id: 2, unitIdx: 0, x: 35, y: 25, hp: 30, hpMax: 30, sys: { ...sys } }); // east, two squares out
+      allocModel(pool, { id: 3, unitIdx: 1, x: 25, y: 25, hp: 30, hpMax: 30, sys: { ...sys, profileIdx: 2 } });
       const units: UnitView[] = [
         { id: "u0", armyId: "a0", factionId: "f0", type: "infantry", name: "Red", profile: {}, stats: { bab: 4, strMod: 2, ac: 16 }, orders: null, formation: "line", sceneId: "scene-1", modelRange: [0, 2], leaderTokenId: null },
         { id: "u1", armyId: "a1", factionId: "f1", type: "infantry", name: "Blue", profile: {}, stats: { bab: 4, strMod: 2, ac: 16 }, orders: null, formation: "line", sceneId: "scene-1", modelRange: [2, 3], leaderTokenId: null },
@@ -528,9 +562,10 @@ describe("createMassBattlePf1e System Package (§12 / Task 9)", () => {
     };
 
     expect(run({ u0: { _id: "actor-giant", system: { pf1e: { size: "Large" } } } })).not.toBe(0);
-    // A Medium leader actor reaches 5 ft: only the near attacker contacts, so no envelopment.
+    // A Medium leader actor reaches 5 ft: its east model is not a threatening ally, so the
+    // lone adjacent attacker cannot flank.
     expect(run({ u0: { _id: "actor-man", system: { pf1e: { size: "Medium" } } } })).toBe(0);
-    // No bound actor at all: D-177's one-cell default, unchanged behaviour.
+    // No bound actor at all: the one-square Medium default, unchanged behaviour.
     expect(run({})).toBe(0);
   });
 

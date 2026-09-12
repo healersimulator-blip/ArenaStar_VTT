@@ -368,19 +368,36 @@ export function isPF1eBonusType(value: unknown): value is PF1eBonusType {
 /**
  * Stacking lives with the resolver that needs it: `effects.ts:contributionsCombine`.
  *
- * Attacks of opportunity per round (A.10): one, plus one more whenever the Dexterity modifier is
- * *positive*, plus one per point of Dex with Combat Reflexes.
+ * Attacks of opportunity per round.
  *
- * NOTE for Gap List §2: the strategic sim models this as `1 + max(0, dexMod)`
- * (`schema.ts:compilePF1eProfile`'s `maxAoos`). That is wrong for Dex 14+ (it grants two extras)
- * and ignores Combat Reflexes; it is fixed with the strategic analytics work, not silently here,
- * because it would shift 10k battle outcomes and their fixtures.
+ * **AoN Rules ID 102 — "Attacks of Opportunity", CRB p.180** (re-verified 2026-09-12):
+ *   "An attack of opportunity is a single melee attack, and most characters can only make
+ *    one per round."
+ * **Combat Reflexes (Combat), CRB p.119** (re-verified 2026-09-12 from the feat entry):
+ *   "You may make a number of additional attacks of opportunity per round equal to your
+ *    Dexterity bonus. With this feat, you may also make attacks of opportunity while
+ *    flat-footed. **Normal**: A character without this feat can make only one attack of
+ *    opportunity per round and can't make attacks of opportunity while flat-footed."
+ *
+ * So the budget is **one per round**, plus the Dexterity bonus for a character who has the
+ * feat. The previous reading — "one, plus one more whenever the Dexterity modifier is
+ * positive, plus one per point of Dex with Combat Reflexes" — granted a second opportunity
+ * to any character with a positive Dexterity bonus, which no fetched text supports, and
+ * then double-counted that point for a Combat Reflexes character (Dex 16: 5, where the
+ * feat gives 4). Corrected here and in the strategic `maxAoos` default (D-183); the flat-
+ * footed exception the same feat entry grants is applied by `actor.ts`'s `canTakeAoO`.
+ *
+ * Clamped at one: a negative Dexterity bonus cannot take away the single attack whose
+ * Normal entry the feat itself restates. The clamp is a documented reading, not
+ * transcribed text — the feat says "additional … equal to your Dexterity bonus" without
+ * saying what a negative bonus does.
  */
 export function attacksOfOpportunityPerRound(
   dexMod: number,
   combatReflexes = false,
 ): number {
-  return 1 + (dexMod > 0 ? 1 : 0) + (combatReflexes ? Math.max(0, dexMod) : 0);
+  if (!combatReflexes) return 1;
+  return Math.max(1, 1 + dexMod);
 }
 
 /**

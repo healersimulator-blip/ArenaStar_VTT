@@ -183,6 +183,13 @@ function makeHarness(
     grid?: SquareGrid | null;
     canMove?: boolean;
     onTokenActivate?: (view: TokenView) => void;
+    onTokenMove?: (move: {
+      view: TokenView;
+      from: { x: number; y: number };
+      to: { x: number; y: number };
+      snapped: boolean;
+      commit: () => void;
+    }) => "cancel" | undefined;
     onContextMenu?: (at: {
       screen: { x: number; y: number };
       world: { x: number; y: number };
@@ -210,6 +217,7 @@ function makeHarness(
       opts.grid === undefined ? { type: "square", size: 100 } : opts.grid,
     canMove: () => opts.canMove ?? true,
     ...(opts.onTokenActivate ? { onTokenActivate: opts.onTokenActivate } : {}),
+    ...(opts.onTokenMove ? { onTokenMove: opts.onTokenMove } : {}),
     onContextMenu: (at) => {
       contextMenus.push(at);
       opts.onContextMenu?.(at);
@@ -298,6 +306,86 @@ describe("CanvasController (§10)", () => {
     // live preview rendered the UNSNAPPED position during the drag
     const duringDrag = h.stage.tokenRenders[0]?.[0];
     expect(duringDrag).toMatchObject({ _id: "hero", x: 140, y: 130 });
+  });
+
+  test("a move Op is only committed after onTokenMove asked, and a cancel suppresses it (P06/D-185)", () => {
+    const t = token("hero", 100, 100);
+    const asked: Array<{
+      from: { x: number; y: number };
+      to: { x: number; y: number };
+      snapped: boolean;
+    }> = [];
+    const h = makeHarness([view(t)], {
+      onTokenMove: (move) => {
+        asked.push({ from: move.from, to: move.to, snapped: move.snapped });
+        // The rule needs the verdict before the Op exists: nothing may be submitted yet.
+        expect(h.client.submitted).toHaveLength(0);
+        return undefined;
+      },
+    });
+    h.source.down(100, 100);
+    h.source.move(140, 130);
+    h.source.up(140, 130);
+    // Asked once, with the snapped target the Op will carry.
+    expect(asked).toEqual([
+      { from: { x: 100, y: 100 }, to: { x: 100, y: 100 }, snapped: true },
+    ]);
+    expect(h.client.submitted).toHaveLength(1);
+
+    // A cancel: no Op at all, and the live render is restored to the committed position.
+    const c = token("hero", 100, 100);
+    const cancelled = makeHarness([view(c)], { onTokenMove: () => "cancel" });
+    cancelled.source.down(100, 100);
+    cancelled.source.move(240, 240);
+    cancelled.source.up(240, 240);
+    expect(cancelled.client.submitted).toHaveLength(0);
+    const restored = cancelled.stage.tokenRenders.at(-1)?.[0];
+    expect(restored).toMatchObject({ _id: "hero", x: 100, y: 100 });
+  });
+
+  test("a cancel may commit the same move later, exactly once (P06/D-186)", () => {
+    // The auto-resolved attack of opportunity needs both halves: hold the move, resolve
+    // the interrupt, then commit — and the committed Op is the one the hook was asked
+    // about, not a re-derived one.
+    const t = token("hero", 100, 100);
+    const commits: Array<() => void> = [];
+    const h = makeHarness([view(t)], {
+      onTokenMove: (move) => {
+        commits.push(move.commit);
+        return "cancel";
+      },
+    });
+    h.source.down(100, 100);
+    h.source.move(240, 240);
+    h.source.up(240, 240);
+    expect(commits).toHaveLength(1);
+    expect(h.client.submitted).toHaveLength(0);
+
+    commits[0]?.();
+    const op = h.client.submitted[0]?.[0];
+    if (op?.kind !== "update") throw new Error("expected update op");
+    expect(op.diff).toEqual({ x: 200, y: 200 });
+    expect(op.ref).toMatchObject({ coll: "tokens", id: "hero" });
+
+    // Idempotent: a second call (a listener that resolves twice) never double-moves.
+    commits[0]?.();
+    expect(h.client.submitted).toHaveLength(1);
+  });
+
+  test("a listener that does not cancel never needs the deferred commit", () => {
+    const t = token("hero", 100, 100);
+    const h = makeHarness([view(t)], {
+      onTokenMove: (move) => {
+        // The Op is already submitted by the time the hook returns: the plain path.
+        expect(h.client.submitted).toHaveLength(0);
+        void move.commit;
+        return undefined;
+      },
+    });
+    h.source.down(100, 100);
+    h.source.move(140, 130);
+    h.source.up(140, 130);
+    expect(h.client.submitted).toHaveLength(1);
   });
 
   test("drag without grid submits the raw delta", () => {

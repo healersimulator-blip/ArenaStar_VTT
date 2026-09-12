@@ -59,6 +59,13 @@ export function rawProfileFromUnit(unit: UnitView): RawPF1eProfile {
   }
   if (s["cmd"] !== undefined) raw.cmd = s["cmd"];
   if (s["cmb"] !== undefined) raw.cmb = s["cmb"];
+  // D-183: the strategic AoO budget is per-unit authored data. The mass battle derives
+  // it from a bound leader actor's own A.10 budget when there is one (Combat Reflexes is
+  // feat data, which only an actor has); a unit with no actor authors nothing and keeps
+  // the Normal one-per-round default.
+  if (typeof s["maxAoos"] === "number" && Number.isFinite(s["maxAoos"])) {
+    raw.maxAoos = Math.max(0, Math.floor(s["maxAoos"]));
+  }
   if (s["casterLevel"] !== undefined) raw.casterLevel = s["casterLevel"];
   if (s["castingStatMod"] !== undefined) raw.castingStatMod = s["castingStatMod"];
   if (s["spellPenetration"] !== undefined) raw.spellPenetration = s["spellPenetration"];

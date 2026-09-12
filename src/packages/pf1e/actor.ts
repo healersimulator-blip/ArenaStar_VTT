@@ -334,6 +334,14 @@ export interface PF1eDerived extends Pick<
   attacks: PF1eDerivedAttack[];
   aooPerRound: number;
   canTakeAoO: boolean;
+  /**
+   * The Combat Reflexes feat, as the derivation read it. Exposed because the two facts it
+   * changes are asked separately: the budget above and AoN 102's "you may also make
+   * attacks of opportunity while flat-footed" — the round-structural flat-footedness
+   * (`combatState.isFlatFootedByRound`, which is not an effect and so never reaches
+   * `canTakeAoO`) needs this flag to be judged at all (P06/D-185).
+   */
+  combatReflexes: boolean;
   speedFt: number;
   flySpeedFt: number | null;
   hp: number;
@@ -1174,7 +1182,12 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
   // The AoO count is a Dexterity statistic (Combat Reflexes keys on the Dex bonus), so the
   // effective modifier feeds it; the budget formula itself stays A.10's recorded reading.
   const aooPerRound = attacksOfOpportunityPerRound(eff.dex, combatReflexes);
-  const canTakeAoO = !resolved.cannotAoO && !flatFooted && aooPerRound > 0;
+  // D-183: the same feat entry that raises the budget also says "With this feat, you may
+  // also make attacks of opportunity while flat-footed" — so flat-footed is a denial only
+  // for a character without it (the Flat-Footed condition's own text in `conditions.ts`
+  // names the same exception).
+  const canTakeAoO =
+    !resolved.cannotAoO && (!flatFooted || combatReflexes) && aooPerRound > 0;
 
   // 9. Movement, hit points, conditions.
   const speedRaw = sys.landSpeedFt ?? sys.speedFt ?? attrs.movement;
@@ -1305,6 +1318,7 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     attacks,
     aooPerRound,
     canTakeAoO,
+    combatReflexes,
     speedFt,
     flySpeedFt,
     hp: hpConAdjusted,
@@ -1376,7 +1390,7 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
         `Dex ${fmt(eff.dex)} + authored ${initiativeAuthored}` +
         `${initiativeEffects !== 0 ? ` + effects ${fmt(initiativeEffects)}` : ""}`,
       aoo: `${aooPerRound}/round${combatReflexes ? " (Combat Reflexes)" : ""}${
-        flatFooted ? " — none while flat-footed" : ""
+        flatFooted && !combatReflexes ? " — none while flat-footed" : ""
       }`,
       speed: `${speedFt} ft; ${sz.spaceFeet} ft space, ${reachFeet} ft natural reach${
         sz.longReachSquares !== null && reachShape === "long" ? " (long)" : ""

@@ -143,6 +143,31 @@ export interface ControllerOptions {
   canMove: (view: TokenView) => boolean;
   /** App-owned actor sheet/navigation callback; the canvas knows nothing about PF1e. */
   onTokenActivate?: (view: TokenView) => void;
+  /**
+   * P06/D-185 — asked **before** a drag's move Op commits, with the position that would be
+   * submitted (`to` is the snapped target when the scene has a grid). Returning `"cancel"`
+   * suppresses the Op and snaps the token back to where it was, so a UI that must resolve
+   * an interrupt first (an attack of opportunity decided by the queue) can stop the move
+   * without the canvas knowing what an interrupt is. The canvas stays PF1e-free: the app
+   * supplies the verdict, this hook only guarantees the ordering.
+   *
+   * P06/D-186 — `move.commit` is the same Op the controller would have submitted, deferred
+   * until the caller says so. A listener that cancels to resolve an interrupt asynchronously
+   * calls it once it is done (D-186's auto-resolved attacks of opportunity: the attack
+   * resolves *before* the mover leaves the square, then the move commits), and a listener
+   * that never calls it leaves the token where it started — the cancellation stays a real
+   * cancellation. Only the first call does anything, and it always uses the snapped target
+   * this hook was asked about, so the move cannot drift while the verdict is being decided.
+   */
+  onTokenMove?: (move: {
+    view: TokenView;
+    from: { x: number; y: number };
+    to: { x: number; y: number };
+    /** True when `to` is a grid-snapped point (the scene has a usable grid). */
+    snapped: boolean;
+    /** Commit this exact move (idempotent; no-op after the first call or after a cancel). */
+    commit: () => void;
+  }) => "cancel" | undefined;
   onSelectionChange?: (selection: readonly DocId[]) => void;
   /** §9: alt+click on the canvas emits a ping at the world point. */
   onPing?: (world: { x: number; y: number }) => void;
@@ -344,20 +369,41 @@ export class CanvasController {
           y: world.y - this.startWorld.y,
         };
         const target = dragTarget(grabbed.token, delta, this.options.getGrid());
-        this.options.client.submit([
-          {
-            kind: "update",
-            ref: {
-              coll: "tokens",
-              id: grabbed.token._id,
-              parent: { coll: "scenes", id: grabbed.sceneId },
-            },
-            diff: { x: target.x, y: target.y },
+        // P06/D-185: the verdict is asked before the Op exists. A cancel restores the
+        // token to its committed position and submits nothing; D-186 lets the listener
+        // commit that same Op later (once an interrupt it had to resolve is done).
+        const op: Op = {
+          kind: "update",
+          ref: {
+            coll: "tokens",
+            id: grabbed.token._id,
+            parent: { coll: "scenes", id: grabbed.sceneId },
           },
-        ]);
-        this.options.stage.syncTokens(
-          this.options.getTokens().map((v) => v.token),
-        );
+          diff: { x: target.x, y: target.y },
+        };
+        let committed = false;
+        const commit = (): void => {
+          if (committed) return;
+          committed = true;
+          this.options.client.submit([op]);
+          this.options.stage.syncTokens(
+            this.options.getTokens().map((v) => v.token),
+          );
+        };
+        const verdict = this.options.onTokenMove?.({
+          view: grabbed,
+          from: { x: grabbed.token.x, y: grabbed.token.y },
+          to: { x: target.x, y: target.y },
+          snapped: this.options.getGrid() !== null,
+          commit,
+        });
+        if (verdict === "cancel") {
+          this.options.stage.syncTokens(
+            this.options.getTokens().map((v) => v.token),
+          );
+          return;
+        }
+        commit();
         return;
       }
       case "marquee": {

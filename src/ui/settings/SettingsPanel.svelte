@@ -25,6 +25,7 @@
     readWorldClock,
     setWorldClockOps,
   } from "../../packages/pf1e/worldClock";
+  import { autoResolveAoosOf } from "../../packages/pf1e/aooSettings";
 
   let {
     client,
@@ -47,6 +48,8 @@
     secondsPerRound: number;
     detectionMultiplier: number;
     advanceClockOnRound: boolean;
+    /** P06/D-186: the app resolves movement attacks of opportunity itself. On by default. */
+    autoResolveAoos: boolean;
   }
   /** E05 (D-146): the replicated world clock, seconds. */
   let clockSeconds = $state(0);
@@ -54,6 +57,7 @@
     secondsPerRound: 6,
     detectionMultiplier: 1,
     advanceClockOnRound: true,
+    autoResolveAoos: true,
   };
   // Initialize only after the defaults exist (opening the window executes this script).
   let rules = $state<RulesOptions>(DEFAULT_RULES);
@@ -80,6 +84,7 @@
           ? settings.detectionMultiplier
           : DEFAULT_RULES.detectionMultiplier,
       advanceClockOnRound: advanceClockOnRoundOf(settings),
+      autoResolveAoos: autoResolveAoosOf(settings),
     };
   }
 
@@ -290,6 +295,23 @@
   {/if}
 
   <h4>Rules options</h4>
+  <div class="row">
+    <label>
+      <input
+        data-world-auto-aoo
+        type="checkbox"
+        checked={rules.autoResolveAoos}
+        onchange={(e) => {
+          rules = {
+            ...rules,
+            autoResolveAoos: (e.target as HTMLInputElement).checked,
+          };
+          applyRules({ autoResolveAoos: rules.autoResolveAoos });
+        }}
+      />
+      Auto-resolve attacks of opportunity
+    </label>
+  </div>
   <div class="row">
     <label>
       Seconds / round

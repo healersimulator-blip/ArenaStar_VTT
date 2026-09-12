@@ -500,8 +500,10 @@ export function combinedTacticalEffects(
 /**
  * A deny token refuses a spend when it equals the spend's action id (`"charge"`,
  * `"full-attack"`, `"cast-spell"` …) or the spend's kind (`"standard"`, `"move"`, …).
- * Tokens nobody consumes yet (the plan's `"aoo"` waits for P6's interrupt queue) are
- * inert here — they stay in the set so later consumers read the same data.
+ * The `"aoo"` token now has its consumer: `ui/combat/actionBudget.ts`'s
+ * `attackOfOpportunityBudget` refuses the spend when it is present (P06/D-185), the same
+ * `aooRefusal` wording the interrupt queue uses. Any token nobody consumes yet stays
+ * inert here — it remains in the set so later consumers read the same data.
  */
 export function deniedActionTokens(
   resolved: ResolvedEffects,
