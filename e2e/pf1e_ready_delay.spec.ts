@@ -117,6 +117,14 @@ test("PF1e delay, ready and fire-ready reorder the tracker by the rule", async (
     .click();
   const fireForm = page.locator("[data-fire-form]");
   await expect(fireForm).toBeVisible();
+  // D-195: the fire form surfaces the trigger matcher for GM confirmation — the
+  // declared event prefills from the stored ready, so it matches; declaring a different
+  // trigger kind shows the mismatch before the GM confirms.
+  await expect(fireForm.locator("[data-fire-match]")).toBeVisible();
+  await fireForm.locator("[data-fire-trigger]").selectOption("cast");
+  await expect(fireForm.locator("[data-fire-mismatch]")).toBeVisible();
+  await fireForm.locator("[data-fire-trigger]").selectOption("attack");
+  await expect(fireForm.locator("[data-fire-match]")).toBeVisible();
   await fireForm.locator("[data-confirm-fire]").click();
   // D-195: firing now *resolves* the readied action through the sheet's flow. The
   // bestiary tokens carry no hit points, so the resolution honestly reports that it

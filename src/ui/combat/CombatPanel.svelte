@@ -59,6 +59,7 @@
   } from "../../packages/pf1e/combatState";
   import {
     delayTo,
+    findReadied,
     readyCombatant,
   } from "../../packages/pf1e/readyDelay";
   import { resolveReadiedAction } from "./pf1eReadyAction";
@@ -412,6 +413,8 @@
   let readyNote = $state("");
   let fireFor = $state<string | null>(null);
   let fireTarget = $state("");
+  /** The declared trigger event kind the fire form matches readied actions against. */
+  let fireTrigger = $state<PF1eReadyTrigger["kind"]>("attack");
   /** The last fired readied action, so the GM knows to resolve it now. */
   let firedNote = $state("");
 
@@ -907,6 +910,7 @@
                 onclick={() => {
                   fireFor = fireFor === c._id ? null : c._id;
                   fireTarget = current._id;
+                  fireTrigger = readCombatantState(c).ready?.trigger.kind ?? "attack";
                 }}>Fire ready</button
               >
             {/if}
@@ -1011,7 +1015,21 @@
             </div>
           {/if}
           {#if pf1e && fireFor === c._id}
+            {@const matches = findReadied(combat, {
+              kind: fireTrigger,
+              triggererId: fireTarget,
+            })}
+            {@const selfMatch = matches.some((m) => m.combatantId === c._id)}
             <div class="row-form" data-fire-form={c._id}>
+              <label
+                >Trigger
+                <select bind:value={fireTrigger} data-fire-trigger>
+                  <option value="attack">attack</option>
+                  <option value="move">move</option>
+                  <option value="cast">cast</option>
+                  <option value="custom">custom</option>
+                </select></label
+              >
               <label
                 >Interrupts
                 <select bind:value={fireTarget} data-fire-target>
@@ -1028,6 +1046,32 @@
               <button type="button" onclick={() => (fireFor = null)}
                 >Cancel</button
               >
+              <small
+                class:match-ok={selfMatch}
+                class:match-no={!selfMatch}
+                data-fire-match={selfMatch ? c._id : undefined}
+                data-fire-mismatch={selfMatch ? undefined : c._id}
+              >
+                {#if selfMatch}
+                  ✓ {c.name}'s readied {readCombatantState(c).ready?.action.kind
+                    ?? "action"} action matches this {fireTrigger} trigger — it
+                  fires just before
+                  {combat.combatants.find((o) => o._id === fireTarget)?.name ??
+                    fireTarget}.
+                {:else}
+                  ✗ {c.name}'s readied {readCombatantState(c).ready?.action.kind
+                    ?? "action"} action is armed for
+                  {readCombatantState(c).ready?.trigger.kind ?? "?"}, not this
+                  {fireTrigger} event — firing is the GM's call.
+                {/if}
+                {#if matches.length > (selfMatch ? 1 : 0)}
+                  · also matching:
+                  {matches
+                    .filter((m) => m.combatantId !== c._id)
+                    .map((m) => combat.combatants.find((o) => o._id === m.combatantId)?.name ?? m.combatantId)
+                    .join(", ")}
+                {/if}
+              </small>
             </div>
           {/if}
         </li>
@@ -1076,6 +1120,12 @@
     gap: 4px;
     flex-wrap: wrap;
     font-size: 12px;
+  }
+  .row-form .match-ok {
+    color: #8fd68f;
+  }
+  .row-form .match-no {
+    color: #d68f8f;
   }
   .order li.active {
     background: #2c4a6e;
