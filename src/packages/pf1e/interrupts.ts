@@ -104,6 +104,13 @@ export interface PF1eAoOTrigger {
   actionId?: string;
   /** `move-out`: the square (feet) the provoker walked out of. */
   left?: { x: number; y: number };
+  /**
+   * `provoking-action`/`ranged-touch`: the square (feet) the provoker occupied
+   * when it acted. The rules attack the provoker *in place* — \"if an attack of
+   * opportunity is provoked, immediately resolve the attack\" — so the interrupt
+   * carries where it happened, exactly as `left` does for a move.
+   */
+  at?: { x: number; y: number };
   /** `move-out`: true when this square is the exempt start square of a withdraw. */
   withdrawExempt?: boolean;
 }

@@ -837,3 +837,111 @@ test.describe("PF1e one decision at a time (D-188)", () => {
     expect(await reactionPrompt(page)).toBeNull();
   });
 });
+
+interface ActionOpportunityResult {
+  ok: boolean;
+  refusal: string | null;
+  squares: string[];
+  rects: number;
+  reactors: Array<{
+    tokenId: string;
+    cell: string;
+    used: number | null;
+    max: number | null;
+    line: string;
+  }>;
+  refused: Array<{ tokenId: string; reason: string }>;
+  queued: Array<{
+    reactorId: string;
+    provokerId: string;
+    kind: string;
+    actionId: string | undefined;
+    square: { x: number; y: number } | null;
+  }>;
+  issues: Array<{ field: string; message: string }>;
+  defaults: Array<{ field: string; message: string }>;
+}
+
+const actionOpportunity = (
+  page: import("@playwright/test").Page,
+  spec: Record<string, unknown>,
+) =>
+  page.evaluate((s) => {
+    const e2e = (globalThis as { __vttE2E?: Record<string, unknown> }).__vttE2E;
+    const app = e2e?.app as
+      { pf1eActionOpportunity: (x: unknown) => ActionOpportunityResult }
+      | undefined;
+    if (!app) throw new Error("app surface missing");
+    return app.pf1eActionOpportunity(s);
+  }, spec);
+
+test.describe("PF1e action-trigger attacks of opportunity (§9/P6 P06, D-190)", () => {
+  test("casting in a threatened square queues the reactor, in the square the caster occupies", async ({
+    page,
+  }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    await sceneWith(page, [
+      { id: "wizard", col: 0, row: 0 },
+      { id: "fighter", col: 0, row: 1 },
+    ]);
+
+    const res = await actionOpportunity(page, {
+      provokerId: "wizard",
+      actionId: "cast-spell",
+      enemiesOf: { wizard: ["fighter"] },
+    });
+    expect(res.ok).toBe(true);
+    expect(res.refusal).toBeNull();
+    expect(res.squares).toEqual(["0,0"]);
+    expect(res.rects).toBe(1);
+    expect(res.queued).toEqual([
+      {
+        reactorId: "fighter",
+        provokerId: "wizard",
+        kind: "provoking-action",
+        actionId: "cast-spell",
+        square: { x: 0, y: 0 },
+      },
+    ]);
+    expect(res.reactors[0]?.line).toBe(
+      "fighter may strike wizard as it acts (0,0)",
+    );
+    expect(res.defaults).toEqual([]); // hostility stated, nothing assumed
+    expect(errors).toEqual([]);
+  });
+
+  test("a Table 7-2 `no` row refuses by name, and a ranged touch is its own kind", async ({
+    page,
+  }) => {
+    await sceneWith(page, [
+      { id: "wizard", col: 0, row: 0 },
+      { id: "fighter", col: 0, row: 1 },
+    ]);
+
+    const noProvoke = await actionOpportunity(page, {
+      provokerId: "wizard",
+      actionId: "total-defense",
+      enemiesOf: { wizard: ["fighter"] },
+    });
+    expect(noProvoke.refusal).toBe(
+      "Total defense does not provoke an attack of opportunity",
+    );
+    expect(noProvoke.queued).toEqual([]);
+
+    const touch = await actionOpportunity(page, {
+      provokerId: "wizard",
+      trigger: "ranged-touch",
+      enemiesOf: { wizard: ["fighter"] },
+    });
+    expect(touch.queued).toEqual([
+      {
+        reactorId: "fighter",
+        provokerId: "wizard",
+        kind: "ranged-touch",
+        actionId: undefined,
+        square: { x: 0, y: 0 },
+      },
+    ]);
+  });
+});

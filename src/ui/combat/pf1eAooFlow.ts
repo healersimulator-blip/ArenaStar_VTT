@@ -56,6 +56,7 @@ import {
   type PF1eInterrupt,
 } from "../../packages/pf1e/interrupts";
 import { pf1eAttackRollGroups } from "../../packages/pf1e/rollData";
+import type { PF1eActionOpportunityResult } from "../../packages/pf1e/actionOpportunity";
 import type { PF1eMovementOpportunityResult } from "../../packages/pf1e/tacticalOpportunity";
 import {
   combatantForToken,
@@ -72,10 +73,11 @@ export interface AooTokenRef {
   actorId?: string | null;
 }
 
-export interface MovementAooResolutionEntry {
+export interface OpportunityResolutionEntry {
   reactorId: string;
   provokerId: string;
-  /** The square the provoker was attacked in (world units), from the queue's trigger. */
+  /** The square the provoker was attacked in (world units), from the queue's trigger:
+   *  the walked-out square for a move, the occupied square for a provoking action. */
   square: { x: number; y: number } | null;
   combatantId: string | null;
   attackName: string;
@@ -98,8 +100,8 @@ export interface MovementAooResolutionEntry {
   line: string;
 }
 
-export interface MovementAooResolution {
-  entries: readonly MovementAooResolutionEntry[];
+export interface OpportunityResolution {
+  entries: readonly OpportunityResolutionEntry[];
   /** Reactors the flow could not resolve, each with the reason — never a silent drop. */
   skipped: readonly { reactorId: string; provokerId: string; reason: string }[];
   /** True when there is no encounter, so nothing was resolved (see the module header). */
@@ -110,6 +112,17 @@ export interface MovementAooResolution {
 
 export interface MovementAooResolutionInput {
   opportunity: PF1eMovementOpportunityResult;
+  combat: CombatDocument | null;
+  actors: readonly ActorDocument[];
+  /** The scene's tokens, for token → actor resolution. */
+  tokens: readonly AooTokenRef[];
+  /** Commit-reveal rolls (the sheet's Verify option); off by default like the sheet's. */
+  verifiable?: boolean;
+}
+
+/** The action-trigger twin of `MovementAooResolutionInput` (D-190). */
+export interface ActionAooResolutionInput {
+  opportunity: PF1eActionOpportunityResult;
   combat: CombatDocument | null;
   actors: readonly ActorDocument[];
   /** The scene's tokens, for token → actor resolution. */
@@ -281,7 +294,7 @@ export function planHeldMove(input: {
  * skip with its reason, the first hard error, and the caller's named assumption.
  */
 export function resolutionLines(
-  resolution: MovementAooResolution,
+  resolution: OpportunityResolution,
   opts: { hostilityAssumed?: boolean } = {},
 ): string[] {
   const lines = resolution.entries.map((e) => e.line);
@@ -302,14 +315,41 @@ export async function resolveMovementOpportunities(
   client: ResolveFlowClient,
   user: PermissionUser | null,
   input: MovementAooResolutionInput,
-): Promise<MovementAooResolution> {
+): Promise<OpportunityResolution> {
+  return resolveQueuedInterrupts(client, user, input.opportunity.queued, input);
+}
+
+/** Resolve every queued opportunity for one provoking action (D-190), same core. */
+export async function resolveActionOpportunities(
+  client: ResolveFlowClient,
+  user: PermissionUser | null,
+  input: ActionAooResolutionInput,
+): Promise<OpportunityResolution> {
+  return resolveQueuedInterrupts(client, user, input.opportunity.queued, input);
+}
+
+/**
+ * The resolution core both seams share: order the queue, roll each reaction through the
+ * sheet's own attack flow, spend the reactor's ledger hit-or-miss, and report. The trigger
+ * kind only changes the logged square — the attack is a single melee attack either way.
+ */
+async function resolveQueuedInterrupts(
+  client: ResolveFlowClient,
+  user: PermissionUser | null,
+  queued: readonly PF1eInterrupt[],
+  input: {
+    combat: CombatDocument | null;
+    actors: readonly ActorDocument[];
+    tokens: readonly AooTokenRef[];
+    verifiable?: boolean;
+  },
+): Promise<OpportunityResolution> {
   const skipped: Array<{
     reactorId: string;
     provokerId: string;
     reason: string;
   }> = [];
-  const entries: MovementAooResolutionEntry[] = [];
-  const queued = input.opportunity.queued;
+  const entries: OpportunityResolutionEntry[] = [];
   if (queued.length === 0)
     return { entries, skipped, needsEncounter: false, error: null };
   if (input.combat === null) {
@@ -475,7 +515,7 @@ export async function resolveMovementOpportunities(
     entries.push({
       reactorId: interrupt.reactorId,
       provokerId: interrupt.provokerId,
-      square: interrupt.trigger.left ?? null,
+      square: interrupt.trigger.left ?? interrupt.trigger.at ?? null,
       combatantId: reactorCombatant?._id ?? null,
       attackName: line.name,
       outcome: result.outcome,

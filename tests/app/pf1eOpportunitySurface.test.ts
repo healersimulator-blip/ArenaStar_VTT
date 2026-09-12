@@ -184,6 +184,71 @@ describe("P06 — the tactical opportunity surface on a real booted host app", (
   });
 });
 
+describe("P06 — the action-trigger opportunity surface on a real booted host app (D-190)", () => {
+  test("a cast in a threatened square queues the reactor, reading size off the actor document", async () => {
+    const { s } = await surfaceWith([
+      { id: "wizard", col: 0, row: 0 },
+      { id: "guard", col: 0, row: 1 },
+    ]);
+    const res = s.pf1eActionOpportunity({
+      provokerId: "wizard",
+      actionId: "cast-spell",
+      enemiesOf: { wizard: ["guard"] },
+    });
+    expect(res.ok).toBe(true);
+    expect(res.refusal).toBeNull();
+    expect(res.squares).toEqual(["0,0"]);
+    expect(res.queued).toEqual([
+      {
+        reactorId: "guard",
+        provokerId: "wizard",
+        kind: "provoking-action",
+        actionId: "cast-spell",
+        square: { x: 0, y: 0 },
+      },
+    ]);
+  });
+
+  test("a Table 7-2 `no` row refuses by name, and a ranged touch is its own kind", async () => {
+    const { s } = await surfaceWith([
+      { id: "wizard", col: 0, row: 0 },
+      { id: "guard", col: 0, row: 1 },
+    ]);
+    const noProvoke = s.pf1eActionOpportunity({
+      provokerId: "wizard",
+      actionId: "total-defense",
+      enemiesOf: { wizard: ["guard"] },
+    });
+    expect(noProvoke.refusal).toBe(
+      "Total defense does not provoke an attack of opportunity",
+    );
+    expect(noProvoke.queued).toEqual([]);
+
+    const touch = s.pf1eActionOpportunity({
+      provokerId: "wizard",
+      trigger: "ranged-touch",
+      enemiesOf: { wizard: ["guard"] },
+    });
+    expect(touch.queued[0]?.kind).toBe("ranged-touch");
+    expect(touch.queued[0]?.square).toEqual({ x: 0, y: 0 });
+  });
+
+  test("a reactor that does not threaten the caster's square is not queued", async () => {
+    const { s } = await surfaceWith([
+      { id: "wizard", col: 0, row: 0 },
+      { id: "far", col: 0, row: 8 },
+    ]);
+    const res = s.pf1eActionOpportunity({
+      provokerId: "wizard",
+      actionId: "cast-spell",
+      enemiesOf: { wizard: ["far"] },
+    });
+    expect(res.ok).toBe(true);
+    expect(res.queued).toEqual([]);
+    expect(res.reactors).toEqual([]);
+  });
+});
+
 /**
  * D-186: an encounter on the scene, with both tokens linked as combatants. Authored here
  * rather than through a surface because the encounter is what the auto-resolution spends
@@ -476,5 +541,65 @@ describe("P06 — the auto-resolved attack of opportunity on a real booted host 
     expect(res.needsEncounter).toBe(true);
     expect(res.entries).toEqual([]);
     expect(res.skipped[0]?.reason).toContain("no encounter");
+  });
+});
+
+describe("P06 — the auto-resolved action opportunity on a real booted host app (D-190)", () => {
+  test("a cast trigger resolves through the host, writes hp, and spends the ledger", async () => {
+    const { app, s } = await surfaceWith([
+      { id: "wizard", col: 0, row: 0 },
+      { id: "fighter", col: 0, row: 1 },
+    ]);
+    app.gm.client.submit([
+      {
+        kind: "update",
+        ref: { coll: "actors", id: "a-fighter" },
+        diff: { "system.pf1e": FIGHTER_STATS },
+      },
+      {
+        kind: "update",
+        ref: { coll: "actors", id: "a-wizard" },
+        diff: { "system.pf1e": GOBLIN_STATS },
+      },
+    ]);
+    const sceneId = s.activeSceneId();
+    if (sceneId === null) throw new Error("no active scene");
+    app.gm.client.submit(
+      encounterOps(sceneId, [{ id: "wizard" }, { id: "fighter" }]),
+    );
+    await settle(8);
+
+    const res = await s.pf1eActionOpportunityResolve({
+      provokerId: "wizard",
+      actionId: "cast-spell",
+      enemiesOf: { wizard: ["fighter"] },
+    });
+    expect(res.needsEncounter).toBe(false);
+    expect(res.error).toBeNull();
+    expect(res.queued).toEqual([
+      {
+        reactorId: "fighter",
+        provokerId: "wizard",
+        kind: "provoking-action",
+        actionId: "cast-spell",
+        square: { x: 0, y: 0 },
+      },
+    ]);
+    expect(res.entries).toHaveLength(1);
+    const entry = res.entries[0];
+    expect(entry).toMatchObject({
+      reactorId: "fighter",
+      provokerId: "wizard",
+      attackName: "Longsword — attack of opportunity",
+      used: 1,
+      max: 1,
+      ledgerError: null,
+    });
+    // Real host rolls: the hit points never rise, and the damage is exactly the write.
+    expect(entry?.hpBefore).toBe(12);
+    expect(entry?.hpAfter).toBeLessThanOrEqual(12);
+    expect(entry?.damage).toBe((entry?.hpBefore ?? 0) - (entry?.hpAfter ?? 0));
+    expect(entry?.line).toContain("1/1 opportunities this round");
+    expect(combatantAooUsed(app, "fighter")).toBe(1);
   });
 });
