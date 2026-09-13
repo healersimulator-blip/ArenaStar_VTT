@@ -185,6 +185,79 @@ export function pf1eMisfireVerdict(input: {
   };
 }
 
+import { pf1eActionById } from "./actions";
+
+/** UC p.135: the Reflex save to halve an early firearm's explosion. */
+export const FIREARM_EXPLOSION_DC = 12 as const;
+/** UC p.135: burst from a chosen corner — a 5-ft radius covering the 4 squares that share it. */
+export const FIREARM_EXPLOSION_RADIUS_FT = 5 as const;
+
+/**
+ * P09/D-218 — the provoking action row for loading. The table row is
+ * `"load-firearm"` in `PF1E_ACTIONS` (provokes yes); the specific action
+ * cost (move/standard/full-round) is the weapon's authored fact, but the
+ * provoke answer is always this row, so interrupt seams can read it without
+ * guessing. A caller that needs the full entry uses `pf1eActionById("load-firearm")`.
+ */
+export const FIREARM_RELOAD_ACTION_ID = "load-firearm" as const;
+
+/** The `load-firearm` row's `PF1eActionEntry`, or null — typed helper so callers don't import `actions.ts` themselves. */
+export function firearmReloadEntry() {
+  return pf1eActionById(FIREARM_RELOAD_ACTION_ID);
+}
+
+/**
+ * The `Quick Clear` deed's action cost (UC p.135: standard needing ≥1 grit,
+ * spending 1 grit makes it a move). Pure — the caller spends the action and
+ * the grit, this reports the cost.  The Gunsmithing `1 hour` repair is
+ * `MISFIRE_CLEARS[1]`'s `cost` — deliberately not a combat action.
+ */
+export function quickClearReloadCost(input: {
+  /** Grit currently available to the gunslinger. */
+  gritAvailable: number;
+  /** Spend a point of grit to hasten the clear? */
+  spendGrit?: boolean;
+}): {
+  action: "standard" | "move";
+  cost: string;
+  gritSpent: number;
+  refusal: string | null;
+} {
+  if (input.gritAvailable < 1) {
+    return {
+      action: "standard",
+      cost: "a standard action, but the gunslinger has no grit — cannot Quick Clear (§2.9b)",
+      gritSpent: 0,
+      refusal: "Quick Clear requires at least 1 grit",
+    };
+  }
+  if (input.spendGrit === true) {
+    return {
+      action: "move",
+      cost: "a move action (1 grit spent — Quick Clear deed, UC p.135)",
+      gritSpent: 1,
+      refusal: null,
+    };
+  }
+  return {
+    action: "standard",
+    cost: "a standard action (requiring at least 1 grit — spend 1 to make it a move action)",
+    gritSpent: 0,
+    refusal: null,
+  };
+}
+
+/** P09/D-218 — the 5-ft burst geometry: the 4 squares sharing the chosen corner. */
+export function firearmExplosionSquares(corner: { col: number; row: number }): ReadonlyArray<{ col: number; row: number }> {
+  const { col, row } = corner;
+  return [
+    { col: col - 1, row: row - 1 },
+    { col, row: row - 1 },
+    { col: col - 1, row },
+    { col, row },
+  ];
+}
+
 /** The named ways a misfire's broken condition is cleared (re-verified). */
 export const MISFIRE_CLEARS = [
   {

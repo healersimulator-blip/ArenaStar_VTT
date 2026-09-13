@@ -86,6 +86,8 @@
     mountFootprint,
     type PF1eMountMovement,
   } from "../../packages/pf1e/mounted";
+  import { firearmShotAmmo, FIREARM_EXPLOSION_DC, firearmExplosionSquares, quickClearReloadCost, firearmReloadEntry } from "../../packages/pf1e/firearms";
+  import { firearmReloadOpportunity } from "./pf1eResolveFlow";
   import type {
     ActorDocument,
     CombatDocument,
@@ -550,6 +552,86 @@
     rideNote = `d100 ${roll} vs ${saddle === "military" ? 75 : 50}% — ${v.reason}`;
     if (!v.stays) void applyFallingDamage("Fell while unconscious");
   }
+  function doGritUpdate(): void {
+    gritNote = "";
+    error = "";
+    const cur = gritCurrentRaw.trim();
+    const max = gritMaxRaw.trim();
+    if (cur !== "") {
+      const r = pf1eSheetEdit(doc, client.user, "grit.current", cur);
+      if (r.error) { error = r.error; return; }
+      if (r.ops.length) pending.add(client.submit(r.ops));
+    }
+    if (max !== "") {
+      const r = pf1eSheetEdit(doc, client.user, "grit.max", max);
+      if (r.error) { error = r.error; return; }
+      if (r.ops.length) pending.add(client.submit(r.ops));
+    }
+    gritNote = `grit ${d.grit.current}/${d.grit.max} — updated`;
+    gritCurrentRaw = "";
+    gritMaxRaw = "";
+  }
+  async function doFirearmReload(): Promise<void> {
+    firearmError = ""; firearmNote = "";
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current) { firearmError = "Actor is no longer available."; return; }
+    const line = d.attacks[resolveAttackIndex];
+    if (!line) { firearmError = "Pick an attack line first."; return; }
+    if (line.misfire === undefined) { firearmError = "This line is not a firearm (add firearm generation / misfire)."; return; }
+    if (!client.user || !can(client.user, "update", current, "actors")) { firearmError = "You do not own this actor."; return; }
+    if (line.ammo && line.ammo.loaded >= line.ammo.capacity) { firearmNote = "Already fully loaded."; return; }
+    if (line.misfire.broken) { firearmError = "The firearm is broken — clear the jam first (Quick Clear)."; return; }
+    firearmBusy = true;
+    try {
+      const tokenId = provokerTokenId();
+      if (tokenId !== null) {
+        const provoke = await resolveActionProvokes({
+          client,
+          user: client.user,
+          provokerTokenId: tokenId,
+          provokes: [{ actionId: "load-firearm" }],
+          autoResolve: autoResolveAoosOf(worldSettingsFrom(client.store.getAll("settings"))),
+          combat: linked.combat,
+        });
+        if (provoke.lines.length > 0) firearmNote = provoke.lines.join(" · ");
+      }
+      const capacity = line.ammo?.capacity ?? 1;
+      const diff: Record<string, import("../../core/documents").Json> = {};
+      diff[`system.pf1e.attacks.${resolveAttackIndex}.firearm.loaded`] = capacity as unknown as import("../../core/documents").Json;
+      pending.add(client.submit([{ kind: "update", ref: { coll: "actors", id: current._id }, diff }]));
+      firearmNote = firearmNote ? `${firearmNote} · Reloaded ${line.name} to ${capacity}/${capacity} — ${reloadEntry ? `${reloadEntry.category} action, provokes ${reloadEntry.provokes}` : "move action, provokes"} (UC p.135 §2.9).` : `Reloaded ${line.name} to ${capacity}/${capacity} — ${reloadEntry ? `${reloadEntry.category} action, provokes ${reloadEntry.provokes}` : "move action, provokes"} (UC p.135 §2.9).`;
+    } finally { firearmBusy = false; }
+  }
+  async function doFirearmClear(): Promise<void> {
+    firearmError = ""; firearmNote = "";
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current) { firearmError = "Actor is no longer available."; return; }
+    const line = d.attacks[resolveAttackIndex];
+    if (!line) { firearmError = "Pick an attack line first."; return; }
+    if (line.misfire === undefined) { firearmError = "Not a firearm."; return; }
+    if (!line.misfire.broken) { firearmNote = "Not broken — nothing to clear."; return; }
+    if (!client.user || !can(client.user, "update", current, "actors")) { firearmError = "You do not own this actor."; return; }
+    const cost = quickClearReloadCost({ gritAvailable: d.grit.current, spendGrit: spendGritForClear });
+    if (cost.refusal) { firearmError = cost.refusal; return; }
+    firearmBusy = true;
+    try {
+      const ops: import("../../core/ops").Op[] = [];
+      ops.push({ kind: "update", ref: { coll: "actors", id: current._id }, diff: { [`system.pf1e.attacks.${resolveAttackIndex}.broken`]: false as unknown as import("../../core/documents").Json } });
+      if (cost.gritSpent === 1) {
+        const next = Math.max(0, d.grit.current - 1);
+        ops.push({ kind: "update", ref: { coll: "actors", id: current._id }, diff: { "system.pf1e.grit.current": next as unknown as import("../../core/documents").Json } });
+      }
+      pending.add(client.submit(ops));
+      firearmNote = `Cleared jam on ${line.name} — ${cost.cost} (${cost.gritSpent ? "spent 1 grit, Quick Clear" : "standard action"}).`;
+    } finally { firearmBusy = false; }
+  }
+  function firearmExplosionHint(): string | null {
+    const line = d.attacks[resolveAttackIndex];
+    if (!line || line.misfire === undefined) return null;
+    // Hint the 5-ft burst from the chosen corner (4 squares) — DC 12 Reflex half, UC p.135
+    const squares = firearmExplosionSquares({ col: 0, row: 0 });
+    return `Explosion on second early misfire while broken: DC ${FIREARM_EXPLOSION_DC} Reflex half, 5-ft burst (${FIREARM_EXPLOSION_RADIUS_FT} ft, ${squares.length} squares from corner, UC p.135).`;
+  }
 
   /**
    * P08/D-201 — the mounted higher-ground fold: a rider whose authored mount
@@ -622,6 +704,20 @@
     const mult = lanceChargeMultiplier({ spiritedCharge: spirited });
     return { mult, spirited };
   });
+  // P09/D-218 — derived firearm ammo/misfire/grit for the combat panel + sheet grit readout
+  let resolveFirearm = $derived.by(() => {
+    const line = d.attacks[resolveAttackIndex];
+    if (!line) return null;
+    return {
+      ammo: line.ammo ?? null,
+      misfire: line.misfire ?? null,
+      broken: line.misfire?.broken ?? false,
+      grit: d.grit,
+      canShoot: line.misfire !== undefined ? firearmShotAmmo({ shotsAvailable: line.ammo?.loaded ?? 0 }).canShoot : null,
+    };
+  });
+  let quickClearPreview = $derived(quickClearReloadCost({ gritAvailable: d.grit.current, spendGrit: spendGritForClear }));
+  let reloadEntry = $derived(firearmReloadEntry());
 
   let effectivePositional = $derived.by(() => {
     const concealment =
@@ -2122,6 +2218,16 @@
       {#if negativeLevelsNote}<p class="note" data-negative-levels-note>{negativeLevelsNote}</p>{/if}
       <p class="note">Per AoN 427/UMR Energy Drain: −1 per level on attacks/saves/skills/ability checks/CMB/CMD, −5 HP (current and total), one level lower for level-dependent variables; death when levels ≥ Hit Dice. Temporary: new save each day at the effect's DC; energy drain: one Fort save after 24h (DC 10 + 1/2 racial HD + Cha), failure makes the level permanent; permanent drain: restoration only. Example DC: vampire 8 HD, Cha +4 → DC {energyDrainSaveDC({ racialHd: 8, chaMod: 4 })}.</p>
     </section>
+    <section class="resolve" aria-label="Grit (gunslinger deeds)" data-pf1e-grit>
+      <h4>Grit — gunslinger deeds (P09, UC p.135 — Quick Clear, Expert Loading)</h4>
+      <p data-grit-readout>Grit {d.grit.current} / {d.grit.max}{#if d.issues.some(i => i.includes("grit."))} <span class="warn"> — {d.issues.filter(i => i.includes("grit."))[0]}</span>{/if}</p>
+      <label>Current <input bind:value={gritCurrentRaw} placeholder={String(d.grit.current)} size="3" data-grit-current /></label>
+      <label>Max <input bind:value={gritMaxRaw} placeholder={String(d.grit.max)} size="3" data-grit-max /></label>
+      <button type="button" disabled={!editable} onclick={() => doGritUpdate()} data-grit-submit>Update grit</button>
+      {#if gritNote}<p class="note" data-grit-note>{gritNote}</p>{/if}
+      {#if error && (gritCurrentRaw || gritMaxRaw)}<p role="alert">{error}</p>{/if}
+      <p class="note">Gunslinger grit pool — spent for Expert Loading (avert a second early misfire while broken: 1 grit prevents the explosion, UC p.135) and Quick Clear (clear a broken firearm as a move action for 1 grit, otherwise a standard action). Load-firearm and Clear-jam buttons are in the Combat panel.</p>
+    </section>
     <p class="note">
       Energy resistance is manually adjudicated; temporary HP absorption, source stacking (same-source highest, different stack) and expiration are automated (CRB p.191), healing never restores temp HP. Ability drain never heals naturally — restoration is its only cure. Derived values are read-only.
     </p>
@@ -2382,12 +2488,34 @@
         {#if lanceHint !== null && resolveTargetId}
           <p class="note" data-pf1e-lance-resolve>Lance charge ×{lanceHint.mult}{lanceHint.spirited ? " (Spirited Charge)" : ""} — damage stacks additively with a crit (CRB p.179)</p>
         {/if}
+        {#if resolveFirearm !== null && resolveFirearm.ammo !== null && resolveTargetId}
+          <p class="note" data-pf1e-firearm-resolve>
+            Firearm {d.attacks[resolveAttackIndex]?.name ?? ""} — ammo {resolveFirearm.ammo.loaded}/{resolveFirearm.ammo.capacity}
+            {#if resolveFirearm.misfire} · misfire {resolveFirearm.misfire.misfireMinimum} ({resolveFirearm.misfire.generation}{resolveFirearm.misfire.broken ? ", broken" : ""}{resolveFirearm.misfire.magical ? ", magical" : ""}){/if}
+            {#if resolveFirearm.canShoot === false} <span class="warn">— empty, cannot shoot (§2.9)</span>{/if}
+            {#if resolveFirearm.broken} <span class="warn">— broken (misfire)</span>{/if}
+            · grit {resolveFirearm.grit.current}/{resolveFirearm.grit.max}
+          </p>
+          {#if firearmExplosionHint() !== null}
+            <p class="note" data-pf1e-explosion-hint>{firearmExplosionHint()}</p>
+          {/if}
+        {/if}
         {#if resolveError}<p class="warn" data-pf1e-resolve-error>
             {resolveError}
           </p>{/if}
         {#if resolveWarning}<p class="note" data-pf1e-resolve-warning>
             {resolveWarning}
           </p>{/if}
+        {#if resolveFirearm !== null && resolveFirearm.ammo !== null}
+          <div class="resolve" data-pf1e-firearm-actions>
+            <button type="button" disabled={firearmBusy || !editable} onclick={() => void doFirearmReload()} data-firearm-reload>Reload ({reloadEntry ? `${reloadEntry.category}, provokes ${reloadEntry.provokes}` : "move, provokes"}) — {resolveFirearm.ammo.loaded}/{resolveFirearm.ammo.capacity} → {resolveFirearm.ammo.capacity}</button>
+            <label><input type="checkbox" bind:checked={spendGritForClear} data-firearm-spend-grit /> Spend 1 grit for Quick Clear</label>
+            <button type="button" disabled={firearmBusy || !editable} onclick={() => void doFirearmClear()} data-firearm-clear>Clear jam — {quickClearPreview.cost} (grit {quickClearPreview.gritSpent ? "1" : "0"}{quickClearPreview.refusal ? ` — ${quickClearPreview.refusal}` : ""})</button>
+            {#if firearmError}<p class="warn" data-firearm-error>{firearmError}</p>{/if}
+            {#if firearmNote}<p class="note" data-firearm-note>{firearmNote}</p>{/if}
+            <p class="note">Reloading an early firearm is a move/{reloadEntry?.category ?? "move"} action that provokes (`load-firearm`, Table 7-2, UC p.135 §2.9 — capacity authored on the attack line: {resolveFirearm.ammo.capacity}). A broken firearm must be cleared first: {quickClearPreview.cost} (standard, or move with 1 grit via Quick Clear). Expert Loading (1 grit) averts the explosion on a second early misfire while broken — the resolve flow spends the grit automatically when it averts.</p>
+          </div>
+        {/if}
       </div>
       <h4>Combat maneuvers (A.9 — provokes an AoO without the Improved feat)</h4>
       <div class="resolve" data-pf1e-maneuver>

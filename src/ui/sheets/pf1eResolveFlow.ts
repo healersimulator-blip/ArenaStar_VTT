@@ -26,7 +26,8 @@ import type { PermissionUser } from "../../core/ownership";
 import type { ActorDocument, MessageDocument } from "../../core/documents";
 import type { PF1eDerived, PF1eDerivedAttack } from "../../packages/pf1e/actor";
 import { confirmCritical, shootingIntoMeleePenalty } from "../../packages/pf1e/tactical";
-import { firearmShotAmmo, type PF1eMisfireFacts } from "../../packages/pf1e/firearms";
+import { FIREARM_RELOAD_ACTION_ID, firearmShotAmmo, type PF1eMisfireFacts } from "../../packages/pf1e/firearms";
+import { pf1eActionOpportunities } from "../../packages/pf1e/actionOpportunity";
 import type { PF1eMountMovement } from "../../packages/pf1e/mounted";
 import {
   lanceChargeMultiplier,
@@ -429,10 +430,13 @@ export async function resolveAttackFlow(
   }
 
   // 0b. P09 — ammo gate (§2.9): a firearm without a loaded shot cannot be attacked with.
-  if (line.misfire !== undefined && params.shotsAvailable !== undefined) {
-    const ammo = firearmShotAmmo({ shotsAvailable: params.shotsAvailable });
-    if (!ammo.canShoot) {
-      return { ok: false, error: ammo.refusal ?? "the firearm has no shot loaded (§2.9)" };
+  if (line.misfire !== undefined) {
+    const shots = params.shotsAvailable !== undefined ? params.shotsAvailable : line.ammo?.loaded;
+    if (shots !== undefined) {
+      const ammo = firearmShotAmmo({ shotsAvailable: shots });
+      if (!ammo.canShoot) {
+        return { ok: false, error: ammo.refusal ?? "the firearm has no shot loaded (§2.9)" };
+      }
     }
   }
 
@@ -643,8 +647,10 @@ export async function resolveAttackFlow(
   // 5b. P09/D-202 — a misfire that breaks the weapon persists the broken condition on the attacker.
   // The resolver already returned the verdict (first misfire → broken; second early → explosion);
   // this is the authoring write so the next shot sees the escalated value.
+  // P09/D-218 — also consume one shot of ammo and, when Expert Loading averted an explosion, spend 1 grit.
+  // Loading a firearm provokes via `load-firearm` (PF1E_ACTIONS provokes yes) — `firearmReloadOpportunity` exposes that seam for the reload button.
   if (result.ok && result.misfire !== undefined && result.misfire.misfire) {
-    const verdict = result.misfire as { breaksWeapon?: boolean; explodes?: boolean; weaponDestroyed?: boolean };
+    const verdict = result.misfire as { breaksWeapon?: boolean; explodes?: boolean; weaponDestroyed?: boolean; notes?: readonly string[] };
     const needsBroken = verdict.breaksWeapon === true || verdict.explodes === true || verdict.weaponDestroyed === true;
     if (needsBroken && params.attackerActor !== undefined && params.attackerAttackIndex !== undefined) {
       if (!user || !can(user, "update", params.attackerActor, "actors")) {
@@ -665,6 +671,34 @@ export async function resolveAttackFlow(
           diff[`system.pf1e.attacks.${idx}.broken`] = true as unknown as import("../../core/documents").Json;
           ops.push({ kind: "update", ref: { coll: "actors", id: params.attackerActor._id }, diff });
         }
+      }
+    }
+    // P09/D-218 — when Expert Loading averted the explosion, spend 1 grit (UC p.135: Expert Loading costs 1 grit).
+    const expertAverted = (verdict.notes ?? []).some((n) => /Expert Loading/.test(n));
+    if (expertAverted && params.attackerActor !== undefined) {
+      const gritRaw = (params.attackerActor.system as { pf1e?: { grit?: { current?: unknown } } })?.pf1e?.grit?.current;
+      const gritCurrent = typeof gritRaw === "number" && Number.isFinite(gritRaw) ? Math.trunc(gritRaw) : 0;
+      if (gritCurrent > 0) {
+        if (!user || !can(user, "update", params.attackerActor, "actors")) {
+          if (hpWriteError === null) hpWriteError = "You do not own the attacker — the grit cost for Expert Loading was not persisted.";
+        } else {
+          ops.push({ kind: "update", ref: { coll: "actors", id: params.attackerActor._id }, diff: { "system.pf1e.grit.current": (gritCurrent - 1) as unknown as import("../../core/documents").Json } });
+        }
+      } else if (hpWriteError === null) {
+        hpWriteError = "Expert Loading requires 1 grit — the explosion was averted but the grit ledger could not be spent.";
+      }
+    }
+  }
+  // P09/D-218 — consume one shot of ammo whether the shot hit, missed, or misfired (§2.9). Idempotent guard uses the authoritative `shotsAvailable` when present, else the derived `line.ammo`.
+  if (result.ok && line.misfire !== undefined && params.attackerActor !== undefined && params.attackerAttackIndex !== undefined) {
+    const shots = params.shotsAvailable !== undefined ? params.shotsAvailable : line.ammo?.loaded;
+    if (shots !== undefined && shots > 0) {
+      if (!user || !can(user, "update", params.attackerActor, "actors")) {
+        if (hpWriteError === null) hpWriteError = "You do not own the attacker — the ammo count was not decremented.";
+      } else {
+        const idx = params.attackerAttackIndex;
+        const remaining = Math.max(0, shots - 1);
+        ops.push({ kind: "update", ref: { coll: "actors", id: params.attackerActor._id }, diff: { [`system.pf1e.attacks.${idx}.firearm.loaded`]: remaining as unknown as import("../../core/documents").Json } });
       }
     }
   }
@@ -702,6 +736,11 @@ export async function resolveAttackFlow(
   client.submit([{ kind: "create", coll: "messages", data: cardMessage }]);
   if (ops.length > 0) client.submit(ops);
   return { ok: true, result, hpWriteError };
+}
+
+/** P09/D-218 — the load-firearm provoke seam for the sheet's Reload button. Loading provokes `yes` (Table 7-2 via `load-firearm`). */
+export function firearmReloadOpportunity(input: Parameters<typeof pf1eActionOpportunities>[0]): ReturnType<typeof pf1eActionOpportunities> {
+  return pf1eActionOpportunities({ ...input, actionId: FIREARM_RELOAD_ACTION_ID });
 }
 
 /** Parameters for the multi-arrow Manyshot flow. */
