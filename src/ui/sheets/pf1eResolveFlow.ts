@@ -28,7 +28,11 @@ import type { PF1eDerived, PF1eDerivedAttack } from "../../packages/pf1e/actor";
 import { confirmCritical, shootingIntoMeleePenalty } from "../../packages/pf1e/tactical";
 import { firearmShotAmmo, type PF1eMisfireFacts } from "../../packages/pf1e/firearms";
 import type { PF1eMountMovement } from "../../packages/pf1e/mounted";
-import { mountedRangedPenalty } from "../../packages/pf1e/mounted";
+import {
+  lanceChargeMultiplier,
+  mountedRangedPenalty,
+  mountLinkageOf,
+} from "../../packages/pf1e/mounted";
 import type { PF1eSituationalModifiers } from "../../packages/pf1e/tactical";
 import type {
   PF1eDefenseChoice,
@@ -288,6 +292,27 @@ function misfireFactsOf(
   };
 }
 
+function isLanceWeaponName(name: string): boolean {
+  return /lance/i.test(name);
+}
+
+function mountedLanceMultiplier(params: ResolveAttackFlowParams): number | null {
+  if (params.situational?.charging !== true) return null;
+  if (!isLanceWeaponName(params.line.name)) return null;
+  if (params.line.ranged === true) return null;
+  const mounted =
+    params.attackerActor !== undefined &&
+    mountLinkageOf(
+      (params.attackerActor.system as { pf1e?: { mount?: unknown } })?.pf1e?.mount,
+    ) !== null &&
+    mountLinkageOf(
+      (params.attackerActor.system as { pf1e?: { mount?: unknown } })?.pf1e?.mount,
+    )?.actorId !== null;
+  if (!mounted) return null;
+  const spirited = hasPF1eFeat(params.feats ?? [], "Spirited Charge");
+  return lanceChargeMultiplier({ spiritedCharge: spirited });
+}
+
 /**
  * Run the full resolution: attack roll → (threat: confirmation) → (hit:
  * damage) → resolution card → HP writes. Every die is a public host-evaluated
@@ -485,20 +510,37 @@ export async function resolveAttackFlow(
     concealmentDie = face;
   }
 
-  // 3. A hit rolls damage (the crit formula on a confirmed threat, D-139).
-  // A07 feat damage (Power Attack, Deadly Aim, Weapon Specialization,
-  // Point-Blank Shot) is static per step and multiplied on a crit
-  // (CRB p.179 — all modifiers multiply).
+  // P08 — lance charge multiplier (A.11, CRB p.136): a lance while mounted and charging
+  // deals ×2, ×3 with Spirited Charge. Combined with a critical, CRB p.179 is
+  // additive (×2 + ×2 ⇒ ×3, ×3 + ×2 ⇒ ×4, ×3 + ×3 ⇒ ×5).
+  const lanceMult = mountedLanceMultiplier(params);
+  // 3. A hit rolls damage (the crit formula on a confirmed threat, D-139, plus
+  // the lance multiplier when applicable; additive per CRB p.179 — all
+  // modifiers multiply with each dice group).
   let damageTotal = 0;
   let damageFormula = params.damageFormula;
+  let combinedMult = 1;
   if (prepared.roll.ok && prepared.roll.hits) {
-    damageFormula =
-      confirmedCrit && params.critDamageFormula !== null
-        ? params.critDamageFormula
-        : params.damageFormula;
+    combinedMult =
+      1 +
+      (confirmedCrit ? (line.critMultiplier ?? 2) - 1 : 0) +
+      (lanceMult !== null ? lanceMult - 1 : 0);
+    if (combinedMult > 1) {
+      const baseGroup = params.damageFormula.trim();
+      if (baseGroup !== "" && baseGroup !== "0") {
+        damageFormula = Array.from({ length: combinedMult }, () => baseGroup).join(" + ");
+      } else {
+        damageFormula =
+          confirmedCrit && params.critDamageFormula !== null
+            ? params.critDamageFormula
+            : params.damageFormula;
+      }
+    } else {
+      damageFormula = params.damageFormula;
+    }
     const damageRoll = await rollOne(
       damageFormula,
-      `${line.name} ${confirmedCrit ? "critical damage" : "damage"}`,
+      `${line.name} ${confirmedCrit && lanceMult !== null ? "critical lance charge damage" : confirmedCrit ? "critical damage" : lanceMult !== null ? "lance charge damage" : "damage"}${combinedMult > 1 ? ` ×${combinedMult}` : ""}`,
     );
     if (!damageRoll.ok) return damageRoll;
     if (
@@ -509,8 +551,7 @@ export async function resolveAttackFlow(
     }
     damageTotal = damageRoll.message.roll.total;
     if (featDamageDelta !== 0) {
-      const mult = confirmedCrit ? (line.critMultiplier ?? 2) : 1;
-      damageTotal += featDamageDelta * mult;
+      damageTotal += featDamageDelta * combinedMult;
     }
   }
 
@@ -523,12 +564,17 @@ export async function resolveAttackFlow(
     damageTotal,
   });
   // Surface A07 feat labels, the AoN 131 shooting-into-melee ladder, and P08 mounted ranged penalty.
-  if (result.ok && (featAttackDeltaParts.length > 0 || featDamageDeltaParts.length > 0 || engagementPenalty !== 0 || mountPenalty !== 0)) {
+  let lanceNote: string | null = null;
+  if (lanceMult !== null) {
+    lanceNote = `lance charge ×${lanceMult}${hasPF1eFeat(params.feats ?? [], "Spirited Charge") ? " (Spirited Charge, A.11/CRB p.136)" : " (A.11)"}${combinedMult > lanceMult ? `, combined with critical ×${line.critMultiplier} ⇒ ×${combinedMult} (additive, CRB p.179)` : ""}`;
+  }
+  if (result.ok && (featAttackDeltaParts.length > 0 || featDamageDeltaParts.length > 0 || engagementPenalty !== 0 || mountPenalty !== 0 || lanceNote !== null)) {
     const featNotes = [
       ...featAttackDeltaParts.map((p) => `${p.label} ${fmtSigned(p.value)}`),
       ...featDamageDeltaParts.map((p) => `${p.label} ${fmtSigned(p.value)}`),
       ...(engagementPenalty !== 0 ? [`shooting into melee ${fmtSigned(engagementPenalty)}`] : []),
       ...(mountPenaltyPart !== null ? [`${mountPenaltyPart.label} ${fmtSigned(mountPenaltyPart.value)}`] : []),
+      ...(lanceNote !== null ? [lanceNote] : []),
     ];
     if (featNotes.length > 0) {
       const withNotes: typeof result = {
@@ -542,6 +588,12 @@ export async function resolveAttackFlow(
     const withNotes: typeof result = {
       ...result,
       notes: [...result.notes, `shooting into melee: no penalty (size/distance/Precise Shot)`],
+    };
+    result = withNotes;
+  } else if (result.ok && lanceNote !== null) {
+    const withNotes: typeof result = {
+      ...result,
+      notes: [...result.notes, lanceNote],
     };
     result = withNotes;
   }

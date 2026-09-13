@@ -78,6 +78,12 @@
     mountedMeleeFullAttack,
     mountedCastingConcentrationDC,
     mountLinkageOf,
+    guideWithKnees,
+    stayInSaddle,
+    unconsciousRiderStays,
+    untrainedMountControl,
+    lanceChargeMultiplier,
+    mountFootprint,
     type PF1eMountMovement,
   } from "../../packages/pf1e/mounted";
   import type {
@@ -446,6 +452,105 @@
     updateDetail({ kind: "mount", actorId, combatTrained, saddle });
   }
 
+  // P08/D-217 — Ride check state (raw inputs, notes, falling 1d6)
+  let rideBonusRaw = $state("");
+  let rideDieRaw = $state("");
+  let rideD100Raw = $state("");
+  let rideNote = $state("");
+  let rideError = $state("");
+  let rideFallingNote = $state("");
+  let rideBusy = $state(false);
+
+  // P08/D-217 — Ride checks (A.11): DC 20 untrained control, DC 5 knees, DC 15 stay, 50/75% unconscious; fall ⇒ 1d6
+  function parseRideBonus(): number {
+    const raw = rideBonusRaw.trim();
+    if (raw === "") return d.abilityMods.dex;
+    const n = Number.parseInt(raw, 10);
+    return Number.isFinite(n) ? n : d.abilityMods.dex;
+  }
+  function parseRideDie(): number | null {
+    const n = Number.parseInt(rideDieRaw.trim(), 10);
+    if (!Number.isInteger(n) || n < 1 || n > 20) return null;
+    return n;
+  }
+  async function applyFallingDamage(notePrefix: string): Promise<void> {
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current || !client.user || !can(client.user, "update", current, "actors")) {
+      rideFallingNote = `${notePrefix} — no permission to apply 1d6 (apply manually)`;
+      return;
+    }
+    rideBusy = true;
+    try {
+      const rollId = client.roll("1d6", "roll", undefined, "falling from mount 1d6 (A.11)");
+      // Wait for the host-evaluated roll message
+      const deadline = Date.now() + 10000;
+      let total: number | null = null;
+      for (;;) {
+        for (const msg of client.store.getAll("messages") as readonly { flags?: { core?: { rollId?: unknown } }; roll?: { total?: unknown } }[]) {
+          if ((msg.flags as { core?: { rollId?: unknown } })?.core?.rollId === rollId && typeof msg.roll?.total === "number") {
+            total = msg.roll.total as number;
+            break;
+          }
+        }
+        if (total !== null) break;
+        if (Date.now() >= deadline) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      if (total === null) {
+        rideFallingNote = `${notePrefix} — falling roll did not arrive (apply 1d6 manually)`;
+        return;
+      }
+      const derived = pf1eSheetView(current).derived;
+      const after = derived.hp - total;
+      const edit = pf1eSheetEdit(current, client.user, "hp", String(after));
+      if (edit.error) rideFallingNote = `${notePrefix} — 1d6 = ${total} but HP write rejected: ${edit.error}`;
+      else {
+        if (edit.ops.length) pending.add(client.submit(edit.ops));
+        rideFallingNote = `${notePrefix} — 1d6 = ${total} applied (${derived.hp} → ${after} HP)`;
+      }
+    } finally {
+      rideBusy = false;
+    }
+  }
+  function doRideCheck(kind: "control" | "knees" | "stay"): void {
+    rideError = "";
+    rideNote = "";
+    rideFallingNote = "";
+    const bonus = parseRideBonus();
+    const die = parseRideDie();
+    if (die === null) {
+      rideError = "Ride d20 must be 1–20";
+      return;
+    }
+    if (kind === "control") {
+      const v = untrainedMountControl({ die, rideMod: bonus });
+      rideNote = `d20 ${die} + ${bonus} = ${die + bonus} vs DC 20 — ${v.reason}`;
+      if (!v.controlled) rideNote += " · the move becomes a full-round action";
+    } else if (kind === "knees") {
+      const v = guideWithKnees({ die, rideMod: bonus });
+      rideNote = `d20 ${die} + ${bonus} = ${die + bonus} vs DC 5 — ${v.reason}`;
+    } else {
+      const v = stayInSaddle({ die, rideMod: bonus });
+      rideNote = `d20 ${die} + ${bonus} = ${die + bonus} vs DC 15 — ${v.reason}`;
+      if (!v.stays) void applyFallingDamage("Fell from mount (DC 15 failed)");
+    }
+  }
+  function doUnconsciousCheck(): void {
+    rideError = "";
+    rideNote = "";
+    rideFallingNote = "";
+    const raw = rideD100Raw.trim();
+    const roll = Number.parseInt(raw, 10);
+    if (!Number.isInteger(roll) || roll < 1 || roll > 100) {
+      rideError = "Unconscious check d100 must be 1–100";
+      return;
+    }
+    const saddle = currentMount?.saddle ?? "none";
+    const v = unconsciousRiderStays({ saddle, roll });
+    rideNote = `d100 ${roll} vs ${saddle === "military" ? 75 : 50}% — ${v.reason}`;
+    if (!v.stays) void applyFallingDamage("Fell while unconscious");
+  }
+
   /**
    * P08/D-201 — the mounted higher-ground fold: a rider whose authored mount
    * (`system.pf1e.mount`) is larger than the on-foot target takes +1 on melee
@@ -497,6 +602,25 @@
     const lvl = Number.parseInt(castLevel, 10);
     if (!Number.isInteger(lvl) || lvl < 0 || lvl > 9) return null;
     return mountedCastingConcentrationDC({ spellLevel: lvl, movedBeforeAndAfter: castMountMovedBeforeAndAfter, mountRunning: castMountRunning });
+  });
+
+  // P08/D-217 — mount footprint (2×2 for Large horse) and lance hint
+  let mountFootprintInfo = $derived.by(() => {
+    const linkage = mountLinkageOf((doc.system as { pf1e?: { mount?: unknown } }).pf1e?.mount);
+    if (linkage === null || linkage.actorId === null) return null;
+    const mount = client.store.get("actors", linkage.actorId) as ActorDocument | undefined;
+    if (mount === undefined) return null;
+    return mountFootprint({ mountSize: (mount.system as { pf1e?: { size?: unknown } }).pf1e?.size as string | null });
+  });
+  let lanceHint = $derived.by(() => {
+    const line = d.attacks[resolveAttackIndex];
+    if (!line || line.ranged === true) return null;
+    if (!/lance/i.test(line.name)) return null;
+    if (currentMount === null || currentMount.actorId === null) return null;
+    if (!resolveCharging) return null;
+    const spirited = (Array.isArray(view.authored.feats) ? view.authored.feats as string[] : []).some((f) => /spirited charge/i.test(f));
+    const mult = lanceChargeMultiplier({ spiritedCharge: spirited });
+    return { mult, spirited };
   });
 
   let effectivePositional = $derived.by(() => {
@@ -2255,6 +2379,9 @@
         {#if mountedMeleeBar.fullAttack === false && d.attacks[resolveAttackIndex]?.ranged !== true && resolveTargetId}
           <p class="note warn" data-pf1e-mounted-melee-bar>{mountedMeleeBar.reason}</p>
         {/if}
+        {#if lanceHint !== null && resolveTargetId}
+          <p class="note" data-pf1e-lance-resolve>Lance charge ×{lanceHint.mult}{lanceHint.spirited ? " (Spirited Charge)" : ""} — damage stacks additively with a crit (CRB p.179)</p>
+        {/if}
         {#if resolveError}<p class="warn" data-pf1e-resolve-error>
             {resolveError}
           </p>{/if}
@@ -2403,6 +2530,29 @@
             </select>
           </label>
         {/if}
+      </div>
+      {#if mountFootprintInfo !== null}
+        <p class="note" data-pf1e-mount-footprint>Mount footprint: {mountFootprintInfo.squares} squares ({mountFootprintInfo.feet} ft) — a Large horse occupies 2×2 (A.11, CRB p.202)</p>
+      {/if}
+      {#if currentMount !== null && currentMount.actorId !== null}
+        <p class="note" data-pf1e-mount-initiative>Initiative is shared: you and the mount act on your initiative count — when charging you must act on the mount's initiative (A.11)</p>
+      {/if}
+      {#if lanceHint !== null}
+        <p class="note" data-pf1e-lance-hint>Lance charge ×{lanceHint.mult} damage on this charge{lanceHint.spirited ? " (Spirited Charge)" : ""} — stacks additively with a critical (×2+×2 ⇒ ×3, ×3+×2 ⇒ ×4, CRB p.179)</p>
+      {/if}
+      <h4>Ride checks — untrained (A.11, Ride skill)</h4>
+      <div class="resolve" data-pf1e-ride>
+        <label>Ride mod <input bind:value={rideBonusRaw} placeholder={String(d.abilityMods.dex)} size="3" data-ride-bonus /></label>
+        <label>d20 <input bind:value={rideDieRaw} placeholder="1–20" size="3" data-ride-die /></label>
+        <button type="button" disabled={rideBusy} onclick={() => doRideCheck("control")} data-ride-control>Control mount DC 20</button>
+        <button type="button" disabled={rideBusy} onclick={() => doRideCheck("knees")} data-ride-knees>Guide with knees DC 5</button>
+        <button type="button" disabled={rideBusy} onclick={() => doRideCheck("stay")} data-ride-stay>Stay in saddle DC 15</button>
+        <label>d100 <input bind:value={rideD100Raw} placeholder="1–100" size="3" data-ride-d100 /></label>
+        <button type="button" disabled={rideBusy} onclick={() => doUnconsciousCheck()} data-ride-unconscious>Unconscious {currentMount?.saddle === "military" ? "75%" : "50%"}</button>
+        {#if rideError}<p class="warn" data-ride-error>{rideError}</p>{/if}
+        {#if rideNote}<p class="note" data-ride-note>{rideNote}</p>{/if}
+        {#if rideFallingNote}<p class="warn" data-ride-falling>{rideFallingNote}</p>{/if}
+        <p class="note">DC 20 — control an untrained mount (move action) or fail ⇒ full-round (A.11 §2); DC 5 — guide with knees (free hand); DC 15 — stay in saddle when hit (fail ⇒ fall 1d6 host roll). Unconscious: 50% (75% military) per round to stay mounted.</p>
       </div>
       <p class="note">
         Rolls post to chat with their breakdown; resolution rolls attack (+

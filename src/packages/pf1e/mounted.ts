@@ -25,13 +25,13 @@
  * mount's 2×2 footprint) belong to the combat and scene glue that consumes
  * them and are named in each consumer's own docs.
  *
- * Deliberately not encoded: the ×3 spirited-charge lance multiplier and every
- * other mounted feat effect (the verified text gives only Ride-By Attack /
- * Trick Riding's ordering, quoted in the header) — `LANCE_CHARGE_MULTIPLIER`
- * is the verified ×2 and feats arrive as caller facts, exactly as
- * `rollData.ts` documents its `extraMultipliers` seam.
+ * The ×3 spirited-charge lance multiplier is `lanceChargeMultiplier({spiritedCharge:true})`
+ * (CRB p.136, caller feat fact); Ride-By Attack / Trick Riding ordering is
+ * the only other feat the verified text names and stays a caller fact.
+ * `LANCE_CHARGE_MULTIPLIER` is the verified ×2; feats still arrive as caller
+ * facts where the `extraMultipliers` seam documents them.
  */
-import { normalizeSize, sizeSteps } from "./rulesTables";
+import { normalizeSize, sizeEntry, sizeSteps } from "./rulesTables";
 
 /** The saddle kinds A.11 names — only the military one changes a number. */
 export type PF1eSaddleKind = "none" | "military";
@@ -127,6 +127,32 @@ export function mountedRangedPenalty(
 
 /** A.11: a lance on a charge deals ×2 (feats may add more — caller facts). */
 export const LANCE_CHARGE_MULTIPLIER = 2;
+
+/**
+ * The lance charge multiplier, including the Spirited Charge feat's
+ * verified ×3 (CRB p.136, \"deals double damage with a melee weapon ... with a
+ * lance, ... triple damage\"). The feat is a caller fact — nothing here
+ * reads it — so the multiplier is a pure function of that boolean.
+ */
+export function lanceChargeMultiplier(input: {
+  spiritedCharge?: boolean | undefined;
+}): number {
+  return input.spiritedCharge === true ? 3 : 2;
+}
+
+/**
+ * Mount footprint for scene geometry: a Large mount occupies 10 ft (2 squares),
+ * matching `sizeEntry(Large).spaceFeet`. The rider shares the mount's space
+ * and acts on its initiative.
+ */
+export function mountFootprint(input: {
+  mountSize: string | null | undefined;
+}): { squares: number; feet: number } | null {
+  const normalized = normalizeSize(input.mountSize);
+  if (normalized === null) return null;
+  const entry = sizeEntry(normalized);
+  return { squares: entry.spaceFeet / 5, feet: entry.spaceFeet };
+}
 
 /**
  * A.11's concentration DCs for casting from a moving mount: moving both
