@@ -5,12 +5,13 @@
   import { createStage, type Stage } from "../canvas/stage";
   import { tokenRect } from "../canvas/tokens";
   import { tokenBadgesMap } from "../packages/pf1e/tokenBadges";
+  import { isPF1eActor } from "../ui/sheets/pf1eSheetModel";
   import {
     pf1eAreaPreviewModel,
     type PF1eAreaPreviewModel,
   } from "../packages/pf1e/areaPreview";
   import type { PF1eAreaKind, PF1eAreaSpec } from "../packages/pf1e/targeting";
-  import { sightSegments } from "../canvas/vision";
+  import { moveSegments, sightSegments } from "../canvas/vision";
   import { SvelteMap } from "svelte/reactivity";
   // static import: a dynamic import("pixi.js") would inline a SECOND copy of
   // pixi into the single-file bundle (+290 KB, D-083)
@@ -77,6 +78,8 @@
   import { worldSettingsFrom } from "../core/worldSettings";
   import { installGmFogE2e } from "./e2eHook";
   import { pf1eMovementOpportunities } from "../packages/pf1e/tacticalOpportunity";
+  import { pf1eMovePlan } from "../packages/pf1e/movement";
+  import { pf1eThreatModel } from "../packages/pf1e/threatPreview";
   import { deriveFromDocuments } from "../packages/pf1e/actor";
   import { autoResolveAoosOf } from "../packages/pf1e/aooSettings";
   import {
@@ -255,6 +258,7 @@
         combat,
         actors: gm.client.store.getAll("actors"),
         tokens: scene.tokens,
+        scene,
       },
     );
     pushLog(
@@ -592,6 +596,59 @@
     stage.getStrategicFogLayer().sync(rects, cam);
   }
 
+  /**
+   * P02/D-197: draw the threatened squares of the **single selected token** —
+   * G §4.5's highlighting, straight off the threat model's own draw list
+   * (`threatRects`). Local selection UI, never replicated: no selection, a
+   * multi-selection or a scene without the token clears the layer.
+   */
+  function syncPF1eThreatOverlay(): void {
+    if (!stage) return;
+    const layer = stage.getThreatOverlayLayer();
+    const scene = activeScene();
+    const selectedId =
+      tokenSelection.ids.length === 1 ? tokenSelection.ids[0] : null;
+    const token =
+      selectedId !== null
+        ? (scene?.tokens.find((t) => t._id === selectedId) ?? null)
+        : null;
+    if (scene === null || token === null) {
+      layer.sync([], null, stage.camera);
+      return;
+    }
+    const actors = app?.gm.client.store.getAll("actors") as ActorDocument[];
+    const model = pf1eThreatModel({
+      grid: scene.grid,
+      tokens: scene.tokens.map((t) => {
+        const actor = t.actorId
+          ? (actors.find((a) => a._id === t.actorId) ?? null)
+          : null;
+        const derived = actor
+          ? deriveFromDocuments({ actor: { system: actor.system } })
+          : null;
+        return {
+          _id: t._id,
+          x: t.x,
+          y: t.y,
+          width: t.width,
+          height: t.height,
+          ...(derived ? { size: derived.size, shape: derived.reachShape } : {}),
+        };
+      }),
+    });
+    const entry = model.entries.find((e) => e.tokenId === token._id);
+    if (!model.ok || entry === undefined) {
+      layer.sync([], null, stage.camera);
+      return;
+    }
+    layer.sync(entry.threatRects, entry.cellRects.length === 1 ? entry.cellRects[0] : {
+      x: token.x - token.width / 2,
+      y: token.y - token.height / 2,
+      width: token.width,
+      height: token.height,
+    }, stage.camera);
+  }
+
   /** P5/C01 (D-154): draw the PF1e area preview from its local model. */
   function syncPF1eAreaPreview(): void {
     if (!stage) return;
@@ -657,6 +714,9 @@
     if (pf1ePreviewSceneId !== null && pf1ePreviewSceneId !== (scene?._id ?? null))
       clearPF1eAreaPreview();
     syncPF1eAreaPreview();
+    // P02: the threat overlay follows the selected token through every store
+    // update, so a moved token re-reads its own threatened squares.
+    syncPF1eThreatOverlay();
     worldName = current.meta.name;
     seq = current.gm.client.store.seq;
     tokenCount = scene?.tokens.length ?? 0;
@@ -962,6 +1022,7 @@
               ids: [...ids],
             };
             closeTokenMenu(); // any new gesture supersedes the menu
+            syncPF1eThreatOverlay(); // P02: one selected token shows its threat
           },
           onContextMenu: ({ screen, tokenId }) => {
             tokenMenu = { x: screen.x, y: screen.y, tokenId };
@@ -1013,6 +1074,59 @@
             const explicit = tokens.every(
               (t) => (dispositionOf.get(t._id) ?? "neutral") !== "neutral",
             );
+            // P03/D-198: the move's own legality — the walk's cost against the
+            // mover's derived speed, occupied ending squares, through-enemy
+            // pass-through and move-blocking walls — asked BEFORE the
+            // opportunity queue, so an illegal drag never provokes. A drag is
+            // a walk (a move action); run/withdraw/charge and the 5-foot step
+            // are the seam's other modes, with no drag UI declaring them yet.
+            {
+              const moverActor = moved.token.actorId
+                ? (actors.find((a) => a._id === moved.token.actorId) ?? null)
+                : null;
+              // The gate is a PF1e rule for PF1e actors: a systemless token's
+              // drag owns no speed and no action economy, so it stays free.
+              if (moverActor !== null && isPF1eActor(moverActor)) {
+              const moverDerived = moverActor
+                ? deriveFromDocuments({ actor: { system: moverActor.system } })
+                : null;
+              const plan = pf1eMovePlan({
+                grid: scene.grid,
+                tokens,
+                mover: {
+                  tokenId: moved.token._id,
+                  to,
+                  ...(moverDerived ? { speedFt: moverDerived.speedFt } : {}),
+                },
+                walls: moveSegments(scene.walls),
+                ...(explicit
+                  ? {
+                      isAlly: (a: string, b: string) =>
+                        dispositionOf.get(a) === dispositionOf.get(b),
+                    }
+                  : {}),
+              });
+              if (plan.refusal !== null) {
+                notifyLog = [
+                  ...notifyLog.slice(-49),
+                  {
+                    message: `${moved.token.name} can't move there — ${plan.refusal}`,
+                    level: "warn" as const,
+                  },
+                ];
+                return "cancel";
+              }
+              if (plan.minimumMovement) {
+                notifyLog = [
+                  ...notifyLog.slice(-49),
+                  {
+                    message: `${moved.token.name} moves by the minimum-movement rule — a full-round action moves 5 ft despite the reduced speed (A.7); it provokes`,
+                    level: "info" as const,
+                  },
+                ];
+              }
+              }
+            }
             // D-187: the prompt's rows read each reactor's AoO budget off the seam's
             // `used`/`max`, so the move must hand the encounter's ledgers in — otherwise
             // every row shows `null` and a reactor that has already spent its opportunity
@@ -1037,6 +1151,9 @@
               grid: scene.grid,
               tokens,
               mover: { tokenId: moved.token._id, to },
+              // P04 — the scene's sight-blocking walls, so AoN 181's cover
+              // exclusion applies to the queued reactions.
+              coverWalls: sightSegments(scene.walls),
               ...(explicit
                 ? {
                     isEnemy: (a: string, b: string) =>
@@ -1116,6 +1233,7 @@
                 combat,
                 actors: actors as ActorDocument[],
                 tokens: scene.tokens,
+                scene,
               },
             )
               .then((resolution) => {
@@ -1338,6 +1456,17 @@
               visible: pf1ePreview !== null && pf1ePreview.ok,
               rectsDrawn: layer.rectCount,
               highlights: layer.highlightCount,
+            };
+          },
+          pf1eThreatOverlayState: () => {
+            const layer = view.getThreatOverlayLayer();
+            return {
+              tokenId:
+                tokenSelection.ids.length === 1
+                  ? (tokenSelection.ids[0] ?? null)
+                  : null,
+              rectsDrawn: layer.rectCount,
+              originDrawn: layer.originDrawn,
             };
           },
           sceneScale: () => {

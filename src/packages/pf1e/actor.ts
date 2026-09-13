@@ -38,6 +38,11 @@ import {
 // this module previously carried. Import, never duplicate.
 import { UNARMED_STRIKE_DAMAGE_BY_SIZE } from "./weapons";
 import {
+  negativeLevelDeath,
+  negativeLevelPenalties,
+  negativeLevelTotalsOf,
+} from "./negativeLevels";
+import {
   resolveEffects,
   type PF1eActiveEffect,
   type ResolvedEffects,
@@ -113,6 +118,19 @@ export interface PF1eAttackEntry {
   touchAttack?: boolean;
   /** The authored `damageBonus` already contains the ability contribution (stat blocks do). */
   abilityDamageIncluded?: boolean;
+  /**
+   * P09/D-202 — firearm facts for this line: the misfire rules
+   * (`firearms.ts`) read them, and the derived line carries them as `misfire`.
+   */
+  firearm?: {
+    generation?: "early" | "advanced";
+    /** 1–20; absent or 0 ⇒ the line never misfires. */
+    misfireMinimum?: number;
+    /** A magical firearm is wrecked by an explosion, not destroyed. */
+    magical?: boolean;
+  };
+  /** The line's weapon carries the broken condition (misfire, sunder, or a pre-broken item). */
+  broken?: boolean;
 }
 
 /** Spellcasting, authored once; prepared and spontaneous differ only in slot bookkeeping. */
@@ -264,6 +282,12 @@ export interface PF1eActorSystem extends PF1eHealthAuthored {
    * adjustment is reported as not computable, never guessed.
    */
   hitDice?: number;
+  /**
+   * P7/H04/D-204 — negative levels (AoN 427): temporary (a new save each
+   * day), permanent (no daily save; restoration only), or both. Every
+   * derived statistic the verified text lists takes the penalties.
+   */
+  negativeLevels?: { temporary?: number; permanent?: number };
   /** Stat blocks publish the generic size modifier, not a category (see A.4's deviation note). */
   sizeMod?: number;
   drBypass?: string[];
@@ -295,6 +319,18 @@ export interface PF1eDerivedAttack {
   reachSquares: number;
   touchAttack: boolean;
   rangedTouch: boolean;
+  /**
+   * P09/D-202 — the line's firearm misfire facts, carried from the authored
+   * `firearm` block (absent ⇒ the line is not a firearm line, or never
+   * misfires). The effective value is computed at resolve time
+   * (`firearms.ts` owns the escalation).
+   */
+  misfire?: {
+    generation: "early" | "advanced";
+    misfireMinimum: number;
+    broken: boolean;
+    magical: boolean;
+  };
   explain: string;
 }
 
@@ -735,6 +771,23 @@ export function parsePF1eActorSystem(raw: unknown): Result<PF1eActorSystem> {
   ) {
     return err("system.pf1e.hitDice must be a nonnegative whole number");
   }
+  if (o.negativeLevels !== undefined && o.negativeLevels !== null) {
+    if (typeof o.negativeLevels !== "object" || Array.isArray(o.negativeLevels)) {
+      return err("system.pf1e.negativeLevels must be an object with temporary/permanent counts");
+    }
+    for (const k of ["temporary", "permanent"] as const) {
+      const v = (o.negativeLevels as Record<string, unknown>)[k];
+      if (
+        v !== undefined &&
+        v !== null &&
+        (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0)
+      ) {
+        return err(
+          `system.pf1e.negativeLevels.${k} must be a nonnegative whole number`,
+        );
+      }
+    }
+  }
   if (o.saves !== undefined && !isRecord(o.saves)) {
     return err("system.pf1e.saves must be an object with fort/ref/will");
   }
@@ -1019,19 +1072,35 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     // penalty applies on top; component saves take the effective modifier (CRB p.555).
     readNumber(base, field, c) +
     (totalsArePublished ? -abilityDamagePenalty[key] : eff[key]);
+  // 4a. Negative levels (AoN 427, D-204), folded into every statistic the
+  //     verified text lists: −1 per level on attacks, saves, CMB and CMD;
+  //     current and total HP each lose 5 per level; one level lower for
+  //     level-dependent variables (caster level here — spell slots and
+  //     prepared spells are NOT lost); death when levels reach Hit Dice.
+  const negativeLevels = negativeLevelTotalsOf(sys.negativeLevels);
+  for (const issue of negativeLevels.issues) c.issues.push(issue);
+  const nl = negativeLevelPenalties(negativeLevels.total);
+  if (negativeLevels.total > 0) {
+    c.defaults.push(
+      `negativeLevels: ${String(negativeLevels.total)} (${String(negativeLevels.temporary)} temporary, ${String(negativeLevels.permanent)} permanent) — AoN 427 penalties folded`,
+    );
+  }
   const saves = {
     fort:
       abilitySave(savesAuthored.fort, "con", "saves.fort") +
       allSaves +
-      (resolved.mods["save.fort"] ?? 0),
+      (resolved.mods["save.fort"] ?? 0) +
+      nl.saves,
     ref:
       abilitySave(savesAuthored.ref, "dex", "saves.ref") +
       allSaves +
-      (resolved.mods["save.ref"] ?? 0),
+      (resolved.mods["save.ref"] ?? 0) +
+      nl.saves,
     will:
       abilitySave(savesAuthored.will, "wis", "saves.will") +
       allSaves +
-      (resolved.mods["save.will"] ?? 0),
+      (resolved.mods["save.will"] ?? 0) +
+      nl.saves,
   };
 
   // 5. Initiative = Dexterity check + authored adjustments + effect modifiers (A.1). Ties, surprise,
@@ -1055,7 +1124,7 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     strMod: eff.str,
     dexMod: eff.dex,
     size,
-    misc: cmbMisc + (resolved.mods.cmb ?? 0),
+    misc: cmbMisc + (resolved.mods.cmb ?? 0) + nl.cmb,
     ...(sys.sizeMod !== undefined ? { sizeModOverride: sys.sizeMod } : {}),
   });
   const cmdParts = cmdFrom({
@@ -1063,7 +1132,7 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     strMod: eff.str,
     dexMod: eff.dex,
     size,
-    misc: cmdMisc + (resolved.mods.cmd ?? 0),
+    misc: cmdMisc + (resolved.mods.cmd ?? 0) + nl.cmd,
     acTransfer: resolved.acTransfer,
     acPenalties: resolved.acPenalties,
     ...(sys.sizeMod !== undefined ? { sizeModOverride: sys.sizeMod } : {}),
@@ -1115,7 +1184,7 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     );
     const effectDamage = resolved.mods.damage ?? 0;
     const ladder = natural ? [baseAttack] : iterativeAttacks;
-    const bonus = ability + sizeAttackAc + toHit(ranged);
+    const bonus = ability + sizeAttackAc + toHit(ranged) + nl.attack;
     const damageBonus =
       abilityDamage + flatDamage + effectDamage - includedLinePenalty;
     const critMultiplier = readNumber(
@@ -1136,6 +1205,41 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
       c.issues.push(
         `attacks[${idx}].critThreatMin = ${critThreatMin} is outside 1–20 — kept, 20 is the default`,
       );
+    }
+    const firearmBlock =
+      typeof a.firearm === "object" && a.firearm !== null
+        ? (a.firearm as {
+            generation?: unknown;
+            misfireMinimum?: unknown;
+            magical?: unknown;
+          })
+        : null;
+    let misfire:
+      | {
+          generation: "early" | "advanced";
+          misfireMinimum: number;
+          broken: boolean;
+          magical: boolean;
+        }
+      | undefined;
+    if (firearmBlock !== null) {
+      const misfireMinimum = readNumber(
+        firearmBlock.misfireMinimum,
+        `attacks[${idx}].firearm.misfireMinimum`,
+        c,
+      );
+      if (misfireMinimum !== 0 && (misfireMinimum < 1 || misfireMinimum > 20)) {
+        c.issues.push(
+          `attacks[${idx}].firearm.misfireMinimum = ${String(misfireMinimum)} is outside 1–20 — treated as never misfiring`,
+        );
+      } else if (misfireMinimum > 0) {
+        misfire = {
+          generation: firearmBlock.generation === "advanced" ? "advanced" : "early",
+          misfireMinimum,
+          broken: a.broken === true,
+          magical: firearmBlock.magical === true,
+        };
+      }
     }
     return {
       name:
@@ -1167,6 +1271,7 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
           : naturalReachSquares(size, reachShape),
       touchAttack: a.touchAttack === true,
       rangedTouch: a.touchAttack === true && ranged,
+      ...(misfire !== undefined ? { misfire } : {}),
       explain:
         `${bonus >= 0 ? "+" : ""}${bonus} = ${ranged ? `Dex ${fmt(eff.dex)}` : `Str ${fmt(ability)}${strMult !== 1 ? ` ×${strMult}` : ""}`}` +
         `, size ${fmt(sz.attackAc)}${toHit(ranged) !== 0 ? `, effects ${fmt(toHit(ranged))}` : ""}` +
@@ -1238,11 +1343,19 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
       thresholdConditions.push(k === "con" ? "dead" : "unconscious");
     }
   }
+  const negativeLevelConditions: string[] = [];
+  if (
+    negativeLevels.total > 0 &&
+    negativeLevelDeath({ levels: negativeLevels.total, hitDice })
+  ) {
+    negativeLevelConditions.push("dead");
+  }
   const conditions = [
     ...new Set([
       ...authoredConditions,
       ...resolved.conditions,
       ...thresholdConditions,
+      ...negativeLevelConditions,
     ]),
   ];
 
@@ -1259,7 +1372,8 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
   const casterLevel =
     readNumber(spellsAuthored.casterLevel, "spells.casterLevel", c) +
     readNumber(spellsAuthored.casterLevelBonus, "spells.casterLevelBonus", c) +
-    (resolved.mods.casterLevel ?? 0);
+    (resolved.mods.casterLevel ?? 0) +
+    nl.effectiveLevelDelta;
   const hasSlots = isRecord(spellsAuthored.slotsPerDay)
     ? Object.values(spellsAuthored.slotsPerDay as Record<string, unknown>).some(
         (v) => typeof v === "number" && v > 0,
@@ -1321,8 +1435,8 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     combatReflexes,
     speedFt,
     flySpeedFt,
-    hp: hpConAdjusted,
-    hpMax: hpMaxConAdjusted,
+    hp: hpConAdjusted + nl.hp,
+    hpMax: hpMaxConAdjusted + nl.hp,
     tempHp: health.tempHp,
     energyResistance: health.energyResistance,
     nonlethalDamage,

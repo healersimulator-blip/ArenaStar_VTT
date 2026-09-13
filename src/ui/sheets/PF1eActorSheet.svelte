@@ -8,7 +8,6 @@
     pf1eSaveRollSpecs,
     type PF1eRollSpec,
   } from "../../packages/pf1e/rollData";
-  import type { ActorDocument } from "../../core/documents";
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import PF1eAcConversion from "./PF1eAcConversion.svelte";
@@ -72,9 +71,25 @@
     pf1eSetCombatantEffectDisabled,
   } from "../../packages/pf1e/effectOps";
   import { resolveTacticalEffects } from "../../packages/pf1e/effectOps";
-  import type { CombatDocument, CombatantDocument } from "../../core/documents";
+  import {
+    mountedHigherGround,
+    mountLinkageOf,
+  } from "../../packages/pf1e/mounted";
+  import type {
+    ActorDocument,
+    CombatDocument,
+    CombatantDocument,
+    SceneDocument,
+  } from "../../core/documents";
   import { resolveAttackFlow, resolveManyshotFlow } from "./pf1eResolveFlow";
   import type { PF1eDefenseChoice } from "../../packages/pf1e/resolve";
+  import {
+    COVER_GRADE_OPTIONS,
+    activeSceneOf,
+    pf1eResolvePositionReport,
+    resolvePositionHint,
+  } from "./pf1eResolvePosition";
+  import { DEFAULT_SCENE_ID } from "../../app/hostBoot";
   import { validatePF1eFeatSelection } from "../../packages/pf1e/feats";
   import { autoResolveAoosOf } from "../../packages/pf1e/aooSettings";
   import { worldSettingsFrom } from "../../core/worldSettings";
@@ -261,7 +276,13 @@
   let resolveTargetId = $state("");
   let resolveAttackIndex = $state(0);
   let resolveDefense = $state<PF1eDefenseChoice>("normal");
-  let resolveFlanking = $state(false);
+  // P02/D-197 — position-aware resolve: flanking and cover read off the linked
+  // tokens and the scene walls when "auto" (the pair seam's own word), or are
+  // set by hand when the table overrules the geometry.
+  let resolveFlankingMode = $state<"auto" | "yes" | "no">("auto");
+  let resolveCoverMode = $state<
+    "auto" | "none" | (typeof COVER_GRADE_OPTIONS)[number]
+  >("auto");
   let resolveCharging = $state(false);
   let resolveNonlethal = $state(false);
   let resolveVerifiable = $state(false);
@@ -290,6 +311,95 @@
     return { actor, derived: pf1eSheetView(actor).derived };
   }
 
+  // P02 — the pair's positional facts, read off the active scene the same way
+  // App.svelte reads it. Recomputed whenever the target, the attack line, the
+  // scene or its tokens change; every unreadable state is named in the hint.
+  let resolvePosition = $derived(
+    pf1eResolvePositionReport({
+      scene: activeSceneOf(
+        client.store.getAll("scenes") as readonly SceneDocument[],
+        DEFAULT_SCENE_ID,
+      ),
+      actors: client.store.getAll("actors") as readonly ActorDocument[],
+      attackerActorId: doc._id,
+      targetActorId: resolveTargetId,
+      ranged: (d.attacks[resolveAttackIndex]?.ranged ?? false) === true,
+      ...(d.attacks[resolveAttackIndex] !== undefined
+        ? { reachSquares: d.attacks[resolveAttackIndex]?.reachSquares }
+        : {}),
+    }),
+  );
+  let resolvePositionLine = $derived(
+    resolvePositionHint(resolvePosition, {
+      attacker: doc.name,
+      target: resolveTargetInfo()?.actor.name ?? "the target",
+    }),
+  );
+  /** The flanking fact the flow folds in: auto = the scene's word (melee only). */
+  let effectiveFlanking = $derived(
+    resolveFlankingMode === "yes"
+      ? true
+      : resolveFlankingMode === "no"
+        ? false
+        : resolvePosition.ok &&
+          resolvePosition.flanked &&
+          (d.attacks[resolveAttackIndex]?.ranged ?? false) === false,
+  );
+  /** P08/D-201 — the authored linkage, re-read from the live document. */
+  let currentMount = $derived(
+    mountLinkageOf(
+      (doc.system as { pf1e?: { mount?: unknown } }).pf1e?.mount,
+    ),
+  );
+
+  /** P08/D-201 — write the whole linkage triple; one edit per change. */
+  function updateMount(
+    actorId: string | null,
+    combatTrained: boolean,
+    saddle: "none" | "military",
+  ): void {
+    updateDetail({ kind: "mount", actorId, combatTrained, saddle });
+  }
+
+  /**
+   * P08/D-201 — the mounted higher-ground fold: a rider whose authored mount
+   * (`system.pf1e.mount`) is larger than the on-foot target takes +1 on melee
+   * attacks (A.11 — the higher-ground bonus, CRB p.202), so the fold is the
+   * situational `higherGround` flag the resolver already limits to melee
+   * lines. No mount authored, no mount actor, or a mounted target ⇒ nothing.
+   */
+  let mountedHigher = $derived.by(() => {
+    const linkage = mountLinkageOf(
+      (doc.system as { pf1e?: { mount?: unknown } }).pf1e?.mount,
+    );
+    if (linkage === null || linkage.actorId === null) return false;
+    const info = resolveTargetInfo();
+    if (info === null) return false;
+    const mount = client.store.get("actors", linkage.actorId) as
+      | ActorDocument
+      | undefined;
+    if (mount === undefined) return false;
+    const targetLinkage = mountLinkageOf(
+      (info.actor.system as { pf1e?: { mount?: unknown } }).pf1e?.mount,
+    );
+    return mountedHigherGround({
+      mountSize: (mount.system as { pf1e?: { size?: unknown } }).pf1e?.size,
+      targetSize: info.derived.size,
+      targetMounted: targetLinkage !== null && targetLinkage.actorId !== null,
+    });
+  });
+
+  /** The positional defenses the resolver folds in: auto = the geometry's word. */
+  let effectivePositional = $derived.by(() => {
+    const concealment =
+      resolvePosition.defense.concealment !== undefined
+        ? { concealment: resolvePosition.defense.concealment }
+        : {};
+    if (resolveCoverMode === "auto") return resolvePosition.defense;
+    if (resolveCoverMode === "none") return concealment;
+    return { cover: resolveCoverMode, ...concealment };
+  });
+
   /** The defense dropdown label, with the picked target's derived AC appended. */
   function defenseOptionLabel(kind: PF1eDefenseChoice): string {
     const name =
@@ -313,6 +423,22 @@
     const line = d.attacks[resolveAttackIndex];
     if (!info || !group || !line) {
       resolveError = "Pick an attack and a target.";
+      return;
+    }
+    // P02/D-197: a melee line whose target stands beyond its reach refuses
+    // before any die is rolled — the pair seam's own refusal names the gap
+    // ("the target is 10 ft away — the attack line reaches 5 ft"). Only the
+    // readable-position path gates: without scene facts the hand-set flow
+    // stands, exactly as the pre-P02 sheet did.
+    if (
+      line.ranged !== true &&
+      resolvePosition.ok &&
+      resolvePosition.reach !== null &&
+      !resolvePosition.reach.canStrike
+    ) {
+      resolveError =
+        resolvePosition.reach.refusals[0] ??
+        "the target is beyond this attack's reach";
       return;
     }
     resolveBusy = true;
@@ -347,13 +473,19 @@
         targetActor: info.actor,
         targetDerived: info.derived,
         defense: resolveDefense,
-        ...(resolveFlanking || resolveCharging
+        ...(effectiveFlanking || resolveCharging || mountedHigher
           ? {
               situational: {
-                ...(resolveFlanking ? { flanking: true } : {}),
+                ...(effectiveFlanking ? { flanking: true } : {}),
                 ...(resolveCharging ? { charging: true } : {}),
+                ...(mountedHigher ? { higherGround: true } : {}),
               },
             }
+          : {}),
+        // P02 — the pair's positional defenses (cover AC fold, concealment d%),
+        // read off the scene when "auto" or the hand-set grade otherwise.
+        ...(Object.keys(effectivePositional).length > 0
+          ? { positional: effectivePositional }
           : {}),
         ...(resolveNonlethal ? { nonlethalDamage: true } : {}),
         // Only the derived unarmed fallback (no authored attack lines) counts
@@ -413,13 +545,18 @@
         targetActor: info.actor,
         targetDerived: info.derived,
         defense: resolveDefense,
-        ...(resolveFlanking || resolveCharging
+        ...(effectiveFlanking || resolveCharging || mountedHigher
           ? {
               situational: {
-                ...(resolveFlanking ? { flanking: true } : {}),
+                ...(effectiveFlanking ? { flanking: true } : {}),
                 ...(resolveCharging ? { charging: true } : {}),
+                ...(mountedHigher ? { higherGround: true } : {}),
               },
             }
+          : {}),
+        // P02 — positional defenses fold into every arrow (cover AC, concealment d%).
+        ...(Object.keys(effectivePositional).length > 0
+          ? { positional: effectivePositional }
           : {}),
         ...(resolveNonlethal ? { nonlethalDamage: true } : {}),
         ...(Array.isArray(view.authored.feats)
@@ -1420,8 +1557,31 @@
           </select>
         </label>
         <label
-          ><input type="checkbox" bind:checked={resolveFlanking} /> Flanking +2</label
-        >
+          >Flanking
+          <select bind:value={resolveFlankingMode} data-pf1e-resolve-flanking>
+            <option value="auto"
+              >Auto{resolvePosition.ok && resolvePosition.flanked
+                ? " (flanked +2)"
+                : " (not flanked)"}</option
+            >
+            <option value="yes">Yes +2</option>
+            <option value="no">No</option>
+          </select>
+        </label>
+        <label
+          >Cover
+          <select bind:value={resolveCoverMode} data-pf1e-resolve-cover>
+            <option value="auto"
+              >Auto{resolvePosition.defense.cover !== undefined
+                ? ` (${resolvePosition.defense.cover})`
+                : " (none)"}</option
+            >
+            <option value="none">None</option>
+            {#each COVER_GRADE_OPTIONS as grade (grade)}
+              <option value={grade}>{grade}</option>
+            {/each}
+          </select>
+        </label>
         <label
           ><input type="checkbox" bind:checked={resolveCharging} /> Charge +2</label
         >
@@ -1457,12 +1617,75 @@
               : `Resolve Manyshot ×${manyshotRolls(resolveAttackIndex).length}`}</button
           >
         {/if}
+        {#if resolveTargetId}
+          <p class="note" data-pf1e-resolve-position>{resolvePositionLine}</p>
+        {/if}
+        {#if mountedHigher && resolveTargetId}
+          <p class="note" data-pf1e-mounted-bonus>
+            Mounted: +1 on melee attacks vs the smaller, on-foot target (A.11 —
+            the higher-ground bonus)
+          </p>
+        {/if}
         {#if resolveError}<p class="warn" data-pf1e-resolve-error>
             {resolveError}
           </p>{/if}
         {#if resolveWarning}<p class="note" data-pf1e-resolve-warning>
             {resolveWarning}
           </p>{/if}
+      </div>
+      <h4>Mount</h4>
+      <div class="resolve" data-pf1e-mount>
+        <label
+          >Mount
+          <select
+            data-pf1e-mount-select
+            value={currentMount?.actorId ?? ""}
+            onchange={(e) =>
+              updateMount(
+                e.currentTarget.value === "" ? null : e.currentTarget.value,
+                currentMount?.combatTrained ?? false,
+                currentMount?.saddle ?? "none",
+              )}
+          >
+            <option value="">— none —</option>
+            {#each pf1eTargetActors() as m (m._id)}
+              <option value={m._id}>{m.name}</option>
+            {/each}
+          </select>
+        </label>
+        {#if currentMount !== null && currentMount.actorId !== null}
+          <label
+            ><input
+              type="checkbox"
+              data-pf1e-mount-trained
+              checked={currentMount.combatTrained}
+              onchange={(e) =>
+                updateMount(
+                  currentMount.actorId,
+                  e.currentTarget.checked,
+                  currentMount.saddle,
+                )}
+            /> Combat-trained</label
+          >
+          <label
+            >Saddle
+            <select
+              data-pf1e-mount-saddle
+              value={currentMount.saddle}
+              onchange={(e) =>
+                updateMount(
+                  currentMount.actorId,
+                  currentMount.combatTrained,
+                  e.currentTarget.value === "military"
+                    ? "military"
+                    : "none",
+                )}
+            >
+              <option value="none">None</option>
+              <option value="military">Military (75% stay mounted)</option>
+            </select>
+          </label>
+        {/if}
       </div>
       <p class="note">
         Rolls post to chat with their breakdown; resolution rolls attack (+

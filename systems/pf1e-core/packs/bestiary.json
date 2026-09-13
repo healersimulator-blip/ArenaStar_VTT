@@ -11,6 +11,7 @@
         "name": "Heavy Infantry",
         "system": {
           "pf1e": {
+            "size": "Medium",
             "bab": 6,
             "strMod": 3,
             "ac": 16,
@@ -32,6 +33,7 @@
         "name": "Heavy Cavalry",
         "system": {
           "pf1e": {
+            "size": "Large",
             "bab": 8,
             "strMod": 4,
             "sizeMod": 1,
@@ -56,6 +58,7 @@
         "name": "Siege Bombard",
         "system": {
           "pf1e": {
+            "size": "Medium",
             "bab": 4,
             "strMod": 1,
             "ac": 12,
@@ -77,6 +80,7 @@
         "name": "Paladin Hero",
         "system": {
           "pf1e": {
+            "size": "Medium",
             "bab": 11,
             "strMod": 5,
             "ac": 20,
@@ -105,6 +109,7 @@
         "name": "Troll Vanguard",
         "system": {
           "pf1e": {
+            "size": "Large",
             "bab": 6,
             "strMod": 6,
             "conMod": 4,
@@ -128,6 +133,7 @@
         "name": "Clay Golem",
         "system": {
           "pf1e": {
+            "size": "Large",
             "bab": 9,
             "strMod": 7,
             "sizeMod": 1,

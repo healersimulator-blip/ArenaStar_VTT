@@ -55,6 +55,7 @@ const moveTo = (
     ...(input.withdraw !== undefined ? { withdraw: input.withdraw } : {}),
     ...(input.ledgers !== undefined ? { ledgers: input.ledgers } : {}),
     ...(input.isEnemy !== undefined ? { isEnemy: input.isEnemy } : {}),
+    ...(input.coverWalls !== undefined ? { coverWalls: input.coverWalls } : {}),
   });
 
 describe("P06 — the tactical scene decides movement AoOs from the queue", () => {
@@ -111,6 +112,68 @@ describe("P06 — the tactical scene decides movement AoOs from the queue", () =
     expect(res.squaresLeft).toEqual(["0,0", "1,0", "2,0", "3,0", "4,0"]);
     expect(res.queued).toHaveLength(1);
     expect(res.queued[0]?.trigger.left).toEqual({ x: 100, y: 0 });
+  });
+
+  test("AoN 181 — cover between the reactor and the left square refuses the strike", () => {
+    // The goblin walks out of (0,0); the fighter below it reacts there. A wall
+    // along their shared edge (x 20–80 on y=100) crosses the diagonal corner
+    // lines, so the provoker has standard cover and the opportunity is refused
+    // — "you can't execute an attack of opportunity against an opponent with
+    // cover" (AoN 181).
+    const res = moveTo({
+      tokens: [token("goblin", 0, 0), token("fighter", 0, 1)],
+      moverId: "goblin",
+      toCol: 4,
+      toRow: 0,
+      isEnemy: () => true,
+      coverWalls: [{ x1: 20, y1: 100, x2: 80, y2: 100 }],
+    });
+    expect(res.queued).toEqual([]);
+    expect(res.refused).toEqual([
+      {
+        tokenId: "fighter",
+        reason:
+          "the provoker has cover — you can't execute an attack of opportunity against an opponent with cover (AoN 181)",
+      },
+    ]);
+    // Refused, not dropped: the reactor row still reports the line.
+    expect(res.reactors[0]?.line).toBe(
+      "fighter forgoes the attack of opportunity — the provoker has cover — you can't execute an attack of opportunity against an opponent with cover (AoN 181)",
+    );
+  });
+
+  test("AoN 181 — a clear lane still queues the opportunity when cover facts are supplied", () => {
+    const res = moveTo({
+      tokens: [token("goblin", 0, 0), token("fighter", 0, 1)],
+      moverId: "goblin",
+      toCol: 4,
+      toRow: 0,
+      isEnemy: () => true,
+      coverWalls: [],
+    });
+    expect(res.queued).toHaveLength(1);
+    expect(res.queued[0]?.reactorId).toBe("fighter");
+    // Cover facts supplied → no coverWalls default is reported.
+    expect(
+      res.defaults.map((d) => d.field).includes("coverWalls"),
+    ).toBe(false);
+  });
+
+  test("absent cover facts are a named default, not a silent queue-through", () => {
+    const res = moveTo({
+      tokens: [token("goblin", 0, 0), token("fighter", 0, 1)],
+      moverId: "goblin",
+      toCol: 4,
+      toRow: 0,
+      isEnemy: () => true,
+    });
+    // Every pre-existing test exercises this path; pin the name once.
+    expect(res.queued).toHaveLength(1);
+    expect(
+      res.defaults.find((d) => d.field === "coverWalls")?.message,
+    ).toBe(
+      "cover facts not supplied — reactors were queued without AoN 181's cover exclusion",
+    );
   });
 
   test("a spent ledger refuses the reaction by name, and the refusal is not a silent drop", () => {

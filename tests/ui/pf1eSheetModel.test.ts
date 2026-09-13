@@ -5,6 +5,7 @@ import { deriveFromDocuments } from "../../src/packages/pf1e/actor";
 import {
   authoredNumber,
   isPF1eActor,
+  pf1eDetailEdit,
   pf1eSheetEdit,
   pf1eSheetView,
   pf1eSpellSlotReadout,
@@ -309,5 +310,65 @@ describe("PF1e spell slot readout (P5/C04)", () => {
     const readout = pf1eSpellSlotReadout(pf1eSheetView(wizard()).derived);
     expect(readout.view.rows.every((row) => row.spent === 0)).toBe(true);
     expect(readout.view.rows.every((row) => !row.over)).toBe(true);
+  });
+});
+
+describe("pf1eDetailEdit — the mount linkage (P08/D-201)", () => {
+  const rider = (mount?: unknown): ActorDocument =>
+    actor({
+      ...(mount === undefined
+        ? {}
+        : { mount: mount as Json }),
+    });
+  const gmUser = { id: "gm", role: "GM" as const };
+
+  test("authoring the linkage writes the whole triple", () => {
+    const res = pf1eDetailEdit(rider(), gmUser, {
+      kind: "mount",
+      actorId: "mount-1",
+      combatTrained: true,
+      saddle: "military",
+    });
+    expect(res.error).toBeNull();
+    expect(res.ops[0]).toMatchObject({
+      kind: "update",
+      diff: {
+        "system.pf1e.mount": {
+          actorId: "mount-1",
+          combatTrained: true,
+          saddle: "military",
+        },
+      },
+    });
+  });
+
+  test("clearing removes the block; a rider without one is a no-op, not an error", () => {
+    const withMount = pf1eDetailEdit(
+      rider({ actorId: "mount-1", combatTrained: false, saddle: "none" }),
+      gmUser,
+      { kind: "mount", actorId: null, combatTrained: false, saddle: "none" },
+    );
+    expect(withMount.ops[0]).toMatchObject({
+      diff: { "-=system.pf1e.mount": null },
+    });
+    const bare = pf1eDetailEdit(rider(), gmUser, {
+      kind: "mount",
+      actorId: null,
+      combatTrained: false,
+      saddle: "none",
+    });
+    expect(bare.ops).toEqual([]);
+    expect(bare.error).toBeNull();
+  });
+
+  test("an actor cannot ride itself", () => {
+    const res = pf1eDetailEdit(rider(), gmUser, {
+      kind: "mount",
+      actorId: "fighter",
+      combatTrained: false,
+      saddle: "none",
+    });
+    expect(res.ops).toEqual([]);
+    expect(res.error).toBe("An actor cannot ride itself.");
   });
 });

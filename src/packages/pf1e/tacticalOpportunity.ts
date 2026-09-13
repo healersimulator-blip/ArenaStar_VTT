@@ -35,7 +35,8 @@ import {
   type PF1eAreaIssue,
   type PF1eCell,
 } from "./targeting";
-import { cellsAlongSegment, FEET_PER_SQUARE } from "./geometry";
+import { cellsAlongSegment, footprintDistance, FEET_PER_SQUARE } from "./geometry";
+import { coverBetween, type PF1eWorldSegment } from "./positional";
 import {
   aooRefusal,
   createInterruptQueue,
@@ -70,6 +71,12 @@ export interface PF1eMovementOpportunityInput {
   ledgers?: Record<string, PF1eOpportunityLedger>;
   /** The turn the queue is labelled with (the queue is turn-local, D-184). */
   turn?: number;
+  /**
+   * P04 — the scene's sight-blocking wall segments in world units, so AoN
+   * 181's cover exclusion applies to the queued reactions. An absent field
+   * is a named default (`coverWalls`), never a silent queue-through.
+   */
+  coverWalls?: readonly PF1eWorldSegment[];
 }
 
 export interface PF1eOpportunityReactor {
@@ -146,6 +153,13 @@ export function pf1eMovementOpportunities(
       field: "isEnemy",
       message:
         "hostility not supplied — every other token is treated as an enemy (AoN 102's opportunity is provoked by a threatening opponent)",
+    });
+  }
+  if (input.coverWalls === undefined) {
+    defaults.push({
+      field: "coverWalls",
+      message:
+        "cover facts not supplied — reactors were queued without AoN 181's cover exclusion",
     });
   }
   if (issues.length > 0) {
@@ -238,10 +252,31 @@ export function pf1eMovementOpportunities(
     const ledger = input.ledgers?.[token._id];
     const used = ledger === undefined ? null : ledger.used;
     const max = ledger === undefined ? null : ledger.max;
-    const refusal =
+    let refusal =
       ledger === undefined
         ? null
         : aooRefusal({ used: ledger.used, budgetMax: ledger.max });
+    // P04 — AoN 181's cover exclusion, decided from the same corner-line
+    // geometry the sheet reads. The AoO is a melee attack: against the
+    // adjacent square it leaves, only walls count; a reach weapon's strike
+    // at a farther square measures cover the ranged way (creatures count).
+    if (refusal === null && input.coverWalls !== undefined) {
+      const reactorCells = (entry.cells ?? []).map(parseCellKey);
+      const cover = coverBetween({
+        attackerCells: reactorCells,
+        defenderCells: [cell],
+        grid: areaGrid,
+        walls: input.coverWalls,
+        creatureCells: input.tokens
+          .filter((t) => t._id !== token._id && t._id !== mover._id)
+          .flatMap((t) => tokenCells(t, areaGrid)),
+        ranged: footprintDistance(reactorCells, [cell]) > 1,
+      });
+      if (cover.kind !== "none") {
+        refusal =
+          "the provoker has cover — you can't execute an attack of opportunity against an opponent with cover (AoN 181)";
+      }
+    }
     const rect = areaPreviewRects([cell], areaGrid)[0] ?? {
       x: 0,
       y: 0,
@@ -298,4 +333,9 @@ export function sceneFeetPerSquare(grid: { distance: number }): number {
   return Number.isFinite(grid.distance) && grid.distance > 0
     ? grid.distance
     : FEET_PER_SQUARE;
+}
+
+function parseCellKey(key: string): PF1eCell {
+  const [col, row] = key.split(",").map((n) => Number.parseInt(n, 10));
+  return { col: col ?? 0, row: row ?? 0 };
 }

@@ -4,6 +4,9 @@ import type {
   CombatDocument,
   Json,
   MessageDocument,
+  SceneDocument,
+  TokenDocument,
+  WallDocument,
 } from "../../src/core/documents";
 import type { Op } from "../../src/core/ops";
 import type { PF1eInterrupt } from "../../src/packages/pf1e/interrupts";
@@ -996,5 +999,219 @@ describe("resolutionLines — what the log shows for a resolved queue (D-186)", 
       "t-archer forgoes the attack of opportunity — no melee attack line — …",
       "(hostility assumed — tokens without a disposition)",
     ]);
+  });
+});
+
+/**
+ * D-200 (P06 closure) — the provoked strike folds the pair's own positional
+ * and situational facts, read through the same pair seam the sheet's resolve
+ * panel reads: flanking's +2, the cover/concealment defense payload, and the
+ * provoker's prone state (+4 for the melee strike, A.14 — standing up from
+ * prone is the flagship provoking action). The queue seams already refuse a
+ * covered strike, so the cover fold here is defense-in-depth: a queue built
+ * without `coverWalls` (or hand-built) still prices the strike correctly.
+ *
+ * Fixtures use the tactical convention: grid.size 100, distance 5, a token's
+ * x/y is its centre, Medium = 100×100 (same as `pf1eResolvePosition.test.ts`).
+ */
+const D200_GRID = {
+  type: "square" as const,
+  size: 100,
+  distance: 5,
+  units: "ft",
+  diagonals: "555" as const,
+  hexLayout: "oddQ" as const,
+};
+
+function d200Token(
+  id: string,
+  col: number,
+  row: number,
+  actorId: string,
+  disposition: "friendly" | "hostile" | "neutral",
+): TokenDocument {
+  return {
+    _id: id,
+    type: "token",
+    name: id,
+    ownership: { default: 2 },
+    flags: {},
+    system: {},
+    x: (col + 0.5) * D200_GRID.size,
+    y: (row + 0.5) * D200_GRID.size,
+    rotation: 0,
+    width: D200_GRID.size,
+    height: D200_GRID.size,
+    img: "",
+    hidden: false,
+    disposition,
+    vision: true,
+    light: { radius: 0, color: "#ffffff", alpha: 1 },
+    actorId,
+  };
+}
+
+function d200Scene(
+  sceneTokens: readonly TokenDocument[],
+  walls: readonly WallDocument[] = [],
+): SceneDocument {
+  return {
+    _id: "scene-d200",
+    type: "scene",
+    name: "D-200",
+    ownership: { default: 2 },
+    flags: {},
+    system: {},
+    active: true,
+    img: null,
+    width: 2000,
+    height: 2000,
+    grid: D200_GRID,
+    darkness: 0,
+    tokens: [...sceneTokens],
+    walls: [...walls],
+    lights: [],
+    sounds: [],
+    tiles: [],
+    drawings: [],
+    templates: [],
+    notes: [],
+  };
+}
+
+/** A bare third body — enough for the pair seam to count it as a flanker. */
+function ally(): ActorDocument {
+  return {
+    _id: "ally",
+    type: "actor",
+    name: "Ally",
+    ownership: { default: 3 },
+    flags: {},
+    items: [],
+    effects: [],
+    system: { pf1e: { abilities: { str: 12, dex: 12, con: 12 }, hp: 10, hpMax: 10 } },
+  };
+}
+
+describe("resolveQueuedInterrupts — the pair's own facts fold into the strike (D-200, P06)", () => {
+  test("a prone provoker is struck at +4: standing up from prone is the flagship provoker", async () => {
+    const client = new FakeClient();
+    // 11 + 9 (the line's own bonus) + 4 (prone target, A.14) = 24 vs AC 16.
+    client.script = [{ die: 11, total: 24 }, { total: 7 }];
+    const resolution = await resolveMovementOpportunities(client, gm, {
+      ...input([interrupt(0, "t-fighter")], {
+        actors: [fighter(), goblin({ conditions: ["Prone"] })],
+      }),
+      scene: d200Scene([
+        d200Token("t-fighter", 0, 0, "fighter", "friendly"),
+        d200Token("t-goblin", 1, 0, "goblin", "hostile"),
+      ]),
+    });
+    expect(resolution.entries[0]).toMatchObject({
+      outcome: "hit",
+      attackTotal: 24,
+      defenseAc: 16,
+    });
+    expect(resolution.entries[0]?.line).toContain("(24 vs AC 16)");
+  });
+
+  test("a directly opposite helper flanks the provoker: the strike takes +2", async () => {
+    const client = new FakeClient();
+    // 11 + 9 + 2 (flanking, §2.2) = 22 vs AC 16.
+    client.script = [{ die: 11, total: 22 }, { total: 7 }];
+    const resolution = await resolveMovementOpportunities(client, gm, {
+      ...input([interrupt(0, "t-fighter")], {
+        actors: [fighter(), goblin(), ally()],
+      }),
+      scene: d200Scene([
+        d200Token("t-fighter", 0, 0, "fighter", "friendly"),
+        d200Token("t-goblin", 1, 0, "goblin", "hostile"),
+        d200Token("t-ally", 2, 0, "ally", "friendly"),
+      ]),
+    });
+    expect(resolution.entries[0]).toMatchObject({
+      outcome: "hit",
+      attackTotal: 22,
+      defenseAc: 16,
+    });
+  });
+
+  test("cover prices the strike even on a queue the seam never filtered — defense-in-depth", async () => {
+    const client = new FakeClient();
+    // A wall on the shared edge grants standard cover (the pair seam's own
+    // fixture): AC 16 + 4 = 20, and 11 + 9 = 20 still hits (ties hit).
+    client.script = [{ die: 11, total: 20 }, { total: 7 }];
+    const resolution = await resolveMovementOpportunities(client, gm, {
+      ...input([interrupt(0, "t-fighter")]),
+      scene: d200Scene(
+        [
+          d200Token("t-fighter", 0, 0, "fighter", "friendly"),
+          d200Token("t-goblin", 1, 0, "goblin", "hostile"),
+        ],
+        [
+          {
+            _id: "w-1",
+            type: "wall",
+            name: "wall",
+            ownership: { default: 2 },
+            flags: {},
+            system: {},
+            c: [100, 20, 100, 80],
+            door: 0,
+            oneWay: false,
+            move: 0,
+            sight: 0,
+            sound: 0,
+            light: 0,
+          },
+        ],
+      ),
+    });
+    expect(resolution.entries[0]).toMatchObject({
+      outcome: "hit",
+      attackTotal: 20,
+      defenseAc: 20,
+    });
+  });
+
+  test("no scene, or a pair the scene cannot read, folds nothing — never a guess", async () => {
+    const client = new FakeClient();
+    client.script = [{ die: 11, total: 20 }, { total: 7 }];
+    // No scene at all: the pre-D-200 behaviour.
+    const bare = await resolveMovementOpportunities(
+      client,
+      gm,
+      input([interrupt(0, "t-fighter")]),
+    );
+    expect(bare.entries[0]).toMatchObject({ attackTotal: 20, defenseAc: 16 });
+
+    // A scene the pair cannot read (the reactor has no token on it): no fold,
+    // no error — the same honest absence the sheet's hint reports.
+    client.script = [{ die: 11, total: 20 }, { total: 7 }];
+    const unreadable = await resolveMovementOpportunities(client, gm, {
+      ...input([interrupt(0, "t-fighter")], {
+        actors: [fighter(), goblin({ conditions: ["Prone"] })],
+      }),
+      scene: d200Scene([d200Token("t-goblin", 1, 0, "goblin", "hostile")]),
+    });
+    expect(unreadable.entries[0]).toMatchObject({ attackTotal: 20, defenseAc: 16 });
+  });
+
+  test("the action trigger folds the same facts through the shared core", async () => {
+    const client = new FakeClient();
+    client.script = [{ die: 11, total: 24 }, { total: 7 }];
+    const resolution = await resolveActionOpportunities(client, gm, {
+      ...actionInput([actionInterrupt(0, "t-fighter")], {
+        actors: [fighter(), goblin({ conditions: ["Prone"] })],
+      }),
+      scene: d200Scene([
+        d200Token("t-fighter", 0, 0, "fighter", "friendly"),
+        d200Token("t-goblin", 1, 0, "goblin", "hostile"),
+      ]),
+    });
+    expect(resolution.entries[0]).toMatchObject({
+      outcome: "hit",
+      attackTotal: 24,
+    });
   });
 });

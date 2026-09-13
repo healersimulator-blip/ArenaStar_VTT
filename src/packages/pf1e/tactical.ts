@@ -231,17 +231,43 @@ export interface PF1eSituationalModifiers {
   attackerInvisible?: boolean | undefined;
   /** Squeezing: −4 on attack rolls and −4 AC (A.7). */
   squeezing?: boolean | undefined;
+  /**
+   * Higher ground: **+1 on melee attack rolls only** (A.14's modifier table —
+   * "On higher ground +1", ranged attacks gain nothing from elevation in
+   * PF1e). The caller says whether the attack is ranged.
+   */
+  higherGround?: boolean | undefined;
+  /**
+   * The defender is prone: **+4 for melee attacks against it, −4 for ranged**
+   * (A.14 prone — "melee attacks made against a prone target get a +4 bonus;
+   * ranged attacks made against a prone target take a −4 penalty").
+   */
+  defenderProne?: boolean | undefined;
+  /**
+   * The defender is helpless (A.13/A.14): **+4 for melee attacks only** —
+   * "Melee attacks against a helpless target get a +4 bonus (equivalent to
+   * attacking a prone target). Ranged attacks get no special bonus against
+   * helpless targets." The Dex-0 AC consequence is the flat-footed defense's,
+   * not a roll modifier.
+   */
+  defenderHelpless?: boolean | undefined;
 }
 
 /**
  * The situational attack modifiers as labeled parts (Gap-List-verified
  * values): flanking +2 (§2.2), charge +2 (the −2 AC half is the defender's),
- * invisible attacker +2 (A.8), squeezing −4 (A.7). Exported because the A06
- * resolve flow adds the same deltas on top of a derived attack line, and the
- * numbers must live in exactly one place.
+ * invisible attacker +2 (A.8), squeezing −4 (A.7), higher ground +1 melee
+ * (A.14), defender prone +4 melee / −4 ranged (A.14), defender helpless +4
+ * melee only (A.13). The three defender-facing parts flip with the attack's
+ * own rangedness, which the resolver knows and passes; an absent `ranged`
+ * flag applies the melee values (every PF1e caller that has no rangedness
+ * fact is a melee path). Exported because the A06 resolve flow adds the same
+ * deltas on top of a derived attack line, and the numbers must live in
+ * exactly one place.
  */
 export function situationalAttackParts(
   situational?: PF1eSituationalModifiers | undefined,
+  ranged?: boolean | undefined,
 ): PF1eModifierPart[] {
   if (situational === undefined) return [];
   const parts: PF1eModifierPart[] = [];
@@ -252,6 +278,15 @@ export function situationalAttackParts(
     parts.push({ label: "invisible attacker", value: 2 });
   if (situational.squeezing === true)
     parts.push({ label: "squeezing", value: -4 });
+  if (situational.higherGround === true && ranged !== true)
+    parts.push({ label: "higher ground", value: 1 });
+  if (situational.defenderProne === true)
+    parts.push({
+      label: ranged === true ? "prone target (ranged)" : "prone target",
+      value: ranged === true ? -4 : 4,
+    });
+  if (situational.defenderHelpless === true && ranged !== true)
+    parts.push({ label: "helpless target", value: 4 });
   return parts;
 }
 

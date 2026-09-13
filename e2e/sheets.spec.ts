@@ -1008,9 +1008,10 @@ test("PF1e resolve-vs-target posts public rolls, a resolution card and hp writes
   const text = (await card.textContent()) ?? "";
   expect(text).toMatch(/hits\.|misses\.|CRITS!/);
   // A hit (or crit) also rolls damage and writes hp through the op path: the
-  // card must then carry the before → after line for the 12-HP dummy.
+  // card must then carry the before → after line for the 12-HP dummy (a crit
+  // can take it below zero, so the after value may be negative).
   if (/hits\.|CRITS!/.test(text)) {
-    expect(text).toMatch(/PF Dummy 12 → \d+ HP/);
+    expect(text).toMatch(/PF Dummy 12 → -?\d+ HP/);
   }
   expect(runtimeErrors).toEqual([]);
 });

@@ -338,7 +338,18 @@ export type DetailEdit =
       expected: Json | undefined;
     }
   | { kind: "monster-start" }
-  | { kind: "monster"; field: string; raw: string; expected: Json | undefined };
+  | { kind: "monster"; field: string; raw: string; expected: Json | undefined }
+  /**
+   * P08/D-201 — the rider↔mount linkage (`system.pf1e.mount`): the chosen
+   * mount's actor id, whether it is combat-trained, and the saddle. A null
+   * id removes the linkage. `packages/pf1e/mounted.ts` normalizes the block.
+   */
+  | {
+      kind: "mount";
+      actorId: string | null;
+      combatTrained: boolean;
+      saddle: "none" | "military";
+    };
 
 /** Materialize only a missing authored group: FlatDiff cannot traverse missing parents. */
 function authoredPatch(
@@ -471,6 +482,24 @@ export function pf1eDetailEdit(
       if (edit.raw.length > 4000) return fail("Use at most 4000 characters.");
       // CR permits fractions such as 1/3. It is descriptive, not a challenge calculator.
       diff = { [`system.pf1e.creature.${edit.field}`]: edit.raw.trim() };
+      break;
+    }
+    case "mount": {
+      if (edit.actorId !== null && edit.actorId === actor._id)
+        return fail("An actor cannot ride itself.");
+      if (edit.actorId === null) {
+        // No mount: remove the linkage block if one exists (idempotent clear).
+        if (!sheetRecord(raw.mount)) return { ops: [], error: null };
+        diff = { "-=system.pf1e.mount": null };
+        break;
+      }
+      diff = {
+        "system.pf1e.mount": {
+          actorId: edit.actorId,
+          combatTrained: edit.combatTrained,
+          saddle: edit.saddle,
+        },
+      };
       break;
     }
   }

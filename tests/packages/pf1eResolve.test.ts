@@ -485,3 +485,74 @@ describe("pf1eResolveManyshot — ordered volley damage", () => {
     ).toEqual({ ok: false, error: "Manyshot requires between 2 and 4 arrows" });
   });
 });
+
+describe("pf1eResolveAttack — the misfire fold (P09/D-202, §2.9b)", () => {
+  const musket = {
+    generation: "early" as const,
+    misfireMinimum: 2,
+    broken: false,
+    magical: false,
+  };
+
+  test("a misfire is an automatic miss that cannot threaten, even on a would-be hit", () => {
+    // die 10 + bonus 16 = 26 vs AC 22 would hit — but 10 > 2, so no misfire here.
+    expect(
+      resolve({ misfire: musket, die: 10 }),
+    ).toMatchObject({ ok: true, outcome: "hit" });
+    // die 2 would also hit (18... 2 + 16 = 18 vs 22 misses; use the touch defense: 18 ≥ 16 hits)
+    const misfired = resolve({ misfire: musket, die: 2, defense: "touch" });
+    expect(misfired).toMatchObject({
+      ok: true,
+      outcome: "miss",
+      threat: false,
+      confirmed: false,
+    });
+    if (!misfired.ok) throw new Error(misfired.error);
+    expect(misfired.misfire).toMatchObject({
+      misfire: true,
+      breaksWeapon: true,
+    });
+    expect(misfired.notes.join(" ")).toContain("automatically misses");
+    expect(misfired.hp.after).toBe(misfired.hp.before);
+  });
+
+  test("a natural 20 never misfires, even at misfire value 20", () => {
+    const verdict = resolve({
+      misfire: { ...musket, misfireMinimum: 20 },
+      die: 20,
+      confirmDie: 2, // threatens (20); fails to confirm — a plain hit
+    });
+    expect(verdict).toMatchObject({ ok: true, threat: true, outcome: "hit" });
+    if (!verdict.ok) throw new Error(verdict.error);
+    expect(verdict.misfire).toBeUndefined();
+  });
+
+  test("a misfired natural 19 does not threaten and does not need a confirmation die", () => {
+    // Threat range 19–20, misfire value 2: die 19 would threaten — but the
+    // weapon misfired at or below 2, so this uses die 2... no: 19 > 2, no
+    // misfire. The discriminating case is a misfire value of 19 with die 19.
+    const misfired = resolve({
+      misfire: { ...musket, misfireMinimum: 19 },
+      die: 19,
+    });
+    expect(misfired).toMatchObject({ ok: true, outcome: "miss", threat: false });
+    if (!misfired.ok) throw new Error(misfired.error);
+    expect(misfired.misfire?.misfire).toBe(true);
+  });
+
+  test("an exploding second misfire reports the save and the destruction", () => {
+    const exploded = resolve({
+      misfire: { ...musket, broken: true, magical: true },
+      die: 6,
+    });
+    expect(exploded).toMatchObject({ ok: true, outcome: "miss" });
+    if (!exploded.ok) throw new Error(exploded.error);
+    expect(exploded.misfire).toMatchObject({
+      misfire: true,
+      explodes: true,
+      save: { dc: 12, half: true },
+      weaponDestroyed: true,
+    });
+    expect(exploded.notes.join(" ")).toContain("wrecked by the explosion");
+  });
+});

@@ -816,9 +816,12 @@ test.describe("PF1e one decision at a time (D-188)", () => {
       await hostCall<{ x: number; y: number } | null>(page, "tokenPos"),
     ).toEqual({ x: 50, y: 50 });
 
-    // Second drag: the fighter steps (3,1)→(3,2); goblin2 threatens (3,1), so this move
-    // would provoke — but the prompt is already open, so it is refused, not substituted.
-    await dragToken(page, centre(3, 1), centre(3, 2));
+    // Second drag: the fighter steps (3,1)→(2,1) — a legal walk under P03's
+    // gate (5 ft, nothing occupied on the way; the old (3,1)→(3,2) drag is now
+    // refused earlier by the ending rule, since goblin2 stands on (3,2)).
+    // goblin2 threatens (3,1), so this move would provoke — but the prompt is
+    // already open, so it is refused, not substituted.
+    await dragToken(page, centre(3, 1), centre(2, 1));
     const still = await reactionPrompt(page);
     expect(still).not.toBeNull();
     // The first decision is untouched: still the goblin-vs-fighter question.

@@ -26,9 +26,11 @@ import type { PermissionUser } from "../../core/ownership";
 import type { ActorDocument, MessageDocument } from "../../core/documents";
 import type { PF1eDerived, PF1eDerivedAttack } from "../../packages/pf1e/actor";
 import { confirmCritical } from "../../packages/pf1e/tactical";
+import type { PF1eMisfireFacts } from "../../packages/pf1e/firearms";
 import type { PF1eSituationalModifiers } from "../../packages/pf1e/tactical";
 import type {
   PF1eDefenseChoice,
+  PF1ePositionalDefense,
   PF1eResolveDefender,
   PF1eResolveResult,
 } from "../../packages/pf1e/resolve";
@@ -73,6 +75,20 @@ export interface ResolveAttackFlowParams {
   unarmed?: boolean;
   feats?: readonly string[];
   provokes?: boolean;
+  /**
+   * P04 — the defender's positional defenses (cover AC fold, concealment miss
+   * chance), read off the scene by `pf1eResolvePositionReport`. A live miss
+   * chance on a hit rolls its own public d% before the damage formula.
+   */
+  positional?: PF1ePositionalDefense;
+  /**
+   * P09/D-202 — per-shot misfire facts the line cannot carry (the loader's
+   * nonproficiency, the Expert Loading deed). The line's own `misfire` block
+   * and the Gun Training feat are read automatically.
+   */
+  misfireExtras?:
+    | Pick<PF1eMisfireFacts, "nonproficientLoader" | "expertLoading">
+    | undefined;
   /** Commit-reveal rolls + a verification chip (the plan's Verify chip). */
   verifiable?: boolean;
 }
@@ -209,6 +225,34 @@ export function resolutionCardContent(
 }
 
 /**
+ * P09/D-202 — the misfire facts for one shot, or null when the line is not a
+ * firearm line (or never misfires). The line carries generation/minimum/
+ * broken/magical; Gun Training is read off the caller's feat list; the
+ * loader's nonproficiency and the Expert Loading deed are per-shot caller
+ * facts (`misfireExtras`).
+ */
+function misfireFactsOf(
+  params: ResolveAttackFlowParams,
+): PF1eMisfireFacts | null {
+  const line = params.line.misfire;
+  if (line === undefined) return null;
+  return {
+    generation: line.generation,
+    misfireMinimum: line.misfireMinimum,
+    broken: line.broken,
+    magical: line.magical,
+    gunTraining:
+      params.feats?.some((f) => /gun training/i.test(f)) ?? false,
+    ...(params.misfireExtras?.nonproficientLoader === true
+      ? { nonproficientLoader: true }
+      : {}),
+    ...(params.misfireExtras?.expertLoading === true
+      ? { expertLoading: true }
+      : {}),
+  };
+}
+
+/**
  * Run the full resolution: attack roll → (threat: confirmation) → (hit:
  * damage) → resolution card → HP writes. Every die is a public host-evaluated
  * roll; the card and the HP writes are ordinary replicated ops.
@@ -223,6 +267,7 @@ export async function resolveAttackFlow(
 > {
   const line = params.line;
   const bonus = line.attackBonuses[params.iterative] ?? line.attackBonus;
+  const misfireFacts = misfireFactsOf(params);
   const prepareInput = {
     attack: {
       label: line.name,
@@ -245,6 +290,8 @@ export async function resolveAttackFlow(
     ...(params.unarmed ? { unarmed: true } : {}),
     ...(params.feats ? { feats: params.feats } : {}),
     ...(params.provokes ? { provokes: true } : {}),
+    ...(params.positional ? { positional: params.positional } : {}),
+    ...(misfireFacts !== null ? { misfire: misfireFacts } : {}),
   };
 
   const rollOne = async (
@@ -271,6 +318,17 @@ export async function resolveAttackFlow(
     const check = await verifyCommitRoll(message.roll);
     return check.ok;
   };
+
+  // 0. P04 — total cover refuses before any die is rolled: "You can't make
+  // an attack against a target that has total cover" (AoN 181). The resolver
+  // reaches the same refusal; this guard keeps the public dice honest.
+  if (params.positional?.cover === "total") {
+    return {
+      ok: false,
+      error:
+        "the target has total cover — no attack can be made (AoN 181, CRB p.195)",
+    };
+  }
 
   // 1. The attack roll.
   const attackRoll = await rollOne(
@@ -316,6 +374,28 @@ export async function resolveAttackFlow(
     confirmedCrit = confirmation.confirmed;
   }
 
+  // 2b. P04 — concealment (AoN 182): a live miss chance on a hit rolls its
+  // own public d% before any damage is rolled; `pf1eResolveAttack` folds the
+  // face into the outcome (≤ the miss chance is a miss, damage zeroed).
+  let concealmentDie: number | undefined;
+  if (
+    prepared.roll.ok &&
+    prepared.roll.hits &&
+    prepared.needsConcealmentRoll !== null
+  ) {
+    const percent = prepared.needsConcealmentRoll.percent;
+    const concealmentRoll = await rollOne(
+      "1d100",
+      `${line.name} concealment miss chance ${String(percent)}%`,
+    );
+    if (!concealmentRoll.ok) return concealmentRoll;
+    const face = dieFaceOf(concealmentRoll.message);
+    if (face === null) {
+      return { ok: false, error: "could not read the concealment roll's d% face" };
+    }
+    concealmentDie = face;
+  }
+
   // 3. A hit rolls damage (the crit formula on a confirmed threat, D-139).
   let damageTotal = 0;
   let damageFormula = params.damageFormula;
@@ -343,6 +423,7 @@ export async function resolveAttackFlow(
     ...prepareInput,
     die,
     ...(confirmDie !== undefined ? { confirmDie } : {}),
+    ...(concealmentDie !== undefined ? { concealmentDie } : {}),
     damageTotal,
   });
   if (!result.ok) return { ok: false, error: result.error };
@@ -420,6 +501,8 @@ export interface ResolveManyshotFlowParams {
   situational?: PF1eSituationalModifiers | undefined;
   nonlethalDamage?: boolean | undefined;
   feats?: readonly string[] | undefined;
+  /** P04 — positional defenses folded into every arrow (cover AC, concealment d%). */
+  positional?: PF1ePositionalDefense | undefined;
   verifiable?: boolean | undefined;
 }
 
@@ -441,7 +524,12 @@ export async function resolveManyshotFlow(
   if (!params.line.ranged) return { ok: false, error: "Manyshot requires a ranged attack" };
 
   const defender = resolveDefenderFromDerived(params.targetName, params.targetDerived);
-  const arrows: { die: number; confirmDie?: number; damageTotal: number }[] = [];
+  const arrows: Array<{
+    die: number;
+    confirmDie?: number;
+    concealmentDie?: number;
+    damageTotal: number;
+  }> = [];
   let currentDefender = { ...defender };
   const roll = async (formula: string, flavor: string) => {
     const id = params.verifiable
@@ -475,6 +563,7 @@ export async function resolveManyshotFlow(
       ...(params.situational ? { situational: params.situational } : {}),
       ...(params.nonlethalDamage === undefined ? {} : { nonlethalDamage: params.nonlethalDamage }),
       ...(params.feats === undefined ? {} : { feats: params.feats }),
+      ...(params.positional === undefined ? {} : { positional: params.positional }),
     });
     if (!prepare.ok) return { ok: false, error: prepare.error };
     let confirmDie: number | undefined;
@@ -486,6 +575,23 @@ export async function resolveManyshotFlow(
       if (confirmation === null) return { ok: false, error: "Manyshot confirmation roll did not arrive" };
       confirmDie = dieFaceOf(confirmation) ?? undefined;
       if (confirmDie === undefined) return { ok: false, error: "could not read a Manyshot confirmation d20" };
+    }
+    // P04 — a live miss chance on a hit rolls its own public d% before damage.
+    let concealmentDie: number | undefined;
+    if (
+      prepare.roll.hits &&
+      prepare.needsConcealmentRoll !== null
+    ) {
+      const percent = prepare.needsConcealmentRoll.percent;
+      const concealment = await roll(
+        "1d100",
+        `${params.line.name} Manyshot arrow ${index + 1} concealment ${String(percent)}%`,
+      );
+      if (concealment === null)
+        return { ok: false, error: "Manyshot concealment roll did not arrive" };
+      concealmentDie = dieFaceOf(concealment) ?? undefined;
+      if (concealmentDie === undefined)
+        return { ok: false, error: "could not read a Manyshot concealment d%" };
     }
     let damageTotal = 0;
     if (prepare.roll.hits) {
@@ -506,17 +612,28 @@ export async function resolveManyshotFlow(
         ranged: true,
         damageType: params.line.damageType,
       },
-      arrows: [{ die, ...(confirmDie === undefined ? {} : { confirmDie }), damageTotal }],
+      arrows: [{
+        die,
+        ...(confirmDie === undefined ? {} : { confirmDie }),
+        ...(concealmentDie === undefined ? {} : { concealmentDie }),
+        damageTotal,
+      }],
       defense: params.defense,
       defender: currentDefender,
       ...(params.situational ? { situational: params.situational } : {}),
       ...(params.nonlethalDamage === undefined ? {} : { nonlethalDamage: params.nonlethalDamage }),
       ...(params.feats === undefined ? {} : { feats: params.feats }),
+      ...(params.positional === undefined ? {} : { positional: params.positional }),
     });
     if (!one.ok) return one;
     const result = one.arrows[0];
     if (!result) return { ok: false, error: "Manyshot produced no arrow result" };
-    arrows.push({ die, ...(confirmDie === undefined ? {} : { confirmDie }), damageTotal });
+    arrows.push({
+      die,
+      ...(confirmDie === undefined ? {} : { confirmDie }),
+      ...(concealmentDie === undefined ? {} : { concealmentDie }),
+      damageTotal,
+    });
     currentDefender = { ...currentDefender, hp: result.hp.after, nonlethalDamage: result.nonlethal.after };
   }
 
@@ -535,6 +652,7 @@ export async function resolveManyshotFlow(
     ...(params.situational ? { situational: params.situational } : {}),
     ...(params.nonlethalDamage === undefined ? {} : { nonlethalDamage: params.nonlethalDamage }),
     ...(params.feats === undefined ? {} : { feats: params.feats }),
+    ...(params.positional === undefined ? {} : { positional: params.positional }),
   });
   if (!resolved.ok) return resolved;
   const final = resolved.arrows[resolved.arrows.length - 1];

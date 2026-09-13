@@ -59,9 +59,41 @@ import type {
 } from "./mitigation";
 import { applyMitigation, damageComponentsFromRoll } from "./mitigation";
 import type { PF1ePhysicalDamageType } from "./weapons";
+import {
+  pf1eMisfireVerdict,
+  type PF1eMisfireFacts,
+  type PF1eMisfireVerdict,
+} from "./firearms";
+import { injuryStateOf, nonlethalStateOf } from "./injury";
 
 /** Which of the derived AC trio the attack resolves against. */
 export type PF1eDefenseChoice = "normal" | "touch" | "flatFooted";
+
+/**
+ * P04 — the defender's positional defenses for one attack. The geometry
+ * (`positional.ts`'s `coverBetween` / `concealmentGrade`) decides `standard`,
+ * `soft` and `total`; `partial` (+2) and `improved` (+8) are AoN 181's
+ * GM-discretion grades the corner lines cannot see, so the caller supplies
+ * them. `total` refuses the attack outright — "You can't make an attack
+ * against a target that has total cover."
+ */
+export interface PF1ePositionalDefense {
+  cover?: "partial" | "soft" | "standard" | "improved" | "total";
+  /** Concealment (AoN 182): the collapsed miss chance, non-stacking. */
+  concealment?: { percent: number; label?: string };
+}
+
+/** AoN 181's cover grades as AC bonuses. */
+export const COVER_AC_BONUS: Readonly<
+  Record<Exclude<NonNullable<PF1ePositionalDefense["cover"]>, undefined>, number>
+> = {
+  partial: 2,
+  soft: 4,
+  standard: 4,
+  improved: 8,
+  /** Unreachable in the AC fold (total cover refuses the attack), listed for totality. */
+  total: 0,
+};
 
 /**
  * The defender, straight off `derivePF1eActor` plus the A05 mitigation fields
@@ -130,6 +162,26 @@ export interface PF1eResolveAttackInput {
   attackFacts?: PF1eDrAttackFacts | undefined;
   /** The attack provokes an AoO (the unarmed fallback without IUS) — note only, P6 owns the interrupt. */
   provokes?: boolean | undefined;
+  /**
+   * P04 — the defender's positional defenses (cover AC fold, concealment miss
+   * chance). Absent means the attack is resolved without positional facts,
+   * exactly as the pre-P04 flow did.
+   */
+  positional?: PF1ePositionalDefense | undefined;
+  /**
+   * The d% face of the concealment roll, required whenever a live miss
+   * chance meets a hit (AoN 182) — `prepareAttack`'s `needsConcealmentRoll`
+   * names it before the roll is made.
+   */
+  concealmentDie?: number | undefined;
+  /**
+   * P09/D-202 — the line's firearm misfire facts. When present, the natural
+   * die face is checked against the effective misfire value (a natural 20
+   * never misfires; a confirmation roll is never checked, §2.9b): a misfire
+   * is an automatic miss that cannot threaten, with the verdict attached for
+   * the caller's weapon-state write.
+   */
+  misfire?: PF1eMisfireFacts | undefined;
 }
 
 export type PF1eResolveResult =
@@ -137,6 +189,8 @@ export type PF1eResolveResult =
   | {
       ok: true;
       outcome: "miss" | "hit" | "crit";
+      /** P09/D-202 — present exactly when the misfire check fired and misfired. */
+      misfire?: PF1eMisfireVerdict;
       /** die + final bonus, what the chat card shows. */
       attackTotal: number;
       /** The derived bonus plus situational and intent deltas. */
@@ -213,8 +267,16 @@ export type PF1ePrepareResult =
         physicalType: PF1ePhysicalDamageType;
         intentLabel: string | null;
       };
-      /** Outcome-independent notes (touch override, provocation). */
+      /** Outcome-independent notes (touch override, provocation, cover). */
       notes: string[];
+      /** P04: the cover bonus folded into `defenseAc` (0 without cover). */
+      coverBonus: number;
+      /**
+       * P04: the concealment the caller must roll for — the flow rolls a d%
+       * when this is non-null and a hit is live, then feeds the face to
+       * `pf1eResolveAttack` as `concealmentDie`.
+       */
+      needsConcealmentRoll: { percent: number; label: string | null } | null;
     }
   | { ok: false; error: string };
 
@@ -270,15 +332,31 @@ export function pf1eResolvePrepare(
   if (attack.touchAttack === true && wanted !== "touch") {
     notes.push("touch attack — resolves against touch AC regardless of choice");
   }
-  const defenseAc =
+  const baseAc =
     defenseUsed === "touch"
       ? defender.ac.touch
       : defenseUsed === "flatFooted"
         ? defender.ac.flatFooted
         : defender.ac.normal;
+  const cover = input.positional?.cover;
+  if (cover === "total") {
+    return {
+      ok: false,
+      error:
+        "the target has total cover — no attack can be made (AoN 181, CRB p.195)",
+    };
+  }
+  const coverBonus = cover === undefined ? 0 : COVER_AC_BONUS[cover];
+  if (cover !== undefined) {
+    notes.push(
+      `${cover} cover: +${String(coverBonus)} to the target's AC (AoN 181)`,
+    );
+  }
+  const defenseAc = baseAc + coverBonus;
 
-  // The modifier deltas on top of the derived line (numbers live in tactical.ts).
-  const sitParts = situationalAttackParts(input.situational);
+  // The modifier deltas on top of the derived line (numbers live in tactical.ts;
+  // A.14's prone/higher-ground/helpless parts flip with the attack's own rangedness).
+  const sitParts = situationalAttackParts(input.situational, attack.ranged === true);
   const situationalDelta = sitParts.reduce((sum, part) => sum + part.value, 0);
   const parsedType = parseDamageType(attack.damageType);
   // An unarmed strike deals nonlethal damage by default even though its
@@ -334,6 +412,14 @@ export function pf1eResolvePrepare(
       intentLabel: intentPenaltyPart === null ? null : intentPenaltyPart.label,
     },
     notes,
+    coverBonus,
+    needsConcealmentRoll:
+      (input.positional?.concealment?.percent ?? 0) > 0
+        ? {
+            percent: input.positional?.concealment?.percent ?? 0,
+            label: input.positional?.concealment?.label ?? null,
+          }
+        : null,
   };
 }
 
@@ -365,6 +451,36 @@ export function pf1eResolveAttack(
     defenseAc,
     threat: roll.threat,
   };
+
+  // P09/D-202 — the misfire check reads the natural face, before everything
+  // else the roll could become: a misfire is an automatic miss that cannot
+  // threaten, and a natural 20 never misfires (§2.9b).
+  if (input.misfire !== undefined) {
+    const verdict = pf1eMisfireVerdict({
+      facts: input.misfire,
+      die: input.die,
+    });
+    if (verdict.misfire) {
+      return {
+        ok: true,
+        outcome: "miss",
+        misfire: verdict,
+        attackTotal: input.die + attackBonus,
+        ...preparedFields,
+        threat: false,
+        confirmed: false,
+        damage: null,
+        hp: { before: defender.hp, after: defender.hp },
+        nonlethal: {
+          before: defender.nonlethalDamage,
+          after: defender.nonlethalDamage,
+        },
+        conditionNotes: [],
+        notes: [...notes, ...verdict.notes],
+        provokes: input.provokes === true,
+      };
+    }
+  }
 
   if (!roll.hits) {
     return {
@@ -412,6 +528,53 @@ export function pf1eResolveAttack(
     crit = false;
     notes.push(
       `critMultiplier ${String(attack.critMultiplier)} is below 2 — the confirmed threat scores as a normal hit`,
+    );
+  }
+
+  // P04 — concealment (AoN 182): a d% at or below the miss chance misses, on
+  // a hit as much as on a confirmed critical (the natural-20 rule speaks to
+  // AC, not to this separate roll). The die is required whenever a miss
+  // chance is live — leaving it out is a caller bug, not a rules state.
+  const concealment = input.positional?.concealment;
+  const missChance = concealment?.percent ?? 0;
+  if (missChance > 0 && roll.hits) {
+    const die = input.concealmentDie;
+    if (
+      die === undefined ||
+      !Number.isInteger(die) ||
+      die < 1 ||
+      die > 100
+    ) {
+      return {
+        ok: false,
+        error:
+          "the target is concealed — concealmentDie (the d% face, 1–100) is required to resolve the attack",
+      };
+    }
+    if (die <= missChance) {
+      notes.push(
+        `concealment miss — d% ${String(die)} ≤ ${String(missChance)}${concealment?.label !== undefined && concealment.label !== "" ? ` (${concealment.label})` : ""}; the attack misses (AoN 182)`,
+      );
+      return {
+        ok: true,
+        outcome: "miss",
+        attackTotal: input.die + attackBonus,
+        ...preparedFields,
+        threat: false,
+        confirmed: false,
+        damage: null,
+        hp: { before: defender.hp, after: defender.hp },
+        nonlethal: {
+          before: defender.nonlethalDamage,
+          after: defender.nonlethalDamage,
+        },
+        conditionNotes: [],
+        notes,
+        provokes: input.provokes === true,
+      };
+    }
+    notes.push(
+      `concealment d% ${String(die)} beats the ${String(missChance)}% miss chance — the attack lands (AoN 182)`,
     );
   }
 
@@ -484,28 +647,22 @@ export function pf1eResolveAttack(
   const nonlethalAfter = defender.nonlethalDamage + nonlethalDealt;
 
   // Condition annotations (CRB p.189–191/A.13): order matters — the lethal
-  // state dominates; the writes themselves are P7's.
+  // state dominates; the writes themselves are P7's. The verdicts are
+  // `injury.ts`'s (D-203) so the thresholds live in exactly one place.
   const conditionNotes: string[] = [];
   const con = defender.conScore ?? 0;
-  if (hpAfter < 0 && con > 0 && -hpAfter >= con) {
-    conditionNotes.push(
-      `dead — negative HP (${String(hpAfter)}) reached Constitution ${String(con)} (CRB p.190)`,
-    );
-  } else if (hpAfter < 0) {
-    conditionNotes.push(
-      "unconscious and dying (below 0 HP, loses 1 HP per round — the stable/dying bookkeeping is P7)",
-    );
-  } else if (hpAfter === 0) {
-    conditionNotes.push(
-      "disabled (staggered at exactly 0 HP; a strenuous standard action costs 1 HP and starts dying)",
-    );
-  }
+  const lethal = injuryStateOf({ hp: hpAfter, conScore: con });
+  if (lethal.note !== null) conditionNotes.push(lethal.note);
   if (hpAfter > 0) {
-    if (nonlethalAfter > hpAfter) {
+    const nonlethal = nonlethalStateOf({
+      hp: hpAfter,
+      nonlethalDamage: nonlethalAfter,
+    });
+    if (nonlethal === "unconscious") {
       conditionNotes.push(
         "unconscious — nonlethal damage exceeds current HP (CRB p.191)",
       );
-    } else if (nonlethalAfter === hpAfter) {
+    } else if (nonlethal === "staggered") {
       conditionNotes.push(
         "staggered — nonlethal damage equals current HP (CRB p.191)",
       );
@@ -550,6 +707,8 @@ export function pf1eResolveAttack(
 export interface PF1eManyshotArrow {
   die: number;
   confirmDie?: number | undefined;
+  /** The d% face of the concealment roll, required on a hit behind a miss chance (AoN 182). */
+  concealmentDie?: number | undefined;
   damageTotal: number;
 }
 
@@ -573,6 +732,8 @@ export function pf1eResolveManyshot(input: {
   feats?: readonly string[] | undefined;
   attackFacts?: PF1eDrAttackFacts | undefined;
   provokes?: boolean | undefined;
+  /** P04 — the defender's positional defenses, folded into every arrow (AoN 181/182). */
+  positional?: PF1ePositionalDefense | undefined;
 }): PF1eManyshotResult {
   if (input.attack.ranged !== true) {
     return { ok: false, error: "Manyshot requires a ranged attack" };
@@ -587,6 +748,9 @@ export function pf1eResolveManyshot(input: {
       attack: input.attack,
       die: arrow.die,
       ...(arrow.confirmDie === undefined ? {} : { confirmDie: arrow.confirmDie }),
+      ...(arrow.concealmentDie === undefined
+        ? {}
+        : { concealmentDie: arrow.concealmentDie }),
       damageTotal: arrow.damageTotal,
       defense: input.defense,
       defender,
@@ -596,6 +760,7 @@ export function pf1eResolveManyshot(input: {
       ...(input.feats === undefined ? {} : { feats: input.feats }),
       ...(input.attackFacts === undefined ? {} : { attackFacts: input.attackFacts }),
       ...(input.provokes === undefined ? {} : { provokes: input.provokes }),
+      ...(input.positional === undefined ? {} : { positional: input.positional }),
     });
     if (!resolved.ok) return resolved;
     results.push(resolved);

@@ -54,6 +54,8 @@ import {
   type PF1eThreatRect,
   type PF1eThreatToken,
 } from "./threatPreview";
+import { footprintDistance } from "./geometry";
+import { coverBetween, type PF1eWorldSegment } from "./positional";
 import type {
   PF1eOpportunityLedger,
   PF1eOpportunityReactor,
@@ -89,6 +91,12 @@ export interface PF1eActionOpportunityInput {
   queue?: PF1eInterruptQueue;
   /** The turn the queue is labelled with (the queue is turn-local, D-184). */
   turn?: number;
+  /**
+   * P04 — sight-blocking wall segments in world units; AoN 181's cover
+   * exclusion for the queued reactions (see the movement seam's twin). An
+   * absent field is a named default, not a silent queue-through.
+   */
+  coverWalls?: readonly PF1eWorldSegment[];
 }
 
 export interface PF1eActionOpportunityResult {
@@ -163,6 +171,13 @@ export function pf1eActionOpportunities(
         "hostility not supplied — every other token is treated as an enemy (AoN 102's opportunity is provoked by a threatening opponent)",
     });
   }
+  if (input.coverWalls === undefined) {
+    defaults.push({
+      field: "coverWalls",
+      message:
+        "cover facts not supplied — reactors were queued without AoN 181's cover exclusion",
+    });
+  }
 
   // The trigger is decided first: a `no` row (total defense), an unknown action, or a
   // `usually`/`maybe`/`varies` row refuses by name before any scene facts are touched.
@@ -234,7 +249,7 @@ export function pf1eActionOpportunities(
     const ledger = input.ledgers?.[token._id];
     const used = ledger === undefined ? null : ledger.used;
     const max = ledger === undefined ? null : ledger.max;
-    const refusal =
+    let refusal =
       ledger === undefined
         ? null
         : aooRefusal({ used: ledger.used, budgetMax: ledger.max });
@@ -243,6 +258,23 @@ export function pf1eActionOpportunities(
       y: 0,
       size: areaGrid.cellSize,
     };
+    if (refusal === null && input.coverWalls !== undefined) {
+      const reactorCells = (entry.cells ?? []).map(parseCellKey);
+      const cover = coverBetween({
+        attackerCells: reactorCells,
+        defenderCells: squares,
+        grid: areaGrid,
+        walls: input.coverWalls,
+        creatureCells: input.tokens
+          .filter((t) => t._id !== token._id && t._id !== provoker._id)
+          .flatMap((t) => tokenCells(t, areaGrid)),
+        ranged: footprintDistance(reactorCells, squares) > 1,
+      });
+      if (cover.kind !== "none") {
+        refusal =
+          "the provoker has cover — you can't execute an attack of opportunity against an opponent with cover (AoN 181)";
+      }
+    }
     reactors.push({
       tokenId: token._id,
       cell: cellKey(cell),
@@ -319,4 +351,9 @@ export function actionProvokeLines(
       ? ["(hostility assumed — tokens without a disposition)"]
       : [];
   return lines.concat(assumption);
+}
+
+function parseCellKey(key: string): PF1eCell {
+  const [col, row] = key.split(",").map((n) => Number.parseInt(n, 10));
+  return { col: col ?? 0, row: row ?? 0 };
 }

@@ -40,6 +40,17 @@ export function sightSegments(walls: readonly WallDocument[]): Segment[] {
   return out;
 }
 
+/** The movement axis's own blocked segments — P03/D-198's walker input. */
+export function moveSegments(walls: readonly WallDocument[]): Segment[] {
+  const out: Segment[] = [];
+  for (const w of walls) {
+    if (!axisBlocks(w.move, w.door)) continue;
+    const c = w.c;
+    out.push({ x1: c[0] ?? 0, y1: c[1] ?? 0, x2: c[2] ?? 0, y2: c[3] ?? 0 });
+  }
+  return out;
+}
+
 // ─── Walls(GM) overlay palette (restriction → stroke color) ──────────────────
 
 export const WALL_COLORS = {
