@@ -101,6 +101,8 @@
   import { planRest, restLevelOf } from "../combat/pf1eRest";
   import { applyHealing } from "../../packages/pf1e/healing";
   import { grantTempHp, expireTempHpSource } from "../../packages/pf1e/tempHp";
+  import { energyDrainSaveDC, negativeLevelPenalties, negativeLevelTotalsOf } from "../../packages/pf1e/negativeLevels";
+  import { planEnergyDrainInflict, planNegativeLevelSave, planRestoration } from "../combat/pf1eEnergyDrain";
   type TabName =
     | "summary"
     | "attributes"
@@ -161,6 +163,9 @@
   // P5/C04 (D-155): persisted slot ledger + prepared list, spend/prepare Ops.
   let spellbook = $derived(pf1eSpellbookView(doc, d));
   let spellbookWarning = $state("");
+  let negativeLevelsTotals = $derived(negativeLevelTotalsOf((doc.system as { pf1e?: { negativeLevels?: unknown } }).pf1e?.negativeLevels));
+  let negativeLevelsPen = $derived(negativeLevelPenalties(negativeLevelsTotals.total));
+  let negativeLevelsHd = $derived((() => { const raw = (doc.system as { pf1e?: { hitDice?: unknown } }).pf1e?.hitDice; return typeof raw === "number" && Number.isFinite(raw) ? Math.trunc(raw as number) : 0; })());
   // P5/C03 (D-158): a held touch-spell charge lives on the actor document.
   let heldCharge = $derived(
     heldChargeFromSystem(doc.system as Record<string, unknown>),
@@ -183,6 +188,16 @@
   let tempHpAmountRaw = $state("");
   let tempHpExpireId = $state("");
   let tempHpNote = $state("");
+  // P7/H04 — negative levels (AoN 427): infliction, 24h saves, restoration.
+  let negativeLevelsCountRaw = $state("");
+  let negativeLevelsKind = $state<"temporary" | "permanent">("temporary");
+  let negativeLevelSaveKind = $state<"temporary" | "energy-drain">("temporary");
+  let negativeLevelDieRaw = $state("");
+  let negativeLevelFortRaw = $state("");
+  let negativeLevelDcRaw = $state("");
+  let restorationCountRaw = $state("");
+  let restorationKind = $state<"any" | "temporary" | "permanent">("any");
+  let negativeLevelsNote = $state("");
   let prepareName = $state("");
   let prepareLevel = $state("1");
   let prepareSlotLevel = $state("");
@@ -1332,6 +1347,57 @@
     tempHpNote = result.note ?? "expired";
   }
 
+  // P7/H04 — negative levels: inflict, 24h save, restoration.
+  function doInflictNegativeLevels(): void {
+    negativeLevelsNote = "";
+    error = "";
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current) { error = "Actor is no longer available."; return; }
+    if (!isPF1eActor(current) || !client.user || !can(client.user, "update", current, "actors")) {
+      error = "You do not have permission to inflict negative levels."; return;
+    }
+    const count = Number.parseInt(negativeLevelsCountRaw.trim(), 10);
+    if (!Number.isSafeInteger(count) || count <= 0) { error = "Count must be a positive whole number (≥1)."; return; }
+    const res = planEnergyDrainInflict({ defender: current, count, kind: negativeLevelsKind });
+    if (!res.ok) { error = res.error; return; }
+    if (res.plan.ops.length > 0) pending.add(client.submit(res.plan.ops));
+    negativeLevelsNote = res.plan.note;
+  }
+  function doNegativeLevelSave(): void {
+    negativeLevelsNote = "";
+    error = "";
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current) { error = "Actor is no longer available."; return; }
+    if (!isPF1eActor(current) || !client.user || !can(client.user, "update", current, "actors")) {
+      error = "You do not have permission to roll a negative-level save."; return;
+    }
+    const die = Number.parseInt(negativeLevelDieRaw.trim(), 10);
+    const fortBonus = Number.parseInt(negativeLevelFortRaw.trim(), 10);
+    const dc = Number.parseInt(negativeLevelDcRaw.trim(), 10);
+    if (!Number.isSafeInteger(die) || die < 1 || die > 20) { error = "Die must be a natural d20 face (1–20)."; return; }
+    if (!Number.isSafeInteger(fortBonus)) { error = "Fort bonus must be a whole number."; return; }
+    if (!Number.isSafeInteger(dc)) { error = "DC must be a whole number."; return; }
+    const res = planNegativeLevelSave({ actor: current, kind: negativeLevelSaveKind, die, fortBonus, dc });
+    if (!res.ok) { error = res.error; return; }
+    if (res.plan.ops.length > 0) pending.add(client.submit(res.plan.ops));
+    negativeLevelsNote = res.plan.note;
+  }
+  function doRestoration(): void {
+    negativeLevelsNote = "";
+    error = "";
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current) { error = "Actor is no longer available."; return; }
+    if (!isPF1eActor(current) || !client.user || !can(client.user, "update", current, "actors")) {
+      error = "You do not have permission to restore negative levels."; return;
+    }
+    const count = Number.parseInt(restorationCountRaw.trim(), 10);
+    if (!Number.isSafeInteger(count) || count <= 0) { error = "Count must be a positive whole number (≥1)."; return; }
+    const res = planRestoration({ actor: current, count, kind: restorationKind });
+    if (!res.ok) { error = res.error; return; }
+    if (res.plan.ops.length > 0) pending.add(client.submit(res.plan.ops));
+    negativeLevelsNote = res.plan.note;
+  }
+
   // E01/E02 — the effect apply/edit/toggle/remove handlers. Both homes resolve
   // fresh documents from the projected store, so a stale tab cannot write over
   // a replica that moved on; the ops go through ClientSync like every edit.
@@ -1641,6 +1707,37 @@
       <button type="button" disabled={!editable} onclick={() => doExpireTempHp()} data-temp-expire-submit>Expire</button>
       {#if tempHpNote}<p class="note" data-temp-note>{tempHpNote}</p>{/if}
       <p class="note">Same source overlaps (highest remaining wins); different sources stack. Expiry removes that source only — damage absorbed earlier stays lost.</p>
+    </section>
+    <section class="resolve" aria-label="Negative levels (energy drain)" data-pf1e-negative-levels>
+      <h4>Negative levels — energy drain (AoN 427 / CRB p.562)</h4>
+      <p data-negative-levels-readout>
+        {#if negativeLevelsTotals.total === 0}
+          No negative levels.
+        {:else}
+          {negativeLevelsTotals.total} total ({negativeLevelsTotals.temporary} temporary, {negativeLevelsTotals.permanent} permanent) — penalties: attack {negativeLevelsPen.attack}, saves {negativeLevelsPen.saves}, HP {negativeLevelsPen.hp}, effective level {negativeLevelsPen.effectiveLevelDelta}{#if negativeLevelsHd > 0 && negativeLevelsTotals.total >= negativeLevelsHd} <span class="warn"> — dead at {negativeLevelsHd} HD (AoN 427)</span>{/if}
+        {/if}
+        {#if negativeLevelsTotals.issues.length > 0}<span class="warn"> — {negativeLevelsTotals.issues.join(" · ")}</span>{/if}
+      </p>
+      <div class="resolve" data-negative-inflict>
+        <label>Inflict — count <input bind:value={negativeLevelsCountRaw} placeholder="e.g. 1" size="3" data-negative-inflict-count /></label>
+        <label>kind <select bind:value={negativeLevelsKind} data-negative-inflict-kind><option value="temporary">temporary (save each day)</option><option value="permanent">permanent (restoration only)</option></select></label>
+        <button type="button" disabled={!editable} onclick={() => doInflictNegativeLevels()} data-negative-inflict-submit>Inflict</button>
+      </div>
+      <div class="resolve" data-negative-save>
+        <span>Save — one level</span>
+        <label>kind <select bind:value={negativeLevelSaveKind} data-negative-save-kind><option value="temporary">temporary (DC = effect's DC)</option><option value="energy-drain">energy drain (DC 10 + 1/2 racial HD + Cha, 24h; fail → permanent)</option></select></label>
+        <label>d20 <input bind:value={negativeLevelDieRaw} placeholder="1–20" size="3" data-negative-save-die /></label>
+        <label>Fort <input bind:value={negativeLevelFortRaw} placeholder={String(d.saves.fort)} size="3" data-negative-save-fort /></label>
+        <label>DC <input bind:value={negativeLevelDcRaw} placeholder="e.g. 16" size="3" data-negative-save-dc /></label>
+        <button type="button" disabled={!editable} onclick={() => doNegativeLevelSave()} data-negative-save-submit>Save</button>
+      </div>
+      <div class="resolve" data-negative-restore>
+        <label>Restoration — count <input bind:value={restorationCountRaw} placeholder="e.g. 1" size="3" data-negative-restore-count /></label>
+        <label>kind <select bind:value={restorationKind} data-negative-restore-kind><option value="any">any (temporary first)</option><option value="temporary">temporary</option><option value="permanent">permanent</option></select></label>
+        <button type="button" disabled={!editable} onclick={() => doRestoration()} data-negative-restore-submit>Restore</button>
+      </div>
+      {#if negativeLevelsNote}<p class="note" data-negative-levels-note>{negativeLevelsNote}</p>{/if}
+      <p class="note">Per AoN 427/UMR Energy Drain: −1 per level on attacks/saves/skills/ability checks/CMB/CMD, −5 HP (current and total), one level lower for level-dependent variables; death when levels ≥ Hit Dice. Temporary: new save each day at the effect's DC; energy drain: one Fort save after 24h (DC 10 + 1/2 racial HD + Cha), failure makes the level permanent; permanent drain: restoration only. Example DC: vampire 8 HD, Cha +4 → DC {energyDrainSaveDC({ racialHd: 8, chaMod: 4 })}.</p>
     </section>
     <p class="note">
       Energy resistance is manually adjudicated; temporary HP absorption, source stacking (same-source highest, different stack) and expiration are automated (CRB p.191), healing never restores temp HP. Ability drain never heals naturally — restoration is its only cure. Derived values are read-only.
