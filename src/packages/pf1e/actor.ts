@@ -336,7 +336,7 @@ export interface PF1eDerivedAttack {
 
 export interface PF1eDerived extends Pick<
   PF1eHealthReadout,
-  "tempHp" | "energyResistance"
+  "tempHp" | "tempHpSources" | "energyResistance"
 > {
   size: PF1eSize;
   sizeEntry: ReturnType<typeof sizeEntry>;
@@ -1438,6 +1438,7 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     hp: hpConAdjusted + nl.hp,
     hpMax: hpMaxConAdjusted + nl.hp,
     tempHp: health.tempHp,
+    tempHpSources: health.tempHpSources,
     energyResistance: health.energyResistance,
     nonlethalDamage,
     conditions,

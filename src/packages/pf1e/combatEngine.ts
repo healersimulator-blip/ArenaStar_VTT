@@ -5,6 +5,8 @@ import type { ModelPool } from "../../core/strategic";
 import { ModelStatus } from "../../core/strategic";
 import type { PRNG } from "../../core/sim";
 import { XoshiroPRNG } from "../../sim/prng";
+import { applyHealing } from "./healing";
+
 import {
   PF1eCondition,
   PF1eDrType,
@@ -452,11 +454,21 @@ export function resetTurnAoOs(pool: ModelPool, modelIndices: number[]): void {
 
 /**
  * Resolve PF1e Fast Healing & Regeneration for models (Exact PF1e SRD Rules).
+ *
+ * P7/H03 — delegates to `healing.ts`'s `applyHealing` so fast healing and
+ * regeneration obey the same nonlethal-removal rule as magical healing
+ * (CRB p.191: healing removes equal nonlethal, rolled amount, even at full
+ * HP). Dead creatures do not heal; temporary hit points are not restored.
+ * When suppression would apply (regeneration ceases after fire/acid, A.18)
+ * the caller can pass a per-model suppression map — absent means not
+ * suppressed. The ModelPool's `hp` and `nonlethal` columns are both updated
+ * atomically; the prior implementation only touched `hp`.
  */
 export function resolvePF1eHealing(
   pool: ModelPool,
   modelIndices: number[],
-  registry: PF1eProfileRegistry
+  registry: PF1eProfileRegistry,
+  opts?: { suppressed?: ReadonlySet<number> }
 ): { totalHealed: number; revivedCount: number } {
   let totalHealed = 0;
   let revivedCount = 0;
@@ -467,31 +479,59 @@ export function resolvePF1eHealing(
     if (!profile) continue;
 
     const status = pool.status[idx] ?? 0;
+    if ((status & ModelStatus.dead) !== 0) continue;
     const hp = pool.hp[idx] ?? 0;
     const maxHp = pool.hpMax[idx] ?? 20;
     const lethalDmg = pool.sys["lethalDmg"]?.[idx] ?? 0;
     const maxEffectiveHp = Math.max(0, maxHp - lethalDmg);
+    const nonlethal = pool.sys["nonlethal"]?.[idx] ?? 0;
+    // Constitution score for death check (A.18 dead at -Con). Fall back to not-dead if missing.
+    const conScore = pool.sys["con"]?.[idx];
+
+    const healOnce = (amount: number, suppressed = false): void => {
+      if (suppressed) return;
+      if (amount <= 0) return;
+      // Dead check via Con: negative HP reaching Con kills, handled in healing.ts
+      const inputHp = pool.hp[idx] ?? hp;
+      const inputNonlethal = pool.sys["nonlethal"]?.[idx] ?? nonlethal;
+      const res = applyHealing({
+        hp: inputHp,
+        hpMax: maxEffectiveHp,
+        nonlethalDamage: inputNonlethal,
+        amount,
+      });
+      if ((res as { ok?: false }).ok === false) return;
+      const r = res as unknown as { hp: number; nonlethalDamage: number; healedHp: number };
+      const beforeHp = pool.hp[idx] ?? inputHp;
+      pool.hp[idx] = r.hp;
+      if (pool.sys["nonlethal"]) pool.sys["nonlethal"][idx] = r.nonlethalDamage;
+      totalHealed += r.healedHp;
+      if (beforeHp === 0 && (r.hp ?? 0) > 0) {
+        pool.status[idx] = (pool.status[idx] ?? 0) & ~PF1eCondition.DISRUPTED;
+        revivedCount++;
+      }
+    };
 
     // Fast Healing: applies only to living models
-    if (profile.fastHealingVal > 0 && (status & ModelStatus.dead) === 0 && hp < maxEffectiveHp) {
-      const healAmount = Math.min(maxEffectiveHp - hp, profile.fastHealingVal);
-      pool.hp[idx] = hp + healAmount;
-      totalHealed += healAmount;
+    if (profile.fastHealingVal > 0) {
+      const wasDead = ((): boolean => {
+        if (hp >= 0) return false;
+        if (conScore === undefined) return false;
+        return -hp >= (conScore as number);
+      })();
+      if (!wasDead) healOnce(profile.fastHealingVal);
     }
 
-    // Regeneration: heals NON-LETHAL damage every round up to maxEffectiveHp (maxHp - lethalDmg)
-    if (profile.regenerationVal > 0 && (status & ModelStatus.dead) === 0) {
-      if (hp < maxEffectiveHp) {
-        const healAmount = Math.min(maxEffectiveHp - hp, profile.regenerationVal);
-        pool.hp[idx] = hp + healAmount;
-        totalHealed += healAmount;
-
-        // Revive from unconsciousness if non-lethal damage is healed back above 0 HP
-        if (hp === 0 && (pool.hp[idx] ?? 0) > 0) {
-          pool.status[idx] = (pool.status[idx] ?? 0) & ~PF1eCondition.DISRUPTED;
-          revivedCount++;
-        }
-      }
+    // Regeneration: heals each round at turn start, unless suppressed (fire/acid last round, A.18)
+    if (profile.regenerationVal > 0) {
+      const suppressed = opts?.suppressed?.has(idx) ?? false;
+      const wasDead = ((): boolean => {
+        const curHp = pool.hp[idx] ?? hp;
+        if (curHp >= 0) return false;
+        if (conScore === undefined) return false;
+        return -curHp >= (conScore as number);
+      })();
+      if (!wasDead) healOnce(profile.regenerationVal, suppressed);
     }
   }
 

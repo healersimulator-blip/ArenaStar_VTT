@@ -65,6 +65,7 @@ import {
   type PF1eMisfireVerdict,
 } from "./firearms";
 import { injuryStateOf, nonlethalStateOf } from "./injury";
+import { absorbDamageWithTempHp } from "./tempHp";
 
 /** Which of the derived AC trio the attack resolves against. */
 export type PF1eDefenseChoice = "normal" | "touch" | "flatFooted";
@@ -113,6 +114,10 @@ export interface PF1eResolveDefender extends PF1eMitigationDefender {
    * p.191 — "This does not apply to creatures with regeneration").
    */
   regeneration?: number | undefined;
+  /** P7/H02 — temporary hit points (separate pool, CRB p.191). */
+  tempHp?: number | undefined;
+  /** P7/H02 — per-source remaining temp HP (Paizo FAQ, CRB p.208). Legacy scalar maps to `legacy`. */
+  tempHpSources?: Readonly<Record<string, number>> | undefined;
 }
 
 /** One derived attack line, as `PF1eDerivedAttack` provides it. */
@@ -215,12 +220,16 @@ export type PF1eResolveResult =
         drBypassedVia: string | null;
         /** Nonlethal that converted to lethal at the max-HP boundary (CRB p.191). */
         convertedToLethal: number;
+        /** Temporary hit points absorbed (CRB p.191). P7/H02 — optional for back-compat with manual test objects. */
+        tempHpAbsorbed?: number;
         notes: string[];
       } | null;
       /** HP before/after the write (equal on a miss). */
       hp: { before: number; after: number };
       /** Nonlethal damage before/after (never deducted from HP, CRB p.191). */
       nonlethal: { before: number; after: number };
+      /** Temporary hit points before/after (CRB p.191, never restored by healing). */
+      tempHp: { before: number; after: number; beforeSources: Readonly<Record<string, number>>; afterSources: Readonly<Record<string, number>> };
       /** Condition annotations (dead/dying/disabled/unconscious/staggered) — P7 owns the writes. */
       conditionNotes: string[];
       notes: string[];
@@ -452,6 +461,15 @@ export function pf1eResolveAttack(
     threat: roll.threat,
   };
 
+  // P7/H02 — temp HP state before the attack (for early exits and notes).
+  const tempHpBeforeSources: Readonly<Record<string, number>> =
+    defender.tempHpSources !== undefined
+      ? defender.tempHpSources
+      : defender.tempHp !== undefined && defender.tempHp > 0
+        ? ({ legacy: defender.tempHp } as Readonly<Record<string, number>>)
+        : Object.freeze({});
+  const tempHpBeforeTotal = Object.values(tempHpBeforeSources).reduce((s, v) => s + v, 0);
+
   // P09/D-202 — the misfire check reads the natural face, before everything
   // else the roll could become: a misfire is an automatic miss that cannot
   // threaten, and a natural 20 never misfires (§2.9b).
@@ -475,6 +493,12 @@ export function pf1eResolveAttack(
           before: defender.nonlethalDamage,
           after: defender.nonlethalDamage,
         },
+        tempHp: {
+          before: tempHpBeforeTotal,
+          after: tempHpBeforeTotal,
+          beforeSources: tempHpBeforeSources,
+          afterSources: tempHpBeforeSources,
+        },
         conditionNotes: [],
         notes: [...notes, ...verdict.notes],
         provokes: input.provokes === true,
@@ -495,6 +519,12 @@ export function pf1eResolveAttack(
       nonlethal: {
         before: defender.nonlethalDamage,
         after: defender.nonlethalDamage,
+      },
+      tempHp: {
+        before: tempHpBeforeTotal,
+        after: tempHpBeforeTotal,
+        beforeSources: tempHpBeforeSources,
+        afterSources: tempHpBeforeSources,
       },
       conditionNotes: [],
       notes,
@@ -567,6 +597,12 @@ export function pf1eResolveAttack(
         nonlethal: {
           before: defender.nonlethalDamage,
           after: defender.nonlethalDamage,
+        },
+        tempHp: {
+          before: tempHpBeforeTotal,
+          after: tempHpBeforeTotal,
+          beforeSources: tempHpBeforeSources,
+          afterSources: tempHpBeforeSources,
         },
         conditionNotes: [],
         notes,
@@ -643,6 +679,19 @@ export function pf1eResolveAttack(
       "nonlethal damage is at the maximum-HP boundary — further nonlethal damage is treated as lethal (CRB p.191)",
     );
   }
+
+  // P7/H02 — temporary hit points absorb lethal damage first (CRB p.191).
+  let tempHpAbsorbed = 0;
+  let tempHpAfterSources: Readonly<Record<string, number>> = tempHpBeforeSources;
+  let tempHpAfterTotal = tempHpBeforeTotal;
+  if (lethalDealt > 0 && tempHpBeforeTotal > 0) {
+    const absorbed = absorbDamageWithTempHp(tempHpBeforeSources, lethalDealt);
+    tempHpAbsorbed = absorbed.absorbed;
+    lethalDealt = absorbed.leftover;
+    tempHpAfterSources = absorbed.sources;
+    tempHpAfterTotal = Object.values(tempHpAfterSources).reduce((s, v) => s + v, 0);
+    notes.push(...absorbed.notes);
+  }
   const hpAfter = defender.hp - lethalDealt;
   const nonlethalAfter = defender.nonlethalDamage + nonlethalDealt;
 
@@ -683,12 +732,19 @@ export function pf1eResolveAttack(
       drApplied: mitigation.drApplied,
       drBypassedVia: mitigation.drBypassedVia,
       convertedToLethal,
+      tempHpAbsorbed,
       notes: [...mitigation.notes],
     },
     hp: { before: defender.hp, after: hpAfter },
     nonlethal: {
       before: defender.nonlethalDamage,
       after: nonlethalAfter,
+    },
+    tempHp: {
+      before: tempHpBeforeTotal,
+      after: tempHpAfterTotal,
+      beforeSources: tempHpBeforeSources,
+      afterSources: tempHpAfterSources,
     },
     conditionNotes,
     notes,
@@ -719,6 +775,8 @@ export type PF1eManyshotResult =
       arrows: Extract<PF1eResolveResult, { ok: true }>[];
       finalHp: number;
       finalNonlethal: number;
+      finalTempHp: number;
+      finalTempHpSources: Readonly<Record<string, number>>;
     };
 
 export function pf1eResolveManyshot(input: {
@@ -764,12 +822,23 @@ export function pf1eResolveManyshot(input: {
     });
     if (!resolved.ok) return resolved;
     results.push(resolved);
-    defender = { ...defender, hp: resolved.hp.after, nonlethalDamage: resolved.nonlethal.after };
+    defender = {
+      ...defender,
+      hp: resolved.hp.after,
+      nonlethalDamage: resolved.nonlethal.after,
+      tempHp: resolved.tempHp.after,
+      tempHpSources: resolved.tempHp.afterSources,
+    };
   }
   return {
     ok: true,
     arrows: results,
     finalHp: defender.hp,
     finalNonlethal: defender.nonlethalDamage,
+    finalTempHp: (defender.tempHpSources !== undefined
+      ? Object.values(defender.tempHpSources).reduce((s, v) => s + v, 0)
+      : defender.tempHp ?? 0),
+    finalTempHpSources: defender.tempHpSources ?? (defender.tempHp !== undefined ? ({ legacy: defender.tempHp } as Readonly<Record<string, number>>) : Object.freeze({})),
   };
+
 }

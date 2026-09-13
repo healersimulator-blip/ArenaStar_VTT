@@ -497,10 +497,12 @@ describe("resolve flow helpers", () => {
         drApplied: 0,
         drBypassedVia: null,
         convertedToLethal: 0,
+        tempHpAbsorbed: 0,
         notes: [],
       },
       hp: { before: 12, after: -8 },
       nonlethal: { before: 0, after: 0 },
+      tempHp: { before: 0, after: 0, beforeSources: {}, afterSources: {} },
       conditionNotes: [
         "unconscious and dying (below 0 HP, loses 1 HP per round — the stable/dying bookkeeping is P7)",
       ],

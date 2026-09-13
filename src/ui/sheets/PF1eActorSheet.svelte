@@ -98,6 +98,9 @@
     rangedAttackProvokes,
     resolveActionProvokes,
   } from "../combat/pf1eActionProvoke";
+  import { planRest, restLevelOf } from "../combat/pf1eRest";
+  import { applyHealing } from "../../packages/pf1e/healing";
+  import { grantTempHp, expireTempHpSource } from "../../packages/pf1e/tempHp";
   type TabName =
     | "summary"
     | "attributes"
@@ -167,6 +170,19 @@
     pendingCastFromSystem(doc.system as Record<string, unknown>),
   );
   let pendingDisruptDamage = $state("");
+  // D-206 — natural recovery (H03, AoN 170): level per night, 2× bed rest, long-term care.
+  let restBed = $state(false);
+  let restCare = $state(false);
+  let restLevelOverride = $state("");
+  let restNote = $state("");
+  // P7/H02 — magical healing (CRB p.191): heals HP + equal nonlethal, never temp HP.
+  let healAmountRaw = $state("");
+  let healNote = $state("");
+  // P7/H02 — temporary HP grant/expire (Paizo FAQ, CRB p.208).
+  let tempHpSourceId = $state("");
+  let tempHpAmountRaw = $state("");
+  let tempHpExpireId = $state("");
+  let tempHpNote = $state("");
   let prepareName = $state("");
   let prepareLevel = $state("1");
   let prepareSlotLevel = $state("");
@@ -1181,6 +1197,141 @@
     );
   }
 
+  // D-206 — natural recovery (H03, AoN 170): level per night, 2× bed rest, long-term care.
+  function doRest(): void {
+    restNote = "";
+    error = "";
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) {
+      error = "Actor is no longer available.";
+      return;
+    }
+    if (
+      !isPF1eActor(current) ||
+      !client.user ||
+      !can(client.user, "update", current, "actors")
+    ) {
+      error = "You do not have permission to rest this actor.";
+      return;
+    }
+    const parsed = restLevelOverride.trim();
+    const level =
+      parsed !== ""
+        ? Number.parseInt(parsed, 10)
+        : restLevelOf(current);
+    if (!Number.isFinite(level) || level < 0) {
+      error = "Rest level must be a non-negative number.";
+      return;
+    }
+    const plan = planRest({
+      actor: current,
+      level,
+      bedRest: restBed,
+      longTermCare: restCare,
+    });
+    if (plan.ops.length > 0) pending.add(client.submit(plan.ops));
+    restNote = plan.note;
+  }
+
+  // P7/H02 — apply magical/mundane healing (CRB p.191).
+  function doHealing(): void {
+    healNote = "";
+    error = "";
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) {
+      error = "Actor is no longer available.";
+      return;
+    }
+    if (
+      !isPF1eActor(current) ||
+      !client.user ||
+      !can(client.user, "update", current, "actors")
+    ) {
+      error = "You do not have permission to heal this actor.";
+      return;
+    }
+    const raw = healAmountRaw.trim();
+    const amount = Number.parseInt(raw, 10);
+    if (!Number.isSafeInteger(amount) || amount <= 0) {
+      error = "Healing amount must be a positive whole number.";
+      return;
+    }
+    const derived = pf1eSheetView(current).derived;
+    const result = applyHealing({
+      hp: derived.hp,
+      hpMax: derived.hpMax,
+      nonlethalDamage: derived.nonlethalDamage,
+      amount,
+    });
+    if ((result as unknown as { ok: false }).ok === false) {
+      error = (result as unknown as { error: string }).error;
+      return;
+    }
+    const r = result as unknown as { hp: number; nonlethalDamage: number; note: string };
+    const diff: Record<string, unknown> = {};
+    if (r.hp !== derived.hp) diff["system.pf1e.hp"] = r.hp;
+    if (r.nonlethalDamage !== derived.nonlethalDamage) diff["system.pf1e.nonlethalDamage"] = r.nonlethalDamage;
+    if (Object.keys(diff).length === 0) {
+      healNote = r.note;
+      return;
+    }
+    pending.add(
+      client.submit([
+        { kind: "update", ref: { coll: "actors", id: current._id }, diff: diff as unknown as Record<string, import("../../core/documents").Json> },
+      ]),
+    );
+    healNote = r.note;
+  }
+
+  // P7/H02 — grant or expire temporary hit points by source.
+  function doGrantTempHp(): void {
+    tempHpNote = "";
+    error = "";
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current) { error = "Actor is no longer available."; return; }
+    if (!isPF1eActor(current) || !client.user || !can(client.user, "update", current, "actors")) {
+      error = "You do not have permission to grant temporary HP."; return;
+    }
+    const id = tempHpSourceId.trim();
+    const amount = Number.parseInt(tempHpAmountRaw.trim(), 10);
+    if (id === "") { error = "Source id must be non-empty."; return; }
+    if (!Number.isSafeInteger(amount) || amount <= 0) { error = "Amount must be a positive whole number."; return; }
+    const derived = pf1eSheetView(current).derived;
+    const result = grantTempHp(derived.tempHpSources, id, amount);
+    if (result.issues.length > 0) { error = result.issues.join(" "); return; }
+    const diff: Record<string, unknown> = {};
+    diff["system.pf1e.tempHpSources"] = result.sources as unknown as Record<string, unknown>;
+    diff["-=system.pf1e.tempHp"] = null;
+    pending.add(client.submit([{ kind: "update", ref: { coll: "actors", id: current._id }, diff: diff as unknown as Record<string, import("../../core/documents").Json> }]));
+    tempHpNote = result.note ?? `granted ${amount} temp HP from ${id} — total ${result.total}`;
+  }
+  function doExpireTempHp(): void {
+    tempHpNote = "";
+    error = "";
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current) { error = "Actor is no longer available."; return; }
+    if (!isPF1eActor(current) || !client.user || !can(client.user, "update", current, "actors")) {
+      error = "You do not have permission to expire temporary HP."; return;
+    }
+    const id = tempHpExpireId.trim();
+    if (id === "") { error = "Source id to expire must be non-empty."; return; }
+    const derived = pf1eSheetView(current).derived;
+    if (!(id in derived.tempHpSources)) { error = `No such temp HP source: ${id}`; return; }
+    const result = expireTempHpSource(derived.tempHpSources, id);
+    const diff: Record<string, unknown> = {};
+    if (Object.keys(result.sources).length === 0) {
+      diff["-=system.pf1e.tempHpSources"] = null;
+      diff["-=system.pf1e.tempHp"] = null;
+    } else {
+      diff["system.pf1e.tempHpSources"] = result.sources as unknown as Record<string, unknown>;
+      diff["-=system.pf1e.tempHp"] = null;
+    }
+    pending.add(client.submit([{ kind: "update", ref: { coll: "actors", id: current._id }, diff: diff as unknown as Record<string, import("../../core/documents").Json> }]));
+    tempHpNote = result.note ?? "expired";
+  }
+
   // E01/E02 — the effect apply/edit/toggle/remove handlers. Both homes resolve
   // fresh documents from the projected store, so a stale tab cannot write over
   // a replica that moved on; the ops go through ClientSync like every edit.
@@ -1383,8 +1534,13 @@
     <dl>
       <dt>HP</dt>
       <dd>{d.hp} / {d.hpMax} · {d.nonlethalDamage} nonlethal</dd>
-      <dt>Temporary HP (manual)</dt>
-      <dd data-temp-hp>{d.tempHp} · separate from current/max HP</dd>
+      <dt>Temporary HP</dt>
+      <dd data-temp-hp>
+        {d.tempHp} total · separate from current/max HP
+        {#if Object.keys(d.tempHpSources).length > 0}
+          ({Object.entries(d.tempHpSources).map(([id, v]) => `${id}: ${v}`).join(" · ")})
+        {/if}
+      </dd>
       <dt>Energy resistance (manual)</dt>
       <dd data-energy-resistance>
         {Object.entries(d.energyResistance)
@@ -1427,11 +1583,67 @@
     {#each slotReadout.view.warnings as warning (warning)}
       <p class="note" data-pf1e-spell-slot-warning>{warning}</p>
     {/each}
+    <section class="resolve" aria-label="Natural recovery (rest)" data-pf1e-rest>
+      <h4>Natural recovery — a night's rest (AoN 170 / CRB p.191)</h4>
+      <label
+        >Character level
+        <input
+          bind:value={restLevelOverride}
+          placeholder={String(restLevelOf(doc))}
+          size="4"
+          data-rest-level
+        /></label
+      >
+      <label
+        ><input type="checkbox" bind:checked={restBed} data-rest-bed /> Complete bed rest (24h) — 2×</label
+      >
+      <label
+        ><input type="checkbox" bind:checked={restCare} data-rest-care /> Long-term care (Heal) — 2× again</label
+      >
+      <button
+        type="button"
+        disabled={!editable}
+        onclick={() => doRest()}
+        data-rest-submit>Rest &amp; recover</button
+      >
+      {#if restNote}<p class="note" data-rest-note>{restNote}</p>{/if}
+      <p class="note">
+        {restLevelOf(doc)} HP per level per night of rest; ability damage heals 1 per affected score per night, 2 per day of complete bed rest; long-term care doubles both. Drain never heals naturally — restoration is its only cure.
+      </p>
+    </section>
+    <section class="resolve" aria-label="Healing" data-pf1e-healing>
+      <h4>Healing (CRB p.191 — equal nonlethal removal, never temp HP)</h4>
+      <label
+        >Amount
+        <input bind:value={healAmountRaw} placeholder="e.g. 8" size="4" data-heal-amount /></label
+      >
+      <button type="button" disabled={!editable} onclick={() => doHealing()} data-heal-submit
+        >Heal</button
+      >
+      {#if healNote}<p class="note" data-heal-note>{healNote}</p>{/if}
+      <p class="note">Healing restores hit points up to maximum and removes an equal amount of nonlethal damage (even at full HP); temporary hit points are never restored.</p>
+    </section>
+    <section class="resolve" aria-label="Temporary hit points" data-pf1e-temp-hp-panel>
+      <h4>Temporary hit points (Paizo FAQ — same-source highest, different stack)</h4>
+      <label
+        >Grant — source
+        <input bind:value={tempHpSourceId} placeholder="e.g. aid" size="8" data-temp-grant-id /></label
+      >
+      <label
+        >Amount
+        <input bind:value={tempHpAmountRaw} placeholder="e.g. 8" size="4" data-temp-grant-amount /></label
+      >
+      <button type="button" disabled={!editable} onclick={() => doGrantTempHp()} data-temp-grant-submit>Grant</button>
+      <label
+        >Expire — source
+        <input bind:value={tempHpExpireId} placeholder="e.g. aid" size="8" data-temp-expire-id /></label
+      >
+      <button type="button" disabled={!editable} onclick={() => doExpireTempHp()} data-temp-expire-submit>Expire</button>
+      {#if tempHpNote}<p class="note" data-temp-note>{tempHpNote}</p>{/if}
+      <p class="note">Same source overlaps (highest remaining wins); different sources stack. Expiry removes that source only — damage absorbed earlier stays lost.</p>
+    </section>
     <p class="note">
-      Temporary HP and energy resistance are manually adjudicated records;
-      absorption, source stacking and expiration are not automated. Ability
-      damage is not yet modeled. Derived values are read-only. Editing a score
-      does not roll initiative or resolve combat.
+      Energy resistance is manually adjudicated; temporary HP absorption, source stacking (same-source highest, different stack) and expiration are automated (CRB p.191), healing never restores temp HP. Ability drain never heals naturally — restoration is its only cure. Derived values are read-only.
     </p>
   {:else if tab === "attributes" || tab === "combat"}
     {#if tab === "combat"}
@@ -2408,6 +2620,7 @@
     <pre>{JSON.stringify(
         {
           tempHp: view.authored.tempHp,
+          tempHpSources: view.authored.tempHpSources,
           energyResistance: view.authored.energyResistance,
           creature: view.authored.creature,
           feats: view.authored.feats,

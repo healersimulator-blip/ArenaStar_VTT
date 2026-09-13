@@ -34,6 +34,7 @@ import type {
   PF1eResolveDefender,
   PF1eResolveResult,
 } from "../../packages/pf1e/resolve";
+import { can } from "../../core/permissions";
 import {
   pf1eResolveAttack,
   pf1eResolveManyshot,
@@ -109,6 +110,9 @@ export function resolveDefenderFromDerived(
     nonlethalDamage: derived.nonlethalDamage,
     conScore: derived.abilities.con,
     regeneration: derived.regeneration,
+    // P7/H02 — temporary HP stacks by source (Paizo FAQ).
+    tempHp: derived.tempHp,
+    tempHpSources: derived.tempHpSources,
     ...(derived.dr > 0
       ? { dr: [{ value: derived.dr, bypass: derived.drBypass }] }
       : {}),
@@ -191,6 +195,9 @@ export function resolutionCardContent(
         `${String(result.damage.convertedToLethal)} nonlethal converted to lethal at the max-HP boundary`,
       );
     }
+    if ((result.damage.tempHpAbsorbed ?? 0) > 0) {
+      parts.push(`temp HP absorbed ${String(result.damage.tempHpAbsorbed)}`);
+    }
     lines.push(parts.join("; ") + ".");
   }
   const hpBits: string[] = [];
@@ -202,6 +209,11 @@ export function resolutionCardContent(
   if (result.nonlethal.after !== result.nonlethal.before) {
     hpBits.push(
       `nonlethal ${String(result.nonlethal.before)} → ${String(result.nonlethal.after)}`,
+    );
+  }
+  if (result.tempHp.after !== result.tempHp.before) {
+    hpBits.push(
+      `temp HP ${String(result.tempHp.before)} → ${String(result.tempHp.after)}`,
     );
   }
   if (hpBits.length > 0) lines.push(hpBits.join(", ") + ".");
@@ -451,6 +463,23 @@ export async function resolveAttackFlow(
     if (edit.error !== null && hpWriteError === null) hpWriteError = edit.error;
     else if (edit.error === null) ops.push(...edit.ops);
   }
+  // P7/H02 — temporary HP is a separate map, not a scalar sheet field.
+  if (result.tempHp.after !== result.tempHp.before) {
+    if (!user || !can(user, "update", params.targetActor, "actors")) {
+      if (hpWriteError === null) hpWriteError = "You do not own this PF1e actor.";
+    } else {
+      const afterSources = result.tempHp.afterSources;
+      const diff: Record<string, import("../../core/documents").Json> = {};
+      if (Object.keys(afterSources).length === 0) {
+        diff["-=system.pf1e.tempHpSources"] = null;
+        diff["-=system.pf1e.tempHp"] = null;
+      } else {
+        diff["system.pf1e.tempHpSources"] = afterSources as unknown as import("../../core/documents").Json;
+        diff["-=system.pf1e.tempHp"] = null;
+      }
+      ops.push({ kind: "update", ref: { coll: "actors", id: params.targetActor._id }, diff });
+    }
+  }
 
   // 6. The resolution card (public narrative; names a rejected write honestly).
   const card = resolutionCardContent(
@@ -634,7 +663,7 @@ export async function resolveManyshotFlow(
       ...(concealmentDie === undefined ? {} : { concealmentDie }),
       damageTotal,
     });
-    currentDefender = { ...currentDefender, hp: result.hp.after, nonlethalDamage: result.nonlethal.after };
+    currentDefender = { ...currentDefender, hp: result.hp.after, nonlethalDamage: result.nonlethal.after, tempHp: result.tempHp.after, tempHpSources: result.tempHp.afterSources };
   }
 
   const resolved = pf1eResolveManyshot({
@@ -667,6 +696,21 @@ export async function resolveManyshotFlow(
     const edit = pf1eSheetEdit(params.targetActor, user, "nonlethalDamage", String(resolved.finalNonlethal));
     if (edit.error && hpWriteError === null) hpWriteError = edit.error;
     else if (!edit.error) ops.push(...edit.ops);
+  }
+  if (final && (resolved.finalTempHp !== (defender.tempHp ?? 0) || JSON.stringify(resolved.finalTempHpSources) !== JSON.stringify(defender.tempHpSources ?? {}))) {
+    if (!user || !can(user, "update", params.targetActor, "actors")) {
+      if (hpWriteError === null) hpWriteError = "You do not own this PF1e actor.";
+    } else {
+      const diff: Record<string, import("../../core/documents").Json> = {};
+      if (Object.keys(resolved.finalTempHpSources).length === 0) {
+        diff["-=system.pf1e.tempHpSources"] = null;
+        diff["-=system.pf1e.tempHp"] = null;
+      } else {
+        diff["system.pf1e.tempHpSources"] = resolved.finalTempHpSources as unknown as import("../../core/documents").Json;
+        diff["-=system.pf1e.tempHp"] = null;
+      }
+      ops.push({ kind: "update", ref: { coll: "actors", id: params.targetActor._id }, diff });
+    }
   }
   client.submit([{ kind: "create", coll: "messages", data: {
     _id: globalThis.crypto.randomUUID(), type: "message", name: `${params.attackerName} Manyshot`,
