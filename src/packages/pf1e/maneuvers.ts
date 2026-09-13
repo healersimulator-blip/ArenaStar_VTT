@@ -89,6 +89,10 @@ export interface PF1eManeuverCheckInput {
     immobilizedOrUnconscious?: boolean;
     /** A.9: a stunned defender cannot resist as well — the check gains +4. */
     stunned?: boolean;
+    /** PF1e trip/overrun: creatures with no legs, oozes, flying cannot be tripped. */
+    cannotBeTripped?: boolean;
+    /** Number of legs (trip/overrun): +2 CMD per leg beyond 2 (A.9). */
+    legs?: number;
   };
   /**
    * Manœuvres are attack rolls (A.9): attack penalties apply. Already summed
@@ -184,6 +188,21 @@ export function pf1eManeuverCheck(
     };
   }
 
+  // Trip/overrun vs multi-legged targets: +2 CMD per leg beyond 2 (A.9).
+  // This is a CMD increase, not a roll bonus, so it is folded into cmdEffective.
+  let legBonus = 0;
+  if (
+    (input.kind === "trip" || input.kind === "overrun") &&
+    typeof input.defender.legs === "number" &&
+    Number.isFinite(input.defender.legs) &&
+    input.defender.legs > 2
+  ) {
+    legBonus = (Math.trunc(input.defender.legs) - 2) * 2;
+    if (legBonus > 0) notes.push(`the target has ${String(Math.trunc(input.defender.legs))} legs — +${String(legBonus)} to CMD (A.9)`);
+  }
+  if (input.kind === "trip" && input.defender.cannotBeTripped === true) {
+    return { ok: false, error: "this creature cannot be tripped — oozes, creatures without legs and flying creatures cannot be tripped (A.9)" };
+  }
   // Stunned: +4 on the check — the appendix's "+4" sits on the attacker's
   // side of the comparison, so it is folded into the roll and the margin
   // keeps its sign for the aftermath consumers (push distance reads it).
@@ -191,7 +210,7 @@ export function pf1eManeuverCheck(
   if (stunnedBonus > 0) {
     notes.push("the target is stunned — +4 on the manœuvre roll (A.9)");
   }
-  const cmdEffective = input.cmd;
+  const cmdEffective = input.cmd + legBonus;
   const penalties =
     (input.attackPenalty ?? 0) + (input.aooDamageTaken ?? 0);
   if (input.aooDamageTaken !== undefined && input.aooDamageTaken > 0) {
@@ -364,3 +383,313 @@ export function pf1eSunder(input: {
     notes,
   };
 }
+
+/** Bull rush: push distance off the margin (5 ft + 5 per 5 over CMD). */
+export function pf1eBullRush(input: {
+  check: Omit<PF1eManeuverCheckInput, "kind">;
+}):
+  | { ok: false; error: string }
+  | {
+      ok: true;
+      check: Extract<PF1eManeuverCheckResult, { ok: true }>;
+      success: boolean;
+      /** Push in feet (5 + 5 per 5 over CMD). 0 when the check fails. */
+      pushDistanceFt: number;
+      /** The attacker may move with the target if they have movement remaining (caller fact). */
+      canMoveWithTarget: boolean;
+      notes: readonly string[];
+    } {
+  const check = pf1eManeuverCheck({ ...input.check, kind: "bull-rush" });
+  if (!check.ok) return check;
+  if (!check.success) {
+    return {
+      ok: true,
+      check,
+      success: false,
+      pushDistanceFt: 0,
+      canMoveWithTarget: false,
+      notes: [...check.notes, "the bull rush fails — your movement ends in front of the target (A.9)"],
+    };
+  }
+  // Margin Infinity (immobilised) → at least 5 ft; otherwise 5 + 5* floor(margin/5)
+  const margin = Number.isFinite(check.margin) ? check.margin : Math.max(0, check.total - check.cmdEffective);
+  const pushDistanceFt = 5 + Math.max(0, Math.floor(margin / 5)) * 5;
+  const notes = [...check.notes, `the bull rush pushes the target ${String(pushDistanceFt)} feet straight back (A.9)`];
+  if (pushDistanceFt > 5) notes.push(`for every 5 by which your attack exceeds CMD you push an additional 5 feet — margin ${String(check.margin)}`);
+  notes.push("you can move with the target if you wish but you must have the available movement to do so");
+  notes.push("an enemy being moved by a bull rush does not provoke an attack of opportunity because of the movement unless you possess Greater Bull Rush");
+  return { ok: true, check, success: true, pushDistanceFt, canMoveWithTarget: true, notes };
+}
+
+/** Trip: prone on success; on fail by 10+ the attacker falls prone. */
+export function pf1eTrip(input: {
+  check: Omit<PF1eManeuverCheckInput, "kind">;
+}):
+  | { ok: false; error: string }
+  | {
+      ok: true;
+      check: Extract<PF1eManeuverCheckResult, { ok: true }>;
+      success: boolean;
+      targetProne: boolean;
+      attackerProne: boolean;
+      notes: readonly string[];
+    } {
+  const check = pf1eManeuverCheck({ ...input.check, kind: "trip" });
+  if (!check.ok) return check;
+  if (check.success) {
+    return {
+      ok: true,
+      check,
+      success: true,
+      targetProne: true,
+      attackerProne: false,
+      notes: [...check.notes, "the target is knocked prone (A.9)"],
+    };
+  }
+  const failBy = check.cmdEffective - check.total;
+  if (failBy >= 10) {
+    return {
+      ok: true,
+      check,
+      success: false,
+      targetProne: false,
+      attackerProne: true,
+      notes: [...check.notes, "your trip fails by 10 or more — you are knocked prone instead (A.9)"],
+    };
+  }
+  return {
+    ok: true,
+    check,
+    success: false,
+    targetProne: false,
+    attackerProne: false,
+    notes: [...check.notes, "the trip fails — the target stays standing"],
+  };
+}
+
+/** Disarm: drop logic incl. the 10-point thresholds. */
+export function pf1eDisarm(input: {
+  check: Omit<PF1eManeuverCheckInput, "kind">;
+  /** True when the attacker is unarmed (—4 already in attackPenalty, but the note clarifies). */
+  attackerUnarmed?: boolean;
+  /** True when the disarm was made without a weapon — you may pick up the dropped item. */
+  disarmedWithoutWeapon?: boolean;
+}):
+  | { ok: false; error: string }
+  | {
+      ok: true;
+      check: Extract<PF1eManeuverCheckResult, { ok: true }>;
+      success: boolean;
+      /** How many items the target drops (0, 1, or 2). */
+      targetDrops: number;
+      /** True when you drop your own weapon (fail by 10+). */
+      attackerDrops: boolean;
+      /** You disarmed without a weapon — you may automatically pick up the item. */
+      canPickUp: boolean;
+      notes: readonly string[];
+    } {
+  const check = pf1eManeuverCheck({ ...input.check, kind: "disarm" });
+  if (!check.ok) return check;
+  const notes = [...check.notes];
+  if (input.attackerUnarmed === true) notes.push("attempting to disarm while unarmed imposes a –4 penalty on the attack (A.9)");
+  if (!check.success) {
+    const failBy = check.cmdEffective - check.total;
+    if (failBy >= 10) {
+      return {
+        ok: true,
+        check,
+        success: false,
+        targetDrops: 0,
+        attackerDrops: true,
+        canPickUp: false,
+        notes: [...notes, "your disarm fails by 10 or more — you drop the weapon you were using to attempt the disarm (A.9)"],
+      };
+    }
+    return {
+      ok: true,
+      check,
+      success: false,
+      targetDrops: 0,
+      attackerDrops: false,
+      canPickUp: false,
+      notes: [...notes, "the disarm fails — the target keeps its item"],
+    };
+  }
+  const margin = check.margin;
+  const targetDrops = margin >= 10 ? 2 : 1;
+  const canPickUp = input.disarmedWithoutWeapon === true;
+  const extra = targetDrops === 2 ? " — exceeding CMD by 10 or more drops the items in both hands (maximum two)" : "";
+  notes.push(`you disarm the target — it drops ${targetDrops === 2 ? "the items in both hands" : "one item of your choice (even if wielded with two hands)"}${extra} (A.9)`);
+  if (canPickUp) notes.push("you disarmed without using a weapon — you may automatically pick up the item dropped");
+  return { ok: true, check, success: true, targetDrops, attackerDrops: false, canPickUp, notes };
+}
+
+/** Overrun: move through, with prone on margin ≥5 and the target-may-avoid choice. */
+export function pf1eOverrun(input: {
+  check?: Omit<PF1eManeuverCheckInput, "kind">;
+  /** The target chooses to avoid — you pass through without a check (A.9). */
+  targetAvoids?: boolean;
+}):
+  | { ok: false; error: string }
+  | {
+      ok: true;
+      check: Extract<PF1eManeuverCheckResult, { ok: true }> | null;
+      success: boolean;
+      /** You move through the target's space. */
+      moveThrough: boolean;
+      /** Target knocked prone (margin ≥5). */
+      targetProne: boolean;
+      /** You stop in the space directly in front of the opponent on a failure. */
+      stoppedInFront: boolean;
+      notes: readonly string[];
+    } {
+  if (input.targetAvoids === true) {
+    return {
+      ok: true,
+      check: null,
+      success: true,
+      moveThrough: true,
+      targetProne: false,
+      stoppedInFront: false,
+      notes: ["the target chooses to avoid you — you pass through its square without requiring a check (A.9)"],
+    };
+  }
+  if (!input.check) return { ok: false, error: "overrun: a check is required when the target does not avoid (A.9)" };
+  const check = pf1eManeuverCheck({ ...input.check, kind: "overrun" });
+  if (!check.ok) return check;
+  if (!check.success) {
+    return {
+      ok: true,
+      check,
+      success: false,
+      moveThrough: false,
+      targetProne: false,
+      stoppedInFront: true,
+      notes: [...check.notes, "your overrun fails — you stop in the space directly in front of the opponent (A.9)"],
+    };
+  }
+  const targetProne = check.margin >= 5;
+  const notes = [...check.notes, "you move through the target's space (A.9)"];
+  if (targetProne) notes.push("your attack exceeds CMD by 5 or more — the target is knocked prone (A.9)");
+  return { ok: true, check, success: true, moveThrough: true, targetProne, stoppedInFront: false, notes };
+}
+
+/** Dirty trick: impose one of six conditions for 1 + floor(margin/5) rounds (Greater: 1d4 + floor). */
+export function pf1eDirtyTrick(input: {
+  check: Omit<PF1eManeuverCheckInput, "kind">;
+  /** One of the six allowed conditions (A.9: blinded/dazzled/deafened/entangled/shaken/sickened). */
+  condition?: string;
+  hasGreaterDirtyTrick?: boolean;
+  /** The d4 face for Greater Dirty Trick (1–4), required when hasGreaterDirtyTrick is true. */
+  greaterDie?: number;
+}):
+  | { ok: false; error: string }
+  | {
+      ok: true;
+      check: Extract<PF1eManeuverCheckResult, { ok: true }>;
+      success: boolean;
+      condition: string | null;
+      /** Duration in rounds. 0 when the check fails. */
+      durationRounds: number;
+      notes: readonly string[];
+    } {
+  const allowed = ["blinded", "dazzled", "deafened", "entangled", "shaken", "sickened"] as const;
+  const condition = input.condition ?? "sickened";
+  if (!allowed.includes(condition as typeof allowed[number])) {
+    return { ok: false, error: `dirty trick condition must be one of ${allowed.join("/")} — got ${JSON.stringify(condition)} (A.9)` };
+  }
+  const check = pf1eManeuverCheck({ ...input.check, kind: "dirty-trick" });
+  if (!check.ok) return check;
+  if (!check.success) {
+    return { ok: true, check, success: false, condition: null, durationRounds: 0, notes: [...check.notes, "the dirty trick fails"] };
+  }
+  let durationRounds: number;
+  const notes = [...check.notes];
+  if (input.hasGreaterDirtyTrick === true) {
+    const die = input.greaterDie;
+    if (die === undefined || !Number.isInteger(die) || die < 1 || die > 4) {
+      return { ok: false, error: "Greater Dirty Trick: greaterDie (the d4 face, 1–4) is required to compute duration (A.9)" };
+    }
+    durationRounds = die + Math.max(0, Math.floor(check.margin / 5));
+    notes.push(`Greater Dirty Trick: the ${condition} condition lasts ${String(die)} + floor(margin/5) = ${String(durationRounds)} rounds (A.9)`);
+    notes.push("removing the condition requires the target to spend a standard action");
+  } else {
+    durationRounds = 1 + Math.max(0, Math.floor(check.margin / 5));
+    notes.push(`the ${condition} condition lasts ${String(durationRounds)} round${durationRounds === 1 ? "" : "s"} (1 + 1 per 5 over CMD, A.9)`);
+    notes.push("the penalty can usually be removed if the target spends a move action");
+  }
+  return { ok: true, check, success: true, condition, durationRounds, notes };
+}
+
+/** Drag: both you and target move 5 ft + 5 per 5 over CMD behind you. */
+export function pf1eDrag(input: {
+  check: Omit<PF1eManeuverCheckInput, "kind">;
+}):
+  | { ok: false; error: string }
+  | {
+      ok: true;
+      check: Extract<PF1eManeuverCheckResult, { ok: true }>;
+      success: boolean;
+      dragDistanceFt: number;
+      notes: readonly string[];
+    } {
+  const check = pf1eManeuverCheck({ ...input.check, kind: "drag" });
+  if (!check.ok) return check;
+  if (!check.success) {
+    return { ok: true, check, success: false, dragDistanceFt: 0, notes: [...check.notes, "the drag fails — you and the target stay where you are"] };
+  }
+  const dragDistanceFt = 5 + Math.max(0, Math.floor(check.margin / 5)) * 5;
+  const notes = [...check.notes, `you drag the target ${String(dragDistanceFt)} feet straight back, with your opponent occupying your original space and you in the space behind that (A.9)`];
+  notes.push("you must be able to move with the target to perform this maneuver — if you do not have enough movement, the drag goes to the maximum available and ends");
+  return { ok: true, check, success: true, dragDistanceFt, notes };
+}
+
+/** Reposition: move target 5 ft + 5 per 5 over CMD within your reach (final 5 may be adjacent). */
+export function pf1eReposition(input: {
+  check: Omit<PF1eManeuverCheckInput, "kind">;
+}):
+  | { ok: false; error: string }
+  | {
+      ok: true;
+      check: Extract<PF1eManeuverCheckResult, { ok: true }>;
+      success: boolean;
+      repositionDistanceFt: number;
+      notes: readonly string[];
+    } {
+  const check = pf1eManeuverCheck({ ...input.check, kind: "reposition" });
+  if (!check.ok) return check;
+  if (!check.success) {
+    return { ok: true, check, success: false, repositionDistanceFt: 0, notes: [...check.notes, "the reposition fails"] };
+  }
+  const repositionDistanceFt = 5 + Math.max(0, Math.floor(check.margin / 5)) * 5;
+  const notes = [...check.notes, `you may move the target ${String(repositionDistanceFt)} feet to a new location — the target must remain within your reach at all times during this movement, except for the final 5 feet which can be to a space adjacent to your reach (A.9)`];
+  return { ok: true, check, success: true, repositionDistanceFt, notes };
+}
+
+/** Steal: take an item that is neither held nor hidden in a bag. */
+export function pf1eSteal(input: {
+  check: Omit<PF1eManeuverCheckInput, "kind">;
+  /** At least one hand free (holding nothing) is required (A.9). */
+  attackerFreeHand?: boolean;
+}):
+  | { ok: false; error: string }
+  | {
+      ok: true;
+      check: Extract<PF1eManeuverCheckResult, { ok: true }>;
+      success: boolean;
+      stolen: boolean;
+      notes: readonly string[];
+    } {
+  if (input.attackerFreeHand === false) {
+    return { ok: false, error: "steal: you must have at least one hand free (holding nothing) to attempt this maneuver (A.9)" };
+  }
+  const check = pf1eManeuverCheck({ ...input.check, kind: "steal" });
+  if (!check.ok) return check;
+  if (!check.success) {
+    return { ok: true, check, success: false, stolen: false, notes: [...check.notes, "the steal fails"] };
+  }
+  const notes = [...check.notes, "you may take one item from your opponent that is neither held nor hidden in a bag or pack (A.9)"];
+  notes.push("items that are closely worn (armor, backpacks, boots, clothing, rings) cannot be taken with this maneuver — use disarm for held items");
+  return { ok: true, check, success: true, stolen: true, notes };
+}
+
