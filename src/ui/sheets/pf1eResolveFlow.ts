@@ -25,7 +25,7 @@ import type { Op } from "../../core/ops";
 import type { PermissionUser } from "../../core/ownership";
 import type { ActorDocument, MessageDocument } from "../../core/documents";
 import type { PF1eDerived, PF1eDerivedAttack } from "../../packages/pf1e/actor";
-import { confirmCritical } from "../../packages/pf1e/tactical";
+import { confirmCritical, shootingIntoMeleePenalty } from "../../packages/pf1e/tactical";
 import type { PF1eMisfireFacts } from "../../packages/pf1e/firearms";
 import type { PF1eSituationalModifiers } from "../../packages/pf1e/tactical";
 import type {
@@ -41,7 +41,7 @@ import {
   pf1eResolvePrepare,
 } from "../../packages/pf1e/resolve";
 import { fmtSigned } from "../../packages/pf1e/rollData";
-import { featAttackParts, featDamageParts } from "../../packages/pf1e/feats";
+import { featAttackParts, featDamageParts, hasPF1eFeat } from "../../packages/pf1e/feats";
 import { pf1eSheetEdit } from "./pf1eSheetModel";
 import { verifyCommitRoll } from "../../dice/commitReveal";
 
@@ -101,6 +101,10 @@ export interface ResolveAttackFlowParams {
   fightingDefensively?: boolean | undefined;
   pointBlankShot?: boolean | undefined;
   distanceFt?: number | undefined;
+  /** P04/C01 — shooting-into-melee geometry (ranged only, AoN 131). */
+  targetEngaged?: boolean | undefined;
+  nearestFriendlyDistanceFt?: number | null | undefined;
+  engagedSizeCategoriesLarger?: number | undefined;
 }
 
 /** The defender for `pf1eResolveAttack`, straight off the target's derivation. */
@@ -301,7 +305,13 @@ export async function resolveAttackFlow(
     distanceFt: params.distanceFt,
   });
   const featAttackDelta = featAttackDeltaParts.reduce((sum, part) => sum + part.value, 0);
-  const bonus = baseBonus + featAttackDelta;
+  const engagementPenalty = line.ranged && params.targetEngaged === true ? shootingIntoMeleePenalty({
+    sizeCategoriesLarger: params.engagedSizeCategoriesLarger ?? 0,
+    preciseShot: hasPF1eFeat(params.feats ?? [], "Precise Shot"),
+    targetEngaged: true,
+    nearestFriendlyDistanceFt: params.nearestFriendlyDistanceFt ?? undefined,
+  }) : 0;
+  const bonus = baseBonus + featAttackDelta + engagementPenalty;
   const featDamageDeltaParts = featDamageParts({
     feats: params.feats,
     bab: params.attackerBab ?? 0,
@@ -314,7 +324,7 @@ export async function resolveAttackFlow(
   });
   const featDamageDelta = featDamageDeltaParts.reduce((sum, part) => sum + part.value, 0);
   const effectiveAttackFormula =
-    featAttackDelta !== 0
+    featAttackDelta !== 0 || engagementPenalty !== 0
       ? `1d20 ${bonus >= 0 ? "+ " + bonus : "- " + Math.abs(bonus)}`
       : params.attackFormula;
   const misfireFacts = misfireFactsOf(params);
@@ -483,12 +493,12 @@ export async function resolveAttackFlow(
     ...(concealmentDie !== undefined ? { concealmentDie } : {}),
     damageTotal,
   });
-  // Surface A07 feat labels in the card notes so the GM can audit the
-  // stance deltas without opening the sheet.
-  if (result.ok && (featAttackDeltaParts.length > 0 || featDamageDeltaParts.length > 0)) {
+  // Surface A07 feat labels and the AoN 131 shooting-into-melee -4/-2/0 ladder in the card notes.
+  if (result.ok && (featAttackDeltaParts.length > 0 || featDamageDeltaParts.length > 0 || engagementPenalty !== 0)) {
     const featNotes = [
       ...featAttackDeltaParts.map((p) => `${p.label} ${fmtSigned(p.value)}`),
       ...featDamageDeltaParts.map((p) => `${p.label} ${fmtSigned(p.value)}`),
+      ...(engagementPenalty !== 0 ? [`shooting into melee ${fmtSigned(engagementPenalty)}`] : []),
     ];
     if (featNotes.length > 0) {
       const withNotes: typeof result = {
@@ -497,6 +507,13 @@ export async function resolveAttackFlow(
       };
       result = withNotes;
     }
+  } else if (result.ok && engagementPenalty === 0 && line.ranged && params.targetEngaged === true) {
+    // Engaged but the size/distance ladder removed the penalty — name it so the GM sees it was considered.
+    const withNotes: typeof result = {
+      ...result,
+      notes: [...result.notes, `shooting into melee: no penalty (size/distance/Precise Shot)`],
+    };
+    result = withNotes;
   }
   if (!result.ok) return { ok: false, error: result.error };
 
@@ -601,6 +618,10 @@ export interface ResolveManyshotFlowParams {
   fightingDefensively?: boolean | undefined;
   pointBlankShot?: boolean | undefined;
   distanceFt?: number | undefined;
+  /** P04/C01 — shooting-into-melee geometry (AoN 131, folded into the Manyshot -4 ladder). */
+  targetEngaged?: boolean | undefined;
+  nearestFriendlyDistanceFt?: number | null | undefined;
+  engagedSizeCategoriesLarger?: number | undefined;
 }
 
 /**
@@ -644,10 +665,16 @@ export async function resolveManyshotFlow(
     distanceFt: params.distanceFt,
   });
   const featDamageDeltaManyshot = featDamageDeltaPartsManyshot.reduce((sum, p) => sum + p.value, 0);
+  const manyshotEngagementPenalty = params.targetEngaged === true ? shootingIntoMeleePenalty({
+    sizeCategoriesLarger: params.engagedSizeCategoriesLarger ?? 0,
+    preciseShot: hasPF1eFeat(params.feats ?? [], "Precise Shot"),
+    targetEngaged: true,
+    nearestFriendlyDistanceFt: params.nearestFriendlyDistanceFt ?? undefined,
+  }) : 0;
   const baseManyshotBonus = (params.line.attackBonuses[0] ?? params.line.attackBonus) - 4;
-  const effectiveManyshotBonus = baseManyshotBonus + featAttackDeltaManyshot;
+  const effectiveManyshotBonus = baseManyshotBonus + featAttackDeltaManyshot + manyshotEngagementPenalty;
   const effectiveManyshotFormulas =
-    featAttackDeltaManyshot !== 0
+    featAttackDeltaManyshot !== 0 || manyshotEngagementPenalty !== 0
       ? params.attackFormulas.map(() => `1d20 ${effectiveManyshotBonus >= 0 ? "+ " + effectiveManyshotBonus : "- " + Math.abs(effectiveManyshotBonus)}`)
       : params.attackFormulas;
   const defender = resolveDefenderFromDerived(params.targetName, params.targetDerived);
@@ -738,7 +765,7 @@ export async function resolveManyshotFlow(
         damageTotal += featDamageDeltaManyshot * mult;
       }
     }
-    const one = pf1eResolveManyshot({
+    const one = pf1eResolveAttack({
       attack: {
         label: params.line.name,
         bonus,
@@ -747,22 +774,19 @@ export async function resolveManyshotFlow(
         ranged: true,
         damageType: params.line.damageType,
       },
-      arrows: [{
-        die,
-        ...(confirmDie === undefined ? {} : { confirmDie }),
-        ...(concealmentDie === undefined ? {} : { concealmentDie }),
-        damageTotal,
-      }],
       defense: params.defense,
       defender: currentDefender,
+      die,
+      ...(confirmDie !== undefined ? { confirmDie } : {}),
+      ...(concealmentDie !== undefined ? { concealmentDie } : {}),
+      damageTotal,
       ...(params.situational ? { situational: params.situational } : {}),
       ...(params.nonlethalDamage === undefined ? {} : { nonlethalDamage: params.nonlethalDamage }),
       ...(params.feats === undefined ? {} : { feats: params.feats }),
       ...(params.positional === undefined ? {} : { positional: params.positional }),
     });
     if (!one.ok) return one;
-    const result = one.arrows[0];
-    if (!result) return { ok: false, error: "Manyshot produced no arrow result" };
+    const result = one;
     arrows.push({
       die,
       ...(confirmDie === undefined ? {} : { confirmDie }),

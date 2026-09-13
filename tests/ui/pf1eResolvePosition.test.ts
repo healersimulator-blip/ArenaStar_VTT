@@ -156,7 +156,7 @@ describe("pf1eResolvePositionReport — the pair's positional facts", () => {
     expect(r.defense).toEqual({});
     expect(r.flanked).toBe(false);
     expect(resolvePositionHint(r, { attacker: "Fighter", target: "Goblin" })).toBe(
-      "Fighter vs Goblin: not flanked; no cover.",
+      "Fighter vs Goblin: not flanked; no cover; not engaged.",
     );
   });
 

@@ -334,6 +334,13 @@ export interface PF1ePairPositionResult {
   cover: ReturnType<typeof coverBetween>;
   /** The collapsed concealment grade the caller supplied (0 when none). */
   concealment: { percent: number; label: string | null };
+  /** P04/C01 — shooting-into-melee geometry (AoN 131): is the target engaged, how far is the nearest friendly, and the size ladder delta. */
+  engagement: {
+    targetEngaged: boolean;
+    nearestFriendlyDistanceFt: number | null;
+    sizeCategoriesLarger: number;
+    engagedFriendlyIds: readonly string[];
+  };
 }
 
 export function pf1ePairPosition(input: {
@@ -401,6 +408,117 @@ export function pf1ePairPosition(input: {
           .flatMap((t) => tokenCells(t, grid)),
         ranged: input.ranged,
       });
+      // P04 — shooting-into-melee engagement (AoN 131): the defender is
+      // engaged with a friendly of the attacker when they are enemies and
+      // either threatens the other. The nearest friendly distance gates the
+      // 10-ft avoidance, and the size ladder gates the -2/0 reductions.
+      const engagement = (() => {
+        const isEnemy = input.isEnemy;
+        if (!isEnemy) {
+          return {
+            targetEngaged: false,
+            nearestFriendlyDistanceFt: null as number | null,
+            sizeCategoriesLarger: 0,
+            engagedFriendlyIds: [] as readonly string[],
+          };
+        }
+        const friendlyTokens = input.tokens.filter(
+          (t) =>
+            t._id !== attacker._id &&
+            t._id !== defender._id &&
+            !isEnemy(attacker._id, t._id),
+        );
+        if (friendlyTokens.length === 0) {
+          return {
+            targetEngaged: false,
+            nearestFriendlyDistanceFt: null,
+            sizeCategoriesLarger: 0,
+            engagedFriendlyIds: [],
+          };
+        }
+        const byIdEntry = new Map(model.entries.map((e) => [e.tokenId, e] as const));
+        const defenderEntry = byIdEntry.get(defender._id);
+        const targetCells = dCells;
+        let nearest: number | null = null;
+        for (const ft of friendlyTokens) {
+          const fCells = tokenCells(ft, grid);
+          if (fCells.length === 0 || targetCells.length === 0) continue;
+          const squares = footprintDistance(fCells, targetCells);
+          if (!Number.isFinite(squares)) continue;
+          const ftDist = squares * FEET_PER_SQUARE;
+          if (nearest === null || ftDist < nearest) nearest = ftDist;
+        }
+        const engagedIds: string[] = [];
+        let maxLarger = 0;
+        const sizeOrder: PF1eSize[] = [
+          "Fine",
+          "Diminutive",
+          "Tiny",
+          "Small",
+          "Medium",
+          "Large",
+          "Huge",
+          "Gargantuan",
+          "Colossal",
+        ];
+        const sizeIndex = (s: PF1eSize | null): number => {
+          if (s === null) return sizeOrder.indexOf("Medium");
+          const idx = sizeOrder.indexOf(s);
+          return idx >= 0 ? idx : sizeOrder.indexOf("Medium");
+        };
+        const defenderSize = defenderEntry?.size ?? "Medium";
+        for (const ft of friendlyTokens) {
+          if (!isEnemy(defender._id, ft._id)) continue;
+          const fEntry = byIdEntry.get(ft._id);
+          const fCells = fEntry ? fEntry.cells.map(parseKey) : tokenCells(ft, grid);
+          const fReachSquares = fEntry?.reachSquares ?? (typeof ft.reachSquares === "number" && Number.isFinite(ft.reachSquares) ? ft.reachSquares : naturalReachSquares(normalizeSize(ft.size) ?? "Medium", ft.shape ?? null));
+          const dReachSquares = defenderEntry?.reachSquares ?? naturalReachSquares(normalizeSize(defender.size) ?? "Medium", null);
+          const fThreatKeys = fEntry ? new Set(fEntry.threatKeys) : new Set(
+            threatenedCells({
+              footprint: fCells,
+              reachSquares: fReachSquares,
+              reachWeapon: ft.reachWeapon === true,
+            }).map(cellKey),
+          );
+          const dThreatKeys = defenderEntry ? new Set(defenderEntry.threatKeys) : new Set(
+            threatenedCells({
+              footprint: targetCells,
+              reachSquares: dReachSquares,
+              reachWeapon: false,
+            }).map(cellKey),
+          );
+          const fThreatens = threatensSpace(
+            {
+              cells: fCells,
+              reachSquares: fReachSquares,
+              reachWeapon: ft.reachWeapon === true,
+              threatened: [...fThreatKeys].map(parseKey),
+            },
+            targetCells,
+          );
+          const dThreatens = threatensSpace(
+            {
+              cells: targetCells,
+              reachSquares: dReachSquares,
+              reachWeapon: false,
+              threatened: [...dThreatKeys].map(parseKey),
+            },
+            fCells,
+          );
+          if (fThreatens || dThreatens) {
+            engagedIds.push(ft._id);
+            const fSize = fEntry?.size ?? (normalizeSize(ft.size) ?? "Medium");
+            const diff = sizeIndex(defenderSize) - sizeIndex(fSize);
+            if (diff > maxLarger) maxLarger = diff;
+          }
+        }
+        return {
+          targetEngaged: engagedIds.length > 0,
+          nearestFriendlyDistanceFt: nearest,
+          sizeCategoriesLarger: Math.max(0, maxLarger),
+          engagedFriendlyIds: engagedIds,
+        };
+      })();
       return {
         ok: true,
         issues: [],
@@ -416,6 +534,7 @@ export function pf1ePairPosition(input: {
           const g = concealmentGrade(input.concealment ?? []);
           return { percent: g.percent, label: g.label };
         })(),
+        engagement,
       };
     }
   }
@@ -443,6 +562,12 @@ export function pf1ePairPosition(input: {
       ranged: input.ranged,
     }),
     concealment: { percent: 0, label: null },
+    engagement: {
+      targetEngaged: false,
+      nearestFriendlyDistanceFt: null,
+      sizeCategoriesLarger: 0,
+      engagedFriendlyIds: [],
+    },
   };
 }
 

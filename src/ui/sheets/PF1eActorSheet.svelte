@@ -564,6 +564,13 @@
         ...(resolveCombatExpertise ? { combatExpertise: true } : {}),
         ...(resolveFightingDefensively ? { fightingDefensively: true } : {}),
         ...(resolvePointBlank ? { pointBlankShot: true, distanceFt: 0 } : {}),
+        ...(line.ranged === true
+          ? {
+              targetEngaged: resolvePosition.engagement?.targetEngaged ?? false,
+              nearestFriendlyDistanceFt: resolvePosition.engagement?.nearestFriendlyDistanceFt ?? null,
+              engagedSizeCategoriesLarger: resolvePosition.engagement?.sizeCategoriesLarger ?? 0,
+            }
+          : {}),
         ...(resolveVerifiable ? { verifiable: true } : {}),
       });
       if (!outcome.ok) resolveError = outcome.error;
@@ -637,6 +644,13 @@
         ...(resolveCombatExpertise ? { combatExpertise: true } : {}),
         ...(resolveFightingDefensively ? { fightingDefensively: true } : {}),
         ...(resolvePointBlank ? { pointBlankShot: true, distanceFt: 0 } : {}),
+        ...(line.ranged === true
+          ? {
+              targetEngaged: resolvePosition.engagement?.targetEngaged ?? false,
+              nearestFriendlyDistanceFt: resolvePosition.engagement?.nearestFriendlyDistanceFt ?? null,
+              engagedSizeCategoriesLarger: resolvePosition.engagement?.sizeCategoriesLarger ?? 0,
+            }
+          : {}),
         ...(resolveVerifiable ? { verifiable: true } : {}),
       });
       if (!outcome.ok) resolveError = outcome.error;
