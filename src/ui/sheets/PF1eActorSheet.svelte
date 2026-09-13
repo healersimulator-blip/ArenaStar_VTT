@@ -82,6 +82,7 @@
     SceneDocument,
   } from "../../core/documents";
   import { resolveAttackFlow, resolveManyshotFlow } from "./pf1eResolveFlow";
+  import { resolveManeuverFlow } from "../combat/pf1eManeuverFlow";
   import type { PF1eDefenseChoice } from "../../packages/pf1e/resolve";
   import {
     COVER_GRADE_OPTIONS,
@@ -321,6 +322,14 @@
   let manyshotBusy = $state(false);
   let resolveError = $state("");
   let resolveWarning = $state("");
+  // P05/D-210 — maneuver resolution (CombatPanel and the sheet share the same flow)
+  let maneuverKind = $state("trip");
+  let maneuverTargetId = $state("");
+  let maneuverHasImproved = $state(false);
+  let maneuverBusy = $state(false);
+  let maneuverError = $state("");
+  let maneuverWarning = $state("");
+  let maneuverVerifiable = $state(false);
   let authoredAttacksCount = $derived(
     Array.isArray(view.authored.attacks) ? view.authored.attacks.length : 0,
   );
@@ -598,6 +607,76 @@
       if (!outcome.ok) resolveError = outcome.error;
     } finally {
       manyshotBusy = false;
+    }
+  }
+
+  function maneuverTargetInfo(): {
+    actor: ActorDocument;
+  } | null {
+    if (!maneuverTargetId) return null;
+    const actor = client.store.get("actors", maneuverTargetId) as ActorDocument | undefined;
+    if (!actor) return null;
+    return { actor };
+  }
+
+  let maneuverPosition = $derived(
+    pf1eResolvePositionReport({
+      scene: activeSceneOf(
+        client.store.getAll("scenes") as readonly SceneDocument[],
+        DEFAULT_SCENE_ID,
+      ),
+      actors: client.store.getAll("actors") as readonly ActorDocument[],
+      attackerActorId: doc._id,
+      targetActorId: maneuverTargetId,
+      ranged: false,
+    }),
+  );
+
+  let maneuverEffectivePositional = $derived.by(() => {
+    const concealment =
+      maneuverPosition.defense?.concealment !== undefined
+        ? { concealment: maneuverPosition.defense.concealment }
+        : undefined;
+    return concealment;
+  });
+
+  async function resolveManeuver(): Promise<void> {
+    maneuverError = "";
+    maneuverWarning = "";
+    const info = maneuverTargetInfo();
+    if (!info) {
+      maneuverError = "Pick a maneuver target.";
+      return;
+    }
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current) {
+      maneuverError = "Actor is no longer available.";
+      return;
+    }
+    maneuverBusy = true;
+    try {
+      const scene = activeSceneOf(
+        client.store.getAll("scenes") as readonly SceneDocument[],
+        DEFAULT_SCENE_ID,
+      );
+      const tokens = (scene?.tokens ?? []) as unknown as readonly { _id: string; actorId?: string | null }[];
+      const outcome = await resolveManeuverFlow(client as unknown as import("../combat/pf1eManeuverFlow").ManeuverFlowClient, client.user, {
+        attacker: current,
+        defender: info.actor,
+        kind: maneuverKind as unknown as import("../combat/pf1eManeuverFlow").ManeuverFlowKind,
+        combat: linked.combat,
+        tokens,
+        scene: scene ?? null,
+        hasImprovedFeat: maneuverHasImproved,
+        ...(maneuverEffectivePositional !== undefined ? maneuverEffectivePositional : {}),
+        ...(maneuverVerifiable ? { verifiable: true } : {}),
+        grappleOpts: { targetAdjacent: true, hasAdjacentSpace: true },
+      });
+      if (!outcome.ok) maneuverError = outcome.error;
+      else if (outcome.aooDamage) maneuverWarning = `AoO dealt ${outcome.aooDamage} — applied as penalty.`;
+      else maneuverWarning = outcome.plan.note ?? "";
+    } finally {
+      maneuverBusy = false;
     }
   }
 
@@ -1941,6 +2020,42 @@
         {#if resolveWarning}<p class="note" data-pf1e-resolve-warning>
             {resolveWarning}
           </p>{/if}
+      </div>
+      <h4>Combat maneuvers (A.9 — provokes an AoO without the Improved feat)</h4>
+      <div class="resolve" data-pf1e-maneuver>
+        <label>Maneuver
+          <select bind:value={maneuverKind} data-pf1e-maneuver-kind>
+            <option value="bull-rush">Bull rush</option>
+            <option value="trip">Trip</option>
+            <option value="disarm">Disarm</option>
+            <option value="sunder">Sunder</option>
+            <option value="reposition">Reposition</option>
+            <option value="drag">Drag</option>
+            <option value="dirty-trick">Dirty trick</option>
+            <option value="steal">Steal</option>
+            <option value="overrun">Overrun</option>
+            <option value="grapple">Grapple</option>
+            <option value="grapple-maintain">Grapple — maintain</option>
+            <option value="grapple-pin">Grapple — pin</option>
+            <option value="grapple-tie-up">Grapple — tie up</option>
+            <option value="grapple-escape">Grapple — escape</option>
+          </select>
+        </label>
+        <label>Target
+          <select bind:value={maneuverTargetId} data-pf1e-maneuver-target>
+            <option value="">— pick a target —</option>
+            {#each pf1eTargetActors() as target (target._id)}
+              <option value={target._id}>{target.name} (CMD {pf1eSheetView(target).derived.cmd})</option>
+            {/each}
+          </select>
+        </label>
+        <label><input type="checkbox" bind:checked={maneuverHasImproved} data-pf1e-maneuver-improved /> Improved (no AoO)</label>
+        <label><input type="checkbox" bind:checked={maneuverVerifiable} data-pf1e-maneuver-verifiable /> Commit-reveal</label>
+        <button type="button" disabled={maneuverBusy || !maneuverTargetId} onclick={() => void resolveManeuver()} data-pf1e-maneuver-submit>{maneuverBusy ? "Resolving…" : "Maneuver"}</button>
+        {#if maneuverError}<p class="warn" data-pf1e-maneuver-error>{maneuverError}</p>{/if}
+        {#if maneuverWarning}<p class="note" data-pf1e-maneuver-warning>{maneuverWarning}</p>{/if}
+        {#if maneuverTargetId && maneuverPosition.ok === false}<p class="note">{maneuverPosition.reason}</p>{/if}
+        <p class="note">Maneuvers spend a standard action and, when they provoke, the defender gets a single melee attack; its damage (if any) penalizes the d20 (AoN 191, 193). Cover/concealment from the scene folds in when readable.</p>
       </div>
       <h4>Mount</h4>
       <div class="resolve" data-pf1e-mount>
