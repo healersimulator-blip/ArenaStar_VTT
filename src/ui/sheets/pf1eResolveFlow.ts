@@ -26,7 +26,9 @@ import type { PermissionUser } from "../../core/ownership";
 import type { ActorDocument, MessageDocument } from "../../core/documents";
 import type { PF1eDerived, PF1eDerivedAttack } from "../../packages/pf1e/actor";
 import { confirmCritical, shootingIntoMeleePenalty } from "../../packages/pf1e/tactical";
-import type { PF1eMisfireFacts } from "../../packages/pf1e/firearms";
+import { firearmShotAmmo, type PF1eMisfireFacts } from "../../packages/pf1e/firearms";
+import type { PF1eMountMovement } from "../../packages/pf1e/mounted";
+import { mountedRangedPenalty } from "../../packages/pf1e/mounted";
 import type { PF1eSituationalModifiers } from "../../packages/pf1e/tactical";
 import type {
   PF1eDefenseChoice,
@@ -105,6 +107,13 @@ export interface ResolveAttackFlowParams {
   targetEngaged?: boolean | undefined;
   nearestFriendlyDistanceFt?: number | null | undefined;
   engagedSizeCategoriesLarger?: number | undefined;
+  /** P08/D-201 — how the mount moved this round (stationary/single/double/run). */
+  mountMovement?: PF1eMountMovement | undefined;
+  /** P09/D-202 — loaded shots for the firearm gate (0 ⇒ refusal). */
+  shotsAvailable?: number | undefined;
+  /** P09/D-202 — attacker for the broken-write when a misfire breaks the weapon. */
+  attackerActor?: ActorDocument | undefined;
+  attackerAttackIndex?: number | undefined;
 }
 
 /** The defender for `pf1eResolveAttack`, straight off the target's derivation. */
@@ -311,7 +320,9 @@ export async function resolveAttackFlow(
     targetEngaged: true,
     nearestFriendlyDistanceFt: params.nearestFriendlyDistanceFt ?? undefined,
   }) : 0;
-  const bonus = baseBonus + featAttackDelta + engagementPenalty;
+  const mountPenaltyPart = line.ranged === true && params.mountMovement !== undefined ? mountedRangedPenalty(params.mountMovement) : null;
+  const mountPenalty = mountPenaltyPart?.value ?? 0;
+  const bonus = baseBonus + featAttackDelta + engagementPenalty + mountPenalty;
   const featDamageDeltaParts = featDamageParts({
     feats: params.feats,
     bab: params.attackerBab ?? 0,
@@ -324,7 +335,7 @@ export async function resolveAttackFlow(
   });
   const featDamageDelta = featDamageDeltaParts.reduce((sum, part) => sum + part.value, 0);
   const effectiveAttackFormula =
-    featAttackDelta !== 0 || engagementPenalty !== 0
+    featAttackDelta !== 0 || engagementPenalty !== 0 || mountPenalty !== 0
       ? `1d20 ${bonus >= 0 ? "+ " + bonus : "- " + Math.abs(bonus)}`
       : params.attackFormula;
   const misfireFacts = misfireFactsOf(params);
@@ -388,6 +399,14 @@ export async function resolveAttackFlow(
       error:
         "the target has total cover — no attack can be made (AoN 181, CRB p.195)",
     };
+  }
+
+  // 0b. P09 — ammo gate (§2.9): a firearm without a loaded shot cannot be attacked with.
+  if (line.misfire !== undefined && params.shotsAvailable !== undefined) {
+    const ammo = firearmShotAmmo({ shotsAvailable: params.shotsAvailable });
+    if (!ammo.canShoot) {
+      return { ok: false, error: ammo.refusal ?? "the firearm has no shot loaded (§2.9)" };
+    }
   }
 
   // 1. The attack roll (A07 feat stances fold into the bonus via featAttackParts).
@@ -493,12 +512,13 @@ export async function resolveAttackFlow(
     ...(concealmentDie !== undefined ? { concealmentDie } : {}),
     damageTotal,
   });
-  // Surface A07 feat labels and the AoN 131 shooting-into-melee -4/-2/0 ladder in the card notes.
-  if (result.ok && (featAttackDeltaParts.length > 0 || featDamageDeltaParts.length > 0 || engagementPenalty !== 0)) {
+  // Surface A07 feat labels, the AoN 131 shooting-into-melee ladder, and P08 mounted ranged penalty.
+  if (result.ok && (featAttackDeltaParts.length > 0 || featDamageDeltaParts.length > 0 || engagementPenalty !== 0 || mountPenalty !== 0)) {
     const featNotes = [
       ...featAttackDeltaParts.map((p) => `${p.label} ${fmtSigned(p.value)}`),
       ...featDamageDeltaParts.map((p) => `${p.label} ${fmtSigned(p.value)}`),
       ...(engagementPenalty !== 0 ? [`shooting into melee ${fmtSigned(engagementPenalty)}`] : []),
+      ...(mountPenaltyPart !== null ? [`${mountPenaltyPart.label} ${fmtSigned(mountPenaltyPart.value)}`] : []),
     ];
     if (featNotes.length > 0) {
       const withNotes: typeof result = {
@@ -555,6 +575,35 @@ export async function resolveAttackFlow(
         diff["-=system.pf1e.tempHp"] = null;
       }
       ops.push({ kind: "update", ref: { coll: "actors", id: params.targetActor._id }, diff });
+    }
+  }
+
+  // 5b. P09/D-202 — a misfire that breaks the weapon persists the broken condition on the attacker.
+  // The resolver already returned the verdict (first misfire → broken; second early → explosion);
+  // this is the authoring write so the next shot sees the escalated value.
+  if (result.ok && result.misfire !== undefined && result.misfire.misfire) {
+    const verdict = result.misfire as { breaksWeapon?: boolean; explodes?: boolean; weaponDestroyed?: boolean };
+    const needsBroken = verdict.breaksWeapon === true || verdict.explodes === true || verdict.weaponDestroyed === true;
+    if (needsBroken && params.attackerActor !== undefined && params.attackerAttackIndex !== undefined) {
+      if (!user || !can(user, "update", params.attackerActor, "actors")) {
+        if (hpWriteError === null) hpWriteError = "You do not own the attacker — the broken condition was not persisted.";
+      } else {
+        const idx = params.attackerAttackIndex;
+        // Only write when the line is not already broken (idempotent guard).
+        const alreadyBroken = params.attackerActor.system !== undefined && typeof (params.attackerActor.system as Record<string, unknown>).pf1e === "object"
+          ? Array.isArray(((params.attackerActor.system as Record<string, unknown>).pf1e as Record<string, unknown>).attacks)
+            ? (((params.attackerActor.system as Record<string, unknown>).pf1e as Record<string, unknown>).attacks as unknown[])[idx] !== undefined
+              && typeof ((((params.attackerActor.system as Record<string, unknown>).pf1e as Record<string, unknown>).attacks as unknown[])[idx] as Record<string, unknown>).broken === "boolean"
+              ? ((((params.attackerActor.system as Record<string, unknown>).pf1e as Record<string, unknown>).attacks as unknown[])[idx] as Record<string, unknown>).broken === true
+              : false
+            : false
+          : false;
+        if (!alreadyBroken) {
+          const diff: Record<string, import("../../core/documents").Json> = {};
+          diff[`system.pf1e.attacks.${idx}.broken`] = true as unknown as import("../../core/documents").Json;
+          ops.push({ kind: "update", ref: { coll: "actors", id: params.attackerActor._id }, diff });
+        }
+      }
     }
   }
 
@@ -622,6 +671,8 @@ export interface ResolveManyshotFlowParams {
   targetEngaged?: boolean | undefined;
   nearestFriendlyDistanceFt?: number | null | undefined;
   engagedSizeCategoriesLarger?: number | undefined;
+  /** P08/D-201 — mount movement (Manyshot is ranged; −4 double/−8 run while mounted). */
+  mountMovement?: PF1eMountMovement | undefined;
 }
 
 /**
@@ -675,9 +726,11 @@ export async function resolveManyshotFlow(
     nearestFriendlyDistanceFt: params.nearestFriendlyDistanceFt ?? undefined,
   }) : 0;
   const baseManyshotBonus = (params.line.attackBonuses[0] ?? params.line.attackBonus) - 4;
-  const effectiveManyshotBonus = baseManyshotBonus + featAttackDeltaManyshot + manyshotEngagementPenalty;
+  const manyshotMountPenaltyPart = params.mountMovement !== undefined ? mountedRangedPenalty(params.mountMovement) : null;
+  const manyshotMountPenalty = manyshotMountPenaltyPart?.value ?? 0;
+  const effectiveManyshotBonus = baseManyshotBonus + featAttackDeltaManyshot + manyshotEngagementPenalty + manyshotMountPenalty;
   const effectiveManyshotFormulas =
-    featAttackDeltaManyshot !== 0 || manyshotEngagementPenalty !== 0
+    featAttackDeltaManyshot !== 0 || manyshotEngagementPenalty !== 0 || manyshotMountPenalty !== 0
       ? params.attackFormulas.map(() => `1d20 ${effectiveManyshotBonus >= 0 ? "+ " + effectiveManyshotBonus : "- " + Math.abs(effectiveManyshotBonus)}`)
       : params.attackFormulas;
   const defender = resolveDefenderFromDerived(params.targetName, params.targetDerived);

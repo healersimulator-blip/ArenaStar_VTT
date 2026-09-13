@@ -74,7 +74,9 @@
   import { resolveTacticalEffects } from "../../packages/pf1e/effectOps";
   import {
     mountedHigherGround,
+    mountedRangedPenalty,
     mountLinkageOf,
+    type PF1eMountMovement,
   } from "../../packages/pf1e/mounted";
   import type {
     ActorDocument,
@@ -331,6 +333,7 @@
     "auto" | "none" | (typeof COVER_GRADE_OPTIONS)[number]
   >("auto");
   let resolveCharging = $state(false);
+  let resolveMountMovement = $state<PF1eMountMovement>("stationary");
   let resolveNonlethal = $state(false);
   let resolveVerifiable = $state(false);
   let resolvePowerAttack = $state(false);
@@ -467,6 +470,9 @@
   });
 
   /** The positional defenses the resolver folds in: auto = the geometry's word. */
+  /** P08/D-201 — ranged penalty from the selected mount movement (−4 double / −8 run). */
+  let mountedRangedPenaltyPart = $derived(mountedRangedPenalty(resolveMountMovement));
+
   let effectivePositional = $derived.by(() => {
     const concealment =
       resolvePosition.defense.concealment !== undefined
@@ -585,6 +591,8 @@
               engagedSizeCategoriesLarger: resolvePosition.engagement?.sizeCategoriesLarger ?? 0,
             }
           : {}),
+        ...(resolveMountMovement !== "stationary" ? { mountMovement: resolveMountMovement } : {}),
+        ...(doc ? { attackerActor: doc, attackerAttackIndex: resolveAttackIndex } : {}),
         ...(resolveVerifiable ? { verifiable: true } : {}),
       });
       if (!outcome.ok) resolveError = outcome.error;
@@ -665,6 +673,7 @@
               engagedSizeCategoriesLarger: resolvePosition.engagement?.sizeCategoriesLarger ?? 0,
             }
           : {}),
+        ...(resolveMountMovement !== "stationary" ? { mountMovement: resolveMountMovement } : {}),
         ...(resolveVerifiable ? { verifiable: true } : {}),
       });
       if (!outcome.ok) resolveError = outcome.error;
@@ -2119,6 +2128,14 @@
         <label
           ><input type="checkbox" bind:checked={resolveCharging} /> Charge +2</label
         >
+        <label>Mount movement
+          <select bind:value={resolveMountMovement} data-pf1e-mount-movement>
+            <option value="stationary">Stationary</option>
+            <option value="single">Single move (no penalty)</option>
+            <option value="double">Double move (−4 ranged)</option>
+            <option value="run">Running (−8 ranged)</option>
+          </select>
+        </label>
         <label
           ><input
             type="checkbox"
@@ -2194,6 +2211,11 @@
           <p class="note" data-pf1e-mounted-bonus>
             Mounted: +1 on melee attacks vs the smaller, on-foot target (A.11 —
             the higher-ground bonus)
+          </p>
+        {/if}
+        {#if mountedRangedPenaltyPart !== null && d.attacks[resolveAttackIndex]?.ranged === true && resolveTargetId}
+          <p class="note" data-pf1e-mounted-penalty>
+            Mounted ranged penalty: {mountedRangedPenaltyPart.label} {mountedRangedPenaltyPart.value} (A.11)
           </p>
         {/if}
         {#if resolveError}<p class="warn" data-pf1e-resolve-error>
