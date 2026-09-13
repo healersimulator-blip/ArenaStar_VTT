@@ -319,6 +319,11 @@
   let resolveCharging = $state(false);
   let resolveNonlethal = $state(false);
   let resolveVerifiable = $state(false);
+  let resolvePowerAttack = $state(false);
+  let resolveDeadlyAim = $state(false);
+  let resolveCombatExpertise = $state(false);
+  let resolveFightingDefensively = $state(false);
+  let resolvePointBlank = $state(false);
   let resolveBusy = $state(false);
   let manyshotBusy = $state(false);
   let resolveError = $state("");
@@ -553,6 +558,12 @@
           ? { feats: view.authored.feats as string[] }
           : {}),
         ...(group.provokes ? { provokes: true } : {}),
+        attackerBab: Math.trunc(view.derived.baseAttack),
+        ...(resolvePowerAttack ? { powerAttack: true } : {}),
+        ...(resolveDeadlyAim ? { deadlyAim: true } : {}),
+        ...(resolveCombatExpertise ? { combatExpertise: true } : {}),
+        ...(resolveFightingDefensively ? { fightingDefensively: true } : {}),
+        ...(resolvePointBlank ? { pointBlankShot: true, distanceFt: 0 } : {}),
         ...(resolveVerifiable ? { verifiable: true } : {}),
       });
       if (!outcome.ok) resolveError = outcome.error;
@@ -620,6 +631,12 @@
         ...(Array.isArray(view.authored.feats)
           ? { feats: view.authored.feats as string[] }
           : {}),
+        attackerBab: Math.trunc(view.derived.baseAttack),
+        ...(resolvePowerAttack ? { powerAttack: true } : {}),
+        ...(resolveDeadlyAim ? { deadlyAim: true } : {}),
+        ...(resolveCombatExpertise ? { combatExpertise: true } : {}),
+        ...(resolveFightingDefensively ? { fightingDefensively: true } : {}),
+        ...(resolvePointBlank ? { pointBlankShot: true, distanceFt: 0 } : {}),
         ...(resolveVerifiable ? { verifiable: true } : {}),
       });
       if (!outcome.ok) resolveError = outcome.error;
@@ -2074,6 +2091,41 @@
             bind:checked={resolveNonlethal}
             data-pf1e-resolve-nonlethal
           /> Nonlethal (−4 with a lethal weapon)</label
+        >
+        <label
+          ><input
+            type="checkbox"
+            bind:checked={resolvePowerAttack}
+            data-pf1e-resolve-power-attack
+          /> Power Attack</label
+        >
+        <label
+          ><input
+            type="checkbox"
+            bind:checked={resolveDeadlyAim}
+            data-pf1e-resolve-deadly-aim
+          /> Deadly Aim</label
+        >
+        <label
+          ><input
+            type="checkbox"
+            bind:checked={resolveCombatExpertise}
+            data-pf1e-resolve-combat-expertise
+          /> Combat Expertise</label
+        >
+        <label
+          ><input
+            type="checkbox"
+            bind:checked={resolveFightingDefensively}
+            data-pf1e-resolve-fighting-defensively
+          /> Fighting defensively (−4 / +2 AC)</label
+        >
+        <label
+          ><input
+            type="checkbox"
+            bind:checked={resolvePointBlank}
+            data-pf1e-resolve-point-blank
+          /> Point-Blank Shot (≤30 ft)</label
         >
         <label
           ><input
