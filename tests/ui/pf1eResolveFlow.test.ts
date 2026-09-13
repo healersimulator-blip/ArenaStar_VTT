@@ -270,6 +270,94 @@ describe("resolveAttackFlow — the A06b chat flow", () => {
     });
   });
 
+  test("P04 — standard cover folds +4 into AC, and the card names it", async () => {
+    const client = new FakeClient();
+    // 11 + 9 = 20 vs AC 16 + 4 cover = 20 — hits exactly through the fold.
+    client.script = [{ die: 11, total: 20 }, { total: 7 }];
+    const outcome = await resolveAttackFlow(client, owner, params({
+      positional: { cover: "standard" },
+    }));
+    expect(outcome).toMatchObject({
+      ok: true,
+      result: {
+        ok: true,
+        outcome: "hit",
+        defenseAc: 20,
+        damage: { dealt: 2 },
+        hp: { before: 12, after: 10 },
+      },
+    });
+    const card = client.submitted[0]?.[0];
+    if (card?.kind !== "create") throw new Error("expected a create op");
+    expect((card.data as MessageDocument).content).toContain(
+      "standard cover: +4 to the target's AC (AoN 181)",
+    );
+  });
+
+  test("P04 — a live hit behind concealment rolls its own public d% before damage", async () => {
+    const client = new FakeClient();
+    // 20 vs AC 20 hits; the d% (15) is at or below the 20% miss chance — the
+    // attack misses, the damage roll is not consumed by the outcome, and no
+    // HP write is submitted (AoN 182).
+    client.script = [
+      { die: 11, total: 20 },
+      { die: 15, total: 15 },
+      { total: 7 },
+    ];
+    const outcome = await resolveAttackFlow(client, owner, params({
+      positional: { concealment: { percent: 20, label: "fog" } },
+    }));
+    expect(client.formulas).toEqual(["1d20 + 9", "1d100", "1d8 + 6"]);
+    expect(outcome).toMatchObject({
+      ok: true,
+      result: {
+        ok: true,
+        outcome: "miss",
+        hp: { before: 12, after: 12 },
+      },
+    });
+    const card = client.submitted[0]?.[0];
+    if (card?.kind !== "create") throw new Error("expected a create op");
+    expect((card.data as MessageDocument).content).toContain(
+      "concealment miss — d% 15 ≤ 20 (fog)",
+    );
+  });
+
+  test("P04 — a d% above the miss chance lets the hit stand", async () => {
+    const client = new FakeClient();
+    client.script = [
+      { die: 11, total: 20 },
+      { die: 21, total: 21 },
+      { total: 7 },
+    ];
+    const outcome = await resolveAttackFlow(client, owner, params({
+      positional: { concealment: { percent: 20 } },
+    }));
+    expect(client.formulas).toEqual(["1d20 + 9", "1d100", "1d8 + 6"]);
+    expect(outcome).toMatchObject({
+      ok: true,
+      result: {
+        ok: true,
+        outcome: "hit",
+        damage: { dealt: 2 },
+        hp: { before: 12, after: 10 },
+      },
+    });
+  });
+
+  test("P04 — total cover refuses before any die is rolled", async () => {
+    const client = new FakeClient();
+    const outcome = await resolveAttackFlow(client, owner, params({
+      positional: { cover: "total" },
+    }));
+    expect(outcome).toMatchObject({
+      ok: false,
+      error:
+        "the target has total cover — no attack can be made (AoN 181, CRB p.195)",
+    });
+    expect(client.formulas).toEqual([]);
+  });
+
   test("a user without ownership narrates but cannot write hp — the card says so", async () => {
     const client = new FakeClient();
     client.script = [{ die: 11, total: 20 }, { total: 7 }];

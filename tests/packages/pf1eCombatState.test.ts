@@ -7,6 +7,7 @@
 import { describe, expect, test } from "vitest";
 import { activeEffects, currentCombatant } from "../../src/core/combat";
 import type {
+  ActorDocument,
   CombatDocument,
   CombatantDocument,
   Json,
@@ -660,5 +661,71 @@ describe("explicit awareness and encounter end (T03, A.1)", () => {
     expect(ended.state.surprised).toEqual([]);
     expect(ended.state.clockSeconds).toBe(0);
     expect(readRoundState(ended.combat).phase).toBe("setup");
+  });
+});
+
+describe("P7/H01/D-204 — the dying round's stabilization obligation", () => {
+  const dyingActor = (
+    hp: number,
+    conditions: string[] = [],
+  ): ActorDocument => ({
+    _id: "hero",
+    type: "actor",
+    name: "Hero",
+    ownership: { default: 3 },
+    flags: {},
+    items: [],
+    effects: [],
+    system: {
+      pf1e: {
+        abilities: { str: 14, dex: 14, con: 14 },
+        hp,
+        hpMax: 20,
+        ...(conditions.length > 0 ? { conditions } : {}),
+      },
+    },
+  });
+  const heroCombatant = (): CombatantDocument => ({
+    ...combatant("hero-c", 5),
+    actorId: "hero",
+  });
+  const roundsCombat = (): CombatDocument =>
+    combat([combatant("foe", 10), heroCombatant()], 1, 0);
+
+  test("a dying creature whose turn starts owes the Constitution check", () => {
+    const next = pf1eNextTurn(roundsCombat(), {
+      actors: [dyingActor(-3)],
+    });
+    expect(next.dyingChecks).toEqual([
+      {
+        combatantId: "hero-c",
+        actorId: "hero",
+        actorName: "Hero",
+        hp: -3,
+        conMod: 2,
+      },
+    ]);
+  });
+
+  test("stable, dead, disabled and unlinked creatures owe nothing", () => {
+    expect(
+      pf1eNextTurn(roundsCombat(), {
+        actors: [dyingActor(-3, ["Stable"])],
+      }).dyingChecks,
+    ).toEqual([]);
+    expect(
+      pf1eNextTurn(roundsCombat(), { actors: [dyingActor(-14)] })
+        .dyingChecks,
+    ).toEqual([]);
+    expect(
+      pf1eNextTurn(roundsCombat(), { actors: [dyingActor(0)] }).dyingChecks,
+    ).toEqual([]);
+    // No actor documents passed ⇒ no checks reported, exactly as documented.
+    expect(pf1eNextTurn(roundsCombat()).dyingChecks).toEqual([]);
+    // A combatant with no actor link cannot owe a check.
+    const unlinked = combat([combatant("foe", 10), combatant("hero-c", 5)], 1, 0);
+    expect(
+      pf1eNextTurn(unlinked, { actors: [dyingActor(-3)] }).dyingChecks,
+    ).toEqual([]);
   });
 });

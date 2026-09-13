@@ -17,11 +17,13 @@
  * transitions, so the host can submit one diff and every client derives the same thing.
  */
 import type {
+  ActorDocument,
   CombatDocument,
   CombatantDocument,
   EffectDocument,
   Json,
 } from "../../core/documents";
+import { deriveFromDocuments } from "./actor";
 import { err, okVal, type Result } from "../../core/result";
 import {
   currentCombatant,
@@ -598,7 +600,15 @@ export function startWithSurprise(
  */
 export function pf1eNextTurn(
   combat: CombatDocument,
-  opts: { advanceClock?: boolean | undefined } = {},
+  opts: {
+    advanceClock?: boolean | undefined;
+    /**
+     * P7/H01/D-204 — the world's actor documents, so the transition can
+     * report which starting combatants owe the dying round's stabilization
+     * check. Absent ⇒ no dying checks are reported (the caller rolls none).
+     */
+    actors?: readonly ActorDocument[] | undefined;
+  } = {},
 ): {
   combat: CombatDocument;
   state: PF1eRoundState;
@@ -608,6 +618,23 @@ export function pf1eNextTurn(
   lapsed: Array<{ combatantId: string; effectId: string }>;
   /** Combatants whose AoO budget just refreshed. */
   aooRefreshed: string[];
+  /**
+   * P7/H01/D-204 — dying combatants whose turn just started: they owe the
+   * round's Constitution check (DC 10, penalty = negative HP, nat 20
+   * automatic, failure loses 1 HP — `injury.ts` owns the verdict). The
+   * transition rolls no die; the UI that drives the turn asks the host and
+   * writes the outcome. Dead-at-negative-Con and stabilized (an authored
+   * "Stable" condition) combatants owe nothing.
+   */
+  dyingChecks: Array<{
+    combatantId: string;
+    actorId: string;
+    actorName: string;
+    /** Current (negative) hit points. */
+    hp: number;
+    /** The derivation's effective Constitution modifier. */
+    conMod: number;
+  }>;
   /** Held actions that came due at the start of the new round. */
   heldDelivered: Array<{
     combatantId: string;
@@ -644,6 +671,7 @@ export function pf1eNextTurn(
         expired: [],
         lapsed: [],
         aooRefreshed: [],
+        dyingChecks: [],
         heldDelivered: [],
         clockDeltaSeconds: 0,
       };
@@ -676,6 +704,7 @@ export function pf1eNextTurn(
       expired: [],
       lapsed: [],
       aooRefreshed: started.combat.combatants.map((c) => c._id),
+      dyingChecks: [],
       heldDelivered: [],
       clockDeltaSeconds: state.secondsPerRound,
     };
@@ -803,6 +832,60 @@ export function pf1eNextTurn(
 
   const active = currentCombatant(core.combat);
 
+  // P7/H01/D-204 — a dying creature owes its stabilization check on its turn:
+  // the transition reports the obligation; the UI rolls and writes (the
+  // derivation supplies the effective Con modifier; the authored "Stable"
+  // condition suspends the round checks in favour of the hourly wake).
+  const dyingChecks: Array<{
+    combatantId: string;
+    actorId: string;
+    actorName: string;
+    hp: number;
+    conMod: number;
+  }> = [];
+  if (active !== null && opts.actors !== undefined) {
+    const actorId = active.actorId ?? null;
+    const actor =
+      actorId !== null
+        ? (opts.actors.find((a) => a._id === actorId) ?? null)
+        : null;
+    if (actor !== null) {
+      const pf1e =
+        (actor.system as { pf1e?: Record<string, unknown> }).pf1e ?? {};
+      const hpRaw = pf1e.hp;
+      const hpMaxRaw = pf1e.hpMax;
+      const hp =
+        typeof hpRaw === "number" && Number.isFinite(hpRaw)
+          ? hpRaw
+          : typeof hpMaxRaw === "number" && Number.isFinite(hpMaxRaw)
+            ? hpMaxRaw
+            : 0;
+      const abilities =
+        typeof pf1e.abilities === "object" && pf1e.abilities !== null
+          ? (pf1e.abilities as Record<string, unknown>)
+          : {};
+      const conRaw = abilities.con;
+      const con =
+        typeof conRaw === "number" && Number.isFinite(conRaw) ? conRaw : 0;
+      const conditions = Array.isArray(pf1e.conditions)
+        ? pf1e.conditions.filter((x): x is string => typeof x === "string")
+        : [];
+      const stable = conditions.some((x) => x.toLowerCase() === "stable");
+      const dying = hp < 0 && !(con > 0 && -hp >= con);
+      if (dying && !stable) {
+        dyingChecks.push({
+          combatantId: active._id,
+          actorId: actor._id,
+          actorName: actor.name,
+          hp,
+          conMod: deriveFromDocuments({
+            actor: { system: actor.system as Record<string, unknown> },
+          }).abilityMods.con,
+        });
+      }
+    }
+  }
+
   if (roundRolled || active) {
     combatants = combatants.map((c) => {
       const cs = readCombatantState(c);
@@ -899,6 +982,7 @@ export function pf1eNextTurn(
     expired,
     lapsed,
     aooRefreshed,
+    dyingChecks,
     heldDelivered,
     clockDeltaSeconds: clockDelta,
   };

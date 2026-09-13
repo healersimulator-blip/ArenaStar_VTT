@@ -945,3 +945,185 @@ describe("ability damage and drain (CRB p.555)", () => {
     }
   });
 });
+
+describe("P09/D-202 — firearm lines carry their misfire facts", () => {
+  test("an authored firearm line carries generation, minimum, broken and magical", () => {
+    const d = deriveFromDocuments({
+      actor: {
+        system: {
+          pf1e: {
+            attacks: [
+              {
+                name: "Musket",
+                ranged: true,
+                rangeIncrementFt: 40,
+                damageDice: "1d12",
+                firearm: { generation: "early", misfireMinimum: 2 },
+              },
+            ],
+          },
+        },
+      },
+    });
+    expect(d.attacks[0]?.misfire).toEqual({
+      generation: "early",
+      misfireMinimum: 2,
+      broken: false,
+      magical: false,
+    });
+    const broken = deriveFromDocuments({
+      actor: {
+        system: {
+          pf1e: {
+            attacks: [
+              {
+                name: "Musket",
+                ranged: true,
+                firearm: {
+                  generation: "advanced",
+                  misfireMinimum: 1,
+                  magical: true,
+                },
+                broken: true,
+              },
+            ],
+          },
+        },
+      },
+    });
+    expect(broken.attacks[0]?.misfire).toEqual({
+      generation: "advanced",
+      misfireMinimum: 1,
+      broken: true,
+      magical: true,
+    });
+  });
+
+  test("a firearm block without a live minimum carries nothing; an out-of-range minimum is named", () => {
+    const never = deriveFromDocuments({
+      actor: {
+        system: {
+          pf1e: {
+            attacks: [
+              {
+                name: "Musket",
+                ranged: true,
+                firearm: { generation: "early" },
+              },
+            ],
+          },
+        },
+      },
+    });
+    expect(never.attacks[0]?.misfire).toBeUndefined();
+    const bad = deriveFromDocuments({
+      actor: {
+        system: {
+          pf1e: {
+            attacks: [
+              {
+                name: "Musket",
+                ranged: true,
+                firearm: { generation: "early", misfireMinimum: 25 },
+              },
+            ],
+          },
+        },
+      },
+    });
+    expect(bad.attacks[0]?.misfire).toBeUndefined();
+    expect(bad.issues.join("\n")).toContain(
+      "attacks[0].firearm.misfireMinimum = 25 is outside 1–20 — treated as never misfiring",
+    );
+  });
+});
+
+describe("P7/H04/D-204 — negative levels fold into every listed statistic", () => {
+  const base = {
+    abilities: { str: 16, dex: 14, con: 14, int: 12, wis: 12, cha: 10 },
+    baseAttack: 6,
+    hp: 30,
+    hpMax: 30,
+    saves: { fort: 8, ref: 5, will: 2 },
+    attacks: [
+      { name: "Longsword", damageDice: "1d8", damageBonus: 3 },
+    ],
+    spells: { keyAbility: "int", casterLevel: 6 },
+  };
+
+  test("two negative levels: −2 attacks/saves/CMB/CMD, −10 HP and HP max, −2 caster level", () => {
+    const clean = deriveFromDocuments({ actor: { system: { pf1e: base } } });
+    const drained = deriveFromDocuments({
+      actor: {
+        system: {
+          pf1e: { ...base, negativeLevels: { temporary: 2 } },
+        },
+      },
+    });
+    expect(drained.attacks[0]?.attackBonus).toBe(
+      (clean.attacks[0]?.attackBonus ?? 0) - 2,
+    );
+    expect(drained.saves).toEqual({
+      fort: clean.saves.fort - 2,
+      ref: clean.saves.ref - 2,
+      will: clean.saves.will - 2,
+    });
+    expect(drained.cmb).toBe(clean.cmb - 2);
+    expect(drained.cmd).toBe(clean.cmd - 2);
+    expect(drained.cmdFlatFooted).toBe(clean.cmdFlatFooted - 2);
+    expect(drained.hp).toBe(20);
+    expect(drained.hpMax).toBe(20);
+    expect(drained.defaults.join("\n")).toContain(
+      "negativeLevels: 2 (2 temporary, 0 permanent) — AoN 427 penalties folded",
+    );
+    // The caster level is a level-dependent variable; spell slots are not lost.
+    expect(drained.spellCasterLevel).toBe(4);
+    // Initiative is not on AoN 427's list — it takes no penalty.
+    expect(drained.initiative).toBe(clean.initiative);
+  });
+
+  test("death when the levels reach authored Hit Dice", () => {
+    const dead = deriveFromDocuments({
+      actor: {
+        system: {
+          pf1e: {
+            ...base,
+            hitDice: 6,
+            negativeLevels: { permanent: 6 },
+          },
+        },
+      },
+    });
+    expect(dead.conditions).toContain("dead");
+    const alive = deriveFromDocuments({
+      actor: {
+        system: {
+          pf1e: {
+            ...base,
+            hitDice: 6,
+            negativeLevels: { permanent: 5 },
+          },
+        },
+      },
+    });
+    expect(alive.conditions).not.toContain("dead");
+  });
+
+  test("an invalid authored count refuses normalization by name", () => {
+    const bad = deriveFromDocuments({
+      actor: {
+        system: {
+          pf1e: {
+            ...base,
+            negativeLevels: { temporary: -1 },
+          },
+        },
+      },
+    });
+    // The system normalizer rejects the whole block (the hitDice contract):
+    // the named error, and the bare-default derivation behind it.
+    expect(bad.issues.join("\n")).toContain(
+      "system.pf1e.negativeLevels.temporary must be a nonnegative whole number",
+    );
+  });
+});

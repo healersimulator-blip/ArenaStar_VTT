@@ -46,6 +46,7 @@ const act = (
     ...(input.trigger !== undefined ? { trigger: input.trigger } : {}),
     ...(input.ledgers !== undefined ? { ledgers: input.ledgers } : {}),
     ...(input.isEnemy !== undefined ? { isEnemy: input.isEnemy } : {}),
+    ...(input.coverWalls !== undefined ? { coverWalls: input.coverWalls } : {}),
   });
 
 describe("P06 — the tactical scene decides action AoOs from the queue", () => {
@@ -78,6 +79,59 @@ describe("P06 — the tactical scene decides action AoOs from the queue", () => 
     );
     // The highlight draw list is world rects, one per occupied square.
     expect(res.rects).toEqual([{ x: 0, y: 0, size: 100 }]);
+  });
+
+  test("AoN 181 — cover between the reactor and the provoker refuses the strike", () => {
+    // The wizard casts at (0,0); the fighter at (1,0) threatens it. A wall
+    // along their shared edge (y 20–80 on x=100) crosses the diagonal corner
+    // lines, so the provoker has standard cover and the opportunity is
+    // refused — cover blocks the attack of opportunity (AoN 181).
+    const res = act({
+      tokens: [token("wizard", 0, 0), token("fighter", 1, 0)],
+      provokerId: "wizard",
+      actionId: "cast-spell",
+      isEnemy: () => true,
+      coverWalls: [{ x1: 100, y1: 20, x2: 100, y2: 80 }],
+    });
+    expect(res.queued).toEqual([]);
+    expect(res.refused).toEqual([
+      {
+        tokenId: "fighter",
+        reason:
+          "the provoker has cover — you can't execute an attack of opportunity against an opponent with cover (AoN 181)",
+      },
+    ]);
+    expect(res.reactors[0]?.line).toBe(
+      "fighter forgoes the attack of opportunity — the provoker has cover — you can't execute an attack of opportunity against an opponent with cover (AoN 181)",
+    );
+  });
+
+  test("AoN 181 — a clear lane still queues when cover facts are supplied; absent facts are a named default", () => {
+    const clear = act({
+      tokens: [token("wizard", 0, 0), token("fighter", 1, 0)],
+      provokerId: "wizard",
+      actionId: "cast-spell",
+      isEnemy: () => true,
+      coverWalls: [],
+    });
+    expect(clear.queued).toHaveLength(1);
+    expect(clear.refused).toEqual([]);
+    expect(clear.defaults.map((d) => d.field).includes("coverWalls")).toBe(
+      false,
+    );
+
+    const noFacts = act({
+      tokens: [token("wizard", 0, 0), token("fighter", 1, 0)],
+      provokerId: "wizard",
+      actionId: "cast-spell",
+      isEnemy: () => true,
+    });
+    expect(noFacts.queued).toHaveLength(1);
+    expect(
+      noFacts.defaults.find((d) => d.field === "coverWalls")?.message,
+    ).toBe(
+      "cover facts not supplied — reactors were queued without AoN 181's cover exclusion",
+    );
   });
 
   test("a Table 7-2 `no` row refuses by name and queues nothing", () => {

@@ -175,6 +175,17 @@ export interface AppSurface {
     tokens: Array<{ id: string; col: number; row: number; size?: string }>,
   ): { ok: boolean; placed: number; cellSize: number };
   /**
+   * D-205 — merge authored `system.pf1e` fields onto an existing actor (the
+   * e2e counterpart of the sheet's editors), so specs can author hp,
+   * abilities, conditions and friends on placed actors without a UI pass.
+   */
+  pf1eAuthorActor(spec: {
+    actorId: string;
+    patch: Record<string, unknown>;
+  }): { ok: boolean; error: string | null };
+  /** D-205 — read one actor's authored `system.pf1e` block back (the write counterpart is `pf1eAuthorActor`). */
+  pf1eActorSystem(actorId: string): Record<string, unknown> | null;
+  /**
    * P04 (D-181): resolve the active scene's threatened squares and AoN 183's
    * flanking facts through the same pure seam the unit tests exercise —
    * scene grid → `tokenCells` → `threatenedCells` → `resolveFlanking`. Creature
@@ -788,6 +799,16 @@ export interface GmFogSurface {
     rectsDrawn: number;
     highlights: number;
   };
+  /**
+   * P02/D-197: what the threatened-square overlay actually drew last — the
+   * selected token's id (null when nothing is selected), the threat cell count
+   * and whether the threatening footprint ring was drawn.
+   */
+  pf1eThreatOverlayState(): {
+    tokenId: string | null;
+    rectsDrawn: number;
+    originDrawn: boolean;
+  };
 }
 
 export interface RulesPackageSmokeResult {
@@ -1046,6 +1067,9 @@ function appSurface(app: HostApp): AppSurface {
             isEnemy: (a: string, b: string) => (enemiesOf[b] ?? []).includes(a),
           }
         : {}),
+      // P04 — the scene's sight-blocking walls, so AoN 181's cover exclusion
+      // applies exactly as the app's own onTokenMove wiring applies it.
+      coverWalls: sightSegments(s.walls),
     });
     return {
       ok: result.ok,
@@ -1148,6 +1172,8 @@ function appSurface(app: HostApp): AppSurface {
             isEnemy: (a: string, b: string) => (enemiesOf[b] ?? []).includes(a),
           }
         : {}),
+      // P04 — the scene's sight-blocking walls (AoN 181's cover exclusion).
+      coverWalls: sightSegments(s.walls),
     });
     return {
       ok: result.ok,
@@ -1246,6 +1272,35 @@ function appSurface(app: HostApp): AppSurface {
         previewRects: areaPreviewRects(res.cells, grid).length,
         issues: res.issues,
       };
+    },
+    pf1eActorSystem: (actorId) => {
+      const actor = client.store.get("actors", actorId) as
+        | ActorDocument
+        | undefined;
+      if (actor === undefined) return null;
+      return ((actor.system as { pf1e?: Record<string, unknown> }).pf1e ??
+        null) as Record<string, unknown> | null;
+    },
+    pf1eAuthorActor: (spec) => {
+      const actor = client.store.get("actors", spec.actorId) as
+        | ActorDocument
+        | undefined;
+      if (actor === undefined)
+        return { ok: false, error: `actor not found: ${spec.actorId}` };
+      const pf1e =
+        (actor.system as { pf1e?: Record<string, unknown> }).pf1e ?? {};
+      const next = {
+        ...pf1e,
+        ...spec.patch,
+      } as Record<string, Json>;
+      client.submit([
+        {
+          kind: "update",
+          ref: { coll: "actors", id: spec.actorId },
+          diff: { "system.pf1e": next },
+        },
+      ]);
+      return { ok: true, error: null };
     },
     pf1ePlaceTokens: (tokens) => {
       const s = scene();
@@ -1434,6 +1489,7 @@ function appSurface(app: HostApp): AppSurface {
           combat,
           actors: client.store.getAll("actors"),
           tokens: s?.tokens ?? [],
+          scene: s ?? null,
           ...(spec.verifiable === true ? { verifiable: true } : {}),
         },
       );
@@ -1489,6 +1545,7 @@ function appSurface(app: HostApp): AppSurface {
           combat,
           actors: client.store.getAll("actors"),
           tokens: s?.tokens ?? [],
+          scene: s ?? null,
           ...(spec.verifiable === true ? { verifiable: true } : {}),
         },
       );

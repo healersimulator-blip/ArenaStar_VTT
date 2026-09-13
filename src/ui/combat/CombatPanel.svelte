@@ -63,6 +63,12 @@
     readyCombatant,
   } from "../../packages/pf1e/readyDelay";
   import { resolveReadiedAction } from "./pf1eReadyAction";
+  import { planDyingTick } from "./pf1eDyingTick";
+  import { stabilizationCheck } from "../../packages/pf1e/injury";
+  import {
+    awaitRollMessage,
+    dieFaceOf,
+  } from "../sheets/pf1eResolveFlow";
   import type { PF1eActionSpend } from "../../packages/pf1e/actions";
   import {
     advanceClockOnRoundOf,
@@ -235,8 +241,19 @@
       push(nextTurn(snapshot));
       return;
     }
-    const result = pf1eNextTurn(snapshot);
+    const result = pf1eNextTurn(snapshot, {
+      actors: $state.snapshot(actors),
+    });
     push(result);
+    // D-205 — a dying creature's turn started: the panel rolls the round's
+    // Constitution check publicly and writes the outcome (the transition
+    // itself rolls no die).
+    if (result.dyingChecks.length > 0) {
+      dyingNotes = [];
+      for (const check of result.dyingChecks) {
+        void rollDyingCheck(check);
+      }
+    }
     if (result.clockDeltaSeconds > 0) {
       const settingsDocs = client.store.getAll("settings");
       if (advanceClockOnRoundOf(worldSettingsFrom(settingsDocs))) {
@@ -417,6 +434,71 @@
   let fireTrigger = $state<PF1eReadyTrigger["kind"]>("attack");
   /** The last fired readied action, so the GM knows to resolve it now. */
   let firedNote = $state("");
+  /** D-205 — the last dying round's stabilization lines, one per check. */
+  let dyingNotes = $state<string[]>([]);
+
+  /**
+   * D-205 — roll one dying creature's stabilization check through the host,
+   * apply `injury.ts`'s verdict, and write the outcome (the Stable condition
+   * on a success, the lost hit point on a failure, the death annotation when
+   * the loss crosses negative Constitution).
+   */
+  async function rollDyingCheck(check: {
+    combatantId: string;
+    actorId: string;
+    actorName: string;
+    hp: number;
+    conMod: number;
+  }): Promise<void> {
+    const rollId = client.roll(
+      `1d20 + ${String(check.conMod)}`,
+      "roll",
+      undefined,
+      `${check.actorName} dying stabilization check (DC 10, penalty for negative HP)`,
+    );
+    const message = await awaitRollMessage(client, rollId);
+    const die = message === null ? null : dieFaceOf(message);
+    if (die === null) {
+      dyingNotes = [
+        ...dyingNotes,
+        `${check.actorName} — the stabilization roll never arrived`,
+      ];
+      return;
+    }
+    const verdict = stabilizationCheck({
+      die,
+      conMod: check.conMod,
+      hp: check.hp,
+      purpose: "stabilize",
+    });
+    const actor = client.store.get("actors", check.actorId) as
+      | ActorDocument
+      | undefined;
+    if (actor === undefined) {
+      dyingNotes = [
+        ...dyingNotes,
+        `${check.actorName} — the actor is no longer available`,
+      ];
+      return;
+    }
+    const conScore = readConScore(actor);
+    const plan = planDyingTick({
+      actor,
+      verdict,
+      conScore,
+    });
+    if (plan.ops.length > 0) client.submit(plan.ops);
+    dyingNotes = [...dyingNotes, plan.note];
+  }
+
+  /** The authored Constitution score, for the death annotation. */
+  function readConScore(actor: ActorDocument): number {
+    const abilities = (
+      actor.system as { pf1e?: { abilities?: Record<string, unknown> } }
+    ).pf1e?.abilities;
+    const con = abilities?.con;
+    return typeof con === "number" && Number.isFinite(con) ? con : 0;
+  }
 
   function doDelay(id: string): void {
     refresh();
@@ -533,6 +615,9 @@
   {/if}
   {#if error}<p role="alert">{error}</p>{/if}
   {#if firedNote}<p role="status" data-fired-note>{firedNote}</p>{/if}
+  {#if dyingNotes.length > 0}
+    <p role="status" data-dying-note>{dyingNotes.join(" · ")}</p>
+  {/if}
   <label
     >Encounter
     <select

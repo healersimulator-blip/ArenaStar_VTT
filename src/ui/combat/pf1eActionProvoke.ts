@@ -48,6 +48,7 @@ import {
 import type { PF1eCastingTime } from "../../packages/pf1e/concentration";
 import type { PF1eAoOTrigger, PF1eInterrupt } from "../../packages/pf1e/interrupts";
 import type { PF1eAreaIssue } from "../../packages/pf1e/targeting";
+import { sightSegments } from "../../canvas/vision/wallSight";
 import {
   attackOfOpportunityBudget,
   combatantForToken,
@@ -222,6 +223,9 @@ export async function resolveActionProvokes(input: {
       ...(isEnemy !== undefined ? { isEnemy } : {}),
       ...(input.combat !== null ? { ledgers } : {}),
       ...(queue !== undefined ? { queue } : {}),
+      // P04 — the scene's sight-blocking walls, so AoN 181's cover exclusion
+      // applies to the queued reactions (absent = the seam's named default).
+      coverWalls: sightSegments(scene.walls),
     });
     if (!opportunity.ok) continue;
     queue = opportunity.queue;
@@ -258,6 +262,7 @@ export async function resolveActionProvokes(input: {
         combat: input.combat,
         actors,
         tokens: scene.tokens,
+        scene,
       },
     );
     return {

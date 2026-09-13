@@ -11,6 +11,7 @@
  */
 import { describe, expect, test } from "vitest";
 import {
+  pf1ePairPosition,
   pf1eThreatModel,
   type PF1eThreatToken,
 } from "../../src/packages/pf1e/threatPreview";
@@ -366,5 +367,116 @@ describe("P04 — refusals are named, defaults are announced", () => {
     expect(noteOf(model, "token:d").message).toContain(
       'size "Huger" is not a PF1e size category',
     );
+  });
+});
+
+// ─── P04/D-196 — the attacker/defender pair seam (cover, reach, flanking) ─────
+
+describe("pf1ePairPosition — one attack's positional facts", () => {
+  const wall = { x1: 15, y1: 0, x2: 15, y2: 5 }; // the border between (2,x) and (3,x) in a 5-unit grid
+
+  test("open field: 15 ft apart, no cover, not flanking, out of melee reach", () => {
+    const r = pf1ePairPosition({
+      grid: GRID,
+      tokens: [tok("a", 0, 0), tok("d", 3, 0)],
+      attackerId: "a",
+      defenderId: "d",
+      ranged: true,
+      walls: [],
+    });
+    expect(r.ok).toBe(true);
+    expect(r.distanceFt).toBe(15);
+    expect(r.adjacent).toBe(false);
+    expect(r.cover.kind).toBe("none");
+    expect(r.flanking.flanked).toBe(false);
+    expect(r.reach).toBeNull();
+    expect(r.concealment.percent).toBe(0);
+  });
+
+  test("adjacent melee: in reach, and a wall between grants cover", () => {
+    const r = pf1ePairPosition({
+      grid: GRID,
+      tokens: [tok("a", 0, 0), tok("d", 1, 0)],
+      attackerId: "a",
+      defenderId: "d",
+      ranged: false,
+      reachSquares: 1,
+      walls: [wall],
+    });
+    expect(r.ok).toBe(true);
+    expect(r.adjacent).toBe(true);
+    expect(r.reach?.canStrike).toBe(true);
+    // The wall at x=15 is past the defender's far border (x=10) — lines end on
+    // it at most, so no cover: the fixture pins the endpoint-touch convention.
+    expect(r.cover.kind).toBe("none");
+  });
+
+  test("a soft-cover creature applies at range; adding a wall makes it standard cover", () => {
+    const shot = pf1ePairPosition({
+      grid: GRID,
+      tokens: [tok("a", 0, 0), tok("d", 5, 0), tok("mule", 3, 0)],
+      attackerId: "a",
+      defenderId: "d",
+      ranged: true,
+      walls: [],
+    });
+    expect(shot.cover.kind).toBe("soft");
+    // A half-height stretch of wall (y 2.5–5 on the x=15 border) blocks some
+    // but not all corner lines — with the creature, every corner has a
+    // blocked line and at least one is wall-blocked: standard, not soft.
+    const walled = pf1ePairPosition({
+      grid: GRID,
+      tokens: [tok("a", 0, 0), tok("d", 5, 0), tok("mule", 3, 0)],
+      attackerId: "a",
+      defenderId: "d",
+      ranged: true,
+      walls: [{ x1: 15, y1: 2.5, x2: 15, y2: 5 }],
+    });
+    expect(walled.cover.kind).toBe("standard");
+  });
+
+  test("flanking is reported for the attacker/defender pair that earns it", () => {
+    const r = pf1ePairPosition({
+      grid: GRID,
+      tokens: [tok("a", 0, 0), tok("d", 1, 0), tok("b", 2, 0)],
+      attackerId: "a",
+      defenderId: "d",
+      ranged: false,
+      reachSquares: 1,
+      walls: [],
+    });
+    expect(r.flanking.flanked).toBe(true);
+    expect(r.flanking.bonus).toBe(PF1E_FLANKING_BONUS);
+    expect(r.flanking.helperIds).toEqual(["b"]);
+  });
+
+  test("an unplaced token pair reports no positional facts, not guesses", () => {
+    const r = pf1ePairPosition({
+      grid: GRID,
+      tokens: [tok("a", 0, 0)],
+      attackerId: "a",
+      defenderId: "missing",
+      ranged: true,
+      walls: [],
+    });
+    expect(r.ok).toBe(false);
+    expect(r.issues.length).toBeGreaterThan(0);
+    expect(r.cover.kind).toBe("none");
+  });
+
+  test("concealment sources collapse through the non-stacking grade", () => {
+    const r = pf1ePairPosition({
+      grid: GRID,
+      tokens: [tok("a", 0, 0), tok("d", 2, 0)],
+      attackerId: "a",
+      defenderId: "d",
+      ranged: true,
+      walls: [],
+      concealment: [
+        { percent: 20, label: "fog" },
+        { percent: 50, label: "invisible" },
+      ],
+    });
+    expect(r.concealment).toEqual({ percent: 50, label: "invisible" });
   });
 });

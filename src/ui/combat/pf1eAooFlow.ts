@@ -35,14 +35,22 @@
  * auto-resolved: the caller gets `needsEncounter: true` and falls back to reporting the
  * queue's lines, exactly as D-185 did. (2) A reactor whose only lines are **ranged** cannot
  * take the opportunity at all — that is reported as a skip with its reason rather than
- * resolved with a ranged line, and no budget is spent. (3) The attack carries no situational
- * modifiers of its own: the queue knows the square, not whether the provoker has cover or
- * concealed, and inventing a bonus here would be a second rules layer (cover and concealment
- * belong to P04, per its own open list). (4) An unarmed reactor's own strike provokes in
+ * resolved with a ranged line, and no budget is spent. (3) The attack folds the pair's own
+ * positional and situational facts (D-200, P06 closure): when the caller passes the scene,
+ * each strike reads the reactor→provoker pair through the same `pf1eResolvePositionReport`
+ * seam the sheet's resolve panel reads — flanking's +2 and the cover/concealment defense
+ * payload (defense-in-depth: the queue seams already refuse a covered strike, so this prices
+ * the queues built without `coverWalls`) — plus the provoker's prone state (+4 for this
+ * melee strike, A.14 — standing up from prone is the flagship provoking action). A fact the
+ * scene cannot state is simply absent, never guessed. (4) An unarmed reactor's own strike provokes in
  * turn, which this flow does not recurse into: the queue is built for movement, and the
  * unarmed-provoke chain is P07's ordering work.
  */
-import type { ActorDocument, CombatDocument } from "../../core/documents";
+import type {
+  ActorDocument,
+  CombatDocument,
+  SceneDocument,
+} from "../../core/documents";
 import type { PermissionUser } from "../../core/ownership";
 import {
   deriveFromDocuments,
@@ -67,6 +75,8 @@ import {
   resolveAttackFlow,
   type ResolveFlowClient,
 } from "../sheets/pf1eResolveFlow";
+import { pf1eResolvePositionReport } from "../sheets/pf1eResolvePosition";
+import type { PF1eSituationalModifiers } from "../../packages/pf1e/tactical";
 
 /** The scene-side facts this flow needs per token (a `TokenDocument` satisfies it). */
 export interface AooTokenRef {
@@ -117,6 +127,12 @@ export interface MovementAooResolutionInput {
   actors: readonly ActorDocument[];
   /** The scene's tokens, for token → actor resolution. */
   tokens: readonly AooTokenRef[];
+  /**
+   * D-200 — the scene the move happens on, for the pair's positional and
+   * situational facts (flanking, cover/concealment, the provoker's prone
+   * state). Absent ⇒ no fold, the pre-D-200 behaviour.
+   */
+  scene?: SceneDocument | null;
   /** Commit-reveal rolls (the sheet's Verify option); off by default like the sheet's. */
   verifiable?: boolean;
 }
@@ -128,6 +144,8 @@ export interface ActionAooResolutionInput {
   actors: readonly ActorDocument[];
   /** The scene's tokens, for token → actor resolution. */
   tokens: readonly AooTokenRef[];
+  /** D-200 — the scene, for the pair's positional/situational facts (see the movement twin). */
+  scene?: SceneDocument | null;
   /** Commit-reveal rolls (the sheet's Verify option); off by default like the sheet's. */
   verifiable?: boolean;
 }
@@ -342,6 +360,7 @@ async function resolveQueuedInterrupts(
     combat: CombatDocument | null;
     actors: readonly ActorDocument[];
     tokens: readonly AooTokenRef[];
+    scene?: SceneDocument | null;
     verifiable?: boolean;
   },
 ): Promise<OpportunityResolution> {
@@ -474,6 +493,34 @@ async function resolveQueuedInterrupts(
       provokerCombatant !== null &&
       isFlatFootedByRound(currentCombat, provokerCombatant).flatFooted;
 
+    // D-200 (P06 closure) — the pair's own facts, folded into the strike:
+    // flanking's +2 and the cover/concealment defense payload read through the
+    // same pair seam the sheet's resolve panel reads (the strike happens from
+    // the geometry the provoker was standing in — the move is still held), and
+    // the provoker's prone state (+4 for this melee strike, A.14 — standing up
+    // from prone is the flagship provoking action). A scene the caller did not
+    // pass, or a pair it cannot read, simply folds nothing: the pre-D-200
+    // behaviour, never a guess.
+    let situational: PF1eSituationalModifiers | undefined;
+    let positional: Parameters<typeof resolveAttackFlow>[2]["positional"] | undefined;
+    if (input.scene !== undefined && input.scene !== null) {
+      const report = pf1eResolvePositionReport({
+        scene: input.scene,
+        actors: input.actors,
+        attackerActorId: reactor._id,
+        targetActorId: provoker._id,
+        ranged: false,
+      });
+      if (report.ok) {
+        if (report.flanked) situational = { flanking: true };
+        if (provokerDerived.conditions.some((c) => c.toLowerCase() === "prone")) {
+          situational = { ...situational, defenderProne: true };
+        }
+        const defense = report.defense;
+        if (Object.keys(defense).length > 0) positional = defense;
+      }
+    }
+
     const outcome = await resolveAttackFlow(client, user, {
       attackerName: reactor.name,
       line,
@@ -485,6 +532,8 @@ async function resolveQueuedInterrupts(
       targetActor: provoker,
       targetDerived: provokerDerived,
       defense: flatFooted ? "flatFooted" : "normal",
+      ...(situational !== undefined ? { situational } : {}),
+      ...(positional !== undefined ? { positional } : {}),
       ...(authored === 0 ? { unarmed: true } : {}),
       ...(feats.length > 0 ? { feats } : {}),
       ...(input.verifiable === true ? { verifiable: true } : {}),
