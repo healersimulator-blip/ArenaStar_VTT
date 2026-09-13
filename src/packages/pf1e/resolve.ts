@@ -753,12 +753,15 @@ export function pf1eResolveAttack(
 }
 
 /**
- * Resolve a Manyshot volley against one target. Manyshot is a standard-action
- * volley: every arrow uses the same first attack bonus and −4 penalty, while
- * damage is applied in order to the same defender state. The caller supplies
- * host-evaluated attack/confirmation faces and damage totals for each arrow.
- * Precision/extra-dice rider allocation is deliberately not inferred here;
- * callers must supply each arrow's already-correct damage total.
+ * Resolve a Manyshot volley against one target. Manyshot is the first attack
+ * of a full-attack action with a bow: the first attack fires 2 arrows (3 at
+ * BAB +11, 4 at BAB +16) at the same first attack bonus with a −4 penalty,
+ * while damage is applied in order to the same defender state. The caller
+ * supplies host-evaluated attack/confirmation faces and damage totals for each
+ * arrow. Precision/extra-dice rider allocation is not inferred here; callers
+ * must supply each arrow's already-correct damage total. When this volley is
+ * the first iterative of a full attack, remaining iteratives (if any) are
+ * resolved separately as single arrows so the first bonus is not doubled.
  */
 export interface PF1eManyshotArrow {
   die: number;

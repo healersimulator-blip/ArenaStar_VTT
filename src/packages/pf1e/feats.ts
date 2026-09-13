@@ -209,10 +209,14 @@ export function offHandAttackCount(feats: readonly string[] | undefined): number
 }
 
 /**
- * Manyshot is a standard-action volley, not a full attack: every arrow uses
- * the first attack bonus and the attack takes −4. At BAB +11 and +16 it adds
- * one arrow, up to four total. The caller applies damage per arrow and keeps
- * precision/extra-dice riders single-use as required by the feat.
+ * Manyshot is the first attack of a full-attack action with a bow: the first
+ * attack fires 2 arrows (3 at BAB +11, 4 at BAB +16). In this implementation
+ * each arrow is rolled separately at the first attack bonus with a −4 penalty,
+ * and the caller applies damage per arrow while keeping precision/extra-dice
+ * riders single-use as required by the feat. When Manyshot is active the
+ * iterative full-attack's first entry is the volley itself — the remaining
+ * iteratives (BAB-5, BAB-10…) follow as single arrows, so the total arrow
+ * count is volley + remaining iteratives and the first bonus is not doubled.
  */
 export function manyshotPlan(input: {
   feats?: readonly string[] | undefined;

@@ -4,6 +4,7 @@
   import {
     pf1eAttackRollGroups,
     pf1eManyshotRollSpecs,
+    pf1eManyshotFullAttackRollSpecs,
     pf1eInitiativeRollSpec,
     pf1eSaveRollSpecs,
     type PF1eRollSpec,
@@ -298,6 +299,19 @@
   }
   function manyshotRolls(index: number): PF1eRollSpec[] {
     return pf1eManyshotRollSpecs(
+      d,
+      index,
+      Array.isArray(view.authored.feats) ? view.authored.feats : [],
+    );
+  }
+  /**
+   * The Manyshot-aware full-attack rolls for one line: when Manyshot applies,
+   * the volley **is** the first iterative (2–4 arrows at the first bonus −4)
+   * and remaining iteratives follow as single arrows, so the first bonus is
+   * not doubled. When Manyshot does not apply this is exactly the ladder.
+   */
+  function manyshotFullAttackRolls(index: number): PF1eRollSpec[] {
+    return pf1eManyshotFullAttackRollSpecs(
       d,
       index,
       Array.isArray(view.authored.feats) ? view.authored.feats : [],
@@ -2012,17 +2026,23 @@
             <button type="button" onclick={() => rollSpec(group.attack)}
               >Attack</button
             >
-            {#if group.fullAttack.length > 1}
-              <button type="button" onclick={() => rollAll(group.fullAttack)}
-                >Full attack</button
-              >
-            {/if}
             {#if manyshotRolls(i).length > 0}
+              <!-- Manyshot volley is the first attack of a full-attack action (2 at BAB +6, 3 at +11, 4 at +16) -->
               <button
                 type="button"
                 data-pf1e-manyshot
+                title="First attack of a full-attack volley — remaining iteratives follow as single arrows, so the first bonus is not doubled"
                 onclick={() => rollAll(manyshotRolls(i))}
-                >Manyshot ×{manyshotRolls(i).length}</button
+                >Manyshot volley ×{manyshotRolls(i).length} (first attack)</button
+              >
+              {#if manyshotFullAttackRolls(i).length > 1}
+                <button type="button" onclick={() => rollAll(manyshotFullAttackRolls(i))}
+                  >Full attack (Manyshot) ×{manyshotFullAttackRolls(i).length}</button
+                >
+              {/if}
+            {:else if group.fullAttack.length > 1}
+              <button type="button" onclick={() => rollAll(group.fullAttack)}
+                >Full attack ×{group.fullAttack.length}</button
               >
             {/if}
             {#if group.damage}
@@ -2161,9 +2181,10 @@
             disabled={resolveBusy || manyshotBusy || !resolveTargetId}
             onclick={() => void resolveManyshotVsTarget()}
             data-pf1e-resolve-manyshot
+            title="First attack of a full-attack action — remaining iteratives resolve as single attacks so the first bonus is not doubled"
             >{manyshotBusy
               ? "Resolving Manyshot…"
-              : `Resolve Manyshot ×${manyshotRolls(resolveAttackIndex).length}`}</button
+              : `Resolve Manyshot volley ×${manyshotRolls(resolveAttackIndex).length} (first attack)`}</button
           >
         {/if}
         {#if resolveTargetId}

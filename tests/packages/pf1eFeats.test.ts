@@ -70,7 +70,7 @@ describe("PF1e A07 feat arithmetic", () => {
     expect(offHandAttackCount(["Greater Two-Weapon Fighting"])).toBe(3);
   });
 
-  test("Manyshot produces a standard-action volley at the first bonus", () => {
+  test("Manyshot produces the first-attack volley at the first bonus", () => {
     expect(manyshotPlan({ feats: ["Manyshot"], bab: 6, ranged: true })).toEqual({
       ok: true,
       arrows: 2,

@@ -625,9 +625,12 @@ export interface ResolveManyshotFlowParams {
 }
 
 /**
- * Host-roll and resolve a complete Manyshot volley. Unlike calling the single
- * attack flow repeatedly, this keeps one evolving defender state and emits one
- * public card plus one final pair of HP Ops.
+ * Host-roll and resolve a Manyshot volley — the first attack of a full-attack
+ * action with a bow (2 arrows at BAB +6, 3 at +11, 4 at +16). Unlike calling
+ * the single attack flow repeatedly, this keeps one evolving defender state and
+ * emits one public card plus the HP writes for the volley. When used as the
+ * first iterative of a full attack, remaining iteratives (BAB-5, BAB-10…)
+ * are resolved separately as single arrows so the first bonus is not doubled.
  */
 export async function resolveManyshotFlow(
   client: ResolveFlowClient,
