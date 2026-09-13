@@ -258,6 +258,38 @@ export function firearmExplosionSquares(corner: { col: number; row: number }): R
   ];
 }
 
+/** P09/D-219 — Reflex DC 12 half for the early firearm burst (UC p.135). Pure. */
+export function firearmExplosionReflexOutcome(input: {
+  die: number;
+  reflexMod: number;
+  dc?: number;
+}): { total: number; success: boolean } {
+  const dc = input.dc ?? FIREARM_EXPLOSION_DC;
+  const total = input.die + input.reflexMod;
+  return { total, success: total >= dc };
+}
+
+/** P09/D-219 — halve the rolled explosion damage on a successful Reflex save (floor). */
+export function firearmExplosionMitigatedDamage(input: {
+  damageTotal: number;
+  success: boolean;
+}): number {
+  if (!input.success) return input.damageTotal;
+  return Math.floor(input.damageTotal / 2);
+}
+
+/** P09/D-219 — one target's mitigated burst damage, naming the roll (card line helper). */
+export function firearmExplosionTargetDamage(input: {
+  damageTotal: number;
+  die: number;
+  reflexMod: number;
+  dc?: number;
+}): { total: number; success: boolean; dealt: number } {
+  const save = input.dc === undefined ? firearmExplosionReflexOutcome({ die: input.die, reflexMod: input.reflexMod }) : firearmExplosionReflexOutcome({ die: input.die, reflexMod: input.reflexMod, dc: input.dc });
+  const dealt = firearmExplosionMitigatedDamage({ damageTotal: input.damageTotal, success: save.success });
+  return { total: save.total, success: save.success, dealt };
+}
+
 /** The named ways a misfire's broken condition is cleared (re-verified). */
 export const MISFIRE_CLEARS = [
   {

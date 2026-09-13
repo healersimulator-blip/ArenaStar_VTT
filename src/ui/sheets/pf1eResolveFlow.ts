@@ -26,7 +26,14 @@ import type { PermissionUser } from "../../core/ownership";
 import type { ActorDocument, MessageDocument } from "../../core/documents";
 import type { PF1eDerived, PF1eDerivedAttack } from "../../packages/pf1e/actor";
 import { confirmCritical, shootingIntoMeleePenalty } from "../../packages/pf1e/tactical";
-import { FIREARM_RELOAD_ACTION_ID, firearmShotAmmo, type PF1eMisfireFacts } from "../../packages/pf1e/firearms";
+import {
+  FIREARM_EXPLOSION_DC,
+  FIREARM_RELOAD_ACTION_ID,
+  firearmExplosionMitigatedDamage,
+  firearmExplosionReflexOutcome,
+  firearmShotAmmo,
+  type PF1eMisfireFacts,
+} from "../../packages/pf1e/firearms";
 import { pf1eActionOpportunities } from "../../packages/pf1e/actionOpportunity";
 import type { PF1eMountMovement } from "../../packages/pf1e/mounted";
 import {
@@ -1006,4 +1013,120 @@ export async function resolveManyshotFlow(
   } as MessageDocument }]);
   if (ops.length) client.submit(ops);
   return { ok: true, results: resolved.arrows, hpWriteError };
+}
+
+/** P09/D-219 — burst explosion flow: a 5-ft burst from a chosen corner (UC p.135). */
+export interface ResolveFirearmExplosionParams {
+  attackerName: string;
+  /** The firearm's damage formula for the burst (e.g. the musket's 1d12). */
+  damageFormula: string;
+  /** Creatures in the 5-ft burst — the 4 squares sharing the chosen corner. */
+  burstTargets: ReadonlyArray<{
+    name: string;
+    actor: ActorDocument;
+    derived: PF1eDerived;
+  }>;
+  /** Corner the burst is placed on — only for the card; omit when the GM places by hand. */
+  corner?: { col: number; row: number } | undefined;
+  verifiable?: boolean | undefined;
+}
+
+export async function resolveFirearmExplosionFlow(
+  client: ResolveFlowClient,
+  user: PermissionUser | null,
+  params: ResolveFirearmExplosionParams,
+): Promise<
+  | {
+      ok: true;
+      damageTotal: number;
+      perTarget: Array<{
+        name: string;
+        die: number;
+        total: number;
+        success: boolean;
+        dealt: number;
+        hpBefore: number;
+        hpAfter: number;
+        hpWriteError: string | null;
+      }>;
+      card: string;
+    }
+  | { ok: false; error: string }
+> {
+  if (params.burstTargets.length === 0) return { ok: false, error: "the explosion burst has no targets" };
+  if (params.damageFormula.trim() === "") return { ok: false, error: "the explosion needs a damage formula (the firearm's dice)" };
+
+  const rollId = params.verifiable
+    ? await client.rollVerified(params.damageFormula, "roll", undefined, `firearm explosion ${params.damageFormula}`)
+    : client.roll(params.damageFormula, "roll", undefined, `firearm explosion ${params.damageFormula}`);
+  const damageMsg = await awaitRollMessage(client, rollId);
+  if (damageMsg === null) return { ok: false, error: `explosion damage roll never arrived: ${params.damageFormula}` };
+  if (damageMsg.roll === null || typeof damageMsg.roll.total !== "number")
+    return { ok: false, error: "the explosion damage message carries no total" };
+  const damageTotal = damageMsg.roll.total;
+
+  const perTarget: Array<{
+    name: string;
+    die: number;
+    total: number;
+    success: boolean;
+    dealt: number;
+    hpBefore: number;
+    hpAfter: number;
+    hpWriteError: string | null;
+  }> = [];
+  const ops: Op[] = [];
+  const lines: string[] = [];
+  lines.push(
+    `${params.attackerName}'s early firearm explodes — burst from a chosen corner deals ${String(damageTotal)} [[${damageTotal}|${params.damageFormula}]] fire damage, DC ${FIREARM_EXPLOSION_DC} Reflex half (UC p.135)` +
+      (params.corner ? ` — corner (${params.corner.col},${params.corner.row}), 5-ft burst` : ""),
+  );
+
+  for (const target of params.burstTargets) {
+    const saveRollId = params.verifiable
+      ? await client.rollVerified("1d20", "roll", undefined, `${target.name} Reflex vs DC ${FIREARM_EXPLOSION_DC}`)
+      : client.roll("1d20", "roll", undefined, `${target.name} Reflex vs DC ${FIREARM_EXPLOSION_DC}`);
+    const saveMsg = await awaitRollMessage(client, saveRollId);
+    if (saveMsg === null) return { ok: false, error: `Reflex save roll never arrived for ${target.name}` };
+    const die = dieFaceOf(saveMsg);
+    if (die === null) return { ok: false, error: `could not read the Reflex save d20 for ${target.name}` };
+    const save = firearmExplosionReflexOutcome({ die, reflexMod: target.derived.saves.ref });
+    const dealt = firearmExplosionMitigatedDamage({ damageTotal, success: save.success });
+    const before = target.derived.hp;
+    const after = Math.max(0, before - dealt);
+    let hpWriteError: string | null = null;
+    if (dealt > 0) {
+      const edit = pf1eSheetEdit(target.actor, user, "hp", String(after));
+      if (edit.error !== null) hpWriteError = edit.error;
+      else ops.push(...edit.ops);
+    }
+    perTarget.push({ name: target.name, die, total: save.total, success: save.success, dealt, hpBefore: before, hpAfter: after, hpWriteError });
+    const saveText = save.success ? `saves (${String(save.total)} ≥ ${FIREARM_EXPLOSION_DC}, half)` : `fails (${String(save.total)} < ${FIREARM_EXPLOSION_DC})`;
+    lines.push(
+      `${target.name}: Reflex ${String(die)} + ${String(target.derived.saves.ref)} = ${String(save.total)} — ${saveText} — ${String(dealt)} damage${hpWriteError ? ` — ⚠ ${hpWriteError}` : ` — ${String(before)} → ${String(after)} HP`}`,
+    );
+  }
+
+  const content = lines.join("\n");
+  client.submit([
+    {
+      kind: "create",
+      coll: "messages",
+      data: {
+        _id: globalThis.crypto.randomUUID(),
+        type: "message",
+        name: `${params.attackerName} firearm explosion`.slice(0, 40),
+        ownership: { default: 1 },
+        flags: {},
+        system: {},
+        author: user?.id ?? "",
+        content,
+        whisper: [],
+        roll: null,
+        flavor: "firearm explosion",
+      } as MessageDocument,
+    },
+  ]);
+  if (ops.length > 0) client.submit(ops);
+  return { ok: true, damageTotal, perTarget, card: content };
 }

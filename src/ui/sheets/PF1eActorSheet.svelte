@@ -86,7 +86,7 @@
     mountFootprint,
     type PF1eMountMovement,
   } from "../../packages/pf1e/mounted";
-  import { firearmShotAmmo, FIREARM_EXPLOSION_DC, firearmExplosionSquares, quickClearReloadCost, firearmReloadEntry } from "../../packages/pf1e/firearms";
+  import { firearmShotAmmo, FIREARM_EXPLOSION_DC, FIREARM_EXPLOSION_RADIUS_FT, firearmExplosionSquares, quickClearReloadCost, firearmReloadEntry } from "../../packages/pf1e/firearms";
   import { firearmReloadOpportunity } from "./pf1eResolveFlow";
   import type {
     ActorDocument,
@@ -94,7 +94,7 @@
     CombatantDocument,
     SceneDocument,
   } from "../../core/documents";
-  import { resolveAttackFlow, resolveManyshotFlow } from "./pf1eResolveFlow";
+  import { resolveAttackFlow, resolveManyshotFlow, resolveFirearmExplosionFlow } from "./pf1eResolveFlow";
   import { resolveManeuverFlow } from "../combat/pf1eManeuverFlow";
   import { resolveAidAnotherFlow, resolveFeintFlow } from "../combat/pf1eAidFeintFlow";
   import type { PF1eDefenseChoice } from "../../packages/pf1e/resolve";
@@ -462,6 +462,23 @@
   let rideError = $state("");
   let rideFallingNote = $state("");
   let rideBusy = $state(false);
+  // P09/D-218 — grit and firearm UI state (Quick Clear, Expert Loading; UC p.135)
+  let gritCurrentRaw = $state("");
+  let gritMaxRaw = $state("");
+  let gritNote = $state("");
+  let firearmError = $state("");
+  let firearmNote = $state("");
+  let firearmBusy = $state(false);
+  let spendGritForClear = $state(false);
+  let resolveExpertLoading = $state(false);
+  // P09/D-219 — explosion burst placement & per-target Reflex (UC p.135, 5-ft burst from a chosen corner)
+  let explosionCornerColRaw = $state("0");
+  let explosionCornerRowRaw = $state("0");
+  let explosionDamageRaw = $state("");
+  let explosionBusy = $state(false);
+  let explosionError = $state("");
+  let explosionNote = $state("");
+  let explosionTargetPicks = $state<Record<string, boolean>>({});
 
   // P08/D-217 — Ride checks (A.11): DC 20 untrained control, DC 5 knees, DC 15 stay, 50/75% unconscious; fall ⇒ 1d6
   function parseRideBonus(): number {
@@ -631,6 +648,41 @@
     // Hint the 5-ft burst from the chosen corner (4 squares) — DC 12 Reflex half, UC p.135
     const squares = firearmExplosionSquares({ col: 0, row: 0 });
     return `Explosion on second early misfire while broken: DC ${FIREARM_EXPLOSION_DC} Reflex half, 5-ft burst (${FIREARM_EXPLOSION_RADIUS_FT} ft, ${squares.length} squares from corner, UC p.135).`;
+  }
+  async function doFirearmExplosion(): Promise<void> {
+    explosionError = "";
+    explosionNote = "";
+    const line = d.attacks[resolveAttackIndex];
+    const raw = explosionDamageRaw.trim();
+    const damageFormula = raw !== "" ? raw : line?.damageDice ? `${line.damageDice}${line.damageBonus ? `+${line.damageBonus}` : ""}` : "";
+    if (damageFormula === "") { explosionError = "Enter a damage formula for the explosion (e.g. 1d12)."; return; }
+    const col = Number.parseInt(explosionCornerColRaw.trim(), 10);
+    const row = Number.parseInt(explosionCornerRowRaw.trim(), 10);
+    const corner = Number.isFinite(col) && Number.isFinite(row) ? { col, row } : undefined;
+    const pickedIds = Object.entries(explosionTargetPicks).filter(([, v]) => v).map(([id]) => id);
+    if (pickedIds.length === 0) { explosionError = "Pick at least one target in the 5-ft burst (the 4 squares sharing the chosen corner)."; return; }
+    const burstTargets: Array<{ name: string; actor: ActorDocument; derived: ReturnType<typeof pf1eSheetView>["derived"] }> = [];
+    for (const id of pickedIds) {
+      const actor = client.store.get("actors", id) as ActorDocument | undefined;
+      if (!actor) continue;
+      burstTargets.push({ name: actor.name, actor, derived: pf1eSheetView(actor).derived });
+    }
+    if (burstTargets.length === 0) { explosionError = "The picked burst targets are no longer available."; return; }
+    explosionBusy = true;
+    try {
+      const outcome = await resolveFirearmExplosionFlow(client, client.user, {
+        attackerName: doc.name,
+        damageFormula,
+        burstTargets,
+        ...(corner ? { corner } : {}),
+        ...(resolveVerifiable ? { verifiable: true } : {}),
+      });
+      if (!outcome.ok) explosionError = outcome.error;
+      else {
+        const lines = outcome.perTarget.map((p) => `${p.name}: Reflex d20 ${p.die} + ${p.total - p.die} = ${p.total} vs DC ${FIREARM_EXPLOSION_DC} ${p.success ? "success" : "fail"} — ${p.dealt} damage (HP ${p.hpBefore}→${p.hpAfter})${p.hpWriteError ? ` — ${p.hpWriteError}` : ""}`).join(" · ");
+        explosionNote = `Explosion ${outcome.damageTotal} damage — ${lines}`;
+      }
+    } finally { explosionBusy = false; }
   }
 
   /**
@@ -840,6 +892,7 @@
         ...(resolveMountMovement !== "stationary" ? { mountMovement: resolveMountMovement } : {}),
         ...(resolveMountMovedFt > 0 ? { mountMovedFt: resolveMountMovedFt } : {}),
         ...(doc ? { attackerActor: doc, attackerAttackIndex: resolveAttackIndex } : {}),
+        ...(resolveExpertLoading ? { misfireExtras: { expertLoading: true } } : {}),
         ...(resolveVerifiable ? { verifiable: true } : {}),
       });
       if (!outcome.ok) resolveError = outcome.error;
@@ -921,6 +974,7 @@
             }
           : {}),
         ...(resolveMountMovement !== "stationary" ? { mountMovement: resolveMountMovement } : {}),
+        ...(resolveExpertLoading ? { misfireExtras: { expertLoading: true } } : {}),
         ...(resolveVerifiable ? { verifiable: true } : {}),
       });
       if (!outcome.ok) resolveError = outcome.error;
@@ -2511,10 +2565,28 @@
             <button type="button" disabled={firearmBusy || !editable} onclick={() => void doFirearmReload()} data-firearm-reload>Reload ({reloadEntry ? `${reloadEntry.category}, provokes ${reloadEntry.provokes}` : "move, provokes"}) — {resolveFirearm.ammo.loaded}/{resolveFirearm.ammo.capacity} → {resolveFirearm.ammo.capacity}</button>
             <label><input type="checkbox" bind:checked={spendGritForClear} data-firearm-spend-grit /> Spend 1 grit for Quick Clear</label>
             <button type="button" disabled={firearmBusy || !editable} onclick={() => void doFirearmClear()} data-firearm-clear>Clear jam — {quickClearPreview.cost} (grit {quickClearPreview.gritSpent ? "1" : "0"}{quickClearPreview.refusal ? ` — ${quickClearPreview.refusal}` : ""})</button>
+            <label><input type="checkbox" bind:checked={resolveExpertLoading} data-firearm-expert-loading /> Expert Loading — spend 1 grit to avert explosion on this shot (broken early firearm, UC p.135)</label>
             {#if firearmError}<p class="warn" data-firearm-error>{firearmError}</p>{/if}
             {#if firearmNote}<p class="note" data-firearm-note>{firearmNote}</p>{/if}
             <p class="note">Reloading an early firearm is a move/{reloadEntry?.category ?? "move"} action that provokes (`load-firearm`, Table 7-2, UC p.135 §2.9 — capacity authored on the attack line: {resolveFirearm.ammo.capacity}). A broken firearm must be cleared first: {quickClearPreview.cost} (standard, or move with 1 grit via Quick Clear). Expert Loading (1 grit) averts the explosion on a second early misfire while broken — the resolve flow spends the grit automatically when it averts.</p>
           </div>
+          {#if resolveFirearm.misfire !== null}
+            <div class="resolve" data-pf1e-explosion-actions>
+              <h5>Firearm explosion — 5-ft burst (UC p.135, DC 12 Reflex half)</h5>
+              <label>Corner col <input bind:value={explosionCornerColRaw} size="3" data-explosion-col /></label>
+              <label>Corner row <input bind:value={explosionCornerRowRaw} size="3" data-explosion-row /></label>
+              <label>Damage <input bind:value={explosionDamageRaw} placeholder={d.attacks[resolveAttackIndex]?.damageDice ?? "1d12"} size="8" data-explosion-damage /></label>
+              <div data-explosion-targets>
+                {#each pf1eTargetActors() as target (target._id)}
+                  <label><input type="checkbox" checked={explosionTargetPicks[target._id] === true} onchange={(e) => (explosionTargetPicks = { ...explosionTargetPicks, [target._id]: e.currentTarget.checked })} data-explosion-target={target._id} /> {target.name} (Ref {pf1eSheetView(target).derived.saves.ref})</label>
+                {/each}
+              </div>
+              <button type="button" disabled={explosionBusy || !editable} onclick={() => void doFirearmExplosion()} data-explosion-submit>{explosionBusy ? "Resolving…" : "Resolve explosion burst"}</button>
+              {#if explosionError}<p class="warn" data-explosion-error>{explosionError}</p>{/if}
+              {#if explosionNote}<p class="note" data-explosion-note>{explosionNote}</p>{/if}
+              <p class="note">Burst from the chosen corner covers the 4 squares sharing it ({FIREARM_EXPLOSION_RADIUS_FT} ft). Roll one damage total, each creature Reflex DC {FIREARM_EXPLOSION_DC} for half (floor). Nonmagical firearm destroyed, magical wrecked on explosion.</p>
+            </div>
+          {/if}
         {/if}
       </div>
       <h4>Combat maneuvers (A.9 — provokes an AoO without the Improved feat)</h4>

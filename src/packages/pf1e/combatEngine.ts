@@ -284,18 +284,43 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
         }
       }
 
-      // Check Firearm Misfire
-      const d20 = rng.d(20);
-      let effectiveMisfireMin = profile.misfireMin;
-      if (highFidelity && ((atkStatus & PF1eCondition.MISFIRED) !== 0 || (atkStatus & PF1eCondition.BROKEN) !== 0)) {
-        effectiveMisfireMin += 4; // Misfired/Broken gun increases misfire threshold by +4
+      // P09/D-219 — ammo gate (§2.9): a firearm with no loaded shot cannot attack (mirrors tactical `firearmShotAmmo`).
+      if (highFidelity && profile.isFirearm) {
+        const ammoCol = pool.sys["ammo"] as unknown as Uint8Array | undefined;
+        const loaded = ammoCol ? (ammoCol[atkIdx] ?? 0) : 1;
+        if (loaded <= 0) {
+          metrics.misses++;
+          continue;
+        }
       }
 
-      if (highFidelity && profile.isFirearm && d20 <= effectiveMisfireMin && effectiveMisfireMin > 0) {
+      // Check Firearm Misfire (UC p.135 — natural 20 never misfires, §2.9b defect (f))
+      const d20 = rng.d(20);
+      let effectiveMisfireMin = profile.misfireMin;
+      const weaponStateCol = pool.sys["weaponState"] as unknown as Uint8Array | undefined;
+      const weaponBroken = weaponStateCol ? ((weaponStateCol[atkIdx] ?? 0) & 1) !== 0 : false;
+      if (highFidelity && (weaponBroken || (atkStatus & PF1eCondition.MISFIRED) !== 0 || (atkStatus & PF1eCondition.BROKEN) !== 0)) {
+        effectiveMisfireMin += 4; // Misfired/Broken gun increases misfire threshold by +4 (Gun Training +2 variant is actor data, default +4)
+      }
+
+      if (highFidelity && profile.isFirearm && d20 !== 20 && d20 <= effectiveMisfireMin && effectiveMisfireMin > 0) {
         metrics.misfiresCount++;
         metrics.misses++;
         pool.status[atkIdx] = (pool.status[atkIdx] ?? 0) | PF1eCondition.MISFIRED | PF1eCondition.BROKEN;
+        if (weaponStateCol) weaponStateCol[atkIdx] = (weaponStateCol[atkIdx] ?? 0) | 1;
+        // Consume the shot even on a misfire (tactical ammo decrement mirrors this)
+        const ammoCol2 = pool.sys["ammo"] as unknown as Uint8Array | undefined;
+        if (ammoCol2) ammoCol2[atkIdx] = Math.max(0, (ammoCol2[atkIdx] ?? 1) - 1);
+        // P09/D-219 — second misfire of a broken early firearm explodes (UC p.135). At mass scale, the explosion is not a separate AOE — the weapon is destroyed.
+        // The broken state already marks it; destruction is the same bit (weapon stays broken, no further shots until Gunsmithing).
         continue;
+      }
+
+      // Consume one shot for this firearm attack (tactical §2.9) — happens before the hit roll so empty stays empty.
+      // Advanced firearms with capacity>1 keep firing until this gate above refuses.
+      if (highFidelity && profile.isFirearm) {
+        const ammoCol3 = pool.sys["ammo"] as unknown as Uint8Array | undefined;
+        if (ammoCol3) ammoCol3[atkIdx] = Math.max(0, (ammoCol3[atkIdx] ?? 1) - 1);
       }
 
       // Apply Attacker Condition & Range Modifiers

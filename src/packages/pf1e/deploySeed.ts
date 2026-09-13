@@ -146,6 +146,8 @@ export function seedPF1ePool(
   const nonlethal = col("nonlethal");
   const lethalDmg = col("lethalDmg");
   const aooUsed = col("aooUsed");
+  const ammo = col("ammo");
+  const weaponState = col("weaponState");
 
   for (const unit of units) {
     const profile = profiles.byUnitId.get(unit.id);
@@ -170,7 +172,11 @@ export function seedPF1ePool(
       if (aooUsed) aooUsed[i] = 0;
 
       const maxHp = pool.hpMax[i] ?? 0;
-      if (maxHp <= 1) {
+      const firstSeed = maxHp <= 1;
+      if (firstSeed) {
+        // P09/D-219 — firearm state: per-weapon, not per-attacker status (Gap §2.9b). First deployment seeds the weapon as sound and loaded.
+        if (ammo) ammo[i] = profile.isFirearm ? 1 : 0;
+        if (weaponState) weaponState[i] = 0;
         pool.hpMax[i] = profile.hp;
         if ((pool.hp[i] ?? 0) <= 1) pool.hp[i] = profile.hp;
         out.hpInitialized++;

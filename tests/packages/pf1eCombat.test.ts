@@ -80,7 +80,7 @@ describe("PF1e Combat Engine (§12 / Task 3 & High-Fidelity Rules)", () => {
       y: 0,
       hp: 20,
       hpMax: 20,
-      sys: { profileIdx: gunnerProfile.id },
+      sys: { profileIdx: gunnerProfile.id, ammo: 1 },
     });
 
     const defenderIdx = allocModel(pool, {
