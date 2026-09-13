@@ -693,3 +693,348 @@ export function pf1eSteal(input: {
   return { ok: true, check, success: true, stolen: true, notes };
 }
 
+/* ──────────────────────────────────────────────────────────────────────────
+ * Grapple — the SRD's most branched manœuvre (AoN 191, CRB p.199). Every
+ * option below is a pure verdict over the same CMB-vs-CMD core. The map
+ * tells the die; the sheet tells the CMB/CMD; the caller tells the hands,
+ * the adjacency and the hazardous placement — this module refuses by name
+ * rather than guessing any of them.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/** Helper: humanoid without two free hands ⇒ –4 (AoN 191). */
+function grappleHumanoidPenalty(opts: {
+  attackerIsHumanoid?: boolean | undefined;
+  attackerFreeHands?: number | undefined;
+}): { penalty: number; note: string | null } {
+  if (opts.attackerIsHumanoid === true) {
+    const hands = opts.attackerFreeHands;
+    if (typeof hands === "number" && hands < 2) {
+      return { penalty: 4, note: "humanoid without two free hands — –4 on the grapple check (AoN 191)" };
+    }
+    if (hands === undefined) {
+      // unknown hands — do not assume, no penalty
+      return { penalty: 0, note: null };
+    }
+  }
+  return { penalty: 0, note: null };
+}
+
+/**
+ * Initial grapple — standard action, provokes unless Improved Grapple / grab
+ * (AoN 191). On success both gain Grappled; if the target was not adjacent
+ * you must move it to an adjacent open space (if none, the grapple fails).
+ */
+export function pf1eGrapple(input: {
+  check: Omit<PF1eManeuverCheckInput, "kind">;
+  /** True when the attacker is a humanoid (affects the –4). */
+  attackerIsHumanoid?: boolean;
+  /** Number of free hands (0–2). Absent ⇒ not evaluated. */
+  attackerFreeHands?: number;
+  /** Whether the target was adjacent before the grapple. */
+  targetAdjacent?: boolean;
+  /** Whether an adjacent open space exists to pull a non-adjacent target into. */
+  hasAdjacentSpace?: boolean;
+}):
+  | { ok: false; error: string }
+  | {
+      ok: true;
+      check: Extract<PF1eManeuverCheckResult, { ok: true }>;
+      success: boolean;
+      /** Both combatants gain Grappled on success. */
+      bothGrappled: boolean;
+      /** The grapple succeeded on the die but had nowhere to put a non-adjacent target. */
+      noSpaceFails: boolean;
+      /** True when the initial success requires the caller to move the target adjacent. */
+      needsMoveAdjacent: boolean;
+      notes: readonly string[];
+    } {
+  const hp = grappleHumanoidPenalty({ attackerIsHumanoid: input.attackerIsHumanoid, attackerFreeHands: input.attackerFreeHands });
+  const effectiveCheck = { ...input.check } as PF1eManeuverCheckInput & { kind: PF1eManeuverKind };
+  // Fold humanoid penalty into attackPenalty (positive = penalty)
+  if (hp.penalty > 0) {
+    effectiveCheck.attackPenalty = (effectiveCheck.attackPenalty ?? 0) + hp.penalty;
+  }
+  const check = pf1eManeuverCheck({ ...effectiveCheck, kind: "grapple" } as PF1eManeuverCheckInput);
+  if (!check.ok) return check;
+  const notes = [...check.notes];
+  if (hp.note) notes.push(hp.note);
+  if (!check.success) {
+    return { ok: true, check: { ...check, notes } as Extract<PF1eManeuverCheckResult, { ok: true }>, success: false, bothGrappled: false, noSpaceFails: false, needsMoveAdjacent: false, notes: [...notes, "the grapple fails — neither combatant is grappled"] };
+  }
+  // Success but non-adjacent target with no open space ⇒ grapple fails
+  if (input.targetAdjacent === false && input.hasAdjacentSpace === false) {
+    return {
+      ok: true,
+      check: { ...check, notes } as Extract<PF1eManeuverCheckResult, { ok: true }>,
+      success: false,
+      bothGrappled: false,
+      noSpaceFails: true,
+      needsMoveAdjacent: false,
+      notes: [...notes, "you successfully grapple a creature that is not adjacent, but there is no adjacent open space — the grapple fails (AoN 191)"],
+    };
+  }
+  const needsMoveAdjacent = input.targetAdjacent === false;
+  if (needsMoveAdjacent) notes.push("you successfully grapple a creature that is not adjacent — move that creature to an adjacent open space (AoN 191)");
+  notes.push("both you and the target gain the grappled condition (AoN 191 / Appendix 2)");
+  notes.push("you can release the grapple as a free action, removing the condition from both (AoN 191)");
+  if (check.provokes) notes.push("this grapple provokes an attack of opportunity from the target unless you have Improved Grapple, grab or a similar ability (AoN 191)");
+  return { ok: true, check: { ...check, notes } as Extract<PF1eManeuverCheckResult, { ok: true }>, success: true, bothGrappled: true, noSpaceFails: false, needsMoveAdjacent, notes };
+}
+
+/**
+ * Maintain grapple — standard action each round to keep the hold. If the
+ * target did not break the grapple since your last turn you gain +5
+ * circumstance on this check (AoN 191). A successful maintain continues the
+ * grappled condition and lets you pick one of move / damage / pin / tie-up
+ * as part of that same standard action.
+ */
+export function pf1eGrappleMaintain(input: {
+  check: Omit<PF1eManeuverCheckInput, "kind">;
+  attackerIsHumanoid?: boolean;
+  attackerFreeHands?: number;
+  /** +5 circumstance when target did not break since your last turn. */
+  hasMaintainBonus?: boolean;
+}):
+  | { ok: false; error: string }
+  | {
+      ok: true;
+      check: Extract<PF1eManeuverCheckResult, { ok: true }>;
+      success: boolean;
+      /** Grapple continues on success; breaks on failure. */
+      continues: boolean;
+      notes: readonly string[];
+    } {
+  const hp = grappleHumanoidPenalty({ attackerIsHumanoid: input.attackerIsHumanoid, attackerFreeHands: input.attackerFreeHands });
+  let effectiveCmb = input.check.cmb;
+  const notesExtra: string[] = [];
+  if (hp.penalty > 0) {
+    effectiveCmb -= hp.penalty;
+    notesExtra.push(hp.note!);
+  }
+  if (input.hasMaintainBonus === true) {
+    effectiveCmb += 5;
+    notesExtra.push("your target did not break the grapple — +5 circumstance bonus on this maintain check (AoN 191)");
+  }
+  const checkInput = { ...input.check, cmb: effectiveCmb };
+  const check = pf1eManeuverCheck({ ...checkInput, kind: "grapple" } as PF1eManeuverCheckInput);
+  if (!check.ok) return check;
+  const notes = [...check.notes, ...notesExtra];
+  if (!check.success) {
+    return { ok: true, check: { ...check, notes } as Extract<PF1eManeuverCheckResult, { ok: true }>, success: false, continues: false, notes: [...notes, "you fail to maintain the grapple — the grapple ends"] };
+  }
+  notes.push("you continue grappling the foe and may perform one of: move half speed with target, damage, pin, or tie-up (AoN 191)");
+  return { ok: true, check: { ...check, notes } as Extract<PF1eManeuverCheckResult, { ok: true }>, success: true, continues: true, notes };
+}
+
+/** Grapple: move — half speed with the target, hazardous placement grants a free break. */
+export function pf1eGrappleMove(input: {
+  /** The maintain check must have succeeded to choose this option. */
+  maintainSuccess: boolean;
+  /** Your speed in feet; the move is at most half. */
+  speedFt?: number;
+  /** True when you place the foe in a hazardous location (wall of fire, pit, …). */
+  hazardousPlacement?: boolean;
+}):
+  | { ok: false; error: string }
+  | {
+      ok: true;
+      success: boolean;
+      /** Maximum distance you may move both with the target. */
+      maxDistanceFt: number;
+      /** Hazardous placement grants the target a free break attempt with +4. */
+      targetFreeBreakWithBonus: boolean;
+      notes: readonly string[];
+    } {
+  if (!input.maintainSuccess) return { ok: false, error: "grapple move requires a successful maintain check (AoN 191)" };
+  const speed = input.speedFt ?? 30;
+  const maxDistanceFt = Math.floor(speed / 2);
+  const notes: string[] = [`you may move both yourself and your target up to ${String(maxDistanceFt)} feet (half your speed; AoN 191)`, "at the end of your movement you may place your target in any square adjacent to you"];
+  if (input.hazardousPlacement === true) {
+    notes.push("you attempt to place your foe in a hazardous location — the target receives a free attempt to break your grapple with a +4 bonus (AoN 191)");
+    return { ok: true, success: true, maxDistanceFt, targetFreeBreakWithBonus: true, notes };
+  }
+  return { ok: true, success: true, maxDistanceFt, targetFreeBreakWithBonus: false, notes };
+}
+
+/** Grapple: damage — unarmed / natural / armor spikes / light-or-one-handed weapon. */
+export function pf1eGrappleDamage(input: {
+  maintainSuccess: boolean;
+  /** Damage you roll (caller-provided). Required to name the total. */
+  damage?: number;
+}):
+  | { ok: false; error: string }
+  | {
+      ok: true;
+      success: boolean;
+      damage: number | null;
+      notes: readonly string[];
+    } {
+  if (!input.maintainSuccess) return { ok: false, error: "grapple damage requires a successful maintain check (AoN 191)" };
+  const notes: string[] = ["you may inflict damage to your target equal to your unarmed strike, a natural attack, or an attack made with armor spikes or a light or one-handed weapon; this damage can be lethal or nonlethal (AoN 191)"];
+  if (typeof input.damage === "number") {
+    notes.push(`damage dealt: ${String(input.damage)}`);
+    return { ok: true, success: true, damage: input.damage, notes };
+  }
+  return { ok: true, success: true, damage: null, notes };
+}
+
+/**
+ * Grapple: pin — the opponent gains Pinned; you remain only Grappled but
+ * lose Dex bonus to AC (AoN 191 / Appendix 2).
+ */
+export function pf1eGrapplePin(input: {
+  maintainSuccess: boolean;
+}):
+  | { ok: false; error: string }
+  | {
+      ok: true;
+      success: boolean;
+      targetPinned: boolean;
+      attackerGrappledNoDex: boolean;
+      notes: readonly string[];
+    } {
+  if (!input.maintainSuccess) return { ok: false, error: "grapple pin requires a successful maintain check (AoN 191)" };
+  return {
+    ok: true,
+    success: true,
+    targetPinned: true,
+    attackerGrappledNoDex: true,
+    notes: ["you give your opponent the pinned condition — they cannot move and are denied Dex bonus, +4 to AC but limited actions (Appendix 2)", "despite pinning your opponent, you still only have the grappled condition, but you lose your Dexterity bonus to AC (AoN 191)"],
+  };
+}
+
+/**
+ * Grapple: tie-up — pin-like, but the DC to escape is 20 + your CMB and the
+ * ropes need no check each round. Requires the target pinned / otherwise
+ * restrained / unconscious. If you are grappling while tying, –10 on the
+ * check (AoN 191). If 20+CMB > 20+target CMB, even a natural 20 cannot escape.
+ */
+export function pf1eGrappleTieUp(input: {
+  check: Omit<PF1eManeuverCheckInput, "kind">;
+  /** The target must be pinned, otherwise restrained, or unconscious. */
+  targetPinnedOrRestrainedOrUnconscious?: boolean;
+  /** True when you are currently grappling the target while tying (–10). */
+  grapplingWhileTying?: boolean;
+  attackerIsHumanoid?: boolean;
+  attackerFreeHands?: number;
+  /** Your CMB — the tie-up DC is 20 + CMB. */
+  attackerCmbForDc: number;
+  /** Target's CMB — to test the “cannot escape even with 20” threshold. */
+  targetCmbForEscape?: number;
+}):
+  | { ok: false; error: string }
+  | {
+      ok: true;
+      check: Extract<PF1eManeuverCheckResult, { ok: true }>;
+      success: boolean;
+      /** DC to escape the ropes. */
+      escapeDc: number;
+      /** True when escape DC > 20 + target CMB ⇒ natural 20 insufficient. */
+      cannotEscapeEvenWith20: boolean;
+      notes: readonly string[];
+    } {
+  if (input.targetPinnedOrRestrainedOrUnconscious !== true) {
+    return { ok: false, error: "tie up requires the target pinned, otherwise restrained, or unconscious (AoN 191)" };
+  }
+  let effectiveCmb = input.check.cmb;
+  const extraNotes: string[] = [];
+  if (input.grapplingWhileTying === true) {
+    effectiveCmb -= 10;
+    extraNotes.push("you are grappling the target while tying him up — –10 penalty on the combat maneuver check (AoN 191)");
+  }
+  const hp = grappleHumanoidPenalty({ attackerIsHumanoid: input.attackerIsHumanoid, attackerFreeHands: input.attackerFreeHands });
+  if (hp.penalty > 0) {
+    effectiveCmb -= hp.penalty;
+    extraNotes.push(hp.note!);
+  }
+  const checkInput = { ...input.check, cmb: effectiveCmb };
+  const check = pf1eManeuverCheck({ ...checkInput, kind: "grapple" } as PF1eManeuverCheckInput);
+  if (!check.ok) return check;
+  const notes = [...check.notes, ...extraNotes];
+  const escapeDc = 20 + input.attackerCmbForDc;
+  const threshold = input.targetCmbForEscape !== undefined ? 20 + input.targetCmbForEscape : null;
+  const cannotEscapeEvenWith20 = threshold !== null ? escapeDc > threshold : false;
+  if (!check.success) {
+    return { ok: true, check: { ...check, notes } as Extract<PF1eManeuverCheckResult, { ok: true }>, success: false, escapeDc, cannotEscapeEvenWith20: false, notes: [...notes, "the tie-up fails"] };
+  }
+  notes.push(`you tie up the target — this works like a pin, but the DC to escape is 20 + your CMB = ${String(escapeDc)} (instead of your CMD); the ropes do not need a check each round to maintain (AoN 191)`);
+  if (cannotEscapeEvenWith20) notes.push(`with DC ${String(escapeDc)} vs 20 + target CMB ${String(threshold)} — the target cannot escape the bonds, even with a natural 20 (AoN 191)`);
+  else if (threshold !== null) notes.push(`DC ${String(escapeDc)} is escapable with a natural 20 (needs ≤ ${String(threshold)} + roll)`);
+  return { ok: true, check: { ...check, notes } as Extract<PF1eManeuverCheckResult, { ok: true }>, success: true, escapeDc, cannotEscapeEvenWith20, notes };
+}
+
+/**
+ * If grappled — break or reverse. Standard action, does not provoke. CMB vs
+ * CMD or Escape Artist vs CMD (AoN 191). On success the grappled creature
+ * can break free and act normally, or become the grappler.
+ */
+export function pf1eGrappleEscape(input: {
+  /** The grappled creature's die and bonus. For CMB use `bonusIsCmb:true`; for Escape Artist the skill total. */
+  die: number;
+  /** The bonus on the check (CMB or Escape Artist). */
+  bonus: number;
+  /** Opponent's CMD. */
+  defenderCmd: number;
+  /** Escaping bonds exception — natural 20 not auto-success when escaping bonds (not grapple). */
+  escapingBonds?: boolean;
+  /** True when this Escape Artist-or-CMB check should become the grappler on success. */
+  becomeGrappler?: boolean;
+  /** Optional extra notes from hazardous placement (+4 free break). */
+  hasHazardBonus?: boolean;
+}):
+  | { ok: false; error: string }
+  | {
+      ok: true;
+      success: boolean;
+      escaped: boolean;
+      reversed: boolean;
+      notes: readonly string[];
+    } {
+  if (!Number.isInteger(input.die) || input.die < 1 || input.die > 20) {
+    return { ok: false, error: "the grapple escape die must be a natural d20 face (1–20)" };
+  }
+  let effectiveBonus = input.bonus;
+  const notes: string[] = [];
+  if (input.hasHazardBonus === true) {
+    effectiveBonus += 4;
+    notes.push("hazardous placement — the target receives a +4 bonus on this break attempt (AoN 191)");
+  }
+  // Escape never provokes and has no size limit / concealment — reuse the core
+  // roll logic without those wrappers. We replicate the nat 20/1 handling so the
+  // size/humanoid/concealment machinery does not double-apply.
+  const total = input.die + effectiveBonus;
+  const cmdEffective = input.defenderCmd;
+  let success: boolean;
+  if (input.die === 20 && input.escapingBonds !== true) {
+    notes.push("natural 20 — the grapple escape automatically succeeds (A.9)");
+    success = true;
+  } else if (input.die === 1) {
+    notes.push("natural 1 — the grapple escape automatically fails (A.9)");
+    success = false;
+  } else {
+    if (input.escapingBonds === true) notes.push("escaping bonds: the natural 20 is not an automatic success (A.9)");
+    success = total >= cmdEffective;
+  }
+  notes.push(`grapple escape does not provoke an attack of opportunity (AoN 191)`);
+  if (!success) {
+    return { ok: true, success: false, escaped: false, reversed: false, notes: [...notes, `escape fails — ${String(total)} vs CMD ${String(cmdEffective)}`] };
+  }
+  if (input.becomeGrappler === true) {
+    notes.push("you succeed and become the grappler, grappling the other creature — the other creature cannot freely release the grapple without a check, while you can (AoN 191)");
+    return { ok: true, success: true, escaped: false, reversed: true, notes };
+  }
+  notes.push("you succeed and break the grapple — you can act normally (AoN 191)");
+  return { ok: true, success: true, escaped: true, reversed: false, notes };
+}
+
+/** Hazardous-place free break — a grappled defender's +4 attempt when moved into hazard. */
+export function pf1eGrappleHazardBreak(input: {
+  die: number;
+  bonus: number;
+  defenderCmd: number;
+}): ReturnType<typeof pf1eGrappleEscape> {
+  return pf1eGrappleEscape({ die: input.die, bonus: input.bonus, defenderCmd: input.defenderCmd, hasHazardBonus: true });
+}
+
+
+
