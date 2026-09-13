@@ -4,6 +4,7 @@
   import {
     pf1eAttackRollGroups,
     pf1eManyshotRollSpecs,
+    pf1eManyshotFullAttackRollSpecs,
     pf1eInitiativeRollSpec,
     pf1eSaveRollSpecs,
     type PF1eRollSpec,
@@ -82,6 +83,8 @@
     SceneDocument,
   } from "../../core/documents";
   import { resolveAttackFlow, resolveManyshotFlow } from "./pf1eResolveFlow";
+  import { resolveManeuverFlow } from "../combat/pf1eManeuverFlow";
+  import { resolveAidAnotherFlow, resolveFeintFlow } from "../combat/pf1eAidFeintFlow";
   import type { PF1eDefenseChoice } from "../../packages/pf1e/resolve";
   import {
     COVER_GRADE_OPTIONS,
@@ -98,6 +101,11 @@
     rangedAttackProvokes,
     resolveActionProvokes,
   } from "../combat/pf1eActionProvoke";
+  import { planRest, restLevelOf } from "../combat/pf1eRest";
+  import { applyHealing } from "../../packages/pf1e/healing";
+  import { grantTempHp, expireTempHpSource } from "../../packages/pf1e/tempHp";
+  import { energyDrainSaveDC, negativeLevelPenalties, negativeLevelTotalsOf } from "../../packages/pf1e/negativeLevels";
+  import { planEnergyDrainInflict, planNegativeLevelSave, planRestoration } from "../combat/pf1eEnergyDrain";
   type TabName =
     | "summary"
     | "attributes"
@@ -158,6 +166,9 @@
   // P5/C04 (D-155): persisted slot ledger + prepared list, spend/prepare Ops.
   let spellbook = $derived(pf1eSpellbookView(doc, d));
   let spellbookWarning = $state("");
+  let negativeLevelsTotals = $derived(negativeLevelTotalsOf((doc.system as { pf1e?: { negativeLevels?: unknown } }).pf1e?.negativeLevels));
+  let negativeLevelsPen = $derived(negativeLevelPenalties(negativeLevelsTotals.total));
+  let negativeLevelsHd = $derived((() => { const raw = (doc.system as { pf1e?: { hitDice?: unknown } }).pf1e?.hitDice; return typeof raw === "number" && Number.isFinite(raw) ? Math.trunc(raw as number) : 0; })());
   // P5/C03 (D-158): a held touch-spell charge lives on the actor document.
   let heldCharge = $derived(
     heldChargeFromSystem(doc.system as Record<string, unknown>),
@@ -167,6 +178,29 @@
     pendingCastFromSystem(doc.system as Record<string, unknown>),
   );
   let pendingDisruptDamage = $state("");
+  // D-206 — natural recovery (H03, AoN 170): level per night, 2× bed rest, long-term care.
+  let restBed = $state(false);
+  let restCare = $state(false);
+  let restLevelOverride = $state("");
+  let restNote = $state("");
+  // P7/H02 — magical healing (CRB p.191): heals HP + equal nonlethal, never temp HP.
+  let healAmountRaw = $state("");
+  let healNote = $state("");
+  // P7/H02 — temporary HP grant/expire (Paizo FAQ, CRB p.208).
+  let tempHpSourceId = $state("");
+  let tempHpAmountRaw = $state("");
+  let tempHpExpireId = $state("");
+  let tempHpNote = $state("");
+  // P7/H04 — negative levels (AoN 427): infliction, 24h saves, restoration.
+  let negativeLevelsCountRaw = $state("");
+  let negativeLevelsKind = $state<"temporary" | "permanent">("temporary");
+  let negativeLevelSaveKind = $state<"temporary" | "energy-drain">("temporary");
+  let negativeLevelDieRaw = $state("");
+  let negativeLevelFortRaw = $state("");
+  let negativeLevelDcRaw = $state("");
+  let restorationCountRaw = $state("");
+  let restorationKind = $state<"any" | "temporary" | "permanent">("any");
+  let negativeLevelsNote = $state("");
   let prepareName = $state("");
   let prepareLevel = $state("1");
   let prepareSlotLevel = $state("");
@@ -270,6 +304,19 @@
       Array.isArray(view.authored.feats) ? view.authored.feats : [],
     );
   }
+  /**
+   * The Manyshot-aware full-attack rolls for one line: when Manyshot applies,
+   * the volley **is** the first iterative (2–4 arrows at the first bonus −4)
+   * and remaining iteratives follow as single arrows, so the first bonus is
+   * not doubled. When Manyshot does not apply this is exactly the ladder.
+   */
+  function manyshotFullAttackRolls(index: number): PF1eRollSpec[] {
+    return pf1eManyshotFullAttackRollSpecs(
+      d,
+      index,
+      Array.isArray(view.authored.feats) ? view.authored.feats : [],
+    );
+  }
 
   // A06b — resolve one attack against a target actor: public rolls, the
   // resolution card, and HP writes through the sheet's own op path.
@@ -286,10 +333,40 @@
   let resolveCharging = $state(false);
   let resolveNonlethal = $state(false);
   let resolveVerifiable = $state(false);
+  let resolvePowerAttack = $state(false);
+  let resolveDeadlyAim = $state(false);
+  let resolveCombatExpertise = $state(false);
+  let resolveFightingDefensively = $state(false);
+  let resolvePointBlank = $state(false);
   let resolveBusy = $state(false);
   let manyshotBusy = $state(false);
   let resolveError = $state("");
   let resolveWarning = $state("");
+  // P05/D-210 — maneuver resolution (CombatPanel and the sheet share the same flow)
+  let maneuverKind = $state("trip");
+  let maneuverTargetId = $state("");
+  let maneuverHasImproved = $state(false);
+  let maneuverBusy = $state(false);
+  let maneuverError = $state("");
+  let maneuverWarning = $state("");
+  let maneuverVerifiable = $state(false);
+  // P05/D-211 — Aid Another and Feint (the two A.9 companions, separate from the ten maneuvers)
+  let aidAidedId = $state("");
+  let aidOpponentId = $state("");
+  let aidChoice = $state<"attack" | "ac">("attack");
+  let aidAidedProvokes = $state(false);
+  let aidVerifiable = $state(false);
+  let aidBusy = $state(false);
+  let aidError = $state("");
+  let aidWarning = $state("");
+  let feintTargetId = $state("");
+  let feintBluffBonusRaw = $state("");
+  let feintHasImproved = $state(false);
+  let feintHasGreater = $state(false);
+  let feintBusy = $state(false);
+  let feintError = $state("");
+  let feintWarning = $state("");
+  let feintVerifiable = $state(false);
   let authoredAttacksCount = $derived(
     Array.isArray(view.authored.attacks) ? view.authored.attacks.length : 0,
   );
@@ -495,6 +572,19 @@
           ? { feats: view.authored.feats as string[] }
           : {}),
         ...(group.provokes ? { provokes: true } : {}),
+        attackerBab: Math.trunc(view.derived.baseAttack),
+        ...(resolvePowerAttack ? { powerAttack: true } : {}),
+        ...(resolveDeadlyAim ? { deadlyAim: true } : {}),
+        ...(resolveCombatExpertise ? { combatExpertise: true } : {}),
+        ...(resolveFightingDefensively ? { fightingDefensively: true } : {}),
+        ...(resolvePointBlank ? { pointBlankShot: true, distanceFt: 0 } : {}),
+        ...(line.ranged === true
+          ? {
+              targetEngaged: resolvePosition.engagement?.targetEngaged ?? false,
+              nearestFriendlyDistanceFt: resolvePosition.engagement?.nearestFriendlyDistanceFt ?? null,
+              engagedSizeCategoriesLarger: resolvePosition.engagement?.sizeCategoriesLarger ?? 0,
+            }
+          : {}),
         ...(resolveVerifiable ? { verifiable: true } : {}),
       });
       if (!outcome.ok) resolveError = outcome.error;
@@ -562,12 +652,172 @@
         ...(Array.isArray(view.authored.feats)
           ? { feats: view.authored.feats as string[] }
           : {}),
+        attackerBab: Math.trunc(view.derived.baseAttack),
+        ...(resolvePowerAttack ? { powerAttack: true } : {}),
+        ...(resolveDeadlyAim ? { deadlyAim: true } : {}),
+        ...(resolveCombatExpertise ? { combatExpertise: true } : {}),
+        ...(resolveFightingDefensively ? { fightingDefensively: true } : {}),
+        ...(resolvePointBlank ? { pointBlankShot: true, distanceFt: 0 } : {}),
+        ...(line.ranged === true
+          ? {
+              targetEngaged: resolvePosition.engagement?.targetEngaged ?? false,
+              nearestFriendlyDistanceFt: resolvePosition.engagement?.nearestFriendlyDistanceFt ?? null,
+              engagedSizeCategoriesLarger: resolvePosition.engagement?.sizeCategoriesLarger ?? 0,
+            }
+          : {}),
         ...(resolveVerifiable ? { verifiable: true } : {}),
       });
       if (!outcome.ok) resolveError = outcome.error;
     } finally {
       manyshotBusy = false;
     }
+  }
+
+  function maneuverTargetInfo(): {
+    actor: ActorDocument;
+  } | null {
+    if (!maneuverTargetId) return null;
+    const actor = client.store.get("actors", maneuverTargetId) as ActorDocument | undefined;
+    if (!actor) return null;
+    return { actor };
+  }
+
+  let maneuverPosition = $derived(
+    pf1eResolvePositionReport({
+      scene: activeSceneOf(
+        client.store.getAll("scenes") as readonly SceneDocument[],
+        DEFAULT_SCENE_ID,
+      ),
+      actors: client.store.getAll("actors") as readonly ActorDocument[],
+      attackerActorId: doc._id,
+      targetActorId: maneuverTargetId,
+      ranged: false,
+    }),
+  );
+
+  let maneuverEffectivePositional = $derived.by(() => {
+    const concealment =
+      maneuverPosition.defense?.concealment !== undefined
+        ? { concealment: maneuverPosition.defense.concealment }
+        : undefined;
+    return concealment;
+  });
+
+  async function resolveManeuver(): Promise<void> {
+    maneuverError = "";
+    maneuverWarning = "";
+    const info = maneuverTargetInfo();
+    if (!info) {
+      maneuverError = "Pick a maneuver target.";
+      return;
+    }
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current) {
+      maneuverError = "Actor is no longer available.";
+      return;
+    }
+    maneuverBusy = true;
+    try {
+      const scene = activeSceneOf(
+        client.store.getAll("scenes") as readonly SceneDocument[],
+        DEFAULT_SCENE_ID,
+      );
+      const tokens = (scene?.tokens ?? []) as unknown as readonly { _id: string; actorId?: string | null }[];
+      const outcome = await resolveManeuverFlow(client as unknown as import("../combat/pf1eManeuverFlow").ManeuverFlowClient, client.user, {
+        attacker: current,
+        defender: info.actor,
+        kind: maneuverKind as unknown as import("../combat/pf1eManeuverFlow").ManeuverFlowKind,
+        combat: linked.combat,
+        tokens,
+        scene: scene ?? null,
+        hasImprovedFeat: maneuverHasImproved,
+        ...(maneuverEffectivePositional !== undefined ? maneuverEffectivePositional : {}),
+        ...(maneuverVerifiable ? { verifiable: true } : {}),
+        grappleOpts: { targetAdjacent: true, hasAdjacentSpace: true },
+      });
+      if (!outcome.ok) maneuverError = outcome.error;
+      else if (outcome.aooDamage) maneuverWarning = `AoO dealt ${outcome.aooDamage} — applied as penalty.`;
+      else maneuverWarning = outcome.plan.note ?? "";
+    } finally {
+      maneuverBusy = false;
+    }
+  }
+
+  function aidAidedInfo(): ActorDocument | null {
+    if (!aidAidedId) return null;
+    return (client.store.get("actors", aidAidedId) as ActorDocument | undefined) ?? null;
+  }
+  function aidOpponentInfo(): ActorDocument | null {
+    if (!aidOpponentId) return null;
+    return (client.store.get("actors", aidOpponentId) as ActorDocument | undefined) ?? null;
+  }
+  function feintTargetInfo(): ActorDocument | null {
+    if (!feintTargetId) return null;
+    return (client.store.get("actors", feintTargetId) as ActorDocument | undefined) ?? null;
+  }
+
+  async function resolveAid(): Promise<void> {
+    aidError = "";
+    aidWarning = "";
+    const aided = aidAidedInfo();
+    const opponent = aidOpponentInfo();
+    if (!aided || !opponent) {
+      aidError = "Pick an aided ally and an opponent.";
+      return;
+    }
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current) { aidError = "Actor is no longer available."; return; }
+    aidBusy = true;
+    try {
+      const scene = activeSceneOf(client.store.getAll("scenes") as readonly SceneDocument[], DEFAULT_SCENE_ID);
+      const tokens = (scene?.tokens ?? []) as unknown as readonly { _id: string; actorId?: string | null }[];
+      const outcome = await resolveAidAnotherFlow(client as unknown as import("../combat/pf1eAidFeintFlow").AidFeintFlowClient, client.user, {
+        aider: current,
+        aided,
+        opponent,
+        combat: linked.combat,
+        tokens,
+        scene: scene ?? null,
+        aidedActionProvokes: aidAidedProvokes,
+        aidChoice,
+        ...(aidVerifiable ? { verifiable: true } : {}),
+      });
+      if (!outcome.ok) aidError = outcome.error;
+      else if (outcome.aooDamage !== undefined) aidWarning = `AoO dealt ${outcome.aooDamage} — applied as penalty. ${outcome.plan.note ?? ""}`;
+      else aidWarning = outcome.plan.note ?? "";
+    } finally { aidBusy = false; }
+  }
+
+  async function resolveFeint(): Promise<void> {
+    feintError = "";
+    feintWarning = "";
+    const target = feintTargetInfo();
+    if (!target) { feintError = "Pick a feint target."; return; }
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current) { feintError = "Actor is no longer available."; return; }
+    const bluffBonus = feintBluffBonusRaw.trim() === "" ? 0 : Number.parseInt(feintBluffBonusRaw, 10);
+    if (!Number.isFinite(bluffBonus)) { feintError = "Bluff bonus must be a whole number."; return; }
+    feintBusy = true;
+    try {
+      const scene = activeSceneOf(client.store.getAll("scenes") as readonly SceneDocument[], DEFAULT_SCENE_ID);
+      const tokens = (scene?.tokens ?? []) as unknown as readonly { _id: string; actorId?: string | null }[];
+      const derived = pf1eSheetView(target).derived;
+      const outcome = await resolveFeintFlow(client as unknown as import("../combat/pf1eAidFeintFlow").AidFeintFlowClient, client.user, {
+        feinter: current,
+        target,
+        bluffBonus,
+        hasImprovedFeint: feintHasImproved,
+        hasGreaterFeint: feintHasGreater,
+        targetIsHumanoid: true,
+        targetIntScore: (derived as { abilities?: Record<string, number> }).abilities?.int ?? null,
+        combat: linked.combat,
+        tokens,
+        scene: scene ?? null,
+        ...(feintVerifiable ? { verifiable: true } : {}),
+      });
+      if (!outcome.ok) feintError = outcome.error;
+      else feintWarning = outcome.plan.note ?? "";
+    } finally { feintBusy = false; }
   }
 
   let editable = $derived(
@@ -1181,6 +1431,192 @@
     );
   }
 
+  // D-206 — natural recovery (H03, AoN 170): level per night, 2× bed rest, long-term care.
+  function doRest(): void {
+    restNote = "";
+    error = "";
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) {
+      error = "Actor is no longer available.";
+      return;
+    }
+    if (
+      !isPF1eActor(current) ||
+      !client.user ||
+      !can(client.user, "update", current, "actors")
+    ) {
+      error = "You do not have permission to rest this actor.";
+      return;
+    }
+    const parsed = restLevelOverride.trim();
+    const level =
+      parsed !== ""
+        ? Number.parseInt(parsed, 10)
+        : restLevelOf(current);
+    if (!Number.isFinite(level) || level < 0) {
+      error = "Rest level must be a non-negative number.";
+      return;
+    }
+    const plan = planRest({
+      actor: current,
+      level,
+      bedRest: restBed,
+      longTermCare: restCare,
+    });
+    if (plan.ops.length > 0) pending.add(client.submit(plan.ops));
+    restNote = plan.note;
+  }
+
+  // P7/H02 — apply magical/mundane healing (CRB p.191).
+  function doHealing(): void {
+    healNote = "";
+    error = "";
+    const current = client.store.get("actors", doc._id) as
+      ActorDocument | undefined;
+    if (!current) {
+      error = "Actor is no longer available.";
+      return;
+    }
+    if (
+      !isPF1eActor(current) ||
+      !client.user ||
+      !can(client.user, "update", current, "actors")
+    ) {
+      error = "You do not have permission to heal this actor.";
+      return;
+    }
+    const raw = healAmountRaw.trim();
+    const amount = Number.parseInt(raw, 10);
+    if (!Number.isSafeInteger(amount) || amount <= 0) {
+      error = "Healing amount must be a positive whole number.";
+      return;
+    }
+    const derived = pf1eSheetView(current).derived;
+    const result = applyHealing({
+      hp: derived.hp,
+      hpMax: derived.hpMax,
+      nonlethalDamage: derived.nonlethalDamage,
+      amount,
+    });
+    if ((result as unknown as { ok: false }).ok === false) {
+      error = (result as unknown as { error: string }).error;
+      return;
+    }
+    const r = result as unknown as { hp: number; nonlethalDamage: number; note: string };
+    const diff: Record<string, unknown> = {};
+    if (r.hp !== derived.hp) diff["system.pf1e.hp"] = r.hp;
+    if (r.nonlethalDamage !== derived.nonlethalDamage) diff["system.pf1e.nonlethalDamage"] = r.nonlethalDamage;
+    if (Object.keys(diff).length === 0) {
+      healNote = r.note;
+      return;
+    }
+    pending.add(
+      client.submit([
+        { kind: "update", ref: { coll: "actors", id: current._id }, diff: diff as unknown as Record<string, import("../../core/documents").Json> },
+      ]),
+    );
+    healNote = r.note;
+  }
+
+  // P7/H02 — grant or expire temporary hit points by source.
+  function doGrantTempHp(): void {
+    tempHpNote = "";
+    error = "";
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current) { error = "Actor is no longer available."; return; }
+    if (!isPF1eActor(current) || !client.user || !can(client.user, "update", current, "actors")) {
+      error = "You do not have permission to grant temporary HP."; return;
+    }
+    const id = tempHpSourceId.trim();
+    const amount = Number.parseInt(tempHpAmountRaw.trim(), 10);
+    if (id === "") { error = "Source id must be non-empty."; return; }
+    if (!Number.isSafeInteger(amount) || amount <= 0) { error = "Amount must be a positive whole number."; return; }
+    const derived = pf1eSheetView(current).derived;
+    const result = grantTempHp(derived.tempHpSources, id, amount);
+    if (result.issues.length > 0) { error = result.issues.join(" "); return; }
+    const diff: Record<string, unknown> = {};
+    diff["system.pf1e.tempHpSources"] = result.sources as unknown as Record<string, unknown>;
+    diff["-=system.pf1e.tempHp"] = null;
+    pending.add(client.submit([{ kind: "update", ref: { coll: "actors", id: current._id }, diff: diff as unknown as Record<string, import("../../core/documents").Json> }]));
+    tempHpNote = result.note ?? `granted ${amount} temp HP from ${id} — total ${result.total}`;
+  }
+  function doExpireTempHp(): void {
+    tempHpNote = "";
+    error = "";
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current) { error = "Actor is no longer available."; return; }
+    if (!isPF1eActor(current) || !client.user || !can(client.user, "update", current, "actors")) {
+      error = "You do not have permission to expire temporary HP."; return;
+    }
+    const id = tempHpExpireId.trim();
+    if (id === "") { error = "Source id to expire must be non-empty."; return; }
+    const derived = pf1eSheetView(current).derived;
+    if (!(id in derived.tempHpSources)) { error = `No such temp HP source: ${id}`; return; }
+    const result = expireTempHpSource(derived.tempHpSources, id);
+    const diff: Record<string, unknown> = {};
+    if (Object.keys(result.sources).length === 0) {
+      diff["-=system.pf1e.tempHpSources"] = null;
+      diff["-=system.pf1e.tempHp"] = null;
+    } else {
+      diff["system.pf1e.tempHpSources"] = result.sources as unknown as Record<string, unknown>;
+      diff["-=system.pf1e.tempHp"] = null;
+    }
+    pending.add(client.submit([{ kind: "update", ref: { coll: "actors", id: current._id }, diff: diff as unknown as Record<string, import("../../core/documents").Json> }]));
+    tempHpNote = result.note ?? "expired";
+  }
+
+  // P7/H04 — negative levels: inflict, 24h save, restoration.
+  function doInflictNegativeLevels(): void {
+    negativeLevelsNote = "";
+    error = "";
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current) { error = "Actor is no longer available."; return; }
+    if (!isPF1eActor(current) || !client.user || !can(client.user, "update", current, "actors")) {
+      error = "You do not have permission to inflict negative levels."; return;
+    }
+    const count = Number.parseInt(negativeLevelsCountRaw.trim(), 10);
+    if (!Number.isSafeInteger(count) || count <= 0) { error = "Count must be a positive whole number (≥1)."; return; }
+    const res = planEnergyDrainInflict({ defender: current, count, kind: negativeLevelsKind });
+    if (!res.ok) { error = res.error; return; }
+    if (res.plan.ops.length > 0) pending.add(client.submit(res.plan.ops));
+    negativeLevelsNote = res.plan.note;
+  }
+  function doNegativeLevelSave(): void {
+    negativeLevelsNote = "";
+    error = "";
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current) { error = "Actor is no longer available."; return; }
+    if (!isPF1eActor(current) || !client.user || !can(client.user, "update", current, "actors")) {
+      error = "You do not have permission to roll a negative-level save."; return;
+    }
+    const die = Number.parseInt(negativeLevelDieRaw.trim(), 10);
+    const fortBonus = Number.parseInt(negativeLevelFortRaw.trim(), 10);
+    const dc = Number.parseInt(negativeLevelDcRaw.trim(), 10);
+    if (!Number.isSafeInteger(die) || die < 1 || die > 20) { error = "Die must be a natural d20 face (1–20)."; return; }
+    if (!Number.isSafeInteger(fortBonus)) { error = "Fort bonus must be a whole number."; return; }
+    if (!Number.isSafeInteger(dc)) { error = "DC must be a whole number."; return; }
+    const res = planNegativeLevelSave({ actor: current, kind: negativeLevelSaveKind, die, fortBonus, dc });
+    if (!res.ok) { error = res.error; return; }
+    if (res.plan.ops.length > 0) pending.add(client.submit(res.plan.ops));
+    negativeLevelsNote = res.plan.note;
+  }
+  function doRestoration(): void {
+    negativeLevelsNote = "";
+    error = "";
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current) { error = "Actor is no longer available."; return; }
+    if (!isPF1eActor(current) || !client.user || !can(client.user, "update", current, "actors")) {
+      error = "You do not have permission to restore negative levels."; return;
+    }
+    const count = Number.parseInt(restorationCountRaw.trim(), 10);
+    if (!Number.isSafeInteger(count) || count <= 0) { error = "Count must be a positive whole number (≥1)."; return; }
+    const res = planRestoration({ actor: current, count, kind: restorationKind });
+    if (!res.ok) { error = res.error; return; }
+    if (res.plan.ops.length > 0) pending.add(client.submit(res.plan.ops));
+    negativeLevelsNote = res.plan.note;
+  }
+
   // E01/E02 — the effect apply/edit/toggle/remove handlers. Both homes resolve
   // fresh documents from the projected store, so a stale tab cannot write over
   // a replica that moved on; the ops go through ClientSync like every edit.
@@ -1383,8 +1819,13 @@
     <dl>
       <dt>HP</dt>
       <dd>{d.hp} / {d.hpMax} · {d.nonlethalDamage} nonlethal</dd>
-      <dt>Temporary HP (manual)</dt>
-      <dd data-temp-hp>{d.tempHp} · separate from current/max HP</dd>
+      <dt>Temporary HP</dt>
+      <dd data-temp-hp>
+        {d.tempHp} total · separate from current/max HP
+        {#if Object.keys(d.tempHpSources).length > 0}
+          ({Object.entries(d.tempHpSources).map(([id, v]) => `${id}: ${v}`).join(" · ")})
+        {/if}
+      </dd>
       <dt>Energy resistance (manual)</dt>
       <dd data-energy-resistance>
         {Object.entries(d.energyResistance)
@@ -1427,11 +1868,98 @@
     {#each slotReadout.view.warnings as warning (warning)}
       <p class="note" data-pf1e-spell-slot-warning>{warning}</p>
     {/each}
+    <section class="resolve" aria-label="Natural recovery (rest)" data-pf1e-rest>
+      <h4>Natural recovery — a night's rest (AoN 170 / CRB p.191)</h4>
+      <label
+        >Character level
+        <input
+          bind:value={restLevelOverride}
+          placeholder={String(restLevelOf(doc))}
+          size="4"
+          data-rest-level
+        /></label
+      >
+      <label
+        ><input type="checkbox" bind:checked={restBed} data-rest-bed /> Complete bed rest (24h) — 2×</label
+      >
+      <label
+        ><input type="checkbox" bind:checked={restCare} data-rest-care /> Long-term care (Heal) — 2× again</label
+      >
+      <button
+        type="button"
+        disabled={!editable}
+        onclick={() => doRest()}
+        data-rest-submit>Rest &amp; recover</button
+      >
+      {#if restNote}<p class="note" data-rest-note>{restNote}</p>{/if}
+      <p class="note">
+        {restLevelOf(doc)} HP per level per night of rest; ability damage heals 1 per affected score per night, 2 per day of complete bed rest; long-term care doubles both. Drain never heals naturally — restoration is its only cure.
+      </p>
+    </section>
+    <section class="resolve" aria-label="Healing" data-pf1e-healing>
+      <h4>Healing (CRB p.191 — equal nonlethal removal, never temp HP)</h4>
+      <label
+        >Amount
+        <input bind:value={healAmountRaw} placeholder="e.g. 8" size="4" data-heal-amount /></label
+      >
+      <button type="button" disabled={!editable} onclick={() => doHealing()} data-heal-submit
+        >Heal</button
+      >
+      {#if healNote}<p class="note" data-heal-note>{healNote}</p>{/if}
+      <p class="note">Healing restores hit points up to maximum and removes an equal amount of nonlethal damage (even at full HP); temporary hit points are never restored.</p>
+    </section>
+    <section class="resolve" aria-label="Temporary hit points" data-pf1e-temp-hp-panel>
+      <h4>Temporary hit points (Paizo FAQ — same-source highest, different stack)</h4>
+      <label
+        >Grant — source
+        <input bind:value={tempHpSourceId} placeholder="e.g. aid" size="8" data-temp-grant-id /></label
+      >
+      <label
+        >Amount
+        <input bind:value={tempHpAmountRaw} placeholder="e.g. 8" size="4" data-temp-grant-amount /></label
+      >
+      <button type="button" disabled={!editable} onclick={() => doGrantTempHp()} data-temp-grant-submit>Grant</button>
+      <label
+        >Expire — source
+        <input bind:value={tempHpExpireId} placeholder="e.g. aid" size="8" data-temp-expire-id /></label
+      >
+      <button type="button" disabled={!editable} onclick={() => doExpireTempHp()} data-temp-expire-submit>Expire</button>
+      {#if tempHpNote}<p class="note" data-temp-note>{tempHpNote}</p>{/if}
+      <p class="note">Same source overlaps (highest remaining wins); different sources stack. Expiry removes that source only — damage absorbed earlier stays lost.</p>
+    </section>
+    <section class="resolve" aria-label="Negative levels (energy drain)" data-pf1e-negative-levels>
+      <h4>Negative levels — energy drain (AoN 427 / CRB p.562)</h4>
+      <p data-negative-levels-readout>
+        {#if negativeLevelsTotals.total === 0}
+          No negative levels.
+        {:else}
+          {negativeLevelsTotals.total} total ({negativeLevelsTotals.temporary} temporary, {negativeLevelsTotals.permanent} permanent) — penalties: attack {negativeLevelsPen.attack}, saves {negativeLevelsPen.saves}, HP {negativeLevelsPen.hp}, effective level {negativeLevelsPen.effectiveLevelDelta}{#if negativeLevelsHd > 0 && negativeLevelsTotals.total >= negativeLevelsHd} <span class="warn"> — dead at {negativeLevelsHd} HD (AoN 427)</span>{/if}
+        {/if}
+        {#if negativeLevelsTotals.issues.length > 0}<span class="warn"> — {negativeLevelsTotals.issues.join(" · ")}</span>{/if}
+      </p>
+      <div class="resolve" data-negative-inflict>
+        <label>Inflict — count <input bind:value={negativeLevelsCountRaw} placeholder="e.g. 1" size="3" data-negative-inflict-count /></label>
+        <label>kind <select bind:value={negativeLevelsKind} data-negative-inflict-kind><option value="temporary">temporary (save each day)</option><option value="permanent">permanent (restoration only)</option></select></label>
+        <button type="button" disabled={!editable} onclick={() => doInflictNegativeLevels()} data-negative-inflict-submit>Inflict</button>
+      </div>
+      <div class="resolve" data-negative-save>
+        <span>Save — one level</span>
+        <label>kind <select bind:value={negativeLevelSaveKind} data-negative-save-kind><option value="temporary">temporary (DC = effect's DC)</option><option value="energy-drain">energy drain (DC 10 + 1/2 racial HD + Cha, 24h; fail → permanent)</option></select></label>
+        <label>d20 <input bind:value={negativeLevelDieRaw} placeholder="1–20" size="3" data-negative-save-die /></label>
+        <label>Fort <input bind:value={negativeLevelFortRaw} placeholder={String(d.saves.fort)} size="3" data-negative-save-fort /></label>
+        <label>DC <input bind:value={negativeLevelDcRaw} placeholder="e.g. 16" size="3" data-negative-save-dc /></label>
+        <button type="button" disabled={!editable} onclick={() => doNegativeLevelSave()} data-negative-save-submit>Save</button>
+      </div>
+      <div class="resolve" data-negative-restore>
+        <label>Restoration — count <input bind:value={restorationCountRaw} placeholder="e.g. 1" size="3" data-negative-restore-count /></label>
+        <label>kind <select bind:value={restorationKind} data-negative-restore-kind><option value="any">any (temporary first)</option><option value="temporary">temporary</option><option value="permanent">permanent</option></select></label>
+        <button type="button" disabled={!editable} onclick={() => doRestoration()} data-negative-restore-submit>Restore</button>
+      </div>
+      {#if negativeLevelsNote}<p class="note" data-negative-levels-note>{negativeLevelsNote}</p>{/if}
+      <p class="note">Per AoN 427/UMR Energy Drain: −1 per level on attacks/saves/skills/ability checks/CMB/CMD, −5 HP (current and total), one level lower for level-dependent variables; death when levels ≥ Hit Dice. Temporary: new save each day at the effect's DC; energy drain: one Fort save after 24h (DC 10 + 1/2 racial HD + Cha), failure makes the level permanent; permanent drain: restoration only. Example DC: vampire 8 HD, Cha +4 → DC {energyDrainSaveDC({ racialHd: 8, chaMod: 4 })}.</p>
+    </section>
     <p class="note">
-      Temporary HP and energy resistance are manually adjudicated records;
-      absorption, source stacking and expiration are not automated. Ability
-      damage is not yet modeled. Derived values are read-only. Editing a score
-      does not roll initiative or resolve combat.
+      Energy resistance is manually adjudicated; temporary HP absorption, source stacking (same-source highest, different stack) and expiration are automated (CRB p.191), healing never restores temp HP. Ability drain never heals naturally — restoration is its only cure. Derived values are read-only.
     </p>
   {:else if tab === "attributes" || tab === "combat"}
     {#if tab === "combat"}
@@ -1498,17 +2026,23 @@
             <button type="button" onclick={() => rollSpec(group.attack)}
               >Attack</button
             >
-            {#if group.fullAttack.length > 1}
-              <button type="button" onclick={() => rollAll(group.fullAttack)}
-                >Full attack</button
-              >
-            {/if}
             {#if manyshotRolls(i).length > 0}
+              <!-- Manyshot volley is the first attack of a full-attack action (2 at BAB +6, 3 at +11, 4 at +16) -->
               <button
                 type="button"
                 data-pf1e-manyshot
+                title="First attack of a full-attack volley — remaining iteratives follow as single arrows, so the first bonus is not doubled"
                 onclick={() => rollAll(manyshotRolls(i))}
-                >Manyshot ×{manyshotRolls(i).length}</button
+                >Manyshot volley ×{manyshotRolls(i).length} (first attack)</button
+              >
+              {#if manyshotFullAttackRolls(i).length > 1}
+                <button type="button" onclick={() => rollAll(manyshotFullAttackRolls(i))}
+                  >Full attack (Manyshot) ×{manyshotFullAttackRolls(i).length}</button
+                >
+              {/if}
+            {:else if group.fullAttack.length > 1}
+              <button type="button" onclick={() => rollAll(group.fullAttack)}
+                >Full attack ×{group.fullAttack.length}</button
               >
             {/if}
             {#if group.damage}
@@ -1595,6 +2129,41 @@
         <label
           ><input
             type="checkbox"
+            bind:checked={resolvePowerAttack}
+            data-pf1e-resolve-power-attack
+          /> Power Attack</label
+        >
+        <label
+          ><input
+            type="checkbox"
+            bind:checked={resolveDeadlyAim}
+            data-pf1e-resolve-deadly-aim
+          /> Deadly Aim</label
+        >
+        <label
+          ><input
+            type="checkbox"
+            bind:checked={resolveCombatExpertise}
+            data-pf1e-resolve-combat-expertise
+          /> Combat Expertise</label
+        >
+        <label
+          ><input
+            type="checkbox"
+            bind:checked={resolveFightingDefensively}
+            data-pf1e-resolve-fighting-defensively
+          /> Fighting defensively (−4 / +2 AC)</label
+        >
+        <label
+          ><input
+            type="checkbox"
+            bind:checked={resolvePointBlank}
+            data-pf1e-resolve-point-blank
+          /> Point-Blank Shot (≤30 ft)</label
+        >
+        <label
+          ><input
+            type="checkbox"
             bind:checked={resolveVerifiable}
             data-pf1e-resolve-verifiable
           /> Commit-reveal rolls (verifiable)</label
@@ -1612,9 +2181,10 @@
             disabled={resolveBusy || manyshotBusy || !resolveTargetId}
             onclick={() => void resolveManyshotVsTarget()}
             data-pf1e-resolve-manyshot
+            title="First attack of a full-attack action — remaining iteratives resolve as single attacks so the first bonus is not doubled"
             >{manyshotBusy
               ? "Resolving Manyshot…"
-              : `Resolve Manyshot ×${manyshotRolls(resolveAttackIndex).length}`}</button
+              : `Resolve Manyshot volley ×${manyshotRolls(resolveAttackIndex).length} (first attack)`}</button
           >
         {/if}
         {#if resolveTargetId}
@@ -1632,6 +2202,94 @@
         {#if resolveWarning}<p class="note" data-pf1e-resolve-warning>
             {resolveWarning}
           </p>{/if}
+      </div>
+      <h4>Combat maneuvers (A.9 — provokes an AoO without the Improved feat)</h4>
+      <div class="resolve" data-pf1e-maneuver>
+        <label>Maneuver
+          <select bind:value={maneuverKind} data-pf1e-maneuver-kind>
+            <option value="bull-rush">Bull rush</option>
+            <option value="trip">Trip</option>
+            <option value="disarm">Disarm</option>
+            <option value="sunder">Sunder</option>
+            <option value="reposition">Reposition</option>
+            <option value="drag">Drag</option>
+            <option value="dirty-trick">Dirty trick</option>
+            <option value="steal">Steal</option>
+            <option value="overrun">Overrun</option>
+            <option value="grapple">Grapple</option>
+            <option value="grapple-maintain">Grapple — maintain</option>
+            <option value="grapple-pin">Grapple — pin</option>
+            <option value="grapple-tie-up">Grapple — tie up</option>
+            <option value="grapple-escape">Grapple — escape</option>
+          </select>
+        </label>
+        <label>Target
+          <select bind:value={maneuverTargetId} data-pf1e-maneuver-target>
+            <option value="">— pick a target —</option>
+            {#each pf1eTargetActors() as target (target._id)}
+              <option value={target._id}>{target.name} (CMD {pf1eSheetView(target).derived.cmd})</option>
+            {/each}
+          </select>
+        </label>
+        <label><input type="checkbox" bind:checked={maneuverHasImproved} data-pf1e-maneuver-improved /> Improved (no AoO)</label>
+        <label><input type="checkbox" bind:checked={maneuverVerifiable} data-pf1e-maneuver-verifiable /> Commit-reveal</label>
+        <button type="button" disabled={maneuverBusy || !maneuverTargetId} onclick={() => void resolveManeuver()} data-pf1e-maneuver-submit>{maneuverBusy ? "Resolving…" : "Maneuver"}</button>
+        {#if maneuverError}<p class="warn" data-pf1e-maneuver-error>{maneuverError}</p>{/if}
+        {#if maneuverWarning}<p class="note" data-pf1e-maneuver-warning>{maneuverWarning}</p>{/if}
+        {#if maneuverTargetId && maneuverPosition.ok === false}<p class="note">{maneuverPosition.reason}</p>{/if}
+        <p class="note">Maneuvers spend a standard action and, when they provoke, the defender gets a single melee attack; its damage (if any) penalizes the d20 (AoN 191, 193). Cover/concealment from the scene folds in when readable.</p>
+      </div>
+      <h4>Aid another (AoN 186 — attack roll vs AC 10)</h4>
+      <div class="resolve" data-pf1e-aid>
+        <label>Aided ally
+          <select bind:value={aidAidedId} data-pf1e-aid-aided>
+            <option value="">— pick an ally —</option>
+            {#each pf1eTargetActors() as target (target._id)}
+              <option value={target._id}>{target.name}</option>
+            {/each}
+          </select>
+        </label>
+        <label>Opponent
+          <select bind:value={aidOpponentId} data-pf1e-aid-opponent>
+            <option value="">— pick the opponent —</option>
+            {#each pf1eTargetActors() as target (target._id)}
+              <option value={target._id}>{target.name} (CMD {pf1eSheetView(target).derived.cmd})</option>
+            {/each}
+          </select>
+        </label>
+        <label>Bonus
+          <select bind:value={aidChoice} data-pf1e-aid-choice>
+            <option value="attack">Attack +2</option>
+            <option value="ac">AC +2</option>
+          </select>
+        </label>
+        <label><input type="checkbox" bind:checked={aidAidedProvokes} data-pf1e-aid-provokes /> Aided action provokes</label>
+        <label><input type="checkbox" bind:checked={aidVerifiable} data-pf1e-aid-verifiable /> Commit-reveal</label>
+        <button type="button" disabled={aidBusy || !aidAidedId || !aidOpponentId} onclick={() => void resolveAid()} data-pf1e-aid-submit>{aidBusy ? "Aiding…" : "Aid another"}</button>
+        {#if aidError}<p class="warn" data-pf1e-aid-error>{aidError}</p>{/if}
+        {#if aidWarning}<p class="note" data-pf1e-aid-warning>{aidWarning}</p>{/if}
+        <p class="note">Aid spends a standard action and rolls your attack bonus vs AC 10 (natural 1 auto-fails, natural 20 auto-succeeds). Success gives the aided ally +2 circumstance to their next attack or AC vs that opponent. When the aided action itself provokes, the opponent gets the usual interrupt — damage penalizes your check.</p>
+      </div>
+      <h4>Feint (AoN 195 — Bluff vs 10 + BAB + Wis, or Sense Motive when trained)</h4>
+      <div class="resolve" data-pf1e-feint>
+        <label>Target
+          <select bind:value={feintTargetId} data-pf1e-feint-target>
+            <option value="">— pick the opponent —</option>
+            {#each pf1eTargetActors() as target (target._id)}
+              <option value={target._id}>{target.name}</option>
+            {/each}
+          </select>
+        </label>
+        <label>Bluff bonus
+          <input bind:value={feintBluffBonusRaw} placeholder={String(d.abilityMods.cha ?? 0)} size="4" data-pf1e-feint-bluff />
+        </label>
+        <label><input type="checkbox" bind:checked={feintHasImproved} data-pf1e-feint-improved /> Improved Feint (move action)</label>
+        <label><input type="checkbox" bind:checked={feintHasGreater} data-pf1e-feint-greater /> Greater Feint (denied until next turn)</label>
+        <label><input type="checkbox" bind:checked={feintVerifiable} data-pf1e-feint-verifiable /> Commit-reveal</label>
+        <button type="button" disabled={feintBusy || !feintTargetId} onclick={() => void resolveFeint()} data-pf1e-feint-submit>{feintBusy ? "Feinting…" : "Feint"}</button>
+        {#if feintError}<p class="warn" data-pf1e-feint-error>{feintError}</p>{/if}
+        {#if feintWarning}<p class="note" data-pf1e-feint-warning>{feintWarning}</p>{/if}
+        <p class="note">Feint is Bluff vs 10 + the target's BAB + Wis (or their Sense Motive when trained and higher), standard action — move with Improved Feint. Success denies Dex to AC for the next melee attack you make on or before your next turn; Greater Feint keeps the denial until the beginning of your next turn. Vs nonhumanoid −4, animal (Int 1–2) −8, mindless impossible; feint never provokes.</p>
       </div>
       <h4>Mount</h4>
       <div class="resolve" data-pf1e-mount>
@@ -2408,6 +3066,7 @@
     <pre>{JSON.stringify(
         {
           tempHp: view.authored.tempHp,
+          tempHpSources: view.authored.tempHpSources,
           energyResistance: view.authored.energyResistance,
           creature: view.authored.creature,
           feats: view.authored.feats,

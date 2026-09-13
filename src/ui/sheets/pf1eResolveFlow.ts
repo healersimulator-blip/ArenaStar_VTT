@@ -25,7 +25,7 @@ import type { Op } from "../../core/ops";
 import type { PermissionUser } from "../../core/ownership";
 import type { ActorDocument, MessageDocument } from "../../core/documents";
 import type { PF1eDerived, PF1eDerivedAttack } from "../../packages/pf1e/actor";
-import { confirmCritical } from "../../packages/pf1e/tactical";
+import { confirmCritical, shootingIntoMeleePenalty } from "../../packages/pf1e/tactical";
 import type { PF1eMisfireFacts } from "../../packages/pf1e/firearms";
 import type { PF1eSituationalModifiers } from "../../packages/pf1e/tactical";
 import type {
@@ -34,12 +34,14 @@ import type {
   PF1eResolveDefender,
   PF1eResolveResult,
 } from "../../packages/pf1e/resolve";
+import { can } from "../../core/permissions";
 import {
   pf1eResolveAttack,
   pf1eResolveManyshot,
   pf1eResolvePrepare,
 } from "../../packages/pf1e/resolve";
 import { fmtSigned } from "../../packages/pf1e/rollData";
+import { featAttackParts, featDamageParts, hasPF1eFeat } from "../../packages/pf1e/feats";
 import { pf1eSheetEdit } from "./pf1eSheetModel";
 import { verifyCommitRoll } from "../../dice/commitReveal";
 
@@ -91,6 +93,18 @@ export interface ResolveAttackFlowParams {
     | undefined;
   /** Commit-reveal rolls + a verification chip (the plan's Verify chip). */
   verifiable?: boolean;
+  /** A07 — attacker BAB and stance toggles (feat-gated; no silent activation). */
+  attackerBab?: number | undefined;
+  powerAttack?: boolean | undefined;
+  deadlyAim?: boolean | undefined;
+  combatExpertise?: boolean | undefined;
+  fightingDefensively?: boolean | undefined;
+  pointBlankShot?: boolean | undefined;
+  distanceFt?: number | undefined;
+  /** P04/C01 — shooting-into-melee geometry (ranged only, AoN 131). */
+  targetEngaged?: boolean | undefined;
+  nearestFriendlyDistanceFt?: number | null | undefined;
+  engagedSizeCategoriesLarger?: number | undefined;
 }
 
 /** The defender for `pf1eResolveAttack`, straight off the target's derivation. */
@@ -109,6 +123,9 @@ export function resolveDefenderFromDerived(
     nonlethalDamage: derived.nonlethalDamage,
     conScore: derived.abilities.con,
     regeneration: derived.regeneration,
+    // P7/H02 — temporary HP stacks by source (Paizo FAQ).
+    tempHp: derived.tempHp,
+    tempHpSources: derived.tempHpSources,
     ...(derived.dr > 0
       ? { dr: [{ value: derived.dr, bypass: derived.drBypass }] }
       : {}),
@@ -191,6 +208,9 @@ export function resolutionCardContent(
         `${String(result.damage.convertedToLethal)} nonlethal converted to lethal at the max-HP boundary`,
       );
     }
+    if ((result.damage.tempHpAbsorbed ?? 0) > 0) {
+      parts.push(`temp HP absorbed ${String(result.damage.tempHpAbsorbed)}`);
+    }
     lines.push(parts.join("; ") + ".");
   }
   const hpBits: string[] = [];
@@ -202,6 +222,11 @@ export function resolutionCardContent(
   if (result.nonlethal.after !== result.nonlethal.before) {
     hpBits.push(
       `nonlethal ${String(result.nonlethal.before)} → ${String(result.nonlethal.after)}`,
+    );
+  }
+  if (result.tempHp.after !== result.tempHp.before) {
+    hpBits.push(
+      `temp HP ${String(result.tempHp.before)} → ${String(result.tempHp.after)}`,
     );
   }
   if (hpBits.length > 0) lines.push(hpBits.join(", ") + ".");
@@ -266,7 +291,42 @@ export async function resolveAttackFlow(
   | { ok: false; error: string }
 > {
   const line = params.line;
-  const bonus = line.attackBonuses[params.iterative] ?? line.attackBonus;
+  const baseBonus = line.attackBonuses[params.iterative] ?? line.attackBonus;
+  const featAttackDeltaParts = featAttackParts({
+    feats: params.feats,
+    bab: params.attackerBab ?? 0,
+    ranged: line.ranged === true,
+    weaponName: line.name,
+    powerAttack: params.powerAttack,
+    deadlyAim: params.deadlyAim,
+    combatExpertise: params.combatExpertise,
+    fightingDefensively: params.fightingDefensively,
+    pointBlankShot: params.pointBlankShot,
+    distanceFt: params.distanceFt,
+  });
+  const featAttackDelta = featAttackDeltaParts.reduce((sum, part) => sum + part.value, 0);
+  const engagementPenalty = line.ranged && params.targetEngaged === true ? shootingIntoMeleePenalty({
+    sizeCategoriesLarger: params.engagedSizeCategoriesLarger ?? 0,
+    preciseShot: hasPF1eFeat(params.feats ?? [], "Precise Shot"),
+    targetEngaged: true,
+    nearestFriendlyDistanceFt: params.nearestFriendlyDistanceFt ?? undefined,
+  }) : 0;
+  const bonus = baseBonus + featAttackDelta + engagementPenalty;
+  const featDamageDeltaParts = featDamageParts({
+    feats: params.feats,
+    bab: params.attackerBab ?? 0,
+    ranged: line.ranged === true,
+    weaponName: line.name,
+    powerAttack: params.powerAttack,
+    deadlyAim: params.deadlyAim,
+    pointBlankShot: params.pointBlankShot,
+    distanceFt: params.distanceFt,
+  });
+  const featDamageDelta = featDamageDeltaParts.reduce((sum, part) => sum + part.value, 0);
+  const effectiveAttackFormula =
+    featAttackDelta !== 0 || engagementPenalty !== 0
+      ? `1d20 ${bonus >= 0 ? "+ " + bonus : "- " + Math.abs(bonus)}`
+      : params.attackFormula;
   const misfireFacts = misfireFactsOf(params);
   const prepareInput = {
     attack: {
@@ -330,9 +390,9 @@ export async function resolveAttackFlow(
     };
   }
 
-  // 1. The attack roll.
+  // 1. The attack roll (A07 feat stances fold into the bonus via featAttackParts).
   const attackRoll = await rollOne(
-    params.attackFormula,
+    effectiveAttackFormula,
     `${line.name} ${fmtSigned(bonus)}`,
   );
   if (!attackRoll.ok) return attackRoll;
@@ -397,6 +457,9 @@ export async function resolveAttackFlow(
   }
 
   // 3. A hit rolls damage (the crit formula on a confirmed threat, D-139).
+  // A07 feat damage (Power Attack, Deadly Aim, Weapon Specialization,
+  // Point-Blank Shot) is static per step and multiplied on a crit
+  // (CRB p.179 — all modifiers multiply).
   let damageTotal = 0;
   let damageFormula = params.damageFormula;
   if (prepared.roll.ok && prepared.roll.hits) {
@@ -416,16 +479,42 @@ export async function resolveAttackFlow(
       return { ok: false, error: "the damage roll message carries no total" };
     }
     damageTotal = damageRoll.message.roll.total;
+    if (featDamageDelta !== 0) {
+      const mult = confirmedCrit ? (line.critMultiplier ?? 2) : 1;
+      damageTotal += featDamageDelta * mult;
+    }
   }
 
   // 4. The authoritative composition.
-  const result = pf1eResolveAttack({
+  let result = pf1eResolveAttack({
     ...prepareInput,
     die,
     ...(confirmDie !== undefined ? { confirmDie } : {}),
     ...(concealmentDie !== undefined ? { concealmentDie } : {}),
     damageTotal,
   });
+  // Surface A07 feat labels and the AoN 131 shooting-into-melee -4/-2/0 ladder in the card notes.
+  if (result.ok && (featAttackDeltaParts.length > 0 || featDamageDeltaParts.length > 0 || engagementPenalty !== 0)) {
+    const featNotes = [
+      ...featAttackDeltaParts.map((p) => `${p.label} ${fmtSigned(p.value)}`),
+      ...featDamageDeltaParts.map((p) => `${p.label} ${fmtSigned(p.value)}`),
+      ...(engagementPenalty !== 0 ? [`shooting into melee ${fmtSigned(engagementPenalty)}`] : []),
+    ];
+    if (featNotes.length > 0) {
+      const withNotes: typeof result = {
+        ...result,
+        notes: [...result.notes, `feats: ${featNotes.join(", ")}`],
+      };
+      result = withNotes;
+    }
+  } else if (result.ok && engagementPenalty === 0 && line.ranged && params.targetEngaged === true) {
+    // Engaged but the size/distance ladder removed the penalty — name it so the GM sees it was considered.
+    const withNotes: typeof result = {
+      ...result,
+      notes: [...result.notes, `shooting into melee: no penalty (size/distance/Precise Shot)`],
+    };
+    result = withNotes;
+  }
   if (!result.ok) return { ok: false, error: result.error };
 
   // 5. HP writes through the sheet's own validated, permission-checked path.
@@ -451,6 +540,23 @@ export async function resolveAttackFlow(
     if (edit.error !== null && hpWriteError === null) hpWriteError = edit.error;
     else if (edit.error === null) ops.push(...edit.ops);
   }
+  // P7/H02 — temporary HP is a separate map, not a scalar sheet field.
+  if (result.tempHp.after !== result.tempHp.before) {
+    if (!user || !can(user, "update", params.targetActor, "actors")) {
+      if (hpWriteError === null) hpWriteError = "You do not own this PF1e actor.";
+    } else {
+      const afterSources = result.tempHp.afterSources;
+      const diff: Record<string, import("../../core/documents").Json> = {};
+      if (Object.keys(afterSources).length === 0) {
+        diff["-=system.pf1e.tempHpSources"] = null;
+        diff["-=system.pf1e.tempHp"] = null;
+      } else {
+        diff["system.pf1e.tempHpSources"] = afterSources as unknown as import("../../core/documents").Json;
+        diff["-=system.pf1e.tempHp"] = null;
+      }
+      ops.push({ kind: "update", ref: { coll: "actors", id: params.targetActor._id }, diff });
+    }
+  }
 
   // 6. The resolution card (public narrative; names a rejected write honestly).
   const card = resolutionCardContent(
@@ -458,7 +564,7 @@ export async function resolveAttackFlow(
       attackerName: params.attackerName,
       targetName: params.targetName,
       label: line.name,
-      attackFormula: params.attackFormula,
+      attackFormula: effectiveAttackFormula,
       damageFormula,
       defense:
         result.defenseUsed !== params.defense
@@ -504,12 +610,27 @@ export interface ResolveManyshotFlowParams {
   /** P04 — positional defenses folded into every arrow (cover AC, concealment d%). */
   positional?: PF1ePositionalDefense | undefined;
   verifiable?: boolean | undefined;
+  /** A07 — attacker BAB and stance toggles (mirror of the single-attack flow). */
+  attackerBab?: number | undefined;
+  powerAttack?: boolean | undefined;
+  deadlyAim?: boolean | undefined;
+  combatExpertise?: boolean | undefined;
+  fightingDefensively?: boolean | undefined;
+  pointBlankShot?: boolean | undefined;
+  distanceFt?: number | undefined;
+  /** P04/C01 — shooting-into-melee geometry (AoN 131, folded into the Manyshot -4 ladder). */
+  targetEngaged?: boolean | undefined;
+  nearestFriendlyDistanceFt?: number | null | undefined;
+  engagedSizeCategoriesLarger?: number | undefined;
 }
 
 /**
- * Host-roll and resolve a complete Manyshot volley. Unlike calling the single
- * attack flow repeatedly, this keeps one evolving defender state and emits one
- * public card plus one final pair of HP Ops.
+ * Host-roll and resolve a Manyshot volley — the first attack of a full-attack
+ * action with a bow (2 arrows at BAB +6, 3 at +11, 4 at +16). Unlike calling
+ * the single attack flow repeatedly, this keeps one evolving defender state and
+ * emits one public card plus the HP writes for the volley. When used as the
+ * first iterative of a full attack, remaining iteratives (BAB-5, BAB-10…)
+ * are resolved separately as single arrows so the first bonus is not doubled.
  */
 export async function resolveManyshotFlow(
   client: ResolveFlowClient,
@@ -523,6 +644,42 @@ export async function resolveManyshotFlow(
     return { ok: false, error: "Manyshot requires between 2 and 4 attack formulas" };
   if (!params.line.ranged) return { ok: false, error: "Manyshot requires a ranged attack" };
 
+  const featAttackDeltaPartsManyshot = featAttackParts({
+    feats: params.feats,
+    bab: params.attackerBab ?? 0,
+    ranged: true,
+    weaponName: params.line.name,
+    powerAttack: params.powerAttack,
+    deadlyAim: params.deadlyAim,
+    combatExpertise: params.combatExpertise,
+    fightingDefensively: params.fightingDefensively,
+    pointBlankShot: params.pointBlankShot,
+    distanceFt: params.distanceFt,
+  });
+  const featAttackDeltaManyshot = featAttackDeltaPartsManyshot.reduce((sum, p) => sum + p.value, 0);
+  const featDamageDeltaPartsManyshot = featDamageParts({
+    feats: params.feats,
+    bab: params.attackerBab ?? 0,
+    ranged: true,
+    weaponName: params.line.name,
+    powerAttack: params.powerAttack,
+    deadlyAim: params.deadlyAim,
+    pointBlankShot: params.pointBlankShot,
+    distanceFt: params.distanceFt,
+  });
+  const featDamageDeltaManyshot = featDamageDeltaPartsManyshot.reduce((sum, p) => sum + p.value, 0);
+  const manyshotEngagementPenalty = params.targetEngaged === true ? shootingIntoMeleePenalty({
+    sizeCategoriesLarger: params.engagedSizeCategoriesLarger ?? 0,
+    preciseShot: hasPF1eFeat(params.feats ?? [], "Precise Shot"),
+    targetEngaged: true,
+    nearestFriendlyDistanceFt: params.nearestFriendlyDistanceFt ?? undefined,
+  }) : 0;
+  const baseManyshotBonus = (params.line.attackBonuses[0] ?? params.line.attackBonus) - 4;
+  const effectiveManyshotBonus = baseManyshotBonus + featAttackDeltaManyshot + manyshotEngagementPenalty;
+  const effectiveManyshotFormulas =
+    featAttackDeltaManyshot !== 0 || manyshotEngagementPenalty !== 0
+      ? params.attackFormulas.map(() => `1d20 ${effectiveManyshotBonus >= 0 ? "+ " + effectiveManyshotBonus : "- " + Math.abs(effectiveManyshotBonus)}`)
+      : params.attackFormulas;
   const defender = resolveDefenderFromDerived(params.targetName, params.targetDerived);
   const arrows: Array<{
     die: number;
@@ -539,14 +696,14 @@ export async function resolveManyshotFlow(
     return message === null ? null : message;
   };
 
-  for (let index = 0; index < params.attackFormulas.length; index += 1) {
-    const formula = params.attackFormulas[index];
+  for (let index = 0; index < effectiveManyshotFormulas.length; index += 1) {
+    const formula = effectiveManyshotFormulas[index];
     if (formula === undefined) return { ok: false, error: "missing Manyshot attack formula" };
     const attack = await roll(formula, `${params.line.name} Manyshot arrow ${index + 1}`);
     if (attack === null) return { ok: false, error: "Manyshot attack roll did not arrive" };
     const die = dieFaceOf(attack);
     if (die === null) return { ok: false, error: "could not read a Manyshot attack d20" };
-    const bonus = (params.line.attackBonuses[0] ?? params.line.attackBonus) - 4;
+    const bonus = effectiveManyshotBonus;
     const prepare = pf1eResolvePrepare({
       attack: {
         label: params.line.name,
@@ -567,6 +724,7 @@ export async function resolveManyshotFlow(
     });
     if (!prepare.ok) return { ok: false, error: prepare.error };
     let confirmDie: number | undefined;
+    let manyshotConfirmed = false;
     if (prepare.roll.hits && prepare.roll.threat) {
       const confirmation = await roll(
         `1d20 ${prepare.attackBonus >= 0 ? `+ ${prepare.attackBonus}` : `- ${Math.abs(prepare.attackBonus)}`}`,
@@ -575,6 +733,9 @@ export async function resolveManyshotFlow(
       if (confirmation === null) return { ok: false, error: "Manyshot confirmation roll did not arrive" };
       confirmDie = dieFaceOf(confirmation) ?? undefined;
       if (confirmDie === undefined) return { ok: false, error: "could not read a Manyshot confirmation d20" };
+      const confCheck = confirmCritical({ die: confirmDie, attackBonus: prepare.attackBonus, ac: prepare.defenseAc });
+      if (!confCheck.ok) return { ok: false, error: confCheck.error };
+      manyshotConfirmed = confCheck.confirmed;
     }
     // P04 — a live miss chance on a hit rolls its own public d% before damage.
     let concealmentDie: number | undefined;
@@ -596,14 +757,18 @@ export async function resolveManyshotFlow(
     let damageTotal = 0;
     if (prepare.roll.hits) {
       const damage = await roll(
-        prepare.roll.threat && confirmDie !== undefined ? params.critDamageFormula ?? params.damageFormula : params.damageFormula,
+        manyshotConfirmed ? params.critDamageFormula ?? params.damageFormula : params.damageFormula,
         `${params.line.name} Manyshot arrow ${index + 1} damage`,
       );
       if (damage === null || damage.roll === null || typeof damage.roll.total !== "number")
         return { ok: false, error: "Manyshot damage roll did not arrive" };
       damageTotal = damage.roll.total;
+      if (featDamageDeltaManyshot !== 0) {
+        const mult = manyshotConfirmed ? (params.line.critMultiplier ?? 2) : 1;
+        damageTotal += featDamageDeltaManyshot * mult;
+      }
     }
-    const one = pf1eResolveManyshot({
+    const one = pf1eResolveAttack({
       attack: {
         label: params.line.name,
         bonus,
@@ -612,35 +777,32 @@ export async function resolveManyshotFlow(
         ranged: true,
         damageType: params.line.damageType,
       },
-      arrows: [{
-        die,
-        ...(confirmDie === undefined ? {} : { confirmDie }),
-        ...(concealmentDie === undefined ? {} : { concealmentDie }),
-        damageTotal,
-      }],
       defense: params.defense,
       defender: currentDefender,
+      die,
+      ...(confirmDie !== undefined ? { confirmDie } : {}),
+      ...(concealmentDie !== undefined ? { concealmentDie } : {}),
+      damageTotal,
       ...(params.situational ? { situational: params.situational } : {}),
       ...(params.nonlethalDamage === undefined ? {} : { nonlethalDamage: params.nonlethalDamage }),
       ...(params.feats === undefined ? {} : { feats: params.feats }),
       ...(params.positional === undefined ? {} : { positional: params.positional }),
     });
     if (!one.ok) return one;
-    const result = one.arrows[0];
-    if (!result) return { ok: false, error: "Manyshot produced no arrow result" };
+    const result = one;
     arrows.push({
       die,
       ...(confirmDie === undefined ? {} : { confirmDie }),
       ...(concealmentDie === undefined ? {} : { concealmentDie }),
       damageTotal,
     });
-    currentDefender = { ...currentDefender, hp: result.hp.after, nonlethalDamage: result.nonlethal.after };
+    currentDefender = { ...currentDefender, hp: result.hp.after, nonlethalDamage: result.nonlethal.after, tempHp: result.tempHp.after, tempHpSources: result.tempHp.afterSources };
   }
 
   const resolved = pf1eResolveManyshot({
     attack: {
       label: params.line.name,
-      bonus: (params.line.attackBonuses[0] ?? params.line.attackBonus) - 4,
+      bonus: effectiveManyshotBonus,
       critThreatMin: params.line.critThreatMin,
       critMultiplier: params.line.critMultiplier,
       ranged: true,
@@ -667,6 +829,21 @@ export async function resolveManyshotFlow(
     const edit = pf1eSheetEdit(params.targetActor, user, "nonlethalDamage", String(resolved.finalNonlethal));
     if (edit.error && hpWriteError === null) hpWriteError = edit.error;
     else if (!edit.error) ops.push(...edit.ops);
+  }
+  if (final && (resolved.finalTempHp !== (defender.tempHp ?? 0) || JSON.stringify(resolved.finalTempHpSources) !== JSON.stringify(defender.tempHpSources ?? {}))) {
+    if (!user || !can(user, "update", params.targetActor, "actors")) {
+      if (hpWriteError === null) hpWriteError = "You do not own this PF1e actor.";
+    } else {
+      const diff: Record<string, import("../../core/documents").Json> = {};
+      if (Object.keys(resolved.finalTempHpSources).length === 0) {
+        diff["-=system.pf1e.tempHpSources"] = null;
+        diff["-=system.pf1e.tempHp"] = null;
+      } else {
+        diff["system.pf1e.tempHpSources"] = resolved.finalTempHpSources as unknown as import("../../core/documents").Json;
+        diff["-=system.pf1e.tempHp"] = null;
+      }
+      ops.push({ kind: "update", ref: { coll: "actors", id: params.targetActor._id }, diff });
+    }
   }
   client.submit([{ kind: "create", coll: "messages", data: {
     _id: globalThis.crypto.randomUUID(), type: "message", name: `${params.attackerName} Manyshot`,

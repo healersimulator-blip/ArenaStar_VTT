@@ -204,7 +204,7 @@ describe("Manyshot roll bridge (A07)", () => {
       "1d20 + 11",
       "1d20 + 11",
     ]);
-    expect(specs[0]?.notes[0]).toContain("standard-action volley");
+    expect(specs[0]?.notes[0]).toContain("first attack of a full attack");
   });
 });
 

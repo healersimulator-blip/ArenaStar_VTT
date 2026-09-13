@@ -102,6 +102,13 @@ export interface PF1eResolvePositionReport {
    * consumer). Null for a ranged line (range increments are the ranged seam).
    */
   reach: { canStrike: boolean; refusals: readonly string[] } | null;
+  /** AoN 131 — shooting-into-melee geometry for the resolve flow's -4/-2/0 ladder (ranged only). */
+  engagement: {
+    targetEngaged: boolean;
+    nearestFriendlyDistanceFt: number | null;
+    sizeCategoriesLarger: number;
+    engagedFriendlyIds: readonly string[];
+  } | null;
 }
 
 /**
@@ -127,6 +134,7 @@ export function pf1eResolvePositionReport(input: {
     flanked: false,
     hostilityAssumed: false,
     reach: null,
+    engagement: null,
   });
   if (input.scene === null) {
     return noPosition("no active scene — flanking and cover are set by hand");
@@ -200,6 +208,7 @@ export function pf1eResolvePositionReport(input: {
     flanked: pair.flanking.flanked,
     hostilityAssumed: !explicit,
     reach: input.ranged ? null : pair.reach,
+    engagement: pair.engagement,
   };
 }
 
@@ -240,6 +249,22 @@ export function resolvePositionHint(
     parts.push(
       `${String(report.defense.concealment.percent)}% concealment (d% on a hit, AoN 182)`,
     );
+  }
+  if (report.engagement !== null) {
+    const e = report.engagement;
+    if (e.targetEngaged) {
+      if (e.nearestFriendlyDistanceFt !== null && e.nearestFriendlyDistanceFt >= 10) {
+        parts.push(`engaged but ${String(e.nearestFriendlyDistanceFt)} ft from ally — no penalty (AoN 131)`);
+      } else if (e.sizeCategoriesLarger >= 3) {
+        parts.push(`engaged — target ${String(e.sizeCategoriesLarger)} sizes larger — no penalty (AoN 131)`);
+      } else if (e.sizeCategoriesLarger === 2) {
+        parts.push(`engaged — target 2 sizes larger — -2 (AoN 131)`);
+      } else {
+        parts.push("engaged — shooting into melee -4 (Precise Shot removes, AoN 131)");
+      }
+    } else {
+      parts.push("not engaged");
+    }
   }
   if (report.hostilityAssumed) {
     parts.push("hostility assumed — a token named no disposition");

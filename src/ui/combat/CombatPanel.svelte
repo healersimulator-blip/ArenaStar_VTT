@@ -64,11 +64,20 @@
   } from "../../packages/pf1e/readyDelay";
   import { resolveReadiedAction } from "./pf1eReadyAction";
   import { planDyingTick } from "./pf1eDyingTick";
-  import { stabilizationCheck } from "../../packages/pf1e/injury";
+  import { planFirstAid } from "./pf1eFirstAid";
+  import { planCoupGrace } from "./pf1eCoupGrace";
+  import { deriveFromDocuments } from "../../packages/pf1e/actor";
+  import {
+    healFirstAid,
+    stabilizationCheck,
+  } from "../../packages/pf1e/injury";
   import {
     awaitRollMessage,
     dieFaceOf,
   } from "../sheets/pf1eResolveFlow";
+  import { resolveActionProvokes } from "./pf1eActionProvoke";
+  import { autoResolveAoosOf } from "../../packages/pf1e/aooSettings";
+  import { worldSettingsFrom as worldSettingsFromProvoke } from "../../core/worldSettings";
   import type { PF1eActionSpend } from "../../packages/pf1e/actions";
   import {
     advanceClockOnRoundOf,
@@ -436,6 +445,19 @@
   let firedNote = $state("");
   /** D-205 — the last dying round's stabilization lines, one per check. */
   let dyingNotes = $state<string[]>([]);
+  // D-206 — first aid (DC 15 Heal, standard, provokes) and coup de grâce
+  // (full-round, provokes, auto crit + Fort DC 10+damage).
+  let firstAidHelperId = $state("");
+  let firstAidTargetId = $state("");
+  let firstAidHealBonus = $state("");
+  let firstAidNote = $state("");
+  let firstAidBusy = $state(false);
+  let coupAttackerId = $state("");
+  let coupTargetId = $state("");
+  let coupWeaponIndex = $state(0);
+  let coupDamage = $state("");
+  let coupNote = $state("");
+  let coupBusy = $state(false);
 
   /**
    * D-205 — roll one dying creature's stabilization check through the host,
@@ -561,6 +583,207 @@
     fireFor = null;
     fireTarget = "";
     push({ combat: outcome.combat, hooks: outcome.hooks, expired: [] });
+  }
+
+  function healBonusOf(actorId: string): number {
+    const actor = actors.find((a) => a._id === actorId);
+    if (!actor) return 0;
+    return deriveFromDocuments({
+      actor: { system: actor.system as Record<string, unknown> },
+    }).abilityMods.wis;
+  }
+
+  function fortBonusOf(actorId: string): number {
+    const actor = actors.find((a) => a._id === actorId);
+    if (!actor) return 0;
+    return deriveFromDocuments({
+      actor: { system: actor.system as Record<string, unknown> },
+    }).saves.fort;
+  }
+
+  function tokenIdOfCombatant(combatantId: string): string | null {
+    if (!combat) return null;
+    return (
+      combat.combatants.find((c) => c._id === combatantId)?.tokenId ?? null
+    );
+  }
+
+  async function doFirstAid(): Promise<void> {
+    firstAidNote = "";
+    error = "";
+    if (!firstAidHelperId || !firstAidTargetId) {
+      error = "Pick a helper and a dying target for first aid.";
+      return;
+    }
+    const helper = combat?.combatants.find((c) => c._id === firstAidHelperId);
+    const target = client.store.get("actors", firstAidTargetId) as
+      | ActorDocument
+      | undefined;
+    if (!helper || !target) {
+      error = "The helper or target is no longer available.";
+      return;
+    }
+    const parsedBonus = firstAidHealBonus.trim();
+    const healMod =
+      parsedBonus !== ""
+        ? Number.parseInt(parsedBonus, 10)
+        : healBonusOf(
+            combat?.combatants.find((c) => c._id === firstAidHelperId)
+              ?.actorId ?? "",
+          );
+    if (!Number.isFinite(healMod)) {
+      error = "Heal bonus must be a number.";
+      return;
+    }
+    // Standard action that provokes (A.13) — the AoO queue is shown before the die.
+    const tokenId = tokenIdOfCombatant(firstAidHelperId);
+    let provokeLines: string[] = [];
+    if (tokenId !== null && combat) {
+      const provoke = await resolveActionProvokes({
+        client: client as unknown as Parameters<
+          typeof resolveActionProvokes
+        >[0]["client"],
+        user: client.user,
+        provokerTokenId: tokenId,
+        provokes: [{ actionId: "stabilize-friend" }],
+        autoResolve: autoResolveAoosOf(
+          worldSettingsFromProvoke(client.store.getAll("settings")),
+        ),
+        combat: $state.snapshot(combat),
+      });
+      provokeLines = provoke.lines;
+    }
+    firstAidBusy = true;
+    try {
+      const flavor = `${helper.name} Heal check to stabilize ${target.name} (DC 15, standard action — provokes)`;
+      const rollId = client.roll(
+        `1d20 + ${String(healMod)}`,
+        "roll",
+        undefined,
+        flavor,
+      );
+      const message = await awaitRollMessage(client, rollId);
+      const die = message === null ? null : dieFaceOf(message);
+      if (die === null) {
+        firstAidNote = `${target.name} — the Heal roll never arrived`;
+        return;
+      }
+      const verdict = healFirstAid({ die, healMod });
+      const plan = planFirstAid({ actor: target, verdict });
+      if (plan.ops.length > 0) client.submit(plan.ops);
+      const prefix = provokeLines.length > 0 ? `${provokeLines.join(" · ")} · ` : "";
+      firstAidNote = `${prefix}${plan.note}`;
+    } finally {
+      firstAidBusy = false;
+    }
+  }
+
+  async function doCoupGrace(): Promise<void> {
+    coupNote = "";
+    error = "";
+    if (!coupAttackerId || !coupTargetId) {
+      error = "Pick an attacker and a helpless target for the coup de grâce.";
+      return;
+    }
+    const attacker = combat?.combatants.find((c) => c._id === coupAttackerId);
+    const defender = client.store.get("actors", coupTargetId) as
+      | ActorDocument
+      | undefined;
+    if (!attacker || !defender) {
+      error = "The attacker or target is no longer available.";
+      return;
+    }
+    const defendersCon = readConScore(defender);
+    // Damage: either the typed number or, when empty, roll the attacker's
+    // first weapon's critical damage via the host (same dice-authority as
+    // every other resolution).
+    let damageDealt = Number.parseInt(coupDamage.trim(), 10);
+    let rolledDamageNote = "";
+    if (coupDamage.trim() === "" || Number.isNaN(damageDealt)) {
+      const atkActor = actors.find((a) => a._id === attacker.actorId);
+      if (atkActor) {
+        const drv = deriveFromDocuments({
+          actor: { system: atkActor.system as Record<string, unknown> },
+        });
+        const line = drv.attacks[coupWeaponIndex] ?? drv.attacks[0];
+        if (line && line.damageDice) {
+          const critFormula =
+            line.damageBonus !== 0
+              ? `${line.damageDice} + ${line.damageBonus} + ${line.damageDice} + ${line.damageBonus}`
+              : `${line.damageDice} + ${line.damageDice}`;
+          const rollId = client.roll(
+            critFormula,
+            "roll",
+            undefined,
+            `${attacker.name} coup de grâce critical damage vs ${defender.name}`,
+          );
+          const message = await awaitRollMessage(client, rollId);
+          if (
+            message?.roll !== null &&
+            message?.roll !== undefined &&
+            typeof message.roll.total === "number"
+          ) {
+            damageDealt = message.roll.total;
+            rolledDamageNote = `rolled ${String(damageDealt)} (${critFormula}) — `;
+          }
+        }
+      }
+    }
+    if (!Number.isFinite(damageDealt) || damageDealt < 0) {
+      error = "Coup damage must be a non-negative number (or leave empty to roll the attacker's crit).";
+      return;
+    }
+    const defenderFort = fortBonusOf(coupTargetId);
+    const tokenId = tokenIdOfCombatant(coupAttackerId);
+    let provokeLines: string[] = [];
+    if (tokenId !== null && combat) {
+      const provoke = await resolveActionProvokes({
+        client: client as unknown as Parameters<
+          typeof resolveActionProvokes
+        >[0]["client"],
+        user: client.user,
+        provokerTokenId: tokenId,
+        provokes: [{ actionId: "coup-de-grace" }],
+        autoResolve: autoResolveAoosOf(
+          worldSettingsFromProvoke(client.store.getAll("settings")),
+        ),
+        combat: $state.snapshot(combat),
+      });
+      provokeLines = provoke.lines;
+    }
+    coupBusy = true;
+    try {
+      const fortRollId = client.roll(
+        `1d20 + ${String(defenderFort)}`,
+        "roll",
+        undefined,
+        `${defender.name} Fort save vs coup de grâce (DC ${String(10 + damageDealt)})`,
+      );
+      const fortMessage = await awaitRollMessage(client, fortRollId);
+      const saveDie = fortMessage === null ? null : dieFaceOf(fortMessage);
+      if (saveDie === null) {
+        coupNote = `${defender.name} — the Fort save never arrived`;
+        return;
+      }
+      const result = planCoupGrace({
+        attackerName: attacker.name,
+        defender,
+        damageDealt,
+        saveDie,
+        fortBonus: defenderFort,
+        conScore: defendersCon,
+      });
+      if (!result.ok) {
+        error = result.error;
+        return;
+      }
+      if (result.plan.ops.length > 0) client.submit(result.plan.ops);
+      const prefix =
+        provokeLines.length > 0 ? `${provokeLines.join(" · ")} · ` : "";
+      coupNote = `${prefix}${rolledDamageNote}${result.plan.note}`;
+    } finally {
+      coupBusy = false;
+    }
   }
 
   onMount(() => {
@@ -1162,6 +1385,112 @@
         </li>
       {/each}
     </ol>
+  {/if}
+  {#if pf1e && combat}
+    <section class="resolve" data-first-aid aria-label="First aid (Heal DC 15)">
+      <h4>First aid — stabilize a dying creature (DC 15 Heal, standard action — provokes)</h4>
+      <label
+        >Helper
+        <select bind:value={firstAidHelperId} data-first-aid-helper>
+          <option value="">— pick a helper —</option>
+          {#each ordered as c (c._id)}
+            <option value={c._id}>{c.name}</option>
+          {/each}
+        </select></label
+      >
+      <label
+        >Dying target
+        <select bind:value={firstAidTargetId} data-first-aid-target>
+          <option value="">— pick a target —</option>
+          {#each actors.filter((a) => {
+            const pf1eBlock = (a.system as { pf1e?: Record<string, unknown> }).pf1e ?? {};
+            const hp = typeof pf1eBlock.hp === "number" ? pf1eBlock.hp : null;
+            return hp !== null && hp < 0;
+          }) as actor (actor._id)}
+            <option value={actor._id}>{actor.name}</option>
+          {/each}
+        </select></label
+      >
+      <label
+        >Heal bonus
+        <input
+          bind:value={firstAidHealBonus}
+          placeholder={firstAidHelperId
+            ? String(healBonusOf(combat.combatants.find((c) => c._id === firstAidHelperId)?.actorId ?? ""))
+            : "Wis mod"}
+          size="4"
+          data-first-aid-bonus
+        /></label
+      >
+      <button
+        type="button"
+        disabled={firstAidBusy || !firstAidHelperId || !firstAidTargetId}
+        onclick={() => void doFirstAid()}
+        data-first-aid-submit>{firstAidBusy ? "Rolling…" : "First aid (DC 15)"}</button
+      >
+      {#if firstAidNote}<p class="note" data-first-aid-note>{firstAidNote}</p>{/if}
+      <p class="note">On a success the target gains the Stable condition — the hourly wake check then applies instead of the round checks.</p>
+    </section>
+    <section class="resolve" data-coup-grace aria-label="Coup de grâce">
+      <h4>Coup de grâce — helpless target (full-round action — provokes, auto hit & crit, Fort DC 10 + damage)</h4>
+      <label
+        >Attacker
+        <select bind:value={coupAttackerId} data-coup-attacker>
+          <option value="">— pick attacker —</option>
+          {#each ordered as c (c._id)}
+            <option value={c._id}>{c.name}</option>
+          {/each}
+        </select></label
+      >
+      <label
+        >Helpless target
+        <select bind:value={coupTargetId} data-coup-target>
+          <option value="">— pick a target —</option>
+          {#each actors.filter((a) => {
+            const pf1eBlock = (a.system as { pf1e?: Record<string, unknown> }).pf1e ?? {};
+            const hp = typeof pf1eBlock.hp === "number" ? pf1eBlock.hp : 0;
+            const conds = Array.isArray(pf1eBlock.conditions) ? pf1eBlock.conditions as string[] : [];
+            const helpless = conds.some((x) => ["helpless","paralyzed","unconscious","petrified","stable"].includes(x.toLowerCase()));
+            const con = typeof (pf1eBlock.abilities as Record<string, unknown> | undefined)?.con === "number" ? (pf1eBlock.abilities as Record<string, unknown>).con as number : 10;
+            const dying = hp < 0 && !(con > 0 && -hp >= con);
+            return helpless || dying || hp <= 0;
+          }) as actor (actor._id)}
+            <option value={actor._id}>{actor.name}</option>
+          {/each}
+        </select></label
+      >
+      <label
+        >Damage (crit, auto-hit)
+        <input
+          bind:value={coupDamage}
+          placeholder="leave empty to roll crit"
+          size="6"
+          data-coup-damage
+        /></label
+      >
+      {#if coupAttackerId}
+        {@const atkActor = actors.find((a) => a._id === combat.combatants.find((c) => c._id === coupAttackerId)?.actorId)}
+        {#if atkActor}
+          {@const drv = deriveFromDocuments({ actor: { system: atkActor.system as Record<string, unknown> } })}
+          <label
+            >Weapon
+            <select bind:value={coupWeaponIndex} data-coup-weapon>
+              {#each drv.attacks as line, i (i)}
+                <option value={i}>{line.name} {line.damageDice ?? ""} +{line.damageBonus}</option>
+              {/each}
+            </select></label
+          >
+        {/if}
+      {/if}
+      <button
+        type="button"
+        disabled={coupBusy || !coupAttackerId || !coupTargetId}
+        onclick={() => void doCoupGrace()}
+        data-coup-submit>{coupBusy ? "Resolving…" : "Deliver coup de grâce"}</button
+      >
+      {#if coupNote}<p class="note" data-coup-note>{coupNote}</p>{/if}
+      <p class="note">A bow or crossbow may be used only while adjacent. Crit-immune creatures (e.g. construct) waive the damage and the save.</p>
+    </section>
   {/if}
 </section>
 

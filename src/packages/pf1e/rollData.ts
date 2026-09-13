@@ -203,9 +203,29 @@ export function pf1eAttackRollGroups(
     const notes: string[] = [];
     const bonuses = line.attackBonuses;
     const attack = attackSpec(line, bonuses[0] ?? bab, bab, null);
-    const fullAttack = bonuses.map((bonus, i) =>
+    let fullAttack = bonuses.map((bonus, i) =>
       attackSpec(line, bonus, bab, bonuses.length > 1 ? i + 1 : null),
     );
+    // A07/Manyshot — when the feat applies to this ranged line, the first
+    // iterative of a full-attack action is the volley itself (2 arrows at BAB
+    // +6, 3 at +11, 4 at +16) at the first bonus with −4. The remaining
+    // iteratives follow as single arrows so the first bonus is not doubled.
+    // The plain `fullAttack` ladder is kept for the unmodified view; the
+    // Manyshot-aware view is exposed via `manyshotRolls` and the sheet's
+    // merged Full attack when `manyshotPlan` is ok. For the derived roll
+    // group we append a note and keep `fullAttack` as the unmodified ladder
+    // to avoid silently changing the contract for callers that do not expect
+    // a volley — the sheet merges them explicitly in `manyshotFullAttackRolls`.
+    const manyshot = manyshotPlan({
+      feats: context?.feats,
+      bab,
+      ranged: line.ranged,
+    });
+    if (manyshot.ok) {
+      notes.push(
+        `Manyshot — first attack of a full attack fires ${manyshot.arrows} arrows at ${fmtSigned((bonuses[0] ?? bab) + manyshot.attackPenalty)} (use the Manyshot volley for the first iterative; remaining iteratives follow as single arrows, so the first bonus is not doubled)`,
+      );
+    }
     const dmg = damageFormula(line.damageDice, line.damageBonus);
     const crit = critDamageFormula(
       line.damageDice,
@@ -294,10 +314,13 @@ export function pf1eAttackRollGroups(
 }
 
 /**
- * Build the Manyshot standard-action volley for one derived ranged line.
- * Each arrow is a separate host-evaluated roll at the same first-attack bonus;
- * damage is deliberately not bundled because the target/precision rider rules
- * belong to the resolution consumer.
+ * Build the Manyshot volley for the first attack of a full-attack action with
+ * a bow. Each arrow is a separate host-evaluated roll at the same first-attack
+ * bonus with the feat's −4; damage is not bundled because precision/extra-dice
+ * rider allocation belongs to the resolution consumer. When used as the first
+ * iterative of a full attack, the volley replaces the single-arrow first
+ * iterative so the first bonus is not doubled — the remaining iteratives (if
+ * any) follow as single arrows.
  */
 export function pf1eManyshotRollSpecs(
   derived: PF1eDerived,
@@ -318,9 +341,29 @@ export function pf1eManyshotRollSpecs(
     kind: "attack" as const,
     label: `${line.name} Manyshot arrow ${index + 1}`,
     formula: `1d20 ${bonus >= 0 ? `+ ${bonus}` : `- ${Math.abs(bonus)}`}`,
-    flavor: `${line.name} Manyshot arrow ${index + 1}/${plan.arrows} ${fmtSigned(bonus)} — same first attack bonus, −4 Manyshot penalty (CRB Manyshot)`,
-    notes: ["standard-action volley; resolve each arrow separately"],
+    flavor: `${line.name} Manyshot arrow ${index + 1}/${plan.arrows} ${fmtSigned(bonus)} — first attack of a full-attack volley, −4 Manyshot penalty (CRB Manyshot)`,
+    notes: ["Manyshot volley: first attack of a full attack — resolve each arrow separately; remaining iteratives follow as single arrows"],
   }));
+}
+
+/**
+ * The Manyshot-aware full-attack rolls for one derived line. When Manyshot
+ * does not apply, this is exactly `pf1eAttackRollGroups(...).fullAttack`;
+ * when it does, the first iterative is replaced by the volley so the first
+ * bonus is not doubled: volley (2–4 rolls at first bonus −4) + remaining
+ * iteratives (if any) as single rolls. Pure — no dice, no store.
+ */
+export function pf1eManyshotFullAttackRollSpecs(
+  derived: PF1eDerived,
+  lineIndex: number,
+  feats?: readonly string[] | undefined,
+): PF1eRollSpec[] {
+  const groups = pf1eAttackRollGroups(derived, { feats });
+  const group = groups[lineIndex];
+  if (!group) return [];
+  const volley = pf1eManyshotRollSpecs(derived, lineIndex, feats);
+  if (volley.length === 0) return group.fullAttack;
+  return [...volley, ...group.fullAttack.slice(1)];
 }
 
 /** The three saving throws as roll specs (d20 + derived total). */
