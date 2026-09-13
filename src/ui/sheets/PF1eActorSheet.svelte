@@ -83,6 +83,7 @@
   } from "../../core/documents";
   import { resolveAttackFlow, resolveManyshotFlow } from "./pf1eResolveFlow";
   import { resolveManeuverFlow } from "../combat/pf1eManeuverFlow";
+  import { resolveAidAnotherFlow, resolveFeintFlow } from "../combat/pf1eAidFeintFlow";
   import type { PF1eDefenseChoice } from "../../packages/pf1e/resolve";
   import {
     COVER_GRADE_OPTIONS,
@@ -330,6 +331,23 @@
   let maneuverError = $state("");
   let maneuverWarning = $state("");
   let maneuverVerifiable = $state(false);
+  // P05/D-211 — Aid Another and Feint (the two A.9 companions, separate from the ten maneuvers)
+  let aidAidedId = $state("");
+  let aidOpponentId = $state("");
+  let aidChoice = $state<"attack" | "ac">("attack");
+  let aidAidedProvokes = $state(false);
+  let aidVerifiable = $state(false);
+  let aidBusy = $state(false);
+  let aidError = $state("");
+  let aidWarning = $state("");
+  let feintTargetId = $state("");
+  let feintBluffBonusRaw = $state("");
+  let feintHasImproved = $state(false);
+  let feintHasGreater = $state(false);
+  let feintBusy = $state(false);
+  let feintError = $state("");
+  let feintWarning = $state("");
+  let feintVerifiable = $state(false);
   let authoredAttacksCount = $derived(
     Array.isArray(view.authored.attacks) ? view.authored.attacks.length : 0,
   );
@@ -678,6 +696,83 @@
     } finally {
       maneuverBusy = false;
     }
+  }
+
+  function aidAidedInfo(): ActorDocument | null {
+    if (!aidAidedId) return null;
+    return (client.store.get("actors", aidAidedId) as ActorDocument | undefined) ?? null;
+  }
+  function aidOpponentInfo(): ActorDocument | null {
+    if (!aidOpponentId) return null;
+    return (client.store.get("actors", aidOpponentId) as ActorDocument | undefined) ?? null;
+  }
+  function feintTargetInfo(): ActorDocument | null {
+    if (!feintTargetId) return null;
+    return (client.store.get("actors", feintTargetId) as ActorDocument | undefined) ?? null;
+  }
+
+  async function resolveAid(): Promise<void> {
+    aidError = "";
+    aidWarning = "";
+    const aided = aidAidedInfo();
+    const opponent = aidOpponentInfo();
+    if (!aided || !opponent) {
+      aidError = "Pick an aided ally and an opponent.";
+      return;
+    }
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current) { aidError = "Actor is no longer available."; return; }
+    aidBusy = true;
+    try {
+      const scene = activeSceneOf(client.store.getAll("scenes") as readonly SceneDocument[], DEFAULT_SCENE_ID);
+      const tokens = (scene?.tokens ?? []) as unknown as readonly { _id: string; actorId?: string | null }[];
+      const outcome = await resolveAidAnotherFlow(client as unknown as import("../combat/pf1eAidFeintFlow").AidFeintFlowClient, client.user, {
+        aider: current,
+        aided,
+        opponent,
+        combat: linked.combat,
+        tokens,
+        scene: scene ?? null,
+        aidedActionProvokes: aidAidedProvokes,
+        aidChoice,
+        ...(aidVerifiable ? { verifiable: true } : {}),
+      });
+      if (!outcome.ok) aidError = outcome.error;
+      else if (outcome.aooDamage !== undefined) aidWarning = `AoO dealt ${outcome.aooDamage} — applied as penalty. ${outcome.plan.note ?? ""}`;
+      else aidWarning = outcome.plan.note ?? "";
+    } finally { aidBusy = false; }
+  }
+
+  async function resolveFeint(): Promise<void> {
+    feintError = "";
+    feintWarning = "";
+    const target = feintTargetInfo();
+    if (!target) { feintError = "Pick a feint target."; return; }
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current) { feintError = "Actor is no longer available."; return; }
+    const bluffBonus = feintBluffBonusRaw.trim() === "" ? 0 : Number.parseInt(feintBluffBonusRaw, 10);
+    if (!Number.isFinite(bluffBonus)) { feintError = "Bluff bonus must be a whole number."; return; }
+    feintBusy = true;
+    try {
+      const scene = activeSceneOf(client.store.getAll("scenes") as readonly SceneDocument[], DEFAULT_SCENE_ID);
+      const tokens = (scene?.tokens ?? []) as unknown as readonly { _id: string; actorId?: string | null }[];
+      const derived = pf1eSheetView(target).derived;
+      const outcome = await resolveFeintFlow(client as unknown as import("../combat/pf1eAidFeintFlow").AidFeintFlowClient, client.user, {
+        feinter: current,
+        target,
+        bluffBonus,
+        hasImprovedFeint: feintHasImproved,
+        hasGreaterFeint: feintHasGreater,
+        targetIsHumanoid: true,
+        targetIntScore: (derived as { abilities?: Record<string, number> }).abilities?.int ?? null,
+        combat: linked.combat,
+        tokens,
+        scene: scene ?? null,
+        ...(feintVerifiable ? { verifiable: true } : {}),
+      });
+      if (!outcome.ok) feintError = outcome.error;
+      else feintWarning = outcome.plan.note ?? "";
+    } finally { feintBusy = false; }
   }
 
   let editable = $derived(
@@ -2056,6 +2151,58 @@
         {#if maneuverWarning}<p class="note" data-pf1e-maneuver-warning>{maneuverWarning}</p>{/if}
         {#if maneuverTargetId && maneuverPosition.ok === false}<p class="note">{maneuverPosition.reason}</p>{/if}
         <p class="note">Maneuvers spend a standard action and, when they provoke, the defender gets a single melee attack; its damage (if any) penalizes the d20 (AoN 191, 193). Cover/concealment from the scene folds in when readable.</p>
+      </div>
+      <h4>Aid another (AoN 186 — attack roll vs AC 10)</h4>
+      <div class="resolve" data-pf1e-aid>
+        <label>Aided ally
+          <select bind:value={aidAidedId} data-pf1e-aid-aided>
+            <option value="">— pick an ally —</option>
+            {#each pf1eTargetActors() as target (target._id)}
+              <option value={target._id}>{target.name}</option>
+            {/each}
+          </select>
+        </label>
+        <label>Opponent
+          <select bind:value={aidOpponentId} data-pf1e-aid-opponent>
+            <option value="">— pick the opponent —</option>
+            {#each pf1eTargetActors() as target (target._id)}
+              <option value={target._id}>{target.name} (CMD {pf1eSheetView(target).derived.cmd})</option>
+            {/each}
+          </select>
+        </label>
+        <label>Bonus
+          <select bind:value={aidChoice} data-pf1e-aid-choice>
+            <option value="attack">Attack +2</option>
+            <option value="ac">AC +2</option>
+          </select>
+        </label>
+        <label><input type="checkbox" bind:checked={aidAidedProvokes} data-pf1e-aid-provokes /> Aided action provokes</label>
+        <label><input type="checkbox" bind:checked={aidVerifiable} data-pf1e-aid-verifiable /> Commit-reveal</label>
+        <button type="button" disabled={aidBusy || !aidAidedId || !aidOpponentId} onclick={() => void resolveAid()} data-pf1e-aid-submit>{aidBusy ? "Aiding…" : "Aid another"}</button>
+        {#if aidError}<p class="warn" data-pf1e-aid-error>{aidError}</p>{/if}
+        {#if aidWarning}<p class="note" data-pf1e-aid-warning>{aidWarning}</p>{/if}
+        <p class="note">Aid spends a standard action and rolls your attack bonus vs AC 10 (natural 1 auto-fails, natural 20 auto-succeeds). Success gives the aided ally +2 circumstance to their next attack or AC vs that opponent. When the aided action itself provokes, the opponent gets the usual interrupt — damage penalizes your check.</p>
+      </div>
+      <h4>Feint (AoN 195 — Bluff vs 10 + BAB + Wis, or Sense Motive when trained)</h4>
+      <div class="resolve" data-pf1e-feint>
+        <label>Target
+          <select bind:value={feintTargetId} data-pf1e-feint-target>
+            <option value="">— pick the opponent —</option>
+            {#each pf1eTargetActors() as target (target._id)}
+              <option value={target._id}>{target.name}</option>
+            {/each}
+          </select>
+        </label>
+        <label>Bluff bonus
+          <input bind:value={feintBluffBonusRaw} placeholder={String(d.abilityMods.cha ?? 0)} size="4" data-pf1e-feint-bluff />
+        </label>
+        <label><input type="checkbox" bind:checked={feintHasImproved} data-pf1e-feint-improved /> Improved Feint (move action)</label>
+        <label><input type="checkbox" bind:checked={feintHasGreater} data-pf1e-feint-greater /> Greater Feint (denied until next turn)</label>
+        <label><input type="checkbox" bind:checked={feintVerifiable} data-pf1e-feint-verifiable /> Commit-reveal</label>
+        <button type="button" disabled={feintBusy || !feintTargetId} onclick={() => void resolveFeint()} data-pf1e-feint-submit>{feintBusy ? "Feinting…" : "Feint"}</button>
+        {#if feintError}<p class="warn" data-pf1e-feint-error>{feintError}</p>{/if}
+        {#if feintWarning}<p class="note" data-pf1e-feint-warning>{feintWarning}</p>{/if}
+        <p class="note">Feint is Bluff vs 10 + the target's BAB + Wis (or their Sense Motive when trained and higher), standard action — move with Improved Feint. Success denies Dex to AC for the next melee attack you make on or before your next turn; Greater Feint keeps the denial until the beginning of your next turn. Vs nonhumanoid −4, animal (Int 1–2) −8, mindless impossible; feint never provokes.</p>
       </div>
       <h4>Mount</h4>
       <div class="resolve" data-pf1e-mount>
