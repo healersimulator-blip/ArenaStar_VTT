@@ -109,6 +109,8 @@ export interface ResolveAttackFlowParams {
   engagedSizeCategoriesLarger?: number | undefined;
   /** P08/D-201 — how the mount moved this round (stationary/single/double/run). */
   mountMovement?: PF1eMountMovement | undefined;
+  /** P08/D-201 — how far the mount moved in feet; >5 ft bars a melee full-attack (A.11). */
+  mountMovedFt?: number | undefined;
   /** P09/D-202 — loaded shots for the firearm gate (0 ⇒ refusal). */
   shotsAvailable?: number | undefined;
   /** P09/D-202 — attacker for the broken-write when a misfire breaks the weapon. */
@@ -407,6 +409,14 @@ export async function resolveAttackFlow(
     if (!ammo.canShoot) {
       return { ok: false, error: ammo.refusal ?? "the firearm has no shot loaded (§2.9)" };
     }
+  }
+
+  // 0c. P08 — mounted melee full-attack bar (A.11): mount >5 ft ⇒ only one melee attack (no full attack).
+  if (line.ranged !== true && params.mountMovedFt !== undefined && params.mountMovedFt > 5 && params.iterative !== 0) {
+    return {
+      ok: false,
+      error: "the mount moved more than 5 ft — only one melee attack at the end of the move, no full attack (A.11)",
+    };
   }
 
   // 1. The attack roll (A07 feat stances fold into the bonus via featAttackParts).

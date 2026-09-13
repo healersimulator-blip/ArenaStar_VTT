@@ -75,6 +75,8 @@
   import {
     mountedHigherGround,
     mountedRangedPenalty,
+    mountedMeleeFullAttack,
+    mountedCastingConcentrationDC,
     mountLinkageOf,
     type PF1eMountMovement,
   } from "../../packages/pf1e/mounted";
@@ -252,6 +254,8 @@
   let castNonDamagingDc = $state("");
   let castGrappleCheck = $state(false);
   let castGrappleCmb = $state("");
+  let castMountMovedBeforeAndAfter = $state(false);
+  let castMountRunning = $state(false);
   let castBusy = $state(false);
   let castError = $state("");
   let castWarning = $state("");
@@ -334,6 +338,7 @@
   >("auto");
   let resolveCharging = $state(false);
   let resolveMountMovement = $state<PF1eMountMovement>("stationary");
+  let resolveMountMovedFtRaw = $state("");
   let resolveNonlethal = $state(false);
   let resolveVerifiable = $state(false);
   let resolvePowerAttack = $state(false);
@@ -472,6 +477,27 @@
   /** The positional defenses the resolver folds in: auto = the geometry's word. */
   /** P08/D-201 — ranged penalty from the selected mount movement (−4 double / −8 run). */
   let mountedRangedPenaltyPart = $derived(mountedRangedPenalty(resolveMountMovement));
+  /** P08/D-201 — numeric mount distance for the melee full-attack bar (>5 ft ⇒ single). */
+  let resolveMountMovedFt = $derived.by(() => {
+    const raw = resolveMountMovedFtRaw.trim();
+    if (raw === "") {
+      // No explicit feet: infer from mountMovement (stationary 0, single 30, double 60, run 120)
+      // so the common horse case (single = >5) correctly bars full attack while 0 keeps it.
+      if (resolveMountMovement === "stationary") return 0;
+      if (resolveMountMovement === "single") return 30;
+      if (resolveMountMovement === "double") return 60;
+      return 120;
+    }
+    const n = Number.parseInt(raw, 10);
+    return Number.isFinite(n) ? Math.max(0, n) : 0;
+  });
+  let mountedMeleeBar = $derived(mountedMeleeFullAttack({ mountMovedFt: resolveMountMovedFt }));
+  /** P08/D-201 — mounted casting DC for the spell level in the cast panel (10+SL / 15+SL). */
+  let castMountConcentrationDc = $derived.by(() => {
+    const lvl = Number.parseInt(castLevel, 10);
+    if (!Number.isInteger(lvl) || lvl < 0 || lvl > 9) return null;
+    return mountedCastingConcentrationDC({ spellLevel: lvl, movedBeforeAndAfter: castMountMovedBeforeAndAfter, mountRunning: castMountRunning });
+  });
 
   let effectivePositional = $derived.by(() => {
     const concealment =
@@ -592,6 +618,7 @@
             }
           : {}),
         ...(resolveMountMovement !== "stationary" ? { mountMovement: resolveMountMovement } : {}),
+        ...(resolveMountMovedFt > 0 ? { mountMovedFt: resolveMountMovedFt } : {}),
         ...(doc ? { attackerActor: doc, attackerAttackIndex: resolveAttackIndex } : {}),
         ...(resolveVerifiable ? { verifiable: true } : {}),
       });
@@ -1007,6 +1034,10 @@
         situation: "grappledOrPinned",
         grapplerCmb: Math.max(0, Math.trunc(Number(castGrappleCmb) || 0)),
       });
+    // P08/D-201 — mounted casting (A.11): moving both before and after ⇒ DC 10+SL (vigorous),
+    // running ⇒ DC 15+SL (violent). The DCs match Table 9-1 motion rows, so we reuse them.
+    if (castMountRunning) declarations.push({ situation: "violentMotion" });
+    else if (castMountMovedBeforeAndAfter) declarations.push({ situation: "vigorousMotion" });
     castBusy = true;
     try {
       // D-191: the casting provoke resolves (or reports) before the spell lands — the
@@ -2136,6 +2167,9 @@
             <option value="run">Running (−8 ranged)</option>
           </select>
         </label>
+        <label>Mount moved (ft)
+          <input bind:value={resolveMountMovedFtRaw} placeholder={String(resolveMountMovedFt)} size="4" data-pf1e-mount-moved-ft />
+        </label>
         <label
           ><input
             type="checkbox"
@@ -2217,6 +2251,9 @@
           <p class="note" data-pf1e-mounted-penalty>
             Mounted ranged penalty: {mountedRangedPenaltyPart.label} {mountedRangedPenaltyPart.value} (A.11)
           </p>
+        {/if}
+        {#if mountedMeleeBar.fullAttack === false && d.attacks[resolveAttackIndex]?.ranged !== true && resolveTargetId}
+          <p class="note warn" data-pf1e-mounted-melee-bar>{mountedMeleeBar.reason}</p>
         {/if}
         {#if resolveError}<p class="warn" data-pf1e-resolve-error>
             {resolveError}
@@ -2876,6 +2913,11 @@
             />
             (DC 10 + CMB + level)</label
           >
+          <label><input type="checkbox" bind:checked={castMountMovedBeforeAndAfter} data-cast-mount-moved /> Mount moved both before and after casting (DC 10 + level, A.11)</label>
+          <label><input type="checkbox" bind:checked={castMountRunning} data-cast-mount-running /> Mount running (DC 15 + level, A.11)</label>
+          {#if castMountConcentrationDc !== null}
+            <p class="note" data-cast-mount-dc>Mounted casting concentration DC {castMountConcentrationDc} (spell level {castLevel})</p>
+          {/if}
         </fieldset>
         <label
           ><input

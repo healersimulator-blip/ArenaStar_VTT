@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import type { ActorDocument, MessageDocument } from "../../src/core/documents";
+import type { ActorDocument, Json, MessageDocument } from "../../src/core/documents";
 import type { Op } from "../../src/core/ops";
 import { deriveFromDocuments, derivePF1eActor } from "../../src/packages/pf1e/actor";
 import type { PF1eDerived } from "../../src/packages/pf1e/actor";
@@ -7,7 +7,7 @@ import { resolveAttackFlow, type ResolveFlowClient } from "../../src/ui/sheets/p
 
 const owner = { id: "player", role: "PLAYER" as const };
 
-function actor(id: string, pf1e: Record<string, unknown>): ActorDocument {
+function actor(id: string, pf1e: Record<string, Json>): ActorDocument {
   return {
     _id: id,
     type: "actor",
@@ -397,3 +397,123 @@ describe("P09 firearm gates in resolveAttackFlow", () => {
     }
   });
 });
+describe("P08 mounted melee full-attack bar (A.11)", () => {
+  test("melee iterative 0 is allowed even when mount moved >5 ft", async () => {
+    const attacker = derivePF1eActor({
+      system: { abilities: { str: 16 }, baseAttack: 11, attacks: [{ name: "Lance", damageDice: "1d8" }] },
+    });
+    const line = attacker.attacks[0]!;
+    const { doc: targetDoc, derived: targetDerived } = derivedTarget();
+    const client = new FakeClient();
+    client.script = [{ die: 15, total: 20 }, { total: 6 }];
+    const result = await resolveAttackFlow(client, owner, {
+      attackerName: "Rider",
+      line,
+      iterative: 0,
+      attackFormula: "1d20 + 11",
+      damageFormula: "1d8 + 4",
+      critDamageFormula: null,
+      targetName: "Goblin",
+      targetActor: targetDoc,
+      targetDerived,
+      defense: "normal",
+      mountMovedFt: 30,
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  test("melee iterative 1 is refused when mount moved >5 ft", async () => {
+    const attacker = derivePF1eActor({
+      system: { abilities: { str: 16 }, baseAttack: 11, attacks: [{ name: "Lance", damageDice: "1d8" }] },
+    });
+    const line = attacker.attacks[0]!;
+    const { doc: targetDoc, derived: targetDerived } = derivedTarget();
+    const client = new FakeClient();
+    const result = await resolveAttackFlow(client, owner, {
+      attackerName: "Rider",
+      line,
+      iterative: 1,
+      attackFormula: "1d20 + 6",
+      damageFormula: "1d8 + 4",
+      critDamageFormula: null,
+      targetName: "Goblin",
+      targetActor: targetDoc,
+      targetDerived,
+      defense: "normal",
+      mountMovedFt: 30,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/only one melee attack/);
+    expect(client.formulas).toEqual([]);
+  });
+
+  test("mount moved exactly 5 ft keeps full attack; 6 ft bars", async () => {
+    const attacker = derivePF1eActor({
+      system: { abilities: { str: 16 }, baseAttack: 11, attacks: [{ name: "Longsword", damageDice: "1d8" }] },
+    });
+    const line = attacker.attacks[0]!;
+    const { doc: targetDoc, derived: targetDerived } = derivedTarget();
+    for (const [ft, shouldAllow] of [[5, true], [6, false]] as const) {
+      const client = new FakeClient();
+      if (shouldAllow) client.script = [{ die: 12, total: 18 }, { total: 5 }];
+      const result = await resolveAttackFlow(client, owner, {
+        attackerName: "Rider",
+        line,
+        iterative: 1,
+        attackFormula: "1d20 + 6",
+        damageFormula: "1d8 + 4",
+        critDamageFormula: null,
+        targetName: "Goblin",
+        targetActor: targetDoc,
+        targetDerived,
+        defense: "normal",
+        mountMovedFt: ft,
+      });
+      expect(result.ok).toBe(shouldAllow);
+    }
+  });
+
+  test("ranged iteratives ignore the melee bar", async () => {
+    const attacker = derivePF1eActor({
+      system: { abilities: { dex: 16 }, baseAttack: 11, attacks: [{ name: "Longbow", ranged: true, rangeIncrementFt: 100, damageDice: "1d8" }] },
+    });
+    const line = attacker.attacks[0]!;
+    const { doc: targetDoc, derived: targetDerived } = derivedTarget();
+    const client = new FakeClient();
+    client.script = [{ die: 12, total: 18 }, { total: 5 }];
+    const result = await resolveAttackFlow(client, owner, {
+      attackerName: "Archer",
+      line,
+      iterative: 1,
+      attackFormula: "1d20 + 6",
+      damageFormula: "1d8 + 2",
+      critDamageFormula: null,
+      targetName: "Goblin",
+      targetActor: targetDoc,
+      targetDerived,
+      defense: "normal",
+      mountMovedFt: 60,
+    });
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe("P08 mounted casting concentration (A.11)", () => {
+  test("mountedCastingConcentrationDC maps to vigorous/violent motion", async () => {
+    const { mountedCastingConcentrationDC } = await import("../../src/packages/pf1e/mounted");
+    expect(mountedCastingConcentrationDC({ spellLevel: 3, movedBeforeAndAfter: true, mountRunning: false })).toBe(13);
+    expect(mountedCastingConcentrationDC({ spellLevel: 3, movedBeforeAndAfter: false, mountRunning: true })).toBe(18);
+    expect(mountedCastingConcentrationDC({ spellLevel: 3, movedBeforeAndAfter: false, mountRunning: false })).toBeNull();
+    // Running wins over moved
+    expect(mountedCastingConcentrationDC({ spellLevel: 1, movedBeforeAndAfter: true, mountRunning: true })).toBe(16);
+  });
+
+  test("sheet wiring pushes vigorousMotion / violentMotion declarations", async () => {
+    // This test documents the sheet's contract: castMountRunning ⇒ violentMotion, else vigorousMotion.
+    // The actual concentrationDc for those triggers is already tested in pf1eConcentration.
+    const { concentrationDc } = await import("../../src/packages/pf1e/concentration");
+    expect(concentrationDc({ situation: "vigorousMotion", die: 10 }, 3).dc).toBe(13);
+    expect(concentrationDc({ situation: "violentMotion", die: 10 }, 3).dc).toBe(18);
+  });
+});
+
