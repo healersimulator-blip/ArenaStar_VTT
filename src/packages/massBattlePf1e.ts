@@ -307,7 +307,6 @@ export function createMassBattlePf1e(
       // Helper: effective initiative for a unit (leader actor or profile fallback)
       const effectiveInitiativeOf = (
         unit: UnitView,
-        _idx: number,
       ): { mod: number; tie: number } => {
         const actorJson = ctx.leaderActors[unit.id] as unknown as
           | { system?: Record<string, unknown> }
@@ -449,13 +448,13 @@ export function createMassBattlePf1e(
           const dx = cx - startX;
           const dy = cy - startY;
           if (dx === 0 && dy === 0 && !hitWall) continue;
-          const paceLabel = order.kind === "retreat" ? "retreat" : (order as any).pace;
+          const paceLabel = order.kind === "retreat" ? "retreat" : order.pace;
           const verb =
             order.kind === "retreat"
               ? "retreats"
-              : (order as any).pace === "run"
+              : order.pace === "run"
                 ? "runs"
-                : (order as any).pace === "charge"
+                : order.pace === "charge"
                   ? "charges"
                   : "moves";
           pendingMoves.push({ unit, dx, dy, cx, cy, traveled, hitWall, paceLabel, verb });
@@ -468,8 +467,8 @@ export function createMassBattlePf1e(
             pool.y[i] = (pool.y[i] ?? 0) + m.dy;
             const q = orders.get(m.unit.id);
             const o = q?.active ?? q?.pending[0];
-            if (o?.kind === "move" && (o as any).facing !== undefined)
-              pool.rot[i] = (o as any).facing;
+            if (o?.kind === "move" && o.facing !== undefined)
+              pool.rot[i] = o.facing;
           }
         }
         // Emit after translation so the log reads in initiative order later (events
@@ -859,11 +858,11 @@ export function createMassBattlePf1e(
       // with 80.
       const meleeUnits = simultaneous
         ? [...units]
-            .map((u, idx) => ({ unit: u, idx, init: effectiveInitiativeOf(u, idx) }))
+            .map((u) => ({ unit: u, init: effectiveInitiativeOf(u) }))
             .filter(({ unit }) => {
               const q = orders.get(unit.id);
               const o = q?.active ?? q?.pending[0];
-              return o?.kind === "attack" && !!(o as any).targetUnitId;
+              return o?.kind === "attack" && !!o.targetUnitId;
             })
             .sort((a, b) => b.init.mod - a.init.mod || b.init.tie - a.init.tie)
             .map(({ unit }) => unit)
@@ -872,7 +871,7 @@ export function createMassBattlePf1e(
               [...units].filter((u) => {
                 const q = orders.get(u.id);
                 const o = q?.active ?? q?.pending[0];
-                return !(o?.kind === "attack" && !!(o as any).targetUnitId);
+                return !(o?.kind === "attack" && !!o.targetUnitId);
               }),
             )
         : units;

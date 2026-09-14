@@ -8,7 +8,7 @@
  * and the line its warning area shows.
  */
 import type { ActorDocument } from "../../core/documents";
-import type { Op } from "../../core/ops";
+import type { FlatDiff, Op } from "../../core/ops";
 import { abilityDamageRecovery, naturalHpRecovery } from "../../packages/pf1e/recovery";
 
 export interface PF1eRestPlanInput {
@@ -95,7 +95,7 @@ export function planRest(input: PF1eRestPlanInput): PF1eRestPlan {
           ops.push({
             kind: "update" as const,
             ref: { coll: "actors" as const, id: input.actor._id },
-            diff: diff as Record<string, unknown> as any,
+            diff: diff as FlatDiff,
           });
         }
       }

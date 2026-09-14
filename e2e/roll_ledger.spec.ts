@@ -85,7 +85,9 @@ test.describe("F01 roll ledger (Messages system.rollLedger v1)", () => {
         ledgerInverses: [
           { kind: "update", ref: { coll: "actors", id: "actor-goblin" }, diff: { "system.attributes.hp.value": 12 } },
         ],
-        turnNumber: 1,
+        // No combat exists in this world → the ledger clock spends the present
+        // turn at 0 (tacticalLedgerTurn), so the card is freshly authored.
+        turnNumber: 0,
         reverted: false,
         rerollCount: 0,
         pendingReroll: null,
@@ -131,7 +133,7 @@ test.describe("F01 roll ledger (Messages system.rollLedger v1)", () => {
     const highlightSmoke = await page.evaluate(async () => {
       const st = (globalThis as unknown as { __stage?: { getRollHighlightLayer?: () => { sync: (rects: unknown[], cam: unknown, fadeSec: number) => void; rectCount: number } ; camera?: unknown } }).__stage;
       if (!st?.getRollHighlightLayer) return { ok: false, reason: "stage missing" } as const;
-      const layer = st.getRollHighlightLayer()!;
+      const layer = st.getRollHighlightLayer();
       const cam = (st as unknown as { camera?: unknown }).camera ?? { x: 0, y: 0, scale: 1 };
       layer.sync([{ x: 0, y: 0, width: 50, height: 50, kind: "initiator" }], cam as { x: number; y: number; scale: number }, 1);
       const before = layer.rectCount;

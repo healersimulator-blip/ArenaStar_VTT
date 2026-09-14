@@ -61,6 +61,13 @@ class FakeClient implements ResolveFlowClient {
   submit(ops: Op[]): string { this.submitted.push(ops); return "tx"; }
 }
 
+/** First+only attack line of a fixture — throws instead of masking a bad fixture. */
+function attackLineOf<T extends { attacks: readonly unknown[] }>(fixture: T): T["attacks"][number] {
+  const [line] = fixture.attacks;
+  if (line === undefined) throw new Error("test fixture must define at least one attack line");
+  return line as T["attacks"][number];
+}
+
 function derivedTarget(): { doc: ActorDocument; derived: PF1eDerived } {
   const doc = actor("goblin", { hp: 12, hpMax: 12, armorClass: { armor: 2 } });
   return { doc, derived: deriveFromDocuments({ actor: doc }) };
@@ -76,7 +83,7 @@ describe("P08 mounted ranged penalty in resolveAttackFlow", () => {
         attacks: [{ name: "Longbow", ranged: true, rangeIncrementFt: 100, damageDice: "1d8", damageType: "piercing" }],
       },
     });
-    const line = attacker.attacks[0]!;
+    const line = attackLineOf(attacker);
     const { doc: targetDoc, derived: targetDerived } = derivedTarget();
 
     for (const [movement, penalty, expectedBonusFormula] of [
@@ -129,7 +136,7 @@ describe("P08 mounted ranged penalty in resolveAttackFlow", () => {
         attacks: [{ name: "Longsword", damageDice: "1d8" }],
       },
     });
-    const line = attacker.attacks[0]!;
+    const line = attackLineOf(attacker);
     const { doc: targetDoc, derived: targetDerived } = derivedTarget();
     const client = new FakeClient();
     client.script = [{ die: 15, total: 20 }, { total: 6 }];
@@ -160,7 +167,7 @@ describe("P08 mounted ranged penalty in resolveAttackFlow", () => {
         attacks: [{ name: "Longbow", ranged: true, rangeIncrementFt: 100, damageDice: "1d8" }],
       },
     });
-    const line = attacker.attacks[0]!;
+    const line = attackLineOf(attacker);
     const { doc: targetDoc, derived: targetDerived } = derivedTarget();
     const client = new FakeClient();
     // Two arrows: each needs attack + (optional conceal) + damage
@@ -402,7 +409,7 @@ describe("P08 mounted melee full-attack bar (A.11)", () => {
     const attacker = derivePF1eActor({
       system: { abilities: { str: 16 }, baseAttack: 11, attacks: [{ name: "Lance", damageDice: "1d8" }] },
     });
-    const line = attacker.attacks[0]!;
+    const line = attackLineOf(attacker);
     const { doc: targetDoc, derived: targetDerived } = derivedTarget();
     const client = new FakeClient();
     client.script = [{ die: 15, total: 20 }, { total: 6 }];
@@ -426,7 +433,7 @@ describe("P08 mounted melee full-attack bar (A.11)", () => {
     const attacker = derivePF1eActor({
       system: { abilities: { str: 16 }, baseAttack: 11, attacks: [{ name: "Lance", damageDice: "1d8" }] },
     });
-    const line = attacker.attacks[0]!;
+    const line = attackLineOf(attacker);
     const { doc: targetDoc, derived: targetDerived } = derivedTarget();
     const client = new FakeClient();
     const result = await resolveAttackFlow(client, owner, {
@@ -451,7 +458,7 @@ describe("P08 mounted melee full-attack bar (A.11)", () => {
     const attacker = derivePF1eActor({
       system: { abilities: { str: 16 }, baseAttack: 11, attacks: [{ name: "Longsword", damageDice: "1d8" }] },
     });
-    const line = attacker.attacks[0]!;
+    const line = attackLineOf(attacker);
     const { doc: targetDoc, derived: targetDerived } = derivedTarget();
     for (const [ft, shouldAllow] of [[5, true], [6, false]] as const) {
       const client = new FakeClient();
@@ -477,7 +484,7 @@ describe("P08 mounted melee full-attack bar (A.11)", () => {
     const attacker = derivePF1eActor({
       system: { abilities: { dex: 16 }, baseAttack: 11, attacks: [{ name: "Longbow", ranged: true, rangeIncrementFt: 100, damageDice: "1d8" }] },
     });
-    const line = attacker.attacks[0]!;
+    const line = attackLineOf(attacker);
     const { doc: targetDoc, derived: targetDerived } = derivedTarget();
     const client = new FakeClient();
     client.script = [{ die: 12, total: 18 }, { total: 5 }];

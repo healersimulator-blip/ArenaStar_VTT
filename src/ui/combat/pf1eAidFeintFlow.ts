@@ -28,7 +28,7 @@ import { pendingRollCreateOp } from "./pf1ePendingRollFlow";
 import { isPlayerOwned } from "../../packages/pf1e/pendingRoll";
 import { worldSettingsFrom } from "../../core/worldSettings";
 
-export interface AidFeintFlowClient extends ResolveFlowClient {}
+export type AidFeintFlowClient = ResolveFlowClient;
 
 function derivedFor(actor: ActorDocument, combat: CombatDocument | null, combatantId: string | null) {
   return deriveFromDocuments({
@@ -109,7 +109,10 @@ export async function resolveAidAnotherFlow(
           const attackFormula = `1d20 + ${line.attackBonus}`;
           const damageFormula = line.damageDice ? `${line.damageDice} + ${line.damageBonus}` : "1d3";
           const aiderDerivedForDef = aiderDerived;
-          const aiderFlat = params.combat && aiderCombatantId ? isFlatFootedByRound(params.combat, params.combat.combatants.find((c) => c._id === aiderCombatantId)!).flatFooted : false;
+          const aiderCombatant = params.combat && aiderCombatantId !== null
+            ? params.combat.combatants.find((c) => c._id === aiderCombatantId)
+            : undefined;
+          const aiderFlat = aiderCombatant ? isFlatFootedByRound(params.combat, aiderCombatant).flatFooted : false;
           const defense: "normal" | "flatFooted" = aiderFlat ? "flatFooted" : "normal";
           const outcome = await resolveAttackFlow(client, user, {
             attackerName: opponent.name,
@@ -178,7 +181,9 @@ export async function resolveAidAnotherFlow(
         return { ok: true, plan: pendingPlanAid, cardId: (pendingOpAid as unknown as { data: { _id: string } }).data._id };
       }
     }
-  } catch {}
+  } catch {
+    // A failed pending-card branch falls back to the inline roll below.
+  }
   const rollId = params.verifiable ? await client.rollVerified("1d20", "roll", undefined, "aid another") : client.roll("1d20", "roll", undefined, "aid another");
   const die = await awaitDie(client, rollId);
   if (die === null) return { ok: false, error: "aid another die roll did not arrive" };
@@ -304,7 +309,9 @@ export async function resolveFeintFlow(
           ...(params.hasGreaterFeint !== undefined ? { hasGreaterFeint: params.hasGreaterFeint } : {}),
         });
         if (probe.ok) dcForFeint = probe.dc;
-      } catch {}
+      } catch {
+        // DC probe is optional; the CRB formula below is the fallback.
+      }
       if (dcForFeint === null) dcForFeint = 10 + defenderBabForDc + defenderWisModForDc;
       const formulaFeint = `1d20${params.bluffBonus >= 0 ? `+${params.bluffBonus}` : `${params.bluffBonus}`}`;
       const pendingOpFeint = pendingRollCreateOp({
@@ -340,7 +347,9 @@ export async function resolveFeintFlow(
         return { ok: true, plan: pendingPlanFeint, cardId: (pendingOpFeint as unknown as { data: { _id: string } }).data._id };
       }
     }
-  } catch {}
+  } catch {
+    // A failed pending-card branch falls back to the inline roll below.
+  }
   const rollId = params.verifiable ? await client.rollVerified("1d20", "roll", undefined, "feint (Bluff)") : client.roll("1d20", "roll", undefined, "feint (Bluff)");
   const die = await awaitDie(client, rollId);
   if (die === null) return { ok: false, error: "feint die roll did not arrive" };

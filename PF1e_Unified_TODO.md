@@ -1577,6 +1577,13 @@ Two user-requested tactical/strategic features that sit on top of the landed P0�
 
 * `e2e/pending_rolls.spec.ts` — non-strategic game, player token fireballed → pending save card shows initiator/target/DC/formula/modifiers dropdown, **no total**, `data-pending-roll` + `Roll` visible only to that player (GM sees GM Resolve); player clicks Roll → card shows `[[18|1d20+5]]`, follow-up `Success — half damage` line, HP actually reduced per the host-evaluated save (not the client's number). With `playerPendingRollMode="savesChecksAuto"`, a fireball save **auto-resolves** (no pending) while a provoked **AoO** is pending; with `"auto"` nothing is pending; with `"manual"` both are pending. Window closes after `T+3` (button `— expired`, server refuses). Strategic (`simultaneous`) turn never creates a pending card. `vitest` pending unit tests cover shouldDefer, ownership, strategic gate, window and prune.
 
+### Status — 2026-09-14 (remediation, D-221)
+
+* **[x] F01–F03 code-rate remediation pass done.** Full V10 gate green on the slice: `lint` 0 errors, `typecheck` clean, `test` 2227✓/3 skipped, `build` OK, `size` within the 6 MB raw budget. The pass replaced silent `catch {}` with named/commented guards or `warnings`-recording fallbacks, removed client-fabricated roll fallbacks (host-absent clicks are honest no-ops now), typed away the `as any`/`!` sloppiness in the ledger/P08/P09 flow files, and rebuilt `ChatPanel`/`RollCard` so highlight is a semantic `rollHighlight` bus event resolved by `App.svelte` (never `__stage` poking) and modifier staging is an additive chip row (never a non-reactive `Map` + double-counting reason editor).
+* **[x] Ledger pre-images are real at every artifact site** — `resolveAttackFlow` shell, Manyshot burst, firearm explosion all call `captureLedgerInverses(store, ops)` + `tacticalLedgerTurn(combats)`, and host Reroll/Revert refuses by name (`ledger has no pre-images`, `ledger stale — effects changed since`) instead of replaying wrong values. `tests/ui/pf1eResolveFlow.test.ts` asserts the captured inverse payload matches the pre-write store state.
+* **Open frontier for F-items:** `e2e/roll_ledger.spec.ts` + `e2e/pending_rolls.spec.ts` need a real Chromium run (not possible in the dev sandbox used for the remediation); `combat_resolver_5.html` reconciliation is still required before marking F02's verbatim tie-breakers landed (per D-220).
+* See D-221 in `DECISIONS.md` for the full rationale and the rejected alternatives (tolerant inverses, offline client RNG, weakened assertions).
+
 ## Recommended execution order
 
 

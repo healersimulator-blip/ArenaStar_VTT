@@ -87,7 +87,6 @@
     type PF1eMountMovement,
   } from "../../packages/pf1e/mounted";
   import { firearmShotAmmo, FIREARM_EXPLOSION_DC, FIREARM_EXPLOSION_RADIUS_FT, firearmExplosionSquares, quickClearReloadCost, firearmReloadEntry } from "../../packages/pf1e/firearms";
-  import { firearmReloadOpportunity } from "./pf1eResolveFlow";
   import type {
     ActorDocument,
     CombatDocument,

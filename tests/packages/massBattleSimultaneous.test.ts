@@ -204,7 +204,7 @@ describe("F02 simultaneous strategic — movement batch + initiative damage orde
       issuedBy: "gm",
       issuedTurn: 1,
       pending: [],
-      active: { kind: "move", path: [{ x: 20, y: 0 }], pace: "march" } as unknown as any,
+      active: { kind: "move", path: [{ x: 20, y: 0 }], pace: "march" },
     });
 
     const events: SimEvent[] = [];
@@ -235,13 +235,13 @@ describe("F02 simultaneous strategic — movement batch + initiative damage orde
       issuedBy: "gm",
       issuedTurn: 1,
       pending: [],
-      active: { kind: "move", path: [{ x: 20, y: 0 }], pace: "march" } as unknown as any,
+      active: { kind: "move", path: [{ x: 20, y: 0 }], pace: "march" },
     });
     orders.set("u1", {
       issuedBy: "gm",
       issuedTurn: 1,
       pending: [],
-      active: { kind: "attack", targetUnitId: "u2" } as unknown as any,
+      active: { kind: "attack", targetUnitId: "u2" },
     });
 
     const events: SimEvent[] = [];

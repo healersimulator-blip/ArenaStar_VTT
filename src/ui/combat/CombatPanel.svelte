@@ -254,7 +254,9 @@ import { pendingPruneOps } from "../../packages/pf1e/pendingRoll";
         const msgs = client.store.getAll("messages") as unknown as Array<{ _id: string; system?: { pendingRoll?: { turnNumber: number; expiresTurn: number; resolved: boolean } } }>;
         const prune = pendingPruneOps(msgs as unknown as Parameters<typeof pendingPruneOps>[0], (snapshot as unknown as { round?: number }).round ?? 0);
         if (prune.length > 0) client.submit(prune);
-      } catch {}
+      } catch {
+        // Pruning is best-effort: a malformed historical card never blocks a turn.
+      }
       return;
     }
     const result = pf1eNextTurn(snapshot, {
@@ -266,7 +268,9 @@ import { pendingPruneOps } from "../../packages/pf1e/pendingRoll";
       const msgs = client.store.getAll("messages") as unknown as Array<{ _id: string; system?: { pendingRoll?: { turnNumber: number; expiresTurn: number; resolved: boolean } } }>;
       const prune = pendingPruneOps(msgs as unknown as Parameters<typeof pendingPruneOps>[0], (result.combat as unknown as { round?: number }).round ?? 0);
       if (prune.length > 0) client.submit(prune);
-    } catch {}
+    } catch {
+      // Pruning is best-effort: a malformed historical card never blocks a turn.
+    }
     // D-205 — a dying creature's turn started: the panel rolls the round's
     // Constitution check publicly and writes the outcome (the transition
     // itself rolls no die).

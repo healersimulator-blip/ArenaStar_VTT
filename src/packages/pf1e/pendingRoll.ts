@@ -105,19 +105,21 @@ export function isPendingExpired(
   return currentTurn > pending.expiresTurn;
 }
 
-/** True when a player may press Roll for this card. */
+/**
+ * True when a player may press Roll for this card. `ownerIds` is the caller's
+ * ownership verdict for the roller (initiator for attacks, target otherwise):
+ * pass the resolved owner list — the player must be in it. When omitted (unit
+ * tests of the window only), the window alone decides.
+ */
 export function canPlayerRoll(
   pending: Pick<PendingRoll, "resolved" | "expiresTurn">,
   currentTurn: number,
-  _playerId: UserId,
-  _ownerIds?: readonly UserId[],
+  playerId: UserId,
+  ownerIds?: readonly UserId[],
 ): boolean {
   if (pending.resolved) return false;
   if (isPendingExpired(pending, currentTurn)) return false;
-  // Ownership check is caller-owned: pass ownerIds when available.
-  // If no owner list is supplied we treat window as sufficient (tests pin window).
-  if (_ownerIds !== undefined && _ownerIds.length === 0) return false;
-  if (_ownerIds !== undefined && !_ownerIds.includes(_playerId as unknown as UserId)) return false;
+  if (ownerIds !== undefined) return ownerIds.includes(playerId);
   return true;
 }
 

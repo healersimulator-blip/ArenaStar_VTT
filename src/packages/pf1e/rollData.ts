@@ -203,7 +203,7 @@ export function pf1eAttackRollGroups(
     const notes: string[] = [];
     const bonuses = line.attackBonuses;
     const attack = attackSpec(line, bonuses[0] ?? bab, bab, null);
-    let fullAttack = bonuses.map((bonus, i) =>
+    const fullAttack = bonuses.map((bonus, i) =>
       attackSpec(line, bonus, bab, bonuses.length > 1 ? i + 1 : null),
     );
     // A07/Manyshot — when the feat applies to this ranged line, the first

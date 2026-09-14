@@ -5621,3 +5621,28 @@ Consequences:
 
 Status: accepted 2026-09-14.
 
+
+## D-221 — 2026-09-14 — F01–F03 roll-ledger remediation: honesty over silent recovery
+
+Decision:
+* **No silent catch, no fabricated RNG.** Every `catch {}` in the F01–F03 slice is now either a named, commented best-effort guard (ledger shell, prune) or a warning-recording fallback (cast-flow concentration/save pending paths push the exception into `warnings`). Client paths that previously *synthesized* a roll total when the host transport was missing were deleted: clicking Reroll/Revert/Delegate/Roll without a host is now a no-op that leaves the card in its true state (`ChatPanel.svelte`), never a forged `d20`.
+* **Typed over `as any`.** Ledger/Op diffs flow is typed end-to-end: `FlatDiff` in `pf1eEnergyDrain`/`pf1eRest`, real `Op` unions in test fakes, removed `Record<string, any>` casts. Combatant lookups (`params.combat.combatants.find(...)!`) are explicit `find(...) ?? undefined` + truthy guard in `pf1eManeuverFlow`/`pf1eAidFeintFlow`; the AoO attack-bonus regex literal was de-escaped (`([+-])\s*(\d+)`).
+* **Fakes implement production interfaces, not vice versa.** `tests/ui/pf1eResolveFlow.test.ts`'s `FakeClient` now implements the `DocReader` (`resolve(ref)`) every real store has, and the hit-path test asserts the *captured pre-image* inverse (`{coll:"actors", id:"goblin", diff:{"system.pf1e.hp":12}}`) — reverting the recorded hp write, not merely "some inverse exists". Production code (`captureLedgerInverses` + `buildRollLedger` calls in `pf1eResolveFlow`) was not weakened to tolerate an under-faked client.
+* **UI honesty in RollCard.** Modifier staging is a chip row (`roll-staged-modifier`, `chip.staged`) feeding `onReroll(staged[])`; the fabricated checkbox `Map`/reason-editor select (which double-counted modifiers into the host total and used a non-reactive built-in `Map` in Svelte state) is gone. `roll-add-modifier` adds a staged chip; the recorded per-roll modifiers render read-only.
+* **Chat highlight is a semantic event, not stage poking.** `ChatPanel.svelte` emits only `bus.emit("rollHighlight", RollHighlightRequest)` via pure builders in `src/ui/chat/rollHighlight.ts` (`highlightRequestFromLedger`/`highlightRequestFromPending`). `App.svelte` owns scene resolution (active-scene tokens → `tokenRect`, grid-true `pxPerFt` for areas, `RollHighlightLayer.sync`, camera centering via `view.setCamera`). The request type lives in `src/client/rollHighlight.ts` so the bus contract stays independent of the PF1e packages (layering: packages import core, never the reverse).
+* **Ledger inverses are real everywhere.** All ledger-artifact sites (`resolveAttackFlow` shell, Manyshot burst, firearm explosion) now call `captureLedgerInverses(client.store as DocReader, ops)` against the pre-submit store and `tacticalLedgerTurn(combats)` for the window clock, so hosted Reroll/Revert replay *recorded* pre-images (and the existing stale-ledger gate refuses by name when a later write would diverge).
+
+Context:
+* User flagged the landed F01–F03 (plus P08/P09 leaked) batch as "sloppy work" and asked for a remediation pass to the repo's own V10 bar (`test` / `typecheck` / `lint` / `build` / `size` all green).
+
+Alternatives considered:
+* Relaxing `captureLedgerInverses` to skip unresolvable refs (empty inverses, silent degraded revert) — rejected: an un-invertible ledger must be refused by name at the host (`ledger has no pre-images`), not silently wrong.
+* Keeping client-side "fallback" rolls for offline/dev play — rejected: a non-host-evaluated total is a forged total; the card keeping state is honest.
+* Fixing tests by deleting the ledger assertions — rejected: assertions were strengthened (real pre-image match) after the fake was upgraded.
+
+Consequences:
+* Full V10 gate green on this slice: `pnpm lint` 0 errors, `tsc --noEmit` clean, `pnpm test` 2227 passed / 3 skipped, `pnpm build` OK, `pnpm size` within the 6 MB budget.
+* Landed flows keep the no-ledger-shell fallback by design only for genuinely optional artifacts (ledger shell, prune), each with an in-code named reason; anything affecting adjudication is surfaced to `warnings`/`gateNotes` instead of being swallowed.
+* e2e (`playwright`) remains un-runnable in this sandbox environment (no Chromium); verification is unit + typecheck + lint only until CI runs the e2e suite.
+
+Status: accepted 2026-09-14.

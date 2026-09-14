@@ -56,7 +56,8 @@ import {
 } from "../../packages/pf1e/resolve";
 import { fmtSigned } from "../../packages/pf1e/rollData";
 import { featAttackParts, featDamageParts, hasPF1eFeat } from "../../packages/pf1e/feats";
-import { buildRollLedger } from "../../packages/pf1e/rollLedger";
+import { buildRollLedger, captureLedgerInverses, tacticalLedgerTurn } from "../../packages/pf1e/rollLedger";
+import type { DocReader } from "../../core/oplog";
 import { pf1eSheetEdit } from "./pf1eSheetModel";
 import { verifyCommitRoll } from "../../dice/commitReveal";
 
@@ -730,12 +731,13 @@ export async function resolveAttackFlow(
   );
   // F01 — build ledger for this tactical roll (non-strategic only).
   // We always attach a shell so the card shows who→what→whom + roll chips;
-  // strategic games never use this flow.
+  // strategic games never use this flow. Pre-images are captured from the
+  // store BEFORE submit so the hosted Reroll/Revert have real inverses; the
+  // window clock is the same `tacticalLedgerTurn` the host handlers use.
   let rollLedger: ReturnType<typeof buildRollLedger> | null = null;
   try {
-    const combats = (client.store as unknown as { getAll?: (c: string) => readonly unknown[] })?.getAll?.("combats") as readonly unknown[] | undefined;
-    const roundRaw = (combats?.[0] as { system?: { round?: unknown } } | undefined)?.system?.round;
-    const turnNumber = typeof roundRaw === "number" && Number.isFinite(roundRaw) ? roundRaw : 0;
+    const combats = (client.store as unknown as { getAll?: (c: string) => readonly unknown[] })?.getAll?.("combats") as readonly { round?: unknown }[] | undefined;
+    const turnNumber = tacticalLedgerTurn(combats ?? []);
     const initiator: import("../../packages/pf1e/rollLedger").RollLedgerInitiator = {
       actorId: (params.attackerActor?._id ?? params.attackerName) as string,
       tokenId: null,
@@ -770,16 +772,23 @@ export async function resolveAttackFlow(
           ]
         : []),
     ];
+    const ledgerInverses = captureLedgerInverses(
+      client.store as unknown as DocReader,
+      ops,
+    );
     rollLedger = buildRollLedger({
       initiator,
       targets,
       area: null,
       rolls,
-      ledgerOps: ops as unknown as never,
-      ledgerInverses: [],
+      ledgerOps: ops,
+      ledgerInverses,
       turnNumber,
     });
-  } catch {}
+  } catch {
+    // A ledger-shell failure never blocks the attack: the card posts without a
+    // ledger and renders as an ordinary roll line.
+  }
   const cardMessage: MessageDocument = {
     _id: globalThis.crypto.randomUUID(),
     type: "message",
@@ -898,6 +907,7 @@ export async function resolveManyshotFlow(
   const defender = resolveDefenderFromDerived(params.targetName, params.targetDerived);
   const arrows: Array<{
     die: number;
+    attackTotal: number;
     confirmDie?: number;
     concealmentDie?: number;
     damageTotal: number;
@@ -1007,6 +1017,7 @@ export async function resolveManyshotFlow(
     const result = one;
     arrows.push({
       die,
+      attackTotal: result.attackTotal,
       ...(confirmDie === undefined ? {} : { confirmDie }),
       ...(concealmentDie === undefined ? {} : { concealmentDie }),
       damageTotal,
@@ -1060,25 +1071,38 @@ export async function resolveManyshotFlow(
       ops.push({ kind: "update", ref: { coll: "actors", id: params.targetActor._id }, diff });
     }
   }
-  // F01 — Manyshot ledger stub (burst of arrows); keep the same 2-round window as single attack
+  // F01 — Manyshot ledger (burst of arrows); the same 2-round window and the
+  // same real pre-images as the single-attack card, so its Revert is sound.
   let manyshotLedger: ReturnType<typeof buildRollLedger> | null = null;
   try {
-    const combats = (client.store as unknown as { getAll?: (c: string) => readonly unknown[] })?.getAll?.("combats") as readonly unknown[] | undefined;
-    const roundRaw = (combats?.[0] as { system?: { round?: unknown } } | undefined)?.system?.round;
-    const turnNumber = typeof roundRaw === "number" && Number.isFinite(roundRaw) ? roundRaw : 0;
+    const combats = (client.store as unknown as { getAll?: (c: string) => readonly unknown[] })?.getAll?.("combats") as readonly { round?: unknown }[] | undefined;
+    const turnNumber = tacticalLedgerTurn(combats ?? []);
     const initiator = { actorId: params.attackerName as string, tokenId: null, name: params.attackerName } as unknown as import("../../packages/pf1e/rollLedger").RollLedgerInitiator;
     const targets = [{ actorId: params.targetActor._id as string, tokenId: null, name: params.targetName }] as unknown as import("../../packages/pf1e/rollLedger").RollLedgerTarget[];
     const rolls = resolved.arrows.map((a, i) => ({
       kind: "attack" as const,
       formula: effectiveManyshotFormulas[i] ?? params.attackFormulas[i] ?? "1d20",
-      total: (a as unknown as { attackTotal?: number }).attackTotal ?? 10,
+      // Honest total: die + static bonus, exactly what the resolver committed.
+      // (Previously `?? 10` fabricated a total — `attackTotal` was never on the
+      // arrow type, so EVERY manyshot ledger total read 10.)
+      total: a.attackTotal,
       terms: [] as unknown as import("../../core/documents").Json[],
       modifiers: featAttackDeltaPartsManyshot.map((pa) => ({ label: pa.label, value: pa.value, reason: pa.label })),
       seedClient: null,
       seedHost: null,
     })) as unknown as import("../../packages/pf1e/rollLedger").RollLedgerRoll[];
-    manyshotLedger = buildRollLedger({ initiator, targets, area: null, rolls, ledgerOps: ops as unknown as never, ledgerInverses: [], turnNumber });
-  } catch {}
+    manyshotLedger = buildRollLedger({
+      initiator,
+      targets,
+      area: null,
+      rolls,
+      ledgerOps: ops,
+      ledgerInverses: captureLedgerInverses(client.store as unknown as DocReader, ops),
+      turnNumber,
+    });
+  } catch {
+    // A ledger-shell failure never blocks the attack: the card posts without a ledger.
+  }
   const manyshotContent = `${params.attackerName}: ${params.line.name} Manyshot against ${params.targetName}\n${resolved.arrows.map((arrow, index) => `Arrow ${index + 1}: ${arrow.outcome}, ${arrow.damage?.dealt ?? 0} damage`).join("\n")}\nHP ${defender.hp} → ${resolved.finalHp}.`;
   const manyshotMsg: MessageDocument = {
     _id: globalThis.crypto.randomUUID(), type: "message", name: `${params.attackerName} Manyshot`,
@@ -1185,9 +1209,8 @@ export async function resolveFirearmExplosionFlow(
   // F01 — explosion ledger: area burst + per-target saves
   let explosionLedger: ReturnType<typeof buildRollLedger> | null = null;
   try {
-    const combats = (client.store as unknown as { getAll?: (c: string) => readonly unknown[] })?.getAll?.("combats") as readonly unknown[] | undefined;
-    const roundRaw = (combats?.[0] as { system?: { round?: unknown } } | undefined)?.system?.round;
-    const turnNumber = typeof roundRaw === "number" && Number.isFinite(roundRaw) ? roundRaw : 0;
+    const combats = (client.store as unknown as { getAll?: (c: string) => readonly unknown[] })?.getAll?.("combats") as readonly { round?: unknown }[] | undefined;
+    const turnNumber = tacticalLedgerTurn(combats ?? []);
     const initiator = { actorId: params.attackerName as string, tokenId: null, name: params.attackerName } as unknown as import("../../packages/pf1e/rollLedger").RollLedgerInitiator;
     const area = params.corner ? { shape: "burst" as const, origin: { x: params.corner.col * 50, y: params.corner.row * 50 }, radiusFt: 5, affectedTokenIds: [] as string[] } : null;
     const rolls = [{
@@ -1199,12 +1222,22 @@ export async function resolveFirearmExplosionFlow(
       seedClient: (damageMsg.roll?.seedClient as string | null) ?? null,
       seedHost: (damageMsg.roll?.seedHost as string | null) ?? null,
     }] as unknown as import("../../packages/pf1e/rollLedger").RollLedgerRoll[];
-    explosionLedger = buildRollLedger({ initiator, targets: null, area, rolls, ledgerOps: ops as unknown as never, ledgerInverses: [], turnNumber });
+    explosionLedger = buildRollLedger({
+      initiator,
+      targets: null,
+      area,
+      rolls,
+      ledgerOps: ops,
+      ledgerInverses: captureLedgerInverses(client.store as unknown as DocReader, ops),
+      turnNumber,
+    });
     if (explosionLedger && explosionLedger.area) {
       // fill affectedTokenIds for the highlight layer
       (explosionLedger.area as unknown as { affectedTokenIds: string[] }).affectedTokenIds = params.burstTargets.map((bt) => bt.actor._id as string);
     }
-  } catch {}
+  } catch {
+    // A ledger-shell failure never blocks the explosion card from posting.
+  }
   const explosionMsg: MessageDocument = {
     _id: globalThis.crypto.randomUUID(),
     type: "message",

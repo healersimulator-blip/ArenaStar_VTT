@@ -145,17 +145,18 @@
   }
 
   // F02 — squad grouping for simultaneous fan-out (ArmyWindow squadId tag)
-  function squadGroups(): Map<string, UnitDocument[]> {
+  function squadGroups(): Array<[string, UnitDocument[]]> {
     const doc = army();
-    const m = new Map<string, UnitDocument[]>();
-    if (!doc) return m;
+    if (!doc) return [];
+    const bySquad: Record<string, UnitDocument[]> = {};
     for (const u of doc.units) {
       const sid = (u as unknown as { squadId?: string | null }).squadId;
       if (!sid) continue;
-      if (!m.has(sid)) m.set(sid, []);
-      m.get(sid)!.push(u);
+      const bucket = bySquad[sid];
+      if (bucket) bucket.push(u);
+      else bySquad[sid] = [u];
     }
-    return m;
+    return Object.entries(bySquad);
   }
 
   function issueToSquad(squadId: string, build: (unit: UnitDocument) => Order): void {
@@ -318,12 +319,12 @@
   {#if tab === "tree"}
     {#if squadGroups().size > 0}
       <div class="squads" data-squads>
-        {#each [...squadGroups().entries()] as [sid, members] (sid)}
+        {#each squadGroups() as [sid, members] (sid)}
           <div class="row squad" data-squad={sid}>
             <span class="c">▣ Squad {sid}</span>
             <span class="dim">{members.length} units</span>
             <button onclick={() => setSelection(members.map((u) => u._id))} data-squad-select={sid}>select</button>
-            <button onclick={() => issueToSquad(sid, (u) => ({ kind: "hold", stance: "defend" }))} data-squad-hold={sid}>Hold</button>
+            <button onclick={() => issueToSquad(sid, () => ({ kind: "hold", stance: "defend" }))} data-squad-hold={sid}>Hold</button>
           </div>
         {/each}
       </div>

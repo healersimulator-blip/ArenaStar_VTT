@@ -86,16 +86,14 @@ export function applyHealing(input: PF1eHealInput): PF1eHealResult | { ok: false
   const healedNonlethal = Math.min(amount, nonlethalDamage);
   const newNonlethal = Math.max(0, nonlethalDamage - healedNonlethal);
 
-  let note = "";
-  if (healedHp > 0 && healedNonlethal > 0) {
-    note = `healed ${healedHp} hit point(s) and removed ${healedNonlethal} point(s) of nonlethal damage (CRB p.191)`;
-  } else if (healedHp > 0) {
-    note = `healed ${healedHp} hit point(s)`;
-  } else if (healedNonlethal > 0) {
-    note = `removed ${healedNonlethal} point(s) of nonlethal damage (CRB p.191 — hit points already at maximum)`;
-  } else {
-    note = `healing ${amount} had no effect — already at full hit points with no nonlethal damage`;
-  }
+  const note =
+    healedHp > 0 && healedNonlethal > 0
+      ? `healed ${healedHp} hit point(s) and removed ${healedNonlethal} point(s) of nonlethal damage (CRB p.191)`
+      : healedHp > 0
+        ? `healed ${healedHp} hit point(s)`
+        : healedNonlethal > 0
+          ? `removed ${healedNonlethal} point(s) of nonlethal damage (CRB p.191 — hit points already at maximum)`
+          : `healing ${amount} had no effect — already at full hit points with no nonlethal damage`;
 
   return { hp: newHp, nonlethalDamage: newNonlethal, healedHp, healedNonlethal, note };
 }
