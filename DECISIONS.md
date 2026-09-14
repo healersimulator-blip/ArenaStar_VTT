@@ -5727,3 +5727,23 @@ Consequences:
 * TODO: N01/N02/M04 annotated complete; M12/M14 checked.
 
 Status: accepted 2026-09-14.
+
+## D-225 — 2026-09-14 — S01/S04 closed under chromium-only acceptance: full audit of the sheet seam and compendium flow
+
+**Context.** S01 (mount the PF1e sheet in normal navigation) and S04 (compendium → token → sheet with derived readouts) were the last two unchecked sheet boxes in `PF1e_Unified_TODO.md`. Per the D-119 convention their boxes had stayed `[ ]` pending the Firefox/WebKit half of the browser matrix; the user's standing directive defers that matrix ("chromium-only acceptance"), so this slice audited every ledger item against landed code and the executed Chromium suite (140/140 green on the `468100f` tree, which includes all of `e2e/sheets.spec.ts` and the `packages.spec.ts` drag-drop case) rather than writing new scaffolding.
+
+**Audit mapping (S01).**
+
+- *Actor rows → specialized sheet in normal navigation:* `SheetPanel.svelte` mounts `PF1eActorSheet` inline for actors with an object-shaped `system.pf1e`; the panel is mounted on the GM path (`App.svelte`) and the player path (`JoinApp.svelte`) with `onOpenActor` wired. Generic actors/items keep the existing editor (e2e asserts no `.sys-field[data-key="pf1e"]`).
+- *Floating windows:* `src/ui/sheets/pf1eSheetWindow.ts` opens a stable `pf1e-sheet:{actorId}` WindowHost id, guarded by readability and PF1e shape (returns false for non-PF1e); the row button `[data-open-pf1e-sheet]` drives it, with singleton/minimize/restore/close exercised in e2e.
+- *Token double-click:* `CanvasController`'s `onDoubleClick` hit-tests the topmost token and fires `onTokenActivate` on plain idle left-dblclick; `App.svelte`/`JoinApp.svelte` route that to `openActorSheet(token.actorId)`. Executed e2e: `e2e/sheets.spec.ts` canvas dblclick → floating sheet with the AC readout (GM), and the player-canvas dblclick case.
+
+**Audit mapping (S04).**
+
+- *Compendium → token → sheet:* `CompendiaPanel` renders searchable packs with an Import button and HTML5-draggable rows (`application/x-vtt-compendium`); `App.svelte`'s `onCompendiumDrop` creates the actor document and, at the drop point, a linked token. Executed e2e: `sheets.spec.ts` "PF1e compendium actor opens an authored sheet and recomputes after edits" (import → sidebar sheet → every editor field recomputes) and `packages.spec.ts` "drag import onto the canvas → actor copy + linked token at the drop".
+- *Derived UI values vs `derivePF1eActor`:* `tests/ui/pf1eSheetModel.test.ts` pins the AC **18/13/15** fixture as the contract readout with no mutation and no stored derived totals; the same file reads **all six shipped `pf1e-core` bestiary records** through the one normalization/derivation path (also exercised by the details/attack editor tests); `pf1eAcConversion.test.ts` pins the derived {18, 13, 15} conversion preview.
+- *Memoization:* structural — `PF1eActorSheet.svelte` derives through Svelte 5 `$derived`, which recomputes only when the read dependencies (authored actor data, effects) invalidate; there is no `requestAnimationFrame` in `src/ui/sheets/`, so derivation can never key off animation frames.
+
+**Alternatives considered and rejected.** (1) Writing a redundant new dblclick e2e in `windows.spec.ts` — duplicated the two executed `sheets.spec.ts` dblclick cases with no new coverage. (2) Adding imperative memoization layers — $derived already gives the required dependency-keyed caching; hand-rolled caches would add invalidation bugs for zero gain. (3) Keeping the boxes `[ ]` pending Firefox/WebKit — contradicts the user's standing chromium-only acceptance directive, which is how N01/N02 were closed.
+
+**Evidence.** No code changed. Unit suite, typecheck, lint, build, size and the full Chromium e2e (140/140) were re-run on the final tree of this slice for a fresh green line; `PF1e_Unified_TODO.md` S01/S04 boxes flipped to `[x]` with the audit note.

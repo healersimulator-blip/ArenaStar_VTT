@@ -90,10 +90,16 @@ Can proceed alongside sheet work; required before claiming multiplayer mass-batt
 
 Depends on D06. Primary surfaces: `PF1eActorSheet.svelte`, `SheetPanel.svelte`, `WindowHost.svelte`, token interactions.
 
-- [ ] **S01 — Mount the PF1e sheet** from actor rows and token double-click, selected by PF1e actor/world context; preserve generic sheets for other systems. (I P1; G §1.7/§4.1; M Task 8)
+- [x] **S01 — Mount the PF1e sheet** from actor rows and token double-click, selected by PF1e actor/world context; preserve generic sheets for other systems. (I P1; G §1.7/§4.1; M Task 8)
 - [x] **S02 — Replace hand-entered totals with authored fields + derived readouts:** six abilities/modifiers, HP/temp/nonlethal/ability damage, AC breakdown, attacks, saves, CMB/CMD, DR/ER/SR, speed, feats/traits and conditional monster CR/type/alignment/senses/special-attacks tab. (I P1; B §6.2)
 - [x] **S03 — Route edits through authorized submit Ops**, remove the orphan sheet's fabricated `applyEnvelope` sequence path, and test ownership/rejection and player replication. (I P1; B §5)
-- [ ] **S04 — Complete compendium-to-token-to-sheet flow** using shipped bestiary actors and normalization metadata; test derived UI values against `derivePF1eActor`, including the planned AC 18/13/15 fixture. Memoize on authored data/effect changes, not animation frames. (I P1; B §7)
+- [x] **S04 — Complete compendium-to-token-to-sheet flow** using shipped bestiary actors and normalization metadata; test derived UI values against `derivePF1eActor`, including the planned AC 18/13/15 fixture. Memoize on authored data/effect changes, not animation frames. (I P1; B §7)
+
+### P1 progress — 2026-09-14, S01/S04 closed under chromium-only acceptance (D-225)
+
+- **S01 full audit:** every ledger item traced to landed, executed code — actor-row sheet mount on GM (`App.svelte` → `SheetPanel`) and player (`JoinApp.svelte`) paths, floating-window kind via `pf1eSheetWindow.ts` (stable `pf1e-sheet:{actorId}` id, non-PF1e actors keep the generic editor), and token double-click wired through `CanvasController.onTokenActivate` (hit-test on plain idle dblclick). Browser evidence is executed, not collected: `e2e/sheets.spec.ts` drives the GM sidebar sheet, the GM canvas dblclick → floating sheet, and the player canvas dblclick, all green in the 140/140 Chromium pass.
+- **S04 full audit:** compendium → import → sheet and compendium → drag-to-map-canvas → actor copy + linked token are both implemented (`CompendiaPanel` rows + `App.svelte` `onCompendiumDrop`) and browser-verified (`sheets.spec.ts` "PF1e compendium actor opens an authored sheet and recomputes after edits"; `packages.spec.ts` drag-drop assertion). Derived UI values are tested against `derivePF1eActor`: the AC 18/13/15 fixture is the contract readout in `tests/ui/pf1eSheetModel.test.ts` with no mutation or stored derived totals, all six shipped `pf1e-core` bestiary records pass the same normalization/derivation reader, and memoization is structural — the sheet derives through Svelte 5 `$derived` (recompute only on authored-data/effect dependency invalidation; zero `requestAnimationFrame` in `src/ui/sheets/`).
+- **Box convention:** per the standing user directive Firefox/WebKit acceptance is deferred; the chromium-only bar (D-222 quality gate) is the acceptance criterion in force, matching how N01/N02 were closed.
 
 ### P1 progress — 2026-09-08, first implementation slice (D-114)
 
