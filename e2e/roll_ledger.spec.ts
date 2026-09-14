@@ -16,24 +16,24 @@ test.describe("F01 roll ledger (Messages system.rollLedger v1)", () => {
     test.setTimeout(90_000);
     await page.goto(entry + "?e2e=1");
     await expect.poll(() =>
-      page.evaluate(() => (globalThis as { __vttE2E?: { app?: { pf1eWorldSettings?: () => unknown } } }).__vttE2E?.app != null),
+      page.evaluate(() => (globalThis as unknown as { __vttE2E?: { app?: { pf1eWorldSettings?: () => unknown } } }).__vttE2E?.app != null),
     ).toBe(true);
 
     // World settings are replicated; the helper writes through worldSettingsOps so the GM and the host share the truth.
     const setFade = await page.evaluate(() => {
-      const app = (globalThis as { __vttE2E: { app: { pf1eSetWorldSetting: (s: unknown) => { ok: boolean; error: string | null } } } }).__vttE2E.app;
+      const app = (globalThis as unknown as { __vttE2E: { app: { pf1eSetWorldSetting: (s: unknown) => { ok: boolean; error: string | null } } } }).__vttE2E.app;
       return app.pf1eSetWorldSetting({ key: "rollHighlightFadeSec", value: 5 });
     });
     expect(setFade.ok, `pf1eSetWorldSetting rollHighlightFadeSec: ${setFade.error}`).toBe(true);
 
     const setSim = await page.evaluate(() => {
-      const app = (globalThis as { __vttE2E: { app: { pf1eSetWorldSetting: (s: unknown) => { ok: boolean; error: string | null } } } }).__vttE2E.app;
+      const app = (globalThis as unknown as { __vttE2E: { app: { pf1eSetWorldSetting: (s: unknown) => { ok: boolean; error: string | null } } } }).__vttE2E.app;
       return app.pf1eSetWorldSetting({ key: "strategicSimultaneous", value: true });
     });
     expect(setSim.ok, `strategicSimultaneous: ${setSim.error}`).toBe(true);
 
     const settings = await page.evaluate(() => {
-      const app = (globalThis as { __vttE2E: { app: { pf1eWorldSettings: () => Record<string, unknown> } } }).__vttE2E.app;
+      const app = (globalThis as unknown as { __vttE2E: { app: { pf1eWorldSettings: () => Record<string, unknown> } } }).__vttE2E.app;
       return app.pf1eWorldSettings();
     });
     expect(settings.rollHighlightFadeSec).toBe(5);
@@ -41,7 +41,7 @@ test.describe("F01 roll ledger (Messages system.rollLedger v1)", () => {
 
     // Bad values are rejected by validateWorldSettingsPatch (form error, not a silent key)
     const badFade = await page.evaluate(() => {
-      const app = (globalThis as { __vttE2E: { app: { pf1eSetWorldSetting: (s: unknown) => { ok: boolean; error: string | null } } } }).__vttE2E.app;
+      const app = (globalThis as unknown as { __vttE2E: { app: { pf1eSetWorldSetting: (s: unknown) => { ok: boolean; error: string | null } } } }).__vttE2E.app;
       return app.pf1eSetWorldSetting({ key: "rollHighlightFadeSec", value: 99 });
     });
     expect(badFade.ok).toBe(false);
@@ -50,7 +50,7 @@ test.describe("F01 roll ledger (Messages system.rollLedger v1)", () => {
     // Inject a tactical roll card with a ledger (the host would commit this alongside the HP ops).
     // We go through the real client.submit path so the chat log re-renders via the bus.
     await page.evaluate(() => {
-      const surface = (globalThis as { __vttE2E: { app: { gm: { client: { submit: (ops: unknown[]) => void; user: { id: string } } } } } }).__vttE2E.app;
+      const surface = (globalThis as unknown as { __vttE2E: { app: { gm: { client: { submit: (ops: unknown[]) => void; user: { id: string } } } } } }).__vttE2E.app;
       const client = surface.gm.client;
       const author = client.user.id;
       const msgId = `msg-ledger-${Date.now()}`;
@@ -167,14 +167,14 @@ test.describe("F01 roll ledger (Messages system.rollLedger v1)", () => {
   test("delegation: GM gives Player Reroll, player sees the button within the window", async ({ page }) => {
     await page.goto(entry + "?e2e=1");
     await expect.poll(() =>
-      page.evaluate(() => (globalThis as { __vttE2E?: { app?: unknown } }).__vttE2E?.app != null),
+      page.evaluate(() => (globalThis as unknown as { __vttE2E?: { app?: unknown } }).__vttE2E?.app != null),
     ).toBe(true);
 
     // Reuse the same injection but with a pendingReroll delegation. In the real flow the GM
     // submits delegateRerollOps({playerId}); the card then shows [data-testid="roll-player-reroll"]
     // to that player. Here we inject the delegated ledger directly.
     await page.evaluate(() => {
-      const surface = (globalThis as { __vttE2E: { app: { gm: { client: { submit: (ops: unknown[]) => void; user: { id: string } } } } } }).__vttE2E.app;
+      const surface = (globalThis as unknown as { __vttE2E: { app: { gm: { client: { submit: (ops: unknown[]) => void; user: { id: string } } } } } }).__vttE2E.app;
       const client = surface.gm.client;
       const author = client.user.id;
       const ledger = {

@@ -212,13 +212,13 @@ test.describe("Strategic simultaneous (F02)", () => {
       // world-setting write path and that the resolver's pure helper exists.
 
       const setOn = await page.evaluate(() => {
-        const app = (globalThis as { __vttE2E: { app: { pf1eSetWorldSetting: (s: unknown) => { ok: boolean; error: string | null } } } }).__vttE2E.app;
+        const app = (globalThis as unknown as { __vttE2E: { app: { pf1eSetWorldSetting: (s: unknown) => { ok: boolean; error: string | null } } } }).__vttE2E.app;
         return app.pf1eSetWorldSetting({ key: "strategicSimultaneous", value: true });
       });
       expect(setOn.ok, setOn.error ?? undefined).toBe(true);
 
       const world = await page.evaluate(() => {
-        const app = (globalThis as { __vttE2E: { app: { pf1eWorldSettings: () => Record<string, unknown> } } }).__vttE2E.app;
+        const app = (globalThis as unknown as { __vttE2E: { app: { pf1eWorldSettings: () => Record<string, unknown> } } }).__vttE2E.app;
         return app.pf1eWorldSettings();
       });
       expect(world.strategicSimultaneous).toBe(true);
@@ -228,7 +228,7 @@ test.describe("Strategic simultaneous (F02)", () => {
       // Here we prove the world-setting write path the UI takes — the same op the
       // settings window submits — and that the setting replicates to every replica.
       const roundtrip = await page.evaluate(async () => {
-        const app = (globalThis as { __vttE2E: { app: { pf1eWorldSettings: () => Record<string, unknown> } } }).__vttE2E.app;
+        const app = (globalThis as unknown as { __vttE2E: { app: { pf1eWorldSettings: () => Record<string, unknown> } } }).__vttE2E.app;
         return app.pf1eWorldSettings();
       });
       expect(roundtrip.strategicSimultaneous).toBe(true);

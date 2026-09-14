@@ -62,6 +62,7 @@ import {
   type TurnEngineEffect,
 } from "./turnEngine";
 import { pendingPruneOps } from "../packages/pf1e/pendingRoll";
+import { pruneOpsForWindow as rollLedgerPruneOps } from "../packages/pf1e/rollLedger";
 
 export interface TurnChannelOptions {
   host: HostSync;
@@ -568,6 +569,12 @@ export class TurnChannel {
       const prune = pendingPruneOps(msgs as unknown as Parameters<typeof pendingPruneOps>[0], turnNumber);
       if (prune.length > 0) forward.push(...prune);
     } catch {}
+    // F01: prune expired roll-ledger windows (T+2) alongside pending rolls — keeps message shell, clears ledger payload
+    try {
+      const msgs2 = [...this.store.getAll("messages")] as unknown as Array<{ _id: string; system?: { rollLedger?: import("../packages/pf1e/rollLedger").RollLedger } }>;
+      const prune2 = rollLedgerPruneOps(msgs2 as unknown as Parameters<typeof rollLedgerPruneOps>[0], turnNumber);
+      if (prune2.length > 0) forward.push(...prune2);
+    } catch {}
     this.lastTurnDocId = turnId;
     const committed = this.host.commitSystem(forward);
     if (!committed.ok)
@@ -1027,6 +1034,13 @@ export class TurnChannel {
       const msgs = [...this.store.getAll("messages")] as unknown as Array<{ _id: string; system?: { pendingRoll?: import("../packages/pf1e/pendingRoll").PendingRoll } }>;
       const prune = pendingPruneOps(msgs as unknown as Parameters<typeof pendingPruneOps>[0], turnNumber);
       if (prune.length > 0) this.host.commitSystem(prune);
+    } catch {}
+    // F01: prune expired roll ledgers on the same turn hop
+    try {
+      const turnNumber = currentTurnNumber(this.engine);
+      const msgs2 = [...this.store.getAll("messages")] as unknown as Array<{ _id: string; system?: { rollLedger?: import("../packages/pf1e/rollLedger").RollLedger } }>;
+      const prune2 = rollLedgerPruneOps(msgs2 as unknown as Parameters<typeof rollLedgerPruneOps>[0], turnNumber);
+      if (prune2.length > 0) this.host.commitSystem(prune2);
     } catch {}
   }
 

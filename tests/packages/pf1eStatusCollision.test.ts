@@ -114,8 +114,8 @@ describe("M03 Gap §2.13 — PF1e condition/status bit collisions (separate colu
     allocModel(pool, { id: 2, unitIdx: 1, x: 20, y: 10, hp: 20, hpMax: 20, sys: { pfCondition: PF1eCondition.SHAKEN } });
     const snap = snapshotFromPool(pool, "scene-1", 1, PF1E_MODEL_SCHEMA);
     const replica = poolFromSnapshot(snap, 20, PF1E_MODEL_SCHEMA);
-    expect((replica.sys.pfCondition as Uint32Array)[0]).toBe(PF1eCondition.FLANKED | PF1eCondition.PRONE);
-    expect((replica.sys.pfCondition as Uint32Array)[1]).toBe(PF1eCondition.SHAKEN);
+    expect((replica.sys.pfCondition as unknown as Uint32Array)[0]).toBe(PF1eCondition.FLANKED | PF1eCondition.PRONE);
+    expect((replica.sys.pfCondition as unknown as Uint32Array)[1]).toBe(PF1eCondition.SHAKEN);
 
     // Delta: change one model's pfCondition from 0 to GRAPPLED
     const prev = createModelPool(4, PF1E_MODEL_SCHEMA);
@@ -132,7 +132,7 @@ describe("M03 Gap §2.13 — PF1e condition/status bit collisions (separate colu
     allocModel(target, { id: 1, unitIdx: 0, x: 10, y: 10, hp: 20, hpMax: 20, sys: { pfCondition: 0 } });
     allocModel(target, { id: 2, unitIdx: 1, x: 20, y: 10, hp: 20, hpMax: 20, sys: { pfCondition: 0 } });
     applySimDelta(target, delta, 20, sysSchema);
-    expect((target.sys.pfCondition as Uint32Array)[0]).toBe(PF1eCondition.GRAPPLED);
+    expect((target.sys.pfCondition as unknown as Uint32Array)[0]).toBe(PF1eCondition.GRAPPLED);
   });
 
   test("combatEngine FLANKED attack bonus reads pfCondition, not status", () => {

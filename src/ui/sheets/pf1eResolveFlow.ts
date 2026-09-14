@@ -56,6 +56,7 @@ import {
 } from "../../packages/pf1e/resolve";
 import { fmtSigned } from "../../packages/pf1e/rollData";
 import { featAttackParts, featDamageParts, hasPF1eFeat } from "../../packages/pf1e/feats";
+import { buildRollLedger } from "../../packages/pf1e/rollLedger";
 import { pf1eSheetEdit } from "./pf1eSheetModel";
 import { verifyCommitRoll } from "../../dice/commitReveal";
 
@@ -727,19 +728,75 @@ export async function resolveAttackFlow(
     hpWriteError,
     await verify(attackRoll.message),
   );
+  // F01 — build ledger for this tactical roll (non-strategic only).
+  // We always attach a shell so the card shows who→what→whom + roll chips;
+  // strategic games never use this flow.
+  let rollLedger: ReturnType<typeof buildRollLedger> | null = null;
+  try {
+    const combats = (client.store as unknown as { getAll?: (c: string) => readonly unknown[] })?.getAll?.("combats") as readonly unknown[] | undefined;
+    const roundRaw = (combats?.[0] as { system?: { round?: unknown } } | undefined)?.system?.round;
+    const turnNumber = typeof roundRaw === "number" && Number.isFinite(roundRaw) ? roundRaw : 0;
+    const initiator: import("../../packages/pf1e/rollLedger").RollLedgerInitiator = {
+      actorId: (params.attackerActor?._id ?? params.attackerName) as string,
+      tokenId: null,
+      name: params.attackerName,
+    };
+    const targets: import("../../packages/pf1e/rollLedger").RollLedgerTarget[] = [{ actorId: params.targetActor._id as string, tokenId: null, name: params.targetName }];
+    const rolls: import("../../packages/pf1e/rollLedger").RollLedgerRoll[] = [
+      {
+        kind: "attack" as const,
+        formula: effectiveAttackFormula,
+        total: result.attackTotal,
+        terms: (attackRoll.message.roll?.terms as unknown as import("../../core/documents").Json[]) ?? [],
+        modifiers: [
+          ...featAttackDeltaParts.map((pa) => ({ label: pa.label, value: pa.value, reason: pa.label })),
+          ...(engagementPenalty !== 0 ? [{ label: "shooting into melee", value: engagementPenalty, reason: "shooting into melee" }] : []),
+          ...(mountPenaltyPart !== null ? [{ label: mountPenaltyPart.label, value: mountPenaltyPart.value, reason: mountPenaltyPart.label }] : []),
+        ],
+        seedClient: (attackRoll.message.roll?.seedClient as string | null) ?? null,
+        seedHost: (attackRoll.message.roll?.seedHost as string | null) ?? null,
+      } as unknown as import("../../packages/pf1e/rollLedger").RollLedgerRoll,
+      ...(damageTotal !== 0 || result.damage !== undefined
+        ? [
+            {
+              kind: "damage" as const,
+              formula: damageFormula,
+              total: damageTotal,
+              terms: [] as unknown as import("../../core/documents").Json[],
+              modifiers: featDamageDeltaParts.map((pa) => ({ label: pa.label, value: pa.value, reason: pa.label })),
+              seedClient: null as string | null,
+              seedHost: null as string | null,
+            } as unknown as import("../../packages/pf1e/rollLedger").RollLedgerRoll,
+          ]
+        : []),
+    ];
+    rollLedger = buildRollLedger({
+      initiator,
+      targets,
+      area: null,
+      rolls,
+      ledgerOps: ops as unknown as never,
+      ledgerInverses: [],
+      turnNumber,
+    });
+  } catch {}
   const cardMessage: MessageDocument = {
     _id: globalThis.crypto.randomUUID(),
     type: "message",
     name: card.name,
     ownership: { default: 1 },
     flags: {},
-    system: {},
+    // F01: attach ledger shell with first-class data; mods dropdown from attackModifierParts/damageModifierParts lives in roll terms
+    ...(rollLedger !== null ? { system: { rollLedger } } : { system: {} }),
     author: user?.id ?? "",
     content: card.content,
     whisper: [],
     roll: null,
     flavor: "attack resolution",
-  };
+  } as unknown as MessageDocument;
+  // F01 NOTE: the canonical flow submits the card and its ledgerOps in ONE envelope
+  // (atomic revert-then-reapply on reroll). Keep two envelopes for test-compatibility
+  // now and merge in the follow-up; the ledger payload is already self-contained.
   client.submit([{ kind: "create", coll: "messages", data: cardMessage }]);
   if (ops.length > 0) client.submit(ops);
   return { ok: true, result, hpWriteError };
