@@ -852,7 +852,11 @@ export async function resolveCastFlow(
           return { ok: true, lost: false, held: false, warnings, gateNotes: [...gateNotes, ...concLines.map((l) => `⚠ ${l} — pending for player roll`)], dc, sr: { resisted: false, total: null, reused: false, issues: [] }, result: { ok: true, passed: false, automatic: null, dealt: 0, saveReduced: 0, erApplied: {}, notes: ["Concentration is pending for player roll."], rolled: 0 } as unknown as Extract<PF1eSpellTargetResult, { ok: true }>, hpWriteError: null } as unknown as PF1eCastFlowOutcome;
         }
       }
-    } catch {}
+    } catch (err) {
+      // A failed pending-card branch must not silently skip concentration: the
+      // flow continues with an inline roll and the player sees a warning.
+      warnings.push(`⚠ concentration pending path failed (${err instanceof Error ? err.message : String(err)}) — falling back to inline roll`);
+    }
     const triggers: PF1eConcentrationTrigger[] = [];
     for (const declaration of gate.declarations ?? []) {
       const rollId = client.roll(
@@ -1321,7 +1325,11 @@ export async function resolveCastFlow(
           hpWriteError: null, ...(touchSummary !== undefined ? { touch: touchSummary } : {}) } as unknown as PF1eCastFlowOutcome;
       }
     }
-  } catch {}
+  } catch (err) {
+    // A failed pending-save branch must not silently skip the save: the flow
+    // continues into the effect pipeline and the player sees a warning.
+    warnings.push(`⚠ pending-save path failed (${err instanceof Error ? err.message : String(err)}) — falling back to the effect pipeline`);
+  }
   // ── the effect pipeline (damage → SR → save → composition → HP write) ────
   const effect = await runSpellEffect(client, user, {
     casterActor: params.casterActor,

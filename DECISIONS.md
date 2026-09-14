@@ -5621,3 +5621,293 @@ Consequences:
 
 Status: accepted 2026-09-14.
 
+
+## D-221 — 2026-09-14 — F01–F03 roll-ledger remediation: honesty over silent recovery
+
+Decision:
+* **No silent catch, no fabricated RNG.** Every `catch {}` in the F01–F03 slice is now either a named, commented best-effort guard (ledger shell, prune) or a warning-recording fallback (cast-flow concentration/save pending paths push the exception into `warnings`). Client paths that previously *synthesized* a roll total when the host transport was missing were deleted: clicking Reroll/Revert/Delegate/Roll without a host is now a no-op that leaves the card in its true state (`ChatPanel.svelte`), never a forged `d20`.
+* **Typed over `as any`.** Ledger/Op diffs flow is typed end-to-end: `FlatDiff` in `pf1eEnergyDrain`/`pf1eRest`, real `Op` unions in test fakes, removed `Record<string, any>` casts. Combatant lookups (`params.combat.combatants.find(...)!`) are explicit `find(...) ?? undefined` + truthy guard in `pf1eManeuverFlow`/`pf1eAidFeintFlow`; the AoO attack-bonus regex literal was de-escaped (`([+-])\s*(\d+)`).
+* **Fakes implement production interfaces, not vice versa.** `tests/ui/pf1eResolveFlow.test.ts`'s `FakeClient` now implements the `DocReader` (`resolve(ref)`) every real store has, and the hit-path test asserts the *captured pre-image* inverse (`{coll:"actors", id:"goblin", diff:{"system.pf1e.hp":12}}`) — reverting the recorded hp write, not merely "some inverse exists". Production code (`captureLedgerInverses` + `buildRollLedger` calls in `pf1eResolveFlow`) was not weakened to tolerate an under-faked client.
+* **UI honesty in RollCard.** Modifier staging is a chip row (`roll-staged-modifier`, `chip.staged`) feeding `onReroll(staged[])`; the fabricated checkbox `Map`/reason-editor select (which double-counted modifiers into the host total and used a non-reactive built-in `Map` in Svelte state) is gone. `roll-add-modifier` adds a staged chip; the recorded per-roll modifiers render read-only.
+* **Chat highlight is a semantic event, not stage poking.** `ChatPanel.svelte` emits only `bus.emit("rollHighlight", RollHighlightRequest)` via pure builders in `src/ui/chat/rollHighlight.ts` (`highlightRequestFromLedger`/`highlightRequestFromPending`). `App.svelte` owns scene resolution (active-scene tokens → `tokenRect`, grid-true `pxPerFt` for areas, `RollHighlightLayer.sync`, camera centering via `view.setCamera`). The request type lives in `src/client/rollHighlight.ts` so the bus contract stays independent of the PF1e packages (layering: packages import core, never the reverse).
+* **Ledger inverses are real everywhere.** All ledger-artifact sites (`resolveAttackFlow` shell, Manyshot burst, firearm explosion) now call `captureLedgerInverses(client.store as DocReader, ops)` against the pre-submit store and `tacticalLedgerTurn(combats)` for the window clock, so hosted Reroll/Revert replay *recorded* pre-images (and the existing stale-ledger gate refuses by name when a later write would diverge).
+
+Context:
+* User flagged the landed F01–F03 (plus P08/P09 leaked) batch as "sloppy work" and asked for a remediation pass to the repo's own V10 bar (`test` / `typecheck` / `lint` / `build` / `size` all green).
+
+Alternatives considered:
+* Relaxing `captureLedgerInverses` to skip unresolvable refs (empty inverses, silent degraded revert) — rejected: an un-invertible ledger must be refused by name at the host (`ledger has no pre-images`), not silently wrong.
+* Keeping client-side "fallback" rolls for offline/dev play — rejected: a non-host-evaluated total is a forged total; the card keeping state is honest.
+* Fixing tests by deleting the ledger assertions — rejected: assertions were strengthened (real pre-image match) after the fake was upgraded.
+
+Consequences:
+* Full V10 gate green on this slice: `pnpm lint` 0 errors, `tsc --noEmit` clean, `pnpm test` 2227 passed / 3 skipped, `pnpm build` OK, `pnpm size` within the 6 MB budget.
+* Landed flows keep the no-ledger-shell fallback by design only for genuinely optional artifacts (ledger shell, prune), each with an in-code named reason; anything affecting adjudication is surfaced to `warnings`/`gateNotes` instead of being swallowed.
+* e2e (`playwright`) remains un-runnable in this sandbox environment (no Chromium); verification is unit + typecheck + lint only until CI runs the e2e suite.
+
+Status: accepted 2026-09-14.
+
+## D-222 — 2026-09-14 — e2e executed via the documented workaround + PR #17/#16 audit
+
+Decision:
+* **E2e workaround recipe (verified 2026-09-14, replaces the stale D-020 paths).** D-020's `~/.toolchain` and `~/.pw-browsers` do not exist in this sandbox and the Playwright CDN is unreachable (egress allowlist = npmjs + github only). Working recipe in one block:
+  1. `corepack pnpm install --frozen-lockfile` (there is no `pnpm` shim; use `corepack pnpm`).
+  2. `mkdir -p ~/.chromium-shim && cd ~/.chromium-shim && npm init -y && npm install @sparticuz/chromium --no-save --ignore-scripts` — the npm package ships the brotli chromium (Chromium 153.0.8010.0 == Playwright 1.63's pinned 153.0.8010.x) and the Amazon Linux 2023 shared-lib pack.
+  3. `node -e 'import("@sparticuz/chromium").then(async m => console.log(await (m.default.default ?? m.default).executablePath()))'` → extracts to `/tmp/chromium`.
+  4. /tmp does not host the al2023 libs unless inflated: brotli-decompress `bin/al2023.tar.br` and `tar -xf` into `/tmp/al2023`.
+  5. Run with `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/chromium LD_LIBRARY_PATH=/tmp/al2023/lib:/tmp corepack pnpm exec playwright test --project=chromium` (playwright.config.ts honors the env var — that seam was the intent of D-020's successor).
+  6. `playwright` runs against `dist/index.html` (file://); **`pnpm build` wipes `dist/` (vite `emptyOutDir`), so every rebuild must be followed by `pnpm build:systems`** or the zip-dependent specs fail with a misleading `pf1e-core-1.0.0.zip missing`.
+* **PR #17 (A07/P04/Manyshot, commits `aadfe83/8fe23b3/2c221aa`) was a primary sloppiness source**, partially covered by D-221. Additional real defects found and fixed this round:
+  - `pf1eResolveFlow.ts` Manyshot ledger fabricated **every** arrow total (`?? 10` on a field that never existed on the arrow type) — fixed: `arrows[]` now carries the resolver's real `attackTotal`.
+  - `pf1eManeuverFlow.ts` `grapple-pin` rolled a **wasted d20** and posted a card with a fabricated `[[0|1d20 + CMB]]` check line — fixed: pin early-returns before the die roll with an honest narrative card (pin rides the maintain check, AoN 191).
+  - `ChatPanel.svelte` **swallowed the card narrative** — a ledger message rendered RollCard but never its `content` (hit/miss/CRITS + hp deltas), silently breaking four Pre-#18 e2e contracts (A06b resolve card, firearms misfire/reload lines) — fixed: the narrative `.line` renders under the card with roll chips.
+  - `PF1eActorSheet.svelte` `doFirearmReload` never cleared the **stale resolve refusal** — after the "no shot loaded" error a successful reload showed ammo 1/1 while the refusal stayed visible — fixed: success clears `resolveError` (the refusal's premise is gone).
+  - `e2e/pf1e_join.spec.ts` asserted `schema["ammo"] === undefined`, stale since PR #18's commit `96bc4f2` honestly added the D-219 `ammo: "u8"` mirror column — fixed to assert the expanded contract (`ammo`/`weaponState`).
+* **PR #16 (D-196–D-205 + code, commit `76d5d25`) is clean.** Spot-verified its untouched files (`positional.ts`, `movement.ts`, `injury.ts`, `mounted.ts`, `negativeLevels.ts`, `threatPreview.ts`, `recovery.ts`, `pf1eManeuver.ts`, `pf1eFirstAid.ts`, `pf1eDyingTick.ts`, `ThreatOverlayLayer.ts`, `pf1eResolvePosition.ts`): nullish defaults are mechanical (30 ft speed, 0,0 origin), no fabricated adjudication, `pf1eResolvePosition.ts` in particular is the intended "name every undecidable fact" pattern done right. Its D-188–D-205 consumers were among the lint-remediated files (D-221) but semantically sound.
+* **e2e result: 138/138 chromium specs pass** (including the four that were red pre-remediation at `efe8dc5`: `pf1e_firearms` misfire+reload, `pf1e_join`, `sheets` A06b). All five V10 gates green: test 2227 pass / 3 skipped, tsc clean, lint 0 errors, build ok, size 0.691 MB gzip.
+
+Context:
+* User asked for the documented Playwright workaround to be used (turning e2e green where possible) and for the two PRs before #18 (F01–F03) to be audited with the same bar.
+
+Alternatives considered:
+* Patching `vite.config` `emptyOutDir: false` to stop dist/packages wipes — rejected: behavior was already additive-safe in CI (`test:e2e` prepends `build:systems`); the footgun only bites ad-hoc runs, and the D-222 note + `test:e2e` script ordering is the documented contract.
+* Amending PR #18's history to move the join-spec fix there — rejected: history is squashed per PR; the fix rides this remediation commit with the commit-referenced audit trail instead.
+
+Consequences:
+* F01–F03's acceptance criterion "demoable in one build + build:systems + Chromium e2e" is now verifiably met in this environment (§13's open frontier: only the `combat_resolver_5.html` verbatim tie-breaker reconciliation remains).
+* Any environment with the same egress policy can repeat the six-step recipe; it is no longer tribal knowledge attached to a no-longer-existing `~/.toolchain`.
+
+Status: accepted 2026-09-14.
+
+## D-223 — 2026-09-14 — G-04 Combat_Resolver_5 strategic fidelity mode (doctrine / envelopment / B12) + verbatim §13 reconciliation
+
+Decision:
+* **`combat_resolver_5.html` landed at `Examples/combat_resolver_5.html` on `main` (`14a1a77 Add files via upload`): the D-220/§13 verbatim reconciliation is now executed.** Findings: (a) the file has **no subPhase names and no shoot→melee staging** — `stepRound` runs `moveUnits(side)` then a per-soldier `soldierTurn` that interleaves volleys and melee per model; the whole army acts in one half-round batch. This vindicates PR #18's F02 choice ("single initiative walk, not shoot→melee staging") over the §13-reverse-engineered `subPhaseOrder` variant — no code change on that point. (b) Initiative is **army-level and verbatim** (B12): `r = d20(b) + cfg.armies[i].init`, RAW tiebreaker "highest initiative modifier acts first on a tie", still-tied armies act in roster order — transcribed into the new `strategicArmyInitiative` path with the reference line quoted in `massBattlePf1e.ts` (the D-220 checklist item named `rollData.ts:initiativeRoll`; the actual export is `pf1eInitiativeRollSpec`, and the mass-battle tie path the wording belongs to lives in `massBattlePf1e.ts:meleeUnits` — the wording now lives there).
+* **Doctrine mode (world setting `strategicDoctrine`, default off) = order synthesis, not a second engine.** Combat_Resolver_5 never requires a per-token driver: `stepRound` → `moveUnits(side)` marches every doctrine-advance unit on the nearest enemy, command orders override (CM1), the threat zone halts the march (CM4). In ArenaStar an un-ordered `advance` unit gets a real order synthesized into the same map the phases read — attack on contact (own natural reach), otherwise march toward the enemy's nearest living model stopping `reach−1 ft` short — so walls, the P06 AoO queue, morale scheduling and the turn report ride existing machinery, and explicit orders always beat doctrine. Synthesized orders are honest artefacts: emitted as `doctrine-advance`/`doctrine-engage` ledger events with `issuedBy:"doctrine"`, never confused with GM orders. Per-unit `doctrine:"hold"` pins a unit; per-unit `envelop:false` opts out of wraps (`UnitDocument` + `UnitView` + both bridges). No auto-volley: the VTT has no strategic ranged subsystem, so none is simulated (archers resolve melee at this scale).
+* **Envelopment wrap restored as Task 4 step 3, purged per D-130.** On an engaged attack pair where the attacker's living frontage exceeds the defender's by more than a square (`strategicDoctrine` + `strategicEnvelop`, the latter default-on under doctrine), models beyond the defender's frontage relocate to flank slots anchored on the defender's outermost living model, stepping down the enemy's side one square per rank on each model's own side (C10/C12/C13's corner-anchored wrap with no centreline crossing — `markPF1eFlanking` then judges whatever AoN 183 geometry results; **no invented +4/flat-footed rule**). Abstraction declared: the wrap is the turn's formation manoeuvre resolved contact-instant, distance-uncapped — the reference spends the same models' per-model movement to do it after the march; our rigid translation leaves no per-model remainder to meter. In doctrine mode the flanking pass reads **post-wrap positions in both modes** (combat_resolver_5 judges current per-soldier placement; it has no snapshot concept — this is the one place F02's faithful-simultaneous snapshot is deliberately overridden, and only when the setting is on).
+* **B12 army initiative (world setting `strategicArmyInitiative`, default off).** Each army rolls `d20 + armyInitiative` per turn (fork `0x5c` per army-index from the seeded turn PRNG), RAW chain: totals → modifiers → stable roster order; the roll is emitted as an `army-initiative` ledger event in the reference's log shape (`Initiative: Red 14 (d20 13 + 1) vs Blue …`). The simultaneous damage-application sort gains army rank as its primary key, reproducing the reference's whole-army-half alpha strike: every unit of the winning army resolves before the losing army's first return fire. **Deviation from the file, stated honestly:** the reference rolls once at battle start and stores `initOrder`; a VTT battle has no start boundary to key state on (armies/units can be added mid-scene, and sim state must survive SimWorker restarts), so the roll re-forks from the same seeded turn PRNG each turn — replay-deterministic, log-visible each turn, and behaviorally identical in everything it orders.
+
+Context:
+* User (2026-09-14): "look at parallel turn execution in combat_resolver_5 and make sure that our VTT can support similar mode as option on strategic level, same of movement as unit and enveloping logic from combat resolver - our VTT should be capable to do something similar in strategic mode so GM won't be forced manually move every token". Explicitly not to disturb the F01–F03 diff (`8f4fdad` stays the base).
+* Work plan `PF1e_MVP_WorkPlan.md` Task 4 step 3 ("vector outer models around the enemy flank"; acceptance "envelopment vectors update model coordinates") was the original contract; only the invented "+4 AB / flat-footed" modifier was rejected in D-130's rewrite. The current tree implemented steps 1–2 (contact detection + FLANKED bits) but never step 3.
+
+Alternatives considered:
+* Faction-level IGOUGO inside `resolveTurn` (resolve side A's full phase sequence, then side B) — rejected: ~1500-line function surgery for something the damage-order key already reproduces observably (casualties suppress returns), at far higher regression risk.
+* Persistent approach targets stored in unit docs (command-continuation across turns, CM3's pin-at-waypoint) — deferred: doctrine synthesis is stateless per turn by design (targets recompute from live positions, which is also the reference's behavior); a command-waypoint channel that persists belongs to a later slice with its own doc semantics.
+* Auto-volley for doctrine units — rejected: no strategic ranged subsystem exists in the VTT; inventing one to satisfy parity would be the fabricated-parity failure mode, not fidelity.
+* Envelop distance budget = per-model move remainder — rejected: rigid translation consumes the anchor's budget; a remainder ledger per model is a new column for a cosmetic gradient. Declared the abstraction instead.
+
+Consequences:
+* V10-slice gate green: `pnpm test` 2235 passed / 3 skipped (8 new `tests/packages/strategicDoctrine.test.ts` — march/hold/orders-win/contact/envelop geometry incl. exact flank-slot pins/opt-out/B12 totals+tie+alpha ordering/off-by-default), `tsc --noEmit` clean, `eslint` 0 errors.
+* New world settings: `strategicDoctrine`, `strategicEnvelop`, `strategicArmyInitiative` (validated as booleans in `core/worldSettings.ts`, toggles in `SettingsPanel.svelte`). New doc fields: `UnitDocument.doctrine`/`envelop`, `ArmyDocument.initiative`; `UnitView` carries all three; ArmyWindow orders tab exposes Doctrine select + Envelop toggle per unit and an Army initiative input.
+* §13's reconciliation item (D-220) is closed: no phase-name split exists in the file; B12 wording landed in the tie path with the reference line quoted in situ.
+* Cross-browser firefox/webkit acceptance remains deferred per the user's standing instruction; chromium e2e for this slice runs as part of the full suite.
+
+Status: accepted 2026-09-14.
+
+## D-224 — 2026-09-14 — M12/M14 closed: analytics reconciled into TurnReport + armies in normal navigation
+
+Decision:
+* **M12 — analytics reconcile at turn resolution.** `SimRunnerCore.resolve` (the one place a stepwise turn resolves, shared by the worker and Node tests) now calls the rules module's `forecast()` for every army in `ctx.armies` and folds the per-army cumulative sheets into `TurnReport.summary.analytics` — this *is* the real `generateReport()` call: the collector lives on the same module instance that resolved the turn, so each turn's report replicates the running campaign aggregate (no collector-only fixtures). The module's forecast payload gained the full per-unit sheet (`units: Record<unitId, UnitAnalyticsSummary>`) so downstream consumers reconstruct the exact report. A module without `forecast` (mass-battle-basic) leaves the summary untouched.
+* **M12 projection honesty.** The analytics payload is per-army; `projectReportForFaction(report, unitVisible, visibleArmies)` filters `summary.analytics` to armies with a visible unit for player projections — the GM's report keeps every army, a player sees own-faction totals only, and absence of the enemy's numbers is the honest projection (no stub rows).
+* **M14 — army windows mount in normal navigation.** GM toolbar gains **Armies** (`kind:"armies"` → `ArmiesTab` in the standard WindowHost chrome); clicking a card opens `kind:"army"` → `ArmyWindow` with `rules` resolved by `armyWindowRules(packages)` from the campaign's **active** system package (`pf1e-mass-battles` → `createMassBattlePf1e()`, otherwise basic) — no more hardcoded `createMassBattleBasic()` from the e2eHook path. ArmyWindow gains an **analysis** tab mounting `PF1eBattleAnalysis` fed by `analysisReportFromReports` (pure, in `armyModel.ts`) from the M12 payload: reactive after real turns, totals reduced from the unit sheet, CSV via the component's own RFC-4180 export. `TurnReportTimeline` continues to ride the reports tab.
+
+Context:
+* Continuation of `PF1e_Unified_TODO.md` implementation after G-04: sweep found N01/N02 already landed (`WelcomeSimInfo` wire + `adoptSimInfo` + simAnnounce suite — checkboxes were stale, now annotated), M04's final open item (envelopment movement) closed by G-04, and M12/M14 as the two remaining mounted-but-unwired items.
+* The collector previously had no production caller: `generateReport()` was only reachable through `forecast()` and `forecast()` had no caller at all — the analytics tab was unmountable.
+
+Alternatives considered:
+* A second message channel ferrying worker analytics per turn — rejected: the TurnReport already replicates per turn and is persisted (§8A reports); the summary is the correct home.
+* Client-side re-accumulation of analytics from turn events — rejected: that duplicates the collector and would drift; the worker's own sheet is the authoritative metric source.
+* Hiding enemy analytics with zeroed rows instead of filtering keys — rejected: a stub tentatively asserts knowledge ("their kills = 0"); absence names the ignorance.
+
+Consequences:
+* `TurnReport.summary` gains one optional `analytics` key — additive, `Record<string, Json>`-compatible; older reports deserialize unchanged. `projectReportForFaction`'s signature gains an optional third parameter (all existing callers unchanged).
+* V10-slice gate: `tsc --noEmit` clean, `eslint` 0 errors, new tests green — M12 (`tests/sim/runnerAnalytics.test.ts`, 4: accumulation/attribution/opt-out/redaction/replay-determinism), M14 (`tests/ui/armyModel.test.ts` +2: rules resolution, sheet rebuild/null-honesty), chromium e2e +1 (`windows.spec.ts` armies-through-chrome).
+* TODO: N01/N02/M04 annotated complete; M12/M14 checked.
+
+Status: accepted 2026-09-14.
+
+## D-225 — 2026-09-14 — S01/S04 closed under chromium-only acceptance: full audit of the sheet seam and compendium flow
+
+**Context.** S01 (mount the PF1e sheet in normal navigation) and S04 (compendium → token → sheet with derived readouts) were the last two unchecked sheet boxes in `PF1e_Unified_TODO.md`. Per the D-119 convention their boxes had stayed `[ ]` pending the Firefox/WebKit half of the browser matrix; the user's standing directive defers that matrix ("chromium-only acceptance"), so this slice audited every ledger item against landed code and the executed Chromium suite (140/140 green on the `468100f` tree, which includes all of `e2e/sheets.spec.ts` and the `packages.spec.ts` drag-drop case) rather than writing new scaffolding.
+
+**Audit mapping (S01).**
+
+- *Actor rows → specialized sheet in normal navigation:* `SheetPanel.svelte` mounts `PF1eActorSheet` inline for actors with an object-shaped `system.pf1e`; the panel is mounted on the GM path (`App.svelte`) and the player path (`JoinApp.svelte`) with `onOpenActor` wired. Generic actors/items keep the existing editor (e2e asserts no `.sys-field[data-key="pf1e"]`).
+- *Floating windows:* `src/ui/sheets/pf1eSheetWindow.ts` opens a stable `pf1e-sheet:{actorId}` WindowHost id, guarded by readability and PF1e shape (returns false for non-PF1e); the row button `[data-open-pf1e-sheet]` drives it, with singleton/minimize/restore/close exercised in e2e.
+- *Token double-click:* `CanvasController`'s `onDoubleClick` hit-tests the topmost token and fires `onTokenActivate` on plain idle left-dblclick; `App.svelte`/`JoinApp.svelte` route that to `openActorSheet(token.actorId)`. Executed e2e: `e2e/sheets.spec.ts` canvas dblclick → floating sheet with the AC readout (GM), and the player-canvas dblclick case.
+
+**Audit mapping (S04).**
+
+- *Compendium → token → sheet:* `CompendiaPanel` renders searchable packs with an Import button and HTML5-draggable rows (`application/x-vtt-compendium`); `App.svelte`'s `onCompendiumDrop` creates the actor document and, at the drop point, a linked token. Executed e2e: `sheets.spec.ts` "PF1e compendium actor opens an authored sheet and recomputes after edits" (import → sidebar sheet → every editor field recomputes) and `packages.spec.ts` "drag import onto the canvas → actor copy + linked token at the drop".
+- *Derived UI values vs `derivePF1eActor`:* `tests/ui/pf1eSheetModel.test.ts` pins the AC **18/13/15** fixture as the contract readout with no mutation and no stored derived totals; the same file reads **all six shipped `pf1e-core` bestiary records** through the one normalization/derivation path (also exercised by the details/attack editor tests); `pf1eAcConversion.test.ts` pins the derived {18, 13, 15} conversion preview.
+- *Memoization:* structural — `PF1eActorSheet.svelte` derives through Svelte 5 `$derived`, which recomputes only when the read dependencies (authored actor data, effects) invalidate; there is no `requestAnimationFrame` in `src/ui/sheets/`, so derivation can never key off animation frames.
+
+**Alternatives considered and rejected.** (1) Writing a redundant new dblclick e2e in `windows.spec.ts` — duplicated the two executed `sheets.spec.ts` dblclick cases with no new coverage. (2) Adding imperative memoization layers — $derived already gives the required dependency-keyed caching; hand-rolled caches would add invalidation bugs for zero gain. (3) Keeping the boxes `[ ]` pending Firefox/WebKit — contradicts the user's standing chromium-only acceptance directive, which is how N01/N02 were closed.
+
+**Evidence.** No code changed. Unit suite, typecheck, lint, build, size and the full Chromium e2e (140/140) were re-run on the final tree of this slice for a fresh green line; `PF1e_Unified_TODO.md` S01/S04 boxes flipped to `[x]` with the audit note.
+
+## D-226 — 2026-09-15 — M02/M03/M11 closed by full audit (M-ledger slice 1): compile reconciliation, status-column collision, metrics sources
+
+**Context.** The user directed the whole remaining M-ledger (M01–M03, M05, re-scoped M06–M11, M15–M18). Slice 1 closes the three items that a code audit shows are already land­ed — rather than re-implementing them — with the same box-flip rule used for S01/S04 (D-225): every ledger sub-item mapped to living code plus a pinning test.
+
+**M02 (G §10.2 compile reconciliation).** AoO budget: closed in D-183 — both scales read `rulesTables.attacksOfOpportunityPerRound`; authored `maxAoos` wins on stat blocks. CMB/CMD size: `cmbFrom`/`cmdFrom` take the *special* ladder; a stat block publishing only `sizeMod` keeps the number through `sizeModOverride` with the deviation recorded per document in `converted` (`actor.ts:1004,1160`); pinned at `pf1eActor.test.ts:244`. Saves: published totals used un-augmented at both scales with the "not re-added" record pinned (:490-493). The §10.2 "measure changed fixtures" clause is satisfied by these discriminator tests, not by a global equality gate. Nothing to change.
+
+**M03 (G §2.13 bit collisions).** The fix already landed as a *separate u32 column*, which is the §2.13-preferred option: `PF1E_MODEL_SCHEMA.pfCondition` (manifest), disjoint from `ModelPool.status`; `envelopment.ts` writes/clears FLANKED only there. `pf1eStatusCollision.test.ts` covers every M03 consumer the checkbox names: manifest existence (schema declaration + `pf1eManifest.test.ts` equality), codec snapshot **and** delta round-trips (compaction path), spatial queries (PRONE no longer filtered as hidden), the engine's bonus grant reading only `pfCondition`, and the ≤200 B budget re-measured (70–72 B). Joiner fidelity rides the N01/N02 schema-generic announce/adopt path, so no extra joiner seam is needed — the same codec delivers `pfCondition` to replicas.
+
+**M11 (I P8 metrics at real sources).** All six named fields verified source-cited in the checkbox annotation; the only field with no mechanic (`cmbSuccesses` — no mass-battle maneuvers) stays zero by documented refusal rather than fabricated increments; overkill is untracked by design (cascade deleted in D-178, `netDamageDealt` is the honest aggregate); channel energy has no mechanic and no advertised field anywhere in the UI, so nothing is missing.
+
+**Alternatives rejected.** (1) Re-renumbering PF1eCondition bits above 8 — unnecessary: column separation already makes aliasing impossible and renumbering would churn every consumer/test for zero behavioral gain. (2) Adding a joiner-specific `pfCondition` e2e — the schema-generic decode is already covered by N02's executed e2e plus the codec round-trip test; a duplicate proves nothing the generic path does not. (3) Fabricating a `cmbSuccesses` source from unrelated counters — violates the honest-projection rule; refusal with the field kept initialized is the stated convention.
+
+**Evidence.** No code changes. Gates re-run on the final tree later this slice; box text in `PF1e_Unified_TODO.md` carries the per-item citations.
+
+## D-227 — 2026-09-15 — M01 landed: the strategic attack kernel is fully data-driven (Gap §2.4–2.10), one range rule, compound DR, weapon payloads from unit stats
+
+**Context.** M01 asked for the outstanding Gap rows 2.4–2.10 brought up to the verified
+contract with scale-specific fixtures — not a cross-scale equality gate. The engine already
+handled firearms misfire/ammo (P09/D-219), flat-footed columns, minimum-damage nonlethal and
+the defender-side DR fallback; what remained was the per-weapon data model and the
+range/damage/DR rules that read it.
+
+**What changed (schema.ts / combatEngine.ts / deploySeed.ts / actor.ts / bestiary.json).**
+
+- **§2.4** — damage splits into base (dice + static, multiplied on crit) and bonus dice
+  (energy/precision, rolled once). Minimum-damage nonlethal binds only the weapon blow.
+- **§2.5** — threat range is weapon data; `improvedCritical` doubles the width
+  (19–20 → 17–20, 18–20 → 15–20).
+- **§2.6** — iteratives are BAB + (Dex if ranged/firearm else Str) + the attack/AC size
+  modifier. The CMB/CMD ladder is a separate `specialSizeMod` raw field (default `sizeMod`),
+  mirroring the tactical `sizeModOverride`, so the two opposite-signed PF1e ladders can never
+  collide in one datum; the tactical parser prefers `specialSizeMod` for the override too.
+- **§2.7** — handedness Strength shares (1.5× two-handed / 0.5× off-hand, penalties never
+  halved; thrown keeps full Str to damage, dex to hit) and enhancement adds to damage.
+- **§2.8/§2.9** — ONE range rule for every weapon: −2 per full increment past the 1st, class
+  ceilings (thrown 5, projectile 10, early firearm 5, advanced firearm 10), touch window early
+  ≤1 / advanced ≤5; beyond the ceiling the attack is refused *before* being counted and before
+  a die is consumed (defender pointer advances).
+- **§2.9b(b)** — a broken weapon fights at −2 attack (attack line) and −2 damage (each critical
+  instance).
+- **§2.10** — compound DR requires every listed quality (AND, not first-match OR); the
+  +1/+3/+3/+4/+5 ladder covers the alignment row with the existing ALIGNMENT bit; weapon
+  alignment flags bypass `/alignment` regardless of enhancement; bonus dice always ignore DR
+  (energy dice are not weapon damage; precision is named exempt). `/epic` refused (DEVIATIONS).
+- **Data flow** — every knob is a numeric `stats` key (`weaponIsRanged`, `weaponHandedness`,
+  `weaponBonusDiceCount/Sides/TypeFlags`, ...) that `rawProfileFromUnit` maps into the raw
+  profile; Pack↔PRECREATED parity holds (pf1ePackage cross-check green).
+
+**Measured fixture movements (all intended).** PRECREATED Large units went −1 to hit (the old
++1 was the special ladder leaked into attacks); artillery to-hit +5→+4 (Dex) with real range
+penalties; paladin hero damage +5→+7 (enhancement now lands on damage). The 10k scale gate is
+unchanged at ~2.4–2.5 s.
+
+**Also fixed in flight:** a TS2322 in `tests/ui/armyModel.test.ts` from the M12/M14 slice
+(masked by a truncated `tail` pipeline in the 468100f gate run) — `reportWith` now takes the
+`Json` type; from this slice on, tsc is run with its own exit code checked.
+
+**Evidence.** 25 new discriminating fixtures (`pf1eAttackFidelity.test.ts`), each named for
+its SRD row; full suite **2267 passed / 3 skipped** across 199 files; typecheck (explicit)
+0, eslint 0.
+
+## D-228 — 2026-09-15 — M06 closed: strategic nonlethal ladder, shared SR checker, once-per-round overcome cache
+
+**Context.** The strategic mass-battle resolver still carried the pre-D-1 inline SR house
+rules (natural 20 auto-overcomes, natural 1 auto-fails) and a nonlethal branch that only
+knocked out past HP — never staggered at the equal mark, never converted past-the-maximum
+excess to lethal, and never stopped an unconscious model from marching an attack routine.
+
+**What changed (schema.ts / combatEngine.ts / spells.ts / massBattlePf1e.ts).**
+
+- **STAGGERED is a first-class strategic condition** (`PF1eCondition.STAGGERED`, 1 << 12).
+  At the mass-battle grain a staggered model's "single move or standard action per round"
+  collapses to one attack per resolution routine, folded into `routineCap` next to the
+  existing `maxIterativeAttacks` guard; the bit is the honest record for the UI.
+- **UNCONSCIOUS now skips attacks**, mirroring STUNNED at the top of the attacker loop.
+- **A.13 thresholds at the strategic scale** — after each subdue hit the fresh nonlethal
+  tally is compared to *current* HP: `>` → UNCONSCIOUS (clears STAGGERED), `===` →
+  STAGGERED. The comparison is read after lethal damage applied earlier in the same hit,
+  so a target whittled low staggers sooner — the intended interplay.
+- **§2.12 conversion** — `convertible = max(0, total − max(prior, hpMax))` is eased once
+  per hit into `pool.hp` through the DR computation already hoisted for the weapon blow,
+  reduced by the attack's **leftover** DR (`max(0, drVal − effectiveDr)`) unless the blow
+  bypassed. DR/5 with only nonlethal dice therefore still spends the full 5 against the
+  first converted point — the "rest of the damage" of the DR text. The shared hp→dead path
+  owns the kill.
+- **One A.16 checker across both scales** — strategic `resolveSpellResistance` delegates to
+  the tactical `spellResistanceCheck`; penetration folds into the caster level. The
+  once-per-round overcome cache (`srRoundCache`, keyed `${casterIdx}:${idx}`) is minted per
+  turn in `resolveTurn`; after one overcome, later spells from the same caster skip the roll
+  against that model (no die consumed, keeping scripted RNG streams stable), matching the
+  tactical pool's `alreadyOvercomeThisRound`.
+
+**Tests.** `pf1eNonlethalFidelity.test.ts` (8): staggered-at-equal, unconscious-beyond with
+staggered replacement, unconscious/staggered attack caps (1 attack from a 3-iterative
+ladder), the three-legged conversion ladder (below max / at max / past max with and without
+residual DR), shared-checker parity (nat 20 + CL 5 vs SR 26 resisted; nat 1 vs SR 6
+overcomes), cache no-die skip with a discriminating queue lead, per-caster independence.
+Full vitest 2275 (was 2267), tsc 0, eslint 0; 10k scale gate ~2.5 s unchanged.
+
+## D-229 — 2026-09-15 — M07 closed: leader-actor stats overlay + atomic write-back; M08 movement-during-turn race verified
+
+**Context.** M07 left "attack/defense inputs from the hero" open: the casting rider
+(D-168) proved leader docs could reach the strategic resolver, but hp/move/AC/DR/SR/saves/
+BAB/Str/Dex still came from hand-authored unit stats, and the binding itself had no UI.
+M08 left its movement-during-turn race test open.
+
+**Design — overlay at the choke point, write-back in the same envelope.**
+
+- `combatStatsFromLeaderActor` (massBattlePf1e.ts) derives the strategic stat block with
+  ONE `deriveFromDocuments` call — the same tactical derivation the tabletop engine and
+  the sheet use, so the mass-battle and the hero's own UI can never disagree about what
+  "the hero is". Keys deliberately match `rawProfileFromUnit` numeric names — no new
+  plumbing past `unit.stats`.
+- `TurnChannel.advance()` maps units across `ctx.leaderActors` and overlays before
+  `bridge.refresh`, so the sim runs on authoritative inputs exactly when they matter
+  (the G §4.12 advance gate), and `commitResolveEnvelope` persists the overlay as
+  `stats.*` update Ops in the same atomic commit as the battle diffs (M08's reconcile
+  contract). Hero keys replace same-key engine diffs by rebuild-then-overlay.
+- An `armyWindow` leader-select binds `leaderTokenId`; the token's `actorId` indirection
+  is the only new concept the UI needed (`sceneTokens()` lists actor-linked tokens of the
+  army's scene). Player hero-sheet access is unchanged: double-click the token, as before.
+  Ownership of writes is the host: `client.submit` → HostSync validate, same as orders.
+
+**M08 verification.** The new race test moves the leader token DURING a pending
+resolution and then lets the resolve complete: the anchor-sync op overwrites the move
+deterministically (sim-wins, matching syncHeroTokens), so the map never forks between
+the player's local action and the authoritative battle state. With the envelope already
+atomic and order-inputs snapshotted at advance (turn.advance → resolution phase lock),
+M08's ledger conditions are now all met; its remaining HP/condition narrative rides the
+M07 overlay note (the `hp` overlay key) rather than a separate channel.
+
+**Tests.** `tests/host/heroStatOverlay.test.ts` (4): pure mapping vs a live derivation
+(no hardcoded numbers), null-guard coverage, the full advance→envelope→doc round-trip
+asserting both the sim feed and the persisted stats (plus an untouched control unit),
+and the movement-during-turn reconciliation. Gates: tsc 0, eslint 0, host suite 15/15.
+
+## D-230 — 2026-09-15 — M09 closed: aura authored values, living-anchor, dead-leader guard
+
+**Context.** The leadership aura pass in `resolveTurn` anchored on `unit.modelRange[0]` —
+a slain leader kept radiating — and hardcoded the work-plan example values (30 ft, +2) at
+the call site. M09 asked for radius/bonuses from data, spatially eligible allies only,
+no per-turn accumulation, and same-turn removal when the leader falls or allies leave.
+
+**What changed.**
+- `applyHeroLeadershipAuras` dead-guards the anchor model itself (was: only the buffed
+  models were filtered) — losing the leader silences the aura even if the call site
+  forgets to skip.
+- `resolveTurn` anchors on the unit's first LIVING model (`anchorPosition`) and reads
+  `leadershipRadius`/`leadershipMoraleBonus` from unit stats; the worked-example 30/+2
+  stay as defaults (D-172: the SRD Leadership feat authors no aura, so these stats are
+  the B-document homebrew made editable).
+- Removal/stacking needed no new mechanics: `seedPF1ePool` already rewrites save/AC
+  columns from the profile above the aura pass every turn (documented in the comment),
+  and `queryPoint` already restricts buffs to same-unit living models in radius — a model
+  leaving the radius simply isn't in next turn's query, and its column was already reset.
+
+**Tests.** `pf1eHeroBridge.test.ts` (+3 as 4 new): dead leader radiates nothing; authored
+radius 5 ft buffs only the 2-ft ally (bonus 5 honored); enemy-unit model in radius
+untouched; seed→aura→seed→aura idempotence pins no-accumulation. Gates: tsc 0, eslint 0,
+41/41 on the touched suites.
+
+**Also in this commit:** `massBattleSpellCatalog()` + `CASTABLE_SPELLS` bundle export
+(M10 first piece: the pack spell dropdown data the caster-order UI will consume).

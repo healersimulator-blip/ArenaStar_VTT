@@ -21,8 +21,11 @@ import {
 
 const owner = { id: "player", role: "PLAYER" as const };
 
+/** Fake store's document registry — the flow's pre-image capture resolve()s refs here. */
+const actorRegistry = new Map<string, ActorDocument>();
+
 function actor(id: string, pf1e: Record<string, Json>): ActorDocument {
-  return {
+  const doc: ActorDocument = {
     _id: id,
     type: "actor",
     name: id === "goblin" ? "Goblin" : "Fighter",
@@ -32,6 +35,8 @@ function actor(id: string, pf1e: Record<string, Json>): ActorDocument {
     items: [],
     effects: [],
   };
+  actorRegistry.set(id, doc);
+  return doc;
 }
 
 const attacker = derivePF1eActor({
@@ -73,8 +78,10 @@ class FakeClient implements ResolveFlowClient {
   verifiable = false;
   private seq = 0;
   readonly store = {
-    getAll: (coll: "messages"): readonly unknown[] =>
+    getAll: (coll: string): readonly unknown[] =>
       coll === "messages" ? this.messages : [],
+    resolve: (ref: { coll: string; id: unknown }): ActorDocument | undefined =>
+      ref.coll === "actors" && typeof ref.id === "string" ? actorRegistry.get(ref.id) : undefined,
   };
 
   roll(formula: string): string {
@@ -210,6 +217,18 @@ describe("resolveAttackFlow — the A06b chat flow", () => {
     // ledger shell is present (non-strategic)
     expect((card.data as MessageDocument).system).toHaveProperty("rollLedger");
     expect((card.data as MessageDocument).system.rollLedger).toMatchObject({ v: 1, turnNumber: 0, reverted: false });
+    // F01 — pre-image inverses are captured from the store state BEFORE the hp
+    // write, so hosted Revert restores the hit points (12), not the post-value.
+    const ledger = (card.data as MessageDocument).system.rollLedger as unknown as { ledgerInverses: Op[] };
+    expect(ledger.ledgerInverses).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "update",
+          ref: { coll: "actors", id: "goblin" },
+          diff: { "system.pf1e.hp": 12 },
+        }),
+      ]),
+    );
     const data = card.data as MessageDocument;
     expect(data.content).toContain("hits.");
     expect(data.content).toContain("[[2|1d8 + 6]]");

@@ -55,6 +55,12 @@
     autoResolveAoos: boolean;
     /** F02 — simultaneous strategic (initiative is damage order). */
     strategicSimultaneous: boolean;
+    /** G-04/D-223 — Combat_Resolver_5 fidelity: units without orders march & engage. */
+    strategicDoctrine: boolean;
+    /** G-04/D-223 — Combat_Resolver_5 fidelity: wide fronts wrap enemy flanks. */
+    strategicEnvelop: boolean;
+    /** G-04/D-223 — Combat_Resolver_5 fidelity: B12 army initiative (d20 + modifier). */
+    strategicArmyInitiative: boolean;
     /** F01 — roll-card area outline fade (1–10 s, default 4 s). */
     rollHighlightFadeSec: number;
     /** F03 — player reaction rolls: auto / savesChecksAuto / manual */
@@ -68,6 +74,9 @@
     advanceClockOnRound: true,
     autoResolveAoos: true,
     strategicSimultaneous: false,
+    strategicDoctrine: false,
+    strategicEnvelop: false,
+    strategicArmyInitiative: false,
     rollHighlightFadeSec: 4,
     playerPendingRollMode: "savesChecksAuto",
   };
@@ -98,6 +107,9 @@
       advanceClockOnRound: advanceClockOnRoundOf(settings),
       autoResolveAoos: autoResolveAoosOf(settings),
       strategicSimultaneous: strategicSimultaneousOf(settings),
+      strategicDoctrine: settings.strategicDoctrine === true,
+      strategicEnvelop: settings.strategicEnvelop === true,
+      strategicArmyInitiative: settings.strategicArmyInitiative === true,
       rollHighlightFadeSec: rollHighlightFadeSecOf(settings),
       playerPendingRollMode: playerPendingRollModeOf(settings),
     };
@@ -340,6 +352,51 @@
         }}
       />
       Strategic simultaneous (initiative = damage order)
+    </label>
+    <label>
+      <input
+        data-world-strategic-doctrine
+        type="checkbox"
+        checked={rules.strategicDoctrine}
+        onchange={(e) => {
+          rules = {
+            ...rules,
+            strategicDoctrine: (e.target as HTMLInputElement).checked,
+          };
+          applyRules({ strategicDoctrine: rules.strategicDoctrine });
+        }}
+      />
+      Combat_Resolver_5 doctrine (units without orders march &amp; engage)
+    </label>
+    <label>
+      <input
+        data-world-strategic-envelop
+        type="checkbox"
+        checked={rules.strategicEnvelop}
+        onchange={(e) => {
+          rules = {
+            ...rules,
+            strategicEnvelop: (e.target as HTMLInputElement).checked,
+          };
+          applyRules({ strategicEnvelop: rules.strategicEnvelop });
+        }}
+      />
+      Combat_Resolver_5 envelopment (wide fronts wrap flanks)
+    </label>
+    <label>
+      <input
+        data-world-strategic-army-initiative
+        type="checkbox"
+        checked={rules.strategicArmyInitiative}
+        onchange={(e) => {
+          rules = {
+            ...rules,
+            strategicArmyInitiative: (e.target as HTMLInputElement).checked,
+          };
+          applyRules({ strategicArmyInitiative: rules.strategicArmyInitiative });
+        }}
+      />
+      Combat_Resolver_5 army initiative (B12: d20 + modifier)
     </label>
     <label>
       Player reaction rolls

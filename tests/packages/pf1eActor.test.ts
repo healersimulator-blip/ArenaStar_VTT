@@ -594,6 +594,9 @@ describe("the shipped bestiary derives cleanly (pack ↔ code parity)", () => {
         dexMod: typeof block.dexMod === "number" ? block.dexMod : 0,
         conMod: typeof block.conMod === "number" ? block.conMod : 0,
         sizeMod: typeof block.sizeMod === "number" ? block.sizeMod : 0,
+        ...(typeof block.specialSizeMod === "number"
+          ? { specialSizeMod: block.specialSizeMod }
+          : {}),
         ...(typeof block.ac === "number" ? { ac: block.ac } : {}),
         ...(typeof block.touchAc === "number"
           ? { touchAc: block.touchAc }

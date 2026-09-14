@@ -69,9 +69,9 @@ describe("P05 — grapple initial (AoN 191)", () => {
 
   test("provokes unless Improved Grapple", () => {
     const provokes = pf1eGrapple({ check: baseCheck() });
-    expect(provokes.ok && provokes.ok ? (provokes as any).check.provokes : false).toBe(true);
+    expect(provokes.ok && provokes.check.provokes).toBe(true);
     const noProvoke = pf1eGrapple({ check: baseCheck({ hasImprovedFeat: true }) });
-    expect(noProvoke.ok && (noProvoke as any).check.provokes).toBe(false);
+    expect(noProvoke.ok && noProvoke.check.provokes).toBe(false);
   });
 });
 

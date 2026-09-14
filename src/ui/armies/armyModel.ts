@@ -25,6 +25,39 @@ import type {
 } from "../../core/rules";
 import type { WallDocument } from "../../core/documents";
 import { worldSettingsFrom } from "../../core/worldSettings";
+import type { RulesModule } from "../../core/rules";
+import type { HostPackages } from "../../app/hostBoot";
+import { createMassBattleBasic } from "../../packages/massBattleBasic";
+import { createMassBattlePf1e } from "../../packages/massBattlePf1e";
+
+// ─── M14 (D-224) — production navigation for the army windows ────────────────
+
+/**
+ * The Army Management Window validates orders and forecasts through a
+ * client-side RulesModule (§10/§12 — the same convention e2eHook used, but
+ * resolved from the campaign's ACTIVE system package, not hardcoded): a PF1e
+ * campaign's orders validate against the PF1e module, the built-in campaign
+ * against mass-battle-basic. Modules are bundled code; package content zips
+ * never execute in-page (§12), so resolving by package id is the honest seam.
+ * Memoized for the window's lifetime (package activation is a world-level
+ * event; a re-opened window re-resolves because the module cache is keyed per
+ * packages handle, see below).
+ */
+let armyWindowRulesCache: { packages: HostPackages | null; rules: Promise<RulesModule> } | null = null;
+
+export function armyWindowRules(packages: HostPackages | null): Promise<RulesModule> {
+  if (armyWindowRulesCache !== null && armyWindowRulesCache.packages === packages)
+    return armyWindowRulesCache.rules;
+  const rules = (async (): Promise<RulesModule> => {
+    if (packages === null) return createMassBattleBasic();
+    const list = await packages.list();
+    const active = list.find((p) => p.type === "system" && p.active);
+    if (active?.id === "pf1e-mass-battles") return createMassBattlePf1e();
+    return createMassBattleBasic();
+  })();
+  armyWindowRulesCache = { packages, rules };
+  return rules;
+}
 
 // ─── Armies tab cards ─────────────────────────────────────────────────────────
 
@@ -439,4 +472,91 @@ export function rulesContextFromStore(
     worldSettings: (worldSettings ??
       worldSettingsFrom(store.getAll("settings"))) as Record<string, never>,
   };
+}
+
+// ─── M14 (D-224) — Battle Analysis over real turn data ──────────────────────
+
+/**
+ * Rebuild the PF1eBattleReport the worker's analytics collector holds from the
+ * newest turn report's `summary.analytics[armyId]` sheet (M12). The Army
+ * Management Window's analysis tab renders this — figures only ever come from
+ * resolved turns, and a player whose projection redacted the enemy's sheet sees
+ * nothing at all (honest absence, not a redraw over stubs). Returns null when
+ * no turn with an analysis sheet for this army exists yet.
+ */
+export function analysisReportFromReports(
+  reports: readonly TurnReport[],
+  armyId: string,
+): import("../../packages/pf1e/analytics").PF1eBattleReport | null {
+  type UnitAnalyticsSummary =
+    import("../../packages/pf1e/analytics").UnitAnalyticsSummary;
+  const ZERO: Omit<UnitAnalyticsSummary, "unitId"> = {
+    totalAttacks: 0,
+    hits: 0,
+    misses: 0,
+    hitPercentage: 0,
+    critThreats: 0,
+    critsConfirmed: 0,
+    misfiresCount: 0,
+    rawDamageDealt: 0,
+    drAbsorbed: 0,
+    drBypassed: 0,
+    srBlocked: 0,
+    netDamageDealt: 0,
+    damageHealed: 0,
+    killsCount: 0,
+    deathsCount: 0,
+    savesPassed: 0,
+    savesFailed: 0,
+    aooExecuted: 0,
+    aooHits: 0,
+    cmbSuccesses: 0,
+    concentrationPassed: 0,
+    concentrationFailed: 0,
+  };
+  for (const report of reports) {
+    const payload = report.summary["analytics"];
+    if (
+      typeof payload !== "object" ||
+      payload === null ||
+      Array.isArray(payload)
+    )
+      continue;
+    const sheet = (payload as Record<string, unknown>)[armyId];
+    if (typeof sheet !== "object" || sheet === null || Array.isArray(sheet))
+      continue;
+    const rows = (sheet as Record<string, unknown>)["units"];
+    if (typeof rows !== "object" || rows === null || Array.isArray(rows))
+      continue;
+    const units: Record<string, UnitAnalyticsSummary> = {};
+    for (const [unitId, raw] of Object.entries(
+      rows as Record<string, unknown>,
+    )) {
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+        continue;
+      units[unitId] = {
+        ...ZERO,
+        ...(raw as Partial<UnitAnalyticsSummary>),
+        unitId,
+      };
+    }
+    if (Object.keys(units).length === 0) return null;
+    const totals: UnitAnalyticsSummary = Object.values(units).reduce(
+      (acc, u) => {
+        const out = { ...acc } as Record<string, number | string>;
+        for (const key of Object.keys(ZERO) as Array<keyof typeof ZERO>) {
+          out[key] = (acc[key] as number) + (u[key] as number);
+        }
+        out["unitId"] = "";
+        return out as unknown as UnitAnalyticsSummary;
+      },
+      { ...ZERO, unitId: "" } as UnitAnalyticsSummary,
+    );
+    totals.hitPercentage =
+      totals.totalAttacks > 0
+        ? Math.round((totals.hits / totals.totalAttacks) * 100)
+        : 0;
+    return { totals, units };
+  }
+  return null;
 }

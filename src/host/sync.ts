@@ -51,12 +51,14 @@ import {
   canReroll as canLedgerReroll,
   canRevert as canLedgerRevert,
   delegateRerollOps,
-  invertLedger,
+  ledgerStaleReason,
+  planDamageDeltaReroll,
   pruneOpsForWindow as rollLedgerPruneOps,
   rerollOps as ledgerRerollOps,
   revertOps as ledgerRevertOps,
+  tacticalLedgerTurn,
 } from "../packages/pf1e/rollLedger";
-import type { RollLedger } from "../packages/pf1e/rollLedger";
+import type { RollLedger, RollLedgerRoll } from "../packages/pf1e/rollLedger";
 import type { AssetId, PeerId, TxId, UserId } from "../core/ids";
 import { DocumentStore } from "../core/store";
 import { OpLog } from "../core/oplog";
@@ -801,9 +803,13 @@ export class HostSync {
           const msgs2 = [...this.store.getAll("messages")] as unknown as Array<{ _id: string; system?: { rollLedger?: RollLedger } }>;
           const prune2 = rollLedgerPruneOps(msgs2 as unknown as Parameters<typeof rollLedgerPruneOps>[0], pruneTurn);
           if (prune2.length > 0) this.commitSystem(prune2, false);
-        } catch {}
+        } catch {
+          // Pruning is best-effort: a malformed historical card never blocks the turn.
+        }
       }
-    } catch {}
+    } catch {
+      // Turn detection/pruning must never break commit handling.
+    }
     return { ok: true, seq: envelope.seq };
   }
 
@@ -1021,36 +1027,15 @@ export class HostSync {
 
   // ─── F03 pending roll (roll.pending 0x33) ───────────────────────────────────
 
+  /**
+   * The F01/F03 2-round window clock: the highest live encounter round
+   * (CombatDocument.round). No combat yet → 0, so cards authored pre-combat
+   * stay inside their window until the table starts advancing rounds.
+   */
   private currentTurnNumber(): number {
-    const combats = this.store.getAll("combats") as unknown as readonly Record<string, unknown>[];
-    if (combats.length > 0) {
-      let maxRound = 0;
-      let maxTurn = 0;
-      for (const c of combats) {
-        const rec = c as Record<string, unknown>;
-        const r = rec["round"];
-        if (typeof r === "number" && Number.isFinite(r)) maxRound = Math.max(maxRound, Math.trunc(r as number));
-        const t = rec["turn"];
-        if (typeof t === "number" && Number.isFinite(t)) maxTurn = Math.max(maxTurn, Math.trunc(t as number));
-        const sys = (rec["system"] as Record<string, unknown> | undefined) ?? undefined;
-        const sr = sys?.["round"];
-        if (typeof sr === "number" && Number.isFinite(sr)) maxRound = Math.max(maxRound, Math.trunc(sr as number));
-        const st = sys?.["turn"];
-        if (typeof st === "number" && Number.isFinite(st)) maxTurn = Math.max(maxTurn, Math.trunc(st as number));
-      }
-      if (maxRound > 0) return maxRound;
-      if (maxTurn > 0) return maxTurn;
-    }
-    let max = 0;
-    const messages = this.store.getAll("messages") as unknown as readonly Record<string, unknown>[];
-    for (const m of messages) {
-      const sys = (m as { system?: { pendingRoll?: PendingRoll; rollLedger?: { turnNumber?: number } } }).system;
-      const pending = (sys as unknown as { pendingRoll?: PendingRoll } | undefined)?.pendingRoll;
-      if (pending && typeof pending.turnNumber === "number") max = Math.max(max, pending.turnNumber);
-      const ledger = (sys as unknown as { rollLedger?: { turnNumber?: number } } | undefined)?.rollLedger;
-      if (ledger && typeof ledger.turnNumber === "number") max = Math.max(max, ledger.turnNumber);
-    }
-    return max;
+    return tacticalLedgerTurn(
+      this.store.getAll("combats") as unknown as readonly { round?: unknown }[],
+    );
   }
 
   private async handleRollPending(
@@ -1129,7 +1114,8 @@ export class HostSync {
         return;
       }
     } catch {
-      // ignore predicate errors — window/ownership already gates
+      // A malformed settings document never blocks resolution: the 2-round
+      // window and the ownership check above are the real gates.
     }
     if (msg.seedClientCommit) {
       const calc = await sha256Hex(msg.seedClient);
@@ -1181,7 +1167,9 @@ export class HostSync {
       system: {},
       author: session.user.id,
       content: pending.formula,
-      whisper: pending.rollMode === "gmroll" || pending.rollMode === "blindroll" ? [] : [],
+      // Roll content stays visible per rollMode projection downstream; whisper
+      // redaction is handled by the existing message projection, not here.
+      whisper: [],
       roll: {
         formula: pending.formula,
         total,
@@ -1210,29 +1198,56 @@ export class HostSync {
     if (user.role === "GM") return true;
     const ops = [...ledger.ledgerOps, ...ledger.ledgerInverses];
     for (const op of ops) {
-      if (op.kind !== "update" && op.kind !== "create" && op.kind !== "delete") continue;
-      const ref = op.kind === "create" ? (op.parent ? { coll: op.coll, id: (op.data as unknown as { _id: string })._id, parent: op.parent } : null) : (op as unknown as { ref: DocRef }).ref;
-      if (!ref) continue;
-      const doc = this.store.resolve(ref as DocRef);
+      let ref: DocRef | null = null;
+      if (op.kind === "update" || op.kind === "delete") ref = op.ref;
+      else if (op.kind === "create") {
+        const id = (op.data as { _id?: unknown })._id;
+        if (typeof id === "string")
+          ref = { coll: op.coll, id, ...(op.parent !== undefined ? { parent: op.parent } : {}) };
+      }
+      if (ref === null) continue;
+      const doc = this.store.resolve(ref);
       if (!doc) continue;
-      const parent = (ref as DocRef).parent !== undefined ? this.store.resolve((ref as DocRef).parent as DocRef) : undefined;
-      const canOpts = parent ? { parent } : {};
-      const collName = ((ref as DocRef).parent ? (ref as DocRef).coll : (ref as DocRef).coll) as CollectionName;
-      if (!can(user, "update", doc, collName, canOpts)) return false;
+      const parent = ref.parent !== undefined ? this.store.resolve(ref.parent) : undefined;
+      if (!can(user, "update", doc, ref.coll, parent ? { parent } : {})) return false;
     }
     return true;
   }
 
-  private freshRollsWithRng(ledger: RollLedger): RollLedger["rolls"] {
+  /**
+   * Re-roll every formula on the card with the host's turn RNG. Seeds are
+   * cleared (not commit-reveal — a GM-table reroll), so the audit trail never
+   * shows a seed pair that cannot reproduce the recorded total.
+   */
+  private freshRollsWithRng(ledger: RollLedger): RollLedgerRoll[] {
     return ledger.rolls.map((roll) => {
       const evalResult = evaluateFormula(roll.formula, undefined, this.rng);
-      if (!evalResult.ok) return roll;
+      if (!evalResult.ok) return { ...roll, seedClient: null, seedHost: null };
       return {
         ...roll,
         total: evalResult.value.total,
         terms: evalResult.value.terms as unknown as typeof roll.terms,
+        seedClient: null,
+        seedHost: null,
       };
-    }) as RollLedger["rolls"];
+    });
+  }
+
+  /** System-line message shared by reroll/revert follow-ups (public audit). */
+  private ledgerFollowUp(authorId: UserId, name: string, content: string): MessageDocument {
+    return {
+      _id: randomId(),
+      type: "message",
+      name,
+      ownership: { default: OWNERSHIP_LEVELS.LIMITED },
+      flags: {},
+      system: {},
+      author: authorId,
+      content,
+      whisper: [],
+      roll: null,
+      flavor: "",
+    };
   }
 
   private async handleRollReroll(session: Session, msg: import("../core/messages").RollRerollMsg): Promise<void> {
@@ -1256,7 +1271,7 @@ export class HostSync {
     }
     const currentTurn = this.currentTurnNumber();
     const isGM = session.user.role === "GM";
-    const viaDelegation = !isGM && canLedgerPlayerReroll(ledger, session.user.id as unknown as UserId, currentTurn);
+    const viaDelegation = !isGM && canLedgerPlayerReroll(ledger, session.user.id, currentTurn);
     const allowed = isGM ? canLedgerReroll(ledger, currentTurn) : viaDelegation;
     if (!allowed) {
       this.reject(session, String(msg.messageId), "invalid_schema", "reroll window closed or already reverted");
@@ -1266,24 +1281,57 @@ export class HostSync {
       this.reject(session, String(msg.messageId), "forbidden", "you cannot update the touched documents");
       return;
     }
+    // F01 spec: the inverse must still apply — a later unrelated write touching a
+    // ledger path makes the revert diverge, and missing pre-images can never revert.
+    const stale = ledgerStaleReason(ledger, this.store);
+    if (stale !== null) {
+      this.reject(session, String(msg.messageId), "invalid_schema", stale);
+      return;
+    }
     let newRolls = this.freshRollsWithRng(ledger);
     if (msg.newModifiers && msg.newModifiers.length > 0) {
-      if (newRolls[0]) {
-        const first = newRolls[0] as unknown as { modifiers: Array<{ label: string; value: number; reason: string }>; total: number };
+      const [first, ...rest] = newRolls;
+      if (first) {
         const extra = msg.newModifiers.reduce((s, m) => s + m.value, 0);
         newRolls = [
-          { ...newRolls[0], modifiers: [...first.modifiers, ...msg.newModifiers], total: first.total + extra } as unknown as RollLedger["rolls"][number],
-          ...newRolls.slice(1),
-        ] as RollLedger["rolls"];
+          { ...first, modifiers: [...first.modifiers, ...msg.newModifiers], total: first.total + extra },
+          ...rest,
+        ];
       }
     }
-    const newLedgerOps: Op[] = [...ledger.ledgerOps];
-    const newLedgerInverses: Op[] = ledger.ledgerInverses.length > 0 ? [...ledger.ledgerInverses] : invertLedger(ledger);
-    const ops = ledgerRerollOps({ messageId: String(msg.messageId) as unknown as import("../core/ids").DocId, ledger, currentTurn, newLedgerOps, newLedgerInverses, newRolls });
+    // Honest recompute: new effect Ops come from the damage delta, never a replay
+    // of the old Ops. Non-HP ledgers are refused by name, not silently skipped.
+    const plan = planDamageDeltaReroll({ ledger, newRolls });
+    if (!plan.ok) {
+      this.reject(session, String(msg.messageId), "invalid_schema", plan.reason);
+      return;
+    }
+    // After inverse(old) the world is back at the recorded pre-state, so the new
+    // envelope's pre-images ARE the original pre-images.
+    const newLedgerInverses: Op[] = [...ledger.ledgerInverses];
+    const ops = ledgerRerollOps({
+      messageId: String(msg.messageId) as unknown as import("../core/ids").DocId,
+      ledger,
+      currentTurn,
+      newLedgerOps: plan.ops,
+      newLedgerInverses,
+      newRolls,
+    });
     if (!ops) {
       this.reject(session, String(msg.messageId), "invalid_schema", "reroll refused by ledger window");
       return;
     }
+    const oldSummary = ledger.rolls.map((r) => `${String(r.total)} (${r.formula})`).join(", ");
+    const newSummary = newRolls.map((r) => `${String(r.total)} (${r.formula})`).join(", ");
+    ops.push({
+      kind: "create",
+      coll: "messages",
+      data: this.ledgerFollowUp(
+        session.user.id,
+        `Rerolled: ${doc.name}`,
+        `Rerolled: ${oldSummary} → ${newSummary}${viaDelegation ? ` (delegated to ${session.user.name})` : ""}`,
+      ),
+    });
     const committed = this.commitOps(ops, session.user.id, "reroll-" + String(msg.messageId), false);
     if (!committed.ok) this.reject(session, String(msg.messageId), "invariant", committed.error);
   }
@@ -1320,11 +1368,21 @@ export class HostSync {
       this.reject(session, String(msg.messageId), "forbidden", "you cannot update the touched documents");
       return;
     }
-    const ops = ledgerRevertOps({ messageId: String(msg.messageId) as unknown as import("../core/ids").DocId, ledger, currentTurn });
-    if (!ops) {
-      this.reject(session, String(msg.messageId), "invalid_schema", "revert refused by ledger window");
+    const stale = ledgerStaleReason(ledger, this.store);
+    if (stale !== null) {
+      this.reject(session, String(msg.messageId), "invalid_schema", stale);
       return;
     }
+    const ops = ledgerRevertOps({ messageId: String(msg.messageId) as unknown as import("../core/ids").DocId, ledger, currentTurn });
+    if (!ops) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "ledger has no pre-images — revert is impossible by design");
+      return;
+    }
+    ops.push({
+      kind: "create",
+      coll: "messages",
+      data: this.ledgerFollowUp(session.user.id, `Reverted: ${doc.name}`, `Reverted: ${doc.name} — its effects were removed as if the roll never happened.`),
+    });
     const committed = this.commitOps(ops, session.user.id, "revert-" + String(msg.messageId), false);
     if (!committed.ok) this.reject(session, String(msg.messageId), "invariant", committed.error);
   }

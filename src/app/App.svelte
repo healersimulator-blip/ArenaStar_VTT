@@ -4,6 +4,7 @@
   import { DEFAULT_SCENE_ID, makeToken, type HostApp } from "./hostBoot";
   import { createStage, type Stage } from "../canvas/stage";
   import { tokenRect } from "../canvas/tokens";
+  import type { RollHighlightRect } from "../canvas/layers/RollHighlightLayer";
   import { tokenBadgesMap } from "../packages/pf1e/tokenBadges";
   import { isPF1eActor } from "../ui/sheets/pf1eSheetModel";
   import {
@@ -1352,23 +1353,55 @@
         current.gm.bus.on("turnPhase", (m) => {
           lastTurnPhase = m.phase;
         });
-        // F01 — roll-card highlight passthrough (ChatPanel emits rollHighlight)
-        (current.gm.bus.on as unknown as (ev: string, cb: (payload: unknown) => void) => () => void)(
-          "rollHighlight",
-          (payload: unknown) => {
-            try {
-              const p = payload as {
-                kind: "initiator" | "target" | "area";
-                ledger?: unknown;
-                fadeSec?: number;
-                id?: string | null;
-              };
-              const st = (globalThis as unknown as { __stage?: { getRollHighlightLayer?: () => unknown } }).__stage;
-              const layer = st?.getRollHighlightLayer?.();
-              void p; void layer;
-            } catch {}
-          },
-        );
+        // F01/F03 — roll-card highlight: the chat card emits a semantic request;
+        // the App owns the stage, so rects are computed here against the ACTIVE
+        // scene (real token rects, real grid px/ft for areas) and the camera
+        // centers on the clicked initiator/target/epicenter.
+        current.gm.bus.on("rollHighlight", (req) => {
+          try {
+            const scene = activeScene();
+            const tokens = scene?.tokens ?? [];
+            const rects: RollHighlightRect[] = [];
+            let center: { x: number; y: number } | null = null;
+            if (req.kind === "area" && req.area) {
+              const grid = scene?.grid;
+              const distance = grid && grid.distance > 0 ? grid.distance : 5;
+              const size = grid && grid.size > 0 ? grid.size : 50;
+              const rPx = (req.area.radiusFt / distance) * size;
+              rects.push({
+                x: req.area.origin.x - rPx,
+                y: req.area.origin.y - rPx,
+                width: rPx * 2,
+                height: rPx * 2,
+                kind: "area",
+              });
+              for (const tokenId of req.affectedTokenIds) {
+                const t = tokens.find((tok) => tok._id === tokenId);
+                if (t) rects.push({ ...tokenRect(t), kind: "target" });
+              }
+              center = req.area.origin;
+            } else if (req.tokenId !== null) {
+              const t = tokens.find((tok) => tok._id === req.tokenId);
+              if (t) {
+                const r = tokenRect(t);
+                rects.push({ ...r, kind: req.kind === "target" ? "target" : "initiator" });
+                center = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+              }
+            }
+            if (rects.length === 0) return; // token gone / nothing resolvable
+            view.getRollHighlightLayer().sync(rects, view.camera, req.fadeSec);
+            if (center !== null) {
+              const cam = view.camera;
+              view.setCamera({
+                x: center.x - view.viewport.width / (2 * cam.scale),
+                y: center.y - view.viewport.height / (2 * cam.scale),
+                scale: cam.scale,
+              });
+            }
+          } catch (err) {
+            console.warn("rollHighlight failed (best-effort overlay)", err);
+          }
+        });
         current.gm.bus.on("turnReport", (m) => {
           lastRulesVersion = m.report.rulesVersion;
           const dist = m.report.summary.distributions as
@@ -1829,6 +1862,14 @@
             onclick={() => openWindow("gmextras", "GM Extras", "gmextras")}
           >
             Extras
+          </button>
+          <button
+            id="gm-armies"
+            type="button"
+            onclick={() => openWindow("armies", "Armies", "armies")}
+            title="Army management (M14)"
+          >
+            Armies
           </button>
           <button
             id="gm-undo"

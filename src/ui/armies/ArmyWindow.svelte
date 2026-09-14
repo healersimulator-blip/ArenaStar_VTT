@@ -16,6 +16,7 @@
   import type { RulesModule, UnitView } from "../../core/rules";
   import {
     ORDER_TEMPLATES,
+    analysisReportFromReports,
     casualtySummary,
     eventsToCsv,
     filterReportEvents,
@@ -30,6 +31,8 @@
     type TreeRow,
   } from "./armyModel";
   import TurnReportTimeline from "./TurnReportTimeline.svelte";
+  import PF1eBattleAnalysis from "./PF1eBattleAnalysis.svelte";
+  import type { PF1eBattleReport } from "../../packages/pf1e/analytics";
 
   let {
     client,
@@ -45,7 +48,7 @@
     onClose: () => void;
   } = $props();
 
-  type Tab = "tree" | "roster" | "orders" | "reports";
+  type Tab = "tree" | "roster" | "orders" | "reports" | "analysis";
   const ROW_H = 26;
 
   let tab = $state<Tab>("tree");
@@ -108,6 +111,36 @@
     selection = new SvelteSet(ids);
   }
 
+  // ── M07 (D-229) — leader binding. Every "unit led by a hero" starts here: the
+  // token's linked actor becomes the unit's combat inputs. Player hero sheet
+  // visibility is a click on the bound row. ────────────────────────────────────
+  function setLeader(unit: UnitDocument, tokenId: string): void {
+    client.submit([
+      {
+        kind: "update",
+        ref: { coll: "units", id: unit._id, parent: { coll: "armies", id: armyId } },
+        diff: { leaderTokenId: tokenId.length > 0 ? tokenId : null },
+      },
+    ]);
+  }
+
+  function sceneTokens(): Array<{ _id: string; name: string; actorId?: string }> {
+    const doc = army();
+    const unitSceneId = doc?.units[0]?.sceneId ?? null;
+    const out: Array<{ _id: string; name: string; actorId?: string }> = [];
+    const scenes = client.store.getAll("scenes") as Array<{
+      _id: string;
+      tokens?: Array<{ _id: string; name: string; actorId?: string }>;
+    }>;
+    for (const scene of scenes) {
+      if (unitSceneId && scene._id !== unitSceneId) continue;
+      for (const t of scene.tokens ?? []) {
+        if (t.actorId) out.push({ _id: t._id, name: t.name });
+      }
+    }
+    return out;
+  }
+
   function toggleSelect(id: string, ev: Event): void {
     const next = new SvelteSet(selection);
     if ((ev.currentTarget as HTMLInputElement).checked) next.add(id);
@@ -141,21 +174,28 @@
       modelRange: unit.modelRange,
       leaderTokenId: unit.leaderTokenId ?? null,
       squadId: (unit as unknown as { squadId?: string | null }).squadId ?? null,
+      doctrine: unit.doctrine ?? null,
+      envelop: unit.envelop ?? null,
+      armyInitiative:
+        typeof doc?.initiative === "number" && Number.isFinite(doc.initiative)
+          ? doc.initiative
+          : null,
     };
   }
 
   // F02 — squad grouping for simultaneous fan-out (ArmyWindow squadId tag)
-  function squadGroups(): Map<string, UnitDocument[]> {
+  function squadGroups(): Array<[string, UnitDocument[]]> {
     const doc = army();
-    const m = new Map<string, UnitDocument[]>();
-    if (!doc) return m;
+    if (!doc) return [];
+    const bySquad: Record<string, UnitDocument[]> = {};
     for (const u of doc.units) {
       const sid = (u as unknown as { squadId?: string | null }).squadId;
       if (!sid) continue;
-      if (!m.has(sid)) m.set(sid, []);
-      m.get(sid)!.push(u);
+      const bucket = bySquad[sid];
+      if (bucket) bucket.push(u);
+      else bySquad[sid] = [u];
     }
-    return m;
+    return Object.entries(bySquad);
   }
 
   function issueToSquad(squadId: string, build: (unit: UnitDocument) => Order): void {
@@ -253,6 +293,49 @@
     if (ops.length > 0) client.submit(ops);
   }
 
+  // ── G-04/D-223 — Combat_Resolver_5 doctrine controls. Doctrine rides the same
+  // embedded-doc update path as orders: the resolver reads `unit.doctrine` /
+  // `unit.envelop` from the UnitView the turn channel builds. ─────────────────
+  function setDoctrine(unit: UnitDocument, doctrine: "advance" | "hold"): void {
+    client.submit([
+      {
+        kind: "update",
+        ref: { coll: "units", id: unit._id, parent: { coll: "armies", id: armyId } },
+        diff: { doctrine },
+      },
+    ]);
+  }
+
+  function setEnvelop(unit: UnitDocument, envelop: boolean): void {
+    client.submit([
+      {
+        kind: "update",
+        ref: { coll: "units", id: unit._id, parent: { coll: "armies", id: armyId } },
+        diff: { envelop },
+      },
+    ]);
+  }
+
+  function setArmyInitiative(raw: string): void {
+    const value = Number.parseInt(raw, 10);
+    client.submit([
+      {
+        kind: "update",
+        ref: { coll: "armies", id: armyId },
+        // Initiative is the army's d20-side modifier (Combat_Resolver_5 B12); an
+        // unparseable field writes 0 rather than a silent NaN.
+        diff: { initiative: Number.isFinite(value) ? value : 0 },
+      },
+    ]);
+  }
+
+  // ── M14 (D-224) — Battle Analysis tab over real turn data: the newest turn
+  // report's summary.analytics[armyId] sheet, rebuilt purely in armyModel so
+  // the logic is unit-testable outside the component. ─────────────────────────
+  function analysisReport(): PF1eBattleReport | null {
+    return analysisReportFromReports(reports, armyId);
+  }
+
   function toggleReady(ready: boolean): void {
     if (phase) client.setTurnReady(phase.turnId, ready);
   }
@@ -306,7 +389,7 @@
   <header>
     <h2>{armyName}</h2>
     <nav>
-      {#each ["tree", "roster", "orders", "reports"] as t (t)}
+      {#each ["tree", "roster", "orders", "reports", "analysis"] as t (t)}
         <button class:active={tab === t} onclick={() => (tab = t as Tab)} data-tab={t}>
           {t}
         </button>
@@ -318,12 +401,12 @@
   {#if tab === "tree"}
     {#if squadGroups().size > 0}
       <div class="squads" data-squads>
-        {#each [...squadGroups().entries()] as [sid, members] (sid)}
+        {#each squadGroups() as [sid, members] (sid)}
           <div class="row squad" data-squad={sid}>
             <span class="c">▣ Squad {sid}</span>
             <span class="dim">{members.length} units</span>
             <button onclick={() => setSelection(members.map((u) => u._id))} data-squad-select={sid}>select</button>
-            <button onclick={() => issueToSquad(sid, (u) => ({ kind: "hold", stance: "defend" }))} data-squad-hold={sid}>Hold</button>
+            <button onclick={() => issueToSquad(sid, () => ({ kind: "hold", stance: "defend" }))} data-squad-hold={sid}>Hold</button>
           </div>
         {/each}
       </div>
@@ -430,6 +513,18 @@
                   {#if cols.has("morale")}<span class="c dim">{row.unit.stats.morale ?? 0}</span
                     >{/if}
                   {#if cols.has("live")}<span class="c live">{row.liveStrength ?? "–"}</span>{/if}
+                  <select
+                    class="c leader"
+                    title="Bind a hero token: the leader's actor sheet becomes this unit's combat inputs (M07)"
+                    value={row.unit.leaderTokenId ?? ""}
+                    onchange={(ev) => setLeader(row.unit, (ev.currentTarget as HTMLSelectElement).value)}
+                    data-unit-leader={row.unit._id}
+                  >
+                    <option value="">— no leader —</option>
+                    {#each sceneTokens() as t (t._id)}
+                      <option value={t._id}>{t.name}</option>
+                    {/each}
+                  </select>
                 </div>
               {:else if row.kind === "model"}
                 <div class="row model" style:height={`${ROW_H}px`}>
@@ -486,6 +581,19 @@
         {:else}
           <span class="dim">Turn phase: {phase ? phase.phase : "—"}</span>
         {/if}
+        <label class="army-init">
+          Army initiative
+          <input
+            type="number"
+            style="width: 3.2rem"
+            value={army()?.initiative ?? 0}
+            onchange={(ev) =>
+              setArmyInitiative(
+                (ev.currentTarget as HTMLInputElement).value,
+              )}
+            data-army-initiative
+          />
+        </label>
       </div>
       {#each selectedUnits() as unit (unit._id)}
         <div class="queue" data-queue={unit._id}>
@@ -502,6 +610,38 @@
               </li>
             {/each}
           </ol>
+          <div class="doctrine" data-doctrine={unit._id}>
+            <label>
+              Doctrine
+              <select
+                value={unit.doctrine ?? "advance"}
+                onchange={(ev) =>
+                  setDoctrine(
+                    unit,
+                    (ev.currentTarget as HTMLSelectElement).value === "hold"
+                      ? "hold"
+                      : "advance",
+                  )}
+                data-doctrine-select={unit._id}
+              >
+                <option value="advance">advance (auto-march & engage)</option>
+                <option value="hold">hold (orders only)</option>
+              </select>
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={unit.envelop !== false}
+                onchange={(ev) =>
+                  setEnvelop(
+                    unit,
+                    (ev.currentTarget as HTMLInputElement).checked,
+                  )}
+                data-envelop-toggle={unit._id}
+              />
+              Envelop (wrap flanks)
+            </label>
+          </div>
         </div>
       {/each}
       {#if selectedUnits().length === 0}
@@ -518,6 +658,19 @@
           </button>
         {/each}
       </div>
+    </div>
+  {:else if tab === "analysis"}
+    {@const analysis = analysisReport()}
+    <div class="analysis-tab" data-analysis-tab>
+      {#if analysis === null}
+        <p class="dim" data-analysis-empty>
+          Battle analysis appears after the first resolved turn — the
+          reconciliation is the turn report's own per-army sheet (M12), not a
+          fixture.
+        </p>
+      {:else}
+        <PF1eBattleAnalysis report={analysis} />
+      {/if}
     </div>
   {:else}
     <div class="reports">

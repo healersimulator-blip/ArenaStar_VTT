@@ -40,9 +40,6 @@ function validateDecoded(obj: unknown, name: MsgName): Result<WireMessage> {
     case "roll.reroll":
     case "roll.revert":
     case "roll.delegate":
-    case "roll.reroll":
-    case "roll.revert":
-    case "roll.delegate":
     case "ephemeral":
     case "asset.get":
     case "fog.put":

@@ -807,9 +807,9 @@ export function pf1eGrappleMaintain(input: {
   const hp = grappleHumanoidPenalty({ attackerIsHumanoid: input.attackerIsHumanoid, attackerFreeHands: input.attackerFreeHands });
   let effectiveCmb = input.check.cmb;
   const notesExtra: string[] = [];
-  if (hp.penalty > 0) {
+  if (hp.penalty > 0 && hp.note !== null) {
     effectiveCmb -= hp.penalty;
-    notesExtra.push(hp.note!);
+    notesExtra.push(hp.note);
   }
   if (input.hasMaintainBonus === true) {
     effectiveCmb += 5;
@@ -943,9 +943,9 @@ export function pf1eGrappleTieUp(input: {
     extraNotes.push("you are grappling the target while tying him up — –10 penalty on the combat maneuver check (AoN 191)");
   }
   const hp = grappleHumanoidPenalty({ attackerIsHumanoid: input.attackerIsHumanoid, attackerFreeHands: input.attackerFreeHands });
-  if (hp.penalty > 0) {
+  if (hp.penalty > 0 && hp.note !== null) {
     effectiveCmb -= hp.penalty;
-    extraNotes.push(hp.note!);
+    extraNotes.push(hp.note);
   }
   const checkInput = { ...input.check, cmb: effectiveCmb };
   const check = pf1eManeuverCheck({ ...checkInput, kind: "grapple" } as PF1eManeuverCheckInput);

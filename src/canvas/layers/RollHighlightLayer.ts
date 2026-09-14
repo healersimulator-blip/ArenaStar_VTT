@@ -84,7 +84,7 @@ export class RollHighlightLayer {
       // Simple timeout fade: after ms, wipe. Tests that need the timing can
       // assert rectCount and that a second sync([]) clears.
       this.fadeHandle = setTimeout(() => {
-        this.clear(camera);
+        this.clear();
       }, ms);
       // So the timeout doesn't keep Node alive in tests.
       if (this.fadeHandle && typeof (this.fadeHandle as unknown as { unref?: () => void }).unref === "function") {
@@ -93,7 +93,7 @@ export class RollHighlightLayer {
     }
   }
 
-  clear(_camera?: Camera): void {
+  clear(): void {
     if (this.fadeHandle !== null) {
       clearTimeout(this.fadeHandle);
       this.fadeHandle = null;
@@ -102,7 +102,8 @@ export class RollHighlightLayer {
     this.g.alpha = 1;
     this.rectCount = 0;
     this.areaDrawn = false;
-    this.key = `${this.key}|cleared:${Date.now()}`;
+    // Force the next sync() to redraw even with an identical rect list.
+    this.key = "";
   }
 
   destroy(): void {

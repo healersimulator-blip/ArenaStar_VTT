@@ -195,7 +195,7 @@ describe("P05 — dirty trick aftermath (APG p.321)", () => {
   });
 
   test("invalid condition and missing greater die refuse", () => {
-    const bad = pf1eDirtyTrick({ check: { die: 15, cmb: 5, cmd: 10, attacker: { size: "Medium" }, defender: { size: "Medium" } }, condition: "stunned" as any });
+    const bad = pf1eDirtyTrick({ check: { die: 15, cmb: 5, cmd: 10, attacker: { size: "Medium" }, defender: { size: "Medium" } }, condition: "stunned" });
     expect(bad.ok).toBe(false);
     const missing = pf1eDirtyTrick({ check: { die: 15, cmb: 5, cmd: 10, attacker: { size: "Medium" }, defender: { size: "Medium" } }, hasGreaterDirtyTrick: true });
     expect(missing.ok).toBe(false);

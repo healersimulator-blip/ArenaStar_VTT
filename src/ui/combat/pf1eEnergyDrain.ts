@@ -6,7 +6,7 @@
  * the plan returns the exact ops the host authorizes.
  */
 import type { ActorDocument } from "../../core/documents";
-import type { Op } from "../../core/ops";
+import type { FlatDiff, Op } from "../../core/ops";
 import {
   inflictNegativeLevels,
   removeNegativeLevels,
@@ -49,7 +49,7 @@ export function planEnergyDrainInflict(
   return {
     ok: true,
     plan: {
-      ops: [{ kind: "update" as const, ref: { coll: "actors" as const, id: input.defender._id }, diff: diff as Record<string, any> }],
+      ops: [{ kind: "update" as const, ref: { coll: "actors" as const, id: input.defender._id }, diff: diff as FlatDiff }],
       note,
     },
   };
@@ -72,7 +72,7 @@ export function planRestoration(
   return {
     ok: true,
     plan: {
-      ops: [{ kind: "update" as const, ref: { coll: "actors" as const, id: input.actor._id }, diff: diff as Record<string, any> }],
+      ops: [{ kind: "update" as const, ref: { coll: "actors" as const, id: input.actor._id }, diff: diff as FlatDiff }],
       note,
     },
   };
@@ -104,6 +104,6 @@ export function planNegativeLevelSave(
   if (!res.result.removed && !res.result.becomesPermanent) {
     return { ok: true, plan: { ops: [], note } };
   }
-  const ops: Op[] = [{ kind: "update" as const, ref: { coll: "actors" as const, id: input.actor._id }, diff: diff as Record<string, any> }];
+  const ops: Op[] = [{ kind: "update" as const, ref: { coll: "actors" as const, id: input.actor._id }, diff: diff as FlatDiff }];
   return { ok: true, plan: { ops, note } };
 }

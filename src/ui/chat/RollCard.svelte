@@ -1,6 +1,12 @@
 <script lang="ts">
-  import type { RollLedger, RollLedgerArea, RollLedgerInitiator, RollLedgerTarget } from "../../packages/pf1e/rollLedger";
+  import type { RollLedger } from "../../packages/pf1e/rollLedger";
   import { canReroll, canRevert } from "../../packages/pf1e/rollLedger";
+
+  interface StagedModifier {
+    label: string;
+    value: number;
+    reason: string;
+  }
 
   let {
     ledger,
@@ -17,8 +23,8 @@
     currentTurn: number;
     isGM?: boolean;
     fadeSec?: number;
-    onReroll?: (ledgerId: string, newModifiers?: Array<{ label: string; value: number; reason: string }>) => void;
-    onRevert?: (ledgerId: string) => void;
+    onReroll?: (newModifiers?: StagedModifier[]) => void;
+    onRevert?: () => void;
     onDelegate?: (playerId: string) => void;
     onPlayerReroll?: () => void;
     onHighlight?: (kind: "initiator" | "target" | "area", id: string | null) => void;
@@ -29,12 +35,28 @@
   const fade = $derived(Math.max(1, Math.min(10, Math.trunc(fadeSec) || 4)));
 
   let delegatePlayerId = $state("");
-  let localModifiers = $state<Map<string, boolean>>(new Map());
+  // Situational modifiers staged for the NEXT reroll (folded into the first
+  // roll by the host, with an honest total = dice + Σ values).
+  let staged = $state<StagedModifier[]>([]);
 
-  function toggleModifier(key: string): void {
-    const next = new Map(localModifiers);
-    next.set(key, !next.get(key));
-    localModifiers = next;
+  function stageFromSelect(e: Event): void {
+    const select = e.target as HTMLSelectElement;
+    const v = select.value;
+    if (!v) return;
+    const [label, val] = v.split("|");
+    const value = Number(val);
+    select.value = "";
+    if (!label || !Number.isFinite(value)) return;
+    staged = [...staged, { label, value, reason: label }];
+  }
+
+  function unstage(idx: number): void {
+    staged = staged.filter((_, i) => i !== idx);
+  }
+
+  function reroll(): void {
+    onReroll?.(staged.length > 0 ? staged : undefined);
+    staged = [];
   }
 
   function highlight(kind: "initiator" | "target" | "area", id: string | null): void {
@@ -113,103 +135,52 @@
             <ul>
               {#each roll.modifiers as mod, mIdx (mIdx)}
                 <li class="modifier">
-                  <label>
-                    <input
-                      type="checkbox"
-                      data-testid="roll-modifier-toggle"
-                      data-mod-idx={mIdx}
-                      checked={localModifiers.get(`${idx}:${mIdx}`) ?? true}
-                      onchange={() => toggleModifier(`${idx}:${mIdx}`)}
-                    />
-                    <span class="mod-label">{mod.label}</span>
-                    <span class="mod-value">{mod.value > 0 ? "+" : ""}{mod.value}</span>
-                    <span class="mod-reason">({mod.reason})</span>
-                  </label>
-                  <!-- per-modifier dropdown — spec says modifier dropdowns on the card -->
+                  <span class="mod-label">{mod.label}</span>
+                  <span class="mod-value">{mod.value > 0 ? "+" : ""}{mod.value}</span>
+                  <!-- read-only reason dropdown — the recorded breakdown, not an editor -->
                   <select
                     data-testid="roll-modifier-dropdown"
                     data-mod-idx={mIdx}
                     value={mod.reason}
-                    onchange={(e) => {
-                      const reason = (e.target as HTMLSelectElement).value;
-                      // bubble as a reroll with updated reason — host will re-derive the modifier table
-                      onReroll?.(ledger.initiator.actorId, [
-                        ...roll.modifiers.slice(0, mIdx),
-                        { ...mod, reason },
-                        ...roll.modifiers.slice(mIdx + 1),
-                      ]);
-                    }}
+                    disabled
+                    aria-label="modifier reason"
                   >
                     <option value={mod.reason}>{mod.reason}</option>
-                    <option value="flanking">flanking</option>
-                    <option value="cover">cover</option>
-                    <option value="charge">charge</option>
-                    <option value="inspire courage">inspire courage</option>
-                    <option value="power attack">power attack</option>
-                    <option value="custom">custom</option>
                   </select>
                 </li>
               {/each}
             </ul>
-            <!-- card-level modifier picker — add a new situational modifier and reroll -->
-            <label class="add-mod">
-              <span>Add modifier</span>
-              <select
-                data-testid="roll-add-modifier"
-                onchange={(e) => {
-                  const v = (e.target as HTMLSelectElement).value;
-                  if (!v) return;
-                  const [label, val] = v.split("|");
-                  const value = Number(val);
-                  if (!Number.isFinite(value)) return;
-                  onReroll?.(ledger.initiator.actorId, [
-                    ...roll.modifiers,
-                    { label: label ?? v, value, reason: label ?? v },
-                  ]);
-                  (e.target as HTMLSelectElement).value = "";
-                }}
-              >
-                <option value="">— pick —</option>
-                <option value="flanking|+2">flanking +2</option>
-                <option value="higher ground|+1">higher ground +1</option>
-                <option value="cover|-4">cover −4</option>
-                <option value="inspire courage|+1">inspire +1</option>
-                <option value="power attack|-2">power attack −2</option>
-              </select>
-            </label>
-          </details>
-        {:else}
-          <details class="modifiers" data-testid="roll-modifiers">
-            <summary>modifiers</summary>
-            <label class="add-mod">
-              <span>Add modifier</span>
-              <select
-                data-testid="roll-add-modifier"
-                onchange={(e) => {
-                  const v = (e.target as HTMLSelectElement).value;
-                  if (!v) return;
-                  const [label, val] = v.split("|");
-                  const value = Number(val);
-                  if (!Number.isFinite(value)) return;
-                  onReroll?.(ledger.initiator.actorId, [
-                    { label: label ?? v, value, reason: label ?? v },
-                  ]);
-                  (e.target as HTMLSelectElement).value = "";
-                }}
-              >
-                <option value="">— pick —</option>
-                <option value="flanking|+2">flanking +2</option>
-                <option value="higher ground|+1">higher ground +1</option>
-                <option value="cover|-4">cover −4</option>
-                <option value="inspire courage|+1">inspire +1</option>
-                <option value="power attack|-2">power attack −2</option>
-              </select>
-            </label>
           </details>
         {/if}
       </div>
     {/each}
   </div>
+
+  {#if isGM && rerollable}
+    <div class="staging">
+      <label class="add-mod">
+        <span>Stage for reroll</span>
+        <select data-testid="roll-add-modifier" onchange={stageFromSelect}>
+          <option value="">— pick —</option>
+          <option value="flanking|+2">flanking +2</option>
+          <option value="higher ground|+1">higher ground +1</option>
+          <option value="cover|-4">cover −4</option>
+          <option value="inspire courage|+1">inspire +1</option>
+          <option value="power attack|-2">power attack −2</option>
+        </select>
+      </label>
+      {#each staged as mod, sIdx (sIdx)}
+        <button
+          class="chip staged"
+          data-testid="roll-staged-modifier"
+          title="Remove staged modifier"
+          onclick={() => unstage(sIdx)}
+        >
+          {mod.label} {mod.value > 0 ? "+" : ""}{mod.value} ✕
+        </button>
+      {/each}
+    </div>
+  {/if}
 
   <footer class="actions">
     {#if isGM}
@@ -218,7 +189,7 @@
         class="primary"
         disabled={!rerollable}
         title={rerollable ? "Reroll (inverse + new envelope)" : "Outside 2-round window or reverted"}
-        onclick={() => onReroll?.(ledger.initiator.actorId)}
+        onclick={reroll}
       >
         Reroll
       </button>
@@ -226,7 +197,7 @@
         data-testid="roll-revert"
         disabled={!revertable}
         title={revertable ? "Revert (inverse of ledgerOps)" : "Outside window or already reverted"}
-        onclick={() => onRevert?.(ledger.initiator.actorId)}
+        onclick={() => onRevert?.()}
       >
         Revert
       </button>
@@ -308,8 +279,11 @@
   .mod-label { font-weight: 600; }
   .mod-value { font-family: monospace; }
   .mod-reason { color: #8b93a3; }
-  .add-mod { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+  .add-mod { display: flex; align-items: center; gap: 6px; }
+  .staging { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .add-mod select, .modifier select { padding: 2px 6px; border-radius: 4px; border: 1px solid #3a3f4a; background: #1d2127; color: #e8e8ee; }
+  .modifier select:disabled { opacity: 0.85; color: #8b93a3; }
+  .chip.staged { padding: 2px 8px; border-radius: 999px; border: 1px solid #2e8b57; background: #1e3a2a; color: #7fe0a7; cursor: pointer; font-size: 11px; }
   .actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .actions button { padding: 4px 10px; border-radius: 6px; border: 1px solid #3a3f4a; background: #1d2127; color: #e8e8ee; cursor: pointer; }
   .actions button.primary { background: #1e3a2a; border-color: #2e8b57; color: #7fe0a7; }

@@ -143,9 +143,10 @@ export function expireTempHpSource(
   if (!(sourceId in sources)) {
     return { sources, total: totalTempHp(sources), note: null };
   }
-  const next: Record<string, number> = { ...sources };
-  const removed = next[sourceId] ?? 0;
-  delete next[sourceId];
+  const removed = sources[sourceId] ?? 0;
+  const next: Record<string, number> = Object.fromEntries(
+    Object.entries(sources).filter(([id]) => id !== sourceId),
+  );
   const total = totalTempHp(next);
   return {
     sources: Object.freeze(next),
@@ -197,7 +198,9 @@ export function absorbDamageWithTempHp(
     toAbsorb -= take;
   }
   // Drop zeroed sources — they are spent, not lingering zeroes.
-  for (const [id, v] of Object.entries(next)) if (v === 0) delete next[id];
+  const remainingSources: Record<string, number> = Object.fromEntries(
+    Object.entries(next).filter(([, remaining]) => remaining !== 0),
+  );
 
   if (absorbed === damage) {
     notes.push(`temporary hit points absorbed ${absorbed} damage — ${leftover === 0 ? "no hit-point damage" : `${leftover} passes through`}`);
@@ -205,7 +208,7 @@ export function absorbDamageWithTempHp(
     notes.push(`temporary hit points absorbed ${absorbed} of ${damage} damage — ${leftover} passes through to hit points`);
   }
 
-  return { sources: Object.freeze(next), absorbed, leftover, notes };
+  return { sources: Object.freeze(remainingSources), absorbed, leftover, notes };
 }
 
 /**

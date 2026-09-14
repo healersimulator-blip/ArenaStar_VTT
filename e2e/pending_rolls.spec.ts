@@ -179,7 +179,7 @@ test.describe("F03 pending rolls (Messages system.pendingRoll v1)", () => {
         }
       ).__stage;
       if (!st?.getRollHighlightLayer) return { ok: true, skipped: true } as const;
-      const layer = st.getRollHighlightLayer()!;
+      const layer = st.getRollHighlightLayer();
       const cam = (st as unknown as { camera?: unknown }).camera ?? { x: 0, y: 0, scale: 1 };
       layer.sync([{ x: 0, y: 0, width: 50, height: 50, kind: "initiator" }], cam as { x: number; y: number; scale: number }, 1);
       const before = layer.rectCount;

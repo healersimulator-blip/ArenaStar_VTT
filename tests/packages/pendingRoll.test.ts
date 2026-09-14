@@ -8,23 +8,35 @@ import {
   pendingPruneOps,
   resolvePendingRoll,
   shouldDeferToPlayer,
+  type PendingRollInitiator,
+  type PendingRollTarget,
 } from "../../src/packages/pf1e/pendingRoll";
 import {
   playerPendingRollModeOf,
   validateWorldSettingsPatch,
   worldSettingsOps,
   worldSettingsFrom,
+  type CoreWorldSettings,
 } from "../../src/core/worldSettings";
+import type { UserId } from "../../src/core/ids";
 
-const init = { actorId: "a-init" as const, tokenId: "t-init" as const, name: "Goblin", actionLabel: "Fireball (DC 17)" };
-const target = { actorId: "a-tgt" as const, tokenId: "t-tgt" as const, name: "Valeros" };
+const init: PendingRollInitiator = {
+  actorId: "a-init",
+  tokenId: "t-init",
+  name: "Goblin",
+  actionLabel: "Fireball (DC 17)",
+};
+const target: PendingRollTarget = { actorId: "a-tgt", tokenId: "t-tgt", name: "Valeros" };
+
+const u1 = "u1" as UserId;
+const u2 = "u2" as UserId;
 
 describe("pendingRoll: build + window", () => {
   test("expiresTurn is turnNumber + 2 and v=1", () => {
     const p = buildPendingRoll({
       kind: "save",
-      initiator: init as any,
-      target: target as any,
+      initiator: init,
+      target,
       formula: "1d20+5",
       dc: 17,
       modifiers: [{ label: "Reflex", value: 5, reason: "save" }],
@@ -38,29 +50,53 @@ describe("pendingRoll: build + window", () => {
   });
 
   test("expired window: T+2 allowed, T+3 refused", () => {
-    const p = buildPendingRoll({ kind: "attack", initiator: init as any, target: target as any, formula: "1d20+7", dc: null, modifiers: [], turnNumber: 5 } as any);
+    const p = buildPendingRoll({
+      kind: "attack",
+      initiator: init,
+      target,
+      formula: "1d20+7",
+      dc: null,
+      modifiers: [],
+      turnNumber: 5,
+    });
     expect(isPendingExpired(p, 7)).toBe(false);
     expect(isPendingExpired(p, 8)).toBe(true);
     expect(canGMRoll(p, 7)).toBe(true);
     expect(canGMRoll(p, 8)).toBe(false);
-    expect(canPlayerRoll(p, 7, "u1" as any)).toBe(true);
-    expect(canPlayerRoll(p, 8, "u1" as any)).toBe(false);
+    expect(canPlayerRoll(p, 7, u1)).toBe(true);
+    expect(canPlayerRoll(p, 8, u1)).toBe(false);
   });
 
   test("resolved never rollable", () => {
-    const p = buildPendingRoll({ kind: "save", initiator: init as any, target: target as any, formula: "1d20+5", dc: 17, modifiers: [], turnNumber: 1 } as any);
+    const p = buildPendingRoll({
+      kind: "save",
+      initiator: init,
+      target,
+      formula: "1d20+5",
+      dc: 17,
+      modifiers: [],
+      turnNumber: 1,
+    });
     const r = resolvePendingRoll(p, { total: 18, seedClient: "c", seedHost: "h" });
     expect(r.resolved).toBe(true);
     expect(r.total).toBe(18);
     expect(canGMRoll(r, 1)).toBe(false);
-    expect(canPlayerRoll(r, 1, "u1" as any)).toBe(false);
+    expect(canPlayerRoll(r, 1, u1)).toBe(false);
   });
 
   test("player owner gating", () => {
-    const p = buildPendingRoll({ kind: "attack", initiator: init as any, target: target as any, formula: "1d20+7", dc: null, modifiers: [], turnNumber: 3 } as any);
-    expect(canPlayerRoll(p, 3, "u1" as any, ["u1" as any])).toBe(true);
-    expect(canPlayerRoll(p, 3, "u2" as any, ["u1" as any])).toBe(false);
-    expect(canPlayerRoll(p, 3, "u1" as any, [] as any)).toBe(false);
+    const p = buildPendingRoll({
+      kind: "attack",
+      initiator: init,
+      target,
+      formula: "1d20+7",
+      dc: null,
+      modifiers: [],
+      turnNumber: 3,
+    });
+    expect(canPlayerRoll(p, 3, u1, [u1])).toBe(true);
+    expect(canPlayerRoll(p, 3, u2, [u1])).toBe(false);
+    expect(canPlayerRoll(p, 3, u1, [])).toBe(false);
   });
 
   test("isPlayerOwned helper", () => {
@@ -71,19 +107,37 @@ describe("pendingRoll: build + window", () => {
   });
 
   test("pendingPruneOps generates ops for expired pending only", () => {
-    const a = buildPendingRoll({ kind: "save", initiator: init as any, target: target as any, formula: "1d20+5", dc: 17, modifiers: [], turnNumber: 1 } as any);
-    const b = buildPendingRoll({ kind: "attack", initiator: init as any, target: target as any, formula: "1d20+7", dc: null, modifiers: [], turnNumber: 10 } as any);
+    const a = buildPendingRoll({
+      kind: "save",
+      initiator: init,
+      target,
+      formula: "1d20+5",
+      dc: 17,
+      modifiers: [],
+      turnNumber: 1,
+    });
+    const b = buildPendingRoll({
+      kind: "attack",
+      initiator: init,
+      target,
+      formula: "1d20+7",
+      dc: null,
+      modifiers: [],
+      turnNumber: 10,
+    });
     const ops = pendingPruneOps(
       [
-        { _id: "m1" as any, system: { pendingRoll: a } },
-        { _id: "m2" as any, system: { pendingRoll: b } },
-        { _id: "m3" as any, system: {} },
+        { _id: "m1", system: { pendingRoll: a } },
+        { _id: "m2", system: { pendingRoll: b } },
+        { _id: "m3", system: {} },
       ],
       5,
     );
     // a turn 1 expires 3 -> expired at 5, b turn 10 expires 12 -> not
     expect(ops.length).toBe(1);
-    expect((ops[0] as any).ref.id).toBe("m1");
+    const only = ops[0];
+    if (only?.kind !== "update") throw new Error("expected update op");
+    expect(only.ref.id).toBe("m1");
   });
 });
 
@@ -110,20 +164,20 @@ describe("pendingRoll: shouldDeferToPlayer", () => {
     ).toBe(false);
   });
   test("savesChecksAuto: only attack pending", () => {
-    const ws = { playerPendingRollMode: "savesChecksAuto" } as any;
+    const ws: CoreWorldSettings = { playerPendingRollMode: "savesChecksAuto" };
     expect(shouldDeferToPlayer({ kind: "attack", targetIsPlayerOwned: true, worldSettings: ws })).toBe(true);
     expect(shouldDeferToPlayer({ kind: "save", targetIsPlayerOwned: true, worldSettings: ws })).toBe(false);
     expect(shouldDeferToPlayer({ kind: "concentration", targetIsPlayerOwned: true, worldSettings: ws })).toBe(false);
     expect(shouldDeferToPlayer({ kind: "check", targetIsPlayerOwned: true, worldSettings: ws })).toBe(false);
   });
   test("manual: all kinds pending for player", () => {
-    const ws = { playerPendingRollMode: "manual" } as any;
+    const ws: CoreWorldSettings = { playerPendingRollMode: "manual" };
     for (const kind of ["attack", "save", "check", "concentration"] as const) {
       expect(shouldDeferToPlayer({ kind, targetIsPlayerOwned: true, worldSettings: ws })).toBe(true);
     }
   });
   test("default is savesChecksAuto", () => {
-    expect(playerPendingRollModeOf({} as any)).toBe("savesChecksAuto");
+    expect(playerPendingRollModeOf({})).toBe("savesChecksAuto");
     expect(shouldDeferToPlayer({ kind: "attack", targetIsPlayerOwned: true, worldSettings: {} })).toBe(true);
     expect(shouldDeferToPlayer({ kind: "save", targetIsPlayerOwned: true, worldSettings: {} })).toBe(false);
   });
@@ -131,7 +185,7 @@ describe("pendingRoll: shouldDeferToPlayer", () => {
 
 describe("worldSettings: playerPendingRollMode validation", () => {
   test("accepts three strings", () => {
-    for (const v of ["auto", "savesChecksAuto", "manual"]) {
+    for (const v of ["auto", "savesChecksAuto", "manual"] as const) {
       const r = validateWorldSettingsPatch({ playerPendingRollMode: v });
       expect(r.ok).toBe(true);
     }
@@ -143,10 +197,12 @@ describe("worldSettings: playerPendingRollMode validation", () => {
   });
   test("worldSettingsOps round-trip", () => {
     const ops = worldSettingsOps([], { playerPendingRollMode: "manual" });
-    expect(ops[0]?.kind).toBe("create");
-    const doc = (ops[0] as any).data;
+    const first = ops[0];
+    expect(first?.kind).toBe("create");
+    if (first?.kind !== "create") throw new Error("expected create op");
+    const doc = first.data as unknown as { system: CoreWorldSettings & Record<string, unknown> };
     expect(doc.system.playerPendingRollMode).toBe("manual");
-    const merged = worldSettingsFrom([doc]);
+    const merged = worldSettingsFrom([doc] as unknown as Parameters<typeof worldSettingsFrom>[0]);
     expect(playerPendingRollModeOf(merged)).toBe("manual");
   });
 });

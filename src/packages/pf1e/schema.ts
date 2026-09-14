@@ -64,6 +64,12 @@ export const PF1eCondition = {
    * see PF1e_Combat_Fidelity_GapList.md §2.13 for the bits that still collide.
    */
   UNCONSCIOUS: 1 << 11,
+  /**
+   * Nonlethal damage exactly equal to current HP ⇒ staggered (SRD A.13/§2.12): a single
+   * move or standard action per turn. At the mass-battle grain this caps the attack routine
+   * at one attack (combatEngine); exceeding the HP total replaces this with UNCONSCIOUS.
+   */
+  STAGGERED: 1 << 12,
 } as const;
 
 /** DR Type Bitfield Flags for Material/Type Bypass */
@@ -99,6 +105,12 @@ export interface RawPF1eProfile {
   wisMod?: number;
   chaMod?: number;
   sizeMod?: number;
+  /**
+   * The *special* size modifier for CMB/CMD ladders (Table 8-4: Small −1, Large +1, Huge +2,
+   * opposite sign to the attack/AC ladder). Defaults to `sizeMod`; stat blocks that publish
+   * both ladders author it explicitly so CMB/CMD and attack rolls can never disagree by sign.
+   */
+  specialSizeMod?: number;
   ac?: number;
   touchAc?: number;
   /** Flat-footed AC; derived from the breakdown below (or from `ac`) when omitted. */
@@ -142,6 +154,25 @@ export interface RawPF1eProfile {
     damageType?: "slashing" | "piercing" | "bludgeoning";
     elementalType?: number; // PF1eDamageType flag
     isMagic?: boolean;
+    /** §2.6 — ranged attacks add Dexterity to the roll, not Strength (firearms count as ranged). */
+    isRanged?: boolean;
+    /** Thrown weapon: max 5 range increments (CRB: Equipment > Weapon Categories > Ranged); damage still uses Strength. */
+    isThrown?: boolean;
+    /** Explicit max range increments; default reflects the weapon class (early firearm 5, advanced 10, thrown 5, projectile 10). */
+    maxIncrements?: number;
+    /** §2.7 — Strength share of the damage bonus: "two" is 1.5x, "offHand" is 0.5x (penalty not halved). */
+    handedness?: "one" | "light" | "two" | "offHand";
+    /** §2.5 — Improved Critical / keen edge doubles the threat range. */
+    improvedCritical?: boolean;
+    /**
+     * §2.4 — bonus dice (flaming 1d6, sneak attack 1d6s, ...): rolled ONCE, never multiplied
+     * on a critical hit, and never reduced by DR (energy dice are not weapon damage; precision
+     * damage is named DR-proof by the Crowding/"Overcoming DR" text). `precision` labels the
+     * dice for readability; both kinds bypass DR at this scale.
+     */
+    bonusDice?: { count: number; sides: number; typeFlags?: number; precision?: boolean };
+    /** §2.10 — weapon alignment bits for DR/<alignment>: 1 good, 2 evil, 4 lawful, 8 chaotic. */
+    alignmentFlags?: number;
   };
   dr?: {
     typeFlags?: number;
@@ -173,6 +204,16 @@ export interface PF1eUnitProfile {
   damageType: "slashing" | "piercing" | "bludgeoning";
   elementalType: number;
   isMagic: boolean;
+  isRanged: boolean;
+  isThrown: boolean;
+  /** Cap on usable range increments; 0 means "not limited" (melee). */
+  maxIncrements: number;
+  handedness: "one" | "light" | "two" | "offHand";
+  bonusDamageCount: number;
+  bonusDamageSides: number;
+  bonusDamageTypeFlags: number;
+  bonusDamagePrecision: boolean;
+  weaponAlignmentFlags: number;
   drTypeFlags: number;
   drVal: number;
   sr: number;
@@ -198,24 +239,47 @@ export interface PF1eUnitProfile {
   trampleDamageDiceSides: number;
 }
 
+/**
+ * §2.7 — Strength's share of the damage bonus by weapon grip. CRB "Damage": two-handed
+ * weapons add 1.5x the Strength modifier; off-hand (light) attacks add half; Strength
+ * *penalties* always apply in full. Ranged weapons add nothing unless thrown.
+ */
+function strengthDamageShare(
+  strMod: number,
+  weapon: RawPF1eProfile["weapon"],
+): number {
+  const v = Math.floor(strMod);
+  if (weapon?.isRanged && !weapon?.isThrown) return 0;
+  const grip = weapon?.handedness ?? "one";
+  if (grip === "two") return v >= 0 ? Math.floor(v * 1.5) : v;
+  if (grip === "offHand") return v >= 0 ? Math.floor(v / 2) : v;
+  return v;
+}
+
 export function compilePF1eProfile(id: number, raw: RawPF1eProfile): PF1eUnitProfile {
   const bab = raw.bab ?? 1;
   const strMod = raw.strMod ?? 0;
   const dexMod = raw.dexMod ?? 0;
   const conMod = raw.conMod ?? 2;
   const sizeMod = raw.sizeMod ?? 0;
-  
-  // Calculate iterative attack bonuses (e.g. BAB 11 -> [11, 6, 1])
+
+  // §2.6 — per-weapon attack ability: ranged (firearms included) uses Dexterity, melee uses
+  // Strength; the attack/AC size modifier applies to every attack roll. Previously the ladder
+  // always baked BAB+Str and ignored size, so Small unit bonuses and Large unit penalties never
+  // reached the die.
+  const usesDexToHit = (raw.weapon?.isRanged ?? false) || (raw.weapon?.isFirearm ?? false);
+  const toHitAbility = usesDexToHit ? dexMod : strMod;
   const iteratives: number[] = [];
   let currentBab = bab;
   while (currentBab > 0) {
-    iteratives.push(currentBab + strMod);
+    iteratives.push(currentBab + toHitAbility + sizeMod);
     currentBab -= 5;
   }
-  if (iteratives.length === 0) iteratives.push(strMod);
+  if (iteratives.length === 0) iteratives.push(toHitAbility + sizeMod);
 
-  const calculatedCmb = raw.cmb ?? (bab + strMod + sizeMod);
-  const calculatedCmd = raw.cmd ?? (10 + bab + strMod + dexMod + sizeMod);
+  const specialSizeMod = raw.specialSizeMod ?? sizeMod;
+  const calculatedCmb = raw.cmb ?? (bab + strMod + specialSizeMod);
+  const calculatedCmd = raw.cmd ?? (10 + bab + strMod + dexMod + specialSizeMod);
 
   // --- Armor Class composition (SRD: Combat Statistics > Armor Class) ---------------
   // With an equipment breakdown all three ACs are derived so they can never disagree;
@@ -253,8 +317,20 @@ export function compilePF1eProfile(id: number, raw: RawPF1eProfile): PF1eUnitPro
     iteratives,
     damageDiceCount: raw.weapon?.damageDiceCount ?? 1,
     damageDiceSides: raw.weapon?.damageDiceSides ?? 6,
-    damageMod: (raw.weapon?.damageMod ?? 0) + strMod,
-    critThreatMin: raw.weapon?.critThreatMin ?? 20,
+    // §2.7 — the Strength share follows the weapon's handedness (1.5x two-handed, 0.5x
+    // off-hand, Strength penalties applied in full), and the weapon's enhancement bonus
+    // adds to damage as well as to the roll. `raw.weapon.damageMod` is any *other*
+    // published bonus (composite bow rating, specialization, ...).
+    damageMod:
+      (raw.weapon?.damageMod ?? 0) +
+      strengthDamageShare(strMod, raw.weapon) +
+      (raw.weapon?.enhancementBonus ?? 0),
+    // §2.5 — threat range is weapon data; Improved Critical / keen doubles it.
+    critThreatMin: raw.weapon?.improvedCritical
+      ? // Threat width is (21 − min) natural rolls; doubling the width raises the floor
+        // symmetric to the SRD table (20→19–20, 19–20→17–20, 18–20→15–20).
+        Math.max(1, 21 - 2 * (21 - (raw.weapon?.critThreatMin ?? 20)))
+      : (raw.weapon?.critThreatMin ?? 20),
     critMultiplier: raw.weapon?.critMultiplier ?? 2,
     isFirearm: raw.weapon?.isFirearm ?? false,
     isEarlyFirearm: raw.weapon?.isEarlyFirearm ?? true,
@@ -265,6 +341,17 @@ export function compilePF1eProfile(id: number, raw: RawPF1eProfile): PF1eUnitPro
     damageType: raw.weapon?.damageType ?? "slashing",
     elementalType: raw.weapon?.elementalType ?? PF1eDamageType.NONE,
     isMagic: raw.weapon?.isMagic ?? ((raw.weapon?.enhancementBonus ?? 0) > 0),
+    isRanged: (raw.weapon?.isRanged ?? false) || (raw.weapon?.isFirearm ?? false),
+    isThrown: raw.weapon?.isThrown ?? false,
+    maxIncrements:
+      raw.weapon?.maxIncrements ??
+      (raw.weapon?.isFirearm ? (raw.weapon?.isEarlyFirearm === false ? 10 : 5) : raw.weapon?.isThrown ? 5 : 10),
+    handedness: raw.weapon?.handedness ?? "one",
+    bonusDamageCount: raw.weapon?.bonusDice?.count ?? 0,
+    bonusDamageSides: raw.weapon?.bonusDice?.sides ?? 0,
+    bonusDamageTypeFlags: raw.weapon?.bonusDice?.typeFlags ?? PF1eDamageType.NONE,
+    bonusDamagePrecision: raw.weapon?.bonusDice?.precision ?? false,
+    weaponAlignmentFlags: raw.weapon?.alignmentFlags ?? 0,
     drTypeFlags: raw.dr?.typeFlags ?? PF1eDrType.NONE,
     drVal: raw.dr?.val ?? 0,
     sr: raw.sr ?? 0,
@@ -411,7 +498,11 @@ export const PRECREATED_PF1E_UNITS: Record<string, RawPF1eProfile> = {
     name: "Heavy Cavalry",
     bab: 8,
     strMod: 4,
-    sizeMod: 1,
+    // D-227/M01: the size modifier is the SRD-signed attack/AC ladder (Large −1). The
+    // combat-maneuver numbers ride the *special* ladder (Large +1) and stay pinned at the
+    // previously-authored values so the measured fixtures do not move twice.
+    sizeMod: -1,
+    specialSizeMod: 1,
     ac: 18,
     touchAc: 11,
     hasTrample: true,
@@ -423,10 +514,14 @@ export const PRECREATED_PF1E_UNITS: Record<string, RawPF1eProfile> = {
   artillery: {
     name: "Siege Bombard",
     bab: 4,
+    // A siege engine fires a ranged attack: Dexterity (0) to hit — the old +1 Strength was an
+    // artifact of the melee-only compile (measured fixture change: +5 → +4); the crew's +1
+    // damage stays authored so the total damage line is unchanged.
     strMod: 1,
+    dexMod: 0,
     ac: 12,
     touchAc: 8,
-    weapon: { damageDiceCount: 3, damageDiceSides: 6, rangeIncrement: 100 },
+    weapon: { damageDiceCount: 3, damageDiceSides: 6, rangeIncrement: 100, isRanged: true, damageMod: 1 },
   },
   hero: {
     name: "Paladin Hero",
@@ -442,7 +537,8 @@ export const PRECREATED_PF1E_UNITS: Record<string, RawPF1eProfile> = {
     bab: 6,
     strMod: 6,
     conMod: 4,
-    sizeMod: 1,
+    sizeMod: -1,
+    specialSizeMod: 1,
     ac: 16,
     touchAc: 10,
     regenerationVal: 5,
@@ -453,7 +549,8 @@ export const PRECREATED_PF1E_UNITS: Record<string, RawPF1eProfile> = {
     name: "Clay Golem",
     bab: 9,
     strMod: 7,
-    sizeMod: 1,
+    sizeMod: -1,
+    specialSizeMod: 1,
     ac: 22,
     touchAc: 9,
     dr: { typeFlags: PF1eDrType.ADAMANTINE, val: 10 },

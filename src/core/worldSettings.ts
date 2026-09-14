@@ -198,6 +198,20 @@ export function validateWorldSettingsPatch(patch: Record<string, unknown>): {
         };
       }
     }
+    // G-04/D-223 — Combat_Resolver_5 fidelity mode toggles.
+    if (
+      key === "strategicDoctrine" ||
+      key === "strategicEnvelop" ||
+      key === "strategicArmyInitiative"
+    ) {
+      if (typeof value !== "boolean") {
+        return {
+          ok: false,
+          error: `${key} must be a boolean`,
+          clean: {},
+        };
+      }
+    }
     if (key === "playerPendingRollMode") {
       if (
         value !== "auto" &&

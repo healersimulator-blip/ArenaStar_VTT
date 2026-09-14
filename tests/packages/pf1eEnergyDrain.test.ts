@@ -28,7 +28,7 @@ describe("D-207 — inflictNegativeLevels", () => {
   test("validates count and kind", () => {
     expect(inflictNegativeLevels({ current: undefined, count: 0, kind: "temporary" })).toMatchObject({ ok: false });
     expect(inflictNegativeLevels({ current: undefined, count: 1.5, kind: "temporary" })).toMatchObject({ ok: false });
-    expect(inflictNegativeLevels({ current: undefined, count: 1, kind: "permanent" as any })).toEqual(expect.objectContaining({ ok: true }));
+    expect(inflictNegativeLevels({ current: undefined, count: 1, kind: "permanent" })).toEqual(expect.objectContaining({ ok: true }));
     // @ts-expect-error intentional bad kind
     expect(inflictNegativeLevels({ current: undefined, count: 1, kind: "foo" }).ok).toBe(false);
   });

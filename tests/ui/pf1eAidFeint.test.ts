@@ -1,9 +1,8 @@
 import { describe, expect, test } from "vitest";
 import type { ActorDocument } from "../../src/core/documents";
-import type { Json } from "../../src/core/documents";
 import { planAidAnother, planFeint } from "../../src/ui/combat/pf1eAidFeint";
 
-function actor(id: string, name: string, _pf1e: Record<string, Json> = {}): ActorDocument {
+function actor(id: string, name: string): ActorDocument {
   return {
     _id: id,
     type: "actor",

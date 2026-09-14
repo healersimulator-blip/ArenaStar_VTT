@@ -5,6 +5,7 @@
  */
 import type { FactionDocument, ModelPool } from "../core/strategic";
 import type { DocId } from "../core/ids";
+import type { Json } from "../core/documents";
 import type { SimDelta, SimEvent, TurnReport } from "../core/sim";
 import type { SysSchema } from "../sim/pool";
 import { projectSimDelta } from "../sim/codec";
@@ -94,6 +95,7 @@ export function makeUnitVisibility(
 export function projectReportForFaction(
   report: TurnReport,
   isVisible: (unitId: DocId) => boolean,
+  visibleArmies?: ReadonlySet<DocId>,
 ): TurnReport {
   const events = report.events.map((e) => {
     const subjectVisible = e.unitId !== "" && isVisible(e.unitId);
@@ -117,6 +119,27 @@ export function projectReportForFaction(
     }
     return e;
   });
+  // M12 (D-224): the analytics sheet in the summary is per-army — a player's
+  // projection keeps only the armies it can see (anything with a visible
+  // unit), never the enemy's exact losses. GM reports are never projected.
+  if (visibleArmies !== undefined) {
+    const raw = report.summary["analytics"];
+    if (
+      typeof raw === "object" &&
+      raw !== null &&
+      !Array.isArray(raw)
+    ) {
+      const filtered: Record<string, Json> = {};
+      for (const [armyId, data] of Object.entries(raw)) {
+        if (visibleArmies.has(armyId)) filtered[armyId] = data;
+      }
+      return {
+        ...report,
+        events,
+        summary: { ...report.summary, analytics: filtered },
+      };
+    }
+  }
   return { ...report, events };
 }
 

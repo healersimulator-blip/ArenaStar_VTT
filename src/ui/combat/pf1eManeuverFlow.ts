@@ -26,7 +26,7 @@ import type { PermissionUser } from "../../core/ownership";
 import type { Op } from "../../core/ops";
 import { deriveFromDocuments, type PF1eDerived } from "../../packages/pf1e/actor";
 import { combinedTacticalEffects } from "../../packages/pf1e/effectOps";
-import { isFlatFootedByRound, readCombatantState, spendCombatantAction } from "../../packages/pf1e/combatState";
+import { isFlatFootedByRound, spendCombatantAction } from "../../packages/pf1e/combatState";
 
 import {
   pf1eBullRush,
@@ -71,9 +71,8 @@ import { pendingRollCreateOp } from "./pf1ePendingRollFlow";
 import { isPlayerOwned } from "../../packages/pf1e/pendingRoll";
 import { worldSettingsFrom } from "../../core/worldSettings";
 
-export interface ManeuverFlowClient extends ResolveFlowClient {
-  // same as ResolveFlowClient — roll, rollVerified, store, submit
-}
+export type ManeuverFlowClient = ResolveFlowClient;
+
 
 export type ManeuverFlowKind = PF1eManeuverKind | "grapple-maintain" | "grapple-pin" | "grapple-tie-up" | "grapple-escape" | "grapple-move" | "grapple-damage" | "sunder";
 
@@ -188,13 +187,18 @@ export async function resolveManeuverFlow(
   const defenderCombatantId = combatantIdForActor(params.combat ?? null, defender._id);
   const attackerDerived = derivedFor(attacker, params.combat ?? null, attackerCombatantId);
   const defenderDerived = derivedFor(defender, params.combat ?? null, defenderCombatantId);
-  const defenderFlat = params.combat && defenderCombatantId ? isFlatFootedByRound(params.combat, params.combat.combatants.find((c) => c._id === defenderCombatantId)!).flatFooted : false;
+  const defenderCombatant = params.combat && defenderCombatantId !== null
+    ? params.combat.combatants.find((c) => c._id === defenderCombatantId)
+    : undefined;
+  const defenderFlat = defenderCombatant && params.combat ? isFlatFootedByRound(params.combat, defenderCombatant).flatFooted : false;
   const defenderCmd = defenderFlat ? defenderDerived.cmdFlatFooted : defenderDerived.cmd;
   const attackerCmb = attackerDerived.cmb;
+  const attackerCombatant = params.combat && attackerCombatantId !== null
+    ? params.combat.combatants.find((c) => c._id === attackerCombatantId)
+    : undefined;
 
   // Action budget: maneuvers are standard actions (or as part of attack). Spend standard when we can.
-  if (params.combat && attackerCombatantId) {
-    const ledger = readCombatantState(params.combat.combatants.find((c) => c._id === attackerCombatantId)!).actions;
+  if (params.combat && attackerCombatantId !== null) {
     // Only spend if the encounter is a PF1e encounter (has a PF1e actor). Otherwise the ledger is not PF1e.
     const hasPf1e = params.combat.combatants.some((c) => {
       const a = c.actorId ? [attacker, defender].find((x) => x._id === c.actorId) : undefined;
@@ -210,7 +214,6 @@ export async function resolveManeuverFlow(
         client.submit([{ kind: "update", ref: { coll: "combats", id: params.combat._id }, diff: { combatants: spend.value.combatants } as unknown as Record<string, unknown> } as Op]);
       }
     }
-    void ledger;
   }
 
   // AoO handling: if the maneuver provokes (no Improved) and the defender can AoO, resolve it first.
@@ -236,7 +239,7 @@ export async function resolveManeuverFlow(
           const damageFormula = line.damageDice ? `${line.damageDice} + ${line.damageBonus}` : "1d3";
           const critFormula: string | null = null;
           // Flat-footed attacker?
-          const attackerFlat = params.combat && attackerCombatantId ? isFlatFootedByRound(params.combat, params.combat.combatants.find((c) => c._id === attackerCombatantId)!).flatFooted : false;
+          const attackerFlat = params.combat && attackerCombatant ? isFlatFootedByRound(params.combat, attackerCombatant).flatFooted : false;
           const defense: "normal" | "flatFooted" = attackerFlat ? "flatFooted" : "normal";
           const outcome = await resolveAttackFlow(client, user, {
             attackerName: defender.name,
@@ -319,7 +322,42 @@ export async function resolveManeuverFlow(
         return { ok: true, plan: pendingPlan, aooDamage, cardId: (pendingOpM as unknown as { data: { _id: string } }).data._id };
       }
     }
-  } catch {}
+  } catch {
+    // A failed pending-card branch falls back to the inline roll below.
+  }
+
+  // grapple-pin rides the successful maintain check (AoN 191) — there is NO
+  // separate pin die, so this flow rolls nothing for pin and posts an honest
+  // narrative card instead of a fabricated [[0]] check line and a wasted d20.
+  if (kind === "grapple-pin") {
+    const g = params.grappleOpts;
+    if (g?.maintainSuccess !== true) return { ok: false, error: "grapple pin requires a successful maintain" };
+    const res = pf1eGrapplePin({ maintainSuccess: true });
+    if (!res.ok) return { ok: false, error: res.error };
+    const p = planGrapplePin({ attacker, defender, maintainSuccess: true });
+    if (!p.ok) return { ok: false, error: p.error };
+    const lines = [
+      `${attacker.name} maintains the grapple and pins ${defender.name}.` +
+        (aooDamage !== null && aooDamage > 0 ? ` (${aooDamage} damage taken to the attack of opportunity on the way in)` : ""),
+    ];
+    for (const n of res.notes) lines.push(n);
+    const pinCard: MessageDocument = {
+      _id: globalThis.crypto.randomUUID(),
+      type: "message",
+      name: `${attacker.name} — grapple-pin`.slice(0, 40),
+      ownership: { default: 1 },
+      flags: {},
+      system: {},
+      author: user?.id ?? "",
+      content: lines.join("\n"),
+      whisper: [],
+      roll: null,
+      flavor: "maneuver resolution",
+    };
+    client.submit([{ kind: "create", coll: "messages", data: pinCard }]);
+    if (p.plan.ops.length > 0) client.submit(p.plan.ops);
+    return { ok: true, plan: p.plan, aooDamage, cardId: pinCard._id };
+  }
 
   const die = await rollOne("1d20", `${kind} maneuver`);
   if (die === null) return { ok: false, error: "maneuver die roll did not arrive" };
@@ -348,9 +386,11 @@ export async function resolveManeuverFlow(
     ...(concealmentDie !== null ? { concealmentDie } : {}),
   } as Omit<PF1eManeuverCheckInput, "kind">;
 
-  // Dispatch to the correct pure consumer and planner
-  let plan: PF1eManeuverPlan | null = null;
-  let checkForCard: { total: number; cmdEffective: number; margin: number; success: boolean; notes: readonly string[] } | null = null;
+  // Dispatch to the correct pure consumer and planner — every dispatch branch
+  // either assigns both bindings or returns a failure, so they are definitely
+  // assigned when the final block runs.
+  let plan: PF1eManeuverPlan;
+  let checkForCard: { total: number; cmdEffective: number; margin: number; success: boolean; notes: readonly string[] };
 
   const attackerName = attacker.name;
   const defenderName = defender.name;
@@ -484,16 +524,6 @@ export async function resolveManeuverFlow(
     if (!p.ok) return { ok: false, error: p.error };
     plan = p.plan;
     checkForCard = { total: res.check.total, cmdEffective: res.check.cmdEffective, margin: res.check.margin, success: res.success, notes: res.notes };
-  } else if (kind === "grapple-pin") {
-    const g = params.grappleOpts;
-    if (g?.maintainSuccess !== true) return { ok: false, error: "grapple pin requires a successful maintain" };
-    const res = pf1eGrapplePin({ maintainSuccess: true });
-    if (!res.ok) return { ok: false, error: res.error };
-    const p = planGrapplePin({ attacker, defender, maintainSuccess: true });
-    if (!p.ok) return { ok: false, error: p.error };
-    plan = p.plan;
-    // Pin has no check, so we fake a card header from the maintain's context
-    checkForCard = { total: 0, cmdEffective: defenderCmd, margin: 0, success: true, notes: res.notes };
   } else if (kind === "grapple-tie-up") {
     const g = params.grappleOpts;
     if (g?.targetPinnedOrRestrainedOrUnconscious !== true) return { ok: false, error: "tie up requires pinned/restrained/unconscious" };
@@ -551,7 +581,6 @@ export async function resolveManeuverFlow(
     return { ok: false, error: `unsupported maneuver kind: ${kind}` };
   }
 
-  if (!plan || !checkForCard) return { ok: false, error: "maneuver produced no plan" };
   const cardId = post(plan, checkForCard);
   return { ok: true, plan, aooDamage, cardId };
 }

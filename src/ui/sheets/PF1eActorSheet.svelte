@@ -87,7 +87,6 @@
     type PF1eMountMovement,
   } from "../../packages/pf1e/mounted";
   import { firearmShotAmmo, FIREARM_EXPLOSION_DC, FIREARM_EXPLOSION_RADIUS_FT, firearmExplosionSquares, quickClearReloadCost, firearmReloadEntry } from "../../packages/pf1e/firearms";
-  import { firearmReloadOpportunity } from "./pf1eResolveFlow";
   import type {
     ActorDocument,
     CombatDocument,
@@ -617,6 +616,9 @@
       diff[`system.pf1e.attacks.${resolveAttackIndex}.firearm.loaded`] = capacity as unknown as import("../../core/documents").Json;
       pending.add(client.submit([{ kind: "update", ref: { coll: "actors", id: current._id }, diff }]));
       firearmNote = firearmNote ? `${firearmNote} · Reloaded ${line.name} to ${capacity}/${capacity} — ${reloadEntry ? `${reloadEntry.category} action, provokes ${reloadEntry.provokes}` : "move action, provokes"} (UC p.135 §2.9).` : `Reloaded ${line.name} to ${capacity}/${capacity} — ${reloadEntry ? `${reloadEntry.category} action, provokes ${reloadEntry.provokes}` : "move action, provokes"} (UC p.135 §2.9).`;
+      // The rejected attack's premise (0 loaded) no longer holds — clear the
+      // stale refusal so the resolve panel doesn't contradict the 1/1 read-out.
+      resolveError = "";
     } finally { firearmBusy = false; }
   }
   async function doFirearmClear(): Promise<void> {

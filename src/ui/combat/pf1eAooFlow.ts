@@ -534,7 +534,7 @@ async function resolveQueuedInterrupts(
       const defer = shouldDeferToPlayer({ kind: "attack", targetIsPlayerOwned: reactorIsPlayerOwned, worldSettings, isStrategic: false });
       if (defer) {
         let atkBonus = 0;
-        const m = group.attack.formula.match(/([+\-])\s*(\d+)/);
+        const m = group.attack.formula.match(/([+-])\s*(\d+)/);
         if (m) atkBonus = (m[1] === "+" ? 1 : -1) * Number(m[2]);
         pendingOp = pendingRollCreateOp({
           kind: "attack",
@@ -550,7 +550,9 @@ async function resolveQueuedInterrupts(
           isStrategic: false,
         });
       }
-    } catch {}
+    } catch {
+      // Deferral probe failed: fall back to the immediate GM-side resolve below.
+    }
     if (pendingOp !== null) {
       let ledgerError: string | null = null;
       let used: number | null = null;

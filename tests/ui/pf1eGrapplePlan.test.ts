@@ -4,6 +4,7 @@
  */
 import { describe, expect, test } from "vitest";
 import type { ActorDocument } from "../../src/core/documents";
+import type { Op } from "../../src/core/ops";
 import {
   planGrapple,
   planGrappleDamage,
@@ -14,6 +15,16 @@ import {
   planGrappleRelease,
   planGrappleTieUp,
 } from "../../src/ui/combat/pf1eManeuver";
+
+type UpdateOp = Extract<Op, { kind: "update" }>;
+
+const updateOpFor = (ops: readonly Op[], id: string): UpdateOp | undefined =>
+  ops.find((op): op is UpdateOp => op.kind === "update" && op.ref.id === id);
+
+const conditionsOf = (op: UpdateOp | undefined): string[] => {
+  const raw = op?.diff["system.pf1e.conditions"];
+  return Array.isArray(raw) ? (raw as string[]) : [];
+};
 
 const actorWithConditions = (id: string, conditions: string[] = []): ActorDocument =>
   ({
@@ -48,7 +59,8 @@ describe("D-209 — planGrapple writes Grappled to both", () => {
     const att2 = actorWithConditions("Attacker2", ["Grappled"]);
     const def2 = actorWithConditions("Defender2", ["Grappled"]);
     const r2 = planGrapple({ attacker: att2, defender: def2, check: baseCheck, targetAdjacent: true });
-    expect(r2.ok && (r2 as any).plan.ops.length).toBe(0);
+    if (!r2.ok) throw new Error("expected planner success");
+    expect(r2.plan.ops.length).toBe(0);
   });
 
   test("non-adjacent with no space fails with no ops", () => {
@@ -70,9 +82,9 @@ describe("D-209 — planGrapplePin replaces Grappled with Pinned", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) throw new Error("fail");
     // Find defender op
-    const defOp = r.plan.ops.find((op: any) => op.ref.id === "Defender");
+    const defOp = updateOpFor(r.plan.ops, "Defender");
     expect(defOp).toBeDefined();
-    const defDiff = (defOp as any).diff["system.pf1e.conditions"] as string[];
+    const defDiff = conditionsOf(defOp);
     expect(defDiff).toContain("Pinned");
     expect(defDiff.some((c) => c.toLowerCase() === "grappled")).toBe(false);
     expect(r.plan.note).toContain("pinned condition");
@@ -116,8 +128,8 @@ describe("D-209 — planGrappleEscape break vs reverse", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) throw new Error("fail");
     expect(r.plan.ops.length).toBe(2);
-    const escOp = r.plan.ops.find((op: any) => op.ref.id === "Escaper");
-    const escConds = (escOp as any).diff["system.pf1e.conditions"] as string[];
+    const escOp = updateOpFor(r.plan.ops, "Escaper");
+    const escConds = conditionsOf(escOp);
     expect(escConds.length).toBe(0);
   });
 
@@ -129,9 +141,9 @@ describe("D-209 — planGrappleEscape break vs reverse", () => {
     if (!r.ok) throw new Error("fail");
     // Should have ops (escaper Pinned -> Grappled, grappler already Grappled)
     expect(r.plan.note).toContain("become the grappler");
-    const escOp = r.plan.ops.find((op: any) => op.ref.id === "Escaper");
+    const escOp = updateOpFor(r.plan.ops, "Escaper");
     if (escOp) {
-      const conds = (escOp as any).diff["system.pf1e.conditions"] as string[];
+      const conds = conditionsOf(escOp);
       expect(conds).toContain("Grappled");
       expect(conds.some((c) => c.toLowerCase() === "pinned")).toBe(false);
     }
@@ -154,8 +166,8 @@ describe("D-209 — planGrappleRelease", () => {
     const def = actorWithConditions("D", ["Pinned"]);
     const r = planGrappleRelease({ attacker: att, defender: def });
     expect(r.plan.ops.length).toBe(2);
-    const defOp = r.plan.ops.find((op: any) => op.ref.id === "D");
-    expect((defOp as any).diff["system.pf1e.conditions"].length).toBe(0);
+    const defOp = updateOpFor(r.plan.ops, "D");
+    expect(conditionsOf(defOp).length).toBe(0);
   });
   test("already clear => no ops but note", () => {
     const att = actorWithConditions("A", []);

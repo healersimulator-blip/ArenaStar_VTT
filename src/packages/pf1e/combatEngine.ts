@@ -154,33 +154,39 @@ export function getModelDistance(pool: ModelPool, idxA: number, idxB: number): n
   return Math.hypot(xB - xA, yB - yA);
 }
 
-/** Check if weapon material/enhancement/type bypasses defender's DR */
+/**
+ * Does the weapon bypass the defender's DR? CRB "Overcoming DR": magic by any +1, cold iron
+ * and silver by +3, adamantine by +4, alignment by +5 (or by a weapon that *is* aligned —
+ * `alignmentFlags` nonzero), the physical-type rows by matching damage type. §2.10 fixes:
+ * compound forms (DR/magic and cold iron) now require EVERY listed quality — the old
+ * first-match OR treated "magic and cold iron" as satisfied by either half alone.
+ * `/epic` has no entry: there is no mythic content at either scale and the u8 flag byte is
+ * full, so the form is refused rather than approximated (DEVIATIONS).
+ */
 export function isDrBypassed(
   enhancement: number,
   material: "cold_iron" | "silver" | "adamantine" | "none",
   damageType: "slashing" | "piercing" | "bludgeoning",
-  drTypeFlags: number
+  drTypeFlags: number,
+  alignmentFlags = 0,
 ): boolean {
   if (drTypeFlags === PF1eDrType.NONE) return false;
 
-  // Magic DR bypass (+1 enhancement)
-  if ((drTypeFlags & PF1eDrType.MAGIC) !== 0 && enhancement >= 1) return true;
+  const unmet: Array<() => boolean> = [];
+  if ((drTypeFlags & PF1eDrType.MAGIC) !== 0) unmet.push(() => enhancement >= 1);
+  if ((drTypeFlags & PF1eDrType.COLD_IRON) !== 0)
+    unmet.push(() => material === "cold_iron" || enhancement >= 3);
+  if ((drTypeFlags & PF1eDrType.SILVER) !== 0)
+    unmet.push(() => material === "silver" || enhancement >= 3);
+  if ((drTypeFlags & PF1eDrType.ADAMANTINE) !== 0)
+    unmet.push(() => material === "adamantine" || enhancement >= 4);
+  if ((drTypeFlags & PF1eDrType.SLASHING) !== 0) unmet.push(() => damageType === "slashing");
+  if ((drTypeFlags & PF1eDrType.PIERCING) !== 0) unmet.push(() => damageType === "piercing");
+  if ((drTypeFlags & PF1eDrType.BLUDGEONING) !== 0) unmet.push(() => damageType === "bludgeoning");
+  if ((drTypeFlags & PF1eDrType.ALIGNMENT) !== 0)
+    unmet.push(() => alignmentFlags !== 0 || enhancement >= 5);
 
-  // Cold Iron DR bypass
-  if ((drTypeFlags & PF1eDrType.COLD_IRON) !== 0 && (material === "cold_iron" || enhancement >= 3)) return true;
-
-  // Silver DR bypass
-  if ((drTypeFlags & PF1eDrType.SILVER) !== 0 && (material === "silver" || enhancement >= 3)) return true;
-
-  // Adamantine DR bypass
-  if ((drTypeFlags & PF1eDrType.ADAMANTINE) !== 0 && (material === "adamantine" || enhancement >= 4)) return true;
-
-  // Damage type bypass (Slashing / Piercing / Bludgeoning)
-  if ((drTypeFlags & PF1eDrType.SLASHING) !== 0 && damageType === "slashing") return true;
-  if ((drTypeFlags & PF1eDrType.PIERCING) !== 0 && damageType === "piercing") return true;
-  if ((drTypeFlags & PF1eDrType.BLUDGEONING) !== 0 && damageType === "bludgeoning") return true;
-
-  return false;
+  return unmet.every((check) => check());
 }
 
 export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
@@ -227,14 +233,21 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
     const atkPf = (pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined)?.[atkIdx] ?? 0;
     if ((atkStatus & ModelStatus.dead) !== 0) continue;
     if (highFidelity && (atkPf & PF1eCondition.STUNNED) !== 0) continue; // Stunned models cannot act
+    if (highFidelity && (atkPf & PF1eCondition.UNCONSCIOUS) !== 0) continue; // nor can unconscious ones (§2.12)
+    // §2.12 — staggered (nonlethal exactly equal to current HP): a single move OR standard
+    // action per turn, read at the mass-battle grain as a one-attack routine cap.
+    const staggeredCap = highFidelity && (atkPf & PF1eCondition.STAGGERED) !== 0 ? 1 : undefined;
 
     const profileId = pool.sys["profileIdx"]?.[atkIdx] ?? 1;
     const profile = registry.get(profileId);
     if (!profile) continue;
 
     let attacksTaken = 0;
+    const routineCap = opts.maxIterativeAttacks !== undefined || staggeredCap !== undefined
+      ? Math.min(opts.maxIterativeAttacks ?? Number.MAX_SAFE_INTEGER, staggeredCap ?? Number.MAX_SAFE_INTEGER)
+      : undefined;
     for (const attackBonus of profile.iteratives) {
-      if (opts.maxIterativeAttacks !== undefined && attacksTaken >= opts.maxIterativeAttacks) break;
+      if (routineCap !== undefined && attacksTaken >= routineCap) break;
       if (defIdxPtr >= defenders.length) break;
       let targetIdx = defenders[defIdxPtr] ?? 0;
 
@@ -245,28 +258,40 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
       }
       if (defIdxPtr >= defenders.length) break;
 
-      metrics.totalAttacks++;
-      attacksTaken++;
-
       const defPf = (pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined)?.[targetIdx] ?? 0;
 
       // The defender's own profile — never the attacker's — backs up missing columns.
       const defProfile = registry.get(pool.sys["profileIdx"]?.[targetIdx] ?? 0);
 
-      // Calculate Target AC with High-Fidelity Firearms & Touch AC rules
+      // §2.8 / §2.9 — one range rule for every weapon, not just firearms: −2 per full range
+      // increment beyond the first on the attack roll, touch AC only inside the firearm's
+      // class window (early: 1st increment; advanced: 5th), and no attack at all beyond the
+      // weapon's maximum increments (thrown 5, projectile 10, early firearms 5, advanced 10).
+      // Legality is checked BEFORE the attack is counted: a refused attack consumes neither
+      // a die nor the attack slot.
       let effectiveAcType: PF1eAcType = targetAcType;
       const distance = getModelDistance(pool, atkIdx, targetIdx);
       let rangePenalty = 0;
 
-      if (highFidelity && profile.isFirearm) {
-        if (distance <= profile.rangeIncrement) {
-          effectiveAcType = "touchAc"; // Touch AC within 1st range increment
-        } else if (profile.isEarlyFirearm) {
-          // Early firearms target Standard AC beyond 1st range increment with -2 per increment
-          const increments = Math.min(5, Math.ceil(distance / profile.rangeIncrement));
-          rangePenalty = (increments - 1) * 2;
+      if (highFidelity && profile.isRanged && distance > 0) {
+        const inc = profile.rangeIncrement > 0 ? profile.rangeIncrement : 1;
+        const increments = Math.ceil(distance / inc);
+        const maxInc = profile.maxIncrements > 0 ? profile.maxIncrements : 10;
+        if (increments > maxInc) {
+          // Beyond maximum range: the attack is not made (SRD: "you can't attack") — the
+          // defender is spared and the pointer moves on.
+          defIdxPtr++;
+          continue;
         }
+        if (profile.isFirearm) {
+          const touchWindow = profile.isEarlyFirearm ? 1 : 5;
+          if (increments <= touchWindow) effectiveAcType = "touchAc";
+        }
+        rangePenalty = Math.max(0, increments - 1) * 2;
       }
+
+      metrics.totalAttacks++;
+      attacksTaken++;
 
       // SRD (Combat Modifiers > Flanking): flanking is a +2 flanking **bonus on the attack
       // roll**, and nothing else — it does not reduce the defender's AC. Applying it to both
@@ -285,6 +310,11 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
         }
       }
 
+      // §2.9b — weapon state is per-weapon column state, read once per attack: broken weapons
+      // escalate misfire +4 and fight at −2/−2 (see below).
+      const weaponStateCol = pool.sys["weaponState"] as unknown as Uint8Array | undefined;
+      const weaponBroken = weaponStateCol ? ((weaponStateCol[atkIdx] ?? 0) & 1) !== 0 : false;
+
       // P09/D-219 — ammo gate (§2.9): a firearm with no loaded shot cannot attack (mirrors tactical `firearmShotAmmo`).
       if (highFidelity && profile.isFirearm) {
         const ammoCol = pool.sys["ammo"] as unknown as Uint8Array | undefined;
@@ -298,8 +328,6 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
       // Check Firearm Misfire (UC p.135 — natural 20 never misfires, §2.9b defect (f))
       const d20 = rng.d(20);
       let effectiveMisfireMin = profile.misfireMin;
-      const weaponStateCol = pool.sys["weaponState"] as unknown as Uint8Array | undefined;
-      const weaponBroken = weaponStateCol ? ((weaponStateCol[atkIdx] ?? 0) & 1) !== 0 : false;
       if (highFidelity && (weaponBroken || (atkPf & PF1eCondition.MISFIRED) !== 0 || (atkPf & PF1eCondition.BROKEN) !== 0)) {
         effectiveMisfireMin += 4; // Misfired/Broken gun increases misfire threshold by +4 (Gun Training +2 variant is actor data, default +4)
       }
@@ -333,6 +361,8 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
         if ((atkPf & PF1eCondition.SHAKEN) !== 0) attackMod -= 2;
         if ((atkPf & PF1eCondition.SICKENED) !== 0) attackMod -= 2;
         if ((atkPf & PF1eCondition.PRONE) !== 0) attackMod -= 4;
+        // §2.9b — a broken weapon fights at −2 attack and −2 damage (CRB: Broken condition).
+        if (weaponBroken) attackMod -= 2;
       }
 
       const totalAttack = d20 + attackMod;
@@ -361,42 +391,32 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
         }
       }
 
-      // Roll Base Damage. Multipliers scale the dice *and* the static bonus, and the
-      // minimum-damage rule applies to the final result: if penalties drive it below 1 the
-      // attack deals 1 point of nonlethal damage instead of 1 point of lethal damage
-      // (SRD: Combat Statistics > Damage, "Minimum Damage"; Gap List §2.3).
-      let rawDamage = 0;
-      let nonlethalDamage = 0;
-      {
-        let damageTotal = 0;
-        for (let m = 0; m < mult; m++) {
-          let diceTotal = 0;
-          for (let d = 0; d < profile.damageDiceCount; d++) {
-            diceTotal += rng.d(profile.damageDiceSides);
-          }
-          let dmgMod = profile.damageMod;
-          if (highFidelity && (atkPf & PF1eCondition.SICKENED) !== 0) dmgMod -= 2;
-          damageTotal += diceTotal + dmgMod;
+      // §2.4 — Multiplying Damage: a critical hit multiplies only the weapon's *base* dice and
+      // static bonuses (Strength, enhancement, morale, penalties); bonus dice — energy (flaming)
+      // or precision (sneak attack) — are rolled exactly once (CRB: "Extra damage dice... are
+      // not multiplied when you score a critical hit"). The minimum-damage rule still applies to
+      // the weapon blow itself: if penalties drive it below 1 it deals 1 point of *nonlethal*
+      // damage instead of lethal (SRD: "Minimum Damage"; Gap §2.3) — bonus dice are never
+      // lifted by that floor.
+      let baseDamage = 0;
+      for (let m = 0; m < mult; m++) {
+        let diceTotal = 0;
+        for (let d = 0; d < profile.damageDiceCount; d++) {
+          diceTotal += rng.d(profile.damageDiceSides);
         }
-        if (damageTotal < 1) nonlethalDamage = 1;
-        else rawDamage = damageTotal;
+        let dmgMod = profile.damageMod;
+        if (highFidelity && (atkPf & PF1eCondition.SICKENED) !== 0) dmgMod -= 2;
+        if (highFidelity && weaponBroken) dmgMod -= 2; // §2.9b
+        baseDamage += diceTotal + dmgMod;
       }
-
-      metrics.rawDamageDealt += rawDamage;
-      if (nonlethalDamage > 0) {
-        metrics.nonlethalDealt += nonlethalDamage;
-        const priorNonlethal = pool.sys["nonlethal"]?.[targetIdx] ?? 0;
-        const totalNonlethal = priorNonlethal + nonlethalDamage;
-        if (pool.sys["nonlethal"]) pool.sys["nonlethal"][targetIdx] = totalNonlethal;
-        // SRD: nonlethal damage does not reduce hit points; reaching past current HP makes
-        // the target unconscious (staggered-at-equal is Gap List §2.12).
-        if (totalNonlethal > (pool.hp[targetIdx] ?? 0)) {
-          {
-            const pfCol2 = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
-            if (pfCol2) pfCol2[targetIdx] = (pfCol2[targetIdx] ?? 0) | PF1eCondition.UNCONSCIOUS;
-          }
+      let bonusDamage = 0;
+      if (profile.bonusDamageCount > 0 && profile.bonusDamageSides > 0) {
+        for (let d = 0; d < profile.bonusDamageCount; d++) {
+          bonusDamage += rng.d(profile.bonusDamageSides);
         }
       }
+      const nonlethalDamage = baseDamage < 1 ? 1 : 0;
+      const rawDamage = baseDamage < 1 ? Math.max(0, bonusDamage) : baseDamage + bonusDamage;
 
       // Damage Reduction is a property of the DEFENDER. Reading it as
       // `(pool column ?? 0) || attacker profile` silently applied the attacker's own DR to
@@ -405,19 +425,61 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
       const defDrType = pool.sys["drType"]?.[targetIdx] ?? 0;
       const drVal = defDrVal > 0 ? defDrVal : (defProfile?.drVal ?? 0);
       const drTypeFlags = defDrType > 0 ? defDrType : (defProfile?.drTypeFlags ?? 0);
-      // DR never applies to nonlethal damage.
-      let effectiveDr = Math.min(rawDamage, drVal);
+      // DR never applies to nonlethal damage; and at §2.10's "Overcoming DR" text it never
+      // applies to the bonus dice either: energy dice are not weapon damage and precision
+      // damage is named exempt. The reduction binds only the weapon blow.
+      const drApplicable = baseDamage > 0 ? Math.min(baseDamage, drVal) : 0;
+      let effectiveDr = drApplicable;
+      let bypassedNow = false;
 
       if (highFidelity) {
-        const bypassed = isDrBypassed(
+        bypassedNow = isDrBypassed(
           profile.enhancementBonus,
           profile.material,
           profile.damageType,
-          drTypeFlags
+          drTypeFlags,
+          profile.weaponAlignmentFlags
         );
-        if (bypassed) {
+        if (bypassedNow) {
           metrics.drBypassed += effectiveDr;
           effectiveDr = 0;
+        }
+      }
+
+      metrics.rawDamageDealt += rawDamage;
+      if (nonlethalDamage > 0) {
+        metrics.nonlethalDealt += nonlethalDamage;
+        const priorNonlethal = (pool.sys["nonlethal"]?.[targetIdx] ?? 0) as number;
+        const totalNonlethal = priorNonlethal + nonlethalDamage;
+        if (pool.sys["nonlethal"]) pool.sys["nonlethal"][targetIdx] = totalNonlethal;
+        // §2.12, the full SRD ladder (SRD: Dealing Nonlethal Damage):
+        // (a) conversion — once the nonlethal tally equals MAX HP, further subdual damage is
+        //     *lethal* ("all further nonlethal damage is treated as lethal"). The converted
+        //     slice faces the same DR availability as the blow that dealt it: any reduction
+        //     capacity the weapon damage did not consume. Converted HP loss feeds the normal
+        //     death path below.
+        const hpMaxDef = (pool.hpMax[targetIdx] ?? 0) as number;
+        const convertible = Math.max(0, totalNonlethal - Math.max(priorNonlethal, hpMaxDef));
+        if (convertible > 0 && hpMaxDef > 0) {
+          const residualDr = Math.max(0, drVal - effectiveDr);
+          const convertedNet = bypassedNow ? convertible : Math.max(0, convertible - residualDr);
+          if (convertedNet > 0) {
+            pool.hp[targetIdx] = Math.max(0, (pool.hp[targetIdx] ?? 0) - convertedNet);
+          }
+        }
+        // (b) thresholds against CURRENT hit points: exactly equal ⇒ staggered (a single
+        //     move or standard), exceeding ⇒ unconscious. HP ≤ 0 is the lethal ladder's
+        //     business (disabled/dying), so nonlethal says nothing there.
+        const hpAfter = (pool.hp[targetIdx] ?? 0) as number;
+        if (hpAfter > 0 && totalNonlethal > hpAfter) {
+          const pfCol2 = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
+          if (pfCol2) {
+            pfCol2[targetIdx] =
+              ((pfCol2[targetIdx] ?? 0) & ~PF1eCondition.STAGGERED) | PF1eCondition.UNCONSCIOUS;
+          }
+        } else if (hpAfter > 0 && totalNonlethal === hpAfter) {
+          const pfCol2 = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
+          if (pfCol2) pfCol2[targetIdx] = (pfCol2[targetIdx] ?? 0) | PF1eCondition.STAGGERED;
         }
       }
 
@@ -429,7 +491,9 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
       // Apply Damage to Model HP / Lethal Damage
       const targetProfile = defProfile;
       const isRegenMonster = targetProfile && targetProfile.regenerationVal > 0;
-      const isLethalType = (profile.elementalType & (targetProfile?.regenerationSuppressFlags ?? 0)) !== 0;
+      const isLethalType =
+        ((profile.elementalType | profile.bonusDamageTypeFlags) &
+          (targetProfile?.regenerationSuppressFlags ?? 0)) !== 0;
 
       if (highFidelity && isRegenMonster) {
         if (isLethalType) {

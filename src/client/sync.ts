@@ -46,6 +46,7 @@ import type { ModelPool } from "../core/strategic";
 import type { SimDelta } from "../core/sim";
 import type { DocId } from "../core/ids";
 import type { SysSchema } from "../sim/pool";
+import type { RollHighlightRequest } from "./rollHighlight";
 import { applySimDelta, decodeSimDelta, decodeSimSnapshot, poolFromSnapshot } from "../sim/codec";
 
 export interface ClientEvents {
@@ -69,6 +70,8 @@ export interface ClientEvents {
   clock: ClockMsg;
   /** §7 scheduled playback command (host clock; play at atHostTime − offset). */
   audio: AudioCmdMsg;
+  /** F01/F03: a chat roll-card link asks the canvas to center + outline. */
+  rollHighlight: RollHighlightRequest;
 }
 
 /** Which intents are latency-sensitive enough for optimistic echo (§5 default). */
@@ -310,7 +313,7 @@ export class ClientSync {
       messageId,
       seedClient,
       ...(commit ? { seedClientCommit: commit } : {}),
-    } as unknown as WireMessage);
+    });
     return seedClient;
   }
 
@@ -320,17 +323,17 @@ export class ClientSync {
       kind: "roll.reroll",
       messageId,
       ...(newModifiers ? { newModifiers } : {}),
-    } as unknown as WireMessage);
+    });
   }
 
   /** F01 — GM revert (inverse of ledgerOps). */
   rollRevert(messageId: DocId): void {
-    this.send({ kind: "roll.revert", messageId } as unknown as WireMessage);
+    this.send({ kind: "roll.revert", messageId });
   }
 
   /** F01 — GM delegates reroll window to a player (expires in 2 turns). */
-  rollDelegate(messageId: DocId, playerId: import("../core/ids").UserId): void {
-    this.send({ kind: "roll.delegate", messageId, playerId } as unknown as WireMessage);
+  rollDelegate(messageId: DocId, playerId: UserId): void {
+    this.send({ kind: "roll.delegate", messageId, playerId });
   }
 
   /** §7: lazy asset fetch with resume; answered by asset.chunk frames. */

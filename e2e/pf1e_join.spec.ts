@@ -155,7 +155,9 @@ test.describe("PF1e multiplayer join (N01/N02)", () => {
       expect(gmInfo).not.toBeNull();
       expect(gmInfo?.packageId).toBe("pf1e-mass-battles");
       expect(gmInfo?.sceneId).toBeTruthy();
-      // the PF1e column contract, not mass-battle-basic's ammo
+      // the PF1e column contract — D-219 made `ammo` a first-class PF1e column
+      // (mirror of `system.pf1e.attacks[i].firearm.loaded`; 0 ⇒ §2.9 ammo gate
+      // refuses), so the stale "no ammo column" assertion was retired.
       expect(gmInfo?.schema).toMatchObject({
         ac: "u8",
         touchAc: "u8",
@@ -165,8 +167,9 @@ test.describe("PF1e multiplayer join (N01/N02)", () => {
         will: "i8",
         profileIdx: "u16",
         nonlethal: "u16",
+        ammo: "u8", // P09/D-219 mirror column
+        weaponState: "u8", // P09/D-219 bit 0 = broken
       });
-      expect(gmInfo?.schema["ammo"]).toBeUndefined();
 
       // ── player joins via manual signaling (join.spec flow) ───────────────
       await host.click("#share");
