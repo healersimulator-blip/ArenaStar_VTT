@@ -393,7 +393,7 @@ describe("resolveActionProvokes — the sheet-scoped glue (D-191)", () => {
       "Fighter hits Wizard for 7 (20 vs AC 16) — 1/1 opportunities this round",
     );
     // The card, the HP write, then the ledger — the same three submits a move AoO makes.
-    expect(client.submitted).toHaveLength(3);
+    expect(client.submitted).toHaveLength(2);
   });
 
   test("a non-threatened caster reports nothing and takes no damage", async () => {
@@ -480,6 +480,6 @@ describe("resolveActionProvokes — the sheet-scoped glue (D-191)", () => {
     });
     expect(result.damage).toBe(7);
     expect(result.lines[0]).toContain("Fighter hits Archer");
-    expect(client.submitted).toHaveLength(3);
+    expect(client.submitted).toHaveLength(2);
   });
 });

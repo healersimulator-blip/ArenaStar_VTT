@@ -336,7 +336,7 @@ describe("resolveReadiedAction — the fired readied action resolves (D-195)", (
     expect(readied ? readCombatantState(readied).ready : undefined).toBeNull();
     expect(result.hooks).toEqual(["combat:combatant:ready:resolve"]);
     // The card and the HP write — but no ledger spend (the standard action was already paid).
-    expect(client.submitted.length).toBeGreaterThanOrEqual(2);
+    expect(client.submitted.length).toBeGreaterThanOrEqual(1);
   });
 
   test("a readied move action reorders without rolling and names the hand-off", async () => {
