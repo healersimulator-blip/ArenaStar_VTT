@@ -10,8 +10,8 @@ import type { CanFn } from "../../src/core/ownership";
 describe("§13 MsgKind map", () => {
   test("all 28 byte values are unique", () => {
     const values = Object.values(MsgKind);
-    expect(values).toHaveLength(32);
-    expect(new Set(values).size).toBe(32);
+    expect(values).toHaveLength(35);
+    expect(new Set(values).size).toBe(35);
   });
 
   test("every kind name is exhaustively classified by direction (compile-time Record)", () => {
@@ -21,6 +21,9 @@ describe("§13 MsgKind map", () => {
       roll: "c2h",
       "roll.reveal": "c2h",
       "roll.pending": "c2h",
+      "roll.reroll": "c2h",
+      "roll.revert": "c2h",
+      "roll.delegate": "c2h",
       "roll.challenge": "h2c",
       ephemeral: "both",
       "asset.get": "c2h",
@@ -49,7 +52,7 @@ describe("§13 MsgKind map", () => {
       pong: "internal",
       "relay.frame": "internal",
     };
-    expect(Object.keys(direction)).toHaveLength(32);
+    expect(Object.keys(direction)).toHaveLength(35);
     expect(direction.hello).toBe("c2h");
   });
 });

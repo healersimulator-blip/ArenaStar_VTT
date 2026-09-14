@@ -123,6 +123,41 @@ interface RollPendingMsg {
 }
 ```
 
+### roll.reroll (0x30 · client → host · ops)
+
+F01 — host-evaluated reroll of a tactical ledger card (or its delegated player reroll). The client sends the `messageId` of the card whose `system.rollLedger` owns the original rolls + ledgerOps; the host validates the 1–2 round window (`currentTurn - ledger.turnNumber ≤ 2`) + `can(update)` on every touched doc (GM bypasses), re-rolls each stored formula with fresh host RNG (same description, `evaluateFormula` under the host seed), optionally folds `newModifiers` from the card dropdown into the first roll, and commits one atomic envelope `[inverse(old) + ledgerOps(new) + ledger rolls/newTotals + rerollCount++]`. Expired/pruned or already-reverted cards are rejected (`invalid_schema`). Delegated player rerolls ride the same kind — host checks `pendingReroll.playerId === user.id && currentTurn ≤ expiresTurn`.
+
+```ts
+interface RollRerollMsg {
+  kind: "roll.reroll";
+  messageId: DocId;
+  newModifiers?: Array<{ label: string; value: number; reason: string }>;
+}
+```
+
+### roll.revert (0x31 · client → host · ops)
+
+F01 — GM revert of a ledger card. The host validates the same 2-round window and `can(update)` (GM only; players via delegate must use reroll), then commits `[inverse(ledgerOps) + mark reverted]` — reviving dead models at pre-card HP/status as the inverse restores the exact pre-images the OpLog kept. Already-reverted or expired cards are rejected. Strategic mass-battle never creates a ledger, so this path is tactical-only.
+
+```ts
+interface RollRevertMsg {
+  kind: "roll.revert";
+  messageId: DocId;
+}
+```
+
+### roll.delegate (0x32 · client → host · ops)
+
+F01 — GM delegates a reroll window to a player. Validates window + GM-only, then commits `[ledger.pendingReroll = {playerId, expiresTurn: currentTurn+2}]`. The delegated card shows **Player Reroll** only to that player, host-evaluated via `roll.reroll` + `canPlayerReroll`. Same window expiry as the card; pruning clears the ledger shell after T+2 regardless.
+
+```ts
+interface RollDelegateMsg {
+  kind: "roll.delegate";
+  messageId: DocId;
+  playerId: UserId;
+}
+```
+
 ### ephemeral (0x04 · both · ephemeral)
 
 Never persisted, rate-limited 20 Hz per peer (§5).

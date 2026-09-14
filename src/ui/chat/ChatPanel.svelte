@@ -150,9 +150,17 @@
     } catch {}
   }
 
-  function handleReroll(messageId: string, ledger: RollLedger): void {
-    // MVP reroll: inverse(old) + a trivial new ledgerOps (no HP change) + new rolls with +1 to every total.
-    // The host in a real game would re-derive modifiers and submit the true Ops; tests pin the inverse+new envelope shape.
+  function handleReroll(messageId: string, ledger: RollLedger, newModifiers?: Array<{ label: string; value: number; reason: string }>): void {
+    const maybeHost = client as unknown as {
+      rollReroll?: (id: import("../../core/ids").DocId, mods?: Array<{ label: string; value: number; reason: string }>) => void;
+    };
+    if (maybeHost.rollReroll) {
+      if (!maybeHost.rollReroll) return;
+      // F01 host-evaluated reroll: same description, fresh RNG, window + can(update), single OpEnvelope
+      maybeHost.rollReroll(messageId as unknown as import("../../core/ids").DocId, newModifiers);
+      return;
+    }
+    // Fallback for unit tests without a host transport — keep the inverse+new envelope shape
     const newRolls = ledger.rolls.map((r) => ({ ...r, total: r.total + 1 })) as RollLedger["rolls"];
     const newLedgerOps: import("../../core/ops").Op[] = [];
     const ops = rerollOps({ messageId: messageId as unknown as import("../../core/ids").DocId, ledger, currentTurn, newLedgerOps, newRolls });
@@ -161,12 +169,22 @@
   }
 
   function handleRevert(messageId: string, ledger: RollLedger): void {
+    const maybeHost = client as unknown as { rollRevert?: (id: import("../../core/ids").DocId) => void };
+    if (maybeHost.rollRevert) {
+      maybeHost.rollRevert(messageId as unknown as import("../../core/ids").DocId);
+      return;
+    }
     const ops = revertOps({ messageId: messageId as unknown as import("../../core/ids").DocId, ledger, currentTurn });
     if (!ops) return;
     client.submit(ops);
   }
 
   function handleDelegate(messageId: string, ledger: RollLedger, playerId: string): void {
+    const maybeHost = client as unknown as { rollDelegate?: (id: import("../../core/ids").DocId, pid: import("../../core/ids").UserId) => void };
+    if (maybeHost.rollDelegate) {
+      maybeHost.rollDelegate(messageId as unknown as import("../../core/ids").DocId, playerId as unknown as import("../../core/ids").UserId);
+      return;
+    }
     const ops = delegateRerollOps({
       messageId: messageId as unknown as import("../../core/ids").DocId,
       ledger,
@@ -178,6 +196,12 @@
   }
 
   function handlePlayerReroll(messageId: string, ledger: RollLedger): void {
+    // Delegated player reroll rides the same host path as GM reroll — host checks pendingReroll
+    const maybeHost = client as unknown as { rollReroll?: (id: import("../../core/ids").DocId) => void };
+    if (maybeHost.rollReroll) {
+      maybeHost.rollReroll(messageId as unknown as import("../../core/ids").DocId);
+      return;
+    }
     const pid = (client.user as unknown as { id?: string })?.id ?? "";
     if (!pid) return;
     const newRolls = ledger.rolls.map((r) => ({ ...r, total: r.total + 1 })) as RollLedger["rolls"];
@@ -498,7 +522,11 @@
           currentTurn={currentTurn}
           isGM={isGMDerived}
           fadeSec={fadeSec}
-          onReroll={() => handleReroll(message._id, ledger)}
+          onReroll={(...a: unknown[]) => {
+            const maybeMods = (a[1] ?? a[0]) as unknown;
+            const mods = Array.isArray(maybeMods) ? (maybeMods as Array<{ label: string; value: number; reason: string }>) : undefined;
+            handleReroll(message._id, ledger, mods);
+          }}
           onRevert={() => handleRevert(message._id, ledger)}
           onDelegate={(playerId: string) => handleDelegate(message._id, ledger, playerId)}
           onPlayerReroll={() => handlePlayerReroll(message._id, ledger)}

@@ -46,6 +46,17 @@ import {
   resolvePendingRoll as resolvePendingRollDoc,
 } from "../packages/pf1e/pendingRoll";
 import type { PendingRoll } from "../packages/pf1e/pendingRoll";
+import {
+  canPlayerReroll as canLedgerPlayerReroll,
+  canReroll as canLedgerReroll,
+  canRevert as canLedgerRevert,
+  delegateRerollOps,
+  invertLedger,
+  pruneOpsForWindow as rollLedgerPruneOps,
+  rerollOps as ledgerRerollOps,
+  revertOps as ledgerRevertOps,
+} from "../packages/pf1e/rollLedger";
+import type { RollLedger } from "../packages/pf1e/rollLedger";
 import type { AssetId, PeerId, TxId, UserId } from "../core/ids";
 import { DocumentStore } from "../core/store";
 import { OpLog } from "../core/oplog";
@@ -450,6 +461,15 @@ export class HostSync {
       case "roll.pending":
         void this.handleRollPending(session, msg as unknown as import("../core/messages").RollPendingMsg);
         return;
+      case "roll.reroll":
+        void this.handleRollReroll(session, msg as unknown as import("../core/messages").RollRerollMsg);
+        return;
+      case "roll.revert":
+        void this.handleRollRevert(session, msg as unknown as import("../core/messages").RollRevertMsg);
+        return;
+      case "roll.delegate":
+        void this.handleRollDelegate(session, msg as unknown as import("../core/messages").RollDelegateMsg);
+        return;
       case "ephemeral":
         this.handleEphemeral(session, msg);
         return;
@@ -776,6 +796,12 @@ export class HostSync {
         const msgs = [...this.store.getAll("messages")] as unknown as Array<{ _id: string; system?: { pendingRoll?: import("../packages/pf1e/pendingRoll").PendingRoll } }>;
         const prune = pendingPruneOps(msgs as unknown as Parameters<typeof pendingPruneOps>[0], pruneTurn);
         if (prune.length > 0) this.commitSystem(prune, false);
+        // F01: prune expired roll ledgers alongside pending rolls
+        try {
+          const msgs2 = [...this.store.getAll("messages")] as unknown as Array<{ _id: string; system?: { rollLedger?: RollLedger } }>;
+          const prune2 = rollLedgerPruneOps(msgs2 as unknown as Parameters<typeof rollLedgerPruneOps>[0], pruneTurn);
+          if (prune2.length > 0) this.commitSystem(prune2, false);
+        } catch {}
       }
     } catch {}
     return { ok: true, seq: envelope.seq };
@@ -1176,6 +1202,168 @@ export class HostSync {
     if (!committed.ok) {
       this.reject(session, String(msg.messageId), "invariant", committed.error);
     }
+  }
+
+  // ─── F01 roll ledger (0x30-0x32) — host-evaluated, 2-round window, can(update) on touched docs ──
+
+  private canUpdateAllLedgerDocs(user: SessionUser, ledger: RollLedger): boolean {
+    if (user.role === "GM") return true;
+    const ops = [...ledger.ledgerOps, ...ledger.ledgerInverses];
+    for (const op of ops) {
+      if (op.kind !== "update" && op.kind !== "create" && op.kind !== "delete") continue;
+      const ref = op.kind === "create" ? (op.parent ? { coll: op.coll, id: (op.data as unknown as { _id: string })._id, parent: op.parent } : null) : (op as unknown as { ref: DocRef }).ref;
+      if (!ref) continue;
+      const doc = this.store.resolve(ref as DocRef);
+      if (!doc) continue;
+      const parent = (ref as DocRef).parent !== undefined ? this.store.resolve((ref as DocRef).parent as DocRef) : undefined;
+      const canOpts = parent ? { parent } : {};
+      const collName = ((ref as DocRef).parent ? (ref as DocRef).coll : (ref as DocRef).coll) as CollectionName;
+      if (!can(user, "update", doc, collName, canOpts)) return false;
+    }
+    return true;
+  }
+
+  private freshRollsWithRng(ledger: RollLedger): RollLedger["rolls"] {
+    return ledger.rolls.map((roll) => {
+      const evalResult = evaluateFormula(roll.formula, undefined, this.rng);
+      if (!evalResult.ok) return roll;
+      return {
+        ...roll,
+        total: evalResult.value.total,
+        terms: evalResult.value.terms as unknown as typeof roll.terms,
+      };
+    }) as RollLedger["rolls"];
+  }
+
+  private async handleRollReroll(session: Session, msg: import("../core/messages").RollRerollMsg): Promise<void> {
+    if (!session.user) {
+      this.reject(session, String(msg.messageId), "forbidden", "not authenticated");
+      return;
+    }
+    if (!session.intentBucket.tryRemove()) {
+      this.reject(session, String(msg.messageId), "rate_limited", "reroll rate exceeded");
+      return;
+    }
+    const doc = this.store.get("messages", String(msg.messageId)) as unknown as MessageDocument | undefined;
+    if (!doc) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "ledger card not found");
+      return;
+    }
+    const ledger = (doc.system as unknown as { rollLedger?: RollLedger } | undefined)?.rollLedger;
+    if (!ledger) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "no rollLedger on that message");
+      return;
+    }
+    const currentTurn = this.currentTurnNumber();
+    const isGM = session.user.role === "GM";
+    const viaDelegation = !isGM && canLedgerPlayerReroll(ledger, session.user.id as unknown as UserId, currentTurn);
+    const allowed = isGM ? canLedgerReroll(ledger, currentTurn) : viaDelegation;
+    if (!allowed) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "reroll window closed or already reverted");
+      return;
+    }
+    if (!this.canUpdateAllLedgerDocs(session.user, ledger)) {
+      this.reject(session, String(msg.messageId), "forbidden", "you cannot update the touched documents");
+      return;
+    }
+    let newRolls = this.freshRollsWithRng(ledger);
+    if (msg.newModifiers && msg.newModifiers.length > 0) {
+      if (newRolls[0]) {
+        const first = newRolls[0] as unknown as { modifiers: Array<{ label: string; value: number; reason: string }>; total: number };
+        const extra = msg.newModifiers.reduce((s, m) => s + m.value, 0);
+        newRolls = [
+          { ...newRolls[0], modifiers: [...first.modifiers, ...msg.newModifiers], total: first.total + extra } as unknown as RollLedger["rolls"][number],
+          ...newRolls.slice(1),
+        ] as RollLedger["rolls"];
+      }
+    }
+    const newLedgerOps: Op[] = [...ledger.ledgerOps];
+    const newLedgerInverses: Op[] = ledger.ledgerInverses.length > 0 ? [...ledger.ledgerInverses] : invertLedger(ledger);
+    const ops = ledgerRerollOps({ messageId: String(msg.messageId) as unknown as import("../core/ids").DocId, ledger, currentTurn, newLedgerOps, newLedgerInverses, newRolls });
+    if (!ops) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "reroll refused by ledger window");
+      return;
+    }
+    const committed = this.commitOps(ops, session.user.id, "reroll-" + String(msg.messageId), false);
+    if (!committed.ok) this.reject(session, String(msg.messageId), "invariant", committed.error);
+  }
+
+  private async handleRollRevert(session: Session, msg: import("../core/messages").RollRevertMsg): Promise<void> {
+    if (!session.user) {
+      this.reject(session, String(msg.messageId), "forbidden", "not authenticated");
+      return;
+    }
+    if (!session.intentBucket.tryRemove()) {
+      this.reject(session, String(msg.messageId), "rate_limited", "revert rate exceeded");
+      return;
+    }
+    const doc = this.store.get("messages", String(msg.messageId)) as unknown as MessageDocument | undefined;
+    if (!doc) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "ledger card not found");
+      return;
+    }
+    const ledger = (doc.system as unknown as { rollLedger?: RollLedger } | undefined)?.rollLedger;
+    if (!ledger) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "no rollLedger on that message");
+      return;
+    }
+    const currentTurn = this.currentTurnNumber();
+    if (!canLedgerRevert(ledger, currentTurn)) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "revert window closed or already reverted");
+      return;
+    }
+    if (session.user.role !== "GM") {
+      this.reject(session, String(msg.messageId), "forbidden", "only GM can revert");
+      return;
+    }
+    if (!this.canUpdateAllLedgerDocs(session.user, ledger)) {
+      this.reject(session, String(msg.messageId), "forbidden", "you cannot update the touched documents");
+      return;
+    }
+    const ops = ledgerRevertOps({ messageId: String(msg.messageId) as unknown as import("../core/ids").DocId, ledger, currentTurn });
+    if (!ops) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "revert refused by ledger window");
+      return;
+    }
+    const committed = this.commitOps(ops, session.user.id, "revert-" + String(msg.messageId), false);
+    if (!committed.ok) this.reject(session, String(msg.messageId), "invariant", committed.error);
+  }
+
+  private async handleRollDelegate(session: Session, msg: import("../core/messages").RollDelegateMsg): Promise<void> {
+    if (!session.user) {
+      this.reject(session, String(msg.messageId), "forbidden", "not authenticated");
+      return;
+    }
+    if (!session.intentBucket.tryRemove()) {
+      this.reject(session, String(msg.messageId), "rate_limited", "delegate rate exceeded");
+      return;
+    }
+    const doc = this.store.get("messages", String(msg.messageId)) as unknown as MessageDocument | undefined;
+    if (!doc) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "ledger card not found");
+      return;
+    }
+    const ledger = (doc.system as unknown as { rollLedger?: RollLedger } | undefined)?.rollLedger;
+    if (!ledger) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "no rollLedger on that message");
+      return;
+    }
+    const currentTurn = this.currentTurnNumber();
+    if (!canLedgerReroll(ledger, currentTurn)) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "delegate window closed or reverted");
+      return;
+    }
+    if (session.user.role !== "GM") {
+      this.reject(session, String(msg.messageId), "forbidden", "only GM can delegate rerolls");
+      return;
+    }
+    const ops = delegateRerollOps({ messageId: String(msg.messageId) as unknown as import("../core/ids").DocId, ledger, currentTurn, playerId: msg.playerId });
+    if (!ops) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "delegate refused by ledger window");
+      return;
+    }
+    const committed = this.commitOps(ops, session.user.id, "delegate-" + String(msg.messageId), false);
+    if (!committed.ok) this.reject(session, String(msg.messageId), "invariant", committed.error);
   }
 
   // ─── Ephemeral relay (§5) ───────────────────────────────────────────────────

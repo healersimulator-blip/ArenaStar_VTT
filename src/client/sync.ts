@@ -314,6 +314,25 @@ export class ClientSync {
     return seedClient;
   }
 
+  /** F01 — GM reroll or delegated player reroll (host-evaluated, 2-round window). */
+  rollReroll(messageId: DocId, newModifiers?: Array<{ label: string; value: number; reason: string }>): void {
+    this.send({
+      kind: "roll.reroll",
+      messageId,
+      ...(newModifiers ? { newModifiers } : {}),
+    } as unknown as WireMessage);
+  }
+
+  /** F01 — GM revert (inverse of ledgerOps). */
+  rollRevert(messageId: DocId): void {
+    this.send({ kind: "roll.revert", messageId } as unknown as WireMessage);
+  }
+
+  /** F01 — GM delegates reroll window to a player (expires in 2 turns). */
+  rollDelegate(messageId: DocId, playerId: import("../core/ids").UserId): void {
+    this.send({ kind: "roll.delegate", messageId, playerId } as unknown as WireMessage);
+  }
+
   /** §7: lazy asset fetch with resume; answered by asset.chunk frames. */
   requestAsset(assetId: AssetId, priority: AssetPriority = "scene", offset = 0): void {
     this.send({ kind: "asset.get", assetId, offset, priority });

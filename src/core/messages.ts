@@ -34,6 +34,10 @@ export const MsgKind = {
   "sim.snapshot.get": 0x0b,
   "audio.cmd": 0x0c,
   "roll.reveal": 0x0d,
+  // F01 — tactical roll ledger (reroll / revert / delegate), host-evaluated, 2-round window
+  "roll.reroll": 0x30,
+  "roll.revert": 0x31,
+  "roll.delegate": 0x32,
   // F03 — player pending roll resolution (client → host, host → client commit-reveal)
   "roll.pending": 0x33,
   // host → client
@@ -127,6 +131,27 @@ export interface RollPendingMsg {
   messageId: DocId;
   seedClient: string;
   seedClientCommit?: string;
+}
+
+/** F01 — GM reroll (or delegated player reroll) of a tactical ledger card, host-evaluated. */
+export interface RollRerollMsg {
+  kind: "roll.reroll";
+  messageId: DocId;
+  /** Optional extra modifiers to fold into the reroll (e.g. from the card dropdown). */
+  newModifiers?: Array<{ label: string; value: number; reason: string }>;
+}
+
+/** F01 — GM revert of a ledger card (inverse of ledgerOps). */
+export interface RollRevertMsg {
+  kind: "roll.revert";
+  messageId: DocId;
+}
+
+/** F01 — GM delegates a reroll window to a player (expires in 2 turns). */
+export interface RollDelegateMsg {
+  kind: "roll.delegate";
+  messageId: DocId;
+  playerId: UserId;
 }
 
 /** §5 ephemeral kinds: cursors, pings, drags, ruler, typing. */
@@ -395,6 +420,9 @@ export type WireMessage =
   | RollChallengeMsg
   | RollRevealMsg
   | RollPendingMsg
+  | RollRerollMsg
+  | RollRevertMsg
+  | RollDelegateMsg
   | EphemeralMsg
   | AssetGetMsg
   | FogPutMsg

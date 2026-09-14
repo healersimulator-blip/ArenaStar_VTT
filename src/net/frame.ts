@@ -37,6 +37,12 @@ function validateDecoded(obj: unknown, name: MsgName): Result<WireMessage> {
     case "roll.challenge":
     case "roll.reveal":
     case "roll.pending":
+    case "roll.reroll":
+    case "roll.revert":
+    case "roll.delegate":
+    case "roll.reroll":
+    case "roll.revert":
+    case "roll.delegate":
     case "ephemeral":
     case "asset.get":
     case "fog.put":
@@ -105,6 +111,9 @@ export function channelFor(kind: MsgName): ChannelName {
     case "roll.challenge":
     case "roll.reveal":
     case "roll.pending":
+    case "roll.reroll":
+    case "roll.revert":
+    case "roll.delegate":
     case "fog.put":
     case "relay.offer":
     case "turn.ready":
