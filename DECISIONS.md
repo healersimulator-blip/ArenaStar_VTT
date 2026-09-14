@@ -5598,3 +5598,26 @@ The provoke gate is the same fact the pure check already carries: `provokes:true
 **Verification.** `tsc --noEmit` green (sheet runtime ReferenceErrors fixed); `vite build` **2,482.70 kB raw / 716.43 kB gzip** (`+22.07/5.24 kB` for the Expert Loading checkbox + explosion panel; budget 6 MB); `vitest run` **2174 passed / 3 skipped** (was 2168/3, +6 from the burst/grit suite and the combat ammo seed); `pf1eCombat` firearm now `ammo:1` and `hits+misfires>0`; `pf1eManifest` `rules.modelColumns` ↔ `PF1E_MODEL_SCHEMA` equality holds (15 cols); `build:systems` emits `pf1e-mass-battles` `rules.js 177.1 kB` (was 173.7 kB, +3.4 kB for the `ammo/weaponState` columns). Chromium `pf1e_firearms` pure suite **4/4** (`--project=chromium`); full UI suite present and `vite build`-proven, browser download blocked in-sandbox (`ECONNRESET`) — the D-189/D-216 workaround precedent.
 
 **Remaining P09/P08.** None — P09 is now done and P08's rule layer was already done at D-217 (Ride, lance ×2/×3 additive `1+(a-1)+(b-1)` CRB p.179, footprint, initiative line). Only the optional combat/scene glue (mount and rider share the mount's 2×2 space and initiative — already stated in the panel via `data-pf1e-mount-footprint`/`data-pf1e-mount-initiative`) remains for a dedicated scene/combat wiring slice if the table needs it.
+
+## D-220 — 2026-09-14 — F01 Roll Ledger + F02 Simultaneous: scope freeze
+
+Decision:
+* **F01** is tactical-only, 1–2 round window, no 50-round store. Roll card owns its `ledgerOps`/`ledgerInverses` in `MessageDocument.system.rollLedger:{v:1}`; Reroll = `inverse(old)+new` single envelope via existing host `roll`/`rollVerified` path; Revert = `inverse(old)`; Player Reroll = delegated GM grant onto the same card (host-evaluated, player-authored audit). Area outline is a temporary `RollHighlightLayer` overlay fading over `world-settings.flags.pf1e.rollHighlightFadeSec` (slider 1–10 s, default 4 s), not a persisted template. Links center+outline via existing `canvasCamera`/`tokenHighlight` path. New `MsgKind` bytes `roll.reroll:0x30`/`roll.revert:0x31`/`roll.delegate:0x32` reused §13 framing.
+* **F02** is a per-world `TurnMode:simultaneous` regime (`world-settings.flags.pf1e.strategicSimultaneous`, next `turn.start` takes effect). `resolveTurn` gains an `if (ctx.turnMode==="simultaneous")` branch: movement phase batch-computed from starting positions, combat phase rolls issued simultaneously (`rng.fork(unitId)`) but damage applied in `effectiveInitiative` descending (PF1eDerived/compile fallback, D-123 ties), with per-attacker live model count re-read before rolling so init-12 kills shrink init-7's attack count (100→80 archers). Report `events` sorted `subPhaseOrder, -initiative`. Cover computed from pre-move positions for the phase. Sequential path byte-identical when `mode!=="simultaneous"`. No new pool column; no new collection.
+* `combat_resolver_5.html` attached to prompt was not present in snapshot — verbatim phase-name / tie-breaker reconciliation is a required checklist item before F02 lands.
+
+Context:
+* User requested both as additions to `PF1e_Unified_TODO.md §13` (2026-09-14): esthetic roll cards in non-strategic with modifier dropdowns, initiator/target centering links, fading area outline with options slider, 3 buttons per card, limited to 1–2 rounds; and strategic simultaneous phasing where everybody declares squads/units moves+targets and the GM progresses time, initiative only orders damage (Combat_Resolver_5 reference).
+
+Alternatives considered:
+* Separate `rollCards` collection or an event-store ledger for F01 — rejected: reuses `messages.system.rollLedger` + `OpLog` inverses (one-envelope revert/reapply), minimal schema change, prunable.
+* Second rule engine or forked `massBattlePf1e.ts` for F02 — rejected: `TurnMode` mode flag on `TurnEngineState`/`RulesContext` with a 150-line branch, keeps sequential tests green and reuses `resolvePF1eAttacks` / `pool.sys` / `pool.hp` paths.
+* Leaderboard-style undo stack for tactical — rejected: 2-round window is explicit product requirement; pruning on `turn.advance` past `+2` is the storage budget.
+
+Consequences:
+* Flows that create tactical cards (`resolveAttackFlow`/`resolveCastFlow`/`touchSpell`/`pendingCast`) must emit the card + its `ledgerOps` in one envelope and populate `rolls[].modifiers` from `attackModifierParts`/`damageModifierParts`.
+* `turn.advance`/`pf1eNextTurn` now drives ledger pruning (`turnNumber < currentTurn-2` clears `ledgerOps` payload).
+* F02 blocked on `TurnMode`/`turnMode` plumbing and on re-attaching `combat_resolver_5.html` for verbatim reconciliation before marking landed.
+
+Status: accepted 2026-09-14.
+
