@@ -85,6 +85,25 @@ test.describe("window manager + GM tools (§10)", () => {
     await expect(page.locator("#chat-log .emote")).toHaveCount(2);
   });
 
+  test("armies window mounts through normal WindowHost navigation (M14)", async ({ page }) => {
+    await page.goto(entry + "?e2e=1");
+    // The GM toolbar's Armies button opens the armies tab inside the standard
+    // window manager chrome — the same chrome Permissions/Macros/Settings use.
+    // Before M14 this surface only existed via the e2eHook harness.
+    await expect(page.locator("#gm-armies")).toBeVisible();
+    await page.click("#gm-armies");
+    const win = page.locator('[data-window="armies"]');
+    await expect(win).toBeVisible();
+    await expect(win.locator(".armies")).toBeVisible();
+    // An empty world still renders the honest empty state, and the window
+    // respects the standard chrome (minimize/close buttons present).
+    await expect(win.locator(".armies .empty")).toHaveText("No armies in this world yet.");
+    await expect(win.locator("[data-window-min]")).toBeVisible();
+    await expect(win.locator("[data-window-close]")).toBeVisible();
+    await page.click('[data-window="armies"] [data-window-close]');
+    await expect(win).toHaveCount(0);
+  });
+
   test("settings: grid size op lands and scene nav switches scenes", async ({ page }) => {
     await page.goto(entry + "?e2e=1");
     await page.click("#gm-settings");

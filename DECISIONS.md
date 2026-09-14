@@ -5704,3 +5704,26 @@ Consequences:
 * Cross-browser firefox/webkit acceptance remains deferred per the user's standing instruction; chromium e2e for this slice runs as part of the full suite.
 
 Status: accepted 2026-09-14.
+
+## D-224 — 2026-09-14 — M12/M14 closed: analytics reconciled into TurnReport + armies in normal navigation
+
+Decision:
+* **M12 — analytics reconcile at turn resolution.** `SimRunnerCore.resolve` (the one place a stepwise turn resolves, shared by the worker and Node tests) now calls the rules module's `forecast()` for every army in `ctx.armies` and folds the per-army cumulative sheets into `TurnReport.summary.analytics` — this *is* the real `generateReport()` call: the collector lives on the same module instance that resolved the turn, so each turn's report replicates the running campaign aggregate (no collector-only fixtures). The module's forecast payload gained the full per-unit sheet (`units: Record<unitId, UnitAnalyticsSummary>`) so downstream consumers reconstruct the exact report. A module without `forecast` (mass-battle-basic) leaves the summary untouched.
+* **M12 projection honesty.** The analytics payload is per-army; `projectReportForFaction(report, unitVisible, visibleArmies)` filters `summary.analytics` to armies with a visible unit for player projections — the GM's report keeps every army, a player sees own-faction totals only, and absence of the enemy's numbers is the honest projection (no stub rows).
+* **M14 — army windows mount in normal navigation.** GM toolbar gains **Armies** (`kind:"armies"` → `ArmiesTab` in the standard WindowHost chrome); clicking a card opens `kind:"army"` → `ArmyWindow` with `rules` resolved by `armyWindowRules(packages)` from the campaign's **active** system package (`pf1e-mass-battles` → `createMassBattlePf1e()`, otherwise basic) — no more hardcoded `createMassBattleBasic()` from the e2eHook path. ArmyWindow gains an **analysis** tab mounting `PF1eBattleAnalysis` fed by `analysisReportFromReports` (pure, in `armyModel.ts`) from the M12 payload: reactive after real turns, totals reduced from the unit sheet, CSV via the component's own RFC-4180 export. `TurnReportTimeline` continues to ride the reports tab.
+
+Context:
+* Continuation of `PF1e_Unified_TODO.md` implementation after G-04: sweep found N01/N02 already landed (`WelcomeSimInfo` wire + `adoptSimInfo` + simAnnounce suite — checkboxes were stale, now annotated), M04's final open item (envelopment movement) closed by G-04, and M12/M14 as the two remaining mounted-but-unwired items.
+* The collector previously had no production caller: `generateReport()` was only reachable through `forecast()` and `forecast()` had no caller at all — the analytics tab was unmountable.
+
+Alternatives considered:
+* A second message channel ferrying worker analytics per turn — rejected: the TurnReport already replicates per turn and is persisted (§8A reports); the summary is the correct home.
+* Client-side re-accumulation of analytics from turn events — rejected: that duplicates the collector and would drift; the worker's own sheet is the authoritative metric source.
+* Hiding enemy analytics with zeroed rows instead of filtering keys — rejected: a stub tentatively asserts knowledge ("their kills = 0"); absence names the ignorance.
+
+Consequences:
+* `TurnReport.summary` gains one optional `analytics` key — additive, `Record<string, Json>`-compatible; older reports deserialize unchanged. `projectReportForFaction`'s signature gains an optional third parameter (all existing callers unchanged).
+* V10-slice gate: `tsc --noEmit` clean, `eslint` 0 errors, new tests green — M12 (`tests/sim/runnerAnalytics.test.ts`, 4: accumulation/attribution/opt-out/redaction/replay-determinism), M14 (`tests/ui/armyModel.test.ts` +2: rules resolution, sheet rebuild/null-honesty), chromium e2e +1 (`windows.spec.ts` armies-through-chrome).
+* TODO: N01/N02/M04 annotated complete; M12/M14 checked.
+
+Status: accepted 2026-09-14.

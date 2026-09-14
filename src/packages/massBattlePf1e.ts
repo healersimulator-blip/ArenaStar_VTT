@@ -1656,6 +1656,13 @@ export function createMassBattlePf1e(
           concentrationPassed: sum((u) => u.concentrationPassed),
           concentrationFailed: sum((u) => u.concentrationFailed),
           srBlocked: sum((u) => u.srBlocked),
+          // M14 (D-224): the full per-unit sheet rides the same payload, so the
+          // Battle Analysis tab (normal navigation, not just e2eHook) rebuilds the
+          // exact PF1eBattleReport the worker's collector holds — figures the
+          // table and the RFC-4180 CSV both read.
+          units: Object.fromEntries(
+            armyUnits.map((u) => [u.unitId, { ...u }]),
+          ) as unknown as import("../core/documents").Json,
         },
       };
     },

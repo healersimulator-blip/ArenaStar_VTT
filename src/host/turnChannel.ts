@@ -1020,7 +1020,14 @@ export class TurnChannel {
           }
           return false;
         };
-        report = projectReportForFaction(result.report, unitVisible);
+        // M12 (D-224): per-army analytics in the summary project the same way
+        // — an army is visible to this faction when any of its units is.
+        const visibleArmies = new Set(
+          armies
+            .filter((a) => a.units.some((u) => unitVisible(u._id)))
+            .map((a) => a._id),
+        );
+        report = projectReportForFaction(result.report, unitVisible, visibleArmies);
         projectedReports.set(key, report);
       }
       this.host.broadcastSim(

@@ -16,6 +16,7 @@
   import type { RulesModule, UnitView } from "../../core/rules";
   import {
     ORDER_TEMPLATES,
+    analysisReportFromReports,
     casualtySummary,
     eventsToCsv,
     filterReportEvents,
@@ -30,6 +31,8 @@
     type TreeRow,
   } from "./armyModel";
   import TurnReportTimeline from "./TurnReportTimeline.svelte";
+  import PF1eBattleAnalysis from "./PF1eBattleAnalysis.svelte";
+  import type { PF1eBattleReport } from "../../packages/pf1e/analytics";
 
   let {
     client,
@@ -45,7 +48,7 @@
     onClose: () => void;
   } = $props();
 
-  type Tab = "tree" | "roster" | "orders" | "reports";
+  type Tab = "tree" | "roster" | "orders" | "reports" | "analysis";
   const ROW_H = 26;
 
   let tab = $state<Tab>("tree");
@@ -296,6 +299,13 @@
     ]);
   }
 
+  // ── M14 (D-224) — Battle Analysis tab over real turn data: the newest turn
+  // report's summary.analytics[armyId] sheet, rebuilt purely in armyModel so
+  // the logic is unit-testable outside the component. ─────────────────────────
+  function analysisReport(): PF1eBattleReport | null {
+    return analysisReportFromReports(reports, armyId);
+  }
+
   function toggleReady(ready: boolean): void {
     if (phase) client.setTurnReady(phase.turnId, ready);
   }
@@ -349,7 +359,7 @@
   <header>
     <h2>{armyName}</h2>
     <nav>
-      {#each ["tree", "roster", "orders", "reports"] as t (t)}
+      {#each ["tree", "roster", "orders", "reports", "analysis"] as t (t)}
         <button class:active={tab === t} onclick={() => (tab = t as Tab)} data-tab={t}>
           {t}
         </button>
@@ -606,6 +616,19 @@
           </button>
         {/each}
       </div>
+    </div>
+  {:else if tab === "analysis"}
+    {@const analysis = analysisReport()}
+    <div class="analysis-tab" data-analysis-tab>
+      {#if analysis === null}
+        <p class="dim" data-analysis-empty>
+          Battle analysis appears after the first resolved turn — the
+          reconciliation is the turn report's own per-army sheet (M12), not a
+          fixture.
+        </p>
+      {:else}
+        <PF1eBattleAnalysis report={analysis} />
+      {/if}
     </div>
   {:else}
     <div class="reports">

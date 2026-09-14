@@ -14,6 +14,9 @@
   import JournalPopout from "../journals/JournalPopout.svelte";
   import PF1eSheetWindow from "../sheets/PF1eSheetWindow.svelte";
   import GmExtrasPanel from "../armies/GmExtrasPanel.svelte";
+  import ArmiesTab from "../armies/ArmiesTab.svelte";
+  import ArmyWindow from "../armies/ArmyWindow.svelte";
+  import { armyWindowRules } from "../armies/armyModel";
   import type { ClientSync } from "../../client/sync";
   import type { ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
@@ -166,6 +169,35 @@
           />
         {:else if win.kind === "gmextras"}
           <GmExtrasPanel {client} {bus} {sceneId} {packages} />
+        {:else if win.kind === "armies"}
+          <ArmiesTab
+            {client}
+            {bus}
+            onOpen={(armyId) => {
+              const name =
+                client.store.get("armies", armyId)?.name ?? "Army";
+              manager.open({
+                id: `army:${armyId}`,
+                title: `Army — ${name}`,
+                kind: "army",
+                x: 60,
+                y: 60,
+                width: 520,
+                height: 560,
+                data: { armyId },
+              });
+            }}
+          />
+        {:else if win.kind === "army" && win.data}
+          {#await armyWindowRules(packages) then rules}
+            <ArmyWindow
+              {client}
+              {bus}
+              armyId={win.data.armyId ?? ""}
+              {rules}
+              onClose={() => manager.close(win.id)}
+            />
+          {/await}
         {/if}
       </div>
       <div

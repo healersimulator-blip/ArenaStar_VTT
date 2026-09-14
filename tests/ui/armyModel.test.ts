@@ -1,7 +1,9 @@
 import { describe, expect, test } from "vitest";
 import {
   ORDER_TEMPLATES,
+  analysisReportFromReports,
   armyCards,
+  armyWindowRules,
   casualtySummary,
   eventsToCsv,
   filterReportEvents,
@@ -265,5 +267,88 @@ describe("reports tab data (§10)", () => {
     expect(lines[1]).toBe('melee,attack,u-1,u-9,"charge, 3 kills"'); // comma inside text → quoted
     expect(csv).toContain('"at ""the mill"""'); // embedded quotes doubled
     expect(csv).toContain("melee,casualty,u-9,,lost 4");
+  });
+});
+
+describe("armyWindowRules (M14/D-224) — production rules resolution", () => {
+  test("active PF1e package resolves the PF1e module; plain world resolves the builtin", async () => {
+    const pf1ePackages = {
+      list: async () => [
+        { id: "pf1e-mass-battles", name: "PF1e", version: "1.0.0", type: "system" as const, packCount: 2, active: true, trustRequested: false, trusted: false },
+      ],
+    };
+    const plainPackages = {
+      list: async () => [
+        { id: "sample.scenery", name: "Scenery", version: "1.0.0", type: "data" as const, packCount: 1, active: true, trustRequested: false, trusted: false },
+      ],
+    };
+    const rules = await armyWindowRules(pf1ePackages as unknown as Parameters<typeof armyWindowRules>[0]);
+    // PF1e module's declared sub-phases include heal/spell — the basic module never does.
+    expect(rules.schema.subPhases).toContain("heal");
+    expect(rules.schema.subPhases).toContain("spell");
+    const basic = await armyWindowRules(plainPackages as unknown as Parameters<typeof armyWindowRules>[0]);
+    expect(basic.schema.subPhases).toContain("supply");
+    expect(basic.schema.subPhases).not.toContain("heal");
+    const none = await armyWindowRules(null);
+    expect(none.schema.subPhases).not.toContain("heal");
+  });
+});
+
+describe("analysisReportFromReports (M14/D-224) — analysis over real turn data", () => {
+  const unitRow = (unitId: string, over: Record<string, number> = {}) => ({
+    unitId,
+    totalAttacks: 4,
+    hits: 2,
+    misses: 2,
+    netDamageDealt: 9,
+    killsCount: 1,
+    ...over,
+  });
+  const reportWith = (sheet: unknown): TurnReport => ({
+    turn: 1,
+    sceneId: "scene-1",
+    subPhases: ["melee"],
+    events: [],
+    summary: { analytics: { "army-red": sheet } },
+    rulesVersion: "1.0.0",
+  });
+
+  test("rebuilds the worker collector's sheet from summary.analytics, totals reduced from units", () => {
+    const sheet = {
+      units: {
+        "u-red-a": unitRow("u-red-a"),
+        "u-red-b": unitRow("u-red-b", { totalAttacks: 2, hits: 2, netDamageDealt: 21, killsCount: 2 }),
+      },
+    };
+    const report = analysisReportFromReports([reportWith(sheet)], "army-red");
+    if (report === null) throw new Error("expected a rebuilt sheet");
+    expect(Object.keys(report.units).sort()).toEqual(["u-red-a", "u-red-b"]);
+    expect(report.units["u-red-a"]?.totalAttacks).toBe(4);
+    expect(report.totals.totalAttacks).toBe(6);
+    expect(report.totals.hits).toBe(4);
+    expect(report.totals.hitPercentage).toBe(67);
+    expect(report.totals.netDamageDealt).toBe(30);
+    expect(report.totals.killsCount).toBe(3);
+    // missing metric fields default to 0 rather than NaN
+    expect(report.totals.drAbsorbed).toBe(0);
+  });
+
+  test("no turn data / foreign army / redacted sheet all yield an honest null", () => {
+    expect(analysisReportFromReports([], "army-red")).toBeNull();
+    expect(
+      analysisReportFromReports([{ turn: 1, sceneId: null, subPhases: [], events: [], summary: { events: 0 }, rulesVersion: "1" }], "army-red"),
+    ).toBeNull();
+    // A player's redacted projection (only its own army survives) reads null
+    // for the enemy — absence of numbers, never a stub.
+    const projected: TurnReport = {
+      turn: 1,
+      sceneId: "scene-1",
+      subPhases: ["melee"],
+      events: [],
+      summary: { analytics: { "army-red": { units: { "u-red-a": unitRow("u-red-a") } } } },
+      rulesVersion: "1.0.0",
+    };
+    expect(analysisReportFromReports([projected], "army-blue")).toBeNull();
+    expect(analysisReportFromReports([projected], "army-red")).not.toBeNull();
   });
 });

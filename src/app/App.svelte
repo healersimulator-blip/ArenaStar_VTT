@@ -1864,6 +1864,14 @@
             Extras
           </button>
           <button
+            id="gm-armies"
+            type="button"
+            onclick={() => openWindow("armies", "Armies", "armies")}
+            title="Army management (M14)"
+          >
+            Armies
+          </button>
+          <button
             id="gm-undo"
             type="button"
             onclick={undo}

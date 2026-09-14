@@ -6,7 +6,7 @@
  * artifacts: SimDelta, compressed pool snapshot (Checkpoint), unit stat
  * diffs, modelRange remaps and the ordered TurnReport.
  */
-import type { RulesContext, RulesModule, UnitView } from "../core/rules";
+import type { ArmyView, RulesContext, RulesModule, UnitView } from "../core/rules";
 import type { OrderQueue, ModelPool } from "../core/strategic";
 import { ModelStatus } from "../core/strategic";
 import type { DocId, UnitId } from "../core/ids";
@@ -258,6 +258,29 @@ export class SimRunnerCore {
     const checkpointMaxHpMax = deltaMaxHpMax;
     const poolHash = canonicalPoolHash(this.pool, this.sys);
 
+    // M12 (D-224): reconcile campaign analytics into the TurnReport at the one
+    // place a turn is actually resolved. The PF1e module's analytics collector
+    // lives on this runner's rules instance for the instance's whole lifetime,
+    // so forecast() inside resolve() *is* the real generateReport() call the
+    // checklist demanded (not a collector-only fixture): per-army cumulative
+    // totals — attacks/hits/hit-rate/net damage/kills/losses — replicate with
+    // every report. The faction projection in broadcastSimTurn keeps each
+    // player's copy to armies they can see; the GM gets the full sheet.
+    let analytics: Record<string, Record<string, import("../core/documents").Json>> | undefined;
+    if (this.rules.forecast && this.ctx.armies.length > 0) {
+      analytics = {};
+      for (const army of this.ctx.armies) {
+        const view: ArmyView = {
+          id: army._id,
+          factionId: army.factionId,
+          name: army.name,
+          supply: army.supply,
+          units: this.units.filter((u) => u.armyId === army._id),
+        };
+        analytics[army._id] = this.rules.forecast(this.ctx, view).data;
+      }
+    }
+
     const report: TurnReport = {
       turn: req.turnNumber,
       sceneId: this.ctx.sceneId,
@@ -274,6 +297,7 @@ export class SimRunnerCore {
         ),
         // §11 distributions (by type / per-unit damage / break-test rolls)
         distributions: distributionsToJson(summarizeDistributions(events)),
+        ...(analytics !== undefined ? { analytics } : {}),
       },
       rulesVersion: this.rules.schema.version,
     };
