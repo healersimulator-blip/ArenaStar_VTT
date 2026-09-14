@@ -201,6 +201,7 @@ export class TurnChannel {
           sceneId: unit.sceneId ?? null,
           modelRange: unit.modelRange,
           leaderTokenId: unit.leaderTokenId ?? null,
+          squadId: (unit as unknown as { squadId?: string | null }).squadId ?? null,
         });
       }
     }

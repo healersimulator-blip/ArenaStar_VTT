@@ -58,6 +58,8 @@ export interface UnitDocument extends BaseDocument {
   modelRange: readonly [number, number] | null;
   orders: OrderQueue;
   stats: UnitStats;
+  /** F02 — squad grouping for simultaneous fan-out (ArmyWindow squadId tag). */
+  squadId?: DocId | null;
 }
 
 /** Army document with embedded units (§4A); ownership cascades to Units. */

@@ -239,6 +239,9 @@ export function createMassBattlePf1e(
       // (M04/D-182) — one scale, derived in one place (`sceneCellFeet`).
       const cellFeet = sceneCellFeet(ctx.grid.distance);
       if (grid.cellSize !== cellFeet) grid = new SpatialGrid(cellFeet);
+      // F02 — snapshot of pre-move positions for simultaneous cover/flanking (faithful simultaneous reading)
+      let simultaneousStartXs: Float32Array | null = null;
+      let simultaneousStartYs: Float32Array | null = null;
 
       // ── natural reach per unit, in feet at this scale (P02, D-180). Table 8-4's reach
       // is a per-size figure, not a constant: "Creatures that take up more than 1 square
@@ -283,6 +286,23 @@ export function createMassBattlePf1e(
         ctx.turnMode === "simultaneous" ||
         (ctx.worldSettings as Record<string, unknown>)?.strategicSimultaneous ===
           true;
+
+      // F02 — squad fan-out: an order keyed by squadId expands to every unit in that squad (no new doc type)
+      // Per-unit orders win (do not overwrite). SquadId is the UnitView.squadId tag (ArmyWindow squadId).
+      {
+        const expanded = new Map<string, import("../core/strategic").OrderQueue>(orders as Map<string, import("../core/strategic").OrderQueue>);
+        for (const [key, queue] of orders.entries()) {
+          const isUnit = units.some((u) => u.id === key);
+          if (isUnit) continue;
+          const members = units.filter((u) => (u as unknown as { squadId?: string | null }).squadId === key);
+          if (members.length === 0) continue;
+          for (const m of members) if (!expanded.has(m.id)) expanded.set(m.id, queue);
+          expanded.delete(key);
+        }
+        // Rebind the local `orders` binding for the rest of resolveTurn
+        (orders as unknown as Map<string, import("../core/strategic").OrderQueue>).clear();
+        for (const [k, v] of expanded.entries()) (orders as unknown as Map<string, import("../core/strategic").OrderQueue>).set(k, v);
+      }
 
       // Helper: effective initiative for a unit (leader actor or profile fallback)
       const effectiveInitiativeOf = (
@@ -351,6 +371,8 @@ export function createMassBattlePf1e(
         // D-174, but mover-vs-mover collision is not re-checked mid-phase.
         const startXs = new Float32Array(pool.x);
         const startYs = new Float32Array(pool.y);
+        simultaneousStartXs = startXs;
+        simultaneousStartYs = startYs;
         const pendingMoves: Array<{
           unit: UnitView;
           dx: number;
@@ -791,20 +813,43 @@ export function createMassBattlePf1e(
 
       // ── flanking (M04, D-182). AoN 183's line test, not the old "≥2 attackers in
       // contact" heuristic: every living model's FLANKED bit is cleared and recomputed
-      // once per turn from the post-movement layout, so a defender flanked by two
-      // enemies on opposite borders — from any units, not just the one it is being
-      // attacked by this round — carries the bit, and a stale bit can never survive a
-      // round in which the geometry stopped supporting it. The melee sub-phase then
-      // reads the per-defender bit through `resolvePF1eAttacks`, exactly as the
-      // tactical scale reads it. Runs after movement, before any engagement resolves.
-      markPF1eFlanking({
-        pool,
-        grid,
-        cellFeet,
-        factionByUnitIdx,
-        reachSquaresByUnitIdx,
-        sizeByUnitIdx,
-      });
+      // once per turn from the layout, so a defender flanked by two enemies on opposite
+      // borders — from any units, not just the one it is being attacked by this round —
+      // carries the bit, and a stale bit can never survive a round in which the geometry
+      // stopped supporting it. The melee sub-phase then reads the per-defender bit through
+      // `resolvePF1eAttacks`, exactly as the tactical scale reads it. Runs after movement,
+      // before any engagement resolves.
+      // F02 — faithful simultaneous reading: flanking/cover computed from pre-move positions
+      // for the whole phase (a unit that moves out of cover still benefits from cover for
+      // shots exchanged that phase). Sequential keeps post-move geometry.
+      if (simultaneous && simultaneousStartXs && simultaneousStartYs) {
+        // Save post-move, swap to pre-move for the flanking pass, then restore
+        const postXs = pool.x;
+        const postYs = pool.y;
+        (pool as unknown as { x: Float32Array; y: Float32Array }).x = simultaneousStartXs;
+        (pool as unknown as { y: Float32Array }).y = simultaneousStartYs;
+        grid.rebuild(pool);
+        markPF1eFlanking({
+          pool,
+          grid,
+          cellFeet,
+          factionByUnitIdx,
+          reachSquaresByUnitIdx,
+          sizeByUnitIdx,
+        });
+        (pool as unknown as { x: Float32Array }).x = postXs;
+        (pool as unknown as { y: Float32Array }).y = postYs;
+        grid.rebuild(pool);
+      } else {
+        markPF1eFlanking({
+          pool,
+          grid,
+          cellFeet,
+          factionByUnitIdx,
+          reachSquaresByUnitIdx,
+          sizeByUnitIdx,
+        });
+      }
 
       // F02 — melee in simultaneous mode is initiative-ordered (damage order)
       // Every unit's attacks are rolled simultaneously (fork per unit) but applied

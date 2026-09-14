@@ -182,4 +182,73 @@ describe("F02 simultaneous strategic — movement batch + initiative damage orde
     };
     expect(run()).toEqual(run());
   });
+
+  test("squad order fan-out — one squadId key expands to every unit in that squad", () => {
+    const rules = createMassBattlePf1e();
+    const pool = createModelPool(10, PF1E_MODEL_SCHEMA);
+    // Three units: two share squad-alpha, one is solo. The squad order is a move.
+    // Squad members start at same y so the same path is equally reachable (infantry march 20 ft)
+    allocModel(pool, { id: 1, unitIdx: 0, x: 0, y: 0, hp: 20, hpMax: 20, sys: { ac: 14 } });
+    allocModel(pool, { id: 2, unitIdx: 1, x: 0, y: 0, hp: 20, hpMax: 20, sys: { ac: 14 } });
+    allocModel(pool, { id: 3, unitIdx: 2, x: 0, y: 20, hp: 20, hpMax: 20, sys: { ac: 14 } });
+
+    const units: UnitView[] = [
+      { id: "u1", armyId: "a0", factionId: "f0", type: "infantry", name: "Alpha 1", profile: {}, stats: {}, orders: null, formation: "line", sceneId: "scene-1", modelRange: [0, 1], leaderTokenId: null, squadId: "squad-alpha" } as unknown as UnitView,
+      { id: "u2", armyId: "a0", factionId: "f0", type: "infantry", name: "Alpha 2", profile: {}, stats: {}, orders: null, formation: "line", sceneId: "scene-1", modelRange: [1, 2], leaderTokenId: null, squadId: "squad-alpha" } as unknown as UnitView,
+      { id: "u3", armyId: "a0", factionId: "f0", type: "infantry", name: "Solo", profile: {}, stats: {}, orders: null, formation: "line", sceneId: "scene-1", modelRange: [2, 3], leaderTokenId: null, squadId: null } as unknown as UnitView,
+    ];
+
+    const orders = new Map<string, OrderQueue>();
+    // One order keyed by squadId, not by unit id — the engine fans it out
+    orders.set("squad-alpha", {
+      issuedBy: "gm",
+      issuedTurn: 1,
+      pending: [],
+      active: { kind: "move", path: [{ x: 20, y: 0 }], pace: "march" } as unknown as any,
+    });
+
+    const events: SimEvent[] = [];
+    rules.resolveTurn(ctxWithSimultaneous(true), pool, units, orders, new XoshiroPRNG(77), (ev) => events.push(ev));
+
+    const arrives = events.filter((e) => e.subPhase === "move" && e.type === "arrive").map((e) => e.unitId).sort();
+    // Both squad members moved; solo did not
+    expect(arrives).toEqual(["u1", "u2"]);
+    expect(pool.x[0]).toBe(20);
+    expect(pool.x[1]).toBe(20);
+    expect(pool.x[2]).toBe(0);
+  });
+
+  test("squad order does not overwrite per-unit order (per-unit wins)", () => {
+    const rules = createMassBattlePf1e();
+    const pool = createModelPool(10, PF1E_MODEL_SCHEMA);
+    allocModel(pool, { id: 1, unitIdx: 0, x: 0, y: 0, hp: 20, hpMax: 20, sys: { ac: 14 } });
+    allocModel(pool, { id: 2, unitIdx: 1, x: 0, y: 10, hp: 20, hpMax: 20, sys: { ac: 14 } });
+
+    const units: UnitView[] = [
+      { id: "u1", armyId: "a0", factionId: "f0", type: "infantry", name: "Alpha 1", profile: {}, stats: {}, orders: null, formation: "line", sceneId: "scene-1", modelRange: [0, 1], leaderTokenId: null, squadId: "squad-alpha" } as unknown as UnitView,
+      { id: "u2", armyId: "a0", factionId: "f0", type: "infantry", name: "Alpha 2", profile: {}, stats: {}, orders: null, formation: "line", sceneId: "scene-1", modelRange: [1, 2], leaderTokenId: null, squadId: "squad-alpha" } as unknown as UnitView,
+    ];
+
+    const orders = new Map<string, OrderQueue>();
+    // Squad says move to 20, but u1 has its own hold-like attack order that should win
+    orders.set("squad-alpha", {
+      issuedBy: "gm",
+      issuedTurn: 1,
+      pending: [],
+      active: { kind: "move", path: [{ x: 20, y: 0 }], pace: "march" } as unknown as any,
+    });
+    orders.set("u1", {
+      issuedBy: "gm",
+      issuedTurn: 1,
+      pending: [],
+      active: { kind: "attack", targetUnitId: "u2" } as unknown as any,
+    });
+
+    const events: SimEvent[] = [];
+    rules.resolveTurn(ctxWithSimultaneous(true), pool, units, orders, new XoshiroPRNG(88), (ev) => events.push(ev));
+
+    const arrives = events.filter((e) => e.subPhase === "move" && e.type === "arrive").map((e) => e.unitId);
+    // u1 kept its attack order, only u2 moved via squad fan-out
+    expect(arrives).toEqual(["u2"]);
+  });
 });

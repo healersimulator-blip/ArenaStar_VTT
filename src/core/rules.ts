@@ -132,6 +132,8 @@ export interface UnitView {
   sceneId: DocId | null;
   modelRange: readonly [number, number] | null;
   leaderTokenId: DocId | null;
+  /** F02 — squad grouping for simultaneous fan-out (ArmyWindow squadId tag). */
+  squadId?: DocId | null;
 }
 
 export interface ArmyView {
