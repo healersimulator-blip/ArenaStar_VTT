@@ -239,3 +239,46 @@ test.describe("Strategic simultaneous (F02)", () => {
   });
 });
 
+
+test.describe("G-04 Combat_Resolver_5 fidelity settings (D-223)", () => {
+  test("strategicDoctrine / strategicEnvelop / strategicArmyInitiative round-trip through the world-settings write path", async ({ browser }: { browser: import("@playwright/test").Browser }) => {
+    test.setTimeout(120_000);
+    const ctx = await browser.newContext();
+    const page = await ctx.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (e) => pageErrors.push(String(e.message ?? e)));
+    try {
+      await page.goto(entry + "?e2e=1");
+      await waitForApp(page);
+
+      // All three G-04 toggles ride the same op the settings window submits;
+      // the resolver proofs (march/hold/orders-win/contact/envelop/B12) are the
+      // unit suite `tests/packages/strategicDoctrine.test.ts`.
+      for (const key of ["strategicDoctrine", "strategicEnvelop", "strategicArmyInitiative"]) {
+        const set = await page.evaluate((k) => {
+          const app = (globalThis as unknown as { __vttE2E: { app: { pf1eSetWorldSetting: (s: unknown) => { ok: boolean; error: string | null } } } }).__vttE2E.app;
+          return app.pf1eSetWorldSetting({ key: k, value: true });
+        }, key);
+        expect(set.ok, set.error ?? undefined).toBe(true);
+      }
+      const world = await page.evaluate(() => {
+        const app = (globalThis as unknown as { __vttE2E: { app: { pf1eWorldSettings: () => Record<string, unknown> } } }).__vttE2E.app;
+        return app.pf1eWorldSettings();
+      });
+      expect(world.strategicDoctrine).toBe(true);
+      expect(world.strategicEnvelop).toBe(true);
+      expect(world.strategicArmyInitiative).toBe(true);
+
+      // The validation gate refuses non-boolean payloads by name (D-223).
+      const rejected = await page.evaluate(() => {
+        const app = (globalThis as unknown as { __vttE2E: { app: { pf1eSetWorldSetting: (s: unknown) => { ok: boolean; error: string | null } } } }).__vttE2E.app;
+        return app.pf1eSetWorldSetting({ key: "strategicDoctrine", value: "yes" });
+      });
+      expect(rejected.ok).toBe(false);
+      expect(rejected.error ?? "").toContain("strategicDoctrine");
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await ctx.close();
+    }
+  });
+});

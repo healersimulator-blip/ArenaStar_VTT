@@ -60,6 +60,15 @@ export interface UnitDocument extends BaseDocument {
   stats: UnitStats;
   /** F02 — squad grouping for simultaneous fan-out (ArmyWindow squadId tag). */
   squadId?: DocId | null;
+  /**
+   * G-04/D-223 — Combat_Resolver_5 doctrine mode (world setting
+   * `strategicDoctrine`): an un-ordered "advance" unit auto-marches on the
+   * nearest living enemy and auto-engages on contact; "hold" pins it in
+   * place. Absent ⇒ "advance" when the setting is on, inert when off.
+   */
+  doctrine?: "advance" | "hold" | null;
+  /** G-04/D-223 — excess-frontage wrap manoeuvre; `false` disables it for this unit. */
+  envelop?: boolean | null;
 }
 
 /** Army document with embedded units (§4A); ownership cascades to Units. */
@@ -67,6 +76,8 @@ export interface ArmyDocument extends BaseDocument {
   type: "army";
   factionId: DocId;
   commander: UserId[];
+  /** G-04/D-223 — Combat_Resolver_5 army initiative modifier (B12: d20 + modifier). */
+  initiative?: number;
   supply: Record<string, Json>;
   units: UnitDocument[];
   ownership: Ownership;

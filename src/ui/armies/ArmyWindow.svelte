@@ -141,6 +141,12 @@
       modelRange: unit.modelRange,
       leaderTokenId: unit.leaderTokenId ?? null,
       squadId: (unit as unknown as { squadId?: string | null }).squadId ?? null,
+      doctrine: unit.doctrine ?? null,
+      envelop: unit.envelop ?? null,
+      armyInitiative:
+        typeof doc?.initiative === "number" && Number.isFinite(doc.initiative)
+          ? doc.initiative
+          : null,
     };
   }
 
@@ -252,6 +258,42 @@
       });
     }
     if (ops.length > 0) client.submit(ops);
+  }
+
+  // ── G-04/D-223 — Combat_Resolver_5 doctrine controls. Doctrine rides the same
+  // embedded-doc update path as orders: the resolver reads `unit.doctrine` /
+  // `unit.envelop` from the UnitView the turn channel builds. ─────────────────
+  function setDoctrine(unit: UnitDocument, doctrine: "advance" | "hold"): void {
+    client.submit([
+      {
+        kind: "update",
+        ref: { coll: "units", id: unit._id, parent: { coll: "armies", id: armyId } },
+        diff: { doctrine },
+      },
+    ]);
+  }
+
+  function setEnvelop(unit: UnitDocument, envelop: boolean): void {
+    client.submit([
+      {
+        kind: "update",
+        ref: { coll: "units", id: unit._id, parent: { coll: "armies", id: armyId } },
+        diff: { envelop },
+      },
+    ]);
+  }
+
+  function setArmyInitiative(raw: string): void {
+    const value = Number.parseInt(raw, 10);
+    client.submit([
+      {
+        kind: "update",
+        ref: { coll: "armies", id: armyId },
+        // Initiative is the army's d20-side modifier (Combat_Resolver_5 B12); an
+        // unparseable field writes 0 rather than a silent NaN.
+        diff: { initiative: Number.isFinite(value) ? value : 0 },
+      },
+    ]);
   }
 
   function toggleReady(ready: boolean): void {
@@ -487,6 +529,19 @@
         {:else}
           <span class="dim">Turn phase: {phase ? phase.phase : "—"}</span>
         {/if}
+        <label class="army-init">
+          Army initiative
+          <input
+            type="number"
+            style="width: 3.2rem"
+            value={army()?.initiative ?? 0}
+            onchange={(ev) =>
+              setArmyInitiative(
+                (ev.currentTarget as HTMLInputElement).value,
+              )}
+            data-army-initiative
+          />
+        </label>
       </div>
       {#each selectedUnits() as unit (unit._id)}
         <div class="queue" data-queue={unit._id}>
@@ -503,6 +558,38 @@
               </li>
             {/each}
           </ol>
+          <div class="doctrine" data-doctrine={unit._id}>
+            <label>
+              Doctrine
+              <select
+                value={unit.doctrine ?? "advance"}
+                onchange={(ev) =>
+                  setDoctrine(
+                    unit,
+                    (ev.currentTarget as HTMLSelectElement).value === "hold"
+                      ? "hold"
+                      : "advance",
+                  )}
+                data-doctrine-select={unit._id}
+              >
+                <option value="advance">advance (auto-march & engage)</option>
+                <option value="hold">hold (orders only)</option>
+              </select>
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={unit.envelop !== false}
+                onchange={(ev) =>
+                  setEnvelop(
+                    unit,
+                    (ev.currentTarget as HTMLInputElement).checked,
+                  )}
+                data-envelop-toggle={unit._id}
+              />
+              Envelop (wrap flanks)
+            </label>
+          </div>
         </div>
       {/each}
       {#if selectedUnits().length === 0}

@@ -134,6 +134,12 @@ export interface UnitView {
   leaderTokenId: DocId | null;
   /** F02 — squad grouping for simultaneous fan-out (ArmyWindow squadId tag). */
   squadId?: DocId | null;
+  /** G-04/D-223 — Combat_Resolver_5 doctrine mode (see UnitDocument). */
+  doctrine?: "advance" | "hold" | null;
+  /** G-04/D-223 — excess-frontage wrap manoeuvre; `false` disables it. */
+  envelop?: boolean | null;
+  /** G-04/D-223 — the unit's army initiative modifier (Combat_Resolver_5 B12). */
+  armyInitiative?: number | null;
 }
 
 export interface ArmyView {

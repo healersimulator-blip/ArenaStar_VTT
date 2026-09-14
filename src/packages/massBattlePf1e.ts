@@ -304,6 +304,203 @@ export function createMassBattlePf1e(
         for (const [k, v] of expanded.entries()) (orders as unknown as Map<string, import("../core/strategic").OrderQueue>).set(k, v);
       }
 
+      // ── G-04/D-223 — Combat_Resolver_5 doctrine mode (world setting
+      // `strategicDoctrine`). The reference's `stepRound` runs `moveUnits(side)`
+      // — EVERY unit of the army marches on the nearest enemy under its standing
+      // behaviour, then fights what it reaches — so the GM never hand-drives one
+      // token per turn. Here that becomes **order synthesis**: an un-ordered
+      // unit whose doctrine is "advance" (the reference's standing default) gets
+      // a contact-tested order materialised in the same map the phases already
+      // read, so walls, the AoO queue, morale and the report all ride the
+      // existing machinery unchanged:
+      //   • in contact (front models within own natural reach of an enemy
+      //     model) ⇒ attack order on the nearest enemy unit;
+      //   • otherwise ⇒ march order toward the nearest living enemy model,
+      //     stopping just outside own reach (the approach way-point; contact
+      //     flips to an attack next turn);
+      //   • doctrine "hold" ⇒ nothing (the unit stands).
+      // Synthesised orders are honest artefacts: each is announced on the
+      // ledger channel with `issuedBy: "doctrine"` so a report can never
+      // confuse an autonomy with a GM order. Units with any queued order are
+      // untouched — orders still outrank doctrine, exactly as CM1's command
+      // channel overrides nearest-enemy doctrine in the reference.
+      const doctrineMode =
+        (ctx.worldSettings as Record<string, unknown>)?.strategicDoctrine ===
+        true;
+      if (doctrineMode) {
+        // Living models per unit index (one scan for the whole synthesis).
+        const livingByUnit: number[][] = units.map((u) => {
+          const indices: number[] = [];
+          const [start, end] = u.modelRange ?? [0, 0];
+          for (let i = start; i < end && i < pool.count; i++) {
+            if (((pool.status[i] ?? 0) & ModelStatus.dead) === 0)
+              indices.push(i);
+          }
+          return indices;
+        });
+        for (let ui = 0; ui < units.length; ui++) {
+          const unit = units[ui];
+          if (!unit) continue;
+          const queue = orders.get(unit.id);
+          if (queue?.active || (queue?.pending?.length ?? 0) > 0) continue;
+          if (unit.doctrine === "hold") continue;
+          const ownLiving = livingByUnit[ui] ?? [];
+          if (ownLiving.length === 0) continue;
+          const anchor = anchorPosition(pool, unit);
+          if (anchor === null) continue;
+          // Nearest living enemy by anchor distance; engage the same unit whose
+          // models stand closest (one pass keeps both honest).
+          let nearest: { unit: UnitView; idx: number; dAnchor: number; dMin: number } | null =
+            null;
+          for (let oi = 0; oi < units.length; oi++) {
+            if (oi === ui) continue;
+            const other = units[oi];
+            if (!other || other.factionId === unit.factionId) continue;
+            const otherLiving = livingByUnit[oi] ?? [];
+            if (otherLiving.length === 0) continue;
+            const otherAnchor = anchorPosition(pool, other);
+            if (otherAnchor === null) continue;
+            const dAnchor = Math.hypot(
+              otherAnchor.x - anchor.x,
+              otherAnchor.y - anchor.y,
+            );
+            let dMin = Infinity;
+            let dMinIdx = otherLiving[0] ?? 0;
+            for (const a of ownLiving) {
+              const ax = pool.x[a] ?? 0;
+              const ay = pool.y[a] ?? 0;
+              for (const b of otherLiving) {
+                const d = Math.hypot(
+                  (pool.x[b] ?? 0) - ax,
+                  (pool.y[b] ?? 0) - ay,
+                );
+                if (d < dMin) {
+                  dMin = d;
+                  dMinIdx = b;
+                }
+              }
+            }
+            if (nearest === null || dAnchor < nearest.dAnchor)
+              nearest = { unit: other, idx: dMinIdx, dAnchor, dMin };
+          }
+          if (nearest === null) continue;
+          const reachFt = reachFeetByUnitIdx[ui] ?? cellFeet;
+          if (nearest.dMin <= reachFt) {
+            orders.set(unit.id, {
+              issuedBy: "doctrine",
+              issuedTurn: strategicTurn,
+              pending: [
+                { kind: "attack", targetUnitId: nearest.unit.id },
+              ],
+            });
+            emit({
+              subPhase: "melee",
+              type: "doctrine-engage",
+              unitId: unit.id,
+              targetUnitId: nearest.unit.id,
+              at: { x: anchor.x, y: anchor.y },
+              text: `${unit.name} engages ${nearest.unit.name} (doctrine)`,
+              data: { kind: "doctrine", action: "engage", distance: Math.round(nearest.dMin * 100) / 100 },
+            });
+          } else {
+            // Approach way-point: from the anchor toward that unit's nearest
+            // living model, halting inside own reach short of the body (the
+            // walls/AoO machinery resolves the actual walk).
+            const tx = pool.x[nearest.idx] ?? 0;
+            const ty = pool.y[nearest.idx] ?? 0;
+            const dx = tx - anchor.x;
+            const dy = ty - anchor.y;
+            const dist = Math.hypot(dx, dy);
+            if (dist === 0) continue;
+            const stopShort = Math.max(cellFeet * 0.2, reachFt - 1);
+            const walk = Math.max(0, dist - stopShort);
+            orders.set(unit.id, {
+              issuedBy: "doctrine",
+              issuedTurn: strategicTurn,
+              pending: [
+                {
+                  kind: "move",
+                  path: [
+                    {
+                      x: anchor.x + (dx / dist) * walk,
+                      y: anchor.y + (dy / dist) * walk,
+                    },
+                  ],
+                  pace: "march",
+                },
+              ],
+            });
+            emit({
+              subPhase: "move",
+              type: "doctrine-advance",
+              unitId: unit.id,
+              targetUnitId: nearest.unit.id,
+              at: { x: anchor.x, y: anchor.y },
+              text: `${unit.name} advances on ${nearest.unit.name} (doctrine)`,
+              data: { kind: "doctrine", action: "advance", distance: Math.round(walk * 100) / 100 },
+            });
+          }
+        }
+      }
+
+      // ── G-04/D-223 — Combat_Resolver_5 B12 army initiative (world setting
+      // `strategicArmyInitiative`). VERBATIM from the reference (marches its
+      // `initiativeModifier + d20` wording straight into this tie path, as
+      // D-220 required):
+      //
+      //     const r0 = d20(b) + cfg.armies[0].init,
+      //           r1 = d20(b) + cfg.armies[1].init;
+      //     // B12: RAW tiebreaker — highest initiative modifier acts first on a tie
+      //     b.initOrder = r1 > r0 ? [1,0] : (r1 < r0 ? [0,1]
+      //        : (cfg.armies[1].init > cfg.armies[0].init ? [1,0] : [0,1]));
+      //
+      // i.e. each army rolls **d20 + initiativeModifier**; equal totals compare
+      // total modifiers; armies still tied act in stable roster order. The
+      // reference rolls once at battle start and acts half-army-at-a-time; this
+      // implementation keys the simultaneous damage-application order by the
+      // same figures (documented D-223 deviation: the roll re-forks each turn
+      // from the seeded turn PRNG instead of being stored on battle state, so
+      // replays remain deterministic; casualties suppress the losing side's
+      // returns exactly as the half-army walk does).
+      let armyRank: Map<string, number> | null = null;
+      if (
+        (ctx.worldSettings as Record<string, unknown>)
+          ?.strategicArmyInitiative === true
+      ) {
+        const mods = new Map<string, number>();
+        for (const u of units) {
+          if (!mods.has(u.armyId))
+            mods.set(u.armyId, u.armyInitiative ?? 0);
+        }
+        const rolls = [...mods.keys()].sort().map((id, k) => {
+          const die = forkRng(rng, 0x1000 + k, 0x5c).d(20);
+          const mod = mods.get(id) ?? 0;
+          return { id, die, mod, total: die + mod };
+        });
+        rolls.sort(
+          (a, b) =>
+            b.total - a.total || b.mod - a.mod || a.id.localeCompare(b.id),
+        );
+        armyRank = new Map(rolls.map((r, rank) => [r.id, rank]));
+        const nameOf = (id: string) =>
+          ctx.armies.find((a) => a._id === id)?.name ?? id;
+        emit({
+          subPhase: "melee",
+          type: "army-initiative",
+          unitId: "",
+          text: `Initiative: ${rolls.map((r) => `${nameOf(r.id)} ${r.total} (d20 ${r.die} + ${r.mod})`).join(" vs ")} → ${nameOf(rolls[0]?.id ?? "")} acts first.`,
+          data: {
+            kind: "army-initiative",
+            rolls: rolls.map((r) => ({
+              armyId: r.id,
+              die: r.die,
+              modifier: r.mod,
+              total: r.total,
+            })),
+          },
+        });
+      }
+
       // Helper: effective initiative for a unit (leader actor or profile fallback)
       const effectiveInitiativeOf = (
         unit: UnitView,
@@ -810,6 +1007,143 @@ export function createMassBattlePf1e(
         });
       }
 
+      // ── G-04/D-223 — Combat_Resolver_5 envelopment wrap (Work Plan Task 4
+      // step 3, restored in its D-130 lawful form). In the reference a wider
+      // unit's excess files never idle opposite nothing: they wrap the enemy's
+      // flanks — slots anchored on the defender's outermost living "corner"
+      // model, stacking outward at formation spacing and stepping down the
+      // enemy's side toward its rear (C10/C11/C12/C13), gated on actual
+      // base-to-base engagement (C6) and on the per-unit envelop toggle (C2).
+      // Grid-port, honouring D-130: NO invented +4/flat-footed rule — the wrap
+      // only moves models, and whatever AoN 183 geometry it creates is judged
+      // by the same `markPF1eFlanking` pass as everything else (+2 melee AB,
+      // nothing more). A unit wraps only when engaged (some own model inside
+      // the defender's reach-band), when its living frontage exceeds the
+      // defender's by more than a square, and only for models standing beyond
+      // the defender's frontage — the front rank stays put (C11). Slots step
+      // down the enemy's flank at one square apiece on the model's own side
+      // (C13: a file never crosses the centreline). The manoeuvre is declared
+      // abstract (D-223): it resolves on contact as the turn's formation
+      // action, distance-uncapped — the reference wraps these same models with
+      // their per-model move after the formation's march, and our rigid
+      // translation has no per-model remainder to spend.
+      if (
+        doctrineMode &&
+        (ctx.worldSettings as Record<string, unknown>)?.strategicEnvelop !==
+          false
+      ) {
+        for (let ui = 0; ui < units.length; ui++) {
+          const unit = units[ui];
+          if (!unit || unit.envelop === false) continue;
+          const queue = orders.get(unit.id);
+          const order = queue?.active ?? queue?.pending[0];
+          if (order?.kind !== "attack" || !order.targetUnitId) continue;
+          const target = units.find((u) => u.id === order.targetUnitId);
+          if (!target) continue;
+          const anchorA = anchorPosition(pool, unit);
+          const anchorB = anchorPosition(pool, target);
+          if (anchorA === null || anchorB === null) continue;
+          const dirLen = Math.hypot(anchorB.x - anchorA.x, anchorB.y - anchorA.y);
+          if (dirLen === 0) continue;
+          const ux = (anchorB.x - anchorA.x) / dirLen;
+          const uy = (anchorB.y - anchorA.y) / dirLen;
+          const px = -uy;
+          const py = ux;
+          const latOf = (i: number) =>
+            (pool.x[i] ?? 0) * px + (pool.y[i] ?? 0) * py;
+          const aliveOf = (u: UnitView, out: number[]): number[] => {
+            const [s, e] = u.modelRange ?? [0, 0];
+            for (let i = s; i < e && i < pool.count; i++) {
+              if (((pool.status[i] ?? 0) & ModelStatus.dead) === 0) out.push(i);
+            }
+            return out;
+          };
+          const ownLiving = aliveOf(unit, []);
+          const foeLiving = aliveOf(target, []);
+          if (ownLiving.length === 0 || foeLiving.length === 0) continue;
+          const reachFt = reachFeetByUnitIdx[ui] ?? cellFeet;
+          // C6 gate: engaged = at least one own model inside the reach-band it
+          // wrapped through (its own reach plus a square of give).
+          let engaged = false;
+          let dMinPair = Infinity;
+          for (const a of ownLiving) {
+            for (const b of foeLiving) {
+              const d = Math.hypot(
+                (pool.x[b] ?? 0) - (pool.x[a] ?? 0),
+                (pool.y[b] ?? 0) - (pool.y[a] ?? 0),
+              );
+              if (d < dMinPair) dMinPair = d;
+              if (d <= reachFt + cellFeet) {
+                engaged = true;
+                break;
+              }
+            }
+            if (engaged) break;
+          }
+          if (!engaged) continue;
+          let foeMin = Infinity;
+          let foeMax = -Infinity;
+          for (const b of foeLiving) {
+            const l = latOf(b);
+            if (l < foeMin) foeMin = l;
+            if (l > foeMax) foeMax = l;
+          }
+          let ownMin = Infinity;
+          let ownMax = -Infinity;
+          for (const a of ownLiving) {
+            const l = latOf(a);
+            if (l < ownMin) ownMin = l;
+            if (l > ownMax) ownMax = l;
+          }
+          if (!(ownMax - ownMin > foeMax - foeMin + cellFeet)) continue;
+          let wrapped = 0;
+          for (const side of [1, -1] as const) {
+            // The defender's outermost living model on this side — the corner
+            // the wrap is anchored on (the reference recomputes it every turn;
+            // the wrap ratchets outward as corner models fall).
+            let cornerIdx = -1;
+            let cornerLat = -Infinity;
+            for (const b of foeLiving) {
+              const l = latOf(b) * side;
+              if (l > cornerLat) {
+                cornerLat = l;
+                cornerIdx = b;
+              }
+            }
+            if (cornerIdx < 0) continue;
+            const foeEdge = side === 1 ? foeMax : foeMin;
+            const excess = ownLiving
+              .filter(
+                (a) => side * (latOf(a) - foeEdge) > cellFeet * 0.5,
+              )
+              .sort((a, b) => side * (latOf(b) - latOf(a)) || a - b);
+            const cx = pool.x[cornerIdx] ?? 0;
+            const cy = pool.y[cornerIdx] ?? 0;
+            for (let k = 0; k < excess.length; k++) {
+              const m = excess[k];
+              if (m === undefined) continue;
+              // Slot k: at own reach beside the corner, stepped down the
+              // enemy's side toward its rear by one square per wrap rank.
+              pool.x[m] = cx + px * side * reachFt - ux * (k * cellFeet);
+              pool.y[m] = cy + py * side * reachFt - uy * (k * cellFeet);
+              wrapped++;
+            }
+          }
+          if (wrapped > 0) {
+            grid.rebuild(pool);
+            emit({
+              subPhase: "move",
+              type: "envelop",
+              unitId: unit.id,
+              targetUnitId: target.id,
+              at: { x: anchorA.x, y: anchorA.y },
+              text: `${unit.name} wraps ${wrapped} model${wrapped === 1 ? "" : "s"} around ${target.name}'s flank (envelop)`,
+              data: { kind: "envelop", wrapped, distance: Math.round(dMinPair * 100) / 100 },
+            });
+          }
+        }
+      }
+
       // ── flanking (M04, D-182). AoN 183's line test, not the old "≥2 attackers in
       // contact" heuristic: every living model's FLANKED bit is cleared and recomputed
       // once per turn from the layout, so a defender flanked by two enemies on opposite
@@ -821,7 +1155,10 @@ export function createMassBattlePf1e(
       // F02 — faithful simultaneous reading: flanking/cover computed from pre-move positions
       // for the whole phase (a unit that moves out of cover still benefits from cover for
       // shots exchanged that phase). Sequential keeps post-move geometry.
-      if (simultaneous && simultaneousStartXs && simultaneousStartYs) {
+      // G-04/D-223 override: in doctrine mode the reference judges the CURRENT per-soldier
+      // placement (there is no snapshot concept in combat_resolver_5), so the pass reads
+      // post-wrap positions in both modes.
+      if (simultaneous && simultaneousStartXs && simultaneousStartYs && !doctrineMode) {
         // Save post-move, swap to pre-move for the flanking pass, then restore
         const postXs = pool.x;
         const postYs = pool.y;
@@ -856,7 +1193,12 @@ export function createMassBattlePf1e(
       // lower-init's attack count. The 100-vs-100 archers at init 12 vs 7 is the
       // discriminating fixture: the 12-init unit fires with 100 models, the 7-init
       // with 80.
-      const meleeUnits = simultaneous
+      // G-04/D-223 — with `strategicArmyInitiative` on, the army roll (B12:
+      // d20 + initiativeModifier, modifier wins ties) becomes the primary key,
+      // reproducing the reference's whole-army half: every unit of the winning
+      // army resolves before the losing army's first return fire. Within an
+      // army the per-unit effectiveInitiative still orders.
+      const meleeUnits = simultaneous || armyRank !== null
         ? [...units]
             .map((u) => ({ unit: u, init: effectiveInitiativeOf(u) }))
             .filter(({ unit }) => {
@@ -864,7 +1206,13 @@ export function createMassBattlePf1e(
               const o = q?.active ?? q?.pending[0];
               return o?.kind === "attack" && !!o.targetUnitId;
             })
-            .sort((a, b) => b.init.mod - a.init.mod || b.init.tie - a.init.tie)
+            .sort(
+              (a, b) =>
+                (armyRank?.get(a.unit.armyId) ?? 0) -
+                  (armyRank?.get(b.unit.armyId) ?? 0) ||
+                b.init.mod - a.init.mod ||
+                b.init.tie - a.init.tie,
+            )
             .map(({ unit }) => unit)
             .concat(
               // Units without attack orders keep array order (they don't fight)

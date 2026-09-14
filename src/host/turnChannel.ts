@@ -202,6 +202,13 @@ export class TurnChannel {
           modelRange: unit.modelRange,
           leaderTokenId: unit.leaderTokenId ?? null,
           squadId: (unit as unknown as { squadId?: string | null }).squadId ?? null,
+          doctrine: unit.doctrine ?? null,
+          envelop: unit.envelop ?? null,
+          armyInitiative:
+            typeof army.initiative === "number" &&
+            Number.isFinite(army.initiative)
+              ? army.initiative
+              : null,
         });
       }
     }
