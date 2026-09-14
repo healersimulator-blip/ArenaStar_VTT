@@ -90,6 +90,7 @@
     type TokenSelection,
   } from "./tokenSelection";
   import { evaluateFormula } from "../../dice/engine";
+import { pendingPruneOps } from "../../packages/pf1e/pendingRoll";
 
   let {
     client,
@@ -248,12 +249,24 @@
     const snapshot = $state.snapshot(combat);
     if (!pf1e) {
       push(nextTurn(snapshot));
+      // F03: prune expired pending rolls on generic turn advance
+      try {
+        const msgs = client.store.getAll("messages") as unknown as Array<{ _id: string; system?: { pendingRoll?: { turnNumber: number; expiresTurn: number; resolved: boolean } } }>;
+        const prune = pendingPruneOps(msgs as unknown as Parameters<typeof pendingPruneOps>[0], (snapshot as unknown as { round?: number }).round ?? 0);
+        if (prune.length > 0) client.submit(prune);
+      } catch {}
       return;
     }
     const result = pf1eNextTurn(snapshot, {
       actors: $state.snapshot(actors),
     });
     push(result);
+    // F03: prune expired pending rolls (T+2 window, keep content) on each turn advance
+    try {
+      const msgs = client.store.getAll("messages") as unknown as Array<{ _id: string; system?: { pendingRoll?: { turnNumber: number; expiresTurn: number; resolved: boolean } } }>;
+      const prune = pendingPruneOps(msgs as unknown as Parameters<typeof pendingPruneOps>[0], (result.combat as unknown as { round?: number }).round ?? 0);
+      if (prune.length > 0) client.submit(prune);
+    } catch {}
     // D-205 — a dying creature's turn started: the panel rolls the round's
     // Constitution check publicly and writes the outcome (the transition
     // itself rolls no die).

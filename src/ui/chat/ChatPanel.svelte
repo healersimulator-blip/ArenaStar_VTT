@@ -266,9 +266,10 @@
     const uid = (client.user as unknown as { id?: string })?.id ?? "";
     if (!uid) return false;
     if (isGMDerived) return true;
-    // Target actor ownership check — if pending target's actor is owned by this user.
+    // Roller is initiator for attacks (AoO/parry) and target for saves/checks/concentration.
+    const rollerId = pending.kind === "attack" ? pending.initiator.actorId : pending.target.actorId;
     const actors = client.store.getAll("actors") as readonly Record<string, unknown>[];
-    const actor = actors.find((a) => (a as Record<string, unknown>)._id === pending.target.actorId) as unknown as { ownership?: Record<string, number> } | undefined;
+    const actor = actors.find((a) => (a as Record<string, unknown>)._id === rollerId) as unknown as { ownership?: Record<string, number> } | undefined;
     if (!actor?.ownership) return false;
     const lvl = actor.ownership[uid];
     return typeof lvl === "number" && lvl >= 1;

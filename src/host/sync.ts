@@ -1027,17 +1027,19 @@ export class HostSync {
       return;
     }
     const isGM = session.user.role === "GM";
-    const targetActor = this.store.get("actors", pending.target.actorId) as unknown as
+    // Roller is initiator for attacks (AoO) and target for saves/checks/concentration.
+    const rollerId = pending.kind === "attack" ? pending.initiator.actorId : pending.target.actorId;
+    const rollerActor = this.store.get("actors", rollerId) as unknown as
       | { ownership?: Record<string, number> }
       | undefined;
-    const ownership = targetActor?.ownership ?? null;
+    const ownership = rollerActor?.ownership ?? null;
     let isOwner = false;
     if (ownership && typeof ownership === "object") {
       const lvl = (ownership as Record<string, number>)[session.user.id];
       if (typeof lvl === "number" && lvl >= 1) isOwner = true;
     }
     if (!isOwner && !isGM) {
-      this.reject(session, String(msg.messageId), "forbidden", "you do not own the target of this pending roll");
+      this.reject(session, String(msg.messageId), "forbidden", "you do not own this pending roll");
       return;
     }
     // Validate shouldDefer predicate (mode + strategic gate). The card's existence

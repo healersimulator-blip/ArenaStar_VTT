@@ -75,6 +75,9 @@ import {
   resolveAttackFlow,
   type ResolveFlowClient,
 } from "../sheets/pf1eResolveFlow";
+import { pendingRollCreateOp } from "./pf1ePendingRollFlow";
+import { isPlayerOwned } from "../../packages/pf1e/pendingRoll";
+import { worldSettingsFrom } from "../../core/worldSettings";
 import { pf1eResolvePositionReport } from "../sheets/pf1eResolvePosition";
 import type { PF1eSituationalModifiers } from "../../packages/pf1e/tactical";
 
@@ -521,6 +524,70 @@ async function resolveQueuedInterrupts(
       }
     }
 
+    // F03 pending attack (AoO) defer: when reactor is player-owned and world mode says attacks pending, create pending card instead of rolling now
+    let pendingOp: import("../../core/ops").Op | null = null;
+    try {
+      const worldSettings = worldSettingsFrom((client as unknown as { store: { getAll(c: string): readonly unknown[] } }).store.getAll("settings") as unknown as Iterable<unknown>);
+      const turnNumber = (currentCombat as unknown as { round?: unknown }).round !== undefined && typeof (currentCombat as unknown as { round?: unknown }).round === "number" ? Math.trunc((currentCombat as unknown as { round: number }).round) : 0;
+      const reactorIsPlayerOwned = isPlayerOwned((reactor as unknown as { ownership?: unknown }).ownership as unknown as import("../../core/documents").Ownership | null | undefined);
+      const { shouldDeferToPlayer } = await import("../../packages/pf1e/pendingRoll");
+      const defer = shouldDeferToPlayer({ kind: "attack", targetIsPlayerOwned: reactorIsPlayerOwned, worldSettings, isStrategic: false });
+      if (defer) {
+        let atkBonus = 0;
+        const m = group.attack.formula.match(/([+\-])\s*(\d+)/);
+        if (m) atkBonus = (m[1] === "+" ? 1 : -1) * Number(m[2]);
+        pendingOp = pendingRollCreateOp({
+          kind: "attack",
+          initiator: { actorId: reactor._id as unknown as string, tokenId: interrupt.reactorId as unknown as string, name: reactor.name, actionLabel: `${line.name} - attack of opportunity` },
+          target: { actorId: provoker._id as unknown as string, tokenId: interrupt.provokerId as unknown as string, name: provoker.name },
+          formula: group.attack.formula,
+          dc: provokerDerived.ac.normal ?? null,
+          modifiers: [{ label: line.name, value: atkBonus, reason: "attack" }],
+          turnNumber,
+          rollMode: "roll",
+          targetIsPlayerOwned: reactorIsPlayerOwned,
+          worldSettings,
+          isStrategic: false,
+        });
+      }
+    } catch {}
+    if (pendingOp !== null) {
+      let ledgerError: string | null = null;
+      let used: number | null = null;
+      let max: number | null = null;
+      if (reactorCombatant === null) {
+        ledgerError = "the reacting token is not a combatant in this encounter";
+      } else {
+        const spent = spendAttackOfOpportunityAuthorized(currentCombat, reactorCombatant._id, user, input.actors, { reason: "movement" });
+        if (spent.error !== null || spent.combat === null) ledgerError = spent.error ?? "the ledger could not be written";
+        else {
+          currentCombat = spent.combat;
+          if (spent.ops.length > 0) client.submit(spent.ops);
+          used = spent.budget?.used ?? null;
+          max = spent.budget?.max ?? null;
+        }
+      }
+      client.submit([pendingOp]);
+      entries.push({
+        reactorId: interrupt.reactorId,
+        provokerId: interrupt.provokerId,
+        square: interrupt.trigger.left ?? interrupt.trigger.at ?? null,
+        combatantId: reactorCombatant?._id ?? null,
+        attackName: line.name,
+        outcome: "miss",
+        attackTotal: 0,
+        defenseAc: provokerDerived.ac.normal,
+        damage: 0,
+        ledgerError,
+        hpWriteError: null,
+        used,
+        max,
+        hpBefore: provokerDerived.hp,
+        hpAfter: provokerDerived.hp,
+        line: `${reactor.name} - attack of opportunity vs ${provoker.name} - pending (Roll ${group.attack.formula} vs AC ${provokerDerived.ac.normal}) - awaiting player roll`,
+      });
+      continue;
+    }
     const outcome = await resolveAttackFlow(client, user, {
       attackerName: reactor.name,
       line,
