@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { SpatialGrid } from "../../src/core/spatialGrid";
 import { markPF1eFlanking, PF1E_STATUS_FLANKED } from "../../src/packages/pf1e/envelopment";
+import { PF1E_MODEL_SCHEMA } from "../../src/packages/pf1e/schema";
 import { allocModel, createModelPool } from "../../src/sim/pool";
 import type { ModelPool } from "../../src/core/strategic";
 
@@ -20,7 +21,7 @@ function battlefield(
   count: number,
   placements: Array<{ unitIdx: number; x: number; y: number }>,
 ): { pool: ModelPool; grid: SpatialGrid } {
-  const pool = createModelPool(Math.max(8, count));
+  const pool = createModelPool(Math.max(8, count), PF1E_MODEL_SCHEMA);
   placements.forEach((p, i) =>
     allocModel(pool, { id: i + 1, unitIdx: p.unitIdx, x: p.x, y: p.y, hp: 5, hpMax: 5 }),
   );
@@ -61,7 +62,7 @@ describe("PF1e strategic flanking — AoN 183 at the mass-battle scale (M04/D-18
     ]);
     const oppositeRes = run(opposite.pool, opposite.grid);
     expect(oppositeRes.flankedDefenders).toEqual([2]);
-    expect((opposite.pool.status[2] ?? 0) & PF1E_STATUS_FLANKED).not.toBe(0);
+    expect(((opposite.pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined)?.[2] ?? 0) & PF1E_STATUS_FLANKED).not.toBe(0);
     expect(oppositeRes.pairs[0]?.flankers.sort()).toEqual([0, 1]);
 
     const sameSide = battlefield(3, [
@@ -71,7 +72,7 @@ describe("PF1e strategic flanking — AoN 183 at the mass-battle scale (M04/D-18
     ]);
     const sameSideRes = run(sameSide.pool, sameSide.grid);
     expect(sameSideRes.flankedDefenders).toEqual([]);
-    expect((sameSide.pool.status[2] ?? 0) & PF1E_STATUS_FLANKED).toBe(0);
+    expect(((sameSide.pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined)?.[2] ?? 0) & PF1E_STATUS_FLANKED).toBe(0);
   });
 
   test("corner contact counts as opposite borders crossing (AoN 183's parenthetical)", () => {
@@ -153,12 +154,15 @@ describe("PF1e strategic flanking — AoN 183 at the mass-battle scale (M04/D-18
     // The east flanker dies: the remaining attacker cannot flank alone.
     pool.status[1] = (pool.status[1] ?? 0) | (1 << 0); // ModelStatus.dead
     expect(run(pool, grid).flankedDefenders).toEqual([]);
-    expect((pool.status[2] ?? 0) & PF1E_STATUS_FLANKED).toBe(0);
+    expect(((pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined)?.[2] ?? 0) & PF1E_STATUS_FLANKED).toBe(0);
 
     // ...and even if a bit were somehow set on a dead model, the pass clears it.
-    pool.status[1] = (pool.status[1] ?? 0) | PF1E_STATUS_FLANKED;
+    {
+    const pfCol = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
+    if (pfCol) pfCol[1] = (pfCol[1] ?? 0) | PF1E_STATUS_FLANKED;
+  }
     run(pool, grid);
-    expect((pool.status[1] ?? 0) & PF1E_STATUS_FLANKED).toBe(0);
+    expect(((pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined)?.[1] ?? 0) & PF1E_STATUS_FLANKED).toBe(0);
   });
 
   test("two models sharing one square are collinear and do not flank (the documented degenerate case)", () => {
@@ -197,7 +201,7 @@ describe("PF1e strategic flanking — AoN 183 at the mass-battle scale (M04/D-18
     // ranks has a single enemy in front (nobody is flanked), which is the mass-battle
     // case the heuristic used to mislabel. The pass is O(n) plus small local pair tests.
     const perSide = 5000;
-    const pool = createModelPool(perSide * 2);
+    const pool = createModelPool(perSide * 2, PF1E_MODEL_SCHEMA);
     for (let i = 0; i < perSide; i++) {
       const col = i % 100;
       const row = Math.floor(i / 100);

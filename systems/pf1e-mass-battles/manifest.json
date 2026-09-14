@@ -24,7 +24,8 @@
             "nonlethal": "u16",
             "aooUsed": "u8",
             "ammo": "u8",
-            "weaponState": "u8"
+            "weaponState": "u8",
+            "pfCondition": "u32"
         }
     }
 }

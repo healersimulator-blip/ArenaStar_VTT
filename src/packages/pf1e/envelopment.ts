@@ -45,10 +45,10 @@ import { canFlank, resolveFlanking, type PF1eFlankingParticipant } from "./flank
 import { cellAt, threatenedCells } from "./geometry";
 
 /**
- * `1 << 2` deliberately: the PF1e module borrows core's `ModelStatus.pinned`
- * slot for FLANKED. That collision is the documented §2.13 bit-allocation debt
- * (M03 owns the separate column); this module does not silently allocate a new
- * one, and it clears only this bit.
+ * M03 — FLANKED now lives in the dedicated `pfCondition` column (u32), not in
+ * `pool.status`. The bit value `1<<2` is kept (same as PF1eCondition.FLANKED)
+ * but is now disjoint from `ModelStatus.pinned` (also 1<<2) which stays in
+ * `pool.status`. Gap §2.13 collision closed; see `PF1E_MODEL_SCHEMA.pfCondition`.
  */
 export const PF1E_STATUS_FLANKED = 1 << 2;
 
@@ -167,8 +167,9 @@ export function markPF1eFlanking(opts: PF1eFlankingPassOptions): PF1eFlankingPas
   const pairs: PF1eFlankingPair[] = [];
 
   for (let d = 0; d < pool.count; d++) {
-    const status = pool.status[d] ?? 0;
-    if ((status & PF1E_STATUS_FLANKED) !== 0) pool.status[d] = status & ~PF1E_STATUS_FLANKED;
+    const pfCol = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
+    const pf = pfCol?.[d] ?? 0;
+    if ((pf & PF1E_STATUS_FLANKED) !== 0 && pfCol) pfCol[d] = pf & ~PF1E_STATUS_FLANKED;
     if (!living(d)) continue;
     const defenderUnitIdx = pool.unitIdx[d] ?? 0;
     const defenderCell = cellAt(pool.x[d] ?? 0, pool.y[d] ?? 0, cellFeet);
@@ -208,7 +209,10 @@ export function markPF1eFlanking(opts: PF1eFlankingPassOptions): PF1eFlankingPas
 
     flankedDefenders.push(d);
     pairs.push(decided);
-    pool.status[d] = (pool.status[d] ?? 0) | PF1E_STATUS_FLANKED;
+    {
+      const pfCol2 = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
+      if (pfCol2) pfCol2[d] = (pfCol2[d] ?? 0) | PF1E_STATUS_FLANKED;
+    }
   }
 
   return { flankedDefenders, pairs };

@@ -182,7 +182,7 @@ describe("PF1e Combat Engine (§12 / Task 3 & High-Fidelity Rules)", () => {
     const res = resolvePF1eCombatManeuver(pool, fIdx, dIdx, "trip", registry, rng);
 
     expect(res.success).toBe(true);
-    expect(((pool.status[dIdx] ?? 0) & PF1eCondition.PRONE)).not.toBe(0);
+    expect(((pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined)?.[dIdx] ?? 0) & PF1eCondition.PRONE).not.toBe(0);
   });
 
   test("resolves Attack of Opportunity (AoO) against provoking caster", () => {

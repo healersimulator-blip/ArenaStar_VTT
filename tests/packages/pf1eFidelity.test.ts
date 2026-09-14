@@ -136,7 +136,8 @@ describe("Combat Modifiers > Flanking (§2.2)", () => {
       { profileIdx: attacker.id },
     );
     if (viaStatusBit) {
-      pool.status[dIdx] = (pool.status[dIdx] ?? 0) | PF1eCondition.FLANKED;
+      const pfCol = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
+      if (pfCol) pfCol[dIdx] = (pfCol[dIdx] ?? 0) | PF1eCondition.FLANKED;
     }
     return resolvePF1eAttacks({
       pool,
@@ -210,11 +211,11 @@ describe("Combat Statistics > Damage — Minimum Damage (§2.3)", () => {
 
     run();
     expect(pool.sys["nonlethal"]?.[dIdx]).toBe(1);
-    expect((pool.status[dIdx] ?? 0) & PF1eCondition.UNCONSCIOUS).toBe(0); // equal ⇒ staggered (§2.12)
+    expect(((pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined)?.[dIdx] ?? 0) & PF1eCondition.UNCONSCIOUS).toBe(0); // equal ⇒ staggered (§2.12)
 
     run();
     expect(pool.sys["nonlethal"]?.[dIdx]).toBe(2); // DR 5 never touched the nonlethal bucket
-    expect((pool.status[dIdx] ?? 0) & PF1eCondition.UNCONSCIOUS).not.toBe(0);
+    expect(((pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined)?.[dIdx] ?? 0) & PF1eCondition.UNCONSCIOUS).not.toBe(0);
     expect(pool.hp[dIdx]).toBe(1); // ...and it is still not dead
     expect((pool.status[dIdx] ?? 0) & 1 /* ModelStatus.dead */).toBe(0);
   });

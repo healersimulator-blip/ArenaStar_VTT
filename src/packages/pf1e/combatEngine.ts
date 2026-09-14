@@ -224,8 +224,9 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
 
   for (const atkIdx of attackers) {
     const atkStatus = pool.status[atkIdx] ?? 0;
+    const atkPf = (pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined)?.[atkIdx] ?? 0;
     if ((atkStatus & ModelStatus.dead) !== 0) continue;
-    if (highFidelity && (atkStatus & PF1eCondition.STUNNED) !== 0) continue; // Stunned models cannot act
+    if (highFidelity && (atkPf & PF1eCondition.STUNNED) !== 0) continue; // Stunned models cannot act
 
     const profileId = pool.sys["profileIdx"]?.[atkIdx] ?? 1;
     const profile = registry.get(profileId);
@@ -247,7 +248,7 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
       metrics.totalAttacks++;
       attacksTaken++;
 
-      const defStatus = pool.status[targetIdx] ?? 0;
+      const defPf = (pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined)?.[targetIdx] ?? 0;
 
       // The defender's own profile — never the attacker's — backs up missing columns.
       const defProfile = registry.get(pool.sys["profileIdx"]?.[targetIdx] ?? 0);
@@ -270,16 +271,16 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
       // SRD (Combat Modifiers > Flanking): flanking is a +2 flanking **bonus on the attack
       // roll**, and nothing else — it does not reduce the defender's AC. Applying it to both
       // sides double-counted the bonus (Gap List §2.2).
-      const isDefenderFlanked = isFlanked || (defStatus & PF1eCondition.FLANKED) !== 0;
+      const isDefenderFlanked = isFlanked || (defPf & PF1eCondition.FLANKED) !== 0;
       let targetAc = resolveTargetAc(pool, defProfile, targetIdx, effectiveAcType);
 
       if (highFidelity) {
         // Prone AC modifier: -4 vs Melee, +4 vs Ranged
-        if ((defStatus & PF1eCondition.PRONE) !== 0) {
+        if ((defPf & PF1eCondition.PRONE) !== 0) {
           if (isRanged) targetAc += 4;
           else targetAc = Math.max(0, targetAc - 4);
         }
-        if ((defStatus & PF1eCondition.BLINDED) !== 0 || (defStatus & PF1eCondition.STUNNED) !== 0) {
+        if ((defPf & PF1eCondition.BLINDED) !== 0 || (defPf & PF1eCondition.STUNNED) !== 0) {
           targetAc = Math.max(0, targetAc - 2);
         }
       }
@@ -299,14 +300,17 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
       let effectiveMisfireMin = profile.misfireMin;
       const weaponStateCol = pool.sys["weaponState"] as unknown as Uint8Array | undefined;
       const weaponBroken = weaponStateCol ? ((weaponStateCol[atkIdx] ?? 0) & 1) !== 0 : false;
-      if (highFidelity && (weaponBroken || (atkStatus & PF1eCondition.MISFIRED) !== 0 || (atkStatus & PF1eCondition.BROKEN) !== 0)) {
+      if (highFidelity && (weaponBroken || (atkPf & PF1eCondition.MISFIRED) !== 0 || (atkPf & PF1eCondition.BROKEN) !== 0)) {
         effectiveMisfireMin += 4; // Misfired/Broken gun increases misfire threshold by +4 (Gun Training +2 variant is actor data, default +4)
       }
 
       if (highFidelity && profile.isFirearm && d20 !== 20 && d20 <= effectiveMisfireMin && effectiveMisfireMin > 0) {
         metrics.misfiresCount++;
         metrics.misses++;
-        pool.status[atkIdx] = (pool.status[atkIdx] ?? 0) | PF1eCondition.MISFIRED | PF1eCondition.BROKEN;
+        {
+          const pfCol = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
+          if (pfCol) pfCol[atkIdx] = (pfCol[atkIdx] ?? 0) | PF1eCondition.MISFIRED | PF1eCondition.BROKEN;
+        }
         if (weaponStateCol) weaponStateCol[atkIdx] = (weaponStateCol[atkIdx] ?? 0) | 1;
         // Consume the shot even on a misfire (tactical ammo decrement mirrors this)
         const ammoCol2 = pool.sys["ammo"] as unknown as Uint8Array | undefined;
@@ -326,9 +330,9 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
       // Apply Attacker Condition & Range Modifiers
       let attackMod = attackBonus + (isDefenderFlanked ? 2 : 0) + profile.enhancementBonus - rangePenalty;
       if (highFidelity) {
-        if ((atkStatus & PF1eCondition.SHAKEN) !== 0) attackMod -= 2;
-        if ((atkStatus & PF1eCondition.SICKENED) !== 0) attackMod -= 2;
-        if ((atkStatus & PF1eCondition.PRONE) !== 0) attackMod -= 4;
+        if ((atkPf & PF1eCondition.SHAKEN) !== 0) attackMod -= 2;
+        if ((atkPf & PF1eCondition.SICKENED) !== 0) attackMod -= 2;
+        if ((atkPf & PF1eCondition.PRONE) !== 0) attackMod -= 4;
       }
 
       const totalAttack = d20 + attackMod;
@@ -371,7 +375,7 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
             diceTotal += rng.d(profile.damageDiceSides);
           }
           let dmgMod = profile.damageMod;
-          if (highFidelity && (atkStatus & PF1eCondition.SICKENED) !== 0) dmgMod -= 2;
+          if (highFidelity && (atkPf & PF1eCondition.SICKENED) !== 0) dmgMod -= 2;
           damageTotal += diceTotal + dmgMod;
         }
         if (damageTotal < 1) nonlethalDamage = 1;
@@ -387,7 +391,10 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
         // SRD: nonlethal damage does not reduce hit points; reaching past current HP makes
         // the target unconscious (staggered-at-equal is Gap List §2.12).
         if (totalNonlethal > (pool.hp[targetIdx] ?? 0)) {
-          pool.status[targetIdx] = (pool.status[targetIdx] ?? 0) | PF1eCondition.UNCONSCIOUS;
+          {
+            const pfCol2 = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
+            if (pfCol2) pfCol2[targetIdx] = (pfCol2[targetIdx] ?? 0) | PF1eCondition.UNCONSCIOUS;
+          }
         }
       }
 
@@ -435,7 +442,11 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
 
           const maxHp = pool.hpMax[targetIdx] ?? 20;
           if (newLethal >= maxHp) {
-            pool.status[targetIdx] = (pool.status[targetIdx] ?? 0) | ModelStatus.dead | PF1eCondition.DEAD;
+            pool.status[targetIdx] = (pool.status[targetIdx] ?? 0) | ModelStatus.dead;
+            {
+              const pfCol3 = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
+              if (pfCol3) pfCol3[targetIdx] = (pfCol3[targetIdx] ?? 0) | PF1eCondition.DEAD;
+            }
             metrics.killsCount++;
             defIdxPtr++; // Permanent Death!
           }
@@ -445,7 +456,10 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
           const newHp = Math.max(0, currentHp - netDamage);
           pool.hp[targetIdx] = newHp;
           if (newHp === 0) {
-            pool.status[targetIdx] = (pool.status[targetIdx] ?? 0) | PF1eCondition.DISRUPTED;
+            {
+              const pfCol5 = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
+              if (pfCol5) pfCol5[targetIdx] = (pfCol5[targetIdx] ?? 0) | PF1eCondition.DISRUPTED;
+            }
           }
         }
       } else {
@@ -455,7 +469,11 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
         pool.hp[targetIdx] = newHp;
 
         if (newHp === 0) {
-          pool.status[targetIdx] = (pool.status[targetIdx] ?? 0) | ModelStatus.dead | PF1eCondition.DEAD;
+          pool.status[targetIdx] = (pool.status[targetIdx] ?? 0) | ModelStatus.dead;
+          {
+            const pfCol4 = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
+            if (pfCol4) pfCol4[targetIdx] = (pfCol4[targetIdx] ?? 0) | PF1eCondition.DEAD;
+          }
           metrics.killsCount++;
           defIdxPtr++; // Target slain
         }
@@ -532,7 +550,10 @@ export function resolvePF1eHealing(
       if (pool.sys["nonlethal"]) pool.sys["nonlethal"][idx] = r.nonlethalDamage;
       totalHealed += r.healedHp;
       if (beforeHp === 0 && (r.hp ?? 0) > 0) {
-        pool.status[idx] = (pool.status[idx] ?? 0) & ~PF1eCondition.DISRUPTED;
+        {
+          const pfCol6 = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
+          if (pfCol6) pfCol6[idx] = (pfCol6[idx] ?? 0) & ~PF1eCondition.DISRUPTED;
+        }
         revivedCount++;
       }
     };
@@ -606,7 +627,11 @@ export function resolvePF1eTrample(
       const curHp = pool.hp[dIdx] ?? 0;
       pool.hp[dIdx] = Math.max(0, curHp - dmg);
       if (pool.hp[dIdx] === 0) {
-        pool.status[dIdx] = (pool.status[dIdx] ?? 0) | ModelStatus.dead | PF1eCondition.DEAD;
+        pool.status[dIdx] = (pool.status[dIdx] ?? 0) | ModelStatus.dead;
+          {
+            const pfColTr = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
+            if (pfColTr) pfColTr[dIdx] = (pfColTr[dIdx] ?? 0) | PF1eCondition.DEAD;
+          }
       }
       totalDamage += dmg;
     }
@@ -641,7 +666,8 @@ export function resolvePF1eCombatManeuver(
     else if (maneuver === "grapple") cond = PF1eCondition.GRAPPLED;
 
     if (cond) {
-      pool.status[defenderIdx] = (pool.status[defenderIdx] ?? 0) | cond;
+      const pfColM = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
+      if (pfColM) pfColM[defenderIdx] = (pfColM[defenderIdx] ?? 0) | cond;
     }
     return { success: true, conditionApplied: cond };
   }
