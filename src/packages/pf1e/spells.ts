@@ -7,6 +7,7 @@ import type { SpatialGrid } from "../../core/spatialGrid";
 import type { RulesWallsContext } from "../../core/rules";
 import { hasLineOfEffect } from "../../core/detection";
 import { pf1eRngFromSeed, resolvePF1eAoO, type PF1eRng } from "./combatEngine";
+import { spellResistanceCheck } from "./casting";
 import type { PF1eProfileRegistry } from "./schema";
 
 export interface PF1eSpellOrder {
@@ -82,6 +83,13 @@ export interface PF1eSpellOptions {
    * origin"). Absent walls keep the historic open-field behaviour.
    */
   walls?: RulesWallsContext;
+  /**
+   * M06/§2.11 — "spell resistance is overcome once per round": the turn owner passes a set
+   * keyed `casterIdx:targetIdx`; after a successful check later spells by the same caster
+   * skip the roll against that model (no die consumed, keeping the stream stable). The mass
+   * battle clears the set at the top of every turn.
+   */
+  srRoundCache?: Set<string>;
 }
 
 export interface PF1eSpellResult {
@@ -112,6 +120,7 @@ export function resolvePF1eAOESpell(opts: PF1eSpellOptions): PF1eSpellResult {
     casterAdjacentEnemies = [],
     highFidelity = true,
     walls,
+    srRoundCache,
   } = opts;
 
   const rng = opts.rng ?? pf1eRngFromSeed(seed ?? 0);
@@ -227,18 +236,29 @@ export function resolvePF1eAOESpell(opts: PF1eSpellOptions): PF1eSpellResult {
 
     metrics.modelsTargeted++;
 
-    // Check Spell Resistance (CL vs SR Roll) in High-Fidelity Mode
+    // Check Spell Resistance (CL vs SR Roll) in High-Fidelity Mode — through the one
+    // tactical checker (M06/§2.11: both scales read A.16 from `spellResistanceCheck`, so a
+    // natural 20 can still fail and a natural 1 can still succeed at both), with the
+    // once-per-round overcome cache the UMR grants ("resistance is overcome once per spell
+    // per round").
     const targetSr = pool.sys["sr"]?.[idx] ?? 0;
     if (highFidelity && targetSr > 0) {
-      const srRoll = rng.d(20);
-      const srTotal = srRoll + casterLevel + spellPenetration;
-      // A caster level check has no natural-die special cases: "if the result equals or
-      // exceeds the creature's spell resistance, the spell works normally". The old
-      // `srRoll !== 20` short-circuit was the DEVIATIONS D-1 house rule.
-      if (srTotal < targetSr) {
+      const cacheKey = `${spell.casterIdx ?? -1}:${idx}`;
+      const already = srRoundCache?.has(cacheKey) === true;
+      const srRes = spellResistanceCheck({
+        // No die is consumed on a RoundCache hit, so the stream stays identical for the
+        // models that follow.
+        ...(already ? {} : { die: rng.d(20) }),
+        casterLevel: casterLevel + spellPenetration,
+        spellResistance: targetSr,
+        alreadyOvercomeThisRound: already,
+      });
+      // `issues` can't fire here: the SR column is a u8 — every integer is well-formed.
+      if (srRes.resisted) {
         metrics.srBlocked++;
         continue; // Spell resisted by target SR!
       }
+      if (!already) srRoundCache?.add(cacheKey);
     }
 
     // DEVIATIONS D-1 (removed, D-130/D-151): a model resolves the save in the square it

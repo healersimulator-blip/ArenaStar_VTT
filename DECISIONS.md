@@ -5808,3 +5808,42 @@ unchanged at ~2.4–2.5 s.
 **Evidence.** 25 new discriminating fixtures (`pf1eAttackFidelity.test.ts`), each named for
 its SRD row; full suite **2267 passed / 3 skipped** across 199 files; typecheck (explicit)
 0, eslint 0.
+
+## D-228 — 2026-09-15 — M06 closed: strategic nonlethal ladder, shared SR checker, once-per-round overcome cache
+
+**Context.** The strategic mass-battle resolver still carried the pre-D-1 inline SR house
+rules (natural 20 auto-overcomes, natural 1 auto-fails) and a nonlethal branch that only
+knocked out past HP — never staggered at the equal mark, never converted past-the-maximum
+excess to lethal, and never stopped an unconscious model from marching an attack routine.
+
+**What changed (schema.ts / combatEngine.ts / spells.ts / massBattlePf1e.ts).**
+
+- **STAGGERED is a first-class strategic condition** (`PF1eCondition.STAGGERED`, 1 << 12).
+  At the mass-battle grain a staggered model's "single move or standard action per round"
+  collapses to one attack per resolution routine, folded into `routineCap` next to the
+  existing `maxIterativeAttacks` guard; the bit is the honest record for the UI.
+- **UNCONSCIOUS now skips attacks**, mirroring STUNNED at the top of the attacker loop.
+- **A.13 thresholds at the strategic scale** — after each subdue hit the fresh nonlethal
+  tally is compared to *current* HP: `>` → UNCONSCIOUS (clears STAGGERED), `===` →
+  STAGGERED. The comparison is read after lethal damage applied earlier in the same hit,
+  so a target whittled low staggers sooner — the intended interplay.
+- **§2.12 conversion** — `convertible = max(0, total − max(prior, hpMax))` is eased once
+  per hit into `pool.hp` through the DR computation already hoisted for the weapon blow,
+  reduced by the attack's **leftover** DR (`max(0, drVal − effectiveDr)`) unless the blow
+  bypassed. DR/5 with only nonlethal dice therefore still spends the full 5 against the
+  first converted point — the "rest of the damage" of the DR text. The shared hp→dead path
+  owns the kill.
+- **One A.16 checker across both scales** — strategic `resolveSpellResistance` delegates to
+  the tactical `spellResistanceCheck`; penetration folds into the caster level. The
+  once-per-round overcome cache (`srRoundCache`, keyed `${casterIdx}:${idx}`) is minted per
+  turn in `resolveTurn`; after one overcome, later spells from the same caster skip the roll
+  against that model (no die consumed, keeping scripted RNG streams stable), matching the
+  tactical pool's `alreadyOvercomeThisRound`.
+
+**Tests.** `pf1eNonlethalFidelity.test.ts` (8): staggered-at-equal, unconscious-beyond with
+staggered replacement, unconscious/staggered attack caps (1 attack from a 3-iterative
+ladder), the three-legged conversion ladder (below max / at max / past max with and without
+residual DR), shared-checker parity (nat 20 + CL 5 vs SR 26 resisted; nat 1 vs SR 6
+overcomes), cache no-die skip with a discriminating queue lead, per-caster independence.
+Full vitest 2275 (was 2267), tsc 0, eslint 0; 10k scale gate ~2.5 s unchanged.
+

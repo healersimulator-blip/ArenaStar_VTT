@@ -233,14 +233,21 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
     const atkPf = (pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined)?.[atkIdx] ?? 0;
     if ((atkStatus & ModelStatus.dead) !== 0) continue;
     if (highFidelity && (atkPf & PF1eCondition.STUNNED) !== 0) continue; // Stunned models cannot act
+    if (highFidelity && (atkPf & PF1eCondition.UNCONSCIOUS) !== 0) continue; // nor can unconscious ones (§2.12)
+    // §2.12 — staggered (nonlethal exactly equal to current HP): a single move OR standard
+    // action per turn, read at the mass-battle grain as a one-attack routine cap.
+    const staggeredCap = highFidelity && (atkPf & PF1eCondition.STAGGERED) !== 0 ? 1 : undefined;
 
     const profileId = pool.sys["profileIdx"]?.[atkIdx] ?? 1;
     const profile = registry.get(profileId);
     if (!profile) continue;
 
     let attacksTaken = 0;
+    const routineCap = opts.maxIterativeAttacks !== undefined || staggeredCap !== undefined
+      ? Math.min(opts.maxIterativeAttacks ?? Number.MAX_SAFE_INTEGER, staggeredCap ?? Number.MAX_SAFE_INTEGER)
+      : undefined;
     for (const attackBonus of profile.iteratives) {
-      if (opts.maxIterativeAttacks !== undefined && attacksTaken >= opts.maxIterativeAttacks) break;
+      if (routineCap !== undefined && attacksTaken >= routineCap) break;
       if (defIdxPtr >= defenders.length) break;
       let targetIdx = defenders[defIdxPtr] ?? 0;
 
@@ -411,22 +418,6 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
       const nonlethalDamage = baseDamage < 1 ? 1 : 0;
       const rawDamage = baseDamage < 1 ? Math.max(0, bonusDamage) : baseDamage + bonusDamage;
 
-      metrics.rawDamageDealt += rawDamage;
-      if (nonlethalDamage > 0) {
-        metrics.nonlethalDealt += nonlethalDamage;
-        const priorNonlethal = pool.sys["nonlethal"]?.[targetIdx] ?? 0;
-        const totalNonlethal = priorNonlethal + nonlethalDamage;
-        if (pool.sys["nonlethal"]) pool.sys["nonlethal"][targetIdx] = totalNonlethal;
-        // SRD: nonlethal damage does not reduce hit points; reaching past current HP makes
-        // the target unconscious (staggered-at-equal is Gap List §2.12).
-        if (totalNonlethal > (pool.hp[targetIdx] ?? 0)) {
-          {
-            const pfCol2 = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
-            if (pfCol2) pfCol2[targetIdx] = (pfCol2[targetIdx] ?? 0) | PF1eCondition.UNCONSCIOUS;
-          }
-        }
-      }
-
       // Damage Reduction is a property of the DEFENDER. Reading it as
       // `(pool column ?? 0) || attacker profile` silently applied the attacker's own DR to
       // the blow when the defender's column was 0 (Gap List §2.10, the fallback half).
@@ -439,18 +430,56 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
       // damage is named exempt. The reduction binds only the weapon blow.
       const drApplicable = baseDamage > 0 ? Math.min(baseDamage, drVal) : 0;
       let effectiveDr = drApplicable;
+      let bypassedNow = false;
 
       if (highFidelity) {
-        const bypassed = isDrBypassed(
+        bypassedNow = isDrBypassed(
           profile.enhancementBonus,
           profile.material,
           profile.damageType,
           drTypeFlags,
           profile.weaponAlignmentFlags
         );
-        if (bypassed) {
+        if (bypassedNow) {
           metrics.drBypassed += effectiveDr;
           effectiveDr = 0;
+        }
+      }
+
+      metrics.rawDamageDealt += rawDamage;
+      if (nonlethalDamage > 0) {
+        metrics.nonlethalDealt += nonlethalDamage;
+        const priorNonlethal = (pool.sys["nonlethal"]?.[targetIdx] ?? 0) as number;
+        const totalNonlethal = priorNonlethal + nonlethalDamage;
+        if (pool.sys["nonlethal"]) pool.sys["nonlethal"][targetIdx] = totalNonlethal;
+        // §2.12, the full SRD ladder (SRD: Dealing Nonlethal Damage):
+        // (a) conversion — once the nonlethal tally equals MAX HP, further subdual damage is
+        //     *lethal* ("all further nonlethal damage is treated as lethal"). The converted
+        //     slice faces the same DR availability as the blow that dealt it: any reduction
+        //     capacity the weapon damage did not consume. Converted HP loss feeds the normal
+        //     death path below.
+        const hpMaxDef = (pool.hpMax[targetIdx] ?? 0) as number;
+        const convertible = Math.max(0, totalNonlethal - Math.max(priorNonlethal, hpMaxDef));
+        if (convertible > 0 && hpMaxDef > 0) {
+          const residualDr = Math.max(0, drVal - effectiveDr);
+          const convertedNet = bypassedNow ? convertible : Math.max(0, convertible - residualDr);
+          if (convertedNet > 0) {
+            pool.hp[targetIdx] = Math.max(0, (pool.hp[targetIdx] ?? 0) - convertedNet);
+          }
+        }
+        // (b) thresholds against CURRENT hit points: exactly equal ⇒ staggered (a single
+        //     move or standard), exceeding ⇒ unconscious. HP ≤ 0 is the lethal ladder's
+        //     business (disabled/dying), so nonlethal says nothing there.
+        const hpAfter = (pool.hp[targetIdx] ?? 0) as number;
+        if (hpAfter > 0 && totalNonlethal > hpAfter) {
+          const pfCol2 = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
+          if (pfCol2) {
+            pfCol2[targetIdx] =
+              ((pfCol2[targetIdx] ?? 0) & ~PF1eCondition.STAGGERED) | PF1eCondition.UNCONSCIOUS;
+          }
+        } else if (hpAfter > 0 && totalNonlethal === hpAfter) {
+          const pfCol2 = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
+          if (pfCol2) pfCol2[targetIdx] = (pfCol2[targetIdx] ?? 0) | PF1eCondition.STAGGERED;
         }
       }
 

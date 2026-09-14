@@ -64,6 +64,12 @@ export const PF1eCondition = {
    * see PF1e_Combat_Fidelity_GapList.md §2.13 for the bits that still collide.
    */
   UNCONSCIOUS: 1 << 11,
+  /**
+   * Nonlethal damage exactly equal to current HP ⇒ staggered (SRD A.13/§2.12): a single
+   * move or standard action per turn. At the mass-battle grain this caps the attack routine
+   * at one attack (combatEngine); exceeding the HP total replaces this with UNCONSCIOUS.
+   */
+  STAGGERED: 1 << 12,
 } as const;
 
 /** DR Type Bitfield Flags for Material/Type Bypass */

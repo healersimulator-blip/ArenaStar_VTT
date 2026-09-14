@@ -233,6 +233,11 @@ export function createMassBattlePf1e(
       // return in a later sub-phase can never leave two turns sharing a label.
       strategicTurn += 1;
 
+      // M06/§2.11 — the once-per-round spell-resistance overcome cache ("resistance is
+      // overcome once per spell per round"): fresh every turn, keyed casterIdx:targetIdx,
+      // consumed by every pack cast this turn.
+      const srRoundCache = new Set<string>();
+
       // One grid cell in feet — the scene's authored grid distance (P01: scene metadata,
       // not constants), with the standard 5-ft fallback. Drives the movement budget
       // (D-173), reach (D-177/D-180), the spatial hash's buckets and the flanking pass
@@ -1525,6 +1530,7 @@ export function createMassBattlePf1e(
           casterAdjacentEnemies,
           rng: forkRng(rng, unitIndex(unit), 2),
           walls: ctx.walls,
+          srRoundCache,
         });
 
         analytics.recordSpell(unit.id, spellRes.metrics);
