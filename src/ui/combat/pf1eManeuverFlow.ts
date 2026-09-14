@@ -67,6 +67,9 @@ import {
   spendAttackOfOpportunityAuthorized,
 } from "./actionBudget";
 import { resolveAttackFlow, type ResolveFlowClient, awaitRollMessage, dieFaceOf } from "../sheets/pf1eResolveFlow";
+import { pendingRollCreateOp } from "./pf1ePendingRollFlow";
+import { isPlayerOwned } from "../../packages/pf1e/pendingRoll";
+import { worldSettingsFrom } from "../../core/worldSettings";
 
 export interface ManeuverFlowClient extends ResolveFlowClient {
   // same as ResolveFlowClient — roll, rollVerified, store, submit
@@ -262,7 +265,7 @@ export async function resolveManeuverFlow(
   }
   void aooCardPosted;
 
-  // Roll the maneuver die
+  // F03: maneuver check pending in manual mode only — defer 1d20+CMB vs CMD to attacker when player-owned
   const rollOne = async (formula: string, flavor: string): Promise<number | null> => {
     const rollId = params.verifiable ? await client.rollVerified(formula, "roll", undefined, flavor) : client.roll(formula, "roll", undefined, flavor);
     const msg = await awaitDie(client, rollId);
@@ -270,6 +273,53 @@ export async function resolveManeuverFlow(
     const face = dieFaceOf(msg);
     return face;
   };
+
+  try {
+    const worldSettingsM = worldSettingsFrom((client as unknown as { store: { getAll(c: string): readonly unknown[] } }).store.getAll("settings") as unknown as Iterable<unknown>);
+    const attackerIsPlayerOwned = isPlayerOwned((attacker as unknown as { ownership?: unknown }).ownership as unknown as import("../../core/documents").Ownership | null | undefined);
+    const turnNumberM = (params.combat as unknown as { round?: unknown })?.round !== undefined && typeof (params.combat as unknown as { round?: unknown }).round === "number" ? Math.trunc((params.combat as unknown as { round: number }).round) : 0;
+    const { shouldDeferToPlayer: shouldDeferM } = await import("../../packages/pf1e/pendingRoll");
+    if (shouldDeferM({ kind: "check", targetIsPlayerOwned: attackerIsPlayerOwned, worldSettings: worldSettingsM, isStrategic: false })) {
+      const bonusForFormula = attackerCmb + (params.attackPenalty ?? 0) + (aooDamage !== null && aooDamage > 0 ? -Math.abs(aooDamage) : 0);
+      const formulaM = `1d20${bonusForFormula >= 0 ? `+${bonusForFormula}` : `${bonusForFormula}`}`;
+      const modifiersM: Array<{ label: string; value: number; reason: string }> = [{ label: "CMB", value: attackerCmb, reason: kind }];
+      if (params.attackPenalty !== undefined && params.attackPenalty !== 0) modifiersM.push({ label: "Penalty", value: params.attackPenalty, reason: "attackPenalty" });
+      if (aooDamage !== null && aooDamage > 0) modifiersM.push({ label: "AoO damage", value: -Math.abs(aooDamage), reason: "aooDamageTaken" });
+      const pendingOpM = pendingRollCreateOp({
+        kind: "check",
+        initiator: { actorId: attacker._id as unknown as string, tokenId: null, name: attacker.name, actionLabel: `${kind} maneuver` },
+        target: { actorId: defender._id as unknown as string, tokenId: null, name: defender.name },
+        formula: formulaM,
+        dc: defenderCmd,
+        modifiers: modifiersM,
+        turnNumber: turnNumberM,
+        rollMode: "roll",
+        targetIsPlayerOwned: attackerIsPlayerOwned,
+        worldSettings: worldSettingsM,
+        isStrategic: false,
+      });
+      if (pendingOpM !== null) {
+        const pendingCardM: MessageDocument = {
+          _id: globalThis.crypto.randomUUID(),
+          type: "message",
+          name: `${attacker.name} — ${kind} (pending)`,
+          ownership: { default: 1 },
+          flags: {},
+          system: {},
+          author: user?.id ?? "",
+          content: `${attacker.name} — ${kind} vs ${defender.name} — [[${formulaM}]] vs CMD ${defenderCmd} — pending for player roll (die ${formulaM}).`,
+          whisper: [],
+          roll: null,
+          flavor: "maneuver resolution",
+        };
+        // Post the narrative line as a card plus the atomic pending card
+        client.submit([{ kind: "create", coll: "messages", data: pendingCardM }]);
+        client.submit([pendingOpM]);
+        const pendingPlan: PF1eManeuverPlan = { ops: [], note: `${kind} maneuver pending for player roll — check ${formulaM} vs CMD ${defenderCmd}` };
+        return { ok: true, plan: pendingPlan, aooDamage, cardId: (pendingOpM as unknown as { data: { _id: string } }).data._id };
+      }
+    }
+  } catch {}
 
   const die = await rollOne("1d20", `${kind} maneuver`);
   if (die === null) return { ok: false, error: "maneuver die roll did not arrive" };

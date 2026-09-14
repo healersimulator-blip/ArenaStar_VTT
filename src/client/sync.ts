@@ -287,6 +287,52 @@ export class ClientSync {
     return rollId;
   }
 
+  /**
+   * F03 — pending player reaction roll (commit-reveal, host-verified).
+   * The pending MessageId is the shell card; the host validates the 2-round
+   * window + ownership + shouldDefer predicate and evaluates deterministically
+   * from both seeds. Falls back to a plain pending resolve when crypto is
+   * unavailable — chat never blocks.
+   */
+  async rollPending(messageId: DocId): Promise<string> {
+    let seedClient: string;
+    let commit: string;
+    try {
+      seedClient = randomSeedHex();
+      commit = await sha256Hex(seedClient);
+    } catch {
+      // fallback to uncommitted seed — host will still accept without commit
+      seedClient = randomSeedHex();
+      commit = "";
+    }
+    this.send({
+      kind: "roll.pending",
+      messageId,
+      seedClient,
+      ...(commit ? { seedClientCommit: commit } : {}),
+    } as unknown as WireMessage);
+    return seedClient;
+  }
+
+  /** F01 — GM reroll or delegated player reroll (host-evaluated, 2-round window). */
+  rollReroll(messageId: DocId, newModifiers?: Array<{ label: string; value: number; reason: string }>): void {
+    this.send({
+      kind: "roll.reroll",
+      messageId,
+      ...(newModifiers ? { newModifiers } : {}),
+    } as unknown as WireMessage);
+  }
+
+  /** F01 — GM revert (inverse of ledgerOps). */
+  rollRevert(messageId: DocId): void {
+    this.send({ kind: "roll.revert", messageId } as unknown as WireMessage);
+  }
+
+  /** F01 — GM delegates reroll window to a player (expires in 2 turns). */
+  rollDelegate(messageId: DocId, playerId: import("../core/ids").UserId): void {
+    this.send({ kind: "roll.delegate", messageId, playerId } as unknown as WireMessage);
+  }
+
   /** §7: lazy asset fetch with resume; answered by asset.chunk frames. */
   requestAsset(assetId: AssetId, priority: AssetPriority = "scene", offset = 0): void {
     this.send({ kind: "asset.get", assetId, offset, priority });

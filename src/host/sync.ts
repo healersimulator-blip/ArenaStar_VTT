@@ -38,6 +38,25 @@ import type {
   WireMessage,
 } from "../core/messages";
 import { evaluateCommitRoll, randomSeedHex, sha256Hex } from "../dice/commitReveal";
+import { worldSettingsFrom } from "../core/worldSettings";
+import {
+  isPendingExpired,
+  pendingPruneOps,
+  shouldDeferToPlayer,
+  resolvePendingRoll as resolvePendingRollDoc,
+} from "../packages/pf1e/pendingRoll";
+import type { PendingRoll } from "../packages/pf1e/pendingRoll";
+import {
+  canPlayerReroll as canLedgerPlayerReroll,
+  canReroll as canLedgerReroll,
+  canRevert as canLedgerRevert,
+  delegateRerollOps,
+  invertLedger,
+  pruneOpsForWindow as rollLedgerPruneOps,
+  rerollOps as ledgerRerollOps,
+  revertOps as ledgerRevertOps,
+} from "../packages/pf1e/rollLedger";
+import type { RollLedger } from "../packages/pf1e/rollLedger";
 import type { AssetId, PeerId, TxId, UserId } from "../core/ids";
 import { DocumentStore } from "../core/store";
 import { OpLog } from "../core/oplog";
@@ -439,6 +458,18 @@ export class HostSync {
       case "roll.reveal":
         this.handleRollReveal(session, msg as RollRevealMsg);
         return;
+      case "roll.pending":
+        void this.handleRollPending(session, msg as unknown as import("../core/messages").RollPendingMsg);
+        return;
+      case "roll.reroll":
+        void this.handleRollReroll(session, msg as unknown as import("../core/messages").RollRerollMsg);
+        return;
+      case "roll.revert":
+        void this.handleRollRevert(session, msg as unknown as import("../core/messages").RollRevertMsg);
+        return;
+      case "roll.delegate":
+        void this.handleRollDelegate(session, msg as unknown as import("../core/messages").RollDelegateMsg);
+        return;
       case "ephemeral":
         this.handleEphemeral(session, msg);
         return;
@@ -744,6 +775,35 @@ export class HostSync {
     if (!appended.ok) return { ok: false, error: appended.error };
     if (recordUndo) this.undoStack.push(envelope, applied.value.inverses);
     this.broadcastEnvelope(envelope, applied.value.inverses);
+    // F03: prune expired pending rolls (T+2 window) when a combat round/turn advanced
+    try {
+      let pruneTurn: number | null = null;
+      for (const op of envelope.ops) {
+        if (op.kind === "update" && op.ref.coll === "combats") {
+          const diff = op.diff as Record<string, unknown>;
+          const rd = diff["round"];
+          if (typeof rd === "number" && Number.isFinite(rd as number)) pruneTurn = Math.max(pruneTurn ?? 0, Math.trunc(rd as number));
+          const td = diff["turn"];
+          if (typeof td === "number" && Number.isFinite(td as number) && pruneTurn === null) pruneTurn = Math.max(pruneTurn ?? 0, Math.trunc(td as number));
+        }
+        if (op.kind === "create" && op.coll === "combats") {
+          const data = op.data as unknown as Record<string, unknown>;
+          const rd = data["round"];
+          if (typeof rd === "number" && Number.isFinite(rd as number)) pruneTurn = Math.max(pruneTurn ?? 0, Math.trunc(rd as number));
+        }
+      }
+      if (pruneTurn !== null) {
+        const msgs = [...this.store.getAll("messages")] as unknown as Array<{ _id: string; system?: { pendingRoll?: import("../packages/pf1e/pendingRoll").PendingRoll } }>;
+        const prune = pendingPruneOps(msgs as unknown as Parameters<typeof pendingPruneOps>[0], pruneTurn);
+        if (prune.length > 0) this.commitSystem(prune, false);
+        // F01: prune expired roll ledgers alongside pending rolls
+        try {
+          const msgs2 = [...this.store.getAll("messages")] as unknown as Array<{ _id: string; system?: { rollLedger?: RollLedger } }>;
+          const prune2 = rollLedgerPruneOps(msgs2 as unknown as Parameters<typeof rollLedgerPruneOps>[0], pruneTurn);
+          if (prune2.length > 0) this.commitSystem(prune2, false);
+        } catch {}
+      }
+    } catch {}
     return { ok: true, seq: envelope.seq };
   }
 
@@ -957,6 +1017,353 @@ export class HostSync {
         false,
       );
     })();
+  }
+
+  // ─── F03 pending roll (roll.pending 0x33) ───────────────────────────────────
+
+  private currentTurnNumber(): number {
+    const combats = this.store.getAll("combats") as unknown as readonly Record<string, unknown>[];
+    if (combats.length > 0) {
+      let maxRound = 0;
+      let maxTurn = 0;
+      for (const c of combats) {
+        const rec = c as Record<string, unknown>;
+        const r = rec["round"];
+        if (typeof r === "number" && Number.isFinite(r)) maxRound = Math.max(maxRound, Math.trunc(r as number));
+        const t = rec["turn"];
+        if (typeof t === "number" && Number.isFinite(t)) maxTurn = Math.max(maxTurn, Math.trunc(t as number));
+        const sys = (rec["system"] as Record<string, unknown> | undefined) ?? undefined;
+        const sr = sys?.["round"];
+        if (typeof sr === "number" && Number.isFinite(sr)) maxRound = Math.max(maxRound, Math.trunc(sr as number));
+        const st = sys?.["turn"];
+        if (typeof st === "number" && Number.isFinite(st)) maxTurn = Math.max(maxTurn, Math.trunc(st as number));
+      }
+      if (maxRound > 0) return maxRound;
+      if (maxTurn > 0) return maxTurn;
+    }
+    let max = 0;
+    const messages = this.store.getAll("messages") as unknown as readonly Record<string, unknown>[];
+    for (const m of messages) {
+      const sys = (m as { system?: { pendingRoll?: PendingRoll; rollLedger?: { turnNumber?: number } } }).system;
+      const pending = (sys as unknown as { pendingRoll?: PendingRoll } | undefined)?.pendingRoll;
+      if (pending && typeof pending.turnNumber === "number") max = Math.max(max, pending.turnNumber);
+      const ledger = (sys as unknown as { rollLedger?: { turnNumber?: number } } | undefined)?.rollLedger;
+      if (ledger && typeof ledger.turnNumber === "number") max = Math.max(max, ledger.turnNumber);
+    }
+    return max;
+  }
+
+  private async handleRollPending(
+    session: Session,
+    msg: import("../core/messages").RollPendingMsg,
+  ): Promise<void> {
+    if (!session.user) {
+      this.reject(session, String(msg.messageId), "forbidden", "not authenticated");
+      return;
+    }
+    if (!session.intentBucket.tryRemove()) {
+      this.reject(session, String(msg.messageId), "rate_limited", "roll rate exceeded");
+      return;
+    }
+    const doc = this.store.get("messages", String(msg.messageId)) as unknown as
+      | MessageDocument
+      | undefined;
+    if (!doc) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "pending card not found");
+      return;
+    }
+    const pending = (doc.system as unknown as { pendingRoll?: PendingRoll } | undefined)?.pendingRoll;
+    if (!pending) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "no pendingRoll on that message");
+      return;
+    }
+    if (pending.resolved) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "pending already resolved");
+      return;
+    }
+    const currentTurn = this.currentTurnNumber();
+    if (isPendingExpired(pending, currentTurn)) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "pending expired — window closed (2 rounds)");
+      return;
+    }
+    const isGM = session.user.role === "GM";
+    // Roller is initiator for attacks (AoO) and target for saves/checks/concentration.
+    const rollerId = pending.kind === "attack" ? pending.initiator.actorId : pending.target.actorId;
+    const rollerActor = this.store.get("actors", rollerId) as unknown as
+      | { ownership?: Record<string, number> }
+      | undefined;
+    const ownership = rollerActor?.ownership ?? null;
+    let isOwner = false;
+    if (ownership && typeof ownership === "object") {
+      const lvl = (ownership as Record<string, number>)[session.user.id];
+      if (typeof lvl === "number" && lvl >= 1) isOwner = true;
+    }
+    if (!isOwner && !isGM) {
+      this.reject(session, String(msg.messageId), "forbidden", "you do not own this pending roll");
+      return;
+    }
+    // Validate shouldDefer predicate (mode + strategic gate). The card's existence
+    // already implies it was deferred, but the host re-checks so a forged
+    // manual save cannot be resolved when the world is in auto mode.
+    try {
+      const settingsDocs = this.store.getAll("settings");
+      const worldSettings = worldSettingsFrom(settingsDocs);
+      const targetIsPlayerOwned = (() => {
+        if (!ownership) return false;
+        for (const [key, lvl] of Object.entries(ownership as Record<string, number>)) {
+          if (key === "default") continue;
+          if (typeof lvl === "number" && lvl >= 1) return true;
+        }
+        return false;
+      })();
+      const isStrategic = false; // tactical only — strategic never creates pending cards (F02)
+      const should = shouldDeferToPlayer({
+        kind: pending.kind,
+        targetIsPlayerOwned,
+        worldSettings,
+        isStrategic,
+      });
+      // If the world is auto, pending should not have existed — refuse unless GM.
+      if (!should && !isGM) {
+        this.reject(session, String(msg.messageId), "forbidden", "that reaction is not pending in this world's mode");
+        return;
+      }
+    } catch {
+      // ignore predicate errors — window/ownership already gates
+    }
+    if (msg.seedClientCommit) {
+      const calc = await sha256Hex(msg.seedClient);
+      if (calc !== msg.seedClientCommit) {
+        this.reject(session, String(msg.messageId), "invalid_schema", "commit-reveal: commitment mismatch");
+        return;
+      }
+    }
+    if (!validateFormula(pending.formula).ok) {
+      this.reject(session, String(msg.messageId), "invalid_schema", `bad formula: ${pending.formula}`);
+      return;
+    }
+    const seedHost = randomSeedHex();
+    const evaluation = await evaluateCommitRoll(pending.formula, msg.seedClient, seedHost, undefined);
+    if (!evaluation.ok) {
+      this.reject(session, String(msg.messageId), "invalid_schema", evaluation.error);
+      return;
+    }
+    const total = evaluation.value.total;
+    const updated: PendingRoll = resolvePendingRollDoc(pending, {
+      total,
+      seedClient: msg.seedClient,
+      seedHost,
+    });
+    // follow-up message (public narrative — same shape ChatPanel used to synthesize locally)
+    const followUp: MessageDocument = {
+      _id: randomId(),
+      type: "message",
+      name: `${pending.target.name} ${pending.kind}`,
+      ownership: { default: OWNERSHIP_LEVELS.LIMITED },
+      flags: {},
+      system: {},
+      author: session.user.id,
+      content: `${pending.target.name} rolled ${String(total)} vs ${pending.dc !== null ? `DC ${pending.dc}` : "—"} — ${
+        pending.dc !== null && total >= pending.dc ? "Success" : pending.dc !== null && total < pending.dc ? "Failure" : "rolled"
+      } (${pending.formula})`,
+      whisper: [],
+      roll: null,
+      flavor: "",
+      rollMode: pending.rollMode,
+    };
+    // also post a rolled message for the dice log (so [[total|formula]] chips can be read)
+    const rollMessage: MessageDocument = {
+      _id: randomId(),
+      type: "message",
+      name: pending.formula,
+      ownership: { default: OWNERSHIP_LEVELS.LIMITED },
+      flags: { core: { rollId: String(msg.messageId) } },
+      system: {},
+      author: session.user.id,
+      content: pending.formula,
+      whisper: pending.rollMode === "gmroll" || pending.rollMode === "blindroll" ? [] : [],
+      roll: {
+        formula: pending.formula,
+        total,
+        terms: evaluation.value.terms,
+        seedClient: msg.seedClient,
+        seedHost,
+        ...(msg.seedClientCommit ? { commit: msg.seedClientCommit } : {}),
+      },
+      rollMode: pending.rollMode,
+      flavor: pending.initiator.actionLabel.slice(0, 300),
+    };
+    const ops: Op[] = [
+      { kind: "update", ref: { coll: "messages", id: String(msg.messageId) }, diff: { "system.pendingRoll": updated as unknown as Json } as Record<string, Json> },
+      { kind: "create", coll: "messages", data: rollMessage },
+      { kind: "create", coll: "messages", data: followUp },
+    ];
+    const committed = this.commitOps(ops, session.user.id, `pending-${String(msg.messageId)}`, false);
+    if (!committed.ok) {
+      this.reject(session, String(msg.messageId), "invariant", committed.error);
+    }
+  }
+
+  // ─── F01 roll ledger (0x30-0x32) — host-evaluated, 2-round window, can(update) on touched docs ──
+
+  private canUpdateAllLedgerDocs(user: SessionUser, ledger: RollLedger): boolean {
+    if (user.role === "GM") return true;
+    const ops = [...ledger.ledgerOps, ...ledger.ledgerInverses];
+    for (const op of ops) {
+      if (op.kind !== "update" && op.kind !== "create" && op.kind !== "delete") continue;
+      const ref = op.kind === "create" ? (op.parent ? { coll: op.coll, id: (op.data as unknown as { _id: string })._id, parent: op.parent } : null) : (op as unknown as { ref: DocRef }).ref;
+      if (!ref) continue;
+      const doc = this.store.resolve(ref as DocRef);
+      if (!doc) continue;
+      const parent = (ref as DocRef).parent !== undefined ? this.store.resolve((ref as DocRef).parent as DocRef) : undefined;
+      const canOpts = parent ? { parent } : {};
+      const collName = ((ref as DocRef).parent ? (ref as DocRef).coll : (ref as DocRef).coll) as CollectionName;
+      if (!can(user, "update", doc, collName, canOpts)) return false;
+    }
+    return true;
+  }
+
+  private freshRollsWithRng(ledger: RollLedger): RollLedger["rolls"] {
+    return ledger.rolls.map((roll) => {
+      const evalResult = evaluateFormula(roll.formula, undefined, this.rng);
+      if (!evalResult.ok) return roll;
+      return {
+        ...roll,
+        total: evalResult.value.total,
+        terms: evalResult.value.terms as unknown as typeof roll.terms,
+      };
+    }) as RollLedger["rolls"];
+  }
+
+  private async handleRollReroll(session: Session, msg: import("../core/messages").RollRerollMsg): Promise<void> {
+    if (!session.user) {
+      this.reject(session, String(msg.messageId), "forbidden", "not authenticated");
+      return;
+    }
+    if (!session.intentBucket.tryRemove()) {
+      this.reject(session, String(msg.messageId), "rate_limited", "reroll rate exceeded");
+      return;
+    }
+    const doc = this.store.get("messages", String(msg.messageId)) as unknown as MessageDocument | undefined;
+    if (!doc) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "ledger card not found");
+      return;
+    }
+    const ledger = (doc.system as unknown as { rollLedger?: RollLedger } | undefined)?.rollLedger;
+    if (!ledger) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "no rollLedger on that message");
+      return;
+    }
+    const currentTurn = this.currentTurnNumber();
+    const isGM = session.user.role === "GM";
+    const viaDelegation = !isGM && canLedgerPlayerReroll(ledger, session.user.id as unknown as UserId, currentTurn);
+    const allowed = isGM ? canLedgerReroll(ledger, currentTurn) : viaDelegation;
+    if (!allowed) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "reroll window closed or already reverted");
+      return;
+    }
+    if (!this.canUpdateAllLedgerDocs(session.user, ledger)) {
+      this.reject(session, String(msg.messageId), "forbidden", "you cannot update the touched documents");
+      return;
+    }
+    let newRolls = this.freshRollsWithRng(ledger);
+    if (msg.newModifiers && msg.newModifiers.length > 0) {
+      if (newRolls[0]) {
+        const first = newRolls[0] as unknown as { modifiers: Array<{ label: string; value: number; reason: string }>; total: number };
+        const extra = msg.newModifiers.reduce((s, m) => s + m.value, 0);
+        newRolls = [
+          { ...newRolls[0], modifiers: [...first.modifiers, ...msg.newModifiers], total: first.total + extra } as unknown as RollLedger["rolls"][number],
+          ...newRolls.slice(1),
+        ] as RollLedger["rolls"];
+      }
+    }
+    const newLedgerOps: Op[] = [...ledger.ledgerOps];
+    const newLedgerInverses: Op[] = ledger.ledgerInverses.length > 0 ? [...ledger.ledgerInverses] : invertLedger(ledger);
+    const ops = ledgerRerollOps({ messageId: String(msg.messageId) as unknown as import("../core/ids").DocId, ledger, currentTurn, newLedgerOps, newLedgerInverses, newRolls });
+    if (!ops) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "reroll refused by ledger window");
+      return;
+    }
+    const committed = this.commitOps(ops, session.user.id, "reroll-" + String(msg.messageId), false);
+    if (!committed.ok) this.reject(session, String(msg.messageId), "invariant", committed.error);
+  }
+
+  private async handleRollRevert(session: Session, msg: import("../core/messages").RollRevertMsg): Promise<void> {
+    if (!session.user) {
+      this.reject(session, String(msg.messageId), "forbidden", "not authenticated");
+      return;
+    }
+    if (!session.intentBucket.tryRemove()) {
+      this.reject(session, String(msg.messageId), "rate_limited", "revert rate exceeded");
+      return;
+    }
+    const doc = this.store.get("messages", String(msg.messageId)) as unknown as MessageDocument | undefined;
+    if (!doc) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "ledger card not found");
+      return;
+    }
+    const ledger = (doc.system as unknown as { rollLedger?: RollLedger } | undefined)?.rollLedger;
+    if (!ledger) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "no rollLedger on that message");
+      return;
+    }
+    const currentTurn = this.currentTurnNumber();
+    if (!canLedgerRevert(ledger, currentTurn)) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "revert window closed or already reverted");
+      return;
+    }
+    if (session.user.role !== "GM") {
+      this.reject(session, String(msg.messageId), "forbidden", "only GM can revert");
+      return;
+    }
+    if (!this.canUpdateAllLedgerDocs(session.user, ledger)) {
+      this.reject(session, String(msg.messageId), "forbidden", "you cannot update the touched documents");
+      return;
+    }
+    const ops = ledgerRevertOps({ messageId: String(msg.messageId) as unknown as import("../core/ids").DocId, ledger, currentTurn });
+    if (!ops) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "revert refused by ledger window");
+      return;
+    }
+    const committed = this.commitOps(ops, session.user.id, "revert-" + String(msg.messageId), false);
+    if (!committed.ok) this.reject(session, String(msg.messageId), "invariant", committed.error);
+  }
+
+  private async handleRollDelegate(session: Session, msg: import("../core/messages").RollDelegateMsg): Promise<void> {
+    if (!session.user) {
+      this.reject(session, String(msg.messageId), "forbidden", "not authenticated");
+      return;
+    }
+    if (!session.intentBucket.tryRemove()) {
+      this.reject(session, String(msg.messageId), "rate_limited", "delegate rate exceeded");
+      return;
+    }
+    const doc = this.store.get("messages", String(msg.messageId)) as unknown as MessageDocument | undefined;
+    if (!doc) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "ledger card not found");
+      return;
+    }
+    const ledger = (doc.system as unknown as { rollLedger?: RollLedger } | undefined)?.rollLedger;
+    if (!ledger) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "no rollLedger on that message");
+      return;
+    }
+    const currentTurn = this.currentTurnNumber();
+    if (!canLedgerReroll(ledger, currentTurn)) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "delegate window closed or reverted");
+      return;
+    }
+    if (session.user.role !== "GM") {
+      this.reject(session, String(msg.messageId), "forbidden", "only GM can delegate rerolls");
+      return;
+    }
+    const ops = delegateRerollOps({ messageId: String(msg.messageId) as unknown as import("../core/ids").DocId, ledger, currentTurn, playerId: msg.playerId });
+    if (!ops) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "delegate refused by ledger window");
+      return;
+    }
+    const committed = this.commitOps(ops, session.user.id, "delegate-" + String(msg.messageId), false);
+    if (!committed.ok) this.reject(session, String(msg.messageId), "invariant", committed.error);
   }
 
   // ─── Ephemeral relay (§5) ───────────────────────────────────────────────────

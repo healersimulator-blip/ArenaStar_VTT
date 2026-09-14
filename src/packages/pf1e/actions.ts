@@ -259,6 +259,13 @@ export const PF1E_ACTIONS: readonly PF1eActionEntry[] = [
     note: "BAB +1: combine with a regular move; Two-Weapon Fighting draws two weapons.",
   },
   {
+    id: "load-firearm",
+    name: "Load a firearm",
+    category: "move",
+    provokes: "yes",
+    note: "Loading a firearm provokes — early firearms often require a standard or full-round action depending on the weapon. The specific reload cost is the weapon's authored capacity, not this row's category — this row names the provoke (UC p.135, §2.9).",
+  },
+  {
     id: "retrieve-stored-item",
     name: "Retrieve a stored item",
     category: "move",

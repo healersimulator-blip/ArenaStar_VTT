@@ -27,6 +27,15 @@ export const ATTACK_BOOLEAN_FIELDS = [
   ["secondary", "Secondary natural attack"],
   ["abilityDamageIncluded", "Damage bonus already includes ability"],
 ] as const;
+export const ATTACK_FIREARM_FIELDS = [
+  ["firearm.misfireMinimum", "Misfire minimum (1–20, 0 = never)"],
+  ["firearm.capacity", "Firearm capacity (shots, 1–20)"],
+  ["firearm.loaded", "Firearm loaded (0–capacity)"],
+] as const;
+export const ATTACK_FIREARM_BOOLEAN_FIELDS = [
+  ["firearm.magical", "Magical firearm (explosion wrecks, not destroys)"],
+  ["broken", "Broken condition (misfire / sunder)"],
+] as const;
 export const MAX_SHEET_ATTACKS = 100;
 
 export type AttackEdit =
@@ -79,14 +88,14 @@ function parseAttackValue(
   input: string | boolean,
 ): { value: Json | undefined; error: string | null } {
   const bad = (error: string) => ({ value: undefined, error });
-  if (ATTACK_BOOLEAN_FIELDS.some(([key]) => key === field)) {
+  if (ATTACK_BOOLEAN_FIELDS.some(([key]) => key === field) || ATTACK_FIREARM_BOOLEAN_FIELDS.some(([key]) => key === field)) {
     return typeof input === "boolean"
       ? { value: input, error: null }
       : bad("Use a checkbox value for this field.");
   }
   if (typeof input !== "string") return bad("Enter a text or numeric value.");
   const raw = input.trim();
-  if (ATTACK_TEXT_FIELDS.some(([key]) => key === field)) {
+  if (ATTACK_TEXT_FIELDS.some(([key]) => key === field) || field === "firearm.generation") {
     if (raw.length > 200) return bad("Use at most 200 characters.");
     if (field === "damageDice" && raw !== "") {
       const match = /^(\d{1,3})d(\d{1,4})$/i.exec(raw);
@@ -98,9 +107,13 @@ function parseAttackValue(
         );
       return { value: `${count}d${sides}`, error: null };
     }
+    if (field === "firearm.generation" && raw !== "") {
+      if (raw !== "early" && raw !== "advanced") return bad("Firearm generation must be early or advanced.");
+      return { value: raw, error: null };
+    }
     return { value: raw === "" ? undefined : raw, error: null };
   }
-  if (!ATTACK_NUMBER_FIELDS.some(([key]) => key === field)) return bad("Unknown attack field.");
+  if (!ATTACK_NUMBER_FIELDS.some(([key]) => key === field) && !ATTACK_FIREARM_FIELDS.some(([key]) => key === field)) return bad("Unknown attack field.");
   if (raw === "") return { value: undefined, error: null };
   const value = Number(raw);
   if (!Number.isSafeInteger(value)) return bad("Enter a finite whole number.");
@@ -111,6 +124,9 @@ function parseAttackValue(
   if (field === "rangeIncrementFt" && value <= 0)
     return bad("Range increment must be positive, or blank for no authored range.");
   if (field === "reachSquares" && value < 0) return bad("Reach cannot be negative.");
+  if (field === "firearm.misfireMinimum" && (value < 0 || value > 20)) return bad("Misfire minimum must be 0–20 (0 = never misfires).");
+  if (field === "firearm.capacity" && (value < 1 || value > 20)) return bad("Firearm capacity must be 1–20.");
+  if (field === "firearm.loaded" && (value < 0 || value > 20)) return bad("Firearm loaded must be 0–20.");
   return { value, error: null };
 }
 
@@ -147,14 +163,39 @@ export function pf1eAttackEdit(
       if (parsed.error) return fail(parsed.error);
       const row = rows[edit.index];
       if (!row) return fail("Attack no longer exists.");
-      if (row[edit.field] !== null && typeof row[edit.field] === "object")
-        return fail("This field contains structured import data and is read-only here.");
-      if (parsed.value === undefined) Reflect.deleteProperty(row, edit.field);
-      else row[edit.field] = parsed.value;
+      // Nested firearm fields (firearm.*) live inside the firearm subobject; clear stale-object guard per leaf
+      if (edit.field.startsWith("firearm.")) {
+        const leaf = edit.field.slice(8);
+        const firearm = (row["firearm"] as Record<string, Json> | undefined) ?? {};
+        if (typeof firearm === "object" && firearm !== null && typeof (firearm as Record<string, unknown>)[leaf] === "object" && (firearm as Record<string, unknown>)[leaf] !== null) return fail("This field contains structured import data and is read-only here.");
+        const nextFirearm: Record<string, Json> = { ...firearm };
+        if (parsed.value === undefined) Reflect.deleteProperty(nextFirearm, leaf);
+        else (nextFirearm as Record<string, unknown>)[leaf] = parsed.value;
+        if (Object.keys(nextFirearm).length === 0) Reflect.deleteProperty(row, "firearm");
+        else row["firearm"] = nextFirearm as unknown as Json;
+      } else {
+        if (row[edit.field] !== null && typeof row[edit.field] === "object")
+          return fail("This field contains structured import data and is read-only here.");
+        if (parsed.value === undefined) Reflect.deleteProperty(row, edit.field);
+        else row[edit.field] = parsed.value;
+      }
       if (Array.isArray(raw.attacks)) {
         // Ordinary edits touch one property, retaining unknown fields and other rows.
-        const path = `system.pf1e.attacks.${edit.index}.${edit.field}`;
-        diff = parsed.value === undefined ? { [`-=${path}`]: null } : { [path]: parsed.value };
+        if (edit.field.startsWith("firearm.")) {
+          const leaf = edit.field.slice(8);
+          const rawRow = (raw.attacks as unknown[])[edit.index] as Record<string, unknown> | undefined;
+          const rawFirearm = rawRow !== undefined && typeof rawRow.firearm === "object" && rawRow.firearm !== null ? (rawRow.firearm as Record<string, unknown>) : {};
+          const remainingKeys = Object.keys(rawFirearm).filter((k) => k !== leaf);
+          const willDeleteFirearm = parsed.value === undefined && remainingKeys.length === 0;
+          if (willDeleteFirearm) diff = { [`-=system.pf1e.attacks.${edit.index}.firearm`]: null };
+          else {
+            const path = `system.pf1e.attacks.${edit.index}.${edit.field}`;
+            diff = parsed.value === undefined ? { [`-=${path}`]: null } : { [path]: parsed.value };
+          }
+        } else {
+          const path = `system.pf1e.attacks.${edit.index}.${edit.field}`;
+          diff = parsed.value === undefined ? { [`-=${path}`]: null } : { [path]: parsed.value };
+        }
       } else {
         // First legacy edit materializes only tactical authored lines, never derived totals.
         diff = { "system.pf1e.attacks": rows };

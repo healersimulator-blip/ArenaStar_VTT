@@ -5,7 +5,7 @@ import { ALL_KINDS, sampleMessage } from "./fixtures";
 
 describe("frameMessage / deframeMessage (§6.1, §13)", () => {
   test("round-trips every one of the 28 message kinds", () => {
-    expect(ALL_KINDS).toHaveLength(28);
+    expect(ALL_KINDS).toHaveLength(35);
     for (const kind of ALL_KINDS) {
       const msg = sampleMessage(kind);
       const framed = frameMessage(msg);
@@ -66,8 +66,12 @@ describe("channelFor (§6.1)", () => {
       hello: "ops",
       intent: "ops",
       roll: "ops",
-    "roll.reveal": "ops",
-    "roll.challenge": "ops",
+      "roll.reveal": "ops",
+      "roll.pending": "ops",
+      "roll.reroll": "ops",
+      "roll.revert": "ops",
+      "roll.delegate": "ops",
+      "roll.challenge": "ops",
       ephemeral: "ephemeral",
       "asset.get": "assets",
       "fog.put": "ops",
@@ -76,7 +80,7 @@ describe("channelFor (§6.1)", () => {
       "sim.control": "ops",
       "report.detail": "ops",
       "sim.snapshot.get": "sim",
-      "audio.cmd": "ops",
+      "audio.cmd": "sim",
       welcome: "ops",
       snapshot: "ops",
       ops: "ops",

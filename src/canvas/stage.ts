@@ -46,6 +46,8 @@ import type { AreaPreviewLayer } from "./layers/AreaPreviewLayer";
 import { AreaPreviewLayer as AreaPreviewLayerImpl } from "./layers/AreaPreviewLayer";
 import type { ThreatOverlayLayer } from "./layers/ThreatOverlayLayer";
 import { ThreatOverlayLayer as ThreatOverlayLayerImpl } from "./layers/ThreatOverlayLayer";
+import type { RollHighlightLayer } from "./layers/RollHighlightLayer";
+import { RollHighlightLayer as RollHighlightLayerImpl } from "./layers/RollHighlightLayer";
 
 /** §9 verbatim layer order (§9A models sit between Tokens and Tiles(above)). */
 export const LAYER_ORDER = [
@@ -102,6 +104,8 @@ export interface Stage {
   getAreaPreviewLayer(): AreaPreviewLayer;
   /** P02/D-197 PF1e threatened-square overlay — selection UI in the controls holder. */
   getThreatOverlayLayer(): ThreatOverlayLayer;
+  /** F01 — Roll-card highlight overlay — chat card UI in the controls holder, fades 1–10 s. */
+  getRollHighlightLayer(): RollHighlightLayer;
   /** §9 drawings (freehand/poly/rect/text). */
   getDrawingsLayer(): DrawingsLayer;
   /** Fit the camera to a scene rect (§9 scene load). */
@@ -224,6 +228,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   let tilesLayer: TilesLayerImpl | null = null;
   let areaPreviewLayer: AreaPreviewLayerImpl | null = null;
   let threatOverlayLayer: ThreatOverlayLayerImpl | null = null;
+  let rollHighlightLayer: RollHighlightLayerImpl | null = null;
 
   // ── §9 placeholders (Drawings/Templates) + Walls + Lighting ─────────────────
   const drawingsHolder = new Container();
@@ -375,6 +380,15 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       }
       return threatOverlayLayer;
     },
+    getRollHighlightLayer(): RollHighlightLayer {
+      if (!rollHighlightLayer) {
+        rollHighlightLayer = new RollHighlightLayerImpl();
+        // Chat-card UI, not a replicated document: it rides the controls
+        // holder so the §9 layer stack above tokens stays untouched.
+        controlsLayer.addChild(rollHighlightLayer.container);
+      }
+      return rollHighlightLayer;
+    },
     fit(width: number, height: number): void {
       state.camera = fitRect({ x: 0, y: 0, width, height }, viewport, 24);
       applyCamera();
@@ -485,6 +499,10 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     destroy(): void {
       areaPreviewLayer?.destroy();
       areaPreviewLayer = null;
+      rollHighlightLayer?.destroy();
+      rollHighlightLayer = null;
+      threatOverlayLayer?.destroy();
+      threatOverlayLayer = null;
       effectsLayer?.destroy();
       effectsLayer = null;
       tilesLayer?.destroy();

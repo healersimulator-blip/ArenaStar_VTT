@@ -71,6 +71,8 @@ export const SHEET_FIELDS = [
   ["spellResistance", "Spell resistance (record only)"],
   ["fastHealing", "Fast healing (record only)"],
   ["regeneration", "Regeneration (record only)"],
+  ["grit.current", "Grit — current (gunslinger deeds)"],
+  ["grit.max", "Grit — maximum (gunslinger deeds)"],
 ] as const;
 export type SheetField = (typeof SHEET_FIELDS)[number][0];
 
@@ -231,6 +233,7 @@ export function pf1eSheetEdit(
       field.startsWith("abilitiesDamage.") ||
       field.startsWith("abilitiesDrain.") ||
       field.startsWith("energyResistance.") ||
+      field.startsWith("grit.") ||
       field === "tempHp" ||
       field === "hitDice" ||
       [

@@ -24,6 +24,9 @@ import type { PF1eAidFeintPlan } from "./pf1eAidFeint";
 import { planAidAnother, planFeint } from "./pf1eAidFeint";
 import { attackOfOpportunityBudget, spendAttackOfOpportunityAuthorized } from "./actionBudget";
 import { awaitRollMessage, dieFaceOf, resolveAttackFlow, type ResolveFlowClient } from "../sheets/pf1eResolveFlow";
+import { pendingRollCreateOp } from "./pf1ePendingRollFlow";
+import { isPlayerOwned } from "../../packages/pf1e/pendingRoll";
+import { worldSettingsFrom } from "../../core/worldSettings";
 
 export interface AidFeintFlowClient extends ResolveFlowClient {}
 
@@ -130,6 +133,52 @@ export async function resolveAidAnotherFlow(
     }
   }
 
+  // F03: aid another pending as attack in savesChecksAuto (default) and manual — defer to aider when player-owned
+  try {
+    const worldSettingsAid = worldSettingsFrom((client as unknown as { store: { getAll(c: string): readonly unknown[] } }).store.getAll("settings") as unknown as Iterable<unknown>);
+    const aiderIsPlayerOwned = isPlayerOwned((aider as unknown as { ownership?: unknown }).ownership as unknown as import("../../core/documents").Ownership | null | undefined);
+    const turnNumberAid = (params.combat as unknown as { round?: unknown })?.round !== undefined && typeof (params.combat as unknown as { round?: unknown }).round === "number" ? Math.trunc((params.combat as unknown as { round: number }).round) : 0;
+    const { shouldDeferToPlayer: shouldDeferAid } = await import("../../packages/pf1e/pendingRoll");
+    if (shouldDeferAid({ kind: "check", targetIsPlayerOwned: aiderIsPlayerOwned, worldSettings: worldSettingsAid, isStrategic: false })) {
+      const bonusAid = attackBonus + (params.attackPenalty ?? 0) + (aooDamage !== null && aooDamage > 0 ? -Math.abs(aooDamage) : 0);
+      const formulaAid = `1d20${bonusAid >= 0 ? `+${bonusAid}` : `${bonusAid}`}`;
+      const modifiersAid: Array<{ label: string; value: number; reason: string }> = [{ label: "Attack", value: attackBonus, reason: "aid another" }];
+      if (params.attackPenalty !== undefined && params.attackPenalty !== 0) modifiersAid.push({ label: "Penalty", value: params.attackPenalty, reason: "attackPenalty" });
+      if (aooDamage !== null && aooDamage > 0) modifiersAid.push({ label: "AoO damage", value: -Math.abs(aooDamage), reason: "aooDamageTaken" });
+      const pendingOpAid = pendingRollCreateOp({
+        kind: "check",
+        initiator: { actorId: aider._id as unknown as string, tokenId: null, name: aider.name, actionLabel: "aid another" },
+        target: { actorId: opponent._id as unknown as string, tokenId: null, name: opponent.name },
+        formula: formulaAid,
+        dc: 10,
+        modifiers: modifiersAid,
+        turnNumber: turnNumberAid,
+        rollMode: "roll",
+        targetIsPlayerOwned: aiderIsPlayerOwned,
+        worldSettings: worldSettingsAid,
+        isStrategic: false,
+      });
+      if (pendingOpAid !== null) {
+        const pendingCardAid = {
+          _id: globalThis.crypto.randomUUID(),
+          type: "message",
+          name: `${aider.name} — aid ${aided.name} (pending)`,
+          ownership: { default: 1 },
+          flags: {},
+          system: {},
+          author: user?.id ?? "",
+          content: `${aider.name} — aid another ${aided.name} vs ${opponent.name} — [[${formulaAid}]] vs AC 10 — pending for player roll (die ${formulaAid}).`,
+          whisper: [],
+          roll: null,
+          flavor: "aid another resolution",
+        } as unknown as import("../../core/documents").MessageDocument;
+        client.submit([{ kind: "create", coll: "messages", data: pendingCardAid }]);
+        client.submit([pendingOpAid]);
+        const pendingPlanAid: PF1eAidFeintPlan = { ops: [], note: `aid another pending for player roll — check ${formulaAid} vs AC 10` };
+        return { ok: true, plan: pendingPlanAid, cardId: (pendingOpAid as unknown as { data: { _id: string } }).data._id };
+      }
+    }
+  } catch {}
   const rollId = params.verifiable ? await client.rollVerified("1d20", "roll", undefined, "aid another") : client.roll("1d20", "roll", undefined, "aid another");
   const die = await awaitDie(client, rollId);
   if (die === null) return { ok: false, error: "aid another die roll did not arrive" };
@@ -228,6 +277,70 @@ export async function resolveFeintFlow(
     }
   }
 
+  // F03: feint pending as check in manual only — defer 1d20+Bluff vs DC to feinter when player-owned
+  try {
+    const worldSettingsFeint = worldSettingsFrom((client as unknown as { store: { getAll(c: string): readonly unknown[] } }).store.getAll("settings") as unknown as Iterable<unknown>);
+    const feinterIsPlayerOwned = isPlayerOwned((feinter as unknown as { ownership?: unknown }).ownership as unknown as import("../../core/documents").Ownership | null | undefined);
+    const turnNumberFeint = (params.combat as unknown as { round?: unknown })?.round !== undefined && typeof (params.combat as unknown as { round: number }).round === "number" ? Math.trunc((params.combat as unknown as { round: number }).round) : 0;
+    const { shouldDeferToPlayer: shouldDeferFeint } = await import("../../packages/pf1e/pendingRoll");
+    if (shouldDeferFeint({ kind: "check", targetIsPlayerOwned: feinterIsPlayerOwned, worldSettings: worldSettingsFeint, isStrategic: false })) {
+      // Compute DC for the pending card by probing the pure feint with a dummy die (dc does not depend on die)
+      const defenderBabForDc = targetDerived.baseAttack;
+      const defenderWisModForDc = targetDerived.abilityMods.wis;
+      const targetIntScoreForDc = params.targetIntScore !== undefined ? params.targetIntScore : targetDerived.abilities.int;
+      let dcForFeint: number | null = null;
+      try {
+        const probe = pf1eFeint({
+          die: 10,
+          bluffBonus: params.bluffBonus,
+          defenderBab: defenderBabForDc,
+          defenderWisMod: defenderWisModForDc,
+          ...(params.targetSenseMotiveBonus !== undefined ? { defenderSenseMotiveBonus: params.targetSenseMotiveBonus } : {}),
+          ...(params.targetSenseMotiveTrained !== undefined ? { defenderSenseMotiveTrained: params.targetSenseMotiveTrained } : {}),
+          ...(params.targetIsHumanoid !== undefined ? { defenderIsHumanoid: params.targetIsHumanoid } : {}),
+          defenderIntScore: targetIntScoreForDc,
+          ...(params.targetIsAnimalInt !== undefined ? { defenderIsAnimalInt: params.targetIsAnimalInt } : {}),
+          ...(params.hasImprovedFeint !== undefined ? { hasImprovedFeint: params.hasImprovedFeint } : {}),
+          ...(params.hasGreaterFeint !== undefined ? { hasGreaterFeint: params.hasGreaterFeint } : {}),
+        });
+        if (probe.ok) dcForFeint = probe.dc;
+      } catch {}
+      if (dcForFeint === null) dcForFeint = 10 + defenderBabForDc + defenderWisModForDc;
+      const formulaFeint = `1d20${params.bluffBonus >= 0 ? `+${params.bluffBonus}` : `${params.bluffBonus}`}`;
+      const pendingOpFeint = pendingRollCreateOp({
+        kind: "check",
+        initiator: { actorId: feinter._id as unknown as string, tokenId: null, name: feinter.name, actionLabel: "feint (Bluff)" },
+        target: { actorId: target._id as unknown as string, tokenId: null, name: target.name },
+        formula: formulaFeint,
+        dc: dcForFeint,
+        modifiers: [{ label: "Bluff", value: params.bluffBonus, reason: "feint" }],
+        turnNumber: turnNumberFeint,
+        rollMode: "roll",
+        targetIsPlayerOwned: feinterIsPlayerOwned,
+        worldSettings: worldSettingsFeint,
+        isStrategic: false,
+      });
+      if (pendingOpFeint !== null) {
+        const pendingCardFeint = {
+          _id: globalThis.crypto.randomUUID(),
+          type: "message",
+          name: `${feinter.name} — feint vs ${target.name} (pending)`,
+          ownership: { default: 1 },
+          flags: {},
+          system: {},
+          author: user?.id ?? "",
+          content: `${feinter.name} — feint vs ${target.name} — [[${formulaFeint}]] vs DC ${dcForFeint} — pending for player roll (die ${formulaFeint}).`,
+          whisper: [],
+          roll: null,
+          flavor: "feint resolution",
+        } as unknown as import("../../core/documents").MessageDocument;
+        client.submit([{ kind: "create", coll: "messages", data: pendingCardFeint }]);
+        client.submit([pendingOpFeint]);
+        const pendingPlanFeint: PF1eAidFeintPlan = { ops: [], note: `feint pending for player roll — check ${formulaFeint} vs DC ${dcForFeint}` };
+        return { ok: true, plan: pendingPlanFeint, cardId: (pendingOpFeint as unknown as { data: { _id: string } }).data._id };
+      }
+    }
+  } catch {}
   const rollId = params.verifiable ? await client.rollVerified("1d20", "roll", undefined, "feint (Bluff)") : client.roll("1d20", "roll", undefined, "feint (Bluff)");
   const die = await awaitDie(client, rollId);
   if (die === null) return { ok: false, error: "feint die roll did not arrive" };

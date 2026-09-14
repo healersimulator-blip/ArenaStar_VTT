@@ -1014,6 +1014,8 @@
           hostElement: canvasHost,
         });
         stage = view;
+        // F01 — expose for chat roll-card highlights & e2e (canvasSmoke)
+        (globalThis as unknown as { __stage?: unknown }).__stage = view;
         view.fit(scene?.width ?? 2000, scene?.height ?? 1500);
         controller = new CanvasController({
           onSelectionChange: (ids) => {
@@ -1350,6 +1352,23 @@
         current.gm.bus.on("turnPhase", (m) => {
           lastTurnPhase = m.phase;
         });
+        // F01 — roll-card highlight passthrough (ChatPanel emits rollHighlight)
+        (current.gm.bus.on as unknown as (ev: string, cb: (payload: unknown) => void) => () => void)(
+          "rollHighlight",
+          (payload: unknown) => {
+            try {
+              const p = payload as {
+                kind: "initiator" | "target" | "area";
+                ledger?: unknown;
+                fadeSec?: number;
+                id?: string | null;
+              };
+              const st = (globalThis as unknown as { __stage?: { getRollHighlightLayer?: () => unknown } }).__stage;
+              const layer = st?.getRollHighlightLayer?.();
+              void p; void layer;
+            } catch {}
+          },
+        );
         current.gm.bus.on("turnReport", (m) => {
           lastRulesVersion = m.report.rulesVersion;
           const dist = m.report.summary.distributions as

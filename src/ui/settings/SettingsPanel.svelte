@@ -12,7 +12,10 @@
   import { DEFAULT_BINDINGS } from "../../core/keys";
   import {
     advanceClockOnRoundOf,
+    playerPendingRollModeOf,
+    rollHighlightFadeSecOf,
     secondsPerRoundOf,
+    strategicSimultaneousOf,
     validateWorldSettingsPatch,
     worldSettingsFrom,
     worldSettingsOps,
@@ -50,6 +53,12 @@
     advanceClockOnRound: boolean;
     /** P06/D-186: the app resolves movement attacks of opportunity itself. On by default. */
     autoResolveAoos: boolean;
+    /** F02 — simultaneous strategic (initiative is damage order). */
+    strategicSimultaneous: boolean;
+    /** F01 — roll-card area outline fade (1–10 s, default 4 s). */
+    rollHighlightFadeSec: number;
+    /** F03 — player reaction rolls: auto / savesChecksAuto / manual */
+    playerPendingRollMode: "auto" | "savesChecksAuto" | "manual";
   }
   /** E05 (D-146): the replicated world clock, seconds. */
   let clockSeconds = $state(0);
@@ -58,6 +67,9 @@
     detectionMultiplier: 1,
     advanceClockOnRound: true,
     autoResolveAoos: true,
+    strategicSimultaneous: false,
+    rollHighlightFadeSec: 4,
+    playerPendingRollMode: "savesChecksAuto",
   };
   // Initialize only after the defaults exist (opening the window executes this script).
   let rules = $state<RulesOptions>(DEFAULT_RULES);
@@ -85,6 +97,9 @@
           : DEFAULT_RULES.detectionMultiplier,
       advanceClockOnRound: advanceClockOnRoundOf(settings),
       autoResolveAoos: autoResolveAoosOf(settings),
+      strategicSimultaneous: strategicSimultaneousOf(settings),
+      rollHighlightFadeSec: rollHighlightFadeSecOf(settings),
+      playerPendingRollMode: playerPendingRollModeOf(settings),
     };
   }
 
@@ -310,6 +325,66 @@
         }}
       />
       Auto-resolve attacks of opportunity
+    </label>
+    <label>
+      <input
+        data-world-strategic-simultaneous
+        type="checkbox"
+        checked={rules.strategicSimultaneous}
+        onchange={(e) => {
+          rules = {
+            ...rules,
+            strategicSimultaneous: (e.target as HTMLInputElement).checked,
+          };
+          applyRules({ strategicSimultaneous: rules.strategicSimultaneous });
+        }}
+      />
+      Strategic simultaneous (initiative = damage order)
+    </label>
+    <label>
+      Player reaction rolls
+      <select
+        data-world-player-pending-roll-mode
+        value={rules.playerPendingRollMode}
+        onchange={(e) => {
+          rules = {
+            ...rules,
+            playerPendingRollMode: (e.target as HTMLSelectElement).value as RulesOptions["playerPendingRollMode"],
+          };
+          applyRules({ playerPendingRollMode: rules.playerPendingRollMode });
+        }}
+      >
+        <option value="auto">Auto (host rolls)</option>
+        <option value="savesChecksAuto">Saves & checks auto (AoO/parry pending)</option>
+        <option value="manual">Manual (all pending)</option>
+      </select>
+    </label>
+  </div>
+  <div class="row">
+    <label>
+      Roll highlight fade (s)
+      <input
+        data-world-roll-highlight
+        type="range"
+        min="1"
+        max="10"
+        step="1"
+        value={rules.rollHighlightFadeSec}
+        oninput={(e) => {
+          rules = {
+            ...rules,
+            rollHighlightFadeSec: Number((e.target as HTMLInputElement).value),
+          };
+        }}
+        onchange={(e) => {
+          rules = {
+            ...rules,
+            rollHighlightFadeSec: Number((e.target as HTMLInputElement).value),
+          };
+          applyRules({ rollHighlightFadeSec: rules.rollHighlightFadeSec });
+        }}
+      />
+      <span data-world-roll-highlight-value>{rules.rollHighlightFadeSec}s</span>
     </label>
   </div>
   <div class="row">

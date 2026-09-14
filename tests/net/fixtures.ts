@@ -127,8 +127,18 @@ export function sampleMessage(kind: WireMessage["kind"]): WireMessage {
       return { kind: "ping", t0: 1 };
     case "pong":
       return { kind: "pong", t0: 1, t1: 2, t2: 2 };
+    case "roll.pending":
+      return { kind: "roll.pending", messageId: "m1", seedClient: "c".repeat(32), seedClientCommit: "d".repeat(64) };
+    case "roll.reroll":
+      return { kind: "roll.reroll", messageId: "m1" };
+    case "roll.revert":
+      return { kind: "roll.revert", messageId: "m1" };
+    case "roll.delegate":
+      return { kind: "roll.delegate", messageId: "m1", playerId: "u1" };
     case "relay.frame":
       return { kind: "relay.frame", from: "p1", to: "host", bytes: new Uint8Array([7]) };
+    default:
+      throw new Error("sampleMessage: unhandled kind " + String(kind));
   }
 }
 
@@ -137,6 +147,12 @@ export const ALL_KINDS: WireMessage["kind"][] = [
   "hello",
   "intent",
   "roll",
+  "roll.reveal",
+  "roll.pending",
+  "roll.reroll",
+  "roll.revert",
+  "roll.delegate",
+  "roll.challenge",
   "ephemeral",
   "asset.get",
   "fog.put",
@@ -145,6 +161,7 @@ export const ALL_KINDS: WireMessage["kind"][] = [
   "sim.control",
   "report.detail",
   "sim.snapshot.get",
+  "audio.cmd",
   "welcome",
   "snapshot",
   "ops",

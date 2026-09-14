@@ -239,6 +239,9 @@ export function createMassBattlePf1e(
       // (M04/D-182) — one scale, derived in one place (`sceneCellFeet`).
       const cellFeet = sceneCellFeet(ctx.grid.distance);
       if (grid.cellSize !== cellFeet) grid = new SpatialGrid(cellFeet);
+      // F02 — snapshot of pre-move positions for simultaneous cover/flanking (faithful simultaneous reading)
+      let simultaneousStartXs: Float32Array | null = null;
+      let simultaneousStartYs: Float32Array | null = null;
 
       // ── natural reach per unit, in feet at this scale (P02, D-180). Table 8-4's reach
       // is a per-size figure, not a constant: "Creatures that take up more than 1 square
@@ -278,6 +281,59 @@ export function createMassBattlePf1e(
       // reacting in the same turn it is spending its own budget in.
       resetTurnAoOs(pool, livingModelIndices(pool, units));
 
+      // F02 — simultaneous regime check (world-settings or turnMode)
+      const simultaneous =
+        ctx.turnMode === "simultaneous" ||
+        (ctx.worldSettings as Record<string, unknown>)?.strategicSimultaneous ===
+          true;
+
+      // F02 — squad fan-out: an order keyed by squadId expands to every unit in that squad (no new doc type)
+      // Per-unit orders win (do not overwrite). SquadId is the UnitView.squadId tag (ArmyWindow squadId).
+      {
+        const expanded = new Map<string, import("../core/strategic").OrderQueue>(orders as Map<string, import("../core/strategic").OrderQueue>);
+        for (const [key, queue] of orders.entries()) {
+          const isUnit = units.some((u) => u.id === key);
+          if (isUnit) continue;
+          const members = units.filter((u) => (u as unknown as { squadId?: string | null }).squadId === key);
+          if (members.length === 0) continue;
+          for (const m of members) if (!expanded.has(m.id)) expanded.set(m.id, queue);
+          expanded.delete(key);
+        }
+        // Rebind the local `orders` binding for the rest of resolveTurn
+        (orders as unknown as Map<string, import("../core/strategic").OrderQueue>).clear();
+        for (const [k, v] of expanded.entries()) (orders as unknown as Map<string, import("../core/strategic").OrderQueue>).set(k, v);
+      }
+
+      // Helper: effective initiative for a unit (leader actor or profile fallback)
+      const effectiveInitiativeOf = (
+        unit: UnitView,
+        _idx: number,
+      ): { mod: number; tie: number } => {
+        const actorJson = ctx.leaderActors[unit.id] as unknown as
+          | { system?: Record<string, unknown> }
+          | undefined;
+        if (actorJson) {
+          try {
+            const derived = deriveFromDocuments({
+              actor: actorJson as unknown as { system?: Record<string, unknown> },
+              effects: [],
+            });
+            const mod = derived.initiative;
+            // tie die: deterministic d20 from forked RNG so ordering cannot alter dice
+            const tieRng = forkRng(rng, unitIndex(unit), 0x5a);
+            const tie = tieRng.d(20);
+            return { mod, tie };
+          } catch {
+            // fall through to profile fallback
+          }
+        }
+        const prof = profiles.byUnitId.get(unit.id);
+        const mod = prof?.dexMod ?? 0;
+        const tieRng = forkRng(rng, unitIndex(unit), 0x5a);
+        const tie = tieRng.d(20);
+        return { mod, tie };
+      };
+
       // Threat at this scale: a model threatens the squares a melee attack of its reach can
       // enter (AoN 102, "you threaten all squares into which you can make a melee attack"),
       // read through the one `threatenedCells` both scales use — the same function the
@@ -308,6 +364,135 @@ export function createMassBattlePf1e(
       };
       let interruptQueue = createInterruptQueue(strategicTurn, "turn");
 
+      if (simultaneous) {
+        // F02 — simultaneous movement: every unit computes its translation from
+        // the starting layout, then all translations are applied together. No
+        // unit sees another unit's movement this phase — walls still block per
+        // D-174, but mover-vs-mover collision is not re-checked mid-phase.
+        const startXs = new Float32Array(pool.x);
+        const startYs = new Float32Array(pool.y);
+        simultaneousStartXs = startXs;
+        simultaneousStartYs = startYs;
+        const pendingMoves: Array<{
+          unit: UnitView;
+          dx: number;
+          dy: number;
+          cx: number;
+          cy: number;
+          traveled: number;
+          hitWall: boolean;
+          paceLabel: string;
+          verb: string;
+        }> = [];
+        for (const unit of units) {
+          const queue = orders.get(unit.id);
+          const order = queue?.active ?? queue?.pending[0];
+          if (!order || (order.kind !== "move" && order.kind !== "retreat"))
+            continue;
+          const typeStats =
+            PF1E_UNIT_TYPE_STATS[unit.type as keyof typeof PF1E_UNIT_TYPE_STATS];
+          const movePoints = typeStats?.move ?? 0;
+          if (movePoints <= 0) continue;
+          let anchorX: number | null = null;
+          let anchorY: number | null = null;
+          const [aStart, aEnd] = unit.modelRange ?? [0, 0];
+          for (let i = aStart; i < aEnd && i < pool.count; i++) {
+            if (((pool.status[i] ?? 0) & ModelStatus.dead) === 0) {
+              anchorX = startXs[i] ?? 0;
+              anchorY = startYs[i] ?? 0;
+              break;
+            }
+          }
+          if (anchorX === null || anchorY === null) continue;
+          let path: ReadonlyArray<{ x: number; y: number }>;
+          let paceMul: number;
+          if (order.kind === "retreat") {
+            path = [order.toward];
+            paceMul = 2;
+          } else {
+            path = order.path;
+            paceMul = order.pace === "run" ? 4 : order.pace === "charge" ? 2 : 1;
+          }
+          let remaining = movePoints * paceMul * cellFeet;
+          let cx = anchorX;
+          let cy = anchorY;
+          const startX = cx;
+          const startY = cy;
+          let leg = 0;
+          let hitWall = false;
+          let traveled = 0;
+          while (remaining > 0 && leg < path.length) {
+            const wp = path[leg];
+            if (!wp || !Number.isFinite(wp.x) || !Number.isFinite(wp.y)) break;
+            const d = Math.hypot(wp.x - cx, wp.y - cy);
+            if (d === 0) {
+              leg++;
+              continue;
+            }
+            const block = firstMoveBlock(cx, cy, wp.x, wp.y, ctx.walls);
+            const traversable =
+              block === null ? d : Math.max(0, block * d - MOVE_BLOCK_EPSILON);
+            const step = Math.min(remaining, traversable);
+            if (step > 0) {
+              cx += ((wp.x - cx) / d) * step;
+              cy += ((wp.y - cy) / d) * step;
+              traveled += step;
+            }
+            remaining -= step;
+            if (block !== null && step >= traversable) {
+              hitWall = true;
+              break;
+            }
+            if (step < d) break;
+            leg++;
+          }
+          const dx = cx - startX;
+          const dy = cy - startY;
+          if (dx === 0 && dy === 0 && !hitWall) continue;
+          const paceLabel = order.kind === "retreat" ? "retreat" : (order as any).pace;
+          const verb =
+            order.kind === "retreat"
+              ? "retreats"
+              : (order as any).pace === "run"
+                ? "runs"
+                : (order as any).pace === "charge"
+                  ? "charges"
+                  : "moves";
+          pendingMoves.push({ unit, dx, dy, cx, cy, traveled, hitWall, paceLabel, verb });
+        }
+        for (const m of pendingMoves) {
+          const [start, end] = m.unit.modelRange ?? [0, 0];
+          for (let i = start; i < end && i < pool.count; i++) {
+            if (((pool.status[i] ?? 0) & ModelStatus.dead) !== 0) continue;
+            pool.x[i] = (pool.x[i] ?? 0) + m.dx;
+            pool.y[i] = (pool.y[i] ?? 0) + m.dy;
+            const q = orders.get(m.unit.id);
+            const o = q?.active ?? q?.pending[0];
+            if (o?.kind === "move" && (o as any).facing !== undefined)
+              pool.rot[i] = (o as any).facing;
+          }
+        }
+        // Emit after translation so the log reads in initiative order later (events
+        // themselves are emitted in initiative order for the report, but move events
+        // have no initiative — they are emitted in unit array order, which is
+        // deterministic and matches the report's subPhase ordering).
+        for (const m of pendingMoves) {
+          emit({
+            subPhase: "move",
+            type: "arrive",
+            unitId: m.unit.id,
+            at: { x: m.cx, y: m.cy },
+            text: `${m.unit.name} ${m.verb} to (${m.cx.toFixed(1)}, ${m.cy.toFixed(1)})`,
+            data: {
+              pace: m.paceLabel,
+              distance: Math.round(m.traveled * 100) / 100,
+              anchorX: m.cx,
+              anchorY: m.cy,
+              ...(m.hitWall ? { blockedByWall: true } : {}),
+            },
+          });
+        }
+      } else {
       // ── move sub-phase (M05, D-173/D-175). A unit with a move or retreat order spends
       // its turn moving as a formation: the anchor (first living model) walks the ordered
       // waypoint path up to its movement budget, and every other living model is
@@ -567,6 +752,8 @@ export function createMassBattlePf1e(
         });
       }
 
+      }
+
       grid.rebuild(pool);
 
       // ── heal sub-phase (M06, D-176). SRD Universal Monster Rules (R02): a creature
@@ -626,23 +813,71 @@ export function createMassBattlePf1e(
 
       // ── flanking (M04, D-182). AoN 183's line test, not the old "≥2 attackers in
       // contact" heuristic: every living model's FLANKED bit is cleared and recomputed
-      // once per turn from the post-movement layout, so a defender flanked by two
-      // enemies on opposite borders — from any units, not just the one it is being
-      // attacked by this round — carries the bit, and a stale bit can never survive a
-      // round in which the geometry stopped supporting it. The melee sub-phase then
-      // reads the per-defender bit through `resolvePF1eAttacks`, exactly as the
-      // tactical scale reads it. Runs after movement, before any engagement resolves.
-      markPF1eFlanking({
-        pool,
-        grid,
-        cellFeet,
-        factionByUnitIdx,
-        reachSquaresByUnitIdx,
-        sizeByUnitIdx,
-      });
+      // once per turn from the layout, so a defender flanked by two enemies on opposite
+      // borders — from any units, not just the one it is being attacked by this round —
+      // carries the bit, and a stale bit can never survive a round in which the geometry
+      // stopped supporting it. The melee sub-phase then reads the per-defender bit through
+      // `resolvePF1eAttacks`, exactly as the tactical scale reads it. Runs after movement,
+      // before any engagement resolves.
+      // F02 — faithful simultaneous reading: flanking/cover computed from pre-move positions
+      // for the whole phase (a unit that moves out of cover still benefits from cover for
+      // shots exchanged that phase). Sequential keeps post-move geometry.
+      if (simultaneous && simultaneousStartXs && simultaneousStartYs) {
+        // Save post-move, swap to pre-move for the flanking pass, then restore
+        const postXs = pool.x;
+        const postYs = pool.y;
+        (pool as unknown as { x: Float32Array; y: Float32Array }).x = simultaneousStartXs;
+        (pool as unknown as { y: Float32Array }).y = simultaneousStartYs;
+        grid.rebuild(pool);
+        markPF1eFlanking({
+          pool,
+          grid,
+          cellFeet,
+          factionByUnitIdx,
+          reachSquaresByUnitIdx,
+          sizeByUnitIdx,
+        });
+        (pool as unknown as { x: Float32Array }).x = postXs;
+        (pool as unknown as { y: Float32Array }).y = postYs;
+        grid.rebuild(pool);
+      } else {
+        markPF1eFlanking({
+          pool,
+          grid,
+          cellFeet,
+          factionByUnitIdx,
+          reachSquaresByUnitIdx,
+          sizeByUnitIdx,
+        });
+      }
 
+      // F02 — melee in simultaneous mode is initiative-ordered (damage order)
+      // Every unit's attacks are rolled simultaneously (fork per unit) but applied
+      // in descending effectiveInitiative so a higher-init unit's kills reduce the
+      // lower-init's attack count. The 100-vs-100 archers at init 12 vs 7 is the
+      // discriminating fixture: the 12-init unit fires with 100 models, the 7-init
+      // with 80.
+      const meleeUnits = simultaneous
+        ? [...units]
+            .map((u, idx) => ({ unit: u, idx, init: effectiveInitiativeOf(u, idx) }))
+            .filter(({ unit }) => {
+              const q = orders.get(unit.id);
+              const o = q?.active ?? q?.pending[0];
+              return o?.kind === "attack" && !!(o as any).targetUnitId;
+            })
+            .sort((a, b) => b.init.mod - a.init.mod || b.init.tie - a.init.tie)
+            .map(({ unit }) => unit)
+            .concat(
+              // Units without attack orders keep array order (they don't fight)
+              [...units].filter((u) => {
+                const q = orders.get(u.id);
+                const o = q?.active ?? q?.pending[0];
+                return !(o?.kind === "attack" && !!(o as any).targetUnitId);
+              }),
+            )
+        : units;
       // Resolve Melee Engagements
-      for (const unit of units) {
+      for (const unit of meleeUnits) {
         const queue = orders.get(unit.id);
         const order = queue?.active ?? queue?.pending[0];
         if (!order || order.kind !== "attack" || !order.targetUnitId) continue;

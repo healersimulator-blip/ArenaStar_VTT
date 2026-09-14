@@ -5,10 +5,18 @@
  */
 import { describe, expect, test } from "vitest";
 import {
+  FIREARM_EXPLOSION_DC,
+  FIREARM_EXPLOSION_RADIUS_FT,
   MISFIRE_CLEARS,
   effectiveMisfireValue,
+  firearmExplosionMitigatedDamage,
+  firearmExplosionReflexOutcome,
+  firearmExplosionSquares,
+  firearmExplosionTargetDamage,
+  firearmReloadEntry,
   firearmShotAmmo,
   pf1eMisfireVerdict,
+  quickClearReloadCost,
   type PF1eMisfireFacts,
 } from "../../src/packages/pf1e/firearms";
 
@@ -171,5 +179,100 @@ describe("P09 — the named clears and the ammo gate", () => {
       canShoot: true,
       remaining: 2,
     });
+  });
+});
+
+describe("P09/D-218 — Quick Clear cost and reload provoke (UC p.135)", () => {
+  test("Quick Clear requires at least 1 grit, standard without spend, move with 1 grit", () => {
+    expect(quickClearReloadCost({ gritAvailable: 0 })).toMatchObject({
+      action: "standard",
+      gritSpent: 0,
+      refusal: "Quick Clear requires at least 1 grit",
+    });
+    expect(quickClearReloadCost({ gritAvailable: 1 })).toMatchObject({
+      action: "standard",
+      gritSpent: 0,
+      refusal: null,
+    });
+    expect(quickClearReloadCost({ gritAvailable: 1, spendGrit: true })).toMatchObject({
+      action: "move",
+      gritSpent: 1,
+      refusal: null,
+    });
+    expect(quickClearReloadCost({ gritAvailable: 2, spendGrit: true }).cost).toContain("move action");
+  });
+
+  test("load-firearm provokes — the entry exists and is the UC p.135 §2.9 row", () => {
+    const entry = firearmReloadEntry();
+    expect(entry).not.toBeNull();
+    expect(entry?.id).toBe("load-firearm");
+    expect(entry?.provokes).toBe("yes");
+    expect(entry?.category).toMatch(/move|standard|full-round/);
+  });
+});
+
+describe("P09/D-219 — burst geometry and Reflex saves (UC p.135, 5-ft burst DC 12)", () => {
+  test("a burst from a chosen corner covers the 4 squares sharing it", () => {
+    expect(FIREARM_EXPLOSION_RADIUS_FT).toBe(5);
+    expect(FIREARM_EXPLOSION_DC).toBe(12);
+    const squares = firearmExplosionSquares({ col: 3, row: 7 });
+    expect(squares).toHaveLength(4);
+    expect(squares).toEqual(
+      expect.arrayContaining([
+        { col: 2, row: 6 },
+        { col: 3, row: 6 },
+        { col: 2, row: 7 },
+        { col: 3, row: 7 },
+      ]),
+    );
+    // Origin corner (0,0) yields negative coords for the northwest squares — caller clips.
+    expect(firearmExplosionSquares({ col: 0, row: 0 })).toEqual([
+      { col: -1, row: -1 },
+      { col: 0, row: -1 },
+      { col: -1, row: 0 },
+      { col: 0, row: 0 },
+    ]);
+  });
+
+  test("DC 12 Reflex — success is total ≥ DC, single die+mod", () => {
+    expect(firearmExplosionReflexOutcome({ die: 10, reflexMod: 2 })).toEqual({
+      total: 12,
+      success: true,
+    });
+    expect(firearmExplosionReflexOutcome({ die: 9, reflexMod: 2 })).toEqual({
+      total: 11,
+      success: false,
+    });
+    expect(firearmExplosionReflexOutcome({ die: 12, reflexMod: 5, dc: 15 })).toEqual({
+      total: 17,
+      success: true,
+    });
+  });
+
+  test("mitigated damage halves on success, floor, full on fail — one target helper", () => {
+    expect(firearmExplosionMitigatedDamage({ damageTotal: 11, success: true })).toBe(5);
+    expect(firearmExplosionMitigatedDamage({ damageTotal: 12, success: true })).toBe(6);
+    expect(firearmExplosionMitigatedDamage({ damageTotal: 11, success: false })).toBe(11);
+    const hit = firearmExplosionTargetDamage({ damageTotal: 9, die: 8, reflexMod: 4 });
+    expect(hit).toMatchObject({ total: 12, success: true, dealt: 4 });
+    const miss = firearmExplosionTargetDamage({ damageTotal: 9, die: 7, reflexMod: 4 });
+    expect(miss).toMatchObject({ total: 11, success: false, dealt: 9 });
+  });
+
+  test("ammo gate and misfire are discriminating: empty can't shoot, natural 20 never misfires, broken+4, expert averts, advanced never explodes", () => {
+    // Empty ⇒ refusal (already covered but re-assert as a bundle)
+    expect(firearmShotAmmo({ shotsAvailable: 0 }).canShoot).toBe(false);
+    expect(firearmShotAmmo({ shotsAvailable: 1 }).canShoot).toBe(true);
+    // Natural 20 gate
+    const nat20 = pf1eMisfireVerdict({ facts: musket({ misfireMinimum: 20, broken: true }), die: 20 });
+    expect(nat20).toEqual({ misfire: false });
+    // Broken escalation +4
+    expect(effectiveMisfireValue(musket({ broken: true }))).toBe(6);
+    // Expert averts
+    const averted = pf1eMisfireVerdict({ facts: musket({ broken: true, expertLoading: true }), die: 6 });
+    expect(averted).toMatchObject({ misfire: true, explodes: false });
+    // Advanced never explodes
+    const advanced = pf1eMisfireVerdict({ facts: musket({ generation: "advanced", broken: true }), die: 6 });
+    expect(advanced).toMatchObject({ misfire: true, explodes: false });
   });
 });

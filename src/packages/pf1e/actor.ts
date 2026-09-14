@@ -121,6 +121,7 @@ export interface PF1eAttackEntry {
   /**
    * P09/D-202 — firearm facts for this line: the misfire rules
    * (`firearms.ts`) read them, and the derived line carries them as `misfire`.
+   * D-218 — capacity/loaded ride the same block so the sheet can edit one place.
    */
   firearm?: {
     generation?: "early" | "advanced";
@@ -128,6 +129,10 @@ export interface PF1eAttackEntry {
     misfireMinimum?: number;
     /** A magical firearm is wrecked by an explosion, not destroyed. */
     magical?: boolean;
+    /** Shots the weapon holds when fully loaded (early firearms 1, advanced many). */
+    capacity?: number;
+    /** Shots currently loaded (0 ⇒ the §2.9 ammo gate refuses). */
+    loaded?: number;
   };
   /** The line's weapon carries the broken condition (misfire, sunder, or a pre-broken item). */
   broken?: boolean;
@@ -177,6 +182,12 @@ export interface PF1eSpellsAuthored {
 
 /** Cap on the authored prepared-spell list (a defense against malformed packs). */
 export const MAX_PREPARED_SPELLS = 200;
+
+/** P09/D-218 — grit (gunslinger deeds) rides the actor document: current / max, non-negative. */
+export interface PF1eGritAuthored {
+  current?: number;
+  max?: number;
+}
 
 /** Everything a PF1e actor document may author under `system.pf1e`. */
 export interface PF1eActorSystem extends PF1eHealthAuthored {
@@ -254,6 +265,8 @@ export interface PF1eActorSystem extends PF1eHealthAuthored {
   nonlethalDamage?: number;
   /** Damage reduction list is P7; the flat shortcut lives here for pack compatibility. */
   dr?: number;
+  /** P09/D-218 — grit pool for gunslinger deeds (Expert Loading, Quick Clear). */
+  grit?: PF1eGritAuthored;
   spellResistance?: number;
   spellResistanceNote?: string;
   /** Melee penalty for shooting a struck-then-withdraw snipe (A.9's sniping note). */
@@ -331,6 +344,11 @@ export interface PF1eDerivedAttack {
     broken: boolean;
     magical: boolean;
   };
+  /** P09/D-218 — shots loaded vs capacity for the §2.9 ammo gate (absent ⇒ not a firearm line). */
+  ammo?: {
+    capacity: number;
+    loaded: number;
+  };
   explain: string;
 }
 
@@ -338,6 +356,8 @@ export interface PF1eDerived extends Pick<
   PF1eHealthReadout,
   "tempHp" | "tempHpSources" | "energyResistance"
 > {
+  /** P09/D-218 — grit pool (gunslinger deeds): current and max, non-negative. */
+  grit: { current: number; max: number };
   size: PF1eSize;
   sizeEntry: ReturnType<typeof sizeEntry>;
   /** Table 8-4's body form: authored, or "tall" — the column the table prints first. */
@@ -800,6 +820,22 @@ export function parsePF1eActorSystem(raw: unknown): Result<PF1eActorSystem> {
       "system.pf1e.feats must be a list of names or a comma-separated string",
     );
   }
+  if (o.grit !== undefined && o.grit !== null) {
+    if (!isRecord(o.grit))
+      return err("system.pf1e.grit must be an object with current/max");
+    for (const k of ["current", "max"] as const) {
+      const v = (o.grit as Record<string, unknown>)[k];
+      if (
+        v !== undefined &&
+        v !== null &&
+        (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0)
+      ) {
+        return err(
+          `system.pf1e.grit.${k} must be a nonnegative whole number`,
+        );
+      }
+    }
+  }
   return okVal(o as PF1eActorSystem);
 }
 
@@ -824,6 +860,16 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
   const sys = (normalized.system ?? {}) as PF1eActorSystem;
   const health = readPF1eHealth(sys);
   c.issues.push(...health.issues);
+  // P09/D-218 — grit pool (gunslinger deeds: Expert Loading, Quick Clear). Pure numbers; written by the flow/UI.
+  const gritRecord = isRecord(sys.grit) ? (sys.grit as Record<string, unknown>) : null;
+  const gritMaxRaw = gritRecord !== null ? gritRecord.max : undefined;
+  const gritCurrentRaw = gritRecord !== null ? gritRecord.current : undefined;
+  const gritMax = Math.max(0, readNumber(gritMaxRaw, "grit.max", c, { fallback: 0 }));
+  const gritCurrentUnclamped = Math.max(0, readNumber(gritCurrentRaw, "grit.current", c, { fallback: 0 }));
+  const gritCurrent = Math.min(gritCurrentUnclamped, gritMax > 0 ? gritMax : gritCurrentUnclamped);
+  if (gritCurrentUnclamped > gritMax && gritMax > 0) {
+    c.issues.push(`grit.current ${String(gritCurrentUnclamped)} exceeds grit.max ${String(gritMax)} — clamped to max`);
+  }
   const attrs = isRecord(input.attributes) ? input.attributes : {};
   const effects = input.effects ?? [];
   const resolved: ResolvedEffects = resolveEffects(effects);
@@ -1212,6 +1258,8 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
             generation?: unknown;
             misfireMinimum?: unknown;
             magical?: unknown;
+            capacity?: unknown;
+            loaded?: unknown;
           })
         : null;
     let misfire:
@@ -1222,6 +1270,7 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
           magical: boolean;
         }
       | undefined;
+    let ammo: { capacity: number; loaded: number } | undefined;
     if (firearmBlock !== null) {
       const misfireMinimum = readNumber(
         firearmBlock.misfireMinimum,
@@ -1240,6 +1289,29 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
           magical: firearmBlock.magical === true,
         };
       }
+      const capacityRaw = (firearmBlock as Record<string, unknown>).capacity;
+      const capacityParsed = capacityRaw === undefined ? 1 : readNumber(capacityRaw, `attacks[${idx}].firearm.capacity`, c, { fallback: 1 });
+      let capacity = capacityParsed;
+      if (capacity < 1) {
+        c.issues.push(`attacks[${idx}].firearm.capacity ${String(capacityParsed)} is below 1 — using 1`);
+        capacity = 1;
+      }
+      if (capacity > 20) {
+        c.issues.push(`attacks[${idx}].firearm.capacity ${String(capacityParsed)} is above 20 — clamped to 20`);
+        capacity = 20;
+      }
+      const loadedRaw = (firearmBlock as Record<string, unknown>).loaded;
+      const loadedParsed = loadedRaw === undefined ? capacity : readNumber(loadedRaw, `attacks[${idx}].firearm.loaded`, c, { fallback: capacity });
+      let loaded = loadedParsed;
+      if (loaded < 0) {
+        c.issues.push(`attacks[${idx}].firearm.loaded ${String(loadedParsed)} is negative — using 0`);
+        loaded = 0;
+      }
+      if (loaded > capacity) {
+        c.issues.push(`attacks[${idx}].firearm.loaded ${String(loadedParsed)} exceeds capacity ${String(capacity)} — clamped`);
+        loaded = capacity;
+      }
+      ammo = { capacity, loaded };
     }
     return {
       name:
@@ -1272,6 +1344,7 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
       touchAttack: a.touchAttack === true,
       rangedTouch: a.touchAttack === true && ranged,
       ...(misfire !== undefined ? { misfire } : {}),
+      ...(ammo !== undefined ? { ammo } : {}),
       explain:
         `${bonus >= 0 ? "+" : ""}${bonus} = ${ranged ? `Dex ${fmt(eff.dex)}` : `Str ${fmt(ability)}${strMult !== 1 ? ` ×${strMult}` : ""}`}` +
         `, size ${fmt(sz.attackAc)}${toHit(ranged) !== 0 ? `, effects ${fmt(toHit(ranged))}` : ""}` +
@@ -1412,6 +1485,7 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     ) + (resolved.mods.concentration ?? 0);
 
   return {
+    grit: { current: gritCurrent, max: gritMax },
     size,
     sizeEntry: sz,
     reachShape,

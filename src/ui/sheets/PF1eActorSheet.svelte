@@ -74,15 +74,27 @@
   import { resolveTacticalEffects } from "../../packages/pf1e/effectOps";
   import {
     mountedHigherGround,
+    mountedRangedPenalty,
+    mountedMeleeFullAttack,
+    mountedCastingConcentrationDC,
     mountLinkageOf,
+    guideWithKnees,
+    stayInSaddle,
+    unconsciousRiderStays,
+    untrainedMountControl,
+    lanceChargeMultiplier,
+    mountFootprint,
+    type PF1eMountMovement,
   } from "../../packages/pf1e/mounted";
+  import { firearmShotAmmo, FIREARM_EXPLOSION_DC, FIREARM_EXPLOSION_RADIUS_FT, firearmExplosionSquares, quickClearReloadCost, firearmReloadEntry } from "../../packages/pf1e/firearms";
+  import { firearmReloadOpportunity } from "./pf1eResolveFlow";
   import type {
     ActorDocument,
     CombatDocument,
     CombatantDocument,
     SceneDocument,
   } from "../../core/documents";
-  import { resolveAttackFlow, resolveManyshotFlow } from "./pf1eResolveFlow";
+  import { resolveAttackFlow, resolveManyshotFlow, resolveFirearmExplosionFlow } from "./pf1eResolveFlow";
   import { resolveManeuverFlow } from "../combat/pf1eManeuverFlow";
   import { resolveAidAnotherFlow, resolveFeintFlow } from "../combat/pf1eAidFeintFlow";
   import type { PF1eDefenseChoice } from "../../packages/pf1e/resolve";
@@ -250,6 +262,8 @@
   let castNonDamagingDc = $state("");
   let castGrappleCheck = $state(false);
   let castGrappleCmb = $state("");
+  let castMountMovedBeforeAndAfter = $state(false);
+  let castMountRunning = $state(false);
   let castBusy = $state(false);
   let castError = $state("");
   let castWarning = $state("");
@@ -331,6 +345,8 @@
     "auto" | "none" | (typeof COVER_GRADE_OPTIONS)[number]
   >("auto");
   let resolveCharging = $state(false);
+  let resolveMountMovement = $state<PF1eMountMovement>("stationary");
+  let resolveMountMovedFtRaw = $state("");
   let resolveNonlethal = $state(false);
   let resolveVerifiable = $state(false);
   let resolvePowerAttack = $state(false);
@@ -438,6 +454,237 @@
     updateDetail({ kind: "mount", actorId, combatTrained, saddle });
   }
 
+  // P08/D-217 — Ride check state (raw inputs, notes, falling 1d6)
+  let rideBonusRaw = $state("");
+  let rideDieRaw = $state("");
+  let rideD100Raw = $state("");
+  let rideNote = $state("");
+  let rideError = $state("");
+  let rideFallingNote = $state("");
+  let rideBusy = $state(false);
+  // P09/D-218 — grit and firearm UI state (Quick Clear, Expert Loading; UC p.135)
+  let gritCurrentRaw = $state("");
+  let gritMaxRaw = $state("");
+  let gritNote = $state("");
+  let firearmError = $state("");
+  let firearmNote = $state("");
+  let firearmBusy = $state(false);
+  let spendGritForClear = $state(false);
+  let resolveExpertLoading = $state(false);
+  // P09/D-219 — explosion burst placement & per-target Reflex (UC p.135, 5-ft burst from a chosen corner)
+  let explosionCornerColRaw = $state("0");
+  let explosionCornerRowRaw = $state("0");
+  let explosionDamageRaw = $state("");
+  let explosionBusy = $state(false);
+  let explosionError = $state("");
+  let explosionNote = $state("");
+  let explosionTargetPicks = $state<Record<string, boolean>>({});
+
+  // P08/D-217 — Ride checks (A.11): DC 20 untrained control, DC 5 knees, DC 15 stay, 50/75% unconscious; fall ⇒ 1d6
+  function parseRideBonus(): number {
+    const raw = rideBonusRaw.trim();
+    if (raw === "") return d.abilityMods.dex;
+    const n = Number.parseInt(raw, 10);
+    return Number.isFinite(n) ? n : d.abilityMods.dex;
+  }
+  function parseRideDie(): number | null {
+    const n = Number.parseInt(rideDieRaw.trim(), 10);
+    if (!Number.isInteger(n) || n < 1 || n > 20) return null;
+    return n;
+  }
+  async function applyFallingDamage(notePrefix: string): Promise<void> {
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current || !client.user || !can(client.user, "update", current, "actors")) {
+      rideFallingNote = `${notePrefix} — no permission to apply 1d6 (apply manually)`;
+      return;
+    }
+    rideBusy = true;
+    try {
+      const rollId = client.roll("1d6", "roll", undefined, "falling from mount 1d6 (A.11)");
+      // Wait for the host-evaluated roll message
+      const deadline = Date.now() + 10000;
+      let total: number | null = null;
+      for (;;) {
+        for (const msg of client.store.getAll("messages") as readonly { flags?: { core?: { rollId?: unknown } }; roll?: { total?: unknown } }[]) {
+          if ((msg.flags as { core?: { rollId?: unknown } })?.core?.rollId === rollId && typeof msg.roll?.total === "number") {
+            total = msg.roll.total as number;
+            break;
+          }
+        }
+        if (total !== null) break;
+        if (Date.now() >= deadline) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      if (total === null) {
+        rideFallingNote = `${notePrefix} — falling roll did not arrive (apply 1d6 manually)`;
+        return;
+      }
+      const derived = pf1eSheetView(current).derived;
+      const after = derived.hp - total;
+      const edit = pf1eSheetEdit(current, client.user, "hp", String(after));
+      if (edit.error) rideFallingNote = `${notePrefix} — 1d6 = ${total} but HP write rejected: ${edit.error}`;
+      else {
+        if (edit.ops.length) pending.add(client.submit(edit.ops));
+        rideFallingNote = `${notePrefix} — 1d6 = ${total} applied (${derived.hp} → ${after} HP)`;
+      }
+    } finally {
+      rideBusy = false;
+    }
+  }
+  function doRideCheck(kind: "control" | "knees" | "stay"): void {
+    rideError = "";
+    rideNote = "";
+    rideFallingNote = "";
+    const bonus = parseRideBonus();
+    const die = parseRideDie();
+    if (die === null) {
+      rideError = "Ride d20 must be 1–20";
+      return;
+    }
+    if (kind === "control") {
+      const v = untrainedMountControl({ die, rideMod: bonus });
+      rideNote = `d20 ${die} + ${bonus} = ${die + bonus} vs DC 20 — ${v.reason}`;
+      if (!v.controlled) rideNote += " · the move becomes a full-round action";
+    } else if (kind === "knees") {
+      const v = guideWithKnees({ die, rideMod: bonus });
+      rideNote = `d20 ${die} + ${bonus} = ${die + bonus} vs DC 5 — ${v.reason}`;
+    } else {
+      const v = stayInSaddle({ die, rideMod: bonus });
+      rideNote = `d20 ${die} + ${bonus} = ${die + bonus} vs DC 15 — ${v.reason}`;
+      if (!v.stays) void applyFallingDamage("Fell from mount (DC 15 failed)");
+    }
+  }
+  function doUnconsciousCheck(): void {
+    rideError = "";
+    rideNote = "";
+    rideFallingNote = "";
+    const raw = rideD100Raw.trim();
+    const roll = Number.parseInt(raw, 10);
+    if (!Number.isInteger(roll) || roll < 1 || roll > 100) {
+      rideError = "Unconscious check d100 must be 1–100";
+      return;
+    }
+    const saddle = currentMount?.saddle ?? "none";
+    const v = unconsciousRiderStays({ saddle, roll });
+    rideNote = `d100 ${roll} vs ${saddle === "military" ? 75 : 50}% — ${v.reason}`;
+    if (!v.stays) void applyFallingDamage("Fell while unconscious");
+  }
+  function doGritUpdate(): void {
+    gritNote = "";
+    error = "";
+    const cur = gritCurrentRaw.trim();
+    const max = gritMaxRaw.trim();
+    if (cur !== "") {
+      const r = pf1eSheetEdit(doc, client.user, "grit.current", cur);
+      if (r.error) { error = r.error; return; }
+      if (r.ops.length) pending.add(client.submit(r.ops));
+    }
+    if (max !== "") {
+      const r = pf1eSheetEdit(doc, client.user, "grit.max", max);
+      if (r.error) { error = r.error; return; }
+      if (r.ops.length) pending.add(client.submit(r.ops));
+    }
+    gritNote = `grit ${d.grit.current}/${d.grit.max} — updated`;
+    gritCurrentRaw = "";
+    gritMaxRaw = "";
+  }
+  async function doFirearmReload(): Promise<void> {
+    firearmError = ""; firearmNote = "";
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current) { firearmError = "Actor is no longer available."; return; }
+    const line = d.attacks[resolveAttackIndex];
+    if (!line) { firearmError = "Pick an attack line first."; return; }
+    if (line.misfire === undefined) { firearmError = "This line is not a firearm (add firearm generation / misfire)."; return; }
+    if (!client.user || !can(client.user, "update", current, "actors")) { firearmError = "You do not own this actor."; return; }
+    if (line.ammo && line.ammo.loaded >= line.ammo.capacity) { firearmNote = "Already fully loaded."; return; }
+    if (line.misfire.broken) { firearmError = "The firearm is broken — clear the jam first (Quick Clear)."; return; }
+    firearmBusy = true;
+    try {
+      const tokenId = provokerTokenId();
+      if (tokenId !== null) {
+        const provoke = await resolveActionProvokes({
+          client,
+          user: client.user,
+          provokerTokenId: tokenId,
+          provokes: [{ actionId: "load-firearm" }],
+          autoResolve: autoResolveAoosOf(worldSettingsFrom(client.store.getAll("settings"))),
+          combat: linked.combat,
+        });
+        if (provoke.lines.length > 0) firearmNote = provoke.lines.join(" · ");
+      }
+      const capacity = line.ammo?.capacity ?? 1;
+      const diff: Record<string, import("../../core/documents").Json> = {};
+      diff[`system.pf1e.attacks.${resolveAttackIndex}.firearm.loaded`] = capacity as unknown as import("../../core/documents").Json;
+      pending.add(client.submit([{ kind: "update", ref: { coll: "actors", id: current._id }, diff }]));
+      firearmNote = firearmNote ? `${firearmNote} · Reloaded ${line.name} to ${capacity}/${capacity} — ${reloadEntry ? `${reloadEntry.category} action, provokes ${reloadEntry.provokes}` : "move action, provokes"} (UC p.135 §2.9).` : `Reloaded ${line.name} to ${capacity}/${capacity} — ${reloadEntry ? `${reloadEntry.category} action, provokes ${reloadEntry.provokes}` : "move action, provokes"} (UC p.135 §2.9).`;
+    } finally { firearmBusy = false; }
+  }
+  async function doFirearmClear(): Promise<void> {
+    firearmError = ""; firearmNote = "";
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current) { firearmError = "Actor is no longer available."; return; }
+    const line = d.attacks[resolveAttackIndex];
+    if (!line) { firearmError = "Pick an attack line first."; return; }
+    if (line.misfire === undefined) { firearmError = "Not a firearm."; return; }
+    if (!line.misfire.broken) { firearmNote = "Not broken — nothing to clear."; return; }
+    if (!client.user || !can(client.user, "update", current, "actors")) { firearmError = "You do not own this actor."; return; }
+    const cost = quickClearReloadCost({ gritAvailable: d.grit.current, spendGrit: spendGritForClear });
+    if (cost.refusal) { firearmError = cost.refusal; return; }
+    firearmBusy = true;
+    try {
+      const ops: import("../../core/ops").Op[] = [];
+      ops.push({ kind: "update", ref: { coll: "actors", id: current._id }, diff: { [`system.pf1e.attacks.${resolveAttackIndex}.broken`]: false as unknown as import("../../core/documents").Json } });
+      if (cost.gritSpent === 1) {
+        const next = Math.max(0, d.grit.current - 1);
+        ops.push({ kind: "update", ref: { coll: "actors", id: current._id }, diff: { "system.pf1e.grit.current": next as unknown as import("../../core/documents").Json } });
+      }
+      pending.add(client.submit(ops));
+      firearmNote = `Cleared jam on ${line.name} — ${cost.cost} (${cost.gritSpent ? "spent 1 grit, Quick Clear" : "standard action"}).`;
+    } finally { firearmBusy = false; }
+  }
+  function firearmExplosionHint(): string | null {
+    const line = d.attacks[resolveAttackIndex];
+    if (!line || line.misfire === undefined) return null;
+    // Hint the 5-ft burst from the chosen corner (4 squares) — DC 12 Reflex half, UC p.135
+    const squares = firearmExplosionSquares({ col: 0, row: 0 });
+    return `Explosion on second early misfire while broken: DC ${FIREARM_EXPLOSION_DC} Reflex half, 5-ft burst (${FIREARM_EXPLOSION_RADIUS_FT} ft, ${squares.length} squares from corner, UC p.135).`;
+  }
+  async function doFirearmExplosion(): Promise<void> {
+    explosionError = "";
+    explosionNote = "";
+    const line = d.attacks[resolveAttackIndex];
+    const raw = explosionDamageRaw.trim();
+    const damageFormula = raw !== "" ? raw : line?.damageDice ? `${line.damageDice}${line.damageBonus ? `+${line.damageBonus}` : ""}` : "";
+    if (damageFormula === "") { explosionError = "Enter a damage formula for the explosion (e.g. 1d12)."; return; }
+    const col = Number.parseInt(explosionCornerColRaw.trim(), 10);
+    const row = Number.parseInt(explosionCornerRowRaw.trim(), 10);
+    const corner = Number.isFinite(col) && Number.isFinite(row) ? { col, row } : undefined;
+    const pickedIds = Object.entries(explosionTargetPicks).filter(([, v]) => v).map(([id]) => id);
+    if (pickedIds.length === 0) { explosionError = "Pick at least one target in the 5-ft burst (the 4 squares sharing the chosen corner)."; return; }
+    const burstTargets: Array<{ name: string; actor: ActorDocument; derived: ReturnType<typeof pf1eSheetView>["derived"] }> = [];
+    for (const id of pickedIds) {
+      const actor = client.store.get("actors", id) as ActorDocument | undefined;
+      if (!actor) continue;
+      burstTargets.push({ name: actor.name, actor, derived: pf1eSheetView(actor).derived });
+    }
+    if (burstTargets.length === 0) { explosionError = "The picked burst targets are no longer available."; return; }
+    explosionBusy = true;
+    try {
+      const outcome = await resolveFirearmExplosionFlow(client, client.user, {
+        attackerName: doc.name,
+        damageFormula,
+        burstTargets,
+        ...(corner ? { corner } : {}),
+        ...(resolveVerifiable ? { verifiable: true } : {}),
+      });
+      if (!outcome.ok) explosionError = outcome.error;
+      else {
+        const lines = outcome.perTarget.map((p) => `${p.name}: Reflex d20 ${p.die} + ${p.total - p.die} = ${p.total} vs DC ${FIREARM_EXPLOSION_DC} ${p.success ? "success" : "fail"} — ${p.dealt} damage (HP ${p.hpBefore}→${p.hpAfter})${p.hpWriteError ? ` — ${p.hpWriteError}` : ""}`).join(" · ");
+        explosionNote = `Explosion ${outcome.damageTotal} damage — ${lines}`;
+      }
+    } finally { explosionBusy = false; }
+  }
+
   /**
    * P08/D-201 — the mounted higher-ground fold: a rider whose authored mount
    * (`system.pf1e.mount`) is larger than the on-foot target takes +1 on melee
@@ -467,6 +714,63 @@
   });
 
   /** The positional defenses the resolver folds in: auto = the geometry's word. */
+  /** P08/D-201 — ranged penalty from the selected mount movement (−4 double / −8 run). */
+  let mountedRangedPenaltyPart = $derived(mountedRangedPenalty(resolveMountMovement));
+  /** P08/D-201 — numeric mount distance for the melee full-attack bar (>5 ft ⇒ single). */
+  let resolveMountMovedFt = $derived.by(() => {
+    const raw = resolveMountMovedFtRaw.trim();
+    if (raw === "") {
+      // No explicit feet: infer from mountMovement (stationary 0, single 30, double 60, run 120)
+      // so the common horse case (single = >5) correctly bars full attack while 0 keeps it.
+      if (resolveMountMovement === "stationary") return 0;
+      if (resolveMountMovement === "single") return 30;
+      if (resolveMountMovement === "double") return 60;
+      return 120;
+    }
+    const n = Number.parseInt(raw, 10);
+    return Number.isFinite(n) ? Math.max(0, n) : 0;
+  });
+  let mountedMeleeBar = $derived(mountedMeleeFullAttack({ mountMovedFt: resolveMountMovedFt }));
+  /** P08/D-201 — mounted casting DC for the spell level in the cast panel (10+SL / 15+SL). */
+  let castMountConcentrationDc = $derived.by(() => {
+    const lvl = Number.parseInt(castLevel, 10);
+    if (!Number.isInteger(lvl) || lvl < 0 || lvl > 9) return null;
+    return mountedCastingConcentrationDC({ spellLevel: lvl, movedBeforeAndAfter: castMountMovedBeforeAndAfter, mountRunning: castMountRunning });
+  });
+
+  // P08/D-217 — mount footprint (2×2 for Large horse) and lance hint
+  let mountFootprintInfo = $derived.by(() => {
+    const linkage = mountLinkageOf((doc.system as { pf1e?: { mount?: unknown } }).pf1e?.mount);
+    if (linkage === null || linkage.actorId === null) return null;
+    const mount = client.store.get("actors", linkage.actorId) as ActorDocument | undefined;
+    if (mount === undefined) return null;
+    return mountFootprint({ mountSize: (mount.system as { pf1e?: { size?: unknown } }).pf1e?.size as string | null });
+  });
+  let lanceHint = $derived.by(() => {
+    const line = d.attacks[resolveAttackIndex];
+    if (!line || line.ranged === true) return null;
+    if (!/lance/i.test(line.name)) return null;
+    if (currentMount === null || currentMount.actorId === null) return null;
+    if (!resolveCharging) return null;
+    const spirited = (Array.isArray(view.authored.feats) ? view.authored.feats as string[] : []).some((f) => /spirited charge/i.test(f));
+    const mult = lanceChargeMultiplier({ spiritedCharge: spirited });
+    return { mult, spirited };
+  });
+  // P09/D-218 — derived firearm ammo/misfire/grit for the combat panel + sheet grit readout
+  let resolveFirearm = $derived.by(() => {
+    const line = d.attacks[resolveAttackIndex];
+    if (!line) return null;
+    return {
+      ammo: line.ammo ?? null,
+      misfire: line.misfire ?? null,
+      broken: line.misfire?.broken ?? false,
+      grit: d.grit,
+      canShoot: line.misfire !== undefined ? firearmShotAmmo({ shotsAvailable: line.ammo?.loaded ?? 0 }).canShoot : null,
+    };
+  });
+  let quickClearPreview = $derived(quickClearReloadCost({ gritAvailable: d.grit.current, spendGrit: spendGritForClear }));
+  let reloadEntry = $derived(firearmReloadEntry());
+
   let effectivePositional = $derived.by(() => {
     const concealment =
       resolvePosition.defense.concealment !== undefined
@@ -585,6 +889,10 @@
               engagedSizeCategoriesLarger: resolvePosition.engagement?.sizeCategoriesLarger ?? 0,
             }
           : {}),
+        ...(resolveMountMovement !== "stationary" ? { mountMovement: resolveMountMovement } : {}),
+        ...(resolveMountMovedFt > 0 ? { mountMovedFt: resolveMountMovedFt } : {}),
+        ...(doc ? { attackerActor: doc, attackerAttackIndex: resolveAttackIndex } : {}),
+        ...(resolveExpertLoading ? { misfireExtras: { expertLoading: true } } : {}),
         ...(resolveVerifiable ? { verifiable: true } : {}),
       });
       if (!outcome.ok) resolveError = outcome.error;
@@ -665,6 +973,8 @@
               engagedSizeCategoriesLarger: resolvePosition.engagement?.sizeCategoriesLarger ?? 0,
             }
           : {}),
+        ...(resolveMountMovement !== "stationary" ? { mountMovement: resolveMountMovement } : {}),
+        ...(resolveExpertLoading ? { misfireExtras: { expertLoading: true } } : {}),
         ...(resolveVerifiable ? { verifiable: true } : {}),
       });
       if (!outcome.ok) resolveError = outcome.error;
@@ -998,6 +1308,10 @@
         situation: "grappledOrPinned",
         grapplerCmb: Math.max(0, Math.trunc(Number(castGrappleCmb) || 0)),
       });
+    // P08/D-201 — mounted casting (A.11): moving both before and after ⇒ DC 10+SL (vigorous),
+    // running ⇒ DC 15+SL (violent). The DCs match Table 9-1 motion rows, so we reuse them.
+    if (castMountRunning) declarations.push({ situation: "violentMotion" });
+    else if (castMountMovedBeforeAndAfter) declarations.push({ situation: "vigorousMotion" });
     castBusy = true;
     try {
       // D-191: the casting provoke resolves (or reports) before the spell lands — the
@@ -1958,6 +2272,16 @@
       {#if negativeLevelsNote}<p class="note" data-negative-levels-note>{negativeLevelsNote}</p>{/if}
       <p class="note">Per AoN 427/UMR Energy Drain: −1 per level on attacks/saves/skills/ability checks/CMB/CMD, −5 HP (current and total), one level lower for level-dependent variables; death when levels ≥ Hit Dice. Temporary: new save each day at the effect's DC; energy drain: one Fort save after 24h (DC 10 + 1/2 racial HD + Cha), failure makes the level permanent; permanent drain: restoration only. Example DC: vampire 8 HD, Cha +4 → DC {energyDrainSaveDC({ racialHd: 8, chaMod: 4 })}.</p>
     </section>
+    <section class="resolve" aria-label="Grit (gunslinger deeds)" data-pf1e-grit>
+      <h4>Grit — gunslinger deeds (P09, UC p.135 — Quick Clear, Expert Loading)</h4>
+      <p data-grit-readout>Grit {d.grit.current} / {d.grit.max}{#if d.issues.some(i => i.includes("grit."))} <span class="warn"> — {d.issues.filter(i => i.includes("grit."))[0]}</span>{/if}</p>
+      <label>Current <input bind:value={gritCurrentRaw} placeholder={String(d.grit.current)} size="3" data-grit-current /></label>
+      <label>Max <input bind:value={gritMaxRaw} placeholder={String(d.grit.max)} size="3" data-grit-max /></label>
+      <button type="button" disabled={!editable} onclick={() => doGritUpdate()} data-grit-submit>Update grit</button>
+      {#if gritNote}<p class="note" data-grit-note>{gritNote}</p>{/if}
+      {#if error && (gritCurrentRaw || gritMaxRaw)}<p role="alert">{error}</p>{/if}
+      <p class="note">Gunslinger grit pool — spent for Expert Loading (avert a second early misfire while broken: 1 grit prevents the explosion, UC p.135) and Quick Clear (clear a broken firearm as a move action for 1 grit, otherwise a standard action). Load-firearm and Clear-jam buttons are in the Combat panel.</p>
+    </section>
     <p class="note">
       Energy resistance is manually adjudicated; temporary HP absorption, source stacking (same-source highest, different stack) and expiration are automated (CRB p.191), healing never restores temp HP. Ability drain never heals naturally — restoration is its only cure. Derived values are read-only.
     </p>
@@ -2119,6 +2443,17 @@
         <label
           ><input type="checkbox" bind:checked={resolveCharging} /> Charge +2</label
         >
+        <label>Mount movement
+          <select bind:value={resolveMountMovement} data-pf1e-mount-movement>
+            <option value="stationary">Stationary</option>
+            <option value="single">Single move (no penalty)</option>
+            <option value="double">Double move (−4 ranged)</option>
+            <option value="run">Running (−8 ranged)</option>
+          </select>
+        </label>
+        <label>Mount moved (ft)
+          <input bind:value={resolveMountMovedFtRaw} placeholder={String(resolveMountMovedFt)} size="4" data-pf1e-mount-moved-ft />
+        </label>
         <label
           ><input
             type="checkbox"
@@ -2196,12 +2531,63 @@
             the higher-ground bonus)
           </p>
         {/if}
+        {#if mountedRangedPenaltyPart !== null && d.attacks[resolveAttackIndex]?.ranged === true && resolveTargetId}
+          <p class="note" data-pf1e-mounted-penalty>
+            Mounted ranged penalty: {mountedRangedPenaltyPart.label} {mountedRangedPenaltyPart.value} (A.11)
+          </p>
+        {/if}
+        {#if mountedMeleeBar.fullAttack === false && d.attacks[resolveAttackIndex]?.ranged !== true && resolveTargetId}
+          <p class="note warn" data-pf1e-mounted-melee-bar>{mountedMeleeBar.reason}</p>
+        {/if}
+        {#if lanceHint !== null && resolveTargetId}
+          <p class="note" data-pf1e-lance-resolve>Lance charge ×{lanceHint.mult}{lanceHint.spirited ? " (Spirited Charge)" : ""} — damage stacks additively with a crit (CRB p.179)</p>
+        {/if}
+        {#if resolveFirearm !== null && resolveFirearm.ammo !== null && resolveTargetId}
+          <p class="note" data-pf1e-firearm-resolve>
+            Firearm {d.attacks[resolveAttackIndex]?.name ?? ""} — ammo {resolveFirearm.ammo.loaded}/{resolveFirearm.ammo.capacity}
+            {#if resolveFirearm.misfire} · misfire {resolveFirearm.misfire.misfireMinimum} ({resolveFirearm.misfire.generation}{resolveFirearm.misfire.broken ? ", broken" : ""}{resolveFirearm.misfire.magical ? ", magical" : ""}){/if}
+            {#if resolveFirearm.canShoot === false} <span class="warn">— empty, cannot shoot (§2.9)</span>{/if}
+            {#if resolveFirearm.broken} <span class="warn">— broken (misfire)</span>{/if}
+            · grit {resolveFirearm.grit.current}/{resolveFirearm.grit.max}
+          </p>
+          {#if firearmExplosionHint() !== null}
+            <p class="note" data-pf1e-explosion-hint>{firearmExplosionHint()}</p>
+          {/if}
+        {/if}
         {#if resolveError}<p class="warn" data-pf1e-resolve-error>
             {resolveError}
           </p>{/if}
         {#if resolveWarning}<p class="note" data-pf1e-resolve-warning>
             {resolveWarning}
           </p>{/if}
+        {#if resolveFirearm !== null && resolveFirearm.ammo !== null}
+          <div class="resolve" data-pf1e-firearm-actions>
+            <button type="button" disabled={firearmBusy || !editable} onclick={() => void doFirearmReload()} data-firearm-reload>Reload ({reloadEntry ? `${reloadEntry.category}, provokes ${reloadEntry.provokes}` : "move, provokes"}) — {resolveFirearm.ammo.loaded}/{resolveFirearm.ammo.capacity} → {resolveFirearm.ammo.capacity}</button>
+            <label><input type="checkbox" bind:checked={spendGritForClear} data-firearm-spend-grit /> Spend 1 grit for Quick Clear</label>
+            <button type="button" disabled={firearmBusy || !editable} onclick={() => void doFirearmClear()} data-firearm-clear>Clear jam — {quickClearPreview.cost} (grit {quickClearPreview.gritSpent ? "1" : "0"}{quickClearPreview.refusal ? ` — ${quickClearPreview.refusal}` : ""})</button>
+            <label><input type="checkbox" bind:checked={resolveExpertLoading} data-firearm-expert-loading /> Expert Loading — spend 1 grit to avert explosion on this shot (broken early firearm, UC p.135)</label>
+            {#if firearmError}<p class="warn" data-firearm-error>{firearmError}</p>{/if}
+            {#if firearmNote}<p class="note" data-firearm-note>{firearmNote}</p>{/if}
+            <p class="note">Reloading an early firearm is a move/{reloadEntry?.category ?? "move"} action that provokes (`load-firearm`, Table 7-2, UC p.135 §2.9 — capacity authored on the attack line: {resolveFirearm.ammo.capacity}). A broken firearm must be cleared first: {quickClearPreview.cost} (standard, or move with 1 grit via Quick Clear). Expert Loading (1 grit) averts the explosion on a second early misfire while broken — the resolve flow spends the grit automatically when it averts.</p>
+          </div>
+          {#if resolveFirearm.misfire !== null}
+            <div class="resolve" data-pf1e-explosion-actions>
+              <h5>Firearm explosion — 5-ft burst (UC p.135, DC 12 Reflex half)</h5>
+              <label>Corner col <input bind:value={explosionCornerColRaw} size="3" data-explosion-col /></label>
+              <label>Corner row <input bind:value={explosionCornerRowRaw} size="3" data-explosion-row /></label>
+              <label>Damage <input bind:value={explosionDamageRaw} placeholder={d.attacks[resolveAttackIndex]?.damageDice ?? "1d12"} size="8" data-explosion-damage /></label>
+              <div data-explosion-targets>
+                {#each pf1eTargetActors() as target (target._id)}
+                  <label><input type="checkbox" checked={explosionTargetPicks[target._id] === true} onchange={(e) => (explosionTargetPicks = { ...explosionTargetPicks, [target._id]: e.currentTarget.checked })} data-explosion-target={target._id} /> {target.name} (Ref {pf1eSheetView(target).derived.saves.ref})</label>
+                {/each}
+              </div>
+              <button type="button" disabled={explosionBusy || !editable} onclick={() => void doFirearmExplosion()} data-explosion-submit>{explosionBusy ? "Resolving…" : "Resolve explosion burst"}</button>
+              {#if explosionError}<p class="warn" data-explosion-error>{explosionError}</p>{/if}
+              {#if explosionNote}<p class="note" data-explosion-note>{explosionNote}</p>{/if}
+              <p class="note">Burst from the chosen corner covers the 4 squares sharing it ({FIREARM_EXPLOSION_RADIUS_FT} ft). Roll one damage total, each creature Reflex DC {FIREARM_EXPLOSION_DC} for half (floor). Nonmagical firearm destroyed, magical wrecked on explosion.</p>
+            </div>
+          {/if}
+        {/if}
       </div>
       <h4>Combat maneuvers (A.9 — provokes an AoO without the Improved feat)</h4>
       <div class="resolve" data-pf1e-maneuver>
@@ -2344,6 +2730,29 @@
             </select>
           </label>
         {/if}
+      </div>
+      {#if mountFootprintInfo !== null}
+        <p class="note" data-pf1e-mount-footprint>Mount footprint: {mountFootprintInfo.squares} squares ({mountFootprintInfo.feet} ft) — a Large horse occupies 2×2 (A.11, CRB p.202)</p>
+      {/if}
+      {#if currentMount !== null && currentMount.actorId !== null}
+        <p class="note" data-pf1e-mount-initiative>Initiative is shared: you and the mount act on your initiative count — when charging you must act on the mount's initiative (A.11)</p>
+      {/if}
+      {#if lanceHint !== null}
+        <p class="note" data-pf1e-lance-hint>Lance charge ×{lanceHint.mult} damage on this charge{lanceHint.spirited ? " (Spirited Charge)" : ""} — stacks additively with a critical (×2+×2 ⇒ ×3, ×3+×2 ⇒ ×4, CRB p.179)</p>
+      {/if}
+      <h4>Ride checks — untrained (A.11, Ride skill)</h4>
+      <div class="resolve" data-pf1e-ride>
+        <label>Ride mod <input bind:value={rideBonusRaw} placeholder={String(d.abilityMods.dex)} size="3" data-ride-bonus /></label>
+        <label>d20 <input bind:value={rideDieRaw} placeholder="1–20" size="3" data-ride-die /></label>
+        <button type="button" disabled={rideBusy} onclick={() => doRideCheck("control")} data-ride-control>Control mount DC 20</button>
+        <button type="button" disabled={rideBusy} onclick={() => doRideCheck("knees")} data-ride-knees>Guide with knees DC 5</button>
+        <button type="button" disabled={rideBusy} onclick={() => doRideCheck("stay")} data-ride-stay>Stay in saddle DC 15</button>
+        <label>d100 <input bind:value={rideD100Raw} placeholder="1–100" size="3" data-ride-d100 /></label>
+        <button type="button" disabled={rideBusy} onclick={() => doUnconsciousCheck()} data-ride-unconscious>Unconscious {currentMount?.saddle === "military" ? "75%" : "50%"}</button>
+        {#if rideError}<p class="warn" data-ride-error>{rideError}</p>{/if}
+        {#if rideNote}<p class="note" data-ride-note>{rideNote}</p>{/if}
+        {#if rideFallingNote}<p class="warn" data-ride-falling>{rideFallingNote}</p>{/if}
+        <p class="note">DC 20 — control an untrained mount (move action) or fail ⇒ full-round (A.11 §2); DC 5 — guide with knees (free hand); DC 15 — stay in saddle when hit (fail ⇒ fall 1d6 host roll). Unconscious: 50% (75% military) per round to stay mounted.</p>
       </div>
       <p class="note">
         Rolls post to chat with their breakdown; resolution rolls attack (+
@@ -2854,6 +3263,11 @@
             />
             (DC 10 + CMB + level)</label
           >
+          <label><input type="checkbox" bind:checked={castMountMovedBeforeAndAfter} data-cast-mount-moved /> Mount moved both before and after casting (DC 10 + level, A.11)</label>
+          <label><input type="checkbox" bind:checked={castMountRunning} data-cast-mount-running /> Mount running (DC 15 + level, A.11)</label>
+          {#if castMountConcentrationDc !== null}
+            <p class="note" data-cast-mount-dc>Mounted casting concentration DC {castMountConcentrationDc} (spell level {castLevel})</p>
+          {/if}
         </fieldset>
         <label
           ><input

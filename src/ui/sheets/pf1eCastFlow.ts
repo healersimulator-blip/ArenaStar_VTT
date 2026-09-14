@@ -70,6 +70,8 @@ import {
   arcaneSpellFailureChance,
   checkCastingLegality,
   componentNeeds,
+  concentrationBonus,
+  concentrationDc,
   parseSpellComponents,
   resolveCastingAttempt,
   type PF1eCasterState,
@@ -86,6 +88,9 @@ import {
   pendingCastDiff,
   pendingCastFromSystem,
 } from "../../packages/pf1e/pendingCast";
+import { pendingRollCreateOp } from "../combat/pf1ePendingRollFlow";
+import { isPlayerOwned } from "../../packages/pf1e/pendingRoll";
+import { worldSettingsFrom } from "../../core/worldSettings";
 import {
   PF1E_ALLY_TOUCH_MAX,
   PF1E_HELD_CHARGE_MAX_CHARGES,
@@ -778,6 +783,76 @@ export async function resolveCastFlow(
         deafenedDie = face;
       }
     }
+    // F03: concentration checks pending per-declaration in manual mode only — defer 1d20+bonus vs DC to the caster when player-owned
+    try {
+      const worldSettingsConc = worldSettingsFrom((client as unknown as { store: { getAll(c: string): readonly unknown[] } }).store.getAll("settings") as unknown as Iterable<unknown>);
+      const casterIsPlayerOwned = isPlayerOwned((params.casterActor as unknown as { ownership?: unknown }).ownership as unknown as import("../../core/documents").Ownership | null | undefined);
+      const turnNumberConc = (params.combat as unknown as { round?: unknown })?.round !== undefined && typeof (params.combat as unknown as { round?: unknown }).round === "number" ? Math.trunc((params.combat as unknown as { round: number }).round) : 0;
+      const { shouldDeferToPlayer: shouldDeferConc } = await import("../../packages/pf1e/pendingRoll");
+      const deferConc = (gate.declarations?.length ?? 0) > 0 && shouldDeferConc({ kind: "concentration", targetIsPlayerOwned: casterIsPlayerOwned, worldSettings: worldSettingsConc, isStrategic: false });
+      if (deferConc) {
+        const bonusRes = concentrationBonus({ casterLevel: casterDerived.spellCasterLevel, keyAbilityMod: casterDerived.abilityMods[casterDerived.spellKeyAbility], featBonus: casterDerived.concentration });
+        const bonus = bonusRes.issues.length === 0 ? bonusRes.bonus : 0;
+        const formula = `1d20${bonus >= 0 ? `+${bonus}` : `${bonus}`}`;
+        const concOps: Op[] = [];
+        const concLines: string[] = [];
+        for (const declaration of gate.declarations ?? []) {
+          let triggerForDc: Parameters<typeof concentrationDc>[0] | null = null;
+          switch (declaration.situation) {
+            case "injured": triggerForDc = { situation: "injured", damage: declaration.damage, die: 10 }; break;
+            case "continuousDamage": triggerForDc = { situation: "continuousDamage", damage: declaration.damage, die: 10 }; break;
+            case "nonDamagingSpell": triggerForDc = { situation: "nonDamagingSpell", spellDc: declaration.spellDc, die: 10 }; break;
+            case "grappledOrPinned": triggerForDc = { situation: "grappledOrPinned", grapplerCmb: declaration.grapplerCmb, die: 10 }; break;
+            case "vigorousMotion": triggerForDc = { situation: "vigorousMotion", die: 10 }; break;
+            case "violentMotion": triggerForDc = { situation: "violentMotion", die: 10 }; break;
+            case "extremelyViolentMotion": triggerForDc = { situation: "extremelyViolentMotion", die: 10 }; break;
+            case "windRainSleet": triggerForDc = { situation: "windRainSleet", die: 10 }; break;
+            case "windHailDebris": triggerForDc = { situation: "windHailDebris", die: 10 }; break;
+            case "entangled": triggerForDc = { situation: "entangled", die: 10 }; break;
+            case "castDefensively": triggerForDc = { situation: "castDefensively", die: 10 }; break;
+            default: triggerForDc = null;
+          }
+          const dcRes = triggerForDc !== null ? concentrationDc(triggerForDc, spell.level) : null;
+          const dcVal = dcRes !== null && dcRes.issues.length === 0 ? dcRes.dc : null;
+          const pendingOp = pendingRollCreateOp({
+            kind: "concentration",
+            initiator: { actorId: params.casterActor._id as unknown as string, tokenId: null, name: params.casterActor.name, actionLabel: `${spell.name} - concentration (${declaration.situation})` },
+            target: { actorId: params.casterActor._id as unknown as string, tokenId: null, name: params.casterActor.name },
+            formula,
+            dc: dcVal,
+            modifiers: [{ label: "Concentration", value: bonus, reason: declaration.situation }],
+            turnNumber: turnNumberConc,
+            rollMode: "roll",
+            targetIsPlayerOwned: casterIsPlayerOwned,
+            worldSettings: worldSettingsConc,
+            isStrategic: false,
+          });
+          if (pendingOp !== null) {
+            concOps.push(pendingOp);
+            concLines.push(`${declaration.situation}: DC ${dcVal !== null ? String(dcVal) : "—"} vs ${formula} — pending`);
+          }
+        }
+        if (concOps.length > 0) {
+          const concPendingCard: MessageDocument = {
+            _id: globalThis.crypto.randomUUID(),
+            type: "message",
+            name: `${spell.name} - concentration pending`,
+            ownership: { default: 1 },
+            flags: {},
+            system: {},
+            author: user?.id ?? "",
+            content: `${params.casterActor.name} casting ${spell.name} — concentration checks pending for player roll:\n${concLines.join("\n")}`,
+            whisper: [],
+            roll: null,
+            flavor: "cast resolution",
+          };
+          client.submit([{ kind: "create", coll: "messages", data: concPendingCard }]);
+          client.submit(concOps);
+          if (ops.length > 0) client.submit(ops);
+          return { ok: true, lost: false, held: false, warnings, gateNotes: [...gateNotes, ...concLines.map((l) => `⚠ ${l} — pending for player roll`)], dc, sr: { resisted: false, total: null, reused: false, issues: [] }, result: { ok: true, passed: false, automatic: null, dealt: 0, saveReduced: 0, erApplied: {}, notes: ["Concentration is pending for player roll."], rolled: 0 } as unknown as Extract<PF1eSpellTargetResult, { ok: true }>, hpWriteError: null } as unknown as PF1eCastFlowOutcome;
+        }
+      }
+    } catch {}
     const triggers: PF1eConcentrationTrigger[] = [];
     for (const declaration of gate.declarations ?? []) {
       const rollId = client.roll(
@@ -1182,6 +1257,71 @@ export async function resolveCastFlow(
     }
   }
 
+  // F03 pending save defer: if the defender is player-owned and the world mode says saves pending (manual), create a pending card instead of rolling now
+  try {
+    const worldSettings = worldSettingsFrom((client as unknown as { store: { getAll(c: string): readonly unknown[] } }).store.getAll("settings") as unknown as Iterable<unknown>);
+    const targetIsPlayerOwned = isPlayerOwned((params.targetActor as unknown as { ownership?: unknown }).ownership as unknown as import("../../core/documents").Ownership | null | undefined);
+    const turnNumber = (params.combat as unknown as { round?: unknown })?.round !== undefined && typeof (params.combat as unknown as { round?: unknown }).round === "number" ? Math.trunc((params.combat as unknown as { round: number }).round) : 0;
+    const { shouldDeferToPlayer } = await import("../../packages/pf1e/pendingRoll");
+    const deferSave = authored.severity !== "none" && shouldDeferToPlayer({ kind: "save", targetIsPlayerOwned, worldSettings, isStrategic: false });
+    if (deferSave) {
+      const saveBonus = authored.saveType === "fort" ? params.targetDerived.saves.fort : authored.saveType === "ref" ? params.targetDerived.saves.ref : params.targetDerived.saves.will;
+      const formula = `1d20${saveBonus >= 0 ? `+${saveBonus}` : `${saveBonus}`}`;
+      const pendingOp = pendingRollCreateOp({
+        kind: "save",
+        initiator: { actorId: params.casterActor._id as unknown as string, tokenId: null, name: params.casterActor.name, actionLabel: `${spell.name} - ${authored.saveType.toUpperCase()} save (DC ${dc})` },
+        target: { actorId: params.targetActor._id as unknown as string, tokenId: null, name: params.targetName },
+        formula,
+        dc,
+        modifiers: [{ label: authored.saveType.toUpperCase(), value: saveBonus, reason: "save" }],
+        turnNumber,
+        rollMode: "roll",
+        targetIsPlayerOwned,
+        worldSettings,
+        isStrategic: false,
+      });
+      if (pendingOp !== null) {
+        // Slot and prepared spend already in ops, plus any held-charge dissipation already queued
+        const pendingCardOps: import("../../core/ops").Op[] = [pendingOp];
+        // Also post a lightweight narrative card for the cast that was deferred
+        const castPendingMessage: MessageDocument = {
+          _id: globalThis.crypto.randomUUID(),
+          type: "message",
+          name: `${spell.name} - save pending`,
+          ownership: { default: 1 },
+          flags: {},
+          system: {},
+          author: user?.id ?? "",
+          content: `${params.casterActor.name} casts ${spell.name} at ${params.targetName} - ${authored.saveType.toUpperCase()} save (DC ${dc}) is pending for ${params.targetName} (Roll ${formula}).`,
+          whisper: [],
+          roll: null,
+          flavor: "cast resolution",
+        };
+        client.submit([{ kind: "create", coll: "messages", data: castPendingMessage }]);
+        client.submit([...pendingCardOps]);
+        if (ops.length > 0) client.submit(ops);
+        // Also handle touch line when present
+        if (touchCardLine !== null) {
+          const touchMsg: MessageDocument = {
+            _id: globalThis.crypto.randomUUID(),
+            type: "message",
+            name: `${spell.name} touch`,
+            ownership: { default: 1 },
+            flags: {},
+            system: {},
+            author: user?.id ?? "",
+            content: touchCardLine,
+            whisper: [],
+            roll: null,
+            flavor: "cast resolution",
+          };
+          client.submit([{ kind: "create", coll: "messages", data: touchMsg }]);
+        }
+        return { ok: true, lost: false, held: false, warnings, gateNotes, dc, sr: { resisted: false, total: null, reused: false, issues: [] }, result: { ok: true, passed: false, automatic: null, dealt: 0, saveReduced: 0, erApplied: {}, notes: ["Save is pending for player roll."], rolled: 0 } as unknown as Extract<PF1eSpellTargetResult, { ok: true }>,
+          hpWriteError: null, ...(touchSummary !== undefined ? { touch: touchSummary } : {}) } as unknown as PF1eCastFlowOutcome;
+      }
+    }
+  } catch {}
   // ── the effect pipeline (damage → SR → save → composition → HP write) ────
   const effect = await runSpellEffect(client, user, {
     casterActor: params.casterActor,

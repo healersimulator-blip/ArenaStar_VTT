@@ -9,10 +9,12 @@ import { describe, expect, test } from "vitest";
 import {
   LANCE_CHARGE_MULTIPLIER,
   guideWithKnees,
+  lanceChargeMultiplier,
   mountedCastingConcentrationDC,
   mountedHigherGround,
   mountedMeleeFullAttack,
   mountedRangedPenalty,
+  mountFootprint,
   mountLinkageOf,
   stayInSaddle,
   unconsciousRiderStays,
@@ -111,6 +113,39 @@ describe("P08 — the full-attack bar and the ranged penalties", () => {
 
   test("a lance on a charge deals ×2", () => {
     expect(LANCE_CHARGE_MULTIPLIER).toBe(2);
+  });
+
+  test("lanceChargeMultiplier: ×2 without Spirited Charge, ×3 with", () => {
+    expect(lanceChargeMultiplier({})).toBe(2);
+    expect(lanceChargeMultiplier({ spiritedCharge: false })).toBe(2);
+    expect(lanceChargeMultiplier({ spiritedCharge: true })).toBe(3);
+  });
+
+  test("mount footprint: Large 2×2 (10 ft), Medium 1×1 (5 ft), Huge 3×3 (15 ft), unknown ⇒ null", () => {
+    expect(mountFootprint({ mountSize: "Large" })).toEqual({ squares: 2, feet: 10 });
+    expect(mountFootprint({ mountSize: "Medium" })).toEqual({ squares: 1, feet: 5 });
+    expect(mountFootprint({ mountSize: "Huge" })).toEqual({ squares: 3, feet: 15 });
+    expect(mountFootprint({ mountSize: null })).toBeNull();
+    expect(mountFootprint({ mountSize: " Gargantuan " })).toEqual({ squares: 4, feet: 20 });
+    expect(mountFootprint({ mountSize: "unknown" })).toBeNull();
+  });
+
+  test("lance ×2/×3 stacks additively with a crit (CRB p.179: 1 + (a-1) + (b-1))", () => {
+    const additive = (crit: number | null, lance: number | null) =>
+      1 + (crit !== null ? crit - 1 : 0) + (lance !== null ? lance - 1 : 0);
+    // plain
+    expect(additive(null, null)).toBe(1);
+    // lance only
+    expect(additive(null, 2)).toBe(2);
+    expect(additive(null, 3)).toBe(3);
+    // crit ×2 + lance ×2 ⇒ ×3 (not ×4)
+    expect(additive(2, 2)).toBe(3);
+    // crit ×3 + lance ×2 ⇒ ×4 (not ×6)
+    expect(additive(3, 2)).toBe(4);
+    // crit ×2 + spirited lance ×3 ⇒ ×4 (not ×6)
+    expect(additive(2, 3)).toBe(4);
+    // crit ×3 + spirited ×3 ⇒ ×5 (not ×9)
+    expect(additive(3, 3)).toBe(5);
   });
 });
 

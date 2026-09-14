@@ -140,7 +140,53 @@
       sceneId: unit.sceneId ?? null,
       modelRange: unit.modelRange,
       leaderTokenId: unit.leaderTokenId ?? null,
+      squadId: (unit as unknown as { squadId?: string | null }).squadId ?? null,
     };
+  }
+
+  // F02 — squad grouping for simultaneous fan-out (ArmyWindow squadId tag)
+  function squadGroups(): Map<string, UnitDocument[]> {
+    const doc = army();
+    const m = new Map<string, UnitDocument[]>();
+    if (!doc) return m;
+    for (const u of doc.units) {
+      const sid = (u as unknown as { squadId?: string | null }).squadId;
+      if (!sid) continue;
+      if (!m.has(sid)) m.set(sid, []);
+      m.get(sid)!.push(u);
+    }
+    return m;
+  }
+
+  function issueToSquad(squadId: string, build: (unit: UnitDocument) => Order): void {
+    const doc = army();
+    if (!doc) return;
+    const members = doc.units.filter((u) => (u as unknown as { squadId?: string | null }).squadId === squadId);
+    if (members.length === 0) return;
+    const ctx = rulesContextFromStore(client.store, members[0]?.sceneId ?? null);
+    const errors: Record<string, string> = {};
+    const ops: import("../../core/ops").Op[] = [];
+    for (const unit of members) {
+      const order = build(unit);
+      if (rules) {
+        const verdict = rules.validateOrder(ctx, unitView(unit), order);
+        if (!verdict.ok) {
+          errors[unit._id] = verdict.error;
+          continue;
+        }
+      }
+      ops.push({
+        kind: "update",
+        ref: { coll: "units", id: unit._id, parent: { coll: "armies", id: armyId } },
+        diff: {
+          "orders.pending": [order],
+          "orders.issuedBy": client.user?.id ?? "",
+          "orders.issuedTurn": phase ? Number(phase.turnId.split(":").pop() ?? 0) : 0,
+        },
+      });
+    }
+    feedback = errors;
+    if (ops.length > 0) client.submit(ops);
   }
 
   function anchorOf(unit: UnitDocument): { x: number; y: number } {
@@ -270,6 +316,18 @@
   </header>
 
   {#if tab === "tree"}
+    {#if squadGroups().size > 0}
+      <div class="squads" data-squads>
+        {#each [...squadGroups().entries()] as [sid, members] (sid)}
+          <div class="row squad" data-squad={sid}>
+            <span class="c">▣ Squad {sid}</span>
+            <span class="dim">{members.length} units</span>
+            <button onclick={() => setSelection(members.map((u) => u._id))} data-squad-select={sid}>select</button>
+            <button onclick={() => issueToSquad(sid, (u) => ({ kind: "hold", stance: "defend" }))} data-squad-hold={sid}>Hold</button>
+          </div>
+        {/each}
+      </div>
+    {/if}
     <div class="tree">
       {#each treeRows as row (row.kind === "unit" ? row.unit._id : `${row.kind}:${row.kind === "army" ? row.army._id : row.type}`)}
         {#if row.kind === "army"}
@@ -293,7 +351,7 @@
               );
             }}
           >
-            {row.unit.name}
+            {row.unit.name}{#if (row.unit as unknown as { squadId?: string | null }).squadId}<span class="c dim" data-squad-badge={row.unit._id}>{(row.unit as unknown as { squadId?: string | null }).squadId}</span>{/if}
             <span class="badges">
               <b title="strength">{row.unit.stats.strength ?? 0}</b>
               <i title="morale">m{row.unit.stats.morale ?? 0}</i>
@@ -400,6 +458,19 @@
     </div>
   {:else if tab === "orders"}
     <div class="orders">
+      {#if squadGroups().size > 0}
+        <div class="squad-orders" data-squad-orders>
+          {#each [...squadGroups().entries()] as [sid, members] (sid)}
+            <div class="queue" data-squad-queue={sid}>
+              <h3>▣ Squad {sid} <span class="dim">({members.length} units)</span></h3>
+              <div class="templates">
+                <button onclick={() => issueToSquad(sid, () => ({ kind: "hold", stance: "defend" }))} data-squad-template-hold={sid}>Hold squad</button>
+                <button onclick={() => issueToSquad(sid, (unit) => ({ kind: "move", path: [{ x: anchorOf(unit).x + 20, y: anchorOf(unit).y }], pace: "march" }))} data-squad-template-move={sid}>March squad</button>
+              </div>
+            </div>
+          {/each}
+        </div>
+      {/if}
       <div class="ready">
         {#if phase && phase.phase === "orders"}
           <label>
@@ -710,6 +781,9 @@
     border-collapse: collapse;
     font-size: 11px;
   }
+  .squads { padding: 6px 12px; border-bottom: 1px solid #2b3138; }
+  .squad { background: #1b2430; border: 1px solid #2b3a4a; border-radius: 4px; margin-bottom: 4px; padding: 4px 6px; }
+  .squad-orders { margin-bottom: 8px; }
   .report td,
   .report th {
     text-align: left;

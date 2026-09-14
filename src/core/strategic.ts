@@ -58,6 +58,8 @@ export interface UnitDocument extends BaseDocument {
   modelRange: readonly [number, number] | null;
   orders: OrderQueue;
   stats: UnitStats;
+  /** F02 — squad grouping for simultaneous fan-out (ArmyWindow squadId tag). */
+  squadId?: DocId | null;
 }
 
 /** Army document with embedded units (§4A); ownership cascades to Units. */
@@ -71,7 +73,7 @@ export interface ArmyDocument extends BaseDocument {
 }
 
 export type TurnPhase = "orders" | "resolution" | "report";
-export type TurnMode = "stepwise" | "realtime";
+export type TurnMode = "stepwise" | "realtime" | "simultaneous";
 
 /** turns[] document (§4A). */
 export interface TurnDocument extends BaseDocument {

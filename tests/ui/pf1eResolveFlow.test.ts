@@ -197,15 +197,19 @@ describe("resolveAttackFlow — the A06b chat flow", () => {
       },
     });
     expect(client.formulas).toEqual(["1d20 + 9", "1d8 + 6"]);
-    // One card create op, then the hp update through pf1eSheetEdit.
-    expect(client.submitted).toHaveLength(2);
+    // F01 — one atomic envelope: card (with ledger) + hp update(s)
+    expect(client.submitted).toHaveLength(1);
+    expect(client.submitted[0]).toHaveLength(2);
     expect(client.submitted[0]?.[0]).toMatchObject({ kind: "create" });
-    expect(client.submitted[1]?.[0]).toMatchObject({
+    expect(client.submitted[0]?.[1]).toMatchObject({
       kind: "update",
       diff: { "system.pf1e.hp": 10 },
     });
     const card = client.submitted[0]?.[0];
     if (card?.kind !== "create") throw new Error("expected a create op");
+    // ledger shell is present (non-strategic)
+    expect((card.data as MessageDocument).system).toHaveProperty("rollLedger");
+    expect((card.data as MessageDocument).system.rollLedger).toMatchObject({ v: 1, turnNumber: 0, reverted: false });
     const data = card.data as MessageDocument;
     expect(data.content).toContain("hits.");
     expect(data.content).toContain("[[2|1d8 + 6]]");

@@ -497,24 +497,24 @@ describe("createMassBattlePf1e System Package (§12 / Task 9)", () => {
 
     // Round 1: west + east enemies ⇒ opposite borders ⇒ FLANKED.
     rules.resolveTurn(ctx, pool, units, orders, new XoshiroPRNG(7), () => {});
-    expect((pool.status[2] ?? 0) & PF1E_STATUS_FLANKED).not.toBe(0);
+    expect(((pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined)?.[2] ?? 0) & PF1E_STATUS_FLANKED).not.toBe(0);
 
     // Round 2: both attackers step to the defender's west side ⇒ same border, no flank.
     pool.x[0] = 15;
     pool.x[1] = 20;
     rules.resolveTurn(ctx, pool, units, orders, new XoshiroPRNG(7), () => {});
-    expect((pool.status[2] ?? 0) & PF1E_STATUS_FLANKED).toBe(0);
+    expect(((pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined)?.[2] ?? 0) & PF1E_STATUS_FLANKED).toBe(0);
 
     // Round 3: back on opposite borders, then the attackers leave reach entirely — a bit
     // that was set is cleared by the next round's recomputation, never left behind.
     pool.x[0] = 20;
     pool.x[1] = 30;
     rules.resolveTurn(ctx, pool, units, orders, new XoshiroPRNG(7), () => {});
-    expect((pool.status[2] ?? 0) & PF1E_STATUS_FLANKED).not.toBe(0);
+    expect(((pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined)?.[2] ?? 0) & PF1E_STATUS_FLANKED).not.toBe(0);
     pool.x[0] = -50;
     pool.x[1] = -50;
     rules.resolveTurn(ctx, pool, units, orders, new XoshiroPRNG(7), () => {});
-    expect((pool.status[2] ?? 0) & PF1E_STATUS_FLANKED).toBe(0);
+    expect(((pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined)?.[2] ?? 0) & PF1E_STATUS_FLANKED).toBe(0);
   });
 
   test("two attackers on the same side no longer flank — the heuristic's false positive is gone (M04/D-182)", () => {
@@ -535,7 +535,7 @@ describe("createMassBattlePf1e System Package (§12 / Task 9)", () => {
     const orders = new Map<string, OrderQueue>();
     orders.set("u0", { issuedBy: "gm", issuedTurn: 1, pending: [], active: { kind: "attack", targetUnitId: "u1" } });
     rules.resolveTurn(spellCtx(), pool, units, orders, new XoshiroPRNG(7), () => {});
-    expect((pool.status[2] ?? 0) & PF1E_STATUS_FLANKED).toBe(0);
+    expect(((pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined)?.[2] ?? 0) & PF1E_STATUS_FLANKED).toBe(0);
   });
 
   test("a Large unit reaches two squares, so a pair the Medium line cannot form flanks (P02/D-180)", () => {
@@ -558,7 +558,7 @@ describe("createMassBattlePf1e System Package (§12 / Task 9)", () => {
       const orders = new Map<string, OrderQueue>();
       orders.set("u0", { issuedBy: "gm", issuedTurn: 1, pending: [], active: { kind: "attack", targetUnitId: "u1" } });
       rules.resolveTurn({ ...spellCtx(), leaderActors }, pool, units, orders, new XoshiroPRNG(7), () => {});
-      return (pool.status[2] ?? 0) & PF1E_STATUS_FLANKED;
+      return ((pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined)?.[2] ?? 0) & PF1E_STATUS_FLANKED;
     };
 
     expect(run({ u0: { _id: "actor-giant", system: { pf1e: { size: "Large" } } } })).not.toBe(0);

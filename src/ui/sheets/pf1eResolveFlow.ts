@@ -26,7 +26,21 @@ import type { PermissionUser } from "../../core/ownership";
 import type { ActorDocument, MessageDocument } from "../../core/documents";
 import type { PF1eDerived, PF1eDerivedAttack } from "../../packages/pf1e/actor";
 import { confirmCritical, shootingIntoMeleePenalty } from "../../packages/pf1e/tactical";
-import type { PF1eMisfireFacts } from "../../packages/pf1e/firearms";
+import {
+  FIREARM_EXPLOSION_DC,
+  FIREARM_RELOAD_ACTION_ID,
+  firearmExplosionMitigatedDamage,
+  firearmExplosionReflexOutcome,
+  firearmShotAmmo,
+  type PF1eMisfireFacts,
+} from "../../packages/pf1e/firearms";
+import { pf1eActionOpportunities } from "../../packages/pf1e/actionOpportunity";
+import type { PF1eMountMovement } from "../../packages/pf1e/mounted";
+import {
+  lanceChargeMultiplier,
+  mountedRangedPenalty,
+  mountLinkageOf,
+} from "../../packages/pf1e/mounted";
 import type { PF1eSituationalModifiers } from "../../packages/pf1e/tactical";
 import type {
   PF1eDefenseChoice,
@@ -42,6 +56,7 @@ import {
 } from "../../packages/pf1e/resolve";
 import { fmtSigned } from "../../packages/pf1e/rollData";
 import { featAttackParts, featDamageParts, hasPF1eFeat } from "../../packages/pf1e/feats";
+import { buildRollLedger } from "../../packages/pf1e/rollLedger";
 import { pf1eSheetEdit } from "./pf1eSheetModel";
 import { verifyCommitRoll } from "../../dice/commitReveal";
 
@@ -105,6 +120,15 @@ export interface ResolveAttackFlowParams {
   targetEngaged?: boolean | undefined;
   nearestFriendlyDistanceFt?: number | null | undefined;
   engagedSizeCategoriesLarger?: number | undefined;
+  /** P08/D-201 — how the mount moved this round (stationary/single/double/run). */
+  mountMovement?: PF1eMountMovement | undefined;
+  /** P08/D-201 — how far the mount moved in feet; >5 ft bars a melee full-attack (A.11). */
+  mountMovedFt?: number | undefined;
+  /** P09/D-202 — loaded shots for the firearm gate (0 ⇒ refusal). */
+  shotsAvailable?: number | undefined;
+  /** P09/D-202 — attacker for the broken-write when a misfire breaks the weapon. */
+  attackerActor?: ActorDocument | undefined;
+  attackerAttackIndex?: number | undefined;
 }
 
 /** The defender for `pf1eResolveAttack`, straight off the target's derivation. */
@@ -277,6 +301,27 @@ function misfireFactsOf(
   };
 }
 
+function isLanceWeaponName(name: string): boolean {
+  return /lance/i.test(name);
+}
+
+function mountedLanceMultiplier(params: ResolveAttackFlowParams): number | null {
+  if (params.situational?.charging !== true) return null;
+  if (!isLanceWeaponName(params.line.name)) return null;
+  if (params.line.ranged === true) return null;
+  const mounted =
+    params.attackerActor !== undefined &&
+    mountLinkageOf(
+      (params.attackerActor.system as { pf1e?: { mount?: unknown } })?.pf1e?.mount,
+    ) !== null &&
+    mountLinkageOf(
+      (params.attackerActor.system as { pf1e?: { mount?: unknown } })?.pf1e?.mount,
+    )?.actorId !== null;
+  if (!mounted) return null;
+  const spirited = hasPF1eFeat(params.feats ?? [], "Spirited Charge");
+  return lanceChargeMultiplier({ spiritedCharge: spirited });
+}
+
 /**
  * Run the full resolution: attack roll → (threat: confirmation) → (hit:
  * damage) → resolution card → HP writes. Every die is a public host-evaluated
@@ -311,7 +356,9 @@ export async function resolveAttackFlow(
     targetEngaged: true,
     nearestFriendlyDistanceFt: params.nearestFriendlyDistanceFt ?? undefined,
   }) : 0;
-  const bonus = baseBonus + featAttackDelta + engagementPenalty;
+  const mountPenaltyPart = line.ranged === true && params.mountMovement !== undefined ? mountedRangedPenalty(params.mountMovement) : null;
+  const mountPenalty = mountPenaltyPart?.value ?? 0;
+  const bonus = baseBonus + featAttackDelta + engagementPenalty + mountPenalty;
   const featDamageDeltaParts = featDamageParts({
     feats: params.feats,
     bab: params.attackerBab ?? 0,
@@ -324,7 +371,7 @@ export async function resolveAttackFlow(
   });
   const featDamageDelta = featDamageDeltaParts.reduce((sum, part) => sum + part.value, 0);
   const effectiveAttackFormula =
-    featAttackDelta !== 0 || engagementPenalty !== 0
+    featAttackDelta !== 0 || engagementPenalty !== 0 || mountPenalty !== 0
       ? `1d20 ${bonus >= 0 ? "+ " + bonus : "- " + Math.abs(bonus)}`
       : params.attackFormula;
   const misfireFacts = misfireFactsOf(params);
@@ -387,6 +434,25 @@ export async function resolveAttackFlow(
       ok: false,
       error:
         "the target has total cover — no attack can be made (AoN 181, CRB p.195)",
+    };
+  }
+
+  // 0b. P09 — ammo gate (§2.9): a firearm without a loaded shot cannot be attacked with.
+  if (line.misfire !== undefined) {
+    const shots = params.shotsAvailable !== undefined ? params.shotsAvailable : line.ammo?.loaded;
+    if (shots !== undefined) {
+      const ammo = firearmShotAmmo({ shotsAvailable: shots });
+      if (!ammo.canShoot) {
+        return { ok: false, error: ammo.refusal ?? "the firearm has no shot loaded (§2.9)" };
+      }
+    }
+  }
+
+  // 0c. P08 — mounted melee full-attack bar (A.11): mount >5 ft ⇒ only one melee attack (no full attack).
+  if (line.ranged !== true && params.mountMovedFt !== undefined && params.mountMovedFt > 5 && params.iterative !== 0) {
+    return {
+      ok: false,
+      error: "the mount moved more than 5 ft — only one melee attack at the end of the move, no full attack (A.11)",
     };
   }
 
@@ -456,20 +522,37 @@ export async function resolveAttackFlow(
     concealmentDie = face;
   }
 
-  // 3. A hit rolls damage (the crit formula on a confirmed threat, D-139).
-  // A07 feat damage (Power Attack, Deadly Aim, Weapon Specialization,
-  // Point-Blank Shot) is static per step and multiplied on a crit
-  // (CRB p.179 — all modifiers multiply).
+  // P08 — lance charge multiplier (A.11, CRB p.136): a lance while mounted and charging
+  // deals ×2, ×3 with Spirited Charge. Combined with a critical, CRB p.179 is
+  // additive (×2 + ×2 ⇒ ×3, ×3 + ×2 ⇒ ×4, ×3 + ×3 ⇒ ×5).
+  const lanceMult = mountedLanceMultiplier(params);
+  // 3. A hit rolls damage (the crit formula on a confirmed threat, D-139, plus
+  // the lance multiplier when applicable; additive per CRB p.179 — all
+  // modifiers multiply with each dice group).
   let damageTotal = 0;
   let damageFormula = params.damageFormula;
+  let combinedMult = 1;
   if (prepared.roll.ok && prepared.roll.hits) {
-    damageFormula =
-      confirmedCrit && params.critDamageFormula !== null
-        ? params.critDamageFormula
-        : params.damageFormula;
+    combinedMult =
+      1 +
+      (confirmedCrit ? (line.critMultiplier ?? 2) - 1 : 0) +
+      (lanceMult !== null ? lanceMult - 1 : 0);
+    if (combinedMult > 1) {
+      const baseGroup = params.damageFormula.trim();
+      if (baseGroup !== "" && baseGroup !== "0") {
+        damageFormula = Array.from({ length: combinedMult }, () => baseGroup).join(" + ");
+      } else {
+        damageFormula =
+          confirmedCrit && params.critDamageFormula !== null
+            ? params.critDamageFormula
+            : params.damageFormula;
+      }
+    } else {
+      damageFormula = params.damageFormula;
+    }
     const damageRoll = await rollOne(
       damageFormula,
-      `${line.name} ${confirmedCrit ? "critical damage" : "damage"}`,
+      `${line.name} ${confirmedCrit && lanceMult !== null ? "critical lance charge damage" : confirmedCrit ? "critical damage" : lanceMult !== null ? "lance charge damage" : "damage"}${combinedMult > 1 ? ` ×${combinedMult}` : ""}`,
     );
     if (!damageRoll.ok) return damageRoll;
     if (
@@ -480,8 +563,7 @@ export async function resolveAttackFlow(
     }
     damageTotal = damageRoll.message.roll.total;
     if (featDamageDelta !== 0) {
-      const mult = confirmedCrit ? (line.critMultiplier ?? 2) : 1;
-      damageTotal += featDamageDelta * mult;
+      damageTotal += featDamageDelta * combinedMult;
     }
   }
 
@@ -493,12 +575,18 @@ export async function resolveAttackFlow(
     ...(concealmentDie !== undefined ? { concealmentDie } : {}),
     damageTotal,
   });
-  // Surface A07 feat labels and the AoN 131 shooting-into-melee -4/-2/0 ladder in the card notes.
-  if (result.ok && (featAttackDeltaParts.length > 0 || featDamageDeltaParts.length > 0 || engagementPenalty !== 0)) {
+  // Surface A07 feat labels, the AoN 131 shooting-into-melee ladder, and P08 mounted ranged penalty.
+  let lanceNote: string | null = null;
+  if (lanceMult !== null) {
+    lanceNote = `lance charge ×${lanceMult}${hasPF1eFeat(params.feats ?? [], "Spirited Charge") ? " (Spirited Charge, A.11/CRB p.136)" : " (A.11)"}${combinedMult > lanceMult ? `, combined with critical ×${line.critMultiplier} ⇒ ×${combinedMult} (additive, CRB p.179)` : ""}`;
+  }
+  if (result.ok && (featAttackDeltaParts.length > 0 || featDamageDeltaParts.length > 0 || engagementPenalty !== 0 || mountPenalty !== 0 || lanceNote !== null)) {
     const featNotes = [
       ...featAttackDeltaParts.map((p) => `${p.label} ${fmtSigned(p.value)}`),
       ...featDamageDeltaParts.map((p) => `${p.label} ${fmtSigned(p.value)}`),
       ...(engagementPenalty !== 0 ? [`shooting into melee ${fmtSigned(engagementPenalty)}`] : []),
+      ...(mountPenaltyPart !== null ? [`${mountPenaltyPart.label} ${fmtSigned(mountPenaltyPart.value)}`] : []),
+      ...(lanceNote !== null ? [lanceNote] : []),
     ];
     if (featNotes.length > 0) {
       const withNotes: typeof result = {
@@ -512,6 +600,12 @@ export async function resolveAttackFlow(
     const withNotes: typeof result = {
       ...result,
       notes: [...result.notes, `shooting into melee: no penalty (size/distance/Precise Shot)`],
+    };
+    result = withNotes;
+  } else if (result.ok && lanceNote !== null) {
+    const withNotes: typeof result = {
+      ...result,
+      notes: [...result.notes, lanceNote],
     };
     result = withNotes;
   }
@@ -558,6 +652,65 @@ export async function resolveAttackFlow(
     }
   }
 
+  // 5b. P09/D-202 — a misfire that breaks the weapon persists the broken condition on the attacker.
+  // The resolver already returned the verdict (first misfire → broken; second early → explosion);
+  // this is the authoring write so the next shot sees the escalated value.
+  // P09/D-218 — also consume one shot of ammo and, when Expert Loading averted an explosion, spend 1 grit.
+  // Loading a firearm provokes via `load-firearm` (PF1E_ACTIONS provokes yes) — `firearmReloadOpportunity` exposes that seam for the reload button.
+  if (result.ok && result.misfire !== undefined && result.misfire.misfire) {
+    const verdict = result.misfire as { breaksWeapon?: boolean; explodes?: boolean; weaponDestroyed?: boolean; notes?: readonly string[] };
+    const needsBroken = verdict.breaksWeapon === true || verdict.explodes === true || verdict.weaponDestroyed === true;
+    if (needsBroken && params.attackerActor !== undefined && params.attackerAttackIndex !== undefined) {
+      if (!user || !can(user, "update", params.attackerActor, "actors")) {
+        if (hpWriteError === null) hpWriteError = "You do not own the attacker — the broken condition was not persisted.";
+      } else {
+        const idx = params.attackerAttackIndex;
+        // Only write when the line is not already broken (idempotent guard).
+        const alreadyBroken = params.attackerActor.system !== undefined && typeof (params.attackerActor.system as Record<string, unknown>).pf1e === "object"
+          ? Array.isArray(((params.attackerActor.system as Record<string, unknown>).pf1e as Record<string, unknown>).attacks)
+            ? (((params.attackerActor.system as Record<string, unknown>).pf1e as Record<string, unknown>).attacks as unknown[])[idx] !== undefined
+              && typeof ((((params.attackerActor.system as Record<string, unknown>).pf1e as Record<string, unknown>).attacks as unknown[])[idx] as Record<string, unknown>).broken === "boolean"
+              ? ((((params.attackerActor.system as Record<string, unknown>).pf1e as Record<string, unknown>).attacks as unknown[])[idx] as Record<string, unknown>).broken === true
+              : false
+            : false
+          : false;
+        if (!alreadyBroken) {
+          const diff: Record<string, import("../../core/documents").Json> = {};
+          diff[`system.pf1e.attacks.${idx}.broken`] = true as unknown as import("../../core/documents").Json;
+          ops.push({ kind: "update", ref: { coll: "actors", id: params.attackerActor._id }, diff });
+        }
+      }
+    }
+    // P09/D-218 — when Expert Loading averted the explosion, spend 1 grit (UC p.135: Expert Loading costs 1 grit).
+    const expertAverted = (verdict.notes ?? []).some((n) => /Expert Loading/.test(n));
+    if (expertAverted && params.attackerActor !== undefined) {
+      const gritRaw = (params.attackerActor.system as { pf1e?: { grit?: { current?: unknown } } })?.pf1e?.grit?.current;
+      const gritCurrent = typeof gritRaw === "number" && Number.isFinite(gritRaw) ? Math.trunc(gritRaw) : 0;
+      if (gritCurrent > 0) {
+        if (!user || !can(user, "update", params.attackerActor, "actors")) {
+          if (hpWriteError === null) hpWriteError = "You do not own the attacker — the grit cost for Expert Loading was not persisted.";
+        } else {
+          ops.push({ kind: "update", ref: { coll: "actors", id: params.attackerActor._id }, diff: { "system.pf1e.grit.current": (gritCurrent - 1) as unknown as import("../../core/documents").Json } });
+        }
+      } else if (hpWriteError === null) {
+        hpWriteError = "Expert Loading requires 1 grit — the explosion was averted but the grit ledger could not be spent.";
+      }
+    }
+  }
+  // P09/D-218 — consume one shot of ammo whether the shot hit, missed, or misfired (§2.9). Idempotent guard uses the authoritative `shotsAvailable` when present, else the derived `line.ammo`.
+  if (result.ok && line.misfire !== undefined && params.attackerActor !== undefined && params.attackerAttackIndex !== undefined) {
+    const shots = params.shotsAvailable !== undefined ? params.shotsAvailable : line.ammo?.loaded;
+    if (shots !== undefined && shots > 0) {
+      if (!user || !can(user, "update", params.attackerActor, "actors")) {
+        if (hpWriteError === null) hpWriteError = "You do not own the attacker — the ammo count was not decremented.";
+      } else {
+        const idx = params.attackerAttackIndex;
+        const remaining = Math.max(0, shots - 1);
+        ops.push({ kind: "update", ref: { coll: "actors", id: params.attackerActor._id }, diff: { [`system.pf1e.attacks.${idx}.firearm.loaded`]: remaining as unknown as import("../../core/documents").Json } });
+      }
+    }
+  }
+
   // 6. The resolution card (public narrative; names a rejected write honestly).
   const card = resolutionCardContent(
     {
@@ -575,22 +728,80 @@ export async function resolveAttackFlow(
     hpWriteError,
     await verify(attackRoll.message),
   );
+  // F01 — build ledger for this tactical roll (non-strategic only).
+  // We always attach a shell so the card shows who→what→whom + roll chips;
+  // strategic games never use this flow.
+  let rollLedger: ReturnType<typeof buildRollLedger> | null = null;
+  try {
+    const combats = (client.store as unknown as { getAll?: (c: string) => readonly unknown[] })?.getAll?.("combats") as readonly unknown[] | undefined;
+    const roundRaw = (combats?.[0] as { system?: { round?: unknown } } | undefined)?.system?.round;
+    const turnNumber = typeof roundRaw === "number" && Number.isFinite(roundRaw) ? roundRaw : 0;
+    const initiator: import("../../packages/pf1e/rollLedger").RollLedgerInitiator = {
+      actorId: (params.attackerActor?._id ?? params.attackerName) as string,
+      tokenId: null,
+      name: params.attackerName,
+    };
+    const targets: import("../../packages/pf1e/rollLedger").RollLedgerTarget[] = [{ actorId: params.targetActor._id as string, tokenId: null, name: params.targetName }];
+    const rolls: import("../../packages/pf1e/rollLedger").RollLedgerRoll[] = [
+      {
+        kind: "attack" as const,
+        formula: effectiveAttackFormula,
+        total: result.attackTotal,
+        terms: (attackRoll.message.roll?.terms as unknown as import("../../core/documents").Json[]) ?? [],
+        modifiers: [
+          ...featAttackDeltaParts.map((pa) => ({ label: pa.label, value: pa.value, reason: pa.label })),
+          ...(engagementPenalty !== 0 ? [{ label: "shooting into melee", value: engagementPenalty, reason: "shooting into melee" }] : []),
+          ...(mountPenaltyPart !== null ? [{ label: mountPenaltyPart.label, value: mountPenaltyPart.value, reason: mountPenaltyPart.label }] : []),
+        ],
+        seedClient: (attackRoll.message.roll?.seedClient as string | null) ?? null,
+        seedHost: (attackRoll.message.roll?.seedHost as string | null) ?? null,
+      } as unknown as import("../../packages/pf1e/rollLedger").RollLedgerRoll,
+      ...(damageTotal !== 0 || result.damage !== undefined
+        ? [
+            {
+              kind: "damage" as const,
+              formula: damageFormula,
+              total: damageTotal,
+              terms: [] as unknown as import("../../core/documents").Json[],
+              modifiers: featDamageDeltaParts.map((pa) => ({ label: pa.label, value: pa.value, reason: pa.label })),
+              seedClient: null as string | null,
+              seedHost: null as string | null,
+            } as unknown as import("../../packages/pf1e/rollLedger").RollLedgerRoll,
+          ]
+        : []),
+    ];
+    rollLedger = buildRollLedger({
+      initiator,
+      targets,
+      area: null,
+      rolls,
+      ledgerOps: ops as unknown as never,
+      ledgerInverses: [],
+      turnNumber,
+    });
+  } catch {}
   const cardMessage: MessageDocument = {
     _id: globalThis.crypto.randomUUID(),
     type: "message",
     name: card.name,
     ownership: { default: 1 },
     flags: {},
-    system: {},
+    // F01: attach ledger shell with first-class data; mods dropdown from attackModifierParts/damageModifierParts lives in roll terms
+    ...(rollLedger !== null ? { system: { rollLedger } } : { system: {} }),
     author: user?.id ?? "",
     content: card.content,
     whisper: [],
     roll: null,
     flavor: "attack resolution",
-  };
-  client.submit([{ kind: "create", coll: "messages", data: cardMessage }]);
-  if (ops.length > 0) client.submit(ops);
+  } as unknown as MessageDocument;
+  // F01 — atomic envelope: card + ledgerOps together so Reroll is inverse+new and Revert is inverse atomically.
+  client.submit([{ kind: "create", coll: "messages", data: cardMessage }, ...ops]);
   return { ok: true, result, hpWriteError };
+}
+
+/** P09/D-218 — the load-firearm provoke seam for the sheet's Reload button. Loading provokes `yes` (Table 7-2 via `load-firearm`). */
+export function firearmReloadOpportunity(input: Parameters<typeof pf1eActionOpportunities>[0]): ReturnType<typeof pf1eActionOpportunities> {
+  return pf1eActionOpportunities({ ...input, actionId: FIREARM_RELOAD_ACTION_ID });
 }
 
 /** Parameters for the multi-arrow Manyshot flow. */
@@ -622,6 +833,8 @@ export interface ResolveManyshotFlowParams {
   targetEngaged?: boolean | undefined;
   nearestFriendlyDistanceFt?: number | null | undefined;
   engagedSizeCategoriesLarger?: number | undefined;
+  /** P08/D-201 — mount movement (Manyshot is ranged; −4 double/−8 run while mounted). */
+  mountMovement?: PF1eMountMovement | undefined;
 }
 
 /**
@@ -675,9 +888,11 @@ export async function resolveManyshotFlow(
     nearestFriendlyDistanceFt: params.nearestFriendlyDistanceFt ?? undefined,
   }) : 0;
   const baseManyshotBonus = (params.line.attackBonuses[0] ?? params.line.attackBonus) - 4;
-  const effectiveManyshotBonus = baseManyshotBonus + featAttackDeltaManyshot + manyshotEngagementPenalty;
+  const manyshotMountPenaltyPart = params.mountMovement !== undefined ? mountedRangedPenalty(params.mountMovement) : null;
+  const manyshotMountPenalty = manyshotMountPenaltyPart?.value ?? 0;
+  const effectiveManyshotBonus = baseManyshotBonus + featAttackDeltaManyshot + manyshotEngagementPenalty + manyshotMountPenalty;
   const effectiveManyshotFormulas =
-    featAttackDeltaManyshot !== 0 || manyshotEngagementPenalty !== 0
+    featAttackDeltaManyshot !== 0 || manyshotEngagementPenalty !== 0 || manyshotMountPenalty !== 0
       ? params.attackFormulas.map(() => `1d20 ${effectiveManyshotBonus >= 0 ? "+ " + effectiveManyshotBonus : "- " + Math.abs(effectiveManyshotBonus)}`)
       : params.attackFormulas;
   const defender = resolveDefenderFromDerived(params.targetName, params.targetDerived);
@@ -845,11 +1060,164 @@ export async function resolveManyshotFlow(
       ops.push({ kind: "update", ref: { coll: "actors", id: params.targetActor._id }, diff });
     }
   }
-  client.submit([{ kind: "create", coll: "messages", data: {
+  // F01 — Manyshot ledger stub (burst of arrows); keep the same 2-round window as single attack
+  let manyshotLedger: ReturnType<typeof buildRollLedger> | null = null;
+  try {
+    const combats = (client.store as unknown as { getAll?: (c: string) => readonly unknown[] })?.getAll?.("combats") as readonly unknown[] | undefined;
+    const roundRaw = (combats?.[0] as { system?: { round?: unknown } } | undefined)?.system?.round;
+    const turnNumber = typeof roundRaw === "number" && Number.isFinite(roundRaw) ? roundRaw : 0;
+    const initiator = { actorId: params.attackerName as string, tokenId: null, name: params.attackerName } as unknown as import("../../packages/pf1e/rollLedger").RollLedgerInitiator;
+    const targets = [{ actorId: params.targetActor._id as string, tokenId: null, name: params.targetName }] as unknown as import("../../packages/pf1e/rollLedger").RollLedgerTarget[];
+    const rolls = resolved.arrows.map((a, i) => ({
+      kind: "attack" as const,
+      formula: effectiveManyshotFormulas[i] ?? params.attackFormulas[i] ?? "1d20",
+      total: (a as unknown as { attackTotal?: number }).attackTotal ?? 10,
+      terms: [] as unknown as import("../../core/documents").Json[],
+      modifiers: featAttackDeltaPartsManyshot.map((pa) => ({ label: pa.label, value: pa.value, reason: pa.label })),
+      seedClient: null,
+      seedHost: null,
+    })) as unknown as import("../../packages/pf1e/rollLedger").RollLedgerRoll[];
+    manyshotLedger = buildRollLedger({ initiator, targets, area: null, rolls, ledgerOps: ops as unknown as never, ledgerInverses: [], turnNumber });
+  } catch {}
+  const manyshotContent = `${params.attackerName}: ${params.line.name} Manyshot against ${params.targetName}\n${resolved.arrows.map((arrow, index) => `Arrow ${index + 1}: ${arrow.outcome}, ${arrow.damage?.dealt ?? 0} damage`).join("\n")}\nHP ${defender.hp} → ${resolved.finalHp}.`;
+  const manyshotMsg: MessageDocument = {
     _id: globalThis.crypto.randomUUID(), type: "message", name: `${params.attackerName} Manyshot`,
-    ownership: { default: 1 }, flags: {}, system: {}, author: user?.id ?? "", whisper: [], roll: null,
-    flavor: "Manyshot resolution", content: `${params.attackerName}: ${params.line.name} Manyshot against ${params.targetName}\n${resolved.arrows.map((arrow, index) => `Arrow ${index + 1}: ${arrow.outcome}, ${arrow.damage?.dealt ?? 0} damage`).join("\n")}\nHP ${defender.hp} → ${resolved.finalHp}.`,
-  } as MessageDocument }]);
-  if (ops.length) client.submit(ops);
+    ownership: { default: 1 }, flags: {}, system: manyshotLedger ? { rollLedger: manyshotLedger } : {}, author: user?.id ?? "", whisper: [], roll: null,
+    flavor: "Manyshot resolution", content: manyshotContent,
+  } as unknown as MessageDocument;
+  client.submit([{ kind: "create", coll: "messages", data: manyshotMsg }, ...ops]);
   return { ok: true, results: resolved.arrows, hpWriteError };
+}
+
+/** P09/D-219 — burst explosion flow: a 5-ft burst from a chosen corner (UC p.135). */
+export interface ResolveFirearmExplosionParams {
+  attackerName: string;
+  /** The firearm's damage formula for the burst (e.g. the musket's 1d12). */
+  damageFormula: string;
+  /** Creatures in the 5-ft burst — the 4 squares sharing the chosen corner. */
+  burstTargets: ReadonlyArray<{
+    name: string;
+    actor: ActorDocument;
+    derived: PF1eDerived;
+  }>;
+  /** Corner the burst is placed on — only for the card; omit when the GM places by hand. */
+  corner?: { col: number; row: number } | undefined;
+  verifiable?: boolean | undefined;
+}
+
+export async function resolveFirearmExplosionFlow(
+  client: ResolveFlowClient,
+  user: PermissionUser | null,
+  params: ResolveFirearmExplosionParams,
+): Promise<
+  | {
+      ok: true;
+      damageTotal: number;
+      perTarget: Array<{
+        name: string;
+        die: number;
+        total: number;
+        success: boolean;
+        dealt: number;
+        hpBefore: number;
+        hpAfter: number;
+        hpWriteError: string | null;
+      }>;
+      card: string;
+    }
+  | { ok: false; error: string }
+> {
+  if (params.burstTargets.length === 0) return { ok: false, error: "the explosion burst has no targets" };
+  if (params.damageFormula.trim() === "") return { ok: false, error: "the explosion needs a damage formula (the firearm's dice)" };
+
+  const rollId = params.verifiable
+    ? await client.rollVerified(params.damageFormula, "roll", undefined, `firearm explosion ${params.damageFormula}`)
+    : client.roll(params.damageFormula, "roll", undefined, `firearm explosion ${params.damageFormula}`);
+  const damageMsg = await awaitRollMessage(client, rollId);
+  if (damageMsg === null) return { ok: false, error: `explosion damage roll never arrived: ${params.damageFormula}` };
+  if (damageMsg.roll === null || typeof damageMsg.roll.total !== "number")
+    return { ok: false, error: "the explosion damage message carries no total" };
+  const damageTotal = damageMsg.roll.total;
+
+  const perTarget: Array<{
+    name: string;
+    die: number;
+    total: number;
+    success: boolean;
+    dealt: number;
+    hpBefore: number;
+    hpAfter: number;
+    hpWriteError: string | null;
+  }> = [];
+  const ops: Op[] = [];
+  const lines: string[] = [];
+  lines.push(
+    `${params.attackerName}'s early firearm explodes — burst from a chosen corner deals ${String(damageTotal)} [[${damageTotal}|${params.damageFormula}]] fire damage, DC ${FIREARM_EXPLOSION_DC} Reflex half (UC p.135)` +
+      (params.corner ? ` — corner (${params.corner.col},${params.corner.row}), 5-ft burst` : ""),
+  );
+
+  for (const target of params.burstTargets) {
+    const saveRollId = params.verifiable
+      ? await client.rollVerified("1d20", "roll", undefined, `${target.name} Reflex vs DC ${FIREARM_EXPLOSION_DC}`)
+      : client.roll("1d20", "roll", undefined, `${target.name} Reflex vs DC ${FIREARM_EXPLOSION_DC}`);
+    const saveMsg = await awaitRollMessage(client, saveRollId);
+    if (saveMsg === null) return { ok: false, error: `Reflex save roll never arrived for ${target.name}` };
+    const die = dieFaceOf(saveMsg);
+    if (die === null) return { ok: false, error: `could not read the Reflex save d20 for ${target.name}` };
+    const save = firearmExplosionReflexOutcome({ die, reflexMod: target.derived.saves.ref });
+    const dealt = firearmExplosionMitigatedDamage({ damageTotal, success: save.success });
+    const before = target.derived.hp;
+    const after = Math.max(0, before - dealt);
+    let hpWriteError: string | null = null;
+    if (dealt > 0) {
+      const edit = pf1eSheetEdit(target.actor, user, "hp", String(after));
+      if (edit.error !== null) hpWriteError = edit.error;
+      else ops.push(...edit.ops);
+    }
+    perTarget.push({ name: target.name, die, total: save.total, success: save.success, dealt, hpBefore: before, hpAfter: after, hpWriteError });
+    const saveText = save.success ? `saves (${String(save.total)} ≥ ${FIREARM_EXPLOSION_DC}, half)` : `fails (${String(save.total)} < ${FIREARM_EXPLOSION_DC})`;
+    lines.push(
+      `${target.name}: Reflex ${String(die)} + ${String(target.derived.saves.ref)} = ${String(save.total)} — ${saveText} — ${String(dealt)} damage${hpWriteError ? ` — ⚠ ${hpWriteError}` : ` — ${String(before)} → ${String(after)} HP`}`,
+    );
+  }
+
+  const content = lines.join("\n");
+  // F01 — explosion ledger: area burst + per-target saves
+  let explosionLedger: ReturnType<typeof buildRollLedger> | null = null;
+  try {
+    const combats = (client.store as unknown as { getAll?: (c: string) => readonly unknown[] })?.getAll?.("combats") as readonly unknown[] | undefined;
+    const roundRaw = (combats?.[0] as { system?: { round?: unknown } } | undefined)?.system?.round;
+    const turnNumber = typeof roundRaw === "number" && Number.isFinite(roundRaw) ? roundRaw : 0;
+    const initiator = { actorId: params.attackerName as string, tokenId: null, name: params.attackerName } as unknown as import("../../packages/pf1e/rollLedger").RollLedgerInitiator;
+    const area = params.corner ? { shape: "burst" as const, origin: { x: params.corner.col * 50, y: params.corner.row * 50 }, radiusFt: 5, affectedTokenIds: [] as string[] } : null;
+    const rolls = [{
+      kind: "damage" as const,
+      formula: params.damageFormula,
+      total: damageTotal,
+      terms: (damageMsg.roll?.terms as unknown as import("../../core/documents").Json[]) ?? [],
+      modifiers: [] as Array<{ label: string; value: number; reason: string }>,
+      seedClient: (damageMsg.roll?.seedClient as string | null) ?? null,
+      seedHost: (damageMsg.roll?.seedHost as string | null) ?? null,
+    }] as unknown as import("../../packages/pf1e/rollLedger").RollLedgerRoll[];
+    explosionLedger = buildRollLedger({ initiator, targets: null, area, rolls, ledgerOps: ops as unknown as never, ledgerInverses: [], turnNumber });
+    if (explosionLedger && explosionLedger.area) {
+      // fill affectedTokenIds for the highlight layer
+      (explosionLedger.area as unknown as { affectedTokenIds: string[] }).affectedTokenIds = params.burstTargets.map((bt) => bt.actor._id as string);
+    }
+  } catch {}
+  const explosionMsg: MessageDocument = {
+    _id: globalThis.crypto.randomUUID(),
+    type: "message",
+    name: `${params.attackerName} firearm explosion`.slice(0, 40),
+    ownership: { default: 1 },
+    flags: {},
+    system: explosionLedger ? { rollLedger: explosionLedger } : {},
+    author: user?.id ?? "",
+    content,
+    whisper: [],
+    roll: null,
+    flavor: "firearm explosion",
+  } as unknown as MessageDocument;
+  client.submit([{ kind: "create", coll: "messages", data: explosionMsg }, ...ops]);
+  return { ok: true, damageTotal, perTarget, card: content };
 }

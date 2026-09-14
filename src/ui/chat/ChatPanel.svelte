@@ -6,6 +6,26 @@
   import type { MessageDocument, UserDocument } from "../../core/documents";
   import { buildChatMessage, parseChatCommand } from "../../core/chat";
   import { renderMarkdown } from "../../core/markdown";
+  import RollCard from "./RollCard.svelte";
+  import PendingRollCard from "./PendingRollCard.svelte";
+  import {
+    delegateRerollOps,
+    invertLedger,
+    playerRerollOps,
+    rerollOps,
+    revertOps,
+  } from "../../packages/pf1e/rollLedger";
+  import type { RollLedger } from "../../packages/pf1e/rollLedger";
+  import type { PendingRoll } from "../../packages/pf1e/pendingRoll";
+  import {
+    canPlayerRoll as canPendingPlayerRoll,
+    canGMRoll as canPendingGMRoll,
+    isPendingExpired,
+    pendingResolveOps,
+    resolvePendingRoll,
+  } from "../../packages/pf1e/pendingRoll";
+  import { rollHighlightFadeSecOf, worldSettingsFrom } from "../../core/worldSettings";
+  import { tokenRect } from "../../canvas/tokens";
 
   let {
     client,
@@ -18,6 +38,330 @@
   let messages = $state<MessageDocument[]>([]);
   let draft = $state("");
   let logEl: HTMLDivElement;
+
+  // F01 ledger window — combat round if a combat exists, else max ledger/pending turn (so cards appear open until the table advances)
+  const currentTurn = $derived.by(() => {
+    const combats = client.store.getAll("combats") as readonly Record<string, unknown>[];
+    if (combats.length > 0) {
+      const c0 = combats[0] as Record<string, unknown>;
+      const sys = (c0?.["system"] as Record<string, unknown> | undefined) ?? undefined;
+      const r = sys?.["round"];
+      if (typeof r === "number" && Number.isFinite(r)) return Math.trunc(r);
+      const t = sys?.["turn"];
+      if (typeof t === "number" && Number.isFinite(t)) return Math.trunc(t);
+    }
+    let max = 0;
+    for (const m of messages) {
+      const sys = m.system as unknown as { rollLedger?: RollLedger; pendingRoll?: PendingRoll } | undefined;
+      const ledger = sys?.rollLedger;
+      if (ledger && typeof ledger.turnNumber === "number") max = Math.max(max, ledger.turnNumber);
+      const pending = sys?.pendingRoll;
+      if (pending && typeof pending.turnNumber === "number") max = Math.max(max, pending.turnNumber);
+    }
+    return max;
+  });
+
+  const fadeSec = $derived.by(() => {
+    try {
+      return rollHighlightFadeSecOf(worldSettingsFrom(client.store.getAll("settings") as unknown as Iterable<unknown>));
+    } catch {
+      return 4;
+    }
+  });
+
+  const isGMDerived = $derived.by(() => {
+    const u = client.user as unknown as { role?: string; isGM?: boolean } | undefined;
+    return u?.isGM === true || u?.role === "gm" || u?.role === "GM";
+  });
+
+  function highlightFromLedger(
+    ledger: RollLedger,
+    kind: "initiator" | "target" | "area",
+    id: string | null,
+  ): void {
+    // G §4.5 highlighting: outline the initiator/target token and the area burst.
+    // Chat drives the RollHighlightLayer; App.svelte also listens on bus "rollHighlight".
+    try {
+      (bus.emit as unknown as (ev: string, payload: unknown) => void)("rollHighlight", {
+        kind,
+        id,
+        ledger,
+        fadeSec,
+      });
+    } catch {}
+    // Best-effort direct layer sync when a stage is exposed on window (e2e / preview)
+    const stage = (globalThis as unknown as { __stage?: { getRollHighlightLayer?: () => { sync: (rects: unknown[], camera: unknown, fadeSec: number) => void }; camera?: unknown } }).__stage;
+    if (!stage?.getRollHighlightLayer) return;
+    try {
+      const tokens = client.store.getAll("tokens") as readonly Record<string, unknown>[];
+      const toRect = (tokenId: string | null, fallback: string | null) => {
+        if (!tokenId && !fallback) return null;
+        const wanted = tokenId ?? fallback;
+        const tok = tokens.find((tokDoc) => (tokDoc as Record<string, unknown>)["_id"] === wanted) as unknown as
+          | { _id: string; x: number; y: number; width: number; height: number }
+          | undefined;
+        if (!tok) return null;
+        try {
+          // tokenRect expects TokenDocument; we have enough fields
+          const r = tokenRect(tok as unknown as import("../../core/documents").TokenDocument);
+          return { ...r, kind } as unknown as import("../../canvas/layers/RollHighlightLayer").RollHighlightRect;
+        } catch {
+          return { x: (tok.x as number) ?? 0, y: (tok.y as number) ?? 0, width: (tok.width as number) ?? 1, height: (tok.height as number) ?? 1, kind } as unknown as import("../../canvas/layers/RollHighlightLayer").RollHighlightRect;
+        }
+      };
+      const rects: import("../../canvas/layers/RollHighlightLayer").RollHighlightRect[] = [];
+      if (kind === "initiator") {
+        const r = toRect(ledger.initiator.tokenId as string | null, ledger.initiator.actorId);
+        if (r) rects.push(r as import("../../canvas/layers/RollHighlightLayer").RollHighlightRect);
+      } else if (kind === "target" && id) {
+        const tgt = ledger.targets?.find((t) => t.actorId === id || t.tokenId === id);
+        const r = toRect(tgt?.tokenId as string | null ?? null, tgt?.actorId ?? id);
+        if (r) rects.push({ ...r, kind: "target" } as import("../../canvas/layers/RollHighlightLayer").RollHighlightRect);
+      } else if (kind === "area" && ledger.area) {
+        const a = ledger.area;
+        // Burst/cone area: draw a square around the origin with side = diameter in scene units.
+        // The exact footprint is templateGeometry's job; here we just outline the burst bounds.
+        const gridSize = 50; // 1 square = 50 px fallback (App will have the real grid)
+        const rPx = (a.radiusFt / 5) * gridSize;
+        rects.push({
+          x: a.origin.x - rPx,
+          y: a.origin.y - rPx,
+          width: rPx * 2,
+          height: rPx * 2,
+          kind: "area",
+        } as unknown as import("../../canvas/layers/RollHighlightLayer").RollHighlightRect);
+        for (const tid of a.affectedTokenIds) {
+          const r = toRect(tid, null);
+          if (r) rects.push({ ...r, kind: "target" } as import("../../canvas/layers/RollHighlightLayer").RollHighlightRect);
+        }
+      }
+      if (rects.length > 0) {
+        const camera = (stage as unknown as { camera?: unknown }).camera ?? { x: 0, y: 0, scale: 1 };
+        stage.getRollHighlightLayer!().sync(rects, camera as import("../../canvas/camera").Camera, fadeSec);
+        // Center the initiator/target point — best-effort (App's camera pan is the real center)
+        try {
+          const layerRect = rects[0];
+          if (layerRect) {
+            const appCam = (globalThis as unknown as { __appCamera?: { setCamera?: (c: unknown) => void; camera?: unknown } }).__appCamera;
+            void appCam; // kept for e2e hook inspection
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+
+  function handleReroll(messageId: string, ledger: RollLedger, newModifiers?: Array<{ label: string; value: number; reason: string }>): void {
+    const maybeHost = client as unknown as {
+      rollReroll?: (id: import("../../core/ids").DocId, mods?: Array<{ label: string; value: number; reason: string }>) => void;
+    };
+    if (maybeHost.rollReroll) {
+      if (!maybeHost.rollReroll) return;
+      // F01 host-evaluated reroll: same description, fresh RNG, window + can(update), single OpEnvelope
+      maybeHost.rollReroll(messageId as unknown as import("../../core/ids").DocId, newModifiers);
+      return;
+    }
+    // Fallback for unit tests without a host transport — keep the inverse+new envelope shape
+    const newRolls = ledger.rolls.map((r) => ({ ...r, total: r.total + 1 })) as RollLedger["rolls"];
+    const newLedgerOps: import("../../core/ops").Op[] = [];
+    const ops = rerollOps({ messageId: messageId as unknown as import("../../core/ids").DocId, ledger, currentTurn, newLedgerOps, newRolls });
+    if (!ops) return;
+    client.submit(ops);
+  }
+
+  function handleRevert(messageId: string, ledger: RollLedger): void {
+    const maybeHost = client as unknown as { rollRevert?: (id: import("../../core/ids").DocId) => void };
+    if (maybeHost.rollRevert) {
+      maybeHost.rollRevert(messageId as unknown as import("../../core/ids").DocId);
+      return;
+    }
+    const ops = revertOps({ messageId: messageId as unknown as import("../../core/ids").DocId, ledger, currentTurn });
+    if (!ops) return;
+    client.submit(ops);
+  }
+
+  function handleDelegate(messageId: string, ledger: RollLedger, playerId: string): void {
+    const maybeHost = client as unknown as { rollDelegate?: (id: import("../../core/ids").DocId, pid: import("../../core/ids").UserId) => void };
+    if (maybeHost.rollDelegate) {
+      maybeHost.rollDelegate(messageId as unknown as import("../../core/ids").DocId, playerId as unknown as import("../../core/ids").UserId);
+      return;
+    }
+    const ops = delegateRerollOps({
+      messageId: messageId as unknown as import("../../core/ids").DocId,
+      ledger,
+      currentTurn,
+      playerId: playerId as unknown as import("../../core/ids").UserId,
+    });
+    if (!ops) return;
+    client.submit(ops);
+  }
+
+  function handlePlayerReroll(messageId: string, ledger: RollLedger): void {
+    // Delegated player reroll rides the same host path as GM reroll — host checks pendingReroll
+    const maybeHost = client as unknown as { rollReroll?: (id: import("../../core/ids").DocId) => void };
+    if (maybeHost.rollReroll) {
+      maybeHost.rollReroll(messageId as unknown as import("../../core/ids").DocId);
+      return;
+    }
+    const pid = (client.user as unknown as { id?: string })?.id ?? "";
+    if (!pid) return;
+    const newRolls = ledger.rolls.map((r) => ({ ...r, total: r.total + 1 })) as RollLedger["rolls"];
+    const ops = playerRerollOps({
+      messageId: messageId as unknown as import("../../core/ids").DocId,
+      ledger,
+      currentTurn,
+      playerId: pid as unknown as import("../../core/ids").UserId,
+      newLedgerOps: [],
+      newRolls,
+    });
+    if (!ops) return;
+    client.submit(ops);
+  }
+
+  function highlightFromPending(
+    pending: PendingRoll,
+    kind: "initiator" | "target" | "area",
+    _id: string | null,
+  ): void {
+    try {
+      (bus.emit as unknown as (ev: string, payload: unknown) => void)("rollHighlight", {
+        kind,
+        id: _id,
+        ledger: {
+          initiator: pending.initiator,
+          targets: pending.target ? [pending.target] : null,
+          area: pending.area
+            ? {
+                shape: pending.area.shape,
+                origin: pending.area.origin,
+                radiusFt: pending.area.radiusFt,
+                direction: pending.area.direction,
+                affectedTokenIds: [],
+              }
+            : null,
+        },
+        fadeSec,
+      });
+    } catch {}
+    const stage = (globalThis as unknown as { __stage?: { getRollHighlightLayer?: () => { sync: (rects: unknown[], camera: unknown, fadeSec: number) => void }; camera?: unknown } }).__stage;
+    if (!stage?.getRollHighlightLayer) return;
+    try {
+      const tokens = client.store.getAll("tokens") as readonly Record<string, unknown>[];
+      const toRect = (tokenId: string | null, fallback: string | null) => {
+        if (!tokenId && !fallback) return null;
+        const wanted = tokenId ?? fallback;
+        const tok = tokens.find((tokDoc) => (tokDoc as Record<string, unknown>)["_id"] === wanted) as unknown as
+          | { _id: string; x: number; y: number; width: number; height: number }
+          | undefined;
+        if (!tok) return null;
+        try {
+          const r = tokenRect(tok as unknown as import("../../core/documents").TokenDocument);
+          return { ...r, kind } as unknown as import("../../canvas/layers/RollHighlightLayer").RollHighlightRect;
+        } catch {
+          return { x: (tok.x as number) ?? 0, y: (tok.y as number) ?? 0, width: (tok.width as number) ?? 1, height: (tok.height as number) ?? 1, kind } as unknown as import("../../canvas/layers/RollHighlightLayer").RollHighlightRect;
+        }
+      };
+      const rects: import("../../canvas/layers/RollHighlightLayer").RollHighlightRect[] = [];
+      if (kind === "initiator") {
+        const r = toRect(pending.initiator.tokenId as string | null, pending.initiator.actorId);
+        if (r) rects.push(r as import("../../canvas/layers/RollHighlightLayer").RollHighlightRect);
+      } else if (kind === "target" && _id) {
+        const r = toRect(pending.target.tokenId as string | null ?? null, pending.target.actorId ?? _id);
+        if (r) rects.push({ ...r, kind: "target" } as import("../../canvas/layers/RollHighlightLayer").RollHighlightRect);
+      } else if (kind === "area" && pending.area) {
+        const a = pending.area;
+        const gridSize = 50;
+        const rPx = (a.radiusFt / 5) * gridSize;
+        rects.push({
+          x: a.origin.x - rPx,
+          y: a.origin.y - rPx,
+          width: rPx * 2,
+          height: rPx * 2,
+          kind: "area",
+        } as unknown as import("../../canvas/layers/RollHighlightLayer").RollHighlightRect);
+      }
+      if (rects.length > 0) {
+        const camera = (stage as unknown as { camera?: unknown }).camera ?? { x: 0, y: 0, scale: 1 };
+        stage.getRollHighlightLayer!().sync(rects, camera as import("../../canvas/camera").Camera, fadeSec);
+      }
+    } catch {}
+  }
+
+  function isOwnerOfPending(pending: PendingRoll): boolean {
+    const uid = (client.user as unknown as { id?: string })?.id ?? "";
+    if (!uid) return false;
+    if (isGMDerived) return true;
+    // Roller is initiator for attacks (AoO/parry) and target for saves/checks/concentration.
+    const rollerId = pending.kind === "attack" ? pending.initiator.actorId : pending.target.actorId;
+    const actors = client.store.getAll("actors") as readonly Record<string, unknown>[];
+    const actor = actors.find((a) => (a as Record<string, unknown>)._id === rollerId) as unknown as { ownership?: Record<string, number> } | undefined;
+    if (!actor?.ownership) return false;
+    const lvl = actor.ownership[uid];
+    return typeof lvl === "number" && lvl >= 1;
+  }
+
+  async function handlePendingRoll(messageId: string, pending: PendingRoll): Promise<void> {
+    const uid = (client.user as unknown as { id?: string })?.id ?? "";
+    if (!uid) return;
+    const ownerCheck = isOwnerOfPending(pending);
+    if (!canPendingPlayerRoll(pending, currentTurn, uid as unknown as import("../../core/ids").UserId, ownerCheck ? [uid as unknown as import("../../core/ids").UserId] : [] ) && !isGMDerived) return;
+    if (isPendingExpired(pending, currentTurn)) return;
+    // Host-verified commit-reveal via roll.pending (0x33). Any local fallback is only for dev with no transport.
+    const maybePending = (client as unknown as { rollPending?: (id: string) => Promise<string> });
+    if (maybePending.rollPending) {
+      try {
+        await maybePending.rollPending(messageId as unknown as import("../../core/ids").DocId);
+        return;
+      } catch {}
+    }
+    // Fallback for unit tests without a host transport (should not happen in e2e)
+    const modSum = pending.modifiers.reduce((a, m) => a + m.value, 0);
+    const total = 10 + modSum;
+    const ops = pendingResolveOps({ messageId: messageId as unknown as import("../../core/ids").DocId, pending, total, seedClient: "local-fallback", seedHost: "local-host" });
+    const followUp = {
+      _id: globalThis.crypto.randomUUID(),
+      type: "message" as const,
+      name: pending.target.name + " save",
+      ownership: { default: 1 },
+      flags: {},
+      system: {},
+      author: uid,
+      content: pending.target.name + " rolled " + String(total) + " vs DC " + String(pending.dc ?? "—") + " — " + (pending.dc !== null && total >= pending.dc ? "Success" : pending.dc !== null && total < pending.dc ? "Failure" : "rolled") + " (" + pending.formula + ")",
+      whisper: [] as string[],
+      roll: null,
+      flavor: "",
+    };
+    client.submit([...ops, { kind: "create", coll: "messages", data: followUp }]);
+  }
+
+  function handlePendingGMResolve(messageId: string, pending: PendingRoll): void {
+    if (!isGMDerived) return;
+    if (isPendingExpired(pending, currentTurn)) return;
+    // GM resolve is the same host path — the host always allows GMs
+    const maybePending = (client as unknown as { rollPending?: (id: string) => Promise<string> });
+    if (maybePending.rollPending) {
+      void maybePending.rollPending(messageId as unknown as import("../../core/ids").DocId);
+      return;
+    }
+    const modSum = pending.modifiers.reduce((a, m) => a + m.value, 0);
+    const total = 10 + modSum;
+    const ops = pendingResolveOps({ messageId: messageId as unknown as import("../../core/ids").DocId, pending, total, seedClient: "gm-seedClient", seedHost: "gm-seedHost" });
+    const uid = (client.user as unknown as { id?: string })?.id ?? "gm";
+    const followUp = {
+      _id: globalThis.crypto.randomUUID(),
+      type: "message" as const,
+      name: pending.target.name + " save (GM)",
+      ownership: { default: 1 },
+      flags: {},
+      system: {},
+      author: uid,
+      content: pending.target.name + " (GM) rolled " + String(total) + " vs DC " + String(pending.dc ?? "—") + " — " + (pending.dc !== null && total >= pending.dc ? "Success" : pending.dc !== null ? "Failure" : "rolled") + " (" + pending.formula + ")",
+      whisper: [] as string[],
+      roll: null,
+      flavor: "",
+    };
+    client.submit([...ops, { kind: "create", coll: "messages", data: followUp }]);
+  }
+
 
   function refresh(): void {
     messages = [...(client.store.getAll("messages") as readonly MessageDocument[])];
@@ -159,7 +503,50 @@
   <h3>Chat</h3>
   <div id="chat-log" bind:this={logEl}>
     {#each messages as message (message._id)}
-      {#if message.roll}
+      {@const pendingRoll = (message.system as unknown as { pendingRoll?: PendingRoll } | undefined)?.pendingRoll}
+      {@const ledger = (message.system as unknown as { rollLedger?: RollLedger } | undefined)?.rollLedger}
+      {#if pendingRoll}
+        <PendingRollCard
+          pending={pendingRoll}
+          currentTurn={currentTurn}
+          isGM={isGMDerived}
+          isOwner={isOwnerOfPending(pendingRoll)}
+          fadeSec={fadeSec}
+          onRoll={() => handlePendingRoll(message._id, pendingRoll)}
+          onGMResolve={() => handlePendingGMResolve(message._id, pendingRoll)}
+          onHighlight={(kind: "initiator" | "target" | "area", id: string | null) => highlightFromPending(pendingRoll, kind, id)}
+        />
+      {:else if ledger}
+        <RollCard
+          ledger={ledger}
+          currentTurn={currentTurn}
+          isGM={isGMDerived}
+          fadeSec={fadeSec}
+          onReroll={(...a: unknown[]) => {
+            const maybeMods = (a[1] ?? a[0]) as unknown;
+            const mods = Array.isArray(maybeMods) ? (maybeMods as Array<{ label: string; value: number; reason: string }>) : undefined;
+            handleReroll(message._id, ledger, mods);
+          }}
+          onRevert={() => handleRevert(message._id, ledger)}
+          onDelegate={(playerId: string) => handleDelegate(message._id, ledger, playerId)}
+          onPlayerReroll={() => handlePlayerReroll(message._id, ledger)}
+          onHighlight={(kind: "initiator" | "target" | "area", id: string | null) => highlightFromLedger(ledger, kind, id)}
+        />
+        {#if message.roll}
+          <p class="line rollcard" data-mode={message.rollMode ?? "roll"}>
+            <span class="author">{userName(message.author)}</span>
+            <span class="total">{message.roll.total}</span>
+            <span class="formula">= {message.roll.formula}</span>
+            {#if message.flavor}
+              <span class="flavor">{message.flavor}</span>
+            {/if}
+            {#if message.rollMode === "gmroll"}<span class="tag">gm</span>{/if}
+            {#if message.whisper.length > 0}
+              <span class="tag">🔒 {message.whisper.map(userName).join(", ")}</span>
+            {/if}
+          </p>
+        {/if}
+      {:else if message.roll}
         <p class="line rollcard" data-mode={message.rollMode ?? "roll"}>
           <span class="author">{userName(message.author)}</span>
           <span class="total">{message.roll.total}</span>

@@ -568,6 +568,8 @@ export interface AppSurface {
     ok: boolean;
     issues: string[];
   };
+  /** e2e: direct GM client for op injection (mirrors HostApp.gm). */
+  gm: HostApp["gm"];
 }
 
 export interface PlayerSurface {
@@ -1999,6 +2001,7 @@ function appSurface(app: HostApp): AppSurface {
         ),
       };
     },
+    gm: app.gm,
   };
 }
 

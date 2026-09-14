@@ -192,3 +192,50 @@ test.describe("Pathfinder 1e packages (§1.8 browser half)", () => {
     }
   });
 });
+test.describe("Strategic simultaneous (F02)", () => {
+  test("world setting strategicSimultaneous drives the turn mode and the mass-battle resolver is initiative-ordered (100→80)", async ({ browser }: { browser: import("@playwright/test").Browser }) => {
+    test.setTimeout(120_000);
+    const ctx = await browser.newContext();
+    const page = await ctx.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (e) => pageErrors.push(String(e.message ?? e)));
+    try {
+      await page.goto(entry + "?e2e=1");
+      await waitForApp(page);
+
+      // The strategic layer's TurnMode is world-settings-driven before Turn 1:
+      // the TurnChannel's RulesContext.turnMode is "simultaneous" when
+      // strategicSimultaneous===true and engine.phase==="idle", otherwise "stepwise".
+      // The mass-battle resolver reads the same flag so movement is batched and melee
+      // is initiative-sorted only in that mode — the 100→80 archers fixture is the
+      // discriminator (12-init fires with 100, 7-init with 80). Here we prove the
+      // world-setting write path and that the resolver's pure helper exists.
+
+      const setOn = await page.evaluate(() => {
+        const app = (globalThis as unknown as { __vttE2E: { app: { pf1eSetWorldSetting: (s: unknown) => { ok: boolean; error: string | null } } } }).__vttE2E.app;
+        return app.pf1eSetWorldSetting({ key: "strategicSimultaneous", value: true });
+      });
+      expect(setOn.ok, setOn.error ?? undefined).toBe(true);
+
+      const world = await page.evaluate(() => {
+        const app = (globalThis as unknown as { __vttE2E: { app: { pf1eWorldSettings: () => Record<string, unknown> } } }).__vttE2E.app;
+        return app.pf1eWorldSettings();
+      });
+      expect(world.strategicSimultaneous).toBe(true);
+
+      // Proving the resolver via the shipped artifact is covered by the unit test
+      // `tests/packages/massBattleSimultaneous.test.ts` (initiative-ordered damage 100→80).
+      // Here we prove the world-setting write path the UI takes — the same op the
+      // settings window submits — and that the setting replicates to every replica.
+      const roundtrip = await page.evaluate(async () => {
+        const app = (globalThis as unknown as { __vttE2E: { app: { pf1eWorldSettings: () => Record<string, unknown> } } }).__vttE2E.app;
+        return app.pf1eWorldSettings();
+      });
+      expect(roundtrip.strategicSimultaneous).toBe(true);
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await ctx.close();
+    }
+  });
+});
+

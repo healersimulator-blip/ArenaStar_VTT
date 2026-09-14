@@ -5,6 +5,8 @@
     ATTACK_TEXT_FIELDS,
     ATTACK_NUMBER_FIELDS,
     ATTACK_BOOLEAN_FIELDS,
+    ATTACK_FIREARM_FIELDS,
+    ATTACK_FIREARM_BOOLEAN_FIELDS,
     MAX_SHEET_ATTACKS,
     pf1eAttackEditorView,
     type AttackEdit,
@@ -114,6 +116,75 @@
           >
         {/if}
       {/each}
+      <fieldset data-pf1e-firearm>
+        <legend>Firearm (P09 — misfire / ammo §2.9)</legend>
+        <label>Generation
+          <select
+            data-attack-field="firearm.generation"
+            value={String((row.firearm as Record<string, unknown> | undefined)?.generation ?? "")}
+            onchange={(e) =>
+              onEdit({
+                kind: "set",
+                index,
+                field: "firearm.generation",
+                value: e.currentTarget.value,
+                expected: view.rows,
+              })}
+          >
+            <option value="">— not a firearm —</option>
+            <option value="early">Early (standard reload, misfire 1–4 escalates)</option>
+            <option value="advanced">Advanced</option>
+          </select>
+        </label>
+        {#each ATTACK_FIREARM_FIELDS as [field, label] (field)}
+          {@const leaf = field.slice(8)}
+          {@const current = (row.firearm as Record<string, unknown> | undefined)?.[leaf]}
+          {#if current !== null && typeof current === "object"}
+            <p>{label} (structured import, read-only)</p>
+            <pre>{JSON.stringify(current, null, 2)}</pre>
+          {:else}
+            <label>{label}<input
+                type="number"
+                step="1"
+                data-attack-field={field}
+                value={typeof current === "number" ? (current as number) : ""}
+                placeholder={leaf === "misfireMinimum" ? "1–20 (blank = never)" : leaf === "capacity" ? "1" : "loaded"}
+                onchange={(e) =>
+                  onEdit({
+                    kind: "set",
+                    index,
+                    field,
+                    value: e.currentTarget.value,
+                    expected: view.rows,
+                  })}
+              /></label>
+          {/if}
+        {/each}
+        {#each ATTACK_FIREARM_BOOLEAN_FIELDS as [field, label] (field)}
+          {@const isFirearmLeaf = field.startsWith("firearm.")}
+          {@const leaf2 = isFirearmLeaf ? field.slice(8) : field}
+          {@const current2 = isFirearmLeaf ? (row.firearm as Record<string, unknown> | undefined)?.[leaf2] : row[field]}
+          {#if current2 !== null && typeof current2 === "object"}
+            <p>{label} (structured import, read-only)</p>
+            <pre>{JSON.stringify(current2, null, 2)}</pre>
+          {:else}
+            <label>{label}<input
+                type="checkbox"
+                data-attack-field={field}
+                checked={current2 === true}
+                onchange={(e) =>
+                  onEdit({
+                    kind: "set",
+                    index,
+                    field,
+                    value: e.currentTarget.checked,
+                    expected: view.rows,
+                  })}
+              /></label>
+          {/if}
+        {/each}
+        <p class="note">Early firearms misfire on the authored minimum (1–4 ⇒ broken, second misfire while broken ⇒ explosion, UC p.135); magical firearms are wrecked, not destroyed. Capacity/loaded drive the §2.9 ammo gate — an empty firearm cannot be shot and loading provokes (`load-firearm`).</p>
+      </fieldset>
       <button
         type="button"
         data-remove-attack
@@ -141,6 +212,8 @@
       <strong>{attack.name}</strong> · {attack.attackBonuses.join(" / ")} · {attack.damageDice ??
         "—"}
       {attack.damageBonus >= 0 ? "+" : ""}{attack.damageBonus} · {attack.critThreatMin}–20/×{attack.critMultiplier}
+      {#if attack.misfire !== undefined} · misfire {attack.misfire.misfireMinimum} ({attack.misfire.generation}{attack.misfire.broken ? ", broken" : ""}{attack.misfire.magical ? ", magical" : ""}){/if}
+      {#if attack.ammo !== undefined} · ammo {attack.ammo.loaded}/{attack.ammo.capacity}{attack.misfire?.broken ? " (broken)" : ""}{attack.ammo.loaded === 0 ? " — empty" : ""}{/if}
     </p>
   {/each}
   <p class="note">

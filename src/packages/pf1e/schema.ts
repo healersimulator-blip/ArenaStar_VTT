@@ -32,6 +32,17 @@ export const PF1E_MODEL_SCHEMA: SysSchema = {
    */
   nonlethal: "u16",
   aooUsed: "u8",
+  /** P09/D-219 — shots currently loaded per model (0 ⇒ §2.9 ammo gate refuses; mirrors `system.pf1e.attacks[i].firearm.loaded`). */
+  ammo: "u8",
+  /** P09/D-219 — weapon state bit 0 = broken (mirrors `system.pf1e.attacks[i].broken` / Gap §2.9b weaponState column). */
+  weaponState: "u8",
+  /**
+   * M03 — PF1e condition bitfield (Gap §2.13: PF1eCondition bits previously reused
+   * ModelStatus bits 0–4, so PRONE (1<<4) masqueraded as hidden (1<<4), FLANKED (1<<2)
+   * as pinned (1<<2), etc. and was filtered out of spatial queries. Separate u32
+   * column, disjoint from ModelPool.status (ModelStatus).
+   */
+  pfCondition: "u32",
 };
 
 /** PF1e Condition Bitfield Flags */

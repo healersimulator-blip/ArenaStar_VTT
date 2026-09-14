@@ -32,7 +32,10 @@ import type {
   TurnReport,
 } from "../core/sim";
 import { DEFAULT_REALTIME_CONFIG } from "../core/sim";
-import { worldSettingsFrom } from "../core/worldSettings";
+import {
+  strategicSimultaneousOf,
+  worldSettingsFrom,
+} from "../core/worldSettings";
 import type { SimResolveResult } from "../sim/runner";
 import type { SysSchema } from "../sim/pool";
 import {
@@ -58,6 +61,8 @@ import {
   turnSeed,
   type TurnEngineEffect,
 } from "./turnEngine";
+import { pendingPruneOps } from "../packages/pf1e/pendingRoll";
+import { pruneOpsForWindow as rollLedgerPruneOps } from "../packages/pf1e/rollLedger";
 
 export interface TurnChannelOptions {
   host: HostSync;
@@ -196,6 +201,7 @@ export class TurnChannel {
           sceneId: unit.sceneId ?? null,
           modelRange: unit.modelRange,
           leaderTokenId: unit.leaderTokenId ?? null,
+          squadId: (unit as unknown as { squadId?: string | null }).squadId ?? null,
         });
       }
     }
@@ -252,6 +258,14 @@ export class TurnChannel {
             import("../core/documents").Json | undefined,
       }),
       worldSettings: worldSettingsFrom(this.store.getAll("settings")),
+      turnMode:
+        "mode" in this.engine
+          ? (this.engine as { mode: import("../core/strategic").TurnMode }).mode
+          : strategicSimultaneousOf(
+              worldSettingsFrom(this.store.getAll("settings")),
+            )
+            ? "simultaneous"
+            : "stepwise",
     };
   }
 
@@ -259,7 +273,7 @@ export class TurnChannel {
 
   /** Start the campaign (GM): loads the SimBridge, creates Turn 1 (§8A resume). */
   async start(
-    mode: "stepwise" | "realtime",
+    mode: "stepwise" | "realtime" | "simultaneous",
     initial?: { bytes: Uint8Array; maxHpMax: number },
   ): Promise<number> {
     const units = this.unitViews();
@@ -302,10 +316,16 @@ export class TurnChannel {
       if (ops.length > 0) this.host.commitSystem(ops);
       await this.broadcastSnapshots();
     }
+    // F02 — world setting drives the default mode when the caller does not request simultaneous explicitly.
+    const worldSimultaneous = strategicSimultaneousOf(
+      worldSettingsFrom(this.store.getAll("settings")),
+    );
+    const effectiveMode =
+      mode === "simultaneous" || worldSimultaneous ? "simultaneous" : mode;
     const step = turnEngineReduce(this.engine, {
       type: "turn.start",
       sceneId: this.sceneId,
-      mode,
+      mode: effectiveMode as typeof mode,
       seed: this.seed,
     });
     if (step.effects.some((e) => e.type === "reject")) return resumed;
@@ -339,7 +359,14 @@ export class TurnChannel {
     switch (msg.action) {
       case "start":
         if (this.engine.phase === "idle")
-          void this.start(msg.mode ?? "stepwise");
+          void this.start(
+            (msg.mode as "stepwise" | "realtime" | "simultaneous") ??
+              (strategicSimultaneousOf(
+                worldSettingsFrom(this.store.getAll("settings")),
+              )
+                ? "simultaneous"
+                : "stepwise"),
+          );
         return;
       case "advance":
         void this.advance();
@@ -537,6 +564,18 @@ export class TurnChannel {
       ref: { coll: "turns", id: turnId },
       diff: { phase: "report", reportRef: `${this.sceneId}:${turnNumber}` },
     });
+    // F03: prune expired pending rolls (T+2 window) as part of the same envelope
+    try {
+      const msgs = [...this.store.getAll("messages")] as unknown as Array<{ _id: string; system?: { pendingRoll?: import("../packages/pf1e/pendingRoll").PendingRoll } }>;
+      const prune = pendingPruneOps(msgs as unknown as Parameters<typeof pendingPruneOps>[0], turnNumber);
+      if (prune.length > 0) forward.push(...prune);
+    } catch {}
+    // F01: prune expired roll-ledger windows (T+2) alongside pending rolls — keeps message shell, clears ledger payload
+    try {
+      const msgs2 = [...this.store.getAll("messages")] as unknown as Array<{ _id: string; system?: { rollLedger?: import("../packages/pf1e/rollLedger").RollLedger } }>;
+      const prune2 = rollLedgerPruneOps(msgs2 as unknown as Parameters<typeof rollLedgerPruneOps>[0], turnNumber);
+      if (prune2.length > 0) forward.push(...prune2);
+    } catch {}
     this.lastTurnDocId = turnId;
     const committed = this.host.commitSystem(forward);
     if (!committed.ok)
@@ -990,6 +1029,20 @@ export class TurnChannel {
 
   private nextTurn(): void {
     this.reduce({ type: "turn.next" });
+    // F03: prune expired pending rolls on nextTurn (host path, non-panel)
+    try {
+      const turnNumber = currentTurnNumber(this.engine);
+      const msgs = [...this.store.getAll("messages")] as unknown as Array<{ _id: string; system?: { pendingRoll?: import("../packages/pf1e/pendingRoll").PendingRoll } }>;
+      const prune = pendingPruneOps(msgs as unknown as Parameters<typeof pendingPruneOps>[0], turnNumber);
+      if (prune.length > 0) this.host.commitSystem(prune);
+    } catch {}
+    // F01: prune expired roll ledgers on the same turn hop
+    try {
+      const turnNumber = currentTurnNumber(this.engine);
+      const msgs2 = [...this.store.getAll("messages")] as unknown as Array<{ _id: string; system?: { rollLedger?: import("../packages/pf1e/rollLedger").RollLedger } }>;
+      const prune2 = rollLedgerPruneOps(msgs2 as unknown as Parameters<typeof rollLedgerPruneOps>[0], turnNumber);
+      if (prune2.length > 0) this.host.commitSystem(prune2);
+    } catch {}
   }
 
   private async undoTurn(): Promise<void> {

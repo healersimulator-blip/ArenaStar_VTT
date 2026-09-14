@@ -407,20 +407,20 @@ describe("resolveMovementOpportunities — the auto-resolved attack of opportuni
     expect(resolution.entries[0]?.line).toBe(
       "Fighter hits Goblin for 2 (20 vs AC 16) — 1/1 opportunities this round",
     );
-    // The attack card, the HP write, then the ledger: the target's HP moves before the
-    // budget is spent, and the budget is spent once.
-    expect(client.submitted).toHaveLength(3);
+    // F01 — atomic envelope: card + HP together, then the ledger spend
+    expect(client.submitted).toHaveLength(2);
+    expect(client.submitted[0]?.length).toBe(2);
     expect(client.submitted[0]?.[0]).toMatchObject({ kind: "create" });
-    expect(client.submitted[1]?.[0]).toMatchObject({
+    expect(client.submitted[0]?.[1]).toMatchObject({
       kind: "update",
       ref: { coll: "actors", id: "goblin" },
       diff: { "system.pf1e.hp": 10 },
     });
-    expect(client.submitted[2]?.[0]).toMatchObject({
+    expect(client.submitted[1]?.[0]).toMatchObject({
       kind: "update",
       ref: { coll: "combats", id: "combat" },
     });
-    const ledger = client.submitted[2]?.[0];
+    const ledger = client.submitted[1]?.[0];
     if (ledger?.kind !== "update") throw new Error("expected a ledger update");
     // The panel's own shape: the whole combatant array under one `combats` update.
     const combatants = (
@@ -722,8 +722,8 @@ describe("resolveActionOpportunities — the action trigger shares the movement 
     expect(resolution.entries[0]?.line).toBe(
       "Fighter hits Goblin for 2 (20 vs AC 16) — 1/1 opportunities this round",
     );
-    // The same three submits as a movement AoO: the card, the HP write, the ledger.
-    expect(client.submitted).toHaveLength(3);
+    // F01 — now two envelopes: [card+HP] + ledger
+    expect(client.submitted).toHaveLength(2);
   });
 
   test("no encounter means no auto-resolution, and the caller is told why", async () => {
