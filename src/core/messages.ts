@@ -34,6 +34,8 @@ export const MsgKind = {
   "sim.snapshot.get": 0x0b,
   "audio.cmd": 0x0c,
   "roll.reveal": 0x0d,
+  // F03 — player pending roll resolution (client → host, host → client commit-reveal)
+  "roll.pending": 0x33,
   // host → client
   welcome: 0x20,
   snapshot: 0x21,

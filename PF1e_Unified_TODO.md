@@ -1512,7 +1512,73 @@ Two user-requested tactical/strategic features that sit on top of the landed P0�
 * F02: `e2e/pf1e_mass_battles.spec.ts` simultaneous scenario + `massBattleSimultaneous.test.ts` deterministic 100-vs-100 archers at init 12 vs 7: `A`'s damage applied first, `B` fires with `80` models' worth of attacks, report event order `A-shoot` before `B-shoot`, sequential mode still `100`-vs-`100`. `vitest` sequential suite untouched.
 
 
+### F03 — Player Reaction Pending Rolls (non-strategic, tactical only)
+
+**Goal.** When a reaction roll (instant save vs spell/ability, concentration while threatened, AoO/parry attack) is initiated **for a player-controlled token in non-strategic (tactical PF1e) play**, the table sees a **pending roll card** in chat instead of an instant host roll. The card contains the normal audit (initiator → what → target → DC/fixture + modifier breakdown *without* the total), the roll itself stays **unresolved** (no `total`, no `seedHost`) until **the owning player presses Roll** (on that chat card — the same surface that shows saves/checks on the sheet). A per-world option controls how much is deferred: **(a) auto — nothing pending, every roll host-resolves instantly (legacy); (b) saves & checks auto — only AoO/parry (and other weapon-attack reactions) are pending, saves/checks/concentration auto-resolve; (c) manual — every player reaction roll is pending**. Strategic mass-battle turns never use pending rolls (they have `TurnReport` summaries, no per-model roll cards).
+
+#### User stories
+
+* As a **player** whose fighter is fireballed, I want my save to be *my* dice: the chat shows “Valeros — **Reflex save vs Fireball (DC 17)** — pending (1d20+5)” with a **Roll** button only I (and the GM) can see; clicking it rolls `1d20+5` via the host-verified path (`roll`/`rollVerified`, `seedClient`/`seedHost` audit), the card flips to `18 (1d20+5: 13+5)` and the real `save → half damage → energy mitigation` pipeline runs from that total, posting the **Save / Damage / Applied HP** follow-up the same way an auto-roll would. If I do nothing, the GM may still resolve it (auto-fallback after the `pendingRollExpires` turn or an explicit GM Resolve button).
+* As a **player** who provokes, I want my **AoO** to be my swing: “Goblin → *AoO vs Valeros (moving)* — pending (Longsword +7 vs AC 18)” with a Roll button; my click is the `d20` + damage dice, the host evaluates hit/threat/confirm/mitigation against the moving token's AC and writes HP authoritatively (a player cannot forge a hit by editing the client).
+* As a **GM** I want a world setting `Settings → PF1e → Player reaction rolls` with three modes: **Auto (host resolves instantly)** / **Saves & Checks auto (AoO/parry pending)** / **Manual (all pending)**. Strategic (`massBattlePf1e`) is unaffected — the toggle is `worldSettings.playerPendingRollMode` (default `"savesChecksAuto"` — saves feel snappy auto, AoOs feel owned; worlds that prefer legacy set **Auto**). Permissions: the pending card may be `whisper`’d to its owner + GM when `rollMode` demands it, but the shell (who/what/whom, DC) is always shell-visible so the table knows a reaction is owed.
+
+#### Detailed requirements (acceptance = all must hold)
+
+* **When pending applies.** Only **non-strategic** (tactical) flows and only when `ctx.worldSettings.playerPendingRollMode !== "auto"` and the **target actor** is **player-owned** (the defender/target's `ownership` grants at least one non-GM `UserId`, or the token's `actorId` is linked and the combatant's `flags.core` owner is a player). The kind decides:
+  * `savesChecksAuto` — **pending** = `attack` (AoO/parry/weapon reaction) only; `save`/`concentration`/`check`/`initiative` auto-resolve.
+  * `manual` — **pending** = `attack` **and** `save`/`check`/`concentration` (every d20 reaction for a player target).
+  * `auto` — never pending.
+  * Strategic (`ctx.turnMode === "simultaneous"` or mass-battle `resolveTurn`) never pending.
+* **Pending card content.** One `MessageDocument` with `system.pendingRoll: PendingRoll` (versioned `v:1`, see data model). Header: initiator portrait/name → action label (`Reflex save vs Fireball`, `AoO vs Valeros (moving)`, `Concentration DC 17 (vigorous motion)`) → target name(s) or `at (x,y)`. Midline: `Formula 1d20+5 vs DC 17` + **modifiers dropdown** (same `attackModifierParts`/`damageModifierParts`/`pf1eSaveRollSpecs` breakdown, values visible, totals hidden). No `total`, no `seedHost` yet; `seedClient` is the `commit` the client will reveal. Footer: primary **Roll — 1d20+5** button (enabled only for the owning player while `pendingRoll.expiresTurn >= currentTurn` and for the GM always) + GM **Resolve (auto)** that host-rolls instantly. `data-pending-roll`, `data-pending-kind`, `data-pending-formula` hooks for `e2e/pending_rolls.spec.ts`.
+* **Roll path.** Clicking **Roll** does **not** roll locally: it sends `MsgKind roll.pending:0x33` with `{messageId, seedClientCommit}` (commit-reveal, same crypto as A06). The host validates window + ownership, reveals with `seedHost`, evaluates `d20+mods` vs `DC`/`AC` through the *same* pure functions auto-rolls use (`resolveSpellSave`, `resolveAttackRoll` + `confirmCritical`, `applyMitigation`, `applyHealing`), builds the same `ledgerOps` the auto path would have, and submits **one envelope** `[new roll result + follow-up message + ledgerOps + pendingRoll: resolved]` (so a rejected follow-up rolls the whole reaction back). The original pending card flips to **resolved** `[[total|formula]]` + dropdown now shows totals, buttons disabled `— rolled 18`, and a new system line `Valeros rolled 18 vs DC 17 — Success (half damage → 7 fire after Resist 5)` is posted.
+* **Window & pruning.** Pending rolls are **rerollable-ledger-adjacent**: `expiresTurn = pendingRoll.turnNumber + 2` (same 2-round bound as F01). After that the host refuses with `pending expired — window closed (2 rounds)` and the card shows `— expired`. Host prunes `system.pendingRoll` from cards whose `turnNumber < currentTurn-2` on each `turn.advance`/`pf1eNextTurn`, keeping the `content` line for history.
+* **Projection.** `rollMode` (`selfroll`/`gmroll`/`blindroll`) still redacts `total`/`seedHost` for unauthorized viewers, but the pending shell stays visible (`Goblin → AoO — hidden`).
+* **Non-goals.** No new `cards` collection, no migration for pre-F03 messages (they render without pending UI), no second RNG, no player-authoritative hit.
+
+#### Data model (no new top-level collection)
+
+* **`MessageDocument.system.pendingRoll?: PendingRoll`** (new, optional, JSON-serializable, `v:1`):
+  ```ts
+  interface PendingRoll {
+    v: 1;
+    kind: "attack" | "save" | "check" | "concentration";
+    initiator: { actorId: DocId; tokenId: DocId | null; name: string; actionLabel: string };
+    target: { actorId: DocId; tokenId: DocId | null; name: string };
+    formula: string;            // e.g. "1d20+5" — the d20 the player will roll
+    dc: number | null;          // AC/DC the host will evaluate against (null = attack vs dynamic AC)
+    modifiers: Array<{label:string;value:number;reason:string}>; // preview without totals
+    seedClientCommit?: string | null;
+    seedHost?: string | null;
+    total?: number | null;      // null while pending
+    turnNumber: number;
+    expiresTurn: number;        // turnNumber + 2
+    resolved: boolean;
+    rollMode: "roll" | "gmroll" | "blindroll" | "selfroll";
+  }
+  ```
+  While `resolved===false` the card shows the Roll button; after resolve `total`/`seedHost`/`seedClient` are filled, `resolved:true`, buttons disabled. The follow-up damage/condition ops live in the same envelope as the resolve, not as a second ledger card — the pending card *is* the ledger card's shell (a pending card may also carry `system.rollLedger`'s `pendingRoll` mirror for the 2-round reroll after it resolves).
+
+#### Implementation steps (order matters)
+
+1. **World setting + validation (pure).** `src/core/worldSettings.ts` add `playerPendingRollMode?: "auto"|"savesChecksAuto"|"manual"` (`CoreWorldSettings`), `playerPendingRollModeOf()` default `"savesChecksAuto"`, `validateWorldSettingsPatch` allow only those three strings, `src/ui/settings/SettingsPanel.svelte` radio/select `data-world-player-pending-roll-mode` (three options, default saves & checks auto) writing via `worldSettingsOps`. `isScalarSetting` already covers strings.
+2. **Pending plumbing (pure, no store).** `src/packages/pf1e/pendingRoll.ts` (new, pure): `buildPendingRoll({initiator,target,kind,formula,dc,modifiers,turnNumber,rollMode})`, `canPlayerRoll({pending,currentTurn,playerId,ownerIds})`, `canGMRoll`, `expires`, `pendingPruneOps(messages,currentTurn)`, `shouldDeferToPlayer({kind, targetActorId, worldSettings, ownershipMap, turnMode})` (the `auto`/`savesChecksAuto`/`manual` branching + strategic-gate + player-owned check).
+3. **Host intents.** `src/core/messages.ts` add `MsgKind roll.pending:0x33`, `src/host/host.ts` add handler that validates window + ownership + `shouldDeferToPlayer`, runs the same `roll`/`rollVerified` host path the sheet's `pf1eResolveFlow` uses (so `seedClient`/`seedHost` audit is identical), evaluates the reaction through the existing pure resolvers (`resolveSpellSave`/`resolveAttackRoll`/`resolveConcentration`), and submits one envelope `[update pendingRoll resolved + follow-up message + ledgerOps]`.
+4. **Flow integration — defer, don't duplicate.** Every tactical flow that currently does an immediate host roll for a *reaction* (the save in `pf1eCastFlow`/`touchSpell`, the AoO in `pf1eAooFlow`/`pf1eActionProvoke`, the parry in `pf1eParry` where it exists) calls `shouldDeferToPlayer` **before** rolling: if true, it does **one** `create messages` with `system.pendingRoll` (no `roll` total yet) and returns — the reaction's damage/condition application is deferred until the player's Roll resolves. Auto mode skips this and rolls immediately (byte-identical to today). This is a 10-line guard per flow, not a rewrite.
+5. **Chat cards.** `src/ui/chat/PendingRollCard.svelte` (new): header links → `centerOnToken` + `RollHighlightLayer` (same highlight path as F01), midline `Formula vs DC/AC` + modifiers dropdown, footer `Roll — <formula>` (owner + GM) + `Resolve (GM)`. `src/ui/chat/ChatPanel.svelte` delegates to it when `msg.system.pendingRoll && !msg.system.pendingRoll.resolved`, and to `RollCard` once `resolved:true` (the same message then shows the `[[total|formula]]` chip like any F01 ledger card). `src/canvas/layers/RollHighlightLayer.ts` reuse — no new layer.
+6. **Tests + e2e.** `tests/packages/pendingRoll.test.ts` (build/shouldDefer/canPlayerRoll/expires/prune, ownership + mode + strategic gate, 2-round window, stale-target refusal), `tests/ui/pendingRollCard.test.ts` (render pending shell, dropdown counts, Roll disabled outside window/for non-owner, GM Resolve always enabled), `e2e/pending_rolls.spec.ts` (non-strategic only: fireball at a player → pending save card with formula vs DC, no total, Roll button only for that player; player clicks → card flips to total + follow-up damage applied; AoO pending while save auto when mode=`savesChecksAuto`; toggle to `auto` → no pending cards; window closes after T+3; strategic turn never pending).
+
+#### Why this shape
+
+* Rides the *existing* host-verified roll path and the *existing* `OpLog` inverse / `rollLedger` 2-round window — the pending card is a *deferred* ledger card, not a second transaction log. The player supplies only the `d20` commitment; the host still evaluates `total vs DC/AC`, mitigation and HP writes authoritatively, so a compromised client cannot forge a hit.
+* A single `messages` field (`system.pendingRoll`) keeps the chat history bounded and prune-able the same way F01's `rollLedger` is — no new collection, no migration for old messages.
+* One `shouldDeferToPlayer` predicate keeps the three modes honest and the strategic gate explicit (mass battle turns have no per-model pending cards by design, matching F01/F02's tactical-only vs strategic-only split).
+
+#### Acceptance (demoable in one `pnpm build` + `pnpm build:systems` + Chromium e2e)
+
+* `e2e/pending_rolls.spec.ts` — non-strategic game, player token fireballed → pending save card shows initiator/target/DC/formula/modifiers dropdown, **no total**, `data-pending-roll` + `Roll` visible only to that player (GM sees GM Resolve); player clicks Roll → card shows `[[18|1d20+5]]`, follow-up `Success — half damage` line, HP actually reduced per the host-evaluated save (not the client's number). With `playerPendingRollMode="savesChecksAuto"`, a fireball save **auto-resolves** (no pending) while a provoked **AoO** is pending; with `"auto"` nothing is pending; with `"manual"` both are pending. Window closes after `T+3` (button `— expired`, server refuses). Strategic (`simultaneous`) turn never creates a pending card. `vitest` pending unit tests cover shouldDefer, ownership, strategic gate, window and prune.
+
 ## Recommended execution order
+
 
 1. **Reconcile R01–R03**, preserve D01–D06; start **N01–N02** as an independent protocol slice.
 2. **P1 sheets → P2 tracker/actions → P3 attacks → P4 effects → P5 casting/awareness → P6 interrupts/movement → P7 injury**. Verify disputed rules before each affected slice; implement only context-menu options that work.

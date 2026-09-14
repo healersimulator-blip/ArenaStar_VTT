@@ -12,6 +12,7 @@
   import { DEFAULT_BINDINGS } from "../../core/keys";
   import {
     advanceClockOnRoundOf,
+    playerPendingRollModeOf,
     rollHighlightFadeSecOf,
     secondsPerRoundOf,
     strategicSimultaneousOf,
@@ -56,6 +57,8 @@
     strategicSimultaneous: boolean;
     /** F01 — roll-card area outline fade (1–10 s, default 4 s). */
     rollHighlightFadeSec: number;
+    /** F03 — player reaction rolls: auto / savesChecksAuto / manual */
+    playerPendingRollMode: "auto" | "savesChecksAuto" | "manual";
   }
   /** E05 (D-146): the replicated world clock, seconds. */
   let clockSeconds = $state(0);
@@ -66,6 +69,7 @@
     autoResolveAoos: true,
     strategicSimultaneous: false,
     rollHighlightFadeSec: 4,
+    playerPendingRollMode: "savesChecksAuto",
   };
   // Initialize only after the defaults exist (opening the window executes this script).
   let rules = $state<RulesOptions>(DEFAULT_RULES);
@@ -95,6 +99,7 @@
       autoResolveAoos: autoResolveAoosOf(settings),
       strategicSimultaneous: strategicSimultaneousOf(settings),
       rollHighlightFadeSec: rollHighlightFadeSecOf(settings),
+      playerPendingRollMode: playerPendingRollModeOf(settings),
     };
   }
 
@@ -335,6 +340,24 @@
         }}
       />
       Strategic simultaneous (initiative = damage order)
+    </label>
+    <label>
+      Player reaction rolls
+      <select
+        data-world-player-pending-roll-mode
+        value={rules.playerPendingRollMode}
+        onchange={(e) => {
+          rules = {
+            ...rules,
+            playerPendingRollMode: (e.target as HTMLSelectElement).value as RulesOptions["playerPendingRollMode"],
+          };
+          applyRules({ playerPendingRollMode: rules.playerPendingRollMode });
+        }}
+      >
+        <option value="auto">Auto (host rolls)</option>
+        <option value="savesChecksAuto">Saves & checks auto (AoO/parry pending)</option>
+        <option value="manual">Manual (all pending)</option>
+      </select>
     </label>
   </div>
   <div class="row">

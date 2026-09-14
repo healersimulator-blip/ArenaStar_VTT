@@ -99,6 +99,30 @@ interface RollChallengeMsg {
 }
 ```
 
+### roll.pending (0x33 · client → host · ops)
+
+F03 — host-verified resolution of a pending player reaction roll. The
+table already shows the *shell* (who → what → target → DC + modifiers,
+no total); the owning player presses **Roll** on that chat card and the
+client sends `roll.pending` with the `messageId` of the pending card and
+the `seedClient` commitment (commit-reveal, same crypto as `roll`/
+`rollVerified`). The host validates the 2-round window + ownership +
+`shouldDeferToPlayer` predicate (auto/savesChecksAuto/manual + strategic
+gate), reveals with `seedHost`, evaluates `d20+mods` vs `DC`/`AC` through
+the same pure functions auto-rolls use, and submits one envelope
+`[pendingRoll resolved + follow-up message + ledgerOps]` atomically — so a
+rejected follow-up rolls the whole reaction back. GM Resolve uses the same
+path with host RNG.
+
+```ts
+interface RollPendingMsg {
+  kind: "roll.pending";
+  messageId: DocId;
+  seedClient: string;
+  seedClientCommit?: string;
+}
+```
+
 ### ephemeral (0x04 · both · ephemeral)
 
 Never persisted, rate-limited 20 Hz per peer (§5).

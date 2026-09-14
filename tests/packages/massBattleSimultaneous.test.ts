@@ -2,7 +2,6 @@ import { describe, expect, test } from "vitest";
 import { createMassBattlePf1e } from "../../src/packages/massBattlePf1e";
 import { PF1E_MODEL_SCHEMA } from "../../src/packages/pf1e/schema";
 import { createModelPool, allocModel } from "../../src/sim/pool";
-import { ModelStatus } from "../../src/core/strategic";
 import { XoshiroPRNG } from "../../src/sim/prng";
 import type { RulesContext, UnitView } from "../../src/core/rules";
 import type { OrderQueue } from "../../src/core/strategic";
