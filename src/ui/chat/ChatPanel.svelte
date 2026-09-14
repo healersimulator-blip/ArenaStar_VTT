@@ -293,6 +293,24 @@
           onPlayerReroll={() => handlePlayerReroll(message._id)}
           onHighlight={(kind: "initiator" | "target" | "area", id: string | null) => highlightFromLedger(ledger, kind, id)}
         />
+        {#if message.content}
+          <!-- F01: the card's narrative (hit/miss verdict, hp delta) is part of
+               the audit — render it under the card instead of swallowing it. -->
+          <p class="line rollcard" data-mode={message.rollMode ?? "roll"}>
+            <span class="author">{userName(message.author)}</span>
+            {#each richSegments(message.content) as segment, i (i)}
+              {#if segment.kind === "chip"}
+                <span class="chip" title={segment.chip}>{segment.text}</span>
+              {:else}
+                <!-- eslint-disable-next-line svelte/no-at-html-tags -- markdown is HTML-escaped by renderMarkdown before any transform -->
+                {@html segment.html}
+              {/if}
+            {/each}
+            {#if message.whisper.length > 0}
+              <span class="tag">🔒 {message.whisper.map(userName).join(", ")}</span>
+            {/if}
+          </p>
+        {/if}
         {#if message.roll}
           <p class="line rollcard" data-mode={message.rollMode ?? "roll"}>
             <span class="author">{userName(message.author)}</span>

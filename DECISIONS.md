@@ -5646,3 +5646,35 @@ Consequences:
 * e2e (`playwright`) remains un-runnable in this sandbox environment (no Chromium); verification is unit + typecheck + lint only until CI runs the e2e suite.
 
 Status: accepted 2026-09-14.
+
+## D-222 — 2026-09-14 — e2e executed via the documented workaround + PR #17/#16 audit
+
+Decision:
+* **E2e workaround recipe (verified 2026-09-14, replaces the stale D-020 paths).** D-020's `~/.toolchain` and `~/.pw-browsers` do not exist in this sandbox and the Playwright CDN is unreachable (egress allowlist = npmjs + github only). Working recipe in one block:
+  1. `corepack pnpm install --frozen-lockfile` (there is no `pnpm` shim; use `corepack pnpm`).
+  2. `mkdir -p ~/.chromium-shim && cd ~/.chromium-shim && npm init -y && npm install @sparticuz/chromium --no-save --ignore-scripts` — the npm package ships the brotli chromium (Chromium 153.0.8010.0 == Playwright 1.63's pinned 153.0.8010.x) and the Amazon Linux 2023 shared-lib pack.
+  3. `node -e 'import("@sparticuz/chromium").then(async m => console.log(await (m.default.default ?? m.default).executablePath()))'` → extracts to `/tmp/chromium`.
+  4. /tmp does not host the al2023 libs unless inflated: brotli-decompress `bin/al2023.tar.br` and `tar -xf` into `/tmp/al2023`.
+  5. Run with `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/chromium LD_LIBRARY_PATH=/tmp/al2023/lib:/tmp corepack pnpm exec playwright test --project=chromium` (playwright.config.ts honors the env var — that seam was the intent of D-020's successor).
+  6. `playwright` runs against `dist/index.html` (file://); **`pnpm build` wipes `dist/` (vite `emptyOutDir`), so every rebuild must be followed by `pnpm build:systems`** or the zip-dependent specs fail with a misleading `pf1e-core-1.0.0.zip missing`.
+* **PR #17 (A07/P04/Manyshot, commits `aadfe83/8fe23b3/2c221aa`) was a primary sloppiness source**, partially covered by D-221. Additional real defects found and fixed this round:
+  - `pf1eResolveFlow.ts` Manyshot ledger fabricated **every** arrow total (`?? 10` on a field that never existed on the arrow type) — fixed: `arrows[]` now carries the resolver's real `attackTotal`.
+  - `pf1eManeuverFlow.ts` `grapple-pin` rolled a **wasted d20** and posted a card with a fabricated `[[0|1d20 + CMB]]` check line — fixed: pin early-returns before the die roll with an honest narrative card (pin rides the maintain check, AoN 191).
+  - `ChatPanel.svelte` **swallowed the card narrative** — a ledger message rendered RollCard but never its `content` (hit/miss/CRITS + hp deltas), silently breaking four Pre-#18 e2e contracts (A06b resolve card, firearms misfire/reload lines) — fixed: the narrative `.line` renders under the card with roll chips.
+  - `PF1eActorSheet.svelte` `doFirearmReload` never cleared the **stale resolve refusal** — after the "no shot loaded" error a successful reload showed ammo 1/1 while the refusal stayed visible — fixed: success clears `resolveError` (the refusal's premise is gone).
+  - `e2e/pf1e_join.spec.ts` asserted `schema["ammo"] === undefined`, stale since PR #18's commit `96bc4f2` honestly added the D-219 `ammo: "u8"` mirror column — fixed to assert the expanded contract (`ammo`/`weaponState`).
+* **PR #16 (D-196–D-205 + code, commit `76d5d25`) is clean.** Spot-verified its untouched files (`positional.ts`, `movement.ts`, `injury.ts`, `mounted.ts`, `negativeLevels.ts`, `threatPreview.ts`, `recovery.ts`, `pf1eManeuver.ts`, `pf1eFirstAid.ts`, `pf1eDyingTick.ts`, `ThreatOverlayLayer.ts`, `pf1eResolvePosition.ts`): nullish defaults are mechanical (30 ft speed, 0,0 origin), no fabricated adjudication, `pf1eResolvePosition.ts` in particular is the intended "name every undecidable fact" pattern done right. Its D-188–D-205 consumers were among the lint-remediated files (D-221) but semantically sound.
+* **e2e result: 138/138 chromium specs pass** (including the four that were red pre-remediation at `efe8dc5`: `pf1e_firearms` misfire+reload, `pf1e_join`, `sheets` A06b). All five V10 gates green: test 2227 pass / 3 skipped, tsc clean, lint 0 errors, build ok, size 0.691 MB gzip.
+
+Context:
+* User asked for the documented Playwright workaround to be used (turning e2e green where possible) and for the two PRs before #18 (F01–F03) to be audited with the same bar.
+
+Alternatives considered:
+* Patching `vite.config` `emptyOutDir: false` to stop dist/packages wipes — rejected: behavior was already additive-safe in CI (`test:e2e` prepends `build:systems`); the footgun only bites ad-hoc runs, and the D-222 note + `test:e2e` script ordering is the documented contract.
+* Amending PR #18's history to move the join-spec fix there — rejected: history is squashed per PR; the fix rides this remediation commit with the commit-referenced audit trail instead.
+
+Consequences:
+* F01–F03's acceptance criterion "demoable in one build + build:systems + Chromium e2e" is now verifiably met in this environment (§13's open frontier: only the `combat_resolver_5.html` verbatim tie-breaker reconciliation remains).
+* Any environment with the same egress policy can repeat the six-step recipe; it is no longer tribal knowledge attached to a no-longer-existing `~/.toolchain`.
+
+Status: accepted 2026-09-14.
