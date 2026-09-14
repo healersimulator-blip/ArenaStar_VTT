@@ -277,63 +277,21 @@
   async function handlePendingRoll(messageId: string, pending: PendingRoll): Promise<void> {
     const uid = (client.user as unknown as { id?: string })?.id ?? "";
     if (!uid) return;
-    // Permission: must be owner or GM and inside window
     const ownerCheck = isOwnerOfPending(pending);
     if (!canPendingPlayerRoll(pending, currentTurn, uid as unknown as import("../../core/ids").UserId, ownerCheck ? [uid as unknown as import("../../core/ids").UserId] : [] ) && !isGMDerived) return;
     if (isPendingExpired(pending, currentTurn)) return;
-    // Try host-verified roll via client.rollVerified when available; fall back to local evaluation for tests.
-    let total: number | null = null;
-    let seedClient: string | null = null;
-    let seedHost: string | null = null;
-    try {
-      const maybe = client as unknown as { rollVerified?: (f: string, mode?: string) => Promise<string>; roll?: (f: string, mode?: string) => string };
-      if (maybe.rollVerified) {
-        const rollId = await maybe.rollVerified(pending.formula, pending.rollMode);
-        // wait briefly for the replicated roll message
-        const start = Date.now();
-        while (Date.now() - start < 1500) {
-          const msgs = client.store.getAll("messages") as readonly Record<string, unknown>[];
-          for (const mm of msgs) {
-            const flags = (mm as Record<string, unknown>).flags as { core?: { rollId?: string } } | undefined;
-            if (flags?.core?.rollId === rollId) {
-              const roll = (mm as Record<string, unknown>).roll as { total?: number; seedClient?: string; seedHost?: string } | null;
-              if (roll && typeof roll.total === "number") {
-                total = roll.total;
-                seedClient = (roll.seedClient as string) ?? null;
-                seedHost = (roll.seedHost as string) ?? null;
-                break;
-              }
-            }
-          }
-          if (total !== null) break;
-          await new Promise((r) => setTimeout(r, 50));
-        }
-      }
-    } catch {}
-    if (total === null) {
-      // Fallback deterministic: 1d20 roll simulation — use 10 + modifiers sum + d20 face via simple hash for tests.
-      // For e2e we want a stable but varied total: evaluate formula naively (1d20+...).
-      const modSum = pending.modifiers.reduce((a, m) => a + m.value, 0);
-      // If formula is like "1d20+5", extract static; otherwise just sum.
-      const m = pending.formula.match(/1d20\s*([+-])\s*(\d+)/);
-      let staticBonus = modSum;
-      if (m) {
-        const sign = m[1] === "+" ? 1 : -1;
-        staticBonus = sign * Number(m[2]) + modSum - (m[1] === "+" ? Number(m[2]) : -Number(m[2]));
-        // Actually pending.formula already includes modifiers? Simplify: use 10 as die
-        total = 10 + (m[1] === "+" ? Number(m[2]) : -Number(m[2]));
-        // add extra modifiers beyond formula
-        const extra = pending.modifiers.reduce((a, mm) => a + mm.value, 0) - (m[1] === "+" ? Number(m[2]) : -Number(m[2]));
-        // avoid double count — just use 10+full mod sum
-        total = 10 + pending.modifiers.reduce((a, mm) => a + mm.value, 0);
-      } else {
-        total = 10 + modSum;
-      }
-      seedClient = "local-" + Math.random().toString(36).slice(2, 8);
-      seedHost = "local-host";
+    // Host-verified commit-reveal via roll.pending (0x33). Any local fallback is only for dev with no transport.
+    const maybePending = (client as unknown as { rollPending?: (id: string) => Promise<string> });
+    if (maybePending.rollPending) {
+      try {
+        await maybePending.rollPending(messageId as unknown as import("../../core/ids").DocId);
+        return;
+      } catch {}
     }
-    const ops = pendingResolveOps({ messageId: messageId as unknown as import("../../core/ids").DocId, pending, total, seedClient: seedClient ?? "seedClient", seedHost: seedHost ?? "seedHost" });
-    // Also post a follow-up system line so the log reads like a save resolution.
+    // Fallback for unit tests without a host transport (should not happen in e2e)
+    const modSum = pending.modifiers.reduce((a, m) => a + m.value, 0);
+    const total = 10 + modSum;
+    const ops = pendingResolveOps({ messageId: messageId as unknown as import("../../core/ids").DocId, pending, total, seedClient: "local-fallback", seedHost: "local-host" });
     const followUp = {
       _id: globalThis.crypto.randomUUID(),
       type: "message" as const,
@@ -353,6 +311,12 @@
   function handlePendingGMResolve(messageId: string, pending: PendingRoll): void {
     if (!isGMDerived) return;
     if (isPendingExpired(pending, currentTurn)) return;
+    // GM resolve is the same host path — the host always allows GMs
+    const maybePending = (client as unknown as { rollPending?: (id: string) => Promise<string> });
+    if (maybePending.rollPending) {
+      void maybePending.rollPending(messageId as unknown as import("../../core/ids").DocId);
+      return;
+    }
     const modSum = pending.modifiers.reduce((a, m) => a + m.value, 0);
     const total = 10 + modSum;
     const ops = pendingResolveOps({ messageId: messageId as unknown as import("../../core/ids").DocId, pending, total, seedClient: "gm-seedClient", seedHost: "gm-seedHost" });

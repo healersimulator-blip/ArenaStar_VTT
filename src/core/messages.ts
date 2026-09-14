@@ -16,7 +16,7 @@ import type { SimEvent, TurnReport } from "./sim";
 export type { RollMode };
 
 /**
- * The 1-byte message-type prefix (§6.1/§13). 28 kinds — this map is the
+ * The 1-byte message-type prefix (§6.1/§13). 32 kinds — this map is the
  * single source of truth; PROTOCOL.md is kept in sync by a unit test.
  */
 export const MsgKind = {
@@ -113,6 +113,20 @@ export interface RollRevealMsg {
   kind: "roll.reveal";
   rollId: string;
   seedClient: string;
+}
+
+/**
+ * F03 — player pending roll resolution (commit-reveal, host-verified).
+ * The client sends the pending MessageId and its seed commitment; the host
+ * validates the 2-round window + ownership + shouldDefer predicate, reveals
+ * with seedHost, evaluates deterministically, and commits
+ * [pendingRoll resolved + follow-up + ledgerOps] atomically.
+ */
+export interface RollPendingMsg {
+  kind: "roll.pending";
+  messageId: DocId;
+  seedClient: string;
+  seedClientCommit?: string;
 }
 
 /** §5 ephemeral kinds: cursors, pings, drags, ruler, typing. */
@@ -380,6 +394,7 @@ export type WireMessage =
   | RollMsg
   | RollChallengeMsg
   | RollRevealMsg
+  | RollPendingMsg
   | EphemeralMsg
   | AssetGetMsg
   | FogPutMsg

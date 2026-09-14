@@ -14,7 +14,6 @@
  * Strategic mass-battle turns never use this gate (they have TurnReports).
  */
 
-import type { DocId } from "../../core/ids";
 import type { Op } from "../../core/ops";
 import type { RollMode } from "../../core/documents";
 import type { CoreWorldSettings } from "../../core/worldSettings";
@@ -49,7 +48,7 @@ export function pendingRollCreateOp(input: PendingRollGateInput): Op | null {
     kind: input.kind,
     targetIsPlayerOwned: input.targetIsPlayerOwned,
     worldSettings: input.worldSettings,
-    isStrategic: input.isStrategic,
+    ...(input.isStrategic !== undefined ? { isStrategic: input.isStrategic } : {}),
   });
   if (!defer) return null;
   const pending = buildPendingRoll({
@@ -60,8 +59,8 @@ export function pendingRollCreateOp(input: PendingRollGateInput): Op | null {
     dc: input.dc,
     modifiers: input.modifiers,
     turnNumber: input.turnNumber,
-    rollMode: input.rollMode,
-    area: input.area,
+    ...(input.rollMode !== undefined ? { rollMode: input.rollMode } : {}),
+    ...(input.area !== undefined ? { area: input.area } : {}),
   });
   const author = input.initiator.actorId as unknown as string;
   return {

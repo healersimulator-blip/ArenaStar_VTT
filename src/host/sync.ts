@@ -38,6 +38,13 @@ import type {
   WireMessage,
 } from "../core/messages";
 import { evaluateCommitRoll, randomSeedHex, sha256Hex } from "../dice/commitReveal";
+import { worldSettingsFrom } from "../core/worldSettings";
+import {
+  isPendingExpired,
+  shouldDeferToPlayer,
+  resolvePendingRoll as resolvePendingRollDoc,
+} from "../packages/pf1e/pendingRoll";
+import type { PendingRoll } from "../packages/pf1e/pendingRoll";
 import type { AssetId, PeerId, TxId, UserId } from "../core/ids";
 import { DocumentStore } from "../core/store";
 import { OpLog } from "../core/oplog";
@@ -438,6 +445,9 @@ export class HostSync {
         return;
       case "roll.reveal":
         this.handleRollReveal(session, msg as RollRevealMsg);
+        return;
+      case "roll.pending":
+        void this.handleRollPending(session, msg as unknown as import("../core/messages").RollPendingMsg);
         return;
       case "ephemeral":
         this.handleEphemeral(session, msg);
@@ -957,6 +967,179 @@ export class HostSync {
         false,
       );
     })();
+  }
+
+  // ─── F03 pending roll (roll.pending 0x33) ───────────────────────────────────
+
+  private currentTurnNumber(): number {
+    const combats = this.store.getAll("combats") as unknown as readonly Record<string, unknown>[];
+    if (combats.length > 0) {
+      const c0 = combats[0] as Record<string, unknown>;
+      const sys = (c0?.["system"] as Record<string, unknown> | undefined) ?? undefined;
+      const r = sys?.["round"];
+      if (typeof r === "number" && Number.isFinite(r)) return Math.trunc(r);
+      const t = sys?.["turn"];
+      if (typeof t === "number" && Number.isFinite(t)) return Math.trunc(t);
+    }
+    let max = 0;
+    const messages = this.store.getAll("messages") as unknown as readonly Record<string, unknown>[];
+    for (const m of messages) {
+      const sys = (m as { system?: { pendingRoll?: PendingRoll; rollLedger?: { turnNumber?: number } } }).system;
+      const pending = (sys as unknown as { pendingRoll?: PendingRoll } | undefined)?.pendingRoll;
+      if (pending && typeof pending.turnNumber === "number") max = Math.max(max, pending.turnNumber);
+      const ledger = (sys as unknown as { rollLedger?: { turnNumber?: number } } | undefined)?.rollLedger;
+      if (ledger && typeof ledger.turnNumber === "number") max = Math.max(max, ledger.turnNumber);
+    }
+    return max;
+  }
+
+  private async handleRollPending(
+    session: Session,
+    msg: import("../core/messages").RollPendingMsg,
+  ): Promise<void> {
+    if (!session.user) {
+      this.reject(session, String(msg.messageId), "forbidden", "not authenticated");
+      return;
+    }
+    if (!session.intentBucket.tryRemove()) {
+      this.reject(session, String(msg.messageId), "rate_limited", "roll rate exceeded");
+      return;
+    }
+    const doc = this.store.get("messages", String(msg.messageId)) as unknown as
+      | MessageDocument
+      | undefined;
+    if (!doc) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "pending card not found");
+      return;
+    }
+    const pending = (doc.system as unknown as { pendingRoll?: PendingRoll } | undefined)?.pendingRoll;
+    if (!pending) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "no pendingRoll on that message");
+      return;
+    }
+    if (pending.resolved) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "pending already resolved");
+      return;
+    }
+    const currentTurn = this.currentTurnNumber();
+    if (isPendingExpired(pending, currentTurn)) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "pending expired — window closed (2 rounds)");
+      return;
+    }
+    const isGM = session.user.role === "GM";
+    const targetActor = this.store.get("actors", pending.target.actorId) as unknown as
+      | { ownership?: Record<string, number> }
+      | undefined;
+    const ownership = targetActor?.ownership ?? null;
+    let isOwner = false;
+    if (ownership && typeof ownership === "object") {
+      const lvl = (ownership as Record<string, number>)[session.user.id];
+      if (typeof lvl === "number" && lvl >= 1) isOwner = true;
+    }
+    if (!isOwner && !isGM) {
+      this.reject(session, String(msg.messageId), "forbidden", "you do not own the target of this pending roll");
+      return;
+    }
+    // Validate shouldDefer predicate (mode + strategic gate). The card's existence
+    // already implies it was deferred, but the host re-checks so a forged
+    // manual save cannot be resolved when the world is in auto mode.
+    try {
+      const settingsDocs = this.store.getAll("settings");
+      const worldSettings = worldSettingsFrom(settingsDocs);
+      const targetIsPlayerOwned = (() => {
+        if (!ownership) return false;
+        for (const [key, lvl] of Object.entries(ownership as Record<string, number>)) {
+          if (key === "default") continue;
+          if (typeof lvl === "number" && lvl >= 1) return true;
+        }
+        return false;
+      })();
+      const isStrategic = false; // tactical only — strategic never creates pending cards (F02)
+      const should = shouldDeferToPlayer({
+        kind: pending.kind,
+        targetIsPlayerOwned,
+        worldSettings,
+        isStrategic,
+      });
+      // If the world is auto, pending should not have existed — refuse unless GM.
+      if (!should && !isGM) {
+        this.reject(session, String(msg.messageId), "forbidden", "that reaction is not pending in this world's mode");
+        return;
+      }
+    } catch {
+      // ignore predicate errors — window/ownership already gates
+    }
+    if (msg.seedClientCommit) {
+      const calc = await sha256Hex(msg.seedClient);
+      if (calc !== msg.seedClientCommit) {
+        this.reject(session, String(msg.messageId), "invalid_schema", "commit-reveal: commitment mismatch");
+        return;
+      }
+    }
+    if (!validateFormula(pending.formula).ok) {
+      this.reject(session, String(msg.messageId), "invalid_schema", `bad formula: ${pending.formula}`);
+      return;
+    }
+    const seedHost = randomSeedHex();
+    const evaluation = await evaluateCommitRoll(pending.formula, msg.seedClient, seedHost, undefined);
+    if (!evaluation.ok) {
+      this.reject(session, String(msg.messageId), "invalid_schema", evaluation.error);
+      return;
+    }
+    const total = evaluation.value.total;
+    const updated: PendingRoll = resolvePendingRollDoc(pending, {
+      total,
+      seedClient: msg.seedClient,
+      seedHost,
+    });
+    // follow-up message (public narrative — same shape ChatPanel used to synthesize locally)
+    const followUp: MessageDocument = {
+      _id: randomId(),
+      type: "message",
+      name: `${pending.target.name} ${pending.kind}`,
+      ownership: { default: OWNERSHIP_LEVELS.LIMITED },
+      flags: {},
+      system: {},
+      author: session.user.id,
+      content: `${pending.target.name} rolled ${String(total)} vs ${pending.dc !== null ? `DC ${pending.dc}` : "—"} — ${
+        pending.dc !== null && total >= pending.dc ? "Success" : pending.dc !== null && total < pending.dc ? "Failure" : "rolled"
+      } (${pending.formula})`,
+      whisper: [],
+      roll: null,
+      flavor: "",
+      rollMode: pending.rollMode,
+    };
+    // also post a rolled message for the dice log (so [[total|formula]] chips can be read)
+    const rollMessage: MessageDocument = {
+      _id: randomId(),
+      type: "message",
+      name: pending.formula,
+      ownership: { default: OWNERSHIP_LEVELS.LIMITED },
+      flags: { core: { rollId: String(msg.messageId) } },
+      system: {},
+      author: session.user.id,
+      content: pending.formula,
+      whisper: pending.rollMode === "gmroll" || pending.rollMode === "blindroll" ? [] : [],
+      roll: {
+        formula: pending.formula,
+        total,
+        terms: evaluation.value.terms,
+        seedClient: msg.seedClient,
+        seedHost,
+        ...(msg.seedClientCommit ? { commit: msg.seedClientCommit } : {}),
+      },
+      rollMode: pending.rollMode,
+      flavor: pending.initiator.actionLabel.slice(0, 300),
+    };
+    const ops: Op[] = [
+      { kind: "update", ref: { coll: "messages", id: String(msg.messageId) }, diff: { "system.pendingRoll": updated as unknown as Json } as Record<string, Json> },
+      { kind: "create", coll: "messages", data: rollMessage },
+      { kind: "create", coll: "messages", data: followUp },
+    ];
+    const committed = this.commitOps(ops, session.user.id, `pending-${String(msg.messageId)}`, false);
+    if (!committed.ok) {
+      this.reject(session, String(msg.messageId), "invariant", committed.error);
+    }
   }
 
   // ─── Ephemeral relay (§5) ───────────────────────────────────────────────────

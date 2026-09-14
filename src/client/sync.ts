@@ -287,6 +287,33 @@ export class ClientSync {
     return rollId;
   }
 
+  /**
+   * F03 — pending player reaction roll (commit-reveal, host-verified).
+   * The pending MessageId is the shell card; the host validates the 2-round
+   * window + ownership + shouldDefer predicate and evaluates deterministically
+   * from both seeds. Falls back to a plain pending resolve when crypto is
+   * unavailable — chat never blocks.
+   */
+  async rollPending(messageId: DocId): Promise<string> {
+    let seedClient: string;
+    let commit: string;
+    try {
+      seedClient = randomSeedHex();
+      commit = await sha256Hex(seedClient);
+    } catch {
+      // fallback to uncommitted seed — host will still accept without commit
+      seedClient = randomSeedHex();
+      commit = "";
+    }
+    this.send({
+      kind: "roll.pending",
+      messageId,
+      seedClient,
+      ...(commit ? { seedClientCommit: commit } : {}),
+    } as unknown as WireMessage);
+    return seedClient;
+  }
+
   /** §7: lazy asset fetch with resume; answered by asset.chunk frames. */
   requestAsset(assetId: AssetId, priority: AssetPriority = "scene", offset = 0): void {
     this.send({ kind: "asset.get", assetId, offset, priority });
