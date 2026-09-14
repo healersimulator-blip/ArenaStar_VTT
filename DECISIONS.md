@@ -5761,3 +5761,50 @@ Status: accepted 2026-09-14.
 **Alternatives rejected.** (1) Re-renumbering PF1eCondition bits above 8 — unnecessary: column separation already makes aliasing impossible and renumbering would churn every consumer/test for zero behavioral gain. (2) Adding a joiner-specific `pfCondition` e2e — the schema-generic decode is already covered by N02's executed e2e plus the codec round-trip test; a duplicate proves nothing the generic path does not. (3) Fabricating a `cmbSuccesses` source from unrelated counters — violates the honest-projection rule; refusal with the field kept initialized is the stated convention.
 
 **Evidence.** No code changes. Gates re-run on the final tree later this slice; box text in `PF1e_Unified_TODO.md` carries the per-item citations.
+
+## D-227 — 2026-09-15 — M01 landed: the strategic attack kernel is fully data-driven (Gap §2.4–2.10), one range rule, compound DR, weapon payloads from unit stats
+
+**Context.** M01 asked for the outstanding Gap rows 2.4–2.10 brought up to the verified
+contract with scale-specific fixtures — not a cross-scale equality gate. The engine already
+handled firearms misfire/ammo (P09/D-219), flat-footed columns, minimum-damage nonlethal and
+the defender-side DR fallback; what remained was the per-weapon data model and the
+range/damage/DR rules that read it.
+
+**What changed (schema.ts / combatEngine.ts / deploySeed.ts / actor.ts / bestiary.json).**
+
+- **§2.4** — damage splits into base (dice + static, multiplied on crit) and bonus dice
+  (energy/precision, rolled once). Minimum-damage nonlethal binds only the weapon blow.
+- **§2.5** — threat range is weapon data; `improvedCritical` doubles the width
+  (19–20 → 17–20, 18–20 → 15–20).
+- **§2.6** — iteratives are BAB + (Dex if ranged/firearm else Str) + the attack/AC size
+  modifier. The CMB/CMD ladder is a separate `specialSizeMod` raw field (default `sizeMod`),
+  mirroring the tactical `sizeModOverride`, so the two opposite-signed PF1e ladders can never
+  collide in one datum; the tactical parser prefers `specialSizeMod` for the override too.
+- **§2.7** — handedness Strength shares (1.5× two-handed / 0.5× off-hand, penalties never
+  halved; thrown keeps full Str to damage, dex to hit) and enhancement adds to damage.
+- **§2.8/§2.9** — ONE range rule for every weapon: −2 per full increment past the 1st, class
+  ceilings (thrown 5, projectile 10, early firearm 5, advanced firearm 10), touch window early
+  ≤1 / advanced ≤5; beyond the ceiling the attack is refused *before* being counted and before
+  a die is consumed (defender pointer advances).
+- **§2.9b(b)** — a broken weapon fights at −2 attack (attack line) and −2 damage (each critical
+  instance).
+- **§2.10** — compound DR requires every listed quality (AND, not first-match OR); the
+  +1/+3/+3/+4/+5 ladder covers the alignment row with the existing ALIGNMENT bit; weapon
+  alignment flags bypass `/alignment` regardless of enhancement; bonus dice always ignore DR
+  (energy dice are not weapon damage; precision is named exempt). `/epic` refused (DEVIATIONS).
+- **Data flow** — every knob is a numeric `stats` key (`weaponIsRanged`, `weaponHandedness`,
+  `weaponBonusDiceCount/Sides/TypeFlags`, ...) that `rawProfileFromUnit` maps into the raw
+  profile; Pack↔PRECREATED parity holds (pf1ePackage cross-check green).
+
+**Measured fixture movements (all intended).** PRECREATED Large units went −1 to hit (the old
++1 was the special ladder leaked into attacks); artillery to-hit +5→+4 (Dex) with real range
+penalties; paladin hero damage +5→+7 (enhancement now lands on damage). The 10k scale gate is
+unchanged at ~2.4–2.5 s.
+
+**Also fixed in flight:** a TS2322 in `tests/ui/armyModel.test.ts` from the M12/M14 slice
+(masked by a truncated `tail` pipeline in the 468100f gate run) — `reportWith` now takes the
+`Json` type; from this slice on, tsc is run with its own exit code checked.
+
+**Evidence.** 25 new discriminating fixtures (`pf1eAttackFidelity.test.ts`), each named for
+its SRD row; full suite **2267 passed / 3 skipped** across 199 files; typecheck (explicit)
+0, eslint 0.

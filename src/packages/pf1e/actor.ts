@@ -1171,7 +1171,13 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     dexMod: eff.dex,
     size,
     misc: cmbMisc + (resolved.mods.cmb ?? 0) + nl.cmb,
-    ...(sys.sizeMod !== undefined ? { sizeModOverride: sys.sizeMod } : {}),
+    ...(sys.specialSizeMod !== undefined || sys.sizeMod !== undefined
+      ? {
+          // D-227/M01: a block authoring both ladders uses the *special* one for CMB/CMD;
+          // the legacy single-`sizeMod` contract keeps its recorded override (§10.2 #2).
+          sizeModOverride: (sys.specialSizeMod ?? sys.sizeMod) as number,
+        }
+      : {}),
   });
   const cmdParts = cmdFrom({
     bab: baseAttack,
@@ -1181,7 +1187,9 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     misc: cmdMisc + (resolved.mods.cmd ?? 0) + nl.cmd,
     acTransfer: resolved.acTransfer,
     acPenalties: resolved.acPenalties,
-    ...(sys.sizeMod !== undefined ? { sizeModOverride: sys.sizeMod } : {}),
+    ...(sys.specialSizeMod !== undefined || sys.sizeMod !== undefined
+      ? { sizeModOverride: (sys.specialSizeMod ?? sys.sizeMod) as number }
+      : {}),
   });
 
   // 7. Attack lines (A.2/A.3).

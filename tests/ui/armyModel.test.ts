@@ -304,7 +304,7 @@ describe("analysisReportFromReports (M14/D-224) — analysis over real turn data
     killsCount: 1,
     ...over,
   });
-  const reportWith = (sheet: unknown): TurnReport => ({
+  const reportWith = (sheet: import("../../src/core/documents").Json): TurnReport => ({
     turn: 1,
     sceneId: "scene-1",
     subPhases: ["melee"],

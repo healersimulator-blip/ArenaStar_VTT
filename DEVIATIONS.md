@@ -38,3 +38,23 @@ they are not deviations *from* anything — they are non-rules):
   set/clear) per Gap List §5.
 - **Combat_Resolver_5 parity** is a metrics-compatibility reference for porting the old
   resolver's reports — it is not an SRD-fidelity claim and may not be cited as one.
+
+## D-227 additions (2026-09-15, M01 / Gap §2.4–2.10)
+
+- **DR `/epic` is refused, not approximated.** The CRB "Overcoming DR" ladder is now complete
+  through +5/alignment, but `PF1eDrType` is a u8 and every bit is allocated (magic, cold iron,
+  silver, adamantine, slashing, piercing, bludgeoning, alignment). No shipped content is
+  mythic, so an epic form would cost a new column for zero reachable behavior. Add it with a
+  column-widening decision if mythic content ever ships.
+- **DR `/alignment` collapses the four alignments to one bit.** The CRB's +5 row treats
+  "alignment" as a single rung, and the weapon side carries explicit good/evil/lawful/chaotic
+  flags; a defender's DR names only "an alignment". Per-alignment defender DR (DR/good vs
+  DR/evil) is not representable in the remaining bit space and is out of scope until content
+  needs it.
+- **Compound DR now requires every listed quality** ("magic and cold iron" stalls both a +1
+  steel sword and a mundane cold-iron sword). Previously the first-match OR treated compound
+  forms as satisfied by either half.
+- **Mass-battle ammunition/weapon-state are per-model columns** (`ammo`, `weaponState`), so
+  the UC p.135 explosion burst and the Gun-Training +2 misfire variant stay tactical-scale
+  notes; the mass scale books the second misfire of a broken early firearm as weapon
+  destruction (the same bit) — D-219's adopted variant stands.

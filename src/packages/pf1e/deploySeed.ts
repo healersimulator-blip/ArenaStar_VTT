@@ -43,6 +43,7 @@ export function rawProfileFromUnit(unit: UnitView): RawPF1eProfile {
     dexMod: num(s, "dexMod", 0),
     conMod: num(s, "conMod", 2),
     sizeMod: num(s, "sizeMod", 0),
+    specialSizeMod: num(s, "specialSizeMod", num(s, "sizeMod", 0)),
     fort: num(s, "fort", 4),
     ref: num(s, "ref", 4),
     will: num(s, "will", 2),
@@ -69,6 +70,80 @@ export function rawProfileFromUnit(unit: UnitView): RawPF1eProfile {
   if (s["casterLevel"] !== undefined) raw.casterLevel = s["casterLevel"];
   if (s["castingStatMod"] !== undefined) raw.castingStatMod = s["castingStatMod"];
   if (s["spellPenetration"] !== undefined) raw.spellPenetration = s["spellPenetration"];
+  // D-227/M01 — the authored weapon payload (Gap §2.4–2.10). Every knob is a numeric stat
+  // key so `stats: Record<string, number>` carries it end to end: `weaponIsRanged`,
+  // `weaponIsThrown`, `weaponIsFirearm`, `weaponIsEarlyFirearm`, `weaponMisfireMin`,
+  // `weaponRangeIncrement`, `weaponMaxIncrements`, `weaponHandedness` (0 one, 1 light, 2 two,
+  // 3 off-hand), `weaponImprovedCritical`, `weaponDamageDiceCount`, `weaponDamageDiceSides`,
+  // `weaponDamageMod`, `weaponCritMin`, `weaponCritMult`, `weaponEnhancement`,
+  // `weaponMaterial` (0 none, 1 cold iron, 2 silver, 3 adamantine), `weaponDamageType`
+  // (0 slashing, 1 piercing, 2 bludgeoning), `weaponBonusDiceCount`, `weaponBonusDiceSides`,
+  // `weaponBonusDiceTypeFlags`, `weaponBonusDicePrecision` and `weaponAlignmentFlags`
+  // (1 good, 2 evil, 4 lawful, 8 chaotic).
+  {
+    const w: NonNullable<RawPF1eProfile["weapon"]> = {};
+    let has = false;
+    const numField = (statKey: string, slot: keyof typeof w): void => {
+      const v = s[statKey];
+      if (typeof v === "number" && Number.isFinite(v)) {
+        (w as Record<string, number>)[slot] = v;
+        has = true;
+      }
+    };
+    const boolField = (statKey: string, slot: "isRanged" | "isThrown" | "isFirearm" | "isEarlyFirearm" | "improvedCritical"): void => {
+      const v = s[statKey];
+      if (typeof v === "number" && Number.isFinite(v)) {
+        w[slot] = v > 0;
+        has = true;
+      }
+    };
+    boolField("weaponIsRanged", "isRanged");
+    boolField("weaponIsThrown", "isThrown");
+    boolField("weaponIsFirearm", "isFirearm");
+    boolField("weaponIsEarlyFirearm", "isEarlyFirearm");
+    boolField("weaponImprovedCritical", "improvedCritical");
+    numField("weaponMisfireMin", "misfireMin");
+    numField("weaponRangeIncrement", "rangeIncrement");
+    numField("weaponMaxIncrements", "maxIncrements");
+    numField("weaponDamageDiceCount", "damageDiceCount");
+    numField("weaponDamageDiceSides", "damageDiceSides");
+    numField("weaponDamageMod", "damageMod");
+    numField("weaponCritMin", "critThreatMin");
+    numField("weaponCritMult", "critMultiplier");
+    numField("weaponEnhancement", "enhancementBonus");
+    const hand = s["weaponHandedness"];
+    if (typeof hand === "number" && Number.isFinite(hand)) {
+      w.handedness = (["one", "light", "two", "offHand"] as const)[Math.max(0, Math.min(3, Math.trunc(hand)))] ?? "one";
+      has = true;
+    }
+    const mat = s["weaponMaterial"];
+    if (typeof mat === "number" && Number.isFinite(mat)) {
+      w.material = (["none", "cold_iron", "silver", "adamantine"] as const)[Math.max(0, Math.min(3, Math.trunc(mat)))] ?? "none";
+      has = true;
+    }
+    const dtype = s["weaponDamageType"];
+    if (typeof dtype === "number" && Number.isFinite(dtype)) {
+      w.damageType = (["slashing", "piercing", "bludgeoning"] as const)[Math.max(0, Math.min(2, Math.trunc(dtype)))] ?? "slashing";
+      has = true;
+    }
+    const bc = s["weaponBonusDiceCount"];
+    const bs = s["weaponBonusDiceSides"];
+    if (typeof bc === "number" && Number.isFinite(bc) && typeof bs === "number" && Number.isFinite(bs)) {
+      w.bonusDice = {
+        count: Math.trunc(bc),
+        sides: Math.trunc(bs),
+        ...(typeof s["weaponBonusDiceTypeFlags"] === "number" ? { typeFlags: Math.trunc(s["weaponBonusDiceTypeFlags"] ?? 0) } : {}),
+        ...(s["weaponBonusDicePrecision"] ? { precision: true } : {}),
+      };
+      has = true;
+    }
+    const align = s["weaponAlignmentFlags"];
+    if (typeof align === "number" && Number.isFinite(align)) {
+      w.alignmentFlags = Math.trunc(align);
+      has = true;
+    }
+    if (has) raw.weapon = w;
+  }
   // SRD universal monster abilities (D-176): fast healing and regeneration are
   // per-round healing values, carried as plain numbers in the unit's stats.
   if (typeof s["fastHealing"] === "number" && Number.isFinite(s["fastHealing"])) {
