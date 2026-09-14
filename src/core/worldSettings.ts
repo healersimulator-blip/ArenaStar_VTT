@@ -38,6 +38,10 @@ export interface CoreWorldSettings {
    * combat tracker's round wrap); never local-only state.
    */
   clockSeconds?: number;
+  /** F02 — when true, strategic turns use simultaneous phasing (movement batch + initiative-ordered damage). */
+  strategicSimultaneous?: boolean;
+  /** F01 — how long the tactical roll-card area outline stays visible (1–10 s, default 4 s). */
+  rollHighlightFadeSec?: number;
   /** Anything a package defines; never stripped by core. Absent means "unset", not `undefined`. */
   [key: string]: Json;
 }
@@ -86,6 +90,16 @@ export function secondsPerRoundOf(settings: CoreWorldSettings): number {
 /** Clock advance on round wrap; on unless the world explicitly opts out. */
 export function advanceClockOnRoundOf(settings: CoreWorldSettings): boolean {
   return settings.advanceClockOnRound !== false;
+}
+
+export function strategicSimultaneousOf(settings: CoreWorldSettings): boolean {
+  return settings.strategicSimultaneous === true;
+}
+
+export function rollHighlightFadeSecOf(settings: CoreWorldSettings): number {
+  const v = settings.rollHighlightFadeSec;
+  if (typeof v !== "number" || !Number.isFinite(v)) return 4;
+  return Math.min(10, Math.max(1, Math.trunc(v)));
 }
 
 /** Values the settings bag may hold; objects/arrays would hide bugs from the diff, so they are refused. */
@@ -151,6 +165,25 @@ export function validateWorldSettingsPatch(patch: Record<string, unknown>): {
         return {
           ok: false,
           error: "clockSeconds must be between 0 and 3153600000",
+          clean: {},
+        };
+      }
+    }
+    if (key === "rollHighlightFadeSec") {
+      const n = typeof value === "number" ? value : NaN;
+      if (!Number.isFinite(n) || n < 1 || n > 10) {
+        return {
+          ok: false,
+          error: "rollHighlightFadeSec must be between 1 and 10",
+          clean: {},
+        };
+      }
+    }
+    if (key === "strategicSimultaneous") {
+      if (typeof value !== "boolean") {
+        return {
+          ok: false,
+          error: "strategicSimultaneous must be a boolean",
           clean: {},
         };
       }

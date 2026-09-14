@@ -71,7 +71,7 @@ export interface ArmyDocument extends BaseDocument {
 }
 
 export type TurnPhase = "orders" | "resolution" | "report";
-export type TurnMode = "stepwise" | "realtime";
+export type TurnMode = "stepwise" | "realtime" | "simultaneous";
 
 /** turns[] document (§4A). */
 export interface TurnDocument extends BaseDocument {

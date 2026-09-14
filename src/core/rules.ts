@@ -91,6 +91,8 @@ export interface RulesContext {
    */
   leaderActors: Record<DocId, Json>;
   worldSettings: Record<string, Json>;
+  /** F02 — TurnMode for the current turn (default "stepwise" when absent). */
+  turnMode?: import("./strategic").TurnMode;
 }
 
 /**
