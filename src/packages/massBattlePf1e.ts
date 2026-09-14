@@ -95,6 +95,24 @@ export const PF1E_MASS_SPELLS: Readonly<Record<string, PF1eMassSpellDef>> =
 /** Orders that omit `data.spell` cast this spell (backwards compatibility). */
 export const DEFAULT_MASS_SPELL_ID = "fireball";
 
+/** M10 — pack-driven spell catalog for caster order UIs (id, display name, AoE shape). */
+export function massBattleSpellCatalog(): Array<{
+  id: string;
+  spellName: string;
+  shape: string;
+}> {
+  return Object.entries(PF1E_MASS_SPELLS).map(([id, def]) => {
+    let spellName = id;
+    let shape = "circle";
+    const probe = parsePackSpellOrder({ entry: def.entry, casterLevel: 1 });
+    if (probe.ok && probe.order) {
+      spellName = probe.order.spellName;
+      shape = probe.order.shape;
+    }
+    return { id, spellName, shape };
+  });
+}
+
 /**
  * The unit-type stat lines the schema advertises. Movement points are the module's own
  * mass-battle abstraction (work-plan schema), resolved against the scene grid: a move
@@ -1001,14 +1019,18 @@ export function createMassBattlePf1e(
       // whichever unit happened to intern fourth.
       for (const unit of units) {
         if (!isHeroUnit(unit, ctx.leaderActors)) continue;
-        const anchor = unit.modelRange?.[0];
-        if (anchor === undefined) continue;
+        // M09 (D-230): the aura emanates from the leader's first LIVING model, so losing
+        // the leader silences it in the same turn (the bridge also dead-guards). Radius
+        // and bonus are authored unit stats, not hardcoded — worked-example values 30/+2
+        // remain the default when the unit carries none.
+        const anchor = anchorPosition(pool, unit);
+        if (anchor === null) continue;
         applyHeroLeadershipAuras({
           pool,
           grid,
-          heroModelIdx: anchor,
-          radius: 30,
-          moraleBonus: 2,
+          heroModelIdx: anchor.idx,
+          radius: unit.stats["leadershipRadius"] ?? 30,
+          moraleBonus: unit.stats["leadershipMoraleBonus"] ?? 2,
         });
       }
 

@@ -20,6 +20,12 @@ export interface LeadershipAuraResult {
 export function applyHeroLeadershipAuras(opts: LeadershipAuraOptions): LeadershipAuraResult {
   const { pool, grid, heroModelIdx, radius = 30, moraleBonus = 2 } = opts;
 
+  // M09 (D-230): a slain leader stops radiating — "leave formation or lose the leader
+  // removes benefits". Previously the aura kept emanating from the dead anchor because
+  // only the buffed models were filtered.
+  const heroStatus = pool.status[heroModelIdx] ?? 0;
+  if ((heroStatus & ModelStatus.dead) !== 0) return { buffedModels: [] };
+
   const hx = pool.x[heroModelIdx] ?? 0;
   const hy = pool.y[heroModelIdx] ?? 0;
   const heroUnitIdx = pool.unitIdx[heroModelIdx];

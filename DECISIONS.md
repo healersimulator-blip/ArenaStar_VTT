@@ -5884,3 +5884,30 @@ M07 overlay note (the `hp` overlay key) rather than a separate channel.
 asserting both the sim feed and the persisted stats (plus an untouched control unit),
 and the movement-during-turn reconciliation. Gates: tsc 0, eslint 0, host suite 15/15.
 
+## D-230 — 2026-09-15 — M09 closed: aura authored values, living-anchor, dead-leader guard
+
+**Context.** The leadership aura pass in `resolveTurn` anchored on `unit.modelRange[0]` —
+a slain leader kept radiating — and hardcoded the work-plan example values (30 ft, +2) at
+the call site. M09 asked for radius/bonuses from data, spatially eligible allies only,
+no per-turn accumulation, and same-turn removal when the leader falls or allies leave.
+
+**What changed.**
+- `applyHeroLeadershipAuras` dead-guards the anchor model itself (was: only the buffed
+  models were filtered) — losing the leader silences the aura even if the call site
+  forgets to skip.
+- `resolveTurn` anchors on the unit's first LIVING model (`anchorPosition`) and reads
+  `leadershipRadius`/`leadershipMoraleBonus` from unit stats; the worked-example 30/+2
+  stay as defaults (D-172: the SRD Leadership feat authors no aura, so these stats are
+  the B-document homebrew made editable).
+- Removal/stacking needed no new mechanics: `seedPF1ePool` already rewrites save/AC
+  columns from the profile above the aura pass every turn (documented in the comment),
+  and `queryPoint` already restricts buffs to same-unit living models in radius — a model
+  leaving the radius simply isn't in next turn's query, and its column was already reset.
+
+**Tests.** `pf1eHeroBridge.test.ts` (+3 as 4 new): dead leader radiates nothing; authored
+radius 5 ft buffs only the 2-ft ally (bonus 5 honored); enemy-unit model in radius
+untouched; seed→aura→seed→aura idempotence pins no-accumulation. Gates: tsc 0, eslint 0,
+41/41 on the touched suites.
+
+**Also in this commit:** `massBattleSpellCatalog()` + `CASTABLE_SPELLS` bundle export
+(M10 first piece: the pack spell dropdown data the caster-order UI will consume).

@@ -10,8 +10,15 @@
  * `export { rules as default }` (rather than `export default …`) is deliberate: it keeps the
  * local name visible to the rewrite step.
  */
-import { createMassBattlePf1e } from "../massBattlePf1e";
+import {
+  createMassBattlePf1e,
+  massBattleSpellCatalog,
+} from "../massBattlePf1e";
 
 const rules = createMassBattlePf1e();
+
+/** M10 — pack spell catalog for caster order dropdowns (stable, registry-driven). */
+export const CASTABLE_SPELLS: ReturnType<typeof massBattleSpellCatalog> =
+  massBattleSpellCatalog();
 
 export { rules as default };
