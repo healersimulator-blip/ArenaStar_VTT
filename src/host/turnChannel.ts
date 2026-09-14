@@ -61,6 +61,7 @@ import {
   turnSeed,
   type TurnEngineEffect,
 } from "./turnEngine";
+import { pendingPruneOps } from "../packages/pf1e/pendingRoll";
 
 export interface TurnChannelOptions {
   host: HostSync;
@@ -561,6 +562,12 @@ export class TurnChannel {
       ref: { coll: "turns", id: turnId },
       diff: { phase: "report", reportRef: `${this.sceneId}:${turnNumber}` },
     });
+    // F03: prune expired pending rolls (T+2 window) as part of the same envelope
+    try {
+      const msgs = [...this.store.getAll("messages")] as unknown as Array<{ _id: string; system?: { pendingRoll?: import("../packages/pf1e/pendingRoll").PendingRoll } }>;
+      const prune = pendingPruneOps(msgs as unknown as Parameters<typeof pendingPruneOps>[0], turnNumber);
+      if (prune.length > 0) forward.push(...prune);
+    } catch {}
     this.lastTurnDocId = turnId;
     const committed = this.host.commitSystem(forward);
     if (!committed.ok)
@@ -1014,6 +1021,13 @@ export class TurnChannel {
 
   private nextTurn(): void {
     this.reduce({ type: "turn.next" });
+    // F03: prune expired pending rolls on nextTurn (host path, non-panel)
+    try {
+      const turnNumber = currentTurnNumber(this.engine);
+      const msgs = [...this.store.getAll("messages")] as unknown as Array<{ _id: string; system?: { pendingRoll?: import("../packages/pf1e/pendingRoll").PendingRoll } }>;
+      const prune = pendingPruneOps(msgs as unknown as Parameters<typeof pendingPruneOps>[0], turnNumber);
+      if (prune.length > 0) this.host.commitSystem(prune);
+    } catch {}
   }
 
   private async undoTurn(): Promise<void> {

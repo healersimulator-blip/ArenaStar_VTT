@@ -113,13 +113,15 @@ test.describe("F01 roll ledger (Messages system.rollLedger v1)", () => {
       (globalThis as unknown as { __ledgerMsgId?: string }).__ledgerMsgId = msgId;
     });
 
-    const card = page.locator('[data-testid="roll-card"]');
+    const card = page.locator('[data-testid="roll-card"]').first();
     await expect(card).toBeVisible({ timeout: 10_000 });
     await expect(card.locator('[data-testid="roll-initiator"]')).toContainText("Valeros");
     await expect(card.locator('[data-testid="roll-target"]')).toContainText("Goblin");
-    await expect(card.locator('[data-testid="roll-modifiers"]')).toBeVisible();
+    await expect(card.locator('[data-testid="roll-modifiers"]').first()).toBeVisible();
+    // Modifiers live inside a closed <details> — open it before asserting the dropdowns.
+    await card.locator('[data-testid="roll-modifiers"]').first().locator('summary').click();
     await expect(card.locator('[data-testid="roll-modifier-dropdown"]').first()).toBeVisible();
-    await expect(card.locator('[data-testid="roll-add-modifier"]')).toBeVisible();
+    await expect(card.locator('[data-testid="roll-add-modifier"]').first()).toBeVisible();
     await expect(card.locator('[data-testid="roll-reroll"]')).toBeVisible();
     await expect(card.locator('[data-testid="roll-revert"]')).toBeVisible();
     await expect(card).toHaveAttribute("data-fade-sec", "5");

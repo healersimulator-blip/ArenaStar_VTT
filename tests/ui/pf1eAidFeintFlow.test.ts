@@ -59,7 +59,11 @@ class FakeClient implements AidFeintFlowClient {
   script: Array<{ die?: number; total: number }> = [];
   private seq = 0;
   readonly store = {
-    getAll: (coll: "messages"): readonly unknown[] => (coll === "messages" ? this.messages : []),
+    getAll: (coll: string): readonly unknown[] => {
+      if (coll === "messages") return this.messages as unknown as readonly unknown[];
+      if (coll === "settings") return [{ _id: "world-settings", type: "settings", name: "World Settings", ownership: { default: 1 }, flags: {}, system: { playerPendingRollMode: "auto" } }] as unknown as readonly unknown[];
+      return [];
+    },
   };
   roll(formula: string): string {
     this.formulas.push(formula);

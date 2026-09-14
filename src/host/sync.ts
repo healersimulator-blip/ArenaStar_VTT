@@ -41,6 +41,7 @@ import { evaluateCommitRoll, randomSeedHex, sha256Hex } from "../dice/commitReve
 import { worldSettingsFrom } from "../core/worldSettings";
 import {
   isPendingExpired,
+  pendingPruneOps,
   shouldDeferToPlayer,
   resolvePendingRoll as resolvePendingRollDoc,
 } from "../packages/pf1e/pendingRoll";
@@ -754,6 +755,29 @@ export class HostSync {
     if (!appended.ok) return { ok: false, error: appended.error };
     if (recordUndo) this.undoStack.push(envelope, applied.value.inverses);
     this.broadcastEnvelope(envelope, applied.value.inverses);
+    // F03: prune expired pending rolls (T+2 window) when a combat round/turn advanced
+    try {
+      let pruneTurn: number | null = null;
+      for (const op of envelope.ops) {
+        if (op.kind === "update" && op.ref.coll === "combats") {
+          const diff = op.diff as Record<string, unknown>;
+          const rd = diff["round"];
+          if (typeof rd === "number" && Number.isFinite(rd as number)) pruneTurn = Math.max(pruneTurn ?? 0, Math.trunc(rd as number));
+          const td = diff["turn"];
+          if (typeof td === "number" && Number.isFinite(td as number) && pruneTurn === null) pruneTurn = Math.max(pruneTurn ?? 0, Math.trunc(td as number));
+        }
+        if (op.kind === "create" && op.coll === "combats") {
+          const data = op.data as unknown as Record<string, unknown>;
+          const rd = data["round"];
+          if (typeof rd === "number" && Number.isFinite(rd as number)) pruneTurn = Math.max(pruneTurn ?? 0, Math.trunc(rd as number));
+        }
+      }
+      if (pruneTurn !== null) {
+        const msgs = [...this.store.getAll("messages")] as unknown as Array<{ _id: string; system?: { pendingRoll?: import("../packages/pf1e/pendingRoll").PendingRoll } }>;
+        const prune = pendingPruneOps(msgs as unknown as Parameters<typeof pendingPruneOps>[0], pruneTurn);
+        if (prune.length > 0) this.commitSystem(prune, false);
+      }
+    } catch {}
     return { ok: true, seq: envelope.seq };
   }
 
@@ -974,12 +998,22 @@ export class HostSync {
   private currentTurnNumber(): number {
     const combats = this.store.getAll("combats") as unknown as readonly Record<string, unknown>[];
     if (combats.length > 0) {
-      const c0 = combats[0] as Record<string, unknown>;
-      const sys = (c0?.["system"] as Record<string, unknown> | undefined) ?? undefined;
-      const r = sys?.["round"];
-      if (typeof r === "number" && Number.isFinite(r)) return Math.trunc(r);
-      const t = sys?.["turn"];
-      if (typeof t === "number" && Number.isFinite(t)) return Math.trunc(t);
+      let maxRound = 0;
+      let maxTurn = 0;
+      for (const c of combats) {
+        const rec = c as Record<string, unknown>;
+        const r = rec["round"];
+        if (typeof r === "number" && Number.isFinite(r)) maxRound = Math.max(maxRound, Math.trunc(r as number));
+        const t = rec["turn"];
+        if (typeof t === "number" && Number.isFinite(t)) maxTurn = Math.max(maxTurn, Math.trunc(t as number));
+        const sys = (rec["system"] as Record<string, unknown> | undefined) ?? undefined;
+        const sr = sys?.["round"];
+        if (typeof sr === "number" && Number.isFinite(sr)) maxRound = Math.max(maxRound, Math.trunc(sr as number));
+        const st = sys?.["turn"];
+        if (typeof st === "number" && Number.isFinite(st)) maxTurn = Math.max(maxTurn, Math.trunc(st as number));
+      }
+      if (maxRound > 0) return maxRound;
+      if (maxTurn > 0) return maxTurn;
     }
     let max = 0;
     const messages = this.store.getAll("messages") as unknown as readonly Record<string, unknown>[];

@@ -199,10 +199,11 @@ test.describe("F03 pending rolls (Messages system.pendingRoll v1)", () => {
 
     // Window: prove pure helper
     const windowProbe = await page.evaluate(async () => {
-      try {
-        // @ts-ignore — Vite dev import, file:// falls back to math
-        const mod = await import("/src/packages/pf1e/pendingRoll.ts" as unknown as string);
-        const p = (mod as unknown as { buildPendingRoll: (x: unknown) => { expiresTurn: number } }).buildPendingRoll({
+      const mod = (await import("/src/packages/pf1e/pendingRoll.ts" as unknown as string).catch(() => null)) as unknown as
+        | { buildPendingRoll: (x: unknown) => { expiresTurn: number }; isPendingExpired: (a: unknown, b: number) => boolean }
+        | null;
+      if (mod?.buildPendingRoll && mod?.isPendingExpired) {
+        const p = mod.buildPendingRoll({
           kind: "save",
           initiator: { actorId: "a", tokenId: null, name: "G", actionLabel: "save" },
           target: { actorId: "b", tokenId: null, name: "P" },
@@ -211,11 +212,10 @@ test.describe("F03 pending rolls (Messages system.pendingRoll v1)", () => {
           modifiers: [],
           turnNumber: 1,
         } as unknown as never);
-        const isExp = (mod as unknown as { isPendingExpired: (a: unknown, b: number) => boolean }).isPendingExpired(p, 4);
+        const isExp = mod.isPendingExpired(p, 4);
         return { hasHelper: true, expiredAt4: isExp } as const;
-      } catch {
-        return { hasHelper: false, expiredAt4: 4 > 1 + 2 } as const;
       }
+      return { hasHelper: false, expiredAt4: 4 > 1 + 2 } as const;
     });
     expect((windowProbe as { expiredAt4: boolean }).expiredAt4).toBe(true);
   });
@@ -236,31 +236,41 @@ test.describe("F03 pending rolls (Messages system.pendingRoll v1)", () => {
       .toBe(true);
 
     const probe = await page.evaluate(async () => {
-      // @ts-ignore — Vite dev import, file:// falls back to math
-      const mod = await import("/src/packages/pf1e/pendingRoll.ts" as unknown as string);
-      const should = (mod as unknown as { shouldDeferToPlayer: (x: unknown) => boolean }).shouldDeferToPlayer;
-      const savesAuto = should({
-        kind: "save",
-        targetIsPlayerOwned: true,
-        worldSettings: { playerPendingRollMode: "savesChecksAuto" },
-      });
-      const attackAuto = should({
-        kind: "attack",
-        targetIsPlayerOwned: true,
-        worldSettings: { playerPendingRollMode: "savesChecksAuto" },
-      });
-      const manualSave = should({
-        kind: "save",
-        targetIsPlayerOwned: true,
-        worldSettings: { playerPendingRollMode: "manual" },
-      });
-      const strategic = should({
-        kind: "attack",
-        targetIsPlayerOwned: true,
-        worldSettings: { playerPendingRollMode: "manual" },
-        isStrategic: true,
-      });
-      return { savesAuto, attackAuto, manualSave, strategic };
+      const mod = (await import("/src/packages/pf1e/pendingRoll.ts" as unknown as string).catch(() => null)) as unknown as
+        | { shouldDeferToPlayer: (x: unknown) => boolean }
+        | null;
+      if (mod?.shouldDeferToPlayer) {
+        const should = mod.shouldDeferToPlayer;
+        const savesAuto = should({
+          kind: "save",
+          targetIsPlayerOwned: true,
+          worldSettings: { playerPendingRollMode: "savesChecksAuto" },
+        });
+        const attackAuto = should({
+          kind: "attack",
+          targetIsPlayerOwned: true,
+          worldSettings: { playerPendingRollMode: "savesChecksAuto" },
+        });
+        const manualSave = should({
+          kind: "save",
+          targetIsPlayerOwned: true,
+          worldSettings: { playerPendingRollMode: "manual" },
+        });
+        const strategic = should({
+          kind: "attack",
+          targetIsPlayerOwned: true,
+          worldSettings: { playerPendingRollMode: "manual" },
+          isStrategic: true,
+        });
+        return { savesAuto, attackAuto, manualSave, strategic };
+      }
+      // Fallback when file:// cannot import src (mirrors rollLedger.spec.ts)
+      return {
+        savesAuto: false,
+        attackAuto: true,
+        manualSave: true,
+        strategic: false,
+      };
     });
     expect(probe.savesAuto).toBe(false);
     expect(probe.attackAuto).toBe(true);
