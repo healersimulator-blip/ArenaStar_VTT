@@ -5847,3 +5847,40 @@ residual DR), shared-checker parity (nat 20 + CL 5 vs SR 26 resisted; nat 1 vs S
 overcomes), cache no-die skip with a discriminating queue lead, per-caster independence.
 Full vitest 2275 (was 2267), tsc 0, eslint 0; 10k scale gate ~2.5 s unchanged.
 
+## D-229 — 2026-09-15 — M07 closed: leader-actor stats overlay + atomic write-back; M08 movement-during-turn race verified
+
+**Context.** M07 left "attack/defense inputs from the hero" open: the casting rider
+(D-168) proved leader docs could reach the strategic resolver, but hp/move/AC/DR/SR/saves/
+BAB/Str/Dex still came from hand-authored unit stats, and the binding itself had no UI.
+M08 left its movement-during-turn race test open.
+
+**Design — overlay at the choke point, write-back in the same envelope.**
+
+- `combatStatsFromLeaderActor` (massBattlePf1e.ts) derives the strategic stat block with
+  ONE `deriveFromDocuments` call — the same tactical derivation the tabletop engine and
+  the sheet use, so the mass-battle and the hero's own UI can never disagree about what
+  "the hero is". Keys deliberately match `rawProfileFromUnit` numeric names — no new
+  plumbing past `unit.stats`.
+- `TurnChannel.advance()` maps units across `ctx.leaderActors` and overlays before
+  `bridge.refresh`, so the sim runs on authoritative inputs exactly when they matter
+  (the G §4.12 advance gate), and `commitResolveEnvelope` persists the overlay as
+  `stats.*` update Ops in the same atomic commit as the battle diffs (M08's reconcile
+  contract). Hero keys replace same-key engine diffs by rebuild-then-overlay.
+- An `armyWindow` leader-select binds `leaderTokenId`; the token's `actorId` indirection
+  is the only new concept the UI needed (`sceneTokens()` lists actor-linked tokens of the
+  army's scene). Player hero-sheet access is unchanged: double-click the token, as before.
+  Ownership of writes is the host: `client.submit` → HostSync validate, same as orders.
+
+**M08 verification.** The new race test moves the leader token DURING a pending
+resolution and then lets the resolve complete: the anchor-sync op overwrites the move
+deterministically (sim-wins, matching syncHeroTokens), so the map never forks between
+the player's local action and the authoritative battle state. With the envelope already
+atomic and order-inputs snapshotted at advance (turn.advance → resolution phase lock),
+M08's ledger conditions are now all met; its remaining HP/condition narrative rides the
+M07 overlay note (the `hp` overlay key) rather than a separate channel.
+
+**Tests.** `tests/host/heroStatOverlay.test.ts` (4): pure mapping vs a live derivation
+(no hardcoded numbers), null-guard coverage, the full advance→envelope→doc round-trip
+asserting both the sim feed and the persisted stats (plus an untouched control unit),
+and the movement-during-turn reconciliation. Gates: tsc 0, eslint 0, host suite 15/15.
+

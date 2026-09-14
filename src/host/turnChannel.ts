@@ -63,6 +63,11 @@ import {
 } from "./turnEngine";
 import { pendingPruneOps } from "../packages/pf1e/pendingRoll";
 import { pruneOpsForWindow as rollLedgerPruneOps } from "../packages/pf1e/rollLedger";
+import {
+  combatStatsFromLeaderActor,
+  LEADER_STAT_OVERLAY_KEYS,
+  type LeaderActorStatOverlay,
+} from "../packages/massBattlePf1e";
 
 export interface TurnChannelOptions {
   host: HostSync;
@@ -465,8 +470,19 @@ export class TurnChannel {
     this.broadcastPhase();
     this.resolving = true;
     try {
-      const units = this.unitViews();
       const ctx = this.rulesCtx();
+      // M07 — hero-authored stats are the authoritative combat inputs (G §4.12). Units
+      // with a bound leader actor fight from the tactical derivation, not the legion
+      // defaults; the derived values are the `unit.stats` keys the profile loader reads.
+      const heroStats = new Map<string, LeaderActorStatOverlay>();
+      const units = this.unitViews().map((u) => {
+        const actor = ctx.leaderActors[u.id];
+        if (actor === undefined) return u;
+        const overlay = combatStatsFromLeaderActor(actor);
+        if (!overlay) return u;
+        heroStats.set(u.id, overlay);
+        return { ...u, stats: { ...u.stats, ...overlay } };
+      });
       this.bridge.refresh(ctx, units);
       const orders: Array<[UnitId, OrderQueue]> = units
         .filter(
@@ -480,7 +496,7 @@ export class TurnChannel {
         ctx,
         units,
       );
-      this.commitResolveEnvelope(units, result, turnNumber);
+      this.commitResolveEnvelope(units, result, turnNumber, heroStats);
       await this.syncHeroTokens();
       this.engine = turnEngineReduce(
         this.engine,
@@ -518,6 +534,7 @@ export class TurnChannel {
     units: UnitView[],
     result: SimResolveResult,
     turnNumber: number,
+    heroStats?: ReadonlyMap<string, LeaderActorStatOverlay>,
   ): void {
     const forward: Op[] = [];
     const inverse: Op[] = [];
@@ -542,6 +559,57 @@ export class TurnChannel {
       }
       forward.push({ kind: "update", ref, diff });
       inverse.unshift({ kind: "update", ref, diff: inv });
+    }
+    // M07 — persist the hero-authored combat inputs for every unit the overlay actually
+    // applied to this turn, keyed to keys where the document still carries the legion
+    // defaults. The write-back is part of the SAME resolve envelope (one atomic commit)
+    // so it is as authoritative as the battle result itself. Hero keys win over any
+    // same-key engine diff.
+    if (heroStats) {
+      for (const [unitId, overlay] of heroStats) {
+        const army = armyOf(unitId);
+        if (!army) continue;
+        const docUnit = army.units.find((u) => u._id === unitId);
+        if (!docUnit) continue;
+        const diff: Record<string, number | null> = {};
+        const inv: Record<string, number | null> = {};
+        const keys: Array<keyof LeaderActorStatOverlay> = [];
+        for (const k of LEADER_STAT_OVERLAY_KEYS) {
+          const v = overlay[k];
+          const docV = docUnit.stats[k] ?? 0;
+          if (v !== docV) {
+            keys.push(k);
+            diff[`stats.${k}`] = v;
+            inv[`stats.${k}`] = docV;
+          }
+        }
+        if (keys.length === 0) continue;
+        const ref = {
+          coll: "units" as const,
+          id: unitId,
+          parent: { coll: "armies" as const, id: army._id },
+        };
+        // Replace any same-key engine diff in this envelope rather than stacking two ops.
+        const existing = forward.find(
+          (op) =>
+            op.kind === "update" &&
+            op.ref.coll === "units" &&
+            op.ref.id === unitId,
+        );
+        if (existing && existing.kind === "update") {
+          // Hero keys replace same-key engine values: rebuild without them, then overlay.
+          const pruned: Record<string, number | null> = {};
+          for (const [dk, dv] of Object.entries(
+            existing.diff as Record<string, number | null>,
+          )) {
+            if (!keys.some((kk) => `stats.${kk}` === dk)) pruned[dk] = dv;
+          }
+          existing.diff = { ...pruned, ...diff };
+        } else {
+          forward.push({ kind: "update", ref, diff });
+        }
+        inverse.unshift({ kind: "update", ref, diff: inv });
+      }
     }
     for (const [unitId, range] of result.rangeDiffs) {
       const army = armyOf(unitId);

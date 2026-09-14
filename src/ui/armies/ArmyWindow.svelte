@@ -111,6 +111,36 @@
     selection = new SvelteSet(ids);
   }
 
+  // ── M07 (D-229) — leader binding. Every "unit led by a hero" starts here: the
+  // token's linked actor becomes the unit's combat inputs. Player hero sheet
+  // visibility is a click on the bound row. ────────────────────────────────────
+  function setLeader(unit: UnitDocument, tokenId: string): void {
+    client.submit([
+      {
+        kind: "update",
+        ref: { coll: "units", id: unit._id, parent: { coll: "armies", id: armyId } },
+        diff: { leaderTokenId: tokenId.length > 0 ? tokenId : null },
+      },
+    ]);
+  }
+
+  function sceneTokens(): Array<{ _id: string; name: string; actorId?: string }> {
+    const doc = army();
+    const unitSceneId = doc?.units[0]?.sceneId ?? null;
+    const out: Array<{ _id: string; name: string; actorId?: string }> = [];
+    const scenes = client.store.getAll("scenes") as Array<{
+      _id: string;
+      tokens?: Array<{ _id: string; name: string; actorId?: string }>;
+    }>;
+    for (const scene of scenes) {
+      if (unitSceneId && scene._id !== unitSceneId) continue;
+      for (const t of scene.tokens ?? []) {
+        if (t.actorId) out.push({ _id: t._id, name: t.name });
+      }
+    }
+    return out;
+  }
+
   function toggleSelect(id: string, ev: Event): void {
     const next = new SvelteSet(selection);
     if ((ev.currentTarget as HTMLInputElement).checked) next.add(id);
@@ -483,6 +513,18 @@
                   {#if cols.has("morale")}<span class="c dim">{row.unit.stats.morale ?? 0}</span
                     >{/if}
                   {#if cols.has("live")}<span class="c live">{row.liveStrength ?? "–"}</span>{/if}
+                  <select
+                    class="c leader"
+                    title="Bind a hero token: the leader's actor sheet becomes this unit's combat inputs (M07)"
+                    value={row.unit.leaderTokenId ?? ""}
+                    onchange={(ev) => setLeader(row.unit, (ev.currentTarget as HTMLSelectElement).value)}
+                    data-unit-leader={row.unit._id}
+                  >
+                    <option value="">— no leader —</option>
+                    {#each sceneTokens() as t (t._id)}
+                      <option value={t._id}>{t.name}</option>
+                    {/each}
+                  </select>
                 </div>
               {:else if row.kind === "model"}
                 <div class="row model" style:height={`${ROW_H}px`}>

@@ -1842,6 +1842,86 @@ export function sizeFromLeaderActor(actorJson: unknown): string | null {
  * Returns null — and the caller keeps the unit-stats profile — when the document is
  * missing, unparseable, or the actor is not a caster (`spellCasterLevel` 0).
  */
+/**
+ * M07 — tactical authored stats that the strategic unit profile consumes. Authoritative
+ * attack/defense inputs for a hero-led unit, derived from the leader's ActorDocument with
+ * the same `deriveFromDocuments` the tabletop engine uses (G §4.12: the hero drives the
+ * strategic profile through tactical numbers).
+ */
+export interface LeaderActorStatOverlay {
+  /** `attributes.hp.max`. */
+  hp: number;
+  /** `attributes.speed.base.total` × 5 ft-per-square conversion at the deploy grain. */
+  move: number;
+  touchAc: number;
+  drVal: number;
+  sr: number;
+  fort: number;
+  ref: number;
+  will: number;
+  bab: number;
+  strMod: number;
+  dexMod: number;
+}
+
+/**
+ * M07 (D-229) — read every strategic-consumed authored stat from the leader's actor
+ * document. The mapping is one tactical derivation call; numeric keys match
+ * `rawProfileFromUnit`, so a merged `unit.stats` update feeds deploy-seed and profile
+ * reload with no further plumbing. Returns null (caller keeps the unit's authored stats)
+ * when the document is missing or unparseable.
+ */
+export function combatStatsFromLeaderActor(
+  actorJson: unknown,
+): LeaderActorStatOverlay | null {
+  const doc =
+    typeof actorJson === "object" &&
+    actorJson !== null &&
+    !Array.isArray(actorJson)
+      ? (actorJson as Record<string, unknown>)
+      : null;
+  if (doc === null) return null;
+  const system =
+    typeof doc.system === "object" &&
+    doc.system !== null &&
+    !Array.isArray(doc.system)
+      ? (doc.system as Record<string, unknown>)
+      : null;
+  if (system === null) return null;
+  const derived = deriveFromDocuments({ actor: { system } });
+  return {
+    hp: derived.hpMax,
+    move: derived.speedFt,
+    touchAc: derived.ac.touch,
+    drVal: derived.dr,
+    sr: derived.spellResistance,
+    fort: derived.saves.fort,
+    ref: derived.saves.ref,
+    will: derived.saves.will,
+    bab: derived.baseAttack,
+    strMod: derived.abilityMods.str,
+    dexMod: derived.abilityMods.dex,
+  };
+}
+
+/**
+ * Numeric keys written by `combatStatsFromLeaderActor` — the write-back complement used
+ * to persist hero-authored stats into the Unit document inside the resolve envelope.
+ */
+export const LEADER_STAT_OVERLAY_KEYS: ReadonlyArray<keyof LeaderActorStatOverlay> = [
+  "hp",
+  "move",
+  "touchAc",
+  "drVal",
+  "sr",
+  "fort",
+  "ref",
+  "will",
+  "bab",
+  "strMod",
+  "dexMod",
+];
+
 export function casterInputsFromLeaderActor(actorJson: unknown): {
   casterLevel: number;
   keyAbilityMod: number;
