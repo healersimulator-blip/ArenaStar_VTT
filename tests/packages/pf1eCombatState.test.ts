@@ -729,3 +729,45 @@ describe("P7/H01/D-204 — the dying round's stabilization obligation", () => {
     ).toEqual([]);
   });
 });
+
+import { checkPositionalSurprise, type PositionalSurpriseCheck } from "../../src/packages/pf1e/combatState";
+
+describe("C06 — checkPositionalSurprise with distance and sensory modes", () => {
+  test("distance penalty allows ambusher to succeed where normal check would fail", () => {
+    // Normal check: Stealth 15 vs Perception 18 -> Defender notices
+    // Positional check at 40 ft: Stealth 15 + 4 (distance) = DC 19 vs Perception 18 -> Defender fails!
+    const check: PositionalSurpriseCheck = {
+      attackers: {
+        goblin1: { stealthRoll: 15, distanceFt: 40 },
+      },
+      defenders: {
+        fighter: { perceptionTotal: 18 },
+      },
+    };
+
+    const outcome = checkPositionalSurprise(["fighter"], check);
+    expect(outcome.surpriseRound).toBe(true);
+    expect(outcome.flatFooted).toEqual(["fighter"]);
+    expect(outcome.aware).toEqual(["goblin1"]);
+  });
+
+  test("Tremorsense alerts defender to grounded ambusher even with high stealth", () => {
+    const check: PositionalSurpriseCheck = {
+      attackers: {
+        assassin: { stealthRoll: 35, distanceFt: 30, grounded: true },
+      },
+      defenders: {
+        dwarf: {
+          perceptionTotal: 12,
+          senses: [{ kind: "tremorsense", rangeFt: 60 }],
+        },
+      },
+    };
+
+    const outcome = checkPositionalSurprise(["dwarf"], check);
+    // Dwarf's Tremorsense detects assassin -> Dwarf is aware!
+    expect(outcome.surpriseRound).toBe(false);
+    expect(outcome.note).toContain("every defender noticed");
+    expect(outcome.aware).toContain("dwarf");
+  });
+});

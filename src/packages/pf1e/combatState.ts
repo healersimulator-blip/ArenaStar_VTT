@@ -1208,3 +1208,80 @@ export function clockRounds(state: PF1eRoundState): number {
 export function minutesElapsed(state: PF1eRoundState): number {
   return Math.floor(state.clockSeconds / 60);
 }
+
+// ─── C06: Positional Stealth vs Perception Ambush Integration ───────────────────
+
+import {
+  
+  evaluateDetection,
+  type StealthSubjectFacts,
+  type ObserverPerceptionFacts,
+} from "./stealthPerception";
+
+export interface PositionalSurpriseCheck {
+  /** Attacker id -> facts about their stealth roll, distance, and cover */
+  attackers: Record<string, StealthSubjectFacts>;
+  /** Defender id -> facts about their perception and sensory modes */
+  defenders: Record<string, ObserverPerceptionFacts>;
+}
+
+/**
+ * Enhanced C06 checkSurprise:
+ * Evaluates whether defenders detect ambushers considering distance (+1 DC / 10 ft),
+ * cover bonuses (+10 improved cover), environmental conditions, and sensory modes (Tremorsense/Blindsight/Scent).
+ */
+export function checkPositionalSurprise(
+  targetIds: readonly string[],
+  check: PositionalSurpriseCheck,
+): SurpriseOutcome {
+  const attackerIds = Object.keys(check.attackers);
+  if (attackerIds.length === 0 || targetIds.length === 0) {
+    return {
+      surpriseRound: false,
+      flatFooted: [],
+      aware: [],
+      note: "no stealth vs perception comparison was made",
+    };
+  }
+
+  const unaware: string[] = [];
+  const awareDefenders: string[] = [];
+
+  for (const targetId of targetIds) {
+    const observer = check.defenders[targetId];
+    if (!observer) {
+      unaware.push(targetId);
+      continue;
+    }
+
+    // A defender is aware if they detect ANY ONE attacker
+    let noticedAny = false;
+    for (const attackerId of attackerIds) {
+      const subject = check.attackers[attackerId];
+      if (!subject) continue;
+      const res = evaluateDetection(subject, observer);
+      // Either seen or located counts as noticing an ambusher
+      if (res.detected && res.awareness !== "none") {
+        noticedAny = true;
+        break;
+      }
+    }
+
+    if (noticedAny) {
+      awareDefenders.push(targetId);
+    } else {
+      unaware.push(targetId);
+    }
+  }
+
+  const aware = [...attackerIds, ...awareDefenders];
+  if (unaware.length === 0) {
+    return {
+      surpriseRound: false,
+      flatFooted: [],
+      aware,
+      note: "every defender noticed an attacker — no surprise round",
+    };
+  }
+  return { surpriseRound: true, flatFooted: unaware, aware, note: null };
+}

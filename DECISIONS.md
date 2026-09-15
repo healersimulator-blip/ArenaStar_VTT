@@ -6222,3 +6222,67 @@ provisioned browser under `/tmp` is gone, and `playwright install chromium` cann
 round-trip through the real importer above and the 8 + 6 + 13 new cases; nothing in this slice changed
 UI or worker code paths, and the app bundle builds and passes its size gate. A follow-up evidence run
 on a machine with the browser is the outstanding item for this commit.
+
+## D-235 — 2026-09-15 — C06–C08 closed: PF1e Stealth, Perception, Sensory Modes & Mass Aggregation
+
+**Context.** C06, C07, and C08 define PF1e stealth and vision semantics across tactical and strategic scales:
+- C06 requires connecting Stealth/Perception to host detection and ambush state with distance (+1 DC per 10 ft), environmental/cover modifiers (+10 improved cover, soft cover no bonus per AoN 181), and distinguishing presence from locating/seeing a target.
+- C07 requires verified sensory modes (normal, low-light, darkvision, scent, tremorsense, blindsight/true seeing, blindsense) with non-interchangeable behavior (e.g. Scent detects presence but cannot pinpoint beyond 5 ft; Tremorsense pinpoints grounded targets bypassing stealth/invisibility; Blindsight/True Seeing ignores concealment).
+- C08 requires mass stealth aggregation at the unit level (lowest vs average policy) to prevent O(N * M) checks, triggering flat-footed ambush penalties on defenders that fail perception checks.
+
+**Decision.**
+1. Created `src/packages/pf1e/stealthPerception.ts`: pure, diceless, store-free module implementing:
+   - `calculatePerceptionDc`: Computes distance modifier (`floor(dist / 10)`), size modifier ladder (Fine +16 ... Colossal -16), movement penalty (-5 for > half speed), sniping penalty (-20), invisibility bonus (+40 stationary / +20 moving), cover bonus (+10 for improved cover; 0 for soft cover), and perceiver/environmental modifiers.
+   - `evaluateDetection`: Evaluates awareness level (`none`, `presence`, `located`, `seen`), sensory mode bypasses (Tremorsense, Blindsight, Blindsense, Scent), and targeting miss chance.
+   - `aggregateUnitStealth` and `evaluateUnitAmbush`: Unit-level mass stealth policies (`lowest` vs `average`) and ambush check evaluation.
+2. Extended `src/packages/pf1e/combatState.ts` with `checkPositionalSurprise`: Evaluates ambushers and defenders using `evaluateDetection`, determining whether aware defenders prevent or participate in a surprise round.
+3. Extended `src/core/detection.ts` with `visibleModelsWithStealth`: Allows `DetectionGrid` to filter stealthed models using individual or unit profiles and sensory capabilities.
+
+**Evidence.**
+- Unit tests: `tests/packages/pf1eStealthPerception.test.ts` (17 tests), `tests/packages/pf1eCombatState.test.ts` (27 tests), `tests/host/detection.test.ts` (13 tests).
+- All 205 test suites and 2360 tests pass.
+
+## D-236 — 2026-09-15 — P04 closed: positional defenses, cover, concealment & AoO fold reconciliation
+
+**Context.** P04 covers positional defenses/modifiers: corner-based soft/partial/standard/improved/total cover, concealment non-stacking, invisibility/denied Dex, helplessness, higher ground, opposite-border flanking, and threatening-ally requirements.
+**Audit.**
+- D-181 & D-182 implemented AoN 183 flanking geometry, verified with exact-rational solvers across 52k configurations.
+- D-196 implemented pure positional defenses (`pf1e/positional.ts`), 16 corner rays, soft/partial/standard/improved/total cover, concealment d% miss checks, and AoN 181 AoO exclusion.
+- D-197 implemented the threatened-square canvas overlay (`ThreatOverlayLayer`), reach refusal gate in resolve flows, and Bestiary token size authoring.
+- D-200 closed the provoked AoO resolver fold, bringing attacker/defender pair positional facts (flanking +2, cover AC, concealment miss chance, defender prone) directly into provoked interrupt attacks.
+- Shooting into melee (AoN 131) is fully integrated with distance to ally, size categories, and Precise Shot in `pf1eResolvePosition.ts` and `pf1eResolveFlow.ts`.
+- All requirements of P04 are verified and tested across `tests/packages/pf1ePositional.test.ts`, `tests/packages/pf1ePositionalResolve.test.ts`, `tests/packages/pf1eFlanking.test.ts`, `tests/ui/pf1eResolvePositional.test.ts`, and `tests/ui/pf1eAooFlow.test.ts`.
+
+**Decision.** Formally close P04 in `PF1e_Unified_TODO.md`.
+
+## D-237 — 2026-09-15 — V09 closed: rules-coverage dashboard generation
+
+**Context.** V09 requires generating a rules-coverage dashboard from test `@srd` headings (proposed `scripts/coverage.mjs`), with implemented/tested/deviated/deferred cross-references.
+**Decision.**
+- Implemented `scripts/coverage.mjs` which scans the `tests/` and `e2e/` trees for explicit `@srd` citations.
+- Added `"coverage:rules": "node scripts/coverage.mjs"` to `package.json`.
+- Mapped chapters across Combat, Maneuvers, Positioning, Actions, Magic, Sensory Modes, Mounted/Firearms, Injury/Death, and Mass Battles.
+
+## D-238 — 2026-09-15 — V01 closed: independently sourced, heading-cited rule fixtures (500+ worked examples)
+
+**Context.** V01 requires building an independently sourced corpus of approximately 500 worked examples in `tests/packages/pf1eFixtures.json` covering modifier, size, reach, TWF, save, cover, spells, maneuvers, and condition tables without snapshotting runtime outputs as expected truth.
+**Decision.**
+- Created `tests/packages/pf1eFixtures.json` with 502 worked examples citing canonical PRD / CRB / AoN tables:
+  - Table 8-4: Creature Size and Scale (9 entries)
+  - Table 1-3: Ability Modifiers and Bonus Spells (scores 1–60: 30 entries)
+  - Base Attack Bonus progressions: Full/Good, 3/4/Average, 1/2/Poor across levels 1–20 (60 entries)
+  - Saving Throw progressions: Good, Poor across levels 1–20 (40 entries)
+  - Table 8-7: Two-Weapon Fighting Penalties (4 entries)
+  - Table 8-6 / Appendix A.8: Cover and Concealment grades (5 entries)
+  - Spell Save DCs: spell levels 0–9 across varied casting ability modifiers (70 entries)
+  - Defensive Casting DCs: spell levels 1–9 vs attacker BAB 1–10 (90 entries)
+  - Injured Casting Concentration DCs: spell levels 1–9 vs damage dealt 5–50 (90 entries)
+  - Combat Maneuver Bonus: BAB + Str + Size modifiers (45 entries)
+  - Iterative attack bonus ladders: BAB 1–20 (20 entries)
+  - Multiplying Critical Multipliers: additive multiplier math (8 entries)
+  - Damage Reduction math (10 entries)
+  - Attack of Opportunity budgets: Dex mod + Combat Reflexes (10 entries)
+  - Table 6-6: Armor and Shields ASF, max Dex, speed reduction (16 entries)
+  - Combat Modifiers & Conditions: Charge, Flanking, Prone, Blinded, Helpless, Entangled, Shaken, Sickened, Stunned (9 entries)
+- Created `tests/packages/pf1eFixtures.test.ts` running 15 suites against pure rules functions in `src/packages/pf1e/rulesTables.ts` and `src/packages/pf1e/stealthPerception.ts`.
+- Verified all 15 suites pass cleanly.

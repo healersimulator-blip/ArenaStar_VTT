@@ -17,7 +17,8 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "size": "node scripts/size.mjs",
-    "build:systems": "node scripts/buildSystemPackages.mjs"
+    "build:systems": "node scripts/buildSystemPackages.mjs",
+    "coverage:rules": "node scripts/coverage.mjs"
   },
   "dependencies": {
     "@msgpack/msgpack": "^3.1.3",
