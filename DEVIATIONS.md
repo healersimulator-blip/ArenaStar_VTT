@@ -58,3 +58,54 @@ they are not deviations *from* anything — they are non-rules):
   the UC p.135 explosion burst and the Gun-Training +2 misfire variant stay tactical-scale
   notes; the mass scale books the second misfire of a broken early firearm as weapon
   destruction (the same bit) — D-219's adopted variant stands.
+
+
+## D-233/D-234 additions (2026-09-15, M15/M16 content coverage)
+
+Content gaps that are **coverage limits of the R02 corpus**, not deviations from a rule: each is a
+number the transcribed appendix does not carry, recorded here so nobody reads its absence as an
+error in the packs. `tests/packages/pf1eContentPacks.test.ts` asserts the shape of every claim below.
+
+- **Bestiary entries are unit-role mirrors, not published stat lines.** The Gap List appendices
+  contain no creature entries, so the pack authors `size/HD/progression/saves-quality/ability
+  modifiers/natural armor/armor/shield/speed/CR/attack dice` and derives BAB, saves, AC and touch AC
+  from `rulesTables.ts` — the same tables the resolver uses. Transcribing a named creature's stat
+  block from memory would be D-1-class invention; if a future slice buys a licensed stat block, the
+  row shape already has a `mirror.derived` field for its citation.
+- **No prices, weights or per-item armor numbers in the equipment pack.** The corpus's Appendix A.7/
+  A.8 rows carry mechanics (damage, crit range, range increment, properties) but list cost and weight
+  as `—`, and the CRB armor tables (max Dex bonus, armor check penalty, arcane spell failure,
+  armored speed by armor category) were transcribed only as the *mechanical* effects. The eight
+  shipped rows are therefore the tables the code reads; a shop, loadout or encumbrance feature needs
+  those tables added to the corpus first.
+- **Armored speed covers 30-ft and 20-ft base speeds only.** `PF1E_ARMORED_SPEED` is exactly
+  `{30: 20, 20: 15}` — the two rows Gap List A.10 transcribes (human/elf 30 ft becoming 20 ft in
+  medium or heavy armor, dwarf/gnome/halfling 20 ft becoming 15). `speedAfterArmor` **keeps the base
+  speed** for any other value rather than extrapolating a halving, so a 50-ft creature in full plate
+  keeps 50 ft until the CRB speed table is in the corpus; the equipment pack therefore carries no
+  armored-speed row, because a row asserting an untranscribed case is the guess this file exists to
+  prevent.
+- **Feat prerequisites are descriptive.** `feats.json` names each row's prerequisite line as text, and
+  only the handful `validatePF1eFeatSelection` checks are enforced; full prerequisite validation is
+  P04-class work. The `automation` split is the honest statement of which feats change a calculation.
+- **The initiative, mobility, defense and maneuver feats M16 names are catalogued, not implemented.**
+  15 of the pack's 33 rows are `automation: descriptive` for exactly that reason: `Improved Initiative`,
+  `Dodge`, `Mobility`, `Spring Attack`, `Combat Casting`, `Toughness`, the three save feats and the six
+  maneuver feats have no rule that looks them up by name — initiative and AC bonuses are authored columns
+  the sheet fills, and there is **no** bull-rush/disarm/grapple/sunder/trip mechanic at strategic scale
+  (M11 records `cmbSuccesses` as having nothing to source it). They ship as searchable content with the
+  reason in `mechanismSource`, which is what M15's descriptive/automated distinction is for; the alternative
+  was a row whose `mechanical` block asserted an effect nothing applies.
+- **Class rows carry no hit die, starting gold, or skill-rank budget.** The six starter classes publish
+  BAB, saves, and the feat-granting levels derived from the shared ladders; the CRB class tables
+  (Table 3-x) are outside the transcribed corpus, so those rows are `automation: descriptive` and say
+  what a mass-battle consumer may actually read (proficiencies and the base attack/save progressions).
+- **XP is authored for CR ≥ 1 only.** Bestiary rows publish `mirror.cr`; the corpus has no XP-below-CR-1
+  ladder, so `precreateActorDocument` leaves `xp` at 0 for those rows instead of interpolating.
+- **Descriptive spells are catalogued, not implemented.** 71 of the 75 rows are `automation:
+  descriptive` with the missing mechanism named in `massBattle.notes`; the four automated ids
+  (`fireball`, `burning-hands`, `cone-of-cold`, `lightning-bolt`) are exactly `PF1E_MASS_SPELLS`, which
+  the content test asserts in both directions. The CRB's remaining combat-relevant spells are not rows
+  at all, so the pack's size is a transcription budget rather than the engine's limit, and §6/P5's
+  "~40 spells" ask is met by content that also says what it cannot do. `massBattleIntent` on the
+  descriptive area rows records the SRD shape so the next C05 slice is a data diff, not archaeology.

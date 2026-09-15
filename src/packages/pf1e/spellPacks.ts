@@ -52,6 +52,17 @@ export interface PF1ePackSpellMassBattle {
   rangeCategory?: PF1ePackSpellRange | undefined;
   /** Line shape only: corridor width in feet (CRB p.214's published lines are 5 ft wide). */
   widthFeet?: number | undefined;
+  /**
+   * Cone/line shapes only, and only where the published area scales with the caster: Lightning
+   * Bolt's "100 ft. + 10 ft./level" line (CRB p.296 in the print edition's Conjuration page,
+   * R02-transcribed here by its own text, not by a page reference the corpus does not carry).
+   * `radiusFeet` is the base and this is what each caster level adds, so the length at level
+   * `L` is `base + per × L` — PF1e's "+X ft./level" ranges include the 1st level, unlike the
+   * close/medium/long categories, whose arithmetic `spellRangeFeet` owns. A circle's radius
+   * never scales in the published blast spells, so the field is refused on a circle rather than
+   * ignored: an author who reaches for it there has almost certainly meant `rangeCategory`.
+   */
+  lengthFeetPerCasterLevel?: number | undefined;
   saveType: PF1ePackSaveType;
   halfOnSave: boolean;
   /** True when Evasion/Improved Evasion can apply — the spell must be Reflex half. */
@@ -142,10 +153,46 @@ export function parsePackSpellOrder(input: {
     return fail();
   }
   const mb = asRecord(system.massBattle);
+  // M15 — a pack entry says which side of the line it is on. `automation: "automated"` means the
+  // block below is executed; "descriptive" means the entry exists for the sheet and the
+  // compendium search and NOTHING here reads it. The declaration is not decoration: it is
+  // cross-checked against the presence of a block, so a spell cannot claim to be live by
+  // omission, and one the engine grew cannot stay marked descriptive.
+  const automation =
+    typeof system.automation === "string"
+      ? system.automation.trim().toLowerCase()
+      : null;
   if (mb === null) {
+    if (automation === "automated") {
+      issues.push({
+        field: "system.automation",
+        message: `${spellName}: declares automation "automated" but ships no "massBattle" block to execute`,
+      });
+    }
     issues.push({
       field: "system.massBattle",
       message: `${spellName}: no "massBattle" block, so it has no mass-battle area payload`,
+    });
+    return fail();
+  }
+  if (automation === "descriptive") {
+    issues.push({
+      field: "system.automation",
+      message: `${spellName}: declares automation "descriptive" but ships a "massBattle" block — the executable key belongs to automated content, and an intended-but-unexecuted payload is authored as "massBattleIntent"`,
+    });
+    return fail();
+  }
+  // An entry may document a payload the engine cannot execute yet — that is `massBattleIntent`,
+  // which is deliberately NOT parsed here (Magic Missile's `missile` shape is the shipped
+  // example: real content, no executor). Marking such a spell "automated" is a content bug, so
+  // it is refused rather than quietly downgraded to descriptive.
+  if (
+    automation === "automated" &&
+    asRecord(system.massBattleIntent) !== null
+  ) {
+    issues.push({
+      field: "system.automation",
+      message: `${spellName}: declares automation "automated" while its payload sits in "massBattleIntent", which no code reads`,
     });
     return fail();
   }
@@ -194,6 +241,24 @@ export function parsePackSpellOrder(input: {
       field: "massBattle.widthFeet",
       message: `${spellName}: widthFeet ${String(widthFeet)} is not a positive number of feet`,
     });
+  }
+  const lengthPerLevel = mb.lengthFeetPerCasterLevel;
+  if (lengthPerLevel !== undefined) {
+    if (shape === "circle") {
+      issues.push({
+        field: "massBattle.lengthFeetPerCasterLevel",
+        message: `${spellName}: a circle's radius is fixed by its Area line — per-level growth belongs to rangeCategory`,
+      });
+    } else if (
+      typeof lengthPerLevel !== "number" ||
+      !Number.isFinite(lengthPerLevel) ||
+      lengthPerLevel < 0
+    ) {
+      issues.push({
+        field: "massBattle.lengthFeetPerCasterLevel",
+        message: `${spellName}: lengthFeetPerCasterLevel ${String(lengthPerLevel)} is not a non-negative number of feet`,
+      });
+    }
   }
   const saveType = mb.saveType;
   if (!(PF1E_PACK_SAVE_TYPES as readonly string[]).includes(String(saveType))) {
@@ -272,12 +337,17 @@ export function parsePackSpellOrder(input: {
   }
   if (issues.length > 0) return fail();
 
+  const length =
+    lengthPerLevel === undefined || shape === "circle"
+      ? (radiusFeet as number)
+      : (radiusFeet as number) + (lengthPerLevel as number) * input.casterLevel;
+
   return {
     ok: true,
     order: {
       spellName,
       shape: shape as PF1ePackSpellShape,
-      radius: radiusFeet as number,
+      radius: length,
       rangeCategory:
         shape === "circle" ? (rangeCategory as PF1ePackSpellRange) : null,
       widthFeet: shape === "line" ? (widthFeet as number) : null,
@@ -321,6 +391,135 @@ export function spellRangeFeet(
 }
 
 /**
+ * One automated spell, mirrored in code: the pack's executable fields plus the spell level the
+ * sim uses for its save DC. The `systems/pf1e-core/packs/spells.json` entry is the authored
+ * source; this is the copy the reference system can read at runtime (it cannot fetch `systems/**`),
+ * and `tests/packages/pf1eSpellPackSync.test.ts` refuses any difference between the two.
+ */
+export interface PF1ePackMassSpellMirror {
+  /** The pack entry, reduced to the fields `parsePackSpellOrder` reads. */
+  readonly entry: Readonly<Record<string, unknown>>;
+  /**
+   * The verified class level the sim uses as `spellSaveDc`'s spell level (D-151): the pack's own
+   * `system.level` table is content the reference system does not read, so this constant is the
+   * one the DC comes from — and the sync test pins the table's `sorcererWizard` against it.
+   */
+  readonly level: number;
+}
+
+/**
+ * The spells the mass-battle engine executes, keyed by pack entry id. Anything the pack lists
+ * with `automation: "descriptive"` is content for the sheet and the compendium search; anything
+ * here is a payload the resolver runs. Four rows, all of them area spells whose published shape
+ * is one the sim's `circle` / `cone` / `line` geometry can express.
+ */
+export type PF1ePackMassSpellMirrorTable = {
+  fireball: PF1ePackMassSpellMirror;
+  "burning-hands": PF1ePackMassSpellMirror;
+  "cone-of-cold": PF1ePackMassSpellMirror;
+  "lightning-bolt": PF1ePackMassSpellMirror;
+};
+
+export const PF1E_PACK_MASS_SPELL_MIRRORS: Readonly<PF1ePackMassSpellMirrorTable> =
+  Object.freeze({
+    fireball: Object.freeze({
+      level: 3,
+      entry: Object.freeze({
+        name: "Fireball",
+        system: Object.freeze({
+          automation: "automated",
+          savingThrow: "Reflex half",
+          spellResistance: true,
+          massBattle: Object.freeze({
+            shape: "circle",
+            radiusFeet: 20,
+            rangeCategory: "long",
+            saveType: "ref",
+            halfOnSave: true,
+            evasion: true,
+            damageDiceCount: 1,
+            damageDiceSides: 6,
+            dicePerCasterLevel: true,
+            maxDice: 10,
+            damageType: "fire",
+          }),
+        }),
+      }),
+    }),
+    "burning-hands": Object.freeze({
+      level: 1,
+      entry: Object.freeze({
+        name: "Burning Hands",
+        system: Object.freeze({
+          automation: "automated",
+          savingThrow: "Reflex half",
+          spellResistance: true,
+          massBattle: Object.freeze({
+            shape: "cone",
+            radiusFeet: 15,
+            saveType: "ref",
+            halfOnSave: true,
+            evasion: true,
+            damageDiceCount: 1,
+            damageDiceSides: 4,
+            dicePerCasterLevel: true,
+            maxDice: 5,
+            damageType: "fire",
+          }),
+        }),
+      }),
+    }),
+    "cone-of-cold": Object.freeze({
+      level: 5,
+      entry: Object.freeze({
+        name: "Cone of Cold",
+        system: Object.freeze({
+          automation: "automated",
+          savingThrow: "Reflex half",
+          spellResistance: true,
+          massBattle: Object.freeze({
+            shape: "cone",
+            radiusFeet: 60,
+            saveType: "ref",
+            halfOnSave: true,
+            evasion: true,
+            damageDiceCount: 1,
+            damageDiceSides: 6,
+            dicePerCasterLevel: true,
+            maxDice: 10,
+            damageType: "cold",
+          }),
+        }),
+      }),
+    }),
+    "lightning-bolt": Object.freeze({
+      level: 3,
+      entry: Object.freeze({
+        name: "Lightning Bolt",
+        system: Object.freeze({
+          automation: "automated",
+          savingThrow: "Reflex half",
+          spellResistance: true,
+          massBattle: Object.freeze({
+            shape: "line",
+            radiusFeet: 100,
+            lengthFeetPerCasterLevel: 10,
+            widthFeet: 5,
+            saveType: "ref",
+            halfOnSave: true,
+            evasion: true,
+            damageDiceCount: 1,
+            damageDiceSides: 6,
+            dicePerCasterLevel: true,
+            maxDice: 10,
+            damageType: "electricity",
+          }),
+        }),
+      }),
+    }),
+  });
+
+/**
  * The `massBattle` block of the shipped `pf1e-core` Fireball, mirrored here because the
  * reference system cannot read `systems/**` at runtime. Asserted against the real file by
  * `tests/packages/pf1eSpellPacks.test.ts`, so drift fails a test instead of silently
@@ -328,28 +527,13 @@ export function spellRangeFeet(
  *
  * Values are the pack's: 20-ft.-radius spread, long range (400 ft. + 40 ft./level),
  * Reflex half, 1d6/level capped at 10d6 (CRB p.283).
+ *
+ * M15 turned this and its Burning Hands sibling into views on
+ * `PF1E_PACK_MASS_SPELL_MIRRORS` so the module's registry and the exported constants cannot
+ * disagree; the names stay because callers and tests already import them.
  */
 export const PF1E_PACK_FIREBALL_MASS_BATTLE: Readonly<Record<string, unknown>> =
-  Object.freeze({
-    name: "Fireball",
-    system: Object.freeze({
-      savingThrow: "Reflex half",
-      spellResistance: true,
-      massBattle: Object.freeze({
-        shape: "circle",
-        radiusFeet: 20,
-        rangeCategory: "long",
-        saveType: "ref",
-        halfOnSave: true,
-        evasion: true,
-        damageDiceCount: 1,
-        damageDiceSides: 6,
-        dicePerCasterLevel: true,
-        maxDice: 10,
-        damageType: "fire",
-      }),
-    }),
-  });
+  PF1E_PACK_MASS_SPELL_MIRRORS.fireball.entry;
 
 /**
  * The `massBattle` block of the shipped `pf1e-core` Burning Hands, mirrored here for the
@@ -362,22 +546,4 @@ export const PF1E_PACK_FIREBALL_MASS_BATTLE: Readonly<Record<string, unknown>> =
  */
 export const PF1E_PACK_BURNING_HANDS_MASS_BATTLE: Readonly<
   Record<string, unknown>
-> = Object.freeze({
-  name: "Burning Hands",
-  system: Object.freeze({
-    savingThrow: "Reflex half",
-    spellResistance: true,
-    massBattle: Object.freeze({
-      shape: "cone",
-      radiusFeet: 15,
-      saveType: "ref",
-      halfOnSave: true,
-      evasion: true,
-      damageDiceCount: 1,
-      damageDiceSides: 4,
-      dicePerCasterLevel: true,
-      maxDice: 5,
-      damageType: "fire",
-    }),
-  }),
-});
+> = PF1E_PACK_MASS_SPELL_MIRRORS["burning-hands"].entry;

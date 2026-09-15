@@ -601,6 +601,158 @@ describe("createMassBattlePf1e System Package (§12 / Task 9)", () => {
     expect(run(true, 30)).toEqual({ attacks: 2, ac: 14 }); // no adjacent foe: no cleave, no penalty
   });
 
+  test("the cleave reports as its own event and is not double-counted (M10)", () => {
+    // M10's half of the hero bridge: an extra swing the player cannot see is a swing that
+    // did not happen as far as the report is concerned. The engagement line keeps carrying
+    // the merged total exactly as D-178 booked it (3 attacks for a BAB-9 hero with a
+    // cleave), and the cleave's own event carries the single swing that produced it.
+    const run = (hero: boolean, defenderX: number): SimEvent[] => {
+      const rules = createMassBattlePf1e();
+      const pool = createModelPool(8, PF1E_MODEL_SCHEMA);
+      const sys = {
+        ac: 14,
+        touchAc: 10,
+        fort: 3,
+        ref: 1,
+        will: 0,
+        sr: 0,
+        drType: 0,
+        drVal: 0,
+        profileIdx: 1,
+      };
+      allocModel(pool, {
+        id: 1,
+        unitIdx: 0,
+        x: 0,
+        y: 0,
+        hp: 200,
+        hpMax: 200,
+        sys: { ...sys },
+      });
+      allocModel(pool, {
+        id: 2,
+        unitIdx: 1,
+        x: defenderX,
+        y: 0,
+        hp: 200,
+        hpMax: 200,
+        sys: { ...sys, profileIdx: 2 },
+      });
+      const units: UnitView[] = [
+        {
+          id: "u0",
+          armyId: "a0",
+          factionId: "f0",
+          type: "infantry",
+          name: "Red",
+          profile: {},
+          stats: { bab: 9, strMod: 4, ac: 14, ...(hero ? { hero: 1 } : {}) },
+          orders: null,
+          formation: "line",
+          sceneId: "scene-1",
+          modelRange: [0, 1],
+          leaderTokenId: null,
+        },
+        {
+          id: "u1",
+          armyId: "a1",
+          factionId: "f1",
+          type: "infantry",
+          name: "Blue",
+          profile: {},
+          stats: { bab: 4, strMod: 2, ac: 14 },
+          orders: null,
+          formation: "line",
+          sceneId: "scene-1",
+          modelRange: [1, 2],
+          leaderTokenId: null,
+        },
+      ];
+      const orders = new Map<string, OrderQueue>();
+      orders.set("u0", {
+        issuedBy: "gm",
+        issuedTurn: 1,
+        pending: [],
+        active: { kind: "attack", targetUnitId: "u1" },
+      });
+      const events: SimEvent[] = [];
+      rules.resolveTurn(
+        spellCtx(),
+        pool,
+        units,
+        orders,
+        new XoshiroPRNG(21),
+        (ev) => events.push(ev),
+      );
+      return events;
+    };
+
+    const events = run(true, 3);
+    const cleave = events.find((e) => e.type === "hero-cleave");
+    const attack = events.find(
+      (e) => e.subPhase === "melee" && e.type === "attack",
+    );
+    expect(cleave).toBeDefined();
+    expect(attack).toBeDefined();
+    if (cleave === undefined || attack === undefined)
+      throw new Error("cleave or attack event missing");
+    const cleaveData = cleave.data as Record<string, unknown>;
+    const attackData = attack.data as Record<string, unknown>;
+    // Its own exchange, one swing, against the adjacent model — reported before the
+    // engagement line so a timeline reads cause (the cleave) then summary (the attack).
+    expect(cleaveData.totalAttacks).toBe(1);
+    expect(cleave.subPhase).toBe("melee");
+    expect(cleave.unitId).toBe("u0");
+    expect(cleave.targetUnitId).toBe("u1");
+    expect(cleaveData.defenderModelIdx).toBe(1);
+    expect(cleave.text).toContain("cleaves");
+    expect(attackData.totalAttacks).toBe(3);
+    // Order of the two events, and the hero's own coordinates on the cleave line.
+    expect(events.indexOf(cleave)).toBeLessThan(events.indexOf(attack));
+    expect(cleave.at).toEqual({ x: 0, y: 0 });
+
+    // No hero, or nobody adjacent: no cleave event at all (and no −2 AC, tested above).
+    expect(run(false, 3).some((e) => e.type === "hero-cleave")).toBe(false);
+    expect(run(true, 30).some((e) => e.type === "hero-cleave")).toBe(false);
+  });
+  test("orderVocabulary is the module's own spell registry (M10)", () => {
+    // The caster dropdown a player sees and the payload `resolveTurn` demands come from one
+    // probe pass, so adding a spell to the registry is the only change either side needs.
+    const rules = createMassBattlePf1e();
+    const vocabulary = rules.orderVocabulary?.();
+    expect(vocabulary).toBeDefined();
+    const casts = vocabulary?.casts ?? [];
+    expect(casts.map((c) => c.id)).toEqual(Object.keys(PF1E_MASS_SPELLS));
+    const fireball = casts.find((c) => c.id === "fireball");
+    const burningHands = casts.find((c) => c.id === "burning-hands");
+    // A burst designates a point; Burning Hands is a 15-ft cone from the caster (D-171).
+    expect(fireball?.targeting).toBe("point");
+    expect(burningHands?.targeting).toBe("direction");
+    expect(fireball?.label).toBe("Fireball");
+    expect(casts.every((c) => c.label.length > 0)).toBe(true);
+    // The vocabulary is a stable snapshot: the same call answers identically, and the
+    // direct-target control's gate is the schema, not this capability.
+    expect(rules.orderVocabulary?.().casts).toEqual(casts);
+    expect(rules.schema.orderTypes).toContain("attack");
+  });
+  test("the spellEntry seam re-types the control, not just the resolution (M10)", () => {
+    // A default spell whose entry is a cone must not offer a point-of-origin form: the
+    // resolver would refuse it (D-167), and an order a player can only be refused is a bug
+    // in the control, not in the rules.
+    const rules = createMassBattlePf1e({ spellEntry: CONE_ENTRY });
+    const casts = rules.orderVocabulary?.().casts ?? [];
+    expect(casts.find((c) => c.id === DEFAULT_MASS_SPELL_ID)?.targeting).toBe(
+      "direction",
+    );
+    expect(casts.find((c) => c.id === DEFAULT_MASS_SPELL_ID)?.label).toBe(
+      "Test Cone",
+    );
+    // Every other spell is untouched by the seam.
+    expect(casts.find((c) => c.id === "burning-hands")?.targeting).toBe(
+      "direction",
+    );
+  });
+
   test("a unit bound to a leader actor counts as a hero: its allies get the aura (M07/D-169)", () => {
     // u0 is ordinary infantry — no `type: "hero"`, no `stats.hero` — but it has a leader
     // actor, so the M07 data path identifies it and its non-anchor model gets the aura's
@@ -678,9 +830,20 @@ describe("createMassBattlePf1e System Package (§12 / Task 9)", () => {
   test("the spell registry ships fireball and burning-hands with verified levels (D-171)", () => {
     // Levels are the CRB constants verified by R02 (D-151/D-171), never the pack's
     // `level` table: fireball sorcerer/wizard 3 (CRB p.283), burning hands 1 (pg. 251).
-    expect(Object.keys(PF1E_MASS_SPELLS).sort()).toEqual(["burning-hands", "fireball"]);
+    // M15 grew the registry to every spell whose published area the resolver can express — the
+    // pack's `system.automation` declaration is what decides membership, and
+    // `tests/packages/pf1eSpellPackSync.test.ts` pins this list against the pack file, so adding
+    // a fifth means authoring the content *and* its declaration, not editing a literal here.
+    expect(Object.keys(PF1E_MASS_SPELLS).sort()).toEqual([
+      "burning-hands",
+      "cone-of-cold",
+      "fireball",
+      "lightning-bolt",
+    ]);
     expect(PF1E_MASS_SPELLS["fireball"]?.level).toBe(3);
     expect(PF1E_MASS_SPELLS["burning-hands"]?.level).toBe(1);
+    expect(PF1E_MASS_SPELLS["cone-of-cold"]?.level).toBe(5);
+    expect(PF1E_MASS_SPELLS["lightning-bolt"]?.level).toBe(3);
     expect(DEFAULT_MASS_SPELL_ID).toBe("fireball");
   });
 
@@ -909,7 +1072,242 @@ describe("createMassBattlePf1e System Package (§12 / Task 9)", () => {
     expect(cast({ x: 10 }).ok).toBe(false);
     expect(cast({ x: "10", y: 10 }).ok).toBe(false);
     expect(cast({ x: Number.NaN, y: 10 }).ok).toBe(false);
-    // Other custom orders are still module-specific and pass through.
-    expect(rules.validateOrder(ctx, unit, { kind: "custom", type: "other", data: null })).toEqual({ ok: true });
+    // M05 reversed this case: a custom order nothing resolves used to pass through, which put
+    // an order in a unit's queue that the report would never mention. The module now refuses it
+    // by name, so a GM sees the rejection at issue instead of a silent turn.
+    expect(rules.validateOrder(ctx, unit, { kind: "custom", type: "other", data: null })).toEqual({
+      ok: false,
+      error: 'custom: no "other" order in this module — the PF1e mass battles execute spell_aoe casts',
+    });
   });
+
+  // ── M05 — the movement, terrain, pace and order-honesty tests ──────────────────
+  //
+  // One fixture, both turn modes: `marchOnce` resolves a single ordered unit against a standing
+  // enemy so each test asserts exactly one rule (terrain cost, a pace bar, a brace, a shot).
+
+  function marchOnce(input: {
+    order: NonNullable<OrderQueue["active"]>;
+    terrain?: { col: number; row: number }[];
+    simultaneous?: boolean;
+    redType?: "infantry" | "cavalry" | "artillery" | "hero";
+    redStats?: Record<string, number>;
+    redModels?: number;
+    blueAt?: { x: number; y: number };
+    blueCount?: number;
+    seed?: number;
+  }): { events: SimEvent[]; pool: ReturnType<typeof createModelPool>; rules: ReturnType<typeof createMassBattlePf1e> } {
+    const rules = createMassBattlePf1e();
+    const pool = createModelPool(20, PF1E_MODEL_SCHEMA);
+    const redModels = input.redModels ?? 1;
+    for (let i = 0; i < redModels; i++) {
+      allocModel(pool, { id: i + 1, unitIdx: 0, x: 10 + i * 2, y: 10, hp: 20, hpMax: 20, sys: { ac: 14, touchAc: 10, fort: 3, ref: 1, will: 0, sr: 0, drType: 0, drVal: 0, profileIdx: 1 } });
+    }
+    const blueCount = input.blueCount ?? 1;
+    const bx = input.blueAt?.x ?? 600;
+    const by = input.blueAt?.y ?? 10;
+    for (let i = 0; i < blueCount; i++) {
+      allocModel(pool, { id: 100 + i, unitIdx: 1, x: bx + i * 2, y: by, hp: 20, hpMax: 20, sys: { ac: 14, touchAc: 10, fort: 3, ref: 1, will: 0, sr: 0, drType: 0, drVal: 0, profileIdx: 2 } });
+    }
+    const units: UnitView[] = [
+      { id: "u0", armyId: "a0", factionId: "f0", type: input.redType ?? "infantry", name: "Red Infantry", profile: {}, stats: { bab: 4, strMod: 2, ac: 14, ...(input.redStats ?? {}) }, orders: null, formation: "line", sceneId: "scene-1", modelRange: [0, redModels], leaderTokenId: null },
+      { id: "u1", armyId: "a1", factionId: "f1", type: "infantry", name: "Blue Infantry", profile: {}, stats: { bab: 4, strMod: 2, ac: 14 }, orders: null, formation: "line", sceneId: "scene-1", modelRange: [redModels, redModels + blueCount], leaderTokenId: null },
+    ];
+    const orders = new Map<string, OrderQueue>();
+    orders.set("u0", { issuedBy: "gm", issuedTurn: 1, pending: [], active: input.order });
+    const ctx: RulesContext = {
+      ...spellCtx(),
+      ...(input.terrain ? { terrain: { difficultCells: input.terrain } } : {}),
+      ...(input.simultaneous ? { turnMode: "simultaneous" as const } : {}),
+    };
+    const events: SimEvent[] = [];
+    rules.resolveTurn(ctx, pool, units, orders, new XoshiroPRNG(input.seed ?? 3), (ev) => events.push(ev));
+    return { events, pool, rules };
+  }
+
+  test("difficult ground doubles what a march pays for the same budget (M05)", () => {
+    // 20 ft of march budget across a 20-ft leg whose last two squares are rough: the open half
+    // costs 10 ft of budget, each rough square 10 ft — so the formation reaches 25 ft and stops.
+    const rough = [{ col: 5, row: 2 }, { col: 6, row: 2 }];
+    const priced = marchOnce({ order: { kind: "move", path: [{ x: 30, y: 10 }], pace: "march" }, terrain: rough });
+    expect(priced.pool.x[0]).toBe(25);
+    const arrive = priced.events.find((e) => e.subPhase === "move" && e.type === "arrive");
+    const data = arrive?.data as Record<string, unknown>;
+    expect(data.distance).toBe(15);
+    expect(data.terrainSquares).toBe(1);
+    expect(data.terrainExtraFeet).toBe(5);
+
+    // The same order on open ground is the plain Euclidean walk — the parity pin: nothing about
+    // the stride rewrites movement where no GM has authored terrain.
+    const open = marchOnce({ order: { kind: "move", path: [{ x: 30, y: 10 }], pace: "march" } });
+    expect(open.pool.x[0]).toBe(30);
+    const openData = open.events.find((e) => e.subPhase === "move" && e.type === "arrive")?.data as Record<string, unknown>;
+    expect(openData.terrainSquares).toBeUndefined();
+  });
+
+  test("a charge cannot cross difficult terrain, and says so instead of moving anyway (M05)", () => {
+    const r = marchOnce({
+      order: { kind: "move", path: [{ x: 20, y: 10 }], pace: "charge" },
+      terrain: [{ col: 3, row: 2 }],
+    });
+    expect(r.pool.x[0]).toBe(10);
+    const refused = r.events.find((e) => e.subPhase === "move" && e.type === "move-refused");
+    expect(refused).toBeDefined();
+    expect(String((refused?.data as Record<string, unknown>).refusal)).toContain("cannot cross difficult terrain");
+  });
+
+  test("a charge leaves the charger exposed until its next turn (M05)", () => {
+    // CRB p.183: +2 on the charge's attack roll, −2 to AC until the turn after. The AC half is
+    // a column write, and the reseed next turn is what expires it — the same mechanism D-178's
+    // cleave penalty relies on, asserted here as the observable write plus its report line.
+    const r = marchOnce({ order: { kind: "move", path: [{ x: 50, y: 10 }], pace: "charge" } });
+    expect(r.pool.x[0]).toBe(50); // 4 move × 2 (charge) × 5 ft = 40 ft of budget
+    expect(r.pool.sys["ac"]?.[0]).toBe(12); // authored 14, less the charge's −2
+    expect(r.events.some((e) => e.subPhase === "move" && e.type === "charge-exposure")).toBe(true);
+
+    // A march costs no AC: the penalty belongs to the charge, not to moving.
+    const plain = marchOnce({ order: { kind: "move", path: [{ x: 50, y: 10 }], pace: "march" } });
+    expect(plain.pool.x[0]).toBe(30);
+    expect(plain.pool.sys["ac"]?.[0]).toBe(14);
+  });
+
+  test("a run is a straight line — refused at issue and at the march (M05)", () => {
+    const curved = { kind: "move" as const, path: [{ x: 20, y: 10 }, { x: 20, y: 30 }], pace: "run" as const };
+    const rules = createMassBattlePf1e();
+    const verdict = rules.validateOrder(spellCtx(), {} as UnitView, curved);
+    expect(verdict.ok).toBe(false);
+    expect(verdict.ok ? "" : verdict.error).toContain("straight line");
+
+    // A resolve-time march of the same order (a queue can outlive a vocabulary change) moves
+    // nobody and reports the reason.
+    const r = marchOnce({ order: curved });
+    expect(r.pool.x[0]).toBe(10);
+    expect(r.events.some((e) => e.type === "move-refused")).toBe(true);
+  });
+
+  test("hold: defend braces the formation's AC for the round (M05)", () => {
+    const r = marchOnce({ order: { kind: "hold", stance: "defend" } });
+    expect(r.pool.sys["ac"]?.[0]).toBe(16); // CRB p.185: +2 dodge
+    const event = r.events.find((e) => e.subPhase === "melee" && e.type === "defend");
+    expect(event).toBeDefined();
+    expect((event?.data as Record<string, unknown>).acBonus).toBe(2);
+
+    // Standing fast without bracing changes nothing about defence — the two hold stances the
+    // module gives no numeric meaning to must not invent one.
+    const plain = marchOnce({ order: { kind: "hold", stance: "hold" } });
+    expect(plain.pool.sys["ac"]?.[0]).toBe(14);
+    expect(plain.events.some((e) => e.type === "defend")).toBe(false);
+  });
+
+  test("a ranged profile shoots in the shoot sub-phase, inside its maximum range (M05)", () => {
+    const gun = { bab: 6, strMod: 0, ac: 14, weaponIsRanged: 1, weaponRangeIncrement: 100, weaponMaxIncrements: 5 };
+    const r = marchOnce({
+      order: { kind: "attack", targetUnitId: "u1" },
+      redType: "artillery",
+      redStats: gun,
+      blueAt: { x: 210, y: 10 }, // 200 ft away: two increments of a 100-ft weapon, inside the cap
+    });
+    const shot = r.events.find((e) => e.subPhase === "shoot" && e.type === "shot");
+    expect(shot).toBeDefined();
+    expect(r.events.some((e) => e.subPhase === "melee" && e.type === "attack")).toBe(false);
+
+    // Beyond five increments the shot is not made — and the report names the distance rather
+    // than showing a silent zero-damage engagement.
+    const out = marchOnce({
+      order: { kind: "attack", targetUnitId: "u1" },
+      redType: "artillery",
+      redStats: gun,
+      blueAt: { x: 800, y: 10 }, // 790 ft: eight increments
+    });
+    const refused = out.events.find((e) => e.subPhase === "shoot" && e.type === "shot-refused");
+    expect(refused).toBeDefined();
+    expect((refused?.data as Record<string, unknown>).increments).toBe(8);
+    expect(out.events.some((e) => e.type === "shot")).toBe(false);
+
+    // A melee profile still resolves as melee — the routing reads the weapon, not the unit type.
+    const melee = marchOnce({ order: { kind: "attack", targetUnitId: "u1" }, blueAt: { x: 30, y: 10 } });
+    expect(melee.events.some((e) => e.subPhase === "melee" && e.type === "attack")).toBe(true);
+    expect(melee.events.some((e) => e.subPhase === "shoot")).toBe(false);
+  });
+
+  test("a forced shot mode is refused by name rather than reinterpreted (M05)", () => {
+    const rules = createMassBattlePf1e();
+    const trample = rules.validateOrder(spellCtx(), {} as UnitView, { kind: "attack", targetUnitId: "u1", mode: "trample" });
+    expect(trample.ok).toBe(false);
+    expect(String((trample as { error?: string }).error)).toMatch(/^attack: this module resolves no "trample" attack mode/);
+    expect(rules.validateOrder(spellCtx(), {} as UnitView, { kind: "attack", targetUnitId: "u1", mode: "shot" })).toEqual({ ok: true });
+  });
+
+  test("simultaneous movement provokes attacks of opportunity too (M05)", () => {
+    // The enemy stands at (18,10) and threatens the squares the march leaves. Before M05 only
+    // the stepwise path reacted, so switching turn mode was a way to walk past a pike line
+    // unmolested — the rule must not depend on how the round is driven.
+    const order = { kind: "move" as const, path: [{ x: 30, y: 10 }], pace: "march" as const };
+    const stepwise = marchOnce({ order, blueAt: { x: 18, y: 10 } });
+    const simultaneous = marchOnce({ order, blueAt: { x: 18, y: 10 }, simultaneous: true });
+    expect(stepwise.events.some((e) => e.subPhase === "move" && e.type === "opportunity")).toBe(true);
+    expect(simultaneous.events.some((e) => e.subPhase === "move" && e.type === "opportunity")).toBe(true);
+    // Both modes see the same provoker and the same marched-away square.
+    const reactorOf = (events: SimEvent[]): unknown =>
+      events.find((e) => e.type === "opportunity")?.data ?? null;
+    expect((reactorOf(simultaneous.events) as Record<string, unknown>).reactorId).toBe(
+      (reactorOf(stepwise.events) as Record<string, unknown>).reactorId,
+    );
+  });
+
+  test("a withdraw still exempts the start square in simultaneous mode (M05)", () => {
+    // The enemy at (7,10) threatens the square the formation starts in and nothing further along
+    // the road, so the only provocation available is the exempt one.
+    const blue = { x: 7, y: 10 };
+    const flee = marchOnce({ order: { kind: "retreat", toward: { x: 40, y: 10 } }, blueAt: blue, simultaneous: true });
+    const march = marchOnce({ order: { kind: "move", path: [{ x: 40, y: 10 }], pace: "march" }, blueAt: blue, simultaneous: true });
+    // CRB p.185: on a withdrawal "the square you start out in is not considered threatened".
+    // That exemption is a rule about the move, not about how the round is driven, so a
+    // simultaneous march provokes here and its withdrawal does not.
+    expect(march.events.some((e) => e.subPhase === "move" && e.type === "opportunity")).toBe(true);
+    expect(flee.events.filter((e) => e.subPhase === "move" && e.type === "opportunity")).toEqual([]);
+  });
+
+  test("the module refuses the orders it does not execute (M05)", () => {
+    const rules = createMassBattlePf1e();
+    const ctx = spellCtx();
+    const unit = {} as UnitView;
+    expect(rules.validateOrder(ctx, unit, { kind: "formation", formation: "line" })).toEqual({
+      ok: false,
+      error: "formation: the PF1e mass-battle module resolves no formation orders (frontage is set at deploy; supply is not simulated at this scale)",
+    });
+    expect(rules.validateOrder(ctx, unit, { kind: "supply", action: "resupply" }).ok).toBe(false);
+    const errText = (v: { ok: boolean }): string => String((v as { error?: string }).error);
+    expect(errText(rules.validateOrder(ctx, unit, { kind: "hold", stance: "flourish" }))).toContain('"defend"');
+    // A path longer than the reference package's cap is refused before it can be queued.
+    const long = { kind: "move" as const, path: Array.from({ length: 13 }, (_, i) => ({ x: i, y: 0 })), pace: "march" as const };
+    expect(errText(rules.validateOrder(ctx, unit, long))).toContain("path too long");
+    // The stances the UI actually issues are all honoured.
+    for (const stance of ["hold", "screen", "defend"]) {
+      expect(rules.validateOrder(ctx, unit, { kind: "hold", stance })).toEqual({ ok: true });
+    }
+  });
+
+  test("the leadership aura reports in the morale sub-phase it declares (M05)", () => {
+    // A hero unit of two models: the aura radiates to the second one, and the phase the module
+    // declares now has an executor and a line in the report instead of a name in a list.
+    const r = marchOnce({ order: { kind: "hold", stance: "hold" }, redType: "hero", redModels: 2 });
+    const morale = r.events.find((e) => e.subPhase === "morale" && e.type === "leadership-aura");
+    expect(morale).toBeDefined();
+    const data = morale?.data as Record<string, unknown>;
+    expect(data.buffedModels).toBe(1);
+    expect(data.moraleBonus).toBe(2);
+    expect(data.radiusFeet).toBe(30);
+    // The buffed model's save is the hero's own plus the bonus; the hero's is untouched.
+    expect(r.pool.sys["fort"]?.[1]).toBe((r.pool.sys["fort"]?.[0] ?? 0) + 2);
+    // The module declares move, heal, shoot, melee, spell, morale. M05 is the pass that made
+    // `shoot` and `morale` more than a name in that list, so the declaration is pinned here and
+    // each phase has an executor with a test that observes it: move (D-173/174/175, plus the
+    // terrain and pace tests above), heal (M06/D-176), shoot and morale (this file, M05), melee
+    // (M04/M07), spell (C05/M11).
+    expect([...createMassBattlePf1e().schema.subPhases].sort()).toEqual(
+      ["heal", "melee", "morale", "move", "shoot", "spell"],
+    );
+  });
+
 });

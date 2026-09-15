@@ -1,11 +1,34 @@
 {
-  "id": "pf1e-core",
-  "name": "Pathfinder 1e Core",
-  "version": "1.0.0",
-  "type": "data",
-  "description": "Seed content packs for the Pathfinder 1e integration: the spells the mass-battle engine can resolve, and the bestiary entries its unit profiles compile from. Character sheets and the tactical (hero-level) rules are in-repo UI, not a package script, so this package is data-only — declare code here only when a sandboxed module.js actually exists.",
-  "packs": [
-    { "name": "PF1e Spells", "type": "items", "file": "packs/spells.json" },
-    { "name": "PF1e Bestiary", "type": "actors", "file": "packs/bestiary.json" }
-  ]
+ "id": "pf1e-core",
+ "name": "Pathfinder 1e Core",
+ "version": "1.0.0",
+ "type": "data",
+ "description": "Seed content packs for the Pathfinder 1e integration: the spells the mass-battle engine can resolve (75 entries, 4 automated and 71 declared descriptive-only), the bestiary mirrors the unit profiles compile from, the six-class starter table, the equipment/armor/shield tables the resolver's own weapon and item tables mirror, and the feats that affect calculations. Character sheets and the tactical (hero-level) rules are in-repo UI, not a package script, so this package is data-only — declare code here only when a sandboxed module.js actually exists.",
+ "packs": [
+  {
+   "name": "PF1e Spells",
+   "type": "items",
+   "file": "packs/spells.json"
+  },
+  {
+   "name": "PF1e Bestiary",
+   "type": "actors",
+   "file": "packs/bestiary.json"
+  },
+  {
+   "name": "PF1e Classes",
+   "type": "actors",
+   "file": "packs/classes.json"
+  },
+  {
+   "name": "PF1e Equipment",
+   "type": "items",
+   "file": "packs/equipment.json"
+  },
+  {
+   "name": "PF1e Feats",
+   "type": "items",
+   "file": "packs/feats.json"
+  }
+ ]
 }

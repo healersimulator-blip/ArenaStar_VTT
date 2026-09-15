@@ -80,6 +80,7 @@
   import { installGmFogE2e } from "./e2eHook";
   import { pf1eMovementOpportunities } from "../packages/pf1e/tacticalOpportunity";
   import { pf1eMovePlan } from "../packages/pf1e/movement";
+  import { sceneDifficultCells } from "../core/rules";
   import { pf1eThreatModel } from "../packages/pf1e/threatPreview";
   import { deriveFromDocuments } from "../packages/pf1e/actor";
   import { autoResolveAoosOf } from "../packages/pf1e/aooSettings";
@@ -1093,6 +1094,7 @@
               const moverDerived = moverActor
                 ? deriveFromDocuments({ actor: { system: moverActor.system } })
                 : null;
+              const sceneTerrain = sceneDifficultCells(scene);
               const plan = pf1eMovePlan({
                 grid: scene.grid,
                 tokens,
@@ -1102,6 +1104,9 @@
                   ...(moverDerived ? { speedFt: moverDerived.speedFt } : {}),
                 },
                 walls: moveSegments(scene.walls),
+                // M05: the scene's authored difficult squares (flags.pf1e.difficultCells).
+                // With no flag authored this stays the P03 module's named default.
+                ...(sceneTerrain ?? { difficultCells: undefined }),
                 ...(explicit
                   ? {
                       isAlly: (a: string, b: string) =>

@@ -66,6 +66,7 @@ import {
 } from "./firearms";
 import { injuryStateOf, nonlethalStateOf } from "./injury";
 import { absorbDamageWithTempHp } from "./tempHp";
+import { coverEntry } from "./rulesTables";
 
 /** Which of the derived AC trio the attack resolves against. */
 export type PF1eDefenseChoice = "normal" | "touch" | "flatFooted";
@@ -88,12 +89,12 @@ export interface PF1ePositionalDefense {
 export const COVER_AC_BONUS: Readonly<
   Record<Exclude<NonNullable<PF1ePositionalDefense["cover"]>, undefined>, number>
 > = {
-  partial: 2,
-  soft: 4,
-  standard: 4,
-  improved: 8,
+  partial: coverEntry("partial")?.acBonus ?? 2,
+  soft: coverEntry("soft")?.acBonus ?? 4,
+  standard: coverEntry("standard")?.acBonus ?? 4,
+  improved: coverEntry("improved")?.acBonus ?? 8,
   /** Unreachable in the AC fold (total cover refuses the attack), listed for totality. */
-  total: 0,
+  total: coverEntry("total")?.acBonus ?? 0,
 };
 
 /**

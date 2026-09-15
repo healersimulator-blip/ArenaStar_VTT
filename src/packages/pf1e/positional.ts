@@ -75,6 +75,7 @@
  */
 import { cellRect, type PF1eAreaGrid, type PF1eCell } from "./targeting";
 import { footprintDistance } from "./geometry";
+import { PF1E_CONCEALMENT_MISS_CHANCE } from "./rulesTables";
 
 /** A world-space blocking segment (a sight-blocking wall or low obstacle edge). */
 export interface PF1eWorldSegment {
@@ -85,9 +86,9 @@ export interface PF1eWorldSegment {
 }
 
 /** Typical concealment miss chance (AoN 182). */
-export const CONCEALMENT_MISS_CHANCE = 20;
+export const CONCEALMENT_MISS_CHANCE = PF1E_CONCEALMENT_MISS_CHANCE.concealment;
 /** Total concealment miss chance (AoN 182). */
-export const TOTAL_CONCEALMENT_MISS_CHANCE = 50;
+export const TOTAL_CONCEALMENT_MISS_CHANCE = PF1E_CONCEALMENT_MISS_CHANCE.total;
 /** Low obstacles only cover creatures within 30 feet — 6 squares (AoN 181). */
 export const LOW_OBSTACLE_RANGE_FT = 30;
 

@@ -17,7 +17,11 @@ import type {
 import type { SimEvent, TurnReport } from "../../core/sim";
 import type { Op } from "../../core/ops";
 import type { DocumentStore } from "../../core/store";
-import { collectLeaderActors, sceneCellFeet } from "../../core/rules";
+import {
+  collectLeaderActors,
+  sceneCellFeet,
+  sceneDifficultCells,
+} from "../../core/rules";
 import type {
   RulesContext,
   RulesGridContext,
@@ -471,6 +475,9 @@ export function rulesContextFromStore(
     // explicit argument only overrides it for callers that are simulating a context (tests, e2e).
     worldSettings: (worldSettings ??
       worldSettingsFrom(store.getAll("settings"))) as Record<string, never>,
+    // M05 — the same authored ground the host channel hands the sim, so the window's
+    // pre-issue `validateOrder` judges movement against the terrain the turn will use.
+    terrain: sceneDifficultCells(scene),
   };
 }
 

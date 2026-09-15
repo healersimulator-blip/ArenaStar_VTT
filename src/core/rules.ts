@@ -74,6 +74,57 @@ export interface RulesWallsContext {
 }
 
 /**
+ * M05 — movement terrain at this scale. The platform has no terrain *layer* (nothing in
+ * `src/canvas` paints movement costs), so the authored channel is the scene document's
+ * `flags.pf1e.difficultCells`: squares, in **cell** coordinates, that a walker pays double
+ * to enter — "each extra 5 feet of distance to move through difficult terrain costs 10 feet"
+ * (CRB p.188, Movement, Difficult Terrain). The tactical scale reads the same flag through
+ * the same helper and hands it to `pf1eMovePlan` (P03/D-198), so a GM authors ground once and
+ * both scales price it; `null` terrain is a *named* default there ("no square was priced at
+ * ×2"), never a silent ×1.
+ */
+export interface RulesTerrainContext {
+  difficultCells: readonly { col: number; row: number }[];
+}
+
+/**
+ * Read the scene's authored difficult squares. Tolerant of both authoring shapes —
+ * `{ col, row }` objects and `[col, row]` pairs — and silent about entries that are not
+ * finite numbers, because a malformed square must not decide a simulation: it is simply not
+ * terrain. Returns `null` when the scene authors no ground at all, which is what lets the
+ * consumer name the absence instead of inventing an empty-but-real terrain model.
+ */
+export function sceneDifficultCells(
+  scene: { flags?: Record<string, unknown> } | null | undefined,
+): RulesTerrainContext | null {
+  const pf1e = scene?.flags?.["pf1e"];
+  if (typeof pf1e !== "object" || pf1e === null) return null;
+  const raw = (pf1e as Record<string, unknown>)["difficultCells"];
+  if (!Array.isArray(raw)) return null;
+  const cells: { col: number; row: number }[] = [];
+  for (const item of raw) {
+    let col: unknown;
+    let row: unknown;
+    if (Array.isArray(item)) {
+      col = item[0];
+      row = item[1];
+    } else if (typeof item === "object" && item !== null) {
+      col = (item as Record<string, unknown>).col;
+      row = (item as Record<string, unknown>).row;
+    }
+    if (
+      typeof col === "number" &&
+      Number.isFinite(col) &&
+      typeof row === "number" &&
+      Number.isFinite(row)
+    ) {
+      cells.push({ col: Math.trunc(col), row: Math.trunc(row) });
+    }
+  }
+  return { difficultCells: cells };
+}
+
+/**
  * Read-only, structured-cloned snapshot of the world the rules may see (§12):
  * scene grid/walls, factions, armies/units, leader Actor data, world settings.
  * No Hooks, no Documents API, no async.
@@ -93,6 +144,8 @@ export interface RulesContext {
   worldSettings: Record<string, Json>;
   /** F02 — TurnMode for the current turn (default "stepwise" when absent). */
   turnMode?: import("./strategic").TurnMode;
+  /** M05 — authored movement ground; absent or `null` ⇒ this scene authors no terrain. */
+  terrain?: RulesTerrainContext | null;
 }
 
 /**
@@ -157,10 +210,40 @@ export interface Forecast {
   data: Record<string, Json>;
 }
 
+/**
+ * M10 — one castable option a rules package advertises to player order controls.
+ *
+ * This is a *presentation* contract over data the module already owns (its spell
+ * registry), never a second source of rules truth: the payload a control builds from it is
+ * still judged by `validateOrder` and executed by `resolveTurn`. `targeting` says which
+ * payload shape the spell needs — `"point"` designates a remote origin (`{x, y}` in feet),
+ * `"direction"` shoots away from the caster (`{dirX, dirY}`), matching CRB p.214's burst
+ * versus cone/line distinction as the mass-battle module encodes it.
+ */
+export interface RulesCastOption {
+  /** The pack entry id the order names in `data.spell`. */
+  id: string;
+  /** Display name (the pack's spell name), never used for resolution. */
+  label: string;
+  /** Payload shape this spell's order needs. */
+  targeting: "point" | "direction";
+}
+
+/**
+ * M10 — the order vocabulary a package accepts from normal player controls. Optional by
+ * design: a module without it (the built-in mass-battle-basic demo) gets no caster
+ * controls anywhere, rather than controls that would only be refused at resolve time.
+ */
+export interface RulesOrderVocabulary {
+  casts: readonly RulesCastOption[];
+}
+
 /** §12 RulesModule — verbatim responsibilities. */
 export interface RulesModule {
   schema: RulesSchema;
   validateOrder(ctx: RulesContext, unit: UnitView, order: Order): OkOrErr;
+  /** M10 — castable-spell vocabulary for order UIs; absent ⇒ no caster controls. */
+  orderVocabulary?(): RulesOrderVocabulary;
   resolveTurn(
     ctx: RulesContext,
     pool: ModelPool,

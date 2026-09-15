@@ -10,7 +10,7 @@
   import { SvelteSet } from "svelte/reactivity";
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
-  import type { ArmyDocument, Order, UnitDocument } from "../../core/strategic";
+  import type { ArmyDocument, FactionDocument, Order, UnitDocument } from "../../core/strategic";
   import type { TurnReport } from "../../core/sim";
   import type { TurnPhaseMsg } from "../../core/messages";
   import type { RulesModule, UnitView } from "../../core/rules";
@@ -33,6 +33,14 @@
   import TurnReportTimeline from "./TurnReportTimeline.svelte";
   import PF1eBattleAnalysis from "./PF1eBattleAnalysis.svelte";
   import type { PF1eBattleReport } from "../../packages/pf1e/analytics";
+  import {
+    castOrderFor,
+    directAttackOrder,
+    enemyTargetRows,
+    heroOrderCapabilities,
+    orderLabel,
+    type HeroOrderBuild,
+  } from "./heroOrders";
 
   let {
     client,
@@ -71,14 +79,94 @@
   let reportType = $state("");
   // turn
   let phase = $state<TurnPhaseMsg | null>(null);
+  // M10 — hero orders: the direct-target selection, the chosen spell, and where it aims.
+  let heroTargetId = $state("");
+  let heroSpellId = $state("");
+  let heroAimMode = $state<"target" | "manual">("target");
+  let heroAimX = $state("");
+  let heroAimY = $state("");
+  /** A control-level refusal (no target picked, unparseable coordinates) — named, never silent. */
+  let heroNotice = $state("");
+  /**
+   * The `DocumentStore` is plain data, not Svelte state, so a template that reads it only
+   * re-renders when something else it reads changes. `refresh` (every snapshot/ops/sim
+   * event) bumps this counter, and the Orders tab's store-derived reads take a dependency on
+   * it — otherwise an order the host echoes back never reaches the pending queue on screen.
+   * (The pending list had that latent staleness before M10; nothing asserted on it until now.)
+   */
+  let replicaTick = $state(0);
 
   function army(): ArmyDocument | undefined {
     return client.store.get("armies", armyId);
   }
 
+  /**
+   * M10 — what the active module accepts from controls. Capability-gated so a campaign on a
+   * module without `orderVocabulary` never renders a caster control that could only be
+   * refused at resolve time.
+   */
+  const heroCaps = $derived(heroOrderCapabilities(rules));
+  /**
+   * The enemy roster a direct target can name. A plain function, like `selectedUnits()` and
+   * `squadGroups()`: the replica store is not reactive state, and the window's refresh tick
+   * (every `ops`/`sim`/`snapshot` event) is what re-runs these reads — a `$derived` over
+   * store calls would compute once and then show a stale battlefield.
+   */
+  function heroTargetList() {
+    if (replicaTick < 0)
+      return { targets: [], undeployed: 0 }; // reactive read — see `replicaTick`
+    return enemyTargetRows({
+      armies: client.store.getAll("armies") as ArmyDocument[],
+      factions: client.store.getAll("factions") as FactionDocument[],
+      ownArmyId: armyId,
+    });
+  }
+  function heroTargetRow() {
+    const id = heroTargetId;
+    return heroTargetList().targets.find((t) => t.unitId === id) ?? null;
+  }
+  const heroSpell = $derived(
+    heroCaps.casts.find((c) => c.id === heroSpellId) ?? null,
+  );
+  /**
+   * Seed the spell selection from the module's own registry the first time a vocabulary
+   * arrives, so the select's visible choice is always the choice that will be cast — no
+   * model/display divergence, and no spell name hardcoded here.
+   */
+  $effect(() => {
+    if (heroSpellId === "" && heroCaps.casts.length > 0)
+      heroSpellId = heroCaps.casts[0].id;
+  });
+
+  /** Any unit document by id, across the replica — a direct target belongs to another army. */
+  function unitDocById(unitId: string): UnitDocument | null {
+    for (const armyDoc of client.store.getAll("armies") as ArmyDocument[]) {
+      const found = armyDoc.units.find((u) => u._id === unitId);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  /** A manual coordinate field: blank/non-numeric reads as NaN, which the builder refuses by name. */
+  function heroCoord(raw: string): number {
+    const trimmed = raw.trim();
+    if (trimmed === "") return Number.NaN;
+    const n = Number(trimmed);
+    return Number.isFinite(n) ? n : Number.NaN;
+  }
+
+  /** The aim point — the target's own anchor (live replica positions), or the manual entry. */
+  function heroAimPoint(): { x: number; y: number } {
+    if (heroAimMode === "manual")
+      return { x: heroCoord(heroAimX), y: heroCoord(heroAimY) };
+    const doc = heroTargetId === "" ? null : unitDocById(heroTargetId);
+    return doc === null ? { x: Number.NaN, y: Number.NaN } : anchorOf(doc);
+  }
+
   const win = $derived(windowRows(roster.length, scrollTop, 320, ROW_H));
 
   function selectedUnits(): UnitDocument[] {
+    if (replicaTick < 0) return []; // reactive read — see `replicaTick`
     const doc = army();
     return doc ? doc.units.filter((u) => selection.has(u._id)) : [];
   }
@@ -90,6 +178,7 @@
     const pool = client.simReplica;
     const sorted = sortRoster(filterRoster(doc ?? emptyArmy(), query), sortKey, sortDir);
     roster = doc ? rosterRows({ ...doc, units: sorted }, pool, expanded) : [];
+    replicaTick += 1;
   }
 
   function emptyArmy(): ArmyDocument {
@@ -291,6 +380,87 @@
       });
     }
     if (ops.length > 0) client.submit(ops);
+  }
+
+  // ── M10 — hero orders: melee against a named enemy, and pack-driven casting ──
+  //
+  // Both ride the exact path the template orders use: build → validate through the active
+  // RulesModule (so a refused order never becomes an Op) → one embedded-doc update per unit,
+  // authorized by the host. Nothing here computes a rule outcome.
+
+  /** Issue an order the pure builders may refuse per unit; every refusal is named. */
+  function issueChecked(build: (unit: UnitDocument) => HeroOrderBuild): void {
+    const doc = army();
+    heroNotice = "";
+    if (!doc) return;
+    const ctx = rulesContextFromStore(client.store, doc.units[0]?.sceneId ?? null);
+    const errors: Record<string, string> = {};
+    const ops: import("../../core/ops").Op[] = [];
+    for (const unit of selectedUnits()) {
+      const built = build(unit);
+      if (!built.ok) {
+        errors[unit._id] = built.reason;
+        continue;
+      }
+      if (rules) {
+        const verdict = rules.validateOrder(ctx, unitView(unit), built.order);
+        if (!verdict.ok) {
+          errors[unit._id] = verdict.error;
+          continue;
+        }
+      }
+      ops.push({
+        kind: "update",
+        ref: { coll: "units", id: unit._id, parent: { coll: "armies", id: armyId } },
+        diff: {
+          "orders.pending": [built.order],
+          "orders.issuedBy": client.user?.id ?? "",
+          "orders.issuedTurn": phase ? Number(phase.turnId.split(":").pop() ?? 0) : 0,
+        },
+      });
+    }
+    feedback = errors;
+    if (ops.length > 0) client.submit(ops);
+  }
+
+  /** M10 — direct targeting (B §4.1): the selected units attack the named enemy unit. */
+  function issueHeroAttack(): void {
+    const row = heroTargetRow();
+    if (row === null) {
+      heroNotice = "pick an enemy target first";
+      return;
+    }
+    issueChecked(() => ({ ok: true, order: directAttackOrder(row.unitId) }));
+  }
+
+  /** M10 — cast the selected pack spell at the aim point (burst) or toward it (cone/line). */
+  function issueHeroCast(): void {
+    const spell = heroSpell;
+    if (spell === null) {
+      heroNotice = "this module advertises no castable spells";
+      return;
+    }
+    if (heroAimMode === "target" && heroTargetRow() === null) {
+      heroNotice = "pick an aim source: an enemy target or manual coordinates";
+      return;
+    }
+    // "Aim at the target" needs the target's live position, which only the sim replica has.
+    // Without it the anchor reads (0, 0) for every unit — a coincident pair that would
+    // silently aim a cone nowhere or a burst at the map corner, so the control says so.
+    if (heroAimMode === "target" && client.simReplica === null) {
+      heroNotice =
+        "the battle has no live model positions yet — resolve a turn or aim with manual coordinates";
+      return;
+    }
+    const aim = heroAimPoint();
+    issueChecked((unit) =>
+      castOrderFor({
+        spellId: spell.id,
+        targeting: spell.targeting,
+        from: anchorOf(unit),
+        aim,
+      }),
+    );
   }
 
   // ── G-04/D-223 — Combat_Resolver_5 doctrine controls. Doctrine rides the same
@@ -603,11 +773,11 @@
             </p>{/if}
           <ol>
             {#each unit.orders.pending as order, i (i)}
-              <li>
-                {order.kind}{order.kind === "move"
-                  ? ` → ${order.path.length} wp (${order.pace})`
-                  : ""}
-              </li>
+              {@const label = orderLabel(
+                order,
+                (id) => unitDocById(id)?.name ?? id,
+              )}
+              <li data-order-label={order.kind}>{label}</li>
             {/each}
           </ol>
           <div class="doctrine" data-doctrine={unit._id}>
@@ -646,6 +816,92 @@
       {/each}
       {#if selectedUnits().length === 0}
         <p class="dim">Select units in the tree or roster.</p>
+      {/if}
+      {#if heroCaps.directAttack || heroCaps.casts.length > 0}
+        <div class="queue hero-orders" data-hero-orders>
+          <h3>Hero orders</h3>
+          {#if heroNotice !== ""}
+            <p class="error" data-hero-notice>{heroNotice}</p>
+          {/if}
+          {#if heroCaps.directAttack}
+            <label>
+              Direct target
+              <select bind:value={heroTargetId} data-hero-target>
+                <option value="">— none —</option>
+                {#each heroTargetList().targets as t (t.unitId)}
+                  <option value={t.unitId}
+                    >{t.hero ? "★ " : ""}{t.name} · {t.armyName} · str {t.strength}</option
+                  >
+                {/each}
+              </select>
+            </label>
+            <button
+              onclick={issueHeroAttack}
+              disabled={selectedUnits().length === 0 || heroTargetRow() === null}
+              data-hero-attack>Attack target</button
+            >
+            {#if heroTargetRow()?.hero}
+              <p class="dim" data-hero-target-hero>
+                hero target — the strike resolves as a full d20 attack routine against its
+                own AC (B §4.1); bodyguard and duel extensions stay L03.
+              </p>
+            {/if}
+            {#if heroTargetList().undeployed > 0}
+              <p class="dim" data-hero-undeployed>
+                {heroTargetList().undeployed} enemy unit(s) hold no models on the field and
+                are not targetable.
+              </p>
+            {/if}
+          {/if}
+          {#if heroCaps.casts.length > 0}
+            <label>
+              Spell
+              <select bind:value={heroSpellId} data-hero-spell>
+                {#each heroCaps.casts as c (c.id)}
+                  <option value={c.id}
+                    >{c.label} — {c.targeting === "point"
+                      ? "point of origin"
+                      : "from the caster, toward"}</option
+                  >
+                {/each}
+              </select>
+            </label>
+            <label>
+              Aim
+              <select bind:value={heroAimMode} data-hero-aim-mode>
+                <option value="target">at the direct target</option>
+                <option value="manual">manual coordinates (feet)</option>
+              </select>
+            </label>
+            {#if heroAimMode === "manual"}
+              <label>
+                x
+                <input
+                  type="text"
+                  inputmode="decimal"
+                  style="width: 4.5rem"
+                  bind:value={heroAimX}
+                  data-hero-aim-x
+                />
+              </label>
+              <label>
+                y
+                <input
+                  type="text"
+                  inputmode="decimal"
+                  style="width: 4.5rem"
+                  bind:value={heroAimY}
+                  data-hero-aim-y
+                />
+              </label>
+            {/if}
+            <button
+              onclick={issueHeroCast}
+              disabled={selectedUnits().length === 0}
+              data-hero-cast>Cast</button
+            >
+          {/if}
+        </div>
       {/if}
       <div class="templates">
         {#each ORDER_TEMPLATES as tpl (tpl.id)}

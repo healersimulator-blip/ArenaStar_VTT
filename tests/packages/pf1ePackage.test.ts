@@ -9,6 +9,7 @@
  *
  * The build runs once for the whole file: a vite build in a subprocess (~2 s).
  */
+import { PF1E_MASS_SPELLS } from "../../src/packages/massBattlePf1e";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -193,9 +194,15 @@ describe("PF1e package manifests + packs (§1.1)", () => {
     expect(core.ok ? null : core.error).toBeNull();
     expect(core.ok && core.value.type).toBe("data");
     expect(core.ok && core.value.module).toBeUndefined();
+    // M18: every pack the folder ships is declared here. The build script refuses a manifest whose
+    // `packs[].file` is missing, and `tests/packages/pf1eContentPacks.test.ts` refuses the reverse —
+    // a file in `packs/` that no manifest entry names, which would be invisible to the importer.
     expect(core.ok && core.value.packs?.map((p) => p.file)).toEqual([
       "packs/spells.json",
       "packs/bestiary.json",
+      "packs/classes.json",
+      "packs/equipment.json",
+      "packs/feats.json",
     ]);
 
     const battles = validatePackageManifest(battlesManifest);
@@ -327,13 +334,32 @@ describe("PF1e package manifests + packs (§1.1)", () => {
       maxDice: 5,
     });
     expect(burningHands?.data.system["savingThrow"]).toBe("Reflex half");
-    expect(raw.entries.map((e) => e.id)).toEqual([
-      "fireball",
-      "burning-hands",
-      "magic-missile",
-      "shield",
-      "true-strike",
-    ]);
+    // M15: the pack is no longer the five-spell demo set. It carries the Core Rulebook's
+    // combat-relevant spells (75 today), and every entry declares which side of the automation
+    // line it is on — which is the box's own requirement, so the distinction is data, not a
+    // comment. The five originals stay present because the tests and the sheets name them.
+    const ids = raw.entries.map((e) => e.id);
+    expect(raw.entries.length).toBeGreaterThanOrEqual(40);
+    for (const id of ["fireball", "burning-hands", "magic-missile", "shield", "true-strike"]) {
+      expect(ids).toContain(id);
+    }
+    expect(new Set(ids).size).toBe(ids.length);
+    const automated = raw.entries
+      .filter((e) => e.data.system["automation"] === "automated")
+      .map((e) => e.id)
+      .sort();
+    expect(automated.length).toBeGreaterThanOrEqual(2);
+    // `PF1E_MASS_SPELLS` is what the resolver executes; the pack is what it documents. Growing
+    // one without the other is exactly the drift D-2 was about, so the two lists must be equal.
+    expect(automated).toEqual(Object.keys(PF1E_MASS_SPELLS).sort());
+    for (const entry of raw.entries) {
+      const automation = entry.data.system["automation"];
+      expect(automation === "automated" || automation === "descriptive").toBe(true);
+      expect(entry.data.system["massBattle"] === undefined).toBe(automation !== "automated");
+      if (automation === "descriptive") {
+        expect(typeof entry.data.system["automationNote"]).toBe("string");
+      }
+    }
   });
 });
 
@@ -394,6 +420,9 @@ describe("installing the built zips", () => {
     expect(Object.keys(core.value.files).sort()).toEqual([
       "manifest.json",
       "packs/bestiary.json",
+      "packs/classes.json",
+      "packs/equipment.json",
+      "packs/feats.json",
       "packs/spells.json",
     ]);
   });
@@ -423,9 +452,24 @@ describe("activating PF1e in a world (§1.1 acceptance, no browser)", () => {
 
     // data-only package: installed, indexed, and NOT activatable as rules
     const packs = await app.packages.compendia();
-    expect(packs.map((p) => p.pack.name).sort()).toEqual(["PF1e Bestiary", "PF1e Spells"]);
-    // Bestiary 6 + spells 5 (fireball, burning-hands, magic-missile, shield, true-strike).
-    expect(packs.reduce((n, p) => n + p.pack.entries.length, 0)).toBe(11);
+    // M18: every pack the manifest declares becomes an indexable compendium, so the list is the
+    // manifest's list — read off the manifest rather than restated here.
+    expect(packs.map((p) => p.pack.name).sort()).toEqual(
+      (coreManifest.packs ?? []).map((d) => d.name).sort(),
+    );
+    expect(packs.map((p) => p.pack.type).sort()).toEqual(
+      (coreManifest.packs ?? []).map((d) => d.type).sort(),
+    );
+    // Entry count is read back off the files in `systems/`, not restated here: the point of the
+    // assertion is that what the app installed into IndexedDB is what the repo ships, entry for
+    // entry (M18's "load content on demand instead of inflating the base HTML", checked end to
+    // end). The floor is the M15/M16 boxes' own number.
+    const onDisk = (coreManifest.packs ?? []).reduce(
+      (n, d) => n + readJson<{ entries: unknown[] }>(join(systemsDir, "pf1e-core", d.file)).entries.length,
+      0,
+    );
+    expect(packs.reduce((n, p) => n + p.pack.entries.length, 0)).toBe(onDisk);
+    expect(onDisk).toBeGreaterThanOrEqual(40);
 
     const activated = await app.packages.activate("pf1e-mass-battles");
     expect(activated.ok ? null : activated.error).toBeNull();

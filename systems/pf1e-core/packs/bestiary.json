@@ -1,157 +1,1967 @@
 {
-  "name": "PF1e Bestiary",
-  "type": "actors",
-  "entries": [
-    {
-      "id": "heavy-infantry",
-      "name": "Heavy Infantry",
-      "keywords": ["humanoid", "infantry", "mass-battle"],
-      "data": {
-        "type": "actor",
-        "name": "Heavy Infantry",
-        "system": {
-          "pf1e": {
-            "size": "Medium",
-            "bab": 6,
-            "strMod": 3,
-            "ac": 16,
-            "touchAc": 11,
-            "weapon": { "damageDiceCount": 1, "damageDiceSides": 8, "damageMod": 3 }
-          },
-          "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.infantry. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3); tests/pf1ePacks.test.ts pins this file against the table."
-        },
-        "items": [],
-        "effects": []
+ "name": "PF1e Bestiary",
+ "type": "actors",
+ "note": "M16: the mass-battle unit mirrors the strategic engine deploys from, one entry per PRECREATED_PF1E_UNITS role (40 rows, which is the box's ~30 ask met by every role the engine actually fields). Each entry's `system.pf1e` block is what compiles into a unit profile; `system.mirror` records the authored facts (hit dice, progression, speed, the mirror's CR, which saves are good) and states which numbers are derived from the shared SRD tables rather than typed in. tests/packages/pf1eContentPacks.test.ts recomputes every derived field, and tests/packages/pf1ePackage.test.ts compiles each entry against the profile table. No entry claims to be a Bestiary stat-line transcription — that is R02 work.",
+ "entries": [
+  {
+   "id": "heavy-infantry",
+   "name": "Heavy Infantry",
+   "keywords": [
+    "humanoid",
+    "infantry",
+    "mass-battle"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Heavy Infantry",
+    "system": {
+     "pf1e": {
+      "size": "Medium",
+      "bab": 6,
+      "strMod": 3,
+      "ac": 16,
+      "touchAc": 11,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 8,
+       "damageMod": 3
       }
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.infantry. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3); tests/packages/pf1ePackage.test.ts pins this file against the table by compiled profile, and tests/packages/pf1eContentPacks.test.ts recomputes the derived numbers."
     },
-    {
-      "id": "heavy-cavalry",
-      "name": "Heavy Cavalry",
-      "keywords": ["humanoid", "cavalry", "mounted", "trample"],
-      "data": {
-        "type": "actor",
-        "name": "Heavy Cavalry",
-        "system": {
-          "pf1e": {
-            "size": "Large",
-            "bab": 8,
-            "strMod": 4,
-            "sizeMod": -1,
-            "specialSizeMod": 1,
-            "ac": 18,
-            "touchAc": 11,
-            "hasTrample": true,
-            "trampleDamage": { "diceCount": 2, "diceSides": 6 },
-            "dr": { "bypass": ["slashing"], "val": 2 },
-            "weapon": { "damageDiceCount": 1, "damageDiceSides": 8, "damageMod": 4 }
-          }
-        },
-        "items": [],
-        "effects": []
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "heavy-cavalry",
+   "name": "Heavy Cavalry",
+   "keywords": [
+    "humanoid",
+    "cavalry",
+    "mounted",
+    "trample"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Heavy Cavalry",
+    "system": {
+     "pf1e": {
+      "size": "Large",
+      "bab": 8,
+      "strMod": 4,
+      "sizeMod": -1,
+      "specialSizeMod": 1,
+      "ac": 18,
+      "touchAc": 11,
+      "hasTrample": true,
+      "trampleDamage": {
+       "diceCount": 2,
+       "diceSides": 6
+      },
+      "dr": {
+       "bypass": [
+        "slashing"
+       ],
+       "val": 2
+      },
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 8,
+       "damageMod": 4
       }
+     }
     },
-    {
-      "id": "siege-bombard",
-      "name": "Siege Bombard",
-      "keywords": ["artillery", "siege", "ranged"],
-      "data": {
-        "type": "actor",
-        "name": "Siege Bombard",
-        "system": {
-          "pf1e": {
-            "size": "Medium",
-            "bab": 4,
-            "strMod": 1,
-            "ac": 12,
-            "touchAc": 8,
-            "dexMod": 0,
-            "weapon": { "damageDiceCount": 3, "damageDiceSides": 6, "damageMod": 1, "isRanged": true, "rangeIncrement": 100 }
-          },
-          "notes": "rangeIncrement is in feet; the sim still ignores range increments for non-firearm attacks (Gap List §2.8)."
-        },
-        "items": [],
-        "effects": []
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "siege-bombard",
+   "name": "Siege Bombard",
+   "keywords": [
+    "artillery",
+    "siege",
+    "ranged"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Siege Bombard",
+    "system": {
+     "pf1e": {
+      "size": "Medium",
+      "bab": 4,
+      "strMod": 1,
+      "ac": 12,
+      "touchAc": 8,
+      "dexMod": 0,
+      "weapon": {
+       "damageDiceCount": 3,
+       "damageDiceSides": 6,
+       "damageMod": 1,
+       "isRanged": true,
+       "rangeIncrement": 100
       }
+     },
+     "notes": "rangeIncrement is in feet; the sim still ignores range increments for non-firearm attacks (Gap List §2.8)."
     },
-    {
-      "id": "paladin-hero",
-      "name": "Paladin Hero",
-      "keywords": ["humanoid", "hero", "player-character"],
-      "data": {
-        "type": "actor",
-        "name": "Paladin Hero",
-        "system": {
-          "pf1e": {
-            "size": "Medium",
-            "bab": 11,
-            "strMod": 5,
-            "ac": 20,
-            "touchAc": 12,
-            "dr": { "bypass": ["magic"], "val": 5 },
-            "weapon": {
-              "enhancementBonus": 2,
-              "damageDiceCount": 1,
-              "damageDiceSides": 10,
-              "critThreatMin": 19,
-              "critMultiplier": 2
-            }
-          },
-          "notes": "The hero marker a mass-battle unit must also carry (unit.type 'hero' or stats.hero = 1) lives on the Unit document, not here — see Gap List §5."
-        },
-        "items": [],
-        "effects": []
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "paladin-hero",
+   "name": "Paladin Hero",
+   "keywords": [
+    "humanoid",
+    "hero",
+    "player-character"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Paladin Hero",
+    "system": {
+     "pf1e": {
+      "size": "Medium",
+      "bab": 11,
+      "strMod": 5,
+      "ac": 20,
+      "touchAc": 12,
+      "dr": {
+       "bypass": [
+        "magic"
+       ],
+       "val": 5
+      },
+      "weapon": {
+       "enhancementBonus": 2,
+       "damageDiceCount": 1,
+       "damageDiceSides": 10,
+       "critThreatMin": 19,
+       "critMultiplier": 2
       }
+     },
+     "notes": "The hero marker a mass-battle unit must also carry (unit.type 'hero' or stats.hero = 1) lives on the Unit document, not here — see Gap List §5."
     },
-    {
-      "id": "troll-vanguard",
-      "name": "Troll Vanguard",
-      "keywords": ["giant", "regen", "brute"],
-      "data": {
-        "type": "actor",
-        "name": "Troll Vanguard",
-        "system": {
-          "pf1e": {
-            "size": "Large",
-            "bab": 6,
-            "strMod": 6,
-            "conMod": 4,
-            "sizeMod": -1,
-            "specialSizeMod": 1,
-            "ac": 16,
-            "touchAc": 10,
-            "regeneration": { "value": 5, "suppress": ["fire", "acid"] },
-            "weapon": { "damageDiceCount": 1, "damageDiceSides": 8, "damageMod": 6 }
-          }
-        },
-        "items": [],
-        "effects": []
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "troll-vanguard",
+   "name": "Troll Vanguard",
+   "keywords": [
+    "giant",
+    "regen",
+    "brute"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Troll Vanguard",
+    "system": {
+     "pf1e": {
+      "size": "Large",
+      "bab": 6,
+      "strMod": 6,
+      "conMod": 4,
+      "sizeMod": -1,
+      "specialSizeMod": 1,
+      "ac": 16,
+      "touchAc": 10,
+      "regeneration": {
+       "value": 5,
+       "suppress": [
+        "fire",
+        "acid"
+       ]
+      },
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 8,
+       "damageMod": 6
       }
+     }
     },
-    {
-      "id": "clay-golem",
-      "name": "Clay Golem",
-      "keywords": ["construct", "adamantine", "spell-resistance"],
-      "data": {
-        "type": "actor",
-        "name": "Clay Golem",
-        "system": {
-          "pf1e": {
-            "size": "Large",
-            "bab": 9,
-            "strMod": 7,
-            "sizeMod": -1,
-            "specialSizeMod": 1,
-            "ac": 22,
-            "touchAc": 9,
-            "dr": { "bypass": ["adamantine"], "val": 10 },
-            "sr": 25,
-            "fastHealing": 0,
-            "weapon": { "damageDiceCount": 2, "damageDiceSides": 10, "damageMod": 7 }
-          }
-        },
-        "items": [],
-        "effects": []
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "clay-golem",
+   "name": "Clay Golem",
+   "keywords": [
+    "construct",
+    "adamantine",
+    "spell-resistance"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Clay Golem",
+    "system": {
+     "pf1e": {
+      "size": "Large",
+      "bab": 9,
+      "strMod": 7,
+      "sizeMod": -1,
+      "specialSizeMod": 1,
+      "ac": 22,
+      "touchAc": 9,
+      "dr": {
+       "bypass": [
+        "adamantine"
+       ],
+       "val": 10
+      },
+      "sr": 25,
+      "fastHealing": 0,
+      "weapon": {
+       "damageDiceCount": 2,
+       "damageDiceSides": 10,
+       "damageMod": 7
       }
-    }
-  ]
+     }
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "light-infantry",
+   "name": "Light Infantry",
+   "keywords": [
+    "humanoid",
+    "medium",
+    "mass-battle",
+    "cr-0.25"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Light Infantry",
+    "system": {
+     "pf1e": {
+      "size": "Medium",
+      "bab": 0,
+      "strMod": 1,
+      "dexMod": 3,
+      "ac": 14,
+      "touchAc": 13,
+      "naturalArmor": 0,
+      "armorBonus": 0,
+      "shieldBonus": 1,
+      "sizeMod": 0,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 8,
+       "damageMod": 1
+      }
+     },
+     "mirror": {
+      "hitDice": 1,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 0,
+       "ref": 0,
+       "will": 0
+      },
+      "speedFeet": 30,
+      "cr": 0.25,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.light-infantry. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 0.25, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "pikemen",
+   "name": "Pike Block",
+   "keywords": [
+    "humanoid",
+    "medium",
+    "mass-battle",
+    "cr-0.5"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Pike Block",
+    "system": {
+     "pf1e": {
+      "size": "Medium",
+      "bab": 0,
+      "strMod": 3,
+      "ac": 12,
+      "touchAc": 10,
+      "naturalArmor": 1,
+      "armorBonus": 1,
+      "shieldBonus": 0,
+      "sizeMod": 0,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 8,
+       "damageMod": 4
+      }
+     },
+     "mirror": {
+      "hitDice": 1,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 0,
+       "ref": 0,
+       "will": 0
+      },
+      "speedFeet": 20,
+      "cr": 0.5,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.pikemen. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 0.5, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "slingers",
+   "name": "Sling Volley",
+   "keywords": [
+    "humanoid",
+    "medium",
+    "mass-battle",
+    "cr-0.25"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Sling Volley",
+    "system": {
+     "pf1e": {
+      "size": "Medium",
+      "bab": 0,
+      "strMod": 1,
+      "dexMod": 3,
+      "ac": 13,
+      "touchAc": 13,
+      "naturalArmor": 0,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": 0,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 6,
+       "damageMod": 1,
+       "isRanged": true,
+       "rangeIncrement": 50
+      }
+     },
+     "mirror": {
+      "hitDice": 1,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 0,
+       "ref": 0,
+       "will": 0
+      },
+      "speedFeet": 30,
+      "cr": 0.25,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.slingers. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 0.25, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "longbowmen",
+   "name": "Longbow Flight",
+   "keywords": [
+    "humanoid",
+    "medium",
+    "mass-battle",
+    "cr-0.25"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Longbow Flight",
+    "system": {
+     "pf1e": {
+      "size": "Medium",
+      "bab": 0,
+      "strMod": 1,
+      "dexMod": 3,
+      "ac": 13,
+      "touchAc": 13,
+      "naturalArmor": 0,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": 0,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 8,
+       "damageMod": 1,
+       "isRanged": true,
+       "rangeIncrement": 100
+      }
+     },
+     "mirror": {
+      "hitDice": 1,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 0,
+       "ref": 0,
+       "will": 0
+      },
+      "speedFeet": 30,
+      "cr": 0.25,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.longbowmen. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 0.25, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "crossbowmen",
+   "name": "Heavy Crossbow Rank",
+   "keywords": [
+    "humanoid",
+    "medium",
+    "mass-battle",
+    "cr-0.5"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Heavy Crossbow Rank",
+    "system": {
+     "pf1e": {
+      "size": "Medium",
+      "bab": 0,
+      "strMod": 1,
+      "dexMod": 2,
+      "ac": 12,
+      "touchAc": 12,
+      "naturalArmor": 0,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": 0,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 10,
+       "damageMod": 1,
+       "isRanged": true,
+       "rangeIncrement": 120
+      }
+     },
+     "mirror": {
+      "hitDice": 1,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 0,
+       "ref": 0,
+       "will": 0
+      },
+      "speedFeet": 20,
+      "cr": 0.5,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.crossbowmen. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 0.5, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "halberdiers",
+   "name": "Halberd Guard",
+   "keywords": [
+    "humanoid",
+    "medium",
+    "mass-battle",
+    "cr-1"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Halberd Guard",
+    "system": {
+     "pf1e": {
+      "size": "Medium",
+      "bab": 1,
+      "strMod": 3,
+      "dexMod": 1,
+      "ac": 14,
+      "touchAc": 11,
+      "naturalArmor": 1,
+      "armorBonus": 2,
+      "shieldBonus": 0,
+      "sizeMod": 0,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 10,
+       "damageMod": 4
+      }
+     },
+     "mirror": {
+      "hitDice": 2,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 1,
+       "ref": 1,
+       "will": 1
+      },
+      "speedFeet": 20,
+      "cr": 1,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.halberdiers. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 1, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "spear-levy",
+   "name": "Spear Levy",
+   "keywords": [
+    "humanoid",
+    "small",
+    "mass-battle",
+    "cr-0.25"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Spear Levy",
+    "system": {
+     "pf1e": {
+      "size": "Small",
+      "bab": 0,
+      "strMod": 0,
+      "dexMod": 3,
+      "ac": 16,
+      "touchAc": 14,
+      "naturalArmor": 1,
+      "armorBonus": 0,
+      "shieldBonus": 1,
+      "sizeMod": 1,
+      "specialSizeMod": -1,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 8,
+       "damageMod": 0
+      }
+     },
+     "mirror": {
+      "hitDice": 1,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 0,
+       "ref": 0,
+       "will": 0
+      },
+      "speedFeet": 20,
+      "cr": 0.25,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.spear-levy. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 0.25, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "javelineers",
+   "name": "Javelin Skirmishers",
+   "keywords": [
+    "humanoid",
+    "medium",
+    "mass-battle",
+    "cr-1"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Javelin Skirmishers",
+    "system": {
+     "pf1e": {
+      "size": "Medium",
+      "bab": 1,
+      "strMod": 2,
+      "dexMod": 3,
+      "ac": 13,
+      "touchAc": 13,
+      "naturalArmor": 0,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": 0,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 6,
+       "damageMod": 2,
+       "isRanged": true,
+       "rangeIncrement": 30
+      }
+     },
+     "mirror": {
+      "hitDice": 2,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 1,
+       "ref": 1,
+       "will": 1
+      },
+      "speedFeet": 30,
+      "cr": 1,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.javelineers. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 1, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "guard-dogs",
+   "name": "War Canine Pack",
+   "keywords": [
+    "humanoid",
+    "medium",
+    "mass-battle",
+    "cr-1"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "War Canine Pack",
+    "system": {
+     "pf1e": {
+      "size": "Medium",
+      "bab": 1,
+      "strMod": 3,
+      "dexMod": 3,
+      "ac": 15,
+      "touchAc": 13,
+      "naturalArmor": 2,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": 0,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 6,
+       "damageMod": 4
+      }
+     },
+     "mirror": {
+      "hitDice": 2,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 1,
+       "ref": 1,
+       "will": 1
+      },
+      "speedFeet": 50,
+      "cr": 1,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.guard-dogs. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 1, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "riding-horse",
+   "name": "Light Horse",
+   "keywords": [
+    "animal",
+    "large",
+    "mass-battle",
+    "cr-1"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Light Horse",
+    "system": {
+     "pf1e": {
+      "size": "Large",
+      "bab": 1,
+      "strMod": 4,
+      "dexMod": 1,
+      "ac": 12,
+      "touchAc": 10,
+      "naturalArmor": 2,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": -1,
+      "specialSizeMod": 1,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 6,
+       "damageMod": 6
+      }
+     },
+     "mirror": {
+      "hitDice": 2,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 1,
+       "ref": 1,
+       "will": 1
+      },
+      "speedFeet": 60,
+      "cr": 1,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.riding-horse. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 1, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "warhorse",
+   "name": "Heavy Horse",
+   "keywords": [
+    "animal",
+    "large",
+    "mass-battle",
+    "cr-2"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Heavy Horse",
+    "system": {
+     "pf1e": {
+      "size": "Large",
+      "bab": 3,
+      "strMod": 6,
+      "ac": 13,
+      "touchAc": 9,
+      "naturalArmor": 4,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": -1,
+      "specialSizeMod": 1,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 8,
+       "damageMod": 8
+      }
+     },
+     "mirror": {
+      "hitDice": 4,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 2,
+       "ref": 2,
+       "will": 2
+      },
+      "speedFeet": 50,
+      "cr": 2,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.warhorse. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 2, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "camel",
+   "name": "Pack Camel",
+   "keywords": [
+    "animal",
+    "large",
+    "mass-battle",
+    "cr-2"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Pack Camel",
+    "system": {
+     "pf1e": {
+      "size": "Large",
+      "bab": 3,
+      "strMod": 4,
+      "ac": 11,
+      "touchAc": 9,
+      "naturalArmor": 2,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": -1,
+      "specialSizeMod": 1,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 6,
+       "damageMod": 4
+      }
+     },
+     "mirror": {
+      "hitDice": 4,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 2,
+       "ref": 2,
+       "will": 2
+      },
+      "speedFeet": 50,
+      "cr": 2,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.camel. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 2, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "elephant",
+   "name": "War Elephant",
+   "keywords": [
+    "animal",
+    "huge",
+    "mass-battle",
+    "cr-5"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "War Elephant",
+    "system": {
+     "pf1e": {
+      "size": "Huge",
+      "bab": 6,
+      "strMod": 8,
+      "ac": 16,
+      "touchAc": 8,
+      "naturalArmor": 8,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": -2,
+      "specialSizeMod": 2,
+      "weapon": {
+       "damageDiceCount": 2,
+       "damageDiceSides": 6,
+       "damageMod": 10
+      },
+      "trampleDamage": {
+       "diceCount": 2,
+       "diceSides": 8
+      },
+      "hasTrample": true
+     },
+     "mirror": {
+      "hitDice": 8,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 4,
+       "ref": 4,
+       "will": 4
+      },
+      "speedFeet": 60,
+      "cr": 5,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.elephant. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 5, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "dire-wolf",
+   "name": "Dire Wolf Pack",
+   "keywords": [
+    "animal",
+    "large",
+    "mass-battle",
+    "cr-3"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Dire Wolf Pack",
+    "system": {
+     "pf1e": {
+      "size": "Large",
+      "bab": 3,
+      "strMod": 6,
+      "dexMod": 3,
+      "ac": 15,
+      "touchAc": 12,
+      "naturalArmor": 3,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": -1,
+      "specialSizeMod": 1,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 8,
+       "damageMod": 8
+      }
+     },
+     "mirror": {
+      "hitDice": 4,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 2,
+       "ref": 2,
+       "will": 2
+      },
+      "speedFeet": 50,
+      "cr": 3,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.dire-wolf. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 3, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "boar-herd",
+   "name": "War Boar Herd",
+   "keywords": [
+    "animal",
+    "medium",
+    "mass-battle",
+    "cr-2"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "War Boar Herd",
+    "system": {
+     "pf1e": {
+      "size": "Medium",
+      "bab": 2,
+      "strMod": 4,
+      "dexMod": 1,
+      "ac": 14,
+      "touchAc": 11,
+      "naturalArmor": 3,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": 0,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 8,
+       "damageMod": 5
+      }
+     },
+     "mirror": {
+      "hitDice": 3,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 1,
+       "ref": 1,
+       "will": 1
+      },
+      "speedFeet": 40,
+      "cr": 2,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.boar-herd. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 2, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "brown-bear",
+   "name": "Brown Bear Shock",
+   "keywords": [
+    "animal",
+    "large",
+    "mass-battle",
+    "cr-4"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Brown Bear Shock",
+    "system": {
+     "pf1e": {
+      "size": "Large",
+      "bab": 4,
+      "strMod": 8,
+      "dexMod": 3,
+      "ac": 15,
+      "touchAc": 12,
+      "naturalArmor": 3,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": -1,
+      "specialSizeMod": 1,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 8,
+       "damageMod": 10
+      }
+     },
+     "mirror": {
+      "hitDice": 6,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 3,
+       "ref": 3,
+       "will": 3
+      },
+      "speedFeet": 50,
+      "cr": 4,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.brown-bear. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 4, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "lion-pride",
+   "name": "Lion Pride",
+   "keywords": [
+    "animal",
+    "medium",
+    "mass-battle",
+    "cr-3"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Lion Pride",
+    "system": {
+     "pf1e": {
+      "size": "Medium",
+      "bab": 3,
+      "strMod": 6,
+      "dexMod": 3,
+      "ac": 15,
+      "touchAc": 13,
+      "naturalArmor": 2,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": 0,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 8,
+       "damageMod": 7
+      }
+     },
+     "mirror": {
+      "hitDice": 4,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 2,
+       "ref": 2,
+       "will": 2
+      },
+      "speedFeet": 50,
+      "cr": 3,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.lion-pride. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 3, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "eagles",
+   "name": "War Eagle Flight",
+   "keywords": [
+    "animal",
+    "large",
+    "mass-battle",
+    "cr-3"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "War Eagle Flight",
+    "system": {
+     "pf1e": {
+      "size": "Large",
+      "bab": 3,
+      "strMod": 6,
+      "dexMod": 3,
+      "ac": 15,
+      "touchAc": 12,
+      "naturalArmor": 3,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": -1,
+      "specialSizeMod": 1,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 6,
+       "damageMod": 6
+      }
+     },
+     "mirror": {
+      "hitDice": 4,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 2,
+       "ref": 2,
+       "will": 2
+      },
+      "speedFeet": 60,
+      "cr": 3,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.eagles. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 3, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "ogre-clubbers",
+   "name": "Ogre Clubbers",
+   "keywords": [
+    "humanoid",
+    "large",
+    "mass-battle",
+    "cr-2"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Ogre Clubbers",
+    "system": {
+     "pf1e": {
+      "size": "Large",
+      "bab": 2,
+      "strMod": 6,
+      "ac": 12,
+      "touchAc": 9,
+      "naturalArmor": 3,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": -1,
+      "specialSizeMod": 1,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 10,
+       "damageMod": 9
+      }
+     },
+     "mirror": {
+      "hitDice": 3,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 1,
+       "ref": 1,
+       "will": 1
+      },
+      "speedFeet": 30,
+      "cr": 2,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.ogre-clubbers. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 2, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "ettin",
+   "name": "Ettin Warline",
+   "keywords": [
+    "humanoid",
+    "large",
+    "mass-battle",
+    "cr-5"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Ettin Warline",
+    "system": {
+     "pf1e": {
+      "size": "Large",
+      "bab": 8,
+      "strMod": 8,
+      "ac": 13,
+      "touchAc": 9,
+      "naturalArmor": 4,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": -1,
+      "specialSizeMod": 1,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 10,
+       "damageMod": 11
+      }
+     },
+     "mirror": {
+      "hitDice": 8,
+      "progression": "good",
+      "goodSaves": [
+       "fort"
+      ],
+      "baseSaves": {
+       "fort": 6,
+       "ref": 4,
+       "will": 4
+      },
+      "speedFeet": 40,
+      "cr": 5,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.ettin. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 5, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "hill-giant",
+   "name": "Hill Giant Hurlers",
+   "keywords": [
+    "humanoid",
+    "huge",
+    "mass-battle",
+    "cr-5"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Hill Giant Hurlers",
+    "system": {
+     "pf1e": {
+      "size": "Huge",
+      "bab": 8,
+      "strMod": 8,
+      "ac": 13,
+      "touchAc": 8,
+      "naturalArmor": 5,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": -2,
+      "specialSizeMod": 2,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 10,
+       "damageMod": 12
+      }
+     },
+     "mirror": {
+      "hitDice": 8,
+      "progression": "good",
+      "goodSaves": [
+       "fort"
+      ],
+      "baseSaves": {
+       "fort": 6,
+       "ref": 4,
+       "will": 4
+      },
+      "speedFeet": 40,
+      "cr": 5,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.hill-giant. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 5, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "stone-giant",
+   "name": "Stone Giant Slingers",
+   "keywords": [
+    "humanoid",
+    "huge",
+    "mass-battle",
+    "cr-6"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Stone Giant Slingers",
+    "system": {
+     "pf1e": {
+      "size": "Huge",
+      "bab": 9,
+      "strMod": 8,
+      "dexMod": 4,
+      "ac": 20,
+      "touchAc": 12,
+      "naturalArmor": 8,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": -2,
+      "specialSizeMod": 2,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 10,
+       "damageMod": 12
+      }
+     },
+     "mirror": {
+      "hitDice": 9,
+      "progression": "good",
+      "goodSaves": [
+       "fort"
+      ],
+      "baseSaves": {
+       "fort": 6,
+       "ref": 4,
+       "will": 4
+      },
+      "speedFeet": 40,
+      "cr": 6,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.stone-giant. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 6, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "fire-giant",
+   "name": "Fire Giant Ironclads",
+   "keywords": [
+    "humanoid",
+    "huge",
+    "mass-battle",
+    "cr-8"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Fire Giant Ironclads",
+    "system": {
+     "pf1e": {
+      "size": "Huge",
+      "bab": 11,
+      "strMod": 8,
+      "ac": 22,
+      "touchAc": 8,
+      "naturalArmor": 10,
+      "armorBonus": 4,
+      "shieldBonus": 0,
+      "sizeMod": -2,
+      "specialSizeMod": 2,
+      "dr": {
+       "bypass": [
+        "bludgeoning",
+        "piercing",
+        "slashing"
+       ],
+       "val": 10
+      },
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 10,
+       "damageMod": 13
+      }
+     },
+     "mirror": {
+      "hitDice": 11,
+      "progression": "good",
+      "goodSaves": [
+       "fort"
+      ],
+      "baseSaves": {
+       "fort": 7,
+       "ref": 5,
+       "will": 5
+      },
+      "speedFeet": 35,
+      "cr": 8,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.fire-giant. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 8, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "minotaur",
+   "name": "Minotaur Axe Berserkers",
+   "keywords": [
+    "humanoid",
+    "large",
+    "mass-battle",
+    "cr-5"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Minotaur Axe Berserkers",
+    "system": {
+     "pf1e": {
+      "size": "Large",
+      "bab": 6,
+      "strMod": 6,
+      "dexMod": 3,
+      "ac": 16,
+      "touchAc": 12,
+      "naturalArmor": 4,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": -1,
+      "specialSizeMod": 1,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 10,
+       "damageMod": 9
+      }
+     },
+     "mirror": {
+      "hitDice": 6,
+      "progression": "good",
+      "goodSaves": [
+       "fort"
+      ],
+      "baseSaves": {
+       "fort": 5,
+       "ref": 3,
+       "will": 3
+      },
+      "speedFeet": 40,
+      "cr": 5,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.minotaur. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 5, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "centaur",
+   "name": "Centaur Horse Archers",
+   "keywords": [
+    "animal",
+    "large",
+    "mass-battle",
+    "cr-3"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Centaur Horse Archers",
+    "system": {
+     "pf1e": {
+      "size": "Large",
+      "bab": 4,
+      "strMod": 4,
+      "dexMod": 1,
+      "ac": 13,
+      "touchAc": 10,
+      "naturalArmor": 3,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": -1,
+      "specialSizeMod": 1,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 8,
+       "damageMod": 4,
+       "isRanged": true,
+       "rangeIncrement": 110
+      }
+     },
+     "mirror": {
+      "hitDice": 4,
+      "progression": "good",
+      "goodSaves": [
+       "fort"
+      ],
+      "baseSaves": {
+       "fort": 4,
+       "ref": 2,
+       "will": 2
+      },
+      "speedFeet": 50,
+      "cr": 3,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.centaur. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 3, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "harpy",
+   "name": "Harpy Sky Line",
+   "keywords": [
+    "animal",
+    "medium",
+    "mass-battle",
+    "cr-3"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Harpy Sky Line",
+    "system": {
+     "pf1e": {
+      "size": "Medium",
+      "bab": 3,
+      "strMod": 3,
+      "dexMod": 3,
+      "ac": 16,
+      "touchAc": 13,
+      "naturalArmor": 3,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": 0,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 6,
+       "damageMod": 3
+      }
+     },
+     "mirror": {
+      "hitDice": 4,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 2,
+       "ref": 2,
+       "will": 2
+      },
+      "speedFeet": 20,
+      "cr": 3,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.harpy. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 3, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "basilisk",
+   "name": "Basilisk Stone Line",
+   "keywords": [
+    "animal",
+    "medium",
+    "mass-battle",
+    "cr-5"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Basilisk Stone Line",
+    "system": {
+     "pf1e": {
+      "size": "Medium",
+      "bab": 4,
+      "strMod": 3,
+      "ac": 15,
+      "touchAc": 10,
+      "naturalArmor": 5,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": 0,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 6,
+       "damageMod": 3
+      }
+     },
+     "mirror": {
+      "hitDice": 6,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 3,
+       "ref": 3,
+       "will": 3
+      },
+      "speedFeet": 20,
+      "cr": 5,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.basilisk. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 5, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "golem-iron",
+   "name": "Iron Golem",
+   "keywords": [
+    "animal",
+    "large",
+    "mass-battle",
+    "cr-11"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Iron Golem",
+    "system": {
+     "pf1e": {
+      "size": "Large",
+      "bab": 13,
+      "strMod": 9,
+      "ac": 24,
+      "touchAc": 9,
+      "naturalArmor": 15,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": -1,
+      "specialSizeMod": 1,
+      "dr": {
+       "bypass": [
+        "adamantine"
+       ],
+       "val": 10
+      },
+      "sr": 27,
+      "weapon": {
+       "damageDiceCount": 2,
+       "damageDiceSides": 10,
+       "damageMod": 9
+      }
+     },
+     "mirror": {
+      "hitDice": 13,
+      "progression": "good",
+      "goodSaves": [
+       "fort"
+      ],
+      "baseSaves": {
+       "fort": 8,
+       "ref": 6,
+       "will": 6
+      },
+      "speedFeet": 30,
+      "cr": 11,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.golem-iron. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 11, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "sapper-team",
+   "name": "Siege Sappers",
+   "keywords": [
+    "humanoid",
+    "medium",
+    "mass-battle",
+    "cr-0.5"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Siege Sappers",
+    "system": {
+     "pf1e": {
+      "size": "Medium",
+      "bab": 0,
+      "strMod": 3,
+      "ac": 12,
+      "touchAc": 10,
+      "naturalArmor": 1,
+      "armorBonus": 1,
+      "shieldBonus": 0,
+      "sizeMod": 0,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 8,
+       "damageMod": 3
+      }
+     },
+     "mirror": {
+      "hitDice": 1,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 0,
+       "ref": 0,
+       "will": 0
+      },
+      "speedFeet": 20,
+      "cr": 0.5,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.sapper-team. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 0.5, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "hero-wizard",
+   "name": "War Wizard Hero",
+   "keywords": [
+    "humanoid",
+    "medium",
+    "mass-battle",
+    "cr-11"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "War Wizard Hero",
+    "system": {
+     "pf1e": {
+      "size": "Medium",
+      "bab": 5,
+      "strMod": 0,
+      "dexMod": 4,
+      "ac": 17,
+      "touchAc": 14,
+      "naturalArmor": 3,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": 0,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 4,
+       "damageMod": 0,
+       "isRanged": true,
+       "rangeIncrement": 0
+      },
+      "casterLevel": 11,
+      "castingStatMod": 4,
+      "spellPenetration": 5
+     },
+     "mirror": {
+      "hitDice": 11,
+      "progression": "poor",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 5,
+       "ref": 5,
+       "will": 5
+      },
+      "speedFeet": 30,
+      "cr": 11,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.hero-wizard. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 11, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "hero-barbarian",
+   "name": "Berserker Hero",
+   "keywords": [
+    "humanoid",
+    "medium",
+    "mass-battle",
+    "cr-11"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Berserker Hero",
+    "system": {
+     "pf1e": {
+      "size": "Medium",
+      "bab": 11,
+      "strMod": 7,
+      "dexMod": 3,
+      "ac": 17,
+      "touchAc": 13,
+      "naturalArmor": 4,
+      "armorBonus": 0,
+      "shieldBonus": 0,
+      "sizeMod": 0,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 12,
+       "damageMod": 10,
+       "critThreatMin": 19,
+       "critMultiplier": 2
+      }
+     },
+     "mirror": {
+      "hitDice": 11,
+      "progression": "good",
+      "goodSaves": [
+       "fort"
+      ],
+      "baseSaves": {
+       "fort": 7,
+       "ref": 5,
+       "will": 5
+      },
+      "speedFeet": 40,
+      "cr": 11,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.hero-barbarian. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 11, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "hero-rogue",
+   "name": "Infiltrator Hero",
+   "keywords": [
+    "humanoid",
+    "medium",
+    "mass-battle",
+    "cr-11"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Infiltrator Hero",
+    "system": {
+     "pf1e": {
+      "size": "Medium",
+      "bab": 8,
+      "strMod": 3,
+      "dexMod": 7,
+      "ac": 24,
+      "touchAc": 17,
+      "naturalArmor": 3,
+      "armorBonus": 3,
+      "shieldBonus": 1,
+      "sizeMod": 0,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 8,
+       "damageMod": 6,
+       "critThreatMin": 19,
+       "critMultiplier": 2
+      }
+     },
+     "mirror": {
+      "hitDice": 11,
+      "progression": "average",
+      "goodSaves": [],
+      "baseSaves": {
+       "fort": 5,
+       "ref": 5,
+       "will": 5
+      },
+      "speedFeet": 30,
+      "cr": 11,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.hero-rogue. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 11, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "hero-cleric",
+   "name": "Warpriest Hero",
+   "keywords": [
+    "humanoid",
+    "medium",
+    "mass-battle",
+    "cr-11"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Warpriest Hero",
+    "system": {
+     "pf1e": {
+      "size": "Medium",
+      "bab": 11,
+      "strMod": 5,
+      "dexMod": 1,
+      "ac": 22,
+      "touchAc": 11,
+      "naturalArmor": 5,
+      "armorBonus": 5,
+      "shieldBonus": 1,
+      "sizeMod": 0,
+      "dr": {
+       "bypass": [
+        "magic"
+       ],
+       "val": 3
+      },
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 8,
+       "damageMod": 8
+      }
+     },
+     "mirror": {
+      "hitDice": 11,
+      "progression": "good",
+      "goodSaves": [
+       "fort"
+      ],
+      "baseSaves": {
+       "fort": 7,
+       "ref": 5,
+       "will": 5
+      },
+      "speedFeet": 30,
+      "cr": 11,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.hero-cleric. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 11, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "hero-ranger",
+   "name": "Huntmaster Hero",
+   "keywords": [
+    "humanoid",
+    "medium",
+    "mass-battle",
+    "cr-11"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Huntmaster Hero",
+    "system": {
+     "pf1e": {
+      "size": "Medium",
+      "bab": 11,
+      "strMod": 5,
+      "dexMod": 5,
+      "ac": 23,
+      "touchAc": 15,
+      "naturalArmor": 4,
+      "armorBonus": 4,
+      "shieldBonus": 0,
+      "sizeMod": 0,
+      "weapon": {
+       "damageDiceCount": 1,
+       "damageDiceSides": 10,
+       "damageMod": 7,
+       "critThreatMin": 19,
+       "critMultiplier": 2
+      }
+     },
+     "mirror": {
+      "hitDice": 11,
+      "progression": "good",
+      "goodSaves": [
+       "fort"
+      ],
+      "baseSaves": {
+       "fort": 7,
+       "ref": 5,
+       "will": 5
+      },
+      "speedFeet": 40,
+      "cr": 11,
+      "derived": "bab comes from the progression ladder in rulesTables.ts (`babAtLevel`) and `baseSaves` from `saveBonusAtLevel`, as the ladder alone: the pool sim reads a published save as a total while the tactical rules add the ability modifier to it, which is the pinned cross-scale difference of Gap List §10.2 (D-226), so the sheet supplies the modifier and this row does not double it. AC is 10 + the size column of Table 8-4 + Dexterity + natural armor + armor + shield, and touchAc drops the worn bonuses. tests/packages/pf1eContentPacks.test.ts recomputes every one of them; the saves live in this mirror block rather than in `pf1e` because the mass engine reads no save column, and authoring a total on the profile side would freeze one scale's answer into content."
+     },
+     "notes": "Mass-battle profile mirror of PRECREATED_PF1E_UNITS.hero-ranger. Hit points default to 10 per model until the profile table carries hp (Gap List §1.3). This is a unit-role mirror at CR 11, NOT a transcription of a Bestiary stat line: the published creature's attack/damage/saves line is R02 work, and the fields the sim reads are authored here and cross-checked against the shared tables."
+    },
+    "items": [],
+    "effects": []
+   }
+  }
+ ]
 }

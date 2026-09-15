@@ -1,0 +1,827 @@
+{
+ "name": "PF1e Feats",
+ "type": "items",
+ "note": "M16: the feats that affect calculations, split by whether a rule in this repo reads them. 33 rows: 18 automated (a rule looks the feat up by name and the row is the arithmetic it applies) and 15 descriptive, which includes the initiative, mobility, defense and maneuver feats M16 names by hand — those are catalogued rather than implemented, because the mechanical effect has no consumer at strategic scale and the note says so instead of pretending. `mechanical` is mirrored from the shipped implementation and tests/packages/pf1eContentPacks.test.ts checks it against the functions named in `mechanismSource` — a row that drifts from the code fails the build.",
+ "entries": [
+  {
+   "id": "power-attack",
+   "name": "Power Attack",
+   "keywords": [
+    "feat",
+    "combat",
+    "mechanical"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Power Attack",
+    "system": {
+     "category": "combat",
+     "mechanical": {
+      "babDivisor": 4,
+      "attackPerStep": -1,
+      "damagePerStep": 2,
+      "twoHandedDamagePerStep": 3,
+      "maxSteps": 5
+     },
+     "mechanismSource": "feats.ts's powerAttackStep/featDamageParts",
+     "automation": "automated",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "deadly-aim",
+   "name": "Deadly Aim",
+   "keywords": [
+    "feat",
+    "combat",
+    "mechanical"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Deadly Aim",
+    "system": {
+     "category": "combat",
+     "mechanical": {
+      "babDivisor": 4,
+      "attackPerStep": -1,
+      "damagePerStep": 2,
+      "rangedOnly": true
+     },
+     "mechanismSource": "feats.ts's deadlyAimStep (the same ladder as Power Attack, ranged side)",
+     "automation": "automated",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "combat-expertise",
+   "name": "Combat Expertise",
+   "keywords": [
+    "feat",
+    "combat",
+    "mechanical"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Combat Expertise",
+    "system": {
+     "category": "combat",
+     "mechanical": {
+      "babDivisor": 4,
+      "attackPerStep": -1,
+      "acPerStep": 1,
+      "maxSteps": 5
+     },
+     "mechanismSource": "feats.ts's featAttackParts/featDefenseParts",
+     "automation": "automated",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "two-weapon-fighting",
+   "name": "Two-Weapon Fighting",
+   "keywords": [
+    "feat",
+    "combat",
+    "mechanical"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Two-Weapon Fighting",
+    "system": {
+     "category": "combat",
+     "mechanical": {
+      "primaryHandPenaltyReduction": 2,
+      "offHandPenaltyReduction": 6
+     },
+     "mechanismSource": "rulesTables.ts's Table 8-7 rows (D-135)",
+     "automation": "automated",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "improved-two-weapon-fighting",
+   "name": "Improved Two-Weapon Fighting",
+   "keywords": [
+    "feat",
+    "combat",
+    "mechanical"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Improved Two-Weapon Fighting",
+    "system": {
+     "category": "combat",
+     "mechanical": {
+      "extraOffHandAttacks": 1
+     },
+     "mechanismSource": "feats.ts's offHandAttackCount (two off-hand attacks in all)",
+     "automation": "automated",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "greater-two-weapon-fighting",
+   "name": "Greater Two-Weapon Fighting",
+   "keywords": [
+    "feat",
+    "combat",
+    "mechanical"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Greater Two-Weapon Fighting",
+    "system": {
+     "category": "combat",
+     "mechanical": {
+      "extraOffHandAttacks": 2
+     },
+     "mechanismSource": "feats.ts's offHandAttackCount (three off-hand attacks in all)",
+     "automation": "automated",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "improved-unarmed-strike",
+   "name": "Improved Unarmed Strike",
+   "keywords": [
+    "feat",
+    "combat",
+    "mechanical"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Improved Unarmed Strike",
+    "system": {
+     "category": "combat",
+     "mechanical": {
+      "provokesWithout": true,
+      "countsAsArmed": true
+     },
+     "mechanismSource": "weapons.ts's unarmedStrikeWeapon and the AoO rule",
+     "automation": "automated",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "precise-shot",
+   "name": "Precise Shot",
+   "keywords": [
+    "feat",
+    "ranged",
+    "mechanical"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Precise Shot",
+    "system": {
+     "category": "ranged",
+     "mechanical": {
+      "removesShootingIntoMelee": -4
+     },
+     "mechanismSource": "tactical.ts's shootingIntoMeleePenalty",
+     "automation": "automated",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "point-blank-shot",
+   "name": "Point-Blank Shot",
+   "keywords": [
+    "feat",
+    "ranged",
+    "mechanical"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Point-Blank Shot",
+    "system": {
+     "category": "ranged",
+     "mechanical": {
+      "withinFeet": 30,
+      "attackBonus": 1,
+      "damageBonus": 1
+     },
+     "mechanismSource": "feats.ts's featAttackParts/featDamageParts",
+     "automation": "automated",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "rapid-shot",
+   "name": "Rapid Shot",
+   "keywords": [
+    "feat",
+    "ranged",
+    "mechanical"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Rapid Shot",
+    "system": {
+     "category": "ranged",
+     "mechanical": {
+      "extraAttack": 1,
+      "penalty": -2
+     },
+     "mechanismSource": "feats.ts's ranged feat parts",
+     "automation": "automated",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "manyshot",
+   "name": "Manyshot",
+   "keywords": [
+    "feat",
+    "ranged",
+    "mechanical"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Manyshot",
+    "system": {
+     "category": "ranged",
+     "mechanical": {
+      "minBab": 6,
+      "arrowsBase": 2,
+      "arrowsPerBab": 5,
+      "maxArrows": 4,
+      "attackPenalty": -4
+     },
+     "mechanismSource": "feats.ts's manyshotPlan",
+     "automation": "automated",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "improved-critical",
+   "name": "Improved Critical",
+   "keywords": [
+    "feat",
+    "combat",
+    "mechanical"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Improved Critical",
+    "system": {
+     "category": "combat",
+     "mechanical": {
+      "threatRangeExpansion": 2
+     },
+     "mechanismSource": "feats.ts's improvedCriticalApplies (§2.5: 20 becomes 19-20, 19-20 becomes 17-20)",
+     "automation": "automated",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "weapon-focus",
+   "name": "Weapon Focus",
+   "keywords": [
+    "feat",
+    "combat",
+    "mechanical"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Weapon Focus",
+    "system": {
+     "category": "combat",
+     "mechanical": {
+      "attackBonus": 1
+     },
+     "mechanismSource": "feats.ts's featAttackParts",
+     "automation": "automated",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "weapon-finesse",
+   "name": "Weapon Finesse",
+   "keywords": [
+    "feat",
+    "combat",
+    "mechanical"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Weapon Finesse",
+    "system": {
+     "category": "combat",
+     "mechanical": {
+      "usesDexterityForLight": true
+     },
+     "mechanismSource": "feats.ts's featAttackParts marker (the caller picks the ability)",
+     "automation": "automated",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "combat-reflexes",
+   "name": "Combat Reflexes",
+   "keywords": [
+    "feat",
+    "combat",
+    "mechanical"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Combat Reflexes",
+    "system": {
+     "category": "combat",
+     "mechanical": {
+      "extraAoosPerRound": "Dexterity modifier",
+      "minimum": 1
+     },
+     "mechanismSource": "rulesTables.ts's attacksOfOpportunityPerRound",
+     "automation": "automated",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "spirited-charge",
+   "name": "Spirited Charge",
+   "keywords": [
+    "feat",
+    "mounted",
+    "mechanical"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Spirited Charge",
+    "system": {
+     "category": "mounted",
+     "mechanical": {
+      "damageMultiplierOnCharge": 2,
+      "damageMultiplierWhileMounted": 3
+     },
+     "mechanismSource": "mounted.ts's charge damage ladder",
+     "automation": "automated",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "evasion",
+   "name": "Evasion",
+   "keywords": [
+    "feat",
+    "defense",
+    "mechanical"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Evasion",
+    "system": {
+     "category": "defense",
+     "mechanical": {
+      "reflexHalfBecomesNone": true
+     },
+     "mechanismSource": "spells.ts's evasion branch",
+     "automation": "automated",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "improved-evasion",
+   "name": "Improved Evasion",
+   "keywords": [
+    "feat",
+    "defense",
+    "mechanical"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Improved Evasion",
+    "system": {
+     "category": "defense",
+     "mechanical": {
+      "reflexHalfBecomesHalf": true
+     },
+     "mechanismSource": "spells.ts's evasion branch",
+     "automation": "automated",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "dodge",
+   "name": "Dodge",
+   "keywords": [
+    "feat",
+    "defense",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Dodge",
+    "system": {
+     "category": "defense",
+     "mechanical": {
+      "dodgeBonusToAc": 1
+     },
+     "mechanismSource": "no rule reads the feat by name — actor.ts consumes the authored armorClass.dodge column instead",
+     "automation": "descriptive",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "mobility",
+   "name": "Mobility",
+   "keywords": [
+    "feat",
+    "defense",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Mobility",
+    "system": {
+     "category": "defense",
+     "mechanical": {
+      "acVsOpportunityWhileMoving": 4
+     },
+     "mechanismSource": "no rule reads the feat by name — it is authored content for the sheet only",
+     "automation": "descriptive",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "spring-attack",
+   "name": "Spring Attack",
+   "keywords": [
+    "feat",
+    "defense",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Spring Attack",
+    "system": {
+     "category": "defense",
+     "mechanical": {
+      "approachAndRetreatDoNotProvoke": true
+     },
+     "mechanismSource": "no rule reads the feat by name — the engagement pass has no per-move exemption list",
+     "automation": "descriptive",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "combat-casting",
+   "name": "Combat Casting",
+   "keywords": [
+    "feat",
+    "general",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Combat Casting",
+    "system": {
+     "category": "general",
+     "mechanical": {
+      "concentrationBonus": 4
+     },
+     "mechanismSource": "no rule reads the feat by name — concentration.ts takes the bonus as an input",
+     "automation": "descriptive",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "toughness",
+   "name": "Toughness",
+   "keywords": [
+    "feat",
+    "general",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Toughness",
+    "system": {
+     "category": "general",
+     "mechanical": {
+      "hitPointsPerLevelUpTo3": 1,
+      "hitPointsAfter": 0
+     },
+     "mechanismSource": "no rule reads the feat by name — hit points come from the profile's hp column",
+     "automation": "descriptive",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "iron-will",
+   "name": "Iron Will",
+   "keywords": [
+    "feat",
+    "general",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Iron Will",
+    "system": {
+     "category": "general",
+     "mechanical": {
+      "willSaveBonus": 2
+     },
+     "mechanismSource": "no rule reads the feat by name — the save columns are authored totals (M02/D-226)",
+     "automation": "descriptive",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "lightning-reflexes",
+   "name": "Lightning Reflexes",
+   "keywords": [
+    "feat",
+    "general",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Lightning Reflexes",
+    "system": {
+     "category": "general",
+     "mechanical": {
+      "reflexSaveBonus": 2
+     },
+     "mechanismSource": "no rule reads the feat by name — the save columns are authored totals (M02/D-226)",
+     "automation": "descriptive",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "great-fortitude",
+   "name": "Great Fortitude",
+   "keywords": [
+    "feat",
+    "general",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Great Fortitude",
+    "system": {
+     "category": "general",
+     "mechanical": {
+      "fortitudeSaveBonus": 2
+     },
+     "mechanismSource": "no rule reads the feat by name — the save columns are authored totals (M02/D-226)",
+     "automation": "descriptive",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "improved-initiative",
+   "name": "Improved Initiative",
+   "keywords": [
+    "feat",
+    "general",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Improved Initiative",
+    "system": {
+     "category": "general",
+     "mechanical": {
+      "initiativeBonus": 4
+     },
+     "mechanismSource": "no rule reads the feat by name — initiativeOrder.ts and the actor sheet read the authored `initiative` value (and its dex/misc components); no bonus is granted by a feat lookup, so the +4 is content the sheet authors",
+     "automation": "descriptive",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "improved-bull-rush",
+   "name": "Improved Bull Rush",
+   "keywords": [
+    "feat",
+    "combat",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Improved Bull Rush",
+    "system": {
+     "category": "combat",
+     "mechanical": {
+      "cmbBonusOnChargeManeuver": 2,
+      "standardActionWithoutProvoking": true
+     },
+     "mechanismSource": "no rule reads the feat by name — there is no bull-rush mechanic at strategic scale at all (M11 records `cmbSuccesses` as sourced by nothing), so neither the +2 nor the action-economy change has anything to attach to",
+     "automation": "descriptive",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "improved-disarm",
+   "name": "Improved Disarm",
+   "keywords": [
+    "feat",
+    "combat",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Improved Disarm",
+    "system": {
+     "category": "combat",
+     "mechanical": {
+      "cmbBonus": 2,
+      "noAttackOfOpportunity": true
+     },
+     "mechanismSource": "no rule reads the feat by name — no strategic disarm path exists, and the tactical `maneuvers.ts` resolves a disarm from the maneuver arguments the caller passes, never from a feat list",
+     "automation": "descriptive",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "improved-grapple",
+   "name": "Improved Grapple",
+   "keywords": [
+    "feat",
+    "combat",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Improved Grapple",
+    "system": {
+     "category": "combat",
+     "mechanical": {
+      "cmbBonus": 2,
+      "noAttackOfOpportunity": true
+     },
+     "mechanismSource": "no rule reads the feat by name — no strategic grapple path exists; the +2 CMB and the provoked-attack exemption are unmodelled at either scale",
+     "automation": "descriptive",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "improved-sunder",
+   "name": "Improved Sunder",
+   "keywords": [
+    "feat",
+    "combat",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Improved Sunder",
+    "system": {
+     "category": "combat",
+     "mechanical": {
+      "cmbBonus": 2,
+      "noAttackOfOpportunity": true
+     },
+     "mechanismSource": "no rule reads the feat by name — there is no strategic sunder path, and the CRB's hardness step is a *weapon-property* rule (`weapons.ts` reads the sunder property), not something this feat changes, so no hardness number belongs on this row",
+     "automation": "descriptive",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "improved-trip",
+   "name": "Improved Trip",
+   "keywords": [
+    "feat",
+    "combat",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Improved Trip",
+    "system": {
+     "category": "combat",
+     "mechanical": {
+      "cmbBonus": 2,
+      "noAttackOfOpportunity": true
+     },
+     "mechanismSource": "no rule reads the feat by name — no strategic trip path exists; the tactical `actions.ts` trip handling reads the attacker's weapon properties, not a feat list",
+     "automation": "descriptive",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "improved-dirty-trick",
+   "name": "Improved Dirty Trick",
+   "keywords": [
+    "feat",
+    "combat",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Improved Dirty Trick",
+    "system": {
+     "category": "combat",
+     "mechanical": {
+      "cmbBonus": 2,
+      "noAttackOfOpportunity": true
+     },
+     "mechanismSource": "no rule reads the feat by name — Ultimate Combat's dirty-trick subsystem is outside the R02 transcription scope, so the feat is catalogued for the compendium and nothing else",
+     "automation": "descriptive",
+     "notes": "M16's feat coverage. `mechanical` states the arithmetic the shipped code implements and `mechanismSource` names where; a feat marked descriptive is content for the sheet and the compendium search — its numbers must be authored into the actor's AC/save columns, because no rule looks the feat up by name. The SRD's prose for each feat is not transcribed here (R02 work); what is transcribed is the implementation, so pack and code cannot diverge silently."
+    },
+    "items": [],
+    "effects": []
+   }
+  }
+ ]
+}

@@ -101,6 +101,7 @@ import {
   iterativeAttackBonuses,
   sizeEntry,
   type PF1eSize,
+  twfPenalties,
 } from "./rulesTables";
 import type { AcBreakdown } from "./rulesTables";
 import type { PF1eEnergyType } from "./healthState";
@@ -132,21 +133,13 @@ export interface PF1eModifierPart {
  * every primary-hand attack and to the one extra off-hand attack. "Light" is
  * the off-hand weapon's handedness; an unarmed strike is always light, and a
  * double weapon's off-hand end counts as light.
+ *
+ * M17 moved the four rows to `rulesTables.ts` — the shared table both scales read — and this
+ * is the re-export of it, so the tactical builder, the strategic engine and the content pack
+ * cannot hold three copies of the same numbers. The call signature, the rows and
+ * `tests/packages/pf1eTactical.test.ts`'s pins are unchanged.
  */
-export function twfPenalties(input: {
-  feat?: boolean | undefined;
-  offHandLight?: boolean | undefined;
-}): { primaryHand: number; offHand: number } {
-  const light = input.offHandLight === true;
-  if (input.feat === true) {
-    return light
-      ? { primaryHand: -2, offHand: -2 }
-      : { primaryHand: -4, offHand: -4 };
-  }
-  return light
-    ? { primaryHand: -4, offHand: -8 }
-    : { primaryHand: -6, offHand: -10 };
-}
+export { twfPenalties };
 
 /**
  * Shooting or Throwing into a Melee (CRB p.182): −4 on the attack roll when the

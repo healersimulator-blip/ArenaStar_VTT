@@ -5911,3 +5911,314 @@ untouched; seed→aura→seed→aura idempotence pins no-accumulation. Gates: ts
 
 **Also in this commit:** `massBattleSpellCatalog()` + `CASTABLE_SPELLS` bundle export
 (M10 first piece: the pack spell dropdown data the caster-order UI will consume).
+
+## D-231 — 2026-09-15 — M10 closed: hero orders through normal controls; §12 `orderVocabulary`; M08's stale box flipped
+
+**Context.** M07/M09 (D-226/D-229) landed the hero↔model bridge data path, and the engine already
+resolved both halves of B §4.1's ask: explicit `attack` orders go through the same D-176
+flanking + D-178 cleave melee path the hero's engagement total reports (D-179), and pack-catalog
+spells cast through C05's `spell_aoe` machinery (D-164). What did not exist was any **player
+control** able to ask for either: the Army Window's Orders tab offered three templates
+(Advance/Screen/Fall back), and `spell_aoe` casts were issued only by tests and the e2e hook. So
+M10 was a UI + contract task, not a rules task.
+
+**Decision.**
+
+1. **§12's `RulesModule` gains an optional `orderVocabulary?(): RulesOrderVocabulary`** — a
+   capability the UI probes: `{ casts: [{ id, label, targeting: "point" | "direction" }] }` —
+   deliberately only what a control cannot infer otherwise. Range/area are *not* mirrored here:
+   the resolver reads them off the pack entry, and a copy in the vocabulary would be a second
+   source of truth for the same number (the target list already filters by the module's own
+   range, so the player sees the consequence without the UI restating the rule). `targeting` carries the CRB p.214 burst/area-vs-spread distinction into the
+   control layer because it decides the *payload*: `spell_aoe` at a point needs absolute map feet
+   (`data.x/y`), a cone/line needs a direction (`data.dirX/dirY`) — and the resolver refuses a
+   zero or missing direction (D-167), so a UI that guessed would produce orders its own module
+   rejects. `validateRulesModule` treats the method as optional (a package that omits it loads and
+   simply offers no caster).
+2. **The UI asks the loaded module, never imports a package.**
+   `src/packages/pf1e/rulesEntry.ts` still exports
+   `CASTABLE_SPELLS` for the package bundle, but `ArmyWindow` renders what `orderVocabulary()`
+   answers, so the pack entry point (D-164's `spellEntry`) and anything a future registry adds
+   propagate with no UI edit. This keeps the §12 packaging boundary D-086/D-110 intact.
+3. **Capability gating, per control.** `src/ui/armies/heroOrders.ts` (pure, store-format-aware):
+   direct targeting needs `schema.orderTypes.includes("attack")`, casting needs a non-empty
+   vocabulary. The two gates are independent, which is what makes `mass-battle-basic` the useful
+   negative case — it validates *and executes* `attack` orders (so the target control is
+   legitimately there) while advertising no spell vocabulary (so no caster). A module whose probe
+   throws or answers oddly degrades to "no hero controls" instead of taking the Orders tab down.
+4. **Orders are pure data with named refusals.** `heroTargetRows`, `heroCastOrderFor` and friends
+   return `Result`s; nothing is silently dropped — an empty target list explains itself ("the
+   enemy holds no models on the field"), aiming at a target with no replica positions is refused
+   by name rather than issuing a cast at (0,0), malformed coordinates are reported on the form.
+   The builder's output then goes through the module's own `validateOrder` before any op is
+   submitted, and submission reuses the authorized embedded-doc path (`issue(ops)`) — no new msg
+   kinds, no new doc fields, no engine edit.
+5. **Cleave gets its own event.** A swing that hits an extra model appends `hero-cleave` beside the
+   `hero-engagement` total, which still carries the merged metrics exactly as D-178 booked them —
+   one event per swing, one total per engagement, so nothing double-counts. The Reports tab's
+   filters derive from event types, so the new event lands in the timeline without a UI change.
+6. **Latent render staleness fixed while testing.** The Orders tab derived lists straight from
+   `client.store`, which is not Svelte state, so a block reading only store data never
+   re-rendered — the pending-order queue the templates already used had that bug; the hero block
+   made it visible (the order landed in the replica but not on screen). `refresh()` now bumps a
+   `replicaTick` the store-derived reads depend on.
+7. **M08's box was stale and is flipped** — see D-229 for the closure (snapshot at advance,
+   `commitResolveEnvelope` atomicity, `syncHeroTokens`, and the executed movement-during-turn race
+   test in `tests/host/heroStatOverlay.test.ts`). The box sat unchecked exactly like M13's did
+   before D-179's audit; the repo's own §0 rule ("an unchecked box is not a claim the work is
+   missing" cuts both ways) says the box has to move.
+
+**Rejected.** Importing `CASTABLE_SPELLS` into the UI (D-110's boundary — the whole point is that
+the window works against *any* module). A UI-side caster-eligibility gate: who may cast, and at
+what level, is authored content that M16/M18's packs decide through M04's validation path, and a
+second rule source in the component would only drift from it; today the control offers what the
+module accepts, which is the contract. Model-level (per-hero) targeting: the engine's cleave
+already chooses the extra target by position and reach, so a UI that named one *other* than the
+model the resolver picked would display a choice the simulation did not make — the honest control
+is unit-level targeting plus the cleave report, and a hero-model column would be a schema/codec
+change with its own §19 budget decision (≤200 B/model). Storing pending orders on a new collection
+(they are embedded doc state, diffed and rolled back with the army document).
+
+**Evidence.** `vitest run` full suite: 201 files / **2304 passed** / 3 skipped, 1 file skipped
+(`tests/net/webrtc` — no real network), serial so the budget gates are not starved. New:
+`tests/ui/heroOrders.test.ts` (19) and 3
+`massBattlePf1e.test.ts` cases (37 → 40). `tsc --noEmit` 0 errors, `eslint .` 0 errors, `prettier
+--check` clean on the touched source files, `scripts/size.mjs`: `dist/index.html` raw 2,620,879 B (2.499 MB) /
+gzip 749,302 B (0.715 MB) — inside the 6 MB raw budget; `build:systems` ok (`mass-battle-basic`
+still prints its "skipped — no manifest.json" line, unchanged from before this slice). **Full Chromium e2e: 141 passed (141/141, `--workers=1`, 7.7 min, on the final tree)** via the
+D-222 recipe
+(`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/chromium LD_LIBRARY_PATH=/tmp/al2023/lib`, `pnpm
+build && pnpm build:systems` first), including the new `e2e/pf1e_hero_orders.spec.ts`, which
+drives the real controls and asserts the resulting order payload in the client replica. Scope of
+that run, stated so it is not over-read: it covers the tree as of this slice. The M05/M15–M18
+content slice landed afterwards in the same commit and its own browser run could not be repeated
+(see D-234's "Not re-run" paragraph) — the pack data it added is reached by the node-side
+`importZip` → IndexedDB → `compendia()` path instead, which is the same code the browser would
+exercise. Caveat recorded so a future run does not misread it: the two CPU-budget gates
+(`tests/canvas/lod100k.test.ts`, `tests/packages/pf1eMassBattleScale.test.ts`) FAIL if anything
+else runs concurrently and pass serially (10k turn p95 98.9 ms against the 250 ms regression
+ceiling; the printed `§19 target p95 < 50 ms` is V07's aspiration, not the gate). The same
+contention bites browser specs — `e2e/pf1e_firearms.spec.ts` hit its 5 s `toContainText` default
+twice at `--workers=2` while tsc ran alongside, and passes 6/6 serially. Quote a run's worker
+count together with its result, and prefer `--workers=1` for an evidence run.
+
+**Formatting note for the reviewer.** `src/packages/massBattlePf1e.ts` and `src/app/e2eHook.ts`
+were already not prettier-conformant at `b539f87` (376 files repo-wide are not; `prettier --check`
+also errors on `**/*.svelte` because no `prettier-plugin-svelte` is installed, which is why
+`ArmyWindow.svelte` is hand-matched to its neighbours instead). Running the repo's `format` script
+on those two files was the only way to keep my additions conformant, so their diffs carry rewrap
+noise — `git diff -w` removes it. `src/sim/rulesLoader.ts`, where the real change is one entry in
+an optional-method list, and `tests/packages/massBattlePf1e.test.ts` (3 tests spliced after
+their neighbour, +152 lines of pure addition) were deliberately kept in HEAD's style so their
+diffs read as the change; `src/core/rules.ts` was already conformant and stays a clean +30.
+
+---
+
+## D-232 — 2026-09-15 — M17 + M05 closed: one SRD ladder table, and the march that is priced by it
+
+**Context.** M17's ask was coverage, not new math: size/reach/speed-armor/cover/concealment/TWF/
+actions-provoke/weapon-armor-properties had to be *shared data with citations*, because "P0 table
+presence" is not coverage (Gap List §6). M05's ask was the other half of the same sentence — the
+declared order phases had to be *executed* rather than accepted-and-ignored, and the movement they
+declare (range, terrain, charge, withdraw, run, movement-triggered AoOs) is exactly the material
+M17's tables describe. Landing them apart would have produced two copies of the pace arithmetic,
+which is the failure mode D-226/D-228 keep having to clean up.
+
+**Decision.**
+
+1. **`src/packages/pf1e/rulesTables.ts` is the single mechanical ladder** for both scales: Table
+   8-4 size→AC/special-size, size→space/reach, BAB by progression, CMB/CMD, the bonus-type stack
+   rule (dodge and penalties stack, everything else does not), the DR/ER ladder, crit range and
+   multiplier, natural armor by size, and the M17 additions — Table 8-7 as
+   `PF1E_TWF_PENALTY_TABLE`, four rows keyed on (has Two-Weapon Fighting, off-hand is light) →
+   −6/−10, −4/−8, −4/−4, −2/−2, with Improved/Greater TWF's BAB +6/+11 prerequisites staying where
+   they are read rather than becoming penalty ladder steps; `PF1E_COVER` as five graded rows
+   (partial +2 AC/+1 Reflex, soft +4/+0, standard +4/+2, improved +8/+4 with the +10 stealth and the
+   improved-evasion carve-out, total granting no bonus at all because it blocks line of effect and so
+   refuses the attack and the attack of opportunity); `PF1E_CONCEALMENT_MISS_CHANCE` (20 % concealment,
+   50 % total — a miss chance on the attack roll, never damage reduction); `PF1E_ARMORED_SPEED`
+   (30→20, 20→15) with `armorReducesSpeed` (medium and heavy only; a shield never does) and
+   `arcaneSpellFailureForCategory` (5/10/15 by category, a CRB-table reading the pack rows are
+   cross-checked against); and `babAtLevel`/`saveBonusAtLevel` (good/average/poor). Every consumer —
+   `schema.ts`'s precreated profiles, the class pack, the bestiary pack, and the tactical scale's own
+   `tactical.ts` re-export of `twfPenalties` (D-135) — reads these functions instead of keeping a copy.
+2. **The AoO budget is a function, not a literal.** `attacksOfOpportunityPerRound(dexMod,
+   combatReflexes)` returns `1` without the feat and `max(1, 1+dexMod)` with it, so M05's rule
+   "movement never produces an attack of opportunity unless the defender has Combat Reflexes and a
+   positive Dexterity" reads as data (P06's budget was already `1 + max(0,dexMod)`; the gate now
+   names the feat instead of assuming it).
+3. **`stride.ts` prices a march; it does not route one.** The module mirrors the tactical
+   `movement.ts` (P03/D-198) and cites CRB p.188 per rule: run ×4 in a straight line (a multi-
+   waypoint run is *refused*, not truncated), charge ×2 with a ≥10-ft minimum and no crossing of
+   difficult terrain (refused, because a charge is a declaration), difficult terrain doubling the
+   cost per square entered, withdraw ×2 with the start square exempt from the caller's AoO seam.
+   With no difficult squares and a single leg it reduces bit-for-bit to the Euclidean walk the sim
+   has always used, which is what keeps the seeded-replay goldens alive.
+4. **Refusal is the product.** `validateOrder` accepts only `move/attack/custom/hold/retreat`,
+   each `hold` stance must be one the resolver executes (`hold`/`screen`/`defend`, where `defend` is
+   CRB p.185's +2 dodge / −4 attacks), and an unknown `attack.mode`, pace, or spell id is refused by
+   name with the SRD clause in the message. A queued order nothing resolves is a claim the GM
+   believes, so the module would rather say no.
+5. **The movement AoO seam is shared.** The provocation walk was hoisted out of the stepwise path so
+   the simultaneous path pays the same tax, judged on the start-of-round layout (D-176 simultaneity)
+   and never against the square the mover began in; `retreat` maps to `pace: withdraw` so the
+   exemption applies there too. Movement is priced by the unit type's own `move` cells
+   (`PF1E_UNIT_TYPE_STATS`: infantry 4, cavalry 8, artillery 2, hero 6) times the pace factor, never
+   by a constant. The set of units that charged is collected once per round and does exactly the two
+   things the SRD says it does: the charger is flat-footed for the −2 AC (`charge-exposure`, "until
+   its next turn") and its melee routine carries the +2 circumstance bonus (CRB p.183) — and because
+   charging is a move while bracing is a hold, a unit can never be in both sets, so the modifiers do
+   not stack. A `shot` is refused past the weapon's range-increment ceiling with the feet and the
+   multiples quoted (`shot-refused`), and `move-refused` / `arrive` carry `planPF1eStride`'s refusal
+   text verbatim, so the log states the rule rather than the fact.
+6. **Morale is decided, not deferred.** The `morale` sub-phase executes the leadership aura (G §4.1:
+   nearby friendly grunts gain the bonus to Fortitude/Will) and reports it; there is **no** morale
+   *check* at this scale because the R02 corpus has none (Ultimate Combat's optional subsystem, L05),
+   and the fear penalties the tactical scale publishes are typed `morale` in `conditions.ts`, which
+   is why they do not stack with each other.
+
+**Rejected.** A per-pack copy of the size/BAB/save numbers (a second source of truth; the drift this
+project keeps paying for, e.g. D-2's literal 15-ft radius); a pathfinder inside `stride.ts` (routing
+around walls/enemies is whoever draws the waypoints' decision, and the module says so in its header);
+slowing a charge through difficult terrain instead of refusing it (CRB p.188 is a prohibition);
+giving `defend` an auto-march exemption as well (the order already outranks the doctrine per D-223).
+
+**Evidence.** `tests/packages/pf1eSrdTables.test.ts` (6 — Table 8-7 row-for-row plus the consumer
+identity check that `tactical.ts` re-exports rather than restates, Appendix A.8's cover grades folded
+into `resolve()`'s AC and its concealment pair against `positional.ts`, the §6/P5 armored-speed pairs
+with "an unknown pair is not invented" as its own assertion, the CRB armor-category cross-checks, and
+the class progressions as arithmetic), `tests/packages/pf1eStride.test.ts` (13 —
+each pace's legality, the wall and terrain clips, the start-square exemption, and the goldens-
+compatibility claim), plus the movement/AoO cases in `tests/packages/massBattlePf1e.test.ts` (51).
+`tsc --noEmit` and `eslint .` clean.
+
+---
+
+## D-233 — 2026-09-15 — M15 + M16 closed: content packs authored as mirrors of the code's tables
+
+**Context.** M15 wanted ~40 spells with full textual blocks and a stated split between descriptive
+and automated entries; M16 wanted a ~30-entry bestiary plus equipment/armor/shield tables, a
+six-class starter table and calculation-affecting feats. Both boxes had been blocked on the same
+thing: the repo's corpus (Gap List appendices, which is the transcribed SRD this project is allowed
+to publish numbers from, R02) carries **no creature stat lines, no per-item prices or weights, and
+no class feature text**. Writing them from memory would be exactly the invention D-1 deleted the
+spell scatter for.
+
+**Decision.**
+
+1. **The spell pack is transcription plus a machine block, validated on load.** 75 CRB combat-
+   relevant entries, each with school/descriptors/components/casting time/range/target/area/
+   duration/save/SR as text and a `massBattle` block (`shape`, `radiusFeet`/`widthFeet`,
+   `rangeCategory`, `saveType` + `halfOnSave`, `evasion`, `damageDiceCount`/`damageDiceSides`,
+   `dicePerCasterLevel`/`maxDice`) that `parsePackSpellOrder` consumes, while `savingThrow` stays the
+   human-readable line ("Reflex half") it always was. `automation: automated|descriptive` is a *declared field*, not a
+   comment: exactly the ids `PF1E_MASS_SPELLS` implements are automated, and each descriptive row
+   says in `massBattle.notes` what the engine lacks. `spellPacks.ts` keeps the in-code mirror keyed
+   by pack id (`PF1ePackMassSpellMirrorTable`), and `tests/packages/pf1eSpellPacks.test.ts` asserts
+   file ↔ mirror equality, so D-151's "no second source of truth" rule still holds.
+2. **The bestiary pack is a unit-role mirror set, not a Bestiary transcription.** 40 entries: the
+   six roles the engine has always fielded, plus 34 named troop and creature roles (levies, pikemen
+   and archers, mounts and beasts of war, ogres through giants, the troll/golem/harpy archetype cases,
+   and five hero classes), and every derived number is *absent* by design: BAB, saves, AC and touch
+   AC are recomputed by the test from `rulesTables.ts` and must equal what the resolver derives. The
+   original six roles were not touched (their numbers are goldens elsewhere), so the growth is purely
+   additive and names stay unique — that uniqueness is what lets the drift test match a pack row to
+   its `PRECREATED_PF1E_UNITS` twin.
+3. **Saves and Con live in `system.mirror`, never in `system.pf1e`.** The pool sim reads a published
+   save as a total while the tactical rules add the ability modifier to it — the known, deliberately
+   pinned cross-scale difference (Gap List §10.2, D-226, asserted in `pf1eActor.test.ts`).
+   Authoring a total into the *content* would freeze one side's answer into data and make P8's
+   unification a content migration, so the pack records `baseSaves` as the ladder alone plus
+   `goodSaves`/`hitDice`/`progression` as the inputs, and `pf1eActor.test.ts`'s `fort ?? 0` formula
+   is untouched.
+4. **Equipment and classes publish only what a resolver reads.** The equipment pack is the six
+   tables the weapon and armor code consults, published as eight rows (unarmed damage by size including
+   the Medium 1d3 exception, range increment ceilings, the firearm touch-AC window, broken-item
+   adjustments, and one row per armor category carrying the arcane spell failure and speed effect that
+   category rule owns), each row's `mirror.derived` naming its citation; the class pack is the six starter
+   classes whose BAB and saves come from `babAtLevel`/`saveBonusAtLevel`, with `bonusCombatFeats`
+   names required to exist in the feats pack (so a class cannot promise a feat the content does not
+   carry). Prices, weights, per-class skill ranks and hit dice are recorded as **not authored** in
+   `DEVIATIONS.md` rather than invented.
+5. **Feats carry their automation status as data.** 33 rows — 18 with `automation: automated` iff a
+   rule reads the feat by name (`mechanismSource` matching `/<file>.ts's <export>/`), 15
+   `automation: descriptive` whose `mechanismSource` begins "no rule reads the feat by name — " and
+   finishes with the reason (no strategic maneuver mechanic, or the bonus is an authored column). The test recomputes the Power Attack/Deadly Aim ladders, the TWF reductions, Manyshot's
+   arrow count, Point-Blank, Weapon Focus, Improved Critical (against `schema.ts:329`'s expansion)
+   and the Combat Reflexes AoO count from the shipped rows, so a feat row cannot claim an effect the
+   code does not implement.
+
+**Rejected.** Inventing Bestiary CR/HD/skill lines for named published creatures (D-1's rule: an
+uncitable number is a guess); shipping the bestiary as raw stat blocks with `bab`/`ac` authored and
+unchecked; putting class features into `feats.json` (different collection, different validation);
+dropping the descriptive spells to keep the pack small (M15's own wording asks for the distinction to
+exist); auto-generating the pack from `PRECREATED_PF1E_UNITS` at build time (then nothing in the
+repo would be reviewable, and the manifest's entry counts would be computed from themselves).
+
+**Evidence.** `tests/packages/pf1eContentPacks.test.ts` (8): all five packs parse through the same
+`parseCompendiumPack` the app uses; per-row recomputation for 40 bestiary + 75 spell + 33 feat +
+8 item + 6 class rows; automated-spell ids equal `Object.keys(PF1E_MASS_SPELLS)`; each mirrored
+`massBattle` block equals the pack's minus `notes`; each `level.sorcererWizard` equals the code
+mirror's; the six required roles are present; and no file under `src/` loads a pack. `tsc`/`eslint`
+clean; `vitest` 204 files / 2343 passed / 3 skipped.
+
+---
+
+## D-234 — 2026-09-15 — M18 closed: five packs declared, the 2,000-entry cap enforced, content loaded on demand
+
+**Context.** M18 is the hygiene box: keep the packs, the normalization and the compiled profiles
+aligned, generate or validate `PRECREATED_PF1E_UNITS` from the packs, declare added packs in the
+manifests, test every mechanical field, enforce the 2,000-entry cap, and load content from IndexedDB
+instead of inflating the base HTML. The first three clauses were half-true before this slice
+(`spells.json`/`bestiary.json` were declared; the M15/M16 files were on disk but undeclared, so the
+app could not see them at all), and the last two were untested.
+
+**Decision.**
+
+1. **`systems/pf1e-core/manifest.json` declares all five packs** — `spells` (75 `items`), `bestiary`
+   (40 `actors`), `classes` (6 `actors`), `equipment` (8 `items`), `feats` (33 `items`) = 162
+   entries. `packs[].type` is the *collection* name (`actors`/`items`, i.e. `TOP_LEVEL_COLLECTIONS`),
+   not the document type: `parseCompendiumPack` validates the collection, and deriving it from
+   `entries[0].data.type` silently produced a package the loader rejected for three of five files.
+   The manifest ↔ folder equality test asserts both directions (no undeclared file, no dangling
+   declaration) and that each descriptor's `name`/`type` match the file it points at.
+2. **The cap is tested, not assumed.** `COMPENDIUM_MAX_ENTRIES = 2_000` accepts exactly 2,000 and
+   rejects 2,001 naming the cap; the shipped largest pack is 75 rows, every entry id matches
+   `^[a-z0-9][a-z0-9-]{0,63}$`, every name ≤ `COMPENDIUM_MAX_NAME` (80), and no entry carries `_id`
+   (the loader assigns `packId-entryId`, and a file-authored `_id` is refused).
+3. **"Load on demand" is proven as a negative structural fact.** No file under `src/` imports,
+   requires, `fetch`es, `readFileSync`s, `new URL`s or dynamically imports anything from
+   `systems/` — the only route content takes into the app is `importZip` → IndexedDB → `compendia()`.
+   Three comments in `rulesTables.ts`/`spellPacks.ts`/`statBlock.ts` name a pack path as citation
+   prose, which is why the guard matches load-shaped expressions rather than the string.
+4. **Every mechanical field is tested, and each pack says so.** Every pack's top-level `note` names
+   `tests/packages/pf1eContentPacks.test.ts` as its checker, so a hand-edited JSON inside a deployed
+   zip carries its own audit trail; the profile-compile parity loop over the whole (now 40-entry)
+   bestiary is what keeps `schema.ts`, the pack and the derivation three-way consistent.
+5. **`PRECREATED_PF1E_UNITS` is validated against the packs, not generated from them.** The rows
+   stay hand-authored (they are fixtures with names the sheets and tests reference) and the drift test
+   requires a same-named pack twin for every row; generation would remove the only check that the
+   two agree.
+
+**Rejected.** Shipping packs as the `systems/` folder only with no manifest declaration (the app's
+installer enumerates descriptors, so undeclared files are dead weight in the zip); a build step that
+regenerates the JSON from the `src/` tables (the content would stop being reviewable, and a mistake in
+the tables would be invisible: today a wrong number fails a test); inflating `index.html` with the
+packs to "simplify loading" (the box forbids it, and the bundle gate is 6 MB raw with the app at
+2.509 MB).
+
+**Evidence.** `pf1ePackage.test.ts`: the zip contains exactly the six core files, `importZip` →
+`compendia()` yields one compendium per declared descriptor with entry counts read off disk rather
+than restated (`onDisk ≥ 40`), and the pack-name/type list is derived from the manifest so the two
+cannot drift. `build:systems`: `pf1e-core-1.0.0.zip` **25.6 kB** (bestiary 74 KB → 4.6 KB gz, spells
+86 KB → 12.7 KB gz) and `pf1e-mass-battles-1.0.0.zip` 65.4 kB; `scripts/size.mjs`: `dist/index.html`
+raw 2.509 MB / gzip 0.717 MB, "OK: within the 6 MB raw budget" (the packs add nothing to the bundle —
+the +10 KB over D-231 is the 34 added precreated profiles and the M17 tables).
+
+**Not re-run in this environment, and why.** The Chromium e2e suite (`pnpm test:e2e -- --workers=1`)
+was the M10 acceptance bar and did **not** run for this slice: the sandbox was recycled mid-task, the
+provisioned browser under `/tmp` is gone, and `playwright install chromium` cannot reach
+`cdn.playwright.dev` from here (`ECONNRESET` at TLS). The node-side substitutes are the pack
+round-trip through the real importer above and the 8 + 6 + 13 new cases; nothing in this slice changed
+UI or worker code paths, and the app bundle builds and passes its size gate. A follow-up evidence run
+on a machine with the browser is the outstanding item for this commit.
