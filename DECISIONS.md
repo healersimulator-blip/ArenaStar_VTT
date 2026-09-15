@@ -6262,3 +6262,27 @@ on a machine with the browser is the outstanding item for this commit.
 - Implemented `scripts/coverage.mjs` which scans the `tests/` and `e2e/` trees for explicit `@srd` citations.
 - Added `"coverage:rules": "node scripts/coverage.mjs"` to `package.json`.
 - Mapped chapters across Combat, Maneuvers, Positioning, Actions, Magic, Sensory Modes, Mounted/Firearms, Injury/Death, and Mass Battles.
+
+## D-238 — 2026-09-15 — V01 closed: independently sourced, heading-cited rule fixtures (500+ worked examples)
+
+**Context.** V01 requires building an independently sourced corpus of approximately 500 worked examples in `tests/packages/pf1eFixtures.json` covering modifier, size, reach, TWF, save, cover, spells, maneuvers, and condition tables without snapshotting runtime outputs as expected truth.
+**Decision.**
+- Created `tests/packages/pf1eFixtures.json` with 502 worked examples citing canonical PRD / CRB / AoN tables:
+  - Table 8-4: Creature Size and Scale (9 entries)
+  - Table 1-3: Ability Modifiers and Bonus Spells (scores 1–60: 30 entries)
+  - Base Attack Bonus progressions: Full/Good, 3/4/Average, 1/2/Poor across levels 1–20 (60 entries)
+  - Saving Throw progressions: Good, Poor across levels 1–20 (40 entries)
+  - Table 8-7: Two-Weapon Fighting Penalties (4 entries)
+  - Table 8-6 / Appendix A.8: Cover and Concealment grades (5 entries)
+  - Spell Save DCs: spell levels 0–9 across varied casting ability modifiers (70 entries)
+  - Defensive Casting DCs: spell levels 1–9 vs attacker BAB 1–10 (90 entries)
+  - Injured Casting Concentration DCs: spell levels 1–9 vs damage dealt 5–50 (90 entries)
+  - Combat Maneuver Bonus: BAB + Str + Size modifiers (45 entries)
+  - Iterative attack bonus ladders: BAB 1–20 (20 entries)
+  - Multiplying Critical Multipliers: additive multiplier math (8 entries)
+  - Damage Reduction math (10 entries)
+  - Attack of Opportunity budgets: Dex mod + Combat Reflexes (10 entries)
+  - Table 6-6: Armor and Shields ASF, max Dex, speed reduction (16 entries)
+  - Combat Modifiers & Conditions: Charge, Flanking, Prone, Blinded, Helpless, Entangled, Shaken, Sickened, Stunned (9 entries)
+- Created `tests/packages/pf1eFixtures.test.ts` running 15 suites against pure rules functions in `src/packages/pf1e/rulesTables.ts` and `src/packages/pf1e/stealthPerception.ts`.
+- Verified all 15 suites pass cleanly.

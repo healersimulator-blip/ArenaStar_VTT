@@ -1,0 +1,5680 @@
+[
+  {
+    "category": "size",
+    "heading": "Table 8-4: Creature Size and Scale (CRB p.194)",
+    "input": {
+      "size": "Fine"
+    },
+    "expected": {
+      "attackAc": 8,
+      "cmbCmd": -8,
+      "spaceFeet": 0.5,
+      "reachSquares": 0,
+      "stealthMod": 16
+    }
+  },
+  {
+    "category": "size",
+    "heading": "Table 8-4: Creature Size and Scale (CRB p.194)",
+    "input": {
+      "size": "Diminutive"
+    },
+    "expected": {
+      "attackAc": 4,
+      "cmbCmd": -4,
+      "spaceFeet": 1,
+      "reachSquares": 0,
+      "stealthMod": 12
+    }
+  },
+  {
+    "category": "size",
+    "heading": "Table 8-4: Creature Size and Scale (CRB p.194)",
+    "input": {
+      "size": "Tiny"
+    },
+    "expected": {
+      "attackAc": 2,
+      "cmbCmd": -2,
+      "spaceFeet": 2.5,
+      "reachSquares": 0,
+      "stealthMod": 8
+    }
+  },
+  {
+    "category": "size",
+    "heading": "Table 8-4: Creature Size and Scale (CRB p.194)",
+    "input": {
+      "size": "Small"
+    },
+    "expected": {
+      "attackAc": 1,
+      "cmbCmd": -1,
+      "spaceFeet": 5,
+      "reachSquares": 1,
+      "stealthMod": 4
+    }
+  },
+  {
+    "category": "size",
+    "heading": "Table 8-4: Creature Size and Scale (CRB p.194)",
+    "input": {
+      "size": "Medium"
+    },
+    "expected": {
+      "attackAc": 0,
+      "cmbCmd": 0,
+      "spaceFeet": 5,
+      "reachSquares": 1,
+      "stealthMod": 0
+    }
+  },
+  {
+    "category": "size",
+    "heading": "Table 8-4: Creature Size and Scale (CRB p.194)",
+    "input": {
+      "size": "Large"
+    },
+    "expected": {
+      "attackAc": -1,
+      "cmbCmd": 1,
+      "spaceFeet": 10,
+      "reachSquares": 2,
+      "stealthMod": -4
+    }
+  },
+  {
+    "category": "size",
+    "heading": "Table 8-4: Creature Size and Scale (CRB p.194)",
+    "input": {
+      "size": "Huge"
+    },
+    "expected": {
+      "attackAc": -2,
+      "cmbCmd": 2,
+      "spaceFeet": 15,
+      "reachSquares": 3,
+      "stealthMod": -8
+    }
+  },
+  {
+    "category": "size",
+    "heading": "Table 8-4: Creature Size and Scale (CRB p.194)",
+    "input": {
+      "size": "Gargantuan"
+    },
+    "expected": {
+      "attackAc": -4,
+      "cmbCmd": 4,
+      "spaceFeet": 20,
+      "reachSquares": 4,
+      "stealthMod": -12
+    }
+  },
+  {
+    "category": "size",
+    "heading": "Table 8-4: Creature Size and Scale (CRB p.194)",
+    "input": {
+      "size": "Colossal"
+    },
+    "expected": {
+      "attackAc": -8,
+      "cmbCmd": 8,
+      "spaceFeet": 30,
+      "reachSquares": 6,
+      "stealthMod": -16
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 1
+    },
+    "expected": {
+      "mod": -5
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 2
+    },
+    "expected": {
+      "mod": -4
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 3
+    },
+    "expected": {
+      "mod": -4
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 4
+    },
+    "expected": {
+      "mod": -3
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 5
+    },
+    "expected": {
+      "mod": -3
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 6
+    },
+    "expected": {
+      "mod": -2
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 7
+    },
+    "expected": {
+      "mod": -2
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 8
+    },
+    "expected": {
+      "mod": -1
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 9
+    },
+    "expected": {
+      "mod": -1
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 10
+    },
+    "expected": {
+      "mod": 0
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 11
+    },
+    "expected": {
+      "mod": 0
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 12
+    },
+    "expected": {
+      "mod": 1
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 13
+    },
+    "expected": {
+      "mod": 1
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 14
+    },
+    "expected": {
+      "mod": 2
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 15
+    },
+    "expected": {
+      "mod": 2
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 16
+    },
+    "expected": {
+      "mod": 3
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 17
+    },
+    "expected": {
+      "mod": 3
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 18
+    },
+    "expected": {
+      "mod": 4
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 19
+    },
+    "expected": {
+      "mod": 4
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 20
+    },
+    "expected": {
+      "mod": 5
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 21
+    },
+    "expected": {
+      "mod": 5
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 22
+    },
+    "expected": {
+      "mod": 6
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 23
+    },
+    "expected": {
+      "mod": 6
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 24
+    },
+    "expected": {
+      "mod": 7
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 25
+    },
+    "expected": {
+      "mod": 7
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 26
+    },
+    "expected": {
+      "mod": 8
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 27
+    },
+    "expected": {
+      "mod": 8
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 28
+    },
+    "expected": {
+      "mod": 9
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 29
+    },
+    "expected": {
+      "mod": 9
+    }
+  },
+  {
+    "category": "abilityModifier",
+    "heading": "Table 1-3: Ability Modifiers and Bonus Spells (CRB p.17)",
+    "input": {
+      "score": 30
+    },
+    "expected": {
+      "mod": 10
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 1,
+      "progression": "good"
+    },
+    "expected": {
+      "bab": 1
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 1,
+      "progression": "average"
+    },
+    "expected": {
+      "bab": 0
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 1,
+      "progression": "poor"
+    },
+    "expected": {
+      "bab": 0
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 2,
+      "progression": "good"
+    },
+    "expected": {
+      "bab": 2
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 2,
+      "progression": "average"
+    },
+    "expected": {
+      "bab": 1
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 2,
+      "progression": "poor"
+    },
+    "expected": {
+      "bab": 1
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 3,
+      "progression": "good"
+    },
+    "expected": {
+      "bab": 3
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 3,
+      "progression": "average"
+    },
+    "expected": {
+      "bab": 2
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 3,
+      "progression": "poor"
+    },
+    "expected": {
+      "bab": 1
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 4,
+      "progression": "good"
+    },
+    "expected": {
+      "bab": 4
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 4,
+      "progression": "average"
+    },
+    "expected": {
+      "bab": 3
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 4,
+      "progression": "poor"
+    },
+    "expected": {
+      "bab": 2
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 5,
+      "progression": "good"
+    },
+    "expected": {
+      "bab": 5
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 5,
+      "progression": "average"
+    },
+    "expected": {
+      "bab": 3
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 5,
+      "progression": "poor"
+    },
+    "expected": {
+      "bab": 2
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 6,
+      "progression": "good"
+    },
+    "expected": {
+      "bab": 6
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 6,
+      "progression": "average"
+    },
+    "expected": {
+      "bab": 4
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 6,
+      "progression": "poor"
+    },
+    "expected": {
+      "bab": 3
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 7,
+      "progression": "good"
+    },
+    "expected": {
+      "bab": 7
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 7,
+      "progression": "average"
+    },
+    "expected": {
+      "bab": 5
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 7,
+      "progression": "poor"
+    },
+    "expected": {
+      "bab": 3
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 8,
+      "progression": "good"
+    },
+    "expected": {
+      "bab": 8
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 8,
+      "progression": "average"
+    },
+    "expected": {
+      "bab": 6
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 8,
+      "progression": "poor"
+    },
+    "expected": {
+      "bab": 4
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 9,
+      "progression": "good"
+    },
+    "expected": {
+      "bab": 9
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 9,
+      "progression": "average"
+    },
+    "expected": {
+      "bab": 6
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 9,
+      "progression": "poor"
+    },
+    "expected": {
+      "bab": 4
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 10,
+      "progression": "good"
+    },
+    "expected": {
+      "bab": 10
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 10,
+      "progression": "average"
+    },
+    "expected": {
+      "bab": 7
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 10,
+      "progression": "poor"
+    },
+    "expected": {
+      "bab": 5
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 11,
+      "progression": "good"
+    },
+    "expected": {
+      "bab": 11
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 11,
+      "progression": "average"
+    },
+    "expected": {
+      "bab": 8
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 11,
+      "progression": "poor"
+    },
+    "expected": {
+      "bab": 5
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 12,
+      "progression": "good"
+    },
+    "expected": {
+      "bab": 12
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 12,
+      "progression": "average"
+    },
+    "expected": {
+      "bab": 9
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 12,
+      "progression": "poor"
+    },
+    "expected": {
+      "bab": 6
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 13,
+      "progression": "good"
+    },
+    "expected": {
+      "bab": 13
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 13,
+      "progression": "average"
+    },
+    "expected": {
+      "bab": 9
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 13,
+      "progression": "poor"
+    },
+    "expected": {
+      "bab": 6
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 14,
+      "progression": "good"
+    },
+    "expected": {
+      "bab": 14
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 14,
+      "progression": "average"
+    },
+    "expected": {
+      "bab": 10
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 14,
+      "progression": "poor"
+    },
+    "expected": {
+      "bab": 7
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 15,
+      "progression": "good"
+    },
+    "expected": {
+      "bab": 15
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 15,
+      "progression": "average"
+    },
+    "expected": {
+      "bab": 11
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 15,
+      "progression": "poor"
+    },
+    "expected": {
+      "bab": 7
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 16,
+      "progression": "good"
+    },
+    "expected": {
+      "bab": 16
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 16,
+      "progression": "average"
+    },
+    "expected": {
+      "bab": 12
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 16,
+      "progression": "poor"
+    },
+    "expected": {
+      "bab": 8
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 17,
+      "progression": "good"
+    },
+    "expected": {
+      "bab": 17
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 17,
+      "progression": "average"
+    },
+    "expected": {
+      "bab": 12
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 17,
+      "progression": "poor"
+    },
+    "expected": {
+      "bab": 8
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 18,
+      "progression": "good"
+    },
+    "expected": {
+      "bab": 18
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 18,
+      "progression": "average"
+    },
+    "expected": {
+      "bab": 13
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 18,
+      "progression": "poor"
+    },
+    "expected": {
+      "bab": 9
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 19,
+      "progression": "good"
+    },
+    "expected": {
+      "bab": 19
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 19,
+      "progression": "average"
+    },
+    "expected": {
+      "bab": 14
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 19,
+      "progression": "poor"
+    },
+    "expected": {
+      "bab": 9
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 20,
+      "progression": "good"
+    },
+    "expected": {
+      "bab": 20
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 20,
+      "progression": "average"
+    },
+    "expected": {
+      "bab": 15
+    }
+  },
+  {
+    "category": "bab",
+    "heading": "Classes > Base Attack Bonus Progression (CRB pp.30-31)",
+    "input": {
+      "level": 20,
+      "progression": "poor"
+    },
+    "expected": {
+      "bab": 10
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 1,
+      "progression": "good"
+    },
+    "expected": {
+      "baseSave": 2
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 1,
+      "progression": "poor"
+    },
+    "expected": {
+      "baseSave": 0
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 2,
+      "progression": "good"
+    },
+    "expected": {
+      "baseSave": 3
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 2,
+      "progression": "poor"
+    },
+    "expected": {
+      "baseSave": 1
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 3,
+      "progression": "good"
+    },
+    "expected": {
+      "baseSave": 3
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 3,
+      "progression": "poor"
+    },
+    "expected": {
+      "baseSave": 1
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 4,
+      "progression": "good"
+    },
+    "expected": {
+      "baseSave": 4
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 4,
+      "progression": "poor"
+    },
+    "expected": {
+      "baseSave": 2
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 5,
+      "progression": "good"
+    },
+    "expected": {
+      "baseSave": 4
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 5,
+      "progression": "poor"
+    },
+    "expected": {
+      "baseSave": 2
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 6,
+      "progression": "good"
+    },
+    "expected": {
+      "baseSave": 5
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 6,
+      "progression": "poor"
+    },
+    "expected": {
+      "baseSave": 3
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 7,
+      "progression": "good"
+    },
+    "expected": {
+      "baseSave": 5
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 7,
+      "progression": "poor"
+    },
+    "expected": {
+      "baseSave": 3
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 8,
+      "progression": "good"
+    },
+    "expected": {
+      "baseSave": 6
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 8,
+      "progression": "poor"
+    },
+    "expected": {
+      "baseSave": 4
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 9,
+      "progression": "good"
+    },
+    "expected": {
+      "baseSave": 6
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 9,
+      "progression": "poor"
+    },
+    "expected": {
+      "baseSave": 4
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 10,
+      "progression": "good"
+    },
+    "expected": {
+      "baseSave": 7
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 10,
+      "progression": "poor"
+    },
+    "expected": {
+      "baseSave": 5
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 11,
+      "progression": "good"
+    },
+    "expected": {
+      "baseSave": 7
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 11,
+      "progression": "poor"
+    },
+    "expected": {
+      "baseSave": 5
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 12,
+      "progression": "good"
+    },
+    "expected": {
+      "baseSave": 8
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 12,
+      "progression": "poor"
+    },
+    "expected": {
+      "baseSave": 6
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 13,
+      "progression": "good"
+    },
+    "expected": {
+      "baseSave": 8
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 13,
+      "progression": "poor"
+    },
+    "expected": {
+      "baseSave": 6
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 14,
+      "progression": "good"
+    },
+    "expected": {
+      "baseSave": 9
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 14,
+      "progression": "poor"
+    },
+    "expected": {
+      "baseSave": 7
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 15,
+      "progression": "good"
+    },
+    "expected": {
+      "baseSave": 9
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 15,
+      "progression": "poor"
+    },
+    "expected": {
+      "baseSave": 7
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 16,
+      "progression": "good"
+    },
+    "expected": {
+      "baseSave": 10
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 16,
+      "progression": "poor"
+    },
+    "expected": {
+      "baseSave": 8
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 17,
+      "progression": "good"
+    },
+    "expected": {
+      "baseSave": 10
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 17,
+      "progression": "poor"
+    },
+    "expected": {
+      "baseSave": 8
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 18,
+      "progression": "good"
+    },
+    "expected": {
+      "baseSave": 11
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 18,
+      "progression": "poor"
+    },
+    "expected": {
+      "baseSave": 9
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 19,
+      "progression": "good"
+    },
+    "expected": {
+      "baseSave": 11
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 19,
+      "progression": "poor"
+    },
+    "expected": {
+      "baseSave": 9
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 20,
+      "progression": "good"
+    },
+    "expected": {
+      "baseSave": 12
+    }
+  },
+  {
+    "category": "save",
+    "heading": "Classes > Base Saving Throw Progressions (CRB pp.30-31)",
+    "input": {
+      "level": 20,
+      "progression": "poor"
+    },
+    "expected": {
+      "baseSave": 10
+    }
+  },
+  {
+    "category": "twf",
+    "heading": "Table 8-10: Two-Weapon Fighting Penalties (CRB p.202)",
+    "input": {
+      "twoWeaponFightingFeat": false,
+      "offHandIsLight": false
+    },
+    "expected": {
+      "primary": -6,
+      "offhand": -10
+    }
+  },
+  {
+    "category": "twf",
+    "heading": "Table 8-10: Two-Weapon Fighting Penalties (CRB p.202)",
+    "input": {
+      "twoWeaponFightingFeat": false,
+      "offHandIsLight": true
+    },
+    "expected": {
+      "primary": -4,
+      "offhand": -8
+    }
+  },
+  {
+    "category": "twf",
+    "heading": "Table 8-10: Two-Weapon Fighting Penalties (CRB p.202)",
+    "input": {
+      "twoWeaponFightingFeat": true,
+      "offHandIsLight": false
+    },
+    "expected": {
+      "primary": -4,
+      "offhand": -4
+    }
+  },
+  {
+    "category": "twf",
+    "heading": "Table 8-10: Two-Weapon Fighting Penalties (CRB p.202)",
+    "input": {
+      "twoWeaponFightingFeat": true,
+      "offHandIsLight": true
+    },
+    "expected": {
+      "primary": -2,
+      "offhand": -2
+    }
+  },
+  {
+    "category": "cover",
+    "heading": "Combat Modifiers > Cover (CRB p.195, AoN Rules ID 181)",
+    "input": {
+      "cover": "partial"
+    },
+    "expected": {
+      "acBonus": 2,
+      "reflexBonus": 1,
+      "stealthBonus": 0
+    }
+  },
+  {
+    "category": "cover",
+    "heading": "Combat Modifiers > Cover (CRB p.195, AoN Rules ID 181)",
+    "input": {
+      "cover": "soft"
+    },
+    "expected": {
+      "acBonus": 4,
+      "reflexBonus": 0,
+      "stealthBonus": 0
+    }
+  },
+  {
+    "category": "cover",
+    "heading": "Combat Modifiers > Cover (CRB p.195, AoN Rules ID 181)",
+    "input": {
+      "cover": "standard"
+    },
+    "expected": {
+      "acBonus": 4,
+      "reflexBonus": 2,
+      "stealthBonus": 0
+    }
+  },
+  {
+    "category": "cover",
+    "heading": "Combat Modifiers > Cover (CRB p.195, AoN Rules ID 181)",
+    "input": {
+      "cover": "improved"
+    },
+    "expected": {
+      "acBonus": 8,
+      "reflexBonus": 4,
+      "stealthBonus": 10
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 0,
+      "abilityMod": 0
+    },
+    "expected": {
+      "dc": 10
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 0,
+      "abilityMod": 1
+    },
+    "expected": {
+      "dc": 11
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 0,
+      "abilityMod": 2
+    },
+    "expected": {
+      "dc": 12
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 0,
+      "abilityMod": 3
+    },
+    "expected": {
+      "dc": 13
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 0,
+      "abilityMod": 4
+    },
+    "expected": {
+      "dc": 14
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 0,
+      "abilityMod": 5
+    },
+    "expected": {
+      "dc": 15
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 0,
+      "abilityMod": 6
+    },
+    "expected": {
+      "dc": 16
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 0,
+      "abilityMod": 7
+    },
+    "expected": {
+      "dc": 17
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 0,
+      "abilityMod": 8
+    },
+    "expected": {
+      "dc": 18
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 0,
+      "abilityMod": 9
+    },
+    "expected": {
+      "dc": 19
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 0,
+      "abilityMod": 10
+    },
+    "expected": {
+      "dc": 20
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 1,
+      "abilityMod": 0
+    },
+    "expected": {
+      "dc": 11
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 1,
+      "abilityMod": 1
+    },
+    "expected": {
+      "dc": 12
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 1,
+      "abilityMod": 2
+    },
+    "expected": {
+      "dc": 13
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 1,
+      "abilityMod": 3
+    },
+    "expected": {
+      "dc": 14
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 1,
+      "abilityMod": 4
+    },
+    "expected": {
+      "dc": 15
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 1,
+      "abilityMod": 5
+    },
+    "expected": {
+      "dc": 16
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 1,
+      "abilityMod": 6
+    },
+    "expected": {
+      "dc": 17
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 1,
+      "abilityMod": 7
+    },
+    "expected": {
+      "dc": 18
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 1,
+      "abilityMod": 8
+    },
+    "expected": {
+      "dc": 19
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 1,
+      "abilityMod": 9
+    },
+    "expected": {
+      "dc": 20
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 1,
+      "abilityMod": 10
+    },
+    "expected": {
+      "dc": 21
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 2,
+      "abilityMod": 0
+    },
+    "expected": {
+      "dc": 12
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 2,
+      "abilityMod": 1
+    },
+    "expected": {
+      "dc": 13
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 2,
+      "abilityMod": 2
+    },
+    "expected": {
+      "dc": 14
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 2,
+      "abilityMod": 3
+    },
+    "expected": {
+      "dc": 15
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 2,
+      "abilityMod": 4
+    },
+    "expected": {
+      "dc": 16
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 2,
+      "abilityMod": 5
+    },
+    "expected": {
+      "dc": 17
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 2,
+      "abilityMod": 6
+    },
+    "expected": {
+      "dc": 18
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 2,
+      "abilityMod": 7
+    },
+    "expected": {
+      "dc": 19
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 2,
+      "abilityMod": 8
+    },
+    "expected": {
+      "dc": 20
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 2,
+      "abilityMod": 9
+    },
+    "expected": {
+      "dc": 21
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 2,
+      "abilityMod": 10
+    },
+    "expected": {
+      "dc": 22
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 3,
+      "abilityMod": 0
+    },
+    "expected": {
+      "dc": 13
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 3,
+      "abilityMod": 1
+    },
+    "expected": {
+      "dc": 14
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 3,
+      "abilityMod": 2
+    },
+    "expected": {
+      "dc": 15
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 3,
+      "abilityMod": 3
+    },
+    "expected": {
+      "dc": 16
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 3,
+      "abilityMod": 4
+    },
+    "expected": {
+      "dc": 17
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 3,
+      "abilityMod": 5
+    },
+    "expected": {
+      "dc": 18
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 3,
+      "abilityMod": 6
+    },
+    "expected": {
+      "dc": 19
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 3,
+      "abilityMod": 7
+    },
+    "expected": {
+      "dc": 20
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 3,
+      "abilityMod": 8
+    },
+    "expected": {
+      "dc": 21
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 3,
+      "abilityMod": 9
+    },
+    "expected": {
+      "dc": 22
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 3,
+      "abilityMod": 10
+    },
+    "expected": {
+      "dc": 23
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 4,
+      "abilityMod": 0
+    },
+    "expected": {
+      "dc": 14
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 4,
+      "abilityMod": 1
+    },
+    "expected": {
+      "dc": 15
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 4,
+      "abilityMod": 2
+    },
+    "expected": {
+      "dc": 16
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 4,
+      "abilityMod": 3
+    },
+    "expected": {
+      "dc": 17
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 4,
+      "abilityMod": 4
+    },
+    "expected": {
+      "dc": 18
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 4,
+      "abilityMod": 5
+    },
+    "expected": {
+      "dc": 19
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 4,
+      "abilityMod": 6
+    },
+    "expected": {
+      "dc": 20
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 4,
+      "abilityMod": 7
+    },
+    "expected": {
+      "dc": 21
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 4,
+      "abilityMod": 8
+    },
+    "expected": {
+      "dc": 22
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 4,
+      "abilityMod": 9
+    },
+    "expected": {
+      "dc": 23
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 4,
+      "abilityMod": 10
+    },
+    "expected": {
+      "dc": 24
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 5,
+      "abilityMod": 0
+    },
+    "expected": {
+      "dc": 15
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 5,
+      "abilityMod": 1
+    },
+    "expected": {
+      "dc": 16
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 5,
+      "abilityMod": 2
+    },
+    "expected": {
+      "dc": 17
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 5,
+      "abilityMod": 3
+    },
+    "expected": {
+      "dc": 18
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 5,
+      "abilityMod": 4
+    },
+    "expected": {
+      "dc": 19
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 5,
+      "abilityMod": 5
+    },
+    "expected": {
+      "dc": 20
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 5,
+      "abilityMod": 6
+    },
+    "expected": {
+      "dc": 21
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 5,
+      "abilityMod": 7
+    },
+    "expected": {
+      "dc": 22
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 5,
+      "abilityMod": 8
+    },
+    "expected": {
+      "dc": 23
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 5,
+      "abilityMod": 9
+    },
+    "expected": {
+      "dc": 24
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 5,
+      "abilityMod": 10
+    },
+    "expected": {
+      "dc": 25
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 6,
+      "abilityMod": 0
+    },
+    "expected": {
+      "dc": 16
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 6,
+      "abilityMod": 1
+    },
+    "expected": {
+      "dc": 17
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 6,
+      "abilityMod": 2
+    },
+    "expected": {
+      "dc": 18
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 6,
+      "abilityMod": 3
+    },
+    "expected": {
+      "dc": 19
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 6,
+      "abilityMod": 4
+    },
+    "expected": {
+      "dc": 20
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 6,
+      "abilityMod": 5
+    },
+    "expected": {
+      "dc": 21
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 6,
+      "abilityMod": 6
+    },
+    "expected": {
+      "dc": 22
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 6,
+      "abilityMod": 7
+    },
+    "expected": {
+      "dc": 23
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 6,
+      "abilityMod": 8
+    },
+    "expected": {
+      "dc": 24
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 6,
+      "abilityMod": 9
+    },
+    "expected": {
+      "dc": 25
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 6,
+      "abilityMod": 10
+    },
+    "expected": {
+      "dc": 26
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 7,
+      "abilityMod": 0
+    },
+    "expected": {
+      "dc": 17
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 7,
+      "abilityMod": 1
+    },
+    "expected": {
+      "dc": 18
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 7,
+      "abilityMod": 2
+    },
+    "expected": {
+      "dc": 19
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 7,
+      "abilityMod": 3
+    },
+    "expected": {
+      "dc": 20
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 7,
+      "abilityMod": 4
+    },
+    "expected": {
+      "dc": 21
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 7,
+      "abilityMod": 5
+    },
+    "expected": {
+      "dc": 22
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 7,
+      "abilityMod": 6
+    },
+    "expected": {
+      "dc": 23
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 7,
+      "abilityMod": 7
+    },
+    "expected": {
+      "dc": 24
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 7,
+      "abilityMod": 8
+    },
+    "expected": {
+      "dc": 25
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 7,
+      "abilityMod": 9
+    },
+    "expected": {
+      "dc": 26
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 7,
+      "abilityMod": 10
+    },
+    "expected": {
+      "dc": 27
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 8,
+      "abilityMod": 0
+    },
+    "expected": {
+      "dc": 18
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 8,
+      "abilityMod": 1
+    },
+    "expected": {
+      "dc": 19
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 8,
+      "abilityMod": 2
+    },
+    "expected": {
+      "dc": 20
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 8,
+      "abilityMod": 3
+    },
+    "expected": {
+      "dc": 21
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 8,
+      "abilityMod": 4
+    },
+    "expected": {
+      "dc": 22
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 8,
+      "abilityMod": 5
+    },
+    "expected": {
+      "dc": 23
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 8,
+      "abilityMod": 6
+    },
+    "expected": {
+      "dc": 24
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 8,
+      "abilityMod": 7
+    },
+    "expected": {
+      "dc": 25
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 8,
+      "abilityMod": 8
+    },
+    "expected": {
+      "dc": 26
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 8,
+      "abilityMod": 9
+    },
+    "expected": {
+      "dc": 27
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 8,
+      "abilityMod": 10
+    },
+    "expected": {
+      "dc": 28
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 9,
+      "abilityMod": 0
+    },
+    "expected": {
+      "dc": 19
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 9,
+      "abilityMod": 1
+    },
+    "expected": {
+      "dc": 20
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 9,
+      "abilityMod": 2
+    },
+    "expected": {
+      "dc": 21
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 9,
+      "abilityMod": 3
+    },
+    "expected": {
+      "dc": 22
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 9,
+      "abilityMod": 4
+    },
+    "expected": {
+      "dc": 23
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 9,
+      "abilityMod": 5
+    },
+    "expected": {
+      "dc": 24
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 9,
+      "abilityMod": 6
+    },
+    "expected": {
+      "dc": 25
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 9,
+      "abilityMod": 7
+    },
+    "expected": {
+      "dc": 26
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 9,
+      "abilityMod": 8
+    },
+    "expected": {
+      "dc": 27
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 9,
+      "abilityMod": 9
+    },
+    "expected": {
+      "dc": 28
+    }
+  },
+  {
+    "category": "spellDc",
+    "heading": "Magic > Spell Save DC (CRB p.205)",
+    "input": {
+      "spellLevel": 9,
+      "abilityMod": 10
+    },
+    "expected": {
+      "dc": 29
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 0,
+      "attackerBab": 1
+    },
+    "expected": {
+      "dc": 11
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 0,
+      "attackerBab": 5
+    },
+    "expected": {
+      "dc": 15
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 0,
+      "attackerBab": 10
+    },
+    "expected": {
+      "dc": 20
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 1,
+      "attackerBab": 1
+    },
+    "expected": {
+      "dc": 12
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 1,
+      "attackerBab": 5
+    },
+    "expected": {
+      "dc": 16
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 1,
+      "attackerBab": 10
+    },
+    "expected": {
+      "dc": 21
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 2,
+      "attackerBab": 1
+    },
+    "expected": {
+      "dc": 13
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 2,
+      "attackerBab": 5
+    },
+    "expected": {
+      "dc": 17
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 2,
+      "attackerBab": 10
+    },
+    "expected": {
+      "dc": 22
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 3,
+      "attackerBab": 1
+    },
+    "expected": {
+      "dc": 14
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 3,
+      "attackerBab": 5
+    },
+    "expected": {
+      "dc": 18
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 3,
+      "attackerBab": 10
+    },
+    "expected": {
+      "dc": 23
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 4,
+      "attackerBab": 1
+    },
+    "expected": {
+      "dc": 15
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 4,
+      "attackerBab": 5
+    },
+    "expected": {
+      "dc": 19
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 4,
+      "attackerBab": 10
+    },
+    "expected": {
+      "dc": 24
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 5,
+      "attackerBab": 1
+    },
+    "expected": {
+      "dc": 16
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 5,
+      "attackerBab": 5
+    },
+    "expected": {
+      "dc": 20
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 5,
+      "attackerBab": 10
+    },
+    "expected": {
+      "dc": 25
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 6,
+      "attackerBab": 1
+    },
+    "expected": {
+      "dc": 17
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 6,
+      "attackerBab": 5
+    },
+    "expected": {
+      "dc": 21
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 6,
+      "attackerBab": 10
+    },
+    "expected": {
+      "dc": 26
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 7,
+      "attackerBab": 1
+    },
+    "expected": {
+      "dc": 18
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 7,
+      "attackerBab": 5
+    },
+    "expected": {
+      "dc": 22
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 7,
+      "attackerBab": 10
+    },
+    "expected": {
+      "dc": 27
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 8,
+      "attackerBab": 1
+    },
+    "expected": {
+      "dc": 19
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 8,
+      "attackerBab": 5
+    },
+    "expected": {
+      "dc": 23
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 8,
+      "attackerBab": 10
+    },
+    "expected": {
+      "dc": 28
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 9,
+      "attackerBab": 1
+    },
+    "expected": {
+      "dc": 20
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 9,
+      "attackerBab": 5
+    },
+    "expected": {
+      "dc": 24
+    }
+  },
+  {
+    "category": "defensiveCastingDc",
+    "heading": "Special Initiative Actions > Concentration > Defensive Casting (A.19)",
+    "input": {
+      "spellLevel": 9,
+      "attackerBab": 10
+    },
+    "expected": {
+      "dc": 29
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 0,
+      "damageDealt": 5
+    },
+    "expected": {
+      "dc": 15
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 0,
+      "damageDealt": 10
+    },
+    "expected": {
+      "dc": 20
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 0,
+      "damageDealt": 15
+    },
+    "expected": {
+      "dc": 25
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 0,
+      "damageDealt": 20
+    },
+    "expected": {
+      "dc": 30
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 1,
+      "damageDealt": 5
+    },
+    "expected": {
+      "dc": 16
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 1,
+      "damageDealt": 10
+    },
+    "expected": {
+      "dc": 21
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 1,
+      "damageDealt": 15
+    },
+    "expected": {
+      "dc": 26
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 1,
+      "damageDealt": 20
+    },
+    "expected": {
+      "dc": 31
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 2,
+      "damageDealt": 5
+    },
+    "expected": {
+      "dc": 17
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 2,
+      "damageDealt": 10
+    },
+    "expected": {
+      "dc": 22
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 2,
+      "damageDealt": 15
+    },
+    "expected": {
+      "dc": 27
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 2,
+      "damageDealt": 20
+    },
+    "expected": {
+      "dc": 32
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 3,
+      "damageDealt": 5
+    },
+    "expected": {
+      "dc": 18
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 3,
+      "damageDealt": 10
+    },
+    "expected": {
+      "dc": 23
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 3,
+      "damageDealt": 15
+    },
+    "expected": {
+      "dc": 28
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 3,
+      "damageDealt": 20
+    },
+    "expected": {
+      "dc": 33
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 4,
+      "damageDealt": 5
+    },
+    "expected": {
+      "dc": 19
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 4,
+      "damageDealt": 10
+    },
+    "expected": {
+      "dc": 24
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 4,
+      "damageDealt": 15
+    },
+    "expected": {
+      "dc": 29
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 4,
+      "damageDealt": 20
+    },
+    "expected": {
+      "dc": 34
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 5,
+      "damageDealt": 5
+    },
+    "expected": {
+      "dc": 20
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 5,
+      "damageDealt": 10
+    },
+    "expected": {
+      "dc": 25
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 5,
+      "damageDealt": 15
+    },
+    "expected": {
+      "dc": 30
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 5,
+      "damageDealt": 20
+    },
+    "expected": {
+      "dc": 35
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 6,
+      "damageDealt": 5
+    },
+    "expected": {
+      "dc": 21
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 6,
+      "damageDealt": 10
+    },
+    "expected": {
+      "dc": 26
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 6,
+      "damageDealt": 15
+    },
+    "expected": {
+      "dc": 31
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 6,
+      "damageDealt": 20
+    },
+    "expected": {
+      "dc": 36
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 7,
+      "damageDealt": 5
+    },
+    "expected": {
+      "dc": 22
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 7,
+      "damageDealt": 10
+    },
+    "expected": {
+      "dc": 27
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 7,
+      "damageDealt": 15
+    },
+    "expected": {
+      "dc": 32
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 7,
+      "damageDealt": 20
+    },
+    "expected": {
+      "dc": 37
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 8,
+      "damageDealt": 5
+    },
+    "expected": {
+      "dc": 23
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 8,
+      "damageDealt": 10
+    },
+    "expected": {
+      "dc": 28
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 8,
+      "damageDealt": 15
+    },
+    "expected": {
+      "dc": 33
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 8,
+      "damageDealt": 20
+    },
+    "expected": {
+      "dc": 38
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 9,
+      "damageDealt": 5
+    },
+    "expected": {
+      "dc": 24
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 9,
+      "damageDealt": 10
+    },
+    "expected": {
+      "dc": 29
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 9,
+      "damageDealt": 15
+    },
+    "expected": {
+      "dc": 34
+    }
+  },
+  {
+    "category": "injuredConcentrationDc",
+    "heading": "Table 9-1: Concentration Check DCs > Injured while casting (CRB p.207)",
+    "input": {
+      "spellLevel": 9,
+      "damageDealt": 20
+    },
+    "expected": {
+      "dc": 39
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 0
+    },
+    "expected": {
+      "dcMod": 0
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 10
+    },
+    "expected": {
+      "dcMod": 1
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 20
+    },
+    "expected": {
+      "dcMod": 2
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 30
+    },
+    "expected": {
+      "dcMod": 3
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 40
+    },
+    "expected": {
+      "dcMod": 4
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 50
+    },
+    "expected": {
+      "dcMod": 5
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 60
+    },
+    "expected": {
+      "dcMod": 6
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 70
+    },
+    "expected": {
+      "dcMod": 7
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 80
+    },
+    "expected": {
+      "dcMod": 8
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 90
+    },
+    "expected": {
+      "dcMod": 9
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 100
+    },
+    "expected": {
+      "dcMod": 10
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 110
+    },
+    "expected": {
+      "dcMod": 11
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 120
+    },
+    "expected": {
+      "dcMod": 12
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 130
+    },
+    "expected": {
+      "dcMod": 13
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 140
+    },
+    "expected": {
+      "dcMod": 14
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 150
+    },
+    "expected": {
+      "dcMod": 15
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 160
+    },
+    "expected": {
+      "dcMod": 16
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 170
+    },
+    "expected": {
+      "dcMod": 17
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 180
+    },
+    "expected": {
+      "dcMod": 18
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 190
+    },
+    "expected": {
+      "dcMod": 19
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 200
+    },
+    "expected": {
+      "dcMod": 20
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 210
+    },
+    "expected": {
+      "dcMod": 21
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 220
+    },
+    "expected": {
+      "dcMod": 22
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 230
+    },
+    "expected": {
+      "dcMod": 23
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 240
+    },
+    "expected": {
+      "dcMod": 24
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 250
+    },
+    "expected": {
+      "dcMod": 25
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 260
+    },
+    "expected": {
+      "dcMod": 26
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 270
+    },
+    "expected": {
+      "dcMod": 27
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 280
+    },
+    "expected": {
+      "dcMod": 28
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 290
+    },
+    "expected": {
+      "dcMod": 29
+    }
+  },
+  {
+    "category": "perceptionDistance",
+    "heading": "Skills > Perception (CRB p.102, AoN Skill 26)",
+    "input": {
+      "distanceFt": 300
+    },
+    "expected": {
+      "dcMod": 30
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 1,
+      "strMod": -1,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": -1
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 1,
+      "strMod": -1,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 0
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 1,
+      "strMod": -1,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 1
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 1,
+      "strMod": 0,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 0
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 1,
+      "strMod": 0,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 1
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 1,
+      "strMod": 0,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 2
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 1,
+      "strMod": 2,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 2
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 1,
+      "strMod": 2,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 3
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 1,
+      "strMod": 2,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 4
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 1,
+      "strMod": 4,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 4
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 1,
+      "strMod": 4,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 5
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 1,
+      "strMod": 4,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 6
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 1,
+      "strMod": 6,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 6
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 1,
+      "strMod": 6,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 7
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 1,
+      "strMod": 6,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 8
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 5,
+      "strMod": -1,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 3
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 5,
+      "strMod": -1,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 4
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 5,
+      "strMod": -1,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 5
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 5,
+      "strMod": 0,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 4
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 5,
+      "strMod": 0,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 5
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 5,
+      "strMod": 0,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 6
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 5,
+      "strMod": 2,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 6
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 5,
+      "strMod": 2,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 7
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 5,
+      "strMod": 2,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 8
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 5,
+      "strMod": 4,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 8
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 5,
+      "strMod": 4,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 9
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 5,
+      "strMod": 4,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 10
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 5,
+      "strMod": 6,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 10
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 5,
+      "strMod": 6,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 11
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 5,
+      "strMod": 6,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 12
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 10,
+      "strMod": -1,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 8
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 10,
+      "strMod": -1,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 9
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 10,
+      "strMod": -1,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 10
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 10,
+      "strMod": 0,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 9
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 10,
+      "strMod": 0,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 10
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 10,
+      "strMod": 0,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 11
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 10,
+      "strMod": 2,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 11
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 10,
+      "strMod": 2,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 12
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 10,
+      "strMod": 2,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 13
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 10,
+      "strMod": 4,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 13
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 10,
+      "strMod": 4,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 14
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 10,
+      "strMod": 4,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 15
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 10,
+      "strMod": 6,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 15
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 10,
+      "strMod": 6,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 16
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 10,
+      "strMod": 6,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 17
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 15,
+      "strMod": -1,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 13
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 15,
+      "strMod": -1,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 14
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 15,
+      "strMod": -1,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 15
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 15,
+      "strMod": 0,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 14
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 15,
+      "strMod": 0,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 15
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 15,
+      "strMod": 0,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 16
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 15,
+      "strMod": 2,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 16
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 15,
+      "strMod": 2,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 17
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 15,
+      "strMod": 2,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 18
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 15,
+      "strMod": 4,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 18
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 15,
+      "strMod": 4,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 19
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 15,
+      "strMod": 4,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 20
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 15,
+      "strMod": 6,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 20
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 15,
+      "strMod": 6,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 21
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 15,
+      "strMod": 6,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 22
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 20,
+      "strMod": -1,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 18
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 20,
+      "strMod": -1,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 19
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 20,
+      "strMod": -1,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 20
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 20,
+      "strMod": 0,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 19
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 20,
+      "strMod": 0,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 20
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 20,
+      "strMod": 0,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 21
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 20,
+      "strMod": 2,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 21
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 20,
+      "strMod": 2,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 22
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 20,
+      "strMod": 2,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 23
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 20,
+      "strMod": 4,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 23
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 20,
+      "strMod": 4,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 24
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 20,
+      "strMod": 4,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 25
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 20,
+      "strMod": 6,
+      "size": "Small"
+    },
+    "expected": {
+      "cmb": 25
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 20,
+      "strMod": 6,
+      "size": "Medium"
+    },
+    "expected": {
+      "cmb": 26
+    }
+  },
+  {
+    "category": "cmb",
+    "heading": "Combat > Combat Maneuver Bonus (CRB p.199)",
+    "input": {
+      "bab": 20,
+      "strMod": 6,
+      "size": "Large"
+    },
+    "expected": {
+      "cmb": 27
+    }
+  },
+  {
+    "category": "iterativeAttacks",
+    "heading": "Combat > Full Attack / Iterative Attacks (CRB p.187)",
+    "input": {
+      "bab": 1
+    },
+    "expected": {
+      "bonuses": [
+        1
+      ]
+    }
+  },
+  {
+    "category": "iterativeAttacks",
+    "heading": "Combat > Full Attack / Iterative Attacks (CRB p.187)",
+    "input": {
+      "bab": 2
+    },
+    "expected": {
+      "bonuses": [
+        2
+      ]
+    }
+  },
+  {
+    "category": "iterativeAttacks",
+    "heading": "Combat > Full Attack / Iterative Attacks (CRB p.187)",
+    "input": {
+      "bab": 3
+    },
+    "expected": {
+      "bonuses": [
+        3
+      ]
+    }
+  },
+  {
+    "category": "iterativeAttacks",
+    "heading": "Combat > Full Attack / Iterative Attacks (CRB p.187)",
+    "input": {
+      "bab": 4
+    },
+    "expected": {
+      "bonuses": [
+        4
+      ]
+    }
+  },
+  {
+    "category": "iterativeAttacks",
+    "heading": "Combat > Full Attack / Iterative Attacks (CRB p.187)",
+    "input": {
+      "bab": 5
+    },
+    "expected": {
+      "bonuses": [
+        5
+      ]
+    }
+  },
+  {
+    "category": "iterativeAttacks",
+    "heading": "Combat > Full Attack / Iterative Attacks (CRB p.187)",
+    "input": {
+      "bab": 6
+    },
+    "expected": {
+      "bonuses": [
+        6,
+        1
+      ]
+    }
+  },
+  {
+    "category": "iterativeAttacks",
+    "heading": "Combat > Full Attack / Iterative Attacks (CRB p.187)",
+    "input": {
+      "bab": 7
+    },
+    "expected": {
+      "bonuses": [
+        7,
+        2
+      ]
+    }
+  },
+  {
+    "category": "iterativeAttacks",
+    "heading": "Combat > Full Attack / Iterative Attacks (CRB p.187)",
+    "input": {
+      "bab": 8
+    },
+    "expected": {
+      "bonuses": [
+        8,
+        3
+      ]
+    }
+  },
+  {
+    "category": "iterativeAttacks",
+    "heading": "Combat > Full Attack / Iterative Attacks (CRB p.187)",
+    "input": {
+      "bab": 9
+    },
+    "expected": {
+      "bonuses": [
+        9,
+        4
+      ]
+    }
+  },
+  {
+    "category": "iterativeAttacks",
+    "heading": "Combat > Full Attack / Iterative Attacks (CRB p.187)",
+    "input": {
+      "bab": 10
+    },
+    "expected": {
+      "bonuses": [
+        10,
+        5
+      ]
+    }
+  },
+  {
+    "category": "iterativeAttacks",
+    "heading": "Combat > Full Attack / Iterative Attacks (CRB p.187)",
+    "input": {
+      "bab": 11
+    },
+    "expected": {
+      "bonuses": [
+        11,
+        6,
+        1
+      ]
+    }
+  },
+  {
+    "category": "iterativeAttacks",
+    "heading": "Combat > Full Attack / Iterative Attacks (CRB p.187)",
+    "input": {
+      "bab": 12
+    },
+    "expected": {
+      "bonuses": [
+        12,
+        7,
+        2
+      ]
+    }
+  },
+  {
+    "category": "iterativeAttacks",
+    "heading": "Combat > Full Attack / Iterative Attacks (CRB p.187)",
+    "input": {
+      "bab": 13
+    },
+    "expected": {
+      "bonuses": [
+        13,
+        8,
+        3
+      ]
+    }
+  },
+  {
+    "category": "iterativeAttacks",
+    "heading": "Combat > Full Attack / Iterative Attacks (CRB p.187)",
+    "input": {
+      "bab": 14
+    },
+    "expected": {
+      "bonuses": [
+        14,
+        9,
+        4
+      ]
+    }
+  },
+  {
+    "category": "iterativeAttacks",
+    "heading": "Combat > Full Attack / Iterative Attacks (CRB p.187)",
+    "input": {
+      "bab": 15
+    },
+    "expected": {
+      "bonuses": [
+        15,
+        10,
+        5
+      ]
+    }
+  },
+  {
+    "category": "iterativeAttacks",
+    "heading": "Combat > Full Attack / Iterative Attacks (CRB p.187)",
+    "input": {
+      "bab": 16
+    },
+    "expected": {
+      "bonuses": [
+        16,
+        11,
+        6,
+        1
+      ]
+    }
+  },
+  {
+    "category": "iterativeAttacks",
+    "heading": "Combat > Full Attack / Iterative Attacks (CRB p.187)",
+    "input": {
+      "bab": 17
+    },
+    "expected": {
+      "bonuses": [
+        17,
+        12,
+        7,
+        2
+      ]
+    }
+  },
+  {
+    "category": "iterativeAttacks",
+    "heading": "Combat > Full Attack / Iterative Attacks (CRB p.187)",
+    "input": {
+      "bab": 18
+    },
+    "expected": {
+      "bonuses": [
+        18,
+        13,
+        8,
+        3
+      ]
+    }
+  },
+  {
+    "category": "iterativeAttacks",
+    "heading": "Combat > Full Attack / Iterative Attacks (CRB p.187)",
+    "input": {
+      "bab": 19
+    },
+    "expected": {
+      "bonuses": [
+        19,
+        14,
+        9,
+        4
+      ]
+    }
+  },
+  {
+    "category": "iterativeAttacks",
+    "heading": "Combat > Full Attack / Iterative Attacks (CRB p.187)",
+    "input": {
+      "bab": 20
+    },
+    "expected": {
+      "bonuses": [
+        20,
+        15,
+        10,
+        5
+      ]
+    }
+  },
+  {
+    "category": "critMultipliers",
+    "heading": "Combat > Multiplying Damage (CRB p.179)",
+    "input": {
+      "multipliers": [
+        2,
+        2
+      ]
+    },
+    "expected": {
+      "combined": 3
+    }
+  },
+  {
+    "category": "critMultipliers",
+    "heading": "Combat > Multiplying Damage (CRB p.179)",
+    "input": {
+      "multipliers": [
+        2,
+        3
+      ]
+    },
+    "expected": {
+      "combined": 4
+    }
+  },
+  {
+    "category": "critMultipliers",
+    "heading": "Combat > Multiplying Damage (CRB p.179)",
+    "input": {
+      "multipliers": [
+        3,
+        3
+      ]
+    },
+    "expected": {
+      "combined": 5
+    }
+  },
+  {
+    "category": "critMultipliers",
+    "heading": "Combat > Multiplying Damage (CRB p.179)",
+    "input": {
+      "multipliers": [
+        2,
+        4
+      ]
+    },
+    "expected": {
+      "combined": 5
+    }
+  },
+  {
+    "category": "damageReduction",
+    "heading": "Special Defenses > Damage Reduction (CRB p.561)",
+    "input": {
+      "damage": 15,
+      "dr": 5
+    },
+    "expected": {
+      "damageTaken": 10
+    }
+  },
+  {
+    "category": "damageReduction",
+    "heading": "Special Defenses > Damage Reduction (CRB p.561)",
+    "input": {
+      "damage": 8,
+      "dr": 10
+    },
+    "expected": {
+      "damageTaken": 0
+    }
+  },
+  {
+    "category": "damageReduction",
+    "heading": "Special Defenses > Damage Reduction (CRB p.561)",
+    "input": {
+      "damage": 25,
+      "dr": 15
+    },
+    "expected": {
+      "damageTaken": 10
+    }
+  },
+  {
+    "category": "damageReduction",
+    "heading": "Special Defenses > Damage Reduction (CRB p.561)",
+    "input": {
+      "damage": 4,
+      "dr": 5
+    },
+    "expected": {
+      "damageTaken": 0
+    }
+  },
+  {
+    "category": "aooBudget",
+    "heading": "Combat > Attacks of Opportunity (CRB p.180, AoN Rules ID 102)",
+    "input": {
+      "dexMod": -2,
+      "combatReflexes": false
+    },
+    "expected": {
+      "budget": 1
+    }
+  },
+  {
+    "category": "aooBudget",
+    "heading": "Combat > Attacks of Opportunity > Combat Reflexes (CRB p.119)",
+    "input": {
+      "dexMod": -2,
+      "combatReflexes": true
+    },
+    "expected": {
+      "budget": 1
+    }
+  },
+  {
+    "category": "aooBudget",
+    "heading": "Combat > Attacks of Opportunity (CRB p.180, AoN Rules ID 102)",
+    "input": {
+      "dexMod": -1,
+      "combatReflexes": false
+    },
+    "expected": {
+      "budget": 1
+    }
+  },
+  {
+    "category": "aooBudget",
+    "heading": "Combat > Attacks of Opportunity > Combat Reflexes (CRB p.119)",
+    "input": {
+      "dexMod": -1,
+      "combatReflexes": true
+    },
+    "expected": {
+      "budget": 1
+    }
+  },
+  {
+    "category": "aooBudget",
+    "heading": "Combat > Attacks of Opportunity (CRB p.180, AoN Rules ID 102)",
+    "input": {
+      "dexMod": 0,
+      "combatReflexes": false
+    },
+    "expected": {
+      "budget": 1
+    }
+  },
+  {
+    "category": "aooBudget",
+    "heading": "Combat > Attacks of Opportunity > Combat Reflexes (CRB p.119)",
+    "input": {
+      "dexMod": 0,
+      "combatReflexes": true
+    },
+    "expected": {
+      "budget": 1
+    }
+  },
+  {
+    "category": "aooBudget",
+    "heading": "Combat > Attacks of Opportunity (CRB p.180, AoN Rules ID 102)",
+    "input": {
+      "dexMod": 1,
+      "combatReflexes": false
+    },
+    "expected": {
+      "budget": 1
+    }
+  },
+  {
+    "category": "aooBudget",
+    "heading": "Combat > Attacks of Opportunity > Combat Reflexes (CRB p.119)",
+    "input": {
+      "dexMod": 1,
+      "combatReflexes": true
+    },
+    "expected": {
+      "budget": 2
+    }
+  },
+  {
+    "category": "aooBudget",
+    "heading": "Combat > Attacks of Opportunity (CRB p.180, AoN Rules ID 102)",
+    "input": {
+      "dexMod": 2,
+      "combatReflexes": false
+    },
+    "expected": {
+      "budget": 1
+    }
+  },
+  {
+    "category": "aooBudget",
+    "heading": "Combat > Attacks of Opportunity > Combat Reflexes (CRB p.119)",
+    "input": {
+      "dexMod": 2,
+      "combatReflexes": true
+    },
+    "expected": {
+      "budget": 3
+    }
+  },
+  {
+    "category": "aooBudget",
+    "heading": "Combat > Attacks of Opportunity (CRB p.180, AoN Rules ID 102)",
+    "input": {
+      "dexMod": 3,
+      "combatReflexes": false
+    },
+    "expected": {
+      "budget": 1
+    }
+  },
+  {
+    "category": "aooBudget",
+    "heading": "Combat > Attacks of Opportunity > Combat Reflexes (CRB p.119)",
+    "input": {
+      "dexMod": 3,
+      "combatReflexes": true
+    },
+    "expected": {
+      "budget": 4
+    }
+  },
+  {
+    "category": "aooBudget",
+    "heading": "Combat > Attacks of Opportunity (CRB p.180, AoN Rules ID 102)",
+    "input": {
+      "dexMod": 4,
+      "combatReflexes": false
+    },
+    "expected": {
+      "budget": 1
+    }
+  },
+  {
+    "category": "aooBudget",
+    "heading": "Combat > Attacks of Opportunity > Combat Reflexes (CRB p.119)",
+    "input": {
+      "dexMod": 4,
+      "combatReflexes": true
+    },
+    "expected": {
+      "budget": 5
+    }
+  },
+  {
+    "category": "aooBudget",
+    "heading": "Combat > Attacks of Opportunity (CRB p.180, AoN Rules ID 102)",
+    "input": {
+      "dexMod": 5,
+      "combatReflexes": false
+    },
+    "expected": {
+      "budget": 1
+    }
+  },
+  {
+    "category": "aooBudget",
+    "heading": "Combat > Attacks of Opportunity > Combat Reflexes (CRB p.119)",
+    "input": {
+      "dexMod": 5,
+      "combatReflexes": true
+    },
+    "expected": {
+      "budget": 6
+    }
+  },
+  {
+    "category": "armorStats",
+    "heading": "Table 6-6: Armor and Shields (CRB p.151)",
+    "input": {
+      "armor": "padded",
+      "category": "light",
+      "baseSpeed": 30
+    },
+    "expected": {
+      "maxDex": 5,
+      "asf": 0.05,
+      "speed": 30
+    }
+  },
+  {
+    "category": "armorStats",
+    "heading": "Table 6-6: Armor and Shields (CRB p.151)",
+    "input": {
+      "armor": "leather",
+      "category": "light",
+      "baseSpeed": 30
+    },
+    "expected": {
+      "maxDex": 6,
+      "asf": 0.1,
+      "speed": 30
+    }
+  },
+  {
+    "category": "armorStats",
+    "heading": "Table 6-6: Armor and Shields (CRB p.151)",
+    "input": {
+      "armor": "studded-leather",
+      "category": "light",
+      "baseSpeed": 30
+    },
+    "expected": {
+      "maxDex": 5,
+      "asf": 0.15,
+      "speed": 30
+    }
+  },
+  {
+    "category": "armorStats",
+    "heading": "Table 6-6: Armor and Shields (CRB p.151)",
+    "input": {
+      "armor": "chain-shirt",
+      "category": "light",
+      "baseSpeed": 30
+    },
+    "expected": {
+      "maxDex": 4,
+      "asf": 0.2,
+      "speed": 30
+    }
+  },
+  {
+    "category": "armorStats",
+    "heading": "Table 6-6: Armor and Shields (CRB p.151)",
+    "input": {
+      "armor": "hide",
+      "category": "medium",
+      "baseSpeed": 30
+    },
+    "expected": {
+      "maxDex": 4,
+      "asf": 0.2,
+      "speed": 20
+    }
+  },
+  {
+    "category": "armorStats",
+    "heading": "Table 6-6: Armor and Shields (CRB p.151)",
+    "input": {
+      "armor": "scale-mail",
+      "category": "medium",
+      "baseSpeed": 30
+    },
+    "expected": {
+      "maxDex": 3,
+      "asf": 0.25,
+      "speed": 20
+    }
+  },
+  {
+    "category": "armorStats",
+    "heading": "Table 6-6: Armor and Shields (CRB p.151)",
+    "input": {
+      "armor": "chainmail",
+      "category": "medium",
+      "baseSpeed": 30
+    },
+    "expected": {
+      "maxDex": 2,
+      "asf": 0.3,
+      "speed": 20
+    }
+  },
+  {
+    "category": "armorStats",
+    "heading": "Table 6-6: Armor and Shields (CRB p.151)",
+    "input": {
+      "armor": "breastplate",
+      "category": "medium",
+      "baseSpeed": 30
+    },
+    "expected": {
+      "maxDex": 3,
+      "asf": 0.25,
+      "speed": 20
+    }
+  },
+  {
+    "category": "armorStats",
+    "heading": "Table 6-6: Armor and Shields (CRB p.151)",
+    "input": {
+      "armor": "splint-mail",
+      "category": "heavy",
+      "baseSpeed": 30
+    },
+    "expected": {
+      "maxDex": 0,
+      "asf": 0.4,
+      "speed": 20
+    }
+  },
+  {
+    "category": "armorStats",
+    "heading": "Table 6-6: Armor and Shields (CRB p.151)",
+    "input": {
+      "armor": "banded-mail",
+      "category": "heavy",
+      "baseSpeed": 30
+    },
+    "expected": {
+      "maxDex": 1,
+      "asf": 0.35,
+      "speed": 20
+    }
+  },
+  {
+    "category": "armorStats",
+    "heading": "Table 6-6: Armor and Shields (CRB p.151)",
+    "input": {
+      "armor": "half-plate",
+      "category": "heavy",
+      "baseSpeed": 30
+    },
+    "expected": {
+      "maxDex": 0,
+      "asf": 0.4,
+      "speed": 20
+    }
+  },
+  {
+    "category": "armorStats",
+    "heading": "Table 6-6: Armor and Shields (CRB p.151)",
+    "input": {
+      "armor": "full-plate",
+      "category": "heavy",
+      "baseSpeed": 30
+    },
+    "expected": {
+      "maxDex": 1,
+      "asf": 0.35,
+      "speed": 20
+    }
+  },
+  {
+    "category": "armorStats",
+    "heading": "Table 6-6: Armor and Shields (CRB p.151)",
+    "input": {
+      "armor": "buckler",
+      "category": "shield",
+      "baseSpeed": 30
+    },
+    "expected": {
+      "maxDex": 0,
+      "asf": 0.05,
+      "speed": 30
+    }
+  },
+  {
+    "category": "armorStats",
+    "heading": "Table 6-6: Armor and Shields (CRB p.151)",
+    "input": {
+      "armor": "light-wooden-shield",
+      "category": "shield",
+      "baseSpeed": 30
+    },
+    "expected": {
+      "maxDex": 0,
+      "asf": 0.05,
+      "speed": 30
+    }
+  },
+  {
+    "category": "armorStats",
+    "heading": "Table 6-6: Armor and Shields (CRB p.151)",
+    "input": {
+      "armor": "heavy-steel-shield",
+      "category": "shield",
+      "baseSpeed": 30
+    },
+    "expected": {
+      "maxDex": 0,
+      "asf": 0.15,
+      "speed": 30
+    }
+  },
+  {
+    "category": "armorStats",
+    "heading": "Table 6-6: Armor and Shields (CRB p.151)",
+    "input": {
+      "armor": "tower-shield",
+      "category": "shield",
+      "baseSpeed": 30
+    },
+    "expected": {
+      "maxDex": 2,
+      "asf": 0.5,
+      "speed": 30
+    }
+  },
+  {
+    "category": "charge",
+    "heading": "Special Attacks > Charge (CRB p.198)",
+    "input": {
+      "action": "charge"
+    },
+    "expected": {
+      "attackBonus": 2,
+      "acPenalty": -2
+    }
+  },
+  {
+    "category": "flanking",
+    "heading": "Combat Modifiers > Flanking (CRB p.197, AoN Rules ID 183)",
+    "input": {
+      "flanked": true
+    },
+    "expected": {
+      "meleeBonus": 2
+    }
+  },
+  {
+    "category": "prone",
+    "heading": "Conditions > Prone (CRB p.568, AoN Condition 14)",
+    "input": {
+      "condition": "prone"
+    },
+    "expected": {
+      "meleeAttackPenalty": -4,
+      "meleeAcPenalty": -4,
+      "rangedAcBonus": 4
+    }
+  },
+  {
+    "category": "blinded",
+    "heading": "Conditions > Blinded (CRB p.565, AoN Condition 1)",
+    "input": {
+      "condition": "blinded"
+    },
+    "expected": {
+      "acPenalty": -2,
+      "missChance": 0.5
+    }
+  },
+  {
+    "category": "helpless",
+    "heading": "Combat Modifiers > Helpless Defenders (CRB p.197)",
+    "input": {
+      "condition": "helpless"
+    },
+    "expected": {
+      "effectiveDex": 0,
+      "meleeAttackBonus": 4,
+      "coupDeGraceLegal": true
+    }
+  },
+  {
+    "category": "entangled",
+    "heading": "Conditions > Entangled (CRB p.567, AoN Condition 7)",
+    "input": {
+      "condition": "entangled"
+    },
+    "expected": {
+      "attackPenalty": -2,
+      "dexPenalty": -4,
+      "halfSpeed": true
+    }
+  },
+  {
+    "category": "shaken",
+    "heading": "Conditions > Shaken (CRB p.568, AoN Condition 16)",
+    "input": {
+      "condition": "shaken"
+    },
+    "expected": {
+      "penalty": -2
+    }
+  },
+  {
+    "category": "sickened",
+    "heading": "Conditions > Sickened (CRB p.568, AoN Condition 17)",
+    "input": {
+      "condition": "sickened"
+    },
+    "expected": {
+      "penalty": -2
+    }
+  },
+  {
+    "category": "stunned",
+    "heading": "Conditions > Stunned (CRB p.568, AoN Condition 19)",
+    "input": {
+      "condition": "stunned"
+    },
+    "expected": {
+      "acPenalty": -2,
+      "losesDexToAc": true,
+      "dropHeld": true
+    }
+  }
+]
