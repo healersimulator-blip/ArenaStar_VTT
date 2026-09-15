@@ -1,0 +1,218 @@
+{
+ "name": "PF1e Equipment",
+ "type": "items",
+ "note": "M16's equipment/armor/shield tables as the repo can honestly ship them: every row mirrors a table the resolver already reads in weapons.ts/items.ts/rulesTables.ts and names the appendix section it came from. Per-item prices, weights and the CRB equipment lists are deliberately absent — not transcribed in this repo's corpus (DEVIATIONS), and inventing them is what D-1 forbids. tests/packages/pf1eContentPacks.test.ts pins every row against the code table.",
+ "entries": [
+  {
+   "id": "unarmed-strike-damage",
+   "name": "Unarmed Strike Damage by Size",
+   "keywords": [
+    "weapon",
+    "table",
+    "unarmed"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Unarmed Strike Damage by Size",
+    "system": {
+     "table": "unarmedStrikeDamageBySize",
+     "rows": {
+      "Fine": "1",
+      "Diminutive": "1",
+      "Tiny": "1",
+      "Small": "1d2",
+      "Medium": "1d3",
+      "Large": "1d4",
+      "Huge": "1d6",
+      "Gargantuan": "1d8",
+      "Colossal": "2d6"
+     },
+     "srd": "AoN Rules ID 131 — verified Small 1d2, Medium 1d3, Large 1d4; the rest from the SRD unarmed-strike table (D-163, which also fixed this repo's wrong Medium 1d2).",
+     "notes": "Mirrored from weapons.ts's UNARMED_STRIKE_DAMAGE_BY_SIZE, the table the resolver reads; tests/packages/pf1eContentPacks.test.ts fails if mirror and table part company. The pack carries no per-item prices or weights: the Core Rulebook's equipment tables are not transcribed in this repo's corpus, and DEVIATIONS records that rather than inventing a gold piece value."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "range-increment-ceilings",
+   "name": "Maximum Range Increments by Weapon Class",
+   "keywords": [
+    "weapon",
+    "table",
+    "range"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Maximum Range Increments by Weapon Class",
+    "system": {
+     "table": "maxRangeIncrements",
+     "rows": {
+      "melee": 0,
+      "thrown": 5,
+      "projectile": 10,
+      "firearm": 5
+     },
+     "advancedFirearmOverride": 10,
+     "srd": "§2.8/§2.9 — one rule for every weapon, refused before an attack is counted or a die consumed.",
+     "notes": "Mirrored from weapons.ts's MAX_RANGE_INCREMENTS and ADVANCED_FIREARM_MAX_INCREMENTS."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "firearm-touch-windows",
+   "name": "Firearm Touch-AC Windows by Generation",
+   "keywords": [
+    "weapon",
+    "table",
+    "firearm"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Firearm Touch-AC Windows by Generation",
+    "system": {
+     "table": "firearmTouchAcIncrements",
+     "rows": {
+      "early": 1,
+      "advanced": 5
+     },
+     "srd": "§2.9 — inside the window a firearm shot resolves against touch AC; outside it, against normal AC.",
+     "notes": "Mirrored from weapons.ts's FIREARM_TOUCH_AC_INCREMENTS."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "broken-item-adjustments",
+   "name": "Broken Armor, Shields and Weapons",
+   "keywords": [
+    "armor",
+    "shield",
+    "weapon",
+    "table",
+    "broken"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Broken Armor, Shields and Weapons",
+    "system": {
+     "table": "brokenItemAdjustments",
+     "rows": {
+      "armorShieldAcBonus": "halved, rounding down",
+      "armorCheckPenalty": "doubled",
+      "weaponAttack": -2,
+      "weaponDamage": -2,
+      "arcaneSpellFailure": "unchanged"
+     },
+     "srd": "AoN Rules ID 413 (armor/shield) and §2.9b (broken weapon −2 attack / −2 damage).",
+     "notes": "The item-state arithmetic items.ts's brokenArmorAdjustments and weapons.ts's brokenWeaponAdjustments apply. No spell-failure change is listed for broken items, so none is applied."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "armor-category-light",
+   "name": "Light Armor",
+   "keywords": [
+    "armor",
+    "light",
+    "table",
+    "category"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Light Armor",
+    "system": {
+     "table": "armorCategories",
+     "category": "light",
+     "arcaneSpellFailure": 5,
+     "reducesSpeed": false,
+     "maxDexBonusByCategory": "not a category rule in PF1e — each authored armor carries its own, and items.ts's resolvePF1eArmor reads it from the item",
+     "srd": "Gap List §6/P5's armor row list (AC bonus, max Dex, ACP, ASF, weight). Of those, only ASF and the speed reduction are category-level rules, and those are what this row carries.",
+     "notes": "Cross-check for the arcaneSpellFailureForCategory/armorReducesSpeed helpers in rulesTables.ts: a pack that ships a medium armor with a 5% failure chance fails the build."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "armor-category-medium",
+   "name": "Medium Armor",
+   "keywords": [
+    "armor",
+    "medium",
+    "table",
+    "category"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Medium Armor",
+    "system": {
+     "table": "armorCategories",
+     "category": "medium",
+     "arcaneSpellFailure": 10,
+     "reducesSpeed": true,
+     "maxDexBonusByCategory": "not a category rule in PF1e — each authored armor carries its own, and items.ts's resolvePF1eArmor reads it from the item",
+     "srd": "Gap List §6/P5's armor row list (AC bonus, max Dex, ACP, ASF, weight). Of those, only ASF and the speed reduction are category-level rules, and those are what this row carries.",
+     "notes": "Cross-check for the arcaneSpellFailureForCategory/armorReducesSpeed helpers in rulesTables.ts: a pack that ships a medium armor with a 5% failure chance fails the build."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "armor-category-heavy",
+   "name": "Heavy Armor",
+   "keywords": [
+    "armor",
+    "heavy",
+    "table",
+    "category"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Heavy Armor",
+    "system": {
+     "table": "armorCategories",
+     "category": "heavy",
+     "arcaneSpellFailure": 15,
+     "reducesSpeed": true,
+     "maxDexBonusByCategory": "not a category rule in PF1e — each authored armor carries its own, and items.ts's resolvePF1eArmor reads it from the item",
+     "srd": "Gap List §6/P5's armor row list (AC bonus, max Dex, ACP, ASF, weight). Of those, only ASF and the speed reduction are category-level rules, and those are what this row carries.",
+     "notes": "Cross-check for the arcaneSpellFailureForCategory/armorReducesSpeed helpers in rulesTables.ts: a pack that ships a medium armor with a 5% failure chance fails the build."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "armor-category-shield",
+   "name": "Shields",
+   "keywords": [
+    "armor",
+    "shield",
+    "table",
+    "category"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Shields",
+    "system": {
+     "table": "armorCategories",
+     "category": "shield",
+     "arcaneSpellFailure": 0,
+     "reducesSpeed": false,
+     "maxDexBonusByCategory": "not a category rule in PF1e — each authored armor carries its own, and items.ts's resolvePF1eArmor reads it from the item",
+     "srd": "Gap List §6/P5's armor row list (AC bonus, max Dex, ACP, ASF, weight). Of those, only ASF and the speed reduction are category-level rules, and those are what this row carries.",
+     "notes": "Cross-check for the arcaneSpellFailureForCategory/armorReducesSpeed helpers in rulesTables.ts: a pack that ships a medium armor with a 5% failure chance fails the build."
+    },
+    "items": [],
+    "effects": []
+   }
+  }
+ ]
+}

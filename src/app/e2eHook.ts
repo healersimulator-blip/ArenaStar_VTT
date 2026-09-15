@@ -179,10 +179,10 @@ export interface AppSurface {
    * e2e counterpart of the sheet's editors), so specs can author hp,
    * abilities, conditions and friends on placed actors without a UI pass.
    */
-  pf1eAuthorActor(spec: {
-    actorId: string;
-    patch: Record<string, unknown>;
-  }): { ok: boolean; error: string | null };
+  pf1eAuthorActor(spec: { actorId: string; patch: Record<string, unknown> }): {
+    ok: boolean;
+    error: string | null;
+  };
   /** D-205 — read one actor's authored `system.pf1e` block back (the write counterpart is `pf1eAuthorActor`). */
   pf1eActorSystem(actorId: string): Record<string, unknown> | null;
   /**
@@ -654,6 +654,35 @@ export interface ArmiesSmokeResult {
   error?: string;
 }
 
+/**
+ * M10 smoke — the Army Window's hero controls (direct target + caster) driven through the
+ * real component, the real ClientSync replica and the active PF1e module.
+ */
+export interface HeroOrdersSmokeResult {
+  ok: boolean;
+  /** The Orders tab rendered the hero block at all (capability gate open). */
+  heroControls: boolean;
+  /** Enemy units the control offered as targets (deployed, other faction). */
+  targets: string[];
+  /** Enemy units it refused to offer because they hold no models. */
+  undeployed: string;
+  /** `unit.orders.pending[0]` after the Attack click, serialized. */
+  attackOrder: string;
+  /** …after the Cast click. */
+  castOrder: string;
+  /** The queue readout line the window rendered for the attack order. */
+  attackLabel: string;
+  /**
+   * mass-battle-basic validates and executes `attack` orders, so the direct-target control
+   * is legitimately there; only the caster control must be absent (no `orderVocabulary`).
+   */
+  basicTargetControl: boolean;
+  basicCastControl: boolean;
+  /** Cast options the PF1e module advertised to the dropdown. */
+  castOptions: string[];
+  error?: string;
+}
+
 export interface GmFogSurface {
   /** Per-faction ownership maps (asserting §4A grants landed). */
   factionOwnership(): Record<string, Record<string, number>>;
@@ -841,6 +870,7 @@ export interface VttE2eSurface {
   modelsSmoke(): Promise<ModelsSmokeResult>;
   rulesPackageSmoke(): Promise<RulesPackageSmokeResult>;
   armiesSmoke(): Promise<ArmiesSmokeResult>;
+  heroOrdersSmoke(): Promise<HeroOrdersSmokeResult>;
   visionSmoke(): Promise<VisionSmokeResult>;
   gridsSmoke(): Promise<GridsSmokeResult>;
   paritySmoke(): Promise<ParitySmokeResult>;
@@ -1277,16 +1307,14 @@ function appSurface(app: HostApp): AppSurface {
     },
     pf1eActorSystem: (actorId) => {
       const actor = client.store.get("actors", actorId) as
-        | ActorDocument
-        | undefined;
+        ActorDocument | undefined;
       if (actor === undefined) return null;
       return ((actor.system as { pf1e?: Record<string, unknown> }).pf1e ??
         null) as Record<string, unknown> | null;
     },
     pf1eAuthorActor: (spec) => {
       const actor = client.store.get("actors", spec.actorId) as
-        | ActorDocument
-        | undefined;
+        ActorDocument | undefined;
       if (actor === undefined)
         return { ok: false, error: `actor not found: ${spec.actorId}` };
       const pf1e =
@@ -1539,18 +1567,14 @@ function appSurface(app: HostApp): AppSurface {
           skipped: [],
         };
       }
-      const resolution = await resolveActionOpportunities(
-        client,
-        client.user,
-        {
-          opportunity: opportunity.result,
-          combat,
-          actors: client.store.getAll("actors"),
-          tokens: s?.tokens ?? [],
-          scene: s ?? null,
-          ...(spec.verifiable === true ? { verifiable: true } : {}),
-        },
-      );
+      const resolution = await resolveActionOpportunities(client, client.user, {
+        opportunity: opportunity.result,
+        combat,
+        actors: client.store.getAll("actors"),
+        tokens: s?.tokens ?? [],
+        scene: s ?? null,
+        ...(spec.verifiable === true ? { verifiable: true } : {}),
+      });
       return {
         ok: opportunity.ok,
         needsEncounter: resolution.needsEncounter,
@@ -1623,7 +1647,9 @@ function appSurface(app: HostApp): AppSurface {
     pf1eReadyFire: async (spec) => {
       const combat = client.store
         .getAll("combats")
-        .find((c) => c.combatants.some((k) => k.tokenId === spec.readiedTokenId));
+        .find((c) =>
+          c.combatants.some((k) => k.tokenId === spec.readiedTokenId),
+        );
       const readied = combat?.combatants.find(
         (k) => k.tokenId === spec.readiedTokenId,
       );
@@ -2619,6 +2645,361 @@ function orderLandedCheck(pending: number): boolean {
   return pending === 1;
 }
 
+/**
+ * M10 — hero orders through the normal controls: pick an enemy unit, attack it; pick a
+ * spell from the module's own vocabulary, cast it at a point. Every step runs the real
+ * `ArmyWindow` component over a real `ClientSync` replica, so what is asserted is the op that
+ * lands on the unit document — not a re-implementation of the component's logic.
+ */
+async function runHeroOrdersSmoke(): Promise<HeroOrdersSmokeResult> {
+  const fail = (error: string): HeroOrdersSmokeResult => ({
+    ok: false,
+    heroControls: false,
+    targets: [],
+    undeployed: "",
+    attackOrder: "",
+    castOrder: "",
+    attackLabel: "",
+    basicTargetControl: false,
+    basicCastControl: false,
+    castOptions: [],
+    error,
+  });
+  try {
+    type HostEvents = import("../host/sync").HostEvents;
+    type ClientEvents = import("../client/sync").ClientEvents;
+    type FactionDocument = import("../core/strategic").FactionDocument;
+    type UnitDocument = import("../core/strategic").UnitDocument;
+    type ArmyDocument = import("../core/strategic").ArmyDocument;
+    const [
+      { DocumentStore },
+      { OpLog },
+      { UndoStack },
+      { createEventBus },
+      { HostSync, gmSessionUser },
+      { ClientSync },
+      { createTransportPair, flushMicrotasks },
+      { mount, unmount },
+      { default: ArmyWindow },
+      { createMassBattlePf1e },
+      { createMassBattleBasic },
+    ] = await Promise.all([
+      import("../core/store"),
+      import("../core/oplog"),
+      import("../core/undo"),
+      import("../core/events"),
+      import("../host/sync"),
+      import("../client/sync"),
+      import("../net/memory"),
+      import("svelte"),
+      import("../ui/armies/ArmyWindow.svelte"),
+      import("../packages/massBattlePf1e"),
+      import("../packages/massBattleBasic"),
+    ]);
+    const store = new DocumentStore({
+      meta: {
+        worldId: "w-hero",
+        name: "HERO",
+        system: "pf1e-mass-battles",
+        systemVersion: "1",
+      },
+    });
+    const host = new HostSync({
+      store,
+      log: new OpLog(),
+      undo: new UndoStack(),
+      bus: createEventBus<HostEvents>(),
+      systemUserId: "gm",
+      roomId: "r",
+      verifyHelloSig: async () => true,
+    });
+    const pair = createTransportPair();
+    const clientBus = createEventBus<ClientEvents>();
+    const client = new ClientSync({
+      transport: pair.a,
+      bus: clientBus,
+      meta: {
+        worldId: "w-hero",
+        name: "HERO",
+        system: "pf1e-mass-battles",
+        systemVersion: "1",
+      },
+    });
+    host.addSession("g", pair.b, gmSessionUser("gm"));
+    await flushMicrotasks();
+
+    const unit = (
+      id: string,
+      type: string,
+      range: [number, number] | null,
+    ): UnitDocument => ({
+      _id: id,
+      type,
+      name: id,
+      ownership: { default: 0 },
+      flags: {},
+      system: {},
+      profile: {},
+      formation: "line",
+      sceneId: null,
+      modelRange: range,
+      orders: { pending: [], issuedBy: "gm", issuedTurn: 0 },
+      stats: { strength: 10, morale: 5, supply: 5, fatigue: 0 },
+    });
+    const armyDoc = (
+      id: string,
+      name: string,
+      factionId: string,
+      units: UnitDocument[],
+    ): ArmyDocument => ({
+      _id: id,
+      type: "army",
+      name,
+      ownership: { default: 0 },
+      flags: {},
+      system: {},
+      factionId,
+      commander: [],
+      supply: { level: 4 },
+      units,
+    });
+    const faction = (id: string, color: string): FactionDocument => ({
+      _id: id,
+      type: "faction",
+      name: id.slice(2),
+      color,
+      allies: [],
+      ownership: { default: 0 },
+      flags: {},
+      system: {},
+    });
+    host.commitSystem([
+      { kind: "create", coll: "factions", data: faction("f-red", "#c0392b") },
+      { kind: "create", coll: "factions", data: faction("f-blue", "#2e6f9e") },
+      {
+        kind: "create",
+        coll: "armies",
+        data: armyDoc("army-r", "Red Host", "f-red", [
+          unit("u-r-0", "hero", [0, 2]),
+          unit("u-r-1", "infantry", [2, 3]),
+        ]),
+      },
+      {
+        kind: "create",
+        coll: "armies",
+        data: armyDoc("army-b", "Blue Host", "f-blue", [
+          unit("u-b-0", "infantry", [3, 5]),
+          unit("u-b-1", "artillery", null), // deployed nowhere: must not be targetable
+        ]),
+      },
+    ]);
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    // An op the client submits travels the memory transport to the host and back as an
+    // `ops` event, which is where the window's refresh tick lives — a macrotask, so a
+    // DOM readout needs a settle loop rather than a microtask flush.
+    const settle = async (ticks = 8): Promise<void> => {
+      for (let i = 0; i < ticks; i++)
+        await new Promise((r) => setTimeout(r, 0));
+    };
+
+    const rules = createMassBattlePf1e();
+    const host0 = globalThis.document.createElement("div");
+    globalThis.document.body.appendChild(host0);
+    const win = mount(ArmyWindow, {
+      target: host0,
+      props: {
+        client,
+        bus: clientBus,
+        armyId: "army-r",
+        rules,
+        onClose: () => undefined,
+      },
+    });
+    await flushMicrotasks();
+    // The tree tab owns row selection, so the unit is picked before the tab switch — the
+    // same order a GM uses (select, then order).
+    const unitRow = host0.querySelector(
+      '[data-unit="u-r-0"]',
+    ) as HTMLElement | null;
+    if (unitRow === null) return fail("hero unit row missing in the tree tab");
+    unitRow.click();
+    await flushMicrotasks();
+    (host0.querySelector('[data-tab="orders"]') as HTMLElement).click();
+    await flushMicrotasks();
+
+    const heroBlock = host0.querySelector("[data-hero-orders]");
+    if (heroBlock === null)
+      return fail("hero order block missing for a PF1e campaign");
+
+    const targetSelect = host0.querySelector(
+      "[data-hero-target]",
+    ) as HTMLSelectElement | null;
+    if (targetSelect === null) return fail("direct-target select missing");
+    const targets = [...targetSelect.options]
+      .map((o) => o.value)
+      .filter((v) => v !== "");
+    const undeployedText =
+      host0.querySelector("[data-hero-undeployed]")?.textContent?.trim() ?? "";
+
+    const castSelect = host0.querySelector(
+      "[data-hero-spell]",
+    ) as HTMLSelectElement | null;
+    const castOptions = castSelect
+      ? [...castSelect.options].map((o) => o.value).filter((v) => v !== "")
+      : [];
+
+    // 1. Direct targeting: pick the enemy infantry, attack with the selected hero unit.
+    const attackBtn = host0.querySelector(
+      "[data-hero-attack]",
+    ) as HTMLButtonElement | null;
+    if (attackBtn === null) return fail("attack button missing");
+    // Before a target is picked the control is honest: disabled, not silently a no-op.
+    const disabledBeforeTarget = attackBtn.disabled;
+    targetSelect.value = "u-b-0";
+    targetSelect.dispatchEvent(new Event("change"));
+    await flushMicrotasks();
+    if (attackBtn.disabled)
+      return fail("attack button stayed disabled after a target was picked");
+    attackBtn.click();
+    await settle();
+    let docAfter = client.store.get("armies", "army-r");
+    const attackOrder = JSON.stringify(
+      docAfter?.units.find((u) => u._id === "u-r-0")?.orders.pending[0] ?? null,
+    );
+    const attackLabel =
+      host0.querySelector('[data-order-label="attack"]')?.textContent?.trim() ??
+      "";
+
+    // 2. Casting: aim at manual coordinates through the module's own vocabulary.
+    const aimMode = host0.querySelector(
+      "[data-hero-aim-mode]",
+    ) as HTMLSelectElement | null;
+    if (aimMode === null) return fail("aim mode select missing");
+    aimMode.value = "manual";
+    aimMode.dispatchEvent(new Event("change"));
+    await flushMicrotasks();
+    const aimX = host0.querySelector(
+      "[data-hero-aim-x]",
+    ) as HTMLInputElement | null;
+    const aimY = host0.querySelector(
+      "[data-hero-aim-y]",
+    ) as HTMLInputElement | null;
+    if (aimX === null || aimY === null)
+      return fail("manual aim fields missing");
+    aimX.value = "40";
+    aimX.dispatchEvent(new Event("input"));
+    aimY.value = "12";
+    aimY.dispatchEvent(new Event("input"));
+    await flushMicrotasks();
+    (host0.querySelector("[data-hero-cast]") as HTMLElement).click();
+    await settle();
+    docAfter = client.store.get("armies", "army-r");
+    const castOrder = JSON.stringify(
+      docAfter?.units.find((u) => u._id === "u-r-0")?.orders.pending[0] ?? null,
+    );
+    // A cone/line spell advertises itself as direction-driven, and the payload follows:
+    // switch the selection and the built order changes shape without any UI logic knowing
+    // the spell's name.
+    if (castSelect !== null && castOptions.includes("burning-hands")) {
+      castSelect.value = "burning-hands";
+      castSelect.dispatchEvent(new Event("change"));
+      await flushMicrotasks();
+      (host0.querySelector("[data-hero-cast]") as HTMLElement).click();
+      await settle();
+      docAfter = client.store.get("armies", "army-r");
+      const dirOrder = docAfter?.units.find((u) => u._id === "u-r-0")?.orders
+        .pending[0];
+      const dirOk =
+        dirOrder !== undefined &&
+        dirOrder.kind === "custom" &&
+        dirOrder.type === "spell_aoe" &&
+        typeof (dirOrder.data as Record<string, unknown>)?.dirX === "number";
+      if (!dirOk)
+        return fail(
+          `direction spell did not build a dir payload: ${JSON.stringify(dirOrder)}`,
+        );
+    }
+
+    unmount(win);
+    host0.remove();
+
+    // 3. The capability gate: the same window on mass-battle-basic shows no hero block.
+    const host1 = globalThis.document.createElement("div");
+    globalThis.document.body.appendChild(host1);
+    mount(ArmyWindow, {
+      target: host1,
+      props: {
+        client,
+        bus: clientBus,
+        armyId: "army-r",
+        rules: createMassBattleBasic(),
+        onClose: () => undefined,
+      },
+    });
+    await flushMicrotasks();
+    (host1.querySelector('[data-tab="orders"]') as HTMLElement).click();
+    await flushMicrotasks();
+    const basicTargetControl =
+      host1.querySelector("[data-hero-target]") !== null;
+    const basicCastControl = host1.querySelector("[data-hero-spell]") !== null;
+    host1.remove();
+
+    const attackOk = attackOrder === '{"kind":"attack","targetUnitId":"u-b-0"}';
+    const castOk =
+      castOrder ===
+      '{"kind":"custom","type":"spell_aoe","data":{"spell":"fireball","x":40,"y":12}}';
+    const ok =
+      targets.length === 1 &&
+      targets[0] === "u-b-0" &&
+      disabledBeforeTarget &&
+      attackOk &&
+      castOk &&
+      attackLabel === "attack → u-b-0" &&
+      undeployedText.includes("1") &&
+      castOptions.includes("fireball") &&
+      basicTargetControl &&
+      !basicCastControl;
+    if (!ok) {
+      return {
+        ok: false,
+        heroControls: true,
+        targets,
+        undeployed: undeployedText,
+        attackOrder,
+        castOrder,
+        attackLabel,
+        basicTargetControl,
+        basicCastControl,
+        castOptions,
+        error: `assertions failed (targets=${targets.length} attack=${attackOk} cast=${castOk} basicTarget=${basicTargetControl} basicCast=${basicCastControl} disabledBefore=${disabledBeforeTarget} label="${attackLabel}" undeployed="${undeployedText}")`,
+      };
+    }
+    return {
+      ok: true,
+      heroControls: true,
+      targets,
+      undeployed: undeployedText,
+      attackOrder,
+      castOrder,
+      attackLabel,
+      basicTargetControl,
+      basicCastControl,
+      castOptions,
+    };
+  } catch (err) {
+    return fail(
+      (err instanceof Error ? err.message : String(err)) +
+        " | " +
+        String(err instanceof Error ? err.stack : "")
+          .split("\n")
+          .slice(1, 4)
+          .join(" <= "),
+    );
+  }
+}
+
 /** §9 vision stack smoke: real vision worker + walls/lighting/fog from file://. */
 async function runVisionSmoke(): Promise<VisionSmokeResult> {
   try {
@@ -3336,6 +3717,7 @@ export async function installE2eHook(app?: HostApp | null): Promise<void> {
     modelsSmoke: () => runModelsSmoke(),
     rulesPackageSmoke: () => runRulesPackageSmoke(),
     armiesSmoke: () => runArmiesSmoke(),
+    heroOrdersSmoke: () => runHeroOrdersSmoke(),
     visionSmoke: () => runVisionSmoke(),
     gridsSmoke: () => runGridsSmoke(),
     paritySmoke: () => runParitySmoke(),

@@ -1,0 +1,1049 @@
+{
+ "name": "PF1e Classes",
+ "type": "actors",
+ "note": "M16: the six-class starter table the compendium and the sheet's class-level editor read. Levels are derived from rulesTables.ts's save/BAB ladders and re-checked by tests/packages/pf1eContentPacks.test.ts.",
+ "entries": [
+  {
+   "id": "barbarian",
+   "name": "Barbarian",
+   "keywords": [
+    "class",
+    "pf1e",
+    "starter"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Barbarian",
+    "system": {
+     "hd": "d12",
+     "babProgression": "good",
+     "goodSaves": [
+      "fort"
+     ],
+     "skillRanksPerLevel": 4,
+     "bonusCombatFeats": [
+      "Power Attack",
+      "Iron Will",
+      "Toughness",
+      "Combat Reflexes"
+     ],
+     "levels": [
+      {
+       "level": 1,
+       "bab": 1,
+       "fort": 2,
+       "ref": 0,
+       "will": 0
+      },
+      {
+       "level": 2,
+       "bab": 2,
+       "fort": 3,
+       "ref": 1,
+       "will": 1
+      },
+      {
+       "level": 3,
+       "bab": 3,
+       "fort": 3,
+       "ref": 1,
+       "will": 1
+      },
+      {
+       "level": 4,
+       "bab": 4,
+       "fort": 4,
+       "ref": 2,
+       "will": 2
+      },
+      {
+       "level": 5,
+       "bab": 5,
+       "fort": 4,
+       "ref": 2,
+       "will": 2
+      },
+      {
+       "level": 6,
+       "bab": 6,
+       "fort": 5,
+       "ref": 3,
+       "will": 3
+      },
+      {
+       "level": 7,
+       "bab": 7,
+       "fort": 5,
+       "ref": 3,
+       "will": 3
+      },
+      {
+       "level": 8,
+       "bab": 8,
+       "fort": 6,
+       "ref": 4,
+       "will": 4
+      },
+      {
+       "level": 9,
+       "bab": 9,
+       "fort": 6,
+       "ref": 4,
+       "will": 4
+      },
+      {
+       "level": 10,
+       "bab": 10,
+       "fort": 7,
+       "ref": 5,
+       "will": 5
+      },
+      {
+       "level": 11,
+       "bab": 11,
+       "fort": 7,
+       "ref": 5,
+       "will": 5
+      },
+      {
+       "level": 12,
+       "bab": 12,
+       "fort": 8,
+       "ref": 6,
+       "will": 6
+      },
+      {
+       "level": 13,
+       "bab": 13,
+       "fort": 8,
+       "ref": 6,
+       "will": 6
+      },
+      {
+       "level": 14,
+       "bab": 14,
+       "fort": 9,
+       "ref": 7,
+       "will": 7
+      },
+      {
+       "level": 15,
+       "bab": 15,
+       "fort": 9,
+       "ref": 7,
+       "will": 7
+      },
+      {
+       "level": 16,
+       "bab": 16,
+       "fort": 10,
+       "ref": 8,
+       "will": 8
+      },
+      {
+       "level": 17,
+       "bab": 17,
+       "fort": 10,
+       "ref": 8,
+       "will": 8
+      },
+      {
+       "level": 18,
+       "bab": 18,
+       "fort": 11,
+       "ref": 9,
+       "will": 9
+      },
+      {
+       "level": 19,
+       "bab": 19,
+       "fort": 11,
+       "ref": 9,
+       "will": 9
+      },
+      {
+       "level": 20,
+       "bab": 20,
+       "fort": 12,
+       "ref": 10,
+       "will": 10
+      }
+     ],
+     "derived": "Every bab/fort/ref/will number in `levels` is produced by the shared ladders in rulesTables.ts (good saves = 2 + 1/2 per level, poor = 1/2; BAB good = 1 per level, average = 3/4, poor = 1/2, each rounded down). tests/packages/pf1eContentPacks.test.ts recomputes them, so this pack cannot disagree with the arithmetic the sheets use.",
+     "notes": "M16's explicitly selected six-class starter table: the Core Rulebook classes whose progression the sim can compile. The hit die, the good-save column and the skill ranks are the class table's authored rows; the bonus-feat list names only feats this repo has a rule for (see packs/feats.json)."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "cleric",
+   "name": "Cleric",
+   "keywords": [
+    "class",
+    "pf1e",
+    "starter"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Cleric",
+    "system": {
+     "hd": "d8",
+     "babProgression": "average",
+     "goodSaves": [
+      "fort"
+     ],
+     "skillRanksPerLevel": 2,
+     "bonusCombatFeats": [
+      "Combat Casting",
+      "Toughness",
+      "Iron Will"
+     ],
+     "levels": [
+      {
+       "level": 1,
+       "bab": 0,
+       "fort": 2,
+       "ref": 0,
+       "will": 0
+      },
+      {
+       "level": 2,
+       "bab": 1,
+       "fort": 3,
+       "ref": 1,
+       "will": 1
+      },
+      {
+       "level": 3,
+       "bab": 2,
+       "fort": 3,
+       "ref": 1,
+       "will": 1
+      },
+      {
+       "level": 4,
+       "bab": 3,
+       "fort": 4,
+       "ref": 2,
+       "will": 2
+      },
+      {
+       "level": 5,
+       "bab": 3,
+       "fort": 4,
+       "ref": 2,
+       "will": 2
+      },
+      {
+       "level": 6,
+       "bab": 4,
+       "fort": 5,
+       "ref": 3,
+       "will": 3
+      },
+      {
+       "level": 7,
+       "bab": 5,
+       "fort": 5,
+       "ref": 3,
+       "will": 3
+      },
+      {
+       "level": 8,
+       "bab": 6,
+       "fort": 6,
+       "ref": 4,
+       "will": 4
+      },
+      {
+       "level": 9,
+       "bab": 6,
+       "fort": 6,
+       "ref": 4,
+       "will": 4
+      },
+      {
+       "level": 10,
+       "bab": 7,
+       "fort": 7,
+       "ref": 5,
+       "will": 5
+      },
+      {
+       "level": 11,
+       "bab": 8,
+       "fort": 7,
+       "ref": 5,
+       "will": 5
+      },
+      {
+       "level": 12,
+       "bab": 9,
+       "fort": 8,
+       "ref": 6,
+       "will": 6
+      },
+      {
+       "level": 13,
+       "bab": 9,
+       "fort": 8,
+       "ref": 6,
+       "will": 6
+      },
+      {
+       "level": 14,
+       "bab": 10,
+       "fort": 9,
+       "ref": 7,
+       "will": 7
+      },
+      {
+       "level": 15,
+       "bab": 11,
+       "fort": 9,
+       "ref": 7,
+       "will": 7
+      },
+      {
+       "level": 16,
+       "bab": 12,
+       "fort": 10,
+       "ref": 8,
+       "will": 8
+      },
+      {
+       "level": 17,
+       "bab": 12,
+       "fort": 10,
+       "ref": 8,
+       "will": 8
+      },
+      {
+       "level": 18,
+       "bab": 13,
+       "fort": 11,
+       "ref": 9,
+       "will": 9
+      },
+      {
+       "level": 19,
+       "bab": 14,
+       "fort": 11,
+       "ref": 9,
+       "will": 9
+      },
+      {
+       "level": 20,
+       "bab": 15,
+       "fort": 12,
+       "ref": 10,
+       "will": 10
+      }
+     ],
+     "derived": "Every bab/fort/ref/will number in `levels` is produced by the shared ladders in rulesTables.ts (good saves = 2 + 1/2 per level, poor = 1/2; BAB good = 1 per level, average = 3/4, poor = 1/2, each rounded down). tests/packages/pf1eContentPacks.test.ts recomputes them, so this pack cannot disagree with the arithmetic the sheets use.",
+     "notes": "M16's explicitly selected six-class starter table: the Core Rulebook classes whose progression the sim can compile. The hit die, the good-save column and the skill ranks are the class table's authored rows; the bonus-feat list names only feats this repo has a rule for (see packs/feats.json)."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "fighter",
+   "name": "Fighter",
+   "keywords": [
+    "class",
+    "pf1e",
+    "starter"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Fighter",
+    "system": {
+     "hd": "d10",
+     "babProgression": "good",
+     "goodSaves": [
+      "fort"
+     ],
+     "skillRanksPerLevel": 2,
+     "bonusCombatFeats": [
+      "Power Attack",
+      "Improved Critical",
+      "Weapon Focus",
+      "Dodge",
+      "Mobility",
+      "Spring Attack",
+      "Combat Reflexes",
+      "Toughness"
+     ],
+     "levels": [
+      {
+       "level": 1,
+       "bab": 1,
+       "fort": 2,
+       "ref": 0,
+       "will": 0
+      },
+      {
+       "level": 2,
+       "bab": 2,
+       "fort": 3,
+       "ref": 1,
+       "will": 1
+      },
+      {
+       "level": 3,
+       "bab": 3,
+       "fort": 3,
+       "ref": 1,
+       "will": 1
+      },
+      {
+       "level": 4,
+       "bab": 4,
+       "fort": 4,
+       "ref": 2,
+       "will": 2
+      },
+      {
+       "level": 5,
+       "bab": 5,
+       "fort": 4,
+       "ref": 2,
+       "will": 2
+      },
+      {
+       "level": 6,
+       "bab": 6,
+       "fort": 5,
+       "ref": 3,
+       "will": 3
+      },
+      {
+       "level": 7,
+       "bab": 7,
+       "fort": 5,
+       "ref": 3,
+       "will": 3
+      },
+      {
+       "level": 8,
+       "bab": 8,
+       "fort": 6,
+       "ref": 4,
+       "will": 4
+      },
+      {
+       "level": 9,
+       "bab": 9,
+       "fort": 6,
+       "ref": 4,
+       "will": 4
+      },
+      {
+       "level": 10,
+       "bab": 10,
+       "fort": 7,
+       "ref": 5,
+       "will": 5
+      },
+      {
+       "level": 11,
+       "bab": 11,
+       "fort": 7,
+       "ref": 5,
+       "will": 5
+      },
+      {
+       "level": 12,
+       "bab": 12,
+       "fort": 8,
+       "ref": 6,
+       "will": 6
+      },
+      {
+       "level": 13,
+       "bab": 13,
+       "fort": 8,
+       "ref": 6,
+       "will": 6
+      },
+      {
+       "level": 14,
+       "bab": 14,
+       "fort": 9,
+       "ref": 7,
+       "will": 7
+      },
+      {
+       "level": 15,
+       "bab": 15,
+       "fort": 9,
+       "ref": 7,
+       "will": 7
+      },
+      {
+       "level": 16,
+       "bab": 16,
+       "fort": 10,
+       "ref": 8,
+       "will": 8
+      },
+      {
+       "level": 17,
+       "bab": 17,
+       "fort": 10,
+       "ref": 8,
+       "will": 8
+      },
+      {
+       "level": 18,
+       "bab": 18,
+       "fort": 11,
+       "ref": 9,
+       "will": 9
+      },
+      {
+       "level": 19,
+       "bab": 19,
+       "fort": 11,
+       "ref": 9,
+       "will": 9
+      },
+      {
+       "level": 20,
+       "bab": 20,
+       "fort": 12,
+       "ref": 10,
+       "will": 10
+      }
+     ],
+     "derived": "Every bab/fort/ref/will number in `levels` is produced by the shared ladders in rulesTables.ts (good saves = 2 + 1/2 per level, poor = 1/2; BAB good = 1 per level, average = 3/4, poor = 1/2, each rounded down). tests/packages/pf1eContentPacks.test.ts recomputes them, so this pack cannot disagree with the arithmetic the sheets use.",
+     "notes": "M16's explicitly selected six-class starter table: the Core Rulebook classes whose progression the sim can compile. The hit die, the good-save column and the skill ranks are the class table's authored rows; the bonus-feat list names only feats this repo has a rule for (see packs/feats.json)."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "rogue",
+   "name": "Rogue",
+   "keywords": [
+    "class",
+    "pf1e",
+    "starter"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Rogue",
+    "system": {
+     "hd": "d8",
+     "babProgression": "average",
+     "goodSaves": [
+      "ref"
+     ],
+     "skillRanksPerLevel": 8,
+     "bonusCombatFeats": [
+      "Dodge",
+      "Mobility",
+      "Spring Attack",
+      "Improved Critical",
+      "Weapon Finesse",
+      "Toughness",
+      "Combat Casting"
+     ],
+     "levels": [
+      {
+       "level": 1,
+       "bab": 0,
+       "fort": 0,
+       "ref": 2,
+       "will": 0
+      },
+      {
+       "level": 2,
+       "bab": 1,
+       "fort": 1,
+       "ref": 3,
+       "will": 1
+      },
+      {
+       "level": 3,
+       "bab": 2,
+       "fort": 1,
+       "ref": 3,
+       "will": 1
+      },
+      {
+       "level": 4,
+       "bab": 3,
+       "fort": 2,
+       "ref": 4,
+       "will": 2
+      },
+      {
+       "level": 5,
+       "bab": 3,
+       "fort": 2,
+       "ref": 4,
+       "will": 2
+      },
+      {
+       "level": 6,
+       "bab": 4,
+       "fort": 3,
+       "ref": 5,
+       "will": 3
+      },
+      {
+       "level": 7,
+       "bab": 5,
+       "fort": 3,
+       "ref": 5,
+       "will": 3
+      },
+      {
+       "level": 8,
+       "bab": 6,
+       "fort": 4,
+       "ref": 6,
+       "will": 4
+      },
+      {
+       "level": 9,
+       "bab": 6,
+       "fort": 4,
+       "ref": 6,
+       "will": 4
+      },
+      {
+       "level": 10,
+       "bab": 7,
+       "fort": 5,
+       "ref": 7,
+       "will": 5
+      },
+      {
+       "level": 11,
+       "bab": 8,
+       "fort": 5,
+       "ref": 7,
+       "will": 5
+      },
+      {
+       "level": 12,
+       "bab": 9,
+       "fort": 6,
+       "ref": 8,
+       "will": 6
+      },
+      {
+       "level": 13,
+       "bab": 9,
+       "fort": 6,
+       "ref": 8,
+       "will": 6
+      },
+      {
+       "level": 14,
+       "bab": 10,
+       "fort": 7,
+       "ref": 9,
+       "will": 7
+      },
+      {
+       "level": 15,
+       "bab": 11,
+       "fort": 7,
+       "ref": 9,
+       "will": 7
+      },
+      {
+       "level": 16,
+       "bab": 12,
+       "fort": 8,
+       "ref": 10,
+       "will": 8
+      },
+      {
+       "level": 17,
+       "bab": 12,
+       "fort": 8,
+       "ref": 10,
+       "will": 8
+      },
+      {
+       "level": 18,
+       "bab": 13,
+       "fort": 9,
+       "ref": 11,
+       "will": 9
+      },
+      {
+       "level": 19,
+       "bab": 14,
+       "fort": 9,
+       "ref": 11,
+       "will": 9
+      },
+      {
+       "level": 20,
+       "bab": 15,
+       "fort": 10,
+       "ref": 12,
+       "will": 10
+      }
+     ],
+     "derived": "Every bab/fort/ref/will number in `levels` is produced by the shared ladders in rulesTables.ts (good saves = 2 + 1/2 per level, poor = 1/2; BAB good = 1 per level, average = 3/4, poor = 1/2, each rounded down). tests/packages/pf1eContentPacks.test.ts recomputes them, so this pack cannot disagree with the arithmetic the sheets use.",
+     "notes": "M16's explicitly selected six-class starter table: the Core Rulebook classes whose progression the sim can compile. The hit die, the good-save column and the skill ranks are the class table's authored rows; the bonus-feat list names only feats this repo has a rule for (see packs/feats.json)."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "sorcerer",
+   "name": "Sorcerer",
+   "keywords": [
+    "class",
+    "pf1e",
+    "starter"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Sorcerer",
+    "system": {
+     "hd": "d6",
+     "babProgression": "poor",
+     "goodSaves": [
+      "will"
+     ],
+     "skillRanksPerLevel": 2,
+     "bonusCombatFeats": [
+      "Combat Casting",
+      "Toughness",
+      "Iron Will"
+     ],
+     "levels": [
+      {
+       "level": 1,
+       "bab": 0,
+       "fort": 0,
+       "ref": 0,
+       "will": 2
+      },
+      {
+       "level": 2,
+       "bab": 1,
+       "fort": 1,
+       "ref": 1,
+       "will": 3
+      },
+      {
+       "level": 3,
+       "bab": 1,
+       "fort": 1,
+       "ref": 1,
+       "will": 3
+      },
+      {
+       "level": 4,
+       "bab": 2,
+       "fort": 2,
+       "ref": 2,
+       "will": 4
+      },
+      {
+       "level": 5,
+       "bab": 2,
+       "fort": 2,
+       "ref": 2,
+       "will": 4
+      },
+      {
+       "level": 6,
+       "bab": 3,
+       "fort": 3,
+       "ref": 3,
+       "will": 5
+      },
+      {
+       "level": 7,
+       "bab": 3,
+       "fort": 3,
+       "ref": 3,
+       "will": 5
+      },
+      {
+       "level": 8,
+       "bab": 4,
+       "fort": 4,
+       "ref": 4,
+       "will": 6
+      },
+      {
+       "level": 9,
+       "bab": 4,
+       "fort": 4,
+       "ref": 4,
+       "will": 6
+      },
+      {
+       "level": 10,
+       "bab": 5,
+       "fort": 5,
+       "ref": 5,
+       "will": 7
+      },
+      {
+       "level": 11,
+       "bab": 5,
+       "fort": 5,
+       "ref": 5,
+       "will": 7
+      },
+      {
+       "level": 12,
+       "bab": 6,
+       "fort": 6,
+       "ref": 6,
+       "will": 8
+      },
+      {
+       "level": 13,
+       "bab": 6,
+       "fort": 6,
+       "ref": 6,
+       "will": 8
+      },
+      {
+       "level": 14,
+       "bab": 7,
+       "fort": 7,
+       "ref": 7,
+       "will": 9
+      },
+      {
+       "level": 15,
+       "bab": 7,
+       "fort": 7,
+       "ref": 7,
+       "will": 9
+      },
+      {
+       "level": 16,
+       "bab": 8,
+       "fort": 8,
+       "ref": 8,
+       "will": 10
+      },
+      {
+       "level": 17,
+       "bab": 8,
+       "fort": 8,
+       "ref": 8,
+       "will": 10
+      },
+      {
+       "level": 18,
+       "bab": 9,
+       "fort": 9,
+       "ref": 9,
+       "will": 11
+      },
+      {
+       "level": 19,
+       "bab": 9,
+       "fort": 9,
+       "ref": 9,
+       "will": 11
+      },
+      {
+       "level": 20,
+       "bab": 10,
+       "fort": 10,
+       "ref": 10,
+       "will": 12
+      }
+     ],
+     "derived": "Every bab/fort/ref/will number in `levels` is produced by the shared ladders in rulesTables.ts (good saves = 2 + 1/2 per level, poor = 1/2; BAB good = 1 per level, average = 3/4, poor = 1/2, each rounded down). tests/packages/pf1eContentPacks.test.ts recomputes them, so this pack cannot disagree with the arithmetic the sheets use.",
+     "notes": "M16's explicitly selected six-class starter table: the Core Rulebook classes whose progression the sim can compile. The hit die, the good-save column and the skill ranks are the class table's authored rows; the bonus-feat list names only feats this repo has a rule for (see packs/feats.json)."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "wizard",
+   "name": "Wizard",
+   "keywords": [
+    "class",
+    "pf1e",
+    "starter"
+   ],
+   "data": {
+    "type": "actor",
+    "name": "Wizard",
+    "system": {
+     "hd": "d6",
+     "babProgression": "poor",
+     "goodSaves": [
+      "will"
+     ],
+     "skillRanksPerLevel": 2,
+     "bonusCombatFeats": [
+      "Combat Casting",
+      "Toughness",
+      "Iron Will"
+     ],
+     "levels": [
+      {
+       "level": 1,
+       "bab": 0,
+       "fort": 0,
+       "ref": 0,
+       "will": 2
+      },
+      {
+       "level": 2,
+       "bab": 1,
+       "fort": 1,
+       "ref": 1,
+       "will": 3
+      },
+      {
+       "level": 3,
+       "bab": 1,
+       "fort": 1,
+       "ref": 1,
+       "will": 3
+      },
+      {
+       "level": 4,
+       "bab": 2,
+       "fort": 2,
+       "ref": 2,
+       "will": 4
+      },
+      {
+       "level": 5,
+       "bab": 2,
+       "fort": 2,
+       "ref": 2,
+       "will": 4
+      },
+      {
+       "level": 6,
+       "bab": 3,
+       "fort": 3,
+       "ref": 3,
+       "will": 5
+      },
+      {
+       "level": 7,
+       "bab": 3,
+       "fort": 3,
+       "ref": 3,
+       "will": 5
+      },
+      {
+       "level": 8,
+       "bab": 4,
+       "fort": 4,
+       "ref": 4,
+       "will": 6
+      },
+      {
+       "level": 9,
+       "bab": 4,
+       "fort": 4,
+       "ref": 4,
+       "will": 6
+      },
+      {
+       "level": 10,
+       "bab": 5,
+       "fort": 5,
+       "ref": 5,
+       "will": 7
+      },
+      {
+       "level": 11,
+       "bab": 5,
+       "fort": 5,
+       "ref": 5,
+       "will": 7
+      },
+      {
+       "level": 12,
+       "bab": 6,
+       "fort": 6,
+       "ref": 6,
+       "will": 8
+      },
+      {
+       "level": 13,
+       "bab": 6,
+       "fort": 6,
+       "ref": 6,
+       "will": 8
+      },
+      {
+       "level": 14,
+       "bab": 7,
+       "fort": 7,
+       "ref": 7,
+       "will": 9
+      },
+      {
+       "level": 15,
+       "bab": 7,
+       "fort": 7,
+       "ref": 7,
+       "will": 9
+      },
+      {
+       "level": 16,
+       "bab": 8,
+       "fort": 8,
+       "ref": 8,
+       "will": 10
+      },
+      {
+       "level": 17,
+       "bab": 8,
+       "fort": 8,
+       "ref": 8,
+       "will": 10
+      },
+      {
+       "level": 18,
+       "bab": 9,
+       "fort": 9,
+       "ref": 9,
+       "will": 11
+      },
+      {
+       "level": 19,
+       "bab": 9,
+       "fort": 9,
+       "ref": 9,
+       "will": 11
+      },
+      {
+       "level": 20,
+       "bab": 10,
+       "fort": 10,
+       "ref": 10,
+       "will": 12
+      }
+     ],
+     "derived": "Every bab/fort/ref/will number in `levels` is produced by the shared ladders in rulesTables.ts (good saves = 2 + 1/2 per level, poor = 1/2; BAB good = 1 per level, average = 3/4, poor = 1/2, each rounded down). tests/packages/pf1eContentPacks.test.ts recomputes them, so this pack cannot disagree with the arithmetic the sheets use.",
+     "notes": "M16's explicitly selected six-class starter table: the Core Rulebook classes whose progression the sim can compile. The hit die, the good-save column and the skill ranks are the class table's authored rows; the bonus-feat list names only feats this repo has a rule for (see packs/feats.json)."
+    },
+    "items": [],
+    "effects": []
+   }
+  }
+ ]
+}

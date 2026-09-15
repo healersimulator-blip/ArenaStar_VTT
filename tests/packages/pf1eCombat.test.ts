@@ -205,4 +205,49 @@ describe("PF1e Combat Engine (§12 / Task 3 & High-Fidelity Rules)", () => {
     expect(aoo.totalDamage).toBeGreaterThan(0);
     expect(pool.hp[casterIdx]).toBeLessThan(15);
   });
+  test("circumstanceMod moves the attack roll the way the SRD's modifiers do (M05)", () => {
+    // BAB 6 against AC 25 needs 19+ at rest — the natural 20s alone hit. +2 (a charge, CRB
+    // p.183) lowers that to 17 and −4 (fighting defensively, CRB p.185) leaves only the auto-hit,
+    // so both directions have somewhere to go.
+    // A +2 charge or a −4 defensive-fighting penalty is a circumstance modifier on the roll,
+    // not a change to the creature: the profile is shared by every model of the type, so the
+    // modifier has to ride the call. Asserted as a direction over many seeds rather than a
+    // golden die, because the point is that the term reaches the roll at all.
+    const registry = new PF1eProfileRegistry();
+    const attacker = registry.register({ name: "Recruit", bab: 6, strMod: 0, weapon: { damageDiceCount: 1, damageDiceSides: 6 } });
+    const defender = registry.register({ name: "Hoplite", ac: 25 });
+
+    const build = () => {
+      const pool = createModelPool(4, PF1E_MODEL_SCHEMA);
+      const a = allocModel(pool, { id: 1, unitIdx: 0, x: 0, y: 0, hp: 40, hpMax: 40, sys: { ac: 12, touchAc: 12, fort: 1, ref: 1, will: 1, sr: 0, drType: 0, drVal: 0, profileIdx: attacker.id } });
+      const d = allocModel(pool, { id: 2, unitIdx: 1, x: 1, y: 0, hp: 40, hpMax: 40, sys: { ac: 25, touchAc: 10, fort: 1, ref: 1, will: 1, sr: 0, drType: 0, drVal: 0, profileIdx: defender.id } });
+      return { pool, a, d };
+    };
+    const run = (mod: number): number => {
+      let hits = 0;
+      // Spread by the golden-ratio constant: consecutive LCG seeds differ by one step of the
+      // multiplier, which for this generator lands almost the same first d20 every time.
+      for (let i = 1; i <= 240; i++) {
+        const seed = (i * 0x9e3779b9) >>> 0;
+        const { pool, a, d } = build();
+        const res = resolvePF1eAttacks({
+          pool,
+          attackers: [a],
+          defenders: [d],
+          registry,
+          rng: new SimpleRng(seed),
+          ...(mod !== 0 ? { circumstanceMod: mod } : {}),
+        });
+        hits += res.metrics.hits;
+      }
+      return hits;
+    };
+
+    const baseline = run(0);
+    const charged = run(2);
+    const defending = run(-4);
+    expect(charged).toBeGreaterThan(baseline);
+    expect(defending).toBeLessThan(baseline);
+  });
+
 });

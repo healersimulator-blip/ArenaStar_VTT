@@ -23,7 +23,11 @@ import type {
 import type { Op } from "../core/ops";
 import type { DocId, UnitId } from "../core/ids";
 import type { OrderQueue } from "../core/strategic";
-import { collectLeaderActors, sceneCellFeet } from "../core/rules";
+import {
+  collectLeaderActors,
+  sceneCellFeet,
+  sceneDifficultCells,
+} from "../core/rules";
 import type { RulesContext, RulesWallsContext, UnitView } from "../core/rules";
 import type {
   RealtimeClockConfig,
@@ -270,6 +274,9 @@ export class TurnChannel {
             import("../core/documents").Json | undefined,
       }),
       worldSettings: worldSettingsFrom(this.store.getAll("settings")),
+      // M05: the scene's authored difficult squares, read through the same helper the
+      // tactical drag uses — one authored ground, two scales that price it identically.
+      terrain: sceneDifficultCells(scene),
       turnMode:
         "mode" in this.engine
           ? (this.engine as { mode: import("../core/strategic").TurnMode }).mode

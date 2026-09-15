@@ -98,7 +98,8 @@ export function validateRulesModule(candidate: unknown): Result<RulesModule> {
       return err(`rules package: ${fn} is not a function`);
     }
   }
-  for (const fn of ["tick", "forecast", "migrate"] as const) {
+  // orderVocabulary (M10) is optional too: a module without it simply gets no caster.
+  for (const fn of ["tick", "forecast", "migrate", "orderVocabulary"] as const) {
     if (m[fn] !== undefined && typeof m[fn] !== "function") {
       return err(`rules package: ${fn} must be a function when present`);
     }

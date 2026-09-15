@@ -58,7 +58,10 @@ describe("PF1e sheet presentation and authorized edit intents", () => {
       expect(view.derived.ac.normal).toBeGreaterThan(10);
       expect(view.derived.converted.length).toBeGreaterThan(0);
     }
-    expect(pack.entries).toHaveLength(6);
+    // M16 grew this pack from six mirror rows to the full unit-role set, so the exact count is no
+    // longer the point: the loop above is what matters (every shipped actor survives this path) and
+    // the pack's own composition is pinned in tests/packages/pf1eContentPacks.test.ts.
+    expect(pack.entries.length).toBeGreaterThanOrEqual(6);
   });
   test("effects change effective scores, never the authored editor value, and disabling reverts", () => {
     const a = actor({ abilities: { str: 16 } });

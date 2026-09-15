@@ -49,6 +49,16 @@ export interface PF1eCombatOptions {
   targetAcType?: PF1eAcType;
   isRanged?: boolean;
   isFlanked?: boolean;
+  /**
+   * M05 — a flat circumstance modifier on every attack roll this resolution makes, applied
+   * after the profile's iterative bonuses and the flanking/enhancement/range terms. It exists
+   * because the mass-battle scale has rules that *shape* an attack routine without reshaping
+   * the profile: a charge's +2 on the charge's single melee attack (CRB p.183) and a
+   * combatant fighting defensively' −4 (CRB p.185). Both are per-declaration, not per-creature
+   * statistics, so they ride the call — never the compiled profile, which is shared by every
+   * unit of the type and would leak the modifier into turns it does not belong to.
+   */
+  circumstanceMod?: number;
   /** When true (default), evaluates full PF1e rules: Firearms range/misfires, DR material bypass, and Condition penalties. */
   highFidelity?: boolean;
   /**
@@ -356,7 +366,12 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
       }
 
       // Apply Attacker Condition & Range Modifiers
-      let attackMod = attackBonus + (isDefenderFlanked ? 2 : 0) + profile.enhancementBonus - rangePenalty;
+      let attackMod =
+        attackBonus +
+        (isDefenderFlanked ? 2 : 0) +
+        profile.enhancementBonus -
+        rangePenalty +
+        (opts.circumstanceMod ?? 0);
       if (highFidelity) {
         if ((atkPf & PF1eCondition.SHAKEN) !== 0) attackMod -= 2;
         if ((atkPf & PF1eCondition.SICKENED) !== 0) attackMod -= 2;

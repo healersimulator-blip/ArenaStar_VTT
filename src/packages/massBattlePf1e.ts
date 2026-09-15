@@ -5,8 +5,10 @@
  */
 import {
   sceneCellFeet,
+  type RulesCastOption,
   type RulesContext,
   type RulesModule,
+  type RulesOrderVocabulary,
   type UnitView,
 } from "../core/rules";
 import type { PRNG } from "../core/sim";
@@ -38,10 +40,10 @@ import {
 } from "./pf1e/interrupts";
 import type { PF1eCell } from "./pf1e/targeting";
 import { resolvePF1eAOESpell } from "./pf1e/spells";
+import { planPF1eStride, type PF1eStridePace } from "./pf1e/stride";
 import {
-  PF1E_PACK_FIREBALL_MASS_BATTLE,
-  PF1E_PACK_BURNING_HANDS_MASS_BATTLE,
   parsePackSpellOrder,
+  PF1E_PACK_MASS_SPELL_MIRRORS,
   spellRangeFeet,
 } from "./pf1e/spellPacks";
 import { spellSaveDc } from "./pf1e/casting";
@@ -55,23 +57,21 @@ import { SpatialGrid } from "../core/spatialGrid";
 import { hasLineOfEffect, firstMoveBlock } from "../core/detection";
 
 /**
- * Fireball's spell level (CRB p.283: "Level sorcerer/wizard 3", verified in D-151's R02
- * transcription). The pack's `level` table still carries a known content bug (5) with a
- * mangled key structure, so the sim keeps the verified constant until that table is
- * repaired wholesale — nothing reads it in the meantime (D-151).
+ * A spell the mass-battle module can fire: the pack entry plus its verified level. Both halves
+ * come from `PF1E_PACK_MASS_SPELL_MIRRORS` in `spellPacks.ts` — the one table that says which
+ * content the resolver executes. M15 grew the shipped pack to 40 spells; four of them are
+ * automated, and the pack's `system.automation` declaration is what keeps that boundary honest:
+ * an entry that claims "automated" without a payload the parser accepts fails
+ * `parsePackSpellOrder`, and the sync test refuses any pack whose declaration and block disagree.
  */
-const FIREBALL_SPELL_LEVEL = 3;
-
-/**
- * Burning Hands' spell level (CRB pg. 251: "Level … sorcerer 1, … wizard 1", verified in
- * D-171's R02 transcription). Like Fireball, the sim uses this verified constant rather
- * than reading the pack's `level` table (D-151).
- */
-const BURNING_HANDS_SPELL_LEVEL = 1;
-
-/** A spell the mass-battle module can fire: the pack entry plus its verified level. */
 export interface PF1eMassSpellDef {
   entry: Readonly<Record<string, unknown>>;
+  /**
+   * The class level used for `spellSaveDc` (CRB p.283: "Level sorcerer/wizard 3" for Fireball,
+   * verified in D-151's R02 transcription). The pack's `level` table is content the reference
+   * system does not read — the pack ships a known-buggy one — so the number lives here and the
+   * sync test pins the pack's `sorcererWizard` entry against it.
+   */
   level: number;
 }
 
@@ -81,16 +81,7 @@ export interface PF1eMassSpellDef {
  * the levels are the verified CRB constants, not the pack's `level` table (D-151).
  */
 export const PF1E_MASS_SPELLS: Readonly<Record<string, PF1eMassSpellDef>> =
-  Object.freeze({
-    fireball: {
-      entry: PF1E_PACK_FIREBALL_MASS_BATTLE,
-      level: FIREBALL_SPELL_LEVEL,
-    },
-    "burning-hands": {
-      entry: PF1E_PACK_BURNING_HANDS_MASS_BATTLE,
-      level: BURNING_HANDS_SPELL_LEVEL,
-    },
-  });
+  PF1E_PACK_MASS_SPELL_MIRRORS;
 
 /** Orders that omit `data.spell` cast this spell (backwards compatibility). */
 export const DEFAULT_MASS_SPELL_ID = "fireball";
@@ -132,6 +123,24 @@ const PF1E_UNIT_TYPE_STATS = {
  * crossing test would otherwise let a segment beginning exactly on the wall through.
  */
 const MOVE_BLOCK_EPSILON = 1e-3;
+
+/**
+ * M05 — the `hold` stances this module gives a mechanical meaning to. Anything else is
+ * refused at issue rather than queued and then silently ignored: a stance nothing resolves is
+ * a message the GM believes, which is worse than a rejection.
+ *  • `defend` — CRB p.185 Defensive Combat: "you gain a +2 dodge bonus to AC and CMD" and
+ *    take "a –4 penalty on all attacks";
+ *  • `hold` / `screen` — stand fast in place. Not inert: the order *is* the unit's order for
+ *    the turn, so it outranks the doctrine's auto-march (D-223) and cancels an in-progress
+ *    march, which is exactly what a screen line is for at this scale.
+ */
+const PF1E_HOLD_STANCES = ["hold", "screen", "defend"] as const;
+
+/** M05 — the attack modes this module resolves (anything else is refused by name). */
+const PF1E_ATTACK_MODES = ["melee", "shot"] as const;
+
+/** Move-order path cap, matching the reference package's DoS guard (massBattleBasic). */
+const MAX_MOVE_WAYPOINTS = 12;
 
 export interface MassBattlePf1eOptions {
   /**
@@ -186,11 +195,27 @@ export function createMassBattlePf1e(
   // Each spell's shape decides what a well-formed order looks like, so probe it once at
   // creation. An unparseable entry is not validated here — resolveTurn names the pack
   // issue per cast; it just defaults the shape to circle for validation purposes.
+  // The same probe answers M10's control question (`orderVocabulary`), so the caster
+  // dropdown a player sees and the payload the resolver demands cannot drift apart: both
+  // read `spellShapes`/`castVocabulary`, built from one pass over the registry.
   const spellShapes = new Map<string, string>();
+  const castVocabulary: RulesCastOption[] = [];
   for (const [id, def] of Object.entries(spells)) {
     const probe = parsePackSpellOrder({ entry: def.entry, casterLevel: 1 });
-    spellShapes.set(id, probe.ok && probe.order ? probe.order.shape : "circle");
+    const shape = probe.ok && probe.order ? probe.order.shape : "circle";
+    spellShapes.set(id, shape);
+    castVocabulary.push({
+      id,
+      label:
+        probe.ok && probe.order && probe.order.spellName.length > 0
+          ? probe.order.spellName
+          : id,
+      // Cones and lines start at the caster and take an aim direction (CRB p.214);
+      // every other shipped shape designates a remote point of origin.
+      targeting: shape === "cone" || shape === "line" ? "direction" : "point",
+    });
   }
+  Object.freeze(castVocabulary);
 
   const subPhases = [
     "move",
@@ -213,20 +238,78 @@ export function createMassBattlePf1e(
       subPhases: [...subPhases],
     },
 
+    // M10 — the caster control vocabulary. Registry-driven (so the `spellEntry` test seam
+    // and any future pack addition show up without touching UI code), and deliberately
+    // silent about who may cast: casting eligibility at this scale is authored content
+    // (M16/M18's class/spell tables), and `validateOrder`/`resolveTurn` own the refusals.
+    orderVocabulary(): RulesOrderVocabulary {
+      return { casts: castVocabulary };
+    },
+
+    // M05 — the module validates exactly the orders it executes, and refuses the rest by
+    // name. An accepted order that nothing resolves is the worst thing a rules package can do:
+    // it occupies the unit's queue, the report stays silent, and the GM has nothing to re-read.
+    // `mass-battle-basic` has always refused this way; the PF1e module now matches it, and the
+    // move/pace checks here are the same rules `planPF1eStride` applies at resolve time — so a
+    // control can surface them before an order is issued instead of after a turn is resolved.
     validateOrder(_ctx: RulesContext, _unit: UnitView, order: Order): OkOrErr {
       switch (order.kind) {
         case "move": {
           if (order.path.length === 0) return err("move: empty path");
+          if (order.path.length > MAX_MOVE_WAYPOINTS)
+            return err(
+              `move: path too long (max ${MAX_MOVE_WAYPOINTS} waypoints)`,
+            );
           for (const p of order.path) {
             if (!Number.isFinite(p.x) || !Number.isFinite(p.y))
               return err("move: NaN waypoint");
           }
+          if (
+            order.pace !== "march" &&
+            order.pace !== "run" &&
+            order.pace !== "charge"
+          )
+            return err(`move: unknown pace "${String(order.pace)}"`);
+          // CRB p.188: a run and a charge are each "in a straight line". Checked here as well
+          // as in the stride so a curved order never enters a queue at all.
+          if (
+            (order.pace === "run" || order.pace === "charge") &&
+            order.path.length > 1
+          )
+            return err(
+              `move: a ${order.pace} is a straight line (CRB p.188) — the order names ${order.path.length} destinations`,
+            );
           return ok;
         }
-        case "attack":
-          return order.targetUnitId ? ok : err("attack: missing targetUnitId");
+        case "attack": {
+          if (!order.targetUnitId) return err("attack: missing targetUnitId");
+          if (
+            order.mode !== undefined &&
+            !PF1E_ATTACK_MODES.includes(order.mode as (typeof PF1E_ATTACK_MODES)[number])
+          )
+            return err(
+              `attack: this module resolves no "${order.mode}" attack mode (it routes on the unit's weapon: melee, or shot when the profile is ranged)`,
+            );
+          return ok;
+        }
+        case "hold":
+          return PF1E_HOLD_STANCES.includes(
+            order.stance as (typeof PF1E_HOLD_STANCES)[number],
+          )
+            ? ok
+            : err(
+                `hold: unknown stance "${order.stance}" — this module gives a meaning to ${PF1E_HOLD_STANCES.map((x) => `"${x}"`).join(", ")}`,
+              );
+        case "formation":
+        case "supply":
+          return err(
+            `${order.kind}: the PF1e mass-battle module resolves no ${order.kind} orders (frontage is set at deploy; supply is not simulated at this scale)`,
+          );
         case "custom": {
-          if (order.type !== "spell_aoe") return ok;
+          if (order.type !== "spell_aoe")
+            return err(
+              `custom: no "${order.type}" order in this module — the PF1e mass battles execute spell_aoe casts`,
+            );
           const spellId = payloadSpellId(order.data);
           if (!spells[spellId])
             return err(`spell_aoe: unknown spell "${spellId}"`);
@@ -234,15 +317,15 @@ export function createMassBattlePf1e(
           const payload = parseSpellAoePayload(shape, order.data);
           return payload.ok ? ok : err(`spell_aoe: ${payload.message}`);
         }
-        case "hold":
-          return ok;
         case "retreat":
           return Number.isFinite(order.toward.x) &&
             Number.isFinite(order.toward.y)
             ? ok
             : err("retreat: NaN destination");
         default:
-          return ok;
+          return err(
+            `order: this module executes no "${String((order as { kind: string }).kind)}" orders`,
+          );
       }
     },
 
@@ -261,6 +344,20 @@ export function createMassBattlePf1e(
       // (D-173), reach (D-177/D-180), the spatial hash's buckets and the flanking pass
       // (M04/D-182) — one scale, derived in one place (`sceneCellFeet`).
       const cellFeet = sceneCellFeet(ctx.grid.distance);
+
+      // M05 — the authored difficult squares for this scene, keyed `col,row` (the same key
+      // form the threat sets below use). `ctx.terrain` is null when the scene authors no
+      // ground, which is a NAMED default rather than an empty-but-real terrain: with it the
+      // walk prices exactly what it always did, and nothing pretends rough ground was judged.
+      const difficultCells = new Set<string>();
+      for (const cell of ctx.terrain?.difficultCells ?? [])
+        difficultCells.add(`${cell.col},${cell.row}`);
+
+      // M05 — a unit that charged this turn carries the charge's combat modifiers into the
+      // melee phase: +2 on the attack roll and −2 AC until its next turn (CRB p.183). Turn
+      // local by construction: the AC write is undone next round by the profile reseed that
+      // already governs the cleave penalty (D-178), and this set is rebuilt every turn.
+      const chargedUnits = new Set<string>();
       if (grid.cellSize !== cellFeet) grid = new SpatialGrid(cellFeet);
       // F02 — snapshot of pre-move positions for simultaneous cover/flanking (faithful simultaneous reading)
       let simultaneousStartXs: Float32Array | null = null;
@@ -307,24 +404,42 @@ export function createMassBattlePf1e(
       // F02 — simultaneous regime check (world-settings or turnMode)
       const simultaneous =
         ctx.turnMode === "simultaneous" ||
-        (ctx.worldSettings as Record<string, unknown>)?.strategicSimultaneous ===
-          true;
+        (ctx.worldSettings as Record<string, unknown>)
+          ?.strategicSimultaneous === true;
 
       // F02 — squad fan-out: an order keyed by squadId expands to every unit in that squad (no new doc type)
       // Per-unit orders win (do not overwrite). SquadId is the UnitView.squadId tag (ArmyWindow squadId).
       {
-        const expanded = new Map<string, import("../core/strategic").OrderQueue>(orders as Map<string, import("../core/strategic").OrderQueue>);
+        const expanded = new Map<
+          string,
+          import("../core/strategic").OrderQueue
+        >(orders as Map<string, import("../core/strategic").OrderQueue>);
         for (const [key, queue] of orders.entries()) {
           const isUnit = units.some((u) => u.id === key);
           if (isUnit) continue;
-          const members = units.filter((u) => (u as unknown as { squadId?: string | null }).squadId === key);
+          const members = units.filter(
+            (u) =>
+              (u as unknown as { squadId?: string | null }).squadId === key,
+          );
           if (members.length === 0) continue;
-          for (const m of members) if (!expanded.has(m.id)) expanded.set(m.id, queue);
+          for (const m of members)
+            if (!expanded.has(m.id)) expanded.set(m.id, queue);
           expanded.delete(key);
         }
         // Rebind the local `orders` binding for the rest of resolveTurn
-        (orders as unknown as Map<string, import("../core/strategic").OrderQueue>).clear();
-        for (const [k, v] of expanded.entries()) (orders as unknown as Map<string, import("../core/strategic").OrderQueue>).set(k, v);
+        (
+          orders as unknown as Map<
+            string,
+            import("../core/strategic").OrderQueue
+          >
+        ).clear();
+        for (const [k, v] of expanded.entries())
+          (
+            orders as unknown as Map<
+              string,
+              import("../core/strategic").OrderQueue
+            >
+          ).set(k, v);
       }
 
       // ── G-04/D-223 — Combat_Resolver_5 doctrine mode (world setting
@@ -373,8 +488,12 @@ export function createMassBattlePf1e(
           if (anchor === null) continue;
           // Nearest living enemy by anchor distance; engage the same unit whose
           // models stand closest (one pass keeps both honest).
-          let nearest: { unit: UnitView; idx: number; dAnchor: number; dMin: number } | null =
-            null;
+          let nearest: {
+            unit: UnitView;
+            idx: number;
+            dAnchor: number;
+            dMin: number;
+          } | null = null;
           for (let oi = 0; oi < units.length; oi++) {
             if (oi === ui) continue;
             const other = units[oi];
@@ -412,9 +531,7 @@ export function createMassBattlePf1e(
             orders.set(unit.id, {
               issuedBy: "doctrine",
               issuedTurn: strategicTurn,
-              pending: [
-                { kind: "attack", targetUnitId: nearest.unit.id },
-              ],
+              pending: [{ kind: "attack", targetUnitId: nearest.unit.id }],
             });
             emit({
               subPhase: "melee",
@@ -423,7 +540,11 @@ export function createMassBattlePf1e(
               targetUnitId: nearest.unit.id,
               at: { x: anchor.x, y: anchor.y },
               text: `${unit.name} engages ${nearest.unit.name} (doctrine)`,
-              data: { kind: "doctrine", action: "engage", distance: Math.round(nearest.dMin * 100) / 100 },
+              data: {
+                kind: "doctrine",
+                action: "engage",
+                distance: Math.round(nearest.dMin * 100) / 100,
+              },
             });
           } else {
             // Approach way-point: from the anchor toward that unit's nearest
@@ -460,7 +581,11 @@ export function createMassBattlePf1e(
               targetUnitId: nearest.unit.id,
               at: { x: anchor.x, y: anchor.y },
               text: `${unit.name} advances on ${nearest.unit.name} (doctrine)`,
-              data: { kind: "doctrine", action: "advance", distance: Math.round(walk * 100) / 100 },
+              data: {
+                kind: "doctrine",
+                action: "advance",
+                distance: Math.round(walk * 100) / 100,
+              },
             });
           }
         }
@@ -492,8 +617,7 @@ export function createMassBattlePf1e(
       ) {
         const mods = new Map<string, number>();
         for (const u of units) {
-          if (!mods.has(u.armyId))
-            mods.set(u.armyId, u.armyInitiative ?? 0);
+          if (!mods.has(u.armyId)) mods.set(u.armyId, u.armyInitiative ?? 0);
         }
         const rolls = [...mods.keys()].sort().map((id, k) => {
           const die = forkRng(rng, 0x1000 + k, 0x5c).d(20);
@@ -529,12 +653,13 @@ export function createMassBattlePf1e(
         unit: UnitView,
       ): { mod: number; tie: number } => {
         const actorJson = ctx.leaderActors[unit.id] as unknown as
-          | { system?: Record<string, unknown> }
-          | undefined;
+          { system?: Record<string, unknown> } | undefined;
         if (actorJson) {
           try {
             const derived = deriveFromDocuments({
-              actor: actorJson as unknown as { system?: Record<string, unknown> },
+              actor: actorJson as unknown as {
+                system?: Record<string, unknown>;
+              },
               effects: [],
             });
             const mod = derived.initiative;
@@ -582,6 +707,175 @@ export function createMassBattlePf1e(
         });
       };
       let interruptQueue = createInterruptQueue(strategicTurn, "turn");
+      // M05 — the march's attacks of opportunity, hoisted out of the stepwise path so the
+      // simultaneous path provokes too (it did not: a mode bug, not a design — the same
+      // P06/D-184 rule must not be escapable by choosing a turn mode).
+      //
+      // `from`/`to` are the marching anchor's feet positions. In simultaneous mode the caller
+      // passes the round's start-of-turn layout, which is the faithful reading: every march in
+      // a simultaneous round begins where the round began, so that is where threat is judged
+      // (D-173's snapshot rule, the same one cover and flanking use).
+      const marchOpportunities = (input: {
+        mover: UnitView;
+        from: { x: number; y: number };
+        to: { x: number; y: number };
+        dx: number;
+        dy: number;
+        withdraw: boolean;
+      }): void => {
+        const { mover, from, to, dx, dy, withdraw } = input;
+                // ── attacks of opportunity against the march (P06, D-184). The walk is taken from
+                // the grid walk itself (`cellsAlongSegment`) rather than from the continuous
+                // displacement, so the interrupted squares are *squares* and the phantom
+                // "grazed" square of a diagonal never provokes. A withdraw (order kind
+                // `retreat`, SRD: "You can move up to double your speed … The square you start
+                // out in is not considered threatened by any opponent you can see") exempts the
+                // start square and nothing else; the sim has no visibility model, so every
+                // enemy is treated as seen and the exemption applies to all of them.
+                  const walked = cellsAlongSegment(from, to, cellFeet);
+                  const moverIdx = leaderModelIdx(mover.id);
+                  const moverUnitIdx = pool.unitIdx[moverIdx] ?? 0;
+                  if (moverIdx >= 0 && walked.length > 1) {
+                    const reactors: Array<{
+                      id: string;
+                      name: string;
+                      threatens: (cell: PF1eCell) => boolean;
+                      modelIdx: number;
+                    }> = [];
+                    for (const other of units) {
+                      if (other.id === mover.id) continue;
+                      const otherLeader = leaderModelIdx(other.id);
+                      if (otherLeader < 0) continue;
+                      // Enemies only, on the same relation the flanking pass uses (M04/D-182): a
+                      // different faction. An ally — and the mover's own unit — never reacts.
+                      const otherUnitIdx = pool.unitIdx[otherLeader] ?? 0;
+                      if (
+                        (factionByUnitIdx[otherUnitIdx] ?? null) ===
+                        (factionByUnitIdx[moverUnitIdx] ?? null)
+                      ) {
+                        continue;
+                      }
+                      // Threat is per model, but a unit moves as a formation: any living model of the
+                      // unit can take the opportunity, so the unit threatens what its members threaten.
+                      const otherStart = other.modelRange?.[0] ?? 0;
+                      const otherEnd = other.modelRange?.[1] ?? 0;
+                      let threatenedSet: Set<string> | null = null;
+                      // The model that actually reacts: the first living member whose reach covers a
+                      // square the march left (so the budget is spent on a model that could strike).
+                      let threatModel: number | null = null;
+                      for (let i = otherStart; i < otherEnd && i < pool.count; i++) {
+                        if (((pool.status[i] ?? 0) & ModelStatus.dead) !== 0) continue;
+                        const cells = threatenedByModel(i);
+                        if (cells.length === 0) continue;
+                        if (threatenedSet === null) threatenedSet = new Set<string>();
+                        for (const c of cells) threatenedSet.add(`${c.col},${c.row}`);
+                        if (threatModel === null) threatModel = i;
+                      }
+                      if (threatenedSet === null || threatModel === null) continue;
+                      const set = threatenedSet;
+                      reactors.push({
+                        id: other.id,
+                        name: other.name,
+                        modelIdx: threatModel,
+                        threatens: (cell) => set.has(`${cell.col},${cell.row}`),
+                      });
+                    }
+                    const result = queueMovementAoOs(interruptQueue, {
+                      turn: strategicTurn,
+                      substep: "move",
+                      moverId: mover.id,
+                      actionId: `move:${strategicTurn}:${mover.id}`,
+                      path: walked,
+                      ...(withdraw ? { withdraw: true } : {}),
+                      cellFeet,
+                      reactors,
+                    });
+                    interruptQueue = result.queue;
+                    // The opportunity interrupts the march: it resolves where the provoker stood,
+                    // before the rest of the move is committed. Movement in the sim is a formation
+                    // translation applied below, so the queue is drained before that write — which is
+                    // what makes the ordering rule true here rather than merely asserted.
+                    while (true) {
+                      const popped = resolveNextInterrupt(interruptQueue, {
+                        initiativeOf: (id) => -leaderModelIdx(id),
+                      });
+                      interruptQueue = popped.queue;
+                      const interrupt = popped.interrupt;
+                      if (interrupt === null) break;
+                      const reactor = reactors.find(
+                        (r) => r.id === interrupt.reactorId,
+                      );
+                      if (reactor === undefined) continue;
+                      const provokerIdx = moverIdx;
+                      const used = pool.sys["aooUsed"]?.[reactor.modelIdx] ?? 0;
+                      const refusal = aooRefusal({
+                        used,
+                        budgetMax: pool.sys["aooMax"]?.[reactor.modelIdx] ?? 1,
+                      });
+                      if (refusal !== null) {
+                        // Say why the reaction did not happen rather than dropping it silently: a
+                        // spent budget and a legal opportunity look identical in the log otherwise.
+                        emit({
+                          subPhase: "move",
+                          type: "opportunity-refused",
+                          unitId: reactor.id,
+                          targetUnitId: mover.id,
+                          at: {
+                            x: pool.x[provokerIdx] ?? 0,
+                            y: pool.y[provokerIdx] ?? 0,
+                          },
+                          text: `${reactor.name} forgoes the attack of opportunity — ${refusal}`,
+                          data: {
+                            kind: "attack-of-opportunity",
+                            reactorId: reactor.id,
+                            reason: refusal,
+                          },
+                        });
+                        continue;
+                      }
+                      // Spend first: the budget is per round and the opportunity is being taken now.
+                      const column = pool.sys["aooUsed"];
+                      if (column !== undefined) column[reactor.modelIdx] = used + 1;
+                      const res = resolvePF1eAttacks({
+                        pool,
+                        attackers: [reactor.modelIdx],
+                        defenders: [provokerIdx],
+                        registry: profiles.registry,
+                        rng: forkRng(rng, unitIndex(mover), 4),
+                      });
+                      const damage = res.metrics.netDamageDealt;
+                      emit({
+                        subPhase: "move",
+                        type: "opportunity",
+                        unitId: reactor.id,
+                        targetUnitId: mover.id,
+                        at: {
+                          x: pool.x[provokerIdx] ?? 0,
+                          y: pool.y[provokerIdx] ?? 0,
+                        },
+                        text: `${reactor.name} strikes ${mover.name} as it leaves the threatened square`,
+                        data: {
+                          kind: "attack-of-opportunity",
+                          reactorId: reactor.id,
+                          provokerId: mover.id,
+                          feetMoved: Math.round(Math.hypot(dx, dy) * 100) / 100,
+                          squaresLeft: result.squaresLeft.length,
+                          // The square the opportunity happened in — where the provoker was
+                          // attacked, not where this march ends (P06's ordering rule).
+                          square: interrupt.trigger.left ?? null,
+                          ...(res.metrics.hits > 0
+                            ? {
+                                hits: res.metrics.hits,
+                                damage: Math.round(damage * 100) / 100,
+                              }
+                            : {}),
+                        },
+                      });
+                    }
+                  }
+
+      };
+
 
       if (simultaneous) {
         // F02 — simultaneous movement: every unit computes its translation from
@@ -600,6 +894,8 @@ export function createMassBattlePf1e(
           cy: number;
           traveled: number;
           hitWall: boolean;
+          terrainSquares: number;
+          terrainExtra: number;
           paceLabel: string;
           verb: string;
         }> = [];
@@ -609,7 +905,9 @@ export function createMassBattlePf1e(
           if (!order || (order.kind !== "move" && order.kind !== "retreat"))
             continue;
           const typeStats =
-            PF1E_UNIT_TYPE_STATS[unit.type as keyof typeof PF1E_UNIT_TYPE_STATS];
+            PF1E_UNIT_TYPE_STATS[
+              unit.type as keyof typeof PF1E_UNIT_TYPE_STATS
+            ];
           const movePoints = typeStats?.move ?? 0;
           if (movePoints <= 0) continue;
           let anchorX: number | null = null;
@@ -623,50 +921,39 @@ export function createMassBattlePf1e(
             }
           }
           if (anchorX === null || anchorY === null) continue;
-          let path: ReadonlyArray<{ x: number; y: number }>;
-          let paceMul: number;
-          if (order.kind === "retreat") {
-            path = [order.toward];
-            paceMul = 2;
-          } else {
-            path = order.path;
-            paceMul = order.pace === "run" ? 4 : order.pace === "charge" ? 2 : 1;
+          // M05 — the march is priced by `planPF1eStride`, the same pure movement module the
+          // stepwise path uses: one pace legality (run/charge straight lines, charge's 10-ft
+          // floor and its difficult-terrain bar) and one cost model (difficult squares double
+          // what they cost to cross), so no rule is escapable by choosing a turn mode.
+          const pace: PF1eStridePace =
+            order.kind === "retreat" ? "withdraw" : order.pace;
+          const stride = planPF1eStride({
+            from: { x: anchorX, y: anchorY },
+            path: order.kind === "retreat" ? [order.toward] : order.path,
+            pace,
+            movePoints,
+            cellFeet,
+            difficult: difficultCells,
+            blockAt: (fx, fy, tx, ty) => firstMoveBlock(fx, fy, tx, ty, ctx.walls),
+            blockEpsilon: MOVE_BLOCK_EPSILON,
+          });
+          if (stride.refusal !== null) {
+            emit({
+              subPhase: "move",
+              type: "move-refused",
+              unitId: unit.id,
+              at: { x: anchorX, y: anchorY },
+              text: `${unit.name} does not march — ${stride.refusal}`,
+              data: { kind: "move", pace, refusal: stride.refusal },
+            });
+            continue;
           }
-          let remaining = movePoints * paceMul * cellFeet;
-          let cx = anchorX;
-          let cy = anchorY;
-          const startX = cx;
-          const startY = cy;
-          let leg = 0;
-          let hitWall = false;
-          let traveled = 0;
-          while (remaining > 0 && leg < path.length) {
-            const wp = path[leg];
-            if (!wp || !Number.isFinite(wp.x) || !Number.isFinite(wp.y)) break;
-            const d = Math.hypot(wp.x - cx, wp.y - cy);
-            if (d === 0) {
-              leg++;
-              continue;
-            }
-            const block = firstMoveBlock(cx, cy, wp.x, wp.y, ctx.walls);
-            const traversable =
-              block === null ? d : Math.max(0, block * d - MOVE_BLOCK_EPSILON);
-            const step = Math.min(remaining, traversable);
-            if (step > 0) {
-              cx += ((wp.x - cx) / d) * step;
-              cy += ((wp.y - cy) / d) * step;
-              traveled += step;
-            }
-            remaining -= step;
-            if (block !== null && step >= traversable) {
-              hitWall = true;
-              break;
-            }
-            if (step < d) break;
-            leg++;
-          }
-          const dx = cx - startX;
-          const dy = cy - startY;
+          const cx = stride.to.x;
+          const cy = stride.to.y;
+          const dx = cx - anchorX;
+          const dy = cy - anchorY;
+          const hitWall = stride.hitWall;
+          const traveled = stride.traveled;
           if (dx === 0 && dy === 0 && !hitWall) continue;
           const paceLabel = order.kind === "retreat" ? "retreat" : order.pace;
           const verb =
@@ -677,7 +964,34 @@ export function createMassBattlePf1e(
                 : order.pace === "charge"
                   ? "charges"
                   : "moves";
-          pendingMoves.push({ unit, dx, dy, cx, cy, traveled, hitWall, paceLabel, verb });
+          if (pace === "charge") chargedUnits.add(unit.id);
+          pendingMoves.push({
+            unit,
+            dx,
+            dy,
+            cx,
+            cy,
+            traveled,
+            hitWall,
+            terrainSquares: stride.terrainSquares,
+            terrainExtra: stride.terrainExtra,
+            paceLabel,
+            verb,
+          });
+        }
+        // M05 — a simultaneous round still provokes: every march starts from the layout at the
+        // start of the round, so that is the layout the opportunity is judged against, and the
+        // reactions resolve before any translation is applied (P06/D-184's ordering rule,
+        // which the stepwise path already honoured — the asymmetry was a mode bug, not a design).
+        for (const m of pendingMoves) {
+          marchOpportunities({
+            mover: m.unit,
+            from: { x: m.cx - m.dx, y: m.cy - m.dy },
+            to: { x: m.cx, y: m.cy },
+            dx: m.dx,
+            dy: m.dy,
+            withdraw: m.paceLabel === "retreat",
+          });
         }
         for (const m of pendingMoves) {
           const [start, end] = m.unit.modelRange ?? [0, 0];
@@ -707,270 +1021,169 @@ export function createMassBattlePf1e(
               distance: Math.round(m.traveled * 100) / 100,
               anchorX: m.cx,
               anchorY: m.cy,
+              ...(m.terrainSquares > 0
+                ? {
+                    terrainSquares: m.terrainSquares,
+                    terrainExtraFeet: Math.round(m.terrainExtra * 100) / 100,
+                  }
+                : {}),
               ...(m.hitWall ? { blockedByWall: true } : {}),
             },
           });
         }
       } else {
-      // ── move sub-phase (M05, D-173/D-175). A unit with a move or retreat order spends
-      // its turn moving as a formation: the anchor (first living model) walks the ordered
-      // waypoint path up to its movement budget, and every other living model is
-      // translated by the same delta — the §12 reference package's model, which keeps
-      // model spacing and unit membership intact. Dead models stay where they fell.
-      // Budget = the unit type's move points × one grid cell (scene grid distance, per
-      // P01's "use scene metadata, not constants") × the pace multiplier. SRD (R02,
-      // CRB "Movement in Combat"/"Run"/"Charge"): a round's move covers your speed,
-      // "up to double your speed" when charging, "up to four times your speed in a
-      // straight line" when running (d20pfsrd Combat). Retreat is SRD Withdraw: "When
-      // you withdraw, you can move up to double your speed" — the destination is the
-      // order's rally point. Charge's attack requirements and Run's straight-line
-      // restriction are combat-mechanic concerns of later M05 slices; this slice
-      // executes only the distances. Terrain, obstacles and movement-triggered AoOs
-      // likewise follow in later slices.
-      for (const unit of units) {
-        const queue = orders.get(unit.id);
-        const order = queue?.active ?? queue?.pending[0];
-        if (!order || (order.kind !== "move" && order.kind !== "retreat"))
-          continue;
-        const typeStats =
-          PF1E_UNIT_TYPE_STATS[unit.type as keyof typeof PF1E_UNIT_TYPE_STATS];
-        const movePoints = typeStats?.move ?? 0;
-        if (movePoints <= 0) continue;
-        const anchor = anchorPosition(pool, unit);
-        if (anchor === null) continue; // a unit with no living models cannot move
-
-        let path: ReadonlyArray<{ x: number; y: number }>;
-        let paceMul: number;
-        if (order.kind === "retreat") {
-          path = [order.toward];
-          paceMul = 2; // SRD Withdraw: up to double speed
-        } else {
-          path = order.path;
-          paceMul = order.pace === "run" ? 4 : order.pace === "charge" ? 2 : 1;
-        }
-        let remaining = movePoints * paceMul * cellFeet;
-        let cx = anchor.x;
-        let cy = anchor.y;
-        const startX = cx;
-        const startY = cy;
-        let leg = 0;
-        let hitWall = false;
-        let traveled = 0;
-        while (remaining > 0 && leg < path.length) {
-          const wp = path[leg];
-          if (!wp || !Number.isFinite(wp.x) || !Number.isFinite(wp.y)) break;
-          const d = Math.hypot(wp.x - cx, wp.y - cy);
-          if (d === 0) {
-            leg++;
+        // ── move sub-phase (M05, D-173/D-175). A unit with a move or retreat order spends
+        // its turn moving as a formation: the anchor (first living model) walks the ordered
+        // waypoint path up to its movement budget, and every other living model is
+        // translated by the same delta — the §12 reference package's model, which keeps
+        // model spacing and unit membership intact. Dead models stay where they fell.
+        // Budget = the unit type's move points × one grid cell (scene grid distance, per
+        // P01's "use scene metadata, not constants") × the pace multiplier. SRD (R02,
+        // CRB "Movement in Combat"/"Run"/"Charge"): a round's move covers your speed,
+        // "up to double your speed" when charging, "up to four times your speed in a
+        // straight line" when running (d20pfsrd Combat). Retreat is SRD Withdraw: "When
+        // you withdraw, you can move up to double your speed" — the destination is the
+        // order's rally point. Charge's attack requirements and Run's straight-line
+        // restriction are combat-mechanic concerns of later M05 slices; this slice
+        // executes only the distances. Terrain, obstacles and movement-triggered AoOs
+        // likewise follow in later slices.
+        for (const unit of units) {
+          const queue = orders.get(unit.id);
+          const order = queue?.active ?? queue?.pending[0];
+          if (!order || (order.kind !== "move" && order.kind !== "retreat"))
             continue;
-          }
-          // Movement-blocking walls (§0 wall contract, bit 0) clip the leg at the first
-          // crossing (D-174): the formation stops just short of the wall and the rest of
-          // the budget is spent — the sim never routes around obstacles (P03's job).
-          const block = firstMoveBlock(cx, cy, wp.x, wp.y, ctx.walls);
-          const traversable =
-            block === null ? d : Math.max(0, block * d - MOVE_BLOCK_EPSILON);
-          const step = Math.min(remaining, traversable);
-          if (step > 0) {
-            cx += ((wp.x - cx) / d) * step;
-            cy += ((wp.y - cy) / d) * step;
-            traveled += step;
-          }
-          remaining -= step;
-          // Stopped at the wall: the march ends here — later waypoints lie beyond it.
-          if (block !== null && step >= traversable) {
-            hitWall = true;
-            break;
-          }
-          if (step < d) break; // budget ran out before the waypoint
-          leg++;
-        }
-        const dx = cx - startX;
-        const dy = cy - startY;
-        // A wall-blocked unit reports even a zero-distance attempt, so the GM sees why
-        // the march went nowhere; otherwise a no-op move stays silent.
-        if (dx === 0 && dy === 0 && !hitWall) continue;
+          const typeStats =
+            PF1E_UNIT_TYPE_STATS[
+              unit.type as keyof typeof PF1E_UNIT_TYPE_STATS
+            ];
+          const movePoints = typeStats?.move ?? 0;
+          if (movePoints <= 0) continue;
+          const anchor = anchorPosition(pool, unit);
+          if (anchor === null) continue; // a unit with no living models cannot move
 
-        // ── attacks of opportunity against the march (P06, D-184). The walk is taken from
-        // the grid walk itself (`cellsAlongSegment`) rather than from the continuous
-        // displacement, so the interrupted squares are *squares* and the phantom
-        // "grazed" square of a diagonal never provokes. A withdraw (order kind
-        // `retreat`, SRD: "You can move up to double your speed … The square you start
-        // out in is not considered threatened by any opponent you can see") exempts the
-        // start square and nothing else; the sim has no visibility model, so every
-        // enemy is treated as seen and the exemption applies to all of them.
-        const walked = cellsAlongSegment(anchor, { x: cx, y: cy }, cellFeet);
-        const moverIdx = leaderModelIdx(unit.id);
-        const moverUnitIdx = pool.unitIdx[moverIdx] ?? 0;
-        if (moverIdx >= 0 && walked.length > 1) {
-          const reactors: Array<{
-            id: string;
-            name: string;
-            threatens: (cell: PF1eCell) => boolean;
-            modelIdx: number;
-          }> = [];
-          for (const other of units) {
-            if (other.id === unit.id) continue;
-            const otherLeader = leaderModelIdx(other.id);
-            if (otherLeader < 0) continue;
-            // Enemies only, on the same relation the flanking pass uses (M04/D-182): a
-            // different faction. An ally — and the mover's own unit — never reacts.
-            const otherUnitIdx = pool.unitIdx[otherLeader] ?? 0;
-            if (
-              (factionByUnitIdx[otherUnitIdx] ?? null) ===
-              (factionByUnitIdx[moverUnitIdx] ?? null)
-            ) {
-              continue;
-            }
-            // Threat is per model, but a unit moves as a formation: any living model of the
-            // unit can take the opportunity, so the unit threatens what its members threaten.
-            const otherStart = other.modelRange?.[0] ?? 0;
-            const otherEnd = other.modelRange?.[1] ?? 0;
-            let threatenedSet: Set<string> | null = null;
-            // The model that actually reacts: the first living member whose reach covers a
-            // square the march left (so the budget is spent on a model that could strike).
-            let threatModel: number | null = null;
-            for (let i = otherStart; i < otherEnd && i < pool.count; i++) {
-              if (((pool.status[i] ?? 0) & ModelStatus.dead) !== 0) continue;
-              const cells = threatenedByModel(i);
-              if (cells.length === 0) continue;
-              if (threatenedSet === null) threatenedSet = new Set<string>();
-              for (const c of cells) threatenedSet.add(`${c.col},${c.row}`);
-              if (threatModel === null) threatModel = i;
-            }
-            if (threatenedSet === null || threatModel === null) continue;
-            const set = threatenedSet;
-            reactors.push({
-              id: other.id,
-              name: other.name,
-              modelIdx: threatModel,
-              threatens: (cell) => set.has(`${cell.col},${cell.row}`),
-            });
-          }
-          const result = queueMovementAoOs(interruptQueue, {
-            turn: strategicTurn,
-            substep: "move",
-            moverId: unit.id,
-            actionId: `move:${strategicTurn}:${unit.id}`,
-            path: walked,
-            ...(order.kind === "retreat" ? { withdraw: true } : {}),
+          // M05 — priced by `planPF1eStride`: the pace's straight-line and 10-ft rules, the
+          // charge bar against difficult terrain, and the doubled cost of every rough square
+          // entered, on top of D-174's wall clipping (which the stride applies first, so a
+          // blocked march never gets to spend budget on a leg it cannot reach). The stride is
+          // shared with the simultaneous path, so no movement rule depends on the turn mode.
+          const pace: PF1eStridePace =
+            order.kind === "retreat" ? "withdraw" : order.pace;
+          const stride = planPF1eStride({
+            from: { x: anchor.x, y: anchor.y },
+            path: order.kind === "retreat" ? [order.toward] : order.path,
+            pace,
+            movePoints,
             cellFeet,
-            reactors,
+            difficult: difficultCells,
+            blockAt: (fx, fy, tx, ty) =>
+              firstMoveBlock(fx, fy, tx, ty, ctx.walls),
+            blockEpsilon: MOVE_BLOCK_EPSILON,
           });
-          interruptQueue = result.queue;
-          // The opportunity interrupts the march: it resolves where the provoker stood,
-          // before the rest of the move is committed. Movement in the sim is a formation
-          // translation applied below, so the queue is drained before that write — which is
-          // what makes the ordering rule true here rather than merely asserted.
-          while (true) {
-            const popped = resolveNextInterrupt(interruptQueue, {
-              initiativeOf: (id) => -leaderModelIdx(id),
-            });
-            interruptQueue = popped.queue;
-            const interrupt = popped.interrupt;
-            if (interrupt === null) break;
-            const reactor = reactors.find((r) => r.id === interrupt.reactorId);
-            if (reactor === undefined) continue;
-            const provokerIdx = moverIdx;
-            const used = pool.sys["aooUsed"]?.[reactor.modelIdx] ?? 0;
-            const refusal = aooRefusal({
-              used,
-              budgetMax: pool.sys["aooMax"]?.[reactor.modelIdx] ?? 1,
-            });
-            if (refusal !== null) {
-              // Say why the reaction did not happen rather than dropping it silently: a
-              // spent budget and a legal opportunity look identical in the log otherwise.
-              emit({
-                subPhase: "move",
-                type: "opportunity-refused",
-                unitId: reactor.id,
-                targetUnitId: unit.id,
-                at: {
-                  x: pool.x[provokerIdx] ?? 0,
-                  y: pool.y[provokerIdx] ?? 0,
-                },
-                text: `${reactor.name} forgoes the attack of opportunity — ${refusal}`,
-                data: {
-                  kind: "attack-of-opportunity",
-                  reactorId: reactor.id,
-                  reason: refusal,
-                },
-              });
-              continue;
-            }
-            // Spend first: the budget is per round and the opportunity is being taken now.
-            const column = pool.sys["aooUsed"];
-            if (column !== undefined) column[reactor.modelIdx] = used + 1;
-            const res = resolvePF1eAttacks({
-              pool,
-              attackers: [reactor.modelIdx],
-              defenders: [provokerIdx],
-              registry: profiles.registry,
-              rng: forkRng(rng, unitIndex(unit), 4),
-            });
-            const damage = res.metrics.netDamageDealt;
+          if (stride.refusal !== null) {
+            // The pace was illegal, so nobody moves — and the report says why, rather than a
+            // queue that silently does nothing for a turn.
             emit({
               subPhase: "move",
-              type: "opportunity",
-              unitId: reactor.id,
-              targetUnitId: unit.id,
-              at: { x: pool.x[provokerIdx] ?? 0, y: pool.y[provokerIdx] ?? 0 },
-              text: `${reactor.name} strikes ${unit.name} as it leaves the threatened square`,
-              data: {
-                kind: "attack-of-opportunity",
-                reactorId: reactor.id,
-                provokerId: unit.id,
-                feetMoved: Math.round(Math.hypot(dx, dy) * 100) / 100,
-                squaresLeft: result.squaresLeft.length,
-                // The square the opportunity happened in — where the provoker was
-                // attacked, not where this march ends (P06's ordering rule).
-                square: interrupt.trigger.left ?? null,
-                ...(res.metrics.hits > 0
-                  ? {
-                      hits: res.metrics.hits,
-                      damage: Math.round(damage * 100) / 100,
-                    }
-                  : {}),
-              },
+              type: "move-refused",
+              unitId: unit.id,
+              at: { x: anchor.x, y: anchor.y },
+              text: `${unit.name} does not march — ${stride.refusal}`,
+              data: { kind: "move", pace, refusal: stride.refusal },
             });
+            continue;
           }
-        }
+          const cx = stride.to.x;
+          const cy = stride.to.y;
+          const startX = anchor.x;
+          const startY = anchor.y;
+          const dx = cx - startX;
+          const dy = cy - startY;
+          const hitWall = stride.hitWall;
+          const traveled = stride.traveled;
+          if (pace === "charge") chargedUnits.add(unit.id);
+          // A wall-blocked unit reports even a zero-distance attempt, so the GM sees why
+          // the march went nowhere; otherwise a no-op move stays silent.
+          if (dx === 0 && dy === 0 && !hitWall) continue;
 
-        const [start, end] = unit.modelRange ?? [0, 0];
-        for (let i = start; i < end && i < pool.count; i++) {
-          if (((pool.status[i] ?? 0) & ModelStatus.dead) !== 0) continue;
-          pool.x[i] = (pool.x[i] ?? 0) + dx;
-          pool.y[i] = (pool.y[i] ?? 0) + dy;
-          if (order.kind === "move" && order.facing !== undefined)
-            pool.rot[i] = order.facing;
+          marchOpportunities({
+            mover: unit,
+            from: { x: startX, y: startY },
+            to: { x: cx, y: cy },
+            dx,
+            dy,
+            withdraw: order.kind === "retreat",
+          });
+
+          // The march is committed after the reactions resolve (P06/D-184's ordering: the
+          // opportunity happens in the square that was left, before the rest of the move).
+          {
+            const [start, end] = unit.modelRange ?? [0, 0];
+            for (let i = start; i < end && i < pool.count; i++) {
+              if (((pool.status[i] ?? 0) & ModelStatus.dead) !== 0) continue;
+              pool.x[i] = (pool.x[i] ?? 0) + dx;
+              pool.y[i] = (pool.y[i] ?? 0) + dy;
+              if (order.kind === "move" && order.facing !== undefined)
+                pool.rot[i] = order.facing;
+            }
+          }
+
+          const paceLabel = order.kind === "retreat" ? "retreat" : order.pace;
+          const verb =
+            order.kind === "retreat"
+              ? "retreats"
+              : order.pace === "run"
+                ? "runs"
+                : order.pace === "charge"
+                  ? "charges"
+                  : "moves";
+          emit({
+            subPhase: "move",
+            type: "arrive",
+            unitId: unit.id,
+            at: { x: cx, y: cy },
+            text: `${unit.name} ${verb} to (${cx.toFixed(1)}, ${cy.toFixed(1)})`,
+            data: {
+              pace: paceLabel,
+              distance: Math.round(traveled * 100) / 100,
+              anchorX: cx,
+              anchorY: cy,
+              // Observable to the GM: what the ground cost. A march across rough squares
+              // covers fewer feet for the same budget, and the report says so (M05).
+              ...(stride.terrainSquares > 0
+                ? {
+                    terrainSquares: stride.terrainSquares,
+                    terrainExtraFeet: Math.round(stride.terrainExtra * 100) / 100,
+                  }
+                : {}),
+              // Observable to the GM: the march ended at a movement-blocking wall, not at
+              // the path's end or the budget's limit.
+              ...(hitWall ? { blockedByWall: true } : {}),
+            },
+          });
         }
-        const paceLabel = order.kind === "retreat" ? "retreat" : order.pace;
-        const verb =
-          order.kind === "retreat"
-            ? "retreats"
-            : order.pace === "run"
-              ? "runs"
-              : order.pace === "charge"
-                ? "charges"
-                : "moves";
-        emit({
-          subPhase: "move",
-          type: "arrive",
-          unitId: unit.id,
-          at: { x: cx, y: cy },
-          text: `${unit.name} ${verb} to (${cx.toFixed(1)}, ${cy.toFixed(1)})`,
-          data: {
-            pace: paceLabel,
-            distance: Math.round(traveled * 100) / 100,
-            anchorX: cx,
-            anchorY: cy,
-            // Observable to the GM: the march ended at a movement-blocking wall, not at
-            // the path's end or the budget's limit.
-            ...(hitWall ? { blockedByWall: true } : {}),
-          },
-        });
       }
 
+      // M05 — the charge's other half. CRB p.183: "you take a –2 penalty to your Armor Class
+      // until your next turn." Written after the move phase and before anything this round can
+      // strike back, so a charger is exposed to the enemies that did not yet resolve; the next
+      // round's profile reseed rewrites the column, which is what makes "until your next turn"
+      // true here without a timer (the same expiry mechanism D-178's cleave penalty relies on).
+      if (chargedUnits.size > 0 && pool.sys["ac"]) {
+        for (const unit of units) {
+          if (!chargedUnits.has(unit.id)) continue;
+          const [start, end] = unit.modelRange ?? [0, 0];
+          for (let i = start; i < end && i < pool.count; i++) {
+            if (((pool.status[i] ?? 0) & ModelStatus.dead) !== 0) continue;
+            pool.sys["ac"][i] = (pool.sys["ac"][i] ?? 0) - 2;
+          }
+          emit({
+            subPhase: "move",
+            type: "charge-exposure",
+            unitId: unit.id,
+            text: `${unit.name} is flat of foot after the charge (−2 AC until its next turn)`,
+            data: { kind: "charge", acPenalty: -2 },
+          });
+        }
       }
 
       grid.rebuild(pool);
@@ -1025,13 +1238,39 @@ export function createMassBattlePf1e(
         // remain the default when the unit carries none.
         const anchor = anchorPosition(pool, unit);
         if (anchor === null) continue;
-        applyHeroLeadershipAuras({
+        const aura = applyHeroLeadershipAuras({
           pool,
           grid,
           heroModelIdx: anchor.idx,
           radius: unit.stats["leadershipRadius"] ?? 30,
           moraleBonus: unit.stats["leadershipMoraleBonus"] ?? 2,
         });
+        // M05 — the `morale` sub-phase now has an executor and a line in the report. The
+        // morale rule this project adopts is G §4.1's leadership clause and nothing else:
+        // "Nearby friendly grunts receive morale bonuses to … Saving Throws", radiating from a
+        // living leader. There is no break/rout check to implement, because the Core Rulebook
+        // has no mass-combat morale check at all (that is Ultimate Combat's optional subsystem,
+        // outside the R02 transcription scope) — so `stats.morale` and the reserved
+        // `ModelStatus.routed` bit stay display-side metadata rather than a rule the report
+        // implies is running. The attack and damage halves of the clause cannot ride this pool
+        // at all: attack bonuses come from the compiled *profile*, shared by every model of the
+        // type, so a per-aura attack term would need its own column (§19 budget decision) — the
+        // saves columns exist, so the saves half is what is applied.
+        if (aura.buffedModels.length > 0) {
+          emit({
+            subPhase: "morale",
+            type: "leadership-aura",
+            unitId: unit.id,
+            at: { x: anchor.x, y: anchor.y },
+            text: `${unit.name} leads from the front: +${unit.stats["leadershipMoraleBonus"] ?? 2} on Fortitude and Will for ${aura.buffedModels.length} model(s) within ${unit.stats["leadershipRadius"] ?? 30} ft`,
+            data: {
+              kind: "leadership-aura",
+              radiusFeet: unit.stats["leadershipRadius"] ?? 30,
+              moraleBonus: unit.stats["leadershipMoraleBonus"] ?? 2,
+              buffedModels: aura.buffedModels.length,
+            },
+          });
+        }
       }
 
       // ── G-04/D-223 — Combat_Resolver_5 envelopment wrap (Work Plan Task 4
@@ -1070,7 +1309,10 @@ export function createMassBattlePf1e(
           const anchorA = anchorPosition(pool, unit);
           const anchorB = anchorPosition(pool, target);
           if (anchorA === null || anchorB === null) continue;
-          const dirLen = Math.hypot(anchorB.x - anchorA.x, anchorB.y - anchorA.y);
+          const dirLen = Math.hypot(
+            anchorB.x - anchorA.x,
+            anchorB.y - anchorA.y,
+          );
           if (dirLen === 0) continue;
           const ux = (anchorB.x - anchorA.x) / dirLen;
           const uy = (anchorB.y - anchorA.y) / dirLen;
@@ -1140,9 +1382,7 @@ export function createMassBattlePf1e(
             if (cornerIdx < 0) continue;
             const foeEdge = side === 1 ? foeMax : foeMin;
             const excess = ownLiving
-              .filter(
-                (a) => side * (latOf(a) - foeEdge) > cellFeet * 0.5,
-              )
+              .filter((a) => side * (latOf(a) - foeEdge) > cellFeet * 0.5)
               .sort((a, b) => side * (latOf(b) - latOf(a)) || a - b);
             const cx = pool.x[cornerIdx] ?? 0;
             const cy = pool.y[cornerIdx] ?? 0;
@@ -1165,7 +1405,11 @@ export function createMassBattlePf1e(
               targetUnitId: target.id,
               at: { x: anchorA.x, y: anchorA.y },
               text: `${unit.name} wraps ${wrapped} model${wrapped === 1 ? "" : "s"} around ${target.name}'s flank (envelop)`,
-              data: { kind: "envelop", wrapped, distance: Math.round(dMinPair * 100) / 100 },
+              data: {
+                kind: "envelop",
+                wrapped,
+                distance: Math.round(dMinPair * 100) / 100,
+              },
             });
           }
         }
@@ -1185,11 +1429,17 @@ export function createMassBattlePf1e(
       // G-04/D-223 override: in doctrine mode the reference judges the CURRENT per-soldier
       // placement (there is no snapshot concept in combat_resolver_5), so the pass reads
       // post-wrap positions in both modes.
-      if (simultaneous && simultaneousStartXs && simultaneousStartYs && !doctrineMode) {
+      if (
+        simultaneous &&
+        simultaneousStartXs &&
+        simultaneousStartYs &&
+        !doctrineMode
+      ) {
         // Save post-move, swap to pre-move for the flanking pass, then restore
         const postXs = pool.x;
         const postYs = pool.y;
-        (pool as unknown as { x: Float32Array; y: Float32Array }).x = simultaneousStartXs;
+        (pool as unknown as { x: Float32Array; y: Float32Array }).x =
+          simultaneousStartXs;
         (pool as unknown as { y: Float32Array }).y = simultaneousStartYs;
         grid.rebuild(pool);
         markPF1eFlanking({
@@ -1225,32 +1475,73 @@ export function createMassBattlePf1e(
       // reproducing the reference's whole-army half: every unit of the winning
       // army resolves before the losing army's first return fire. Within an
       // army the per-unit effectiveInitiative still orders.
-      const meleeUnits = simultaneous || armyRank !== null
-        ? [...units]
-            .map((u) => ({ unit: u, init: effectiveInitiativeOf(u) }))
-            .filter(({ unit }) => {
-              const q = orders.get(unit.id);
-              const o = q?.active ?? q?.pending[0];
-              return o?.kind === "attack" && !!o.targetUnitId;
-            })
-            .sort(
-              (a, b) =>
-                (armyRank?.get(a.unit.armyId) ?? 0) -
-                  (armyRank?.get(b.unit.armyId) ?? 0) ||
-                b.init.mod - a.init.mod ||
-                b.init.tie - a.init.tie,
-            )
-            .map(({ unit }) => unit)
-            .concat(
-              // Units without attack orders keep array order (they don't fight)
-              [...units].filter((u) => {
-                const q = orders.get(u.id);
+      const meleeUnits =
+        simultaneous || armyRank !== null
+          ? [...units]
+              .map((u) => ({ unit: u, init: effectiveInitiativeOf(u) }))
+              .filter(({ unit }) => {
+                const q = orders.get(unit.id);
                 const o = q?.active ?? q?.pending[0];
-                return !(o?.kind === "attack" && !!o.targetUnitId);
-              }),
-            )
-        : units;
-      // Resolve Melee Engagements
+                return o?.kind === "attack" && !!o.targetUnitId;
+              })
+              .sort(
+                (a, b) =>
+                  (armyRank?.get(a.unit.armyId) ?? 0) -
+                    (armyRank?.get(b.unit.armyId) ?? 0) ||
+                  b.init.mod - a.init.mod ||
+                  b.init.tie - a.init.tie,
+              )
+              .map(({ unit }) => unit)
+              .concat(
+                // Units without attack orders keep array order (they don't fight)
+                [...units].filter((u) => {
+                  const q = orders.get(u.id);
+                  const o = q?.active ?? q?.pending[0];
+                  return !(o?.kind === "attack" && !!o.targetUnitId);
+                }),
+              )
+          : units;
+      // M05 — `hold: defend` (CRB p.185 Defensive Combat). Applied after movement, so a
+      // formation that marched into position and then braced is not also credited with the
+      // brace for the march: at this scale one order is a unit's whole turn, and the brace is
+      // the defensive half of standing fast. +2 dodge to AC is written on the models directly —
+      // the same mechanism (and the same natural expiry) as the cleave and charge penalties:
+      // the next round's profile reseed rewrites the column, so it never persists by accident.
+      // The rule's other half, −4 on attacks, is inert here for the honest reason: a unit with
+      // a hold order makes no attack this turn, and the module refuses nothing more than it
+      // executes.
+      const defendingUnits = new Set<string>();
+      for (const unit of units) {
+        const queue = orders.get(unit.id);
+        const order = queue?.active ?? queue?.pending[0];
+        if (!order || order.kind !== "hold" || order.stance !== "defend") continue;
+        const [start, end] = unit.modelRange ?? [0, 0];
+        let braced = 0;
+        for (let i = start; i < end && i < pool.count; i++) {
+          if (((pool.status[i] ?? 0) & ModelStatus.dead) !== 0) continue;
+          if (pool.sys["ac"])
+            pool.sys["ac"][i] = (pool.sys["ac"][i] ?? 0) + 2;
+          braced++;
+        }
+        if (braced === 0) continue;
+        defendingUnits.add(unit.id);
+        emit({
+          subPhase: "melee",
+          type: "defend",
+          unitId: unit.id,
+          text: `${unit.name} fights defensively (+2 dodge AC this round)`,
+          data: { kind: "defensive-combat", models: braced, acBonus: 2 },
+        });
+      }
+
+      // Resolve Melee and Ranged Engagements (M05).
+      //
+      // One loop, two sub-phases: a unit whose compiled profile carries a ranged weapon shoots,
+      // everything else swings. The routing matters because the *maths* differs — the profile's
+      // attack routine for a ranged weapon is Dexterity-based, and `resolvePF1eAttacks` applies
+      // the −2-per-increment range penalty and the weapon's maximum range only when it is told
+      // the attack is ranged (§2.8/§2.9). Before this, an artillery order was resolved with melee
+      // maths in the melee phase, which is why the declared `shoot` sub-phase had no executor.
       for (const unit of meleeUnits) {
         const queue = orders.get(unit.id);
         const order = queue?.active ?? queue?.pending[0];
@@ -1260,6 +1551,11 @@ export function createMassBattlePf1e(
         if (!targetUnit) continue;
 
         const targetUnitIdx = units.indexOf(targetUnit);
+        const engageProfile = profiles.byUnitId.get(unit.id);
+        const shoots =
+          order.mode === "shot" ||
+          (order.mode !== "melee" && (engageProfile?.isRanged ?? false));
+        const engSubPhase = shoots ? "shoot" : "melee";
 
         // Collect attacker and defender model indices
         const [aStart, aEnd] = unit.modelRange ?? [0, 0];
@@ -1277,6 +1573,38 @@ export function createMassBattlePf1e(
             defenders.push(i);
         }
 
+        // A shot beyond the weapon's maximum range is refused *here*, by name, instead of
+        // resolving as zero attacks: the resolver declines those attacks silently (§2.9), and a
+        // GM reading a report needs to know the artillery was simply too far away.
+        if (shoots) {
+          const inc = engageProfile?.rangeIncrement ?? 0;
+          const maxInc = engageProfile?.maxIncrements ?? 0;
+          const from = anchorPosition(pool, unit);
+          const to = anchorPosition(pool, targetUnit);
+          if (from !== null && to !== null && inc > 0 && maxInc > 0) {
+            const distance = Math.hypot(to.x - from.x, to.y - from.y);
+            const increments = Math.ceil(distance / inc);
+            if (increments > maxInc) {
+              emit({
+                subPhase: "shoot",
+                type: "shot-refused",
+                unitId: unit.id,
+                targetUnitId: targetUnit.id,
+                at: { x: from.x, y: from.y },
+                text: `${unit.name} cannot shoot ${targetUnit.name}: ${Math.round(distance)} ft is ${increments} range increments, beyond the weapon's maximum of ${maxInc}`,
+                data: {
+                  kind: "shot-refused",
+                  distanceFeet: Math.round(distance * 100) / 100,
+                  rangeIncrement: inc,
+                  increments,
+                  maxIncrements: maxInc,
+                },
+              });
+              continue;
+            }
+          }
+        }
+
         // Resolve PF1e Attack Loop. Dice come from the turn PRNG forked per unit
         // (§5A), never Math.random() — a seeded turn must replay identically.
         const combatRes = resolvePF1eAttacks({
@@ -1285,6 +1613,11 @@ export function createMassBattlePf1e(
           defenders,
           registry,
           rng: forkRng(rng, unitIndex(unit), 1),
+          isRanged: shoots,
+          // The charge's +2 (CRB p.183) rides the routine it was declared for. A unit that
+          // both charged and braced cannot exist: charging is a move, bracing is a hold, and a
+          // unit has one order per turn — so the two modifiers never stack.
+          ...(chargedUnits.has(unit.id) ? { circumstanceMod: 2 } : {}),
         });
 
         // Hero Cleave (D-178). Once per hero *unit* per engagement, SRD Cleave grants
@@ -1295,7 +1628,22 @@ export function createMassBattlePf1e(
         // rejected model, D-130). `maxIterativeAttacks: 1` keeps it to exactly one
         // attack regardless of the hero's iterative routine. Until actor feat data
         // exists, cleave rides the same `isHeroUnit` gate as the leadership aura.
-        if (isHeroUnit(unit, ctx.leaderActors) && attackers.length > 0) {
+        //
+        // M10: the cleave is *reported*, not just folded. Its own metrics ride a
+        // `hero-cleave` event before the engagement line, so the TurnReport timeline and
+        // the Reports tab's type filter show that the extra swing happened and against
+        // which model — the merged numbers stay in the engagement total exactly as D-178
+        // booked them (one event per swing, one total per engagement, never double-counted).
+        let cleaveReport: {
+          metrics: Record<string, number>;
+          heroIdx: number;
+          defenderIdx: number;
+        } | null = null;
+        if (
+          !shoots &&
+          isHeroUnit(unit, ctx.leaderActors) &&
+          attackers.length > 0
+        ) {
           const heroIdx = attackers[0];
           if (heroIdx !== undefined) {
             const adjacentEnemy = grid
@@ -1322,6 +1670,14 @@ export function createMassBattlePf1e(
               for (const [key, value] of Object.entries(cleaveRes.metrics)) {
                 merged[key] = (merged[key] ?? 0) + (value as number);
               }
+              cleaveReport = {
+                metrics: { ...cleaveRes.metrics } as unknown as Record<
+                  string,
+                  number
+                >,
+                heroIdx,
+                defenderIdx: adjacentEnemy,
+              };
               // SRD Cleave penalty (R03/D-130): "You take a −2 penalty to your Armor
               // Class until your next turn." Seeding rewrites the ac column from the
               // profile every round before melee, so the penalty is naturally wiped at
@@ -1335,12 +1691,32 @@ export function createMassBattlePf1e(
 
         analytics.recordCombat(unit.id, combatRes.metrics);
 
+        if (cleaveReport !== null) {
+          emit({
+            subPhase: engSubPhase,
+            type: "hero-cleave",
+            unitId: unit.id,
+            targetUnitId: targetUnit.id,
+            at: {
+              x: pool.x[cleaveReport.heroIdx] ?? 0,
+              y: pool.y[cleaveReport.heroIdx] ?? 0,
+            },
+            text: `${unit.name} cleaves to an adjacent foe: ${cleaveReport.metrics.hits} hits, ${cleaveReport.metrics.netDamageDealt} damage, ${cleaveReport.metrics.killsCount} kills (−2 AC until the next round)`,
+            data: {
+              kind: "cleave",
+              heroModelIdx: cleaveReport.heroIdx,
+              defenderModelIdx: cleaveReport.defenderIdx,
+              ...cleaveReport.metrics,
+            },
+          });
+        }
+
         emit({
-          subPhase: "melee",
-          type: "attack",
+          subPhase: engSubPhase,
+          type: shoots ? "shot" : "attack",
           unitId: unit.id,
           targetUnitId: targetUnit.id,
-          text: `${unit.name} attacks ${targetUnit.name}: ${combatRes.metrics.hits} hits, ${combatRes.metrics.netDamageDealt} damage, ${combatRes.metrics.killsCount} kills`,
+          text: `${unit.name} ${shoots ? "shoots" : "attacks"} ${targetUnit.name}: ${combatRes.metrics.hits} hits, ${combatRes.metrics.netDamageDealt} damage, ${combatRes.metrics.killsCount} kills`,
           data: combatRes.metrics as unknown as Record<
             string,
             import("../core/documents").Json
@@ -1930,7 +2306,9 @@ export function combatStatsFromLeaderActor(
  * Numeric keys written by `combatStatsFromLeaderActor` — the write-back complement used
  * to persist hero-authored stats into the Unit document inside the resolve envelope.
  */
-export const LEADER_STAT_OVERLAY_KEYS: ReadonlyArray<keyof LeaderActorStatOverlay> = [
+export const LEADER_STAT_OVERLAY_KEYS: ReadonlyArray<
+  keyof LeaderActorStatOverlay
+> = [
   "hp",
   "move",
   "touchAc",

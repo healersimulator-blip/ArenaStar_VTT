@@ -1,162 +1,3176 @@
 {
-  "name": "PF1e Spells",
-  "type": "items",
-  "entries": [
-    {
-      "id": "fireball",
-      "name": "Fireball",
-      "keywords": ["evocation", "fire", "splash", "aoe"],
-      "data": {
-        "type": "item",
-        "name": "Fireball",
-        "system": {
-          "level": { "sorcererWitch": 5, "wizard": 5, "magus": 5, "alchemist": 5, "investigator": 5, "oracle": 5 },
-          "school": "evocation",
-          "descriptors": ["fire"],
-          "components": { "verbal": true, "somatic": true, "material": "a ball of bat guano and sulfur" },
-          "castingTime": "1 standard",
-          "range": "long (400 ft. + 40 ft./level)",
-          "area": "20-ft.-radius spread",
-          "duration": "instantaneous",
-          "savingThrow": "Reflex half",
-          "spellResistance": true,
-          "massBattle": {
-            "shape": "circle",
-            "radiusFeet": 20,
-            "rangeCategory": "long",
-            "saveType": "ref",
-            "halfOnSave": true,
-            "evasion": true,
-            "damageDiceCount": 1,
-            "damageDiceSides": 6,
-            "dicePerCasterLevel": true,
-            "maxDice": 10,
-            "damageType": "fire",
-            "notes": "The sim derives the save DC as 10 + spell level + casting ability modifier (spellSaveDc); it does not read a hard-coded DC. radiusFeet, saveType, halfOnSave and the dice are the fields the mass-battle order consumes."
-          }
-        },
-        "effects": []
-      }
+ "name": "PF1e Spells",
+ "type": "items",
+ "note": "M15: the spells pf1e-core ships. Every entry carries the published stat-block lines (school, descriptors, components, casting time, range, target or area, duration, saving throw, spell resistance) and an `automation` declaration. `automated` entries ship a `system.massBattle` block that parsePackSpellOrder validates and the mass-battle resolver executes; `descriptive` entries ship `automationNote` naming what the resolver cannot do and, where the intent is worth keeping, a `system.massBattleIntent` block that NO code reads. Entries are content: nothing in src/** imports this file — it reaches the app only as a file inside an imported package record in IndexedDB. tests/packages/pf1eContentPacks.test.ts pins the automated set against the module's registry, entry for entry.",
+ "entries": [
+  {
+   "id": "fireball",
+   "name": "Fireball",
+   "keywords": [
+    "evocation",
+    "fire",
+    "automated"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Fireball",
+    "system": {
+     "level": {
+      "sorcererWizard": 3,
+      "arcanist": 3,
+      "bloodrager": 3,
+      "magus": 3,
+      "skald": 3,
+      "witch": 3,
+      "investigator": 4
+     },
+     "school": "evocation",
+     "descriptors": [
+      "fire"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a ball of bat guano and sulfur"
+     },
+     "castingTime": "1 standard",
+     "range": "long (400 ft. + 40 ft./level)",
+     "area": "20-ft.-radius spread",
+     "duration": "instantaneous",
+     "savingThrow": "Reflex half",
+     "spellResistance": true,
+     "automation": "automated",
+     "massBattle": {
+      "shape": "circle",
+      "radiusFeet": 20,
+      "saveType": "ref",
+      "halfOnSave": true,
+      "evasion": true,
+      "damageDiceCount": 1,
+      "damageDiceSides": 6,
+      "damageType": "fire",
+      "rangeCategory": "long",
+      "dicePerCasterLevel": true,
+      "maxDice": 10,
+      "notes": "Transcribed from the Core Rulebook's Fireball entry (R02, D-151): 20-ft.-radius spread, long range, 1d6 points of fire damage per caster level (maximum 10d6), Reflex half for half damage, spell resistance yes. radiusFeet, rangeCategory, saveType, halfOnSave and the dice are the fields the mass-battle order consumes; the sim derives the save DC as 10 + spell level + casting ability modifier (spellSaveDc) and never reads a hard-coded DC. Evasion applies because the spell is Reflex half."
+     }
     },
-    {
-      "id": "burning-hands",
-      "name": "Burning Hands",
-      "keywords": ["evocation", "fire", "aoe"],
-      "data": {
-        "type": "item",
-        "name": "Burning Hands",
-        "system": {
-          "level": { "adept": 1, "arcanist": 1, "bloodrager": 1, "magus": 1, "occultist": 1, "shaman": 1, "sorcererWitch": 1, "wizard": 1 },
-          "school": "evocation",
-          "descriptors": ["fire"],
-          "components": { "verbal": true, "somatic": true },
-          "castingTime": "1 standard",
-          "range": "15 ft.",
-          "area": "cone-shaped burst",
-          "duration": "instantaneous",
-          "savingThrow": "Reflex half",
-          "spellResistance": true,
-          "massBattle": {
-            "shape": "cone",
-            "radiusFeet": 15,
-            "saveType": "ref",
-            "halfOnSave": true,
-            "evasion": true,
-            "damageDiceCount": 1,
-            "damageDiceSides": 4,
-            "dicePerCasterLevel": true,
-            "maxDice": 5,
-            "damageType": "fire",
-            "notes": "Transcribed from PRPG Core Rulebook pg. 251 (R02): 15-ft cone-shaped burst, 1d4 fire per caster level (maximum 5d4), Reflex half, SR yes. A cone starts at the caster and widens out; it does not designate a remote point of origin, so there is no rangeCategory. Evasion applies because the spell is Reflex half."
-          }
-        },
-        "effects": []
-      }
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "burning-hands",
+   "name": "Burning Hands",
+   "keywords": [
+    "evocation",
+    "fire",
+    "automated"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Burning Hands",
+    "system": {
+     "level": {
+      "adept": 1,
+      "arcanist": 1,
+      "bloodrager": 1,
+      "magus": 1,
+      "occultist": 1,
+      "shaman": 1,
+      "sorcererWizard": 1,
+      "witch": 1
+     },
+     "school": "evocation",
+     "descriptors": [
+      "fire"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true
+     },
+     "castingTime": "1 standard",
+     "range": "15 ft.",
+     "area": "cone-shaped burst",
+     "duration": "instantaneous",
+     "savingThrow": "Reflex half",
+     "spellResistance": true,
+     "automation": "automated",
+     "massBattle": {
+      "shape": "cone",
+      "radiusFeet": 15,
+      "saveType": "ref",
+      "halfOnSave": true,
+      "evasion": true,
+      "damageDiceCount": 1,
+      "damageDiceSides": 4,
+      "damageType": "fire",
+      "dicePerCasterLevel": true,
+      "maxDice": 5,
+      "notes": "Transcribed from PRPG Core Rulebook pg. 251 (R02): 15-ft cone-shaped burst, 1d4 fire per caster level (maximum 5d4), Reflex half, SR yes. A cone starts at the caster and widens out; it does not designate a remote point of origin, so there is no rangeCategory. Evasion applies because the spell is Reflex half."
+     }
     },
-    {
-      "id": "magic-missile",
-      "name": "Magic Missile",
-      "keywords": ["evocation", "force"],
-      "data": {
-        "type": "item",
-        "name": "Magic Missile",
-        "system": {
-          "level": { "sorcererWitch": 1, "wizard": 1, "magus": 1 },
-          "school": "evocation",
-          "descriptors": ["force"],
-          "components": { "verbal": true, "somatic": true },
-          "castingTime": "1 standard",
-          "range": "100 ft. + 10 ft./level",
-          "target": "one living or undead creature per two caster levels, no two more than 30 ft. apart",
-          "duration": "instantaneous",
-          "savingThrow": "none",
-          "spellResistance": true,
-          "massBattle": {
-            "shape": "missile",
-            "saveType": null,
-            "halfOnSave": false,
-            "autoHits": true,
-            "damageDiceCount": 1,
-            "damageDiceSides": 4,
-            "damageMod": 1,
-            "targetsPerTwoCasterLevels": true,
-            "damageType": "bludgeoning",
-            "notes": "Unerring: no attack roll, so no miss chance from concealment and no critical (SRD: 'These missiles always hit')."
-          }
-        },
-        "effects": []
-      }
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "cone-of-cold",
+   "name": "Cone of Cold",
+   "keywords": [
+    "conjuration",
+    "cold",
+    "creation",
+    "automated"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Cone of Cold",
+    "system": {
+     "level": {
+      "arcanist": 5,
+      "bloodrager": 5,
+      "magus": 5,
+      "sorcererWizard": 5,
+      "witch": 5
+     },
+     "school": "conjuration",
+     "descriptors": [
+      "cold",
+      "creation"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a small silver or crystal cup"
+     },
+     "castingTime": "1 standard",
+     "range": "60 ft.",
+     "area": "60-ft. cone",
+     "duration": "instantaneous",
+     "savingThrow": "Reflex half",
+     "spellResistance": true,
+     "automation": "automated",
+     "massBattle": {
+      "shape": "cone",
+      "radiusFeet": 60,
+      "saveType": "ref",
+      "halfOnSave": true,
+      "evasion": true,
+      "damageDiceCount": 1,
+      "damageDiceSides": 6,
+      "damageType": "cold",
+      "dicePerCasterLevel": true,
+      "maxDice": 10,
+      "notes": "Transcribed from the Core Rulebook's Cone of Cold entry: a 60-ft. cone, 1d6 points of cold damage per caster level (maximum 10d6), Reflex half, spell resistance yes. The cone's length and the spell's range are the same published number, and a cone shoots away from the caster, so there is no rangeCategory (CRB pp.213-214). The freezing of water and the fragility of cold-immunity-less objects are not modelled at this scale."
+     }
     },
-    {
-      "id": "shield",
-      "name": "Shield",
-      "keywords": ["abjuration", "force", "defense"],
-      "data": {
-        "type": "item",
-        "name": "Shield",
-        "system": {
-          "level": { "sorcererWitch": 1, "wizard": 1, "skald": 1, "warpriest": 1 },
-          "school": "abjuration",
-          "descriptors": ["force"],
-          "components": { "verbal": true, "somatic": true },
-          "castingTime": "1 standard",
-          "range": "personal",
-          "target": "you",
-          "duration": "1 min./level",
-          "savingThrow": "none",
-          "spellResistance": false,
-          "massBattle": {
-            "buff": { "ac": { "type": "shield", "value": 4 } },
-            "notes": "Only the +4 shield bonus to AC is encoded; the SRD's shield-vs-melee and CMD-vs-trip/disarm lines are not modelled by the sim yet (Gap List §2)."
-          }
-        },
-        "effects": []
-      }
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "lightning-bolt",
+   "name": "Lightning Bolt",
+   "keywords": [
+    "conjuration",
+    "electricity",
+    "creation",
+    "automated"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Lightning Bolt",
+    "system": {
+     "level": {
+      "arcanist": 3,
+      "bloodrager": 3,
+      "magus": 3,
+      "skald": 3,
+      "sorcererWizard": 3,
+      "witch": 3
+     },
+     "school": "conjuration",
+     "descriptors": [
+      "electricity",
+      "creation"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a fur and a rod of amber, crystal or glass"
+     },
+     "castingTime": "1 standard",
+     "range": "100 ft. + 10 ft./level",
+     "area": "line from where you release the point of origin, 100 ft. long + 10 ft./level, 5 ft. wide",
+     "duration": "instantaneous",
+     "savingThrow": "Reflex half",
+     "spellResistance": true,
+     "automation": "automated",
+     "massBattle": {
+      "shape": "line",
+      "radiusFeet": 100,
+      "saveType": "ref",
+      "halfOnSave": true,
+      "evasion": true,
+      "damageDiceCount": 1,
+      "damageDiceSides": 6,
+      "damageType": "electricity",
+      "lengthFeetPerCasterLevel": 10,
+      "widthFeet": 5,
+      "dicePerCasterLevel": true,
+      "maxDice": 10,
+      "notes": "Transcribed from the Core Rulebook's Lightning Bolt entry: a line 100 ft. long + 10 ft. per caster level and 5 ft. wide, 1d6 points of electricity damage per caster level (maximum 10d6), Reflex half, spell resistance yes. radiusFeet is the line's BASE length and lengthFeetPerCasterLevel the per-level extension, because '+X ft./level' ranges count the 1st level (unlike close/medium/long, whose arithmetic spellRangeFeet owns). The bolt's spread into conductive liquid and its 10%-per-5-ft. fire chance are not modelled."
+     }
     },
-    {
-      "id": "true-strike",
-      "name": "True Strike",
-      "keywords": ["divination", "bonus", "attack"],
-      "data": {
-        "type": "item",
-        "name": "True Strike",
-        "system": {
-          "level": { "bard": 1, "sorcererWitch": 1, "wizard": 1, "magus": 1, "investigator": 1 },
-          "school": "divination",
-          "components": { "verbal": true, "somatic": true },
-          "castingTime": "1 standard",
-          "range": "personal",
-          "target": "you",
-          "duration": "1 round",
-          "savingThrow": "none",
-          "spellResistance": false,
-          "massBattle": {
-            "buff": { "attack": { "type": "insight", "value": 20 } },
-            "notes": "+20 insight bonus on the next attack roll; insight bonuses stack unless they share a source, so the sim must apply it once and expire it (Gap List §2.4)."
-          }
-        },
-        "effects": []
-      }
-    }
-  ]
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "acid-arrow",
+   "name": "Acid Arrow",
+   "keywords": [
+    "conjuration",
+    "acid",
+    "creation",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Acid Arrow",
+    "system": {
+     "level": {
+      "arcanist": 1,
+      "magus": 1,
+      "sorcererWizard": 1,
+      "summoner": 1,
+      "witch": 1
+     },
+     "school": "conjuration",
+     "descriptors": [
+      "acid",
+      "creation"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "powdered rhubarb leaf and an adder's tongue"
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "target": "one creature",
+     "duration": "instantaneous + 1 round/level",
+     "savingThrow": "none",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "a ranged touch attack against one creature: the mass resolver has no single-target spell attack path, only areas (D-1/D-151), so the first-round 1d4 + 1d4 per three levels and the follow-up round have nothing to execute against a formation."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "acid-armor",
+   "name": "Acid Armor",
+   "keywords": [
+    "conjuration",
+    "acid",
+    "creation",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Acid Armor",
+    "system": {
+     "level": {
+      "arcanist": 2,
+      "magus": 2,
+      "sorcererWizard": 2
+     },
+     "school": "conjuration",
+     "descriptors": [
+      "acid",
+      "creation"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a piece of leather that has been soaked in acid"
+     },
+     "castingTime": "1 standard",
+     "range": "personal",
+     "target": "you",
+     "duration": "1 min./level",
+     "savingThrow": "Reflex partial",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "a personal buff plus a reaction on being hit; buffs and readied reactions are D01/temporary-effect work, not a resolveTurn area."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "aid",
+   "name": "Aid",
+   "keywords": [
+    "enchantment",
+    "emotion",
+    "mind-affecting",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Aid",
+    "system": {
+     "level": {
+      "cleric": 2,
+      "inquisitor": 2,
+      "oracle": 2,
+      "paladin": 2,
+      "skald": 2,
+      "warpriest": 2
+     },
+     "school": "enchantment",
+     "descriptors": [
+      "emotion",
+      "mind-affecting"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a tiny bandage"
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "target": "you and all allies within 50 ft.",
+     "duration": "1 min./level",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "a +1 attack/roll bonus and temporary hit points: a duration-based buff applied to a set of allies needs the timed-effect channel (D01), and the mass resolver applies nothing that lasts past the turn."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "animate-dead",
+   "name": "Animate Dead",
+   "keywords": [
+    "necromancy",
+    "death",
+    "evil",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Animate Dead",
+    "system": {
+     "level": {
+      "arcanist": 5,
+      "cleric": 5,
+      "occultist": 5,
+      "sorcererWizard": 5,
+      "witch": 5
+     },
+     "school": "necromancy",
+     "descriptors": [
+      "death",
+      "evil"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a cast or lead figurine worth 25 gp per Hit Die of the undead created"
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "target": "one corpse/level",
+     "duration": "instantaneous",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "creates persistent thralls with their own initiative; the sim has no summon/tracking state, and D-130 removed invented mass-scale bookkeeping rather than faking it."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "bane",
+   "name": "Bane",
+   "keywords": [
+    "enchantment",
+    "emotion",
+    "fear",
+    "mind-affecting",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Bane",
+    "system": {
+     "level": {
+      "antipaladin": 1,
+      "cleric": 1,
+      "inquisitor": 1,
+      "oracle": 1,
+      "skald": 1
+     },
+     "school": "enchantment",
+     "descriptors": [
+      "emotion",
+      "fear",
+      "mind-affecting"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "area": "all enemies within 50 ft.",
+     "duration": "1 min./level",
+     "savingThrow": "Will negates",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "a −1 penalty on attack and save rolls over a duration, negated by a Will save; penalties that persist across turns are D01's timed-effect work."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "barkskin",
+   "name": "Barkskin",
+   "keywords": [
+    "transmutation",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Barkskin",
+    "system": {
+     "level": {
+      "cleric": 2,
+      "druid": 2,
+      "hunter": 2,
+      "ranger": 2,
+      "shaman": 2,
+      "skald": 2,
+      "warpriest": 2
+     },
+     "school": "transmutation",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a handful of dirt from a freshly dug grave",
+      "focus": "a sprig of mistletoe"
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "creature touched",
+     "duration": "10 min./level",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "an +1 natural armor bonus per four caster levels on one ally: a natural-armor write that must revert is D01, and the mass scale has no per-model temporary bonus."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "bear-endurance",
+   "name": "Bear's Endurance",
+   "keywords": [
+    "transmutation",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Bear's Endurance",
+    "system": {
+     "level": {
+      "alchemist": 2,
+      "antipaladin": 2,
+      "bloodrager": 2,
+      "cleric": 2,
+      "druid": 2,
+      "ranger": 2,
+      "skald": 2,
+      "sorcererWizard": 2,
+      "warpriest": 2
+     },
+     "school": "transmutation",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "creature touched",
+     "duration": "1 min./level",
+     "savingThrow": "Will negates (harmless)",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "an enhancement bonus to Constitution, which at mass scale rewrites several derived columns (hp, Fort, Con-based saves) and must revert on expiry — D01's temporary-effect work."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "bless",
+   "name": "Bless",
+   "keywords": [
+    "enchantment",
+    "emotion",
+    "mind-affecting",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Bless",
+    "system": {
+     "level": {
+      "cleric": 1,
+      "inquisitor": 1,
+      "oracle": 1,
+      "paladin": 1,
+      "skald": 1,
+      "warpriest": 1
+     },
+     "school": "enchantment",
+     "descriptors": [
+      "emotion",
+      "mind-affecting"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "area": "all allies within 50 ft.",
+     "duration": "1 min./level",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "a +1 morale bonus to attack and weapon damage over a duration: the mass resolver's turn is atomic, so nothing carries a morale bonus into the next round."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "blindness-deafness",
+   "name": "Blindness/Deafness",
+   "keywords": [
+    "transmutation",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Blindness/Deafness",
+    "system": {
+     "level": {
+      "arcanist": 2,
+      "bard": 2,
+      "bloodrager": 2,
+      "occultist": 2,
+      "sorcererWizard": 2,
+      "witch": 2
+     },
+     "school": "transmutation",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "target": "one living creature",
+     "duration": "permanent",
+     "savingThrow": "Will negates",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "a permanent condition on one creature. The condition columns exist (C02/C03) but the mass resolver applies them per formation for a turn only; permanent, save-negated conditions are tactical-scale state."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "bull-strength",
+   "name": "Bull's Strength",
+   "keywords": [
+    "transmutation",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Bull's Strength",
+    "system": {
+     "level": {
+      "alchemist": 2,
+      "antipaladin": 2,
+      "bloodrager": 2,
+      "cleric": 2,
+      "druid": 2,
+      "magus": 2,
+      "ranger": 2,
+      "skald": 2,
+      "sorcererWizard": 2,
+      "warpriest": 2
+     },
+     "school": "transmutation",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "creature touched",
+     "duration": "1 min./level",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "an enhancement bonus to Strength, which the strategic profile compiles from once at deploy; recompiling a profile per turn is D01's and P07's temporary-modifier work, not a resolveTurn payload."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "call-lightning",
+   "name": "Call Lightning",
+   "keywords": [
+    "conjuration",
+    "electricity",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Call Lightning",
+    "system": {
+     "level": {
+      "cleric": 3,
+      "druid": 3,
+      "hunter": 3,
+      "ranger": 3,
+      "shaman": 3,
+      "witch": 3
+     },
+     "school": "conjuration",
+     "descriptors": [
+      "electricity"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a feather from a storm petrel",
+      "focus": "a rod struck by lightning"
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "area": "one cloud (see text)",
+     "duration": "1 min./level",
+     "savingThrow": "Reflex half",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "a persistent cloud the caster directs each round (40-ft.-tall, 10-ft.-radius cylinder; 30 ft. of movement per standard action). Sustained areas with per-round re-aiming need the channel and a persistent-area concept the mass resolver does not have; the base 4d6 + 1d6 per three levels is a flat figure the resolver cannot express as a fixed-die area without lying about the cap."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "chain-lightning",
+   "name": "Chain Lightning",
+   "keywords": [
+    "evocation",
+    "electricity",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Chain Lightning",
+    "system": {
+     "level": {
+      "arcanist": 6,
+      "bloodrager": 6,
+      "magus": 6,
+      "sorcererWizard": 6
+     },
+     "school": "evocation",
+     "descriptors": [
+      "electricity"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a bit of fur and a rod of amber, crystal or glass"
+     },
+     "castingTime": "1 standard",
+     "range": "400 ft. + 40 ft./level",
+     "target": "one creature/level, no two of which can be more than 30 ft. apart",
+     "duration": "instantaneous",
+     "savingThrow": "Reflex half",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "the arc's target selection (jump to the nearest creatures at full damage, none twice) is a graph walk the mass resolver has no notion of; a formation-level area approximation would invent a rule (D-1's standing prohibition)."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "charm-animal",
+   "name": "Charm Animal",
+   "keywords": [
+    "enchantment",
+    "charm",
+    "emotion",
+    "mind-affecting",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Charm Animal",
+    "system": {
+     "level": {
+      "druid": 1,
+      "ranger": 1,
+      "shaman": 1,
+      "skald": 1,
+      "witch": 1
+     },
+     "school": "enchantment",
+     "descriptors": [
+      "charm",
+      "emotion",
+      "mind-affecting"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "target": "one animal",
+     "duration": "1 hour/level",
+     "savingThrow": "Will negates",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "a duration-long attitude change on one creature: the mass sim has no faction-ownership change, no save-ends-and-tries-again loop, and no creature-level relationship."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "charm-person",
+   "name": "Charm Person",
+   "keywords": [
+    "enchantment",
+    "charm",
+    "emotion",
+    "mind-affecting",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Charm Person",
+    "system": {
+     "level": {
+      "arcanist": 1,
+      "bard": 1,
+      "bloodrager": 1,
+      "inquisitor": 1,
+      "investigator": 1,
+      "magus": 1,
+      "medium": 1,
+      "occultist": 1,
+      "oracle": 1,
+      "sorcererWizard": 1,
+      "witch": 1
+     },
+     "school": "enchantment",
+     "descriptors": [
+      "charm",
+      "emotion",
+      "mind-affecting"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "target": "one humanoid",
+     "duration": "1 hour/level",
+     "savingThrow": "Will negates",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "see Charm Person's mass-scale counterpart problem in charm-animal: an hour-per-level attitude change is a relationship, not a turn of damage."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "cloudkill",
+   "name": "Cloudkill",
+   "keywords": [
+    "necromancy",
+    "death",
+    "fog",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Cloudkill",
+    "system": {
+     "level": {
+      "ranger": 5,
+      "sorcererWizard": 5,
+      "witch": 5
+     },
+     "school": "necromancy",
+     "descriptors": [
+      "death",
+      "fog"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a live toad and a mixture of blood and arsenic"
+     },
+     "castingTime": "1 standard",
+     "range": "medium (100 ft. + 10 ft./level)",
+     "area": "cloud spreading in a 20-ft. radius per round",
+     "duration": "1 round/level",
+     "savingThrow": "Fortitude partial",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "a moving, rolling cloud that keeps damaging as it travels and sinks into holes. Both the movement and the Fortitude-negates-then-dies state are outside the one-shot area the resolver implements."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "command",
+   "name": "Command",
+   "keywords": [
+    "enchantment",
+    "language-dependent",
+    "mind-affecting",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Command",
+    "system": {
+     "level": {
+      "cleric": 1,
+      "inquisitor": 1,
+      "oracle": 1,
+      "paladin": 1,
+      "skald": 1
+     },
+     "school": "enchantment",
+     "descriptors": [
+      "language-dependent",
+      "mind-affecting"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "target": "one living creature",
+     "duration": "1 round",
+     "savingThrow": "Will negates",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "one creature loses its action for a round. The mass scale resolves formations, and refusing a unit's order for a round would be a new strategic rule rather than a pack payload."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "contagion",
+   "name": "Contagion",
+   "keywords": [
+    "necromancy",
+    "evil",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Contagion",
+    "system": {
+     "level": {
+      "cleric": 5,
+      "druid": 5,
+      "hunter": 5,
+      "oracle": 5,
+      "shaman": 5,
+      "witch": 5
+     },
+     "school": "necromancy",
+     "descriptors": [
+      "evil"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "living creature touched",
+     "duration": "instantaneous",
+     "savingThrow": "Fortitude initial",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "a delayed disease with its own save schedule and onset; the sim has no disease state, and D-1's rule is that an unavailable mechanic is refused rather than approximated."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "create-food-and-water",
+   "name": "Create Food and Water",
+   "keywords": [
+    "conjuration",
+    "creation",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Create Food and Water",
+    "system": {
+     "level": {
+      "cleric": 1,
+      "druid": 1,
+      "orbam": 1,
+      "shaman": 1,
+      "warpriest": 1
+     },
+     "school": "conjuration",
+     "descriptors": [
+      "creation"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "area": "5 gallons/level plus 1 lb. of food per person",
+     "duration": "instantaneous",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "non-combat creation. It ships so the compendium search finds it, and because supply is deliberately unmodelled at mass scale (validateOrder refuses `supply` orders by name)."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "create-water",
+   "name": "Create Water",
+   "keywords": [
+    "conjuration",
+    "creation",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Create Water",
+    "system": {
+     "level": {
+      "cleric": 1,
+      "druid": 1,
+      "orbam": 1,
+      "ranger": 1,
+      "shaman": 1,
+      "warpriest": 1
+     },
+     "school": "conjuration",
+     "descriptors": [
+      "creation"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "area": "2 gallons/level",
+     "duration": "instantaneous",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "a cantrip with no combat effect; content for the sheet and the search index, not the resolver."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "darkvision",
+   "name": "Darkvision",
+   "keywords": [
+    "divination",
+    "arcane",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Darkvision",
+    "system": {
+     "level": {
+      "alchemist": 2,
+      "arcanist": 2,
+      "bloodrager": 2,
+      "druid": 2,
+      "hunter": 2,
+      "magus": 2,
+      "ranger": 2,
+      "sorcererWizard": 2
+     },
+     "school": "divination",
+     "descriptors": [
+      "arcane"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a bit of bat fur"
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "creature touched",
+     "duration": "10 min./level",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "a sensory duration. The sim's sight model is the scene's light and the walls' sight flags, not per-creature vision modes."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "daylight",
+   "name": "Daylight",
+   "keywords": [
+    "evocation",
+    "light",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Daylight",
+    "system": {
+     "level": {
+      "alchemist": 3,
+      "bloodrager": 3,
+      "cleric": 3,
+      "druid": 3,
+      "inquisitor": 2,
+      "magus": 3,
+      "oracle": 3,
+      "paladin": 3,
+      "ranger": 3,
+      "sorcererWizard": 3,
+      "witch": 3
+     },
+     "school": "evocation",
+     "descriptors": [
+      "light"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "focus": "a firefly"
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "object touched",
+     "duration": "10 min./level",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "an area of light with counterspell interactions; the scene's lighting is document state (E-group), not a spell payload."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "death-knell",
+   "name": "Death Knell",
+   "keywords": [
+    "necromancy",
+    "death",
+    "evil",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Death Knell",
+    "system": {
+     "level": {
+      "cleric": 6,
+      "oracle": 6,
+      "witch": 6
+     },
+     "school": "necromancy",
+     "descriptors": [
+      "death",
+      "evil"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "target": "one helpless or dying living creature",
+     "duration": "instantaneous",
+     "savingThrow": "Will negates",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "kills a dying creature and grants the caster a level-bonus boost: the target condition ('dying or helpless') and the temporary level are both state the mass resolver does not carry."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "delay-poison",
+   "name": "Delay Poison",
+   "keywords": [
+    "conjuration",
+    "healing",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Delay Poison",
+    "system": {
+     "level": {
+      "alchemist": 1,
+      "cleric": 1,
+      "druid": 1,
+      "inquisitor": 1,
+      "paladin": 1,
+      "ranger": 1,
+      "shaman": 1,
+      "warpriest": 1
+     },
+     "school": "conjuration",
+     "descriptors": [
+      "healing"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "creature touched",
+     "duration": "10 min./level",
+     "savingThrow": "Fort negates (harmless)",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "suppression of a condition for a duration; the sim has no poison track for a model, so there is nothing to delay."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "detect-magic",
+   "name": "Detect Magic",
+   "keywords": [
+    "divination",
+    "arcane",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Detect Magic",
+    "system": {
+     "level": {
+      "bard": 0,
+      "cleric": 0,
+      "druid": 0,
+      "magus": 0,
+      "occultist": 0,
+      "oracle": 0,
+      "ranger": 0,
+      "sorcererWizard": 0,
+      "witch": 0
+     },
+     "school": "divination",
+     "descriptors": [
+      "arcane"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "60 ft.",
+     "area": "cone-shaped emanation",
+     "duration": "concentration, up to 1 min./level (D)",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "information, not damage. It ships because the compendium is the source the sheets read, and because cone-shaped *detection* must not be mistaken for a cone-shaped burst by a future loader: the entry carries no massBattle block for exactly that reason."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "dimensional-anchor",
+   "name": "Dimensional Anchor",
+   "keywords": [
+    "abjuration",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Dimensional Anchor",
+    "system": {
+     "level": {
+      "cleric": 4,
+      "magus": 4,
+      "occultist": 4,
+      "sorcererWizard": 4
+     },
+     "school": "abjuration",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "medium (100 ft. + 10 ft./level)",
+     "target": "one creature",
+     "duration": "1 min./level",
+     "savingThrow": "Will negates (harmless)",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "blocks teleportation on one creature for a duration; no mass-scale state represents 'cannot teleport'."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "dispel-magic",
+   "name": "Dispel Magic",
+   "keywords": [
+    "abjuration",
+    "arcane",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Dispel Magic",
+    "system": {
+     "level": {
+      "arcanist": 2,
+      "bard": 2,
+      "bloodrager": 2,
+      "cleric": 2,
+      "druid": 2,
+      "inquisitor": 2,
+      "magus": 2,
+      "medium": 2,
+      "occultist": 2,
+      "oracle": 2,
+      "ranger": 2,
+      "sorcererWizard": 2,
+      "witch": 2
+     },
+     "school": "abjuration",
+     "descriptors": [
+      "arcane"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "medium (100 ft. + 10 ft./level)",
+     "target": "one spellcaster, creature or object under a spell, or a spell effect",
+     "duration": "instantaneous",
+     "savingThrow": "none",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "the check is caster level + 1d20 against 11 + the target's caster level, and it ends effects rather than dealing damage: with no timed effects in the mass resolver there is nothing to end (D01's channel is the consumer this spell waits for)."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "enlarge-person",
+   "name": "Enlarge Person",
+   "keywords": [
+    "transmutation",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Enlarge Person",
+    "system": {
+     "level": {
+      "alchemist": 1,
+      "arcanist": 1,
+      "bloodrager": 1,
+      "magus": 1,
+      "sorcererWizard": 1
+     },
+     "school": "transmutation",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a pinch of iron filings"
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "target": "one humanoid creature touched",
+     "duration": "1 min./level",
+     "savingThrow": "Fort negates (harmless)",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "changes size, reach and space, and the mass geometry caches size at deploy (D-180); an in-turn size change with reversion is D01 work."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "entangle",
+   "name": "Entangle",
+   "keywords": [
+    "transmutation",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Entangle",
+    "system": {
+     "level": {
+      "druid": 1,
+      "hunter": 1,
+      "ranger": 1,
+      "shaman": 1,
+      "witch": 1
+     },
+     "school": "transmutation",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "medium (100 ft. + 10 ft./level)",
+     "area": "40-ft. square/level",
+     "duration": "1 round/level",
+     "savingThrow": "Reflex negates",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "a per-square area that restrains for rounds; the mass resolver has no prone/restrained state that persists per model, and D-1 deleted the old scatter-area version of exactly this spell."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "fear",
+   "name": "Fear",
+   "keywords": [
+    "necromancy",
+    "emotion",
+    "fear",
+    "mind-affecting",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Fear",
+    "system": {
+     "level": {
+      "arcanist": 3,
+      "bloodrager": 3,
+      "inquisitor": 3,
+      "magus": 3,
+      "occultist": 3,
+      "shaman": 3,
+      "skald": 3,
+      "sorcererWizard": 3,
+      "witch": 3
+     },
+     "school": "necromancy",
+     "descriptors": [
+      "emotion",
+      "fear",
+      "mind-affecting"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "area": "one or more creatures within 30 ft., no two within 10 ft.",
+     "duration": "1 round",
+     "savingThrow": "Will partial",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "spreads to a growing set of creatures and makes them flee for a round; the target-set walk and the flee state are not area payloads, and this module's morale phase is the leadership aura, nothing else."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "false-life",
+   "name": "False Life",
+   "keywords": [
+    "necromancy",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "False Life",
+    "system": {
+     "level": {
+      "arcanist": 1,
+      "bloodrager": 1,
+      "magus": 1,
+      "sorcererWizard": 1,
+      "warpriest": 1
+     },
+     "school": "necromancy",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a drop of blood"
+     },
+     "castingTime": "1 standard",
+     "range": "personal",
+     "target": "you",
+     "duration": "1 hour/level",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "temporary hit points (1d10 + 1 per level, max 10): the tempHp module owns that at tactical scale and the mass pool has no per-model temp-hp column."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "find-traps",
+   "name": "Find Traps",
+   "keywords": [
+    "divination",
+    "scrying",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Find Traps",
+    "system": {
+     "level": {
+      "brawler": 1,
+      "inquisitor": 1,
+      "magus": 1,
+      "ranger": 1,
+      "rogue": 1,
+      "skald": 1,
+      "summoner": 1
+     },
+     "school": "divination",
+     "descriptors": [
+      "scrying"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "target": "confers an ability bonus on a Search check",
+     "duration": "1 min./level",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "a skill bonus. There is no skill system at mass scale, so the entry is content only."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "flame-strike",
+   "name": "Flame Strike",
+   "keywords": [
+    "evocation",
+    "fire",
+    "good",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Flame Strike",
+    "system": {
+     "level": {
+      "cleric": 6,
+      "inquisitor": 6,
+      "oracle": 6,
+      "warpriest": 6
+     },
+     "school": "evocation",
+     "descriptors": [
+      "fire",
+      "good"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "long (400 ft. + 40 ft./level)",
+     "area": "10-ft.-radius, 40-ft.-tall cylinder",
+     "duration": "instantaneous",
+     "savingThrow": "Fort half",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "Fortitude for half, not Reflex, and a cylinder the resolver cannot shape; it stays in the pack because the C05 tests document which of the four shapes the loader accepts and why this one of the Cleric's signature blasts is not among them."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "flare",
+   "name": "Flare",
+   "keywords": [
+    "transmutation",
+    "fire",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Flare",
+    "system": {
+     "level": {
+      "druid": 0,
+      "sorcererWizard": 0
+     },
+     "school": "transmutation",
+     "descriptors": [
+      "fire"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "target": "one creature",
+     "duration": "1 round",
+     "savingThrow": "Will negates",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "a cantrip that dazes one creature for a round; single-target conditions are not mass payloads."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "floating-disc",
+   "name": "Floating Disc",
+   "keywords": [
+    "conjuration",
+    "creation",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Floating Disc",
+    "system": {
+     "level": {
+      "arcanist": 1,
+      "magus": 1,
+      "sorcererWizard": 1,
+      "witch": 1
+     },
+     "school": "conjuration",
+     "descriptors": [
+      "creation"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a drop of mercury"
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "area": "one disc 5 ft. in diameter and 2 in. thick",
+     "duration": "1 hr./level",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "carries up to 500 lb. for an hour: pure utility, and it ships so the compendium's cantrip/1st-level coverage is not just damage."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "gentle-repose",
+   "name": "Gentle Repose",
+   "keywords": [
+    "necromancy",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Gentle Repose",
+    "system": {
+     "level": {
+      "cleric": 0,
+      "druid": 0,
+      "ranger": 0,
+      "witch": 0
+     },
+     "school": "necromancy",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a pinch of grave dirt"
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "corpse touched",
+     "duration": "1 day/level",
+     "savingThrow": "Will negates (harmless)",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "preserves a corpse. No mass-scale state models a body, so the entry documents the spell's absence from resolution rather than the spell's absence from the pack."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "ghost-sound",
+   "name": "Ghost Sound",
+   "keywords": [
+    "illusion",
+    "glamer",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Ghost Sound",
+    "system": {
+     "level": {
+      "bard": 0,
+      "skald": 0,
+      "sorcererWizard": 0
+     },
+     "school": "illusion",
+     "descriptors": [
+      "glamer"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "area": "burst emanating from you, with a 5-ft./level radius and a 10-ft.-tall cylinder",
+     "duration": "1 min./level",
+     "savingThrow": "Will disbelieved",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "a figment with a disbelief save; the sim has no sensory/auditory state and D-1 keeps no fake-audio rules at mass scale."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "goodberry",
+   "name": "Good Berry",
+   "keywords": [
+    "transmutation",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Good Berry",
+    "system": {
+     "level": {
+      "druid": 1,
+      "ranger": 1,
+      "shaman": 1
+     },
+     "school": "transmutation",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "up to 10 berries touched",
+     "duration": "1 hour/level",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "one berry cures 1 hp of lethal and nonlethal damage and feeds a creature: a resource ledger, not an area."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "grease",
+   "name": "Grease",
+   "keywords": [
+    "transmutation",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Grease",
+    "system": {
+     "level": {
+      "alchemist": 1,
+      "arcanist": 1,
+      "magus": 1,
+      "sorcererWizard": 1,
+      "witch": 1
+     },
+     "school": "transmutation",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a pig's foot",
+      "focus": "a bit of cheese"
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "area": "one 10-ft. square or 1 object",
+     "duration": "1 min./level",
+     "savingThrow": "Reflex negates",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "a fixed 10-ft. square that makes creatures prone each round they enter it; the per-round re-entry check is sustained-area work (see call-lightning)."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "guidance",
+   "name": "Guidance",
+   "keywords": [
+    "divination",
+    "emotion",
+    "mind-affecting",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Guidance",
+    "system": {
+     "level": {
+      "cleric": 0,
+      "druid": 0,
+      "orbam": 0,
+      "shaman": 0,
+      "warpriest": 0
+     },
+     "school": "divination",
+     "descriptors": [
+      "emotion",
+      "mind-affecting"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "target": "one creature",
+     "duration": "concentration, up to 1 level (D)",
+     "savingThrow": "Will negates (harmless)",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "a +1 competence bonus on one attack roll, save or check before the end of the target's next turn: the mass resolver takes no per-roll intervention (the pendingRoll path is tactical, C/P groups)."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "haste",
+   "name": "Haste",
+   "keywords": [
+    "transmutation",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Haste",
+    "system": {
+     "level": {
+      "alchemist": 3,
+      "arcanist": 3,
+      "bloodrager": 3,
+      "magus": 3,
+      "occultist": 3,
+      "skald": 3,
+      "sorcererWizard": 3,
+      "witch": 3
+     },
+     "school": "transmutation",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a grasshopper's hind leg",
+      "focus": "a drop of citrus oil"
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "target": "one creature/level, no two within 30 ft.",
+     "duration": "1 round/level",
+     "savingThrow": "Will negates (harmless)",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "+1 to hit, +1 AC, +1 Reflex, an extra attack and an increased speed for rounds. The strategic engine's move budget is compiled from unit-type stats at deploy, so a per-turn pace rewrite (plus the fatigue round that follows) is D01/P07 work, not an area payload."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "heal",
+   "name": "Heal",
+   "keywords": [
+    "conjuration",
+    "healing",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Heal",
+    "system": {
+     "level": {
+      "cleric": 6,
+      "oracle": 6,
+      "warpriest": 6
+     },
+     "school": "conjuration",
+     "descriptors": [
+      "healing"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a drop of holy water"
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "creature touched",
+     "duration": "instantaneous",
+     "savingThrow": "Will half; Fortitude half (see text)",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "the only spell in the pack whose damage uses a caster-level cap rather than dice (10 + 1 per level, and it removes ability damage, conditions and curse effects). The M06 heal path runs off authored fast-healing/regeneration per model, so a targeted burst of healing has no field to land in; the save line above is the SRD's 'spell resistance as noted' row, transcribed rather than tidied."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "heroism",
+   "name": "Heroism",
+   "keywords": [
+    "enchantment",
+    "emotion",
+    "mind-affecting",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Heroism",
+    "system": {
+     "level": {
+      "arcanist": 1,
+      "bard": 1,
+      "bloodrager": 1,
+      "investigator": 1,
+      "skald": 1,
+      "warpriest": 1
+     },
+     "school": "enchantment",
+     "descriptors": [
+      "emotion",
+      "mind-affecting"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "creature touched",
+     "duration": "10 min./level",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "+2 morale bonus on attacks, damage, saves and checks for 10 minutes: the same timed-buff shape as bless, and the mass resolver's morale phase is the leadership aura and nothing else."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "ice-storm",
+   "name": "Ice Storm",
+   "keywords": [
+    "evocation",
+    "cold",
+    "water",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Ice Storm",
+    "system": {
+     "level": {
+      "arcanist": 4,
+      "bloodrager": 4,
+      "druid": 4,
+      "magus": 4,
+      "ranger": 4,
+      "sorcererWizard": 4,
+      "witch": 4
+     },
+     "school": "evocation",
+     "descriptors": [
+      "cold",
+      "water"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a pinch of dust and a drop of water"
+     },
+     "castingTime": "1 standard",
+     "range": "long (400 ft. + 40 ft./level)",
+     "area": "40-ft.-radius burst",
+     "duration": "instantaneous",
+     "savingThrow": "Reflex negates (see text)",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "two damage types on one area (2d6 bludgeoning plus 1d6 cold per two caster levels) plus a 'hail damages objects and shatters' clause. The resolver's area payload carries ONE dice set and ONE damage type, so an entry that flattened it to 2d6 bludgeoning would be a wrong number, not a simplification — see D-1."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "identify",
+   "name": "Identify",
+   "keywords": [
+    "divination",
+    "arcane",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Identify",
+    "system": {
+     "level": {
+      "alchemist": 1,
+      "arcanist": 1,
+      "magus": 1,
+      "occultist": 1,
+      "sorcererWizard": 1
+     },
+     "school": "divination",
+     "descriptors": [
+      "arcane"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a pearl worth 100 gp and an owl feather"
+     },
+     "castingTime": "1 standard",
+     "range": "personal",
+     "target": "you",
+     "duration": "instantaneous",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "reveals magic on one object for 10 minutes per item; needs the item state of the sheet path, and the mass resolver has no objects."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "invisibility",
+   "name": "Invisibility",
+   "keywords": [
+    "illusion",
+    "glamer",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Invisibility",
+    "system": {
+     "level": {
+      "alchemist": 2,
+      "arcanist": 2,
+      "bard": 2,
+      "bloodrager": 2,
+      "hunter": 2,
+      "investigator": 2,
+      "magus": 2,
+      "occultist": 2,
+      "ranger": 2,
+      "skald": 2,
+      "sorcererWizard": 2,
+      "witch": 2
+     },
+     "school": "illusion",
+     "descriptors": [
+      "glamer"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "an eyelash encased in gum arabic"
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "creature touched",
+     "duration": "1 min./level (D)",
+     "savingThrow": "Will negates (harmless)",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "the +2 to attack, the denial of Dex bonuses and the ending-on-attack rule are all per-actor state; detection and stealth are E-group's scene model."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "jump",
+   "name": "Jump",
+   "keywords": [
+    "transmutation",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Jump",
+    "system": {
+     "level": {
+      "alchemist": 1,
+      "druid": 1,
+      "magus": 1,
+      "ranger": 1,
+      "sorcererWizard": 1
+     },
+     "school": "transmutation",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a grasshopper's hind leg"
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "creature touched",
+     "duration": "1 round/level",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "a +30 bonus on Acrobatics to clear obstacles and distance; the mass stride prices movement in feet through cells, and jump would be a second, uncited movement rule."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "lesser-restoration",
+   "name": "Lesser Restoration",
+   "keywords": [
+    "abjuration",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Lesser Restoration",
+    "system": {
+     "level": {
+      "cleric": 3,
+      "druid": 3,
+      "inquisitor": 3,
+      "paladin": 3,
+      "ranger": 3,
+      "warpriest": 3
+     },
+     "school": "abjuration",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "creature touched",
+     "duration": "instantaneous",
+     "savingThrow": "Will negates (harmless)",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "ends one ability-score damage, one ability-drain, or the shaken/frightened/nauseated/poisoned/diseased/dazzled/deafened/entangled condition on a target: a condition-cleared event with no mass-scale target state to clear it on."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "levitate",
+   "name": "Levitate",
+   "keywords": [
+    "transmutation",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Levitate",
+    "system": {
+     "level": {
+      "arcanist": 2,
+      "sorcererWizard": 2,
+      "witch": 2
+     },
+     "school": "transmutation",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a gold-threaded cord and a small leather loop"
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "target": "one creature or object",
+     "duration": "1 min./level",
+     "savingThrow": "Will negates (harmless)",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "moves a target vertically up to 20 ft./round as a move action; the sim's grid is planar and the stride owns vertical-free movement (M05)."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "light",
+   "name": "Light",
+   "keywords": [
+    "evocation",
+    "light",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Light",
+    "system": {
+     "level": {
+      "alchemist": 0,
+      "arcanist": 0,
+      "bloodrager": 0,
+      "cleric": 0,
+      "druid": 0,
+      "magus": 0,
+      "oracle": 0,
+      "sorcererWizard": 0,
+      "warpriest": 0
+     },
+     "school": "evocation",
+     "descriptors": [
+      "light"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "object touched",
+     "duration": "10 min./level",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "illumination of 20 ft. bright/20 ft. more of shadow; scene lighting is document state (E01/E02), and the spell ships so the pack's light/darkness pair is searchable."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "locate-objects",
+   "name": "Locate Objects",
+   "keywords": [
+    "divination",
+    "scrying",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Locate Objects",
+    "system": {
+     "level": {
+      "bard": 4,
+      "cleric": 5,
+      "druid": 5,
+      "magus": 5,
+      "paladin": 3,
+      "ranger": 4,
+      "sorcererWizard": 5
+     },
+     "school": "divination",
+     "descriptors": [
+      "scrying"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a forked twig"
+     },
+     "castingTime": "1 standard",
+     "range": "one object/level within 400 ft.",
+     "target": "see text",
+     "duration": "concentration, up to 1 level/round (D)",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "direction and distance to a named object; no mass-scale query answers it."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "magic-missile",
+   "name": "Magic Missile",
+   "keywords": [
+    "evocation",
+    "force",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Magic Missile",
+    "system": {
+     "level": {
+      "arcanist": 1,
+      "magus": 1,
+      "sorcererWizard": 1,
+      "summoner": 1,
+      "witch": 1
+     },
+     "school": "evocation",
+     "descriptors": [
+      "force"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "100 ft. + 10 ft./level",
+     "target": "one living or undead creature/2 levels, no two more than 30 ft. apart",
+     "duration": "instantaneous",
+     "savingThrow": "none",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "Unerring: no attack roll, so no miss chance from concealment and no critical. The shape stays 'missile' — the mass resolver's geometry is circle, cone and line only (D-151's shape list), so a missile payload has no executor and is authored as intent, which parsePackSpellOrder refuses by name rather than approximating.",
+     "massBattleIntent": {
+      "shape": "missile",
+      "saveType": null,
+      "halfOnSave": false,
+      "autoHits": true,
+      "damageDiceCount": 1,
+      "damageDiceSides": 4,
+      "damageMod": 1,
+      "targetsPerTwoCasterLevels": true,
+      "damageType": "bludgeoning"
+     }
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "magic-weapon",
+   "name": "Magic Weapon",
+   "keywords": [
+    "transmutation",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Magic Weapon",
+    "system": {
+     "level": {
+      "arcanist": 1,
+      "bloodrager": 1,
+      "magus": 1,
+      "paladin": 1,
+      "ranger": 1,
+      "sorcererWizard": 1
+     },
+     "school": "transmutation",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "target": "weapon touched",
+     "duration": "1 min./level",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "+1 enhancement bonus on attack and damage rolls (plus the enhancement's DR-bypass row, which M01's §2.10 ladder reads at tactical scale): an item write with a timer."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "mage-armor",
+   "name": "Mage Armor",
+   "keywords": [
+    "conjuration",
+    "force",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Mage Armor",
+    "system": {
+     "level": {
+      "arcanist": 1,
+      "bloodrager": 1,
+      "magus": 1,
+      "occultist": 1,
+      "sorcererWizard": 1
+     },
+     "school": "conjuration",
+     "descriptors": [
+      "force"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a piece of cured leather"
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "creature touched",
+     "duration": "1 hour/level",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "+4 armor bonus, no max Dex cap, no armor check penalty and no arcane spell failure (CRB's Mage Armor text is explicit that it is not armor for those purposes) — an hour-long armor row that no mass-scale column holds."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "mage-hand",
+   "name": "Mage Hand",
+   "keywords": [
+    "evocation",
+    "force",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Mage Hand",
+    "system": {
+     "level": {
+      "arcanist": 0,
+      "occultist": 0,
+      "sorcererWizard": 0,
+      "summoner": 0,
+      "witch": 0
+     },
+     "school": "evocation",
+     "descriptors": [
+      "force"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "target": "one object or creature, up to 5 lb.",
+     "duration": "concentration, up to 1 round/level (D)",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "a 25-ft. telekinetic hand that manipulates 5-pound objects; cantrips with no combat outcome still ship because the pack's coverage claim is about the compendium, not the resolver."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "magic-fang",
+   "name": "Magic Fang",
+   "keywords": [
+    "transmutation",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Magic Fang",
+    "system": {
+     "level": {
+      "druid": 1,
+      "hunter": 1,
+      "ranger": 1,
+      "shaman": 1
+     },
+     "school": "transmutation",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "living creature touched",
+     "duration": "1 min./level",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "+1 enhancement bonus on one natural weapon's attack and damage rolls, and it makes the natural weapon good-aligned for DR (M01's §2.10 alignment row at tactical scale)."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "miracle",
+   "name": "Miracle",
+   "keywords": [
+    "evocation",
+    "divine",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Miracle",
+    "system": {
+     "level": {
+      "cleric": 9,
+      "oracle": 9
+     },
+     "school": "evocation",
+     "descriptors": [
+      "divine"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "see text",
+     "target": "see text",
+     "duration": "see text",
+     "savingThrow": "see text",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "the divine counterpart to wish: its payload is defined by whatever spell it duplicates, so the pack records the entry and no mechanical block (D-1's rule against a resolver inventing an effect)."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "pass-without-trace",
+   "name": "Pass Without Trace",
+   "keywords": [
+    "illusion",
+    "glamer",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Pass Without Trace",
+    "system": {
+     "level": {
+      "druid": 1,
+      "ranger": 1,
+      "shaman": 1
+     },
+     "school": "illusion",
+     "descriptors": [
+      "glamer"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "creature touched",
+     "duration": "10 min./level",
+     "savingThrow": "Will negates (harmless)",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "+10 on Stealth to avoid tracking; no pursuit model at mass scale."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "protection-from-energy",
+   "name": "Protection from Energy",
+   "keywords": [
+    "abjuration",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Protection from Energy",
+    "system": {
+     "level": {
+      "cleric": 2,
+      "druid": 2,
+      "ranger": 2,
+      "sorcererWizard": 2,
+      "witch": 2
+     },
+     "school": "abjuration",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a bit of the appropriate material"
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "creature touched",
+     "duration": "1 min./level",
+     "savingThrow": "Will negates (harmless)",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "absorbs 12 points of one energy type per level: an energy-resistance ledger the tactical scale owns (A05) and the mass pool has no column for."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "protection-from-evil",
+   "name": "Protection from Evil",
+   "keywords": [
+    "abjuration",
+    "divine",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Protection from Evil",
+    "system": {
+     "level": {
+      "cleric": 1,
+      "inquisitor": 1,
+      "magus": 1,
+      "oracle": 1,
+      "paladin": 1,
+      "sorcererWizard": 1,
+      "witch": 1
+     },
+     "school": "abjuration",
+     "descriptors": [
+      "divine"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a circle of powdered silver"
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "target": "creature touched",
+     "duration": "1 min./level",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "+2 deflection to AC and +2 on saves against mental effects from evil creatures, and it ends a possession: deflection bonuses and possession both live outside the resolver's fields (A05 owns deflection)."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "purify-food-and-drink",
+   "name": "Purify Food and Drink",
+   "keywords": [
+    "transmutation",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Purify Food and Drink",
+    "system": {
+     "level": {
+      "cleric": 1,
+      "druid": 1,
+      "orbam": 1,
+      "ranger": 1
+     },
+     "school": "transmutation",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "area": "1 cu. ft./level",
+     "duration": "instantaneous",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "renders 1 cubic foot per level pure; supply and disease are not simulated at this scale, and validateOrder says so for supply orders."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "remove-curse",
+   "name": "Remove Curse",
+   "keywords": [
+    "abjuration",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Remove Curse",
+    "system": {
+     "level": {
+      "cleric": 3,
+      "oracle": 3,
+      "sorcererWizard": 3,
+      "witch": 3
+     },
+     "school": "abjuration",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a sprig of rosemary"
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "creature or object touched",
+     "duration": "instantaneous",
+     "savingThrow": "Will negates (harmless)",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "ends a curse on a target; the mass resolver's status columns carry conditions, not item-bound curses (C03 keeps the difference deliberate)."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "resist-energy",
+   "name": "Resist Energy",
+   "keywords": [
+    "abjuration",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Resist Energy",
+    "system": {
+     "level": {
+      "alchemist": 2,
+      "cleric": 2,
+      "druid": 2,
+      "hunter": 2,
+      "magus": 2,
+      "ranger": 2,
+      "sorcererWizard": 2,
+      "warpriest": 2,
+      "witch": 2
+     },
+     "school": "abjuration",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a bit of sulfur"
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "creature touched",
+     "duration": "10 min./level",
+     "savingThrow": "Will negates (harmless)",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "absorbs 10 points of one energy type per attack (15 at 7th, 20 at 9th, 25 at 11th, 30 at 13th) — the ER ladder mitigation.ts already implements at tactical scale, with no mass-scale column to read."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "sanctuary",
+   "name": "Sanctuary",
+   "keywords": [
+    "abjuration",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Sanctuary",
+    "system": {
+     "level": {
+      "cleric": 1,
+      "inquisitor": 1,
+      "oracle": 1,
+      "warpriest": 1
+     },
+     "school": "abjuration",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a silver wand worth 25 gp"
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "creature touched",
+     "duration": "1 round/level",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "enemies must make a Will save or be unable to attack the warded creature: an attack-refusal state on a single model, which the mass resolver's engagement pass does not carry."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "shield",
+   "name": "Shield",
+   "keywords": [
+    "abjuration",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Shield",
+    "system": {
+     "level": {
+      "arcanist": 1,
+      "bloodrager": 1,
+      "magus": 1,
+      "sorcererWizard": 1,
+      "witch": 1
+     },
+     "school": "abjuration",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "focus": "a shield"
+     },
+     "castingTime": "1 standard",
+     "range": "personal",
+     "target": "you",
+     "duration": "1 min./level",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "a +5 shield bonus to AC, and it blocks magic missile damage. A duration buff on one actor's AC column with an exception clause: the mass resolver writes temporary AC in the M05 defend and charge passes only, and both are recomputed from the profile each turn (D-178), so an hour-long shield bonus has no field to live in.",
+     "massBattleIntent": {
+      "shape": "buff",
+      "saveType": null,
+      "halfOnSave": false,
+      "autoHits": false,
+      "acBonus": 5,
+      "bonusType": "shield",
+      "blocksMagicMissile": true,
+      "damageDiceCount": 0,
+      "damageDiceSides": 0,
+      "damageType": null
+     }
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "silence",
+   "name": "Silence",
+   "keywords": [
+    "illusion",
+    "glamer",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Silence",
+    "system": {
+     "level": {
+      "bard": 2,
+      "cleric": 2,
+      "druid": 2,
+      "inquisitor": 2,
+      "oracle": 2,
+      "ranger": 2,
+      "witch": 2
+     },
+     "school": "illusion",
+     "descriptors": [
+      "glamer"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "creature or object touched",
+     "duration": "1 min./level",
+     "savingThrow": "Will negates (harmless)",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "a 15-ft.-radius field that nullifies verbal components and sonic effects; breaking a cast mid-component is the concentration path's neighbour, and no mass-scale field carries 'cannot speak'."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "sleep",
+   "name": "Sleep",
+   "keywords": [
+    "enchantment",
+    "mind-affecting",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Sleep",
+    "system": {
+     "level": {
+      "arcanist": 1,
+      "bard": 1,
+      "bloodrager": 1,
+      "magus": 1,
+      "skald": 1,
+      "sorcererWizard": 1,
+      "witch": 1
+     },
+     "school": "enchantment",
+     "descriptors": [
+      "mind-affecting"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a pinch of fine sand, rose petals or ashes"
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "area": "all creatures within a 20-ft.-radius spread, total 5 HD",
+     "duration": "1 min./level",
+     "savingThrow": "none",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "the area is sorted by HD — 'creatures with fewer HD are affected first, up to 5 HD total' — which the resolver's area pass (every living model in the shape, save or not) cannot do without a new targeting rule; the spell ships descriptive for that reason, and a Will-less, HD-budgeted area is exactly what D-1 says not to fake."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "slow",
+   "name": "Slow",
+   "keywords": [
+    "transmutation",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Slow",
+    "system": {
+     "level": {
+      "arcanist": 3,
+      "occultist": 3,
+      "sorcererWizard": 3,
+      "witch": 3
+     },
+     "school": "transmutation",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a drop of honey and a bit of pickled snail"
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "area": "one creature/3 levels, no two within 36 ft.",
+     "duration": "1 round/level",
+     "savingThrow": "Will negates",
+     "spellResistance": true,
+     "automation": "descriptive",
+     "automationNote": "halves the target's actions, drops its AC and attacks by one, and removes its attacks of opportunity: an action-economy state, which the mass resolver expresses nowhere (its own move budget is compiled at deploy)."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "spare-the-dying",
+   "name": "Spare the Dying",
+   "keywords": [
+    "necromancy",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Spare the Dying",
+    "system": {
+     "level": {
+      "adept": 0,
+      "cleric": 0,
+      "inquisitor": 0,
+      "oracle": 0,
+      "paladin": 0,
+      "ranger": 0,
+      "warpriest": 0
+     },
+     "school": "necromancy",
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "focus": "a steel mirror"
+     },
+     "castingTime": "1 standard",
+     "range": "touch",
+     "target": "dying living creature touched",
+     "duration": "instantaneous",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "a cantrip that stabilises one dying creature; M06's heal phase runs off authored regeneration, and the mass pool's dead models are per M05 left where they fell."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "summon-monster-i",
+   "name": "Summon Monster I",
+   "keywords": [
+    "conjuration",
+    "calling",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Summon Monster I",
+    "system": {
+     "level": {
+      "arcanist": 1,
+      "occultist": 1,
+      "oracle": 1,
+      "sorcererWizard": 1,
+      "summoner": 1,
+      "witch": 1
+     },
+     "school": "conjuration",
+     "descriptors": [
+      "calling"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a tiny bag and a small candle"
+     },
+     "castingTime": "1 standard",
+     "range": "close (10 ft./level)",
+     "area": "one or more summoned creatures within 30 ft.",
+     "duration": "1 round/level (D)",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "creates autonomous creatures with initiative; D-130 removed the mass-scale summoning approximation rather than keep a fake, and the pack keeps the entry so the compendium does not pretend the spell is missing."
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "true-strike",
+   "name": "True Strike",
+   "keywords": [
+    "divination",
+    "fortune",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "True Strike",
+    "system": {
+     "level": {
+      "alchemist": 1,
+      "arcanist": 1,
+      "bard": 1,
+      "bloodrager": 1,
+      "magus": 1,
+      "occultist": 1,
+      "sorcererWizard": 1,
+      "witch": 1
+     },
+     "school": "divination",
+     "descriptors": [
+      "fortune"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "focus": "an augur's rod or a misted glass"
+     },
+     "castingTime": "1 standard",
+     "range": "personal",
+     "target": "you",
+     "duration": "1 round/level",
+     "savingThrow": "none",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "a +20 insight bonus on the caster's next attack roll and immunity to miss chance from concealment. No mass-scale attack is a single roll the caster keeps between turns, so the entry documents the intent without shipping an executable block.",
+     "massBattleIntent": {
+      "shape": "buff",
+      "saveType": null,
+      "halfOnSave": false,
+      "autoHits": false,
+      "attackBonus": 20,
+      "bonusType": "insight",
+      "ignoresConcealment": true,
+      "damageDiceCount": 0,
+      "damageDiceSides": 0,
+      "damageType": null
+     }
+    },
+    "items": [],
+    "effects": []
+   }
+  },
+  {
+   "id": "ventriloquism",
+   "name": "Ventriloquism",
+   "keywords": [
+    "illusion",
+    "glamer",
+    "descriptive-only"
+   ],
+   "data": {
+    "type": "item",
+    "name": "Ventriloquism",
+    "system": {
+     "level": {
+      "bard": 1,
+      "sorcererWizard": 1
+     },
+     "school": "illusion",
+     "descriptors": [
+      "glamer"
+     ],
+     "components": {
+      "verbal": true,
+      "somatic": true,
+      "material": "a small paper cone or horn"
+     },
+     "castingTime": "1 standard",
+     "range": "medium (100 ft. + 10 ft./level)",
+     "area": "one 10-ft. cube/level",
+     "duration": "1 min./level",
+     "savingThrow": "Will disbelieved",
+     "spellResistance": false,
+     "automation": "descriptive",
+     "automationNote": "a figment sound placed in an area, with disbelief and an opposed Bluff/Perception check: no sensory state at mass scale."
+    },
+    "items": [],
+    "effects": []
+   }
+  }
+ ]
 }
