@@ -6222,3 +6222,35 @@ provisioned browser under `/tmp` is gone, and `playwright install chromium` cann
 round-trip through the real importer above and the 8 + 6 + 13 new cases; nothing in this slice changed
 UI or worker code paths, and the app bundle builds and passes its size gate. A follow-up evidence run
 on a machine with the browser is the outstanding item for this commit.
+
+## D-235 — 2026-09-15 — C06–C08 closed: PF1e Stealth, Perception, Sensory Modes & Mass Aggregation
+
+**Context.** C06, C07, and C08 define PF1e stealth and vision semantics across tactical and strategic scales:
+- C06 requires connecting Stealth/Perception to host detection and ambush state with distance (+1 DC per 10 ft), environmental/cover modifiers (+10 improved cover, soft cover no bonus per AoN 181), and distinguishing presence from locating/seeing a target.
+- C07 requires verified sensory modes (normal, low-light, darkvision, scent, tremorsense, blindsight/true seeing, blindsense) with non-interchangeable behavior (e.g. Scent detects presence but cannot pinpoint beyond 5 ft; Tremorsense pinpoints grounded targets bypassing stealth/invisibility; Blindsight/True Seeing ignores concealment).
+- C08 requires mass stealth aggregation at the unit level (lowest vs average policy) to prevent O(N * M) checks, triggering flat-footed ambush penalties on defenders that fail perception checks.
+
+**Decision.**
+1. Created `src/packages/pf1e/stealthPerception.ts`: pure, diceless, store-free module implementing:
+   - `calculatePerceptionDc`: Computes distance modifier (`floor(dist / 10)`), size modifier ladder (Fine +16 ... Colossal -16), movement penalty (-5 for > half speed), sniping penalty (-20), invisibility bonus (+40 stationary / +20 moving), cover bonus (+10 for improved cover; 0 for soft cover), and perceiver/environmental modifiers.
+   - `evaluateDetection`: Evaluates awareness level (`none`, `presence`, `located`, `seen`), sensory mode bypasses (Tremorsense, Blindsight, Blindsense, Scent), and targeting miss chance.
+   - `aggregateUnitStealth` and `evaluateUnitAmbush`: Unit-level mass stealth policies (`lowest` vs `average`) and ambush check evaluation.
+2. Extended `src/packages/pf1e/combatState.ts` with `checkPositionalSurprise`: Evaluates ambushers and defenders using `evaluateDetection`, determining whether aware defenders prevent or participate in a surprise round.
+3. Extended `src/core/detection.ts` with `visibleModelsWithStealth`: Allows `DetectionGrid` to filter stealthed models using individual or unit profiles and sensory capabilities.
+
+**Evidence.**
+- Unit tests: `tests/packages/pf1eStealthPerception.test.ts` (17 tests), `tests/packages/pf1eCombatState.test.ts` (27 tests), `tests/host/detection.test.ts` (13 tests).
+- All 205 test suites and 2360 tests pass.
+
+## D-236 — 2026-09-15 — P04 closed: positional defenses, cover, concealment & AoO fold reconciliation
+
+**Context.** P04 covers positional defenses/modifiers: corner-based soft/partial/standard/improved/total cover, concealment non-stacking, invisibility/denied Dex, helplessness, higher ground, opposite-border flanking, and threatening-ally requirements.
+**Audit.**
+- D-181 & D-182 implemented AoN 183 flanking geometry, verified with exact-rational solvers across 52k configurations.
+- D-196 implemented pure positional defenses (`pf1e/positional.ts`), 16 corner rays, soft/partial/standard/improved/total cover, concealment d% miss checks, and AoN 181 AoO exclusion.
+- D-197 implemented the threatened-square canvas overlay (`ThreatOverlayLayer`), reach refusal gate in resolve flows, and Bestiary token size authoring.
+- D-200 closed the provoked AoO resolver fold, bringing attacker/defender pair positional facts (flanking +2, cover AC, concealment miss chance, defender prone) directly into provoked interrupt attacks.
+- Shooting into melee (AoN 131) is fully integrated with distance to ally, size categories, and Precise Shot in `pf1eResolvePosition.ts` and `pf1eResolveFlow.ts`.
+- All requirements of P04 are verified and tested across `tests/packages/pf1ePositional.test.ts`, `tests/packages/pf1ePositionalResolve.test.ts`, `tests/packages/pf1eFlanking.test.ts`, `tests/ui/pf1eResolvePositional.test.ts`, and `tests/ui/pf1eAooFlow.test.ts`.
+
+**Decision.** Formally close P04 in `PF1e_Unified_TODO.md`.

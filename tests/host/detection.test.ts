@@ -302,3 +302,72 @@ test("sanity: status bit import matches §4A", () => {
   expect(ModelStatus.dead).toBe(1);
   expect(new XoshiroPRNG(1).nextFloat()).toBeGreaterThanOrEqual(0);
 });
+
+import { visibleModelsWithStealth, type ModelStealthProfile } from "../../src/core/detection";
+
+describe("C06/C07/C08 — DetectionGrid with Stealth and Senses", () => {
+  test("stealthed models remain hidden unless perception beats stealth DC", () => {
+    const grid = new DetectionGrid(5);
+    grid.reseed([{ anchor: { x: 5, y: 5 }, factionId: "f-red", radius: 10 }], {
+      minX: 0,
+      minY: 0,
+      maxX: 20,
+      maxY: 20,
+    });
+
+    const pool = poolWith([
+      { faction: "f-blue", count: 2, x: 6, y: 6 },
+    ]);
+
+    const stealthProfiles: Record<number, ModelStealthProfile> = {
+      0: { stealthRoll: 15 }, // DC 15
+      1: { stealthRoll: 25 }, // DC 25
+    };
+
+    // Observer perception = 18 -> detects model 0 (18 >= 15), but not model 1 (18 < 25)
+    const vis = visibleModelsWithStealth(
+      grid,
+      pool,
+      "f-red",
+      [],
+      stealthProfiles,
+      18,
+    );
+
+    expect(vis[0]).toBe(1);
+    expect(vis[1]).toBe(0);
+  });
+
+  test("Tremorsense detects grounded stealthed models regardless of DC", () => {
+    const grid = new DetectionGrid(5);
+    grid.reseed([{ anchor: { x: 5, y: 5 }, factionId: "f-red", radius: 10 }], {
+      minX: 0,
+      minY: 0,
+      maxX: 20,
+      maxY: 20,
+    });
+
+    const pool = poolWith([
+      { faction: "f-blue", count: 2, x: 6, y: 6 },
+    ]);
+
+    const stealthProfiles: Record<number, ModelStealthProfile> = {
+      0: { stealthRoll: 40, grounded: true },
+      1: { stealthRoll: 40, grounded: false }, // flying
+    };
+
+    // Observer perception = 10, but has Tremorsense
+    const vis = visibleModelsWithStealth(
+      grid,
+      pool,
+      "f-red",
+      [],
+      stealthProfiles,
+      10,
+      [{ kind: "tremorsense", rangeFt: 30 }],
+    );
+
+    expect(vis[0]).toBe(1); // Detected via Tremorsense!
+    expect(vis[1]).toBe(0); // Flying -> Tremorsense fails, low perception fails
+  });
+});

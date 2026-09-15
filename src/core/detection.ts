@@ -350,3 +350,76 @@ export class DetectionGrid {
     return this.losCache.size;
   }
 }
+
+// ─── C06 / C07 / C08: Sensory & Stealth Additions for DetectionGrid ─────────────
+
+export interface SensorySource extends DetectionSource {
+  senses?: Array<{
+    kind: "normal" | "low-light" | "darkvision" | "scent" | "tremorsense" | "blindsense" | "blindsight" | "true-seeing";
+    rangeFt: number | null;
+  }>;
+  /** Passive perception score of the detecting source/unit. */
+  perceptionTotal?: number;
+}
+
+export interface ModelStealthProfile {
+  stealthRoll: number;
+  grounded?: boolean;
+  invisible?: boolean;
+  moving?: boolean;
+}
+
+/**
+ * Filter pool models visible to a faction considering stealth, distance penalties, and sensory modes.
+ * If modelStealth is provided for an index, evaluates if that model is detected or concealed.
+ */
+export function visibleModelsWithStealth(
+  grid: DetectionGrid,
+  pool: ModelPool,
+  factionId: DocId,
+  allies: readonly DocId[] = [],
+  modelStealth?: Record<number, ModelStealthProfile>,
+  observerPerception = 10,
+  senses: Array<{ kind: "normal" | "low-light" | "darkvision" | "scent" | "tremorsense" | "blindsense" | "blindsight" | "true-seeing"; rangeFt: number | null }> = [],
+): Uint8Array {
+  const who = [factionId, ...allies];
+  const out = new Uint8Array(pool.count);
+  for (let i = 0; i < pool.count; i++) {
+    const x = pool.x[i] ?? 0;
+    const y = pool.y[i] ?? 0;
+    if (!grid.detectedAt(x, y, who)) {
+      out[i] = 0;
+      continue;
+    }
+    const profile = modelStealth ? modelStealth[i] : undefined;
+    if (!profile) {
+      out[i] = 1;
+      continue;
+    }
+
+    // Check special bypasses
+    const tremorsense = senses.find((s) => s.kind === "tremorsense");
+    if (tremorsense && profile.grounded !== false) {
+      out[i] = 1;
+      continue;
+    }
+    const blindsight = senses.find((s) => s.kind === "blindsight" || s.kind === "true-seeing");
+    if (blindsight) {
+      out[i] = 1;
+      continue;
+    }
+
+    // Stealth check: Base DC = stealthRoll + (invisibility ? (moving ? 20 : 40) : 0)
+    let dc = profile.stealthRoll;
+    if (profile.invisible) {
+      dc += profile.moving ? 20 : 40;
+    }
+    // Observer perception vs DC
+    if (observerPerception >= dc) {
+      out[i] = 1;
+    } else {
+      out[i] = 0;
+    }
+  }
+  return out;
+}
