@@ -6254,3 +6254,11 @@ on a machine with the browser is the outstanding item for this commit.
 - All requirements of P04 are verified and tested across `tests/packages/pf1ePositional.test.ts`, `tests/packages/pf1ePositionalResolve.test.ts`, `tests/packages/pf1eFlanking.test.ts`, `tests/ui/pf1eResolvePositional.test.ts`, and `tests/ui/pf1eAooFlow.test.ts`.
 
 **Decision.** Formally close P04 in `PF1e_Unified_TODO.md`.
+
+## D-237 — 2026-09-15 — V09 closed: rules-coverage dashboard generation
+
+**Context.** V09 requires generating a rules-coverage dashboard from test `@srd` headings (proposed `scripts/coverage.mjs`), with implemented/tested/deviated/deferred cross-references.
+**Decision.**
+- Implemented `scripts/coverage.mjs` which scans the `tests/` and `e2e/` trees for explicit `@srd` citations.
+- Added `"coverage:rules": "node scripts/coverage.mjs"` to `package.json`.
+- Mapped chapters across Combat, Maneuvers, Positioning, Actions, Magic, Sensory Modes, Mounted/Firearms, Injury/Death, and Mass Battles.
