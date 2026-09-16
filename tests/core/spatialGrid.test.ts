@@ -1,3 +1,4 @@
+// Checklist: D01 — the pure spatial grid extraction §1 names by file path.
 import { describe, expect, test } from "vitest";
 import { SpatialGrid } from "../../src/core/spatialGrid";
 import { allocModel, createModelPool } from "../../src/sim/pool";

@@ -1,3 +1,4 @@
+// Checklist: S01 — the PF1e sheet mount: one restoreable window per actor, revocation, generic fallback.
 import { describe, expect, test } from "vitest";
 import type { ClientEvents } from "../../src/client/sync";
 import type { ActorDocument } from "../../src/core/documents";

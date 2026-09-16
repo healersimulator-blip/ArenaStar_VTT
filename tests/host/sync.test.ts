@@ -1,3 +1,4 @@
+// Checklist: S03 — host/GM/two-player replication of a sheet edit and host rejection of a forged non-owner update.
 import { editSelectedRoster, selectedTokens } from "../../src/ui/combat/tokenSelection";
 import {
   rollEncounterInitiative,

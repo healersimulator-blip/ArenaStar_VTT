@@ -11,6 +11,8 @@
  * a 5× regression instead of flaking on a noisy CI box. The measured p50/p95 are printed for the
  * record; §19's target is p95 < 50 ms, and `PF1e_Combat_Fidelity_GapList.md` keeps the figures.
  */
+// Checklist: D05 — the portable 10k-model scale/replay gate (pool layout, wire budget, seed→byte equality).
+
 import { decompressSync } from "fflate";
 import { describe, expect, test, vi } from "vitest";
 import type { UnitId } from "../../src/core/ids";

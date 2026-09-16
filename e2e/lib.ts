@@ -64,3 +64,44 @@ export const manualFragment = (inviteLink: string): string => {
   const params = new URLSearchParams(inviteLink.slice(inviteLink.indexOf("#") + 1));
   return `room=${params.get("room")}&k=${params.get("k")}`;
 };
+
+/**
+ * Import the shipped data-only `pf1e-core` package into the running app (V10 browser gate).
+ *
+ * The pack list is read from `systems/pf1e-core/manifest.json` rather than hardcoded: D-234
+ * (M15/M16/M18) grew that manifest from two packs to five, and a hardcoded
+ * `["manifest.json", "packs/bestiary.json", "packs/spells.json"]` then produced a zip whose
+ * manifest declared three files it did not ship — `buildPackageFromFiles` refuses that with
+ * `package pf1e-core: pack file packs/classes.json is missing`, which surfaced as five opaque
+ * `{ok:false}` browser failures. Deriving the list makes the helper immune to the next pack.
+ */
+export async function importShippedCore(page: Page): Promise<void> {
+  const { readFileSync } = await import("node:fs");
+  const { zipSync } = await import("fflate");
+  const manifestText = readFileSync(
+    new URL("../systems/pf1e-core/manifest.json", import.meta.url),
+    "utf8",
+  );
+  const declared = (JSON.parse(manifestText) as { packs?: Array<{ file?: unknown }> })
+    .packs?.map((pack) => pack.file)
+    .filter((file): file is string => typeof file === "string");
+  if (!declared || declared.length === 0) {
+    throw new Error("pf1e-core manifest declares no packs — nothing to ship");
+  }
+  const files = Object.fromEntries(
+    ["manifest.json", ...declared].map((path) => [
+      path,
+      readFileSync(new URL(`../systems/pf1e-core/${path}`, import.meta.url)),
+    ]),
+  );
+  const imported = await surfaceCallArg<{ ok: boolean; error?: string }>(
+    page,
+    "app",
+    "importPackageZip",
+    Array.from(zipSync(files)),
+  );
+  if (!imported.ok) {
+    throw new Error(`pf1e-core import failed: ${imported.error ?? "unknown"}`);
+  }
+}
+

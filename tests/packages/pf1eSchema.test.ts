@@ -1,3 +1,4 @@
+// Checklist: D02 — manifest-schema alignment, content-addressed profiles and the signed i8 codec (§12/Task 2).
 import { describe, expect, test } from "vitest";
 import { PF1E_MODEL_SCHEMA, PF1eDrType, PF1eProfileRegistry } from "../../src/packages/pf1e/schema";
 import { createModelPool, allocModel } from "../../src/sim/pool";

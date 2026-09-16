@@ -90,8 +90,28 @@ interface Threatening {
   unitIdx: number;
   cells: PF1eCell[];
   threatened: PF1eCell[];
+  /**
+   * The threatened set keyed numerically, so the per-defender membership test is
+   * a `Set.has` on a number.
+   *
+   * V07: this replaced `` `${c.col},${c.row}` === defenderKey ``, which built a
+   * template string for every threatened cell of every candidate for every
+   * living model — hundreds of thousands of throwaway strings per turn at 10 000
+   * models, and one of the two hot spots a CPU profile put at ~30% of a turn.
+   */
+  threatKeys: Set<number>;
   participant: PF1eFlankingParticipant;
 }
+
+/**
+ * Injective numeric key for a `(col, row)` cell pair.
+ *
+ * `col * 2^33 + row` is one-to-one for `|row| < 2^32` and `|col| < 2^20`; at the
+ * 5 ft default cell that is ±5,242,880 columns of scene width, several orders of
+ * magnitude past any arena `deploy.ts` can build, and the product stays exactly
+ * representable (≪ 2^53). No string allocation, no collision, no Map boxing.
+ */
+const cellKey = (col: number, row: number): number => col * 2 ** 33 + row;
 
 /**
  * Clear and recompute every living model's FLANKED bit from the current layout.
@@ -144,11 +164,13 @@ export function markPF1eFlanking(opts: PF1eFlankingPassOptions): PF1eFlankingPas
       if (canFlank({ reachSquares, size })) {
         const cells = [cellAt(pool.x[index] ?? 0, pool.y[index] ?? 0, cellFeet)];
         const threatened = threatenedCells({ footprint: cells, reachSquares });
+        const threatKeys = new Set<number>(threatened.map((c) => cellKey(c.col, c.row)));
         entry = {
           index,
           unitIdx,
           cells,
           threatened,
+          threatKeys,
           participant: {
             id: String(pool.id[index] ?? index),
             cells,
@@ -173,19 +195,24 @@ export function markPF1eFlanking(opts: PF1eFlankingPassOptions): PF1eFlankingPas
     if (!living(d)) continue;
     const defenderUnitIdx = pool.unitIdx[d] ?? 0;
     const defenderCell = cellAt(pool.x[d] ?? 0, pool.y[d] ?? 0, cellFeet);
-    const defenderKey = `${defenderCell.col},${defenderCell.row}`;
+    const defenderKey = cellKey(defenderCell.col, defenderCell.row);
 
     // Candidates: living enemies whose threatened set covers the defender's square.
+    // `visitPoint` (not `queryPoint`): the pass walks the hits without needing them
+    // nearest-first, so neither the result array nor the per-hit objects nor the
+    // sort are worth allocating 10 000 times per turn.
     const candidates: Threatening[] = [];
-    for (const hit of grid.queryPoint(pool.x[d] ?? 0, pool.y[d] ?? 0, queryFeet, pool)) {
-      const a = hit.index;
-      if (a === d || !living(a)) continue;
-      if (!isEnemy(pool.unitIdx[a] ?? 0, defenderUnitIdx)) continue;
+    grid.visitPoint(pool.x[d] ?? 0, pool.y[d] ?? 0, queryFeet, pool, (a) => {
+      // No `living(a)` here: `visitPoint` is given the pool, so it already skips
+      // dead and hidden slots — re-testing cost ~7% of a turn at 10 000 models
+      // (V07) for a guarantee the traversal just gave us.
+      if (a === d) return;
+      if (!isEnemy(pool.unitIdx[a] ?? 0, defenderUnitIdx)) return;
       const attacker = threatening(a);
-      if (attacker === null) continue;
-      if (!attacker.threatened.some((c) => `${c.col},${c.row}` === defenderKey)) continue;
+      if (attacker === null) return;
+      if (!attacker.threatKeys.has(defenderKey)) return;
       candidates.push(attacker);
-    }
+    });
     if (candidates.length < 2) continue;
 
     // AoN 183's pair test, through the shared rule — never a second copy of it.

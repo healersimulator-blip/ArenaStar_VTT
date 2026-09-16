@@ -1,3 +1,4 @@
+// Checklist: D05 — the real-package browser half of the scale gate (built zips, worker rules slot).
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -27,6 +28,18 @@ const distPackages = fileURLToPath(
 );
 const pkgPath = (name: string): string => join(distPackages, name);
 const DIST_ZIPS = ["pf1e-core-1.0.0.zip", "pf1e-mass-battles-1.0.0.zip"];
+
+/** Pack count the shipped `pf1e-core` manifest declares — read from the file, never restated. */
+const CORE_PACK_COUNT: number = (
+  JSON.parse(
+    readFileSync(
+      fileURLToPath(
+        new URL("../systems/pf1e-core/manifest.json", import.meta.url),
+      ),
+      "utf8",
+    ),
+  ) as { packs?: unknown[] }
+).packs?.length ?? 0;
 
 const appCall = <T>(
   page: Page,
@@ -122,7 +135,11 @@ test.describe("Pathfinder 1e packages (§1.8 browser half)", () => {
       ]);
       const core = rows.find((r) => r.id === "pf1e-core") as PackageRow;
       expect(core.type).toBe("data");
-      expect(core.packCount).toBe(2); // spells + bestiary
+      // Read off the shipped manifest, not restated: D-234 (M15/M16/M18) grew this package from
+      // two packs (spells + bestiary) to five (+ classes, equipment, feats), and a literal `2`
+      // here turned that content addition into a red browser gate nobody ran.
+      expect(core.packCount).toBe(CORE_PACK_COUNT);
+      expect(core.packCount).toBeGreaterThanOrEqual(5);
       expect(rows.find((r) => r.id === "pf1e-mass-battles")?.type).toBe(
         "system",
       );

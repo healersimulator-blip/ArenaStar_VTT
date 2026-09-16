@@ -1,3 +1,4 @@
+// Checklist: S03 — authorized edit intents (pf1eSheetEdit) — ownership, validation and rejection feedback.
 import { describe, expect, test } from "vitest";
 import { readFileSync } from "node:fs";
 import type { ActorDocument, Json } from "../../src/core/documents";

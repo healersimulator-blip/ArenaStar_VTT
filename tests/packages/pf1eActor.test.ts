@@ -4,6 +4,8 @@
  * through the reader, which is what keeps pack data and code from drifting (and is why there is no
  * manifest version bump in this phase: nothing has to migrate, the pack is already the contract).
  */
+// Checklist: D06 M02 — the tactical P0 contracts/derivation, and the §10.2 compile reconciliation pins (CMB/CMD special ladder, un-augmented saves).
+
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";

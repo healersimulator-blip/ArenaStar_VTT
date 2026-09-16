@@ -1,7 +1,9 @@
+// Checklist: S01 S04 — browser acceptance: sidebar + canvas-dblclick sheet mount, compendium→token→sheet flow.
 import { test, expect, type Page } from "@playwright/test";
 import {
   entry,
   hostCall,
+  importShippedCore,
   playerCall,
   waitForSurface,
   manualFragment,
@@ -379,29 +381,6 @@ test("PF1e compendium actor opens an authored sheet and recomputes after edits",
   expect(runtimeErrors).toEqual([]);
 });
 
-/** Package the shipped data-only core sources, not a second hand-written bestiary fixture. */
-async function importShippedCore(page: Page): Promise<void> {
-  const { readFileSync } = await import("node:fs");
-  const { zipSync } = await import("fflate");
-  const { surfaceCallArg } = await import("./lib");
-  const files = Object.fromEntries(
-    ["manifest.json", "packs/bestiary.json", "packs/spells.json"].map(
-      (path) => [
-        path,
-        readFileSync(new URL(`../systems/pf1e-core/${path}`, import.meta.url)),
-      ],
-    ),
-  );
-  expect(
-    await surfaceCallArg(
-      page,
-      "app",
-      "importPackageZip",
-      Array.from(zipSync(files)),
-    ),
-  ).toMatchObject({ ok: true });
-}
-
 test("all shipped bestiary sheets match the shared derivation and open Weapons without runtime errors", async ({
   page,
 }) => {
@@ -420,6 +399,11 @@ test("all shipped bestiary sheets match the shared derivation and open Weapons w
   await importShippedCore(page);
   for (const item of pack.entries) {
     await page.click('[data-tab="compendia"]');
+    // The panel renders at most 50 rows, and browse mode interleaves the five
+    // shipped packs (~10 rows each), so the 13th of 40 bestiary entries is not on
+    // the unfiltered list. Search for it by name — which is also what a user does
+    // — instead of depending on where the entry happens to land in the listing.
+    await page.fill("#compendium-search", item.name);
     await page
       .locator(`[data-entry-id="${item.id}"] [data-entry-import]`)
       .click();

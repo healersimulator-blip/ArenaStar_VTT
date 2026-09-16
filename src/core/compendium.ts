@@ -127,9 +127,26 @@ export function searchCompendia(
 ): SearchHit[] {
   const terms = tokenize(query);
   if (terms.length === 0) {
-    return packs
-      .flatMap((pack) => pack.entries.slice(0, limit).map((entry) => ({ pack, entry, score: 0 })))
-      .slice(0, limit);
+    // Browse mode: interleave packs round-robin instead of concatenating them. Concatenation
+    // plus the render `limit` lets one large pack hide every later pack — the shipped
+    // `pf1e-core` declares its 75-entry spells pack first, so a 50-row cap showed 50 spells
+    // and *zero* of the 40 bestiary entries, making the bestiary un-draggable from the panel
+    // until you happened to search for it (V05/V03 browser gate). Interleaving keeps the cap
+    // (the panel still renders at most `limit` rows) while guaranteeing every pack is
+    // represented, and preserves each pack's own authored order within its slice.
+    const hits: SearchHit[] = [];
+    for (let i = 0; hits.length < limit; i++) {
+      let advanced = false;
+      for (const pack of packs) {
+        const entry = pack.entries[i];
+        if (!entry) continue;
+        advanced = true;
+        hits.push({ pack, entry, score: 0 });
+        if (hits.length >= limit) break;
+      }
+      if (!advanced) break;
+    }
+    return hits;
   }
   const hits: SearchHit[] = [];
   for (const pack of packs) {

@@ -1,3 +1,4 @@
+// Checklist: S04 — compendium drag-to-canvas actor copy + linked token.
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { strToU8, zipSync } from "fflate";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
