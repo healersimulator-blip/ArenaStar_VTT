@@ -1,3 +1,4 @@
+// Checklist: T04 — create/activate/select encounter list rather than getAll("combats")[0].
 import { describe, expect, test } from "vitest";
 import type { SceneDocument, TokenDocument } from "../../src/core/documents";
 import { applyDiff } from "../../src/core/diff";

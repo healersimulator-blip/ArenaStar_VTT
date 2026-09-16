@@ -6286,3 +6286,122 @@ on a machine with the browser is the outstanding item for this commit.
   - Combat Modifiers & Conditions: Charge, Flanking, Prone, Blinded, Helpless, Entangled, Shaken, Sickened, Stunned (9 entries)
 - Created `tests/packages/pf1eFixtures.test.ts` running 15 suites against pure rules functions in `src/packages/pf1e/rulesTables.ts` and `src/packages/pf1e/stealthPerception.ts`.
 - Verified all 15 suites pass cleanly.
+
+## D-239 — 2026-09-16 — V02 closed: seeded probability oracles at 100k iterations
+
+**Context.** V02 requires seeded probability oracles at 100k iterations for fixed builds/defenses with tolerances, plus exact single-roll assertions, including discriminating AC 22/16/17, a flank boundary and minimum-nonlethal regressions, testing tactical and strategic paths independently.
+**Decision.**
+- Created `tests/packages/pf1eProbability.test.ts` (19 tests).
+- The oracle is **analytic, not a snapshot of the implementation**: for `needed = ac - bonus`, a d20 hits with probability `19/20` when `needed <= 2`, `(21 - needed)/20` for `3..20`, and `1/20` for `>= 21` (CRB p.179: natural 1 always misses, natural 20 always hits, otherwise `d20 + bonus >= AC`).
+- n = 100 000 per measurement; observed SE ≈ 0.00158, so a 5σ band is used — tight enough to catch a one-step off-by-one, wide enough not to flake.
+- Determinism: `XoshiroPRNG(seed)` (`src/sim/prng.ts`) wrapped by `pf1eRngFromPrng`, so every run is bit-identical and a "failure" is a real behaviour change.
+- Discriminating cases: at bonus +9, AC 22 → 0.40, AC 16 → 0.70, AC 17 → 0.65 (the three ACs share no probability, so a shifted ladder cannot pass all three); `critThreatMin: 19` → 0.10 (a threat range below 20 threatens without auto-hitting, CRB p.182); flanking's +2 moves the curve by exactly ±0.10 at the AC boundary — a boundary test, never a snapshot.
+- Exact single-roll assertions for the SRD Minimum Damage rule: any damage mitigated below 1 becomes exactly **1 nonlethal** (`mitigation.ts`).
+- **Mutation-checked** — two deliberate mutations were made to the arithmetic and both turned the suite red, then restored. An oracle that cannot fail is not an oracle.
+- Fixture notes worth keeping: `defIdxPtr` advances only past **dead** defenders, so defenders must be kept alive with `hp/hpMax = 1e9`; creature sizes are capitalised (`"Medium"`).
+
+## D-240 — 2026-09-16 — V06 closed: pinned strategic golden gate over deploy/manifest/codec/replay
+
+**Context.** V06 requires preserving deploy, manifest, codec and replay gates with every strategic change: seeded hashes, decompressed wire equality, checkpoint ≤ 1.5 MB at 10k, ≤ 200 B/model, warm-up before timing, and genuine combat events rather than empty late-turn work.
+**Decision.**
+- Created `tests/sim/strategicGoldenGate.test.ts` (7 tests). Fixture: 2 factions × 3 units × 20 models, `hp: 60`, `BASE_SEED = 0x601d`, 10 turns.
+- The golden is a 10-line digest pinned **inside the test file as an explicit `[...].join("\n")` array**. A multi-line template literal gains a leading `\n` and silently fails an exact-match comparison — this cost one debugging cycle and is recorded so it is not repeated.
+- Gates: content-addressed deploy places every model; the manifest asserts `rules.modelColumns === PF1E_MODEL_SCHEMA` and `bytesPerModel <= 200`; delta and checkpoint survive `decompressSync` to byte-equal wire across two independently constructed runners; `freeze(N) == pool(N-1)` every turn (the §5A chain); checkpoint ≤ 1.5 MB.
+- **Genuine-combat guard:** all 10 pool hashes are asserted distinct. A battle fixture that settles early silently becomes the "empty late-turn work" this item forbids, and self-consistency alone (`pf1eMassBattleScale.test.ts`) cannot detect it.
+- **A pinned golden can be blind to a rule it appears to cover.** Mutating the flanking bonus `? 2 :` → `? 3 :` left the golden *green* because no model in this fixture is ever flanked. Mutating the hit test `totalAttack >= targetAc` → `>` correctly turned it red. New goldens must be mutation-verified against a path the fixture actually exercises.
+- Re-pinning the digest requires a `DECISIONS.md` entry; the digest is also archived at `/tmp/digest.txt` for the session that produced it.
+
+## D-241 — 2026-09-16 — V07 closed: dense-army benchmark at both shapes, per-unit overhead cut ~68%
+
+**Context.** V07 requires benchmarking at least 20×500 and 40×250 models, reducing per-unit overhead to pursue warmed p95 < 50 ms, reporting environment/distributions separately from the existing 250 ms regression gate, avoiding hot-loop `Math.hypot` where squared-distance geometry suffices, and not loosening tests to conceal misses.
+**Context (measured).** Only the 20×500 shape existed before this change. Adding the missing **40×250** shape immediately exposed a regression: at the *same* 10 000 models it ran **p50 214 ms / p95 290 ms** — over the 250 ms catastrophe ceiling — against 20×500's 63 / 71 ms.
+**Diagnosis.** A CPU profile of the vitest worker (the parent process profile is ~83% idle and useless) attributed ~30% of a turn to `ModelSpatialHash.queryPoint`, ~10% to `markPF1eFlanking`, and ~7% to the per-hit `living()` re-test. The traversal allocated a result array plus one `{index, dist2}` object per hit and sorted it, for a caller that never uses the order; the flanking pass compared threatened cells by building a `` `${col},${row}` `` template string per candidate cell per defender.
+**Decision — three changes, all behaviour-preserving.**
+- Squared distance replaces `Math.hypot` in the two O(own × foe) scans in `massBattlePf1e.ts` (the nearest-foe/doctrine scan and the C6 engagement scan). Both only compare, `√` is strictly monotonic, so the winner is identical; one `Math.sqrt` outside both loops still produces the real distance for the report line. `pool.x[a]` is hoisted out of the inner loop.
+- `ModelSpatialHash.visitPoint(x, y, radius, pool, visit)` traverses without collecting or sorting. `queryPoint` is reimplemented on top of it, so its behaviour is unchanged.
+- Threat sets are keyed numerically as `col * 2^33 + row` (injective for `|row| < 2^32`, `|col| < 2^20` — orders of magnitude past any arena `deploy.ts` can build, and exactly representable in a double) and looked up with `Set.has`.
+- The redundant `living(a)` re-test inside the flanking callback is removed: `visitPoint` is handed the pool and already skips dead *and* hidden slots, a strictly stronger filter.
+**Measured result (node v22.22.3, linux x64, 2 CPUs, 3.8 GB; 3 warmed turns discarded, 12 measured).**
+
+| shape | p50 before | p50 after | p95 before | p95 after |
+|---|---|---|---|---|
+| 20 × 500 | 63.4 ms | 57.7 ms | 70.8 ms | 72.3 ms |
+| 40 × 250 | 214.0 ms | **106.1 ms** | 290.2 ms | **115.9 ms** |
+
+Per-extra-unit overhead: **7 534 µs → 2 423 µs (−68%)**. Correctness held: 75 tests across `strategicDoctrine`, `pf1eEnvelopment`, `massBattlePf1e` and the V06 golden gate pass unchanged, and the full suite is green.
+**Decision — what is asserted vs reported.** The asserted gate stays the 250 ms catastrophe ceiling for both shapes. §19's p95 < 50 ms is **printed beside the measurement, never asserted**: a threshold that is red on any shared CI box gets skipped or loosened, which is precisely the concealment V07 forbids.
+**Open — V07b.** The two shapes still differ ≈2×. `ms/unit` is now near-identical (≈2.5 both), so the residual tracks *local density*, not unit bookkeeping: 40 units in a bounded arena overlap about twice as much and `markPF1eFlanking` is O(models × models per cell). A density-independent flanking query is a larger change than V07's scope and is tracked as V07b rather than hidden behind a looser threshold.
+
+## D-242 — 2026-09-16 — V08 closed: 200-actor tactical refresh inside a documented frame budget
+
+**Context.** V08 requires gating 200-actor tactical refresh/resolution within a documented frame budget, covering sheet derivation, effects, tracker and relevant detection work, and rechecking single-file size after UI mounts.
+**Decision.**
+- Created `tests/ui/pf1eFrameBudget.test.ts` (6 tests) measuring all four named surfaces at exactly 200 actors: derivation `derivePF1eActor` 8.00 ms · effects `tokenBadgesMap` 1.97 ms · tracker `combatantBudget` ×200 4.13 ms · detection `DetectionGrid.reseed` + `visibleModels` 2.00 ms · **total 16.10 ms against a 16.67 ms frame**.
+- The asserted ceiling is **3 frames (50 ms)** with per-surface sub-ceilings, so it fails on a real regression without flaking on a shared runner. `measure(fn, repeats = 5)` is best-of-N after 3 warm-up passes.
+- A `fullMs / halfMs < 3` linearity guard catches a surface that has gone quadratic, which the totals alone would hide. A two-pass derivation-purity guard proves `derivePF1eActor` does not mutate its input. A fixture-is-real-payload guard asserts the badge fixture actually yields a condition badge.
+- **Fixture gotcha:** PF1e condition effects must be authored with `pf1eConditionPayload(name)` in `flags.pf1e`. An invented `flags: { pf1e: { condition: true } }` renders a badge (`readTacticalEffect` accepts it, `badgeOf` does not classify it) — the test would pass while asserting nothing.
+
+## D-243 — 2026-09-16 — V03 closed: the corrected S1–S5 table-top flows executed as chained tests
+
+**Context.** V03 requires executing the corrected S1–S5 table-top flows with pure logic tests: fighter/bestiary/initiative/attack, a timed buff and its revert, a 20-ft Fireball cluster, trip and defensive/injury concentration as *distinct* cases, and dying/stabilization/coup de grâce. The plan's own words: "Anything a phase's scenario cannot express is a scope bug, not a follow-up."
+**Decision.**
+- Created `tests/packages/pf1eScenarioFlows.test.ts` (22 tests), one `describe` per scenario. The point is the *chaining*: initiative before attack, buff before derived number, save before damage, trip before concentration, damage before dying. Individual rules already had isolated coverage; what was missing was proof the flows hold together.
+- Expectations are transcribed from the rule text, never snapshotted from the implementation, and every die face is supplied by the test so a red test names a rule rather than an unlucky roll.
+- Notable corrections the flows pin:
+  - S1's advertised `1d20+7` is BAB-only prose; the derived line is BAB 7 + Str 3 + size 0 = **+10**, and the test asserts the derived number.
+  - The two-handed ×1½ Str comes out of `damageModifierParts({ wieldingTwoHanded: true })`, not from the test restating `Math.floor(str * 1.5)` — otherwise the test would prove nothing.
+  - Minimum Damage produces `lethal: 0, nonlethal: 1`, **not** `lethal: 1`. An earlier draft of this test asserted `lethal >= 1` and was wrong.
+  - `PF1eAttackHand` is `"primary" | "off-hand" | "natural"` — there is no `"two-handed"` hand. The grip is `weapon.handedness` or `wieldingTwoHanded`.
+  - The prone AC split is attacker-facing and lives in `situationalAttackParts(situational, ranged)`, not in `attackModifierParts`, which has no rangedness fact.
+  - S3's Reflex half rounds down **with no minimum** — 1 damage halves to 0 — which is the opposite of the attack-side Minimum Damage rule, and both are asserted in the same file so the contrast is visible.
+
+## D-244 — 2026-09-16 — V04 closed: the 2-PCs-vs-3-goblins encounter, rules and replication
+
+**Context.** V04 requires the broader tactical encounter flow — 2 PCs vs 3 goblins with surprise, step, AoO, charge, cover/concealment, manœuvre and injury progression — plus player ownership/replication assertions.
+**Decision.**
+- `tests/packages/pf1eEncounterFlow.test.ts` (10 tests) runs the encounter's rules; `tests/host/pf1eEncounterOwnership.test.ts` (6 tests) runs the same encounter over `HostSync`/`ClientSync` with a GM, Rex's owner and Ivy's owner, and three GM-only goblins.
+- The replication half asserts the distinction §5 draws between a **replica** and an **echo**: a forbidden edit must not merely fail to land, the optimistic echo has to roll back so the offending player's own screen returns to the truth. `hostStore.seq` is asserted unmoved, proving nothing was applied at all rather than applied and reverted.
+- Scene fixtures use the project's real grid scale — 100 world units per 5-ft square. Cover geometry written against a `cellSize: 1` grid silently reports no cover, because the wall sits outside every corner-line; the half-height wall at `x=200, y∈[50,100]` is the shape that yields standard cover.
+- `resolveInitiative` takes **already-rolled totals** (`{combatantId, value, dexMod}`), not a dice function, and returns `{values, ties, needsReroll}`. An unbreakable tie reports `needsReroll` rather than inventing an order — asserted directly.
+- **Mutation-checked.** Stubbing the host's `can(user, "update", doc, …)` gate to `false && !can(...)` turns exactly the three authorisation tests red while the three replication tests stay green, which is the discriminating result: the replication tests do not secretly depend on the gate. Restored from backup and verified clean with `git diff`.
+
+## D-245 — 2026-09-16 — timing gates are opt-in; coverage's open-item set is derived
+
+**Context.** Two tests added this slice passed in isolation and failed under the full `pnpm test` run, for different reasons. Both were design flaws in the new code, not pre-existing bugs.
+**Decision — the benchmark.** `tests/packages/pf1eDenseArmyBenchmark.test.ts` asserts a 250 ms per-turn ceiling, but under the default run it competes with 200+ sibling files on a 2-CPU box: the same 40 × 250 turn that measures ~102 ms in isolation measured **271.7 ms** there. A wall-clock ceiling measured under 200-way contention is not a measurement, and a test that is red on every shared runner gets skipped or loosened — the concealment V07 forbids. So the file is split:
+- **always on** — both shapes resolve real combat, progress, replay deterministically, and every run prints the environment and the p50/p95 distributions;
+- **`VTT_DENSE_BENCH=1`** (npm script `pnpm bench:dense`) — the wall-clock assertions: the catastrophe ceiling per shape and the per-extra-unit overhead gate.
+Measured under `bench:dense` on an idle box: 20 × 500 p50 51.0 ms / p95 78.8 ms; 40 × 250 p50 99.6 ms / p95 102.2 ms; 2 428 µs per extra unit.
+**Decision — the coverage test.** `tests/scripts/coverage.test.ts` enumerated the 16 open checklist ids as a literal array. Closing V02/V06/V07/V08 and adding V07b broke it, which is precisely the drift V09 exists to prevent — the test had become a second copy of the checklist that had to be hand-edited every time a box closed. It now derives the expectation: every open id must match `/^[VL]\d{2}[a-z]?$/` (a non-V/L open item means a rule phase regressed), and the open set must equal the checklist file's own unchecked boxes, re-read independently in the test.
+
+## D-246 — 2026-09-16 — V10/V11 closed: the executed gate set and this slice's doc sync
+
+**Context.** V10 requires running and reporting the quality checks per slice; V11 requires keeping decisions, deviations and the checklist synchronized in the same reviewable phase slice.
+**Decision — V10, every gate executed (not collected).**
+- `pnpm typecheck` exit 0 · `pnpm lint` exit 0 · `node scripts/coverage.mjs --check` OK (80 implemented items all carry test evidence, 9 `@srd` citations).
+- `pnpm test` **214 files / 2,461 passed, 5 skipped** (the 5 are the two opt-in dense-benchmark timing tests from D-245 plus three `webrtc.test.ts` skips).
+- `pnpm build` 2,630,741 B raw / 752,327 B gzip · `pnpm size` OK within the 6 MB budget · `pnpm build:systems` pf1e-core 25.6 kB, pf1e-mass-battles rules.js 219.5 kB → 65.9 kB.
+- **Chromium 141/141 in 8.4 m** on Chromium 152.0.7977.0 over `file://` dist, via the documented D-222 route (`@sparticuz/chromium@152.0.0` + `al2023` libraries through `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`), no security-bypass flags. The same suite was 134/7 at the start of the slice.
+- The Firefox/WebKit matrix is **held open by the user's standing deferral, not by a functional gap**: those binaries cannot be fetched here (Playwright CDN and Debian mirrors unreachable; D-082/D-119/D-153/D-222 precedent). The chromium-only bar is the criterion in force.
+**Decision — V11, what was recorded where.** D-239…D-245 each landed in the same commit as the code and the checklist box it closes, with measured budgets written into the entry rather than left in test output. **`DEVIATIONS.md` needed no entry**: nothing this slice changed a rule's meaning. The V07 optimisations are behaviour-preserving (75 doctrine/envelopment/mass-battle tests plus the pinned V06 golden pass unchanged) and V07b is a performance gap tracked in §11, not a divergence from a rule. `ModelSpatialHash.queryPoint` was reimplemented on `visitPoint` rather than forked, so no contract changed.
+**Decision — the coverage gate's exemption list grew, and why that is not a loosening.** Closing V10/V11 made `--check` fail: both are `[x]` with no test file naming them, and neither can have one — their deliverable is a *process* (run the gates; keep the docs synchronized), evidenced by the executed command and its DECISIONS entry, not by a spec importing a module. Forcing a spec to name them would produce a test that asserts nothing. So `scripts/coverage.mjs` gains a `PROCESS_ONLY` set beside the existing `DOCUMENTATION_ONLY`, unioned into `EXEMPT_FROM_CHECK`. Both are still listed by id, still printed under "Implemented items with no test file naming them", and now print a reason — an exemption that is invisible would be a loosening, one that names itself and its justification is not. `tests/scripts/coverage.test.ts` reads *both* sets back out of the script's source rather than restating them, and additionally asserts that every exempt id still appears in the human-readable report with a reason, so an exemption can never become silent.
+
+## D-247 — 2026-09-16 — V05 closed: the two-peer 10k/20-turn acceptance flow, and the four false greens it had to rule out
+
+**Context.** V05 is the last open V item: run the full two-peer mass-battle acceptance flow — import/activate real zips, deploy 10k, resolve 20 turns, move/cast/attack with a hero, inspect exact analytics and CSV, assert clean rules boot/console and joiner state — with the explicit note that browser package activation alone does not satisfy it. Its ingredients were individually green (`e2e/pf1e_join.spec.ts` two-peer adoption, `e2e/pf1e_mass_battles.spec.ts` real-zip activation, `pf1eMassBattleScale.test.ts` 10k/20-turn in Node) but nothing chained them in a browser, and no hook supported an in-page 10k deploy.
+
+**Decision — drive the shipped pieces, not a parallel implementation.** `e2e/pf1e_acceptance.spec.ts` (2 tests) runs over a new root-level `massBattleAcceptance()` hook in `src/app/e2eHook.ts`. It sits at root level rather than on `__vttE2E.gm`/`.player` because those are different objects from the root surface. The hook spins a real `WorkerSimRunner` over the inlined sim worker, extracts `rules.js` from the shipped zip with `fflate` and loads it through `loadRules` exactly as activation does, places models with `deploySnapshot`, and exports with `exportAnalyticsToCsv`. Per-unit figures are read back off the wire from `report.summary.analytics` — the rules module's own `forecast()` payload — and re-assembled into a `PF1eBattleReport` for the CSV, so the export is derived from replicated figures rather than from a collector the test happens to hold. A broken analytics path therefore fails here instead of only in the UI.
+
+**Measured.** 10 000 models (10 units × 500 models × 2 factions) · 20 turns · **all 20 pool hashes distinct** · 421 events, 397 of them melee · hero marches turns 1–2 (`move/arrive`), casts Fireball turn 3 (`spell`, DC 16, 20-ft burst, 174 damage), swings from turn 4 · both armies' analytics carry 10 units each · CSV 14 columns × 22 lines (header + 20 units + TOTALS). The joiner test runs the full manual-signaling flow, adopts the *announced* `pf1e-mass-battles` battle with identical schema and version, and its replica advances through the delta path, with page errors and console errors clean on both sides.
+
+**Decision — four assertions had to be earned by measurement before any of this counted as evidence.** Each was found by watching a number come back wrong, not by inspection:
+1. **`loadRules` alone does not select the rules module.** `InlineSimRunner.load` and the worker both key off `rulesSource` on the *load request*; calling `loadRules` first only warms the source-keyed registry. Without it the worker silently runs its built-in default engine — the run still deploys 10 000 models, still resolves 20 turns, still emits `arrive` events, and returns `analytics: {army: {}}` per army. Every figure looked plausible while describing the wrong rules engine. `rulesSource` now rides the `load` request, with a comment saying why.
+2. **`massBattlePf1e` never shifts `OrderQueue.pending`.** Every phase reads `queue.active ?? queue.pending[0]`, and neither the module nor `runner.ts` advances the queue, so a `[move, cast, attack]` hero queue executes the march on all twenty turns and the cast never happens. Orders are therefore authored per turn — which is also how the Army Window actually behaves (a hero's order stands until the GM replaces it), so this exercises the shipped command path instead of inventing a batch semantics the product does not have.
+3. **A fixed unit-to-unit target pairing settles the battle by turn 4.** Each attacker kept swinging at the same enemy unit after it was wiped, so turns 5–20 resolved "0 hits, 0 damage, 0 kills" — sixteen turns of exactly the "empty late-turn work" V06 forbids, in a suite that reported 397 melee events and looked busy. Targets are now re-picked each turn from the runner's own recomputed live `strength` (carried in `unitStatDiffs`), and model HP was raised so the exchange is still live at turn 20. The gate is `distinctPoolHashes === 20`, an equality, not a floor.
+4. **A joiner with no faction ownership receives no §5A strategic frames.** The campaign resolved entirely on the host (`turnPhase` reached `report`) while the joiner's `simVersion` stayed 0 — an invisible replication gap unless the version is asserted. The spec now grants OBSERVER ownership through `#gm-perms` before starting, as `pf1e_join.spec.ts` does.
+
+**Decision — one environmental noise class is named rather than blanket-ignored.** The app dials the public Nostr relays it is configured with; with no route to the internet those sockets log `WebSocket connection to 'wss://…' failed: Error in connection establishment`. The spec filters exactly that shape through a named `isOfflineRelayNoise` predicate and asserts everything else on the console is clean, so the check stays meaningful instead of being dropped.
+
+**Decision — no `DEVIATIONS.md` entry.** Nothing here changed a rule's meaning. The findings are about the harness and the command contract; the rules module, the codec and the wire format are untouched, and the pinned V06 golden passes unchanged.
+
+**Evidence, all executed.** `pnpm typecheck` exit 0 · `pnpm lint` exit 0 · `node scripts/coverage.mjs --check` OK (**83 implemented / 8 open / 7 deferred**, 9 `@srd` citations; open is now V07b + L01–L07) · `pnpm test` **214 files / 2,461 passed / 5 skipped** · `pnpm build` **2,644,905 B raw / 755,614 B gzip** · `pnpm size` OK within the 6 MB budget · `pnpm build:systems` pf1e-mass-battles rules.js 219.5 kB → 65.9 kB · **Chromium 143/143 in 3.5 m** on Chromium 152.0.7977.0 over `file://` dist via the documented D-222 route (was 141/141 before this spec landed). The Firefox/WebKit matrix remains held open by the user's standing deferral, not by a functional gap.

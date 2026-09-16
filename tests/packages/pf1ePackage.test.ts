@@ -9,6 +9,8 @@
  *
  * The build runs once for the whole file: a vite build in a subprocess (~2 s).
  */
+// Checklist: D04 — buildable/importable packages and shipped content (Gap List §1.1).
+
 import { PF1E_MASS_SPELLS } from "../../src/packages/massBattlePf1e";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";

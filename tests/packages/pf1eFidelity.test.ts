@@ -6,6 +6,8 @@
  * Each test names the SRD heading it is asserting, and every dice source is a fixed stub so
  * the assertions are about the rule rather than about luck.
  */
+// Checklist: D03 — the foundational AC / flanking / minimum-nonlethal fixes and the seeded strategic plumbing.
+
 import { describe, expect, test } from "vitest";
 import {
   PF1E_MODEL_SCHEMA,

@@ -6,28 +6,7 @@
  * tracker controls use (no synthetic RNG; the delay/ready transitions are dice-free).
  */
 import { expect, test, type Page } from "@playwright/test";
-import { entry, surfaceCallArg, waitForSurface } from "./lib";
-
-async function importShippedCore(page: Page): Promise<void> {
-  const { readFileSync } = await import("node:fs");
-  const { zipSync } = await import("fflate");
-  const files = Object.fromEntries(
-    ["manifest.json", "packs/bestiary.json", "packs/spells.json"].map(
-      (path) => [
-        path,
-        readFileSync(new URL(`../systems/pf1e-core/${path}`, import.meta.url)),
-      ],
-    ),
-  );
-  expect(
-    await surfaceCallArg(
-      page,
-      "app",
-      "importPackageZip",
-      Array.from(zipSync(files)),
-    ),
-  ).toMatchObject({ ok: true });
-}
+import { entry, importShippedCore, waitForSurface } from "./lib";
 
 async function setInit(
   page: Page,

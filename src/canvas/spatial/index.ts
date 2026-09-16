@@ -159,17 +159,21 @@ export class ModelSpatialHash {
   }
 
   /**
-   * Model indices within `radius` of (x, y), nearest first.
-   * When a pool is given, dead and hidden models are filtered (hidden slots
-   * of a projected replica carry zeroed positions and must never hit-test).
+   * Same traversal as `queryPoint`, but allocation-free: the visitor is called
+   * with `(index, dist2)` for every hit and nothing is collected or sorted.
+   *
+   * V07: the strategic flanking pass calls this once per living model, and at
+   * 10 000 models the array + per-hit `{index, dist2}` objects that `queryPoint`
+   * returns — plus a sort it never uses — were ~30% of a turn. Callers that do
+   * not need nearest-first order use this instead.
    */
-  queryPoint(
+  visitPoint(
     x: number,
     y: number,
-    radius = 0.5,
-    pool?: ModelPool,
-  ): Array<{ index: number; dist2: number }> {
-    const hits: Array<{ index: number; dist2: number }> = [];
+    radius: number,
+    pool: ModelPool | undefined,
+    visit: (index: number, dist2: number) => void,
+  ): void {
     const r = Math.max(radius, this.cellSize * 0.001);
     const cx0 = Math.floor((x - r) / this.cellSize);
     const cx1 = Math.floor((x + r) / this.cellSize);
@@ -191,10 +195,27 @@ export class ModelSpatialHash {
               continue;
             }
           }
-          hits.push({ index: i, dist2: d2 });
+          visit(i, d2);
         }
       }
     }
+  }
+
+  /**
+   * Model indices within `radius` of (x, y), nearest first.
+   * When a pool is given, dead and hidden models are filtered (hidden slots
+   * of a projected replica carry zeroed positions and must never hit-test).
+   */
+  queryPoint(
+    x: number,
+    y: number,
+    radius = 0.5,
+    pool?: ModelPool,
+  ): Array<{ index: number; dist2: number }> {
+    const hits: Array<{ index: number; dist2: number }> = [];
+    this.visitPoint(x, y, radius, pool, (index, dist2) => {
+      hits.push({ index, dist2 });
+    });
     hits.sort((a, b) => a.dist2 - b.dist2);
     return hits;
   }

@@ -89,6 +89,73 @@ describe("searchCompendia (§12)", () => {
   test("limit caps results", () => {
     expect(searchCompendia([PACK], "goblin", 1).length).toBe(1);
   });
+
+  /**
+   * V03/V05 regression — browse mode must not let one large pack hide the rest.
+   *
+   * The shipped `pf1e-core` (D-234) declares five packs, spells first with 75 entries, and
+   * `CompendiaPanel` renders at most 50 rows. Concatenating packs and slicing to the limit
+   * therefore showed 50 spells and **zero** bestiary entries: the panel's drag-to-canvas rows
+   * for every actor pack were unreachable without a search query, which is what turned the
+   * five-pack manifest into a red browser gate (`[data-entry-id="heavy-infantry"]` never
+   * rendered). Interleaving keeps the render cap and represents every pack.
+   */
+  test("browse mode represents every pack within the render limit (no large-pack starvation)", () => {
+    const spells: CompendiumPack = {
+      name: "Spells",
+      type: "items",
+      entries: Array.from({ length: 75 }, (_, i) => entry(`spell-${i}`, `Spell ${i}`)),
+    };
+    const bestiary: CompendiumPack = {
+      name: "Bestiary",
+      type: "actors",
+      entries: [
+        entry("heavy-infantry", "Heavy Infantry"),
+        entry("heavy-cavalry", "Heavy Cavalry"),
+        ...Array.from({ length: 38 }, (_, i) => entry(`mob-${i}`, `Mob ${i}`)),
+      ],
+    };
+    const feats: CompendiumPack = {
+      name: "Feats",
+      type: "items",
+      entries: Array.from({ length: 33 }, (_, i) => entry(`feat-${i}`, `Feat ${i}`)),
+    };
+
+    const rows = searchCompendia([spells, bestiary, feats], "", 50);
+    expect(rows.length).toBe(50); // the render cap is still honoured
+    const ids = rows.map((hit) => hit.entry.id);
+    expect(ids).toContain("heavy-infantry");
+    expect(ids).toContain("heavy-cavalry");
+    // Every declared pack is represented, not just the first ones that fit.
+    expect(new Set(rows.map((hit) => hit.pack.name))).toEqual(
+      new Set(["Spells", "Bestiary", "Feats"]),
+    );
+    // A pack's own authored order survives the interleave.
+    expect(ids.filter((id) => id.startsWith("spell-"))).toEqual([
+      "spell-0",
+      "spell-1",
+      "spell-2",
+      "spell-3",
+      "spell-4",
+      "spell-5",
+      "spell-6",
+      "spell-7",
+      "spell-8",
+      "spell-9",
+      "spell-10",
+      "spell-11",
+      "spell-12",
+      "spell-13",
+      "spell-14",
+      "spell-15",
+      "spell-16",
+    ]);
+
+    // A limit smaller than the pack count still terminates and never repeats an entry.
+    const tiny = searchCompendia([spells, bestiary, feats], "", 2);
+    expect(tiny.map((hit) => hit.entry.id)).toEqual(["spell-0", "heavy-infantry"]);
+    expect(new Set(rows.map((hit) => hit.pack.name + ":" + hit.entry.id)).size).toBe(rows.length);
+  });
 });
 
 describe("importEntryOp (§12)", () => {

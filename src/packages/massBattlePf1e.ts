@@ -506,22 +506,26 @@ export function createMassBattlePf1e(
               otherAnchor.x - anchor.x,
               otherAnchor.y - anchor.y,
             );
-            let dMin = Infinity;
+            let dMin2 = Infinity;
             let dMinIdx = otherLiving[0] ?? 0;
             for (const a of ownLiving) {
               const ax = pool.x[a] ?? 0;
               const ay = pool.y[a] ?? 0;
               for (const b of otherLiving) {
-                const d = Math.hypot(
-                  (pool.x[b] ?? 0) - ax,
-                  (pool.y[b] ?? 0) - ay,
-                );
-                if (d < dMin) {
-                  dMin = d;
+                // V07: squared distance in the inner O(own × foe) doctrine scan. The loop only
+                // ever asks "which pair is smaller", and √ is strictly monotonic, so the winner
+                // (and therefore `dMinIdx`) is identical without a `Math.hypot` per pair. The
+                // one real distance is taken once, outside both loops, for the report line.
+                const dx = (pool.x[b] ?? 0) - ax;
+                const dy = (pool.y[b] ?? 0) - ay;
+                const d2 = dx * dx + dy * dy;
+                if (d2 < dMin2) {
+                  dMin2 = d2;
                   dMinIdx = b;
                 }
               }
             }
+            const dMin = Number.isFinite(dMin2) ? Math.sqrt(dMin2) : Infinity;
             if (nearest === null || dAnchor < nearest.dAnchor)
               nearest = { unit: other, idx: dMinIdx, dAnchor, dMin };
           }
@@ -1334,21 +1338,28 @@ export function createMassBattlePf1e(
           // C6 gate: engaged = at least one own model inside the reach-band it
           // wrapped through (its own reach plus a square of give).
           let engaged = false;
-          let dMinPair = Infinity;
+          // V07: squared distance in the O(own × foe) envelopment contact scan, with the reach
+          // band squared once per unit pair instead of taking a root per model pair. Both the
+          // `dMinPair` minimum and the `d <= band` gate compare identically under √.
+          let dMinPair2 = Infinity;
+          const engageBandFt = reachFt + cellFeet;
+          const engageBand2 = engageBandFt * engageBandFt;
           for (const a of ownLiving) {
+            const ax = pool.x[a] ?? 0;
+            const ay = pool.y[a] ?? 0;
             for (const b of foeLiving) {
-              const d = Math.hypot(
-                (pool.x[b] ?? 0) - (pool.x[a] ?? 0),
-                (pool.y[b] ?? 0) - (pool.y[a] ?? 0),
-              );
-              if (d < dMinPair) dMinPair = d;
-              if (d <= reachFt + cellFeet) {
+              const dx = (pool.x[b] ?? 0) - ax;
+              const dy = (pool.y[b] ?? 0) - ay;
+              const d2 = dx * dx + dy * dy;
+              if (d2 < dMinPair2) dMinPair2 = d2;
+              if (d2 <= engageBand2) {
                 engaged = true;
                 break;
               }
             }
             if (engaged) break;
           }
+          const dMinPair = Number.isFinite(dMinPair2) ? Math.sqrt(dMinPair2) : Infinity;
           if (!engaged) continue;
           let foeMin = Infinity;
           let foeMax = -Infinity;

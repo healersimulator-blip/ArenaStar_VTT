@@ -1,3 +1,4 @@
+// Checklist: M13 — RFC-4180 CSV escaping (commas, quotes) with a round-trip column-count assertion.
 import { describe, expect, test } from "vitest";
 import { PF1eBattleAnalyticsCollector, exportAnalyticsToCsv } from "../../src/packages/pf1e/analytics";
 

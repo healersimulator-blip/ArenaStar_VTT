@@ -12,6 +12,7 @@
     "dev": "vite",
     "build": "vite build",
     "test": "vitest run",
+    "bench:dense": "VTT_DENSE_BENCH=1 vitest run tests/packages/pf1eDenseArmyBenchmark.test.ts",
     "test:e2e": "pnpm build && pnpm build:systems && playwright test",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
