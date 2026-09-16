@@ -874,6 +874,15 @@ export interface VttE2eSurface {
   visionSmoke(): Promise<VisionSmokeResult>;
   gridsSmoke(): Promise<GridsSmokeResult>;
   paritySmoke(): Promise<ParitySmokeResult>;
+  /**
+   * V05 — the full mass-battle acceptance flow: the shipped `rules.js` artifact
+   * loaded into a real SimWorker, 10 000 models deployed, 20 turns resolved with
+   * a hero that moves/casts/attacks, and the per-unit analytics and CSV read
+   * back off the wire. See `runMassBattleAcceptance`.
+   */
+  massBattleAcceptance(
+    opts: MassBattleAcceptanceOptions,
+  ): Promise<MassBattleAcceptanceResult>;
   app: AppSurface | null;
   player: PlayerSurface | null;
   share: ShareSurface | null;
@@ -3706,6 +3715,490 @@ async function runRulesPackageSmoke(): Promise<RulesPackageSmokeResult> {
   }
 }
 
+/**
+ * V05 — the full two-peer mass-battle acceptance flow, in one call.
+ *
+ * The checklist is explicit that "browser package activation alone does not
+ * satisfy this": importing a zip and watching the rules slot light up proves
+ * almost nothing. What has to hold is that the **shipped rules artifact** can
+ * carry a real campaign — 10 000 models deployed through the real deploy path,
+ * twenty turns resolved through a real SimWorker, a hero that moves and casts
+ * and attacks, and analytics that come back exact enough to build the CSV from.
+ *
+ * So this drives the same pieces the product uses, not a parallel re-implementation:
+ * `WorkerSimRunner` over the inlined sim worker, the package's own bundled
+ * `rules.js` source loaded through `loadRules` exactly as activation loads it,
+ * `deploySnapshot` for placement, and `exportAnalyticsToCsv` for the export.
+ * The per-unit figures are read back off the wire (`report.summary.analytics`,
+ * which is the rules module's own `forecast()` payload), so a broken analytics
+ * path fails here rather than only in the UI.
+ */
+export interface MassBattleAcceptanceResult {
+  ok: boolean;
+  error?: string;
+  /** The rules artifact's own version string, as loaded into the worker. */
+  rulesVersion: string;
+  /** The report's `rulesVersion`, read back off the wire — must match the load. */
+  reportRulesVersion: string;
+  modelsDeployed: number;
+  expectedModels: number;
+  unitsPerFaction: number;
+  modelsPerUnit: number;
+  turnsResolved: number;
+  firstPoolHash: string;
+  lastPoolHash: string;
+  /** Distinct pool hashes across the run — a settled battle would repeat one. */
+  distinctPoolHashes: number;
+  heroUnitId: string | null;
+  /** Whether each hero order survived `validateOrder` and reached the resolver. */
+  heroOrders: { move: boolean; cast: boolean; attack: boolean };
+  meleeEvents: number;
+  spellEvents: number;
+  moveEvents: number;
+  /** Raw timeline events the wire carried, for diagnosis when a tally is zero. */
+  eventsTotal: number;
+  /** Wall-clock per resolved turn, in request order — the distribution V05 reports. */
+  perTurnMs: number[];
+  /** Per-army per-unit analytics exactly as the wire carried them. */
+  analyticsArmies: Array<{ armyId: string; unitCount: number }>;
+  /** The exact per-unit figures the CSV is built from, keyed by unit id. */
+  analyticsUnits: Record<
+    string,
+    {
+      totalAttacks: number;
+      hits: number;
+      netDamageDealt: number;
+      killsCount: number;
+      deathsCount: number;
+    }
+  >;
+  csv: { lines: number; header: string; firstRows: string[] };
+}
+
+export interface MassBattleAcceptanceOptions {
+  /** The package's bundled `rules.js` source text, loaded as activation loads it. */
+  rulesSource: string;
+  unitsPerFaction: number;
+  modelsPerUnit: number;
+  turns: number;
+  seed: number;
+}
+
+async function runMassBattleAcceptance(
+  opts: MassBattleAcceptanceOptions,
+): Promise<MassBattleAcceptanceResult> {
+  const fail = (error: unknown): MassBattleAcceptanceResult => ({
+    ok: false,
+    error: error instanceof Error ? error.message : String(error),
+    rulesVersion: "",
+    reportRulesVersion: "",
+    modelsDeployed: 0,
+    expectedModels: opts.unitsPerFaction * opts.modelsPerUnit * 2,
+    unitsPerFaction: opts.unitsPerFaction,
+    modelsPerUnit: opts.modelsPerUnit,
+    turnsResolved: 0,
+    firstPoolHash: "",
+    lastPoolHash: "",
+    distinctPoolHashes: 0,
+    heroUnitId: null,
+    heroOrders: { move: false, cast: false, attack: false },
+    meleeEvents: 0,
+    spellEvents: 0,
+    moveEvents: 0,
+    eventsTotal: 0,
+    perTurnMs: [],
+    analyticsArmies: [],
+    analyticsUnits: {},
+    csv: { lines: 0, header: "", firstRows: [] },
+  });
+
+  try {
+    const { WorkerSimRunner } = await import("../workers/simWorkerClient");
+    const SimWorkerCtor = (
+      await import("../workers/sim.worker.ts?worker&inline")
+    ).default;
+    const { deploySnapshot } = await import("../sim/deploy");
+    const { PF1E_MODEL_SCHEMA } = await import("../packages/pf1e/schema");
+    const { exportAnalyticsToCsv } = await import("../packages/pf1e/analytics");
+
+    const runner = new WorkerSimRunner(SimWorkerCtor);
+    // The same entry point activation uses, with the shipped artifact's own text.
+    const info = await runner.loadRules(opts.rulesSource, 20_000);
+
+    const factionIds = ["f-blue", "f-red"];
+    const factions = factionIds.map(
+      (id, k) =>
+        ({
+          _id: id,
+          type: "faction",
+          name: k === 0 ? "Blue" : "Red",
+          ownership: { default: 0 },
+          flags: {},
+          system: {},
+          allies: [],
+        }) as unknown as import("../core/strategic").FactionDocument,
+    );
+
+    // Two armies, `unitsPerFaction` units each. The first Blue unit is the hero:
+    // `isHeroUnit` keys on `unit.type === "hero"`, which is what the Army Window's
+    // hero controls author, so the move/cast/attack path is the real one.
+    const units: import("../core/rules").UnitView[] = [];
+    let heroUnitId: string | null = null;
+    for (const [side, factionId] of factionIds.entries()) {
+      for (let i = 0; i < opts.unitsPerFaction; i++) {
+        const isHero = side === 0 && i === 0;
+        const id = `${factionId}-u${i}`;
+        if (isHero) heroUnitId = id;
+        units.push({
+          id,
+          armyId: `army-${factionId}`,
+          factionId,
+          type: isHero ? "hero" : "infantry",
+          name: isHero ? "Hero" : `Unit ${id}`,
+          profile: {},
+          stats: {
+            strength: opts.modelsPerUnit,
+            bab: 6 + side,
+            strMod: 3,
+            ac: 16 + side,
+            touchAc: 11,
+            // Tough enough that the exchange is still live on turn 20: at ~3.5k
+            // damage per unit per turn, 10 hit points wipes a 500-model unit in
+            // under two rounds and the campaign is over by turn 4.
+            hp: 200,
+            fort: 5,
+            ref: 4,
+            will: 3,
+            damageDiceCount: 1,
+            damageDiceSides: 8,
+            damageMod: 3,
+            ...(isHero ? { hero: 1 } : {}),
+          },
+          orders: null,
+          formation: "line",
+          sceneId: "s-accept",
+          modelRange: null,
+          leaderTokenId: null,
+        });
+      }
+    }
+
+    // A "line" formation lays ranks backwards from its anchor at `spacing` (4 ft),
+    // so the anchor IS the front rank. The two lanes are therefore placed 4 ft
+    // apart: inside one 5-ft reach, so a contact exists from turn 1 and every
+    // attack order has a target it can actually swing at. The default
+    // `laneX(k) = 150 + k*300` leaves a 55-ft gap, and with the module's honest
+    // reach test that produces a battle in which nobody ever fights — the pool
+    // still changes and the run still looks alive, which is exactly the false
+    // green V05 exists to rule out.
+    const snap = deploySnapshot(units, factions, PF1E_MODEL_SCHEMA, {
+      laneX: (k) => (k === 0 ? 1000 : 1200),
+      laneY: (j) => 1000 + j * 250,
+    });
+    const ranges = new Map<string, readonly [number, number] | null>(
+      snap.ranges as Array<[string, readonly [number, number] | null]>,
+    );
+    for (const unit of units) unit.modelRange = ranges.get(unit.id) ?? null;
+
+    const armies = factionIds.map((factionId) => ({
+      _id: `army-${factionId}`,
+      factionId,
+      name: factionId === "f-blue" ? "Blue Host" : "Red Host",
+      supply: { level: 4 },
+      units: units.filter((u) => u.armyId === `army-${factionId}`),
+    })) as unknown as import("../core/strategic").ArmyDocument[];
+
+    const ctx = {
+      sceneId: "s-accept",
+      grid: {
+        type: "square",
+        size: 20_000,
+        distance: 5,
+        units: "ft",
+        diagonals: "555",
+      },
+      walls: {
+        x1: new Float32Array(0),
+        y1: new Float32Array(0),
+        x2: new Float32Array(0),
+        y2: new Float32Array(0),
+        restriction: new Uint8Array(0),
+      },
+      factions,
+      armies,
+      leaderActors: {},
+      worldSettings: {},
+    } as unknown as import("../core/rules").RulesContext;
+
+    await runner.load({
+      sceneId: "s-accept",
+      sys: PF1E_MODEL_SCHEMA,
+      // Without this the worker runs its built-in default module and never touches
+      // the artifact under test — `loadRules` alone only warms the source-keyed
+      // registry, it does not select the module for the next `load`. Every figure
+      // below would then describe the wrong rules engine while still looking
+      // plausible, which is the specific false green V05 exists to rule out.
+      rulesSource: opts.rulesSource,
+      ctx,
+      units,
+      snapshot: {
+        bytes: snap.bytes,
+        maxHpMax: snap.maxHpMax,
+        version: 0,
+      },
+    });
+
+    // Orders are authored per turn, not queued once. That is the module's real
+    // contract, not a convenience: every phase reads `queue.active ?? queue.pending[0]`
+    // and nothing in `massBattlePf1e.ts` or `runner.ts` ever shifts `pending`, so a
+    // three-order queue would execute `pending[0]` on all twenty turns and the cast
+    // and attack behind it would never run. Driving one order at a time is also how
+    // the Army Window works — the GM sets a hero's order and it stands until it is
+    // replaced — so this exercises the shipped command path rather than inventing a
+    // batch semantics the product does not have.
+    const heroMoveTurns = 2;
+    const heroCastTurn = heroMoveTurns + 1;
+    const heroAim = { x: 1100, y: 1000 };
+
+    const perTurnMs: number[] = [];
+    const hashes: string[] = [];
+    let meleeEvents = 0;
+    let spellEvents = 0;
+    let moveEvents = 0;
+    let eventsTotal = 0;
+    let reportRulesVersion = "";
+    let lastAnalytics: Record<string, unknown> = {};
+    // Whether the hero was ever seen marching, casting and swinging, read off the
+    // sub-phase the module itself stamped on each event — not off the prose, which
+    // is presentation and free to change.
+    const heroDid = { move: false, cast: false, attack: false };
+    // Live model count per unit, seeded at deploy and then kept current from the
+    // runner's own `unitStatDiffs` (it recomputes `strength` from the pool every
+    // turn). This is what lets each turn's orders target an enemy that is still
+    // standing: a fixed unit-to-unit pairing wipes the paired enemy inside four
+    // turns, after which every attack resolves "0 hits, 0 damage, 0 kills" and the
+    // remaining sixteen turns are hollow — a 20-turn campaign in name only.
+    const live = new Map<string, number>();
+    for (const unit of units) live.set(unit.id, opts.modelsPerUnit);
+    const strongestFoe = (factionId: string): string | null => {
+      let best: string | null = null;
+      let bestCount = 0;
+      for (const candidate of units) {
+        if (candidate.factionId === factionId) continue;
+        const count = live.get(candidate.id) ?? 0;
+        if (count > bestCount) {
+          bestCount = count;
+          best = candidate.id;
+        }
+      }
+      return best;
+    };
+
+    for (let turn = 1; turn <= opts.turns; turn++) {
+      const orders: Array<[string, import("../core/strategic").OrderQueue]> = [];
+      for (const unit of units) {
+        const attack = {
+          kind: "attack",
+          targetUnitId: strongestFoe(unit.factionId) ?? unit.id,
+        } as const;
+        let order: import("../core/strategic").Order = attack;
+        if (unit.id === heroUnitId) {
+          order =
+            turn <= heroMoveTurns
+              ? { kind: "move", path: [{ x: 1030, y: 1000 }], pace: "march" }
+              : turn === heroCastTurn
+                ? {
+                    kind: "custom",
+                    type: "spell_aoe",
+                    data: { spell: "fireball", x: heroAim.x, y: heroAim.y },
+                  }
+                : attack;
+        }
+        orders.push([
+          unit.id,
+          { issuedBy: "gm", issuedTurn: turn, pending: [order], active: order },
+        ]);
+      }
+
+      const start = performance.now();
+      const res = await runner.resolve({
+        orders,
+        seed: opts.seed + turn,
+        turnNumber: turn,
+      });
+      perTurnMs.push(performance.now() - start);
+      hashes.push(res.poolHash);
+      reportRulesVersion = res.report.rulesVersion;
+      const summary = res.report.summary as Record<string, unknown>;
+      const analytics = summary["analytics"];
+      if (analytics && typeof analytics === "object") {
+        lastAnalytics = analytics as Record<string, unknown>;
+      }
+      // Counted from the report's own per-sub-phase totals, not by matching
+      // event prose: `summary[subPhase]` is the runner's authoritative tally and
+      // rides the wire, whereas the raw `events` array is a timeline payload the
+      // worker may bound. The PF1e module declares move/heal/shoot/melee/spell/
+      // morale, so these three keys are the module's own vocabulary.
+      const phaseCount = (key: string): number => {
+        const v = summary[key];
+        return typeof v === "number" && Number.isFinite(v) ? v : 0;
+      };
+      meleeEvents += phaseCount("melee");
+      spellEvents += phaseCount("spell");
+      moveEvents += phaseCount("move");
+      eventsTotal += res.report.events.length;
+      for (const [unitId, diff] of Object.entries(res.unitStatDiffs)) {
+        const strength = diff["strength"];
+        if (typeof strength === "number") live.set(unitId, strength);
+      }
+      for (const event of res.report.events) {
+        if (event.unitId !== heroUnitId) continue;
+        if (event.subPhase === "move" && event.type === "arrive")
+          heroDid.move = true;
+        else if (event.subPhase === "spell" && event.type === "spell")
+          heroDid.cast = true;
+        else if (
+          (event.subPhase === "melee" || event.subPhase === "shoot") &&
+          event.type === "attack"
+        )
+          heroDid.attack = true;
+      }
+    }
+
+    // Rebuild the PF1eBattleReport the CSV reads, from the per-army `units` maps
+    // the wire carried — so the export is derived from replicated figures, not
+    // from a collector this test happens to hold.
+    const unitsAccum: Record<
+      string,
+      {
+        unitId: string;
+        totalAttacks: number;
+        hits: number;
+        misses: number;
+        hitPercentage: number;
+        misfiresCount: number;
+        netDamageDealt: number;
+        killsCount: number;
+        deathsCount: number;
+        damageHealed: number;
+        drAbsorbed: number;
+        drBypassed: number;
+        srBlocked: number;
+        savesPassed: number;
+        savesFailed: number;
+      }
+    > = {};
+    const analyticsArmies: Array<{ armyId: string; unitCount: number }> = [];
+    for (const [armyId, payload] of Object.entries(lastAnalytics)) {
+      const rec = payload as { units?: Record<string, Record<string, number>> };
+      const perUnit = rec.units ?? {};
+      analyticsArmies.push({ armyId, unitCount: Object.keys(perUnit).length });
+      for (const [unitId, u] of Object.entries(perUnit)) {
+        const num = (key: string): number => {
+          const v = u[key];
+          return typeof v === "number" && Number.isFinite(v) ? v : 0;
+        };
+        unitsAccum[unitId] = {
+          unitId,
+          totalAttacks: num("totalAttacks"),
+          hits: num("hits"),
+          misses: num("misses"),
+          hitPercentage: num("hitPercentage"),
+          misfiresCount: num("misfiresCount"),
+          netDamageDealt: num("netDamageDealt"),
+          killsCount: num("killsCount"),
+          deathsCount: num("deathsCount"),
+          damageHealed: num("damageHealed"),
+          drAbsorbed: num("drAbsorbed"),
+          drBypassed: num("drBypassed"),
+          srBlocked: num("srBlocked"),
+          savesPassed: num("savesPassed"),
+          savesFailed: num("savesFailed"),
+        };
+      }
+    }
+
+    const zeros = {
+      unitId: "TOTALS",
+      totalAttacks: 0,
+      hits: 0,
+      misses: 0,
+      hitPercentage: 0,
+      critThreats: 0,
+      critsConfirmed: 0,
+      misfiresCount: 0,
+      rawDamageDealt: 0,
+      drAbsorbed: 0,
+      drBypassed: 0,
+      srBlocked: 0,
+      netDamageDealt: 0,
+      damageHealed: 0,
+      killsCount: 0,
+      deathsCount: 0,
+      savesPassed: 0,
+      savesFailed: 0,
+      concentrationPassed: 0,
+      concentrationFailed: 0,
+      aooExecuted: 0,
+      aooHits: 0,
+    };
+    const csv = exportAnalyticsToCsv({
+      totals: zeros,
+      units: unitsAccum,
+    } as unknown as Parameters<typeof exportAnalyticsToCsv>[0]);
+    const csvLines = csv.split("\n").filter((line) => line.trim().length > 0);
+
+    const modelsDeployed = units.reduce(
+      (n, u) => n + (u.modelRange ? u.modelRange[1] - u.modelRange[0] : 0),
+      0,
+    );
+
+    return {
+      ok: true,
+      rulesVersion: info.version,
+      reportRulesVersion,
+      modelsDeployed,
+      expectedModels: opts.unitsPerFaction * opts.modelsPerUnit * 2,
+      unitsPerFaction: opts.unitsPerFaction,
+      modelsPerUnit: opts.modelsPerUnit,
+      turnsResolved: perTurnMs.length,
+      firstPoolHash: hashes[0] ?? "",
+      lastPoolHash: hashes[hashes.length - 1] ?? "",
+      distinctPoolHashes: new Set(hashes).size,
+      heroUnitId,
+      // The hero's queue held move → cast → attack; if any had failed
+      // `validateOrder` the resolver would have refused it and its event type
+      // would be absent from the run.
+      heroOrders: heroDid,
+      meleeEvents,
+      spellEvents,
+      moveEvents,
+      eventsTotal,
+      perTurnMs,
+      analyticsArmies,
+      analyticsUnits: Object.fromEntries(
+        Object.entries(unitsAccum).map(([id, u]) => [
+          id,
+          {
+            totalAttacks: u.totalAttacks,
+            hits: u.hits,
+            netDamageDealt: u.netDamageDealt,
+            killsCount: u.killsCount,
+            deathsCount: u.deathsCount,
+          },
+        ]),
+      ),
+      csv: {
+        lines: csvLines.length,
+        header: csvLines[0] ?? "",
+        firstRows: csvLines.slice(1, 4),
+      },
+    };
+  } catch (e) {
+    return fail(e);
+  }
+}
+
 export async function installE2eHook(app?: HostApp | null): Promise<void> {
   const { runWebrtcLoopback } = await import("../net/webrtc");
   // A late-resolving null-install must never clobber surfaces already
@@ -3721,6 +4214,7 @@ export async function installE2eHook(app?: HostApp | null): Promise<void> {
     visionSmoke: () => runVisionSmoke(),
     gridsSmoke: () => runGridsSmoke(),
     paritySmoke: () => runParitySmoke(),
+    massBattleAcceptance: (opts) => runMassBattleAcceptance(opts),
     app: app ? appSurface(app) : (existing?.app ?? null),
     player: existing?.player ?? null,
     share: existing?.share ?? null,
