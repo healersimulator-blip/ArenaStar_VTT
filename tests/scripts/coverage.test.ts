@@ -167,19 +167,36 @@ describe("V09 — the coverage dashboard is derived from the checklist and the t
       stdio: "pipe",
     });
     expect(out).toContain("coverage --check OK");
-    // Any closed item still lacking a test file must be one the script exempts by name — the
-    // documentation-only reconciliation deliverables (§0 calls them controlling decisions, not
-    // implementation tasks). The exemption list is read back out of the script rather than
-    // restated here, so this file's own text cannot become a fake "evidence" source for the
-    // very ids it names (the id scan is a text scan; see the script header).
+    // Any closed item still lacking a test file must be one the script exempts by name.
+    // Two kinds qualify, and both are declared as named sets in the script so each exemption
+    // has to be argued for: the documentation-only reconciliation deliverables (§0 calls them
+    // controlling decisions, not implementation tasks) and the process gates, whose evidence
+    // is the executed command and its DECISIONS entry rather than a spec.
+    //
+    // The exemption list is read back out of the script rather than restated here, so this
+    // file's own text cannot become a fake "evidence" source for the very ids it names (the
+    // id scan is a text scan; see the script header).
+    const scriptSource = readFileSync(script, "utf8");
     const exempt = new Set(
-      [...readFileSync(script, "utf8").matchAll(/DOCUMENTATION_ONLY = new Set\(\[([^\]]*)\]\)/g)]
+      [...scriptSource.matchAll(/(?:DOCUMENTATION_ONLY|PROCESS_ONLY) = new Set\(\[([^\]]*)\]\)/g)]
         .flatMap((m) => [...(m[1] ?? "").matchAll(/"([A-Z]\d{2}[a-z]?)"/g)].map((x) => x[1] ?? "")),
     );
     expect(exempt.size).toBeGreaterThan(0);
     for (const gap of dashboard.totals.implementedWithoutTestEvidence) {
       expect(exempt.has(gap), `${gap} is closed with no test file and is not exempt`).toBe(true);
-      expect(gap.startsWith("R"), `${gap} must be a reconciliation deliverable`).toBe(true);
+      // …and an exemption must never be a silent one: the script still lists the item under
+      // "no test file naming them" with a reason, so the dashboard cannot imply unit coverage.
+      const report = execFileSync(process.execPath, [script], {
+        cwd: repoRoot,
+        encoding: "utf8",
+        timeout: 120_000,
+        stdio: "pipe",
+      });
+      const line = report
+        .split("\n")
+        .find((row) => row.includes(`✗ ${gap} —`));
+      expect(line, `${gap} is exempt but not reported`).toBeDefined();
+      expect(line).toMatch(/exempt from --check|process gate/);
     }
   });
 

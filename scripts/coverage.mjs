@@ -238,6 +238,21 @@ const liveDeviations = deviations.rows.filter((r) => r.state === "live");
  */
 const DOCUMENTATION_ONLY = new Set(["R01", "R03"]);
 
+/**
+ * Items whose deliverable is a *process*, not a behaviour, so no test file can name them.
+ *
+ * V10 is "run and report the quality gates" and V11 is "keep decisions/deviations and the
+ * checklist synchronized". Their evidence is the executed command and the DECISIONS entry
+ * that records its output — not a spec that imports a module. Forcing a test file to name
+ * them would produce a test that asserts nothing, which is worse than an exemption.
+ *
+ * Listed by id so the exemption is visible and has to be argued for, exactly like
+ * DOCUMENTATION_ONLY. Both are still reported under "no test file naming them" so the
+ * dashboard never silently pretends they have unit coverage.
+ */
+const PROCESS_ONLY = new Set(["V10", "V11"]);
+const EXEMPT_FROM_CHECK = new Set([...DOCUMENTATION_ONLY, ...PROCESS_ONLY]);
+
 if (JSON_OUT) {
   console.log(
     JSON.stringify(
@@ -325,7 +340,9 @@ if (JSON_OUT) {
     for (const item of untestedButDone) {
       const why = DOCUMENTATION_ONLY.has(item.id)
         ? "  (documentation-only deliverable — exempt from --check)"
-        : "";
+        : PROCESS_ONLY.has(item.id)
+          ? "  (process gate — evidenced by the executed command and its DECISIONS entry, not a spec)"
+          : "";
       console.log(`  ✗ ${item.id} — ${item.title.slice(0, 70)}  → ${item.link}${why}`);
     }
     console.log("");
@@ -334,7 +351,7 @@ if (JSON_OUT) {
 
 if (CHECK) {
   const problems = [];
-  const gaps = untestedButDone.filter((i) => !DOCUMENTATION_ONLY.has(i.id));
+  const gaps = untestedButDone.filter((i) => !EXEMPT_FROM_CHECK.has(i.id));
   if (gaps.length > 0) {
     problems.push(
       `${gaps.length} checklist item(s) marked [x] with no test file naming them: ` +
