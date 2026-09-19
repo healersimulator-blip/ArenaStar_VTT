@@ -53,6 +53,12 @@ import {
   type PF1eHealthReadout,
 } from "./healthState";
 import { normalizePF1eSystem } from "./statBlock";
+import {
+  deriveAllPF1eSkills,
+  type PF1eAuthoredSkill,
+  type PF1eDerivedSkill,
+  type PF1eSkillId,
+} from "./skills";
 
 export const PF1E_ABILITY_KEYS = [
   "str",
@@ -309,6 +315,8 @@ export interface PF1eActorSystem extends PF1eHealthAuthored {
   fastHealing?: number;
   spellPenetration?: number;
   casterLevel?: number;
+  /** PF1e skills authored ranks/classSkill (G-01). */
+  skills?: Record<string, PF1eAuthoredSkill>;
   /** Anything a rule needs that this contract has no field for yet — preserved, never invented from. */
   [key: string]: unknown;
 }
@@ -425,6 +433,10 @@ export interface PF1eDerived extends Pick<
   /** Index = spell level; authored slots per day, null when the actor has no slots at that level. */
   spellSlots: (number | null)[];
   spellMode: "prepared" | "spontaneous";
+  /** Derived PF1e skills breakdown and totals (G-01). */
+  skills: Record<PF1eSkillId, PF1eDerivedSkill>;
+  /** Armor check penalty calculated from worn armor and shield. */
+  armorCheckPenalty: number;
   /** `key → why this number is what it is`, so the sheet shows its work instead of trusting itself. */
   explain: Record<string, string>;
   /** Per mod key, the contributions that summed to it (`resolveEffects`). */
@@ -1013,6 +1025,7 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
 
   // 3. Armor, the Dexterity cap it imposes, and the three ACs (A.2).
   const armor = isRecord(sys.armor) ? (sys.armor as PF1eArmorEntry) : {};
+  const armorCheckPenalty = Math.max(0, readNumber(armor.checkPenalty ?? (sys as Record<string, unknown>).checkPenalty, "armor.checkPenalty", c));
   const acC = isRecord(sys.armorClass)
     ? (sys.armorClass as PF1eAcComponents)
     : {};
@@ -1492,6 +1505,15 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
       c,
     ) + (resolved.mods.concentration ?? 0);
 
+  // 11. Skills (G-01): derive all 35 PF1e core skills + specializations.
+  const authoredSkills = isRecord(sys.skills) ? (sys.skills as Record<string, PF1eAuthoredSkill>) : undefined;
+  const derivedSkills = deriveAllPF1eSkills(authoredSkills, {
+    abilities: eff,
+    armorCheckPenalty,
+    effectMods: resolved.mods,
+    negativeLevels: negativeLevels.total,
+  });
+
   return {
     grit: { current: gritCurrent, max: gritMax },
     size,
@@ -1548,6 +1570,8 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     spellSlots,
     spellMode:
       spellsAuthored.mode === "spontaneous" ? "spontaneous" : "prepared",
+    skills: derivedSkills,
+    armorCheckPenalty,
     explain: {
       abilities: abilityExplain(
         abilities,

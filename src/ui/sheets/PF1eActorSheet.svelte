@@ -17,6 +17,11 @@
   import { pf1eAttackEdit, type AttackEdit } from "./pf1eAttackEditor";
   import PF1eDetailsEditor from "./PF1eDetailsEditor.svelte";
   import PF1eEffectsTab from "./PF1eEffectsTab.svelte";
+  import PF1eSkillsTab from "./PF1eSkillsTab.svelte";
+  import PF1eCharacterBuilderModal from "./PF1eCharacterBuilderModal.svelte";
+  import PF1eCompendiumPicker from "./PF1eCompendiumPicker.svelte";
+  import { pf1eSkillRollSpec } from "../../packages/pf1e/rollData";
+  import type { CompendiumEntry } from "../../core/compendium";
   import { can } from "../../core/permissions";
   import {
     SHEET_FIELDS,
@@ -121,6 +126,7 @@
     | "summary"
     | "attributes"
     | "combat"
+    | "skills"
     | "weapons"
     | "armor"
     | "features"
@@ -143,6 +149,8 @@
   } = $props();
   let tab = $derived(initialTab);
   let error = $state("");
+  let showBuilder = $state(false);
+  let compendiumPickerKind = $state<"spell" | "feat" | null>(null);
   const pending = new SvelteSet<string>();
   // E01: when this actor fights inside an encounter, its combatant's timed
   // effects (`flags.core.effects`) ride the derivation (id collision → the
@@ -1181,6 +1189,43 @@
     if (result.ops.length) pending.add(client.submit(result.ops));
   }
 
+  function handleSelectCompendiumEntry(entry: CompendiumEntry): void {
+    if (compendiumPickerKind === "feat") {
+      const featName = entry.name;
+      const existing = (sheetRecord(doc.system.pf1e) ?? {}).feats;
+      const list = Array.isArray(existing) ? [...existing] : [];
+      if (!list.includes(featName)) {
+        list.push(featName);
+        updateDetail({
+          kind: "list",
+          field: "feats",
+          raw: list.join("\n"),
+          expected: existing,
+        });
+      }
+    } else if (compendiumPickerKind === "spell") {
+      const entrySys = (entry.data?.system ?? {}) as Record<string, unknown>;
+      const level = typeof entrySys.levelNumber === "number" ? entrySys.levelNumber : (parseInt(String(entrySys.level), 10) || 1);
+      const components = Array.isArray(entrySys.components)
+        ? entrySys.components.join(", ")
+        : typeof entrySys.components === "object" && entrySys.components !== null
+          ? Object.keys(entrySys.components).join(", ")
+          : typeof entrySys.components === "string"
+            ? entrySys.components
+            : "V, S";
+      updateSpellbook({
+        kind: "prepare",
+        entry: {
+          name: entry.name,
+          level,
+          slotLevel: level,
+          components,
+        },
+      });
+    }
+    compendiumPickerKind = null;
+  }
+
   function updateSpellbook(edit: PF1eSpellbookEdit): void {
     const current = client.store.get("actors", doc._id) as
       ActorDocument | undefined;
@@ -2104,11 +2149,25 @@
 
 <section class="pf1e-sheet" aria-label="PF1e character sheet" data-pf1e-sheet>
   <header>
-    <h3>{doc.name}</h3>
-    <span>PF1e · {d.size}</span>
+    <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+      <div>
+        <h3>{doc.name}</h3>
+        <span>PF1e · {d.size} · HD {d.hitDice ?? 1}</span>
+      </div>
+      {#if editable}
+        <button
+          type="button"
+          class="builder-btn"
+          data-open-builder
+          onclick={() => (showBuilder = true)}
+        >
+          Character Builder
+        </button>
+      {/if}
+    </div>
   </header>
   <nav aria-label="PF1e sheet tabs">
-    {#each ["summary", "attributes", "combat", "weapons", "armor", "features", ...(d.casting ? ["spells"] : []), "effects", ...(sheetRecord(view.authored.creature) ? ["monster"] : []), "details"] as name (name)}
+    {#each ["summary", "attributes", "combat", "skills", "weapons", "armor", "features", ...(d.casting ? ["spells"] : []), "effects", ...(sheetRecord(view.authored.creature) ? ["monster"] : []), "details"] as name (name)}
       <button
         type="button"
         class:active={tab === name}
@@ -2774,6 +2833,17 @@
         >
       </div>
     {/if}
+  {:else if tab === "skills"}
+    <PF1eSkillsTab
+      {doc}
+      {editable}
+      {client}
+      derivedSkills={d.skills}
+      onRoll={(skill, type) => {
+        const spec = pf1eSkillRollSpec(skill, type);
+        client.roll(spec.formula, "roll", undefined, spec.flavor);
+      }}
+    />
   {:else if tab === "weapons"}
     <PF1eAttackEditor
       {doc}
@@ -2789,6 +2859,18 @@
       publishedAc={d.acFromTotals}
       onEdit={updateDetail}
     />
+    {#if tab === "features" && editable}
+      <div style="margin: 8px 0;">
+        <button
+          type="button"
+          class="builder-btn"
+          data-browse-compendium-feats
+          onclick={() => (compendiumPickerKind = "feat")}
+        >
+          + Add Feat from Compendium
+        </button>
+      </div>
+    {/if}
     {#if tab === "features" && featWarnings.length > 0}
       <aside class="warn" data-pf1e-feat-warnings>
         <strong>Prerequisite warnings</strong>
@@ -2803,9 +2885,21 @@
     {/if}
   {:else if tab === "spells"}
     <section class="spellbook" aria-label="Spellbook" data-pf1e-spellbook>
-      <h4>
-        Spell slots · {spellbook.mode} · keyed to {d.spellKeyAbility.toUpperCase()}
-      </h4>
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <h4>
+          Spell slots · {spellbook.mode} · keyed to {d.spellKeyAbility.toUpperCase()}
+        </h4>
+        {#if editable}
+          <button
+            type="button"
+            class="builder-btn"
+            data-browse-compendium-spells
+            onclick={() => (compendiumPickerKind = "spell")}
+          >
+            + Browse Spells
+          </button>
+        {/if}
+      </div>
       {#if spellbookWarning}<p role="alert" data-spellbook-warning>
           {spellbookWarning}
         </p>{/if}
@@ -3493,9 +3587,38 @@
         2,
       )}</pre>
   {/if}
+
+  {#if showBuilder}
+    <PF1eCharacterBuilderModal
+      {doc}
+      {client}
+      onClose={() => (showBuilder = false)}
+    />
+  {/if}
+
+  {#if compendiumPickerKind}
+    <PF1eCompendiumPicker
+      {client}
+      kind={compendiumPickerKind}
+      onSelect={handleSelectCompendiumEntry}
+      onClose={() => (compendiumPickerKind = null)}
+    />
+  {/if}
 </section>
 
 <style>
+  .builder-btn {
+    background: #2b593f;
+    border: 1px solid #3d7d59;
+    color: #e0e5ed;
+    font-size: 0.8rem;
+    padding: 3px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .builder-btn:hover {
+    background: #366f4e;
+  }
   .pf1e-sheet {
     padding: 8px;
     background: #121820;
