@@ -11,6 +11,7 @@ interface FogState {
   lastSaveBytes: number;
   explored: number;
   shown: boolean | null;
+  style: string | null;
   stored: number;
 }
 
@@ -19,7 +20,7 @@ const exploredAt = (page: Parameters<typeof gmCall>[0], x: number, y: number): P
   surfaceCallArg<boolean | null>(page, "gm", "fogExploredAt", { x, y });
 
 test.describe("explored fog of war (§9, D-250)", () => {
-  test("Settings switch → tokens uncover → god view only hides → the map survives a reload", async ({
+  test("Settings switch → tokens uncover → god view only restyles → the map survives a reload", async ({
     page,
   }) => {
     await page.goto(entry + "?e2e=1");
@@ -45,21 +46,24 @@ test.describe("explored fog of war (§9, D-250)", () => {
     await settings.locator("[data-scene-fog]").check();
     await expect.poll(async () => (await fog(page)).enabled).toBe(true);
 
-    // the scout uncovers its surroundings; god view (on by default) keeps the cover hidden
+    // the scout uncovers its surroundings; god view (on by default) draws the GM's cover
+    // translucent — shown, but everything under it stays visible (D-251)
     await expect.poll(async () => (await fog(page)).explored).toBeGreaterThan(0.02);
     const first = await fog(page);
     expect(first.sceneId).toBe("scene-1");
     expect(first.restored).toBe(true);
     expect(first.restoredBytes).toBe(0); // nothing was stored before
-    expect(first.shown).toBe(false);
+    expect(first.shown).toBe(true);
+    expect(first.style).toBe("translucent");
     expect(first.explored).toBeLessThan(0.5); // the range clips the reveal well short of the scene
     expect(await exploredAt(page, 150, 150)).toBe(true);
     expect(await exploredAt(page, 1000, 750)).toBe(false);
     expect(await exploredAt(page, 1750, 1250)).toBe(false);
 
-    // god view off → the cover is drawn (the same texture, nothing recomputed)
+    // god view off → the opaque cover players get (the same texture, nothing recomputed)
     await settings.locator("[data-gm-god-view]").uncheck();
-    await expect.poll(async () => (await fog(page)).shown).toBe(true);
+    await expect.poll(async () => (await fog(page)).style).toBe("opaque");
+    expect((await fog(page)).shown).toBe(true);
 
     // ── move the scout to the far corner: the first area stays uncovered (memory) ──
     await surfaceCallArg(page, "app", "pf1eMoveToken", { tokenId: "scout", col: 17, row: 12 });

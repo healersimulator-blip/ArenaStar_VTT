@@ -14,6 +14,13 @@
  * never read back a surface the next scene already replaced, and a stale polygon result
  * never lands on a newer scene. No pixi here: the surface is an interface, and the unit
  * tests drive the loop with a fake one.
+ *
+ * D-251 — what the viewer is shown: `onVisibility` receives the set of token ids the user
+ * may see (their own tokens plus whatever stands in current sight), recomputed on EVERY
+ * replica change against the last polygons (a token walking into an unmoved eye's sight
+ * must appear), `null` when fog is off for the scene. It fails closed: the moment a fogged
+ * scene is entered only the user's own tokens are listed, before any polygon exists. The
+ * GM shell does not wire it (the GM sees everything under a translucent cover).
  */
 import { sightSegments } from "../canvas/vision/wallSight";
 import type { ActorDocument, SceneDocument } from "../core/documents";
@@ -22,10 +29,18 @@ import {
   fogRevealKey,
   fogSightRadius,
   fogViewers,
+  fogVisibleTokenIds,
   sceneFogSettings,
 } from "../core/fogExploration";
 import type { PermissionUser } from "../core/ownership";
 import type { VisionComputer } from "../workers/visionWorkerClient";
+
+/**
+ * How the cover is drawn: `opaque` is the player's fog (black over the unseen, a veil over
+ * the remembered); `translucent` is the GM's — the same shapes at a fraction of the alpha,
+ * so the GM sees where fog lies and everything under it (D-251).
+ */
+export type FogStyle = "opaque" | "translucent";
 
 /** What the loop needs from a fog layer (FogLayer implements it). */
 export interface FogSurface {
@@ -35,6 +50,7 @@ export interface FogSurface {
   mergePng(png: Uint8Array): Promise<void>;
   readbackPng(): Promise<Uint8Array>;
   setShown(shown: boolean): void;
+  setStyle(style: FogStyle): void;
 }
 
 /** What the loop needs from ClientSync. */
@@ -53,6 +69,11 @@ export interface FogExplorationOptions {
   transport: FogTransport;
   user: () => PermissionUser | null;
   actors: () => readonly ActorDocument[];
+  /**
+   * D-251: the token ids the user may currently see (`null` = fog off, everything). Called
+   * only when the set changes. Player shells wire it to the stage; the GM shell leaves it.
+   */
+  onVisibility?: (visible: ReadonlySet<string> | null) => void;
   /** Quiet time after the last reveal before the map is uploaded (default 1500 ms). */
   saveDelayMs?: number;
   /**
@@ -76,6 +97,8 @@ export interface FogExplorationStats {
   saves: number;
   lastSaveBytes: number;
   dirty: boolean;
+  /** D-251: token ids currently shown (null = fog off / not gating). */
+  visibleTokenIds: string[] | null;
 }
 
 export class FogExploration {
@@ -92,6 +115,10 @@ export class FogExploration {
   private lastSaveBytes = 0;
   private enabled = false;
   private destroyed = false;
+  /** Polygons of the last reveal pass (current sight), for the visibility gate. */
+  private polys: readonly Float32Array[] = [];
+  private visibleKey: string | null = null;
+  private visibleIds: Set<string> | null = null;
   private readonly saveDelayMs: number;
   private readonly restoreTimeoutMs: number;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
@@ -106,9 +133,9 @@ export class FogExploration {
       ((handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>));
   }
 
-  /** Feed the current scene (null = none); `shown` hides the cover without stopping it. */
-  sync(scene: SceneDocument | null, view: { shown: boolean }): Promise<void> {
-    return this.enqueue("sync", () => this.syncInner(scene, view.shown));
+  /** Feed the current scene (null = none) and how this shell draws the cover. */
+  sync(scene: SceneDocument | null, view: { style: FogStyle }): Promise<void> {
+    return this.enqueue("sync", () => this.syncInner(scene, view.style));
   }
 
   /** Upload now if anything changed since the last save (scene switch, close, pagehide). */
@@ -150,6 +177,7 @@ export class FogExploration {
       saves: this.saves,
       lastSaveBytes: this.lastSaveBytes,
       dirty: this.dirty,
+      visibleTokenIds: this.visibleIds ? [...this.visibleIds].sort() : null,
     };
   }
 
@@ -174,25 +202,33 @@ export class FogExploration {
     return this.chain;
   }
 
-  private async syncInner(scene: SceneDocument | null, shown: boolean): Promise<void> {
+  private async syncInner(scene: SceneDocument | null, style: FogStyle): Promise<void> {
     if (this.destroyed) return;
     const settings = scene ? sceneFogSettings(scene) : { enabled: false, rangeSquares: null };
     if (!scene || !settings.enabled) {
       await this.leaveScene();
       this.enabled = false;
       this.options.hideSurface();
+      this.publishVisibility(null);
       return;
     }
     this.enabled = true;
+    const user = this.options.user();
+    const actors = this.options.actors();
     if (scene._id !== this.sceneId) {
       await this.leaveScene();
       const surface = this.options.surfaceFor(scene);
       surface.reset();
+      surface.setStyle(style);
+      surface.setShown(true);
       this.surface = surface;
       this.sceneId = scene._id;
       this.key = null;
+      this.polys = [];
       this.restored = false;
       this.restoredBytes = 0;
+      // fail closed: until the first polygons exist only the user's own tokens are shown
+      this.publishVisibility(fogVisibleTokenIds(scene, user, [], { actors }));
       const stored = await this.fetchStored(scene._id);
       if (this.destroyed || this.sceneId !== scene._id) return;
       if (stored && stored.length > 0) {
@@ -203,25 +239,39 @@ export class FogExploration {
     }
     const surface = this.surface;
     if (!surface) return;
-    surface.setShown(shown);
+    surface.setStyle(style);
+    surface.setShown(true);
 
-    const viewers = fogViewers(scene, this.options.user(), { actors: this.options.actors() });
+    const viewers = fogViewers(scene, user, { actors });
     const radius = fogSightRadius(scene, settings);
     const key = fogRevealKey(scene, viewers, radius);
-    if (key === this.key) return;
-    this.key = key;
-    const segments = flatSegments(sightSegments(scene.walls));
-    const polys = await Promise.all(
-      viewers.map((v) => this.options.computer.compute(v.x, v.y, segments, radius)),
-    );
-    if (this.destroyed || this.sceneId !== scene._id || this.surface !== surface) return;
-    for (const poly of polys) surface.reveal(poly);
-    surface.setVisible(polys);
-    this.reveals++;
-    if (polys.length > 0) {
-      this.dirty = true;
-      this.scheduleSave();
+    if (key !== this.key) {
+      this.key = key;
+      const segments = flatSegments(sightSegments(scene.walls));
+      const polys = await Promise.all(
+        viewers.map((v) => this.options.computer.compute(v.x, v.y, segments, radius)),
+      );
+      if (this.destroyed || this.sceneId !== scene._id || this.surface !== surface) return;
+      for (const poly of polys) surface.reveal(poly);
+      surface.setVisible(polys);
+      this.polys = polys;
+      this.reveals++;
+      if (polys.length > 0) {
+        this.dirty = true;
+        this.scheduleSave();
+      }
     }
+    // every replica change: a token may have walked into (or out of) an unmoved eye's sight
+    this.publishVisibility(fogVisibleTokenIds(scene, user, this.polys, { actors }));
+  }
+
+  /** Hand the shell the visible set, only when it changed (null = fog off, everything). */
+  private publishVisibility(ids: Set<string> | null): void {
+    const key = ids === null ? null : [...ids].sort().join("\n");
+    if (key === this.visibleKey) return;
+    this.visibleKey = key;
+    this.visibleIds = ids;
+    this.options.onVisibility?.(ids);
   }
 
   /** The stored map for a scene, or null on a miss, an error, or a host that stays silent. */
@@ -247,6 +297,7 @@ export class FogExploration {
     this.sceneId = null;
     this.surface = null;
     this.key = null;
+    this.polys = [];
     this.restored = false;
   }
 

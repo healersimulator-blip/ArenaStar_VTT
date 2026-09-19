@@ -8,6 +8,10 @@
  *
  * A second texture dims what is explored but not in sight right now
  * (`setVisible`): black = never seen, dim = remembered, clear = seen now.
+ *
+ * Two styles (D-251): `opaque` is what a player gets; `translucent` is the GM's cover — the
+ * same shapes at a fraction of the alpha, so the GM sees where fog lies and every token and
+ * map feature under it.
  */
 import { Container, Graphics, RenderTexture, Sprite, Texture } from "pixi.js";
 import type { Application } from "pixi.js";
@@ -16,6 +20,12 @@ import type { Camera, Viewport } from "../camera";
 export const FOG_TEXTURE_WIDTH = 512;
 /** Alpha of the "remembered but not currently visible" veil. */
 export const FOG_DIM_ALPHA = 0.55;
+/** D-251: the GM's translucent cover — unexplored areas at this alpha… */
+export const FOG_GM_COVER_ALPHA = 0.35;
+/** …and the remembered veil at this fraction of its player alpha. */
+export const FOG_GM_VEIL_ALPHA = 0.35;
+
+export type FogLayerStyle = "opaque" | "translucent";
 
 type PngCanvas = HTMLCanvasElement & {
   convertToBlob?: (o?: { type?: string }) => Promise<Blob>;
@@ -60,6 +70,7 @@ export class FogLayer {
    */
   private readonly scratch = new Graphics();
   private readonly brush = new Container();
+  private currentStyle: FogLayerStyle = "opaque";
   private destroyed = false;
 
   constructor(
@@ -109,13 +120,25 @@ export class FogLayer {
     this.setVisible([]);
   }
 
-  /** Show or hide the whole fog (GM god view keeps revealing while hidden). */
+  /** Show or hide the whole fog (fog off for the scene hides it; the map keeps accumulating). */
   setShown(shown: boolean): void {
     this.container.visible = shown;
   }
 
   get shown(): boolean {
     return this.container.visible;
+  }
+
+  /** D-251: the player's opaque cover, or the GM's see-through one. */
+  setStyle(style: FogLayerStyle): void {
+    this.currentStyle = style;
+    const translucent = style === "translucent";
+    this.cover.alpha = translucent ? FOG_GM_COVER_ALPHA : 1;
+    this.veil.alpha = translucent ? FOG_GM_VEIL_ALPHA : 1;
+  }
+
+  get style(): FogLayerStyle {
+    return this.currentStyle;
   }
 
   private polygonPath(g: Graphics, poly: Float32Array): void {

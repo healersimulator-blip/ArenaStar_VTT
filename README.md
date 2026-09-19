@@ -65,10 +65,16 @@ Fog is a per-scene switch under **Settings → Scene** (*Fog of war*, with an op
 range* in squares; 0 = the whole scene, sight-blocking walls and closed doors always apply).
 Each player uncovers the map with the tokens they control and keeps what they have seen
 (D-250): the explored map is saved per player and scene by the host, comes back on reload or
-reconnect, and travels in the world file (`fog.json` + `fog/*.png`). The GM's own map is the
-union of every vision token; **God view** (Settings → Scene or GM extras) hides the cover for
-the GM without stopping it from accumulating. What is in sight right now is clear; what was
-seen before is dimmed; what was never seen is black.
+reconnect, and travels in the world file (`fog.json` + `fog/*.png`). What is in sight right
+now is clear; what was seen before is dimmed; what was never seen is black.
+
+Fog also hides tokens (D-251): on a fogged scene a player's canvas draws only the tokens they
+control plus whatever stands in their sight right now — a token in a remembered or unexplored
+area is not drawn and cannot be selected, opened or right-clicked; it appears the moment it
+walks into sight or the player's token walks up to it. The GM is never gated: the GM's fog is
+a translucent overlay marking where fog lies while every token and map feature stays visible
+under it (**God view**, on by default; switch it off in Settings → Scene or GM extras to
+preview the opaque cover players get). The GM's own map is the union of every vision token.
 
 ## file:// limitations (§15)
 

@@ -1,8 +1,9 @@
 /**
- * §9 explored fog — the client loop (D-250) against a fake surface: restore merges the
+ * §9 explored fog — the client loop (D-250/D-251) against a fake surface: restore merges the
  * stored map, reveals follow token moves and door state, saves debounce and flush on scene
- * change, god view hides without stopping, and the loop never touches a surface after the
- * scene left or the loop was destroyed.
+ * change, the GM's translucent style restyles without recomputing, the token gate fails
+ * closed and follows tokens that walk into an unmoved eye's sight, and the loop never
+ * touches a surface after the scene left or the loop was destroyed.
  */
 import { describe, expect, test } from "vitest";
 import { FogExploration, type FogSurface, type FogTransport } from "../../src/client/fogExploration";
@@ -79,6 +80,7 @@ class FakeSurface implements FogSurface {
   visible: Float32Array[][] = [];
   merged: Uint8Array[] = [];
   shown: boolean | null = null;
+  style: string | null = null;
   readbacks = 0;
   destroyed = false;
   constructor(readonly label: string) {}
@@ -107,6 +109,10 @@ class FakeSurface implements FogSurface {
   setShown(shown: boolean): void {
     this.assertAlive("setShown");
     this.shown = shown;
+  }
+  setStyle(style: "opaque" | "translucent"): void {
+    this.assertAlive("setStyle");
+    this.style = style;
   }
   private assertAlive(what: string): void {
     if (this.destroyed) throw new Error(`${what} on destroyed surface ${this.label}`);
@@ -161,6 +167,7 @@ function harness(opts: { user?: { id: string; role: "GM" | "PLAYER" } | null } =
   const transport = new FakeTransport();
   const timers = new Timers();
   const errors: string[] = [];
+  const visibility: Array<string[] | null> = [];
   const user = opts.user === undefined ? { id: "gm", role: "GM" as const } : opts.user;
   const fog = new FogExploration({
     surfaceFor: (sc) => {
@@ -183,6 +190,7 @@ function harness(opts: { user?: { id: string; role: "GM" | "PLAYER" } | null } =
     transport,
     user: () => user,
     actors: () => [],
+    onVisibility: (ids) => visibility.push(ids === null ? null : [...ids].sort()),
     saveDelayMs: 1500,
     restoreTimeoutMs: 15_000,
     setTimer: timers.set,
@@ -194,6 +202,7 @@ function harness(opts: { user?: { id: string; role: "GM" | "PLAYER" } | null } =
     transport,
     timers,
     errors,
+    visibility,
     surface: () => {
       if (!current) throw new Error("no surface yet");
       return current;
@@ -209,13 +218,14 @@ describe("FogExploration loop", () => {
     const h = harness();
     h.transport.stored.set("s1", new Uint8Array([1, 2, 3]));
     const s1 = scene("s1", { tokens: [token("t", 200, 200)], walls: [wall("w", [0, 300, 1000, 300])] });
-    await h.fog.sync(s1, { shown: true });
+    await h.fog.sync(s1, { style: "opaque" });
 
     const surface = h.surface();
     expect(surface.resets).toBe(1);
     expect(h.transport.gets).toEqual(["s1"]);
     expect(surface.merged.map((m) => [...m])).toEqual([[1, 2, 3]]);
     expect(surface.shown).toBe(true);
+    expect(surface.style).toBe("opaque");
     expect(surface.reveals).toHaveLength(1);
     const poly = surface.reveals[0] as Float32Array;
     expect(pointInPolygon(poly, 200, 100)).toBe(true); // same side of the wall
@@ -227,7 +237,7 @@ describe("FogExploration loop", () => {
 
   test("nothing stored → restored with 0 bytes, no merge", async () => {
     const h = harness();
-    await h.fog.sync(scene("s1", { tokens: [token("t", 200, 200)] }), { shown: true });
+    await h.fog.sync(scene("s1", { tokens: [token("t", 200, 200)] }), { style: "opaque" });
     expect(h.surface().merged).toEqual([]);
     expect(h.fog.stats()).toMatchObject({ restored: true, restoredBytes: 0 });
   });
@@ -235,8 +245,8 @@ describe("FogExploration loop", () => {
   test("a save lands after the quiet time, not before; unchanged replicas do not re-reveal", async () => {
     const h = harness();
     const s1 = scene("s1", { tokens: [token("t", 200, 200)] });
-    await h.fog.sync(s1, { shown: true });
-    await h.fog.sync(s1, { shown: true }); // same key → no second polygon pass
+    await h.fog.sync(s1, { style: "opaque" });
+    await h.fog.sync(s1, { style: "opaque" }); // same key → no second polygon pass
     expect(h.surface().reveals).toHaveLength(1);
     expect(h.transport.puts).toEqual([]);
     expect([...h.timers.pending.values()].map((t) => t.ms)).toEqual([1500]);
@@ -247,8 +257,8 @@ describe("FogExploration loop", () => {
     expect(h.fog.stats()).toMatchObject({ saves: 1, dirty: false, lastSaveBytes: 2 });
 
     // a move re-reveals and re-arms ONE timer
-    await h.fog.sync({ ...s1, tokens: [token("t", 500, 200)] }, { shown: true });
-    await h.fog.sync({ ...s1, tokens: [token("t", 600, 200)] }, { shown: true });
+    await h.fog.sync({ ...s1, tokens: [token("t", 500, 200)] }, { style: "opaque" });
+    await h.fog.sync({ ...s1, tokens: [token("t", 600, 200)] }, { style: "opaque" });
     expect(h.surface().reveals).toHaveLength(3);
     expect([...h.timers.pending.values()].filter((t) => t.ms === 1500)).toHaveLength(1);
   });
@@ -257,20 +267,20 @@ describe("FogExploration loop", () => {
     const h = harness();
     const door = wall("d", [0, 300, 1000, 300], { sight: 1, door: 0 });
     const s1 = scene("s1", { tokens: [token("t", 200, 200)], walls: [door] });
-    await h.fog.sync(s1, { shown: true });
+    await h.fog.sync(s1, { style: "opaque" });
     const closed = h.surface().reveals[0] as Float32Array;
     expect(pointInPolygon(closed, 200, 500)).toBe(false);
-    await h.fog.sync({ ...s1, walls: [{ ...door, door: 1 }] }, { shown: true });
+    await h.fog.sync({ ...s1, walls: [{ ...door, door: 1 }] }, { style: "opaque" });
     const open = h.surface().reveals[1] as Float32Array;
     expect(pointInPolygon(open, 200, 500)).toBe(true);
   });
 
   test("leaving a scene flushes its dirty map BEFORE the next scene's surface replaces it", async () => {
     const h = harness();
-    await h.fog.sync(scene("s1", { tokens: [token("t", 200, 200)] }), { shown: true });
+    await h.fog.sync(scene("s1", { tokens: [token("t", 200, 200)] }), { style: "opaque" });
     const first = h.surface();
     // a different size → the stage would destroy the first layer when asked for the second
-    await h.fog.sync(scene("s2", { width: 600, height: 600, tokens: [token("t", 100, 100)] }), { shown: true });
+    await h.fog.sync(scene("s2", { width: 600, height: 600, tokens: [token("t", 100, 100)] }), { style: "opaque" });
     expect(h.transport.puts.map((p) => p.sceneId)).toEqual(["s1"]);
     expect(first.readbacks).toBe(1);
     expect(h.surface()).not.toBe(first);
@@ -279,21 +289,23 @@ describe("FogExploration loop", () => {
     expect(h.errors).toEqual([]);
   });
 
-  test("fog off for the scene (or no scene): flush, forget, hide — and a GM's god view only hides", async () => {
+  test("fog off for the scene (or no scene): flush, forget, hide — and the GM's style only restyles", async () => {
     const h = harness();
     const s1 = scene("s1", { tokens: [token("t", 200, 200)] });
-    await h.fog.sync(s1, { shown: false });
-    expect(h.surface().shown).toBe(false);
-    expect(h.surface().reveals).toHaveLength(1); // still accumulating while hidden
-    await h.fog.sync(s1, { shown: true });
+    await h.fog.sync(s1, { style: "translucent" });
     expect(h.surface().shown).toBe(true);
+    expect(h.surface().style).toBe("translucent");
+    expect(h.surface().reveals).toHaveLength(1);
+    await h.fog.sync(s1, { style: "opaque" });
+    expect(h.surface().style).toBe("opaque");
+    expect(h.surface().reveals).toHaveLength(1); // a restyle recomputes nothing
 
     const plain = { ...s1, flags: {} };
-    await h.fog.sync(plain, { shown: true });
+    await h.fog.sync(plain, { style: "opaque" });
     expect(h.transport.puts.map((p) => p.sceneId)).toEqual(["s1"]);
     expect(h.hidden()).toBe(1);
     expect(h.fog.stats()).toMatchObject({ sceneId: null, enabled: false });
-    await h.fog.sync(null, { shown: true });
+    await h.fog.sync(null, { style: "opaque" });
     expect(h.hidden()).toBe(2);
     expect(h.transport.puts).toHaveLength(1); // nothing new to save
   });
@@ -303,21 +315,74 @@ describe("FogExploration loop", () => {
     const s1 = scene("s1", {
       tokens: [token("mine", 200, 200, { ownership: { default: 0, rex: 3 } }), token("npc", 800, 600, { ownership: { default: 0 } })],
     });
-    await h.fog.sync(s1, { shown: true });
+    await h.fog.sync(s1, { style: "opaque" });
     expect(h.surface().reveals).toHaveLength(1);
     const h2 = harness({ user: { id: "ivy", role: "PLAYER" } });
-    await h2.fog.sync(s1, { shown: true });
+    await h2.fog.sync(s1, { style: "opaque" });
     expect(h2.surface().reveals).toHaveLength(0);
     expect(h2.surface().visible.at(-1)).toEqual([]);
     expect(h2.fog.stats().dirty).toBe(false);
     expect(h2.timers.pending.size).toBe(0);
+    // D-251: ivy controls nothing and sees nothing; the gate closed before any polygon
+    expect(h2.visibility).toEqual([[]]);
+  });
+
+  test("D-251 token gate: fails closed on entry, opens for tokens in sight, follows a token that walks in or out", async () => {
+    const h = harness({ user: { id: "rex", role: "PLAYER" } });
+    const wallAcross = wall("w", [0, 300, 1000, 300]); // the hero's side is y < 300
+    const hero = token("hero", 200, 200, { ownership: { default: 0, rex: 3 } });
+    const orcNear = token("orc", 600, 150, { ownership: { default: 0 } }); // same side, in sight
+    const orcFar = token("orc", 600, 600, { ownership: { default: 0 } }); // behind the wall
+    const s1 = scene("s1", { tokens: [hero, orcFar], walls: [wallAcross] });
+
+    // entering: own token only, published BEFORE the restore/polygons (fail closed)
+    h.transport.silent = true;
+    const first = h.fog.sync(s1, { style: "opaque" });
+    for (let i = 0; i < 50 && h.visibility.length === 0; i++) await Promise.resolve();
+    expect(h.visibility).toEqual([["hero"]]);
+    expect(h.fog.stats().restored).toBe(false);
+    h.timers.fire(15_000);
+    await first;
+    // polygons in: the far orc is behind the wall → still just the hero (no re-publish)
+    expect(h.visibility).toEqual([["hero"]]);
+    expect(h.fog.stats().visibleTokenIds).toEqual(["hero"]);
+
+    // the orc walks around the wall into sight — the hero never moved (same reveal key)
+    const revealsBefore = h.surface().reveals.length;
+    await h.fog.sync({ ...s1, tokens: [hero, orcNear] }, { style: "opaque" });
+    expect(h.surface().reveals).toHaveLength(revealsBefore);
+    expect(h.visibility.at(-1)).toEqual(["hero", "orc"]);
+
+    // …and back out of sight
+    await h.fog.sync({ ...s1, tokens: [hero, orcFar] }, { style: "opaque" });
+    expect(h.visibility.at(-1)).toEqual(["hero"]);
+
+    // a second controlled token is always shown, wherever it stands
+    const mule = token("mule", 900, 700, { ownership: { default: 0, rex: 3 }, vision: false });
+    await h.fog.sync({ ...s1, tokens: [hero, orcFar, mule] }, { style: "opaque" });
+    expect(h.visibility.at(-1)).toEqual(["hero", "mule"]);
+
+    // fog off → null (everything), once
+    await h.fog.sync({ ...s1, flags: {} }, { style: "opaque" });
+    expect(h.visibility.at(-1)).toBeNull();
+    expect(h.fog.stats().visibleTokenIds).toBeNull();
+  });
+
+  test("D-251: the GM is never gated — every token is listed regardless of sight", async () => {
+    const h = harness();
+    const s1 = scene("s1", {
+      tokens: [token("a", 200, 200), token("b", 900, 700, { ownership: { default: 0 }, vision: false })],
+      walls: [wall("w", [0, 300, 1000, 300])],
+    });
+    await h.fog.sync(s1, { style: "translucent" });
+    expect(h.visibility.at(-1)).toEqual(["a", "b"]);
   });
 
   test("a silent host: restore times out as 'nothing stored', reveals go on, refreshStored merges later", async () => {
     const h = harness();
     h.transport.silent = true;
     const s1 = scene("s1", { tokens: [token("t", 200, 200)] });
-    const sync = h.fog.sync(s1, { shown: true });
+    const sync = h.fog.sync(s1, { style: "opaque" });
     // the restore timeout is armed a few microtasks in (queue → leaveScene → surface → fetch)
     for (let i = 0; i < 50 && !h.timers.armed(15_000); i++) await Promise.resolve();
     expect(h.timers.armed(15_000)).toBe(true);
@@ -337,7 +402,7 @@ describe("FogExploration loop", () => {
   test("flush then destroy: the queued flush lands, later syncs are ignored, nothing touches the surface", async () => {
     const h = harness();
     const s1 = scene("s1", { tokens: [token("t", 200, 200)] });
-    await h.fog.sync(s1, { shown: true });
+    await h.fog.sync(s1, { style: "opaque" });
     const flushed = h.fog.flush();
     h.fog.destroy();
     await flushed;
@@ -345,7 +410,7 @@ describe("FogExploration loop", () => {
     expect(h.timers.pending.size).toBe(0);
     const surface = h.surface();
     surface.destroyed = true; // the stage is gone
-    await h.fog.sync({ ...s1, tokens: [token("t", 600, 600)] }, { shown: true });
+    await h.fog.sync({ ...s1, tokens: [token("t", 600, 600)] }, { style: "opaque" });
     await h.fog.flush();
     expect(h.errors).toEqual([]);
     expect(h.transport.puts).toHaveLength(1);
@@ -354,13 +419,13 @@ describe("FogExploration loop", () => {
   test("a surface/transport failure is reported, not thrown, and the loop keeps serving", async () => {
     const h = harness();
     const s1 = scene("s1", { tokens: [token("t", 200, 200)] });
-    await h.fog.sync(s1, { shown: true });
+    await h.fog.sync(s1, { style: "opaque" });
     const surface = h.surface();
     surface.readbackPng = () => Promise.reject(new Error("gpu lost"));
     await h.fog.flush();
     expect(h.errors).toEqual(["flush: Error: gpu lost"]);
     surface.readbackPng = () => Promise.resolve(new Uint8Array([1]));
-    await h.fog.sync({ ...s1, tokens: [token("t", 300, 300)] }, { shown: true });
+    await h.fog.sync({ ...s1, tokens: [token("t", 300, 300)] }, { style: "opaque" });
     await h.fog.flush();
     expect(h.transport.puts).toHaveLength(1);
   });

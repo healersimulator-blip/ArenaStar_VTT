@@ -83,10 +83,11 @@ describe("fog.put / fog.get through the host (D-250)", () => {
     cleanup.push(hostApp.worldId);
     try {
       const db = await openVttDb();
-      const playerId = playerApp.client.user?.id;
-      if (!playerId) throw new Error("player not authenticated");
+      const playerClient = playerApp.client;
+      const playerId = playerClient?.user?.id;
+      if (!playerClient || !playerId) throw new Error("player not authenticated");
       hostApp.gm.client.sendFogPng(DEFAULT_SCENE_ID, png(0xaa));
-      playerApp.client.sendFogPng(DEFAULT_SCENE_ID, png(0xbb, 0xbb));
+      playerClient.sendFogPng(DEFAULT_SCENE_ID, png(0xbb, 0xbb));
       await settle(6);
 
       const rows = await listFogForWorld(db, hostApp.worldId);
@@ -97,14 +98,14 @@ describe("fog.put / fog.get through the host (D-250)", () => {
         ].sort(),
       );
       // each side gets its own map back
-      const mine = await playerApp.client.requestFog(DEFAULT_SCENE_ID);
+      const mine = await playerClient.requestFog(DEFAULT_SCENE_ID);
       expect(mine && [...mine]).toEqual([...png(0xbb, 0xbb)]);
       const gms = await hostApp.gm.client.requestFog(DEFAULT_SCENE_ID);
       expect(gms && [...gms]).toEqual([...png(0xaa)]);
       // concurrent requests for one scene share one answer
       const [a, b] = await Promise.all([
-        playerApp.client.requestFog("scene-2"),
-        playerApp.client.requestFog("scene-2"),
+        playerClient.requestFog("scene-2"),
+        playerClient.requestFog("scene-2"),
       ]);
       expect(a).toBeNull();
       expect(b).toBeNull();
@@ -133,23 +134,20 @@ describe("fog rides the world file (D-250)", () => {
     const scene1 = client.store.get("scenes", DEFAULT_SCENE_ID) as SceneDocument;
     // scene-1 stays tactical with fog on; scene-2 is a strategic (heroes + units) scene with
     // fog on as well — both flags travel as scene documents, the maps as fog rows
+    const strategicScene: SceneDocument = {
+      ...scene1,
+      _id: "scene-strategic",
+      name: "The Field",
+      active: false,
+      flags: { core: { scale: "strategic", fog: true } },
+    };
     client.submit([
       {
         kind: "update",
         ref: { coll: "scenes", id: DEFAULT_SCENE_ID },
         diff: { flags: { core: { fog: true, fogRange: 6 } } },
       },
-      {
-        kind: "create",
-        coll: "scenes",
-        data: {
-          ...scene1,
-          _id: "scene-strategic",
-          name: "The Field",
-          active: false,
-          flags: { core: { scale: "strategic", fog: true } },
-        },
-      },
+      { kind: "create", coll: "scenes", data: strategicScene },
     ]);
     await settle();
     client.sendFogPng(DEFAULT_SCENE_ID, png(1));

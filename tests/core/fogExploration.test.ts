@@ -10,7 +10,9 @@ import {
   fogSettingsOps,
   fogSightRadius,
   fogViewers,
+  fogVisibleTokenIds,
   sceneFogSettings,
+  tokenInSight,
 } from "../../src/core/fogExploration";
 import { applyDiff } from "../../src/core/diff";
 
@@ -97,7 +99,7 @@ describe("scene fog flags", () => {
   });
 
   test("fogSettingsOps writes flags whole and keeps the other core flags (D-012 / D-080)", () => {
-    const s = scene({ flags: { core: { scale: "strategic" }, other: 1 } });
+    const s = scene({ flags: { core: { scale: "strategic" }, other: { kept: 1 } } });
     const ops = fogSettingsOps(s, { enabled: true, rangeSquares: 8 });
     expect(ops).toHaveLength(1);
     const op = ops[0];
@@ -106,7 +108,7 @@ describe("scene fog flags", () => {
     const applied = applyDiff(s, op.diff);
     if (!applied.ok) throw new Error(applied.error);
     const next = applied.value;
-    expect(next.flags).toEqual({ core: { scale: "strategic", fog: true, fogRange: 8 }, other: 1 });
+    expect(next.flags).toEqual({ core: { scale: "strategic", fog: true, fogRange: 8 }, other: { kept: 1 } });
     expect(sceneFogSettings(next)).toEqual({ enabled: true, rangeSquares: 8 });
 
     // turning it off removes both keys and leaves the scale alone
@@ -115,7 +117,7 @@ describe("scene fog flags", () => {
     if (!off || off.kind !== "update") throw new Error("expected an update op");
     const appliedOff = applyDiff(next, off.diff);
     if (!appliedOff.ok) throw new Error(appliedOff.error);
-    expect(appliedOff.value.flags).toEqual({ core: { scale: "strategic" }, other: 1 });
+    expect(appliedOff.value.flags).toEqual({ core: { scale: "strategic" }, other: { kept: 1 } });
   });
 });
 
@@ -186,5 +188,66 @@ describe("sight radius + reveal key", () => {
     expect([...flatSegments([{ x1: 1, y1: 2, x2: 3, y2: 4 }, { x1: 5, y1: 6, x2: 7, y2: 8 }])]).toEqual([
       1, 2, 3, 4, 5, 6, 7, 8,
     ]);
+  });
+});
+
+// D-251 — what a player is shown on a fogged scene
+describe("token gate", () => {
+  /** A square sight polygon [x0,x1]×[y0,y1] as the worker would hand it back. */
+  const square = (x0: number, y0: number, x1: number, y1: number): Float32Array =>
+    new Float32Array([x0, y0, x1, y0, x1, y1, x0, y1]);
+
+  test("tokenInSight: centre or any inset corner inside a polygon counts; degenerate polygons do not", () => {
+    const sight = square(0, 0, 500, 500);
+    expect(tokenInSight({ x: 250, y: 250, width: 100, height: 100 }, [sight])).toBe(true);
+    // centre just outside, but the inset corner (x - w/4 = 505) is not inside either → out
+    expect(tokenInSight({ x: 530, y: 250, width: 100, height: 100 }, [sight])).toBe(false);
+    // centre outside, inset corner at 520 - 25 = 495 inside → half behind the edge shows
+    expect(tokenInSight({ x: 520, y: 250, width: 100, height: 100 }, [sight])).toBe(true);
+    // a big token whose centre is far out but whose near quarter reaches in
+    expect(tokenInSight({ x: 600, y: 250, width: 500, height: 500 }, [sight])).toBe(true);
+    expect(tokenInSight({ x: 900, y: 900, width: 100, height: 100 }, [sight])).toBe(false);
+    expect(tokenInSight({ x: 250, y: 250, width: 100, height: 100 }, [])).toBe(false);
+    expect(tokenInSight({ x: 250, y: 250, width: 100, height: 100 }, [new Float32Array([1, 2, 3, 4])])).toBe(
+      false,
+    );
+    // any one of several polygons suffices
+    expect(tokenInSight({ x: 800, y: 800, width: 100, height: 100 }, [sight, square(700, 700, 900, 900)])).toBe(
+      true,
+    );
+  });
+
+  test("fogVisibleTokenIds: own tokens always, others only in sight; GM/ASSISTANT everything; no user nothing", () => {
+    const s = scene({
+      tokens: [
+        token("mine", { x: 100, y: 100, ownership: { default: 0, rex: 3 } }),
+        token("mine-far", { x: 900, y: 900, ownership: { default: 0, rex: 3 }, vision: false }),
+        token("orc-near", { x: 200, y: 150 }),
+        token("orc-far", { x: 900, y: 100 }),
+        token("friend", { x: 850, y: 850, ownership: { default: 0, ivy: 3 } }),
+      ],
+    });
+    const sight = [square(0, 0, 400, 400)];
+    const rex = { id: "rex", role: "PLAYER" as const };
+    expect([...fogVisibleTokenIds(s, rex, sight)].sort()).toEqual(["mine", "mine-far", "orc-near"]);
+    // no polygons yet (scene just entered): only what rex controls
+    expect([...fogVisibleTokenIds(s, rex, [])].sort()).toEqual(["mine", "mine-far"]);
+    // control through the actor counts as ownership, as it does for revealing
+    const actor: ActorDocument = {
+      _id: "actor-orc-far",
+      type: "actor",
+      name: "Orc",
+      ownership: { default: 0, rex: 3 },
+      flags: {},
+      system: {},
+      items: [],
+      effects: [],
+    };
+    const viaActor = scene({ tokens: [token("orc-far", { x: 900, y: 100, actorId: "actor-orc-far" })] });
+    expect([...fogVisibleTokenIds(viaActor, rex, [], { actors: [actor] })]).toEqual(["orc-far"]);
+    // the GM and the assistant are never gated
+    expect(fogVisibleTokenIds(s, { id: "gm", role: "GM" }, []).size).toBe(5);
+    expect(fogVisibleTokenIds(s, { id: "asst", role: "ASSISTANT" }, []).size).toBe(5);
+    expect(fogVisibleTokenIds(s, null, sight).size).toBe(0);
   });
 });

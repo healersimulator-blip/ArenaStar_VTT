@@ -44,17 +44,18 @@ Milestone assignment mirrors PLAN.md.
 - Retire the in-world **Activate** button once every campaign starts through the wizard or a
   starter (kept for fresh campaigns for now; see D-249).
 
-## Fog follow-ups (after D-250 — explored fog of war)
+## Fog follow-ups (after D-250 / D-251 — explored fog of war, token gating)
 
 - Sight bounded by darkness and light sources (today: walls, doors and the optional range in
   squares only; a token sees through darkness).
-- Token visibility gating: hide tokens that stand in a player's unexplored or out-of-sight
-  area on the player's canvas and in the player's replica projection (today every token the
-  player may read is drawn; the fog only covers the map under it).
+- Replica-level token gating: today fog hides out-of-sight tokens on the player's canvas
+  (D-251, client-side — the position still reaches the player's replica, so a tampered client
+  could read it); a host-side projection that withholds a token until it enters a player's
+  sight needs the host to run each player's vision (or trust the player's fog.put map).
+- Map features above the fog layer (notes, effects) are not gated by sight; drawings, tiles,
+  templates and the background sit under the cover and are.
 - GM "view as player" for explored fog (the GM's cover is the union of every vision token;
   a per-player preview would request that player's stored map through a GM-only fog.get).
 - Fog reset / reveal-all / hide-all brushes for the GM (today: switch fog off and on again to
   start over, or wait for tokens to uncover it).
-- A player-side Playwright run over the real join path (the player flow is unit-tested over
-  the in-memory join pair in `tests/host/fogPersistence.test.ts`; Chromium e2e drives the GM).
 

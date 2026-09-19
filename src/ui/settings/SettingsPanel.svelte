@@ -364,8 +364,9 @@
           onchange={(e) =>
             applyFog({ ...fog, enabled: (e.target as HTMLInputElement).checked })}
         />
-        Fog of war — each player uncovers the map with the tokens they control; what they
-        have seen stays uncovered and is saved with the world
+        Fog of war — each player uncovers the map with the tokens they control and sees
+        other tokens only while in sight; what they have seen stays uncovered and is saved
+        with the world
       </label>
       <label>
         Sight range (squares, 0 = whole scene)
@@ -386,7 +387,8 @@
       </label>
       <label class="check">
         <input data-gm-god-view type="checkbox" bind:checked={gmState.godView} />
-        God view — the GM sees through fog (off: see what the table has uncovered)
+        God view — the GM's fog is see-through (every token and map feature stays visible
+        under it); off: preview the opaque cover players get
       </label>
     </div>
   {/if}

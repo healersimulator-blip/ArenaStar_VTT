@@ -761,9 +761,10 @@
         combats: current.gm.client.store.getAll("combats") as CombatDocument[],
       }),
     );
-    // D-250: explored fog follows the replica — tokens moved, doors opened, scene switched;
-    // god view hides the cover for the GM without stopping the map from accumulating.
-    void fog?.sync(scene, { shown: !gmState.godView });
+    // D-250/D-251: explored fog follows the replica — tokens moved, doors opened, scene
+    // switched. The GM's cover is translucent (everything stays visible under it); god view
+    // off previews the opaque cover players get.
+    void fog?.sync(scene, { style: gmState.godView ? "translucent" : "opaque" });
     // §9 tiles: roofs fade over tokens with vision (D-083)
     const occupied = (scene?.tokens ?? [])
       .filter((t) => t.vision)
@@ -1570,6 +1571,7 @@
               lastSaveBytes: stats.lastSaveBytes,
               explored: layer ? layer.exploredFraction() : 0,
               shown: layer ? layer.shown : null,
+              style: layer ? layer.style : null,
               stored,
             };
           },
@@ -1871,10 +1873,10 @@
     };
   });
 
-  // D-250: god view toggles (Settings / GM extras) show or hide the cover at once.
+  // D-250/D-251: god view toggles (Settings / GM extras) restyle the cover at once.
   $effect(() => {
-    const shown = !gmState.godView;
-    void fog?.sync(activeScene(), { shown });
+    const style = gmState.godView ? "translucent" : "opaque";
+    void fog?.sync(activeScene(), { style });
   });
 </script>
 

@@ -4,8 +4,10 @@ import { fileURLToPath } from "node:url";
 export const entry = "file://" + fileURLToPath(new URL("../dist/index.html", import.meta.url));
 
 type AnySurface = Record<string, () => unknown>;
+/** `playerCanvas` (D-251) is the player shell's stage readback — fog's token gate. */
+export type SurfaceName = "app" | "player" | "gm" | "playerCanvas";
 
-export const surfaceCall = <T>(page: Page, surface: "app" | "player" | "gm", method: string): Promise<T> =>
+export const surfaceCall = <T>(page: Page, surface: SurfaceName, method: string): Promise<T> =>
   page.evaluate(
     ({ surface, method }) => {
       const e2e = (globalThis as { __vttE2E?: Record<string, AnySurface | null> }).__vttE2E;
@@ -24,7 +26,7 @@ export const playerCall = <T>(page: Page, method: string): Promise<T> =>
 export const gmCall = <T>(page: Page, method: string): Promise<T> =>
   surfaceCall<T>(page, "gm", method);
 
-export async function waitForSurface(page: Page, surface: "app" | "player" | "gm"): Promise<void> {
+export async function waitForSurface(page: Page, surface: SurfaceName): Promise<void> {
   const deadline = Date.now() + 20_000;
   for (;;) {
     const ok = await page.evaluate(
@@ -41,7 +43,7 @@ export async function waitForSurface(page: Page, surface: "app" | "player" | "gm
 /** Call a one-arg surface method (e.g. cacheHas(hash)). */
 export const surfaceCallArg = <T>(
   page: Page,
-  surface: "app" | "player" | "gm",
+  surface: SurfaceName,
   method: string,
   arg: unknown,
 ): Promise<T> =>

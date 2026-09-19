@@ -11,6 +11,10 @@
  * has seen. Sight is bounded by sight-blocking walls (`wallSight`) and, optionally, a range
  * in grid squares (`flags.core.fogRange`; absent/0 = the whole scene). Darkness and light
  * sources do not shorten exploration yet (ROADMAP).
+ *
+ * Fog also decides what a player is shown (D-251): their own tokens always; any other token
+ * only while it stands inside one of their current sight polygons (`fogVisibleTokenIds`). The
+ * GM is never gated — the GM's cover is drawn translucent instead.
  */
 import type {
   ActorDocument,
@@ -22,6 +26,7 @@ import type {
 import type { Op } from "./ops";
 import type { PermissionUser } from "./ownership";
 import { can } from "./permissions";
+import { pointInPolygon } from "../canvas/vision/polygon";
 
 export interface FogSettings {
   enabled: boolean;
@@ -112,6 +117,57 @@ function controlsToken(
   if (!token.actorId) return false;
   const actor = actors.find((a) => a._id === token.actorId);
   return actor !== undefined && can(user, "update", actor, "actors");
+}
+
+/**
+ * Is any part of the token in sight? The centre and four points a quarter of the footprint
+ * in from the corners are tested against every current polygon, so a token half behind a
+ * corner still shows while one fully around it does not.
+ */
+export function tokenInSight(
+  token: Pick<TokenDocument, "x" | "y" | "width" | "height">,
+  polys: readonly Float32Array[],
+): boolean {
+  if (polys.length === 0) return false;
+  const dx = Math.max(0, token.width) / 4;
+  const dy = Math.max(0, token.height) / 4;
+  const probes: ReadonlyArray<readonly [number, number]> = [
+    [token.x, token.y],
+    [token.x - dx, token.y - dy],
+    [token.x + dx, token.y - dy],
+    [token.x - dx, token.y + dy],
+    [token.x + dx, token.y + dy],
+  ];
+  for (const poly of polys) {
+    if (poly.length < 6) continue;
+    for (const [px, py] of probes) if (pointInPolygon(poly, px, py)) return true;
+  }
+  return false;
+}
+
+/**
+ * D-251: which tokens a user is shown on a fogged scene — the ones they control, always
+ * (they are the eyes), and any other only while `tokenInSight` of the user's current
+ * polygons. GM/ASSISTANT see everything. Tokens the host already withheld (`hidden`) never
+ * reach a player's replica in the first place (§5 projection).
+ */
+export function fogVisibleTokenIds(
+  scene: SceneDocument,
+  user: PermissionUser | null,
+  polys: readonly Float32Array[],
+  context: FogViewerContext = {},
+): Set<string> {
+  const out = new Set<string>();
+  if (!user) return out;
+  const actors = context.actors ?? [];
+  for (const token of scene.tokens) {
+    if (user.role === "GM" || user.role === "ASSISTANT") {
+      out.add(token._id);
+      continue;
+    }
+    if (controlsToken(user, token, scene, actors) || tokenInSight(token, polys)) out.add(token._id);
+  }
+  return out;
 }
 
 /**
