@@ -502,4 +502,46 @@ describe("activating PF1e in a world (§1.1 acceptance, no browser)", () => {
     await second.persister.drain();
     second.close();
   });
+
+  // LAST on purpose: the shared fake-indexeddb world is inherited by this test, and the
+  // compendia test above asserts an exact pack list — a package imported here first would leak
+  // into it.
+  test("a world-origin pack above the 2,000-entry app cap is served in full by compendia() (D-252)", async () => {
+    // pf-feats scale (3,541): the flat cap used to drop the whole pack from the compendium
+    // silently. The size-domain decision (world zips may be any size) means the host serves it.
+    const n = 3_541;
+    const bigPack = {
+      name: "Big Feats",
+      type: "items",
+      entries: Array.from({ length: n }, (_, i) => ({
+        id: `feat-${i}`,
+        name: `Feat ${i}`,
+        data: { type: "item", name: `Feat ${i}` },
+      })),
+    };
+    const zip = zipSync({
+      "manifest.json": strToU8(
+        JSON.stringify({
+          id: "probe-big-content",
+          name: "Probe Big Content",
+          version: "1.0.0",
+          type: "data",
+          packs: [{ name: "Big Feats", type: "items", file: "packs/feats.json" }],
+        }),
+      ),
+      "packs/feats.json": strToU8(JSON.stringify(bigPack)),
+    });
+
+    const app = await bootWithRunner();
+    const imported = await app.packages.importZip(zip);
+    expect(imported.ok ? null : imported.error).toBeNull();
+    const packs = await app.packages.compendia();
+    const big = packs.find((p) => p.packageId === "probe-big-content");
+    expect(big?.pack.name).toBe("Big Feats");
+    expect(big?.pack.entries.length).toBe(n);
+    expect(big?.pack.entries[0]?.id).toBe("feat-0");
+    expect(big?.pack.entries[n - 1]?.id).toBe(`feat-${n - 1}`);
+    await app.persister.drain();
+    await app.close();
+  });
 });

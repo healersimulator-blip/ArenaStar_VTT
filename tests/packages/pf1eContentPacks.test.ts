@@ -600,7 +600,7 @@ describe("pf1e-core content packs (M15/M16/M18)", () => {
     ).toBe("long");
   });
 
-  test("the 2,000-entry pack cap is enforced at the parser, with headroom to spare (M18)", () => {
+  test("the 2,000-entry pack cap is enforced at the parser for app-origin packs, with headroom to spare (M18; D-252)", () => {
     const entry = (i: number): unknown => ({
       id: `e-${i}`,
       name: `Entry ${i}`,

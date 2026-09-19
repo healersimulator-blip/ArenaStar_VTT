@@ -1,5 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
+  COMPENDIUM_MAX_ENTRIES,
+  COMPENDIUM_WORLD_SANITY_MAX_ENTRIES,
   importEntryOp,
   parseCompendiumPack,
   searchCompendia,
@@ -58,6 +60,74 @@ describe("parseCompendiumPack (§12)", () => {
       }).ok,
     ).toBe(false);
     expect(parseCompendiumPack(null).ok).toBe(false);
+  });
+});
+
+describe("parseCompendiumPack origin (size domains, D-252)", () => {
+  const many = (n: number) => ({
+    name: "Big",
+    type: "items",
+    entries: Array.from({ length: n }, (_, i) => ({
+      id: `e-${i}`,
+      name: `Entry ${i}`,
+      data: { type: "item", name: `Entry ${i}` },
+    })),
+  });
+
+  test("default (app origin) keeps the 2,000-entry DoS guard", () => {
+    expect(parseCompendiumPack(many(COMPENDIUM_MAX_ENTRIES)).ok).toBe(true);
+    const over = parseCompendiumPack(many(COMPENDIUM_MAX_ENTRIES + 1));
+    expect(over.ok).toBe(false);
+    if (!over.ok) expect(over.error).toContain(String(COMPENDIUM_MAX_ENTRIES));
+  });
+
+  test("app origin passed explicitly behaves identically to the default", () => {
+    expect(parseCompendiumPack(many(COMPENDIUM_MAX_ENTRIES + 1), { origin: "app" }).ok).toBe(false);
+  });
+
+  test("world origin is NOT capped by the app guard (real packs sit far above 2,000)", () => {
+    // pf-feats 3,541 / pf-class-abilities 4,727 — the packs the cap would have rejected.
+    for (const n of [COMPENDIUM_MAX_ENTRIES + 1, 3_541, 4_727]) {
+      const res = parseCompendiumPack(many(n), { origin: "world" });
+      expect(res.ok).toBe(true);
+      if (res.ok) expect(res.value.entries.length).toBe(n);
+    }
+  });
+
+  test("world origin hits the corruption sanity ceiling (never the app cap) on file-scale garbage", () => {
+    // Sparse arrays: the length check fires before per-entry validation, so no 1M objects.
+    const overCeiling = parseCompendiumPack(
+      {
+        name: "Big",
+        type: "items",
+        entries: Array.from({ length: COMPENDIUM_WORLD_SANITY_MAX_ENTRIES + 1 }),
+      },
+      { origin: "world" },
+    );
+    expect(overCeiling.ok).toBe(false);
+    if (!overCeiling.ok)
+      expect(overCeiling.error).toContain(String(COMPENDIUM_WORLD_SANITY_MAX_ENTRIES));
+    // The same array, app origin: rejected by the much lower app guard.
+    const appView = parseCompendiumPack({
+      name: "Big",
+      type: "items",
+      entries: Array.from({ length: COMPENDIUM_WORLD_SANITY_MAX_ENTRIES + 1 }),
+    });
+    expect(appView.ok).toBe(false);
+    if (!appView.ok) expect(appView.error).toContain(String(COMPENDIUM_MAX_ENTRIES));
+  });
+
+  test("world origin does not relax the per-entry guards (name length, slug, _id)", () => {
+    const badName = parseCompendiumPack(
+      { name: "Big", type: "items", entries: [{ id: "ok", name: "x".repeat(81), data: { type: "item", name: "x".repeat(81) } }] },
+      { origin: "world" },
+    );
+    expect(badName.ok).toBe(false);
+    const smuggled = parseCompendiumPack(
+      { name: "Big", type: "items", entries: [{ id: "ok", name: "N", data: { type: "item", name: "N", _id: "steal" } }] },
+      { origin: "world" },
+    );
+    expect(smuggled.ok).toBe(false);
   });
 });
 

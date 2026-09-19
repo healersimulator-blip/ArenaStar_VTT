@@ -12,9 +12,34 @@ import type { Op } from "./ops";
 import type { Result } from "./result";
 import { err, okVal } from "./result";
 
-/** Max entries per pack and chars per entry name (DoS guard). */
+/**
+ * Max entries per pack (DoS guard) — **app-body domain only**. The guard protects the app
+ * body (`dist/index.html`): content compiled into the app is an unchosen attack surface,
+ * so it is capped. No compendium pack is compiled into `index.html` today; packs the app
+ * parses at runtime all come from world-scoped packages (world zips), which are **world
+ * domain** and may be any size (size-domain decision, user 2026-09-19, D-252).
+ */
 export const COMPENDIUM_MAX_ENTRIES = 2_000;
 export const COMPENDIUM_MAX_NAME = 80;
+
+/**
+ * Parser sanity ceiling for world-origin packs — a corruption/accident guard, NOT a content
+ * constraint: world files may be any size, and the largest real pack (~4,700 entries) sits
+ * three orders of magnitude below it. A 1,000,001-entry "pack" would be hundreds of MB of
+ * JSON poked into a browser tab by a file no human wrote.
+ */
+export const COMPENDIUM_WORLD_SANITY_MAX_ENTRIES = 1_000_000;
+
+export type CompendiumOrigin = "app" | "world";
+
+export interface ParseCompendiumPackOptions {
+  /**
+   * Where the pack came from. `"app"` (default) = compiled into the app body → the
+   * 2,000-entry DoS guard. `"world"` = parsed from a world-scoped package (a world zip /
+   * its IDB record) → the entry-count cap does not apply; only the sanity ceiling holds.
+   */
+  origin?: CompendiumOrigin;
+}
 
 export interface CompendiumEntry {
   /** Stable pack-local slug. */
@@ -38,7 +63,10 @@ const ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 
 /** Parse + validate a pack file body (already JSON.parse'd by the loader). */
-export function parseCompendiumPack(raw: unknown): Result<CompendiumPack> {
+export function parseCompendiumPack(
+  raw: unknown,
+  opts: ParseCompendiumPackOptions = {},
+): Result<CompendiumPack> {
   if (!isRecord(raw)) return err("compendium: pack is not an object");
   const { name, type, entries } = raw;
   if (typeof name !== "string" || name.length === 0 || name.length > COMPENDIUM_MAX_NAME) {
@@ -47,8 +75,12 @@ export function parseCompendiumPack(raw: unknown): Result<CompendiumPack> {
   if (typeof type !== "string" || !TOP_LEVEL_COLLECTIONS.includes(type as CollectionName)) {
     return err(`compendium ${name}: pack.type must be a top-level collection`);
   }
-  if (!Array.isArray(entries) || entries.length > COMPENDIUM_MAX_ENTRIES) {
-    return err(`compendium ${name}: entries must be an array of ≤ ${COMPENDIUM_MAX_ENTRIES}`);
+  // App-body packs keep the 2,000 DoS guard; world packs (any size, D-252) only hit the
+  // corruption sanity ceiling. Default "app" keeps every existing caller guarded.
+  const maxEntries =
+    opts.origin === "world" ? COMPENDIUM_WORLD_SANITY_MAX_ENTRIES : COMPENDIUM_MAX_ENTRIES;
+  if (!Array.isArray(entries) || entries.length > maxEntries) {
+    return err(`compendium ${name}: entries must be an array of ≤ ${maxEntries}`);
   }
   const seen = new Set<string>();
   const list: CompendiumEntry[] = [];
