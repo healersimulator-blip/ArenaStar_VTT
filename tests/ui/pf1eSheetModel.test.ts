@@ -1,5 +1,5 @@
 // Checklist: S03 — authorized edit intents (pf1eSheetEdit) — ownership, validation and rejection feedback.
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, it } from "vitest";
 import { readFileSync } from "node:fs";
 import type { ActorDocument, Json } from "../../src/core/documents";
 import { deriveFromDocuments } from "../../src/packages/pf1e/actor";
@@ -10,6 +10,7 @@ import {
   pf1eSheetEdit,
   pf1eSheetView,
   pf1eSpellSlotReadout,
+  pf1eSkillEdit,
 } from "../../src/ui/sheets/pf1eSheetModel";
 
 const owner = { id: "player", role: "PLAYER" as const };
@@ -374,5 +375,34 @@ describe("pf1eDetailEdit — the mount linkage (P08/D-201)", () => {
     });
     expect(res.ops).toEqual([]);
     expect(res.error).toBe("An actor cannot ride itself.");
+  });
+});
+
+describe("pf1eSkillEdit", () => {
+  const user: import("../../src/core/ownership").PermissionUser = owner;
+  const a = actor({
+    skills: {
+      perception: { ranks: 2, classSkill: true },
+    },
+  });
+
+  it("produces update op for rank changes", () => {
+    const res = pf1eSkillEdit(a, user, "perception", { ranks: 3 });
+    expect(res.error).toBeNull();
+    expect(res.ops.length).toBe(1);
+    const op = res.ops[0];
+    expect(op?.kind).toBe("update");
+    if (op && op.kind === "update") {
+      expect((op.diff as Record<string, Json>)["system.pf1e.skills.perception"]).toEqual({
+        ranks: 3,
+        classSkill: true,
+      });
+    }
+  });
+
+  it("refuses negative ranks", () => {
+    const res = pf1eSkillEdit(a, user, "perception", { ranks: -1 });
+    expect(res.error).toContain("cannot be negative");
+    expect(res.ops.length).toBe(0);
   });
 });

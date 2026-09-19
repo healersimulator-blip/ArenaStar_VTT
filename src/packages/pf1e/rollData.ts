@@ -398,3 +398,44 @@ export function pf1eInitiativeRollSpec(derived: PF1eDerived): PF1eRollSpec {
     notes: [],
   };
 }
+
+/** Skill check as a roll spec (d20 + total, or static 10/20 take check, G-01). */
+export function pf1eSkillRollSpec(
+  skill: import("./skills").PF1eDerivedSkill,
+  type: "normal" | "take10" | "take20" = "normal",
+): PF1eRollSpec {
+  const total = skill.total;
+  if (type === "take10") {
+    return {
+      kind: "check",
+      label: `${skill.name} (Take 10)`,
+      formula: `${10 + total}`,
+      flavor: `${skill.name} (Take 10) = 10 ${fmtSigned(total)} = ${10 + total}`,
+      notes: [],
+    };
+  }
+  if (type === "take20") {
+    return {
+      kind: "check",
+      label: `${skill.name} (Take 20)`,
+      formula: `${20 + total}`,
+      flavor: `${skill.name} (Take 20) = 20 ${fmtSigned(total)} = ${20 + total}`,
+      notes: [],
+    };
+  }
+  const breakdownParts = [
+    `${skill.ability.toUpperCase()} ${fmtSigned(skill.abilityMod)}`,
+    skill.ranks > 0 ? `ranks +${skill.ranks}` : null,
+    skill.classSkillBonus > 0 ? `class skill +${skill.classSkillBonus}` : null,
+    skill.armorCheckPenalty < 0 ? `ACP ${skill.armorCheckPenalty}` : null,
+    skill.effectBonus !== 0 ? `effects ${fmtSigned(skill.effectBonus)}` : null,
+  ].filter(Boolean).join(", ");
+  return {
+    kind: "check",
+    label: skill.name,
+    formula: `1d20 ${total >= 0 ? `+ ${total}` : `- ${Math.abs(total)}`}`,
+    flavor: `${skill.name} ${fmtSigned(total)} (${breakdownParts})`,
+    notes: [],
+  };
+}
+

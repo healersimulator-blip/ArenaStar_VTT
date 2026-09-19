@@ -511,3 +511,39 @@ export function pf1eDetailEdit(
     error: null,
   };
 }
+
+export function pf1eSkillEdit(
+  actor: ActorDocument,
+  user: PermissionUser | null,
+  skillId: string,
+  update: { ranks?: number; classSkill?: boolean; customBonus?: number },
+): EditResult {
+  const fail = (error: string): EditResult => ({ ops: [], error });
+  if (!isPF1eActor(actor) || !user || !can(user, "update", actor, "actors"))
+    return fail("You do not own this PF1e actor.");
+  const original = (actor.system.pf1e ?? {}) as Record<string, Json>;
+  const skills = (sheetRecord(original.skills) ?? {}) as Record<string, Json>;
+  const current = (sheetRecord(skills[skillId]) ?? {}) as Record<string, Json>;
+
+  const nextSkill: Record<string, Json> = { ...current };
+  if (update.ranks !== undefined) {
+    if (update.ranks < 0) return fail("Skill ranks cannot be negative.");
+    nextSkill.ranks = Math.floor(update.ranks);
+  }
+  if (update.classSkill !== undefined) {
+    nextSkill.classSkill = Boolean(update.classSkill);
+  }
+  if (update.customBonus !== undefined) {
+    nextSkill.customBonus = Math.floor(update.customBonus);
+  }
+
+  const diff: Record<string, Json> = {
+    [`system.pf1e.skills.${skillId}`]: nextSkill as Json,
+  };
+
+  return {
+    ops: [{ kind: "update", ref: { coll: "actors", id: actor._id }, diff }],
+    error: null,
+  };
+}
+
