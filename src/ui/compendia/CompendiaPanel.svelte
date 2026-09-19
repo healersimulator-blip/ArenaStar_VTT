@@ -118,7 +118,7 @@
   }
   .hint {
     margin: 0;
-    font-size: 11px;
+    font-size: 0.8125rem;
     opacity: 0.7;
   }
   .results {
@@ -141,10 +141,10 @@
   }
   .entry .name {
     flex: 1;
-    font-size: 12px;
+    font-size: 0.875rem;
   }
   .entry .meta {
-    font-size: 10px;
+    font-size: 0.8125rem;
     opacity: 0.6;
   }
 </style>

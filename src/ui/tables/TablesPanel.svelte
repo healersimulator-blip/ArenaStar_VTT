@@ -159,7 +159,7 @@
     align-items: center;
   }
   .range {
-    font-size: 11px;
+    font-size: 0.8125rem;
     opacity: 0.75;
     min-width: 3.2em;
     text-align: right;

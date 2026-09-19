@@ -124,7 +124,13 @@
       onpointerdown={() => manager.focus(win.id)}
       aria-label={win.title}
     >
-      <header class="wm-title" onpointerdown={(e) => startDrag(e, win)}>
+      <header
+        class="wm-title"
+        role="toolbar"
+        tabindex="-1"
+        aria-label={`${win.title} window controls`}
+        onpointerdown={(e) => startDrag(e, win)}
+      >
         <span class="wm-name">{win.title}</span>
         <span class="wm-buttons">
           <button
@@ -174,8 +180,7 @@
             {client}
             {bus}
             onOpen={(armyId) => {
-              const name =
-                client.store.get("armies", armyId)?.name ?? "Army";
+              const name = client.store.get("armies", armyId)?.name ?? "Army";
               manager.open({
                 id: `army:${armyId}`,
                 title: `Army — ${name}`,
@@ -202,8 +207,11 @@
       </div>
       <div
         class="wm-resize"
+        role="separator"
+        aria-label={`Resize ${win.title}`}
+        tabindex="-1"
         onpointerdown={(e) => startResize(e, win)}
-        title="Resize"
+        title="Resize window"
       ></div>
     </section>
   {/each}
@@ -233,40 +241,42 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    height: 34px;
-    padding: 0 6px;
+    min-height: 44px;
+    height: 44px;
+    padding: 0 10px;
     background: #1d2530;
     cursor: grab;
     user-select: none;
     touch-action: none;
   }
   .wm-name {
-    font-size: 12px;
-    font-weight: 600;
+    font-size: 15px;
+    font-weight: 700;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
   .wm-buttons {
     display: flex;
-    gap: 4px;
+    gap: 6px;
   }
   .wm-buttons button {
-    width: 20px;
-    height: 20px;
+    width: 34px;
+    height: 34px;
     line-height: 1;
     padding: 0;
-    border-radius: 3px;
+    border-radius: 6px;
+    font-size: 1rem;
   }
   .wm-body {
     flex: 1;
     min-height: 0;
     overflow: auto;
-    padding: 8px;
-    font-size: 12px;
+    padding: 14px;
+    font-size: 1rem;
   }
-  .wm-window.minimized .wm-body,
-  .wm-window.minimized .wm-resize {
+  :global(.wm-window.minimized .wm-body),
+  :global(.wm-window.minimized .wm-resize) {
     display: none;
   }
   .wm-resize {

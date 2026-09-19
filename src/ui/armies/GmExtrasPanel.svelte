@@ -554,7 +554,7 @@
   }
   .hint {
     margin: 0;
-    font-size: 11px;
+    font-size: 0.8125rem;
     opacity: 0.7;
   }
   .row {
@@ -574,7 +574,7 @@
   td {
     text-align: left;
     padding: 2px 4px;
-    font-size: 12px;
+    font-size: 0.875rem;
     border-bottom: 1px solid #262e3a;
   }
   .allies {
@@ -583,7 +583,7 @@
     gap: 2px 8px;
   }
   .ally {
-    font-size: 11px;
+    font-size: 0.8125rem;
     display: flex;
     gap: 2px;
     align-items: center;
@@ -595,7 +595,7 @@
     border-radius: 2px;
   }
   .dim {
-    font-size: 11px;
+    font-size: 0.8125rem;
     opacity: 0.7;
     margin: 0;
   }
@@ -605,7 +605,7 @@
     padding: 0;
     max-height: 120px;
     overflow-y: auto;
-    font-size: 12px;
+    font-size: 0.875rem;
   }
   form {
     display: flex;

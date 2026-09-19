@@ -1524,7 +1524,7 @@ import { pendingPruneOps } from "../../packages/pf1e/pendingRoll";
     flex-wrap: wrap;
   }
   .round {
-    font-size: 12px;
+    font-size: 0.875rem;
     opacity: 0.85;
   }
   .order {
@@ -1541,7 +1541,7 @@ import { pendingPruneOps } from "../../packages/pf1e/pendingRoll";
     gap: 4px;
     padding: 2px 4px;
     border-radius: 4px;
-    font-size: 12px;
+    font-size: 0.875rem;
     flex-wrap: wrap;
   }
   .row-form {
@@ -1550,7 +1550,7 @@ import { pendingPruneOps } from "../../packages/pf1e/pendingRoll";
     align-items: center;
     gap: 4px;
     flex-wrap: wrap;
-    font-size: 12px;
+    font-size: 0.875rem;
   }
   .row-form .match-ok {
     color: #8fd68f;
@@ -1579,14 +1579,14 @@ import { pendingPruneOps } from "../../packages/pf1e/pendingRoll";
     align-items: center;
     gap: 4px;
     flex-wrap: wrap;
-    font-size: 12px;
+    font-size: 0.875rem;
   }
   .unaware {
     display: flex;
     align-items: center;
     gap: 4px;
     flex-wrap: wrap;
-    font-size: 12px;
+    font-size: 0.875rem;
   }
   .unaware button.marked {
     background: #5e2c2c;
@@ -1596,13 +1596,13 @@ import { pendingPruneOps } from "../../packages/pf1e/pendingRoll";
     align-items: center;
     gap: 4px;
     flex-wrap: wrap;
-    font-size: 12px;
+    font-size: 0.875rem;
   }
   .budget .chip {
     border: 1px solid #3c4a5e;
     border-radius: 3px;
     padding: 0 4px;
-    font-size: 11px;
+    font-size: 0.8125rem;
   }
   .budget .chip.spent {
     opacity: 0.55;
@@ -1615,6 +1615,6 @@ import { pendingPruneOps } from "../../packages/pf1e/pendingRoll";
     background: #463a2c;
     border-radius: 3px;
     padding: 0 4px;
-    font-size: 11px;
+    font-size: 0.8125rem;
   }
 </style>

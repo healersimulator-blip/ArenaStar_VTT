@@ -1,3 +1,4 @@
+import "../ui/global.css";
 import { mount } from "svelte";
 import App from "./App.svelte";
 import JoinApp from "./JoinApp.svelte";
@@ -15,20 +16,27 @@ if (e2eMode) {
   void import("./e2eHook").then((m) => m.installE2eHook(null));
 }
 
+const params = new URLSearchParams(globalThis.location.search);
+const joinMode =
+  params.has("join") || globalThis.location.hash.includes("room=");
+
 let app: HostApp | null = null;
 let bootError: string | null = null;
-try {
-  app = await bootHostApp();
-} catch (err) {
-  bootError = err instanceof Error ? err.message : String(err);
+// The picker and join screen must not silently create a GM world in the
+// background. The e2e host route is the only direct App route today; Root
+// owns the normal host boot after the user chooses "Host a world".
+if (e2eMode && !joinMode) {
+  try {
+    app = await bootHostApp();
+  } catch (err) {
+    bootError = err instanceof Error ? err.message : String(err);
+  }
 }
 
-const params = new URLSearchParams(globalThis.location.search);
-const application =
-  params.has("join") || params.has("e2e") || globalThis.location.hash.includes("room=")
-    ? params.has("join")
-      ? mount(JoinApp, { target })
-      : mount(App, { target, props: { app, bootError } })
+const application = joinMode
+  ? mount(JoinApp, { target })
+  : e2eMode
+    ? mount(App, { target, props: { app, bootError } })
     : mount(Root, { target });
 
 // Test-only (D-045): attach the live app to the e2e surface once booted.

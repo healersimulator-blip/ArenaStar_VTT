@@ -3,7 +3,11 @@
   import { bootPlayerApp, type PlayerApp } from "./joinBoot";
   import { parseInvite } from "./hostShare";
   import { createStage, type Stage } from "../canvas/stage";
-  import { CanvasController, domPointerSource, type TokenView } from "../canvas/interactions";
+  import {
+    CanvasController,
+    domPointerSource,
+    type TokenView,
+  } from "../canvas/interactions";
   import { can } from "../core/permissions";
   import { ChatPanel } from "../ui/chat";
   import { WindowManager } from "../core/windows";
@@ -12,6 +16,7 @@
   import { SheetPanel } from "../ui/sheets";
   import type { SceneDocument, SceneGrid } from "../core/documents";
   import type { Op } from "../core/ops";
+  import { copyText } from "../ui/clipboard";
 
   let app = $state<PlayerApp | null>(null);
   let phase = $state<"invite" | "exchange" | "live" | "dead">("invite");
@@ -25,6 +30,8 @@
   let tokenCount = $state(0);
   let playerName = $state("");
   let connState = $state("new");
+  let copyStatus = $state("");
+  let copyTimer: ReturnType<typeof setTimeout> | null = null;
 
   const wm = new WindowManager({ width: 800, height: 600 });
   let wmVersion = $state(0);
@@ -44,7 +51,7 @@
     );
   }
 
-  let canvasHost: HTMLDivElement;
+  let canvasHost = $state<HTMLDivElement | null>(null);
   let canvasError = $state<string | null>(null);
   let loadedMapHash: string | null = null;
   let stage: Stage | null = null;
@@ -86,15 +93,38 @@
 
   function applyAnswer(): void {
     const code = answerText.trim();
-    if (code && app) void app.receiveCode(code);
+    if (code && app) {
+      void app.receiveCode(code).catch((err: unknown) => {
+        joinError = err instanceof Error ? err.message : String(err);
+        phase = "exchange";
+      });
+    }
     answerText = "";
+  }
+
+  async function copyCode(value: string, label: string): Promise<void> {
+    const copied = await copyText(value);
+    copyStatus = copied
+      ? `${label} copied to clipboard.`
+      : `Select the ${label.toLowerCase()} and copy it manually.`;
+    if (copyTimer !== null) clearTimeout(copyTimer);
+    copyTimer = setTimeout(() => (copyStatus = ""), 4_000);
+  }
+
+  function clearCopyTimer(): void {
+    if (copyTimer !== null) clearTimeout(copyTimer);
+    copyTimer = null;
   }
 
   function activeScene(): SceneDocument | null {
     const client = app?.client;
     if (!client) return null;
     const scene = client.store.get("scenes", "scene-1");
-    return scene ?? (client.store.getAll("scenes") as readonly SceneDocument[])[0] ?? null;
+    return (
+      scene ??
+      (client.store.getAll("scenes") as readonly SceneDocument[])[0] ??
+      null
+    );
   }
 
   function tokenViews(): TokenView[] {
@@ -103,7 +133,9 @@
     return scene.tokens.map((token) => ({ token, sceneId: scene._id }));
   }
 
-  function squareGrid(grid: SceneGrid | undefined): { type: "square"; size: number } | null {
+  function squareGrid(
+    grid: SceneGrid | undefined,
+  ): { type: "square"; size: number } | null {
     if (grid && grid.type === "square" && grid.size > 0)
       return { type: "square", size: grid.size };
     return null;
@@ -149,9 +181,11 @@
         const client = current.client;
         await current.ready;
         const scene = activeScene();
-        const width = Math.max(320, canvasHost.clientWidth);
-        const height = Math.max(240, canvasHost.clientHeight);
-        const view = await createStage({ width, height, hostElement: canvasHost });
+        const hostElement = canvasHost;
+        if (!hostElement) return;
+        const width = Math.max(320, hostElement.clientWidth);
+        const height = Math.max(240, hostElement.clientHeight);
+        const view = await createStage({ width, height, hostElement });
         stage = view;
         view.fit(scene?.width ?? 2000, scene?.height ?? 1500);
         controller = new CanvasController({
@@ -205,6 +239,7 @@
     }, 250);
     return () => {
       offWm();
+      clearCopyTimer();
       if (pollTimer !== null) clearInterval(pollTimer);
       controller?.destroy();
       stage?.destroy();
@@ -214,36 +249,104 @@
   });
 </script>
 
-<main>
-  <h1>VTT — player</h1>
+<main class="vtt-ui">
+  <header class="join-header">
+    <p class="eyebrow">ARENASTAR</p>
+    <h1>Join a game</h1>
+    <p class="sub">
+      Connect to a host with an invite link and a short manual code exchange.
+    </p>
+  </header>
   {#if joinError}
-    <p class="error">{joinError}</p>
+    <p class="error" role="alert">{joinError}</p>
   {/if}
 
   {#if phase === "invite"}
     <section class="join-panel" aria-label="Join a game">
-      <label for="invite-input">Invite (link or #room=…&k=…)</label>
-      <textarea id="invite-input" rows="3" bind:value={inviteText} placeholder="#room=…&k=…"
-      ></textarea>
-      <button id="join-connect" type="button" onclick={() => void connect(inviteText)}>
-        Connect
+      <div class="panel-heading">
+        <h2>Game invite</h2>
+        <p>
+          Paste the invite link or the full <code>#room=…&amp;k=…</code> fragment
+          from the host.
+        </p>
+      </div>
+      <label for="invite-input">Invite link or room fragment</label>
+      <textarea
+        id="invite-input"
+        rows="3"
+        bind:value={inviteText}
+        placeholder="#room=…&amp;k=…"
+        spellcheck="false"
+        autocapitalize="off"
+        autocomplete="off"></textarea>
+      <button
+        id="join-connect"
+        type="button"
+        onclick={() => void connect(inviteText)}
+      >
+        Connect to game
       </button>
     </section>
   {:else if phase === "exchange" || phase === "dead"}
-    <section class="join-panel" aria-label="Signaling exchange">
+    <section class="join-panel exchange-panel" aria-label="Signaling exchange">
       {#if phase === "dead"}
-        <p class="error" id="disconnect-notice">Host disconnected — connection lost.</p>
+        <p class="error" id="disconnect-notice" role="alert">
+          Host disconnected — connection lost.
+        </p>
       {/if}
-      <label for="offer-out">Your code (send to the host)</label>
-      <textarea id="offer-out" rows="4" readonly value={hostCode}></textarea>
-      <label for="answer-input">Host's code (paste here)</label>
-      <textarea
-        id="answer-input"
-        rows="4"
-        bind:value={answerText}
-        placeholder="paste the host's answer"></textarea>
-      <button id="answer-apply" type="button" onclick={applyAnswer}>Apply host code</button>
-      <p class="hint">state: {connState}</p>
+      <div class="panel-heading">
+        <h2>Secure connection</h2>
+        <p>
+          Copy your code to the host. Then paste the host's answer below and
+          apply it.
+        </p>
+      </div>
+      <div class="code-field">
+        <label for="offer-out"
+          >Your player code <span class="required-note">(send to host)</span
+          ></label
+        >
+        <textarea
+          id="offer-out"
+          class="signal-code"
+          rows="5"
+          readonly
+          value={hostCode}
+          spellcheck="false"
+          aria-describedby="offer-help"></textarea>
+        <div class="field-actions">
+          <button
+            id="copy-offer-out"
+            class="secondary"
+            type="button"
+            disabled={!hostCode}
+            onclick={() => void copyCode(hostCode, "player code")}
+            >Copy player code</button
+          >
+          <p id="offer-help" class="hint">
+            Give this one-time code to the host.
+          </p>
+        </div>
+      </div>
+      <div class="code-field">
+        <label for="answer-input">Host's answer code</label>
+        <textarea
+          id="answer-input"
+          class="signal-code"
+          rows="5"
+          bind:value={answerText}
+          placeholder="Paste the host's answer here"
+          spellcheck="false"
+          autocapitalize="off"
+          autocomplete="off"></textarea>
+      </div>
+      <button id="answer-apply" type="button" onclick={applyAnswer}
+        >Apply host code</button
+      >
+      <p class="hint status-line" aria-live="polite">
+        Connection state: <strong>{connState}</strong>
+      </p>
+      {#if copyStatus}<p class="copy-status" role="status">{copyStatus}</p>{/if}
     </section>
   {/if}
 
@@ -261,11 +364,21 @@
         </div>
         {#if app?.client}
           <ChatPanel client={app.client} bus={app.bus} />
-          <SheetPanel client={app.client} bus={app.bus} onOpenActor={openActorSheet} />
+          <SheetPanel
+            client={app.client}
+            bus={app.bus}
+            onOpenActor={openActorSheet}
+          />
         {/if}
       </aside>
       <div class="canvas-area">
-        <div class="canvas-host" bind:this={canvasHost}></div>
+        <div
+          class="canvas-host"
+          bind:this={canvasHost}
+          role="application"
+          aria-label="Game board"
+          tabindex="-1"
+        ></div>
         {#if app?.client}
           <WindowHost
             manager={wm}
@@ -282,85 +395,203 @@
 </main>
 
 <style>
-  :global(body) {
-    margin: 0;
-    background: #101014;
-    color: #e8e8ee;
-    font-family: system-ui, sans-serif;
-  }
   main {
+    min-height: 100vh;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    align-items: center;
+    gap: 20px;
+    padding: clamp(24px, 4vw, 48px) clamp(16px, 4vw, 56px);
+    background:
+      radial-gradient(circle at 85% 0%, #203d56 0%, transparent 42%), #0d1117;
+  }
+  .join-header {
+    width: min(100%, 760px);
+    text-align: center;
+  }
+  .eyebrow {
+    margin: 0 0 8px;
+    color: #66b7ff;
+    font-size: 0.8rem;
+    font-weight: 800;
+    letter-spacing: 0.18em;
   }
   h1 {
-    font-size: 18px;
-    margin: 8px 0 0 8px;
+    margin: 0;
+    color: #f4f7fb;
+    font-size: clamp(2rem, 5vw, 3.25rem);
+    line-height: 1.1;
+    letter-spacing: -0.03em;
+  }
+  .sub {
+    max-width: 620px;
+    margin: 10px auto 0;
+    color: #bdc9d6;
+    font-size: 1.05rem;
   }
   .join-panel {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    max-width: 480px;
-    margin: 8px;
-    padding: 12px;
-    border: 1px solid #3a3f4a;
-    border-radius: 8px;
-    background: #16181d;
+    gap: 12px;
+    width: min(100%, 720px);
+    margin: 0;
+    padding: clamp(18px, 3vw, 28px);
+    border: 1px solid #41566d;
+    border-radius: 14px;
+    background: #151f2aee;
+    box-shadow: 0 16px 40px #0005;
+  }
+  .panel-heading h2 {
+    margin: 0;
+    color: #f2f5f8;
+    font-size: 1.35rem;
+  }
+  .panel-heading p {
+    margin: 6px 0 0;
+    color: #bdc9d6;
+    font-size: 0.95rem;
+  }
+  code {
+    padding: 2px 5px;
+    border: 1px solid #405369;
+    border-radius: 4px;
+    background: #0d151f;
+    color: #c6e5ff;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  label {
+    font-weight: 700;
   }
   textarea {
-    font-family: ui-monospace, monospace;
-    font-size: 11px;
-    background: #101216;
-    color: #cfd3dc;
-    border: 1px solid #3a3f4a;
-    border-radius: 6px;
-    padding: 6px;
+    width: 100%;
+    min-width: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 1rem;
+    line-height: 1.5;
+    background: #0d151f;
+    color: #edf6ff;
+    border: 1px solid #50677f;
+    border-radius: 8px;
+    padding: 12px;
+  }
+  textarea::placeholder {
+    color: #7f93a7;
+  }
+  textarea:read-only {
+    background: #101d2b;
+    border-color: #5b7895;
+  }
+  #invite-input {
+    min-height: 96px !important;
+  }
+  .signal-code {
+    min-height: 138px !important;
+    white-space: pre;
+    overflow-x: auto;
+    overflow-y: auto;
+    overflow-wrap: normal;
+    resize: vertical;
   }
   button {
-    padding: 8px 12px;
-    border: 1px solid #3a3f4a;
-    border-radius: 6px;
-    background: #1d2127;
-    color: #e8e8ee;
+    padding: 12px 18px;
+    border: 1px solid #52708e;
+    border-radius: 9px;
+    background: #1c2d3e;
+    color: #f2f5f8;
     cursor: pointer;
+    font-weight: 700;
   }
-  button:hover {
-    background: #262b33;
+  button:hover:not(:disabled) {
+    background: #2a4862;
+    border-color: #79c5ff;
   }
-  .hint {
-    color: #8b93a3;
-    font-size: 12px;
+  button:disabled {
+    opacity: 0.55;
   }
-  .error {
-    color: #ff6b6b;
+  .join-panel > button:not(.secondary) {
+    background: #1f689b;
+    border-color: #69baf2;
   }
-  .shell {
-    display: flex;
-    gap: 8px;
-    height: calc(100vh - 48px);
-    padding: 8px;
-    box-sizing: border-box;
+  .join-panel > button:not(.secondary):hover:not(:disabled) {
+    background: #2d82bb;
   }
-  .sidebar {
-    width: 200px;
-    flex-shrink: 0;
-    overflow-y: auto;
+  .code-field {
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+  .required-note {
+    color: #aebdcb;
+    font-size: 0.875rem;
+    font-weight: 500;
+  }
+  .field-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .field-actions .secondary {
+    flex: 0 0 auto;
+    padding-inline: 14px;
+  }
+  .field-actions .hint {
+    flex: 1 1 220px;
+  }
+  .hint {
+    margin: 0;
+    color: #aebdcb;
+    font-size: 0.875rem;
+  }
+  .status-line {
+    padding-top: 4px;
+    border-top: 1px solid #2f4153;
+  }
+  .copy-status {
+    margin: 0;
+    color: #81e0b4;
+    font-size: 0.9rem;
+  }
+  .error {
+    width: min(100%, 720px);
+    margin: 0;
+    color: #ffb4b4;
+    font-size: 1rem;
+  }
+  .shell {
+    display: flex;
+    gap: 14px;
+    width: min(100%, 1440px);
+    height: min(780px, calc(100vh - 180px));
+    min-height: 520px;
+    padding: 12px;
+    border: 1px solid #2f4052;
+    border-radius: 14px;
+    background: #101923;
+    box-shadow: 0 16px 40px #0005;
+  }
+  .sidebar {
+    width: 280px;
+    flex: 0 0 280px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
   }
   #pstatus {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    padding: 8px;
-    border: 1px solid #3a3f4a;
-    border-radius: 6px;
-    font-size: 13px;
+    gap: 5px;
+    padding: 12px;
+    border: 1px solid #40566d;
+    border-radius: 9px;
+    background: #172331;
+    font-size: 0.95rem;
+    color: #cbd8e5;
   }
   #pstatus strong {
-    font-size: 14px;
+    color: #f2f5f8;
+    font-size: 1.1rem;
   }
   .canvas-area {
     position: relative;
@@ -369,12 +600,39 @@
   }
   .canvas-host {
     height: 100%;
-    box-sizing: border-box;
-    border: 1px solid #3a3f4a;
-    border-radius: 8px;
+    min-height: 280px;
+    border: 1px solid #40566d;
+    border-radius: 10px;
     overflow: hidden;
+    background: #0a0f15;
   }
   .canvas-host :global(canvas) {
     display: block;
+  }
+  @media (max-width: 760px) {
+    main {
+      align-items: stretch;
+      padding: 20px 12px;
+    }
+    .join-header {
+      text-align: left;
+    }
+    .join-panel,
+    .error {
+      width: 100%;
+    }
+    .shell {
+      flex-direction: column;
+      height: auto;
+      min-height: 0;
+    }
+    .sidebar {
+      width: 100%;
+      flex-basis: auto;
+      max-height: 420px;
+    }
+    .canvas-area {
+      min-height: 58vh;
+    }
   }
 </style>

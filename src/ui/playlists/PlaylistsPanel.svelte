@@ -189,17 +189,17 @@
   }
   .name {
     flex: 1;
-    font-size: 12px;
+    font-size: 0.875rem;
     overflow: hidden;
     text-overflow: ellipsis;
   }
   .state {
-    font-size: 10px;
+    font-size: 0.8125rem;
     opacity: 0.7;
     min-width: 4em;
   }
   .mode {
-    font-size: 12px;
+    font-size: 0.875rem;
     display: flex;
     gap: 4px;
     align-items: center;

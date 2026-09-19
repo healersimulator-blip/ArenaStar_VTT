@@ -1,0 +1,187 @@
+/* Shared product-wide UI baseline.
+ *
+ * The VTT has a deliberately dense layout, but density must never come from
+ * shrinking controls below a comfortable reading/touch size. Component
+ * styles can still opt into compact, non-interactive metadata; interactive
+ * controls use the baseline below unless they are an icon-only control with
+ * its own accessible label.
+ */
+:root {
+  color-scheme: dark;
+  font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  font-size: 16px;
+  line-height: 1.45;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  --vtt-bg: #0d1117;
+  --vtt-panel: #151b24;
+  --vtt-panel-raised: #1c2632;
+  --vtt-border: #344254;
+  --vtt-border-strong: #52657d;
+  --vtt-text: #f2f5f8;
+  --vtt-muted: #b1bdca;
+  --vtt-accent: #66b7ff;
+  --vtt-focus: #ffd166;
+  --vtt-control-height: 2.625rem;
+}
+
+html,
+body {
+  min-width: 320px;
+  min-height: 100%;
+  margin: 0;
+  background: var(--vtt-bg);
+  color: var(--vtt-text);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button,
+input,
+select,
+textarea {
+  accent-color: var(--vtt-accent);
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 3px solid var(--vtt-focus);
+  outline-offset: 2px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+textarea {
+  resize: vertical;
+}
+
+/* All role-picker, join, GM, player, panel and window controls share this
+ * floor. The exceptions are checkboxes/radios/ranges and inline link buttons;
+ * those controls keep their native shape while remaining readable. */
+.vtt-ui
+  :where(
+    button:not(.link):not(.wm-control):not([data-icon-button]),
+    input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not(
+        [type="file"]
+      ),
+    select,
+    textarea
+  ) {
+  min-height: var(--vtt-control-height) !important;
+  font-size: 1rem !important;
+  line-height: 1.35;
+}
+
+.vtt-ui :where(label, legend, .field-label) {
+  color: var(--vtt-text);
+  font-size: 0.95rem;
+  line-height: 1.35;
+}
+
+/* Metadata remains visually secondary, not microscopic. */
+.vtt-ui
+  :where(.hint, .meta, .state, .tag, .kind, .formula, .faction, .stats, small) {
+  font-size: 0.8125rem !important;
+  line-height: 1.35;
+}
+
+.vtt-ui :where(.wm-body, .tabbody, .chat, .rollcard, .pendingcard, .page) {
+  font-size: 1rem !important;
+  line-height: 1.45;
+}
+
+/* The sidebar is intentionally compact in width, but tabs and tool buttons
+ * must remain easy to scan and click. */
+.vtt-ui .gmtools button,
+.vtt-ui .tabs button,
+.vtt-ui .scenenav button {
+  width: auto !important;
+}
+
+.vtt-ui .gmtools button {
+  flex: 1 1 7rem;
+}
+
+.vtt-ui .tabs button {
+  flex: 1 1 auto;
+}
+
+.vtt-ui .scenenav button {
+  flex: 0 1 auto;
+}
+
+.vtt-ui .hotbar .slot {
+  min-height: 2.25rem !important;
+  font-size: 0.8125rem !important;
+}
+
+/* Window chrome uses small icon buttons by design, but their hit target is
+ * still large enough for pointer and keyboard users. */
+.vtt-ui .wm-buttons button {
+  min-width: 2rem !important;
+  min-height: 2rem !important;
+  padding: 0.25rem !important;
+  font-size: 1.05rem !important;
+}
+
+.vtt-ui .wm-title {
+  min-height: 2.75rem;
+}
+
+.vtt-ui .wm-name {
+  font-size: 0.9375rem !important;
+}
+
+.vtt-ui .token-menu {
+  font-size: 1rem !important;
+}
+
+.vtt-ui .token-menu button {
+  min-height: 2.5rem !important;
+  font-size: 0.9375rem !important;
+}
+
+@media (max-width: 760px) {
+  :root {
+    --vtt-control-height: 2.75rem;
+  }
+
+  .vtt-ui :where(.gmtools button, .tabs button, .scenenav button) {
+    flex-basis: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
