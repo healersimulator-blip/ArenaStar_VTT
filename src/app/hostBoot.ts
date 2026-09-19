@@ -48,12 +48,20 @@ import { TOP_LEVEL_COLLECTIONS } from "../core/documents";
 import { diffFlat, type JsonRecord } from "../core/diff";
 import type { Op, OpEnvelope } from "../core/ops";
 import type { PackageRecord, WorldsRecord } from "../storage/idb";
-import { latestCheckpoint } from "../storage/strategicStore";
+import { listCheckpointsForWorld } from "../storage/strategicStore";
 import type { SysSchema } from "../sim/pool";
 import { verifyHello } from "../net/identity";
 
 export const GM_USER_ID = "gm";
 export const DEFAULT_SCENE_ID = "scene-1";
+/**
+ * The built-in strategic ruleset (`src/packages/massBattleBasic.ts`) — what a world runs when
+ * no §12 system package is active. `WorldsRecord.system` is either this id or the active
+ * package's id, so the record (and the join welcome that echoes it) always names the ruleset
+ * the sim actually boots with.
+ */
+export const BUILTIN_SYSTEM_ID = "mass-battle-basic";
+export const BUILTIN_SYSTEM_VERSION = "1.0.0";
 
 export interface HostAppOptions {
   /** Injected DB handle (tests); default opens "vtt". */
@@ -85,6 +93,10 @@ export interface PackageSummary {
   trustRequested: boolean;
   /** §12 GM granted in-page trust for this world. */
   trusted: boolean;
+  /** Package ids the manifest names as companions (advisory, D-110). */
+  dependencies: string[];
+  /** The subset of `dependencies` not imported into this world — what the GM still has to add. */
+  missingDependencies: string[];
 }
 
 export interface HostModuleBoot {
@@ -117,7 +129,12 @@ export interface HostPackages {
   importZip(
     bytes: Uint8Array,
   ): Promise<{ ok: true; summary: PackageSummary } | { ok: false; error: string }>;
-  activate(id: string): Promise<{ ok: true } | { ok: false; error: string }>;
+  /**
+   * Pin a strategic ruleset for this world (applies at the next load; fresh campaigns only).
+   * `warnings` is present only when something is worth telling the GM — today: declared
+   * dependencies that are not imported.
+   */
+  activate(id: string): Promise<{ ok: true; warnings?: string[] } | { ok: false; error: string }>;
   deactivate(): Promise<{ ok: true } | { ok: false; error: string }>;
   /** §12 grant/revoke in-page execution trust (per package, this world). */
   grantTrust(id: string): Promise<{ ok: true } | { ok: false; error: string }>;
@@ -247,7 +264,7 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
     meta = {
       worldId: options.worldId,
       name: rec?.name ?? "World",
-      system: rec?.system ?? "mass-battle-basic",
+      system: rec?.system ?? BUILTIN_SYSTEM_ID,
       systemVersion: rec?.version ?? "1.0.0",
     };
   } else {
@@ -264,7 +281,12 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
       };
     } else {
       const worldId = `w-${globalThis.crypto.randomUUID().slice(0, 8)}`;
-      meta = { worldId, name: "World One", system: "mass-battle-basic", systemVersion: "1.0.0" };
+      meta = {
+        worldId,
+        name: "World One",
+        system: BUILTIN_SYSTEM_ID,
+        systemVersion: BUILTIN_SYSTEM_VERSION,
+      };
       persister = await HostPersister.createWorld(db, meta, { now });
       worldRec = await getWorld(db, worldId);
     }
@@ -298,14 +320,14 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
   // ── §12 migrations per dataSchema version on world load ────────────────────
   // Runs against the HYDRATED store (documents store + oplog tail replay);
   // changes ride a normal op envelope — persisted, replayable, idempotent.
-  const BUILTIN_VERSION = "1.0.0";
+  const BUILTIN_VERSION = BUILTIN_SYSTEM_VERSION;
   const activePkgRec: PackageRecord | undefined = worldRec?.activeRulesPackage
     ? await getPackage(db, meta.worldId, worldRec.activeRulesPackage)
     : undefined;
   const effectiveSystemId = worldRec?.activeRulesPackage ?? meta.system;
   const currentVersion =
     activePkgRec?.manifest.version ??
-    (effectiveSystemId === "mass-battle-basic" ? BUILTIN_VERSION : null);
+    (effectiveSystemId === BUILTIN_SYSTEM_ID ? BUILTIN_VERSION : null);
   const persistedVersion = worldRec?.version ?? BUILTIN_VERSION;
   let migrationBoot: HostMigrationBoot | null = null;
   if (currentVersion !== null && compareVersions(persistedVersion, currentVersion) < 0) {
@@ -549,23 +571,35 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
     rec: PackageRecord,
     active: string | null,
     trustedIds: readonly string[],
-  ): PackageSummary => ({
-    id: rec.id,
-    name: rec.name,
-    version: rec.version,
-    type: rec.type,
-    packCount: rec.manifest.packs?.length ?? 0,
-    active: active === rec.id,
-    trustRequested: rec.manifest.module?.trusted === true,
-    trusted: trustedIds.includes(rec.id),
-  });
+    importedIds: readonly string[],
+  ): PackageSummary => {
+    const dependencies = rec.manifest.dependencies ?? [];
+    return {
+      id: rec.id,
+      name: rec.name,
+      version: rec.version,
+      type: rec.type,
+      packCount: rec.manifest.packs?.length ?? 0,
+      active: active === rec.id,
+      trustRequested: rec.manifest.module?.trusted === true,
+      trusted: trustedIds.includes(rec.id),
+      dependencies,
+      missingDependencies: dependencies.filter((dep) => !importedIds.includes(dep)),
+    };
+  };
   const activePackageId = async (): Promise<string | null> =>
     (await getWorld(db, meta.worldId))?.activeRulesPackage ?? null;
+  const importedIds = async (): Promise<string[]> =>
+    (await listPackages(db, meta.worldId)).map((r) => r.id);
   const guardFreshCampaign = async (): Promise<string | null> => {
-    // rules are pinned per campaign: swapping after the first checkpoint
-    // would break §5A determinism/replay
-    const cp = await latestCheckpoint(db, meta.worldId, DEFAULT_SCENE_ID);
-    return cp ? "campaign already started — packages apply to fresh worlds only" : null;
+    // Rules are pinned per campaign: swapping after the first checkpoint would break §5A
+    // determinism/replay. Checked across EVERY scene, not just the default one — a world may
+    // run several strategic scenes, and a checkpoint on any of them was produced by the
+    // current ruleset.
+    const cps = await listCheckpointsForWorld(db, meta.worldId);
+    return cps.length > 0
+      ? "campaign already started — the strategic ruleset is pinned once a turn has been resolved (start a fresh world to change it)"
+      : null;
   };
   const trustedIds = async (): Promise<string[]> =>
     (await getWorld(db, meta.worldId))?.trustedPackages ?? [];
@@ -579,7 +613,9 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
     async list() {
       const active = await activePackageId();
       const trusted = await trustedIds();
-      return (await listPackages(db, meta.worldId)).map((r) => summarize(r, active, trusted));
+      const records = await listPackages(db, meta.worldId);
+      const ids = records.map((r) => r.id);
+      return records.map((r) => summarize(r, active, trusted, ids));
     },
     async importZip(bytes) {
       const loaded = await readZipPackage(bytes);
@@ -598,7 +634,7 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
       await putPackage(db, rec);
       return {
         ok: true,
-        summary: summarize(rec, await activePackageId(), await trustedIds()),
+        summary: summarize(rec, await activePackageId(), await trustedIds(), await importedIds()),
       };
     },
     async activate(id) {
@@ -612,14 +648,32 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
       }
       const guarded = await guardFreshCampaign();
       if (guarded) return { ok: false, error: guarded };
-      // §12: the world's version tracks the ACTIVE system (migration baseline)
-      await persister.patchWorld({ activeRulesPackage: id, version: rec.manifest.version });
-      return { ok: true };
+      // §12: the world's version tracks the ACTIVE system (migration baseline), and `system`
+      // names it — the record, the join welcome and the world file all read the same id.
+      await persister.patchWorld({
+        activeRulesPackage: id,
+        system: id,
+        version: rec.manifest.version,
+      });
+      const present = await importedIds();
+      const missing = (rec.manifest.dependencies ?? []).filter((dep) => !present.includes(dep));
+      return missing.length === 0
+        ? { ok: true }
+        : {
+            ok: true,
+            warnings: [
+              `${rec.name} expects ${missing.join(", ")} alongside it — not imported into this world yet`,
+            ],
+          };
     },
     async deactivate() {
       const guarded = await guardFreshCampaign();
       if (guarded) return { ok: false, error: guarded };
-      await persister.patchWorld({ activeRulesPackage: undefined });
+      await persister.patchWorld({
+        activeRulesPackage: undefined,
+        system: BUILTIN_SYSTEM_ID,
+        version: BUILTIN_SYSTEM_VERSION,
+      });
       return { ok: true };
     },
     async grantTrust(id) {

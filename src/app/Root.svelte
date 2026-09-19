@@ -5,6 +5,7 @@
   import JoinApp from "./JoinApp.svelte";
   import { bootHostApp, type HostApp } from "./hostBoot";
   import { importWorldZip } from "../host/worldFile";
+  import { classifyZip, describePackage } from "../host/zipKind";
   import { openVttDb } from "../storage/idb";
   import { opfsRoot } from "../storage/opfs";
 
@@ -35,13 +36,27 @@
     if (!file) return;
     importError = null;
     try {
+      // D-248: name the file's kind before failing on it — a ruleset or content pack is
+      // not a world and belongs under Extras once a world is hosted.
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const kind = await classifyZip(bytes);
+      if (kind.kind === "package") {
+        importError = `${describePackage(kind.manifest)} is not a world. Host a world, then add it under Extras → Strategic ruleset & content.`;
+        return;
+      }
+      if (kind.kind === "unknown") {
+        importError = kind.reason;
+        return;
+      }
       const db = await openVttDb();
       const root = await opfsRoot();
-      const imported = await importWorldZip({ db, root, file });
+      const imported = await importWorldZip({ db, root, file: bytes });
       await hostFrom(imported.worldId);
     } catch (err) {
       importError = err instanceof Error ? err.message : String(err);
       mode = "picker";
+    } finally {
+      input.value = "";
     }
   }
 
@@ -77,6 +92,7 @@
       >
       <label class="btn" for="role-import">
         Import world file (.zip)
+        <small>rulesets &amp; content packs travel inside it</small>
         <input
           id="role-import"
           type="file"
@@ -86,7 +102,7 @@
         />
       </label>
       {#if importError}
-        <p class="error" role="alert">Import failed: {importError}</p>
+        <p class="error" role="alert" data-import-error>Import failed: {importError}</p>
       {/if}
     </section>
     <section class="capabilities" aria-labelledby="caps-h">
@@ -192,6 +208,13 @@
   }
   .picker input[type="file"] {
     display: none;
+  }
+  .picker .btn small {
+    display: block;
+    margin-top: 2px;
+    font-size: 0.75rem;
+    font-weight: 400;
+    opacity: 0.7;
   }
   .error {
     max-width: 620px;

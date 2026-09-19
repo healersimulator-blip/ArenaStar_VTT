@@ -42,8 +42,12 @@ test.describe("world.zip export/import (§8)", () => {
       worldId: string;
       seq: number;
       format: number;
+      rules: { active: string | null };
     };
-    expect(meta.format).toBe(1);
+    // D-248: format 2 carries the strategic ruleset pin + package index (empty here: built-in)
+    expect(meta.format).toBe(2);
+    expect(meta.rules).toEqual({ active: null });
+    expect(JSON.parse(strFromU8(files["packages.json"] as Uint8Array))).toEqual([]);
     expect(files["documents.json"]).toBeDefined();
     const worldId = meta.worldId;
     const seqAtExport = meta.seq;

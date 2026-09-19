@@ -209,9 +209,11 @@
             applyScale(scale);
           }}
         >
-          {#each ["tactical", "strategic"] as sc (sc)}
-            <option value={sc}>{sc}</option>
-          {/each}
+          <!-- D-248: values are the D-080 flag; labels say what each kind means -->
+          <option value="tactical">tactical — heroes only</option>
+          <option value="strategic"
+            >strategic — heroes + units (uses the world's strategic ruleset)</option
+          >
         </select>
       </label>
       <label>

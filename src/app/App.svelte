@@ -27,6 +27,7 @@
     exportWorldZip,
     importWorldZip,
   } from "../host/worldFile";
+  import { classifyZip, describePackage } from "../host/zipKind";
   import { ChatPanel } from "../ui/chat";
   import { CombatPanel } from "../ui/combat";
   import {
@@ -858,24 +859,55 @@
     }
   }
 
+  /**
+   * One entry for every `.zip` the GM may hold (D-248): the file's kind decides what
+   * happens. A world archive replaces this world and reboots; a strategic ruleset or
+   * content pack is imported into THIS world (no reboot — activation is a separate,
+   * deliberate step under Extras); anything else is named and refused.
+   */
   async function importWorld(ev: Event): Promise<void> {
     if (!app) return;
     const input = ev.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
     if (!file) return;
     try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const kind = await classifyZip(bytes);
+      if (kind.kind === "unknown") {
+        canvasError = `import failed: ${kind.reason}`;
+        return;
+      }
+      if (kind.kind === "package") {
+        const res = await app.packages.importZip(bytes);
+        if (!res.ok) {
+          canvasError = `import failed: ${res.error}`;
+          return;
+        }
+        const what = describePackage(kind.manifest);
+        pushLog(
+          [
+            kind.manifest.type === "system"
+              ? `${what} added — activate it under Extras → Strategic ruleset & content (it drives strategic scenes only).`
+              : `${what} added — its packs are under Compendia.`,
+          ],
+          "info",
+        );
+        return;
+      }
       const { db, root } = app;
       // AWAITED: close() settles the persister's final batched flush. Importing
       // before it lands lets that flush write a post-export document on top of
       // the restore, so the reload boots a world the archive never contained.
       await app.close(); // stop live writes; import replaces the world rows
-      const imported = await importWorldZip({ db, root, file });
+      const imported = await importWorldZip({ db, root, file: bytes });
       console.info(
-        `vtt: imported world ${imported.name} at seq ${imported.seq}`,
+        `vtt: imported world ${imported.name} at seq ${imported.seq} (format ${imported.format}, ${imported.packages.length} package(s))`,
       );
       globalThis.location.reload(); // reboot into the restored world
     } catch (err) {
       canvasError = `import failed: ${err instanceof Error ? err.message : String(err)}`;
+    } finally {
+      input.value = "";
     }
   }
 
@@ -1853,7 +1885,22 @@
           <strong>{worldName}</strong>
           <span>seq {seq}</span>
           <span>tokens {tokenCount}</span>
+          <!-- D-248: which strategic ruleset this world runs (strategic scenes only) -->
+          <span
+            data-rules-status
+            data-rules-source={app.rulesBoot.source}
+            title="Strategic ruleset — applies to strategic-scale scenes; tactical scenes are heroes only"
+            >strategic rules: {app.rulesBoot.source === "package"
+              ? `${app.rulesBoot.packageId} v${app.rulesBoot.version}`
+              : `built-in v${app.rulesBoot.version}`}</span
+          >
         </div>
+        {#if app.rulesBoot.error}
+          <p class="error rules-boot-error" role="alert" data-rules-boot-error>
+            Strategic ruleset {app.rulesBoot.packageId ?? ""} could not load — running built-in
+            rules instead: {app.rulesBoot.error}
+          </p>
+        {/if}
         <label class="btn file-control" for="map-input">
           Import map
           <input
@@ -2076,8 +2123,8 @@
             Save to folder…
           </button>
         {/if}
-        <label class="btn">
-          Import world (.zip)
+        <label class="btn" title="A world file replaces this world; a ruleset or content pack is added to it">
+          Import world or package (.zip)
           <input
             id="import-world"
             type="file"
@@ -2520,6 +2567,14 @@
   #status strong {
     color: #f2f5f8;
     font-size: 1.1rem;
+  }
+  #status [data-rules-status] {
+    font-size: 0.8rem;
+    color: #b1bdca;
+  }
+  .rules-boot-error {
+    margin: 8px 0 0;
+    font-size: 0.85rem;
   }
   .btn,
   button {

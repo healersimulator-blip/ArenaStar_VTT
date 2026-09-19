@@ -105,6 +105,7 @@ DEVIATIONS.md (target: empty).
 ### export/import
 
 - [x] world.zip streaming fflate export/import (world.json + documents.json + assets.json + assets/<hash>; fog/ + checkpoints/ land with their M2 features) — restore semantics, lossless round-trip test + e2e (§8)
+- [x] world.zip **format 2** — self-contained: `packages.json` + `packages/<id>/…` carry the §12 strategic ruleset and content packs with `rules.active`; format 1 still imports; trust never exported; one sniffing importer (world / ruleset / content pack) — D-248 (`tests/host/worldFilePackages.test.ts`, `tests/host/zipKind.test.ts`)
 - [ ] File System Access "save to folder" alternative to the download (§8, M3 — ROADMAP)
 
 ### e2e (§14)

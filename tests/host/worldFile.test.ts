@@ -12,6 +12,7 @@ import { MemDirHandle } from "../../src/storage/opfs";
 import {
   exportWorldZip,
   importWorldZip,
+  WORLD_FILE_FORMAT,
   type WorldFileDocuments,
   type WorldFileMeta,
 } from "../../src/host/worldFile";
@@ -118,8 +119,12 @@ describe("world.zip export/import (§8)", () => {
     const archive = new Uint8Array(await blob.arrayBuffer());
     const files = parseZip(archive);
     const meta = JSON.parse(strFromU8(files.get("world.json") as Uint8Array)) as WorldFileMeta;
-    expect(meta.format).toBe(1);
+    expect(meta.format).toBe(WORLD_FILE_FORMAT);
     expect(meta.worldId).toBe(app.worldId);
+    // D-248: a world on the built-in ruleset says so, and carries an (empty) package index
+    expect(meta.rules).toEqual({ active: null });
+    expect(meta.system).toBe("mass-battle-basic");
+    expect(JSON.parse(strFromU8(files.get("packages.json") as Uint8Array))).toEqual([]);
     const documents = JSON.parse(
       strFromU8(files.get("documents.json") as Uint8Array),
     ) as WorldFileDocuments;

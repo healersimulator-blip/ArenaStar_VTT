@@ -27,6 +27,25 @@ ui/*, dice, audio, packages, storage, workers, sim) and `systems/mass-battle-bas
 Each module folder has an `index.ts` barrel. Tracking files live in the repo root:
 `PLAN.md`, `DECISIONS.md`, `DEVIATIONS.md`, `ROADMAP.md`, `PROTOCOL.md`.
 
+## World files, rulesets and content packs (§8, §12)
+
+Everything a GM loads is a `.zip`, and the app tells them apart by content (D-248):
+
+- **World file** — `world.json` at the root. Exported from *Export world (.zip)* /
+  *Save to folder…*; format 2 carries the world's §12 packages inside it, so a
+  shared world boots the same strategic ruleset on another machine.
+- **Strategic ruleset** — a `manifest.json` with `type: "system"` and `rules.js`
+  (e.g. `systems/pf1e-mass-battles`). It drives **strategic** scenes only
+  (heroes + units, Settings → Scale); tactical scenes (heroes only) never touch it,
+  so one world can mix both kinds. Activate it under Extras → *Strategic ruleset &
+  content* before the first strategic turn — it is pinned per campaign.
+- **Content pack** — a `manifest.json` with `type: "data"` and packs (e.g.
+  `systems/pf1e-core`); its entries appear under Compendia.
+
+Any of the three can be dropped on *Import world or package (.zip)* in the GM
+sidebar: a world replaces the current one, a ruleset/content pack is added to it.
+The role picker's *Import world file* only takes worlds and says so otherwise.
+
 ## file:// limitations (§15)
 
 The deliverable must boot from `https://` and `file://`:
