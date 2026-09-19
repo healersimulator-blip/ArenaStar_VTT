@@ -83,17 +83,24 @@ test.describe("world.zip export/import (§8)", () => {
     await page.click("#add-token");
     await expect.poll(() => appCall<number>(page, "tokenCount")).toBe(3);
 
-    // ── import the archive through the UI; the app reboots into it ──
-    const reloaded = page.waitForEvent("load", { timeout: 15_000 }); // the reload() after import
-    await page.setInputFiles("#import-world", zipPath);
-    await reloaded;
-    await waitForApp(page);
+    // ── D-249: importing happens on the start screen — Close world, Open file, Restore ──
+    await page.click("#close-world");
+    const list = page.locator("[data-world-list]");
+    await expect(list.locator(`[data-world-row][data-world-id="${worldId}"]`)).toBeVisible();
+    await expect.poll(() => appCall<string>(page, "worldId").catch(() => null)).toBeNull(); // surface detached
+    await page.setInputFiles("#role-import", zipPath);
+    const dialog = page.locator("[data-open-dialog]");
+    await expect(dialog).toHaveAttribute("data-open-kind", "world");
+    await expect(dialog.locator("[data-open-contents]")).toContainText("built-in strategic rules");
+    await expect(dialog.locator("[data-open-replace]")).toContainText("Restore over");
+    await dialog.locator("[data-open-replace]").click();
+    await waitForApp(page); // Root re-attaches the e2e surface to the rebooted world
     await expect.poll(() => appCall<number>(page, "tokenCount")).toBe(2); // restored to the export point
     expect(await appCall<string>(page, "worldId")).toBe(worldId);
     await expect.poll(() => appCall<number>(page, "seq")).toBe(seqAtExport);
   });
 
-  test("D-248: one importer sorts zips by kind, and the world file carries its strategic ruleset to another browser", async ({
+  test("D-248/D-249: Settings sorts zips by kind, and the world file carries its strategic ruleset to another browser", async ({
     page,
     browser,
   }: {
@@ -122,28 +129,30 @@ test.describe("world.zip export/import (§8)", () => {
         /strategic rules: built-in/,
       );
 
-      // ── the sidebar importer takes a RULESET: added to this world, no reboot ──
-      await page.setInputFiles("#import-world", rulesetPath);
-      await expect(page.locator("[data-notify]").last()).toContainText(
-        "Probe Rules v9.9.9 (strategic ruleset) added",
+      // ── D-249: the sidebar no longer imports; packages live under Settings ──
+      await expect(page.locator("#import-world")).toHaveCount(0);
+      await page.click("#gm-settings");
+      const extras = page.locator('[data-window="settings"]');
+      await expect(extras.locator("[data-pkg-section] h4")).toHaveText(
+        "Strategic ruleset & content (§12)",
       );
+      await expect(extras.locator("[data-pkg-status-ruleset]")).toContainText("built-in");
+      await expect(extras.locator("[data-pkg-pinned]")).toHaveCount(0); // fresh campaign: switchable
+
+      // ── Settings takes a RULESET: added to this world, no reboot ──
+      await extras.locator("#pkg-file").setInputFiles(rulesetPath);
+      const row = extras.locator('[data-pkg-row][data-pkg-id="probe-rules"]');
+      await expect(row).toContainText("strategic ruleset");
       await expect
         .poll(() => appCall<Array<{ id: string }>>(page, "packages"))
         .toEqual([expect.objectContaining({ id: "probe-rules", active: false })]);
       expect(await appCall<string>(page, "worldId")).toBeTruthy(); // same page, same world
 
       // ── junk is named, not failed with a zip-internal message ──
-      await page.setInputFiles("#import-world", junkPath);
-      await expect(page.locator("p.error")).toContainText("neither a world file");
+      await extras.locator("#pkg-file").setInputFiles(junkPath);
+      await expect(extras.locator("[data-pkg-error]")).toContainText("neither a world file");
 
-      // ── the Extras section talks about strategic scenes, and refuses a WORLD file ──
-      await page.click("#gm-extras");
-      const extras = page.locator('[data-window="gmextras"]');
-      await expect(extras.locator("[data-pkg-section] h4")).toHaveText(
-        "Strategic ruleset & content (§12)",
-      );
-      const row = extras.locator('[data-pkg-row][data-pkg-id="probe-rules"]');
-      await expect(row).toContainText("strategic ruleset");
+      // ── activate: the section talks about strategic scenes and offers the reload ──
       await row.locator("[data-pkg-activate]").click();
       await expect(row.locator("[data-pkg-active]")).toHaveCount(1);
       await expect(extras.locator("[data-pkg-reload]")).toBeVisible();
@@ -157,6 +166,7 @@ test.describe("world.zip export/import (§8)", () => {
       const files = unzipSync(archive);
       const meta = JSON.parse(strFromU8(files["world.json"] as Uint8Array)) as {
         format: number;
+        worldId: string;
         name: string;
         system: string;
         rules: { active: string | null };
@@ -169,6 +179,7 @@ test.describe("world.zip export/import (§8)", () => {
       ).toEqual([expect.objectContaining({ id: "probe-rules", type: "system" })]);
       expect(strFromU8(files["packages/probe-rules/rules.js"] as Uint8Array)).toBe(RULES_JS);
 
+      // …and refuses a WORLD file, pointing at the start screen
       await extras.locator("#pkg-file").setInputFiles(worldPath);
       await expect(extras.locator("[data-pkg-error]")).toContainText("is a world file");
 
@@ -182,6 +193,8 @@ test.describe("world.zip export/import (§8)", () => {
         "strategic rules: probe-rules v9.9.9",
       );
       await expect(page.locator("[data-rules-boot-error]")).toHaveCount(0);
+      await page.click("#gm-settings");
+      await expect(extras.locator("[data-pkg-status-ruleset]")).toContainText("Probe Rules v9.9.9 (package)");
 
       // ── "another GM's machine": a fresh browser context has no packages at all ──
       const other = await browser.newContext();
@@ -189,25 +202,63 @@ test.describe("world.zip export/import (§8)", () => {
         const picker = await other.newPage();
         await picker.goto(entry);
         await expect(picker.locator("#role-host")).toBeVisible();
-        // the picker names a package for what it is
+        await expect(picker.locator("[data-world-empty]")).toBeVisible();
+        // Open file names a package for what it is and offers the wizard instead of failing
         await picker.setInputFiles("#role-import", rulesetPath);
-        await expect(picker.locator("[data-import-error]")).toContainText(
-          "Probe Rules v9.9.9 (strategic ruleset) is not a world",
-        );
-        // …and boots a world file on the ruleset it carries
+        const pkgDialog = picker.locator("[data-open-dialog]");
+        await expect(pkgDialog).toHaveAttribute("data-open-kind", "package");
+        await expect(pkgDialog).toContainText("Probe Rules v9.9.9 (strategic ruleset)");
+        await expect(pkgDialog.locator("[data-open-wizard]")).toBeVisible();
+        await pkgDialog.locator("[data-open-cancel]").click();
+        await expect(pkgDialog).toHaveCount(0);
+        // …and a world file is described (ruleset it carries) and opened as a copy
         await picker.setInputFiles("#role-import", worldPath);
+        await expect(pkgDialog).toHaveAttribute("data-open-kind", "world");
+        await expect(pkgDialog.locator("[data-open-contents]")).toContainText(
+          "strategic ruleset Probe Rules v9.9.9",
+        );
+        await expect(pkgDialog.locator("#open-copy-name")).toHaveValue(`${meta.name} (copy)`);
+        await expect(pkgDialog.locator("[data-open-replace]")).toContainText("Restore (keep its id)");
+        await pkgDialog.locator("[data-open-copy]").click();
         // the picker route mounts the shell only once the boot has an app (status + canvas live)
-        await expect(picker.locator("#status")).toContainText(meta.name, { timeout: 20_000 });
+        await expect(picker.locator("#status")).toContainText(`${meta.name} (copy)`, { timeout: 20_000 });
         await expect(picker.locator("canvas").first()).toBeVisible();
         await expect(picker.locator("#status [data-rules-status]")).toHaveText(
           "strategic rules: probe-rules v9.9.9",
         );
         await expect(picker.locator("[data-rules-boot-error]")).toHaveCount(0);
-        await picker.click("#gm-extras");
-        const otherExtras = picker.locator('[data-window="gmextras"]');
+        await picker.click("#gm-settings");
+        const otherSettings = picker.locator('[data-window="settings"]');
         await expect(
-          otherExtras.locator('[data-pkg-row][data-pkg-id="probe-rules"] [data-pkg-active]'),
+          otherSettings.locator('[data-pkg-row][data-pkg-id="probe-rules"] [data-pkg-active]'),
         ).toHaveCount(1);
+
+        // ── back on the start screen the copy is listed under its own id; Export + Delete work ──
+        await picker.click("#close-world");
+        const rows = picker.locator("[data-world-list] [data-world-row]");
+        await expect(rows).toHaveCount(1);
+        await expect(rows.first().locator("[data-world-name]")).toHaveText(`${meta.name} (copy)`);
+        await expect(rows.first()).toContainText("probe-rules v9.9.9");
+        const copyId = await rows.first().getAttribute("data-world-id");
+        expect(copyId).toBeTruthy();
+        expect(copyId).not.toBe(meta.worldId);
+        const [listDownload] = await Promise.all([
+          picker.waitForEvent("download"),
+          rows.first().locator("[data-world-export]").click(),
+        ]);
+        const listed = unzipSync(new Uint8Array(await readFile((await listDownload.path()) as string)));
+        const listedMeta = JSON.parse(strFromU8(listed["world.json"] as Uint8Array)) as {
+          worldId: string;
+          rules: { active: string | null };
+        };
+        expect(listedMeta.worldId).toBe(copyId);
+        expect(listedMeta.rules).toEqual({ active: "probe-rules" });
+        // delete is two-step: the first click arms, the second removes the world
+        await rows.first().locator("[data-world-delete]").click();
+        await expect(rows.first().locator("[data-world-delete]")).toHaveAttribute("data-world-delete-armed", "true");
+        await rows.first().locator("[data-world-delete]").click();
+        await expect(picker.locator("[data-world-empty]")).toBeVisible();
+        await expect(picker.locator("[data-start-notice]")).toContainText("Deleted");
       } finally {
         await other.close();
       }

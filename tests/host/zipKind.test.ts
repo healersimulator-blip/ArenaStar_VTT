@@ -41,7 +41,18 @@ describe("classifyZip", () => {
         "packages/pf1e-core/manifest.json": JSON.stringify(contentManifest),
       }),
     );
-    expect(kind).toEqual({ kind: "world", format: 2, worldId: "w-1", name: "Siege of Absalom" });
+    // D-249: the sniff also reads the ruleset pin, the package index and the starter flag —
+    // here none of them are present (no packages.json), which reads as "built-in, nothing embedded".
+    expect(kind).toEqual({
+      kind: "world",
+      format: 2,
+      worldId: "w-1",
+      name: "Siege of Absalom",
+      system: null,
+      activeRules: null,
+      packages: [],
+      starter: false,
+    });
   });
 
   test("manifest.json at the root → package, validated", async () => {

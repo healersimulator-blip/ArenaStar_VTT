@@ -15,10 +15,17 @@ pnpm test         # vitest unit tests
 pnpn typecheck    # tsc --noEmit
 pnpm lint         # eslint
 pnpm size         # prints raw+gzip size of dist/index.html, fails > 6 MB raw
+pnpm build:systems # → dist/packages/<id>-<version>.zip (strategic ruleset + content pack)
+pnpm build:worlds  # → dist/worlds/<id>-starter-<version>.zip (ready-to-open starter worlds)
 pnpm test:e2e     # builds, then runs Playwright against file:// of dist/index.html
 ```
 
 Requires Node 20+ and pnpm 10.
+
+**Play PF1e Mass Battles in three clicks:** `pnpm build && pnpm build:systems && pnpm build:worlds`,
+open `dist/index.html`, **Open file (.zip)** → `dist/worlds/pf1e-mass-battles-starter-1.0.0.zip`
+→ **Open as new world**. The world boots with the PF1e strategic ruleset active and the PF1e
+Core compendia installed; nothing to activate, nothing to reload.
 
 ## Layout
 
@@ -29,22 +36,28 @@ Each module folder has an `index.ts` barrel. Tracking files live in the repo roo
 
 ## World files, rulesets and content packs (§8, §12)
 
-Everything a GM loads is a `.zip`, and the app tells them apart by content (D-248):
+A GM handles **one file per campaign**: the world file. Everything else travels inside it
+(D-248 format 2, D-249 lifecycle). The app tells the three `.zip` shapes apart by content:
 
 - **World file** — `world.json` at the root. Exported from *Export world (.zip)* /
-  *Save to folder…*; format 2 carries the world's §12 packages inside it, so a
-  shared world boots the same strategic ruleset on another machine.
+  *Save to folder…* (in-world) or *Export* on the start screen; it carries the world's
+  §12 packages, so a shared world boots the same strategic ruleset on another machine.
+  A **starter world** (`pnpm build:worlds`) is a world file with no campaign in it, a
+  ruleset active and its content packs installed — it always opens as a fresh copy.
 - **Strategic ruleset** — a `manifest.json` with `type: "system"` and `rules.js`
   (e.g. `systems/pf1e-mass-battles`). It drives **strategic** scenes only
   (heroes + units, Settings → Scale); tactical scenes (heroes only) never touch it,
-  so one world can mix both kinds. Activate it under Extras → *Strategic ruleset &
-  content* before the first strategic turn — it is pinned per campaign.
+  so one world can mix both kinds. It is chosen in **New world…** and pinned once the
+  first strategic turn is resolved.
 - **Content pack** — a `manifest.json` with `type: "data"` and packs (e.g.
-  `systems/pf1e-core`); its entries appear under Compendia.
+  `systems/pf1e-core`); its entries appear under Compendia. Chosen in **New world…** or
+  added any time under Settings → *Strategic ruleset & content*.
 
-Any of the three can be dropped on *Import world or package (.zip)* in the GM
-sidebar: a world replaces the current one, a ruleset/content pack is added to it.
-The role picker's *Import world file* only takes worlds and says so otherwise.
+The start screen lists the worlds on this device (**Open / Export / Delete**) and has one
+**Open file (.zip)** entry: a world file offers *Open as new world* (a copy under a fresh id,
+optionally renamed) or *Restore* (the archive's own id — overwrites that world if present); a
+ruleset or content pack is named for what it is and offers *New world with it…*. Inside a
+world, **Close world…** returns to the start screen; the sidebar has no importer of its own.
 
 ## file:// limitations (§15)
 

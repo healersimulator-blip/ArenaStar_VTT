@@ -12,20 +12,16 @@
   import type { EventBus } from "../../core/events";
   import type { ArmyDocument, FactionDocument, UnitDocument } from "../../core/strategic";
   import { ORDER_TEMPLATES, rulesContextFromStore } from "./armyModel";
-  import type { HostPackages, PackageSummary } from "../../app/hostBoot";
-  import { classifyZip, packageKindLabel } from "../../host/zipKind";
   import { gmState } from "./gmState.svelte";
 
   let {
     client,
     bus,
     sceneId = null,
-    packages = null,
   }: {
     client: ClientSync;
     bus: EventBus<ClientEvents>;
     sceneId?: string | null;
-    packages?: HostPackages | null;
   } = $props();
 
   let factions = $state<FactionDocument[]>([]);
@@ -178,108 +174,7 @@
     if (ops.length > 0) client.submit(ops);
   }
 
-  // §12 strategic ruleset + content packs (import + activate; applies on world reload).
-  // D-248: the ruleset only drives strategic-scale scenes — tactical (heroes-only) scenes
-  // never touch it, so a world can mix both kinds under one active ruleset.
-  let pkgList = $state<PackageSummary[]>([]);
-  let pkgBusy = $state(false);
-  let pkgError = $state("");
-  /** Name of the ruleset activated this session — it runs after the next world reload. */
-  let pkgPendingReload = $state("");
-  /** Advisory notes from the last activation (missing declared companions, D-110). */
-  let pkgWarnings = $state<string[]>([]);
-  let pkgFileInput = $state<HTMLInputElement | null>(null);
-  const refreshPackages = (): void => {
-    if (!packages) return;
-    void packages
-      .list()
-      .then((list) => {
-        pkgList = list;
-      })
-      .catch(() => {});
-  };
-  async function importPackageZip(): Promise<void> {
-    if (!packages || !pkgFileInput?.files?.[0]) return;
-    pkgBusy = true;
-    pkgError = "";
-    try {
-      const bytes = new Uint8Array(await pkgFileInput.files[0].arrayBuffer());
-      // D-248: a world file dropped here is named, not failed with "manifest.json missing".
-      const kind = await classifyZip(bytes);
-      if (kind.kind === "world") {
-        pkgError = `"${kind.name}" is a world file, not a ruleset or content pack — use Import world or package (.zip) in the sidebar.`;
-        return;
-      }
-      const res = await packages.importZip(bytes);
-      if (!res.ok) pkgError = res.error;
-      refreshPackages();
-    } finally {
-      // let the same file be picked again after a fix
-      if (pkgFileInput) pkgFileInput.value = "";
-      pkgBusy = false;
-    }
-  }
-  async function activatePackage(id: string): Promise<void> {
-    if (!packages) return;
-    pkgBusy = true;
-    pkgError = "";
-    pkgWarnings = [];
-    try {
-      const res = await packages.activate(id);
-      if (!res.ok) pkgError = res.error;
-      else {
-        pkgWarnings = res.warnings ?? [];
-        pkgPendingReload = pkgList.find((p) => p.id === id)?.name ?? id;
-      }
-      refreshPackages();
-    } finally {
-      pkgBusy = false;
-    }
-  }
-  const reloadWorld = (): void => {
-    if (typeof location !== "undefined") location.reload();
-  };
-
-  // §12 trusted in-page execution: two-step GM consent (first click arms,
-  // second click within 3 s grants)
-  let trustConfirmId = $state("");
-  let trustTimer: ReturnType<typeof setTimeout> | null = null;
-  function requestGrantTrust(id: string): void {
-    if (trustConfirmId !== id) {
-      trustConfirmId = id;
-      if (trustTimer !== null) clearTimeout(trustTimer);
-      trustTimer = setTimeout(() => (trustConfirmId = ""), 3_000);
-      return;
-    }
-    trustConfirmId = "";
-    if (trustTimer !== null) clearTimeout(trustTimer);
-    void grantTrust(id);
-  }
-  async function grantTrust(id: string): Promise<void> {
-    if (!packages) return;
-    pkgBusy = true;
-    pkgError = "";
-    try {
-      const res = await packages.grantTrust(id);
-      if (!res.ok) pkgError = res.error;
-      refreshPackages();
-    } finally {
-      pkgBusy = false;
-    }
-  }
-  async function revokeTrust(id: string): Promise<void> {
-    if (!packages) return;
-    pkgBusy = true;
-    pkgError = "";
-    try {
-      const res = await packages.revokeTrust(id);
-      if (!res.ok) pkgError = res.error;
-      refreshPackages();
-    } finally {
-      pkgBusy = false;
-    }
-  }
-  onMount(refreshPackages);
+  // §12 strategic ruleset & content moved to Settings → RulesetSection (D-249).
 
   onMount(() => {
     const offSnapshot = bus.on("snapshot", refresh);
@@ -505,98 +400,6 @@
   </div>
 </div>
 
-{#if packages}
-  <div class="section" data-pkg-section>
-    <h4>Strategic ruleset &amp; content (§12)</h4>
-    <p class="hint">
-      The active ruleset drives <b>strategic</b> scenes (heroes + units). Tactical scenes
-      (heroes only) are unaffected — a world can mix both. Change a scene's kind under
-      Settings → Scale.
-    </p>
-    {#if pkgList.length === 0}
-      <p class="hint" data-pkg-empty>
-        Built-in strategic rules. Add a ruleset (e.g. PF1e Mass Battles) or a content pack below.
-      </p>
-    {/if}
-    {#each pkgList as p (p.id)}
-      <div class="row" data-pkg-row data-pkg-id={p.id} data-pkg-type={p.type}>
-        <span
-          >{p.name} v{p.version} · {packageKindLabel(p.type)}{p.packCount > 0
-            ? ` · ${p.packCount} pack(s)`
-            : ""}</span
-        >
-        {#if p.missingDependencies.length > 0}
-          <span
-            class="warn"
-            data-pkg-missing-deps
-            title={`Declared companions not imported: ${p.missingDependencies.join(", ")}`}
-            >needs {p.missingDependencies.join(", ")}</span
-          >
-        {/if}
-        {#if p.active}
-          <span data-pkg-active>active</span>
-        {:else if p.type === "system"}
-          <button
-            type="button"
-            data-pkg-activate
-            disabled={pkgBusy}
-            onclick={() => activatePackage(p.id)}
-          >
-            Activate
-          </button>
-        {/if}
-        {#if p.trustRequested}
-          {#if p.trusted}
-            <span data-pkg-trusted>trusted (in-page)</span>
-            <button
-              type="button"
-              data-trust-revoke
-              disabled={pkgBusy}
-              onclick={() => revokeTrust(p.id)}
-            >
-              Revoke trust
-            </button>
-          {:else}
-            <span data-pkg-trust-requested>wants in-page</span>
-            <button
-              type="button"
-              data-trust-grant
-              disabled={pkgBusy}
-              onclick={() => requestGrantTrust(p.id)}
-            >
-              {trustConfirmId === p.id ? "Confirm grant?" : "Grant in-page"}
-            </button>
-          {/if}
-        {/if}
-      </div>
-    {/each}
-    <div class="row">
-      <label for="pkg-file">Add ruleset / content pack (.zip)</label>
-      <input
-        id="pkg-file"
-        type="file"
-        accept=".zip"
-        bind:this={pkgFileInput}
-        onchange={() => void importPackageZip()}
-      />
-    </div>
-    {#if pkgError}<p data-pkg-error>{pkgError}</p>{/if}
-    {#if pkgPendingReload}
-      <p class="hint" data-pkg-pending>
-        <b>{pkgPendingReload}</b> takes over strategic scenes when the world reloads.
-        <button type="button" data-pkg-reload onclick={reloadWorld}>Reload now</button>
-      </p>
-    {/if}
-    {#each pkgWarnings as w (w)}
-      <p class="warn" data-pkg-warning>{w}</p>
-    {/each}
-    <p class="hint">
-      The ruleset is pinned once any strategic scene has resolved a turn — pick it before the
-      first turn (start a fresh world to change it). It is saved inside the world file, so a
-      shared world plays the same rules elsewhere.
-    </p>
-  </div>
-{/if}
 
 <style>
   .gmextras {
@@ -606,21 +409,6 @@
   }
   h4 {
     margin: 4px 0 0;
-  }
-  .hint {
-    margin: 0;
-    font-size: 0.8125rem;
-    opacity: 0.7;
-  }
-  .warn {
-    margin: 0;
-    font-size: 0.8125rem;
-    color: var(--vtt-focus);
-  }
-  [data-pkg-error] {
-    margin: 0;
-    font-size: 0.8125rem;
-    color: #ff9b9b;
   }
   .row {
     display: flex;

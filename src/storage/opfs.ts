@@ -22,7 +22,22 @@ export interface FileHandleLike {
 export interface DirHandleLike {
   getDirectoryHandle(name: string, options?: { create?: boolean }): Promise<DirHandleLike>;
   getFileHandle(name: string, options?: { create?: boolean }): Promise<FileHandleLike>;
-  removeEntry(name: string): Promise<void>;
+  /** `recursive` is what the real API needs to remove a non-empty directory. */
+  removeEntry(name: string, options?: { recursive?: boolean }): Promise<void>;
+}
+
+/**
+ * Drop a world's OPFS tree (`/vtt/<worldId>/`), if any. Missing directories are not an
+ * error: a world may never have stored a blob, or OPFS may be unavailable (`root` null).
+ */
+export async function deleteWorldFiles(root: DirHandleLike | null, worldId: WorldId): Promise<void> {
+  if (!root) return;
+  try {
+    const vtt = await root.getDirectoryHandle("vtt");
+    await vtt.removeEntry(worldId, { recursive: true });
+  } catch {
+    // NotFoundError: nothing stored for this world
+  }
 }
 
 /** Real OPFS root, or null where unsupported (§15 file:// on some browsers). */

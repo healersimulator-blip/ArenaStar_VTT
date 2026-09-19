@@ -30,6 +30,13 @@
  * §8 checkpoint. Format 1 archives still import; they carry no packages, so the
  * packages already in the local world (and its activation) are left untouched.
  *
+ * Import as copy (`mode: "copy"`, D-249) writes the same rows under a NEW
+ * worldId and leaves any world the archive names untouched — how a GM opens a
+ * shared world beside their own, and how a *starter* archive (`starter: true`,
+ * emitted by `scripts/buildStarterWorlds.mjs`: no documents, the ruleset and
+ * its content packs pre-installed) becomes a fresh campaign every time it is
+ * opened. A copy carries no trust either.
+ *
  * Trust is never imported. `WorldsRecord.trustedPackages` is THIS GM's consent
  * to run a module in-page (D-089); it is not exported, and an archive claiming it
  * is ignored. A restore keeps whatever this browser had already granted.
@@ -79,6 +86,11 @@ export interface WorldFileMeta {
   exportedAt: number;
   /** Format ≥ 2. */
   rules?: WorldFileRules;
+  /**
+   * A template rather than someone's campaign (D-249): the start screen always imports it as
+   * a copy under a fresh id, so opening it twice yields two worlds and never a "replace?".
+   */
+  starter?: boolean;
 }
 
 /** documents.json body. */
@@ -113,6 +125,15 @@ export interface ExportWorldOptions {
 export interface ImportWorldOptions {
   db: IDBPDatabase;
   file: Blob | Uint8Array;
+  /**
+   * `replace` (default) restores the archive's own worldId; `copy` imports under a fresh id
+   * (or `worldId` when given) and never touches the world the archive names.
+   */
+  mode?: "replace" | "copy";
+  /** Copy mode only: the id to import under (default `w-<random>`). */
+  worldId?: WorldId;
+  /** Rename on import (starters and copies usually want one). */
+  name?: string;
   /** OPFS root for blob storage; null/omitted → blobs inline in IDB (D-037). */
   root?: DirHandleLike | null;
   now?: () => number;
@@ -122,6 +143,10 @@ export interface ImportedWorld {
   worldId: WorldId;
   name: string;
   seq: number;
+  /** How the archive was written into the database. */
+  mode: "replace" | "copy";
+  /** The worldId the archive itself names (differs from `worldId` for a copy). */
+  sourceWorldId: WorldId;
   /** Archive format that was read. */
   format: number;
   /** Package ids restored from the archive (format 2) — empty for format 1. */
@@ -391,7 +416,21 @@ export async function importWorldZip(options: ImportWorldOptions): Promise<Impor
     requireFile(files, "assets.json"),
     "assets.json",
   );
-  const worldId: WorldId = meta.worldId;
+  const mode = options.mode ?? "replace";
+  if (mode === "replace" && options.worldId !== undefined && options.worldId !== meta.worldId) {
+    throw new Error("world file: a replace import restores the archive's own worldId");
+  }
+  const worldId: WorldId =
+    mode === "copy"
+      ? (options.worldId ?? `w-${globalThis.crypto.randomUUID().slice(0, 8)}`)
+      : meta.worldId;
+  if (mode === "copy" && (await getWorld(options.db, worldId))) {
+    throw new Error(`world file: cannot copy onto existing world ${worldId}`);
+  }
+  const name =
+    options.name !== undefined && options.name.trim().length > 0
+      ? options.name.trim()
+      : meta.name;
 
   // ── §12 packages + the ruleset pin (format 2) ──────────────────────────────
   const carriesPackages = meta.format >= 2;
@@ -412,9 +451,10 @@ export async function importWorldZip(options: ImportWorldOptions): Promise<Impor
     archiveActive = active;
   }
 
-  // What this browser already knows about the world. Trust is local consent and always
-  // carried; the activation is carried only when the archive has no say (format 1).
-  const existing = await getWorld(options.db, worldId);
+  // What this browser already knows about the world (nothing, for a copy — it is a new id).
+  // Trust is local consent and always carried; the activation is carried only when the
+  // archive has no say (format 1).
+  const existing = mode === "copy" ? undefined : await getWorld(options.db, worldId);
   const activeRulesPackage = carriesPackages ? archiveActive : (existing?.activeRulesPackage ?? null);
   const trustedPackages = existing?.trustedPackages ?? [];
 
@@ -473,7 +513,7 @@ export async function importWorldZip(options: ImportWorldOptions): Promise<Impor
   }
   const world: WorldsRecord = {
     worldId,
-    name: meta.name,
+    name,
     // `system` names the ruleset the world boots with (D-248); older archives wrote the
     // built-in id regardless, so it is derived from the pin rather than copied.
     system: activeRulesPackage ?? (carriesPackages ? BUILTIN_SYSTEM : meta.system),
@@ -489,8 +529,10 @@ export async function importWorldZip(options: ImportWorldOptions): Promise<Impor
 
   return {
     worldId,
-    name: meta.name,
+    name,
     seq: meta.seq,
+    mode,
+    sourceWorldId: meta.worldId,
     format: meta.format,
     packages: packageRecords.map((p) => p.id),
     activeRulesPackage,

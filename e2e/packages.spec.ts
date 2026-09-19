@@ -129,14 +129,14 @@ test.describe("Package loader (§12)", () => {
       // boots on built-in rules
       expect((await appCall<Record<string, string>>(page, "rulesBoot")).source).toBe("builtin");
 
-      // ── GM UI: import the package zip through the file input ────────────
-      await page.click("#gm-extras");
-      const win = page.locator('[data-window="gmextras"]');
-      await expect(win).toBeVisible();
+      // ── GM UI: import the package zip through the file input (Settings, D-249) ──
+      await page.click("#gm-settings");
+      const settings = page.locator('[data-window="settings"]');
+      await expect(settings).toBeVisible();
       await page.setInputFiles("#pkg-file", zipPath);
-      const row = win.locator('[data-pkg-row][data-pkg-id="probe-rules"]');
+      const row = settings.locator('[data-pkg-row][data-pkg-id="probe-rules"]');
       await expect(row).toBeVisible();
-      await expect(win.locator("[data-pkg-active]")).toHaveCount(0);
+      await expect(settings.locator("[data-pkg-active]")).toHaveCount(0);
 
       // ── API negatives: not-a-zip rejected; data-only cannot activate ────
       const bad = await appCall<{ ok: boolean; error?: string }>(
@@ -186,6 +186,7 @@ test.describe("Package loader (§12)", () => {
 
       // ── campaign under package rules ─────────────────────────────────────
       await page.click("#gm-extras");
+      const win = page.locator('[data-window="gmextras"]');
       await expect(win).toBeVisible();
       await page.fill("#faction-name", "Probes");
       await page.click("#faction-create");
@@ -434,8 +435,8 @@ test.describe("Package loader (§12)", () => {
       expect(
         (await appCall<{ ok: boolean; error?: string }>(page, "activatePackage", "trust-probe")).ok,
       ).toBe(true);
-      await page.click("#gm-extras");
-      const win = page.locator('[data-window="gmextras"]');
+      await page.click("#gm-settings");
+      const win = page.locator('[data-window="settings"]');
       await expect(win).toBeVisible();
       const row = win.locator('[data-pkg-row][data-pkg-id="trust-probe"]');
       await expect(row.locator("[data-pkg-trust-requested]")).toBeVisible();
@@ -459,7 +460,7 @@ test.describe("Package loader (§12)", () => {
       expect(sandboxTier).toEqual({ inPage: false, hasLocalStorage: false });
 
       // grant through the two-step panel consent
-      await page.click("#gm-extras");
+      await page.click("#gm-settings");
       await expect(win).toBeVisible();
       const grantBtn = row.locator("[data-trust-grant]");
       await grantBtn.click(); // arms
@@ -486,7 +487,7 @@ test.describe("Package loader (§12)", () => {
       expect(trustedTier).toEqual({ inPage: true, hasLocalStorage: true });
 
       // revoke: back to the sandboxed tier after reload
-      await page.click("#gm-extras");
+      await page.click("#gm-settings");
       await expect(win).toBeVisible();
       await row.locator("[data-trust-revoke]").click();
       await expect(row.locator("[data-pkg-trust-requested]")).toBeVisible();

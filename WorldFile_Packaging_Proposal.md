@@ -1,8 +1,24 @@
 # Proposal — one file to load: world.zip carries its ruleset and content
 
-Status: **Phase 0 and Phase 1 implemented — D-248 (2026-09-19)**; Phases 2–5 remain
-proposals. Addresses tester feedback that loading zips for "world, ruleset and
-modes/modules" is confusing.
+Status: **all phases implemented — Phase 0/1 in D-248, Phases 2–5 in D-249 (2026-09-19)**.
+Addresses tester feedback that loading zips for "world, ruleset and modes/modules" is
+confusing.
+
+> **Implemented (D-249, Phases 2–5):** start screen with the device's world list
+> (Open / Export / Delete), one sniffing **Open file (.zip)** with *Open as new world*
+> (copy) vs *Restore* (replace) and a **New world with it…** jump for packages, the
+> **New world…** wizard (`src/app/worldRecipe.ts` + `src/ui/start/NewWorldWizard.svelte`:
+> Name → Strategic ruleset → Content packs → Create; the world boots on the ruleset with no
+> activate/reload), **Settings → Strategic ruleset & content** replacing the Extras section
+> (status line, pinned message, add content pack, fresh-campaign Activate, D-089 trust),
+> **Close world…** in the sidebar instead of a second importer, `importWorldZip({ mode:
+> "copy", name })`, full `deleteWorldData` + `deleteWorldFiles`, and starter worlds from the
+> build (`pnpm build:worlds` → `dist/worlds/pf1e-mass-battles-starter-1.0.0.zip`, format 2
+> with `starter: true`, no documents, ruleset + `pf1e-core` pre-installed; always opens as a
+> fresh copy). Deviations from the text below are listed in D-249: starters ship *without*
+> seed documents (the host seeds on first boot exactly as for a new world), the starter writer
+> is plain JS proved by parity tests rather than a shared TS writer, and in-world **Activate**
+> stays available for fresh campaigns (the wizard is the primary path, not the only one).
 
 > **Implemented (D-248):** `src/host/zipKind.ts` (sniffing), world file **format 2**
 > (`packages.json` + `packages/<id>/…` + `rules.active`; format 1 still imports; trust

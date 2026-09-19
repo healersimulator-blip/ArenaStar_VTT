@@ -13,12 +13,13 @@
     "build": "vite build",
     "test": "vitest run",
     "bench:dense": "VTT_DENSE_BENCH=1 vitest run tests/packages/pf1eDenseArmyBenchmark.test.ts",
-    "test:e2e": "pnpm build && pnpm build:systems && playwright test",
+    "test:e2e": "pnpm build && pnpm build:systems && pnpm build:worlds && playwright test",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
     "size": "node scripts/size.mjs",
     "build:systems": "node scripts/buildSystemPackages.mjs",
+    "build:worlds": "node scripts/buildStarterWorlds.mjs",
     "coverage:rules": "node scripts/coverage.mjs"
   },
   "dependencies": {

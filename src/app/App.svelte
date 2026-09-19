@@ -25,9 +25,7 @@
   import {
     exportWorldToFolder,
     exportWorldZip,
-    importWorldZip,
   } from "../host/worldFile";
-  import { classifyZip, describePackage } from "../host/zipKind";
   import { ChatPanel } from "../ui/chat";
   import { CombatPanel } from "../ui/combat";
   import {
@@ -109,7 +107,17 @@
   let {
     app = null,
     bootError = null,
-  }: { app?: HostApp | null; bootError?: string | null } = $props();
+    onExit = null,
+  }: {
+    app?: HostApp | null;
+    bootError?: string | null;
+    /**
+     * D-249 "Close world": the host (Root) closes the HostApp and returns to the start
+     * screen, where worlds are listed, opened, imported, exported and deleted. Null hides
+     * the button (embedding without a start screen).
+     */
+    onExit?: (() => void) | null;
+  } = $props();
 
   const caps = detectCapabilities();
   const rows: Array<[string, boolean]> = Object.entries(caps);
@@ -387,7 +395,8 @@
       x: 40 + (wm.list().length % 5) * 24,
       y: 40 + (wm.list().length % 5) * 24,
       width: 380,
-      height: 420,
+      // Settings carries the ruleset section on top of the scene options (D-249): taller.
+      height: kind === "settings" ? 560 : 420,
       ...(data ? { data } : {}),
     });
   }
@@ -856,58 +865,6 @@
     } catch (err) {
       if ((err as Error)?.name === "AbortError") return;
       canvasError = `folder export failed: ${err instanceof Error ? err.message : String(err)}`;
-    }
-  }
-
-  /**
-   * One entry for every `.zip` the GM may hold (D-248): the file's kind decides what
-   * happens. A world archive replaces this world and reboots; a strategic ruleset or
-   * content pack is imported into THIS world (no reboot — activation is a separate,
-   * deliberate step under Extras); anything else is named and refused.
-   */
-  async function importWorld(ev: Event): Promise<void> {
-    if (!app) return;
-    const input = ev.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file) return;
-    try {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      const kind = await classifyZip(bytes);
-      if (kind.kind === "unknown") {
-        canvasError = `import failed: ${kind.reason}`;
-        return;
-      }
-      if (kind.kind === "package") {
-        const res = await app.packages.importZip(bytes);
-        if (!res.ok) {
-          canvasError = `import failed: ${res.error}`;
-          return;
-        }
-        const what = describePackage(kind.manifest);
-        pushLog(
-          [
-            kind.manifest.type === "system"
-              ? `${what} added — activate it under Extras → Strategic ruleset & content (it drives strategic scenes only).`
-              : `${what} added — its packs are under Compendia.`,
-          ],
-          "info",
-        );
-        return;
-      }
-      const { db, root } = app;
-      // AWAITED: close() settles the persister's final batched flush. Importing
-      // before it lands lets that flush write a post-export document on top of
-      // the restore, so the reload boots a world the archive never contained.
-      await app.close(); // stop live writes; import replaces the world rows
-      const imported = await importWorldZip({ db, root, file: bytes });
-      console.info(
-        `vtt: imported world ${imported.name} at seq ${imported.seq} (format ${imported.format}, ${imported.packages.length} package(s))`,
-      );
-      globalThis.location.reload(); // reboot into the restored world
-    } catch (err) {
-      canvasError = `import failed: ${err instanceof Error ? err.message : String(err)}`;
-    } finally {
-      input.value = "";
     }
   }
 
@@ -2115,6 +2072,7 @@
           {/if}
         </div>
         <h3>World file (§8)</h3>
+        <p class="hint" data-world-name title={app.worldId}>{app.meta.name}</p>
         <button id="export-world" type="button" onclick={exportWorld}>
           Export world (.zip)
         </button>
@@ -2123,16 +2081,16 @@
             Save to folder…
           </button>
         {/if}
-        <label class="btn" title="A world file replaces this world; a ruleset or content pack is added to it">
-          Import world or package (.zip)
-          <input
-            id="import-world"
-            type="file"
-            accept=".zip,application/zip"
-            onchange={importWorld}
-            hidden
-          />
-        </label>
+        {#if onExit}
+          <!--
+            D-249: opening/importing another world happens on the start screen, not from
+            inside a running one — so the sidebar offers the way back instead of a second
+            importer. The world is saved continuously; closing loses nothing.
+          -->
+          <button id="close-world" type="button" onclick={() => onExit?.()}>
+            Close world…
+          </button>
+        {/if}
       </aside>
       <div class="canvas-col">
         <nav class="scenenav" aria-label="Scenes" data-testid="scene-nav">
@@ -2240,6 +2198,7 @@
           onUndo={undo}
           onRedo={redo}
           packages={app.packages}
+          rulesBoot={app.rulesBoot}
         />
         {#if pendingReaction}
           <!--

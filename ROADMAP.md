@@ -34,3 +34,13 @@ Milestone assignment mirrors PLAN.md.
 - JoinApp: hide the manual code panel automatically once transportKind()==="nostr" connects.
 - Public-relay smoke (damus/nos.lol) as an optional, non-CI e2e; CI keeps the local relay.
 
+## World-file follow-ups (after D-248/D-249 — `WorldFile_Packaging_Proposal.md`)
+
+- Simulate more than one strategic scene at a time (SimBridge/TurnChannel still bind to
+  `DEFAULT_SCENE_ID`); the ruleset pin already looks at every scene's checkpoints.
+- Per-scene ruleset override (a world carries one strategic ruleset today; §9 open question).
+- Starter worlds with seed content (pre-placed factions/armies on a strategic scene) — the
+  D-249 starters are documents-empty and self-seed like a new world.
+- Retire the in-world **Activate** button once every campaign starts through the wizard or a
+  starter (kept for fresh campaigns for now; see D-249).
+

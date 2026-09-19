@@ -4221,3 +4221,13 @@ export async function installE2eHook(app?: HostApp | null): Promise<void> {
   };
   (globalThis as { __vttE2E?: VttE2eSurface }).__vttE2E = surface;
 }
+
+/**
+ * D-249 "Close world": the HostApp behind `app` is gone, so the readbacks must go with it
+ * (a spec that reads `app.seq()` after closing would otherwise see the dead world).
+ * The transport drivers and the player/share surfaces are untouched.
+ */
+export function detachE2eApp(): void {
+  const surface = (globalThis as { __vttE2E?: VttE2eSurface }).__vttE2E;
+  if (surface) surface.app = null;
+}

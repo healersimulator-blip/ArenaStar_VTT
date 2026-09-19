@@ -136,6 +136,12 @@ export interface HostPackages {
    */
   activate(id: string): Promise<{ ok: true; warnings?: string[] } | { ok: false; error: string }>;
   deactivate(): Promise<{ ok: true } | { ok: false; error: string }>;
+  /**
+   * True once any scene has resolved a turn (a checkpoint exists): the strategic ruleset is
+   * pinned for this campaign and activate/deactivate will refuse (D-249 UI reads this to say so
+   * up front instead of after a click).
+   */
+  campaignStarted(): Promise<boolean>;
   /** §12 grant/revoke in-page execution trust (per package, this world). */
   grantTrust(id: string): Promise<{ ok: true } | { ok: false; error: string }>;
   revokeTrust(id: string): Promise<{ ok: true } | { ok: false; error: string }>;
@@ -665,6 +671,9 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
               `${rec.name} expects ${missing.join(", ")} alongside it — not imported into this world yet`,
             ],
           };
+    },
+    async campaignStarted() {
+      return (await guardFreshCampaign()) !== null;
     },
     async deactivate() {
       const guarded = await guardFreshCampaign();

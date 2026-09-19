@@ -29,17 +29,24 @@
     setWorldClockOps,
   } from "../../packages/pf1e/worldClock";
   import { autoResolveAoosOf } from "../../packages/pf1e/aooSettings";
+  import type { HostPackages, HostRulesBoot } from "../../app/hostBoot";
+  import RulesetSection from "../packages/RulesetSection.svelte";
 
   let {
     client,
     bus,
     onUndo,
     onRedo,
+    packages = null,
+    rulesBoot = null,
   }: {
     client: ClientSync;
     bus: EventBus<ClientEvents>;
     onUndo: () => void;
     onRedo: () => void;
+    /** §12 host package surface (GM only; null hides the ruleset section). */
+    packages?: HostPackages | null;
+    rulesBoot?: HostRulesBoot | null;
   } = $props();
 
   let grid = $state<SceneGrid | null>(null);
@@ -195,6 +202,9 @@
 </script>
 
 <div class="settings">
+  {#if packages}
+    <RulesetSection {packages} {rulesBoot} />
+  {/if}
   <h4>Scene grid</h4>
   {#if grid}
     <div class="row">
