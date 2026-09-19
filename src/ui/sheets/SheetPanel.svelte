@@ -263,7 +263,7 @@
   }
   h3 {
     margin: 0;
-    font-size: 12px;
+    font-size: 0.875rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: #8b93a3;
@@ -275,7 +275,7 @@
   .tab {
     flex: 1;
     padding: 4px 6px;
-    font-size: 11px;
+    font-size: 0.8125rem;
     border: 1px solid #3a3f4a;
     border-radius: 6px;
     background: #1d2127;
@@ -304,14 +304,14 @@
     color: #cfd3dc;
     cursor: pointer;
     text-align: left;
-    font-size: 12.5px;
+    font-size: 0.9rem;
   }
   .sheet-row.selected {
     border-color: #4a7ec4;
     background: #1a2536;
   }
   .badge {
-    font-size: 10px;
+    font-size: 0.8125rem;
     color: #7fe0a7;
     border: 1px solid #2e8b57;
     border-radius: 999px;
@@ -319,7 +319,7 @@
   }
   .empty {
     color: #8b93a3;
-    font-size: 12px;
+    font-size: 0.875rem;
     margin: 0;
   }
   .editor {
@@ -336,7 +336,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 6px;
-    font-size: 12px;
+    font-size: 0.875rem;
     color: #aab2c0;
   }
   input,
@@ -348,7 +348,7 @@
     border-radius: 5px;
     background: #16181d;
     color: #e8e8ee;
-    font-size: 12px;
+    font-size: 0.875rem;
   }
   input:disabled {
     opacity: 0.5;
@@ -363,11 +363,11 @@
     background: #1d2127;
     color: #e8e8ee;
     cursor: pointer;
-    font-size: 11px;
+    font-size: 0.8125rem;
   }
   .hint {
     margin: 0;
     color: #8b93a3;
-    font-size: 11px;
+    font-size: 0.8125rem;
   }
 </style>

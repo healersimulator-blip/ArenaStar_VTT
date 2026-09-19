@@ -127,7 +127,7 @@
   }
   .card .label {
     display: block;
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: #a0a0b0;
   }
   .card .val {

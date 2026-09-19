@@ -83,6 +83,7 @@
   import { sceneDifficultCells } from "../core/rules";
   import { pf1eThreatModel } from "../packages/pf1e/threatPreview";
   import { deriveFromDocuments } from "../packages/pf1e/actor";
+  import { copyText } from "../ui/clipboard";
   import { autoResolveAoosOf } from "../packages/pf1e/aooSettings";
   import {
     attackOfOpportunityBudget,
@@ -113,7 +114,7 @@
   const rows: Array<[string, boolean]> = Object.entries(caps);
   const ready = rows.filter(([, ok]) => ok).length;
 
-  let canvasHost: HTMLDivElement;
+  let canvasHost = $state<HTMLDivElement | null>(null);
   /** T01 token context menu: opened by a right-CLICK on a token (right-drag pans). */
   let tokenMenu = $state<{ x: number; y: number; tokenId: string } | null>(
     null,
@@ -163,6 +164,8 @@
   let shareError = $state<string | null>(null);
   let peerCode = $state("");
   let hostAnswer = $state("");
+  let copyStatus = $state("");
+  let copyTimer: ReturnType<typeof setTimeout> | null = null;
   let shareTimer: ReturnType<typeof setInterval> | null = null;
   let fogTimer: ReturnType<typeof setInterval> | null = null;
   let lastTurnPhase = "idle";
@@ -188,7 +191,7 @@
   let importedTokens = $state<{ name: string; actorId: string; img: string }[]>(
     [],
   );
-  let dice3dHost: HTMLElement | null = null;
+  let dice3dHost = $state<HTMLElement | null>(null);
   let last3dRollId: string | null = null;
   /** §5A realtime: client-side position interpolation over the replica. */
   const rtInterp = new PoolInterpolator();
@@ -243,7 +246,10 @@
     const scene = activeScene();
     if (!scene || scene._id !== pending.sceneId) {
       // The prompt outlived its scene (a switch, an undo): never resolve against another.
-      pushLog(["the attack of opportunity was dropped — the scene changed"], "warn");
+      pushLog(
+        ["the attack of opportunity was dropped — the scene changed"],
+        "warn",
+      );
       pendingReaction = null;
       pendingCommit = null;
       return;
@@ -643,12 +649,18 @@
       layer.sync([], null, stage.camera);
       return;
     }
-    layer.sync(entry.threatRects, entry.cellRects.length === 1 ? entry.cellRects[0] : {
-      x: token.x - token.width / 2,
-      y: token.y - token.height / 2,
-      width: token.width,
-      height: token.height,
-    }, stage.camera);
+    layer.sync(
+      entry.threatRects,
+      entry.cellRects.length === 1
+        ? entry.cellRects[0]
+        : {
+            x: token.x - token.width / 2,
+            y: token.y - token.height / 2,
+            width: token.width,
+            height: token.height,
+          },
+      stage.camera,
+    );
   }
 
   /** P5/C01 (D-154): draw the PF1e area preview from its local model. */
@@ -713,7 +725,10 @@
     if (tokenSelection.sceneId !== (scene?._id ?? null)) clearTokenSelection();
     // A preview belongs to the scene it was resolved against; switching scenes
     // clears it rather than repainting stale cells.
-    if (pf1ePreviewSceneId !== null && pf1ePreviewSceneId !== (scene?._id ?? null))
+    if (
+      pf1ePreviewSceneId !== null &&
+      pf1ePreviewSceneId !== (scene?._id ?? null)
+    )
       clearPF1eAreaPreview();
     syncPF1eAreaPreview();
     // P02: the threat overlay follows the selected token through every store
@@ -780,8 +795,26 @@
 
   function applyPeerCode(): void {
     const code = peerCode.trim();
-    if (code && share) void share.receiveCode(code);
+    if (code && share) {
+      void share.receiveCode(code).catch((err: unknown) => {
+        shareError = err instanceof Error ? err.message : String(err);
+      });
+    }
     peerCode = "";
+  }
+
+  async function copyCode(value: string, label: string): Promise<void> {
+    const copied = await copyText(value);
+    copyStatus = copied
+      ? `${label} copied to clipboard.`
+      : `Select the ${label.toLowerCase()} and copy it manually.`;
+    if (copyTimer !== null) clearTimeout(copyTimer);
+    copyTimer = setTimeout(() => (copyStatus = ""), 4_000);
+  }
+
+  function clearCopyTimer(): void {
+    if (copyTimer !== null) clearTimeout(copyTimer);
+    copyTimer = null;
   }
 
   async function exportWorld(): Promise<void> {
@@ -1008,12 +1041,14 @@
     void (async () => {
       try {
         const scene = activeScene();
-        const width = Math.max(320, canvasHost.clientWidth);
-        const height = Math.max(240, canvasHost.clientHeight);
+        const hostElement = canvasHost;
+        if (!hostElement) return;
+        const width = Math.max(320, hostElement.clientWidth);
+        const height = Math.max(240, hostElement.clientHeight);
         const view = await createStage({
           width,
           height,
-          hostElement: canvasHost,
+          hostElement,
         });
         stage = view;
         // F01 — expose for chat roll-card highlights & e2e (canvasSmoke)
@@ -1074,7 +1109,9 @@
             // dispositions are the only side information a token carries, so a pair is
             // hostile when both sides named a disposition and they differ — and anything
             // less explicit is reported as an assumption instead of being assumed silently.
-            const dispositionOf = new Map(scene.tokens.map((t) => [t._id, t.disposition]));
+            const dispositionOf = new Map(
+              scene.tokens.map((t) => [t._id, t.disposition]),
+            );
             const explicit = tokens.every(
               (t) => (dispositionOf.get(t._id) ?? "neutral") !== "neutral",
             );
@@ -1091,48 +1128,50 @@
               // The gate is a PF1e rule for PF1e actors: a systemless token's
               // drag owns no speed and no action economy, so it stays free.
               if (moverActor !== null && isPF1eActor(moverActor)) {
-              const moverDerived = moverActor
-                ? deriveFromDocuments({ actor: { system: moverActor.system } })
-                : null;
-              const sceneTerrain = sceneDifficultCells(scene);
-              const plan = pf1eMovePlan({
-                grid: scene.grid,
-                tokens,
-                mover: {
-                  tokenId: moved.token._id,
-                  to,
-                  ...(moverDerived ? { speedFt: moverDerived.speedFt } : {}),
-                },
-                walls: moveSegments(scene.walls),
-                // M05: the scene's authored difficult squares (flags.pf1e.difficultCells).
-                // With no flag authored this stays the P03 module's named default.
-                ...(sceneTerrain ?? { difficultCells: undefined }),
-                ...(explicit
-                  ? {
-                      isAlly: (a: string, b: string) =>
-                        dispositionOf.get(a) === dispositionOf.get(b),
-                    }
-                  : {}),
-              });
-              if (plan.refusal !== null) {
-                notifyLog = [
-                  ...notifyLog.slice(-49),
-                  {
-                    message: `${moved.token.name} can't move there — ${plan.refusal}`,
-                    level: "warn" as const,
+                const moverDerived = moverActor
+                  ? deriveFromDocuments({
+                      actor: { system: moverActor.system },
+                    })
+                  : null;
+                const sceneTerrain = sceneDifficultCells(scene);
+                const plan = pf1eMovePlan({
+                  grid: scene.grid,
+                  tokens,
+                  mover: {
+                    tokenId: moved.token._id,
+                    to,
+                    ...(moverDerived ? { speedFt: moverDerived.speedFt } : {}),
                   },
-                ];
-                return "cancel";
-              }
-              if (plan.minimumMovement) {
-                notifyLog = [
-                  ...notifyLog.slice(-49),
-                  {
-                    message: `${moved.token.name} moves by the minimum-movement rule — a full-round action moves 5 ft despite the reduced speed (A.7); it provokes`,
-                    level: "info" as const,
-                  },
-                ];
-              }
+                  walls: moveSegments(scene.walls),
+                  // M05: the scene's authored difficult squares (flags.pf1e.difficultCells).
+                  // With no flag authored this stays the P03 module's named default.
+                  ...(sceneTerrain ?? { difficultCells: undefined }),
+                  ...(explicit
+                    ? {
+                        isAlly: (a: string, b: string) =>
+                          dispositionOf.get(a) === dispositionOf.get(b),
+                      }
+                    : {}),
+                });
+                if (plan.refusal !== null) {
+                  notifyLog = [
+                    ...notifyLog.slice(-49),
+                    {
+                      message: `${moved.token.name} can't move there — ${plan.refusal}`,
+                      level: "warn" as const,
+                    },
+                  ];
+                  return "cancel";
+                }
+                if (plan.minimumMovement) {
+                  notifyLog = [
+                    ...notifyLog.slice(-49),
+                    {
+                      message: `${moved.token.name} moves by the minimum-movement rule — a full-round action moves 5 ft despite the reduced speed (A.7); it provokes`,
+                      level: "info" as const,
+                    },
+                  ];
+                }
               }
             }
             // D-187: the prompt's rows read each reactor's AoO budget off the seam's
@@ -1170,7 +1209,8 @@
                 : {}),
               ...(combat !== null ? { ledgers } : {}),
             });
-            if (result.queued.length === 0 && result.refused.length === 0) return;
+            if (result.queued.length === 0 && result.refused.length === 0)
+              return;
             const push = (messages: string[], level: "info" | "warn"): void => {
               notifyLog = [
                 ...notifyLog.slice(-49),
@@ -1389,7 +1429,10 @@
               const t = tokens.find((tok) => tok._id === req.tokenId);
               if (t) {
                 const r = tokenRect(t);
-                rects.push({ ...r, kind: req.kind === "target" ? "target" : "initiator" });
+                rects.push({
+                  ...r,
+                  kind: req.kind === "target" ? "target" : "initiator",
+                });
                 center = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
               }
             }
@@ -1764,6 +1807,7 @@
     })();
     return () => {
       if (shareTimer !== null) clearInterval(shareTimer);
+      clearCopyTimer();
       share?.close();
       controller?.destroy();
       stage?.destroy();
@@ -1772,17 +1816,21 @@
   });
 </script>
 
-<main>
-  <h1>VTT</h1>
-  <p class="sub">
-    browser-only virtual tabletop · bootstrap v{__APP_VERSION__}
-  </p>
-
+<main class="vtt-ui">
+  <header class="app-header">
+    <div>
+      <p class="eyebrow">ARENASTAR</p>
+      <h1>VTT</h1>
+    </div>
+    <p class="sub">
+      Browser-only virtual tabletop · bootstrap v{__APP_VERSION__}
+    </p>
+  </header>
   {#if bootError}
-    <p class="error">boot failed: {bootError}</p>
+    <p class="error" role="alert">Boot failed: {bootError}</p>
   {/if}
 
-  <section aria-labelledby="caps-h">
+  <section class="capabilities" aria-labelledby="caps-h">
     <h2 id="caps-h">Runtime capabilities ({ready}/{rows.length} available)</h2>
     <ul>
       {#each rows as [name, ok] (name)}
@@ -1806,7 +1854,7 @@
           <span>seq {seq}</span>
           <span>tokens {tokenCount}</span>
         </div>
-        <label class="btn">
+        <label class="btn file-control" for="map-input">
           Import map
           <input
             id="map-input"
@@ -1819,26 +1867,95 @@
         <button id="add-token" type="button" onclick={addToken}
           >Add token</button
         >
-        <h3>Invite (§6.2)</h3>
-        {#if !share}
-          <button id="share" type="button" onclick={() => void beginShare()}>
-            Share invite
-          </button>
-        {:else}
-          <textarea id="invite-link" rows="3" readonly value={share.inviteLink}
-          ></textarea>
-          <label for="peer-code">Player's code</label>
-          <textarea id="peer-code" rows="4" bind:value={peerCode}></textarea>
-          <button id="code-apply" type="button" onclick={applyPeerCode}
-            >Apply player code</button
-          >
-          <label>Your answer code</label>
-          <textarea id="share-out" rows="4" readonly value={hostAnswer}
-          ></textarea>
-        {/if}
-        {#if shareError}
-          <p class="error">{shareError}</p>
-        {/if}
+        <section class="invite-panel" aria-labelledby="invite-heading">
+          <div class="section-heading">
+            <h2 id="invite-heading">Invite players</h2>
+            <p>Share the link, then complete the one-time code exchange.</p>
+          </div>
+          {#if !share}
+            <button id="share" type="button" onclick={() => void beginShare()}>
+              Create invite link
+            </button>
+          {:else}
+            <div class="code-field">
+              <label for="invite-link">Invite link</label>
+              <textarea
+                id="invite-link"
+                class="signal-code"
+                rows="3"
+                readonly
+                value={share.inviteLink}
+                spellcheck="false"
+                aria-describedby="invite-help"></textarea>
+              <div class="field-actions">
+                <button
+                  id="copy-invite-link"
+                  class="secondary"
+                  type="button"
+                  onclick={() =>
+                    void copyCode(share?.inviteLink ?? "", "invite link")}
+                  >Copy invite link</button
+                >
+                <p id="invite-help" class="hint">
+                  Send this link to each player.
+                </p>
+              </div>
+            </div>
+            <div class="code-field">
+              <label for="peer-code">Player's code</label>
+              <textarea
+                id="peer-code"
+                class="signal-code"
+                rows="5"
+                bind:value={peerCode}
+                placeholder="Paste the player's code here"
+                spellcheck="false"
+                autocapitalize="off"
+                autocomplete="off"
+                aria-describedby="peer-help"></textarea>
+              <p id="peer-help" class="hint">
+                Paste a player's code, then apply it.
+              </p>
+            </div>
+            <button id="code-apply" type="button" onclick={applyPeerCode}
+              >Apply player code</button
+            >
+            <div class="code-field">
+              <label for="share-out"
+                >Your answer code <span class="required-note"
+                  >(send to player)</span
+                ></label
+              >
+              <textarea
+                id="share-out"
+                class="signal-code"
+                rows="5"
+                readonly
+                value={hostAnswer}
+                spellcheck="false"
+                aria-describedby="answer-help"></textarea>
+              <div class="field-actions">
+                <button
+                  id="copy-share-out"
+                  class="secondary"
+                  type="button"
+                  disabled={!hostAnswer}
+                  onclick={() => void copyCode(hostAnswer, "answer code")}
+                  >Copy answer code</button
+                >
+                <p id="answer-help" class="hint">
+                  Send this answer back to the player.
+                </p>
+              </div>
+            </div>
+            {#if copyStatus}<p class="copy-status" role="status">
+                {copyStatus}
+              </p>{/if}
+          {/if}
+          {#if shareError}
+            <p class="error" role="alert">{shareError}</p>
+          {/if}
+        </section>
         <div class="gmtools" aria-label="GM tools">
           <button
             id="gm-perms"
@@ -1880,13 +1997,15 @@
             id="gm-undo"
             type="button"
             onclick={undo}
-            title="Undo (Ctrl+Z)">↩</button
+            title="Undo (Ctrl+Z)"
+            aria-label="Undo (Ctrl+Z)">↩</button
           >
           <button
             id="gm-redo"
             type="button"
             onclick={redo}
-            title="Redo (Ctrl+Y)">↪</button
+            title="Redo (Ctrl+Y)"
+            aria-label="Redo (Ctrl+Y)">↪</button
           >
         </div>
         <nav class="tabs" aria-label="Sidebar tabs">
@@ -1984,7 +2103,8 @@
             id="scene-add"
             type="button"
             onclick={addScene}
-            title="New scene">+</button
+            title="New scene"
+            aria-label="New scene">+</button
           >
         </nav>
         <div class="players" aria-label="Players">
@@ -1998,6 +2118,9 @@
         <div
           class="canvas-host"
           bind:this={canvasHost}
+          role="application"
+          aria-label="Game board"
+          tabindex="-1"
           ondragover={(ev) => {
             if (
               ev.dataTransfer?.types.includes("application/x-vtt-compendium")
@@ -2028,6 +2151,7 @@
                 onpointerdown={(ev) => ev.stopPropagation()}
                 style={`left: ${Math.round(tokenMenu.x)}px; top: ${Math.round(tokenMenu.y)}px;`}
                 role="menu"
+                tabindex="-1"
                 aria-label="{model.title} actions"
               >
                 <span class="token-menu-title">{model.title}</span>
@@ -2091,16 +2215,21 @@
                 <button
                   type="button"
                   data-reaction-strike={row.reactorId}
-                  onclick={() => void strikeReaction(row.reactorId)}>Strike</button
+                  onclick={() => void strikeReaction(row.reactorId)}
+                  >Strike</button
                 >
               </div>
             {/each}
             <div class="reaction-actions">
-              <button type="button" data-reaction-forgo onclick={forgoReactionPrompt}
-                >Let it pass</button
+              <button
+                type="button"
+                data-reaction-forgo
+                onclick={forgoReactionPrompt}>Let it pass</button
               >
-              <button type="button" data-reaction-cancel onclick={cancelHeldMove}
-                >Stay put</button
+              <button
+                type="button"
+                data-reaction-cancel
+                onclick={cancelHeldMove}>Stay put</button
               >
             </div>
           </div>
@@ -2127,61 +2256,60 @@
   }
   .reaction-prompt {
     position: fixed;
-    right: 12px;
-    bottom: 96px;
+    right: 16px;
+    bottom: 104px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    padding: 10px 12px;
-    max-width: 360px;
-    background: #262016f2;
-    border: 1px solid #6b5320;
-    border-left: 3px solid #f0c04a;
-    border-radius: 4px;
-    font-size: 12px;
+    gap: 10px;
+    width: min(420px, calc(100vw - 32px));
+    padding: 16px;
+    background: #2a2115f5;
+    border: 1px solid #8b6d2b;
+    border-left: 4px solid #f0c04a;
+    border-radius: 10px;
+    font-size: 1rem;
     z-index: 61;
-    box-shadow: 0 4px 14px #0009;
+    box-shadow: 0 8px 24px #0009;
   }
-  .reaction-prompt .hint {
-    color: #9aa7bd;
-    font-size: 11px;
+  .reaction-prompt .hint,
+  .reaction-row .budget {
+    color: #b7c5d5;
+    font-size: 0.875rem;
   }
   .reaction-row {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 10px;
   }
   .reaction-row .line {
     flex: 1;
   }
-  .reaction-row .budget {
-    color: #9aa7bd;
-    font-size: 11px;
-  }
   .reaction-actions {
     display: flex;
-    gap: 6px;
+    gap: 10px;
     justify-content: flex-end;
+    flex-wrap: wrap;
   }
   .notify-stack {
     position: fixed;
-    right: 12px;
-    bottom: 12px;
+    right: 16px;
+    bottom: 16px;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 8px;
+    width: min(420px, calc(100vw - 32px));
     z-index: 60;
     pointer-events: none;
   }
   .notify {
-    background: #1d2330ee;
-    border: 1px solid #3a4a66;
-    border-left: 3px solid #6ea8fe;
-    border-radius: 4px;
-    padding: 6px 10px;
-    font-size: 12px;
-    max-width: 320px;
-    box-shadow: 0 2px 8px #0007;
+    background: #1d2a3aee;
+    border: 1px solid #506b8d;
+    border-left: 4px solid #6ea8fe;
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 0.9375rem;
+    line-height: 1.4;
+    box-shadow: 0 4px 14px #0007;
   }
   .notify[data-notify-level="warn"] {
     border-left-color: #f0c04a;
@@ -2189,94 +2317,116 @@
   .notify[data-notify-level="error"] {
     border-left-color: #e05656;
   }
-  :global(body) {
-    margin: 0;
-    background: #101014;
-    color: #e8e8ee;
-    font-family: system-ui, sans-serif;
-  }
   main {
-    max-width: 960px;
+    width: min(100%, 1440px);
     margin: 0 auto;
-    padding: 12px 16px 24px;
+    padding: 24px clamp(16px, 3vw, 42px) 36px;
+  }
+  .app-header {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 20px;
+    margin-bottom: 20px;
+  }
+  .eyebrow {
+    margin: 0 0 4px;
+    color: #66b7ff;
+    font-size: 0.75rem;
+    font-weight: 800;
+    letter-spacing: 0.18em;
   }
   h1 {
-    font-size: 2.2rem;
     margin: 0;
+    color: #f4f7fb;
+    font-size: clamp(2rem, 4vw, 3rem);
+    line-height: 1.05;
+    letter-spacing: -0.03em;
   }
   .sub {
-    color: #8a8a97;
-    margin: 2px 0 12px;
+    margin: 0;
+    color: #bdc9d6;
+    font-size: 0.95rem;
   }
   .error {
-    color: #ff9c9c;
-  }
-  section[aria-labelledby="caps-h"] {
-    margin-bottom: 14px;
-  }
-  section[aria-labelledby="caps-h"] h2 {
+    margin: 0 0 16px;
+    color: #ffb4b4;
     font-size: 1rem;
-    margin: 0 0 6px;
   }
-  ul {
+  .capabilities {
+    margin-bottom: 20px;
+    padding: 16px 18px;
+    border: 1px solid #293d52;
+    border-radius: 12px;
+    background: #111a25;
+  }
+  .capabilities h2 {
+    margin: 0 0 12px;
+    color: #dce8f4;
+    font-size: 1rem;
+  }
+  .capabilities ul {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 8px 18px;
     list-style: none;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    padding: 0;
     margin: 0;
+    padding: 0;
   }
-  li {
+  .capabilities li {
     display: flex;
     align-items: center;
-    gap: 6px;
-    border: 1px solid #2a2a33;
-    border-radius: 999px;
-    padding: 2px 10px;
-    font-size: 0.8rem;
+    gap: 9px;
+    min-height: 28px;
+    color: #d5e0eb;
+    font-size: 0.9rem;
   }
-  li.missing {
-    opacity: 0.55;
+  .capabilities li.missing {
+    opacity: 0.7;
   }
   .dot {
-    width: 8px;
-    height: 8px;
+    width: 10px;
+    height: 10px;
+    flex: 0 0 10px;
     border-radius: 50%;
-    background: #555;
+    background: #69798a;
+    box-shadow: 0 0 0 3px #69798a22;
   }
-  li.ok .dot {
-    background: #4cc38a;
+  .capabilities li.ok .dot {
+    background: #4fd09a;
+    box-shadow: 0 0 0 3px #4fd09a22;
   }
-  .state {
-    color: #8a8a97;
+  .capabilities .state {
+    margin-left: auto;
+    color: #aebdcb;
   }
   .shell {
     display: flex;
-    gap: 12px;
-    border: 1px solid #2a2a33;
-    border-radius: 10px;
+    gap: 14px;
+    min-height: 650px;
+    height: min(780px, calc(100vh - 230px));
+    border: 1px solid #304458;
+    border-radius: 14px;
     overflow: visible; /* windows may hang past the canvas (§10) */
-    height: 62vh;
-    min-height: 360px;
+    background: #101923;
+    box-shadow: 0 16px 40px #0005;
   }
   .gmtools {
     display: flex;
-    gap: 3px;
+    gap: 8px;
     flex-wrap: wrap;
   }
   .gmtools button {
-    font-size: 11px;
-    padding: 3px 6px;
+    padding: 8px 10px;
   }
   .hotbar {
     display: flex;
-    gap: 3px;
+    gap: 5px;
   }
   .hotbar .slot {
     flex: 1;
     min-width: 0;
-    font-size: 10px;
-    padding: 3px 2px;
+    padding: 5px 3px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -2290,119 +2440,212 @@
   }
   .scenenav {
     display: flex;
-    gap: 3px;
-    padding: 4px;
-    border-bottom: 1px solid #2a2a33;
-    background: #14161c;
+    gap: 6px;
+    padding: 8px;
+    border-bottom: 1px solid #2f4052;
+    background: #141d28;
     flex-wrap: wrap;
   }
   .scenenav button {
-    font-size: 11px;
-    padding: 2px 8px;
-    border-radius: 3px;
+    padding: 8px 12px;
+    border-radius: 7px;
   }
   .scenenav button.active {
-    background: #2c4a6e;
+    background: #2c5a84;
+    border-color: #71b9ef;
   }
   .players {
     display: flex;
-    gap: 6px;
-    padding: 2px 4px;
-    font-size: 10px;
-    border-bottom: 1px solid #2a2a33;
-    background: #12141a;
+    gap: 10px;
+    min-height: 32px;
+    align-items: center;
+    padding: 5px 8px;
+    color: #cbd8e5;
+    border-bottom: 1px solid #2f4052;
+    background: #121a24;
   }
   .players small {
-    opacity: 0.6;
+    color: #aebdcb;
   }
   .tabs {
     display: flex;
     flex-wrap: wrap;
-    gap: 3px;
+    gap: 6px;
   }
   .tabs button {
-    font-size: 11px;
-    padding: 3px 7px;
-    border-radius: 4px 4px 0 0;
-    border: 1px solid #2a323d;
-    background: #171b22;
-    color: #9fb0c3;
+    padding: 8px 10px;
+    border-radius: 7px 7px 0 0;
+    border: 1px solid #3a5068;
+    background: #171f2a;
+    color: #c4d2e0;
     cursor: pointer;
   }
   .tabs button.active {
-    background: #2c4a6e;
-    color: #e8f1fb;
+    background: #2c5a84;
+    color: #eff7ff;
+    border-color: #71b9ef;
   }
   .tabbody {
-    border: 1px solid #2a323d;
-    border-radius: 0 4px 4px 4px;
-    padding: 4px;
-    min-height: 100px;
-    flex: 0 0 auto; /* never compress: overflow would paint UNDER later siblings */
+    overflow: auto;
+    border: 1px solid #3a5068;
+    border-radius: 0 8px 8px 8px;
+    padding: 10px;
+    min-height: 140px;
+    max-height: min(46vh, 480px);
+    flex: 1 1 auto;
+    background: #121a24;
   }
   .sidebar {
-    width: 168px;
-    flex: none;
+    width: 300px;
+    flex: 0 0 300px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 10px;
     overflow-y: auto;
-    padding: 12px;
-    border-right: 1px solid #2a2a33;
-    background: #14161c;
+    padding: 16px;
+    border-right: 1px solid #2f4052;
+    background: #141d28;
   }
   #status {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    font-size: 0.85rem;
-    color: #b8b8c4;
+    gap: 5px;
+    padding: 12px;
+    border: 1px solid #40566d;
+    border-radius: 9px;
+    background: #172331;
+    color: #cbd8e5;
+    font-size: 0.95rem;
+  }
+  #status strong {
+    color: #f2f5f8;
+    font-size: 1.1rem;
   }
   .btn,
   button {
     display: block;
     width: 100%;
     box-sizing: border-box;
-    padding: 8px 10px;
-    border-radius: 8px;
-    border: 1px solid #3a3f4b;
-    background: #1d2127;
-    color: #e8e8ee;
-    font-size: 0.9rem;
+    padding: 10px 12px;
+    border-radius: 9px;
+    border: 1px solid #40566d;
+    background: #1c2a38;
+    color: #f2f5f8;
     cursor: pointer;
     text-align: center;
   }
   .btn:hover,
-  button:hover {
-    background: #262b33;
+  button:hover:not(:disabled) {
+    background: #29445d;
+    border-color: #6fb8ef;
+  }
+  .file-control {
+    font-weight: 700;
+  }
+  .invite-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px;
+    border: 1px solid #40566d;
+    border-radius: 10px;
+    background: #172331;
+  }
+  .section-heading h2 {
+    margin: 0;
+    color: #eff7ff;
+    font-size: 1.1rem;
+  }
+  .section-heading p {
+    margin: 4px 0 0;
+    color: #aebdcb;
+    font-size: 0.875rem;
+  }
+  .code-field {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .code-field label {
+    font-weight: 700;
+  }
+  .required-note {
+    color: #aebdcb;
+    font-size: 0.8125rem;
+    font-weight: 500;
+  }
+  .signal-code {
+    width: 100%;
+    min-width: 0;
+    min-height: 122px !important;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    line-height: 1.45;
+    white-space: pre;
+    overflow-x: auto;
+    overflow-y: auto;
+    overflow-wrap: normal;
+    background: #0d151f;
+    color: #edf6ff;
+    border: 1px solid #50677f;
+    border-radius: 8px;
+    padding: 10px;
+  }
+  .signal-code::placeholder {
+    color: #7f93a7;
+  }
+  .signal-code:read-only {
+    background: #101d2b;
+    border-color: #5b7895;
+  }
+  .field-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .field-actions .secondary {
+    flex: 0 0 auto;
+    width: auto !important;
+    padding-inline: 12px;
+  }
+  .field-actions .hint {
+    flex: 1 1 120px;
+  }
+  .hint {
+    margin: 0;
+    color: #aebdcb;
+  }
+  .copy-status {
+    margin: 0;
+    color: #81e0b4;
   }
   .token-menu {
     position: absolute;
     z-index: 40;
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    min-width: 180px;
-    padding: 4px;
-    background: #1c2430;
-    border: 1px solid #3c4a5e;
-    border-radius: 4px;
-    font-size: 12px;
+    gap: 4px;
+    min-width: 230px;
+    padding: 8px;
+    background: #1c2b3a;
+    border: 1px solid #56718e;
+    border-radius: 9px;
+    box-shadow: 0 8px 24px #0009;
   }
   .token-menu-title {
-    font-weight: bold;
-    padding: 0 4px;
+    font-weight: 700;
+    padding: 4px 8px;
   }
   .token-menu-static {
     opacity: 0.85;
-    padding: 2px 4px;
+    padding: 6px 8px;
   }
   .token-menu button {
     text-align: left;
-    background: none;
-    border: none;
+    background: transparent;
+    border: 1px solid transparent;
     color: inherit;
-    padding: 2px 4px;
+    padding: 8px 10px;
     cursor: pointer;
   }
   .token-menu button:disabled {
@@ -2413,8 +2656,47 @@
     flex: 1;
     min-width: 0;
     position: relative;
+    background: #0a0f15;
   }
   .canvas-host :global(canvas) {
     display: block;
+  }
+  @media (max-width: 980px) {
+    .shell {
+      min-height: 600px;
+    }
+    .sidebar {
+      width: 260px;
+      flex-basis: 260px;
+      padding: 12px;
+    }
+  }
+  @media (max-width: 760px) {
+    main {
+      padding: 20px 12px 28px;
+    }
+    .app-header {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .shell {
+      height: auto;
+      min-height: 0;
+      flex-direction: column;
+    }
+    .sidebar {
+      width: 100%;
+      flex-basis: auto;
+      max-height: 580px;
+      border-right: 0;
+      border-bottom: 1px solid #2f4052;
+    }
+    .canvas-col {
+      min-height: 58vh;
+    }
+    .tabbody {
+      max-height: 420px;
+    }
   }
 </style>

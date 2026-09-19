@@ -94,7 +94,7 @@
   }
   .empty {
     color: #8b93a1;
-    font-size: 12px;
+    font-size: 0.875rem;
     padding: 8px;
   }
   .card {
@@ -119,11 +119,11 @@
     font-size: 13px;
   }
   .faction {
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: #9aa0a8;
   }
   .stats {
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: #6f7885;
   }
 </style>

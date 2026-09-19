@@ -151,7 +151,7 @@
   }
   .name {
     flex: 1;
-    font-size: 12px;
+    font-size: 0.875rem;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

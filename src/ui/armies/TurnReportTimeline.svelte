@@ -20,7 +20,15 @@
     onComplete?: (() => void) | null;
   } = $props();
 
-  let playback = new TurnReportPlayback(report);
+  const EMPTY_REPORT: TurnReport = {
+    turn: 0,
+    sceneId: "",
+    subPhases: [],
+    events: [],
+    summary: {},
+    rulesVersion: "",
+  };
+  let playback = new TurnReportPlayback(EMPTY_REPORT);
   let state = $state<PlaybackState>(playback.getState());
   let animFrameId: number | null = null;
   let lastTime: number | null = null;
@@ -175,7 +183,7 @@
     border: 1px solid #2d3748;
     border-radius: 6px;
     color: #e2e8f0;
-    font-size: 12px;
+    font-size: 0.875rem;
   }
   .timeline-header {
     display: flex;
@@ -188,11 +196,11 @@
     color: #ffffff;
     padding: 2px 6px;
     border-radius: 4px;
-    font-size: 11px;
+    font-size: 0.8125rem;
     text-transform: uppercase;
   }
   .counter {
-    font-size: 11px;
+    font-size: 0.8125rem;
     opacity: 0.8;
   }
   .scrubber-row input[type="range"] {
@@ -207,11 +215,11 @@
   }
   .controls-row button {
     padding: 4px 8px;
-    font-size: 12px;
+    font-size: 0.875rem;
   }
   .controls-row select {
     padding: 2px 4px;
-    font-size: 12px;
+    font-size: 0.875rem;
   }
   .event-card {
     background: #2d3748;
@@ -220,7 +228,7 @@
     border-left: 3px solid #4299e1;
   }
   .event-type {
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: #a0aec0;
     margin-bottom: 2px;
   }
@@ -229,7 +237,7 @@
     color: #cbd5e0;
   }
   .event-text {
-    font-size: 12px;
+    font-size: 0.875rem;
     color: #ffffff;
   }
   .empty-hint {

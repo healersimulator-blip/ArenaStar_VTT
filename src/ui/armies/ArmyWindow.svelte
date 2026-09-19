@@ -596,7 +596,15 @@
             class:selected={selection.has(row.unit._id)}
             draggable="true"
             data-unit={row.unit._id}
+            role="button"
+            tabindex="0"
             onclick={() => setSelection([row.unit._id])}
+            onkeydown={(ev) => {
+              if (ev.key === "Enter" || ev.key === " ") {
+                ev.preventDefault();
+                setSelection([row.unit._id]);
+              }
+            }}
             ondragstart={(ev) => {
               ev.dataTransfer?.setData(
                 "application/x-vtt-unit",
@@ -1020,7 +1028,7 @@
     border: 1px solid #2b3138;
     border-radius: 8px;
     color: #e8ecf2;
-    font-size: 12px;
+    font-size: 0.875rem;
     z-index: 40;
     box-shadow: 0 8px 32px rgb(0 0 0 / 45%);
   }
@@ -1036,7 +1044,7 @@
     margin: 0 8px 0 0;
   }
   h3 {
-    font-size: 12px;
+    font-size: 0.875rem;
     margin: 4px 0;
   }
   nav {
@@ -1093,7 +1101,7 @@
   .badges u {
     font-style: normal;
     text-decoration: none;
-    font-size: 10px;
+    font-size: 0.8125rem;
     color: #8b93a1;
     margin-left: 6px;
   }
@@ -1188,7 +1196,7 @@
   .report table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 11px;
+    font-size: 0.8125rem;
   }
   .squads { padding: 6px 12px; border-bottom: 1px solid #2b3138; }
   .squad { background: #1b2430; border: 1px solid #2b3a4a; border-radius: 4px; margin-bottom: 4px; padding: 4px 6px; }

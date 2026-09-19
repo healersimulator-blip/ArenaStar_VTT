@@ -565,7 +565,7 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-    font-size: 11px;
+    font-size: 0.8125rem;
   }
   input,
   select {
@@ -576,17 +576,17 @@
   }
   td {
     padding: 1px 4px;
-    font-size: 12px;
+    font-size: 0.875rem;
     border-bottom: 1px solid #262e3a;
   }
   .hint {
     margin: 0;
-    font-size: 10px;
+    font-size: 0.8125rem;
     color: #7d8ea6;
   }
   .error {
     margin: 0;
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: #e0736b;
   }
   kbd {
@@ -594,6 +594,6 @@
     border: 1px solid #3a4656;
     border-radius: 3px;
     padding: 0 4px;
-    font-size: 11px;
+    font-size: 0.8125rem;
   }
 </style>

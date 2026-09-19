@@ -327,7 +327,7 @@
     border: 1px solid #28303a;
     border-radius: 6px;
     color: #e2e8f0;
-    font-size: 12px;
+    font-size: 0.875rem;
   }
   header {
     display: flex;
@@ -343,7 +343,7 @@
   }
   nav button {
     padding: 3px 8px;
-    font-size: 11px;
+    font-size: 0.8125rem;
     background: #232a34;
     border: 1px solid #323b46;
     color: #cbd5e0;
@@ -368,19 +368,19 @@
   .stats {
     display: flex;
     gap: 12px;
-    font-size: 11px;
+    font-size: 0.8125rem;
   }
   .negative {
     color: #f56565;
   }
   .warning {
     color: #ecc94b;
-    font-size: 11px;
+    font-size: 0.8125rem;
     margin-top: 4px;
   }
   .reinf-info {
     color: #48bb78;
-    font-size: 11px;
+    font-size: 0.8125rem;
     margin-top: 2px;
   }
   ul {

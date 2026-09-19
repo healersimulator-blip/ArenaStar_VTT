@@ -169,7 +169,7 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-    font-size: 12.5px;
+    font-size: 0.9rem;
   }
   .head {
     display: flex;
@@ -190,16 +190,16 @@
   .link:hover { color: #a8d0f0; }
   .arrow { color: #8b93a3; }
   .action { font-weight: 600; color: #e8c07a; }
-  .meta { color: #8b93a3; font-size: 11px; margin-left: auto; }
-  .tag { font-size: 10px; padding: 1px 6px; border-radius: 999px; }
+  .meta { color: #8b93a3; font-size: 0.8125rem; margin-left: auto; }
+  .tag { font-size: 0.8125rem; padding: 1px 6px; border-radius: 999px; }
   .tag.pending { background: #2a3a5a; color: #8ab4ff; }
   .tag.resolved { background: #1a3a2a; color: #7fe0a7; }
   .tag.expired { background: #3a2a2a; color: #e0a0a0; }
   .area { display: flex; gap: 6px; }
   .body { display: flex; flex-direction: column; gap: 6px; }
   .line { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
-  .kind { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: #8b93a3; }
-  .formula { color: #8b93a3; font-family: monospace; font-size: 11px; }
+  .kind { font-size: 0.8125rem; text-transform: uppercase; letter-spacing: 0.06em; color: #8b93a3; }
+  .formula { color: #8b93a3; font-family: monospace; font-size: 0.8125rem; }
   .dc { font-weight: 600; color: #e8c07a; }
   .total.chip {
     display: inline-block;
@@ -216,7 +216,7 @@
   .mod-label { font-weight: 600; }
   .mod-value { font-family: monospace; }
   .mod-reason { color: #8b93a3; }
-  .hint { color: #8b93a3; font-size: 11px; margin: 2px 0 0; }
+  .hint { color: #8b93a3; font-size: 0.8125rem; margin: 2px 0 0; }
   .actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .actions button { padding: 4px 10px; border-radius: 6px; border: 1px solid #3a3f4a; background: #1d2127; color: #e8e8ee; cursor: pointer; }
   .actions button.primary { background: #1e3a5a; border-color: #3a5a9f; color: #8ab4ff; }

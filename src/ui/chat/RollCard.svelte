@@ -246,7 +246,7 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-    font-size: 12.5px;
+    font-size: 0.9rem;
   }
   .head {
     display: flex;
@@ -264,31 +264,30 @@
     text-underline-offset: 2px;
   }
   .link:hover { color: #a8d0f0; }
-  .meta { color: #8b93a3; font-size: 11px; margin-left: auto; }
-  .tag { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: #3a2a2a; color: #e0a0a0; }
+  .meta { color: #8b93a3; font-size: 0.8125rem; margin-left: auto; }
+  .tag { font-size: 0.8125rem; padding: 1px 6px; border-radius: 999px; background: #3a2a2a; color: #e0a0a0; }
   .targets, .area { display: flex; flex-wrap: wrap; gap: 6px; }
   .rolls { display: flex; flex-direction: column; gap: 6px; }
   .roll { border: 1px solid #2a3a2e; border-radius: 6px; padding: 6px; background: #0e1510; }
   .roll-head { display: flex; align-items: baseline; gap: 6px; }
-  .kind { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: #8b93a3; }
-  .formula { color: #8b93a3; font-family: monospace; font-size: 11px; }
+  .kind { font-size: 0.8125rem; text-transform: uppercase; letter-spacing: 0.06em; color: #8b93a3; }
+  .formula { color: #8b93a3; font-family: monospace; font-size: 0.8125rem; }
   .total { font-weight: 800; color: #7fe0a7; margin-left: auto; }
   .modifiers { margin-top: 6px; }
   .modifiers summary { cursor: pointer; color: #9eafc5; }
   .modifier { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
   .mod-label { font-weight: 600; }
   .mod-value { font-family: monospace; }
-  .mod-reason { color: #8b93a3; }
   .add-mod { display: flex; align-items: center; gap: 6px; }
   .staging { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .add-mod select, .modifier select { padding: 2px 6px; border-radius: 4px; border: 1px solid #3a3f4a; background: #1d2127; color: #e8e8ee; }
   .modifier select:disabled { opacity: 0.85; color: #8b93a3; }
-  .chip.staged { padding: 2px 8px; border-radius: 999px; border: 1px solid #2e8b57; background: #1e3a2a; color: #7fe0a7; cursor: pointer; font-size: 11px; }
+  .chip.staged { padding: 2px 8px; border-radius: 999px; border: 1px solid #2e8b57; background: #1e3a2a; color: #7fe0a7; cursor: pointer; font-size: 0.8125rem; }
   .actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .actions button { padding: 4px 10px; border-radius: 6px; border: 1px solid #3a3f4a; background: #1d2127; color: #e8e8ee; cursor: pointer; }
   .actions button.primary { background: #1e3a2a; border-color: #2e8b57; color: #7fe0a7; }
   .actions button:disabled { opacity: 0.45; cursor: not-allowed; }
   .delegate { display: flex; align-items: center; gap: 4px; margin-left: auto; }
   .delegate input { padding: 3px 6px; border-radius: 4px; border: 1px solid #3a3f4a; background: #101216; color: #e8e8ee; width: 120px; }
-  .hint { color: #8b93a3; font-size: 11px; }
+  .hint { color: #8b93a3; font-size: 0.8125rem; }
 </style>

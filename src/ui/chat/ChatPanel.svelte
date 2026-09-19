@@ -386,7 +386,7 @@
   }
   h3 {
     margin: 0;
-    font-size: 12px;
+    font-size: 0.875rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: #8b93a3;
@@ -403,7 +403,7 @@
     border: 1px solid #3a3f4a;
     border-radius: 6px;
     background: #101216;
-    font-size: 12.5px;
+    font-size: 0.9rem;
   }
   .line {
     margin: 0;
@@ -452,12 +452,12 @@
   .rollcard .flavor {
     display: block;
     color: #9eafc5;
-    font-size: 11px;
+    font-size: 0.8125rem;
   }
   .tag {
     margin-left: auto;
     color: #8b93a3;
-    font-size: 11px;
+    font-size: 0.8125rem;
   }
   form {
     display: flex;
@@ -471,7 +471,7 @@
     border-radius: 6px;
     background: #101216;
     color: #e8e8ee;
-    font-size: 12.5px;
+    font-size: 0.9rem;
   }
   button {
     padding: 6px 10px;

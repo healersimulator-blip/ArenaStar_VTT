@@ -141,7 +141,7 @@
     /** E02: token-menu "Apply effect…" opens the sheet directly on this tab. */
     initialTab?: TabName;
   } = $props();
-  let tab = $state<TabName>(initialTab);
+  let tab = $derived(initialTab);
   let error = $state("");
   const pending = new SvelteSet<string>();
   // E01: when this actor fights inside an encounter, its combatant's timed
@@ -3500,7 +3500,7 @@
     padding: 8px;
     background: #121820;
     color: #e0e5ed;
-    font-size: 12px;
+    font-size: 0.875rem;
     border: 1px solid #3a4656;
     border-radius: 6px;
   }

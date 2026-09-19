@@ -194,7 +194,7 @@
     text-align: left;
     padding: 2px 4px;
     border-bottom: 1px solid #262e3a;
-    font-size: 12px;
+    font-size: 0.875rem;
   }
   .picker {
     display: flex;
@@ -202,6 +202,6 @@
   }
   .empty {
     opacity: 0.7;
-    font-size: 12px;
+    font-size: 0.875rem;
   }
 </style>
