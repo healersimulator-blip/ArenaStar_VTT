@@ -89,6 +89,10 @@ export interface Stage {
   getLightingLayer(): LightingLayer;
   /** §9 per-user explored fog (one per scene size — recreate per scene). */
   getFogLayer(sceneSize: { width: number; height: number }): FogLayer;
+  /** §9 fog is off for the scene: hide the mounted layer (if any) without dropping it. */
+  hideFogLayer(): void;
+  /** The mounted fog layer, if any (readbacks for e2e). */
+  peekFogLayer(): FogLayer | null;
   /** §9A faction fog cover (strategic scenes). */
   getStrategicFogLayer(): StrategicFogLayer;
   /** §9 pings + rulers (ephemeral overlays, ticker-driven). */
@@ -482,6 +486,12 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       }
       fogLayer = new FogLayerImpl(app, sceneSize);
       fogHolder.addChild(fogLayer.container);
+      return fogLayer;
+    },
+    hideFogLayer(): void {
+      fogLayer?.setShown(false);
+    },
+    peekFogLayer(): FogLayer | null {
       return fogLayer;
     },
     setMarquee(a, b): void {

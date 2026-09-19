@@ -75,6 +75,8 @@ describe("channelFor (§6.1)", () => {
       ephemeral: "ephemeral",
       "asset.get": "assets",
       "fog.put": "ops",
+      "fog.get": "ops",
+      "fog.state": "ops",
       "relay.offer": "ops",
       "turn.ready": "ops",
       "sim.control": "ops",

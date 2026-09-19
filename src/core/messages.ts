@@ -16,7 +16,7 @@ import type { SimEvent, TurnReport } from "./sim";
 export type { RollMode };
 
 /**
- * The 1-byte message-type prefix (§6.1/§13). 32 kinds — this map is the
+ * The 1-byte message-type prefix (§6.1/§13). 37 kinds — this map is the
  * single source of truth; PROTOCOL.md is kept in sync by a unit test.
  */
 export const MsgKind = {
@@ -40,6 +40,8 @@ export const MsgKind = {
   "roll.delegate": 0x32,
   // F03 — player pending roll resolution (client → host, host → client commit-reveal)
   "roll.pending": 0x33,
+  // D-250 — explored fog restore: the client asks, the host answers from its fog store
+  "fog.get": 0x0e,
   // host → client
   welcome: 0x20,
   snapshot: 0x21,
@@ -55,6 +57,7 @@ export const MsgKind = {
   "turn.report": 0x2b,
   "report.detail.page": 0x2c,
   "roll.challenge": 0x2d,
+  "fog.state": 0x2e,
   // internal / both directions
   heartbeat: 0x40,
   ping: 0x41,
@@ -176,11 +179,27 @@ export interface AssetGetMsg {
   priority: AssetPriority;
 }
 
-/** §8/§9: fog explored-texture downscaled PNG readback, per user + scene. */
+/**
+ * §8/§9: the sender's explored-fog map for a scene as a PNG (opaque = unexplored). The host
+ * keeps the latest per user + scene and persists it (D-250: `fog` store, world file `fog/`).
+ */
 export interface FogPutMsg {
   kind: "fog.put";
   sceneId: DocId;
   png: Uint8Array;
+}
+
+/** D-250: ask for one's own stored explored map of a scene (answered with `fog.state`). */
+export interface FogGetMsg {
+  kind: "fog.get";
+  sceneId: DocId;
+}
+
+/** D-250: the stored explored map for the asking user + scene; `png` null = nothing stored. */
+export interface FogStateMsg {
+  kind: "fog.state";
+  sceneId: DocId;
+  png: Uint8Array | null;
 }
 
 /** §6.3 (M4): an unreachable player's offer forwarded through a connected peer. */
@@ -426,6 +445,8 @@ export type WireMessage =
   | EphemeralMsg
   | AssetGetMsg
   | FogPutMsg
+  | FogGetMsg
+  | FogStateMsg
   | RelayOfferMsg
   | TurnReadyMsg
   | SimControlMsg

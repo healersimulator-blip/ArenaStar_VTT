@@ -59,6 +59,17 @@ optionally renamed) or *Restore* (the archive's own id — overwrites that world
 ruleset or content pack is named for what it is and offers *New world with it…*. Inside a
 world, **Close world…** returns to the start screen; the sidebar has no importer of its own.
 
+## Fog of war (§9)
+
+Fog is a per-scene switch under **Settings → Scene** (*Fog of war*, with an optional *Sight
+range* in squares; 0 = the whole scene, sight-blocking walls and closed doors always apply).
+Each player uncovers the map with the tokens they control and keeps what they have seen
+(D-250): the explored map is saved per player and scene by the host, comes back on reload or
+reconnect, and travels in the world file (`fog.json` + `fog/*.png`). The GM's own map is the
+union of every vision token; **God view** (Settings → Scene or GM extras) hides the cover for
+the GM without stopping it from accumulating. What is in sight right now is clear; what was
+seen before is dimmed; what was never seen is black.
+
 ## file:// limitations (§15)
 
 The deliverable must boot from `https://` and `file://`:

@@ -42,7 +42,7 @@ import {
   planMigrationChain,
   type MigrationStep,
 } from "../core/migrations";
-import { getPackage, getWorld, listPackages, putPackage } from "../storage/idb";
+import { getFog, getPackage, getWorld, listPackages, putFog, putPackage } from "../storage/idb";
 import type { BaseDocument, CollectionName } from "../core/documents";
 import { TOP_LEVEL_COLLECTIONS } from "../core/documents";
 import { diffFlat, type JsonRecord } from "../core/diff";
@@ -448,6 +448,12 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
     verifyHelloSig: (hello, roomId) => verifyHello(hello, roomId),
     now,
     assets,
+    // D-250: explored fog per user + scene lives in the world's `fog` store, so a reload,
+    // a player's reconnect and the world file all bring the same map back.
+    fogStore: {
+      put: (userId, sceneId, png) => putFog(db, { worldId: meta.worldId, sceneId, userId, png }),
+      get: async (userId, sceneId) => (await getFog(db, meta.worldId, sceneId, userId))?.png ?? null,
+    },
   });
 
   // ── §5A turn/sim channel: sandboxed SimWorker + §12 package boot ──────────

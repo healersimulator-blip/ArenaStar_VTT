@@ -43,6 +43,8 @@ function validateDecoded(obj: unknown, name: MsgName): Result<WireMessage> {
     case "ephemeral":
     case "asset.get":
     case "fog.put":
+    case "fog.get":
+    case "fog.state":
     case "relay.offer":
     case "turn.ready":
     case "sim.control":
@@ -112,6 +114,8 @@ export function channelFor(kind: MsgName): ChannelName {
     case "roll.revert":
     case "roll.delegate":
     case "fog.put":
+    case "fog.get":
+    case "fog.state":
     case "relay.offer":
     case "turn.ready":
     case "sim.control":

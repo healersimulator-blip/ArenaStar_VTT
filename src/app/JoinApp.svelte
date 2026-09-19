@@ -14,9 +14,11 @@
   import { WindowHost } from "../ui/windows";
   import { openPF1eSheetWindow } from "../ui/sheets/pf1eSheetWindow";
   import { SheetPanel } from "../ui/sheets";
-  import type { SceneDocument, SceneGrid } from "../core/documents";
+  import type { ActorDocument, SceneDocument, SceneGrid } from "../core/documents";
   import type { Op } from "../core/ops";
   import { copyText } from "../ui/clipboard";
+  import { FogExploration } from "../client/fogExploration";
+  import { createVisionComputer } from "../workers/visionComputer";
 
   let app = $state<PlayerApp | null>(null);
   let phase = $state<"invite" | "exchange" | "live" | "dead">("invite");
@@ -57,6 +59,8 @@
   let stage: Stage | null = null;
   let controller: CanvasController | null = null;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  /** D-250: this player's explored fog — revealed by the tokens they control, kept by the host. */
+  let fog: FogExploration | null = null;
 
   async function connect(inviteRaw: string): Promise<void> {
     joinError = null;
@@ -151,6 +155,7 @@
     seq = client.store.seq;
     tokenCount = scene?.tokens.length ?? 0;
     view.syncTokens(scene?.tokens ?? []);
+    void fog?.sync(scene, { shown: true });
     const img = scene?.img ?? null;
     if (img !== null && img !== loadedMapHash && current.fetcher) {
       loadedMapHash = img;
@@ -188,6 +193,17 @@
         const view = await createStage({ width, height, hostElement });
         stage = view;
         view.fit(scene?.width ?? 2000, scene?.height ?? 1500);
+        fog = new FogExploration({
+          surfaceFor: (sc) => view.getFogLayer({ width: sc.width, height: sc.height }),
+          hideSurface: () => view.hideFogLayer(),
+          computer: createVisionComputer(),
+          transport: client,
+          user: () => client.user,
+          actors: () => client.store.getAll("actors") as readonly ActorDocument[],
+          onError: (where, error) => console.warn(`fog ${where} failed`, error),
+        });
+        // a reconnect may reach a host session holding a map this tab never saw
+        client.bus.on("welcome", () => void fog?.refreshStored());
         controller = new CanvasController({
           onTokenActivate: ({ token }) => {
             if (token.actorId) openActorSheet(token.actorId);
@@ -237,11 +253,16 @@
       const code = app?.adapter.lastSentCode;
       if (code) hostCode = code;
     }, 250);
+    const onPageHide = (): void => void fog?.flush(); // D-250: last reveal before unload
+    globalThis.addEventListener("pagehide", onPageHide);
     return () => {
+      globalThis.removeEventListener("pagehide", onPageHide);
       offWm();
       clearCopyTimer();
       if (pollTimer !== null) clearInterval(pollTimer);
       controller?.destroy();
+      fog?.destroy();
+      fog = null;
       stage?.destroy();
       stage = null;
       app?.close();

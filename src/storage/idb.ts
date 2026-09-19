@@ -4,7 +4,7 @@
  *   worlds     keyPath worldId                  → WorldsRecord (meta + flush state)
  *   documents  keyPath [worldId, coll, id]      → DocumentsRecord (top-level docs)
  *   oplog      keyPath [worldId, seq]           → OplogRecord (envelope + inverses)
- *   fog        keyPath [worldId, sceneId, userId] → FogRecord (PNG bytes)
+ *   fog        keyPath [worldId, sceneId, userId] → FogRecord (explored-map PNG, D-250)
  *   settings   keyPath [scope, key]             → SettingsRecord (world/client/module KV)
  *
  * OPFS: /vtt/<worldId>/assets/<hash> (see opfs.ts). Strategic stores (§8A:
@@ -76,7 +76,7 @@ export interface FogRecord {
   worldId: WorldId;
   sceneId: SceneId;
   userId: UserId;
-  /** Downscaled explored-fog PNG (§9). */
+  /** Explored-fog map as PNG: opaque = unexplored (§9, D-250). */
   png: Uint8Array;
 }
 
@@ -199,6 +199,11 @@ export async function getFog(
   userId: UserId,
 ): Promise<FogRecord | undefined> {
   return db.get(STORES.fog, [worldId, sceneId, userId]);
+}
+
+/** Every explored-fog row of a world (D-250: the world file's `fog/` entries). */
+export async function listFogForWorld(db: IDBPDatabase, worldId: WorldId): Promise<FogRecord[]> {
+  return db.getAll(STORES.fog, IDBKeyRange.bound([worldId], [worldId, []]));
 }
 
 export async function putSetting(db: IDBPDatabase, rec: SettingsRecord): Promise<void> {

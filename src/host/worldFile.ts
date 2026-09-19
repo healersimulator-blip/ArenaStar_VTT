@@ -14,6 +14,8 @@
  *   packages.json    [{ id, name, version, type, importedAt, packCount }]
  *   packages/<id>/…  every file of each §12 package imported into the world,
  *                    verbatim (manifest.json, rules.js, packs/*.json, module.js)
+ *   fog.json         [{ sceneId, userId, file }]   §9 explored fog per user + scene (D-250;
+ *   fog/<n>.png      optional — archives without it simply carry no explored maps)
  *
  * Format 2 (D-248) made the archive self-contained: a world's strategic ruleset
  * and content packs are world-scoped records (`packages [worldId, id]`) and the
@@ -43,8 +45,8 @@
  */
 import { strFromU8, strToU8, unzip, Zip, ZipDeflate } from "fflate";
 import type { IDBPDatabase } from "idb";
-import type { AssetRecord, PackageRecord, WorldsRecord } from "../storage/idb";
-import { getWorld, listAssets, listPackages, STORES } from "../storage/idb";
+import type { AssetRecord, FogRecord, PackageRecord, WorldsRecord } from "../storage/idb";
+import { getWorld, listAssets, listFogForWorld, listPackages, STORES } from "../storage/idb";
 import {
   decodeReport,
   listCheckpointsForWorld,
@@ -102,6 +104,14 @@ export interface WorldFileDocuments {
 /** assets.json entry: an AssetRecord minus { worldId, bytes }. */
 export type WorldFileAsset = Omit<AssetRecord, "worldId" | "bytes">;
 
+/** fog.json entry (D-250): one user's explored map of one scene, stored at `file`. */
+export interface WorldFileFog {
+  sceneId: DocId;
+  userId: string;
+  /** Archive path of the PNG, e.g. `fog/3.png` (ids are not filesystem-safe). */
+  file: string;
+}
+
 /** packages.json entry — an index; the folder under packages/<id>/ is the source of truth. */
 export interface WorldFilePackage {
   id: string;
@@ -153,6 +163,8 @@ export interface ImportedWorld {
   packages: string[];
   /** The strategic ruleset the world will boot with (null = built-in). */
   activeRulesPackage: string | null;
+  /** Explored-fog maps restored (user × scene), D-250. */
+  fogRecords: number;
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -258,6 +270,8 @@ export async function collectWorldArchive(options: ExportWorldOptions): Promise<
   // §8A: checkpoints/ + reports/ ride in the world file (resume + replay)
   const checkpoints = await listCheckpointsForWorld(options.db, options.worldId);
   const reportRecords = await listReportsForWorld(options.db, options.worldId);
+  // §9 explored fog per user + scene (D-250)
+  const fogRows = await listFogForWorld(options.db, options.worldId);
 
   const entries: WorldArchiveEntry[] = [];
   const add = (path: string, bytes: Uint8Array): void => {
@@ -289,6 +303,13 @@ export async function collectWorldArchive(options: ExportWorldOptions): Promise<
       add(`packages/${p.id}/${path}`, strToU8(text));
     }
   }
+  const fogIndex: WorldFileFog[] = fogRows.map((row, i) => ({
+    sceneId: row.sceneId,
+    userId: row.userId,
+    file: `fog/${i}.png`,
+  }));
+  add("fog.json", jsonBytes(fogIndex));
+  fogRows.forEach((row, i) => add(`fog/${i}.png`, row.png));
   return { meta, entries };
 }
 
@@ -383,6 +404,35 @@ function readArchivePackages(
       manifest,
       files: loaded.value.files,
     });
+  }
+  return records;
+}
+
+/** The explored-fog rows an archive carries (none for archives written before D-250). */
+function readArchiveFog(files: Map<string, Uint8Array>, worldId: WorldId): FogRecord[] {
+  const indexBytes = files.get("fog.json");
+  if (!indexBytes) return [];
+  const index = parseJson<WorldFileFog[]>(indexBytes, "fog.json");
+  if (!Array.isArray(index)) throw new Error("world file: fog.json must be an array");
+  const records: FogRecord[] = [];
+  const seen = new Set<string>();
+  for (const entry of index) {
+    if (
+      typeof entry?.sceneId !== "string" ||
+      entry.sceneId.length === 0 ||
+      typeof entry.userId !== "string" ||
+      entry.userId.length === 0 ||
+      typeof entry.file !== "string"
+    ) {
+      throw new Error("world file: fog.json entry needs sceneId, userId and file");
+    }
+    const key = `${entry.sceneId}/${entry.userId}`;
+    if (seen.has(key)) throw new Error(`world file: fog.json lists ${entry.sceneId}/${entry.userId} twice`);
+    seen.add(key);
+    const png = files.get(entry.file);
+    if (!png) throw new Error(`world file: fog.json names missing ${entry.file}`);
+    if (png.length === 0) continue; // an empty map is no map
+    records.push({ worldId, sceneId: entry.sceneId, userId: entry.userId, png });
   }
   return records;
 }
@@ -488,6 +538,10 @@ export async function importWorldZip(options: ImportWorldOptions): Promise<Impor
     await putReport(options.db, worldId, turn.sceneId ?? "", turn);
   }
 
+  // §9 explored fog (optional; D-250). Same user ids on every machine (pubkeys / "gm"),
+  // so a copy opened elsewhere still shows each player their own map.
+  const fogRecords = readArchiveFog(files, worldId);
+
   type StoreName = (typeof STORES)[keyof typeof STORES];
   const replaced: StoreName[] = [STORES.documents, STORES.oplog, STORES.fog, STORES.assets];
   if (carriesPackages) replaced.push(STORES.packages);
@@ -511,6 +565,8 @@ export async function importWorldZip(options: ImportWorldOptions): Promise<Impor
     const pkgStore = tx.objectStore(STORES.packages);
     for (const rec of packageRecords) void pkgStore.put(rec);
   }
+  const fogStore = tx.objectStore(STORES.fog);
+  for (const rec of fogRecords) void fogStore.put(rec);
   const world: WorldsRecord = {
     worldId,
     name,
@@ -536,6 +592,7 @@ export async function importWorldZip(options: ImportWorldOptions): Promise<Impor
     format: meta.format,
     packages: packageRecords.map((p) => p.id),
     activeRulesPackage,
+    fogRecords: fogRecords.length,
   };
 }
 

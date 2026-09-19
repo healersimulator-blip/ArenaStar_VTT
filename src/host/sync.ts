@@ -59,7 +59,7 @@ import {
   tacticalLedgerTurn,
 } from "../packages/pf1e/rollLedger";
 import type { RollLedger, RollLedgerRoll } from "../packages/pf1e/rollLedger";
-import type { AssetId, PeerId, TxId, UserId } from "../core/ids";
+import type { AssetId, DocId, PeerId, TxId, UserId } from "../core/ids";
 import { DocumentStore } from "../core/store";
 import { OpLog } from "../core/oplog";
 import { UndoStack } from "../core/undo";
@@ -72,7 +72,8 @@ import {
   createEphemeralRateLimiter,
   createIntentRateLimiter,
 } from "../core/ratelimit";
-import type { AssetGetMsg } from "../core/messages";
+import type { AssetGetMsg, FogGetMsg, FogPutMsg } from "../core/messages";
+import { MAX_FOG_PNG_BYTES } from "../core/fogExploration";
 import type { AssetServer } from "./assets";
 import { AssetTransfer } from "../net/transfer";
 import type { EventBus, PermissionUser } from "../core";
@@ -126,8 +127,19 @@ export interface HostSyncOptions {
   assets?: AssetServer;
   /** Transfer overrides (tests): chunk size, bandwidth cap, clock. */
   assetTransfer?: { chunkSize?: number; bytesPerSecond?: number; now?: () => number };
+  /**
+   * D-250: where explored-fog maps live between sessions (hostBoot wires the IDB `fog`
+   * store). Absent → fog.put is kept in memory only and fog.get answers from that.
+   */
+  fogStore?: FogStore;
   rng?: RngFn;
   now?: () => number;
+}
+
+/** Persistence for §9 explored fog, keyed per user + scene (the world is implied). */
+export interface FogStore {
+  put(userId: UserId, sceneId: DocId, png: Uint8Array): Promise<void>;
+  get(userId: UserId, sceneId: DocId): Promise<Uint8Array | null>;
 }
 
 interface Session {
@@ -265,8 +277,9 @@ export class HostSync {
   private readonly transfer: AssetTransfer | null;
   private readonly rng: RngFn;
   private readonly now: () => number;
-  /** §8/§9 fog readbacks: `${sceneId}:${userId}` → latest PNG bytes. */
+  /** §8/§9 fog readbacks: `${sceneId}:${userId}` → latest PNG bytes (write-through cache). */
   readonly fogPngs = new Map<string, Uint8Array>();
+  private readonly fogStore: FogStore | null;
 
   private sessions = new Map<PeerId, Session>();
   private banned = new Set<UserId>();
@@ -363,6 +376,7 @@ export class HostSync {
           options.assetTransfer ?? {},
         )
       : null;
+    this.fogStore = options.fogStore ?? null;
     this.rng = options.rng ?? cryptoRng;
     this.now = options.now ?? (() => Date.now());
   }
@@ -504,12 +518,13 @@ export class HostSync {
         this.handleAssetGet(session, msg);
         return;
       case "fog.put":
-        // §8/§9: keep the latest explored-texture readback per user+scene
-        // (reconnect + future world export; D-075).
-        if (session.user) {
-          this.fogPngs.set(`${msg.sceneId}:${session.user.id}`, msg.png);
-        }
+        this.handleFogPut(session, msg);
         return;
+      case "fog.get":
+        void this.handleFogGet(session, msg);
+        return;
+      case "fog.state":
+        return; // host → client only
       case "turn.ready":
         if (session.user && this.sim) this.sim.handleTurnReady(session.user, msg);
         return;
@@ -523,6 +538,45 @@ export class HostSync {
         if (session.user && this.sim) this.sim.handleSimSnapshotGet(session.user, msg);
         return;
     }
+  }
+
+  // ─── §9 explored fog (D-250) ────────────────────────────────────────────────
+
+  /**
+   * Keep the sender's explored map for a scene: the latest PNG per user + scene in memory
+   * (write-through) and in the fog store, so it survives the session, rides the world file
+   * and answers the user's next `fog.get`. A user can only ever write their own map, and an
+   * oversized or empty payload is dropped (§16).
+   */
+  private handleFogPut(session: Session, msg: FogPutMsg): void {
+    const user = session.user;
+    if (!user) return;
+    if (!(msg.png instanceof Uint8Array) || msg.png.length === 0) return;
+    if (msg.png.length > MAX_FOG_PNG_BYTES) return;
+    if (typeof msg.sceneId !== "string" || msg.sceneId.length === 0) return;
+    this.fogPngs.set(`${msg.sceneId}:${user.id}`, msg.png);
+    if (this.fogStore) {
+      this.fogStore.put(user.id, msg.sceneId, msg.png).catch(() => undefined);
+    }
+  }
+
+  /** Answer with the asker's own stored map for the scene (null when nothing is stored). */
+  private async handleFogGet(session: Session, msg: FogGetMsg): Promise<void> {
+    const user = session.user;
+    if (!user) return;
+    if (typeof msg.sceneId !== "string" || msg.sceneId.length === 0) return;
+    let png: Uint8Array | null = this.fogPngs.get(`${msg.sceneId}:${user.id}`) ?? null;
+    if (png === null && this.fogStore) {
+      try {
+        png = await this.fogStore.get(user.id, msg.sceneId);
+      } catch {
+        png = null;
+      }
+      if (png) this.fogPngs.set(`${msg.sceneId}:${user.id}`, png);
+    }
+    // the session may have gone while the store answered
+    if (this.sessions.get(session.peerId) !== session) return;
+    this.send(session, { kind: "fog.state", sceneId: msg.sceneId, png });
   }
 
   // ─── Join flow (§6.4) ───────────────────────────────────────────────────────

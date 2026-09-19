@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { detectCapabilities } from "./capabilities";
-  import { DEFAULT_SCENE_ID, makeToken, type HostApp } from "./hostBoot";
+  import { DEFAULT_SCENE_ID, GM_USER_ID, makeToken, type HostApp } from "./hostBoot";
   import { createStage, type Stage } from "../canvas/stage";
   import { tokenRect } from "../canvas/tokens";
   import type { RollHighlightRect } from "../canvas/layers/RollHighlightLayer";
@@ -39,6 +39,8 @@
   import { macroSlots, runChatMacro } from "../ui/macros";
   import { gmState } from "../ui/armies/gmState.svelte";
   import { buildStrategicFog, sceneIsStrategic } from "../core/strategicFog";
+  import { FogExploration } from "../client/fogExploration";
+  import { createVisionComputer } from "../workers/visionComputer";
   import { ModuleIframe } from "../packages/moduleIframe";
   import { dice3dStats, diceInfoFromRecord, showDice3D } from "../dice/dice3d";
   import { verifyCommitRoll } from "../dice/commitReveal";
@@ -51,7 +53,7 @@
     type ModuleHost,
   } from "../packages/moduleHandlers";
   import type { ModuleHookName } from "../core/moduleApi";
-  import { getSetting } from "../storage/idb";
+  import { getFog, getSetting } from "../storage/idb";
   import { createMassBattleBasic } from "../packages/massBattleBasic";
   import type {
     ArmyDocument,
@@ -177,6 +179,8 @@
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
   let shareTimer: ReturnType<typeof setInterval> | null = null;
   let fogTimer: ReturnType<typeof setInterval> | null = null;
+  /** D-250: §9 explored fog loop (restore → reveal → persist) for the GM's own map. */
+  let fog: FogExploration | null = null;
   let lastTurnPhase = "idle";
   let lastRulesVersion = "";
   let lastByType: Record<string, number> = {};
@@ -757,6 +761,9 @@
         combats: current.gm.client.store.getAll("combats") as CombatDocument[],
       }),
     );
+    // D-250: explored fog follows the replica — tokens moved, doors opened, scene switched;
+    // god view hides the cover for the GM without stopping the map from accumulating.
+    void fog?.sync(scene, { shown: !gmState.godView });
     // §9 tiles: roofs fade over tokens with vision (D-083)
     const occupied = (scene?.tokens ?? [])
       .filter((t) => t.vision)
@@ -1043,6 +1050,18 @@
         // F01 — expose for chat roll-card highlights & e2e (canvasSmoke)
         (globalThis as unknown as { __stage?: unknown }).__stage = view;
         view.fit(scene?.width ?? 2000, scene?.height ?? 1500);
+        // D-250: the GM's explored map — every vision token reveals; persisted through the
+        // same fog.put/fog.get the players use (the GM UI only ever speaks ClientSync, §2).
+        fog = new FogExploration({
+          surfaceFor: (sc) => view.getFogLayer({ width: sc.width, height: sc.height }),
+          hideSurface: () => view.hideFogLayer(),
+          computer: createVisionComputer(),
+          transport: current.gm.client,
+          user: () => current.gm.client.user,
+          actors: () =>
+            current.gm.client.store.getAll("actors") as readonly ActorDocument[],
+          onError: (where, error) => console.warn(`fog ${where} failed`, error),
+        });
         controller = new CanvasController({
           onSelectionChange: (ids) => {
             tokenSelection = {
@@ -1524,6 +1543,41 @@
         fogTimer = globalThis.setInterval(syncStrategicFog, 300);
         installGmFogE2e({
           rectCount: () => view.getStrategicFogLayer().rectCount,
+          fogState: async () => {
+            await fog?.settle();
+            const stats = fog?.stats() ?? {
+              sceneId: null,
+              enabled: false,
+              restored: false,
+              restoredBytes: 0,
+              reveals: 0,
+              saves: 0,
+              lastSaveBytes: 0,
+              dirty: false,
+            };
+            const layer = view.peekFogLayer();
+            const stored = stats.sceneId
+              ? ((await getFog(current.db, current.worldId, stats.sceneId, GM_USER_ID))
+                  ?.png.length ?? 0)
+              : 0;
+            return {
+              sceneId: stats.sceneId,
+              enabled: stats.enabled,
+              restored: stats.restored,
+              restoredBytes: stats.restoredBytes,
+              reveals: stats.reveals,
+              saves: stats.saves,
+              lastSaveBytes: stats.lastSaveBytes,
+              explored: layer ? layer.exploredFraction() : 0,
+              shown: layer ? layer.shown : null,
+              stored,
+            };
+          },
+          fogFlush: async () => {
+            await fog?.flush();
+            return fog?.stats().saves ?? 0;
+          },
+          fogExploredAt: ({ x, y }) => view.peekFogLayer()?.exploredAt(x, y) ?? null,
           pf1eAreaPreviewShow: (spec) => {
             const model = showPF1eAreaPreview({
               kind: spec.kind as PF1eAreaKind,
@@ -1565,6 +1619,12 @@
             return flags?.core?.scale === "strategic"
               ? "strategic"
               : "tactical";
+          },
+          sceneCoreFlags: () => {
+            const core = (activeScene()?.flags as { core?: unknown } | undefined)?.core;
+            return core !== null && typeof core === "object"
+              ? { ...(core as Record<string, unknown>) }
+              : {};
           },
           godView: () => gmState.godView,
           viewAsFaction: () => gmState.viewAsFaction,
@@ -1794,14 +1854,27 @@
         canvasError = err instanceof Error ? err.message : String(err);
       }
     })();
+    // D-250: the explored map is uploaded after a quiet 1.5 s; a reload or tab close inside
+    // that window would lose the last reveal, so flush on pagehide (synchronous readback).
+    const onPageHide = (): void => void fog?.flush();
+    globalThis.addEventListener("pagehide", onPageHide);
     return () => {
+      globalThis.removeEventListener("pagehide", onPageHide);
       if (shareTimer !== null) clearInterval(shareTimer);
       clearCopyTimer();
       share?.close();
       controller?.destroy();
+      fog?.destroy();
+      fog = null;
       stage?.destroy();
       stage = null;
     };
+  });
+
+  // D-250: god view toggles (Settings / GM extras) show or hide the cover at once.
+  $effect(() => {
+    const shown = !gmState.godView;
+    void fog?.sync(activeScene(), { shown });
   });
 </script>
 
@@ -2087,7 +2160,14 @@
             inside a running one — so the sidebar offers the way back instead of a second
             importer. The world is saved continuously; closing loses nothing.
           -->
-          <button id="close-world" type="button" onclick={() => onExit?.()}>
+          <button
+            id="close-world"
+            type="button"
+            onclick={async () => {
+              await fog?.flush(); // D-250: the last reveal lands before the world closes
+              onExit?.();
+            }}
+          >
             Close world…
           </button>
         {/if}

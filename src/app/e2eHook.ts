@@ -690,6 +690,8 @@ export interface GmFogSurface {
   rectCount(): number;
   /** Active scene flags.core.scale ("tactical" when unset). */
   sceneScale(): string;
+  /** Active scene `flags.core` as stored (D-250: fog / fogRange land here). */
+  sceneCoreFlags(): Record<string, unknown>;
   godView(): boolean;
   viewAsFaction(): string;
   /** GM client pool replica model count (null before the first snapshot). */
@@ -840,6 +842,27 @@ export interface GmFogSurface {
     rectsDrawn: number;
     originDrawn: boolean;
   };
+  /**
+   * D-250 explored fog: the loop's stats after everything queued has landed, the share of
+   * the texture explored (0..1), whether the cover is drawn, and the bytes the host's fog
+   * store holds for the GM on the active scene.
+   */
+  fogState(): Promise<{
+    sceneId: string | null;
+    enabled: boolean;
+    restored: boolean;
+    restoredBytes: number;
+    reveals: number;
+    saves: number;
+    lastSaveBytes: number;
+    explored: number;
+    shown: boolean | null;
+    stored: number;
+  }>;
+  /** D-250: upload the map now (the debounce is 1.5 s); resolves with the save count. */
+  fogFlush(): Promise<number>;
+  /** D-250: is the world point explored on the GM's texture? (null = no fog layer) */
+  fogExploredAt(spec: { x: number; y: number }): boolean | null;
 }
 
 export interface RulesPackageSmokeResult {

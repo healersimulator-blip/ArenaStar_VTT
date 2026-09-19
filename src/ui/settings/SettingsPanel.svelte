@@ -9,7 +9,13 @@
   import type { ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import type { SceneDocument, SceneGrid } from "../../core/documents";
+  import {
+    fogSettingsOps,
+    sceneFogSettings,
+    type FogSettings,
+  } from "../../core/fogExploration";
   import { DEFAULT_BINDINGS } from "../../core/keys";
+  import { gmState } from "../armies/gmState.svelte";
   import {
     advanceClockOnRoundOf,
     playerPendingRollModeOf,
@@ -90,12 +96,15 @@
   // Initialize only after the defaults exist (opening the window executes this script).
   let rules = $state<RulesOptions>(DEFAULT_RULES);
   let scale = $state<"tactical" | "strategic">("tactical");
+  /** D-250: the active scene's explored-fog flags. */
+  let fog = $state<FogSettings>({ enabled: false, rangeSquares: null });
 
   function refresh(): void {
     const scenes = client.store.getAll("scenes") as readonly SceneDocument[];
     const active = scenes.find((s) => s.active) ?? scenes[0] ?? null;
     sceneId = active?._id ?? "";
     grid = active ? { ...active.grid } : null;
+    fog = sceneFogSettings(active);
     scale =
       (active?.flags as { core?: { scale?: unknown } } | undefined)?.core
         ?.scale === "strategic"
@@ -181,6 +190,20 @@
     client.submit([
       { kind: "update", ref: { coll: "scenes", id: sceneId }, diff: { flags } },
     ]);
+  }
+
+  /**
+   * D-250: explored fog is a per-scene switch (`flags.core.fog`) plus an optional sight
+   * range in squares (`flags.core.fogRange`); both ride the same whole-object flags update
+   * as the scale flag.
+   */
+  function applyFog(next: FogSettings): void {
+    if (!sceneId) return;
+    const scenes = client.store.getAll("scenes") as readonly SceneDocument[];
+    const scene = scenes.find((sc) => sc._id === sceneId);
+    if (!scene) return;
+    fog = next;
+    client.submit(fogSettingsOps(scene, next));
   }
 
   function apply(): void {
@@ -329,6 +352,41 @@
             <option value={d}>{d}</option>
           {/each}
         </select>
+      </label>
+    </div>
+    <!-- D-250: explored fog — per scene, remembered per player, saved with the world -->
+    <div class="row fog">
+      <label class="check">
+        <input
+          data-scene-fog
+          type="checkbox"
+          checked={fog.enabled}
+          onchange={(e) =>
+            applyFog({ ...fog, enabled: (e.target as HTMLInputElement).checked })}
+        />
+        Fog of war — each player uncovers the map with the tokens they control; what they
+        have seen stays uncovered and is saved with the world
+      </label>
+      <label>
+        Sight range (squares, 0 = whole scene)
+        <input
+          data-scene-fog-range
+          type="number"
+          min="0"
+          step="1"
+          value={fog.rangeSquares ?? 0}
+          onchange={(e) => {
+            const n = Number((e.target as HTMLInputElement).value);
+            applyFog({
+              ...fog,
+              rangeSquares: Number.isFinite(n) && n > 0 ? Math.round(n) : null,
+            });
+          }}
+        />
+      </label>
+      <label class="check">
+        <input data-gm-god-view type="checkbox" bind:checked={gmState.godView} />
+        God view — the GM sees through fog (off: see what the table has uncovered)
       </label>
     </div>
   {/if}
@@ -578,6 +636,18 @@
     flex-direction: column;
     gap: 2px;
     font-size: 0.8125rem;
+  }
+  .fog {
+    margin-top: 8px;
+  }
+  .fog .check {
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    flex-basis: 100%;
+  }
+  .fog .check input {
+    width: auto;
   }
   input,
   select {
