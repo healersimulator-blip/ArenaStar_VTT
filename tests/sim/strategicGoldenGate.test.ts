@@ -198,7 +198,11 @@ describe("V06 — deploy gate: the same units and seed deploy identically", () =
   test("deployment is content-addressed and reproducible", () => {
     const a = arena();
     const b = arena();
-    expect(Array.from(a.load.snapshot.bytes)).toEqual(Array.from(b.load.snapshot.bytes));
+    // fflate's gzip header includes the current second as MTIME; compare the
+    // content-addressed payload rather than incidental compression metadata.
+    expect(Array.from(decompressSync(a.load.snapshot.bytes))).toEqual(
+      Array.from(decompressSync(b.load.snapshot.bytes)),
+    );
     expect(a.load.snapshot.maxHpMax).toBe(b.load.snapshot.maxHpMax);
     expect(a.units.map((u) => u.modelRange)).toEqual(b.units.map((u) => u.modelRange));
     // Every model is placed: one per square, no overlaps, no empty unit.

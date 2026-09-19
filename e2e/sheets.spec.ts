@@ -39,7 +39,9 @@ async function connectSheetPlayer(host: Page, player: Page): Promise<string> {
   return playerCall<string>(player, "userId");
 }
 
-test.setTimeout(90_000);
+// The shipped-bestiary sweep opens all 40 entries through the file:// app; keep
+// enough headroom for the documented external Chromium executable as well as CI.
+test.setTimeout(120_000);
 
 test.describe("sheets (§10 M1)", () => {
   test("GM creates + assigns an actor; the player edits it; ownership enforced", async ({

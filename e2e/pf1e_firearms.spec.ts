@@ -334,6 +334,24 @@ test.describe("PF1e firearms reload (P09/D-218) — ammo 1→0→reload→1 prov
     await sheet.getByRole("button", { name: "combat", exact: true }).click();
     const resolve = sheet.locator("[data-pf1e-resolve]");
     await resolve.locator("[data-pf1e-resolve-target]").selectOption({ label: "PF Dummy" });
+    // The reload assertion is about the ammo/provoke state, not the attack
+    // outcome. Keep the preceding shot away from natural 1 so it cannot
+    // introduce the broken-firearm branch and make reload correctly refuse.
+    // HostSync uses cryptoRng rather than Math.random for real dice.
+    await page.evaluate(() => {
+      const cryptoApi = globalThis.crypto;
+      const original = cryptoApi.getRandomValues.bind(cryptoApi);
+      Object.defineProperty(cryptoApi, "getRandomValues", {
+        configurable: true,
+        value: (array: ArrayBufferView) => {
+          if (array instanceof Uint32Array && array.length === 1) {
+            array[0] = 0x80000000;
+            return array;
+          }
+          return original(array);
+        },
+      });
+    });
 
     // Initial ammo read-out is 1/1
     await expect(sheet.locator("[data-pf1e-firearm-resolve]")).toContainText("ammo 1/1");
