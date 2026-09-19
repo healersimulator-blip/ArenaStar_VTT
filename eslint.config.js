@@ -14,6 +14,9 @@ export default tseslint.config(
       "coverage/**",
       // §12 generated package artifacts (build step: pnpm build:systems)
       "systems/**/rules.js",
+      // Pinned Foundry checkouts for the content converter (gitignored; they carry
+      // their own eslint config, which must never be linted or even discovered)
+      "tools/content/vendor/**",
     ],
   },
   eslint.configs.recommended,
@@ -27,7 +30,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ["scripts/**/*.mjs", "vite.config.ts", "playwright.config.ts", "e2e/**/*.ts"],
+    files: ["scripts/**/*.mjs", "tools/**/*.mjs", "vite.config.ts", "playwright.config.ts", "e2e/**/*.ts"],
     languageOptions: { globals: { ...globals.node } },
   },
   prettier,

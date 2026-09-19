@@ -6,3 +6,6 @@ test-results/
 # §12 generated system-package artifacts (build step: pnpm build:systems)
 systems/*/rules.js
 playwright-report/
+
+# PF1e content vendor checkouts (git-ignored — pinned commits, see tools/adopt/INVENTORY.md)
+tools/content/vendor/

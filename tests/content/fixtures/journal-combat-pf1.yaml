@@ -1,0 +1,27 @@
+# pf1-system journal shape — minimal hand-crafted sample (the full journals in
+# pf1-system/packs/rules/ run 180-290 KB; the shape is taken verbatim from
+# combat.pq1DpUWzXjWih8g2.yaml at the pinned commit: _key '!journal!…', pages[]
+# with name + nested text.content HTML, Foundry @Source/@Compendium tags).
+_id: pq1DpUWzXjWih8g2
+_key: '!journal!pq1DpUWzXjWih8g2'
+_stats:
+  coreVersion: '13.351'
+name: Combat
+pages:
+  - _id: BCVeQKP4LwBz6rCq
+    _key: '!journal.pages!pq1DpUWzXjWih8g2.BCVeQKP4LwBz6rCq'
+    name: Attacks of Opportunity
+    sort: 100000
+    text:
+      content: >-
+        <h2>Table 8-2: Actions in Combat</h2>
+
+        <p><strong>Source</strong>: @Source[CRB;pages=183]</p>
+
+        <p>An attack of opportunity is a <em>single</em> standard action.
+        @Compendium[pf1.pf1e-rules.abc]{Attacks of Opportunity} are denied by
+        total concealment.</p>
+        <ul>
+          <li>Attack (melee)</li>
+          <li>Cast a spell (1 standard action casting time)</li>
+        </ul>

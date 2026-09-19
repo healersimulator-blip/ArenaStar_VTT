@@ -1,0 +1,109 @@
+{
+  "_id": "ZrBJj61RtfoT2BCg",
+  "name": "Power Attack (Mythic)",
+  "type": "feat",
+  "img": "systems/pf1/icons/feats/power-attack.jpg",
+  "system": {
+    "description": {
+      "value": "<em>Your attacks are truly devastating.</em><br/><br/><b>Prerequisites</b><br/>Power Attack.<br/><br/><b>Benefits</b><br/>When you use Power Attack, you gain a +3 bonus on melee damage rolls instead of +2. When your base attack bonus reaches +4 and every 4 points thereafter, the amount of bonus damage increases by +3 instead of +2. In addition, the bonus damage from this feat is doubled on a critical hit, before it's multiplied by the weapon's critical multiplier.<br/><br/> You can expend one use of mythic power when you activate Power Attack to ignore the penalties on melee attack rolls and combat maneuver checks for 1 minute.",
+      "chat": "",
+      "unidentified": ""
+    },
+    "tags": [
+      [
+        "PFS"
+      ],
+      [
+        "Combat"
+      ],
+      [
+        "Mythic"
+      ]
+    ],
+    "actions": [],
+    "uses": {
+      "per": null,
+      "value": 0,
+      "maxFormula": "",
+      "autoDeductChargesCost": "1"
+    },
+    "attackNotes": [],
+    "effectNotes": [],
+    "changes": [],
+    "changeFlags": {
+      "loseDexToAC": false,
+      "noEncumbrance": false,
+      "mediumArmorFullSpeed": false,
+      "heavyArmorFullSpeed": false
+    },
+    "contextNotes": [],
+    "links": {
+      "children": [],
+      "charges": []
+    },
+    "tag": "",
+    "useCustomTag": false,
+    "armorProf": {
+      "value": [],
+      "custom": ""
+    },
+    "weaponProf": {
+      "value": [],
+      "custom": ""
+    },
+    "languages": {
+      "value": [],
+      "custom": ""
+    },
+    "flags": {
+      "boolean": {},
+      "dictionary": {}
+    },
+    "scriptCalls": [],
+    "featType": "feat",
+    "associations": {
+      "classes": []
+    },
+    "showInQuickbar": false,
+    "abilityType": "none",
+    "crOffset": "",
+    "disabled": false,
+    "classSkills": {},
+    "activation": {
+      "cost": 1,
+      "type": ""
+    },
+    "unchainedAction": {
+      "activation": {
+        "cost": 1,
+        "type": ""
+      }
+    },
+    "duration": {
+      "value": null,
+      "units": ""
+    },
+    "ability": {
+      "damageMult": 1,
+      "critMult": 2
+    },
+    "range": {
+      "maxIncrements": 1
+    }
+  },
+  "ownership": {
+    "default": 0
+  },
+  "_stats": {
+    "systemId": "pf1",
+    "systemVersion": "0.82.5",
+    "coreVersion": "10.291",
+    "createdTime": 1665428355548,
+    "modifiedTime": 1677435488914,
+    "lastModifiedBy": "IPeKQhMz2Odi77tR"
+  },
+  "effects": [],
+  "folder": null,
+  "sort": 0,
+  "flags": {}
+}
