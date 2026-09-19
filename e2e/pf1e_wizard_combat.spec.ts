@@ -54,8 +54,8 @@ test("Level 5 Wizard armed with Dragoon pistol and Fireball vs 3 Goblins, 2 Ogre
                 firearm: {
                   generation: "early",
                   misfireMinimum: 1,
-                  capacity: 1,
-                  loaded: 1,
+                  capacity: 3,
+                  loaded: 3,
                   magical: false,
                 },
               },
@@ -207,8 +207,12 @@ test("Level 5 Wizard armed with Dragoon pistol and Fireball vs 3 Goblins, 2 Ogre
   await expect(chatLog).toContainText("Dragoon Pistol");
   await expect(chatLog).toContainText("Ogre 1");
 
-  // Verify firearm consumed loaded bullet (0 shots left)
-  await expect(wizardSheet.locator('[data-pf1e-firearm-resolve]')).toContainText("ammo 0/1");
+  // Verify firearm consumed 1 loaded bullet out of 3 (2 shots left)
+  await expect(wizardSheet.locator('[data-pf1e-firearm-resolve]')).toContainText("ammo 2/3");
+
+  // Fire a second shot from the Dragoon Pistol without needing to reload
+  await wizardSheet.locator('[data-pf1e-resolve-attack]').click();
+  await expect(wizardSheet.locator('[data-pf1e-firearm-resolve]')).toContainText("ammo 1/3");
 
   // 2. TEST SPELLCASTING: FIREBALL WITH DC, REFLEX SAVE, FIRE DAMAGE, AND TARGET HP LOSS
   await wizardSheet.locator('nav button:has-text("spells")').click();
