@@ -190,13 +190,42 @@ interface AssetGetMsg {
 
 ### fog.put (0x06 · client → host · ops)
 
-Per-user explored fog, downscaled PNG readback (§8 key [worldId,sceneId,userId]).
+Per-user explored fog: the sender's explored map of a scene as a PNG (opaque = unexplored,
+the fog texture read back at 512 px wide). The host keeps the latest per user + scene and
+persists it (§8 key [worldId,sceneId,userId]; the world file carries it under `fog/`, D-250).
+A user can only write their own map; empty or > 1 MiB payloads are dropped (§16).
 
 ```ts
 interface FogPutMsg {
   kind: "fog.put";
   sceneId: DocId;
   png: Uint8Array;
+}
+```
+
+### fog.get (0x0e · client → host · ops)
+
+Ask for one's own stored explored map of a scene (D-250). Sent when a fogged scene is
+entered and again after every welcome (reconnect); the client merges the answer into its
+texture, so repeats are harmless. Answered with `fog.state`.
+
+```ts
+interface FogGetMsg {
+  kind: "fog.get";
+  sceneId: DocId;
+}
+```
+
+### fog.state (0x2e · host → client · ops)
+
+The asker's stored explored map for `sceneId` — the latest `fog.put` in memory, else the fog
+store; `png: null` when nothing is stored (D-250).
+
+```ts
+interface FogStateMsg {
+  kind: "fog.state";
+  sceneId: DocId;
+  png: Uint8Array | null;
 }
 ```
 

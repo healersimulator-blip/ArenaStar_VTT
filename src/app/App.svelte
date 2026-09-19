@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { detectCapabilities } from "./capabilities";
-  import { DEFAULT_SCENE_ID, makeToken, type HostApp } from "./hostBoot";
+  import { DEFAULT_SCENE_ID, GM_USER_ID, makeToken, type HostApp } from "./hostBoot";
   import { createStage, type Stage } from "../canvas/stage";
   import { tokenRect } from "../canvas/tokens";
   import type { RollHighlightRect } from "../canvas/layers/RollHighlightLayer";
@@ -25,7 +25,6 @@
   import {
     exportWorldToFolder,
     exportWorldZip,
-    importWorldZip,
   } from "../host/worldFile";
   import { ChatPanel } from "../ui/chat";
   import { CombatPanel } from "../ui/combat";
@@ -40,6 +39,8 @@
   import { macroSlots, runChatMacro } from "../ui/macros";
   import { gmState } from "../ui/armies/gmState.svelte";
   import { buildStrategicFog, sceneIsStrategic } from "../core/strategicFog";
+  import { FogExploration } from "../client/fogExploration";
+  import { createVisionComputer } from "../workers/visionComputer";
   import { ModuleIframe } from "../packages/moduleIframe";
   import { dice3dStats, diceInfoFromRecord, showDice3D } from "../dice/dice3d";
   import { verifyCommitRoll } from "../dice/commitReveal";
@@ -52,7 +53,7 @@
     type ModuleHost,
   } from "../packages/moduleHandlers";
   import type { ModuleHookName } from "../core/moduleApi";
-  import { getSetting } from "../storage/idb";
+  import { getFog, getSetting } from "../storage/idb";
   import { createMassBattleBasic } from "../packages/massBattleBasic";
   import type {
     ArmyDocument,
@@ -108,7 +109,17 @@
   let {
     app = null,
     bootError = null,
-  }: { app?: HostApp | null; bootError?: string | null } = $props();
+    onExit = null,
+  }: {
+    app?: HostApp | null;
+    bootError?: string | null;
+    /**
+     * D-249 "Close world": the host (Root) closes the HostApp and returns to the start
+     * screen, where worlds are listed, opened, imported, exported and deleted. Null hides
+     * the button (embedding without a start screen).
+     */
+    onExit?: (() => void) | null;
+  } = $props();
 
   const caps = detectCapabilities();
   const rows: Array<[string, boolean]> = Object.entries(caps);
@@ -168,6 +179,8 @@
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
   let shareTimer: ReturnType<typeof setInterval> | null = null;
   let fogTimer: ReturnType<typeof setInterval> | null = null;
+  /** D-250: §9 explored fog loop (restore → reveal → persist) for the GM's own map. */
+  let fog: FogExploration | null = null;
   let lastTurnPhase = "idle";
   let lastRulesVersion = "";
   let lastByType: Record<string, number> = {};
@@ -386,7 +399,8 @@
       x: 40 + (wm.list().length % 5) * 24,
       y: 40 + (wm.list().length % 5) * 24,
       width: 380,
-      height: 420,
+      // Settings carries the ruleset section on top of the scene options (D-249): taller.
+      height: kind === "settings" ? 560 : 420,
       ...(data ? { data } : {}),
     });
   }
@@ -747,6 +761,10 @@
         combats: current.gm.client.store.getAll("combats") as CombatDocument[],
       }),
     );
+    // D-250/D-251: explored fog follows the replica — tokens moved, doors opened, scene
+    // switched. The GM's cover is translucent (everything stays visible under it); god view
+    // off previews the opaque cover players get.
+    void fog?.sync(scene, { style: gmState.godView ? "translucent" : "opaque" });
     // §9 tiles: roofs fade over tokens with vision (D-083)
     const occupied = (scene?.tokens ?? [])
       .filter((t) => t.vision)
@@ -855,27 +873,6 @@
     } catch (err) {
       if ((err as Error)?.name === "AbortError") return;
       canvasError = `folder export failed: ${err instanceof Error ? err.message : String(err)}`;
-    }
-  }
-
-  async function importWorld(ev: Event): Promise<void> {
-    if (!app) return;
-    const input = ev.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file) return;
-    try {
-      const { db, root } = app;
-      // AWAITED: close() settles the persister's final batched flush. Importing
-      // before it lands lets that flush write a post-export document on top of
-      // the restore, so the reload boots a world the archive never contained.
-      await app.close(); // stop live writes; import replaces the world rows
-      const imported = await importWorldZip({ db, root, file });
-      console.info(
-        `vtt: imported world ${imported.name} at seq ${imported.seq}`,
-      );
-      globalThis.location.reload(); // reboot into the restored world
-    } catch (err) {
-      canvasError = `import failed: ${err instanceof Error ? err.message : String(err)}`;
     }
   }
 
@@ -1054,6 +1051,18 @@
         // F01 — expose for chat roll-card highlights & e2e (canvasSmoke)
         (globalThis as unknown as { __stage?: unknown }).__stage = view;
         view.fit(scene?.width ?? 2000, scene?.height ?? 1500);
+        // D-250: the GM's explored map — every vision token reveals; persisted through the
+        // same fog.put/fog.get the players use (the GM UI only ever speaks ClientSync, §2).
+        fog = new FogExploration({
+          surfaceFor: (sc) => view.getFogLayer({ width: sc.width, height: sc.height }),
+          hideSurface: () => view.hideFogLayer(),
+          computer: createVisionComputer(),
+          transport: current.gm.client,
+          user: () => current.gm.client.user,
+          actors: () =>
+            current.gm.client.store.getAll("actors") as readonly ActorDocument[],
+          onError: (where, error) => console.warn(`fog ${where} failed`, error),
+        });
         controller = new CanvasController({
           onSelectionChange: (ids) => {
             tokenSelection = {
@@ -1535,6 +1544,42 @@
         fogTimer = globalThis.setInterval(syncStrategicFog, 300);
         installGmFogE2e({
           rectCount: () => view.getStrategicFogLayer().rectCount,
+          fogState: async () => {
+            await fog?.settle();
+            const stats = fog?.stats() ?? {
+              sceneId: null,
+              enabled: false,
+              restored: false,
+              restoredBytes: 0,
+              reveals: 0,
+              saves: 0,
+              lastSaveBytes: 0,
+              dirty: false,
+            };
+            const layer = view.peekFogLayer();
+            const stored = stats.sceneId
+              ? ((await getFog(current.db, current.worldId, stats.sceneId, GM_USER_ID))
+                  ?.png.length ?? 0)
+              : 0;
+            return {
+              sceneId: stats.sceneId,
+              enabled: stats.enabled,
+              restored: stats.restored,
+              restoredBytes: stats.restoredBytes,
+              reveals: stats.reveals,
+              saves: stats.saves,
+              lastSaveBytes: stats.lastSaveBytes,
+              explored: layer ? layer.exploredFraction() : 0,
+              shown: layer ? layer.shown : null,
+              style: layer ? layer.style : null,
+              stored,
+            };
+          },
+          fogFlush: async () => {
+            await fog?.flush();
+            return fog?.stats().saves ?? 0;
+          },
+          fogExploredAt: ({ x, y }) => view.peekFogLayer()?.exploredAt(x, y) ?? null,
           pf1eAreaPreviewShow: (spec) => {
             const model = showPF1eAreaPreview({
               kind: spec.kind as PF1eAreaKind,
@@ -1576,6 +1621,12 @@
             return flags?.core?.scale === "strategic"
               ? "strategic"
               : "tactical";
+          },
+          sceneCoreFlags: () => {
+            const core = (activeScene()?.flags as { core?: unknown } | undefined)?.core;
+            return core !== null && typeof core === "object"
+              ? { ...(core as Record<string, unknown>) }
+              : {};
           },
           godView: () => gmState.godView,
           viewAsFaction: () => gmState.viewAsFaction,
@@ -1805,14 +1856,27 @@
         canvasError = err instanceof Error ? err.message : String(err);
       }
     })();
+    // D-250: the explored map is uploaded after a quiet 1.5 s; a reload or tab close inside
+    // that window would lose the last reveal, so flush on pagehide (synchronous readback).
+    const onPageHide = (): void => void fog?.flush();
+    globalThis.addEventListener("pagehide", onPageHide);
     return () => {
+      globalThis.removeEventListener("pagehide", onPageHide);
       if (shareTimer !== null) clearInterval(shareTimer);
       clearCopyTimer();
       share?.close();
       controller?.destroy();
+      fog?.destroy();
+      fog = null;
       stage?.destroy();
       stage = null;
     };
+  });
+
+  // D-250/D-251: god view toggles (Settings / GM extras) restyle the cover at once.
+  $effect(() => {
+    const style = gmState.godView ? "translucent" : "opaque";
+    void fog?.sync(activeScene(), { style });
   });
 </script>
 
@@ -1853,7 +1917,22 @@
           <strong>{worldName}</strong>
           <span>seq {seq}</span>
           <span>tokens {tokenCount}</span>
+          <!-- D-248: which strategic ruleset this world runs (strategic scenes only) -->
+          <span
+            data-rules-status
+            data-rules-source={app.rulesBoot.source}
+            title="Strategic ruleset — applies to strategic-scale scenes; tactical scenes are heroes only"
+            >strategic rules: {app.rulesBoot.source === "package"
+              ? `${app.rulesBoot.packageId} v${app.rulesBoot.version}`
+              : `built-in v${app.rulesBoot.version}`}</span
+          >
         </div>
+        {#if app.rulesBoot.error}
+          <p class="error rules-boot-error" role="alert" data-rules-boot-error>
+            Strategic ruleset {app.rulesBoot.packageId ?? ""} could not load — running built-in
+            rules instead: {app.rulesBoot.error}
+          </p>
+        {/if}
         <label class="btn file-control" for="map-input">
           Import map
           <input
@@ -2068,6 +2147,7 @@
           {/if}
         </div>
         <h3>World file (§8)</h3>
+        <p class="hint" data-world-name title={app.worldId}>{app.meta.name}</p>
         <button id="export-world" type="button" onclick={exportWorld}>
           Export world (.zip)
         </button>
@@ -2076,16 +2156,23 @@
             Save to folder…
           </button>
         {/if}
-        <label class="btn">
-          Import world (.zip)
-          <input
-            id="import-world"
-            type="file"
-            accept=".zip,application/zip"
-            onchange={importWorld}
-            hidden
-          />
-        </label>
+        {#if onExit}
+          <!--
+            D-249: opening/importing another world happens on the start screen, not from
+            inside a running one — so the sidebar offers the way back instead of a second
+            importer. The world is saved continuously; closing loses nothing.
+          -->
+          <button
+            id="close-world"
+            type="button"
+            onclick={async () => {
+              await fog?.flush(); // D-250: the last reveal lands before the world closes
+              onExit?.();
+            }}
+          >
+            Close world…
+          </button>
+        {/if}
       </aside>
       <div class="canvas-col">
         <nav class="scenenav" aria-label="Scenes" data-testid="scene-nav">
@@ -2193,6 +2280,7 @@
           onUndo={undo}
           onRedo={redo}
           packages={app.packages}
+          rulesBoot={app.rulesBoot}
         />
         {#if pendingReaction}
           <!--
@@ -2520,6 +2608,14 @@
   #status strong {
     color: #f2f5f8;
     font-size: 1.1rem;
+  }
+  #status [data-rules-status] {
+    font-size: 0.8rem;
+    color: #b1bdca;
+  }
+  .rules-boot-error {
+    margin: 8px 0 0;
+    font-size: 0.85rem;
   }
   .btn,
   button {

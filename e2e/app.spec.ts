@@ -27,6 +27,16 @@ const waitForApp = (page: Page): Promise<void> =>
     .toBe(true);
 
 test.describe("GM tab app shell (§2, §14 M1)", () => {
+  test("the role picker's Host a world boots a live shell (D-248 regression)", async ({ page }) => {
+    // The production route (no ?e2e): Root boots, THEN mounts App. Mounting App before the
+    // boot had an app left a dead shell — status "—", no canvas.
+    await page.goto(entry);
+    await page.click("#role-host");
+    await expect(page.locator("#status")).toContainText("World One", { timeout: 15_000 });
+    await expect(page.locator("#status [data-rules-status]")).toHaveText(/strategic rules: built-in/);
+    await expect(page.locator("canvas").first()).toBeVisible();
+  });
+
   test("boots a fresh world with the loopback GM session", async ({ page }) => {
     await page.goto(entry + "?e2e=1");
     await waitForApp(page);

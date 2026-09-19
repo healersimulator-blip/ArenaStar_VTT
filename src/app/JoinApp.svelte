@@ -14,9 +14,11 @@
   import { WindowHost } from "../ui/windows";
   import { openPF1eSheetWindow } from "../ui/sheets/pf1eSheetWindow";
   import { SheetPanel } from "../ui/sheets";
-  import type { SceneDocument, SceneGrid } from "../core/documents";
+  import type { ActorDocument, SceneDocument, SceneGrid } from "../core/documents";
   import type { Op } from "../core/ops";
   import { copyText } from "../ui/clipboard";
+  import { FogExploration } from "../client/fogExploration";
+  import { createVisionComputer } from "../workers/visionComputer";
 
   let app = $state<PlayerApp | null>(null);
   let phase = $state<"invite" | "exchange" | "live" | "dead">("invite");
@@ -57,6 +59,13 @@
   let stage: Stage | null = null;
   let controller: CanvasController | null = null;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  /** D-250: this player's explored fog — revealed by the tokens they control, kept by the host. */
+  let fog: FogExploration | null = null;
+  /**
+   * D-251: token ids fog lets this player see (null = fog off, all). The stage draws only
+   * these, and the controller never picks a hidden one (no select, sheet or menu through fog).
+   */
+  let fogVisible: ReadonlySet<string> | null = null;
 
   async function connect(inviteRaw: string): Promise<void> {
     joinError = null;
@@ -130,7 +139,10 @@
   function tokenViews(): TokenView[] {
     const scene = activeScene();
     if (!scene) return [];
-    return scene.tokens.map((token) => ({ token, sceneId: scene._id }));
+    const visible = fogVisible;
+    return scene.tokens
+      .filter((token) => visible === null || visible.has(token._id))
+      .map((token) => ({ token, sceneId: scene._id }));
   }
 
   function squareGrid(
@@ -151,6 +163,7 @@
     seq = client.store.seq;
     tokenCount = scene?.tokens.length ?? 0;
     view.syncTokens(scene?.tokens ?? []);
+    void fog?.sync(scene, { style: "opaque" });
     const img = scene?.img ?? null;
     if (img !== null && img !== loadedMapHash && current.fetcher) {
       loadedMapHash = img;
@@ -188,6 +201,46 @@
         const view = await createStage({ width, height, hostElement });
         stage = view;
         view.fit(scene?.width ?? 2000, scene?.height ?? 1500);
+        fog = new FogExploration({
+          surfaceFor: (sc) => view.getFogLayer({ width: sc.width, height: sc.height }),
+          hideSurface: () => view.hideFogLayer(),
+          computer: createVisionComputer(),
+          transport: client,
+          user: () => client.user,
+          actors: () => client.store.getAll("actors") as readonly ActorDocument[],
+          onVisibility: (ids) => {
+            fogVisible = ids;
+            view.setTokenVisibility(ids);
+          },
+          onError: (where, error) => console.warn(`fog ${where} failed`, error),
+        });
+        // a reconnect may reach a host session holding a map this tab never saw
+        client.bus.on("welcome", () => void fog?.refreshStored());
+        if (new URLSearchParams(globalThis.location.search).has("e2e")) {
+          const fogLoop = fog;
+          void import("./e2eHook").then((m) =>
+            m.installPlayerCanvasE2e({
+              fogState: async () => {
+                await fogLoop.settle();
+                const stats = fogLoop.stats();
+                const layer = view.peekFogLayer();
+                return {
+                  sceneId: stats.sceneId,
+                  enabled: stats.enabled,
+                  restored: stats.restored,
+                  reveals: stats.reveals,
+                  saves: stats.saves,
+                  explored: layer ? layer.exploredFraction() : 0,
+                  shown: layer ? layer.shown : null,
+                  style: layer ? layer.style : null,
+                  visibleTokenIds: stats.visibleTokenIds,
+                };
+              },
+              drawnTokens: () => view.drawnTokenIds(),
+              pickableTokens: () => tokenViews().map((t) => t.token._id).sort(),
+            }),
+          );
+        }
         controller = new CanvasController({
           onTokenActivate: ({ token }) => {
             if (token.actorId) openActorSheet(token.actorId);
@@ -237,11 +290,16 @@
       const code = app?.adapter.lastSentCode;
       if (code) hostCode = code;
     }, 250);
+    const onPageHide = (): void => void fog?.flush(); // D-250: last reveal before unload
+    globalThis.addEventListener("pagehide", onPageHide);
     return () => {
+      globalThis.removeEventListener("pagehide", onPageHide);
       offWm();
       clearCopyTimer();
       if (pollTimer !== null) clearInterval(pollTimer);
       controller?.destroy();
+      fog?.destroy();
+      fog = null;
       stage?.destroy();
       stage = null;
       app?.close();

@@ -7,7 +7,7 @@
    * goes stale (D-079). GM tools + journal popouts are the residents.
    */
   import type { WindowManager, WindowSpec } from "../../core/windows";
-  import type { HostPackages } from "../../app/hostBoot";
+  import type { HostPackages, HostRulesBoot } from "../../app/hostBoot";
   import PermissionsPanel from "../permissions/PermissionsPanel.svelte";
   import MacrosPanel from "../macros/MacrosPanel.svelte";
   import SettingsPanel from "../settings/SettingsPanel.svelte";
@@ -30,6 +30,7 @@
     onUndo,
     onRedo,
     packages = null,
+    rulesBoot = null,
   }: {
     manager: WindowManager;
     /** App-derived copy (manager.list() is a live ref — each{} needs fresh identity). */
@@ -40,6 +41,8 @@
     onUndo: () => void;
     onRedo: () => void;
     packages?: HostPackages | null;
+    /** Which strategic ruleset booted (Settings → ruleset section status line). */
+    rulesBoot?: HostRulesBoot | null;
   } = $props();
 
   /**
@@ -166,7 +169,7 @@
         {:else if win.kind === "macros"}
           <MacrosPanel {client} {bus} />
         {:else if win.kind === "settings"}
-          <SettingsPanel {client} {bus} {onUndo} {onRedo} />
+          <SettingsPanel {client} {bus} {onUndo} {onRedo} {packages} {rulesBoot} />
         {:else if win.kind === "journal" && win.data}
           <JournalPopout
             {client}
@@ -174,7 +177,7 @@
             pageId={win.data.pageId ?? ""}
           />
         {:else if win.kind === "gmextras"}
-          <GmExtrasPanel {client} {bus} {sceneId} {packages} />
+          <GmExtrasPanel {client} {bus} {sceneId} />
         {:else if win.kind === "armies"}
           <ArmiesTab
             {client}

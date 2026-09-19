@@ -15,10 +15,17 @@ pnpm test         # vitest unit tests
 pnpn typecheck    # tsc --noEmit
 pnpm lint         # eslint
 pnpm size         # prints raw+gzip size of dist/index.html, fails > 6 MB raw
+pnpm build:systems # → dist/packages/<id>-<version>.zip (strategic ruleset + content pack)
+pnpm build:worlds  # → dist/worlds/<id>-starter-<version>.zip (ready-to-open starter worlds)
 pnpm test:e2e     # builds, then runs Playwright against file:// of dist/index.html
 ```
 
 Requires Node 20+ and pnpm 10.
+
+**Play PF1e Mass Battles in three clicks:** `pnpm build && pnpm build:systems && pnpm build:worlds`,
+open `dist/index.html`, **Open file (.zip)** → `dist/worlds/pf1e-mass-battles-starter-1.0.0.zip`
+→ **Open as new world**. The world boots with the PF1e strategic ruleset active and the PF1e
+Core compendia installed; nothing to activate, nothing to reload.
 
 ## Layout
 
@@ -26,6 +33,48 @@ Exact per spec §18 — see `src/` (app, core, host, client, net/signaling/_, ca
 ui/*, dice, audio, packages, storage, workers, sim) and `systems/mass-battle-basic/`.
 Each module folder has an `index.ts` barrel. Tracking files live in the repo root:
 `PLAN.md`, `DECISIONS.md`, `DEVIATIONS.md`, `ROADMAP.md`, `PROTOCOL.md`.
+
+## World files, rulesets and content packs (§8, §12)
+
+A GM handles **one file per campaign**: the world file. Everything else travels inside it
+(D-248 format 2, D-249 lifecycle). The app tells the three `.zip` shapes apart by content:
+
+- **World file** — `world.json` at the root. Exported from *Export world (.zip)* /
+  *Save to folder…* (in-world) or *Export* on the start screen; it carries the world's
+  §12 packages, so a shared world boots the same strategic ruleset on another machine.
+  A **starter world** (`pnpm build:worlds`) is a world file with no campaign in it, a
+  ruleset active and its content packs installed — it always opens as a fresh copy.
+- **Strategic ruleset** — a `manifest.json` with `type: "system"` and `rules.js`
+  (e.g. `systems/pf1e-mass-battles`). It drives **strategic** scenes only
+  (heroes + units, Settings → Scale); tactical scenes (heroes only) never touch it,
+  so one world can mix both kinds. It is chosen in **New world…** and pinned once the
+  first strategic turn is resolved.
+- **Content pack** — a `manifest.json` with `type: "data"` and packs (e.g.
+  `systems/pf1e-core`); its entries appear under Compendia. Chosen in **New world…** or
+  added any time under Settings → *Strategic ruleset & content*.
+
+The start screen lists the worlds on this device (**Open / Export / Delete**) and has one
+**Open file (.zip)** entry: a world file offers *Open as new world* (a copy under a fresh id,
+optionally renamed) or *Restore* (the archive's own id — overwrites that world if present); a
+ruleset or content pack is named for what it is and offers *New world with it…*. Inside a
+world, **Close world…** returns to the start screen; the sidebar has no importer of its own.
+
+## Fog of war (§9)
+
+Fog is a per-scene switch under **Settings → Scene** (*Fog of war*, with an optional *Sight
+range* in squares; 0 = the whole scene, sight-blocking walls and closed doors always apply).
+Each player uncovers the map with the tokens they control and keeps what they have seen
+(D-250): the explored map is saved per player and scene by the host, comes back on reload or
+reconnect, and travels in the world file (`fog.json` + `fog/*.png`). What is in sight right
+now is clear; what was seen before is dimmed; what was never seen is black.
+
+Fog also hides tokens (D-251): on a fogged scene a player's canvas draws only the tokens they
+control plus whatever stands in their sight right now — a token in a remembered or unexplored
+area is not drawn and cannot be selected, opened or right-clicked; it appears the moment it
+walks into sight or the player's token walks up to it. The GM is never gated: the GM's fog is
+a translucent overlay marking where fog lies while every token and map feature stays visible
+under it (**God view**, on by default; switch it off in Settings → Scene or GM extras to
+preview the opaque cover players get). The GM's own map is the union of every vision token.
 
 ## file:// limitations (§15)
 

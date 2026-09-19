@@ -86,6 +86,7 @@ DEVIATIONS.md (target: empty).
 - [x] Host path: bootHostApp composition root (IDB → world pick → persister → seed → assets/pipeline → HostSync + GM loopback → AssetCache/Fetcher → lifecycle) (§2)
 - [x] GM tab shell: sidebar (#status world/seq/tokens, #add-token, #map-input import), canvas host w/ stage + interactions; drag commits update op; persists across reload (§2, §14)
 - [x] Role picker screen (Host a world / Join a game / Import world file) with §0 capability report; invite-link fragment (#room=&k=) opens join directly (§1, §2)
+- [x] Start screen (D-249): world list with Open / Export / Delete (two-step), one sniffing **Open file (.zip)** (world → *Open as new world* copy | *Restore*; starter → copy only; package → *New world with it…*), **New world…** wizard (name → strategic ruleset → content packs; `src/app/worldRecipe.ts`), **Close world…** back to the list; `?e2e=1` boots through the same `Root` (`e2e/start.spec.ts`, `tests/app/worldRecipe.test.ts`, `tests/host/worldLifecycle.test.ts`)
 - [x] Player join via Manual copy/paste signaling: GM share panel (invite + code exchange), player shell w/ ownership-gated canvas; two-context WebRTC e2e (§6.2, §6.4)
 - [x] Join via Nostr signaling (network stack lazy-imported at the share/join UI) (§19 M1) — invite `&h=<hostPubkey>`, local-relay e2e (D-066)
 - [x] Per-browser identity persisted (Ed25519→ECDSA fallback, IDB settings) (§6.4)
@@ -105,6 +106,9 @@ DEVIATIONS.md (target: empty).
 ### export/import
 
 - [x] world.zip streaming fflate export/import (world.json + documents.json + assets.json + assets/<hash>; fog/ + checkpoints/ land with their M2 features) — restore semantics, lossless round-trip test + e2e (§8)
+- [x] world.zip **format 2** — self-contained: `packages.json` + `packages/<id>/…` carry the §12 strategic ruleset and content packs with `rules.active`; format 1 still imports; trust never exported; one sniffing importer (world / ruleset / content pack) — D-248 (`tests/host/worldFilePackages.test.ts`, `tests/host/zipKind.test.ts`)
+- [x] import-as-copy (`importWorldZip({ mode: "copy", name })` → fresh `w-<id>`, the archive's world untouched, no trust carried), full `deleteWorldData` (every `[worldId, …]` store) + `deleteWorldFiles` (OPFS tree), `world.json.starter` — D-249 (`tests/host/worldLifecycle.test.ts`)
+- [x] starter worlds from the build — `pnpm build:worlds` → `dist/worlds/<id>-starter-<version>.zip` (format 2, `starter: true`, no documents, ruleset active + declared content packs installed; deterministic); part of `test:e2e` — D-249 (`tests/scripts/buildStarterWorlds.test.ts`, `e2e/start.spec.ts`)
 - [ ] File System Access "save to folder" alternative to the download (§8, M3 — ROADMAP)
 
 ### e2e (§14)
@@ -141,7 +145,7 @@ e2e 14/14 incl. late join, token move, GM crash recovery.
 - [x] Walls: segments, door state, one-way, sight/light/sound/move restrictions (§9) — D-075 (WallsLayer GM overlay + wallSight semantics)
 - [x] Visibility polygon per light/token — angular sweep O(n log n) in vision.worker.ts (§9) — D-075 (transferable-segment RPC; Node handler tests via stub scope)
 - [x] Lighting: additive render-texture, darkness level, colored ambient, token vision masks (§9) — D-075 (additive radial-gradient polys; token masks land with the app shell)
-- [x] Fog: per-user explored texture, downscaled readback → fog.put (§9) — D-075 (erase-into-RT reveal; 128px PNG readback; host stores per user+scene)
+- [x] Fog: per-user explored texture, downscaled readback → fog.put (§9) — D-075 (erase-into-RT reveal; 128px PNG readback; host stores per user+scene) · **live and persistent since D-250**: Settings → Scene switch + sight range, both shells run the reveal loop (`src/client/fogExploration.ts`), the host persists fog.put per user+scene (`fog` store, `fog.get`/`fog.state` restore) and the world file carries `fog/` · **hides tokens since D-251**: a player's canvas draws only their own tokens plus those in current sight (`fogVisibleTokenIds` → `stage.setTokenVisibility`); the GM's cover is translucent (0.35) and never gates
 - [x] Grids: hex (4 orientations), gridless; full measurement pluggability (§9) — D-076 (offset⇄axial⇄pixel for all 4 HexLayouts; hex measurement = cube distance × size)
 - [x] Templates (cone/circle/ray/rect) + drawings (freehand/poly/rect/text) layers + geometry/hit-tests — D-076 (§9)
 - [x] Tiles with occlusion (roof/fade), pings, rulers with waypoints, animated token movement (§9) — D-083 (glide already in the ticker; alt+click ping, ctrl+click snapped ruler ×12 + Escape, roof/fade over vision tokens; ephemeral relay via §5 channel)

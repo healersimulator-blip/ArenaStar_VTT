@@ -208,3 +208,31 @@ describe("readZipPackage / buildPackageFromFiles (§12)", () => {
     expect(res2.error).toContain("manifest.json not found");
   });
 });
+
+describe("manifest.dependencies (D-248 — advisory companions)", () => {
+  test("accepts a list of package ids, dedupes, and rejects self/invalid entries", () => {
+    const ok = validatePackageManifest(
+      systemManifest({ dependencies: ["pf1e-core", "pf1e-core", "other-pack"] }),
+    );
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect(ok.value.dependencies).toEqual(["pf1e-core", "other-pack"]);
+
+    const absent = validatePackageManifest(systemManifest());
+    expect(absent.ok).toBe(true);
+    if (absent.ok) expect(absent.value.dependencies).toBeUndefined();
+
+    expect(validatePackageManifest(systemManifest({ dependencies: "pf1e-core" })).ok).toBe(false);
+    expect(validatePackageManifest(systemManifest({ dependencies: ["Not An Id"] })).ok).toBe(false);
+    const self = validatePackageManifest(systemManifest({ dependencies: ["probe-rules"] }));
+    expect(self.ok).toBe(false);
+    if (!self.ok) expect(self.error).toContain("depend on itself");
+  });
+
+  test("data packages may declare dependencies too", () => {
+    const data = validatePackageManifest(
+      systemManifest({ id: "tables-pkg", type: "data", rules: undefined, dependencies: ["base-pack"] }),
+    );
+    expect(data.ok).toBe(true);
+    if (data.ok) expect(data.value.dependencies).toEqual(["base-pack"]);
+  });
+});

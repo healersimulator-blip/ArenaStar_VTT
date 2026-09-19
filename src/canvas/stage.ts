@@ -89,6 +89,10 @@ export interface Stage {
   getLightingLayer(): LightingLayer;
   /** §9 per-user explored fog (one per scene size — recreate per scene). */
   getFogLayer(sceneSize: { width: number; height: number }): FogLayer;
+  /** §9 fog is off for the scene: hide the mounted layer (if any) without dropping it. */
+  hideFogLayer(): void;
+  /** The mounted fog layer, if any (readbacks for e2e). */
+  peekFogLayer(): FogLayer | null;
   /** §9A faction fog cover (strategic scenes). */
   getStrategicFogLayer(): StrategicFogLayer;
   /** §9 pings + rulers (ephemeral overlays, ticker-driven). */
@@ -119,6 +123,13 @@ export interface Stage {
     tokens: readonly TokenDocument[],
     badges?: ReadonlyMap<string, readonly { code: string; tint: number }[]>,
   ): void;
+  /**
+   * D-251: which token ids are drawn (null = all). Applied to the views now and to every
+   * later `syncTokens`, so a token entering the replica while fog hides it never flashes.
+   */
+  setTokenVisibility(visible: ReadonlySet<string> | null): void;
+  /** Ids of the token views actually drawn right now (sorted; e2e readback). */
+  drawnTokenIds(): string[];
   /** Rubber-band selection rectangle in world coords (null clears). */
   setMarquee(
     a: { x: number; y: number } | null,
@@ -251,6 +262,8 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   tokenLayer.label = "tokens";
   root.addChild(tokenLayer);
   const tokenViews = new Map<string, Container>();
+  /** D-251: fog's token gate (null = draw every token). */
+  let tokenFilter: ReadonlySet<string> | null = null;
   /** Glide targets (§9 animated movement): views lerp here each tick. */
   const tokenTargets = new Map<string, { x: number; y: number }>();
 
@@ -424,6 +437,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
         tokenTargets.set(token._id, { x: rect.x, y: rect.y });
         if (jump) view.position.set(rect.x, rect.y); // new tokens appear in place
         view.alpha = token.hidden ? 0.5 : 1;
+        view.visible = tokenFilter === null || tokenFilter.has(token._id);
         const body = view.getChildByLabel("body") as Graphics | null;
         if (body) {
           body
@@ -446,6 +460,18 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           badgeChips.delete(id);
         }
       }
+    },
+    setTokenVisibility(visible: ReadonlySet<string> | null): void {
+      tokenFilter = visible;
+      for (const [id, view] of tokenViews) {
+        view.visible = visible === null || visible.has(id);
+      }
+    },
+    drawnTokenIds(): string[] {
+      return [...tokenViews]
+        .filter(([, view]) => view.visible)
+        .map(([id]) => id)
+        .sort();
     },
     getModelLayer(): ModelLayer {
       if (!modelLayer) {
@@ -482,6 +508,12 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       }
       fogLayer = new FogLayerImpl(app, sceneSize);
       fogHolder.addChild(fogLayer.container);
+      return fogLayer;
+    },
+    hideFogLayer(): void {
+      fogLayer?.setShown(false);
+    },
+    peekFogLayer(): FogLayer | null {
       return fogLayer;
     },
     setMarquee(a, b): void {

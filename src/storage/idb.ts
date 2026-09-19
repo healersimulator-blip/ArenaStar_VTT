@@ -4,7 +4,7 @@
  *   worlds     keyPath worldId                  → WorldsRecord (meta + flush state)
  *   documents  keyPath [worldId, coll, id]      → DocumentsRecord (top-level docs)
  *   oplog      keyPath [worldId, seq]           → OplogRecord (envelope + inverses)
- *   fog        keyPath [worldId, sceneId, userId] → FogRecord (PNG bytes)
+ *   fog        keyPath [worldId, sceneId, userId] → FogRecord (explored-map PNG, D-250)
  *   settings   keyPath [scope, key]             → SettingsRecord (world/client/module KV)
  *
  * OPFS: /vtt/<worldId>/assets/<hash> (see opfs.ts). Strategic stores (§8A:
@@ -76,7 +76,7 @@ export interface FogRecord {
   worldId: WorldId;
   sceneId: SceneId;
   userId: UserId;
-  /** Downscaled explored-fog PNG (§9). */
+  /** Explored-fog map as PNG: opaque = unexplored (§9, D-250). */
   png: Uint8Array;
 }
 
@@ -145,12 +145,29 @@ export async function listWorlds(db: IDBPDatabase): Promise<WorldsRecord[]> {
   return all.sort((a, b) => b.lastOpened - a.lastOpened);
 }
 
+/** Every store keyed `[worldId, …]` — what a world owns besides its `worlds` row. */
+export const WORLD_SCOPED_STORES = [
+  STORES.documents,
+  STORES.oplog,
+  STORES.fog,
+  STORES.assets,
+  STORES.checkpoints,
+  STORES.turnReports,
+  STORES.simdeltas,
+  STORES.packages,
+] as const;
+
+/**
+ * Remove a world and everything keyed under it (D-249: the start screen's Delete and the
+ * restore path both rely on this leaving no row behind in ANY world-scoped store — asset
+ * metadata, §8A strategic state and §12 packages included, not only the M1 trio). OPFS blobs
+ * are a separate tree; see `deleteWorldFiles` in opfs.ts.
+ */
 export async function deleteWorldData(db: IDBPDatabase, worldId: WorldId): Promise<void> {
+  const range = IDBKeyRange.bound([worldId], [worldId, []]);
   await Promise.all([
     db.delete(STORES.worlds, worldId),
-    deleteRange(db, STORES.documents, IDBKeyRange.bound([worldId], [worldId, []])),
-    deleteRange(db, STORES.oplog, IDBKeyRange.bound([worldId], [worldId, []])),
-    deleteRange(db, STORES.fog, IDBKeyRange.bound([worldId], [worldId, []])),
+    ...WORLD_SCOPED_STORES.map((store) => deleteRange(db, store, range)),
   ]);
 }
 
@@ -182,6 +199,11 @@ export async function getFog(
   userId: UserId,
 ): Promise<FogRecord | undefined> {
   return db.get(STORES.fog, [worldId, sceneId, userId]);
+}
+
+/** Every explored-fog row of a world (D-250: the world file's `fog/` entries). */
+export async function listFogForWorld(db: IDBPDatabase, worldId: WorldId): Promise<FogRecord[]> {
+  return db.getAll(STORES.fog, IDBKeyRange.bound([worldId], [worldId, []]));
 }
 
 export async function putSetting(db: IDBPDatabase, rec: SettingsRecord): Promise<void> {

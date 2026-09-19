@@ -7,7 +7,8 @@ test.describe("bootstrap (§15: must boot from file://)", () => {
   test("app boots and reports runtime capabilities", async ({ page }) => {
     await page.goto(entry);
     await expect(page.locator("h1")).toHaveText("VTT");
-    await expect(page.locator("section h2")).toContainText("Runtime capabilities");
+    // D-249: the start screen also lists worlds under its own h2; the capability report keeps its id.
+    await expect(page.locator("#caps-h")).toContainText("Runtime capabilities");
     // The seven §0-detected capabilities render with an explicit state.
     await expect(page.locator("li")).toHaveCount(7);
     await expect(page.getByText("webcrypto", { exact: true })).toBeVisible();

@@ -18,6 +18,7 @@ import type {
   ClockMsg,
   EphemeralKind,
   EphemeralMsg,
+  FogStateMsg,
   HelloMsg,
   PongMsg,
   RollChallengeMsg,
@@ -72,6 +73,8 @@ export interface ClientEvents {
   audio: AudioCmdMsg;
   /** F01/F03: a chat roll-card link asks the canvas to center + outline. */
   rollHighlight: RollHighlightRequest;
+  /** D-250: the host's answer to `requestFog` (also resolves the pending promise). */
+  fogState: FogStateMsg;
 }
 
 /** Which intents are latency-sensitive enough for optimistic echo (§5 default). */
@@ -118,6 +121,8 @@ export interface ClientSyncOptions {
 export class ClientSync {
   /** §11 pending client seeds, keyed by committed rollId. */
   private readonly committedRolls = new Map<string, string>();
+  /** D-250: `requestFog` waiters per sceneId. */
+  private readonly fogWaiters = new Map<DocId, Array<(png: Uint8Array | null) => void>>();
   readonly store: DocumentStore;
   private echoImpl: DocumentStore;
   private transport: Transport;
@@ -349,6 +354,9 @@ export class ClientSync {
 
   close(): void {
     this.transport.close();
+    // nothing more can arrive: release fog restores as "nothing stored"
+    for (const waiters of this.fogWaiters.values()) for (const w of waiters) w(null);
+    this.fogWaiters.clear();
   }
 
   private send(msg: WireMessage): void {
@@ -408,12 +416,20 @@ export class ClientSync {
       case "roll.reveal":
       case "asset.get":
       case "fog.put":
+      case "fog.get":
       case "relay.offer":
       case "turn.ready":
       case "sim.control":
       case "report.detail":
       case "sim.snapshot.get":
         return; // client→host kinds and later-milestone kinds are never received here
+      case "fog.state": {
+        const waiters = this.fogWaiters.get(msg.sceneId) ?? [];
+        this.fogWaiters.delete(msg.sceneId);
+        for (const w of waiters) w(msg.png);
+        this.bus.emit("fogState", msg);
+        return;
+      }
       case "asset.chunk":
         this.bus.emit("asset", msg);
         return;
@@ -561,11 +577,27 @@ export class ClientSync {
   }
 
   /**
-   * §8/§9 fog explored-texture upload (periodic downscaled PNG readback).
-   * The host stores it per user+scene for reconnect/world export.
+   * §8/§9 fog explored-map upload (PNG readback of the fog texture). The host keeps it per
+   * user + scene, persists it and hands it back through `requestFog` (D-250).
    */
   sendFogPng(sceneId: DocId, png: Uint8Array): void {
     this.send({ kind: "fog.put", sceneId, png });
+  }
+
+  /**
+   * D-250: this user's stored explored map for a scene — null when nothing is stored or the
+   * connection closes first. Concurrent requests for one scene share the answer.
+   */
+  requestFog(sceneId: DocId): Promise<Uint8Array | null> {
+    return new Promise((resolve) => {
+      const waiters = this.fogWaiters.get(sceneId);
+      if (waiters) {
+        waiters.push(resolve);
+        return;
+      }
+      this.fogWaiters.set(sceneId, [resolve]);
+      this.send({ kind: "fog.get", sceneId });
+    });
   }
 
   /** GM sim controls (§5A); non-GM sends are dropped by the host (§16). */

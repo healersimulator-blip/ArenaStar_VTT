@@ -57,6 +57,12 @@ export interface PackageManifest {
   version: string;
   type: "system" | "data";
   description?: string;
+  /**
+   * Package ids this one expects alongside it (e.g. a strategic ruleset naming its content
+   * pack). Advisory, never enforced (D-110: a system package must stay loadable alone) — the
+   * host reports the ones that are not imported so the GM can see what is missing.
+   */
+  dependencies?: string[];
   /** Required for `system`, forbidden for `data`. */
   rules?: PackageRulesBlock;
   /** Optional (system only): classic-script module entry for the sandboxed iframe. */
@@ -100,6 +106,20 @@ export function validatePackageManifest(raw: unknown): Result<PackageManifest> {
   }
   const manifest: PackageManifest = { id, name, version, type };
   if (description !== undefined) manifest.description = description;
+
+  const rawDeps = (raw as Record<string, unknown>).dependencies;
+  if (rawDeps !== undefined) {
+    if (!Array.isArray(rawDeps)) return err(`package ${id}: manifest.dependencies must be an array`);
+    const deps: string[] = [];
+    for (const dep of rawDeps) {
+      if (typeof dep !== "string" || !ID_RE.test(dep)) {
+        return err(`package ${id}: manifest.dependencies entries must be package ids`);
+      }
+      if (dep === id) return err(`package ${id}: a package cannot depend on itself`);
+      if (!deps.includes(dep)) deps.push(dep);
+    }
+    manifest.dependencies = deps;
+  }
 
   if (type === "data") {
     if (rules !== undefined) {

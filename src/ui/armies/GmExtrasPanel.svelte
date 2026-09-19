@@ -12,19 +12,16 @@
   import type { EventBus } from "../../core/events";
   import type { ArmyDocument, FactionDocument, UnitDocument } from "../../core/strategic";
   import { ORDER_TEMPLATES, rulesContextFromStore } from "./armyModel";
-  import type { HostPackages, PackageSummary } from "../../app/hostBoot";
   import { gmState } from "./gmState.svelte";
 
   let {
     client,
     bus,
     sceneId = null,
-    packages = null,
   }: {
     client: ClientSync;
     bus: EventBus<ClientEvents>;
     sceneId?: string | null;
-    packages?: HostPackages | null;
   } = $props();
 
   let factions = $state<FactionDocument[]>([]);
@@ -177,86 +174,7 @@
     if (ops.length > 0) client.submit(ops);
   }
 
-  // §12 system/data packages (import + activate; applies on world reload)
-  let pkgList = $state<PackageSummary[]>([]);
-  let pkgBusy = $state(false);
-  let pkgError = $state("");
-  let pkgFileInput = $state<HTMLInputElement | null>(null);
-  const refreshPackages = (): void => {
-    if (!packages) return;
-    void packages
-      .list()
-      .then((list) => {
-        pkgList = list;
-      })
-      .catch(() => {});
-  };
-  async function importPackageZip(): Promise<void> {
-    if (!packages || !pkgFileInput?.files?.[0]) return;
-    pkgBusy = true;
-    pkgError = "";
-    try {
-      const bytes = new Uint8Array(await pkgFileInput.files[0].arrayBuffer());
-      const res = await packages.importZip(bytes);
-      if (!res.ok) pkgError = res.error;
-      refreshPackages();
-    } finally {
-      pkgBusy = false;
-    }
-  }
-  async function activatePackage(id: string): Promise<void> {
-    if (!packages) return;
-    pkgBusy = true;
-    pkgError = "";
-    try {
-      const res = await packages.activate(id);
-      if (!res.ok) pkgError = res.error;
-      refreshPackages();
-    } finally {
-      pkgBusy = false;
-    }
-  }
-
-  // §12 trusted in-page execution: two-step GM consent (first click arms,
-  // second click within 3 s grants)
-  let trustConfirmId = $state("");
-  let trustTimer: ReturnType<typeof setTimeout> | null = null;
-  function requestGrantTrust(id: string): void {
-    if (trustConfirmId !== id) {
-      trustConfirmId = id;
-      if (trustTimer !== null) clearTimeout(trustTimer);
-      trustTimer = setTimeout(() => (trustConfirmId = ""), 3_000);
-      return;
-    }
-    trustConfirmId = "";
-    if (trustTimer !== null) clearTimeout(trustTimer);
-    void grantTrust(id);
-  }
-  async function grantTrust(id: string): Promise<void> {
-    if (!packages) return;
-    pkgBusy = true;
-    pkgError = "";
-    try {
-      const res = await packages.grantTrust(id);
-      if (!res.ok) pkgError = res.error;
-      refreshPackages();
-    } finally {
-      pkgBusy = false;
-    }
-  }
-  async function revokeTrust(id: string): Promise<void> {
-    if (!packages) return;
-    pkgBusy = true;
-    pkgError = "";
-    try {
-      const res = await packages.revokeTrust(id);
-      if (!res.ok) pkgError = res.error;
-      refreshPackages();
-    } finally {
-      pkgBusy = false;
-    }
-  }
-  onMount(refreshPackages);
+  // §12 strategic ruleset & content moved to Settings → RulesetSection (D-249).
 
   onMount(() => {
     const offSnapshot = bus.on("snapshot", refresh);
@@ -482,66 +400,6 @@
   </div>
 </div>
 
-{#if packages}
-  <div class="section" data-pkg-section>
-    <h4>System package (§12)</h4>
-    {#each pkgList as p (p.id)}
-      <div class="row" data-pkg-row data-pkg-id={p.id}>
-        <span
-          >{p.name} v{p.version} · {p.type}{p.packCount > 0
-            ? ` · ${p.packCount} pack(s)`
-            : ""}</span
-        >
-        {#if p.active}
-          <span data-pkg-active>active</span>
-        {:else if p.type === "system"}
-          <button
-            type="button"
-            data-pkg-activate
-            disabled={pkgBusy}
-            onclick={() => activatePackage(p.id)}
-          >
-            Activate
-          </button>
-        {/if}
-        {#if p.trustRequested}
-          {#if p.trusted}
-            <span data-pkg-trusted>trusted (in-page)</span>
-            <button
-              type="button"
-              data-trust-revoke
-              disabled={pkgBusy}
-              onclick={() => revokeTrust(p.id)}
-            >
-              Revoke trust
-            </button>
-          {:else}
-            <span data-pkg-trust-requested>wants in-page</span>
-            <button
-              type="button"
-              data-trust-grant
-              disabled={pkgBusy}
-              onclick={() => requestGrantTrust(p.id)}
-            >
-              {trustConfirmId === p.id ? "Confirm grant?" : "Grant in-page"}
-            </button>
-          {/if}
-        {/if}
-      </div>
-    {/each}
-    <div class="row">
-      <input
-        id="pkg-file"
-        type="file"
-        accept=".zip"
-        bind:this={pkgFileInput}
-        onchange={() => void importPackageZip()}
-      />
-    </div>
-    {#if pkgError}<p data-pkg-error>{pkgError}</p>{/if}
-    <p class="hint">Activation applies when the world reloads; fresh campaigns only.</p>
-  </div>
-{/if}
 
 <style>
   .gmextras {
@@ -551,11 +409,6 @@
   }
   h4 {
     margin: 4px 0 0;
-  }
-  .hint {
-    margin: 0;
-    font-size: 0.8125rem;
-    opacity: 0.7;
   }
   .row {
     display: flex;

@@ -8,6 +8,7 @@ import type {
   ActorDocument,
   CombatDocument,
   Json,
+  Ownership,
   TokenDocument,
 } from "../core/documents";
 import type { FlatDiff } from "../core/ops";
@@ -172,7 +173,14 @@ export interface AppSurface {
    * facts arrive via `deriveFromDocuments` rather than from this spec.
    */
   pf1ePlaceTokens(
-    tokens: Array<{ id: string; col: number; row: number; size?: string }>,
+    tokens: Array<{
+      id: string;
+      col: number;
+      row: number;
+      size?: string;
+      /** D-251: `"gm"` places a token (and actor) only the GM owns — a monster to be hidden by fog. */
+      owner?: "all" | "gm";
+    }>,
   ): { ok: boolean; placed: number; cellSize: number };
   /**
    * D-205 — merge authored `system.pf1e` fields onto an existing actor (the
@@ -690,6 +698,8 @@ export interface GmFogSurface {
   rectCount(): number;
   /** Active scene flags.core.scale ("tactical" when unset). */
   sceneScale(): string;
+  /** Active scene `flags.core` as stored (D-250: fog / fogRange land here). */
+  sceneCoreFlags(): Record<string, unknown>;
   godView(): boolean;
   viewAsFaction(): string;
   /** GM client pool replica model count (null before the first snapshot). */
@@ -840,6 +850,29 @@ export interface GmFogSurface {
     rectsDrawn: number;
     originDrawn: boolean;
   };
+  /**
+   * D-250 explored fog: the loop's stats after everything queued has landed, the share of
+   * the texture explored (0..1), whether the cover is drawn, and the bytes the host's fog
+   * store holds for the GM on the active scene.
+   */
+  fogState(): Promise<{
+    sceneId: string | null;
+    enabled: boolean;
+    restored: boolean;
+    restoredBytes: number;
+    reveals: number;
+    saves: number;
+    lastSaveBytes: number;
+    explored: number;
+    shown: boolean | null;
+    /** D-251: "translucent" (god view, the GM's see-through cover) or "opaque" (preview). */
+    style: string | null;
+    stored: number;
+  }>;
+  /** D-250: upload the map now (the debounce is 1.5 s); resolves with the save count. */
+  fogFlush(): Promise<number>;
+  /** D-250: is the world point explored on the GM's texture? (null = no fog layer) */
+  fogExploredAt(spec: { x: number; y: number }): boolean | null;
 }
 
 export interface RulesPackageSmokeResult {
@@ -885,7 +918,29 @@ export interface VttE2eSurface {
   ): Promise<MassBattleAcceptanceResult>;
   app: AppSurface | null;
   player: PlayerSurface | null;
+  /** D-251: the player shell's canvas readbacks (fog gate), installed once its stage mounts. */
+  playerCanvas?: PlayerCanvasSurface | null;
   share: ShareSurface | null;
+}
+
+/** D-251: what the player's canvas shows under fog. */
+export interface PlayerCanvasSurface {
+  /** The player's fog loop after everything queued landed, plus the layer's style/visibility. */
+  fogState(): Promise<{
+    sceneId: string | null;
+    enabled: boolean;
+    restored: boolean;
+    reveals: number;
+    saves: number;
+    explored: number;
+    shown: boolean | null;
+    style: string | null;
+    visibleTokenIds: string[] | null;
+  }>;
+  /** Token views the stage draws right now (sorted ids). */
+  drawnTokens(): string[];
+  /** Token ids the controller can pick (select / sheet / menu) — fog-hidden ones are not. */
+  pickableTokens(): string[];
 }
 
 function playerSurface(playerApp: PlayerApp): PlayerSurface {
@@ -942,6 +997,11 @@ function playerSurface(playerApp: PlayerApp): PlayerSurface {
 export async function installPlayerE2e(playerApp: PlayerApp): Promise<void> {
   const surface = (globalThis as { __vttE2E?: VttE2eSurface }).__vttE2E;
   if (surface) surface.player = playerSurface(playerApp);
+}
+
+export function installPlayerCanvasE2e(surface: PlayerCanvasSurface): void {
+  const s = (globalThis as { __vttE2E?: VttE2eSurface }).__vttE2E;
+  if (s) s.playerCanvas = surface;
 }
 
 export function installGmFogE2e(surface: GmFogSurface): void {
@@ -1351,11 +1411,13 @@ function appSurface(app: HostApp): AppSurface {
         const actorId = `a-${t.id}`;
         // Typed locals: the size is authored data the model has to read back
         // through `deriveFromDocuments`, not something this call hands it.
+        const ownership: Ownership =
+          t.owner === "gm" ? { default: 0, gm: 3 } : { default: 3 };
         const actorDoc: ActorDocument = {
           _id: actorId,
           type: "actor",
           name: `${t.id} (actor)`,
-          ownership: { default: 3 },
+          ownership,
           flags: {},
           system: { pf1e: { size: t.size ?? "Medium" } },
           items: [],
@@ -1369,6 +1431,7 @@ function appSurface(app: HostApp): AppSurface {
             (t.row + side / 2) * cellSize,
             t.id,
           ),
+          ownership,
           width: side * cellSize,
           height: side * cellSize,
           actorId,
@@ -4217,7 +4280,18 @@ export async function installE2eHook(app?: HostApp | null): Promise<void> {
     massBattleAcceptance: (opts) => runMassBattleAcceptance(opts),
     app: app ? appSurface(app) : (existing?.app ?? null),
     player: existing?.player ?? null,
+    playerCanvas: existing?.playerCanvas ?? null,
     share: existing?.share ?? null,
   };
   (globalThis as { __vttE2E?: VttE2eSurface }).__vttE2E = surface;
+}
+
+/**
+ * D-249 "Close world": the HostApp behind `app` is gone, so the readbacks must go with it
+ * (a spec that reads `app.seq()` after closing would otherwise see the dead world).
+ * The transport drivers and the player/share surfaces are untouched.
+ */
+export function detachE2eApp(): void {
+  const surface = (globalThis as { __vttE2E?: VttE2eSurface }).__vttE2E;
+  if (surface) surface.app = null;
 }
