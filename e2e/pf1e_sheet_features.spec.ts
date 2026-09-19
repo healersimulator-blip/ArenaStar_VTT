@@ -22,12 +22,12 @@ test("PF1e character sheet: Skills tab, Character Builder, and Compendium Picker
       },
       {
         name: "feats",
-        type: "feats",
+        type: "items",
         file: "packs/feats.json",
       },
       {
         name: "spells",
-        type: "spells",
+        type: "items",
         file: "packs/spells.json",
       },
     ],
@@ -35,18 +35,32 @@ test("PF1e character sheet: Skills tab, Character Builder, and Compendium Picker
 
   const featPack = {
     name: "feats",
-    type: "feats",
+    type: "items",
     entries: [
       {
         id: "feat-power-attack",
         name: "Power Attack",
         data: {
-          type: "feat",
+          type: "item",
           name: "Power Attack",
           system: {
             pf1e: {
-              category: "combat",
+              category: "feat",
               summary: "Trade melee attack bonus for damage.",
+            },
+          },
+        },
+      },
+      {
+        id: "feat-cleave",
+        name: "Cleave",
+        data: {
+          type: "item",
+          name: "Cleave",
+          system: {
+            pf1e: {
+              category: "feat",
+              summary: "Make an extra attack when you fell a foe.",
             },
           },
         },
@@ -56,16 +70,17 @@ test("PF1e character sheet: Skills tab, Character Builder, and Compendium Picker
 
   const spellPack = {
     name: "spells",
-    type: "spells",
+    type: "items",
     entries: [
       {
         id: "spell-magic-missile",
         name: "Magic Missile",
         data: {
-          type: "spell",
+          type: "item",
           name: "Magic Missile",
           system: {
             pf1e: {
+              category: "spell",
               school: "evocation",
               level: 1,
               summary: "Fires unerring darts of magical energy.",
@@ -88,7 +103,7 @@ test("PF1e character sheet: Skills tab, Character Builder, and Compendium Picker
           name: "Valeros",
           system: {
             pf1e: {
-              abilities: { str: 16, dex: 14, con: 14, int: 10, wis: 12, cha: 10 },
+              abilities: { str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10 },
               hp: 12,
               hpMax: 12,
               skills: {
@@ -138,7 +153,7 @@ test("PF1e character sheet: Skills tab, Character Builder, and Compendium Picker
   const sheet = page.locator(".wm-window [data-pf1e-sheet]");
   await expect(sheet).toBeVisible();
 
-  // 1. Verify Character Builder Modal
+  // 1. Verify Character Builder Modal (Standard + Free-Form Modes + Search)
   await sheet.locator('[data-open-builder]').click();
   const builderModal = page.locator('.builder-modal');
   await expect(builderModal).toBeVisible();
@@ -147,7 +162,7 @@ test("PF1e character sheet: Skills tab, Character Builder, and Compendium Picker
   await builderModal.locator('label:has-text("Race") select').selectOption("elf");
   await builderModal.locator('label:has-text("Class") select').selectOption("fighter");
 
-  // Verify point-buy points calculate
+  // Verify point-buy points calculate with starting 10s
   await expect(builderModal.locator('.pointbuy-status')).toContainText("Spent: 0 / 15 pts");
 
   // Adjust an ability (increase STR input to 14)
@@ -155,7 +170,22 @@ test("PF1e character sheet: Skills tab, Character Builder, and Compendium Picker
   await strInput.fill("14");
   await expect(builderModal.locator('.pointbuy-status')).toContainText("Spent: 5 / 15 pts");
 
-  // Take screenshot of character builder
+  // Verify search for feats/spells inside builder
+  const searchInput = builderModal.locator('[data-builder-search]');
+  await searchInput.fill("Cleave");
+  await expect(builderModal.locator('.compendium-hit-row')).toContainText("Cleave");
+  // Add Cleave feat
+  await builderModal.locator('[data-add-hit]').first().click();
+  await expect(builderModal.locator('.selected-col').first()).toContainText("Cleave");
+
+  // Test Free-Form Mode tab
+  await builderModal.locator('[data-freeform-tab]').click();
+  await expect(builderModal).toContainText("Free-Form Character Details");
+  // Set custom race and class
+  await builderModal.locator('input[placeholder*="Aasimar"]').fill("Tiefling Custom");
+  await builderModal.locator('input[placeholder*="Magus"]').fill("Eldritch Knight");
+
+  // Take screenshot of character builder with free-form and search results
   await page.screenshot({ path: "test-results/character-builder-screenshot.png" });
 
   // Apply build
@@ -201,23 +231,31 @@ test("PF1e character sheet: Skills tab, Character Builder, and Compendium Picker
   await expect(chat).toHaveCount(1);
   await expect(chat.first().locator(".flavor")).toContainText("Perception");
 
-  // Take screenshot of skills tab
-  await page.screenshot({ path: "test-results/skills-tab-screenshot.png" });
+  // Switch back to actors tab and sheet
+  await page.click('[data-tab="actors"]');
 
-  // 3. Verify Compendium Feat Picker Modal
+  // 3. Verify Compendium Feat Picker Modal with search
   await sheet.locator('nav button:has-text("features")').click();
-  await sheet.locator('[data-browse-compendium-feats]').click();
+  // Verify Cleave added from builder is present
+  await expect(sheet.locator('[data-pf1e-detail="feats"]')).toHaveValue(/Cleave/);
 
+  await sheet.locator('[data-browse-compendium-feats]').click();
   const pickerModal = page.locator('.compendium-picker-window');
   await expect(pickerModal).toBeVisible();
   await expect(pickerModal.locator('.picker-header')).toContainText("feat");
 
-  // Take screenshot of compendium picker
-  await page.screenshot({ path: "test-results/compendium-picker-screenshot.png" });
+  // Test search in compendium picker
+  const pickerSearch = pickerModal.locator('[data-picker-search]');
+  await pickerSearch.fill("Power");
+  await expect(pickerModal.locator('.result-row')).toHaveCount(1);
+  await expect(pickerModal.locator('.result-row')).toContainText("Power Attack");
 
-  // Click close to verify dismiss
-  await pickerModal.locator('.close-btn').click();
+  // Add Power Attack
+  await pickerModal.locator('[data-add-compendium-entry]').click();
   await expect(pickerModal).not.toBeVisible();
+
+  // Verify Power Attack was added to feats
+  await expect(sheet.locator('[data-pf1e-detail="feats"]')).toHaveValue(/Power Attack/);
 
   expect(runtimeErrors).toEqual([]);
 });

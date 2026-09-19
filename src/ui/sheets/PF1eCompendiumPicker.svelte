@@ -1,37 +1,36 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { searchCompendia, type CompendiumPack, type CompendiumEntry } from "../../core/compendium";
+  import { loadWorldCompendia, type CompendiumPackRow } from "./compendiumLoader";
 
   let {
     kind = "spell", // "spell" | "feat" | "item"
+    worldId,
     onSelect,
     onClose,
   }: {
     kind?: "spell" | "feat" | "item";
+    worldId?: string;
     onSelect: (entry: CompendiumEntry, pack: CompendiumPack) => void;
     onClose: () => void;
   } = $props();
 
-  type Row = { packageId: string; pack: CompendiumPack };
-  let packs = $state<Row[]>([]);
+  let packs = $state<CompendiumPackRow[]>([]);
   let query = $state("");
   let loading = $state(true);
 
   onMount(async () => {
     loading = true;
     try {
-      // Find package compendia matching kind
-      // Compendia packs are retrieved from world packages if available
-      // or window hook if in browser
-      const hostPackages = (window as unknown as { __arenaHostPackages?: { compendia: () => Promise<Row[]> } }).__arenaHostPackages;
-      if (hostPackages) {
-        const all = await hostPackages.compendia();
-        packs = all.filter((r) => {
-          if (kind === "spell") return r.pack.name.toLowerCase().includes("spell");
-          if (kind === "feat") return r.pack.name.toLowerCase().includes("feat");
-          return true;
-        });
-      }
+      const all = await loadWorldCompendia(worldId);
+      packs = all.filter((r) => {
+        const pType = r.pack.type.toLowerCase();
+        const pName = r.pack.name.toLowerCase();
+        if (kind === "spell") return pType.includes("spell") || pName.includes("spell");
+        if (kind === "feat") return pType.includes("feat") || pName.includes("feat");
+        if (kind === "item") return pType.includes("item") || pName.includes("item") || pType.includes("weapon") || pType.includes("armor");
+        return true;
+      });
     } catch {
       // ignore
     } finally {
@@ -43,7 +42,7 @@
     searchCompendia(
       packs.map((r) => r.pack),
       query,
-      40,
+      60,
     ),
   );
 </script>
@@ -60,6 +59,7 @@
         type="search"
         placeholder={`Search ${kind}s...`}
         bind:value={query}
+        data-picker-search
       />
     </div>
 
@@ -79,6 +79,7 @@
             <button
               type="button"
               class="add-btn"
+              data-add-compendium-entry
               onclick={() => onSelect(hit.entry, hit.pack)}
             >
               Add
@@ -133,63 +134,72 @@
     color: #9eafc5;
     cursor: pointer;
     font-size: 1.1rem;
+    padding: 2px 6px;
   }
   .close-btn:hover {
     color: #fff;
   }
   .picker-search {
-    padding: 10px 14px;
+    padding: 8px 12px;
+    background: #141a22;
+    border-bottom: 1px solid #273547;
   }
   .picker-search input {
     width: 100%;
-    box-sizing: border-box;
-    padding: 6px 10px;
-    background: #131922;
+    background: #1c2430;
     border: 1px solid #3d4f66;
-    border-radius: 4px;
     color: #fff;
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    box-sizing: border-box;
   }
   .status-msg, .stats-msg {
-    margin: 0;
-    padding: 6px 14px;
+    padding: 10px 14px;
     font-size: 0.85rem;
     color: #9eafc5;
+    margin: 0;
   }
   .results-list {
     list-style: none;
+    padding: 0;
     margin: 0;
-    padding: 0 14px 14px 14px;
     overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
+    max-height: 50vh;
   }
   .result-row {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    padding: 6px 12px;
+    border-bottom: 1px solid #273547;
+  }
+  .result-row:hover {
     background: #232e3d;
-    padding: 8px 10px;
-    border-radius: 4px;
-    border: 1px solid #2e3e52;
   }
-  .result-row .name {
+  .info {
+    display: flex;
+    flex-direction: column;
+  }
+  .name {
     font-weight: 500;
-    display: block;
+    font-size: 0.9rem;
+    color: #e0e5ed;
   }
-  .result-row .meta {
+  .meta {
     font-size: 0.75rem;
-    color: #9eafc5;
+    color: #7b8ea6;
   }
   .add-btn {
-    background: #2d5a88;
+    background: #2b593f;
+    border: 1px solid #3d7d59;
     color: #fff;
-    border: 1px solid #437ab3;
     padding: 4px 10px;
     border-radius: 4px;
     cursor: pointer;
+    font-size: 0.8rem;
   }
   .add-btn:hover {
-    background: #3b73ad;
+    background: #366f4e;
   }
 </style>
