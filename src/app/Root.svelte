@@ -130,8 +130,15 @@
         >Back to start</button
       >
     </main>
-  {:else}
+  {:else if app}
+    <!-- App wires its canvas, bus listeners and status in onMount from the `app` prop, so it
+         must not mount before the boot has produced one (mounting on null left a dead shell:
+         no canvas, status "—" — found by the D-248 picker-import e2e). -->
     <App {app} {bootError} />
+  {:else}
+    <main class="vtt-ui">
+      <p class="sub" role="status" data-booting>Starting world…</p>
+    </main>
   {/if}
 {/if}
 

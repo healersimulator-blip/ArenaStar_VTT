@@ -11,9 +11,12 @@ modes/modules" is confusing.
 > picker and the GM sidebar, rules status + boot-error banner. **Strategic-mode
 > guarantee:** the ruleset applies to strategic-scale scenes only, so one world keeps
 > mixing heroes-only (tactical) and heroes-plus-units (strategic) scenes — proved by the
-> mixed-scene round trip in `tests/host/worldFilePackages.test.ts`. Not done: the
-> e2e package round-trip through the UI (Playwright's browser could not be fetched in
-> the implementing sandbox — see D-248 evidence) and everything from Phase 2 on.
+> mixed-scene round trip in `tests/host/worldFilePackages.test.ts` and, in a real
+> browser, by `e2e/worldfile.spec.ts` "D-248" (sidebar import → activate → export →
+> fresh browser context → picker import → boots on the package; Chromium 148/148 via
+> the D-222 recipe). Side find: the picker's *Host a world* / *Import world file*
+> routes mounted a dead shell (pre-existing; fixed in `Root.svelte`, see D-248).
+> Not done: everything from Phase 2 on.
 
 > Terminology used below, mapped onto what actually exists in the repo today:
 >
