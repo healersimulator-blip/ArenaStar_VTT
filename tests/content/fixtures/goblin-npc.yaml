@@ -1,0 +1,697 @@
+_id: sozB4GqGGPvdJ0PY
+_key: '!actors!sozB4GqGGPvdJ0PY'
+_stats:
+  coreVersion: '13.351'
+img: systems/pf1/icons/races/goblin.png
+items:
+  - _id: g9Dlg66yJNbzeJ0C
+    _key: '!actors.items!sozB4GqGGPvdJ0PY.g9Dlg66yJNbzeJ0C'
+    _stats:
+      compendiumSource: Compendium.pf1.races.Item.bOv30pyHB1gFbSTj
+      coreVersion: '13.346'
+    img: systems/pf1/icons/races/goblin.png
+    name: Goblin
+    system:
+      changes:
+        0xm2NjdF:
+          _id: 0xm2NjdF
+          formula: '4'
+          target: skill.rid
+          type: racial
+        ONfw8KnD:
+          _id: ONfw8KnD
+          formula: '-2'
+          target: str
+          type: racial
+        iQgVV9Pc:
+          _id: iQgVV9Pc
+          formula: '4'
+          target: dex
+          type: racial
+        qzNkiF7M:
+          _id: qzNkiF7M
+          formula: '-2'
+          target: cha
+          type: racial
+        w8XUnAl2:
+          _id: w8XUnAl2
+          formula: '4'
+          target: skill.ste
+          type: racial
+      creatureSubtypes:
+        - goblinoid
+      creatureTypes:
+        - humanoid
+      description:
+        value: >-
+          <h2>Starting
+          Age</h2><table><thead><tr><th>Adulthood</th><th>Intuitive<sup>1</sup></th><th>Self-Taught<sup>2</sup></th><th>Trained<sup>3</sup></th></tr></thead><tbody><tr><td>12
+          years</td><td><p>+1d4 years<br />(13 – 16 years)</p></td><td><p>+1d6
+          years<br />(13 – 18 years)</p></td><td><p>+2d6 years<br />(14 – 24
+          years)</p></td></tr></tbody></table><p><sup>1</sup> This category
+          includes barbarians, oracles, rogues, and sorcerers.<br /><sup>2</sup>
+          This category includes bards, cavaliers, fighters, gunslingers,
+          paladins, rangers, summoners, and witches.<br /><sup>3</sup> This
+          category includes alchemists, clerics, druids, inquisitors, magi,
+          monks, and wizards.</p><h2>Height and
+          Weight</h2><table><thead><tr><th>Gender</th><th>Base
+          Height</th><th>Height Modifier</th><th>Base Weight</th><th>Weight
+          Modifier</th></tr></thead><tbody><tr><td>Male</td><td>2 ft. 8
+          in.</td><td><p>+2d4 in.<br />(2 ft 10 in. – 3 ft. 4
+          in.)</p></td><td>30 lbs.</td><td><p>+(2d4 lbs.)<br />(32 – 38
+          lbs.)</p></td></tr><tr><td>Female</td><td>2 ft. 6 in.</td><td><p>+2d4
+          in.<br />(2 ft. 8 in. – 3 ft. 2 in.)</p></td><td>25
+          lbs.</td><td><p>+(2d4 lbs.)<br />(27 – 33
+          lbs.)</p></td></tr></tbody></table><h2>Standard Racial
+          Traits</h2><ul><li><strong>Ability Score Modifiers</strong>: Goblins
+          are fast, but weak and unpleasant to be around. They gain +4
+          <em>Dexterity</em>, -2 <em>Strength</em>, and -2
+          <em>Charisma</em>.</li><li><strong>Type</strong>: Goblins are
+          <em>humanoids</em> with the <em>goblinoid</em>
+          subtype.</li><li><strong>Size</strong>: Goblins are Small creatures
+          and thus gain a +1 <em>size bonus</em> to their AC, a +1 <em>size
+          bonus</em> on <em>attack rolls</em>, a -1 penalty to their
+          <em>CMB</em> and <em>CMD</em>, and a +4 <em>size bonus</em> on
+          <em>Stealth</em> checks.</li><li><strong>Base Speed</strong>: Goblins
+          are fast for their size, and have a base speed of 30
+          feet.</li><li><strong>Languages</strong>: Goblins begin play speaking
+          Goblin. Goblins with high <em>Intelligence</em> scores can choose from
+          the following: Common, Draconic, Dwarven, Gnoll, Gnome, Halfling, and
+          Orc. See the <em>Linguistics skill page</em> for more information
+          about these languages.</li></ul><h3>Feat and Skill Racial
+          Traits</h3><ul><li><strong>Skilled</strong>: Goblins gain a +4
+          <em>racial bonus</em> on
+          @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.xQbTtefpEfEaOYo7]{Ride}
+          and
+          @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.wRWHk7tCUHR99PzD]{Stealth}
+          checks.</li></ul><h3>Movement Racial Traits</h3><ul><li><strong>Fast
+          Movement</strong>: Goblins gain a +10 foot bonus to their base speed
+          (this is already added to their Base Speed above.)</li></ul><h3>Senses
+          Racial Traits</h3><ul><li><strong>Darkvision</strong>: Goblins see
+          perfectly in the dark up to 60 feet.</li></ul>
+      languages:
+        - goblin
+      size: sm
+      sources:
+        - id: PZO9280
+          pages: '244'
+      speeds:
+        land: 30
+      tags:
+        - Uncommon
+    type: race
+  - _id: g2Iie7MnYakof1Ve
+    _key: '!actors.items!sozB4GqGGPvdJ0PY.g2Iie7MnYakof1Ve'
+    _stats:
+      compendiumSource: Compendium.pf1.classes.Item.KfcnHrgAMpBhScKB
+      coreVersion: '13.346'
+    img: systems/pf1/icons/items/weapons/club.PNG
+    name: Warrior
+    system:
+      armorProf:
+        - lgt
+        - med
+        - hvy
+        - shl
+        - twr
+      bab: high
+      classSkills:
+        - art
+        - clm
+        - crf
+        - han
+        - int
+        - lor
+        - pro
+        - rid
+        - swm
+      description:
+        value: >-
+          <h2>Class Skills</h2><p>The warrior’s class skills (and the key
+          ability for each skill) are Climb (Str), Craft (Int), <em>Handle
+          Animal</em> (Cha), Intimidate (Cha), Profession (Wis), Ride (Dex), and
+          Swim (Str).</p>
+      hd: 10
+      hp: 5
+      level: 1
+      savingThrows:
+        fort:
+          value: high
+        ref:
+          value: low
+        will:
+          value: low
+      skillsPerLevel: 2
+      sources:
+        - id: PZO1110
+          pages: '450'
+      subType: npc
+      tag: warrior
+      weaponProf:
+        - simple
+        - martial
+    type: class
+  - _id: 0jogyxRE2kncrzzT
+    _key: '!actors.items!sozB4GqGGPvdJ0PY.0jogyxRE2kncrzzT'
+    _stats:
+      compendiumSource: Compendium.pf1.feats.Item.Uuiu3p982omhMEPj
+      coreVersion: '13.346'
+    img: systems/pf1/icons/feats/improved-initiative.jpg
+    name: Improved Initiative
+    system:
+      changes:
+        boYEW5Pa:
+          _id: boYEW5Pa
+          formula: '4'
+          target: init
+          type: untyped
+      description:
+        value: >-
+          <p><em>Your quick reflexes allow you to react rapidly to
+          danger.</em></p><p><strong>Benefits</strong>: You get a +4 bonus on
+          initiative checks.</p>
+      sources:
+        - id: PZO1110
+          pages: 115, 127
+      subType: feat
+      tags:
+        - Combat
+    type: feat
+  - _id: iBcabjRUwJDTurDL
+    _key: '!actors.items!sozB4GqGGPvdJ0PY.iBcabjRUwJDTurDL'
+    _stats:
+      compendiumSource: Compendium.pf1.armors-and-shields.Item.6YCQkebsf4vR508H
+      coreVersion: '13.346'
+    img: systems/pf1/icons/items/armor/leather.PNG
+    name: Leather Armor
+    system:
+      armor:
+        dex: 6
+        material:
+          base:
+            value: leather
+        value: 2
+      baseTypes:
+        - Leather Armor
+      description:
+        value: >-
+          <p>Leather armor is made up of multiple overlapping pieces of leather,
+          boiled to increase their natural toughness and then deliberately
+          stitched together. Although not as sturdy as metal armor, the
+          flexibility it allows wearers makes it among the most widely used
+          types of armor.</p>
+      equipmentSubtype: lightArmor
+      hardness: 2
+      hp:
+        base: 10
+      price: 10
+      size: sm
+      slot: armor
+      sources:
+        - id: PZO1110
+          pages: '151'
+      spellFailure: 10
+      subType: armor
+      weight:
+        value: 15
+    type: equipment
+  - _id: 3qntOPa41iNl7h0w
+    _key: '!actors.items!sozB4GqGGPvdJ0PY.3qntOPa41iNl7h0w'
+    _stats:
+      compendiumSource: Compendium.pf1.armors-and-shields.Item.l1qNkx4xGXelq6yY
+      coreVersion: '13.351'
+    img: systems/pf1/icons/items/armor/shield-light-wood.png
+    name: Light Wooden Shield
+    system:
+      actions:
+        ssnk6JSRh4Vo04Z9:
+          _id: ssnk6JSRh4Vo04Z9
+          ability:
+            attack: str
+            critMult: 2
+            critRange: 20
+            damage: str
+          actionType: mwak
+          activation:
+            type: attack
+            unchained:
+              type: attack
+          damage:
+            parts:
+              - formula: sizeRoll(1, 3, @size)
+                types:
+                  - bludgeoning
+          duration:
+            units: inst
+          extraAttacks:
+            type: standard
+          name: Bash
+          range:
+            units: melee
+          sort: 0
+      armor:
+        acp: 1
+        material:
+          base:
+            value: wood
+        value: 1
+      description:
+        value: >-
+          <p>A light wooden shield is essentially the same as a light steel
+          shield, except it responds differently to some spells and effects
+          (such as rusting grasp). A druid can use a light wooden shield, but
+          not a light steel shield.</p>
+      equipmentSubtype: lightShield
+      hardness: 5
+      hp:
+        base: 7
+      price: 3
+      size: sm
+      slot: shield
+      sources:
+        - id: PZO1110
+          pages: 142, 148, 151, 152
+      spellFailure: 5
+      subType: shield
+      weight:
+        value: 5
+    type: equipment
+  - _id: QRPzeIV6DlJq2xb8
+    _key: '!actors.items!sozB4GqGGPvdJ0PY.QRPzeIV6DlJq2xb8'
+    _stats:
+      compendiumSource: Compendium.pf1.weapons-and-ammo.Item.05rD6YP5sVSrKY28
+      coreVersion: '13.346'
+    img: systems/pf1/icons/items/weapons/sword-short.PNG
+    name: Shortsword
+    system:
+      actions:
+        lkzee7hknlqx9chs:
+          _id: lkzee7hknlqx9chs
+          ability:
+            attack: _default
+            critMult: 2
+            critRange: 19
+            damage: str
+          actionType: mwak
+          activation:
+            type: attack
+            unchained:
+              type: attack
+          damage:
+            parts:
+              - formula: sizeRoll(1, 6, @size)
+                types:
+                  - piercing
+          duration:
+            units: inst
+          extraAttacks:
+            type: standard
+          name: Attack
+          range:
+            units: melee
+            value: '0'
+          sort: 0
+      baseTypes:
+        - Shortsword
+      description:
+        value: >-
+          <p>Short swords are some of the most common weapons found in any
+          martial society, and thus designs are extremely varied, depending on
+          the region and creator. Most are around 2 feet in length. Their blades
+          can be curved or straight, single- or double-edged, and wide or
+          narrow. Hilts may be ornate or simple, with crossguards, basket hilts,
+          or no guard at all. Such weapons are often used on their own, but can
+          also be paired as a matched set, or used in conjunction with a dagger
+          or longer sword.</p>
+      hardness: 10
+      hp:
+        base: 2
+      links:
+        children:
+          - uuid: .Item.sSAycXieP9c2Anz4
+      material:
+        base:
+          value: steel
+      price: 10
+      properties:
+        fin: true
+      size: sm
+      sources:
+        - id: PZO1110
+          pages: 142, 148
+        - id: PZO1123
+          pages: '18'
+      subType: martial
+      weaponGroups:
+        - bladesLight
+      weaponSubtype: light
+      weight:
+        value: 2
+    type: weapon
+  - _id: nDUV33o5xwVEncg2
+    _key: '!actors.items!sozB4GqGGPvdJ0PY.nDUV33o5xwVEncg2'
+    _stats:
+      compendiumSource: Compendium.pf1.weapons-and-ammo.Item.Ata6ajiY9wuAnBLB
+      coreVersion: '13.346'
+    img: systems/pf1/icons/items/weapons/shortbow.PNG
+    name: Shortbow
+    system:
+      actions:
+        v3teurqmkaib0rai:
+          _id: v3teurqmkaib0rai
+          ability:
+            attack: _default
+            critMult: 3
+            critRange: 20
+          actionType: rwak
+          activation:
+            type: attack
+            unchained:
+              type: attack
+          ammo:
+            type: arrow
+          damage:
+            parts:
+              - formula: sizeRoll(1, 6, @size) + min(@abilities.str.mod, 0)[Strength]
+                types:
+                  - piercing
+          duration:
+            units: inst
+          extraAttacks:
+            type: standard
+          name: Attack
+          range:
+            maxIncrements: 10
+            units: ft
+            value: '60'
+          sort: 0
+      ammo:
+        default: JVyVrbzcgixIso9N
+        type: arrow
+      baseTypes:
+        - Shortbow
+      description:
+        value: >-
+          <p>A shortbow is made up of one piece of wood about 3 feet in length.
+          You need two hands to use a bow, regardless of its size. You can use a
+          shortbow while mounted. If you have a penalty for low Strength, apply
+          it to damage rolls when you use a shortbow. If you have a bonus for
+          high Strength, you can apply it to damage rolls when you use a
+          composite shortbow, but not a regular shortbow. A shortbow fires
+          arrows.</p>
+      hands: 2
+      hardness: 5
+      hp:
+        base: 5
+      links:
+        children:
+          - uuid: .Item.qkgFSbIdpzUUr0cl
+      material:
+        base:
+          value: wood
+      price: 30
+      size: sm
+      sources:
+        - id: PZO1110
+          pages: 143, 148
+        - id: PZO9452
+          pages: '0'
+      subType: martial
+      weaponGroups:
+        - bows
+      weaponSubtype: ranged
+      weight:
+        value: 2
+    type: weapon
+  - _id: JVyVrbzcgixIso9N
+    _key: '!actors.items!sozB4GqGGPvdJ0PY.JVyVrbzcgixIso9N'
+    _stats:
+      compendiumSource: Compendium.pf1.weapons-and-ammo.Item.23HXFjpPnuLFOylm
+      coreVersion: '13.346'
+    img: systems/pf1/icons/items/weapons/arrow.PNG
+    name: Arrow
+    system:
+      description:
+        value: >-
+          <p>An arrow used as a melee weapon is treated as a light improvised
+          weapon (-4 penalty on attack rolls) and deals damage as a dagger of
+          its size (critical multiplier x2).</p>
+
+          <p>Arrows come in a leather quiver that holds 20 arrows.</p>
+      equipped: false
+      hardness: 5
+      hp:
+        base: 1
+      price: 0.05
+      quantity: 20
+      size: sm
+      sources:
+        - id: PZO1110
+          pages: 142, 145
+        - id: PZO1123
+          pages: '22'
+      subType: arrow
+      unidentified:
+        price: 0.05
+      weight:
+        value: 0.15
+    type: ammo
+  - _id: IJdOZ2HNcUf3uOE2
+    _key: '!actors.items!sozB4GqGGPvdJ0PY.IJdOZ2HNcUf3uOE2'
+    _stats:
+      compendiumSource: Compendium.pf1.monster-abilities.Item.abPQPu23CmkfWudq
+      coreVersion: '13.346'
+    img: icons/creatures/eyes/humanoid-single-blind.webp
+    name: Darkvision
+    system:
+      abilityType: ex
+      changes:
+        X3tGp3Mi:
+          _id: X3tGp3Mi
+          formula: '60'
+          operator: set
+          target: sensedv
+          type: racial
+      description:
+        value: >-
+          <p>A creature with darkvision can see in total darkness, usually to a
+          range of 60 feet. Within this range, the creature can see as clearly
+          as a sighted creature could see in an area of bright light. Darkvision
+          is black and white only but otherwise like normal
+          sight.</p><p><em>Format:</em> darkvision 60
+          ft.</p><p><em>Location:</em> Senses.</p>
+      sources:
+        - id: PZO1133
+          pages: '292'
+        - id: PZO1127
+          pages: '292'
+        - id: PZO1137
+          pages: '292'
+      subType: misc
+    type: feat
+  - _id: sSAycXieP9c2Anz4
+    _key: '!actors.items!sozB4GqGGPvdJ0PY.sSAycXieP9c2Anz4'
+    _stats:
+      coreVersion: '13.346'
+    img: systems/pf1/icons/items/weapons/sword-short.PNG
+    name: Shortsword
+    system:
+      actions:
+        aKa67BB8RHBh8nyF:
+          _id: aKa67BB8RHBh8nyF
+          ability:
+            attack: str
+            critMult: 2
+            critRange: 19
+            damage: str
+          actionType: mwak
+          activation:
+            type: attack
+            unchained:
+              type: attack
+          damage:
+            parts:
+              - formula: sizeRoll(1, 6, @size)
+                types:
+                  - piercing
+          duration:
+            units: inst
+          extraAttacks:
+            type: standard
+          name: Attack
+          range:
+            units: melee
+            value: '0'
+          sort: 0
+      baseTypes:
+        - Shortsword
+      proficient: true
+      subType: weapon
+      weapon:
+        category: simple
+        type: light
+      weaponGroups:
+        - bladesLight
+    type: attack
+  - _id: qkgFSbIdpzUUr0cl
+    _key: '!actors.items!sozB4GqGGPvdJ0PY.qkgFSbIdpzUUr0cl'
+    _stats:
+      coreVersion: '13.346'
+    img: systems/pf1/icons/items/weapons/shortbow.PNG
+    name: Shortbow
+    system:
+      actions:
+        H7c9lA6odSzWVfxW:
+          _id: H7c9lA6odSzWVfxW
+          ability:
+            attack: dex
+            critMult: 3
+            critRange: 20
+            damage: str
+            max: 0
+          actionType: rwak
+          activation:
+            type: attack
+            unchained:
+              type: attack
+          ammo:
+            type: arrow
+          damage:
+            parts:
+              - formula: sizeRoll(1, 6, @size)
+                types:
+                  - piercing
+          duration:
+            units: inst
+          extraAttacks:
+            type: standard
+          name: Attack
+          range:
+            maxIncrements: 10
+            units: ft
+            value: '60'
+          sort: 0
+      ammo:
+        default: JVyVrbzcgixIso9N
+        type: arrow
+      baseTypes:
+        - Shortbow
+      proficient: true
+      subType: weapon
+      weapon:
+        category: simple
+        type: light
+      weaponGroups:
+        - bows
+    type: attack
+name: Goblin
+prototypeToken:
+  sight:
+    enabled: true
+  texture:
+    src: systems/pf1/icons/races/goblin.png
+system:
+  abilities:
+    cha:
+      value: 8
+    con:
+      value: 12
+    dex:
+      value: 11
+    int:
+      value: 10
+    str:
+      value: 13
+    wis:
+      value: 9
+  attributes:
+    speed:
+      burrow:
+        base: null
+      climb:
+        base: null
+      fly:
+        base: null
+      land:
+        base: 30
+      swim:
+        base: null
+  details:
+    alignment: ce
+    biography:
+      value: >-
+        <p>Goblins prefer to dwell in caves, amid large and dense thickets of
+        thistles and brambles, or in structures built and then abandoned by
+        others. Very few goblins have the drive to build structures of their
+        own. Coastlines are favored, as goblins are quite fond of sifting
+        through junk and flotsam in an unending quest to find treasures among
+        the refuse of more civilized races.</p><p>Goblin hatred runs deep, and
+        few things inspire their wrath more than gnomes (who have long fought
+        against goblins), horses (who frighten goblins tremendously), and
+        regular dogs (whom goblins regard as pale imitations of goblin
+        dogs).</p><p>Goblins are also quite superstitious, and treat magic with
+        a fawning mixture of awe and fear. They have the habit of ascribing
+        magic to the mundane as well, with fire and writing both taking on
+        mystical power in goblin society. Fire is much loved by goblins for its
+        capacity to wreak great destruction and because it doesn’t require size
+        or strength to wield, but written words are hated. Goblins believe that
+        writing steals words out of your head, and as a result of this belief,
+        goblins are universally illiterate.</p><p>Goblins are voracious and can
+        eat their body weight in food daily without growing fat. Goblin lairs
+        always have numerous storerooms and larders. While they prefer human and
+        gnome flesh, a goblin won’t turn down any food—except, perhaps,
+        vegetables.</p>
+    cr:
+      offset: 4
+    notes:
+      value: <p><strong>Source</strong> <em>Pathfinder RPG Bestiary pg. 156</em></p>
+    xp:
+      value: 0
+  skills:
+    acr: {}
+    apr: {}
+    art: {}
+    blf: {}
+    clm: {}
+    crf: {}
+    dev: {}
+    dip: {}
+    dis: {}
+    esc: {}
+    fly: {}
+    han: {}
+    hea: {}
+    int: {}
+    kar: {}
+    kdu: {}
+    ken: {}
+    kge: {}
+    khi: {}
+    klo: {}
+    kna: {}
+    kno: {}
+    kpl: {}
+    kre: {}
+    lin: {}
+    lor: {}
+    per: {}
+    prf: {}
+    pro: {}
+    rid:
+      rank: 1
+    sen: {}
+    slt: {}
+    spl: {}
+    ste: {}
+    sur: {}
+    swm:
+      rank: 1
+    umd: {}
+  traits:
+    ageCategory: adult
+    senses:
+      dv:
+        value: 60
+    size: sm
+    stature: tall
+type: npc

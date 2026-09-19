@@ -718,7 +718,9 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
           } catch {
             continue;
           }
-          const pack = parseCompendiumPack(parsed);
+          // World-origin packs: parsed from this world's own package records (world zip),
+          // so the 2,000-entry app-body cap does not apply (size-domain decision, D-252).
+          const pack = parseCompendiumPack(parsed, { origin: "world" });
           if (pack.ok) out.push({ packageId: rec.id, pack: pack.value });
         }
       }

@@ -1,0 +1,86 @@
+_id: mL9k7wUzzFbj1NmY
+_key: '!macros!mL9k7wUzzFbj1NmY'
+_stats:
+  coreVersion: '13.351'
+author: T9i9xVjdkHeFZC72
+command: >-
+  /**
+   * Prompt for Skill to roll.
+   *
+   * If no predefined actors are set, actors to roll are chosen first by selected tokens.
+   * If no tokens are selected, configured character is used instead.
+   */
+
+  // Enter actor names here, e.g. ["Bob", "Sneazel", "Karen the Destroyer"]
+
+  let actors = [];
+
+  // Limit skill choices to these IDs
+
+  // For example: ["int", "dip", "blf"]
+
+  let skills = [];
+
+  const skipDialog = true;
+
+
+  // END CONFIG
+
+
+  if (actors.length) actors = actors.map(actor =>
+  game.actors.getName(actor)).filter(a => !!a);
+
+  if (!actors.length) actors = canvas.tokens.controlled.map((t) =>
+  t.actor).filter((a) => !!a);
+
+  if (!actors.length && game.user.character) actors.push(game.user.character);
+
+  if (!actors.length)
+    return ui.notifications.warn("No applicable actor(s) found");
+
+  const rollSkill = (skillId) => actors.forEach((actor, i) =>
+  actor.rollSkill(skillId, { skipDialog, noSound: i > 0 }));
+
+
+  // Collect valid skills
+
+  const baseActor = actors[0];
+
+  if (skills.length == 0) {
+    skills = baseActor.allSkills
+      .filter(sklId => !sklId.includes(".")); // Ignore subskills
+  }
+
+
+  // Remap skill ID to full skill info
+
+  skills = skills
+    .map(sklId => baseActor.getSkillInfo(sklId)) // Get full info on each
+    .sort((a, b) => a.name.localeCompare(b.name)); // Alpha sort
+
+  // Build select box
+
+  const choices = skills.map(skl => `<option
+  value="${skl.id}">${skl.fullName}</option>`);
+
+
+  const msg = `Choose a skill to roll for the following actor(s): <b>${actors
+    .map((o) => o.name)
+    .join("</b>, <b>")}</b>`;
+
+  foundry.applications.api.DialogV2.wait({
+    window: { title: "Roll skill" },
+    content: `<p>${msg}</p><p style="justify-self:center;"><select name='skill'>${choices.join("")}</select></p>`,
+    buttons: [
+      {
+        label: "Roll",
+        icon: "fa-solid fa-dice-d20",
+        callback: (ev, button, dialog) => rollSkill(dialog.querySelector("select").value),
+      }
+    ],
+  });
+img: systems/pf1/icons/feats/skill-focus.jpg
+name: Roll Skill
+scope: global
+sort: 0
+type: script

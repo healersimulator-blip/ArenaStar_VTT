@@ -1,0 +1,622 @@
+_id: Vm8ccE6qchTx2Trn
+_key: '!tables!Vm8ccE6qchTx2Trn'
+_stats:
+  coreVersion: '13.351'
+displayRoll: true
+formula: 1d100
+img: icons/magic/unholy/hand-marked-pink.webp
+name: Arcane Malignancies
+replacement: true
+results:
+  - _id: 1L0YKX6tnMvS7cYK
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.1L0YKX6tnMvS7cYK'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      The smallest three toes on each of your feet have fused together. You take
+      a –2 penalty on
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.gGfJO90ZuRT4sZ9X]{Acrobatics},
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.ZAwjVOTwsBpZRgw4]{Climb},
+      and
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.emzBKDFNkNnC7N8u]{Perform
+      (dance)} checks.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 1
+      - 2
+    type: text
+    weight: 1
+  - _id: Bf5xcbWI27KGrv7b
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.Bf5xcbWI27KGrv7b'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      Your incisors grow so long and sharp that you have difficulty eating.
+      Eating takes twice as long. Consuming a potion or other magical foodstuff
+      requires a full-round action.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 3
+      - 4
+    type: text
+    weight: 1
+  - _id: QdgBIpYNZadJmZcb
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.QdgBIpYNZadJmZcb'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      You have an extra digit on each hand, which hampers your fine motor
+      skills. You take a –2 penalty on
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.3E8pxbjI8MD3JbfQ]{Craft},
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.cSdUATLHBFfw3v4s]{Disable
+      Device}, and
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.joza8kAIiImrPft7]{Sleight
+      of Hand} checks.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 5
+      - 7
+    type: text
+    weight: 1
+  - _id: Al4UbOYe90fMqlgj
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.Al4UbOYe90fMqlgj'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      Your limbs and torso are covered with piscine scales that you must
+      constantly moisten. If more than 1 day passes without you applying at
+      least a gallon of water to them, you take 1d3 points of damage each hour
+      until you do so.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 8
+      - 10
+    type: text
+    weight: 1
+  - _id: bRkk8VlVH4W4q2cA
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.bRkk8VlVH4W4q2cA'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      Your skin bears a sizable scarlet mark that flushes and lightens with your
+      moods. You take a –2 penalty on
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.kRK5XwVBvcMi35w2]{Bluff}
+      and
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.xg25z3GIpS590NDW]{Disguise}
+      checks.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 11
+      - 13
+    type: text
+    weight: 1
+  - _id: S4ljobUtpP8b7PUl
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.S4ljobUtpP8b7PUl'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      One of your eyes has grown enlarged and developed a pale, milky film.
+      Daylight seems uncomfortably bright to you. You take a –2 penalty on
+      saving throws against light-based spells and effects, and you are
+      automatically
+      @UUID[Compendium.pf1.pf1e-rules.NSqfXaj4MevUR2uJ.JournalEntryPage.xHUnCadQ2qYsfvV0]{Dazzled}
+      for 1d6 rounds when exposed to bright light or sunlight.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 14
+      - 16
+    type: text
+    weight: 1
+  - _id: IL4mvn2mLOxumrp5
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.IL4mvn2mLOxumrp5'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      The soles of your feet are flat, and you tire quickly. You can hustle for
+      only a half hour before becoming
+      @UUID[Compendium.pf1.pf1e-rules.NSqfXaj4MevUR2uJ.JournalEntryPage.AVaxTNildXRzYnQm]{Fatigued},
+      and every 4 hours spent traveling by foot in a day deals 1 point of
+      Constitution damage.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 17
+      - 19
+    type: text
+    weight: 1
+  - _id: RiMg4ivo2mx7TKxG
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.RiMg4ivo2mx7TKxG'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      Your already pallid complexion grows unusually sensitive to the rays of
+      the sun. Exposure to direct sunlight for more than 1 hour at a time makes
+      you
+      @UUID[Compendium.pf1.pf1e-rules.NSqfXaj4MevUR2uJ.JournalEntryPage.7LwCMwrX3tchvrjW]{Sickened}
+      for 24 hours.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 20
+      - 22
+    type: text
+    weight: 1
+  - _id: z5BA05MpeAnonVkg
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.z5BA05MpeAnonVkg'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      The tip of your tongue is forked and stiff. You have difficulty making
+      yourself understood. You take a –2 penalty on
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.kRK5XwVBvcMi35w2]{Bluff},
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.uB9Fy36RUjibxqvt]{Diplomacy},
+      and
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.xg25z3GIpS590NDW]{Disguise}
+      checks to fool or persuade others.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 23
+      - 25
+    type: text
+    weight: 1
+  - _id: xkXSyBmLiC2mHP37
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.xkXSyBmLiC2mHP37'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      The painful and stiff swelling of your joints puts you at a disadvantage
+      in combat. You take a –2 penalty on combat maneuver checks and
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.DTNlXXg77s3178WJ]{Escape
+      Artist} checks to free yourself when grappled or pinned.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 26
+      - 28
+    type: text
+    weight: 1
+  - _id: BXRP2hp1WvxqOSiD
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.BXRP2hp1WvxqOSiD'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      Your ears have stretched to an abnormal size, making you overly sensitive
+      to loud noises. Whenever you are dealt sonic damage, you take 1 additional
+      point of damage, and you are
+      @UUID[Compendium.pf1.pf1e-rules.NSqfXaj4MevUR2uJ.JournalEntryPage.3uIamlB0L1UZUwoF]{Deafened}
+      for 1 minute whenever you take damage from any sonic effect.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 29
+      - 31
+    type: text
+    weight: 1
+  - _id: IFteWwJ6EDA0GWvJ
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.IFteWwJ6EDA0GWvJ'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      The pupils of your eyes resemble a cat’s, and beasts cannot abide your
+      presence. You take a –2 penalty on
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.IrVgSeMcAM8rAh2B]{Handle
+      Animal} and
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.xQbTtefpEfEaOYo7]{Ride}
+      checks.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 32
+      - 33
+    type: text
+    weight: 1
+  - _id: mtMlXIkNOHFZhbk1
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.mtMlXIkNOHFZhbk1'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      You grow velvety-soft fur along your back, arms, and legs that chafes and
+      catches under clothing and armor, increasing the armor check penalty of
+      any armor by 1 and applying a –1 armor check penalty to ordinary clothing.
+      Clothing and armor can be specially fitted for you, eliminating the
+      increased penalty but increasing their price by 50 gp.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 34
+      - 35
+    type: text
+    weight: 1
+  - _id: i3iA0Fikd7Vw12CI
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.i3iA0Fikd7Vw12CI'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      You grow an extra row of sharp, crooked teeth. The uneven set of your jaws
+      gives you constant headaches. You take a –2 penalty on concentration
+      checks and saving throws against pain effects.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 36
+      - 37
+    type: text
+    weight: 1
+  - _id: VwaHD5YjLnQKli2k
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.VwaHD5YjLnQKli2k'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      It is nearly impossible to find armor that fits your concave chest and
+      unusually narrow, sloping shoulders. The armor check penalty of any armor
+      you wear increases by 1, and you take a –1 penalty to AC when wearing
+      medium or heavy armor.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 38
+      - 40
+    type: text
+    weight: 1
+  - _id: j5rNurO2d8ABhTfE
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.j5rNurO2d8ABhTfE'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      Your throat balloons out like a frog’s, and your voice comes out as an odd
+      croak. You take a –2 penalty on
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.uB9Fy36RUjibxqvt]{Diplomacy}
+      checks and on
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.emzBKDFNkNnC7N8u]{Perform
+      (act, oratory, and sing)} checks.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 41
+      - 42
+    type: text
+    weight: 1
+  - _id: XaQ97YaGODHye2P4
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.XaQ97YaGODHye2P4'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      An oozing sore has developed on your face that refuses to heal and makes
+      you more susceptible to illness. You take a –2 penalty on saving throws
+      against disease.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 43
+      - 45
+    type: text
+    weight: 1
+  - _id: Z8VPnu3SA0BFisbQ
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.Z8VPnu3SA0BFisbQ'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      Your flesh grows bark, and your major joints have become gnarled and
+      knotted like tree limbs, causing you to move slowly and stiffly. You take
+      a –2 penalty on Reflex saves.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 46
+      - 48
+    type: text
+    weight: 1
+  - _id: 1e0ccATCfwRbDv1S
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.1e0ccATCfwRbDv1S'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      Your thin, almost translucent skin is delicate and tears easily. You take
+      1 point of bleed damage from slashing attacks that deal at least 1 point
+      of damage to you.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 49
+      - 51
+    type: text
+    weight: 1
+  - _id: SBCPV4ACTmyzRHsu
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.SBCPV4ACTmyzRHsu'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      A massive patch of multicolored warts covers much of your face. People
+      cannot help but stare, and they always remember you once they’ve seen you.
+      You take a –4 penalty on
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.xg25z3GIpS590NDW]{Disguise}
+      checks.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 52
+      - 54
+    type: text
+    weight: 1
+  - _id: A2hJZCMzReLCV5jE
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.A2hJZCMzReLCV5jE'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      Your unruly hair grows with alarming speed. If you do not spend 1 hour
+      trimming and grooming your hair every 48 hours, it snarls in nearby
+      foliage whenever you are outdoors, imposing a –2 penalty to your Armor
+      Class and on attack rolls and
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.wRWHk7tCUHR99PzD]{Stealth}
+      checks.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 55
+      - 57
+    type: text
+    weight: 1
+  - _id: jPZIRrAUKoiiG7nJ
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.jPZIRrAUKoiiG7nJ'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      Your limbs are thin and frail. You take a –2 penalty to CMD against
+      disarm, grapple, and trip attempts.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 58
+      - 60
+    type: text
+    weight: 1
+  - _id: 1PvkZc1wtWMr4Tjp
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.1PvkZc1wtWMr4Tjp'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      Your bones shatter as easily as glass. You take 2 additional points of
+      damage each time you are hit by an attack made with a bludgeoning weapon.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 61
+      - 63
+    type: text
+    weight: 1
+  - _id: rBVd43kPusVE6ATb
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.rBVd43kPusVE6ATb'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      One arm is turning to stone, though you retain limited mobility. You take
+      a –4 penalty on all skill checks requiring the use of two hands and on
+      attack rolls when wielding a two-handed weapon or fighting with two
+      weapons.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 64
+      - 65
+    type: text
+    weight: 1
+  - _id: HgrxXBjRStjULWCi
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.HgrxXBjRStjULWCi'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      You develop an allergy to one spell per spell level from the witch spell
+      list (determined by your GM). Casting or being the target of a spell
+      you’re allergic to causes you to break out in a painful rash. This rash
+      deals 1d4 points of damage per spell level, and imposes a penalty on your
+      Charisma equal to the level of the spell. The rash fades after a number of
+      hours equal to the level of the spell.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 66
+      - 67
+    type: text
+    weight: 1
+  - _id: x5kAubzC7vAbax3M
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.x5kAubzC7vAbax3M'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      The joints in your unnaturally long thumbs have fused, and you often
+      fumble objects. When you retrieve a stored item, you have a 10% chance of
+      dropping it.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 68
+      - 69
+    type: text
+    weight: 1
+  - _id: 90kHOFcDxGQxKLhK
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.90kHOFcDxGQxKLhK'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      Your knees bend backward like a bird’s, which makes many athletic
+      movements difficult to master. You take a –2 penalty on
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.ZAwjVOTwsBpZRgw4]{Climb}
+      and
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.xhmDhOXuBbfVcD0Q]{Swim}
+      checks, and your running speed is only three times your regular walking
+      speed.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 70
+      - 72
+    type: text
+    weight: 1
+  - _id: V6TCPe72MHbdpjq7
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.V6TCPe72MHbdpjq7'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      A tenacious patch of fungus has sprouted on your back, weakening your
+      system against toxins. You take a –2 penalty on saves against poison
+      effects.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 73
+      - 75
+    type: text
+    weight: 1
+  - _id: U49Lv0Le2vZLJ5tU
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.U49Lv0Le2vZLJ5tU'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      Your misaligned eyes affect your ability to judge distances. You take a –2
+      penalty on ranged attack and damage rolls.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 76
+      - 77
+    type: text
+    weight: 1
+  - _id: aDDEQpCH3Vh1ZAyu
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.aDDEQpCH3Vh1ZAyu'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      When you get flustered, heat builds up in your face until it glows with
+      inner fire. You take a –4 penalty on
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.uB9Fy36RUjibxqvt]{Diplomacy}
+      and
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.emzBKDFNkNnC7N8u]{Perform}
+      checks when in the presence of 5 or more creatures.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 78
+      - 80
+    type: text
+    weight: 1
+  - _id: r368jGxcv2xDGaC6
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.r368jGxcv2xDGaC6'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      Your ears curl up like dried leaves, and you experience difficulty picking
+      up sounds. You take a –2 penalty on hearing-based
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.2h6hz5AkTDxKPFxr]{Perception}
+      checks.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 81
+      - 83
+    type: text
+    weight: 1
+  - _id: jOFHBYJsKdMsrHRi
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.jOFHBYJsKdMsrHRi'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      Your curving, clawlike fingernails grow so long so quickly that they
+      impede you in dangerous situations. You take a –2 penalty on
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.DTNlXXg77s3178WJ]{Escape
+      Artist} and
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.joza8kAIiImrPft7]{Sleight
+      of Hand} checks.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 84
+      - 86
+    type: text
+    weight: 1
+  - _id: mvtkfn7GX0PtxuzP
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.mvtkfn7GX0PtxuzP'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      One of your legs measures noticeably longer than the other, and you lose
+      your balance easily. You take a –2 penalty to CMD against bull rush and
+      trip attempts.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 87
+      - 89
+    type: text
+    weight: 1
+  - _id: 2WNV1Q1cbg81dYsx
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.2WNV1Q1cbg81dYsx'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      Your eyes have swollen to mere slits. You take a –2 penalty on sight-based
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.2h6hz5AkTDxKPFxr]{Perception}
+      checks.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 90
+      - 92
+    type: text
+    weight: 1
+  - _id: Im2met4fcUqoLnNS
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.Im2met4fcUqoLnNS'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      You develop a shaggy pelt about your neck and shoulders that makes you
+      overheat quickly. You take a –4 penalty on checks and saves to resist
+      environmental heat effects.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 93
+      - 96
+    type: text
+    weight: 1
+  - _id: LgMK0tMIGSO4oWbd
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.LgMK0tMIGSO4oWbd'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      You grow a tail that you can’t easily conceal and that thrashes violently
+      at inconvenient moments. You take a –2 penalty on
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.xg25z3GIpS590NDW]{Disguise}
+      and
+      @UUID[Compendium.pf1.pf1e-rules.x175kVqUfLGPt8tC.JournalEntryPage.wRWHk7tCUHR99PzD]{Stealth}
+      checks.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 97
+      - 98
+    type: text
+    weight: 1
+  - _id: pglLcIxKmNuvfKT6
+    _key: '!tables.results!Vm8ccE6qchTx2Trn.pglLcIxKmNuvfKT6'
+    _stats:
+      coreVersion: '13.346'
+    description: >-
+      You grow vestigial gills. While they grant you no ability to breathe in
+      water, they make it harder for you to catch your breath. When you are
+      fatigued, it takes 12 hours of complete rest to recover. When you are
+      exhausted, it takes 2 hours of complete rest to become fatigued.
+    img: icons/svg/d20-black.svg
+    name: ''
+    range:
+      - 99
+      - 100
+    type: text
+    weight: 1
+sort: 0
