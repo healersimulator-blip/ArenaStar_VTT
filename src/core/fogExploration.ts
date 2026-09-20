@@ -26,6 +26,7 @@ import type {
 import type { Op } from "./ops";
 import type { PermissionUser } from "./ownership";
 import { can } from "./permissions";
+import { fogMaskLog, pointInFogMask } from "./fogMask";
 import { pointInPolygon } from "../canvas/vision/polygon";
 
 export interface FogSettings {
@@ -146,10 +147,41 @@ export function tokenInSight(
 }
 
 /**
+ * D-256: the tokens the GM's manual Hide/Reveal mask covers, for one user. Roll20's Mask is
+ * *static* — it hides whatever the GM painted over and no amount of vision paints it away — so
+ * it is a filter on top of sight, not part of it. The one exception is the tokens a player
+ * controls: the mask never swallows a player's own mini, which is also what makes a player
+ * walked under the cover still able to move.
+ *
+ * The probe is the token's centre — the grid cell it stands in — so a token straddling a mask
+ * edge keeps showing, mirroring `tokenInSight`'s rule for a token half behind a wall. GM and
+ * ASSISTANT are never gated (the mask is drawn translucent for them, everything visible).
+ */
+export function maskHiddenTokenIds(
+  scene: SceneDocument,
+  user: PermissionUser | null,
+  context: FogViewerContext = {},
+): Set<string> {
+  const out = new Set<string>();
+  if (!user || user.role === "GM" || user.role === "ASSISTANT") return out;
+  const log = fogMaskLog(scene);
+  if (log.length === 0) return out;
+  const actors = context.actors ?? [];
+  for (const token of scene.tokens) {
+    if (controlsToken(user, token, scene, actors)) continue;
+    if (pointInFogMask(log, token.x, token.y)) out.add(token._id);
+  }
+  return out;
+}
+
+/**
  * D-251: which tokens a user is shown on a fogged scene — the ones they control, always
  * (they are the eyes), and any other only while `tokenInSight` of the user's current
  * polygons. GM/ASSISTANT see everything. Tokens the host already withheld (`hidden`) never
  * reach a player's replica in the first place (§5 projection).
+ *
+ * D-256 layers the GM's manual mask on top: a token standing in a hidden stroke is withheld
+ * however clear the line of sight is.
  */
 export function fogVisibleTokenIds(
   scene: SceneDocument,
@@ -160,12 +192,18 @@ export function fogVisibleTokenIds(
   const out = new Set<string>();
   if (!user) return out;
   const actors = context.actors ?? [];
+  const masked = maskHiddenTokenIds(scene, user, context);
   for (const token of scene.tokens) {
     if (user.role === "GM" || user.role === "ASSISTANT") {
       out.add(token._id);
       continue;
     }
-    if (controlsToken(user, token, scene, actors) || tokenInSight(token, polys)) out.add(token._id);
+    if (controlsToken(user, token, scene, actors)) {
+      out.add(token._id);
+      continue;
+    }
+    if (masked.has(token._id)) continue;
+    if (tokenInSight(token, polys)) out.add(token._id);
   }
   return out;
 }

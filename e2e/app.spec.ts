@@ -89,7 +89,9 @@ test.describe("GM tab app shell (§2, §14 M1)", () => {
     await page.goto(entry);
     await page.getByRole("button", { name: "Host a world" }).click();
     await expect(page.locator("[data-canvas-toolbar]")).toBeVisible();
-    await expect(page.locator("[data-canvas-tool]")).toHaveCount(6);
+    // D-256: the rail carries Roll20's tool set — select/pan, the drawing tools, measure,
+    // dice, and the GM's fog / wall / light / pin placements.
+    await expect(page.locator("[data-canvas-tool]")).toHaveCount(10);
     await page.locator('[data-canvas-tool="dice"]').click();
     await expect(page.getByLabel("Dice formula")).toHaveValue("1d20");
     await page.getByLabel("Dice formula").fill("1d20+5");

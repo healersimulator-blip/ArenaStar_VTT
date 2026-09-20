@@ -186,6 +186,20 @@ export interface ControllerOptions {
   }) => void;
   /** §9: ctrl+click appends a ruler waypoint ([] clears; snapped to grid). */
   onRulerChange?: (points: ReadonlyArray<{ x: number; y: number }>) => void;
+  /**
+   * §10 toolbar precedence (D-255). The app's active canvas tool decides who owns a left
+   * press: `"select"` (default) keeps the M1 gestures; `"pan"` makes a plain left-drag pan
+   * the camera (Roll20's Pan mode) instead of marquee-selecting or dragging a token; and
+   * `"suppress"` hands the canvas to the owning tool (draw/text/measure) — the controller
+   * ignores the gesture entirely so a stroke never drags a token under it.
+   */
+  interactionMode?: () => "select" | "pan" | "suppress";
+  /**
+   * D-256 layer gate: the **Objects & Tokens** layer is the only one where a token answers a
+   * pointer (Roll20: the same click on the map/GM/lighting layer manipulates the layer's own
+   * content instead). Defaults to true so every existing caller keeps its behaviour.
+   */
+  tokenLayerActive?: () => boolean;
 }
 
 type Mode = "idle" | "pan" | "marquee" | "drag";
@@ -219,10 +233,13 @@ export class CanvasController {
       this.dragged
     )
       return;
-    const hit = pickToken(
-      this.options.getTokens(),
-      screenToWorld(this.options.stage.camera, ev.x, ev.y),
-    );
+    const hit =
+      this.options.tokenLayerActive?.() === false
+        ? null
+        : pickToken(
+            this.options.getTokens(),
+            screenToWorld(this.options.stage.camera, ev.x, ev.y),
+          );
     if (hit && this.options.onTokenActivate) {
       ev.preventDefault();
       this.options.onTokenActivate(hit);
@@ -265,6 +282,9 @@ export class CanvasController {
 
   private pointerDown(ev: PointerEvt): void {
     this.dragged = false;
+    const tool = this.options.interactionMode?.() ?? "select";
+    // Draw/text/measure own the canvas: no marquee, no token drag, no ping/ruler.
+    if (tool === "suppress") return;
     const camera = this.options.stage.camera;
     const world = screenToWorld(camera, ev.x, ev.y);
     if (ev.button === 0 && ev.altKey && this.options.onPing) {
@@ -284,7 +304,11 @@ export class CanvasController {
       }
       return;
     }
-    const wantsPan = ev.button === 1 || ev.button === 2 || ev.shiftKey;
+    const wantsPan =
+      ev.button === 1 ||
+      ev.button === 2 ||
+      ev.shiftKey ||
+      (tool === "pan" && ev.button === 0);
     if (wantsPan) {
       ev.preventDefault();
       this.mode = "pan";
@@ -293,7 +317,9 @@ export class CanvasController {
       this.startCamera = { ...camera };
       return;
     }
-    const hit = pickToken(this.options.getTokens(), world);
+    const hit = this.options.tokenLayerActive?.() === false
+      ? null
+      : pickToken(this.options.getTokens(), world);
     if (hit) {
       this.selection.clear();
       this.selection.add(hit.token._id);

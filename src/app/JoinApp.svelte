@@ -1,12 +1,26 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onMount } from "svelte";
   import { bootPlayerApp, type PlayerApp } from "./joinBoot";
   import { parseInvite } from "./hostShare";
   import { createStage, type Stage } from "../canvas/stage";
-  import { screenToWorld } from "../canvas/camera";
-  import CanvasToolbar, { type CanvasTool } from "../ui/canvas/CanvasToolbar.svelte";
-  import { ToolInteractionController } from "../canvas/tools/controller";
+  import { screenToWorld, worldToScreen, zoomAt } from "../canvas/camera";
+  import { displayDistance } from "../canvas/grid/measure";
+  import { rulerLabel } from "../canvas/ephemera";
+  import CanvasToolbar, {
+    type CanvasAction,
+    type CanvasTool,
+    type RollMode,
+  } from "../ui/canvas/CanvasToolbar.svelte";
+  import {
+    DEFAULT_TOOL_OPTIONS,
+    ToolInteractionController,
+    type MeasurePreview,
+    type ShapePreview,
+    type ToolOptions,
+  } from "../canvas/tools/controller";
   import { drawingForText } from "../canvas/tools/drawing";
+  import { templateOutline } from "../canvas/layers/templateGeometry";
+  import { DEFAULT_BINDINGS, isTypingTarget } from "../core/keys";
   import {
     CanvasController,
     domPointerSource,
@@ -22,6 +36,8 @@
   import type { Op } from "../core/ops";
   import { copyText } from "../ui/clipboard";
   import { FogExploration } from "../client/fogExploration";
+  import { fogMaskLog } from "../core/fogMask";
+  import { drawingBounds } from "../canvas/layers/drawingGeometry";
   import { createVisionComputer } from "../workers/visionComputer";
   import { buildChatMessage, parseChatCommand } from "../core/chat";
 
@@ -62,15 +78,175 @@
   let canvasError = $state<string | null>(null);
   let canvasTool = $state<CanvasTool>("select");
   let canvasToolbarCollapsed = $state(false);
-  const rollFromToolbar = (formula: string) => {
+  /** D-256: the player's sub-tool settings (players never get the GM-only tools). */
+  let toolOptions = $state<ToolOptions>({
+    ...DEFAULT_TOOL_OPTIONS,
+    drawingStyle: { ...DEFAULT_TOOL_OPTIONS.drawingStyle },
+  });
+  /** D-256: the in-flight shape / brush gesture, drawn as an SVG overlay. */
+  let shapePreview = $state<ShapePreview | null>(null);
+  /** D-256: the in-canvas text editor (Roll20 types in place; `window.prompt` is gone). */
+  let textDraft = $state<{ at: { x: number; y: number }; value: string; editingId: string | null } | null>(null);
+  /** Roll20's own dice tray: the last five rolls are re-rollable. */
+  const GESTURE_TOOLS: ReadonlySet<CanvasTool> = new Set<CanvasTool>([
+    "draw",
+    "text",
+    "measure",
+  ]);
+  const rollFromToolbar = (formula: string, mode: RollMode = "roll") => {
     if (!app?.client?.user) return;
-    const built = buildChatMessage({ author: app.client.user._id, parsed: parseChatCommand(`/roll ${formula}`) });
+    const built = buildChatMessage({ author: app.client.user?.id ?? "", parsed: parseChatCommand(`/${mode} ${formula}`) });
     app.client.submit([{ kind: "create", coll: "messages", data: built.message }]);
   };
+  const nextId = (prefix: string) => `${prefix}-${globalThis.crypto.randomUUID().slice(0, 8)}`;
+  const playerUserId = () => app?.client.user?.id ?? "";
+  /** Commit the player's text tool editor (same contract as the GM shell). */
+  function commitTextDraft() {
+    const draft = textDraft;
+    textDraft = null;
+    const scene = activeScene();
+    if (!draft || !scene || !draft.value.trim()) return;
+    if (draft.editingId) {
+      app?.client.submit([
+        {
+          kind: "update",
+          ref: { coll: "drawings", id: draft.editingId, parent: { coll: "scenes", id: scene._id } },
+          diff: { text: draft.value, name: draft.value.slice(0, 80), strokeWidth: toolOptions.textSize },
+        },
+      ]);
+      return;
+    }
+    const drawing = drawingForText(nextId("drawing"), draft.at, draft.value, playerUserId(), {
+      color: toolOptions.drawingStyle.stroke,
+      width: Math.max(80, draft.value.length * toolOptions.textSize * 0.7),
+      height: toolOptions.textSize + 12,
+    });
+    drawing.strokeWidth = toolOptions.textSize;
+    app?.client.submit([
+      { kind: "create", coll: "drawings", parent: { coll: "scenes", id: scene._id }, data: drawing },
+    ]);
+  }
+  /** Double-clicking a label re-opens it in the editor (Roll20's double-click to edit). */
+  function editTextAt(world: { x: number; y: number }): boolean {
+    const scene = activeScene();
+    if (!scene) return false;
+    for (let i = scene.drawings.length - 1; i >= 0; i--) {
+      const drawing = scene.drawings[i];
+      if (!drawing || drawing.kind !== "text" || !drawing.text) continue;
+      const bounds = drawingBounds(drawing);
+      if (!bounds) continue;
+      if (
+        world.x >= bounds.x &&
+        world.x <= bounds.x + bounds.width &&
+        world.y >= bounds.y &&
+        world.y <= bounds.y + bounds.height
+      ) {
+        textDraft = { at: { x: bounds.x, y: bounds.y }, value: drawing.text, editingId: drawing._id };
+        return true;
+      }
+    }
+    return false;
+  }
+  /** The rail's actions a player has: view + windows (no GM fog/placement tools). */
+  function runCanvasAction(action: CanvasAction) {
+    const view = stage;
+    switch (action) {
+      case "zoom-in":
+      case "zoom-out": {
+        if (!view) return;
+        const host = canvasHost?.getBoundingClientRect();
+        view.setCamera(
+          zoomAt(
+            view.camera,
+            (host?.width ?? 0) / 2,
+            (host?.height ?? 0) / 2,
+            action === "zoom-in" ? 1.25 : 1 / 1.25,
+          ),
+        );
+        break;
+      }
+      case "zoom-fit": {
+        const scene = activeScene();
+        if (view && scene) view.fit(scene.width, scene.height);
+        break;
+      }
+      case "turn-order":
+        openTurnOrder();
+        break;
+      case "help":
+        openHelp();
+        break;
+      case "recall-measure":
+        toolController?.recall();
+        break;
+      case "escape":
+        if (!toolController || toolController.current() === null) canvasTool = "select";
+        else toolController.dismissGesture();
+        break;
+      default:
+        break;
+    }
+  }
+  /** Roll20's Turn Tracker for a player: the shared list, read-only where they lack rights. */
+  function openTurnOrder() {
+    const rect = canvasHost?.getBoundingClientRect();
+    if (rect) wm.setBounds({ width: rect.width, height: rect.height });
+    wm.open({
+      id: "turn-order",
+      title: "Turn order",
+      kind: "combat",
+      x: 60,
+      y: 60,
+      width: 380,
+      height: 420,
+    });
+  }
+  function openHelp() {
+    const rect = canvasHost?.getBoundingClientRect();
+    if (rect) wm.setBounds({ width: rect.width, height: rect.height });
+    wm.open({
+      id: "help",
+      title: "Keyboard shortcuts",
+      kind: "help",
+      x: 40,
+      y: 40,
+      width: 380,
+      height: 520,
+    });
+  }
   let loadedMapHash: string | null = null;
-  let stage: Stage | null = null;
+  /** `$state.raw`: the stage is a Pixi object graph — assignment must re-run the
+   *  effects that read it, but it must never be deep-proxied. */
+  let stage = $state.raw<Stage | null>(null);
   let controller: CanvasController | null = null;
+  let toolController: ToolInteractionController | null = null;
+  let measurePreview = $state<MeasurePreview | null>(null);
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Canvas tool listeners are attached after `await createStage(...)`, i.e. after the
+   * component-init context is gone — `onDestroy` may only be *called* synchronously
+   * (Svelte 5 throws `lifecycle_outside_component` otherwise, aborting the rest of the
+   * boot wiring). The teardown is registered in onMount and fills itself in later.
+   */
+  let toolCleanup: (() => void) | null = null;
+  /** Bumped when the (async) tool controller exists — the activation effect below re-runs. */
+  let toolReady = $state(0);
+  /**
+   * The player shell's active tool owns the next gesture — the same contract as the GM
+   * shell (D-255): draw/text/measure arm the tool controller, select disarms it, and
+   * `interactionMode` keeps token/marquee gestures from firing underneath a stroke.
+   */
+  $effect(() => {
+    void toolReady;
+    const tool = toolController;
+    if (!tool) return;
+    if (GESTURE_TOOLS.has(canvasTool)) {
+      tool.activate(canvasTool);
+    } else {
+      tool.cancel();
+      shapePreview = null;
+    }
+  });
   /** D-250: this player's explored fog — revealed by the tokens they control, kept by the host. */
   let fog: FogExploration | null = null;
   /**
@@ -176,6 +352,10 @@
     tokenCount = scene?.tokens.length ?? 0;
     view.syncTokens(scene?.tokens ?? []);
     void fog?.sync(scene, { style: "opaque" });
+    // D-256: the GM's manual mask + visible map pins (the projection already withheld every
+    // pin the GM has not made visible, so this layer only ever draws player-visible pins).
+    view.peekFogLayer()?.applyManualMask(fogMaskLog(scene));
+    view.getNotesLayer().sync(scene?.notes ?? [], view.camera);
     const img = scene?.img ?? null;
     if (img !== null && img !== loadedMapHash && current.fetcher) {
       loadedMapHash = img;
@@ -198,6 +378,22 @@
     if (grid) view.setGrid(grid);
   }
 
+  /** Overlay coordinates are the canvas's own screen space (stage root = top-left origin). */
+  const measurePoint = (point: { x: number; y: number }) =>
+    stage ? worldToScreen(stage.camera, point.x, point.y) : point;
+  /** What the ruler reads out: world units → the scene grid's own distance units. */
+  const measureReadout = (distance: number): string => {
+    const grid = activeScene()?.grid;
+    if (!grid) return rulerLabel(distance, "ft");
+    return rulerLabel(
+      displayDistance(
+        { type: grid.type, size: grid.size, distance: grid.distance, diagonals: grid.diagonals },
+        distance,
+      ),
+      grid.units || "ft",
+    );
+  };
+
   function mountCanvas(): void {
     void (async () => {
       try {
@@ -212,6 +408,9 @@
         const height = Math.max(240, hostElement.clientHeight);
         const view = await createStage({ width, height, hostElement });
         stage = view;
+        // e2e readback (camera / stage introspection) — the player shell's own global, so a
+        // page that hosts both shells never confuses the two stages.
+        (globalThis as unknown as { __canvasStage?: unknown }).__canvasStage = view;
         view.fit(scene?.width ?? 2000, scene?.height ?? 1500);
         fog = new FogExploration({
           surfaceFor: (sc) => view.getFogLayer({ width: sc.width, height: sc.height }),
@@ -255,19 +454,60 @@
         }
         const canvas = view.app.canvas as HTMLCanvasElement;
         const toWorld = (event: PointerEvent) => { const r = canvas.getBoundingClientRect(); return screenToWorld(view.camera, event.clientX - r.left, event.clientY - r.top); };
-        const toolController = new ToolInteractionController({
+        toolController = new ToolInteractionController({
           nextId: () => `drawing-${globalThis.crypto.randomUUID().slice(0, 8)}`,
-          userId: client.user._id,
+          userId: client.user?.id ?? "",
           grid: () => squareGrid(activeScene()?.grid),
           createDrawing: (drawing) => { const sc = activeScene(); if (sc) client.submit([{ kind: "create", coll: "drawings", parent: { coll: "scenes", id: sc._id }, data: drawing }]); },
-          promptText: (at) => { const text = globalThis.prompt("Text label"); const sc = activeScene(); if (text && sc) client.submit([{ kind: "create", coll: "drawings", parent: { coll: "scenes", id: sc._id }, data: drawingForText(`drawing-${globalThis.crypto.randomUUID().slice(0, 8)}`, at, text, client.user._id) }]); },
-          measurePreview: () => undefined,
+          options: () => toolOptions,
+          promptText: (at) => { textDraft = { at: { ...at }, value: "", editingId: null }; },
+          createWall: () => undefined,
+          createLight: () => undefined,
+          createNote: () => undefined,
+          measurePreview: (value) => { measurePreview = value; },
+          shapePreview: (value) => { shapePreview = value; },
+          broadcastMeasure: (points) => {
+            view.getEffectsLayer().showRuler(client.user?.id ?? "player", points, squareGrid(activeScene()?.grid) as never, activeScene()?.grid.units ?? "ft");
+            client.sendEphemeral("ruler", { points: points.map((p) => ({ x: p.x, y: p.y })) });
+          },
+          fogPaint: () => undefined,
         });
-        const toolDown = (e: PointerEvent) => { if (canvasTool === "draw" || canvasTool === "text" || canvasTool === "measure") toolController.pointerDown({ world: toWorld(e), button: e.button, ctrlKey: e.ctrlKey }); };
-        const toolMove = (e: PointerEvent) => { if (canvasTool === "draw" || canvasTool === "measure") toolController.pointerMove({ world: toWorld(e), button: e.button, ctrlKey: e.ctrlKey }); };
-        const toolUp = (e: PointerEvent) => { if (canvasTool === "draw" || canvasTool === "measure") toolController.pointerUp({ world: toWorld(e), button: e.button, ctrlKey: e.ctrlKey }); };
+        toolReady++;
+        const toolPointer = (e: PointerEvent) => ({
+          world: toWorld(e),
+          button: e.button,
+          ctrlKey: e.ctrlKey,
+          shiftKey: e.shiftKey,
+          altKey: e.altKey,
+        });
+        const toolDown = (e: PointerEvent) => { if (GESTURE_TOOLS.has(canvasTool)) toolController.pointerDown(toolPointer(e)); };
+        const toolMove = (e: PointerEvent) => { if (GESTURE_TOOLS.has(canvasTool)) toolController.pointerMove(toolPointer(e)); };
+        const toolUp = (e: PointerEvent) => { if (GESTURE_TOOLS.has(canvasTool)) toolController.pointerUp(toolPointer(e)); };
+        const onToolContext = (e: MouseEvent) => {
+          if (canvasTool !== "draw") return;
+          e.preventDefault();
+          toolController.finishPoly();
+        };
+        const onToolKey = (e: KeyboardEvent) => {
+          if (e.key !== "Escape" || isTypingTarget(e.target)) return;
+          if (GESTURE_TOOLS.has(canvasTool)) toolController.finishPoly();
+        };
+        const onTextEdit = (e: MouseEvent) => {
+          if (canvasTool !== "text" || e.button !== 0) return;
+          editTextAt(toWorld({ clientX: e.clientX, clientY: e.clientY } as PointerEvent));
+        };
         canvas.addEventListener("pointerdown", toolDown); canvas.addEventListener("pointermove", toolMove); canvas.addEventListener("pointerup", toolUp);
-        onDestroy(() => { canvas.removeEventListener("pointerdown", toolDown); canvas.removeEventListener("pointermove", toolMove); canvas.removeEventListener("pointerup", toolUp); });
+        canvas.addEventListener("contextmenu", onToolContext);
+        canvas.addEventListener("dblclick", onTextEdit);
+        globalThis.addEventListener("keydown", onToolKey);
+        toolCleanup = () => {
+          canvas.removeEventListener("pointerdown", toolDown);
+          canvas.removeEventListener("pointermove", toolMove);
+          canvas.removeEventListener("pointerup", toolUp);
+          canvas.removeEventListener("contextmenu", onToolContext);
+          canvas.removeEventListener("dblclick", onTextEdit);
+          globalThis.removeEventListener("keydown", onToolKey);
+        };
         controller = new CanvasController({
           onTokenActivate: ({ token }) => {
             if (token.actorId) openActorSheet(token.actorId);
@@ -279,6 +519,10 @@
           },
           getTokens: tokenViews,
           getGrid: () => squareGrid(activeScene()?.grid),
+          // §10/D-255: the active tool owns the canvas (no token drag under a stroke); the
+          // Pan tool pans on left-drag, exactly like the GM shell.
+          interactionMode: () =>
+            canvasTool === "select" ? "select" : canvasTool === "pan" ? "pan" : "suppress",
           // §5: players move only tokens they own (host re-validates anyway)
           canMove: (tokenView) => {
             const user = client.user;
@@ -322,6 +566,8 @@
     return () => {
       globalThis.removeEventListener("pagehide", onPageHide);
       offWm();
+      toolCleanup?.();
+      toolCleanup = null;
       clearCopyTimer();
       if (pollTimer !== null) clearInterval(pollTimer);
       controller?.destroy();
@@ -457,14 +703,84 @@
         {/if}
       </aside>
       <div class="canvas-area">
-        <div
+        <div class="board">
+          <div class="toolrail">
+            <CanvasToolbar
+              bind:active={canvasTool}
+              bind:collapsed={canvasToolbarCollapsed}
+              settings={toolOptions}
+              cellSize={activeScene()?.grid.size ?? 100}
+              onRoll={rollFromToolbar}
+              onAction={runCanvasAction}
+            />
+          </div>
+          <div
           class="canvas-host"
           bind:this={canvasHost}
           role="application"
           aria-label="Game board"
           tabindex="-1"
         >
-          <CanvasToolbar bind:active={canvasTool} bind:collapsed={canvasToolbarCollapsed} onRoll={rollFromToolbar} />
+          {#if measurePreview}
+            {@const pts = measurePreview.points.map(measurePoint)}
+            {@const tail = pts.at(-1) ?? null}
+            {@const areaPts = measurePreview.area ? templateOutline(measurePreview.area).map(measurePoint) : null}
+            <svg class="measure-preview" aria-label={`Measurement ${measureReadout(measurePreview.distance)}`}>
+              <polyline points={pts.map((p) => `${p.x},${p.y}`).join(" ")} fill="none" stroke="#f4c95d" stroke-width="3" stroke-dasharray="8 5" />
+              {#if measurePreview.radiusPx && pts[0]}
+                <circle cx={pts[0].x} cy={pts[0].y} r={measurePreview.radiusPx * (stage?.camera.scale ?? 1)} fill="#f4c95d22" stroke="#f4c95d" stroke-width="2" />
+              {/if}
+              {#if areaPts && areaPts.length > 1}
+                <polygon points={areaPts.map((p) => `${p.x},${p.y}`).join(" ")} fill="#f4c95d1a" stroke="#f4c95d" stroke-width="2" stroke-dasharray="4 4" />
+              {/if}
+              {#if tail}
+                <text x={tail.x + 8} y={tail.y - 8} fill="#fff" stroke="#111" stroke-width="3" paint-order="stroke">{measureReadout(measurePreview.distance)}</text>
+              {/if}
+            </svg>
+          {/if}
+          {#if shapePreview}
+            {@const preview = shapePreview}
+            <svg class="shape-preview" aria-label="Tool preview" data-shape-preview={preview.kind}>
+              {#if preview.kind === "draw"}
+                {@const a = measurePoint(preview.from)}
+                {@const b = measurePoint(preview.to)}
+                {#if preview.shape === "rect" || preview.shape === "ellipse"}
+                  <rect x={Math.min(a.x, b.x)} y={Math.min(a.y, b.y)} width={Math.abs(b.x - a.x)} height={Math.abs(b.y - a.y)} rx={preview.shape === "ellipse" ? Math.abs(b.x - a.x) / 2 : 0} ry={preview.shape === "ellipse" ? Math.abs(b.y - a.y) / 2 : 0} fill={`${preview.style.stroke}22`} stroke={preview.style.stroke} stroke-width={preview.style.strokeWidth} />
+                {:else}
+                  <polyline points={[...preview.points, preview.to].map((p) => { const q = measurePoint(p); return `${q.x},${q.y}`; }).join(" ")} fill="none" stroke={preview.style.stroke} stroke-width={preview.style.strokeWidth} stroke-dasharray="6 4" />
+                {/if}
+              {:else if preview.kind === "fog"}
+                {@const a = measurePoint(preview.from)}
+                {@const b = measurePoint(preview.to)}
+                <rect x={Math.min(a.x, b.x)} y={Math.min(a.y, b.y)} width={Math.abs(b.x - a.x)} height={Math.abs(b.y - a.y)} fill={preview.brush === "hide" ? "#0a0f1599" : "#ffd47933"} stroke={preview.brush === "hide" ? "#8892a6" : "#ffd479"} stroke-width="2" stroke-dasharray="6 4" />
+              {:else}
+                {@const a = measurePoint(preview.from)}
+                {@const b = measurePoint(preview.to)}
+                <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="#ff9f6e" stroke-width="4" stroke-dasharray="10 5" />
+              {/if}
+            </svg>
+          {/if}
+          {#if textDraft}
+            {@const anchor = measurePoint(textDraft.at)}
+            <div class="text-editor" style={`left:${anchor.x}px; top:${anchor.y}px;`}>
+              <!-- svelte-ignore a11y_autofocus -->
+              <textarea
+                data-text-editor
+                autofocus
+                aria-label="Text label"
+                bind:value={textDraft.value}
+                onkeydown={(event) => {
+                  if (event.key === "Escape") { event.preventDefault(); commitTextDraft(); }
+                  if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); commitTextDraft(); }
+                }}
+              ></textarea>
+              <div class="text-editor-actions">
+                <button type="button" data-text-commit onclick={() => commitTextDraft()}>Done</button>
+                <button type="button" onclick={() => (textDraft = null)}>Cancel</button>
+              </div>
+            </div>
+          {/if}
+          </div>
         </div>
         {#if app?.client}
           <WindowHost
@@ -474,6 +790,8 @@
             bus={app.bus}
             onUndo={() => undefined}
             onRedo={() => undefined}
+            bindings={DEFAULT_BINDINGS}
+            isGM={false}
           />
         {/if}
       </div>
@@ -685,7 +1003,19 @@
     flex: 1;
     min-width: 0;
   }
+  .board {
+    display: flex;
+    height: 100%;
+    min-height: 280px;
+  }
+  /* D-255: the rail is a column of its own — it never covers the map or a window. */
+  .toolrail {
+    flex: 0 0 auto;
+    display: flex;
+  }
   .canvas-host {
+    flex: 1;
+    min-width: 0;
     height: 100%;
     min-height: 280px;
     border: 1px solid #40566d;
@@ -695,6 +1025,45 @@
   }
   .canvas-host :global(canvas) {
     display: block;
+  }
+  /* D-256: draw/fog gesture preview and the in-canvas text editor (player shell) */
+  .shape-preview,
+  .measure-preview {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 10;
+    overflow: visible;
+  }
+  .shape-preview {
+    z-index: 11;
+  }
+  .text-editor {
+    position: absolute;
+    z-index: 12;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px;
+    border: 1px solid #4c5b7d;
+    border-radius: 5px;
+    background: #111827f2;
+  }
+  .text-editor textarea {
+    width: 220px;
+    height: 62px;
+    padding: 5px;
+    color: #fff;
+    background: #0c111b;
+    border: 1px solid #3a455e;
+    border-radius: 3px;
+    resize: both;
+  }
+  .text-editor-actions {
+    display: flex;
+    gap: 4px;
   }
   @media (max-width: 760px) {
     main {

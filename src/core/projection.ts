@@ -24,6 +24,7 @@ import {
   type DocRef,
   type JournalDocument,
   type MessageDocument,
+  type NoteDocument,
   type SceneDocument,
   type TokenDocument,
   type WorldCollections,
@@ -103,10 +104,51 @@ function tokenVisible(
   return getEffectiveOwnership(user, token, scene) >= OWNERSHIP_LEVELS.OWNER;
 }
 
+/**
+ * D-256: the one visibility rule, shared by the world snapshot (`projectWorld`), the per-op
+ * projection (`projectEnvelope`) and the host's boundary-crossing rewrite (§5, host/sync.ts).
+ * Keeping one predicate is what makes the three agree — a session that "gains" visibility on a
+ * document it never received has to be sent a full create, and that is only sound if all three
+ * read the same rule.
+ *
+ * Map pins are the one special case: a note is a *pin*, and Roll20 keeps a pin hidden until the
+ * GM toggles it visible, whatever the scene it sits in grants. Ownership alone cannot express
+ * that here, because effective ownership cascades from the scene (which every player may read)
+ * and would publish a hidden pin; so for notes the flag is the gate. The GM's write path keeps
+ * `ownership.default` in step with the flag, so the ownership ledger stays honest for the
+ * permission engine while the projection reads the flag.
+ */
+export function docVisibleTo(
+  user: PermissionUser,
+  doc: BaseDocument,
+  parent?: BaseDocument,
+): boolean {
+  if (isGm(user)) return true;
+  if (doc.type === "note") {
+    const note = doc as NoteDocument;
+    // An explicit pin state wins. `visible: false` is the GM's "not yet"; `visible: true` is
+    // "publish it". Notes written before D-256 carry no flag at all — those fall through to
+    // ownership, which is how the starter world's pins have always been published.
+    if (note.visible === false) return false;
+    if (note.visible === true) return true;
+  }
+  return getEffectiveOwnership(user, doc, parent) >= OWNERSHIP_LEVELS.LIMITED;
+}
+
+/**
+ * Fields whose change can move a document across a session's read boundary: the ownership map
+ * everywhere, plus the pin visibility flag on notes. `host/sync.ts` watches updates that touch
+ * these to rewrite the envelope per session (grant → create, revoke → delete).
+ */
+export function visibilityFields(doc: BaseDocument): readonly string[] {
+  return doc.type === "note" ? ["ownership", "visible"] : ["ownership"];
+}
+
 function projectScene(user: PermissionUser, scene: SceneDocument): SceneDocument {
   const tokens = scene.tokens.filter((t) => tokenVisible(user, t, scene));
-  if (tokens.length === scene.tokens.length) return scene;
-  return { ...scene, tokens };
+  const notes = scene.notes.filter((n) => docVisibleTo(user, n, scene));
+  if (tokens.length === scene.tokens.length && notes.length === scene.notes.length) return scene;
+  return { ...scene, tokens, notes };
 }
 
 function projectJournal(journal: JournalDocument): JournalDocument {
@@ -216,6 +258,9 @@ function createVisible(
     }
     return op;
   }
+  if (op.coll === "notes" && !docVisibleTo(user, data, parent)) {
+    return null; // D-256: a hidden pin never reaches a player, even as a create op
+  }
   if (getEffectiveOwnership(user, data, parent) >= OWNERSHIP_LEVELS.LIMITED) return op;
   // Embedded create in a parent we cannot resolve (envelope-only mode): the
   // recipient sees the parent (host projects to connected users only), keep.
@@ -242,6 +287,10 @@ function updateVisible(
   if (op.ref.coll === "tokens" && (doc as TokenDocument).hidden) {
     if (getEffectiveOwnership(user, doc, parent) < OWNERSHIP_LEVELS.OWNER) return null;
   }
+  if (op.ref.coll === "notes" && !docVisibleTo(user, doc, parent)) {
+    // Making a pin hidden again is a delete for the player (it leaves their replica).
+    return { kind: "delete", ref: op.ref };
+  }
   if (getEffectiveOwnership(user, doc, parent) < OWNERSHIP_LEVELS.LIMITED) return null;
   if (op.ref.coll === "pages" || op.ref.coll === "journals") {
     const diff = stripSecretsFromDiff(op.diff);
@@ -264,6 +313,7 @@ function deleteVisible(
   if (op.ref.coll === "tokens" && (doc as TokenDocument).hidden) {
     if (getEffectiveOwnership(user, doc, parent) < OWNERSHIP_LEVELS.OWNER) return null;
   }
+  if (op.ref.coll === "notes" && !docVisibleTo(user, doc, parent)) return null;
   if (getEffectiveOwnership(user, doc, parent) < OWNERSHIP_LEVELS.LIMITED) return null;
   return op;
 }

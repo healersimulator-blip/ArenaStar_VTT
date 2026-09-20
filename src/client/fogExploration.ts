@@ -30,6 +30,7 @@ import {
   fogSightRadius,
   fogViewers,
   fogVisibleTokenIds,
+  maskHiddenTokenIds,
   sceneFogSettings,
 } from "../core/fogExploration";
 import type { PermissionUser } from "../core/ownership";
@@ -209,7 +210,11 @@ export class FogExploration {
       await this.leaveScene();
       this.enabled = false;
       this.options.hideSurface();
-      this.publishVisibility(null);
+      // D-256: the GM's manual mask outlives the sight loop. With fog off there are no
+      // polygons to intersect, but a painted stroke still withholds the tokens under it
+      // (Roll20's Mask is static and independent of Dynamic Lighting) — `null` stays the
+      // answer only for a scene nobody painted.
+      this.publishVisibility(this.maskOnlyVisibility(scene));
       return;
     }
     this.enabled = true;
@@ -263,6 +268,20 @@ export class FogExploration {
     }
     // every replica change: a token may have walked into (or out of) an unmoved eye's sight
     this.publishVisibility(fogVisibleTokenIds(scene, user, this.polys, { actors }));
+  }
+
+  /**
+   * D-256: the visible-id set for a scene whose sight loop is idle — every token except the
+   * ones the GM's mask covers, or `null` ("no gate") when nothing is masked. Fails closed in
+   * the same direction as the loop: only the user's own tokens are ever spared by the mask.
+   */
+  private maskOnlyVisibility(scene: SceneDocument | null): Set<string> | null {
+    if (!scene) return null;
+    const masked = maskHiddenTokenIds(scene, this.options.user(), {
+      actors: this.options.actors(),
+    });
+    if (masked.size === 0) return null;
+    return new Set(scene.tokens.filter((t) => !masked.has(t._id)).map((t) => t._id));
   }
 
   /** Hand the shell the visible set, only when it changed (null = fog off, everything). */

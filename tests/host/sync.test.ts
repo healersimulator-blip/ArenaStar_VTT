@@ -25,6 +25,7 @@ import type {
   ActorDocument,
   Json,
   MessageDocument,
+  NoteDocument,
   SceneDocument,
   TokenDocument,
   UserDocument,
@@ -1028,4 +1029,60 @@ test("selected roster edits and partial initiative replicate without modifying u
       turn: 0,
       combatants: [],
     });
+});
+
+/**
+ * D-256 map pins: a note lives *inside* a scene, and the scene is readable by every player, so
+ * the gate cannot be ownership arithmetic — it is the pin's own `visible` flag. The host has to
+ * rewrite the envelope per session either way: a hidden pin's create is projected away, so when
+ * the GM later reveals it the player must receive a full create (an update would target a
+ * document their replica never held), and hiding it again must retract the entry.
+ */
+test("D-256 pins: revealing a pin materializes it in the player's replica, hiding retracts it", async () => {
+  const h = await setup();
+  const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+  const sceneRef = { coll: "scenes" as const, id: "s1" };
+  const noteRef = { coll: "notes" as const, id: "pin-1", parent: sceneRef };
+  const pin = (over: Partial<NoteDocument> = {}): NoteDocument => ({
+    _id: "pin-1",
+    type: "note",
+    name: "Pin 1",
+    ownership: { default: 0 },
+    flags: {},
+    system: {},
+    x: 200,
+    y: 300,
+    text: "Cultists ambush the party",
+    playerText: "Gate is open",
+    icon: "pin",
+    visible: false,
+    ...over,
+  });
+  const playerNotes = (): NoteDocument[] =>
+    (player.store.get("scenes", "s1") as SceneDocument | undefined)?.notes ?? [];
+
+  h.gm.submit([{ kind: "create", coll: "notes", parent: sceneRef, data: pin() }]);
+  await flushMicrotasks();
+  expect(playerNotes()).toHaveLength(0); // hidden pin: projected away, not merely hidden in the UI
+
+  h.gm.submit([
+    {
+      kind: "update",
+      ref: noteRef,
+      diff: { visible: true, ownership: { default: 1 } },
+    },
+  ]);
+  await flushMicrotasks();
+  expect(playerNotes()).toHaveLength(1);
+  expect(playerNotes()[0]?.playerText).toBe("Gate is open");
+
+  h.gm.submit([
+    {
+      kind: "update",
+      ref: noteRef,
+      diff: { visible: false, ownership: { default: 0 } },
+    },
+  ]);
+  await flushMicrotasks();
+  expect(playerNotes()).toHaveLength(0); // no stale pin left in the replica
 });

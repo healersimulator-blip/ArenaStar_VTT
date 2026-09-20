@@ -27,6 +27,7 @@ import type { TemplatesLayer } from "./layers/TemplatesLayer";
 import { TemplatesLayer as TemplatesLayerImpl } from "./layers/TemplatesLayer";
 import type { DrawingsLayer } from "./layers/DrawingsLayer";
 import { DrawingsLayer as DrawingsLayerImpl } from "./layers/DrawingsLayer";
+import { NotesLayer, NotesLayer as NotesLayerImpl } from "./layers/NotesLayer";
 import { dispositionColor, marqueeRect, tokenRect } from "./tokens";
 import type { ModelLayer } from "./layers/ModelLayer";
 import { ModelLayer as ModelLayerImpl } from "./layers/ModelLayer";
@@ -112,6 +113,8 @@ export interface Stage {
   getRollHighlightLayer(): RollHighlightLayer;
   /** §9 drawings (freehand/poly/rect/text). */
   getDrawingsLayer(): DrawingsLayer;
+  /** D-256 map pins (notes) — placed with the rail's Pin tool. */
+  getNotesLayer(): NotesLayer;
   /** Fit the camera to a scene rect (§9 scene load). */
   fit(width: number, height: number): void;
   setCamera(camera: Camera): void;
@@ -284,9 +287,10 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   const effectsHolder = new Container();
   effectsHolder.label = "effects";
   root.addChild(effectsHolder);
-  const notesLayer = new Container();
-  notesLayer.label = "notes";
-  root.addChild(notesLayer);
+  const notesHolder = new Container();
+  notesHolder.label = "notes";
+  root.addChild(notesHolder);
+  let notesPins: NotesLayerImpl | null = null;
 
   // ── Controls (top) ──────────────────────────────────────────────────────────
   const controlsLayer = new Container();
@@ -374,6 +378,13 @@ export async function createStage(options: StageOptions): Promise<Stage> {
         drawingsHolder.addChild(drawingsLayer.container);
       }
       return drawingsLayer;
+    },
+    getNotesLayer(): NotesLayer {
+      if (!notesPins) {
+        notesPins = new NotesLayerImpl();
+        notesHolder.addChild(notesPins.container);
+      }
+      return notesPins;
     },
     getAreaPreviewLayer(): AreaPreviewLayer {
       if (!areaPreviewLayer) {
@@ -549,6 +560,8 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       drawingsLayer = null;
       wallsLayer?.destroy();
       wallsLayer = null;
+      notesPins?.destroy();
+      notesPins = null;
       lightingLayer?.destroy();
       lightingLayer = null;
       fogLayer?.destroy();

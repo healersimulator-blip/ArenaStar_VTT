@@ -368,6 +368,26 @@ describe("FogExploration loop", () => {
     expect(h.fog.stats().visibleTokenIds).toBeNull();
   });
 
+  test("D-256: with fog off the GM's manual mask still withholds the tokens under it — and only those", async () => {
+    const h = harness({ user: { id: "rex", role: "PLAYER" } });
+    const hero = token("hero", 150, 150, { ownership: { default: 0, rex: 3 } });
+    const orcUnder = token("orc-under", 250, 250, { ownership: { default: 0 } });
+    const orcOut = token("orc-out", 700, 700, { ownership: { default: 0 } });
+    const mask = { core: { fogMask: [{ mode: "hide", poly: [0, 0, 500, 0, 500, 500, 0, 500] }] } };
+    const masked = scene("s1", { tokens: [hero, orcUnder, orcOut], walls: [], flags: mask });
+
+    await h.fog.sync(masked, { style: "opaque" });
+    expect(h.fog.stats().enabled).toBe(false); // no sight loop …
+    expect(h.visibility.at(-1)).toEqual(["hero", "orc-out"]); // … but the cover still gates
+    expect(h.fog.stats().visibleTokenIds).toEqual(["hero", "orc-out"]);
+    expect(h.hidden()).toBeGreaterThan(0); // the fog layer itself stays out of the way
+
+    // the GM uncovers it again: back to "no gate" rather than "no gate plus a set"
+    await h.fog.sync({ ...masked, flags: { core: { fogMask: [] } } }, { style: "opaque" });
+    expect(h.visibility.at(-1)).toBeNull();
+    expect(h.fog.stats().visibleTokenIds).toBeNull();
+  });
+
   test("D-251: the GM is never gated — every token is listed regardless of sight", async () => {
     const h = harness();
     const s1 = scene("s1", {

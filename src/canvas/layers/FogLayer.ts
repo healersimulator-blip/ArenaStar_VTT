@@ -61,6 +61,12 @@ export class FogLayer {
   readonly coverWidth: number;
   readonly coverHeight: number;
   private readonly cover = new Sprite();
+  /**
+   * D-256: the GM's manual mask (Hide/Reveal brushes) as its own texture, drawn over the
+   * explored cover. White = the GM hid this area, transparent = GM reveal or untouched.
+   */
+  readonly manualTexture: RenderTexture;
+  private readonly manual = new Sprite();
   private readonly veil = new Sprite();
   private readonly sceneBounds = { x: 0, y: 0, width: 100, height: 100 };
   /**
@@ -83,12 +89,15 @@ export class FogLayer {
     const h = Math.max(1, Math.round(w / Math.max(aspect, 0.01)));
     this.texture = RenderTexture.create({ width: w, height: h });
     this.visibleTexture = RenderTexture.create({ width: w, height: h });
+    this.manualTexture = RenderTexture.create({ width: w, height: h });
     this.veil.texture = this.visibleTexture;
     this.veil.label = "fogVeil";
     this.container.addChild(this.veil);
     this.cover.texture = this.texture;
     this.cover.label = "fogCover";
-    this.container.addChild(this.cover);
+    this.manual.texture = this.manualTexture;
+    this.manual.label = "fogManual";
+    this.container.addChild(this.cover, this.manual);
     this.sceneBounds.width = sceneSize.width;
     this.sceneBounds.height = sceneSize.height;
     this.coverWidth = sceneSize.width;
@@ -116,8 +125,10 @@ export class FogLayer {
     this.app.renderer.render({ container: g, target: this.texture, clear: true });
     g.destroy();
     this.fitSprite(this.cover);
+    this.fitSprite(this.manual);
     this.fitSprite(this.veil);
     this.setVisible([]);
+    this.clearManualMask();
   }
 
   /** Show or hide the whole fog (fog off for the scene hides it; the map keeps accumulating). */
@@ -134,6 +145,7 @@ export class FogLayer {
     this.currentStyle = style;
     const translucent = style === "translucent";
     this.cover.alpha = translucent ? FOG_GM_COVER_ALPHA : 1;
+    this.manual.alpha = translucent ? FOG_GM_COVER_ALPHA : 1;
     this.veil.alpha = translucent ? FOG_GM_VEIL_ALPHA : 1;
   }
 
@@ -162,6 +174,46 @@ export class FogLayer {
   /** Erase a visibility polygon (flat world coords) from the explored map. */
   reveal(poly: Float32Array): void {
     this.erase(this.texture, poly);
+  }
+
+  /** D-256: drop every manual GM stroke (scene load / "reveal all"). */
+  clearManualMask(): void {
+    const g = new Graphics();
+    g.rect(0, 0, this.manualTexture.width, this.manualTexture.height).fill(0x000000);
+    this.app.renderer.render({ container: g, target: this.manualTexture, clear: true });
+    g.destroy();
+    this.fitSprite(this.manual);
+  }
+
+  /**
+   * D-256: replay the GM's ordered mask log. `hide` strokes paint cover into the manual
+   * texture, `reveal` strokes erase it **and** the explored cover underneath (a GM reveal
+   * shows the map even where nobody has vision), so a later stroke always wins over an
+   * earlier one. Replaying is idempotent — every client does it on every sync.
+   */
+  applyManualMask(log: readonly { mode: "reveal" | "hide"; poly: number[] }[]): void {
+    this.clearManualMask();
+    if (log.length === 0) return;
+    for (const op of log) {
+      const poly = Float32Array.from(op.poly);
+      if (poly.length < 6) continue;
+      if (op.mode === "hide") {
+        const g = new Graphics();
+        this.polygonPath(g, poly);
+        this.brush.addChild(g);
+        this.app.renderer.render({
+          container: this.brush,
+          target: this.manualTexture,
+          clear: false,
+        });
+        this.brush.removeChild(g);
+        g.destroy();
+      } else {
+        this.erase(this.manualTexture, poly);
+        // A GM reveal also uncovers terrain and tokens the viewers have no sight of.
+        this.erase(this.texture, poly);
+      }
+    }
   }
 
   /**

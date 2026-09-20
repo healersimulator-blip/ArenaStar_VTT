@@ -15,6 +15,7 @@ import type { FlatDiff } from "../core/ops";
 import type { PlayerApp } from "./joinBoot";
 import type { HostShare } from "./hostShare";
 import { sightSegments } from "../canvas/vision/wallSight";
+import { fogMaskLog, pointInFogMask } from "../core/fogMask";
 import {
   affectedTokens,
   areaPreviewRects,
@@ -105,6 +106,38 @@ export interface AppSurface {
   activeSceneId(): string | null;
   gridSize(): number | null;
   sceneCount(): number;
+  /** D-255/D-256: the active scene's drawings — what the canvas Draw tool must produce. */
+  drawings(): Array<{
+    id: string;
+    kind: string;
+    createdBy: string | null;
+    points: number;
+    text: string | null;
+    /** rect/ellipse/text geometry; null for point-based kinds. */
+    box: [number, number, number, number] | null;
+    stroke: string;
+    fill: string;
+    strokeWidth: number;
+  }>;
+  /** D-256: what the rail's walls/doors and lighting tools placed. */
+  walls(): Array<{ id: string; c: [number, number, number, number]; door: number }>;
+  lights(): Array<{ id: string; x: number; y: number; dim: number; color: string }>;
+  /** D-256 map pins: the GM note text, the player text and the visibility state. */
+  notes(): Array<{
+    id: string;
+    x: number;
+    y: number;
+    text: string;
+    playerText: string | null;
+    visible: boolean;
+    ownershipDefault: number;
+    journalId: string | null;
+  }>;
+  /** D-256: the manual fog mask — stroke count and whether a world point is hidden. */
+  fogMaskStrokes(): number;
+  fogMaskAt(point: { x: number; y: number }): boolean;
+  /** D-255: the live camera — pan mode / zoom assertions. */
+  camera(): { x: number; y: number; scale: number } | null;
   lastRejected(): string | null;
   /** §12 rules-package boot state + management readbacks. */
   rulesBoot(): {
@@ -589,6 +622,16 @@ export interface PlayerSurface {
   sceneImg(): string | null;
   tokenCount(): number;
   tokenPos(): { x: number; y: number } | null;
+  /** D-255: drawings the player shell sees (its Draw tool writes these). */
+  drawings(): Array<{ id: string; kind: string; createdBy: string | null }>;
+  /** D-256: the pins that reached this player (hidden pins never leave the host). */
+  /** D-256: the pin text this replica holds — the player-facing note is what it renders. */
+  notes(): Array<{ id: string; text: string; playerText: string | null; visible: boolean }>;
+  /** D-256: the mask strokes this player replays onto its own fog layer. */
+  fogMaskStrokes(): number;
+  /** D-256: what the GM's placements look like on this replica. */
+  walls(): Array<{ id: string; door: number }>;
+  camera(): { x: number; y: number; scale: number } | null;
   role(): string | null;
   connected(): boolean;
   /** Test-only direct manual-signaling access (atomic code exchange). */
@@ -977,6 +1020,27 @@ function playerSurface(playerApp: PlayerApp): PlayerSurface {
       const token = scene()?.tokens[0];
       return token ? { x: token.x, y: token.y } : null;
     },
+    drawings: () =>
+      (scene()?.drawings ?? []).map((d) => ({
+        id: d._id,
+        kind: d.kind,
+        createdBy:
+          typeof d.flags.core?.createdBy === "string" ? d.flags.core.createdBy : null,
+      })),
+    notes: () =>
+      (scene()?.notes ?? []).map((n) => ({
+        id: n._id,
+        text: n.text,
+        playerText: n.playerText ?? null,
+        visible: n.visible === true,
+      })),
+    fogMaskStrokes: () => fogMaskLog(scene()).length,
+    walls: () => (scene()?.walls ?? []).map((w) => ({ id: w._id, door: w.door })),
+    camera: () => {
+      const stage = (globalThis as { __canvasStage?: { camera: { x: number; y: number; scale: number } } })
+        .__canvasStage;
+      return stage ? { ...stage.camera } : null;
+    },
     role: () => client()?.user?.role ?? null,
     connected: () => playerApp.session.stats.state === "connected",
     takeOutbox: () => playerApp.takeOutbox(),
@@ -1316,6 +1380,51 @@ function appSurface(app: HostApp): AppSurface {
       return (scenes.find((sc) => sc.active) ?? scenes[0])?._id ?? null;
     },
     sceneCount: () => client.store.getAll("scenes").length,
+    drawings: () =>
+      (scene()?.drawings ?? []).map((d) => ({
+        id: d._id,
+        kind: d.kind,
+        createdBy:
+          typeof d.flags.core?.createdBy === "string" ? d.flags.core.createdBy : null,
+        points: d.points.length,
+        text: d.text ?? null,
+        box: d.box ? ([...d.box] as [number, number, number, number]) : null,
+        stroke: d.stroke,
+        fill: d.fill,
+        strokeWidth: d.strokeWidth,
+      })),
+    walls: () =>
+      (scene()?.walls ?? []).map((w) => ({
+        id: w._id,
+        c: [...w.c] as [number, number, number, number],
+        door: w.door,
+      })),
+    lights: () =>
+      (scene()?.lights ?? []).map((l) => ({
+        id: l._id,
+        x: l.x,
+        y: l.y,
+        dim: l.dim,
+        color: l.color,
+      })),
+    notes: () =>
+      (scene()?.notes ?? []).map((n) => ({
+        id: n._id,
+        x: n.x,
+        y: n.y,
+        text: n.text,
+        playerText: n.playerText ?? null,
+        visible: n.visible === true,
+        ownershipDefault: n.ownership.default,
+        journalId: n.journalId ?? null,
+      })),
+    fogMaskStrokes: () => fogMaskLog(scene()).length,
+    fogMaskAt: (point: { x: number; y: number }) => pointInFogMask(fogMaskLog(scene()), point.x, point.y),
+    camera: () => {
+      const stage = (globalThis as { __stage?: { camera: { x: number; y: number; scale: number } } })
+        .__stage;
+      return stage ? { ...stage.camera } : null;
+    },
     lastRejected: () =>
       globalThis.localStorage.getItem("vtt-e2e-last-rejected"),
     rulesBoot: () => app.rulesBoot,

@@ -15,6 +15,8 @@
   import PF1eSheetWindow from "../sheets/PF1eSheetWindow.svelte";
   import GmExtrasPanel from "../armies/GmExtrasPanel.svelte";
   import ArmiesTab from "../armies/ArmiesTab.svelte";
+  import CombatPanel from "../combat/CombatPanel.svelte";
+  import HelpPanel from "../canvas/HelpPanel.svelte";
   import ArmyWindow from "../armies/ArmyWindow.svelte";
   import { armyWindowRules } from "../armies/armyModel";
   import type { ClientSync } from "../../client/sync";
@@ -31,6 +33,8 @@
     onRedo,
     packages = null,
     rulesBoot = null,
+    bindings = {},
+    isGM = false,
   }: {
     manager: WindowManager;
     /** App-derived copy (manager.list() is a live ref — each{} needs fresh identity). */
@@ -43,6 +47,9 @@
     packages?: HostPackages | null;
     /** Which strategic ruleset booted (Settings → ruleset section status line). */
     rulesBoot?: HostRulesBoot | null;
+    /** §10 keybinding map for the help window (D-256). */
+    bindings?: Readonly<Record<string, string>>;
+    isGM?: boolean;
   } = $props();
 
   /**
@@ -164,6 +171,10 @@
               ? win.data.tab
               : "summary"}
           />
+        {:else if win.kind === "combat"}
+          <CombatPanel {client} {bus} />
+        {:else if win.kind === "help"}
+          <HelpPanel {bindings} {isGM} />
         {:else if win.kind === "permissions"}
           <PermissionsPanel {client} {bus} />
         {:else if win.kind === "macros"}

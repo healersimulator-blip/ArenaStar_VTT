@@ -117,8 +117,12 @@ export interface TileDocument extends BaseDocument {
 
 export interface DrawingDocument extends BaseDocument {
   type: "drawing";
-  kind: "freehand" | "poly" | "rect" | "text";
-  /** Flat point list [x1,y1,x2,y2,...] for freehand/poly. */
+  /**
+   * §10 tool shapes: freehand, poly (closed polygon), line (open 2-point segment),
+   * rect and ellipse (both from `box`), text.
+   */
+  kind: "freehand" | "poly" | "rect" | "ellipse" | "line" | "text";
+  /** Flat point list [x1,y1,x2,y2,...] for freehand/poly/line. */
   points: number[];
   /** Bounding box [x,y,w,h] for rect/text. */
   box: [number, number, number, number] | null;
@@ -142,10 +146,22 @@ export interface NoteDocument extends BaseDocument {
   type: "note";
   x: number;
   y: number;
+  /** The GM's note text (D-256: map pins call it the GM tooltip). */
   text: string;
   icon: string;
   /** §9A: strategic scenes link to tactical scenes via notes with linkedSceneId. */
   linkedSceneId?: DocId;
+  /**
+   * D-256 map pins: what a *player* reads in the tooltip. Roll20 keeps player and GM notes
+   * separate on a pin, and a pin is hidden until the GM toggles visibility. The flag below is
+   * the gate the projection layer (§5) reads; `ownership.default` is kept in step with it
+   * (LIMITED when visible) so the permission engine and the ownership ledger agree.
+   */
+  playerText?: string;
+  /** The handout this pin opens on double-click (§10 window host, kind "journal"). */
+  journalId?: DocId;
+  /** GM-side visibility state (mirrors the ownership default; players never see false). */
+  visible?: boolean;
 }
 
 export interface EffectDocument extends BaseDocument {

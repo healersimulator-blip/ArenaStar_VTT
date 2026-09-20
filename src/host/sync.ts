@@ -18,7 +18,6 @@ import {
   type MessageDocument,
   type Role,
   type UserDocument,
-  type Ownership,
 } from "../core/documents";
 import type { DocRef, Json } from "../core/documents";
 import type { Op, OpEnvelope } from "../core/ops";
@@ -63,8 +62,8 @@ import type { AssetId, DocId, PeerId, TxId, UserId } from "../core/ids";
 import { DocumentStore } from "../core/store";
 import { OpLog } from "../core/oplog";
 import { UndoStack } from "../core/undo";
-import { can, getEffectiveOwnership } from "../core/permissions";
-import { projectEnvelope, projectWorld } from "../core/projection";
+import { can } from "../core/permissions";
+import { docVisibleTo, projectEnvelope, projectWorld, visibilityFields } from "../core/projection";
 import { applyDiff } from "../core/diff";
 import {
   TokenBucket,
@@ -187,31 +186,39 @@ function resolveInlineRolls(content: string, rng: RngFn): string {
   });
 }
 
-/** Top-level docs whose ownership field this envelope replaces. */
-interface OwnershipCrossing {
+/**
+ * A document whose read boundary this envelope moves: the update touches a
+ * visibility-bearing field (ownership, or a pin's `visible` flag), so some sessions gain or
+ * lose sight of it. `before` is the document with the inverse diff applied — the state the
+ * projection would have judged one envelope ago.
+ */
+interface VisibilityCrossing {
   key: string;
+  ref: DocRef;
   doc: BaseDocument;
-  prev: Ownership;
+  before: BaseDocument;
 }
 
-function ownershipCrossings(
+function visibilityCrossings(
   envelope: OpEnvelope,
   inverses: readonly Op[],
-  resolveTop: (ref: DocRef) => BaseDocument | undefined,
-): OwnershipCrossing[] {
-  const out: OwnershipCrossing[] = [];
+  resolve: (ref: DocRef) => BaseDocument | undefined,
+): VisibilityCrossing[] {
+  const out: VisibilityCrossing[] = [];
   for (let i = 0; i < envelope.ops.length; i += 1) {
     const op: Op | undefined = envelope.ops[i];
     const inverse: Op | undefined = inverses[i];
     if (!op || !inverse) continue;
     if (op.kind !== "update" || inverse.kind !== "update") continue;
-    if (!("ownership" in op.diff) || !("ownership" in inverse.diff)) continue;
-    const doc = resolveTop(op.ref);
+    const doc = resolve(op.ref);
     if (!doc) continue;
+    const fields = visibilityFields(doc);
+    if (!fields.some((f) => f in op.diff && f in inverse.diff)) continue;
     out.push({
       key: `${op.ref.coll}/${op.ref.id}`,
+      ref: op.ref,
       doc,
-      prev: inverse.diff.ownership as Ownership,
+      before: { ...doc, ...inverse.diff } as BaseDocument,
     });
   }
   return out;
@@ -222,11 +229,16 @@ function ownershipCrossings(
  * never saw the create becomes a full-doc create; a revoke becomes a delete
  * (the plain projection would DROP the update for the newly-blind session,
  * leaving a stale doc in the replica). Same seq, no protocol additions.
+ *
+ * Embedded documents (D-256 map pins under a scene) cross boundaries the same way, so the
+ * rewrite carries `parent` and the pre-image is compared with the shared visibility rule —
+ * `docVisibleTo` — rather than ownership arithmetic, which would disagree with the
+ * projection on a pin whose scene grants read access to every player.
  */
 function projectWithCrossings(
   envelope: OpEnvelope,
   user: PermissionUser,
-  crossings: OwnershipCrossing[],
+  crossings: VisibilityCrossing[],
   resolver: { resolve: (ref: DocRef) => BaseDocument | undefined },
 ): OpEnvelope | null {
   let modified = false;
@@ -238,12 +250,16 @@ function projectWithCrossings(
         ? crossings.find((c) => c.key === `${rawOp.ref.coll}/${rawOp.ref.id}`)
         : undefined;
     if (crossing) {
-      const nowVisible = getEffectiveOwnership(user, crossing.doc) >= OWNERSHIP_LEVELS.LIMITED;
-      const wasVisible =
-        getEffectiveOwnership(user, { ...crossing.doc, ownership: crossing.prev }) >=
-        OWNERSHIP_LEVELS.LIMITED;
+      const parent = crossing.ref.parent ? resolver.resolve(crossing.ref.parent) : undefined;
+      const nowVisible = docVisibleTo(user, crossing.doc, parent);
+      const wasVisible = docVisibleTo(user, crossing.before, parent);
       if (nowVisible && !wasVisible) {
-        ops.push({ kind: "create", coll: op.ref.coll, data: structuredClone(crossing.doc) });
+        ops.push({
+          kind: "create",
+          coll: crossing.ref.coll,
+          ...(crossing.ref.parent !== undefined ? { parent: crossing.ref.parent } : {}),
+          data: structuredClone(crossing.doc),
+        });
         modified = true;
         continue;
       }
@@ -872,9 +888,7 @@ export class HostSync {
     // cross a session's read boundary. New viewers never received the create
     // (it was projected away) — rewrite as a full-doc create; revoked viewers
     // get a delete. Same seq, no protocol additions (D-064).
-    const crossings = ownershipCrossings(envelope, inverses, (ref) =>
-      ref.parent === undefined ? this.store.get(ref.coll as CollectionName, ref.id) : undefined,
-    );
+    const crossings = visibilityCrossings(envelope, inverses, (ref) => this.store.resolve(ref));
     for (const session of this.sessions.values()) {
       if (!session.user) continue;
       const resolver = { resolve: (ref: DocRef) => this.store.resolve(ref) };

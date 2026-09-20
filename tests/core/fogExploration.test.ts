@@ -11,6 +11,7 @@ import {
   fogSightRadius,
   fogViewers,
   fogVisibleTokenIds,
+  maskHiddenTokenIds,
   sceneFogSettings,
   tokenInSight,
 } from "../../src/core/fogExploration";
@@ -249,5 +250,54 @@ describe("token gate", () => {
     expect(fogVisibleTokenIds(s, { id: "gm", role: "GM" }, []).size).toBe(5);
     expect(fogVisibleTokenIds(s, { id: "asst", role: "ASSISTANT" }, []).size).toBe(5);
     expect(fogVisibleTokenIds(s, null, sight).size).toBe(0);
+  });
+
+  test("D-256: the manual mask withholds tokens under it, however clear the line of sight", () => {
+    const s = scene({
+      flags: {
+        core: {
+          fog: true,
+          fogMask: [{ mode: "hide", poly: [100, 100, 500, 100, 500, 500, 100, 500] }],
+        },
+      },
+      tokens: [
+        token("mine-under", { x: 200, y: 200, ownership: { default: 0, rex: 3 } }),
+        token("orc-under", { x: 300, y: 300 }),
+        token("orc-outside", { x: 700, y: 300 }),
+        token("edge", { x: 500, y: 300 }), // straddles the stroke: the centre is the probe
+      ],
+    });
+    const everywhere = [square(0, 0, 1000, 1000)];
+    const rex = { id: "rex", role: "PLAYER" as const };
+    // a mask covers the whole visible field: the orc under it is withheld, the one outside is not
+    expect([...fogVisibleTokenIds(s, rex, everywhere)].sort()).toEqual(["edge", "mine-under", "orc-outside"]);
+    expect([...maskHiddenTokenIds(s, rex)].sort()).toEqual(["orc-under"]);
+    // a player's own token is never swallowed by the mask (it is the eyes)
+    const mine = token("mine-under", { x: 200, y: 200, ownership: { default: 0, rex: 3 } });
+    expect(maskHiddenTokenIds(scene({ tokens: [mine], flags: s.flags }), rex).size).toBe(0);
+    // the GM and the assistant keep seeing everything, masked or not
+    expect([...maskHiddenTokenIds(s, { id: "gm", role: "GM" })].sort()).toEqual([]);
+    expect(fogVisibleTokenIds(s, { id: "gm", role: "GM" }, everywhere).size).toBe(4);
+    // a scene nobody painted is gated by sight alone; an empty log is zero cost
+    expect(maskHiddenTokenIds(scene(), rex).size).toBe(0);
+    expect(maskHiddenTokenIds(s, null).size).toBe(0);
+  });
+
+  test("D-256: a reveal stroke over a hidden one uncovers the token again", () => {
+    const s = scene({
+      flags: {
+        core: {
+          fog: true,
+          fogMask: [
+            { mode: "hide", poly: [100, 100, 500, 100, 500, 500, 100, 500] },
+            { mode: "reveal", poly: [150, 150, 450, 150, 450, 450, 150, 450] },
+          ],
+        },
+      },
+      tokens: [token("orc", { x: 300, y: 300 })],
+    });
+    const rex = { id: "rex", role: "PLAYER" as const };
+    expect(maskHiddenTokenIds(s, rex).size).toBe(0);
+    expect([...fogVisibleTokenIds(s, rex, [square(0, 0, 1000, 1000)])]).toEqual(["orc"]);
   });
 });
