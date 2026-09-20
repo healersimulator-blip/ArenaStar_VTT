@@ -47,6 +47,10 @@
   import { PoolInterpolator } from "../sim/interpolate";
   import { TrustedModuleHost } from "../packages/trustedModule";
   import { screenToWorld } from "../canvas/camera";
+  import CanvasToolbar, { type CanvasTool } from "../ui/canvas/CanvasToolbar.svelte";
+  import { ToolInteractionController } from "../canvas/tools/controller";
+  import { drawingForText } from "../canvas/tools/drawing";
+  import { buildChatMessage, parseChatCommand } from "../core/chat";
   import CompendiaPanel from "../ui/compendia/CompendiaPanel.svelte";
   import {
     createModuleHandlers,
@@ -150,9 +154,28 @@
     { id: "compendia", label: "Compendia" },
   ];
   let canvasError = $state<string | null>(null);
+  let canvasTool = $state<CanvasTool>("select");
+  let canvasToolbarCollapsed = $state(false);
   let loadedMapHash: string | null = null;
   let stage: Stage | null = null;
   let controller: CanvasController | null = null;
+  let toolController: ToolInteractionController | null = null;
+  let measurePreview = $state<{ kind: "line" | "path" | "radius"; points: Array<{ x: number; y: number }>; distance: number; radiusPx?: number } | null>(null);
+  const rollFromToolbar = (formula: string) => {
+    if (!app) return;
+    const built = buildChatMessage({ author: app.gm.client.user._id, parsed: parseChatCommand(`/roll ${formula}`) });
+    app.gm.client.submit([{ kind: "create", coll: "messages", data: built.message }]);
+  };
+  const eraseAllDrawings = () => {
+    const scene = activeScene();
+    if (!scene || !globalThis.confirm("Erase all drawings in this scene?")) return;
+    app?.gm.client.submit(scene.drawings.map((drawing) => ({ kind: "delete" as const, ref: { coll: "drawings" as const, id: drawing._id, parent: { coll: "scenes" as const, id: scene._id } } })));
+  };
+  const measurePoint = (point: { x: number; y: number }) => {
+    const camera = stage?.camera;
+    const rect = canvasHost?.getBoundingClientRect();
+    return { x: (point.x - (camera?.x ?? 0)) * (camera?.scale ?? 1) + (rect?.width ?? 0) / 2, y: (point.y - (camera?.y ?? 0)) * (camera?.scale ?? 1) + (rect?.height ?? 0) / 2 };
+  };
   let tokenSelection = $state.raw<{
     sceneId: string | null;
     ids: readonly string[];
@@ -1048,6 +1071,36 @@
           hostElement,
         });
         stage = view;
+        const canvas = view.app.canvas as HTMLCanvasElement;
+        const toWorld = (event: PointerEvent) => {
+          const rect = canvas.getBoundingClientRect();
+          return screenToWorld(view.camera, event.clientX - rect.left, event.clientY - rect.top);
+        };
+        toolController = new ToolInteractionController({
+          nextId: () => `drawing-${globalThis.crypto.randomUUID().slice(0, 8)}`,
+          userId: current.gm.client.user._id,
+          grid: () => {
+            const sc = activeScene();
+            return sc?.grid ? { ...sc.grid, size: sc.grid.size, feetPerCell: sc.grid.distance } : null;
+          },
+          createDrawing: (drawing) => {
+            const sc = activeScene();
+            if (sc) current.gm.client.submit([{ kind: "create", coll: "drawings", parent: { coll: "scenes", id: sc._id }, data: drawing }]);
+          },
+          promptText: (at) => {
+            const text = globalThis.prompt("Text label");
+            const sc = activeScene();
+            if (text && sc) current.gm.client.submit([{ kind: "create", coll: "drawings", parent: { coll: "scenes", id: sc._id }, data: drawingForText(`drawing-${globalThis.crypto.randomUUID().slice(0, 8)}`, at, text, current.gm.client.user._id) }]);
+          },
+          measurePreview: (value) => { measurePreview = value; },
+        });
+        const onToolDown = (e: PointerEvent) => { if (canvasTool === "draw" || canvasTool === "text" || canvasTool === "measure") toolController?.pointerDown({ world: toWorld(e), button: e.button, ctrlKey: e.ctrlKey }); };
+        const onToolMove = (e: PointerEvent) => { if (canvasTool === "draw" || canvasTool === "measure") toolController?.pointerMove({ world: toWorld(e), button: e.button, ctrlKey: e.ctrlKey }); };
+        const onToolUp = (e: PointerEvent) => { if (canvasTool === "draw" || canvasTool === "measure") toolController?.pointerUp({ world: toWorld(e), button: e.button, ctrlKey: e.ctrlKey }); };
+        canvas.addEventListener("pointerdown", onToolDown);
+        canvas.addEventListener("pointermove", onToolMove);
+        canvas.addEventListener("pointerup", onToolUp);
+        onDestroy(() => { canvas.removeEventListener("pointerdown", onToolDown); canvas.removeEventListener("pointermove", onToolMove); canvas.removeEventListener("pointerup", onToolUp); });
         // F01 — expose for chat roll-card highlights & e2e (canvasSmoke)
         (globalThis as unknown as { __stage?: unknown }).__stage = view;
         view.fit(scene?.width ?? 2000, scene?.height ?? 1500);
@@ -2218,6 +2271,19 @@
           ondrop={(ev) => void onCompendiumDrop(ev)}
           onpointerdown={() => closeTokenMenu()}
         >
+          <CanvasToolbar bind:active={canvasTool} bind:collapsed={canvasToolbarCollapsed} isGM={true} onEraseAll={eraseAllDrawings} onRoll={rollFromToolbar} />
+          {#if measurePreview}
+            {@const pts = measurePreview.points.map(measurePoint)}
+            <svg class="measure-preview" aria-label={`Measurement ${measurePreview.distance}`}>
+              <polyline points={pts.map((p) => `${p.x},${p.y}`).join(" ")} fill="none" stroke="#f4c95d" stroke-width="3" stroke-dasharray="8 5" />
+              {#if measurePreview.radiusPx && pts[0]}
+                <circle cx={pts[0].x} cy={pts[0].y} r={measurePreview.radiusPx * (stage?.camera.scale ?? 1)} fill="#f4c95d22" stroke="#f4c95d" stroke-width="2" />
+              {/if}
+              {#if pts.at(-1)}
+                <text x={pts.at(-1)!.x + 8} y={pts.at(-1)!.y - 8} fill="#fff" stroke="#111" stroke-width="3" paint-order="stroke">{measurePreview.distance}</text>
+              {/if}
+            </svg>
+          {/if}
           {#if tokenMenu && activeScene()}
             {@const menuScene = activeScene()}
             {@const menuToken = menuScene?.tokens.find(
@@ -2754,6 +2820,7 @@
     position: relative;
     background: #0a0f15;
   }
+  .measure-preview { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; overflow: visible; }
   .canvas-host :global(canvas) {
     display: block;
   }

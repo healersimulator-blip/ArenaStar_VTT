@@ -78,11 +78,13 @@ describe("scripts/buildStarterWorlds.mjs", () => {
       worldId: "starter-pf1e-mass-battles",
       system: "pf1e-mass-battles",
       version: "1.0.0",
-      seq: 0,
+      seq: 11,
       rules: { active: "pf1e-mass-battles" },
       starter: true,
     });
-    expect(JSON.parse(strFromU8(entries["documents.json"] as Uint8Array))).toEqual({ seq: 0, docs: [] });
+    const starterDocuments = JSON.parse(strFromU8(entries["documents.json"] as Uint8Array)) as { seq: number; docs: unknown[] };
+    expect(starterDocuments.seq).toBe(11);
+    expect(starterDocuments.docs).toHaveLength(11);
     expect(Object.keys(entries)).toEqual(expect.arrayContaining([
       "packages/pf1e-mass-battles/manifest.json",
       "packages/pf1e-mass-battles/rules.js",
