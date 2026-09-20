@@ -25,7 +25,11 @@ function harness(overrides: Partial<ToolOptions> = {}) {
   const created: DrawingDocument[] = [];
   const previews: Array<ShapePreview | null> = [];
   const measures: Array<MeasurePreview | null> = [];
-  const walls: Array<{ c: [number, number, number, number]; door: number }> = [];
+  const walls: Array<{
+    kind: "wall" | "door" | "window";
+    c: [number, number, number, number];
+    door: number;
+  }> = [];
   const lights: Array<{ x: number; y: number; radius: number; color: string }> = [];
   const notes: Array<{ x: number; y: number }> = [];
   const texts: Array<{ x: number; y: number }> = [];
@@ -39,7 +43,7 @@ function harness(overrides: Partial<ToolOptions> = {}) {
     grid: () => null,
     options: () => options,
     createDrawing: (d) => created.push(d),
-    createWall: (w) => walls.push({ c: w.c, door: w.door }),
+    createWall: (w) => walls.push({ kind: w.kind, c: w.c, door: w.door }),
     createLight: (l) => lights.push(l),
     createNote: (at) => notes.push(at),
     promptText: (at) => texts.push(at),
@@ -238,16 +242,28 @@ describe("GM tools", () => {
     expect(rectPolygon({ x: 0, y: 0 }, { x: 0, y: 0 })).toBeNull();
   });
 
-  test("walls, doors and lights are placed with the configured kind", () => {
-    const wall = harness({ wallKind: "wall", placementSnap: "none" });
+  test("walls, doors and windows are placed with the configured kind", () => {
+    const wall = harness({ wallKind: "wall", wallDoorState: 2, placementSnap: "none" });
     wall.tool.activate("wall");
     drag(wall.tool, { x: 10, y: 10 }, { x: 110, y: 10 });
-    expect(wall.walls).toEqual([{ c: [10, 10, 110, 10], door: 0 }]);
+    // a wall has no door state — the rail's door choice cannot leak onto it (D-257)
+    expect(wall.walls).toEqual([{ kind: "wall", c: [10, 10, 110, 10], door: 0 }]);
 
+    // a door is placed in the state the rail selected; the default is closed, not open (G-43)
     const door = harness({ wallKind: "door", placementSnap: "none" });
     door.tool.activate("wall");
     drag(door.tool, { x: 0, y: 0 }, { x: 50, y: 0 });
-    expect(door.walls[0]?.door).toBe(1);
+    expect(door.walls[0]).toEqual({ kind: "door", c: [0, 0, 50, 0], door: 0 });
+
+    const locked = harness({ wallKind: "door", wallDoorState: 2, placementSnap: "none" });
+    locked.tool.activate("wall");
+    drag(locked.tool, { x: 0, y: 0 }, { x: 50, y: 0 });
+    expect(locked.walls[0]?.door).toBe(2);
+
+    const window = harness({ wallKind: "window", wallDoorState: 1, placementSnap: "none" });
+    window.tool.activate("wall");
+    drag(window.tool, { x: 0, y: 0 }, { x: 50, y: 0 });
+    expect(window.walls[0]).toEqual({ kind: "window", c: [0, 0, 50, 0], door: 0 });
 
     const light = harness({ lightRadius: 60, lightColor: "#33ccff" });
     light.tool.activate("light");

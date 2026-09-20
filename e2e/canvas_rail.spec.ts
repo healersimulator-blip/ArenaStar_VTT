@@ -232,8 +232,13 @@ test.describe("canvas rail — tools (§10, D-256)", () => {
     await page.mouse.move(box.x + 320, box.y + 300, { steps: 5 });
     await page.mouse.up();
     await expect.poll(() => hostCall<Array<{ door: number }>>(page, "walls")).toHaveLength(2);
-    const doors = await hostCall<Array<{ door: number }>>(page, "walls");
-    expect(doors[1]?.door).toBe(1);
+    const doors = await hostCall<
+      Array<{ door: number; kind: string; sight: number; move: number }>
+    >(page, "walls");
+    // D-257: a door is placed *closed* with conditional axes (it used to be written open, G-43)
+    expect(doors[1]?.door).toBe(0);
+    expect(doors[1]?.kind).toBe("door");
+    expect(doors[1]?.sight).toBe(1);
 
     // Erase last removes the door again
     await pick(page, '[data-canvas-action="delete-last-placement"]');

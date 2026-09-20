@@ -30,7 +30,8 @@ import {
 import type { TemplateShape } from "../layers/templateGeometry";
 import { snapWorldWith, type SnapMode } from "../grid/snapMode";
 import type { MeasureGrid } from "../grid/measure";
-import type { DrawingDocument, WallDocument } from "../../core/documents";
+import type { DrawingDocument } from "../../core/documents";
+import type { WallKind } from "../vision/wallKinds";
 import type { DocId, UserId } from "../../core/ids";
 
 export type ToolGesture = "draw" | "text" | "measure" | "fog" | "wall" | "light" | "pin";
@@ -38,7 +39,7 @@ export type ToolGesture = "draw" | "text" | "measure" | "fog" | "wall" | "light"
 /** Roll20's advanced hotkeys draw the wall/light layer with snapping on by default. */
 export type FogBrush = "reveal" | "hide";
 export type FogShape = "rect" | "poly";
-export type WallKind = "wall" | "door";
+export type { WallKind };
 
 export interface ToolOptions {
   drawShape: DrawShape;
@@ -105,7 +106,7 @@ export type ShapePreview =
       style: DrawingStyle;
     }
   | { kind: "fog"; brush: FogBrush; shape: FogShape; from: Point; to: Point; points: Point[] }
-  | { kind: "wall"; from: Point; to: Point; door: boolean };
+  | { kind: "wall"; from: Point; to: Point; wallKind: WallKind };
 
 export interface ToolCallbacks {
   nextId: () => DocId;
@@ -113,7 +114,11 @@ export interface ToolCallbacks {
   grid: () => MeasureGrid | null;
   options: () => ToolOptions;
   createDrawing: (drawing: DrawingDocument) => void;
-  createWall: (wall: Pick<WallDocument, "c" | "door">) => void;
+  createWall: (wall: {
+    kind: WallKind;
+    c: [number, number, number, number];
+    door: 0 | 1 | 2;
+  }) => void;
   createLight: (light: { x: number; y: number; radius: number; color: string }) => void;
   createNote: (at: Point) => void;
   promptText: (at: Point) => void;
@@ -317,8 +322,9 @@ export class ToolInteractionController {
       this.callbacks.shapePreview(null);
       if (Math.hypot(to.x - from.x, to.y - from.y) >= MIN_SHAPE_SIZE) {
         this.callbacks.createWall({
+          kind: options.wallKind,
           c: [from.x, from.y, to.x, to.y],
-          door: options.wallKind === "door" ? (options.wallDoorState === 0 ? 1 : options.wallDoorState) : 0,
+          door: options.wallKind === "door" ? options.wallDoorState : 0,
         });
       }
       return;
@@ -485,7 +491,7 @@ export class ToolInteractionController {
       kind: "wall",
       from: this.start,
       to,
-      door: this.options().wallKind === "door",
+      wallKind: this.options().wallKind,
     });
   }
 }

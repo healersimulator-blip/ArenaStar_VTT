@@ -44,6 +44,8 @@
     { keys: "Ctrl + click", action: "Add a ruler waypoint (max 12) · Alt+click pings" },
     { keys: "Middle / right / Shift + drag", action: "Pan the map from any tool" },
     { keys: "Double-click a label", action: "Edit it (text tool)" },
+    { keys: "Click a door (wall tool, GM info)", action: "Open or close it · a locked door ignores the click" },
+    { keys: "Alt + click a wall (GM info)", action: "Erase that wall" },
     { keys: "Click a map pin", action: "Tooltip · double-click opens the linked handout" },
     { keys: "Alt + wheel", action: "Zoom · Ctrl+A selects the layer's content" },
   ];

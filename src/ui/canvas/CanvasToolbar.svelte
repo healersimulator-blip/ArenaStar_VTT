@@ -8,6 +8,7 @@
    */
   import { isTypingTarget } from "../../core/keys";
   import type { ToolOptions } from "../../canvas/tools/controller";
+  import type { DoorState } from "../../canvas/vision/wallSight";
 
   export type CanvasTool =
     | "select"
@@ -92,6 +93,12 @@
     { id: "gm", label: "GM info", key: "K" },
     { id: "lighting", label: "Dynamic lighting", key: "," },
   ] as const;
+  /** D-257: the state a placed door is written in (Roll20 places doors closed). */
+  const doorStates = [
+    { id: 0 as DoorState, label: "Closed" },
+    { id: 1 as DoorState, label: "Open" },
+    { id: 2 as DoorState, label: "Locked" },
+  ];
   let rollModes = [
     { id: "roll", label: "Public" },
     { id: "gmroll", label: "GM" },
@@ -468,7 +475,7 @@
             type="button"
             class:active={settings.wallKind === "wall"}
             aria-pressed={settings.wallKind === "wall"}
-            title="Wall segment"
+            title="Wall segment — blocks sight, light, sound and movement"
             data-canvas-wall-kind="wall"
             onclick={() => (settings.wallKind = "wall")}><span class="label">Wall</span></button
           >
@@ -476,15 +483,37 @@
             type="button"
             class:active={settings.wallKind === "door"}
             aria-pressed={settings.wallKind === "door"}
-            title="Door"
+            title="Door — click it to open or close"
             data-canvas-wall-kind="door"
             onclick={() => (settings.wallKind = "door")}><span class="label">Door</span></button
           >
+          <button
+            type="button"
+            class:active={settings.wallKind === "window"}
+            aria-pressed={settings.wallKind === "window"}
+            title="Window — sight and light pass, movement and sound do not"
+            data-canvas-wall-kind="window"
+            onclick={() => (settings.wallKind = "window")}><span class="label">Window</span></button
+          >
         </div>
+        {#if settings.wallKind === "door"}
+          <div class="swatches">
+            {#each doorStates as state (state.id)}
+              <button
+                type="button"
+                class:active={settings.wallDoorState === state.id}
+                aria-pressed={settings.wallDoorState === state.id}
+                title={`Place the door ${state.label.toLowerCase()}`}
+                data-canvas-door-state={state.label.toLowerCase()}
+                onclick={() => (settings.wallDoorState = state.id)}
+              ><span class="label">{state.label}</span></button>
+            {/each}
+          </div>
+        {/if}
         <button type="button" data-canvas-action="delete-last-placement" onclick={() => act("delete-last-placement")}>
           <span class="label">Erase last</span>
         </button>
-        <p class="hint">Drag to place · grid-snapped · Esc cancels</p>
+        <p class="hint">Drag to place · click a door to open/close · Alt-click erases a wall</p>
       {:else if active === "light"}
         <div class="swatches">
           {#each [1, 2, 3, 6] as cells (cells)}

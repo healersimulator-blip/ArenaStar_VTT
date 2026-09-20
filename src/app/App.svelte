@@ -58,6 +58,12 @@
     type RollMode,
   } from "../ui/canvas/CanvasToolbar.svelte";
   import { ToolInteractionController } from "../canvas/tools/controller";
+  import {
+    doorToggleDiff,
+    wallFieldsFor,
+    wallKindName,
+    wallPickAt,
+  } from "../canvas/vision/wallKinds";
   import { displayDistance } from "../canvas/grid/measure";
   import { rulerLabel } from "../canvas/ephemera";
   import { canEditDrawing, drawingForText } from "../canvas/tools/drawing";
@@ -75,6 +81,7 @@
     type MeasurePreview,
     type ShapePreview,
     type ToolOptions,
+    type WallKind,
   } from "../canvas/tools/controller";
   import { templateOutline } from "../canvas/layers/templateGeometry";
   import {
@@ -202,6 +209,8 @@
   let lastPlacement = $state<{ kind: "wall" | "light"; id: string } | null>(null);
   /** Screen-pixel pick radius for a map pin (the marker is drawn at a constant size). */
   const PIN_PICK_RADIUS = 16;
+/** Wall pick tolerance in screen pixels (D-257). */
+const WALL_PICK_RADIUS = 12;
   let loadedMapHash: string | null = null;
   /** `$state.raw`: the stage is a Pixi object graph — assignment must re-run the
    *  effects that read it, but it must never be deep-proxied. */
@@ -253,25 +262,23 @@
     if (!scene) return;
     paintFog(mode, sceneRectPoly(scene));
   }
-  /** D-256: place a wall/door — grid-snapped by the controller, committed as a create. */
-  function createWall(wall: { c: [number, number, number, number]; door: 0 | 1 | 2 }) {
+  /** D-256/D-257: place a wall/door/window — grid-snapped, committed as a create. */
+  function createWall(wall: {
+    kind: WallKind;
+    c: [number, number, number, number];
+    door: 0 | 1 | 2;
+  }) {
     const scene = activeScene();
     if (!scene) return;
     const id = nextId("wall");
     const doc: WallDocument = {
       _id: id,
       type: "wall",
-      name: wall.door === 0 ? "Wall" : "Door",
+      name: wallKindName(wall.kind),
       ownership: { default: 0 },
       flags: {},
       system: {},
-      c: wall.c,
-      door: wall.door,
-      oneWay: false,
-      move: wall.door === 0 ? 1 : 1,
-      sight: wall.door === 0 ? 1 : 1,
-      sound: 1,
-      light: 1,
+      ...wallFieldsFor(wall.kind, wall.c, wall.door),
     };
     app?.gm.client.submit([
       { kind: "create", coll: "walls", parent: { coll: "scenes", id: scene._id }, data: doc },
@@ -1137,6 +1144,20 @@
   }
 
   /** Re-render tokens + background from the GM client replica (never host internals). */
+  /**
+   * D-257: the **GM Info** layer draws the walls overlay — every segment with its restriction
+   * colour, door-state dots, window strokes. It is the map of what blocks sight and movement
+   * and the surface a door is clicked on, so it must be on screen exactly when the GM is
+   * working on that layer.
+   */
+  function syncWallsOverlay(): void {
+    const view = stage;
+    if (!view) return;
+    const scene = activeScene();
+    const show = canvasLayer === "gm";
+    view.getWallsLayer().sync(show ? (scene?.walls ?? []) : [], view.camera);
+  }
+
   function refresh(): void {
     storeVersion++;
     const current = app;
@@ -1180,6 +1201,8 @@
     // D-256 map pins: the notes layer draws whatever this replica holds (players only ever
     // hold pins the GM made visible — the projection withholds the rest).
     view.getNotesLayer().sync(scene?.notes ?? [], view.camera);
+    // D-257: walls overlay follows the replica too (a door toggled anywhere redraws here).
+    syncWallsOverlay();
     // §9 tiles: roofs fade over tokens with vision (D-083)
     const occupied = (scene?.tokens ?? [])
       .filter((t) => t.vision)
@@ -1570,6 +1593,48 @@
         };
         canvas.addEventListener("click", onPinClick);
         canvas.addEventListener("dblclick", onPinOpen);
+        // D-257 (G-43): with the wall tool, a *click* on an existing wall edits it — a door
+        // toggles closed ⇄ open, `Alt`-click deletes a wall, and a locked door ignores the
+        // click. A drag that placed a wall moves more than a few pixels and is ignored.
+        let wallDownAt: { x: number; y: number } | null = null;
+        const onWallDown = (e: PointerEvent) => {
+          wallDownAt = { x: e.clientX, y: e.clientY };
+        };
+        const onWallClick = (e: MouseEvent) => {
+          if (canvasTool !== "wall" || e.button !== 0 || canvasLayer !== "gm") return;
+          const down = wallDownAt;
+          if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) return;
+          const scene = activeScene();
+          if (!scene) return;
+          const world = toWorld({ clientX: e.clientX, clientY: e.clientY } as PointerEvent);
+          const pick = wallPickAt(scene.walls, world, WALL_PICK_RADIUS / (view.camera.scale || 1));
+          if (!pick) return;
+          const ref = {
+            coll: "walls" as const,
+            id: pick.wall._id,
+            parent: { coll: "scenes" as const, id: scene._id },
+          };
+          if (e.altKey) {
+            current.gm.client.submit([{ kind: "delete", ref }]);
+            if (lastPlacement?.kind === "wall" && lastPlacement.id === pick.wall._id) lastPlacement = null;
+            return;
+          }
+          const diff = doorToggleDiff(pick.wall);
+          if (diff) current.gm.client.submit([{ kind: "update", ref, diff }]);
+        };
+        canvas.addEventListener("pointerdown", onWallDown);
+        canvas.addEventListener("click", onWallClick);
+        // The overlay's stroke widths are screen-constant, so a pan/zoom redraws it (the key
+        // inside WallsLayer.sync keeps this cheap — nothing is rebuilt when the camera is still).
+        let lastCameraKey = "";
+        const onCameraTick = () => {
+          const cam = view.camera;
+          const key = `${cam.x}|${cam.y}|${cam.scale}`;
+          if (key === lastCameraKey) return;
+          lastCameraKey = key;
+          syncWallsOverlay();
+        };
+        view.app.ticker.add(onCameraTick);
         toolCleanup = () => {
           canvas.removeEventListener("pointerdown", onToolDown);
           canvas.removeEventListener("pointermove", onToolMove);
@@ -1578,6 +1643,9 @@
           canvas.removeEventListener("dblclick", onTextEdit);
           canvas.removeEventListener("click", onPinClick);
           canvas.removeEventListener("dblclick", onPinOpen);
+          canvas.removeEventListener("pointerdown", onWallDown);
+          canvas.removeEventListener("click", onWallClick);
+          view.app.ticker.remove(onCameraTick);
           globalThis.removeEventListener("keydown", onToolKey);
         };
         // F01 — expose for chat roll-card highlights & e2e (canvasSmoke)
@@ -2812,7 +2880,7 @@
               {:else}
                 {@const a = measurePoint(preview.from)}
                 {@const b = measurePoint(preview.to)}
-                <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={preview.door ? "#8ad9ff" : "#ff9f6e"} stroke-width="4" stroke-dasharray="10 5" />
+                <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={preview.wallKind === "door" ? "#8ad9ff" : preview.wallKind === "window" ? "#7ee0ff" : "#ff9f6e"} stroke-width="4" stroke-dasharray="10 5" />
               {/if}
             </svg>
           {/if}

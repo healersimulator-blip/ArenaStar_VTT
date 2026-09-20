@@ -29,6 +29,7 @@ closed (§0), an architectural bet (§0.1), an opportunistic bet (§5), or delib
 | Phase 3.2 fog GM brushes (G-25) | **Done** | D-256 | `src/core/fogMask.ts` + both shells + token gating. Remaining: "view as player X" (Wave 2.3). |
 | Rail / toolbar parity work (not in v1) | **Done** | D-255/D-256 | Layers, draw shapes, measure options, dice tray, wall/light placement, pins, help window. Its wall/door semantics are **defective** — Wave 1.2 / G-43. |
 | `.svelte` typecheck gate (not in v1) | **Done** | D-256 | `scripts/checkSvelte.mjs` inside `pnpm typecheck`; 39 components, 0 blocking. |
+| **Wave 1.2** door/wall lifecycle + window (G-43/G-27) | **Done** | D-257 | Kinds map to honest axes (`src/canvas/vision/wallKinds.ts`), doors are placed closed, a click toggles them, locked ignores clicks, `Alt`-click deletes, and the GM overlay is drawn. Remaining G-43 tail: endpoint reshaping / kind change after placement. |
 | Adoption/transfer pipeline **scaffolding** (v1 §5.5 P-1…P-3) | **Partly done** | D-253 | `tools/adopt/INVENTORY.md` (10 candidates, licenses verified at pinned commits, `legalStatus: pending`) + `tools/adopt/README.md` (the P-1…P-6 flow). What is *not* built: the `fx.json` validator/loader, the C3 playback corpus and the C4 module-API conformance modules — see §5. |
 | Content-mapping documentation (v1 §2.2/§2.3) | **Superseded** | D-253 | `tools/convert/README.md` documents the landed pipeline (28 packs, drop policy, source-shape detection) better than the plan's preview did; the v1 text stays in git history. |
 | `changes[]` as the item-automation mechanic (v1 §2.3) | **Rejected — do not revive** | D-112 | The project decision keeps `EffectDocument` untouched and PF1e on a **closed typed mod list** with bonus-type stacking (`src/packages/pf1e/effects.ts`); "path overwrite" changes cannot express "+2 morale to AC". The converter keeps Foundry `changes[]` raw under `system.foundry` for reference; **nothing evaluates them**, and Wave 1.3 must not start. |
@@ -110,16 +111,16 @@ the door dot colour (`src/canvas/layers/WallsLayer.ts:59`). Nothing in the app m
 after creation, and there is no window primitive.
 
 **Work.**
-1. Map the rail's kinds to honest documents: *wall* → `door: 0` (closed state is irrelevant for a
-   solid wall: keep `sight/move/sound/light = 1`); *door* → `door: 0` (closed) with the
-   conditional axes, so an open/close toggle means something; *window* → `sight: 2` (permits),
-   `light: 2` (permits), `move: 1` (blocks), `sound: 1` — the existing restriction axes already
-   express it, no document change.
-2. Door interaction: click/`D` on a door dot toggles `door` 0 ⇄ 1 (update op), lock via
-   modifier; the GM-only Walls layer already renders the three states.
-3. Wall editing: select a wall (GM layer) → delete / drag endpoint / change kind, replacing
-   "erase last placement" as the only correction path. Reuse the existing op + selection
-   plumbing; no new document types.
+1. ~~Map the rail's kinds to honest documents~~ **done (D-257)**: *wall* → `0` on every axis
+   (unconditional — a door state must never open a wall); *door* → conditional `1` on every
+   axis, placed `door: 0` (closed) unless the rail says open/locked; *window* → `sight: 2`,
+   `light: 2`, `move: 0`, `sound: 2` — the existing restriction axes express it, no document
+   change, and `wallKindOf()` recovers the kind for worlds written before D-257.
+2. ~~Door interaction~~ **done (D-257)**: a click on the door dot toggles closed ⇄ open; a
+   locked door ignores the click; the GM overlay that draws the dot is synced onto the GM Info
+   layer and redraws on replica changes and camera moves.
+3. **Wall editing — partially done (D-257)**: `Alt`-click deletes a wall (beyond "erase last").
+   Still open: drag an endpoint, change a placed wall's kind.
 
 **Acceptance.** e2e: place a door → it blocks sight while closed (vision polygon shrinks), toggling
 it opens the line of sight (`e2e` reads the vision result, the pattern
@@ -253,7 +254,7 @@ D-255/D-256 pattern).
 | Wave | Item | Depends on | Effort | Closes |
 |---|---|---|---|---|
 | 1.1 | Content fetch + publish + credits | — | S–M | G-44, (G-18 remainder) |
-| 1.2 | Door/wall lifecycle + window | — | S | G-43, G-27 |
+| 1.2 | Door/wall lifecycle + window | — | S | G-43 (lifecycle), G-27 — **done, D-257** |
 | 1.3 | Inventory + items + encumbrance | 1.1 (packs to import) | M–L | G-03, G-04, G-05 tail, G-01 tail |
 | 1.4 | Compendium scale UX | 1.1 | S–M | G-45 |
 | 2.1 | Lighting-as-vision (+G-32 decision, +G-26) | — | L | G-24, G-26, G-32 |

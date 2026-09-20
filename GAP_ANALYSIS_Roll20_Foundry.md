@@ -23,6 +23,11 @@ kind selector is cosmetic to the engine (flagged in G-27 too). **Two more gaps a
 Every entry below carries a file path or a test as its evidence, so the next pass can re-check it
 mechanically.
 
+**Follow-up (same day):** **D-257** closed the G-43 lifecycle and G-27 — kinds now write
+honest restriction axes, doors are placed closed and toggle on a click, locked doors ignore
+clicks, `Alt`-click deletes a wall, and the GM overlay that draws them is finally synced. Only
+wall reshaping (drag an endpoint / change a placed wall's kind) remains of G-43.
+
 **Purpose:** answer "what do Roll20 and Foundry VTT offer — especially their Pathfinder 1e
 character sheet / module / ruleset — that ArenaStar_VTT does not have?"
 **Method:** repo audit (code in `src/`, `systems/`, plus the repo's own tracking docs
@@ -394,15 +399,12 @@ remaining work is different from what the original assumed, that is called out.
   is the *strategic* faction fog, not a per-player fog view. *(Internal: ROADMAP follow-up.)*
 - **G-26 — Light source animation & richness.** Low · ⛔ **Open.** Static lights; no flicker,
   domes, darkness sources, priorities/thresholds.
-- **G-27 — Windows / wall variety.** Low · ⛔ **Open — with an audit finding.**
-  Doors carry sight/light/sound/move restrictions (D-009) and the vision spec proves an open
-  doorway drops out of sight geometry, but: **(a)** there is no window primitive, and **(b)** the
-  D-256 rail's wall tool writes `door: 1` for a placed "door" (i.e. *open*) and hardcodes
-  `move: 1, sight: 1` (`src/app/App.svelte:257-275`), so the wall/door choice is cosmetic today;
-  **(c)** nothing in the app ever mutates a door's state after creation (no open/close/lock
-  control anywhere — the only writer is the create path). The fix is small and belongs with
-  **G-43**: a window is expressible with the existing axes (`sight: 2` permits, `light: 2`
-  permits, `move: 1` blocks).
+- **G-27 — Windows / wall variety.** Low · ✅ **Closed (D-257).**
+  A **window** is now a first-class kind (`sight: 2`, `light: 2`, `move: 0`, `sound: 2` —
+  expressible with D-009's existing axes, no new document field), drawn as a cyan double line on
+  the GM overlay, and proven in `e2e/walls.spec.ts`: the sight polygon passes a window while
+  `moveSegments` still contains it. One-way sight refinement remains D-075's open question (the
+  axis is authored, the vision worker treats a one-way sight wall as blocking from both sides).
 - **G-28 — Drawing shape set.** Low · ✅ **Closed (D-256).** Freehand, polygon, rectangle,
   **ellipse** (Alt-drag), **line/straight segment**, text with an in-canvas editor, and stroke/
   fill/width style swatches (`src/canvas/tools/drawing.ts`, `CanvasToolbar.svelte`,
@@ -454,15 +456,16 @@ remaining work is different from what the original assumed, that is called out.
 
 ### I. Gaps found by the 2026-09-20 pass
 
-- **G-43 — Door & wall lifecycle (NEW).** Med.
-  Both competitors treat walls as editable objects and doors as interactive: R20/FVTT let you
-  drag a door to open it, lock it, and delete or reshape any wall. We can create a wall, and
-  "erase last placement" (`data-canvas-action="delete-last-placement"`, D-256) — that is all.
-  A placed "door" is written *open* (`door: 1`) and its `move/sight` axes are hardcoded `1`
-  (`src/app/App.svelte:257-275`), so the kind selector changes the label and the door dot colour
-  (`src/canvas/layers/WallsLayer.ts:59`) and nothing else. No mutation site for `door` exists
-  outside creation (verified by grep across `src/`). Closes with: door state toggle in the UI
-  (+ keyboard), window primitive via the restriction axes, and wall edit/delete beyond "last".
+- **G-43 — Door & wall lifecycle (NEW in this pass, closed by D-257).** Med · 🟡 **Partial — lifecycle done, reshaping open.**
+  The finding: a placed "door" was written *open* (`door: 1`) with `move/sight` hardcoded `1`,
+  so the kind selector changed only a label and a dot colour, and no mutation site for `door`
+  existed outside creation. D-257 fixed the whole lifecycle: kinds map to honest axes
+  (`src/canvas/vision/wallKinds.ts`), a door is placed **closed** (or open/locked on request),
+  a click toggles it closed ⇄ open, a locked door ignores clicks, `Alt`-click deletes a wall,
+  and the GM overlay that draws the door dot (and therefore the click target) is finally synced
+  (`WallsLayer` on the GM Info layer, redrawn on replica changes and camera moves).
+  **Remaining:** drag a placed wall's endpoint and change its kind after placement (both are
+  edits of an existing segment; the overlay now gives them a surface to live on).
 - **G-44 — Content delivery to a GM (NEW).** High.
   The 25,376 converted entries and the full-content starter world are **build products with an
   unreproducible input**: `tools/content/vendor/` (262 MB of upstream checkouts) is git-ignored,
@@ -491,7 +494,8 @@ first, dependencies second**, market-differentiating (non-parity) work last:
 **Wave 1 — close the loops we already opened** (no new architecture; each item unblocks something
 that already exists)
 1. **G-44** content delivery (a landed pipeline nobody can fetch) + OGL/CREDITS surface.
-2. **G-43 / G-27** door & wall lifecycle + window primitive (a shipped tool whose kinds are cosmetic).
+2. ~~**G-43 / G-27** door & wall lifecycle + window primitive~~ — ✅ done by D-257 (wall
+   reshaping remains, tracked in G-43).
 3. **G-03 / G-04** inventory + encumbrance + currency + item surface (the last Tier-1 sheet gap).
 4. **G-45** compendium scale UX (makes the 25k entries usable, not just present).
 

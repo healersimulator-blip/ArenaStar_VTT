@@ -15,6 +15,8 @@ import type { FlatDiff } from "../core/ops";
 import type { PlayerApp } from "./joinBoot";
 import type { HostShare } from "./hostShare";
 import { sightSegments } from "../canvas/vision/wallSight";
+import { wallKindOf } from "../canvas/vision/wallKinds";
+import { worldToScreen } from "../canvas/camera";
 import { fogMaskLog, pointInFogMask } from "../core/fogMask";
 import {
   affectedTokens,
@@ -119,8 +121,30 @@ export interface AppSurface {
     fill: string;
     strokeWidth: number;
   }>;
-  /** D-256: what the rail's walls/doors and lighting tools placed. */
-  walls(): Array<{ id: string; c: [number, number, number, number]; door: number }>;
+  /** D-256/D-257: what the rail's walls/doors/windows and lighting tools placed. */
+  walls(): Array<{
+    id: string;
+    name: string;
+    kind: "wall" | "door" | "window";
+    c: [number, number, number, number];
+    door: number;
+    sight: number;
+    move: number;
+    sound: number;
+    light: number;
+  }>;
+  /**
+   * D-257: run the REAL vision worker over the live scene's walls for a viewer at `from` and
+   * report whether `to` is inside the resulting polygon. This is how an e2e proves a door
+   * actually changes what a token can see.
+   */
+  wallSightProbe(spec: {
+    from: { x: number; y: number };
+    to: { x: number; y: number };
+    radius: number;
+  }): Promise<{ wallSegments: number; points: number; sees: boolean }>;
+  /** Viewport coordinates of a world point (canvas rect + camera) — for real mouse gestures. */
+  screenOf(point: { x: number; y: number }): { x: number; y: number } | null;
   lights(): Array<{ id: string; x: number; y: number; dim: number; color: string }>;
   /** D-256 map pins: the GM note text, the player text and the visibility state. */
   notes(): Array<{
@@ -1396,9 +1420,55 @@ function appSurface(app: HostApp): AppSurface {
     walls: () =>
       (scene()?.walls ?? []).map((w) => ({
         id: w._id,
+        name: w.name,
+        kind: wallKindOf(w),
         c: [...w.c] as [number, number, number, number],
         door: w.door,
+        sight: w.sight,
+        move: w.move,
+        sound: w.sound,
+        light: w.light,
       })),
+    /**
+     * D-257: real vision for the live scene — the app's own vision computer over the scene's
+     * sight segments, so a door toggle can be asserted end to end.
+     */
+    wallSightProbe: async (spec) => {
+      const s = scene();
+      if (!s) return { wallSegments: 0, points: 0, sees: false };
+      const segs = sightSegments(s.walls);
+      const flat = new Float32Array(segs.length * 4);
+      segs.forEach((sg, i) => {
+        flat[i * 4] = sg.x1;
+        flat[i * 4 + 1] = sg.y1;
+        flat[i * 4 + 2] = sg.x2;
+        flat[i * 4 + 3] = sg.y2;
+      });
+      const { createVisionComputer } = await import("../workers/visionComputer");
+      const { pointInPolygon } = await import("../canvas/vision/polygon");
+      const computer = createVisionComputer();
+      try {
+        const poly = await computer.compute(spec.from.x, spec.from.y, flat, spec.radius);
+        return {
+          wallSegments: segs.length,
+          points: poly.length / 2,
+          sees: pointInPolygon(poly, spec.to.x, spec.to.y),
+        };
+      } finally {
+        computer.terminate();
+      }
+    },
+    screenOf: (point) => {
+      const stage = (
+        globalThis as {
+          __stage?: { app: { canvas: HTMLCanvasElement }; camera: { x: number; y: number; scale: number } };
+        }
+      ).__stage;
+      if (!stage) return null;
+      const rect = stage.app.canvas.getBoundingClientRect();
+      const p = worldToScreen(stage.camera, point.x, point.y);
+      return { x: rect.left + p.x, y: rect.top + p.y };
+    },
     lights: () =>
       (scene()?.lights ?? []).map((l) => ({
         id: l._id,
