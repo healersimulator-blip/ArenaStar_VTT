@@ -202,7 +202,8 @@ function assembleArchive(systemsDir, rulesetId, opts = {}) {
 
 /** Assemble the plain (document-less) starter for one strategic ruleset. */
 export function buildStarterArchive(systemsDir, rulesetId, opts = {}) {
-  return assembleArchive(systemsDir, rulesetId, opts);
+  const docs = opts.docs ?? (rulesetId === "pf1e-mass-battles" ? testerDocuments(null) : []);
+  return assembleArchive(systemsDir, rulesetId, { ...opts, docs });
 }
 
 // ─── tester starter: rulesets + converted content + a playable scenario ────────
@@ -476,7 +477,12 @@ export async function buildStarterWorlds(opts = {}) {
     if (only !== null && only !== id) continue;
     const manifest = readManifest(systemsDir, id);
     if (!manifest || manifest.type !== "system" || !manifest.rules?.entry) continue;
-    const built = buildStarterArchive(systemsDir, id);
+    // Keep the built-in starter playable even when the optional converted content checkout is
+    // unavailable. The PF1e Core package still supplies the compendia; these seeded documents
+    // provide the hero, enemy actors, scene tokens, and tester guide for real browser testing.
+    const built = buildStarterArchive(systemsDir, id, {
+      docs: id === "pf1e-mass-battles" ? testerDocuments(null) : [],
+    });
     results.push({ ...built, zip: writeZip(built, `${id}-starter-${built.version}.zip`) });
   }
   // The tester starter needs the converted content — skip quietly when it is not built

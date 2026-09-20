@@ -186,6 +186,12 @@ test.describe("start screen (D-249)", () => {
 
     await expectHosting(page, "Pathfinder 1e Mass Battles");
     await expect(page.locator("#status [data-rules-status]")).toHaveText("strategic rules: pf1e-mass-battles v1.0.0");
+    // The shipped PF1e starter must be playable, not merely a package container.
+    await expect(page.locator("#status")).toContainText("tokens 3");
+    await page.getByRole("button", { name: "Actors", exact: true }).click();
+    await expect(page.getByText("Ser Aldric Vane", { exact: true })).toBeVisible();
+    await expect(page.getByText("Goblin", { exact: true })).toBeVisible();
+    await expect(page.getByText("Goblin 2", { exact: true })).toBeVisible();
     await expect(page.locator("[data-rules-boot-error]")).toHaveCount(0);
     await page.click("#gm-settings");
     const settings = page.locator('[data-window="settings"]');

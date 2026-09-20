@@ -85,6 +85,19 @@ test.describe("GM tab app shell (§2, §14 M1)", () => {
     expect(await appCall<number>(page, "seq")).toBeGreaterThanOrEqual(seq);
   });
 
+  test("canvas toolbar exposes tools and dice formula control", async ({ page }) => {
+    await page.goto(entry);
+    await page.getByRole("button", { name: "Host a world" }).click();
+    await expect(page.locator("[data-canvas-toolbar]")).toBeVisible();
+    await expect(page.locator("[data-canvas-tool]")).toHaveCount(6);
+    await page.locator('[data-canvas-tool="dice"]').click();
+    await expect(page.getByLabel("Dice formula")).toHaveValue("1d20");
+    await page.getByLabel("Dice formula").fill("1d20+5");
+    await expect(page.getByRole("button", { name: "Roll" })).toBeVisible();
+    await page.locator("[data-canvas-toolbar] .collapse").click();
+    await expect(page.locator("[data-canvas-toolbar]")).toHaveClass(/collapsed/);
+  });
+
   test("import map: thumbnail pipeline + scene.img streamed by hash (§7)", async ({ page }) => {
     await page.goto(entry + "?e2e=1");
     await waitForApp(page);

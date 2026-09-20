@@ -1,8 +1,12 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { bootPlayerApp, type PlayerApp } from "./joinBoot";
   import { parseInvite } from "./hostShare";
   import { createStage, type Stage } from "../canvas/stage";
+  import { screenToWorld } from "../canvas/camera";
+  import CanvasToolbar, { type CanvasTool } from "../ui/canvas/CanvasToolbar.svelte";
+  import { ToolInteractionController } from "../canvas/tools/controller";
+  import { drawingForText } from "../canvas/tools/drawing";
   import {
     CanvasController,
     domPointerSource,
@@ -19,6 +23,7 @@
   import { copyText } from "../ui/clipboard";
   import { FogExploration } from "../client/fogExploration";
   import { createVisionComputer } from "../workers/visionComputer";
+  import { buildChatMessage, parseChatCommand } from "../core/chat";
 
   let app = $state<PlayerApp | null>(null);
   let phase = $state<"invite" | "exchange" | "live" | "dead">("invite");
@@ -55,6 +60,13 @@
 
   let canvasHost = $state<HTMLDivElement | null>(null);
   let canvasError = $state<string | null>(null);
+  let canvasTool = $state<CanvasTool>("select");
+  let canvasToolbarCollapsed = $state(false);
+  const rollFromToolbar = (formula: string) => {
+    if (!app?.client?.user) return;
+    const built = buildChatMessage({ author: app.client.user._id, parsed: parseChatCommand(`/roll ${formula}`) });
+    app.client.submit([{ kind: "create", coll: "messages", data: built.message }]);
+  };
   let loadedMapHash: string | null = null;
   let stage: Stage | null = null;
   let controller: CanvasController | null = null;
@@ -241,6 +253,21 @@
             }),
           );
         }
+        const canvas = view.app.canvas as HTMLCanvasElement;
+        const toWorld = (event: PointerEvent) => { const r = canvas.getBoundingClientRect(); return screenToWorld(view.camera, event.clientX - r.left, event.clientY - r.top); };
+        const toolController = new ToolInteractionController({
+          nextId: () => `drawing-${globalThis.crypto.randomUUID().slice(0, 8)}`,
+          userId: client.user._id,
+          grid: () => squareGrid(activeScene()?.grid),
+          createDrawing: (drawing) => { const sc = activeScene(); if (sc) client.submit([{ kind: "create", coll: "drawings", parent: { coll: "scenes", id: sc._id }, data: drawing }]); },
+          promptText: (at) => { const text = globalThis.prompt("Text label"); const sc = activeScene(); if (text && sc) client.submit([{ kind: "create", coll: "drawings", parent: { coll: "scenes", id: sc._id }, data: drawingForText(`drawing-${globalThis.crypto.randomUUID().slice(0, 8)}`, at, text, client.user._id) }]); },
+          measurePreview: () => undefined,
+        });
+        const toolDown = (e: PointerEvent) => { if (canvasTool === "draw" || canvasTool === "text" || canvasTool === "measure") toolController.pointerDown({ world: toWorld(e), button: e.button, ctrlKey: e.ctrlKey }); };
+        const toolMove = (e: PointerEvent) => { if (canvasTool === "draw" || canvasTool === "measure") toolController.pointerMove({ world: toWorld(e), button: e.button, ctrlKey: e.ctrlKey }); };
+        const toolUp = (e: PointerEvent) => { if (canvasTool === "draw" || canvasTool === "measure") toolController.pointerUp({ world: toWorld(e), button: e.button, ctrlKey: e.ctrlKey }); };
+        canvas.addEventListener("pointerdown", toolDown); canvas.addEventListener("pointermove", toolMove); canvas.addEventListener("pointerup", toolUp);
+        onDestroy(() => { canvas.removeEventListener("pointerdown", toolDown); canvas.removeEventListener("pointermove", toolMove); canvas.removeEventListener("pointerup", toolUp); });
         controller = new CanvasController({
           onTokenActivate: ({ token }) => {
             if (token.actorId) openActorSheet(token.actorId);
@@ -436,7 +463,9 @@
           role="application"
           aria-label="Game board"
           tabindex="-1"
-        ></div>
+        >
+          <CanvasToolbar bind:active={canvasTool} bind:collapsed={canvasToolbarCollapsed} onRoll={rollFromToolbar} />
+        </div>
         {#if app?.client}
           <WindowHost
             manager={wm}
