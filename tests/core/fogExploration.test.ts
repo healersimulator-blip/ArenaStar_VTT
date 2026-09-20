@@ -14,6 +14,7 @@ import {
   maskHiddenTokenIds,
   sceneFogSettings,
   tokenInSight,
+  type FogViewer,
 } from "../../src/core/fogExploration";
 import { applyDiff } from "../../src/core/diff";
 
@@ -157,7 +158,15 @@ describe("whose eyes reveal", () => {
   });
 
   test("viewers carry the token centre", () => {
-    expect(fogViewers(s, REX)[0]).toEqual({ tokenId: "own", x: 100, y: 100 });
+    // §2.1: a viewer also carries what it can see — with no darkness and no sight range that
+    // is the scene's diagonal (the whole scene), exactly as before this slice.
+    expect(fogViewers(s, REX)[0]).toEqual({
+      tokenId: "own",
+      x: 100,
+      y: 100,
+      radiusPx: fogSightRadius(s, { enabled: true, rangeSquares: null }),
+      darkvisionPx: 0,
+    });
   });
 });
 
@@ -176,12 +185,12 @@ describe("sight radius + reveal key", () => {
     const k0 = fogRevealKey(s, viewers, 2500);
     expect(fogRevealKey(scene({ ...s, name: "renamed" }), viewers, 2500)).toBe(k0);
     expect(fogRevealKey(s, viewers, 600)).not.toBe(k0);
-    expect(fogRevealKey(s, [{ tokenId: "t", x: 101, y: 100 }], 2500)).not.toBe(k0);
-    expect(fogRevealKey(s, [{ tokenId: "t", x: 100.2, y: 100.1 }], 2500)).toBe(k0); // sub-pixel jitter
+    expect(fogRevealKey(s, [viewer("t", 101, 100)], 2500)).not.toBe(k0);
+    expect(fogRevealKey(s, [viewer("t", 100.2, 100.1)], 2500)).toBe(k0); // sub-pixel jitter
     const opened = scene({ ...s, walls: [s.walls[0] as WallDocument, { ...door, door: 1 }] });
     expect(fogRevealKey(opened, viewers, 2500)).not.toBe(k0);
     // the order of the eyes does not matter
-    const two = [{ tokenId: "a", x: 1, y: 1 }, { tokenId: "b", x: 2, y: 2 }];
+    const two = [viewer("a", 1, 1), viewer("b", 2, 2)];
     expect(fogRevealKey(s, two, 2500)).toBe(fogRevealKey(s, [...two].reverse(), 2500));
   });
 
@@ -193,6 +202,15 @@ describe("sight radius + reveal key", () => {
 });
 
 // D-251 — what a player is shown on a fogged scene
+/** A hand-built fog viewer, as `fogViewers` would return one (radius in pixels). */
+const viewer = (
+  tokenId: string,
+  x: number,
+  y: number,
+  radiusPx = 2500,
+  darkvisionPx = 0,
+): FogViewer => ({ tokenId, x, y, radiusPx, darkvisionPx });
+
 describe("token gate", () => {
   /** A square sight polygon [x0,x1]×[y0,y1] as the worker would hand it back. */
   const square = (x0: number, y0: number, x1: number, y1: number): Float32Array =>

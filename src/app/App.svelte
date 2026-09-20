@@ -2239,6 +2239,12 @@ const WALL_PICK_RADIUS = 12;
               ? { ...(core as Record<string, unknown>) }
               : {};
           },
+          sceneDarkness: () => {
+            const value = activeScene()?.darkness;
+            return typeof value === "number" && Number.isFinite(value)
+              ? Math.max(0, Math.min(1, value))
+              : 0;
+          },
           godView: () => gmState.godView,
           viewAsFaction: () => gmState.viewAsFaction,
           simCount: () => current.gm.client.simReplica?.count ?? null,

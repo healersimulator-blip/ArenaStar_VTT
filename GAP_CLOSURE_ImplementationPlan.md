@@ -237,32 +237,72 @@ world, types a partial name, and drag-imports the 3rd hit.
 
 ## 2. Wave 2 — platform parity a table feels within a session
 
-### 2.1 Sight bounded by lighting — **G-24** (+ G-26, G-32 decision) · L · *the biggest platform gap*
+### 2.1 Sight bounded by lighting — **G-24** (G-32 decided; G-26 open) · L · *the biggest platform gap* · ✅ **done for G-24 (D-260)**
 
 **Problem (re-verified).** `src/canvas/vision/lights.ts` is render-only; nothing in the vision
 worker, `fogVisibleTokenIds` or the fog loop reads darkness/light state, so tokens see through
 unlit darkness.
 
-**Work.** The document already carries what this needs, which keeps the slice small:
-`TokenDocument.vision: boolean` (`src/core/documents.ts:66`) is the sight gate the reveal uses
-(`src/core/fogExploration.ts:104`), and `TokenDocument.light: TokenLight { radius, color, alpha }`
-(`:48`) is already an emitted light source (the D-256 lighting tool writes one). What is missing is
-a **vision range** and a darkness/light term.
-1. Model: add `sight` range + `darkvision` range to the token's vision settings (extend
-   `TokenLight`'s sibling block, not a new document type), keeping `vision: boolean` as the master
-   gate; per-scene ambient darkness and per-token lights already exist.
-2. Gate the reveal and the token-visibility set on light state — `fogVisibleTokenIds` gains a
-   light term; `sightSegments` stays as it is. The vision worker's angular sweep is unchanged; the
-   effective radius becomes `max(darkvision, min(sight, lit radius))` per viewer.
-3. **G-32 decision** (host-side vs client-side withholding of positions) is the *same* decision as
-   this: while lighting is client-side, darkvision is advisory. Take it explicitly here, or record
-   why not.
-4. **G-26** (light animation, priorities/thresholds) follows once the model exists — separate
-   slice, no document change.
+**Result — every step below was built and executed, not planned (D-260).** The document already
+carried what this needed (`TokenDocument.vision` as the master gate, `TokenDocument.light` as an
+emitted source, `SceneDocument.darkness`/`.lights`), so the slice is the missing **range** and the
+light term in the gate, not a new document type.
 
-**Acceptance.** Unit: light/vision matrix (unlit + no darkvision → nothing new revealed; darkvision
-→ reveal within its range; bright vs dim radius). e2e: the fog spec's pattern, with the GM turning
-the lights off and the player's `visibleTokenIds` shrinking without any token moving.
+1. ~~**Model**: add `sight` + `darkvision` to the token's vision settings~~ **done.**
+   `src/canvas/vision/darkness.ts` (new, pure — no pixi, no store, no worker) holds the whole
+   rule: `tokenVisionOf` / `tokenLightSourceOf` / `sceneLightSources` / `lightLevelAt` /
+   `effectiveSightRadiusPx` / `viewerSightRadiusPx` / `withinDarkvision`. Ranges are authored in
+   **feet** ("darkvision 60 ft.") and converted through the scene grid (20 px/ft on a 5 ft /
+   100 px grid); light radii stay in scene pixels because that is the unit the rail's light tool
+   and `LightDocument` already write. `TokenLight.bright` became authorable (absent = half the dim
+   radius, the rail's own proportion).
+2. ~~**Gate the reveal and the token-visibility set on light state**~~ **done.** `fogViewers`
+   carries a per-viewer `radiusPx` and `darkvisionPx`; the client loop hands each viewer **its own**
+   radius to the worker, so the angular sweep and `sightSegments` are untouched — what changed is
+   the radius the same worker is asked for. `fogVisibleTokenIds` gained the light term (an in-sight
+   token must also be lit, or inside some eye's darkvision) and `fogRevealKey` moved with the
+   lighting, so a GM's darkness change re-runs the loop with no token moving. The effective radius
+   is the plan's own `max(darkvision, min(sight, lit radius))`, where "lit radius" is how far the
+   illumination reaching the viewer carries (`dim − distance(viewer, light)`; unbounded under
+   ambient light, so a scene that never touches darkness behaves exactly as before).
+3. ~~**G-32 decision**~~ **decided here (D-260): lighting stays client-side, positions stay
+   replicated, darkvision is advisory.** The boundary this slice enforces is what a player's shell
+   *draws, uncovers and lets a click reach* (the D-251 gate, one more term) — not information: a
+   replica still holds every token's `x`/`y`, so darkvision is a table-trust boundary like fog
+   itself. Host-side withholding is a **replication-layer** change (per-user projection with its own
+   late-join/undo/migration story), not a lighting change; the path is now cheap, since the
+   explored fog is already host-side and per user (D-250) and `fogVisibleTokenIds` is pure. Recorded
+   rather than half-built.
+4. **G-26** (light animation, priorities/thresholds) — **still open, as the plan says**: a separate
+   slice, no document change. What it needs from here is `sceneLightSources` (colour and alpha
+   included) and the render side: `LightingLayer` is built but **never synced by either shell**, so
+   the app draws no darkness overlay and no torch glows yet (pre-existing; darkness reaches players
+   through the fog cover, whose reach shrinks in the dark). Wall-clipped light polygons are G-26's
+   display half too — illumination here is a distance test, deliberately erring toward *too much*
+   light (a torch behind a wall still lights the far tile) rather than toward unplayable blackness.
+
+**Acceptance — met.** Unit: `tests/canvas/darkness.test.ts` **19** (light/vision matrix: total
+darkness with no darkvision reveals nothing; darkvision reveals within its range independently of
+light; bright vs dim radius; a light caps sight while ambient light does not; the scene cap bounds
+every sense; the token gate with a light, with darkvision, and without a lighting context — the old
+meaning) plus `tests/core/fogExploration.test.ts` **12** (one radius per viewer, the reveal key, the
+gate). e2e: `e2e/fog_lighting.spec.ts` **1/1 (29.4 s)** — the fog spec's pattern, watched by a
+really joined player: daylight shows the hero, an orc 10 ft. away and a scout 40 ft. out; the GM
+slides ambient darkness to 100 % through the Settings window and the player keeps **only their own
+token**, with the replica's token count, `tokenPos` and explored map unchanged (and no move op in the
+spec at all, so nothing but the lighting can explain the shrink); a six-cell light placed
+through the rail (`dim 600 / bright 300`) brings the orc back but not the scout, whose distance is
+beyond the light's reach; **"Erase last" takes the light away and the visible set shrinks again with
+no token having moved**; ambient light back to 0 % returns all three with nothing placed. The four
+specs that had to keep working untouched did: `fog_player` 2/2, `fog`, `vision`, `walls` 1/1 each.
+
+**Honest notes (in D-260, not hidden here).** No lighting *render* yet (above) · a token's
+`sight`/`darkvision` are document+data fields with **no editor window** today (the pre-existing
+`vision` flag and `TokenDocument.light` are in the same state), so a GM reaches the slice through
+the darkness control and the rail's *scene* lights, while a bestiary's darkvision needs the
+converter+actor+token-editor tail recorded in D-260 · the gate's light term is provably redundant
+with the reveal radius for today's single caller and is kept as the caller contract (the future
+host-side gate) and against a stale-polys race.
 
 ### 2.2 Table flow — **G-22 / G-10a / G-10b / G-20** · M
 
@@ -314,7 +354,7 @@ D-255/D-256 pattern).
 | 1.2 | Door/wall lifecycle + window | — | S | G-43 (lifecycle), G-27 — **done, D-257** |
 | 1.3 | Inventory + items + encumbrance | 1.1 (packs to import) | M–L | G-03, G-04, G-05 tail, G-01 tail |
 | 1.4 | Compendium scale UX | 1.1 | S–M | G-45 |
-| 2.1 | Lighting-as-vision (+G-32 decision, +G-26) | — | L | G-24, G-26, G-32 |
+| 2.1 | Lighting-as-vision | — | L | G-24 — **done, D-260** (G-32 **decided**, D-260; G-26 open) |
 | 2.2 | Table flow (HP bars, quickbar, chat apply) | 1.3 for item-bound slots | M | G-22, G-10a, G-10b, G-20 |
 | 2.3 | Tails (view-as, onboarding, i18n) | 2.1 for view-as | S | G-25 tail, G-41 tail, G-38 |
 | 3.1 | Character import | 1.3 (item/actor shape stable) | Med–L | G-39 |

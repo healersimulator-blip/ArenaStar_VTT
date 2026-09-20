@@ -146,7 +146,14 @@ export interface AppSurface {
   }): Promise<{ wallSegments: number; points: number; sees: boolean }>;
   /** Viewport coordinates of a world point (canvas rect + camera) — for real mouse gestures. */
   screenOf(point: { x: number; y: number }): { x: number; y: number } | null;
-  lights(): Array<{ id: string; x: number; y: number; dim: number; color: string }>;
+  lights(): Array<{
+    id: string;
+    x: number;
+    y: number;
+    dim: number;
+    bright: number;
+    color: string;
+  }>;
   /** D-256 map pins: the GM note text, the player text and the visibility state. */
   notes(): Array<{
     id: string;
@@ -238,6 +245,16 @@ export interface AppSurface {
       size?: string;
       /** D-251: `"gm"` places a token (and actor) only the GM owns — a monster to be hidden by fog. */
       owner?: "all" | "gm";
+      /**
+       * §2.1: the token's own senses, authored in **feet** the way a stat block states them
+       * (`sightFeet` absent = unlimited, `darkvisionFeet` absent = none), and a carried torch
+       * in grid cells (`lightCells`) — the three fields the lighting gate reads. They are
+       * written onto the created token document, so the fog loop reads them from the replica
+       * exactly as it would after a GM's own edit.
+       */
+      sightFeet?: number;
+      darkvisionFeet?: number;
+      lightCells?: number;
     }>,
   ): { ok: boolean; placed: number; cellSize: number };
   /**
@@ -768,6 +785,8 @@ export interface GmFogSurface {
   sceneScale(): string;
   /** Active scene `flags.core` as stored (D-250: fog / fogRange land here). */
   sceneCoreFlags(): Record<string, unknown>;
+  /** §2.1: the active scene's ambient darkness as stored (0 = bright, 1 = pitch dark). */
+  sceneDarkness(): number;
   godView(): boolean;
   viewAsFaction(): string;
   /** GM client pool replica model count (null before the first snapshot). */
@@ -1476,6 +1495,8 @@ function appSurface(app: HostApp): AppSurface {
         x: l.x,
         y: l.y,
         dim: l.dim,
+        /** §2.1: the bright radius too — the dark/dim/bright matrix is asserted from here. */
+        bright: l.bright,
         color: l.color,
       })),
     notes: () =>
@@ -1615,6 +1636,20 @@ function appSurface(app: HostApp): AppSurface {
           width: side * cellSize,
           height: side * cellSize,
           actorId,
+          ...(typeof t.sightFeet === "number" ? { sight: t.sightFeet } : {}),
+          ...(typeof t.darkvisionFeet === "number"
+            ? { darkvision: t.darkvisionFeet }
+            : {}),
+          ...(typeof t.lightCells === "number" && t.lightCells > 0
+            ? {
+                light: {
+                  radius: t.lightCells * cellSize,
+                  bright: (t.lightCells * cellSize) / 2,
+                  color: "#ffcc66",
+                  alpha: 0.5,
+                },
+              }
+            : {}),
         };
         ops.push({
           kind: "create",

@@ -2,3 +2,4 @@
 export * from "./polygon";
 export * from "./wallSight";
 export * from "./lights";
+export * from "./darkness";

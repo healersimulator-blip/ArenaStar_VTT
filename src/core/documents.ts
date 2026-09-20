@@ -46,7 +46,10 @@ export interface DocRef {
 // ─── Embedded document shapes (§4) ────────────────────────────────────────────
 
 export interface TokenLight {
+  /** The dim (outer) radius, in scene pixels. `0` = the token carries no light. */
   radius: number;
+  /** The bright (fully lit) radius; absent = half the dim radius, as the rail's tool writes it. */
+  bright?: number;
   color: string;
   alpha: number;
 }
@@ -65,6 +68,14 @@ export interface TokenDocument extends BaseDocument {
   disposition: "hostile" | "neutral" | "friendly";
   vision: boolean;
   light: TokenLight;
+  /**
+   * §9 vision bounded by light (plan §2.1): normal sight range in **feet**, absent/0 =
+   * unlimited (the scene's fog range and diagonal still cap it). Authored in feet because a
+   * stat block says "60 ft.", converted through `grid.distance`/`grid.size` for the math.
+   */
+  sight?: number | null;
+  /** Darkvision range in feet; absent = none. Sees in total darkness within its range. */
+  darkvision?: number;
 }
 
 /**

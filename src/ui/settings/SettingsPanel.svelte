@@ -11,6 +11,7 @@
   import type { SceneDocument, SceneGrid } from "../../core/documents";
   import {
     fogSettingsOps,
+    sceneDarknessOp,
     sceneFogSettings,
     type FogSettings,
   } from "../../core/fogExploration";
@@ -98,6 +99,8 @@
   let scale = $state<"tactical" | "strategic">("tactical");
   /** D-250: the active scene's explored-fog flags. */
   let fog = $state<FogSettings>({ enabled: false, rangeSquares: null });
+  /** §2.1: the active scene's ambient darkness (0 = bright, 1 = pitch dark). */
+  let darkness = $state(0);
 
   function refresh(): void {
     const scenes = client.store.getAll("scenes") as readonly SceneDocument[];
@@ -105,6 +108,7 @@
     sceneId = active?._id ?? "";
     grid = active ? { ...active.grid } : null;
     fog = sceneFogSettings(active);
+    darkness = clampDarkness(active?.darkness);
     scale =
       (active?.flags as { core?: { scale?: unknown } } | undefined)?.core
         ?.scale === "strategic"
@@ -206,11 +210,31 @@
     client.submit(fogSettingsOps(scene, next));
   }
 
+  /**
+   * §2.1 (G-24): the GM's darkness control. Darkness is a scene fact, not a client pref: it
+   * rides the `scenes` document, so every client's fog loop re-reads it and the torchless
+   * players stop seeing what no light reaches (see D-260 for the authority note).
+   */
+  function applyDarkness(value: number): void {
+    const scenes = client.store.getAll("scenes") as readonly SceneDocument[];
+    const scene = scenes.find((sc) => sc._id === sceneId);
+    if (!scene) return;
+    const next = clampDarkness(value);
+    darkness = next;
+    client.submit([sceneDarknessOp(scene, next)]);
+  }
+
   function apply(): void {
     if (!grid || !sceneId) return;
     client.submit([
       { kind: "update", ref: { coll: "scenes", id: sceneId }, diff: { grid } },
     ]);
+  }
+
+  /** One definition of "0…1, and a NaN reads as bright" for the field and the op. */
+  function clampDarkness(value: unknown): number {
+    if (typeof value !== "number" || !Number.isFinite(value)) return 0;
+    return Math.max(0, Math.min(1, value));
   }
 
   onMount(() => {
@@ -389,6 +413,26 @@
         <input data-gm-god-view type="checkbox" bind:checked={gmState.godView} />
         God view — the GM's fog is see-through (every token and map feature stays visible
         under it); off: preview the opaque cover players get
+      </label>
+    </div>
+    <!-- §2.1: how far sight carries is bounded by light; this is the ambient share of it -->
+    <div class="row lighting">
+      <label class="check">
+        Ambient darkness
+        <input
+          data-scene-darkness
+          type="range"
+          min="0"
+          max="1"
+          step="0.05"
+          value={darkness}
+          aria-label="Ambient darkness"
+          oninput={(e) => (darkness = clampDarkness(Number((e.target as HTMLInputElement).value)))}
+          onchange={(e) => applyDarkness(Number((e.target as HTMLInputElement).value))}
+        />
+        <span class="readout" data-scene-darkness-value>{Math.round(darkness * 100)}%</span>
+        — 0% is broad daylight; at 100% a token sees only what a light reaches: the torch it
+        carries, a placed light, or its own darkvision (feet, on the token)
       </label>
     </div>
   {/if}
@@ -650,6 +694,20 @@
   }
   .fog .check input {
     width: auto;
+  }
+  .lighting .check {
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    flex-basis: 100%;
+  }
+  .lighting input[type="range"] {
+    width: 12em;
+  }
+  .lighting .readout {
+    width: 3em;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
   }
   input,
   select {

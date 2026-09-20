@@ -15,6 +15,11 @@
  * never lands on a newer scene. No pixi here: the surface is an interface, and the unit
  * tests drive the loop with a fake one.
  *
+ * §2.1 (G-24) — darkness bounds sight: each viewer's reveal radius is
+ * `max(darkvision, min(sight, light at the viewer))`, and the visibility gate additionally
+ * requires the target to be lit (or within some eye's darkvision). A scene with `darkness: 0`
+ * and no sight ranges — every scene written before this slice — behaves exactly as before.
+ *
  * D-251 — what the viewer is shown: `onVisibility` receives the set of token ids the user
  * may see (their own tokens plus whatever stands in current sight), recomputed on EVERY
  * replica change against the last polygons (a token walking into an unmoved eye's sight
@@ -22,6 +27,7 @@
  * scene is entered only the user's own tokens are listed, before any polygon exists. The
  * GM shell does not wire it (the GM sees everything under a translucent cover).
  */
+import { sceneLighting } from "../canvas/vision/darkness";
 import { sightSegments } from "../canvas/vision/wallSight";
 import type { ActorDocument, SceneDocument } from "../core/documents";
 import {
@@ -233,7 +239,9 @@ export class FogExploration {
       this.restored = false;
       this.restoredBytes = 0;
       // fail closed: until the first polygons exist only the user's own tokens are shown
-      this.publishVisibility(fogVisibleTokenIds(scene, user, [], { actors }));
+      this.publishVisibility(
+        fogVisibleTokenIds(scene, user, [], { actors, lighting: sceneLighting(scene) }),
+      );
       const stored = await this.fetchStored(scene._id);
       if (this.destroyed || this.sceneId !== scene._id) return;
       if (stored && stored.length > 0) {
@@ -248,13 +256,16 @@ export class FogExploration {
     surface.setShown(true);
 
     const viewers = fogViewers(scene, user, { actors });
+    const lighting = sceneLighting(scene);
     const radius = fogSightRadius(scene, settings);
     const key = fogRevealKey(scene, viewers, radius);
     if (key !== this.key) {
       this.key = key;
       const segments = flatSegments(sightSegments(scene.walls));
+      // §2.1: each viewer reveals within its own light-bounded radius — a token in an unlit
+      // room reveals nothing while a lit one next door reveals its torch's reach.
       const polys = await Promise.all(
-        viewers.map((v) => this.options.computer.compute(v.x, v.y, segments, radius)),
+        viewers.map((v) => this.options.computer.compute(v.x, v.y, segments, v.radiusPx)),
       );
       if (this.destroyed || this.sceneId !== scene._id || this.surface !== surface) return;
       for (const poly of polys) surface.reveal(poly);
@@ -267,7 +278,11 @@ export class FogExploration {
       }
     }
     // every replica change: a token may have walked into (or out of) an unmoved eye's sight
-    this.publishVisibility(fogVisibleTokenIds(scene, user, this.polys, { actors }));
+    // — or a light may have changed, which is why the lighting state and the viewers' senses
+    // ride the gate too (§2.1).
+    this.publishVisibility(
+      fogVisibleTokenIds(scene, user, this.polys, { actors, lighting, viewers }),
+    );
   }
 
   /**
