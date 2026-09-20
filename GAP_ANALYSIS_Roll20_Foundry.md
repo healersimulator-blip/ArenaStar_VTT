@@ -26,7 +26,12 @@ mechanically.
 **Follow-up (same day):** **D-257** closed the G-43 lifecycle and G-27 — kinds now write
 honest restriction axes, doors are placed closed and toggle on a click, locked doors ignore
 clicks, `Alt`-click deletes a wall, and the GM overlay that draws them is finally synced. Only
-wall reshaping (drag an endpoint / change a placed wall's kind) remains of G-43.
+wall reshaping (drag an endpoint / change a placed wall's kind) remains of G-43. **D-258** then
+closed **G-44** — the pins moved into `tools/content/sources.json`, `pnpm content:fetch` makes
+them reproducible from a fresh clone, `pnpm content:package` produces the installable,
+checksummed artifact, and the licences are visible in the app (Help → *Licences & credits*), so
+"the content landed" is now a claim a person outside this machine can act on. The one deliberate
+hand-off is the release upload (no tags exist in the repo yet).
 
 **Purpose:** answer "what do Roll20 and Foundry VTT offer — especially their Pathfinder 1e
 character sheet / module / ruleset — that ArenaStar_VTT does not have?"
@@ -111,8 +116,9 @@ items 1,474 · traits 1,915 · racial-traits 1,214 · magic 790 · rules 591+10 
 goods-services 531 · artifacts 409 · companions 209 · familiars 175 · basic-npcs 15 · roll-tables
 19 and more — plus the `pf1e-mass-battles-tester` world zip that embeds ruleset + content side
 by side. Both are **build artifacts, not repo files**: `tools/content/vendor/` is git-ignored
-(262 MB) and `dist/` is produced by the build (see **G-44**: today a fresh clone cannot
-reproduce either without the vendored checkout).
+(262 MB) and `dist/` is produced by the build — the gap this used to be is closed by **G-44 /
+D-258**: `pnpm content:fetch` reproduces the inputs from the pinned commits and
+`pnpm content:package` writes the downloadable artifact with checksums.
 
 **Landed since the original pass (D-248…D-256), so §4's statuses reflect it:**
 - **Content pipeline + world-file packaging (D-248/D-249/D-253):** `tools/convert/`
@@ -361,9 +367,10 @@ remaining work is different from what the original assumed, that is called out.
 - **G-18 — Content scale.** High · 🟡 **Pipeline closed, distribution + bestiary open.**
   28 packs / 25,376 converted entries (D-253) is the same order of magnitude as PF-Content, and
   the packaging decision (D-248/D-249) makes world zips uncapped, so nothing structural blocks
-  parity. Two things remain: **the Bestiary module (1c)** is not converted, and **the delivery
-  path is broken for anyone without the vendored 262 MB checkout** — see **G-44** (new). This is
-  the gap most likely to be *mistaken* for closed: the data exists, a GM cannot fetch it yet.
+  parity. Two things remain: **the Bestiary module (1c)** is not converted, and — since D-258
+  closed **G-44** — the delivery path is no longer one of them (`pnpm content:fetch` from a fresh
+  clone, or the packaged artifact; the release upload is the only hand-off). This was the gap most
+  likely to be *mistaken* for closed: the data existed and a GM could not fetch it.
 - **G-19 — Adventure/module content support.** Med · ⛔ **Open.** No adventure pipeline
   (encounters + maps + journals + tokens as one importable thing).
 
@@ -466,16 +473,25 @@ remaining work is different from what the original assumed, that is called out.
   (`WallsLayer` on the GM Info layer, redrawn on replica changes and camera moves).
   **Remaining:** drag a placed wall's endpoint and change its kind after placement (both are
   edits of an existing segment; the overlay now gives them a surface to live on).
-- **G-44 — Content delivery to a GM (NEW).** High.
-  The 25,376 converted entries and the full-content starter world are **build products with an
+- **G-44 — Content delivery to a GM (NEW).** High · ✅ **Closed by D-258.**
+  The 25,376 converted entries and the full-content starter world were **build products with an
   unreproducible input**: `tools/content/vendor/` (262 MB of upstream checkouts) is git-ignored,
-  `dist/content` is not in the tree (verified: `ls dist/content` → absent, `dist/worlds` holds
-  only `pf1e-mass-battles-starter-1.0.0.zip`), and `scripts/buildStarterWorlds.mjs` *skips* the
-  tester world with a note when the content directory is missing. A GM cloning the repo therefore
-  cannot obtain the content the gap list now counts as landed, and the OGL notice/CREDITS surface
-  lives only inside the zip. Closes with: a repeatable fetch+build path (`pnpm content:fetch` →
-  `content:convert` → `build:worlds`) that a person can run from the README, a published artifact
-  (release asset) for people who cannot, and a `LEGAL.md`/in-app credits entry.
+  `dist/content` was not in the tree (verified: `ls dist/content` → absent, `dist/worlds` held
+  only `pf1e-mass-battles-starter-1.0.0.zip`), `scripts/buildStarterWorlds.mjs` *skipped* the
+  tester world with a note when the content directory was missing, and the OGL notice/CREDITS
+  surface lived only inside a zip. D-258 closed the loop with the three pieces the entry asked
+  for: **`tools/content/sources.json`** holds the pins (repo, exact commit, sparse paths,
+  required dirs, licence fact) as data; **`pnpm content:fetch`** (`tools/content/fetch.mjs`)
+  materialises them idempotently and *verifies* (`HEAD == pin`, required paths present and
+  non-empty) while naming the offline alternative on failure — `--check`, `--dest`, `--only`,
+  `--force` cover the rest; **`pnpm content:package`** writes the installable
+  `dist/packages/pf1e-content-1.0.0.zip` (8,084,502 B, byte-reproducible) plus
+  `dist/release/SHA256SUMS` over it and the world zips; and attribution is a surface a player can
+  read (`LEGAL.md`, `src/core/credits.ts`, Help → *Licences & credits*). The test that used to
+  self-skip — `tests/scripts/testerRealZip.test.ts` — now runs, and `e2e/content_world.spec.ts`
+  opens the real 8 MB zip through the start screen and imports converted entries.
+  **Remaining (hand-off, not a gap):** attaching the built zips to a release page; the repo has no
+  tags yet and README names the upload set.
 - **G-45 — Compendium scale UX (NEW).** Med.
   Search is a ranked full scan of every entry per keystroke (`src/core/compendium.ts:139-195`
   builds only an id index), and browse mode caps the rendered list (the sheets spec notes "at
@@ -493,7 +509,8 @@ first, dependencies second**, market-differentiating (non-parity) work last:
 
 **Wave 1 — close the loops we already opened** (no new architecture; each item unblocks something
 that already exists)
-1. **G-44** content delivery (a landed pipeline nobody can fetch) + OGL/CREDITS surface.
+1. ~~**G-44** content delivery (a landed pipeline nobody can fetch) + OGL/CREDITS surface~~ —
+   ✅ done by D-258 (fetch script, packaged artifact + checksums, `LEGAL.md` and in-app credits).
 2. ~~**G-43 / G-27** door & wall lifecycle + window primitive~~ — ✅ done by D-257 (wall
    reshaping remains, tracked in G-43).
 3. **G-03 / G-04** inventory + encumbrance + currency + item surface (the last Tier-1 sheet gap).

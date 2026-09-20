@@ -18,6 +18,10 @@ pnpm size         # prints raw+gzip size of dist/index.html, fails > 6 MB raw
 pnpm build:systems # → dist/packages/<id>-<version>.zip (strategic ruleset + content pack)
 pnpm build:worlds  # → dist/worlds/<id>-starter-<version>.zip (ready-to-open starter worlds)
 pnpm test:e2e     # builds, then runs Playwright against file:// of dist/index.html
+
+# Content (optional — the full PF1e compendium, 28 packs / ~25k entries):
+pnpm content:fetch   # clones the pinned sources into tools/content/vendor/ (git-ignored, ~262 MB)
+pnpm content:convert # → dist/content/pf1e (manifest + packs + OGL.txt + CREDITS.md)
 ```
 
 Requires Node 20+ and pnpm 10.
@@ -26,6 +30,37 @@ Requires Node 20+ and pnpm 10.
 open `dist/index.html`, **Open file (.zip)** → `dist/worlds/pf1e-mass-battles-starter-1.0.0.zip`
 → **Open as new world**. The world boots with the PF1e strategic ruleset active and the PF1e
 Core compendia installed; nothing to activate, nothing to reload.
+
+### Content: two ways in
+
+The full converted compendium is **data**, not code: it rides in a world zip and never enters the
+app body, so the single-file build stays inside its 6 MB budget.
+
+1. **Build it here** (needs network once). The order matters, because `pnpm build` empties `dist/`:
+
+   ```sh
+   pnpm content:fetch                      # pinned checkouts → tools/content/vendor/
+   pnpm build && pnpm build:systems && pnpm content:convert && pnpm build:worlds
+   pnpm content:package                    # download-ready zip + dist/release/SHA256SUMS
+   ```
+
+   `content:fetch` reads `tools/content/sources.json` — every source is a repo URL, an exact
+   commit, a sparse path set and the licence fact recorded in `tools/adopt/INVENTORY.md`. It is
+   idempotent and verifies what it fetched; `pnpm content:fetch --check` reports the state without
+   changing anything, and `--dest <dir>` keeps the 262 MB of sources outside the repo (the
+   converter then needs `VTT_CONTENT_VENDOR=<dir>`). If the content directory is missing,
+   `build:worlds` still builds the plain starter and says so.
+
+2. **Download the artifacts** (no toolchain, nothing to build). `pnpm content:package` writes the
+   installable `dist/packages/pf1e-content-<v>.zip`, `dist/worlds/` holds the ready-made world
+   zips, and `dist/release/SHA256SUMS` covers both — that is the file set to attach to a release,
+   so a GM without a toolchain downloads one file. Open a zip in the app — **Open file (.zip)** —
+   and the packs are installed with the world.
+
+Either way the licence travels with the data: every content package ships `OGL.txt` and
+`CREDITS.md` beside its packs, and the app's Help window (**Licences & credits**, `?` in the
+canvas rail) names the upstream sources, their pinned commits and the licence. The policy and the
+per-asset facts live in `LEGAL.md` and `tools/adopt/INVENTORY.md`.
 
 ## Layout
 

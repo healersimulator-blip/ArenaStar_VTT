@@ -30,6 +30,7 @@ closed (§0), an architectural bet (§0.1), an opportunistic bet (§5), or delib
 | Rail / toolbar parity work (not in v1) | **Done** | D-255/D-256 | Layers, draw shapes, measure options, dice tray, wall/light placement, pins, help window. Its wall/door semantics are **defective** — Wave 1.2 / G-43. |
 | `.svelte` typecheck gate (not in v1) | **Done** | D-256 | `scripts/checkSvelte.mjs` inside `pnpm typecheck`; 39 components, 0 blocking. |
 | **Wave 1.2** door/wall lifecycle + window (G-43/G-27) | **Done** | D-257 | Kinds map to honest axes (`src/canvas/vision/wallKinds.ts`), doors are placed closed, a click toggles them, locked ignores clicks, `Alt`-click deletes, and the GM overlay is drawn. Remaining G-43 tail: endpoint reshaping / kind change after placement. |
+| **Wave 1.1** content delivery to a GM (G-44) | **Done** | D-258 | `tools/content/sources.json` (the pins, as data) + `pnpm content:fetch` (idempotent, verifies HEAD == pin, names the offline alternative) + `pnpm content:package` (the installable zip + `dist/release/SHA256SUMS`) + `LEGAL.md` and the Help window's *Licences & credits*. A fresh clone reaches a full-content world zip with one documented command, and `tests/scripts/testerRealZip.test.ts` **runs** instead of skipping. Hand-off: attaching the zips to a release page (no tags exist yet). |
 | Adoption/transfer pipeline **scaffolding** (v1 §5.5 P-1…P-3) | **Partly done** | D-253 | `tools/adopt/INVENTORY.md` (10 candidates, licenses verified at pinned commits, `legalStatus: pending`) + `tools/adopt/README.md` (the P-1…P-6 flow). What is *not* built: the `fx.json` validator/loader, the C3 playback corpus and the C4 module-API conformance modules — see §5. |
 | Content-mapping documentation (v1 §2.2/§2.3) | **Superseded** | D-253 | `tools/convert/README.md` documents the landed pipeline (28 packs, drop policy, source-shape detection) better than the plan's preview did; the v1 text stays in git history. |
 | `changes[]` as the item-automation mechanic (v1 §2.3) | **Rejected — do not revive** | D-112 | The project decision keeps `EffectDocument` untouched and PF1e on a **closed typed mod list** with bonus-type stacking (`src/packages/pf1e/effects.ts`); "path overwrite" changes cannot express "+2 morale to AC". The converter keeps Foundry `changes[]` raw under `system.foundry` for reference; **nothing evaluates them**, and Wave 1.3 must not start. |
@@ -70,38 +71,49 @@ single-file identity, and each would be re-opened only by an explicit scope deci
 No new architecture. Each item unblocks something that already exists but cannot be reached,
 trusted, or used.
 
-### 1.1 Content delivery to a GM — **G-44** · S–M · **highest value in the plan**
+### 1.1 Content delivery to a GM — **G-44** · S–M · **highest value in the plan** — ✅ **done (D-258)**
 
-**Problem (verified).** The 25,376 converted entries and the full-content tester world exist only
-as `dist/**` products whose input (`tools/content/vendor/`, 262 MB of upstream checkouts) is
-git-ignored: `ls dist/content` → absent, `dist/worlds` holds the starter only, and
-`scripts/buildStarterWorlds.mjs` skips the tester world with a note when content is missing. A GM
-who clones the repo cannot obtain the content the parity story now depends on.
+**Problem (verified at the audit).** The 25,376 converted entries and the full-content tester world
+existed only as `dist/**` products whose input (`tools/content/vendor/`, 262 MB of upstream
+checkouts) is git-ignored: `ls dist/content` → absent, `dist/worlds` held the starter only, and
+`scripts/buildStarterWorlds.mjs` skipped the tester world with a note when content is missing. A GM
+who cloned the repo could not obtain the content the parity story now depends on.
 
-**Work.**
-1. `pnpm content:fetch` — a scripted, pinned checkout of the upstream mirrors into
-   `tools/content/vendor/`, then `content:convert` → `build:systems` → `build:worlds`. The clone
-   commands and the pinned commit hashes exist today only as prose in
-   `tools/adopt/INVENTORY.md`/`tools/convert/README.md`; the script makes them repeatable (and
-   fails loudly with the offline alternative when a mirror is unreachable). One documented command
-   from a fresh clone to a full-content world zip.
-2. Publish the built artifacts as **release assets** (the tester world zip, stage packs) with
-   checksums, so a GM without the toolchain downloads one file; README quickstart gains the two
-   paths (fetch-and-build, download-and-open).
-3. OGL/CREDITS surface: `LEGAL.md` + `OGL.txt`/`CREDITS.md` inside every content zip (already
-   written by the converter) **and** an in-app "Licenses & credits" entry in the Help window
-   (G-41's panel is already there), so attribution is visible to players, not just inside a zip.
-4. Icon/art policy decision (v1 risk 3) folds in here, because it changes the artifact's size and
-   its CREDITS story: adopt system icons with attribution, generate neutral category glyphs, or
-   hybrid (recommended).
+**Result — every step below was executed, not planned (D-258).**
+1. ~~`pnpm content:fetch` — a scripted, pinned checkout~~ **done.** `tools/content/sources.json`
+   holds each source as data (repo, exact commit, sparse paths, required dirs, licence fact) and
+   `tools/content/fetch.mjs` materialises it: blobless + sparse clone, idempotent, verifying
+   `HEAD == pin` **and** that every required path exists and is non-empty, failing with the offline
+   alternative named. `--check` reports state without changing it; `--dest` / `--only` / `--force`
+   cover the rest. The vendor→converter and converter→worlds hops are bridged by
+   `VTT_CONTENT_VENDOR` / `VTT_CONTENT_DIR` rather than hard-coded paths, and `pnpm test:e2e` now
+   re-runs the conversion (`--allow-missing`, one explicit flag, printing its skip) instead of
+   letting a `pnpm build` quietly cost the content specs their coverage.
+2. ~~Publish the built artifacts (release assets) with checksums~~ **built and checksummed.**
+   `pnpm content:package` emits `dist/packages/pf1e-content-1.0.0.zip` (8,084,502 B) — exactly the
+   shape the app's own importer installs — plus `dist/release/SHA256SUMS` over it and the world
+   zips. The bytes are reproducible (sorted walk, fixed 1980-01-02 zip mtime), which is what makes
+   a published checksum verifiable by whoever rebuilds. README's *Content: two ways in* documents
+   both paths; the release upload itself is a maintainer step (the repo has no tags yet).
+3. ~~OGL/CREDITS surface~~ **done.** `LEGAL.md` is the repo's legal posture; the converter already
+   ships `OGL.txt` + `CREDITS.md` inside the package; `src/core/credits.ts` inlines
+   `tools/content/sources.json` at build time and the Help window's *Licences & credits* section
+   (`[data-credits]`) names each source, its pinned commit and its licence — attribution a player
+   reads without opening a zip.
+4. **Icon/art policy — decided (v1 risk 4).** Nothing upstream ships: the converter drops `img` and
+   counts it per pack in `REPORT.md`, entries carry no icon path, and the app draws its own glyphs.
+   No generated art was added in this slice — it would change artifact size and the CREDITS story
+   for no user-visible gain today.
 
-**Acceptance.** From a clean clone with network: the documented command produces
-`dist/worlds/pf1e-mass-battles-tester-<v>.zip`; the zip opens in the app, lists the 28 packs, and
-drag-imports a spell/feat/item/class; `pnpm build` leaves `dist/index.html` under the 6 MB gate
-(content untouched in the app body). `tests/scripts/testerRealZip.test.ts` — which self-skips via
-`describe.skipIf(!existsSync(zipPath))` today — must **run, not skip**, and pass on the produced
-zip ("real tester zip (real converted content)"), because a skipped test is exactly how this gap
-stayed invisible.
+**Acceptance — met.** From a clean clone the documented commands produce
+`dist/worlds/pf1e-mass-battles-tester-1.0.0.zip` (8,185,999 B) carrying `OGL.txt` + `CREDITS.md` in
+15.9 s after an 11.9 s fetch — and the clean clone's `SHA256SUMS` is **byte-identical** to the one
+built here (two independent builds, `sha256sum -c` 3/3 OK);
+`tests/scripts/testerRealZip.test.ts` (the test that used to self-skip and hide this gap) **runs
+and passes**; `e2e/content_world.spec.ts` opens the real zip through the start screen, finds
+≥ 28 packs / ≥ 25,376 entries in the compendium reader and imports a spell and a feat into an actor
+sheet through the UI; `pnpm build` leaves `dist/index.html` at 2,823,986 B raw / 806,350 B gzip,
+far inside the 6 MB gate.
 
 ### 1.2 Door & wall lifecycle + window primitive — **G-43 / G-27** · S · *fixes a shipped defect*
 
@@ -333,8 +345,8 @@ should name the one load-sensitive spec that failed and show it green standalone
 rather than pretending the environment is idle.
 
 **Per-wave acceptance highlights**
-- 1.1: clean-clone → documented command → working full-content world; a booting test over the
-  produced zip.
+- 1.1: ✅ clean-clone → documented command → working full-content world; a booting test over the
+  produced zip (executed — D-258).
 - 1.2: door toggle changes sight geometry end to end; window passes sight/light, blocks movement.
 - 1.3: import → equip → attack → cast → charge decrement, all through the UI, all persisted.
 - 1.4: < 16 ms keystroke at 20k entries, virtualized browse, drag-import from a large pack.
@@ -347,14 +359,20 @@ rather than pretending the environment is idle.
 ## 7. Risks & open decisions
 
 1. **Repo LICENSE still absent** — does not gate third-party adoption (case-by-case), but it does
-   gate accepting community contributions and telling anyone what they may do with the app. Decide
-   in Wave 1.1 (it is the natural moment: credits and attribution land there).
+   gate accepting community contributions and telling anyone what they may do with the app. The
+   posture is now **recorded instead of implicit** (`LEGAL.md` §1, restated in the Help window's
+   credits section, decision in D-258): no licence published, all rights reserved, no contribution
+   grant. Choosing a licence is still open — it is a maintainer decision, and nothing in Wave 1.1
+   depends on it.
 2. **Upstream content availability** (1.1): the mirrors are third-party GitLab/GitHub repos; pin
    commits and record checksums so a fetch failure is diagnosable, and ship the built artifact so
    a GM is never blocked by an upstream outage.
 3. **Bestiary (1c) format** — if the module ships only Foundry `.db` packs, budget our own decoder
    (original code, ~a day). Do not ship a `.db` reader that depends on an unlicensed toolbox.
-4. **Icon/art policy** (1.1) — attribution vs generated glyphs; affects artifact size and CREDITS.
+4. **Icon/art policy** (1.1) — **decided (D-258)**: no upstream art ships (the converter drops
+   `img` and counts it per pack in `REPORT.md`; entries carry no icon path; the app draws its own
+   glyphs). Revisit only if a slice genuinely needs per-entry art — it changes artifact size *and*
+   the CREDITS story.
 5. **OGL no-charge constraint** — fine for the free single-file model; must be re-checked if any
    paid distribution is ever considered.
 6. **3PP/Mythic gate** (3.4) — opt-in packs flagged `thirdParty` or excluded: still a scope

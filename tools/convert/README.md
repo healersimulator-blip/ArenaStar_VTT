@@ -1,15 +1,23 @@
 # PF1e content converter
 
-Converts the pinned Foundry checkouts (`tools/content/vendor/`, gitignored — clone commands
-in `tools/adopt/INVENTORY.md`) into the `pf1e-content` data package that the app's
-compendium reader consumes.
+Converts the pinned Foundry checkouts (`tools/content/vendor/`, gitignored) into the
+`pf1e-content` data package that the app's compendium reader consumes. The checkouts come from
+`pnpm content:fetch`, which reads `tools/content/sources.json` (repo + exact commit + sparse
+paths + licence fact per source).
 
 ## Run
 
 ```
+pnpm content:fetch                  # materialise tools/content/vendor/ (idempotent; --check verifies)
 pnpm content:convert                # → dist/content/pf1e (manifest.json + packs/*.json + OGL.txt + CREDITS.md + REPORT.md)
-node tools/convert/index.mjs --only spells-core,feats   # a subset of the 28 packs
+pnpm content:convert -- --only spells-core,feats        # a subset of the 28 packs
+pnpm content:convert -- --vendor <dir>                  # a checkout that lives elsewhere
+pnpm content:convert -- --allow-missing                 # exit 0 with a note instead of failing when the checkout is absent
 ```
+
+`VTT_CONTENT_VENDOR` points the whole chain at one directory (`content:fetch --dest`,
+`content:convert`, and `build:worlds` via `VTT_CONTENT_DIR`), which is how CI can keep the ~262 MB
+of sources out of the repository.
 
 **Pipeline order matters:** `pnpm build` (vite) empties `dist/`, which also removes
 `dist/content/`. Build in this order:
@@ -18,9 +26,17 @@ node tools/convert/index.mjs --only spells-core,feats   # a subset of the 28 pac
 pnpm build && pnpm build:systems && pnpm content:convert && pnpm build:worlds
 ```
 
+`pnpm test:e2e` runs that same chain with `--allow-missing`, precisely so a `build` mid-way
+through a developer's day cannot silently cost them the content specs: either the conversion runs,
+or the skip is printed.
+
 `build:worlds` defaults `--content-dir` to `dist/content/pf1e`; when that folder is missing
 (fresh clone, or a `build` that ran since the last convert) it builds the plain starter and
-notes that the tester starter is skipped.
+notes that the tester starter is skipped. The full chain, from a bare clone:
+
+```
+pnpm install && pnpm content:fetch && pnpm build && pnpm build:systems && pnpm content:convert && pnpm build:worlds
+```
 
 ## Layout
 

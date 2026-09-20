@@ -14,6 +14,9 @@
  * pf1e-mass-battles strategic ruleset.
  *
  * Usage: node tools/convert/index.mjs [--vendor <dir>] [--out <dir>] [--only <out…>]
+ *        [--allow-missing]   exit 0 with a note when the checkout is absent (used by
+ *                            `pnpm test:e2e`, which must not fail on a machine that has
+ *                            not fetched the 262 MB of sources — it skips, and says so)
  */
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
@@ -202,17 +205,41 @@ function main() {
     const i = argv.indexOf(flag);
     return i === -1 ? null : (argv[i + 1] ?? null);
   };
-  const vendorRoot = resolve(repoRoot, argOf("--vendor") ?? join("tools", "content", "vendor"));
+  // VTT_CONTENT_VENDOR lets the whole chain point at one checkout (fetch --dest, this, worlds),
+  // which is how a sandbox or CI keeps the 262 MB of sources outside the repo.
+  const vendorRoot = resolve(
+    repoRoot,
+    argOf("--vendor") ?? process.env.VTT_CONTENT_VENDOR ?? join("tools", "content", "vendor"),
+  );
   const outDir = resolve(repoRoot, argOf("--out") ?? join("dist", "content", "pf1e"));
   const only = argOf("--only");
   const onlySet = only !== null ? new Set(only.split(",")) : null;
 
   if (!existsSync(vendorRoot)) {
+    // The recipe lives in tools/content/sources.json and materialises with one command (G-44);
+    // this message used to be the only copy of the two clone lines, which is why a fresh clone
+    // could not reach the content pipeline at all.
     console.error(`vendor checkout missing: ${relative(repoRoot, vendorRoot)}`);
-    console.error("Clone the pinned commits first (see tools/adopt/INVENTORY.md):");
-    console.error(`  cd ${relative(repoRoot, vendorRoot)}`);
-    console.error("  git clone --filter=blob:none --no-checkout https://github.com/gabrieldosprazeres/foundryvtt-pathfinder1 pf1-system && cd pf1-system && git sparse-checkout init --cone && git sparse-checkout set packs && git checkout 681929d1f5471178a99fc3285f94caa85d78e427");
-    console.error("  git clone --filter=blob:none --no-checkout https://github.com/baileymh/pf1e-content pf1e-content && cd pf1e-content && git sparse-checkout init --cone && git sparse-checkout set src/packs && git checkout baf5232c5dc16af99d49ae1bf57ead6473b46bbb");
+    console.error("Fetch the pinned sources first:");
+    console.error(
+      vendorRoot === resolve(repoRoot, join("tools", "content", "vendor"))
+        ? "  pnpm content:fetch"
+        : `  pnpm content:fetch --dest ${relative(repoRoot, vendorRoot)}`,
+    );
+    console.error(
+      "  (or, offline: download the published pf1e-content / tester-world artifacts — README, \"Content: two ways in\")",
+    );
+    // `--allow-missing` exists for exactly one caller: `pnpm test:e2e`, which runs the whole
+    // build chain on whatever machine it is run on. Without it, a developer who has not fetched
+    // the sources gets a hard failure; with an implicit skip, the content specs go quiet and the
+    // gap is invisible again (D-258). So: one explicit flag, and the skip is printed.
+    if (argv.includes("--allow-missing")) {
+      console.error("");
+      console.error(
+        "--allow-missing: skipping the conversion; dist/content is left as it is (content specs will self-skip).",
+      );
+      process.exit(0);
+    }
     process.exit(1);
   }
 

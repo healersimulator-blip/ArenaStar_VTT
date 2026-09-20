@@ -514,7 +514,10 @@ if (isCli) {
   const out = argOf("--out");
   const systemsDir = argOf("--systems-dir");
   // The converted content package — built by `pnpm content:convert` (tools/convert/).
-  const contentDir = argOf("--content-dir") ?? join(repoRoot, "dist", "content", "pf1e");
+  const contentDir =
+    argOf("--content-dir") ??
+    process.env.VTT_CONTENT_DIR ??
+    join(repoRoot, "dist", "content", "pf1e");
   try {
     const built = await buildStarterWorlds({
       dryRun: argv.includes("--dry-run"),

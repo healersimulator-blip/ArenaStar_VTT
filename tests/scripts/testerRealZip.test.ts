@@ -1,12 +1,15 @@
 /**
  * The REAL built tester world (dist/worlds/pf1e-mass-battles-tester-<v>.zip — the converted
- * content, 28 packs / 25 k entries) imports and boots. Skips itself when the artifact is not
- * built (fresh clones): build it with `pnpm build && pnpm build:systems && pnpm content:convert
- * && pnpm build:worlds` first. The hermetic counterpart (a small fixture content package) is
- * in tests/scripts/buildStarterWorlds.test.ts.
+ * content, 28 packs / 25 k entries) imports and boots, and the licence notices that must travel
+ * with that content are inside the artifact. Skips itself when the artifact is not built (fresh
+ * clones): build it with `pnpm content:fetch && pnpm build && pnpm build:systems &&
+ * pnpm content:convert && pnpm build:worlds` first — the skip note says so, and D-258 records the
+ * run where this test executed instead of skipping, which is the G-44 acceptance. The hermetic
+ * counterpart (a small fixture content package) is in tests/scripts/buildStarterWorlds.test.ts.
  */
 import "fake-indexeddb/auto";
 import { existsSync, readFileSync } from "node:fs";
+import { strFromU8, unzipSync } from "fflate";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bootHostApp } from "../../src/app/hostBoot";
@@ -60,6 +63,29 @@ describe.skipIf(!existsSync(zipPath))("real tester zip (real converted content)"
       expect(spells?.pack.entries.length).toBe(3028);
       const rulesRef = compendia.find((c) => c.pack.name === "PF1e Rules (Reference)");
       expect(rulesRef?.pack.entries.length).toBe(591);
+
+      // ── G-44: the notices ship WITH the data, inside the same artifact ──
+      // A licence notice that lives only in the repo does not travel with a world a GM downloads,
+      // so the package carries the OGL text and the credits next to its packs. (The in-app
+      // pointer to them is the Help window's "Licences & credits" section.)
+      const files = unzipSync(bytes);
+      const names = Object.keys(files);
+      const notice = names.find((n) => /packages\/pf1e-content\/OGL\.txt$/.test(n));
+      const credits = names.find((n) => /packages\/pf1e-content\/CREDITS\.md$/.test(n));
+      expect(notice).toBeDefined();
+      expect(credits).toBeDefined();
+      const ogl = strFromU8(files[notice as string] as Uint8Array);
+      expect(ogl).toMatch(/OPEN GAME LICENSE Version 1\.0a/i);
+      expect(ogl).toMatch(/15\. COPYRIGHT NOTICE/);
+      // the notice is the *content's* Section 15 list, not an empty template
+      expect(ogl).toContain("Pathfinder RPG Core Rulebook");
+      expect(ogl.length).toBeGreaterThan(20_000);
+      const creditText = strFromU8(files[credits as string] as Uint8Array);
+      // the credits name the pinned upstreams, both commits, and every converted pack
+      expect(creditText).toContain("681929d1f5471178a99fc3285f94caa85d78e427");
+      expect(creditText).toContain("baf5232c5dc16af99d49ae1bf57ead6473b46bbb");
+      expect(creditText).toContain("PF1e Spells (Core)");
+      expect(creditText).toContain("PF1e Feats (Expanded)");
       await app.persister.flush();
     } finally {
       await app.close();

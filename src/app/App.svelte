@@ -2283,6 +2283,8 @@ const WALL_PICK_RADIUS = 12;
           actorCount: () =>
             (current.gm.client.store.getAll("actors") as readonly unknown[])
               .length,
+          itemCount: () =>
+            (current.gm.client.store.getAll("items") as readonly unknown[]).length,
           importedTokens: () => [...importedTokens],
           dice3d: () => ({
             ...dice3dStats,

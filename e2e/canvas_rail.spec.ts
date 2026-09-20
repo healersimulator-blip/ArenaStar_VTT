@@ -299,6 +299,14 @@ test.describe("canvas rail — tools (§10, D-256)", () => {
     await page.locator('[data-window="turn-order"] [data-window-close]').click();
     await pick(page, '[data-canvas-action="help"]');
     await expect(page.locator('[data-help-panel]')).toBeVisible();
+    // G-44: the help window is also the in-app attribution surface — it names the pinned content
+    // sources and their licences, and points at the notices that ship inside the content package.
+    const credits = page.locator("[data-credits]");
+    await expect(credits).toBeVisible();
+    await expect(credits).toContainText(/OGL|Open Game/i);
+    await expect(credits).toContainText("681929d"); // the pinned commits, as shown
+    await expect(credits).toContainText("baf5232");
+    await expect(credits).toContainText(/no licence has been published/i);
     await page.locator('[data-window="help"] [data-window-close]').click();
     await pick(page, '[data-canvas-action="settings"]');
     await expect(page.locator('[data-window="settings"]')).toBeVisible();

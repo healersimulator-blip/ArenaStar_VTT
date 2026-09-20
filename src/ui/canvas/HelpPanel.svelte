@@ -5,6 +5,11 @@
    * the live binding map, so a rebound action shows its new combo.
    */
   import { DEFAULT_BINDINGS } from "../../core/keys";
+  import {
+    APP_LICENSE_NOTE,
+    CONTENT_NOTICE_NOTE,
+    CONTENT_SOURCE_CREDITS,
+  } from "../../core/credits";
 
   let {
     bindings = DEFAULT_BINDINGS,
@@ -90,6 +95,20 @@
       {/each}
     </dl>
   </section>
+  <section data-credits>
+    <h4>Licences &amp; credits</h4>
+    <p class="prose">{APP_LICENSE_NOTE}</p>
+    <p class="prose">{CONTENT_NOTICE_NOTE}</p>
+    <dl>
+      {#each CONTENT_SOURCE_CREDITS as source (source.id)}
+        <dt>{source.commit}</dt>
+        <dd>
+          <span class="source">{source.id}</span> — {source.license}
+          <span class="url">{source.url.replace("https://", "")}</span>
+        </dd>
+      {/each}
+    </dl>
+  </section>
 </div>
 
 <style>
@@ -120,5 +139,19 @@
   dd {
     margin: 0;
     color: #c8d1e0;
+  }
+  .prose {
+    margin: 0;
+    color: #a8b2c4;
+    line-height: 1.45;
+  }
+  .source {
+    font-family: ui-monospace, monospace;
+    color: #c8d1e0;
+  }
+  .url {
+    display: block;
+    color: #7c869a;
+    font-size: 11px;
   }
 </style>
