@@ -53,6 +53,17 @@ import {
   type PF1eHealthReadout,
 } from "./healthState";
 import { normalizePF1eSystem } from "./statBlock";
+import { actorItemEffects } from "./itemChanges";
+import {
+  capacityStrengthBonusOf,
+  carriedWeightLb,
+  encumbranceReadout,
+  equippedArmorEntry,
+  readCurrency,
+  readInventoryItems,
+  slowAndSteadyOf,
+  worseOfArmorAndLoad,
+} from "./inventory";
 import {
   deriveAllPF1eSkills,
   type PF1eAuthoredSkill,
@@ -103,6 +114,12 @@ export interface PF1eArmorEntry {
 /** An authored attack line; iterative extra attacks and ability damage are derived, not authored. */
 export interface PF1eAttackEntry {
   name?: string;
+  /**
+   * G-04: the inventory item this line was authored from (a weapon on the actor's Items tab).
+   * The line stays the editable copy the resolve path consumes; this is only the link the
+   * sheet shows and offers to re-sync. Absent for hand-authored lines.
+   */
+  itemId?: string;
   ranged?: boolean;
   rangeIncrementFt?: number;
   /** Authored damage dice, e.g. "1d8". */
@@ -856,6 +873,24 @@ export interface DeriveInput {
   /** Core-owned attributes (`hp`, `ac`, `movement`), which is where pack documents keep them. */
   attributes?: Record<string, unknown> | undefined;
   effects?: readonly PF1eActiveEffect[] | undefined;
+  /**
+   * Plan §1.3 / G-03: the **load's** own penalties, already resolved by `inventory.ts`
+   * (Table 7-5) and already merged with the worn armor by the "worse figure, do not stack"
+   * rule. Two things change when a creature is encumbered: the Dexterity cap and the armor
+   * check penalty (both shared with armor), and the speed (Table: Armor and Encumbrance for
+   * Other Base Speeds). Absent = no load, which is what every pre-1.3 caller means.
+   */
+  encumbrance?:
+    | {
+        /** Max Dexterity bonus from the load alone (`null` = no cap). */
+        maxDexBonus: number | null;
+        /** Armor check penalty from the load alone, non-negative. */
+        checkPenalty: number;
+        /** Speed after the load; `null` = leave the authored speed alone. */
+        speedFt: number | null;
+      }
+    | null
+    | undefined;
 }
 
 /**
@@ -1025,7 +1060,13 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
 
   // 3. Armor, the Dexterity cap it imposes, and the three ACs (A.2).
   const armor = isRecord(sys.armor) ? (sys.armor as PF1eArmorEntry) : {};
-  const armorCheckPenalty = Math.max(0, readNumber(armor.checkPenalty ?? (sys as Record<string, unknown>).checkPenalty, "armor.checkPenalty", c));
+  const encumbrance = input.encumbrance ?? null;
+  const authoredAcp = Math.max(0, readNumber(armor.checkPenalty ?? (sys as Record<string, unknown>).checkPenalty, "armor.checkPenalty", c));
+  // Table 7-5 + "use the worse figure (from armor or from load) for each category. Do not
+  // stack the penalties." The load's figure arrives pre-merged by `worseOfArmorAndLoad`
+  // (inventory.ts) when the caller had both; a caller that passes only the load still gets
+  // the worse of the two here.
+  const armorCheckPenalty = Math.max(authoredAcp, encumbrance?.checkPenalty ?? 0);
   const acC = isRecord(sys.armorClass)
     ? (sys.armorClass as PF1eAcComponents)
     : {};
@@ -1042,19 +1083,24 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     "armor.shieldBonus",
     c,
   );
-  const naturalArmor = readNumber(
-    acC.natural ?? attrs.naturalArmor,
-    "armorClass.natural",
-    c,
-  );
+  // Effects and items add to the natural-armor component (an amulet of natural armor +1 is
+  // "+1 natural armor", not "+1 to AC"): the component keeps its own AC arithmetic, so touch
+  // AC correctly stays out of it.
+  const naturalArmor =
+    readNumber(acC.natural ?? attrs.naturalArmor, "armorClass.natural", c) +
+    (resolved.mods.naturalArmor ?? 0);
   const dodgeBonus = readNumber(acC.dodge, "armorClass.dodge", c);
   const acMisc = readNumber(acC.misc, "armorClass.misc", c);
-  const maxDex =
+  const armorMaxDex =
     armor.maxDexBonus === undefined || armor.maxDexBonus === null
       ? Number.POSITIVE_INFINITY
       : readNumber(armor.maxDexBonus, "armor.maxDexBonus", c, {
           fallback: Number.POSITIVE_INFINITY,
         });
+  const maxDex =
+    encumbrance?.maxDexBonus !== undefined && encumbrance?.maxDexBonus !== null
+      ? Math.min(armorMaxDex, encumbrance.maxDexBonus)
+      : armorMaxDex;
   const cappedDex = Number.isFinite(maxDex)
     ? Math.min(eff.dex, maxDex)
     : eff.dex;
@@ -1390,7 +1436,23 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
 
   // 9. Movement, hit points, conditions.
   const speedRaw = sys.landSpeedFt ?? sys.speedFt ?? attrs.movement;
-  const speedFt = readNumber(speedRaw, "speedFt", c, { defaultWhenAbsent: 30 });
+  const authoredSpeedFt = readNumber(speedRaw, "speedFt", c, { defaultWhenAbsent: 30 });
+  // Effect/item speed modifiers (boots of striding and springing, a `landSpeed` change) move
+  // the *base* figure; the load still caps the result below, because Table 7-5's reduced
+  // speed is a maximum.
+  const effectSpeed = Math.trunc(resolved.mods.speed ?? 0);
+  const baseSpeedFt = Math.max(0, authoredSpeedFt + effectSpeed);
+  const loadSpeed = encumbrance?.speedFt;
+  const speedFt =
+    typeof loadSpeed === "number" && Number.isFinite(loadSpeed)
+      ? Math.min(baseSpeedFt, loadSpeed)
+      : baseSpeedFt;
+  if (effectSpeed !== 0)
+    c.defaults.push(`speed: ${fmt(effectSpeed)} ft from effects/items on the ${authoredSpeedFt} ft base`);
+  if (speedFt !== baseSpeedFt)
+    c.defaults.push(
+      `speed: ${speedFt} ft (encumbered) — the load's figure, per Table: Encumbrance Effects`,
+    );
   const flySpeedFt =
     sys.flySpeedFt === undefined
       ? null
@@ -1510,7 +1572,7 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
   const derivedSkills = deriveAllPF1eSkills(authoredSkills, {
     abilities: eff,
     armorCheckPenalty,
-    effectMods: resolved.mods,
+    effectMods: resolved.mods as Record<string, number | undefined>,
     negativeLevels: negativeLevels.total,
   });
 
@@ -1708,22 +1770,150 @@ export function unarmedDamageDice(size: PF1eSize): string {
   return UNARMED_STRIKE_DAMAGE_BY_SIZE[size];
 }
 
-/** A derived view straight from documents, for the sheet and the combat panel. */
+/**
+ * A derived view straight from documents, for the sheet and the combat panel.
+ *
+ * `items` (plan §1.3 / G-04) is the embedded inventory: the **equipped** armor/shield items
+ * become the worn armor entry when any exist (an authored `system.pf1e.armor` still stands on
+ * its own, for the stat blocks that carry one), and the carried weight resolves through Table
+ * 7-4/7-5 into the load's Dexterity cap, check penalty and speed. The items' *typed mods* do
+ * not ride here — they ride `effectOps.combinedTacticalEffects`, which every tactical consumer
+ * already calls, so a caller passing `items` gets the same numbers in the sheet and in combat.
+ */
 export function deriveFromDocuments(input: {
   actor: {
     system?: Record<string, unknown> | undefined;
     attributes?: Record<string, unknown> | undefined;
   };
   effects?: readonly PF1eActiveEffect[] | undefined;
+  /** `ActorDocument.items` — read through `inventory.ts`, never guessed at. */
+  items?: readonly unknown[] | undefined;
+  /**
+   * Plan §1.3: the table's encumbrance rule, off when the GM switched it off
+   * (`worldSettings.encumbranceRule === "off"`). Default on, which is what D-… shipped.
+   */
+  encumbranceEnabled?: boolean | undefined;
+  /** Extra Strength for carrying capacity only (Muleback-style items and the world setting). */
+  capacityStrengthBonus?: number | undefined;
 }): PF1eDerived {
   const block = input.actor.system?.pf1e;
   const parsed = parsePF1eActorSystem(block);
+  const authored = parsed.ok ? parsed.value : ({} as PF1eActorSystem);
+  const items = readInventoryItems(input.items).items;
+  const extraDefaults: string[] = [];
+  let system = authored;
+  const itemArmor = equippedArmorEntry(items);
+  if (itemArmor !== null) {
+    const authoredArmor = isRecord(authored.armor) ? (authored.armor as Record<string, unknown>) : null;
+    const authoredHasNumbers =
+      authoredArmor !== null &&
+      Object.values(authoredArmor).some((v) => typeof v === "number" && v !== 0);
+    if (authoredHasNumbers)
+      extraDefaults.push(
+        "armor: the authored armor entry is ignored — the equipped armor/shield item(s) are the worn ones",
+      );
+    system = { ...authored, armor: itemArmor } as PF1eActorSystem;
+  }
+  let encumbrance: DeriveInput["encumbrance"] = null;
+  const rawCurrency = isRecord((input.actor.system as Record<string, unknown> | undefined)?.pf1e)
+    ? (isRecord(input.actor.system?.pf1e) ? (input.actor.system.pf1e as Record<string, unknown>) : null)
+    : null;
+  const { currency } = readCurrency(rawCurrency?.currency);
+  if (input.encumbranceEnabled !== false) {
+    const traits = Array.isArray(system.traits) ? system.traits.filter((t): t is string => typeof t === "string") : [];
+    const strScore = numberOr(system.abilities?.str, 10);
+    const capacityStrengthBonus =
+      (input.capacityStrengthBonus ?? 0) + capacityStrengthBonusOf(items);
+    const readout = encumbranceReadout({
+      strength: strScore,
+      size: normalizeSize(system.size) ?? "Medium",
+      quadruped: system.reachShape === "long" || system.quadruped === true,
+      strengthForCapacity: capacityStrengthBonus,
+      totalLb: carriedWeightLb(items, currency),
+      baseSpeedFt: numberOr(system.landSpeedFt ?? system.speedFt, 30),
+      slowAndSteady: slowAndSteadyOf(items, traits),
+    });
+    for (const line of readout.issues) extraDefaults.push(`encumbrance: ${line}`);
+    if (readout.encumbered)
+      extraDefaults.push(
+        `encumbrance: ${readout.level} load — max Dex ${readout.maxDexBonus ?? "—"}, check penalty ${readout.checkPenalty}, speed ${readout.speedFt} ft`,
+      );
+    const merged = worseOfArmorAndLoad(itemArmor ?? authored.armor ?? null, readout);
+    encumbrance = readout.encumbered
+      ? {
+          maxDexBonus: merged.maxDexBonus,
+          checkPenalty: merged.checkPenalty,
+          speedFt: readout.speedFt,
+        }
+      : null;
+  }
+  // Plan §1.3: an actor document's items contribute through the *effect* funnel, so the
+  // derivation this seam returns is the same one the sheet shows. The merge is by effect id
+  // (`item:<itemId>`), and the caller's own list wins on a collision — a caller that already
+  // merged item effects (`effectOps.combinedTacticalEffects`) therefore cannot double-count
+  // them, and a caller that only has a document (`deriveFromActorDocument`, the combat state
+  // read, a token's size lookup) still gets them.
+  const effects: PF1eActiveEffect[] = [...input.effects ?? []];
+  {
+    const seen = new Set(effects.map((e) => e.id));
+    for (const effect of actorItemEffects(input.items)) {
+      if (seen.has(effect.id)) continue;
+      seen.add(effect.id);
+      effects.push(effect);
+    }
+  }
   const d = derivePF1eActor({
-    system: parsed.ok ? parsed.value : {},
+    system,
     attributes: input.actor.attributes,
-    effects: input.effects ?? [],
+    effects,
+    encumbrance,
   });
-  return parsed.ok ? d : { ...d, issues: [parsed.error, ...d.issues] };
+  const issues = [...d.issues, ...(parsed.ok ? [] : [parsed.error])];
+  return {
+    ...d,
+    defaults: [...extraDefaults, ...d.defaults],
+    issues,
+  };
+}
+
+/**
+ * Plan §1.3 — the one-call derivation for a whole **actor document**: its embedded items (an
+ * equipped suit of armour, a shield, a load that finally crosses Table 7-4's heavy column) and
+ * the table's encumbrance rule ride the derivation. `deriveFromDocuments` stays the explicit
+ * seam; this is the helper every caller with a real `ActorDocument` in hand should use, so no
+ * call site can forget the items and quietly derive a different AC than the sheet shows.
+ *
+ * `settings` is the structural subset of `worldSettings` that matters here, spelled out so
+ * this package keeps its no-core-import rule.
+ */
+export function deriveFromActorDocument(
+  actor: {
+    system?: Record<string, unknown> | undefined;
+    attributes?: Record<string, unknown> | undefined;
+    items?: readonly unknown[] | undefined;
+  },
+  options?: {
+    effects?: readonly PF1eActiveEffect[] | undefined;
+    /** `worldSettings.encumbranceRule` — anything but `"off"` keeps the rule on. */
+    encumbranceRule?: string | undefined;
+    /** `worldSettings.encumbranceCapacityStrBonus` (a table-wide Muleback-style allowance). */
+    encumbranceCapacityStrBonus?: number | undefined;
+  },
+): PF1eDerived {
+  return deriveFromDocuments({
+    actor,
+    items: actor.items,
+    encumbranceEnabled: options?.encumbranceRule !== "off",
+    ...(options?.effects !== undefined ? { effects: options.effects } : {}),
+    ...(options?.encumbranceCapacityStrBonus !== undefined
+      ? { capacityStrengthBonus: options.encumbranceCapacityStrBonus }
+      : {}),
+  });
+}
+
+/** A number field or a fallback (`undefined` is absent; garbage is the fallback too). */
+function numberOr(v: unknown, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
 }
 
 /** Bonus types that move CMD through AC (re-exported so the editor can label them). */

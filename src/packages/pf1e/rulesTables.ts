@@ -347,6 +347,9 @@ export const PF1E_BONUS_TYPES = [
   "natural",
   "profane",
   "racial",
+  // "resistance" is the SRD's own name for the bonus a cloak of resistance grants; Foundry's
+  // pithy spelling of the same type is `resist` (`itemChanges.ts` maps it here).
+  "resistance",
   "sacred",
   "shield",
   "size",

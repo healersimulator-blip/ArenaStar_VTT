@@ -467,6 +467,124 @@ export function mapClass(src, report, used) {
   };
 }
 
+// ─── weapon stat blocks (plan §1.3 item 4, T6) ─────────────────────────────────
+//
+// The pinned pf1-system commit publishes weapon stats in `system.actions.<id>` (Foundry v13
+// moved them out of the legacy `system.weapon` block this mapper used to copy), so weapons
+// arrived as bare `{category: "weapon", value, weight}` rows and no weapon item could produce
+// an attack line. This maps the *attack* action onto the app's own descriptor
+// (`src/packages/pf1e/weapons.ts:PF1eWeaponAuthored`), which is what `attackEntryFromWeapon`
+// reads. Anything unparseable is left absent and counted by the caller — never guessed.
+
+/** Our three physical damage types; an energy-typed part is left for the description. */
+const PHYSICAL = new Set(["slashing", "piercing", "bludgeoning"]);
+
+/** `sizeRoll(1, 8, @size)` / `sizeRoll(2, 6, @item.size, 3)` / `1d8` → the dice string. */
+export function diceFormulaOf(formula) {
+  const text = String(formula ?? "").trim();
+  const sizeRoll = /^sizeRoll\(\s*(\d+)\s*,\s*(\d+)\s*,\s*@[A-Za-z.]+\s*(?:,\s*\d+\s*)?\)$/.exec(text);
+  if (sizeRoll) return `${sizeRoll[1]}d${sizeRoll[2]}`;
+  const plain = /^(\d+)d(\d+)$/.exec(text);
+  if (plain) return `${plain[1]}d${plain[2]}`;
+  return null;
+}
+
+const ACTION_CLASS = {
+  mwak: "melee",
+  msak: "melee",
+  twak: "thrown",
+  rsak: "projectile",
+  rwak: "projectile",
+};
+
+/**
+ * One weapon's stat block from `system.actions` + `system.weaponSubtype` + `system.properties`.
+ * Returns `undefined` for a row with no weapon action at all (siege engines and the handful of
+ * misc rows), which the caller reports as "stat block not carried".
+ */
+export function weaponFromActions(system) {
+  const actions = isRecord(system.actions)
+    ? Object.values(system.actions).filter(isRecord)
+    : [];
+  const chosen = (() => {
+    // A thrown weapon authors both a twak and a mwak action: the throw is the interesting
+    // one, since the melee line is the same dice with no range. Otherwise the first action
+    // that names a weapon class wins, in the order the source lists them.
+    const twak = actions.find((a) => a.actionType === "twak");
+    const weapon = actions.find((a) => ACTION_CLASS[a.actionType] !== undefined);
+    const ranged = actions.find((a) => a.actionType === "rwak");
+    return system.weaponSubtype === "ranged" ? (ranged ?? weapon) : (twak ?? weapon);
+  })();
+  if (!chosen) return undefined;
+  const actionType = typeof chosen.actionType === "string" ? chosen.actionType : "";
+  const tags = Array.isArray(system.tags) ? system.tags.map((t) => String(t)) : [];
+  const firearmTag = tags.find((t) => /firearm/i.test(t));
+  const ammo = isRecord(system.ammo) ? system.ammo : null;
+  const properties = Array.isArray(system.properties)
+    ? system.properties.map((x) => String(x))
+    : isRecord(system.properties)
+      ? Object.keys(system.properties)
+      : [];
+  const ability = isRecord(chosen.ability) ? chosen.ability : {};
+  const parts = isRecord(chosen.damage) && Array.isArray(chosen.damage.parts) ? chosen.damage.parts : [];
+  const first = parts.find(isRecord) ?? null;
+  const damageDice = first ? diceFormulaOf(first.formula) : null;
+  const types = first && Array.isArray(first.types) ? first.types.map((t) => String(t).toLowerCase()) : [];
+  const damageType = types.find((t) => PHYSICAL.has(t)) ?? null;
+  const range = isRecord(chosen.range) ? chosen.range : {};
+  const rangeValue = num(range.value);
+  const rangeIncrementFt =
+    range.units === "ft" && rangeValue !== undefined && rangeValue > 0 ? rangeValue : null;
+  const critThreat = num(ability.critRange);
+  const critMult = num(ability.critMult);
+  const hands = num(system.hands);
+  const weaponSubtype = typeof system.weaponSubtype === "string" ? system.weaponSubtype : "";
+  const proficiency = ["simple", "martial", "exotic"].includes(system.subType)
+    ? system.subType
+    : null;
+  const weaponClass = firearmTag
+    ? "firearm"
+    : system.weaponSubtype === "ranged"
+      ? ACTION_CLASS[actionType] ?? "projectile"
+      : ACTION_CLASS[actionType] ?? "melee";
+  const handedness =
+    weaponSubtype === "light"
+      ? "light"
+      : weaponSubtype === "2h" || (hands !== undefined && hands >= 2)
+        ? "two-handed"
+        : "one-handed";
+  return {
+    class: weaponClass,
+    handedness,
+    ...(proficiency ? { proficiency } : {}),
+    ...(damageDice ? { damageDice } : {}),
+    ...(damageType ? { damageType } : {}),
+    ...(critThreat !== undefined && critThreat >= 1 && critThreat <= 20
+      ? { critThreatMin: critThreat }
+      : {}),
+    ...(critMult !== undefined && critMult >= 2 ? { critMultiplier: critMult } : {}),
+    ...(rangeIncrementFt !== null ? { rangeIncrementFt } : {}),
+    ...(properties.includes("rch") ? { reach: true } : {}),
+    ...(properties.includes("trp") ? { trip: true } : {}),
+    ...(properties.includes("dis") ? { disarm: true } : {}),
+    ...(properties.includes("nnl") ? { nonlethal: true } : {}),
+    ...(firearmTag
+      ? { firearmGeneration: /advanced/i.test(firearmTag) ? "advanced" : "early" }
+      : {}),
+    ...(firearmTag && ammo && num(ammo.misfire) !== undefined
+      ? { misfireMinimum: num(ammo.misfire) }
+      : {}),
+    ...(ammo
+      ? {
+          ammo: {
+            ...(typeof ammo.type === "string" ? { type: ammo.type } : {}),
+            ...(num(ammo.capacity) !== undefined ? { capacity: num(ammo.capacity) } : {}),
+          },
+        }
+      : {}),
+  };
+}
+
 /**
  * Item of any other kind (weapon, armor, item, wondrous, consumable, artifact, buff,
  * trait, racialTrait, classAbility, specialQuality, rule, technology, …). Display-first:
@@ -490,14 +608,44 @@ export function mapItem(src, report, used) {
     const maxDex = num(a.maximumDexBonus) ?? (a.dex === null ? 0 : num(a.dex));
     const acp = num(a.checkPenalty) ?? num(a.acp);
     const spellFail = num(a.arcaneSpellFailure) ?? num(a.spellFailure);
+    // The slot decides *which* AC bonus the entry is (armor vs shield, `items.ts`), and the
+    // proficiency category feeds the non-proficiency penalty — both are in the source's
+    // `subType` / `equipmentSubtype` and were being dropped, which made every shield count as
+    // armor.
+    const subtype = typeof system.subType === "string" ? system.subType : "";
+    const armorSubtype =
+      typeof system.equipmentSubtype === "string" ? system.equipmentSubtype : "";
+    const slot = subtype === "shield" ? "shield" : subtype === "armor" ? "armor" : null;
+    const proficiency =
+      subtype === "shield"
+        ? "shield"
+        : armorSubtype === "lightArmor"
+          ? "light"
+          : armorSubtype === "mediumArmor"
+            ? "medium"
+            : armorSubtype === "heavyArmor"
+              ? "heavy"
+              : null;
     sys.armor = {
-      ...(bonus !== undefined ? { armorBonus: bonus } : {}),
+      ...(slot !== null ? { slot } : {}),
+      ...(proficiency !== null ? { proficiency } : {}),
+      ...(bonus !== undefined
+        ? slot === "shield"
+          ? { shieldBonus: bonus }
+          : { armorBonus: bonus }
+        : {}),
       ...(maxDex !== undefined ? { maxDexBonus: maxDex } : {}),
       ...(acp !== undefined ? { checkPenalty: acp } : {}),
       ...(spellFail !== undefined ? { spellFailure: spellFail } : {}),
     };
   }
   if (isRecord(system.weapon)) sys.weapon = system.weapon;
+  else if (kind === "weapon") {
+    // The pinned system publishes the stat block in `system.actions`, not `system.weapon`.
+    const weapon = weaponFromActions(system);
+    if (weapon) sys.weapon = weapon;
+    else dropField(report, "weapon stat block (no weapon action in system.actions)");
+  }
   if (isRecord(system.uses)) sys.uses = system.uses;
   const cost = num(system.value) ?? num(system.price) ?? num(system.price?.value);
   if (cost !== undefined) sys.value = cost;

@@ -27,7 +27,7 @@ import {
   type PF1eAreaKind,
   type PF1eAreaIssue,
 } from "../packages/pf1e/targeting";
-import { deriveFromDocuments } from "../packages/pf1e/actor";
+import { deriveFromActorDocument, deriveFromDocuments } from "../packages/pf1e/actor";
 import { footprintSide } from "../packages/pf1e/geometry";
 import { pf1eThreatModel } from "../packages/pf1e/threatPreview";
 import {
@@ -55,6 +55,7 @@ import {
 } from "../packages/pf1e/combatState";
 import {
   validateWorldSettingsPatch,
+  encumbranceOptionsOf,
   worldSettingsFrom,
   worldSettingsOps,
 } from "../core/worldSettings";
@@ -1229,7 +1230,7 @@ function appSurface(app: HostApp): AppSurface {
           ? (actors.find((a) => a._id === t.actorId) ?? null)
           : null;
         const derived = actor
-          ? deriveFromDocuments({ actor: { system: actor.system } })
+          ? deriveFromActorDocument(actor, encumbranceOptionsOf(worldSettingsFrom(client.store.getAll("settings"))))
           : null;
         return {
           _id: t._id,
@@ -1339,7 +1340,7 @@ function appSurface(app: HostApp): AppSurface {
           ? (actors.find((a) => a._id === t.actorId) ?? null)
           : null;
         const derived = actor
-          ? deriveFromDocuments({ actor: { system: actor.system } })
+          ? deriveFromActorDocument(actor, encumbranceOptionsOf(worldSettingsFrom(client.store.getAll("settings"))))
           : null;
         return {
           _id: t._id,
@@ -1668,7 +1669,7 @@ function appSurface(app: HostApp): AppSurface {
             ? (actors.find((a) => a._id === t.actorId) ?? null)
             : null;
           const derived = actor
-            ? deriveFromDocuments({ actor: { system: actor.system } })
+            ? deriveFromActorDocument(actor, encumbranceOptionsOf(worldSettingsFrom(client.store.getAll("settings"))))
             : null;
           return {
             _id: t._id,
@@ -2076,7 +2077,7 @@ function appSurface(app: HostApp): AppSurface {
       const hp =
         actor === null
           ? null
-          : deriveFromDocuments({ actor: { system: actor.system } }).hp;
+          : deriveFromActorDocument(actor, encumbranceOptionsOf(worldSettingsFrom(client.store.getAll("settings")))).hp;
       return {
         aooUsed: state.aooUsed,
         aooMax: state.aooMax,

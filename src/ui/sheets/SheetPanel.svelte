@@ -146,6 +146,7 @@
     {#each docs as doc (doc._id)}
       <button
         class="sheet-row"
+        data-doc-id={doc._id}
         class:selected={doc._id === selectedId}
         onclick={() => pick(doc._id)}
       >

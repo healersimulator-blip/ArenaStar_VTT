@@ -13,6 +13,8 @@
   import SettingsPanel from "../settings/SettingsPanel.svelte";
   import JournalPopout from "../journals/JournalPopout.svelte";
   import PF1eSheetWindow from "../sheets/PF1eSheetWindow.svelte";
+  import PF1eItemWindow from "../sheets/PF1eItemWindow.svelte";
+  import { openPF1eItemWindow } from "../sheets/pf1eItemWindow";
   import GmExtrasPanel from "../armies/GmExtrasPanel.svelte";
   import ArmiesTab from "../armies/ArmiesTab.svelte";
   import CombatPanel from "../combat/CombatPanel.svelte";
@@ -97,6 +99,11 @@
     globalThis.addEventListener("pointerup", up);
   }
 
+  /** §1.3: the items tab asks for an item's own window; the manager owns where it lands. */
+  function openItemWindow(actorId: string, itemId: string): void {
+    openPF1eItemWindow(manager, client, actorId, itemId);
+  }
+
   function startDrag(e: PointerEvent, win: WindowSpec): void {
     manager.focus(win.id);
     e.preventDefault();
@@ -170,6 +177,15 @@
             initialTab={typeof win.data.tab === "string"
               ? win.data.tab
               : "summary"}
+            onOpenItem={openItemWindow}
+          />
+        {:else if win.kind === "item" && win.data}
+          <!-- Plan §1.3 item 2: an item's own window, opened from the sheet's Items tab. -->
+          <PF1eItemWindow
+            {client}
+            {bus}
+            actorId={win.data.actorId ?? ""}
+            itemId={win.data.itemId ?? ""}
           />
         {:else if win.kind === "combat"}
           <CombatPanel {client} {bus} />

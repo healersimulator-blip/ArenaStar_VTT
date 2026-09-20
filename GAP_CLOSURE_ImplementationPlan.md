@@ -140,37 +140,82 @@ it opens the line of sight (`e2e` reads the vision result, the pattern
 movement does not (`moveSegments` still contains it); delete and re-place a wall from the UI.
 Unit: the kind→document mapping table.
 
-### 1.3 Inventory, items & encumbrance — **G-03 / G-04 / G-05 tail** · M–L
+### 1.3 Inventory, items & encumbrance — **G-03 / G-04 / G-05 tail** · M–L · ✅ **done (D-259)**
 
 **Problem.** No `encumbrance`/`carryingCapacity` anywhere in `src/`; items are authored actor
 fields; converted equipment/magic packs have no sheet surface.
 
-**Work.**
-1. **Items tab** on the actor sheet over `ActorDocument.items` (embedded, already in the core
-   contract): rows = icon/name/qty/price/weight, equipped toggle, `uses` (charges) ledger
-   `{max, value, per}`, containers (nested), currency pp/gp/sp/cp.
-2. **Item sheet window** (`WindowHost` kind `item`): description through the existing
-   description renderer, properties, `changes` preview, hint chips (Koboldworks parity, cheap).
-3. **Encumbrance**: Str-based capacity, load thresholds, dwarf rule + Muleback-style Str bonus as
-   a world setting (transcription T3 — all pure formulas, `src/packages/pf1e/`).
-4. **Item → attack linkage**: "create attack from this weapon" writes the existing
-   `PF1eAttackEntry` (the sheet's attack editor is the consumer, unchanged); consumables
-   (potion/wand/scroll) generated from a spell with charges from T6.
-5. **Widening**: extend the closed `PF1E_MOD_KEYS` list (`src/packages/pf1e/effects.ts:24`) to the
-   skills whose typed mods are still missing (G-01 remainder) — one slice, one test.
-6. **Imported items' Foundry `changes[]`** — decide here, not by accident: either map the common
-   Foundry paths onto typed mods (`system.attributes.ac.flat` +2 → `ac` +2 untyped; saves, attack,
-   damage, ability scores), or ship those items as description-only and say so in the item sheet.
-   **D-112 forbids** introducing a general path-overwrite mechanic; the mapped subset becomes the
-   C1 fixture set (`tools/adopt/README.md` defines C1 "golden converted items that must derive the
-   same stats", seeded from the pipeline, ~50 items). Scope expectation: the mapping covers the
-   majority of *passive* items and none of the scripted ones (`scriptCalls` are dropped and
-   counted by the converter).
+**Result — every step below was built and executed, not planned (D-259).** Three new pure
+rules modules (`src/packages/pf1e/inventory.ts`, `itemChanges.ts`, `consumables.ts`) plus the
+Items tab and item window; the numbers live in the package, the pixels in the sheet.
 
-**Acceptance.** e2e: create an actor, import a weapon + a wand from a converted pack, equip, see
-AC/encumbrance/speed change, make an attack from the item, cast the wand and watch a charge
-decrement and persist across reload. Unit: T3/T6 fixtures with AoN citations; a `changes[]`
-fixture from the C1 corpus (see §5) proves item-driven modifiers reach `derivePF1eActor`.
+1. ~~**Items tab** on the actor sheet over `ActorDocument.items`~~ **done.** `PF1eItemsTab`
+   renders rows (category, name, quantity-aware weight, price, `uses` ledger, armor line,
+   equipped toggle, ±1, use/recharge, **Attack**, carry/stow, container select), nested
+   containers one level deep (a dangling container id is named, never hidden), the
+   pp/gp/sp/cp block, and the load readout. It also carries the missing verb that makes a
+   converted pack reachable: the world `items` collection (what a compendium *Item* import
+   writes) is listed as a picker, and **Add** embeds a copy on the actor through one ordinary
+   `create` op with a parent (the item's `_id` is kept, so the item-window id is stable, and a
+   collision is refused with a reason).
+2. ~~**Item sheet window** (`WindowHost` kind `item`)~~ **done.** `PF1eItemWindow` (`kind:
+   "item"`, id `pf1e-item:<actor>:<item>`, 420×520) shows the description through the existing
+   markdown renderer, a properties list, the **`changes` preview** (applied vs. kept-but-not-
+   applied, each with its reason), the weapon line ("1d8 · crit 19–20/×2 · heavy blade") and the
+   cast panel.
+3. ~~**Encumbrance**: Str capacity, load thresholds, dwarf rule + Muleback-style Str bonus as a
+   world setting~~ **done.** Table 7-4 (with the size and quadruped multipliers and Tremendous
+   Strength), Table 7-5 (max Dex, ACP, run), the reduced-speed table 5–120 ft and the "worse of
+   armor and load, do not stack" sentence are `inventory.ts`, transcribed row-for-row in the
+   unit test. World settings `encumbranceRule` (`weight`/`off`) and
+   `encumbranceCapacityStrBonus`; dwarf **Slow and Steady** from either an actor trait or a worn
+   item; capacity-only Strength from a Muleback-style item flag.
+4. ~~**Item → attack linkage**; consumables generated from a spell with charges~~ **done.**
+   "Attack" writes a real `PF1eAttackEntry` (tagged `itemId`) into `system.pf1e.attacks`, which
+   the sheet's existing attack editor reads unchanged. `planConsumable` generates a wand (50
+   charges, CL 5, no recharge), staff (10, rechargeable), scroll and potion (single use) from an
+   authored spell, with the item's **own** save DC (`10 + level + the minimum ability modifier`)
+   and its own caster level; the charge decrement is written by the existing cast flow as an
+   embedded-document op, so the cast card and the ledger cannot drift.
+5. ~~**Widening** the closed `PF1E_MOD_KEYS` list (G-01 remainder)~~ **done.** `effectOps`/
+   `effects` gained the `skill.<id>` family and `naturalArmor`, with `resistance` added to
+   `PF1E_BONUS_TYPES` so a converted cloak's `resist` is a typed bonus rather than a promoted
+   untyped one.
+6. ~~**Imported items' Foundry `changes[]`** — decide here~~ **decided and built.** The
+   **mapped subset** (D-112 forbids a general path-overwrite mechanic, so `set` is refused by
+   name): the PF1e system's own targets the corpus actually publishes — `ac`, `aac`, `sac`,
+   `nac`, `tac`, `allSavingThrows`/`fort`/`ref`/`will`, `attack`/`mattack`/`rattack`/`wattack`,
+   `damage`/`wdamage`, the six ability scores, `landSpeed`, `skill.<code>` — read from both the
+   converted shape (`{subTarget, modifier, operator, formula}` under `system.foundry.changes`)
+   and the vendored shape (`system.changes`, id-keyed). The C1 corpus is
+   `tests/packages/pf1eItemChanges.test.ts`: fixtures copied from the pinned packs (the pack and
+   item named per fixture) proving each mapped family reaches `deriveFromActorDocument`, plus the
+   refusal cases (`set` by name, an unevaluable formula, an unknown target, an unmapped
+   sub-skill, an unknown bonus type promoted with a note). Measured over the 28 converted packs:
+   **24,487 items, 248 with a `changes[]` block, 416 changes** — `ac` 38, `allSavingThrows` 29,
+   `attack` 28, `str` 19, `skill.per` 13, `ref` 13, `dex` 12, `landSpeed` 12, `wdamage` 12,
+   `con` 10 … i.e. the mapping covers the passive majority and drops nothing silently.
+
+**Acceptance — met.** `e2e/pf1e_inventory.spec.ts` (1/1, 10.8 s) builds a package whose item
+rows are **verbatim copies of the converted pack rows** (Longsword from `weapons-ammo.json`,
+Chain Shirt from `armor-shields.json`, Cloak of Resistance +1 from `wondrous.json` — its real
+`foundry.changes` block), imports the actor and the four items through the Compendia tab, adds
+them from the Items tab's picker, equips the armor (AC `16/12/14`, speed `30 ft`), equips the
+cloak (saves `0/2/0` → `1/3/1`, AC unchanged — its all-zero Foundry `armor` block is *not* read
+as armor; the item window shows the change as `saves · resistance +1`), carries a 50 lb anvil
+(80 lb ⇒ **heavy**: speed `20 ft`, max Dex +1, ACP −6, AC `15/11/14`), makes an attack line from
+the weapon item (read back out of `system.pf1e.attacks` with its `itemId`), generates a wand
+from the actor's prepared spell, casts it from the item window at the hero, and sees the charge
+`50 → 49` **and the whole equipment state** survive `page.reload()`. Unit: T3/T6 transcription
+fixtures (`tests/packages/pf1eInventory.test.ts`, 54 tests, every expected number carrying its
+AoN/CRB citation) and the C1 corpus above. Two honest notes on the acceptance sentence itself:
+the **wand is generated in-app**, because neither vendored corpus ships a spell-trigger wand to
+import (of the 28 packs' **24,039 item documents, not one** carries a spell block; `Wand of
+misery` is a `loot` cane and `Icicle Wand` a description-only `consumable`) — which is also §1.3
+item 4's own wording, "consumables … generated from a spell with charges"; and the spell it holds is *bless* (no save, no damage)
+because the cast pipeline's damage grammar is bare `NdM`, so a formula like magic missile's
+`1d4+1` is refused before any charge is spent — a pre-existing limit of `pf1eCastFlow`, recorded
+here rather than worked around inside the fixture.
 
 ### 1.4 Compendium scale UX — **G-45** · S–M
 

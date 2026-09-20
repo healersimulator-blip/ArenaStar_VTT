@@ -10,11 +10,14 @@
     bus,
     actorId,
     initialTab = "summary",
+    onOpenItem,
   }: {
     client: ClientSync;
     bus: EventBus<ClientEvents>;
     actorId: string;
     initialTab?: string;
+    /** §1.3 item 2: the host's manager opens an embedded item's window (`item` kind). */
+    onOpenItem?: ((actorId: string, itemId: string) => void) | undefined;
   } = $props();
   let actor = $state<ActorDocument | null>(null);
 
@@ -34,6 +37,7 @@
       {client}
       {bus}
       initialTab={initialTab as never}
+      {onOpenItem}
     />
   {/key}
 {:else}

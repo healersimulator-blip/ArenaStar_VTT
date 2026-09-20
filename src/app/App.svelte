@@ -118,13 +118,13 @@
   } from "../core/documents";
   import { OWNERSHIP_LEVELS } from "../core/documents";
   import type { Op } from "../core/ops";
-  import { worldSettingsFrom } from "../core/worldSettings";
+  import { encumbranceOptionsOf, worldSettingsFrom } from "../core/worldSettings";
   import { installGmFogE2e } from "./e2eHook";
   import { pf1eMovementOpportunities } from "../packages/pf1e/tacticalOpportunity";
   import { pf1eMovePlan } from "../packages/pf1e/movement";
   import { sceneDifficultCells } from "../core/rules";
   import { pf1eThreatModel } from "../packages/pf1e/threatPreview";
-  import { deriveFromDocuments } from "../packages/pf1e/actor";
+  import { deriveFromActorDocument } from "../packages/pf1e/actor";
   import { copyText } from "../ui/clipboard";
   import { autoResolveAoosOf } from "../packages/pf1e/aooSettings";
   import {
@@ -1060,7 +1060,7 @@ const WALL_PICK_RADIUS = 12;
           ? (actors.find((a) => a._id === t.actorId) ?? null)
           : null;
         const derived = actor
-          ? deriveFromDocuments({ actor: { system: actor.system } })
+          ? deriveFromActorDocument(actor, encumbranceOptionsOf(worldSettingsFrom(app?.gm.client.store.getAll("settings") ?? [])))
           : null;
         return {
           _id: t._id,
@@ -1701,7 +1701,7 @@ const WALL_PICK_RADIUS = 12;
                 ? (actors.find((a) => a._id === t.actorId) ?? null)
                 : null;
               const derived = actor
-                ? deriveFromDocuments({ actor: { system: actor.system } })
+                ? deriveFromActorDocument(actor, encumbranceOptionsOf(worldSettingsFrom(current.gm.client.store.getAll("settings"))))
                 : null;
               return {
                 _id: t._id,
@@ -1738,9 +1738,12 @@ const WALL_PICK_RADIUS = 12;
               // drag owns no speed and no action economy, so it stays free.
               if (moverActor !== null && isPF1eActor(moverActor)) {
                 const moverDerived = moverActor
-                  ? deriveFromDocuments({
-                      actor: { system: moverActor.system },
-                    })
+                  ? deriveFromActorDocument(
+                      moverActor,
+                      encumbranceOptionsOf(
+                        worldSettingsFrom(current.gm.client.store.getAll("settings")),
+                      ),
+                    )
                   : null;
                 const sceneTerrain = sceneDifficultCells(scene);
                 const plan = pf1eMovePlan({

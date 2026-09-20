@@ -36,6 +36,7 @@
     pf1eSpellSlotReadout,
     type SheetField,
   } from "./pf1eSheetModel";
+  import PF1eItemsTab from "./PF1eItemsTab.svelte";
   import {
     pf1eSpellbookEdit,
     pf1eSpellbookView,
@@ -129,6 +130,7 @@
     | "skills"
     | "weapons"
     | "armor"
+    | "items"
     | "features"
     | "spells"
     | "effects"
@@ -140,12 +142,19 @@
     client,
     bus,
     initialTab = "summary",
+    onOpenItem,
   }: {
     doc: ActorDocument;
     client: ClientSync;
     bus: EventBus<ClientEvents>;
     /** E02: token-menu "Apply effect…" opens the sheet directly on this tab. */
     initialTab?: TabName;
+    /**
+     * §1.3 item 2: open an embedded item's own window. The window manager lives in the app
+     * shell (WindowHost), so the sheet only asks; without the callback the tab still renders
+     * every number and action, just without the window jump.
+     */
+    onOpenItem?: ((actorId: string, itemId: string) => void) | undefined;
   } = $props();
   let tab = $derived(initialTab);
   let error = $state("");
@@ -176,6 +185,7 @@
     pf1eSheetView(doc, {
       combat: linked.combat,
       combatantId: linked.combatantId,
+      settings: worldSettingsFrom(client.store.getAll("settings")),
     }),
   );
   let d = $derived(view.derived);
@@ -2167,7 +2177,7 @@
     </div>
   </header>
   <nav aria-label="PF1e sheet tabs">
-    {#each ["summary", "attributes", "combat", "skills", "weapons", "armor", "features", ...(d.casting ? ["spells"] : []), "effects", ...(sheetRecord(view.authored.creature) ? ["monster"] : []), "details"] as name (name)}
+    {#each ["summary", "attributes", "combat", "skills", "weapons", "armor", "items", "features", ...(d.casting ? ["spells"] : []), "effects", ...(sheetRecord(view.authored.creature) ? ["monster"] : []), "details"] as name (name)}
       <button
         type="button"
         class:active={tab === name}
@@ -2212,11 +2222,11 @@
       <dt>Initiative</dt>
       <dd>{d.initiative}</dd>
       <dt>Fort / Ref / Will</dt>
-      <dd>{d.saves.fort} / {d.saves.ref} / {d.saves.will}</dd>
+      <dd data-pf1e-saves>{d.saves.fort} / {d.saves.ref} / {d.saves.will}</dd>
       <dt>CMB / CMD</dt>
       <dd>{d.cmb} / {d.cmd}</dd>
       <dt>Speed</dt>
-      <dd>{d.speedFt} ft</dd>
+      <dd data-pf1e-speed>{d.speedFt} ft</dd>
       <dt>DR</dt>
       <dd>{d.dr} / {d.drBypass.join(", ") || "—"}</dd>
       <dt>Spell resistance</dt>
@@ -2833,6 +2843,15 @@
         >
       </div>
     {/if}
+  {:else if tab === "items"}
+    <!-- Plan §1.3 (G-03): the inventory surface over the actor's embedded items. -->
+    <PF1eItemsTab
+      {doc}
+      {client}
+      {bus}
+      {editable}
+      onOpenItem={onOpenItem === undefined ? undefined : (itemId) => onOpenItem(doc._id, itemId)}
+    />
   {:else if tab === "skills"}
     <PF1eSkillsTab
       {doc}
