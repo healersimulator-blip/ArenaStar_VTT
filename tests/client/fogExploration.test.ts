@@ -160,7 +160,16 @@ class Timers {
   }
 }
 
-function harness(opts: { user?: { id: string; role: "GM" | "PLAYER" } | null } = {}) {
+function harness(
+  opts: {
+    user?: { id: string; role: "GM" | "PLAYER" } | null;
+    /** §2.3/D-262: the caller's filter on the published set (the preview's §5 rule). */
+    visibilityFilter?: (
+      scene: SceneDocument | null,
+      ids: ReadonlySet<string> | null,
+    ) => ReadonlySet<string> | null;
+  } = {},
+) {
   const surfaces = new Map<string, FakeSurface>();
   let current: FakeSurface | null = null;
   let hidden = 0;
@@ -168,7 +177,7 @@ function harness(opts: { user?: { id: string; role: "GM" | "PLAYER" } | null } =
   const timers = new Timers();
   const errors: string[] = [];
   const visibility: Array<string[] | null> = [];
-  const user = opts.user === undefined ? { id: "gm", role: "GM" as const } : opts.user;
+  let user = opts.user === undefined ? { id: "gm", role: "GM" as const } : opts.user;
   const fog = new FogExploration({
     surfaceFor: (sc) => {
       // like the stage: a new layer per scene size, the old one destroyed
@@ -191,6 +200,7 @@ function harness(opts: { user?: { id: string; role: "GM" | "PLAYER" } | null } =
     user: () => user,
     actors: () => [],
     onVisibility: (ids) => visibility.push(ids === null ? null : [...ids].sort()),
+    ...(opts.visibilityFilter ? { visibilityFilter: opts.visibilityFilter } : {}),
     saveDelayMs: 1500,
     restoreTimeoutMs: 15_000,
     setTimer: timers.set,
@@ -203,6 +213,10 @@ function harness(opts: { user?: { id: string; role: "GM" | "PLAYER" } | null } =
     timers,
     errors,
     visibility,
+    /** §2.3/D-262: hand the loop a different viewer (a GM previewing a player). */
+    setUser: (next: { id: string; role: "GM" | "PLAYER" } | null) => {
+      user = next;
+    },
     surface: () => {
       if (!current) throw new Error("no surface yet");
       return current;
@@ -368,6 +382,26 @@ describe("FogExploration loop", () => {
     expect(h.fog.stats().visibleTokenIds).toBeNull();
   });
 
+  test("D-256: with fog off the GM's manual mask still withholds the tokens under it — and only those", async () => {
+    const h = harness({ user: { id: "rex", role: "PLAYER" } });
+    const hero = token("hero", 150, 150, { ownership: { default: 0, rex: 3 } });
+    const orcUnder = token("orc-under", 250, 250, { ownership: { default: 0 } });
+    const orcOut = token("orc-out", 700, 700, { ownership: { default: 0 } });
+    const mask = { core: { fogMask: [{ mode: "hide", poly: [0, 0, 500, 0, 500, 500, 0, 500] }] } };
+    const masked = scene("s1", { tokens: [hero, orcUnder, orcOut], walls: [], flags: mask });
+
+    await h.fog.sync(masked, { style: "opaque" });
+    expect(h.fog.stats().enabled).toBe(false); // no sight loop …
+    expect(h.visibility.at(-1)).toEqual(["hero", "orc-out"]); // … but the cover still gates
+    expect(h.fog.stats().visibleTokenIds).toEqual(["hero", "orc-out"]);
+    expect(h.hidden()).toBeGreaterThan(0); // the fog layer itself stays out of the way
+
+    // the GM uncovers it again: back to "no gate" rather than "no gate plus a set"
+    await h.fog.sync({ ...masked, flags: { core: { fogMask: [] } } }, { style: "opaque" });
+    expect(h.visibility.at(-1)).toBeNull();
+    expect(h.fog.stats().visibleTokenIds).toBeNull();
+  });
+
   test("D-251: the GM is never gated — every token is listed regardless of sight", async () => {
     const h = harness();
     const s1 = scene("s1", {
@@ -414,6 +448,69 @@ describe("FogExploration loop", () => {
     await h.fog.flush();
     expect(h.errors).toEqual([]);
     expect(h.transport.puts).toHaveLength(1);
+  });
+
+  test("D-262: switching the viewer re-enters the scene as that user — fresh surface, their map, their polygons", async () => {
+    const h = harness({ user: { id: "gm", role: "GM" } });
+    h.transport.stored.set("s1", new Uint8Array([9]));
+    const s1 = scene("s1", { tokens: [token("t", 200, 200)] });
+    await h.fog.sync(s1, { style: "opaque" });
+    expect(h.transport.gets).toEqual(["s1"]);
+    expect(h.fog.stats().reveals).toBe(1);
+
+    // the GM points the loop at a player who has explored this scene before
+    h.setUser({ id: "p1", role: "PLAYER" });
+    await h.fog.sync(s1, { style: "opaque" });
+    // the scene is entered *again*: the restore runs under the new identity, the surface restarts
+    expect(h.transport.gets).toEqual(["s1", "s1"]);
+    expect(h.surface().resets).toBe(2);
+    // the outgoing viewer's map is flushed first (leaveScene → save): that upload belongs to the
+    // *GM's* identity — a preview never writes, which is the shell's transport's job (core/viewAs)
+    expect(h.transport.puts.map((p) => p.sceneId)).toEqual(["s1"]);
+    expect(h.surface().merged.map((m) => [...m])).toEqual([
+      [9],
+      [0x89, 1],
+    ]);
+    // the second restore merges what the *host* now holds for that scene — the GM's flush above
+    expect(h.fog.stats().restoredBytes).toBe(2);
+
+    // …and switching back is the same again, with no error on any of the three entries
+    h.setUser({ id: "gm", role: "GM" });
+    await h.fog.sync(s1, { style: "opaque" });
+    expect(h.transport.gets).toEqual(["s1", "s1", "s1"]);
+    // one flush per switch — the outgoing viewer's map, and never a write on the incoming one's
+    expect(h.transport.puts.map((p) => p.sceneId)).toEqual(["s1", "s1"]);
+    expect(h.errors).toEqual([]);
+  });
+
+  test("D-262: a viewer switch is not a scene switch — the same scene is not re-revealed for the same viewer", async () => {
+    const h = harness({ user: { id: "p1", role: "PLAYER" } });
+    const s1 = scene("s1", { tokens: [token("t", 200, 200)] });
+    await h.fog.sync(s1, { style: "opaque" });
+    const reveals = h.fog.stats().reveals;
+    await h.fog.sync(s1, { style: "opaque" });
+    expect(h.fog.stats().reveals).toBe(reveals); // the key is unchanged
+  });
+
+  test("D-262: the visibility filter is the last word on the published set — and `null` stays `null`", async () => {
+    const seen: Array<[string | null, string[] | null]> = [];
+    const h = harness({
+      user: { id: "p1", role: "PLAYER" },
+      visibilityFilter: (sc, ids) => {
+        seen.push([sc?._id ?? null, ids === null ? null : [...ids].sort()]);
+        return ids === null ? null : new Set([...ids].filter((id) => id !== "t-secret"));
+      },
+    });
+    const s1 = scene("s1", {
+      tokens: [token("t-seen", 200, 200), token("t-secret", 240, 220)],
+    });
+    await h.fog.sync(s1, { style: "opaque" });
+    const published = h.visibility.at(-1) ?? null;
+    expect(published).toEqual(["t-seen"]);
+    expect(h.fog.stats().visibleTokenIds).toEqual(["t-seen"]);
+    // the filter saw this scene and the *unfiltered* gate (the caller decides, the loop reports)
+    expect(seen.at(-1)?.[0]).toBe("s1");
+    expect(seen.at(-1)?.[1]).toEqual(["t-secret", "t-seen"]);
   });
 
   test("a surface/transport failure is reported, not thrown, and the loop keeps serving", async () => {

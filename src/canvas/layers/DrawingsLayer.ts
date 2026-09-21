@@ -59,9 +59,25 @@ export class DrawingsLayer {
         g.closePath();
         if (hasFill) g.fill({ color: fill, alpha: 0.3 });
         g.stroke({ width: lw, color: stroke, alpha: 0.95 });
+      } else if (d.kind === "line" && d.points.length >= 4) {
+        // An open 2-point segment (Roll20's "one segment + finish" line): stroke only.
+        g.moveTo(d.points[0] ?? 0, d.points[1] ?? 0);
+        for (let i = 2; i + 1 < d.points.length; i += 2)
+          g.lineTo(d.points[i] ?? 0, d.points[i + 1] ?? 0);
+        g.stroke({ width: lw, color: stroke, alpha: 0.95 });
       } else if (d.kind === "rect" && d.box) {
         const [x, y, w, h] = d.box;
         g.rect(x ?? 0, y ?? 0, w ?? 0, h ?? 0);
+        if (hasFill) g.fill({ color: fill, alpha: 0.3 });
+        g.stroke({ width: lw, color: stroke, alpha: 0.95 });
+      } else if (d.kind === "ellipse" && d.box) {
+        const [x, y, w, h] = d.box;
+        g.ellipse(
+          (x ?? 0) + (w ?? 0) / 2,
+          (y ?? 0) + (h ?? 0) / 2,
+          Math.abs(w ?? 0) / 2,
+          Math.abs(h ?? 0) / 2,
+        );
         if (hasFill) g.fill({ color: fill, alpha: 0.3 });
         g.stroke({ width: lw, color: stroke, alpha: 0.95 });
       } else if (d.kind === "text" && d.box && d.text) {

@@ -159,7 +159,7 @@ export interface PF1eDerivedSkill {
 export interface SkillDeriveContext {
   abilities: Record<PF1eAbilityKey, number>;
   armorCheckPenalty: number;
-  effectMods?: Record<string, number>;
+  effectMods?: Record<string, number | undefined>;
   negativeLevels?: number;
 }
 
@@ -187,7 +187,8 @@ export function derivePF1eSkill(
 
   // Modifiers from active effects: general "skills" mod + specific skill mod (e.g. "perception", "stealth", "skill.acrobatics")
   const effects = context.effectMods ?? {};
-  const skillEffect = (effects[def.id] ?? 0) + (effects[`skill.${def.id}`] ?? 0) + (effects["skills"] ?? 0);
+  const skillEffect =
+    (effects[def.id] ?? 0) + (effects[`skill.${def.id}`] ?? 0) + (effects["skills"] ?? 0);
 
   // Negative levels penalty (-1 per negative level)
   const negLevelPenalty = -(Math.max(0, context.negativeLevels ?? 0));

@@ -379,6 +379,8 @@ function testerDocuments(contentDir) {
     y: 200,
     text: "Welcome to the PF1e tester world. The full guide is in the Journal. This tactical scene is a small skirmish: three tokens, fog, and a Fighter 3 to sheet.",
     icon: "🚩",
+    // D-256: a pin is hidden until the GM publishes it. These two ship published.
+    visible: true,
   });
   const linkNote = baseDoc("note-link", "note", "Tactical view", {
     x: 200,
@@ -386,6 +388,7 @@ function testerDocuments(contentDir) {
     text: "Strategic scene — order the armies in the Army window and run turns. The tactical detail of the hero is in the linked scene.",
     icon: "🗺️",
     linkedSceneId: "scene-1",
+    visible: true, // D-256
   });
 
   return [
@@ -511,7 +514,10 @@ if (isCli) {
   const out = argOf("--out");
   const systemsDir = argOf("--systems-dir");
   // The converted content package — built by `pnpm content:convert` (tools/convert/).
-  const contentDir = argOf("--content-dir") ?? join(repoRoot, "dist", "content", "pf1e");
+  const contentDir =
+    argOf("--content-dir") ??
+    process.env.VTT_CONTENT_DIR ??
+    join(repoRoot, "dist", "content", "pf1e");
   try {
     const built = await buildStarterWorlds({
       dryRun: argv.includes("--dry-run"),

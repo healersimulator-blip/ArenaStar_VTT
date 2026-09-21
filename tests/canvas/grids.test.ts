@@ -13,7 +13,12 @@ import {
 } from "../../src/canvas/grid/hex";
 import type { HexLayout } from "../../src/core/documents";
 import { snapPoint, snapTokenCenter, type GridSpec } from "../../src/canvas/grid";
-import { measurePath, measureSegment, type MeasureGrid } from "../../src/canvas/grid/measure";
+import {
+  displayDistance,
+  measurePath,
+  measureSegment,
+  type MeasureGrid,
+} from "../../src/canvas/grid/measure";
 import { pointInTemplate, templateShape } from "../../src/canvas/layers/templateGeometry";
 import { drawingBounds } from "../../src/canvas/layers/drawingGeometry";
 import type { DrawingDocument, TemplateDocument } from "../../src/core/documents";
@@ -175,6 +180,31 @@ describe("hex measurement (§9 pluggability)", () => {
     const b = hexCenter(hex, 1, 0);
     const c = hexCenter(hex, 2, 1);
     expect(measurePath(g, [a, b, c])).toBeCloseTo(60, 6); // (1,0)→(2,1) is a 2-hex step
+  });
+});
+
+describe("measurement display units (D-255)", () => {
+  test("world px → the grid's own distance units (scene 100 px cell = 5 ft)", () => {
+    const g: MeasureGrid = { type: "square", size: 100, distance: 5, diagonals: "555" };
+    // three cells of travel = 15 ft, not 300 "ft"
+    expect(displayDistance(g, 300)).toBeCloseTo(15, 9);
+    expect(displayDistance(g, 0)).toBe(0);
+    // half cells keep the fraction for the rounding caller
+    expect(displayDistance(g, 50)).toBeCloseTo(2.5, 9);
+  });
+
+  test("a grid without a stated cell distance is one unit per cell", () => {
+    expect(displayDistance({ type: "square", size: 20, diagonals: "555" }, 60)).toBe(3);
+  });
+
+  test("gridless and absent grids pass the world length through", () => {
+    expect(displayDistance({ type: "gridless", size: 0, diagonals: "555" }, 42)).toBe(42);
+    expect(displayDistance(null, 42)).toBe(42);
+  });
+
+  test("hex grids convert on the same rule (size = circumradius in px)", () => {
+    const g: MeasureGrid = { type: "hex", size: 20, distance: 5, layout: "oddR", diagonals: "555" };
+    expect(displayDistance(g, 60)).toBeCloseTo(15, 9); // three hexes
   });
 });
 

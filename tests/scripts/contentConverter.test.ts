@@ -4,11 +4,11 @@
  * tools/adopt/INVENTORY.md), plus the drop-report contract and a small end-to-end CLI
  * run against a staged vendor dir.
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { parse as parseYaml } from "yaml";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import {
@@ -411,4 +411,28 @@ test("CLI: converts the staged vendor dir into a package + report", () => {
   expect(report).toContain("5 source entries → 5 pack entries");
   expect(readFileSync(join(out, "OGL.txt"), "utf8")).toContain("OGL 1.0a");
   expect(readFileSync(join(out, "CREDITS.md"), "utf8")).toContain("pf1e-content");
+});
+
+test("CLI: a missing checkout is an error — and `--allow-missing` is the only way to skip it out loud", () => {
+  // G-44/D-258: this failure used to be a self-skipping test plus a skipped world, so a green
+  // suite reported "content" as fine on a machine that had never fetched it. The two behaviours
+  // are now pinned: the default is a hard failure naming the fetch command, and the flag
+  // `pnpm test:e2e` uses exits 0 while *printing* what it skipped.
+  const cli = join(repoRoot, "tools/convert/index.mjs");
+  const absent = join(stage, "never-fetched");
+  const missingOut = join(stage, "missing-out");
+  const run = (args: string[]) =>
+    spawnSync(process.execPath, [cli, ...args], { cwd: repoRoot, encoding: "utf8" });
+
+  const strict = run(["--vendor", absent, "--out", missingOut]);
+  expect(strict.status).toBe(1);
+  expect(strict.stderr).toContain("vendor checkout missing");
+  expect(strict.stderr).toContain("pnpm content:fetch");
+  expect(strict.stderr).toContain("Content: two ways in");
+  expect(existsSync(missingOut)).toBe(false);
+
+  const lenient = run(["--vendor", absent, "--out", missingOut, "--allow-missing"]);
+  expect(lenient.status).toBe(0);
+  expect(lenient.stderr).toContain("--allow-missing: skipping the conversion");
+  expect(existsSync(missingOut)).toBe(false);
 });

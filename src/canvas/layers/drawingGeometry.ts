@@ -1,10 +1,10 @@
-/** §9 drawing bounds (pure) — freehand/poly → point bbox; rect/text → box. */
+/** §9 drawing bounds (pure) — freehand/poly/line → point bbox; rect/ellipse/text → box. */
 export function drawingBounds(d: {
-  kind: "freehand" | "poly" | "rect" | "text";
+  kind: "freehand" | "poly" | "rect" | "ellipse" | "line" | "text";
   points: number[];
   box: [number, number, number, number] | null;
 }): { x: number; y: number; width: number; height: number } | null {
-  if (d.kind === "rect" || d.kind === "text") {
+  if (d.kind === "rect" || d.kind === "ellipse" || d.kind === "text") {
     const b = d.box;
     return b ? { x: b[0], y: b[1], width: b[2], height: b[3] } : null;
   }

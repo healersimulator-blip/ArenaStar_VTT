@@ -35,6 +35,32 @@ export function isPF1eSize(value: unknown): value is PF1eSize {
   );
 }
 
+/**
+ * Foundry pf1's short size keys (`traits.size: "med"`, `"lg"`, …). They are not size categories,
+ * they are that system's *spelling* of one — and it is the spelling both the build-time converter
+ * (`tools/convert/mappers.mjs`, which carries its own copy because it cannot import `src/`) and the
+ * runtime character importer meet.
+ */
+export const SIZE_SHORT_KEYS: Readonly<Record<string, PF1eSize>> = {
+  f: "Fine",
+  d: "Diminutive",
+  t: "Tiny",
+  sm: "Small",
+  med: "Medium",
+  lg: "Large",
+  xl: "Huge",
+  g: "Gargantuan",
+  co: "Colossal",
+};
+
+/** `normalizeSize`, plus the short keys a Foundry export states (`"med"` → `"Medium"`). */
+export function normalizeSizeKey(value: unknown): PF1eSize | null {
+  const full = normalizeSize(value);
+  if (full !== null) return full;
+  if (typeof value !== "string") return null;
+  return SIZE_SHORT_KEYS[value.trim().toLowerCase()] ?? null;
+}
+
 /** Canonical spelling of an authored size, or null when it is not a size category at all. */
 export function normalizeSize(value: unknown): PF1eSize | null {
   if (typeof value !== "string") return null;
@@ -347,6 +373,9 @@ export const PF1E_BONUS_TYPES = [
   "natural",
   "profane",
   "racial",
+  // "resistance" is the SRD's own name for the bonus a cloak of resistance grants; Foundry's
+  // pithy spelling of the same type is `resist` (`itemChanges.ts` maps it here).
+  "resistance",
   "sacred",
   "shield",
   "size",

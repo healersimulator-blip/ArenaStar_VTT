@@ -6,7 +6,7 @@
 import { Container, Graphics, Text } from "pixi.js";
 import { PING_TTL_MS, pingPhase, rulerLabel, type TileRect } from "../ephemera";
 import type { MeasureGrid } from "../grid/measure";
-import { measurePath } from "../grid/measure";
+import { displayDistance, measurePath } from "../grid/measure";
 
 interface PingItem {
   x: number;
@@ -127,7 +127,7 @@ export class EffectsLayer {
     for (const p of pts) {
       item.g.circle(p.x, p.y, 4).fill({ color: 0xffd166, alpha: 0.95 });
     }
-    const total = measurePath(grid, pts);
+    const total = displayDistance(grid, measurePath(grid, pts));
     item.label.text = pts.length >= 2 ? rulerLabel(total, item.labelUnits) : "";
     const last = pts[pts.length - 1];
     if (last) item.label.position.set(last.x + 8, last.y - 4);

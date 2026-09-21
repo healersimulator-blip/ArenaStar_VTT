@@ -125,7 +125,7 @@ class FakeSource implements PointerEventSource {
       });
     }
   }
-  up(x: number, y: number): void {
+  up(x: number, y: number, opts: Partial<PointerEvt> = {}): void {
     for (const cb of [...this.pointer.pointerup]) {
       cb({
         x,
@@ -134,6 +134,7 @@ class FakeSource implements PointerEventSource {
         shiftKey: false,
         pointerId: 1,
         preventDefault: () => undefined,
+        ...opts,
       });
     }
   }
@@ -195,6 +196,7 @@ function makeHarness(
       world: { x: number; y: number };
       tokenId: string;
     }) => void;
+    interactionMode?: () => "select" | "pan" | "suppress";
   } = {},
 ) {
   const stage = new FakeStage();
@@ -218,6 +220,7 @@ function makeHarness(
     canMove: () => opts.canMove ?? true,
     ...(opts.onTokenActivate ? { onTokenActivate: opts.onTokenActivate } : {}),
     ...(opts.onTokenMove ? { onTokenMove: opts.onTokenMove } : {}),
+    interactionMode: () => opts.interactionMode?.() ?? "select",
     onContextMenu: (at) => {
       contextMenus.push(at);
       opts.onContextMenu?.(at);
@@ -463,6 +466,47 @@ describe("CanvasController (§10)", () => {
     h.source.down(400, 400);
     h.source.up(410, 410);
     expect(h.controller.selected).toEqual([]);
+  });
+
+  test("a suppress-mode tool owns the canvas: no marquee, drag or ping under a stroke (D-255)", () => {
+    const h = makeHarness([view(token("hero", 100, 100))], {
+      interactionMode: () => "suppress",
+    });
+    // left press on the token: draw/text/measure must not grab it
+    h.source.down(100, 100);
+    h.source.move(160, 140);
+    h.source.up(160, 140);
+    expect(h.client.submitted).toEqual([]);
+    expect(h.controller.selected).toEqual([]);
+    expect(h.stage.tokenRenders.flat()).toHaveLength(0);
+    // alt+click ping and ctrl+click ruler are the tool's business too
+    h.source.down(20, 20, { altKey: true });
+    h.source.up(20, 20, { altKey: true });
+    h.source.down(40, 40, { ctrlKey: true });
+    h.source.up(40, 40, { ctrlKey: true });
+    expect(h.pings).toEqual([]);
+    expect(h.rulerChanges).toEqual([]);
+  });
+
+  test("pan mode pans on a plain left-drag and never drags the token beneath it (D-255)", () => {
+    const h = makeHarness([view(token("hero", 100, 100))], {
+      interactionMode: () => "pan",
+    });
+    h.source.down(100, 100); // straight on the token
+    h.source.move(80, 120);
+    h.source.up(80, 120);
+    expect(h.stage.cameraValue).toEqual({ x: 20, y: -20, scale: 1 });
+    expect(h.client.submitted).toEqual([]);
+    expect(h.controller.selected).toEqual([]);
+  });
+
+  test("select mode is unchanged: the same gesture still moves the token (D-255)", () => {
+    const h = makeHarness([view(token("hero", 100, 100))], { interactionMode: () => "select" });
+    h.source.down(100, 100);
+    h.source.move(120, 110);
+    h.source.up(120, 110);
+    expect(h.client.submitted).toHaveLength(1);
+    expect(h.stage.cameraValue).toEqual({ x: 0, y: 0, scale: 1 });
   });
 
   test("destroy removes all listeners", () => {

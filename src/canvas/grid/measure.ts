@@ -11,6 +11,12 @@ export interface MeasureGrid {
   type: "square" | "hex" | "gridless";
   /** World units per grid cell (hex: circumradius). */
   size: number;
+  /**
+   * Distance one cell stands for in `units` (scene `grid.distance`, e.g. 5 ft). Only the
+   * user-facing readouts read it — the ruler math above stays in world units so move-order
+   * budgets (§9A) and area counts are unaffected. Defaults to 1 when a caller omits it.
+   */
+  distance?: number;
   diagonals: DiagonalRule;
   /** Hex layout (§9, four orientations; hex measurement ignores `diagonals`). */
   layout?: HexLayout;
@@ -53,6 +59,17 @@ export function measureSegment(
   const dxCells = Math.abs(b.x - a.x) / grid.size;
   const dyCells = Math.abs(b.y - a.y) / grid.size;
   return cellDistance(grid.diagonals, dxCells, dyCells) * grid.size;
+}
+
+/**
+ * World length → the number the user should read: world units / cell × the cell's distance
+ * (px → ft). One conversion for every readout — the in-canvas ruler (EffectsLayer) and the
+ * toolbar's measure preview (App) must not disagree. Gridless/unknown geometry passes the
+ * world length through unchanged; a grid without `distance` is 1 unit per cell.
+ */
+export function displayDistance(grid: MeasureGrid | null, worldUnits: number): number {
+  if (!grid || grid.type === "gridless" || grid.size <= 0) return worldUnits;
+  return (worldUnits / grid.size) * (grid.distance ?? 1);
 }
 
 /** Measured length of a waypoint path (§9A ruler); ≥ 2 points required. */

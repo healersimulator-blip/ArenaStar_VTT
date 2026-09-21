@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "comment": "Pinned content sources for the PF1e converter (plan §1.1 / gap G-44). Every entry is a git checkout at an exact commit with a sparse path set; `pnpm content:fetch` materialises them under tools/content/vendor/ (git-ignored) so `pnpm content:convert` can run. Licenses are the verified facts recorded in tools/adopt/INVENTORY.md — input to a case, not a verdict.",
+  "sources": [
+    {
+      "id": "pf1-system",
+      "url": "https://github.com/gabrieldosprazeres/foundryvtt-pathfinder1",
+      "commit": "681929d1f5471178a99fc3285f94caa85d78e427",
+      "ref": "refs/heads/master",
+      "sparse": ["packs"],
+      "required": ["packs/spells", "packs/feats", "packs/classes", "packs/races"],
+      "license": "GPLv3 (code) + OGL 1.0a (content) + Paizo Community-Use Policy",
+      "usage": "Data only — per-entry YAML packs are converted; no system code is transferred (INVENTORY row 2, transfer approach: clean-room transcription for logic)."
+    },
+    {
+      "id": "pf1e-content",
+      "url": "https://github.com/baileymh/pf1e-content",
+      "commit": "baf5232c5dc16af99d49ae1bf57ead6473b46bbb",
+      "ref": "refs/heads/main",
+      "sparse": ["src/packs"],
+      "required": ["src/packs/pf-feats", "src/packs/pf-wondrous", "src/packs/pf-items"],
+      "license": "OGL 1.0a (content) + GPLv3 (code)",
+      "usage": "Data only — per-entry JSON packs are converted with the OGL notice and CREDITS (INVENTORY row 1)."
+    }
+  ]
+}

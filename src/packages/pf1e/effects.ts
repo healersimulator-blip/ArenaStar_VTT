@@ -19,12 +19,23 @@ import {
   PF1E_BONUS_TYPES,
   type PF1eBonusType,
 } from "./rulesTables";
+import { PF1E_SKILLS } from "./skills";
+
+/**
+ * Every PF1e skill as a typed mod key (`skill.acrobatics` … `skill.useMagicDevice`). Built
+ * from the skill table rather than typed out, so a new skill cannot be forgotten here — the
+ * plan's G-01 remainder was exactly that gap ("only perception and stealth had a key").
+ */
+export const PF1E_SKILL_MOD_KEYS = PF1E_SKILLS.map((s) => `skill.${s.id}` as const);
 
 /** Every number a PF1e effect may adjust. The closed list is what makes typos loud. */
 export const PF1E_MOD_KEYS = [
   "ac",
   "acTouch",
   "acFlatFooted",
+  // Natural armor (an amulet of natural armor, a `nac` change): applies to normal and
+  // flat-footed AC, never to touch — which is why it is not folded into `ac`.
+  "naturalArmor",
   "attack",
   "attackMelee",
   "attackRanged",
@@ -47,8 +58,14 @@ export const PF1E_MOD_KEYS = [
   "concentration",
   "spellDc",
   "spellPenetration",
+  // G-01 remainder / plan §1.3 item 5: the whole skill family, not just the two that had names.
+  // `PF1eSkillId` values are the ids, so a mod key is `skill.<id>` and the skill derivation
+  // (`skills.ts:derivePF1eSkill`) already reads that exact spelling.
+  ...PF1E_SKILL_MOD_KEYS,
+  // Kept because existing effects, items and tests use them; they read as the same skills.
   "perception",
   "stealth",
+  "skills",
 ] as const;
 
 export type PF1eModKey = (typeof PF1E_MOD_KEYS)[number];

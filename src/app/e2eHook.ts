@@ -6,15 +6,20 @@ import type { LoopbackResult } from "../net/webrtc";
 import { makeToken, type HostApp } from "./hostBoot";
 import type {
   ActorDocument,
+  MessageDocument,
   CombatDocument,
   Json,
   Ownership,
   TokenDocument,
 } from "../core/documents";
+import type { DocId } from "../core/ids";
 import type { FlatDiff } from "../core/ops";
 import type { PlayerApp } from "./joinBoot";
 import type { HostShare } from "./hostShare";
 import { sightSegments } from "../canvas/vision/wallSight";
+import { wallKindOf } from "../canvas/vision/wallKinds";
+import { worldToScreen } from "../canvas/camera";
+import { fogMaskLog, pointInFogMask } from "../core/fogMask";
 import {
   affectedTokens,
   areaPreviewRects,
@@ -24,7 +29,9 @@ import {
   type PF1eAreaKind,
   type PF1eAreaIssue,
 } from "../packages/pf1e/targeting";
-import { deriveFromDocuments } from "../packages/pf1e/actor";
+import { deriveFromActorDocument, deriveFromDocuments } from "../packages/pf1e/actor";
+import { readRollApplications } from "../packages/pf1e/rollApply";
+import { readQuickbar } from "../ui/quickbar/model";
 import { footprintSide } from "../packages/pf1e/geometry";
 import { pf1eThreatModel } from "../packages/pf1e/threatPreview";
 import {
@@ -52,6 +59,7 @@ import {
 } from "../packages/pf1e/combatState";
 import {
   validateWorldSettingsPatch,
+  encumbranceOptionsOf,
   worldSettingsFrom,
   worldSettingsOps,
 } from "../core/worldSettings";
@@ -105,6 +113,67 @@ export interface AppSurface {
   activeSceneId(): string | null;
   gridSize(): number | null;
   sceneCount(): number;
+  /** D-255/D-256: the active scene's drawings — what the canvas Draw tool must produce. */
+  drawings(): Array<{
+    id: string;
+    kind: string;
+    createdBy: string | null;
+    points: number;
+    text: string | null;
+    /** rect/ellipse/text geometry; null for point-based kinds. */
+    box: [number, number, number, number] | null;
+    stroke: string;
+    fill: string;
+    strokeWidth: number;
+  }>;
+  /** D-256/D-257: what the rail's walls/doors/windows and lighting tools placed. */
+  walls(): Array<{
+    id: string;
+    name: string;
+    kind: "wall" | "door" | "window";
+    c: [number, number, number, number];
+    door: number;
+    sight: number;
+    move: number;
+    sound: number;
+    light: number;
+  }>;
+  /**
+   * D-257: run the REAL vision worker over the live scene's walls for a viewer at `from` and
+   * report whether `to` is inside the resulting polygon. This is how an e2e proves a door
+   * actually changes what a token can see.
+   */
+  wallSightProbe(spec: {
+    from: { x: number; y: number };
+    to: { x: number; y: number };
+    radius: number;
+  }): Promise<{ wallSegments: number; points: number; sees: boolean }>;
+  /** Viewport coordinates of a world point (canvas rect + camera) — for real mouse gestures. */
+  screenOf(point: { x: number; y: number }): { x: number; y: number } | null;
+  lights(): Array<{
+    id: string;
+    x: number;
+    y: number;
+    dim: number;
+    bright: number;
+    color: string;
+  }>;
+  /** D-256 map pins: the GM note text, the player text and the visibility state. */
+  notes(): Array<{
+    id: string;
+    x: number;
+    y: number;
+    text: string;
+    playerText: string | null;
+    visible: boolean;
+    ownershipDefault: number;
+    journalId: string | null;
+  }>;
+  /** D-256: the manual fog mask — stroke count and whether a world point is hidden. */
+  fogMaskStrokes(): number;
+  fogMaskAt(point: { x: number; y: number }): boolean;
+  /** D-255: the live camera — pan mode / zoom assertions. */
+  camera(): { x: number; y: number; scale: number } | null;
   lastRejected(): string | null;
   /** §12 rules-package boot state + management readbacks. */
   rulesBoot(): {
@@ -180,6 +249,21 @@ export interface AppSurface {
       size?: string;
       /** D-251: `"gm"` places a token (and actor) only the GM owns — a monster to be hidden by fog. */
       owner?: "all" | "gm";
+      /**
+       * §2.1: the token's own senses, authored in **feet** the way a stat block states them
+       * (`sightFeet` absent = unlimited, `darkvisionFeet` absent = none), and a carried torch
+       * in grid cells (`lightCells`) — the three fields the lighting gate reads. They are
+       * written onto the created token document, so the fog loop reads them from the replica
+       * exactly as it would after a GM's own edit.
+       */
+      sightFeet?: number;
+      darkvisionFeet?: number;
+      lightCells?: number;
+      /**
+       * §2.3/D-262: write the token's `hidden` flag (§5 withholds such documents from every
+       * player — the one thing a client-side *view as* preview has to emulate itself).
+       */
+      hidden?: boolean;
     }>,
   ): { ok: boolean; placed: number; cellSize: number };
   /**
@@ -254,6 +338,16 @@ export interface AppSurface {
     hp: number | null;
   } | null;
   /**
+   * §2.2/G-10a: the derived hit points the canvas bars draw, read from the **host replica** —
+   * the sheet's own derivation (`deriveFromActorDocument`), so a bar and a sheet cannot disagree.
+   */
+  pf1eDerivedHp(actorId: string): {
+    hp: number;
+    hpMax: number;
+    tempHp: number;
+    nonlethalDamage: number;
+  } | null;
+  /**
    * D-186: write one world rules option through `worldSettingsOps` — the same op the
    * settings window submits — so a spec can prove the replication path an option takes.
    */
@@ -263,6 +357,27 @@ export interface AppSurface {
   }): { ok: boolean; error: string | null; ops: number };
   /** D-186: the merged world settings bag as every replica derives it. */
   pf1eWorldSettings(): Record<string, unknown>;
+  /**
+   * §2.2 item 3 (G-20/D-261): the newest roll card as the **host replica** holds it — the total the
+   * host evaluated and the record of what that card has already applied to whom.
+   */
+  pf1eLastRoll(): {
+    id: string;
+    total: number;
+    formula: string;
+    applied: Record<string, { damage?: number; healing?: number }>;
+  } | null;
+  /**
+   * §2.2 item 2 (G-10b/D-261): one actor's quickbar bindings, as the **host replica** holds them —
+   * a binding is an ordinary op, so the replica is where the table's shared truth lives.
+   */
+  pf1eQuickbar(actorId: string): Array<{
+    slot: number;
+    kind: string;
+    label: string;
+    attackIndex: number;
+    itemId: string | null;
+  }>;
   /** D-186: the public chat cards containing `needle`, for the resolution cards. */
   pf1eCardsContaining(needle: string): { count: number; first: string | null };
   /**
@@ -589,6 +704,16 @@ export interface PlayerSurface {
   sceneImg(): string | null;
   tokenCount(): number;
   tokenPos(): { x: number; y: number } | null;
+  /** D-255: drawings the player shell sees (its Draw tool writes these). */
+  drawings(): Array<{ id: string; kind: string; createdBy: string | null }>;
+  /** D-256: the pins that reached this player (hidden pins never leave the host). */
+  /** D-256: the pin text this replica holds — the player-facing note is what it renders. */
+  notes(): Array<{ id: string; text: string; playerText: string | null; visible: boolean }>;
+  /** D-256: the mask strokes this player replays onto its own fog layer. */
+  fogMaskStrokes(): number;
+  /** D-256: what the GM's placements look like on this replica. */
+  walls(): Array<{ id: string; door: number }>;
+  camera(): { x: number; y: number; scale: number } | null;
   role(): string | null;
   connected(): boolean;
   /** Test-only direct manual-signaling access (atomic code exchange). */
@@ -615,6 +740,13 @@ export interface PlayerSurface {
   /** §11 distributions from the last received report (null before one). */
   reportByType(): Record<string, number> | null;
   cacheHas(hash: string): Promise<boolean>;
+  /**
+   * D-261 authority probe: ask the host to apply a roll card's total to an actor, bypassing the
+   * chat card's own target picker. `roll.apply` carries no amount — the host re-reads the total
+   * from the card it evaluated and re-checks the permission — so this is how a spec proves the
+   * *host* refuses an apply the UI would never have offered.
+   */
+  rollApply(arg: { messageId: string; actorId: string; mode: "damage" | "healing" }): void;
 }
 
 export interface ShareSurface {
@@ -700,8 +832,23 @@ export interface GmFogSurface {
   sceneScale(): string;
   /** Active scene `flags.core` as stored (D-250: fog / fogRange land here). */
   sceneCoreFlags(): Record<string, unknown>;
+  /** §2.1: the active scene's ambient darkness as stored (0 = bright, 1 = pitch dark). */
+  sceneDarkness(): number;
   godView(): boolean;
   viewAsFaction(): string;
+  /**
+   * §2.3/G-25 (D-262): the GM's **view as player X** preview — the user it runs as (null = the
+   * GM's own view), how many players the picker offers, the tokens the gate leaves on the canvas,
+   * the ones the pointer can reach, the ids the fog loop published and which carry a bar.
+   */
+  viewAsState(): {
+    user: string | null;
+    followedPlayers: number;
+    drawnTokens: string[];
+    pickableTokens: string[];
+    visibleTokenIds: string[] | null;
+    tokenHpBars: string[];
+  };
   /** GM client pool replica model count (null before the first snapshot). */
   simCount(): number | null;
   /** Last turn.phase frame phase ("idle" before any campaign). */
@@ -710,6 +857,18 @@ export interface GmFogSurface {
   effectsSummary(): { pings: number; rulers: number };
   /** §9 tile occlusion alpha per tile id (null = not rendered). */
   tileAlphas(): Record<string, number | null>;
+  /**
+   * §2.2/G-10a: the token HP bars the GM canvas draws right now (what a `"hover"` mode hides
+   * shows up here as an empty list), with the label text each bar carries.
+   */
+  tokenHpBars(): Array<{
+    id: string;
+    hp: number;
+    hpMax: number;
+    tempHp: number;
+    nonlethalDamage: number;
+    label: string;
+  }>;
   /** §9 e2e: create a tile doc through the client op path; returns its id. */
   seedTile(spec: {
     x: number;
@@ -873,6 +1032,11 @@ export interface GmFogSurface {
   fogFlush(): Promise<number>;
   /** D-250: is the world point explored on the GM's texture? (null = no fog layer) */
   fogExploredAt(spec: { x: number; y: number }): boolean | null;
+  /**
+   * §2.3/D-262: the bytes the host's fog store holds for one user on a scene — what a *preview*
+   * must never change (it reads that player's map; every write stays the player's own).
+   */
+  fogStoredBytesFor(spec: { sceneId: string; userId: string }): Promise<number>;
 }
 
 export interface RulesPackageSmokeResult {
@@ -941,6 +1105,15 @@ export interface PlayerCanvasSurface {
   drawnTokens(): string[];
   /** Token ids the controller can pick (select / sheet / menu) — fog-hidden ones are not. */
   pickableTokens(): string[];
+  /** §2.2/G-10a: the HP bars this canvas draws right now (empty under the default `"gm"`). */
+  tokenHpBars(): Array<{
+    id: string;
+    hp: number;
+    hpMax: number;
+    tempHp: number;
+    nonlethalDamage: number;
+    label: string;
+  }>;
 }
 
 function playerSurface(playerApp: PlayerApp): PlayerSurface {
@@ -977,6 +1150,27 @@ function playerSurface(playerApp: PlayerApp): PlayerSurface {
       const token = scene()?.tokens[0];
       return token ? { x: token.x, y: token.y } : null;
     },
+    drawings: () =>
+      (scene()?.drawings ?? []).map((d) => ({
+        id: d._id,
+        kind: d.kind,
+        createdBy:
+          typeof d.flags.core?.createdBy === "string" ? d.flags.core.createdBy : null,
+      })),
+    notes: () =>
+      (scene()?.notes ?? []).map((n) => ({
+        id: n._id,
+        text: n.text,
+        playerText: n.playerText ?? null,
+        visible: n.visible === true,
+      })),
+    fogMaskStrokes: () => fogMaskLog(scene()).length,
+    walls: () => (scene()?.walls ?? []).map((w) => ({ id: w._id, door: w.door })),
+    camera: () => {
+      const stage = (globalThis as { __canvasStage?: { camera: { x: number; y: number; scale: number } } })
+        .__canvasStage;
+      return stage ? { ...stage.camera } : null;
+    },
     role: () => client()?.user?.role ?? null,
     connected: () => playerApp.session.stats.state === "connected",
     takeOutbox: () => playerApp.takeOutbox(),
@@ -991,6 +1185,8 @@ function playerSurface(playerApp: PlayerApp): PlayerSurface {
     reportEvents: () => lastReportEvents,
     reportByType: () => lastByType,
     cacheHas: (hash) => playerApp.cacheHas(hash),
+    rollApply: (arg) =>
+      client()?.rollApply(arg.messageId as DocId, arg.actorId as DocId, arg.mode),
   };
 }
 
@@ -1141,7 +1337,7 @@ function appSurface(app: HostApp): AppSurface {
           ? (actors.find((a) => a._id === t.actorId) ?? null)
           : null;
         const derived = actor
-          ? deriveFromDocuments({ actor: { system: actor.system } })
+          ? deriveFromActorDocument(actor, encumbranceOptionsOf(worldSettingsFrom(client.store.getAll("settings"))))
           : null;
         return {
           _id: t._id,
@@ -1251,7 +1447,7 @@ function appSurface(app: HostApp): AppSurface {
           ? (actors.find((a) => a._id === t.actorId) ?? null)
           : null;
         const derived = actor
-          ? deriveFromDocuments({ actor: { system: actor.system } })
+          ? deriveFromActorDocument(actor, encumbranceOptionsOf(worldSettingsFrom(client.store.getAll("settings"))))
           : null;
         return {
           _id: t._id,
@@ -1316,6 +1512,99 @@ function appSurface(app: HostApp): AppSurface {
       return (scenes.find((sc) => sc.active) ?? scenes[0])?._id ?? null;
     },
     sceneCount: () => client.store.getAll("scenes").length,
+    drawings: () =>
+      (scene()?.drawings ?? []).map((d) => ({
+        id: d._id,
+        kind: d.kind,
+        createdBy:
+          typeof d.flags.core?.createdBy === "string" ? d.flags.core.createdBy : null,
+        points: d.points.length,
+        text: d.text ?? null,
+        box: d.box ? ([...d.box] as [number, number, number, number]) : null,
+        stroke: d.stroke,
+        fill: d.fill,
+        strokeWidth: d.strokeWidth,
+      })),
+    walls: () =>
+      (scene()?.walls ?? []).map((w) => ({
+        id: w._id,
+        name: w.name,
+        kind: wallKindOf(w),
+        c: [...w.c] as [number, number, number, number],
+        door: w.door,
+        sight: w.sight,
+        move: w.move,
+        sound: w.sound,
+        light: w.light,
+      })),
+    /**
+     * D-257: real vision for the live scene — the app's own vision computer over the scene's
+     * sight segments, so a door toggle can be asserted end to end.
+     */
+    wallSightProbe: async (spec) => {
+      const s = scene();
+      if (!s) return { wallSegments: 0, points: 0, sees: false };
+      const segs = sightSegments(s.walls);
+      const flat = new Float32Array(segs.length * 4);
+      segs.forEach((sg, i) => {
+        flat[i * 4] = sg.x1;
+        flat[i * 4 + 1] = sg.y1;
+        flat[i * 4 + 2] = sg.x2;
+        flat[i * 4 + 3] = sg.y2;
+      });
+      const { createVisionComputer } = await import("../workers/visionComputer");
+      const { pointInPolygon } = await import("../canvas/vision/polygon");
+      const computer = createVisionComputer();
+      try {
+        const poly = await computer.compute(spec.from.x, spec.from.y, flat, spec.radius);
+        return {
+          wallSegments: segs.length,
+          points: poly.length / 2,
+          sees: pointInPolygon(poly, spec.to.x, spec.to.y),
+        };
+      } finally {
+        computer.terminate();
+      }
+    },
+    screenOf: (point) => {
+      const stage = (
+        globalThis as {
+          __stage?: { app: { canvas: HTMLCanvasElement }; camera: { x: number; y: number; scale: number } };
+        }
+      ).__stage;
+      if (!stage) return null;
+      const rect = stage.app.canvas.getBoundingClientRect();
+      const p = worldToScreen(stage.camera, point.x, point.y);
+      return { x: rect.left + p.x, y: rect.top + p.y };
+    },
+    lights: () =>
+      (scene()?.lights ?? []).map((l) => ({
+        id: l._id,
+        x: l.x,
+        y: l.y,
+        dim: l.dim,
+        /** §2.1: the bright radius too — the dark/dim/bright matrix is asserted from here. */
+        bright: l.bright,
+        color: l.color,
+      })),
+    notes: () =>
+      (scene()?.notes ?? []).map((n) => ({
+        id: n._id,
+        x: n.x,
+        y: n.y,
+        text: n.text,
+        playerText: n.playerText ?? null,
+        visible: n.visible === true,
+        ownershipDefault: n.ownership.default,
+        journalId: n.journalId ?? null,
+      })),
+    fogMaskStrokes: () => fogMaskLog(scene()).length,
+    fogMaskAt: (point: { x: number; y: number }) => pointInFogMask(fogMaskLog(scene()), point.x, point.y),
+    camera: () => {
+      const stage = (globalThis as { __stage?: { camera: { x: number; y: number; scale: number } } })
+        .__stage;
+      return stage ? { ...stage.camera } : null;
+    },
     lastRejected: () =>
       globalThis.localStorage.getItem("vtt-e2e-last-rejected"),
     rulesBoot: () => app.rulesBoot,
@@ -1435,6 +1724,22 @@ function appSurface(app: HostApp): AppSurface {
           width: side * cellSize,
           height: side * cellSize,
           actorId,
+          ...(typeof t.sightFeet === "number" ? { sight: t.sightFeet } : {}),
+          ...(typeof t.darkvisionFeet === "number"
+            ? { darkvision: t.darkvisionFeet }
+            : {}),
+          ...(typeof t.lightCells === "number" && t.lightCells > 0
+            ? {
+                light: {
+                  radius: t.lightCells * cellSize,
+                  bright: (t.lightCells * cellSize) / 2,
+                  color: "#ffcc66",
+                  alpha: 0.5,
+                },
+              }
+            : {}),
+          // §2.3/D-262: a token the host withholds from players (§5 projection)
+          ...(t.hidden === true ? { hidden: true } : {}),
         };
         ops.push({
           kind: "create",
@@ -1489,7 +1794,7 @@ function appSurface(app: HostApp): AppSurface {
             ? (actors.find((a) => a._id === t.actorId) ?? null)
             : null;
           const derived = actor
-            ? deriveFromDocuments({ actor: { system: actor.system } })
+            ? deriveFromActorDocument(actor, encumbranceOptionsOf(worldSettingsFrom(client.store.getAll("settings"))))
             : null;
           return {
             _id: t._id,
@@ -1897,12 +2202,29 @@ function appSurface(app: HostApp): AppSurface {
       const hp =
         actor === null
           ? null
-          : deriveFromDocuments({ actor: { system: actor.system } }).hp;
+          : deriveFromActorDocument(actor, encumbranceOptionsOf(worldSettingsFrom(client.store.getAll("settings")))).hp;
       return {
         aooUsed: state.aooUsed,
         aooMax: state.aooMax,
         acted: state.acted,
         hp,
+      };
+    },
+    pf1eDerivedHp: (actorId) => {
+      const actor =
+        (client.store.getAll("actors") as ActorDocument[]).find(
+          (a) => a._id === actorId,
+        ) ?? null;
+      if (actor === null) return null;
+      const derived = deriveFromActorDocument(
+        actor,
+        encumbranceOptionsOf(worldSettingsFrom(client.store.getAll("settings"))),
+      );
+      return {
+        hp: derived.hp,
+        hpMax: derived.hpMax,
+        tempHp: derived.tempHp,
+        nonlethalDamage: derived.nonlethalDamage,
       };
     },
     pf1eSetWorldSetting: (spec) => {
@@ -1918,6 +2240,23 @@ function appSurface(app: HostApp): AppSurface {
     pf1eWorldSettings: () => ({
       ...worldSettingsFrom(client.store.getAll("settings")),
     }),
+    pf1eLastRoll: () => {
+      const rolls = (client.store.getAll("messages") as MessageDocument[]).filter(
+        (m) => m.roll !== null && typeof m.roll?.total === "number",
+      );
+      const last = rolls[rolls.length - 1];
+      if (!last || !last.roll) return null;
+      return {
+        id: last._id,
+        total: last.roll.total,
+        formula: last.roll.formula,
+        applied: readRollApplications(last),
+      };
+    },
+    pf1eQuickbar: (actorId) => {
+      const actor = client.store.get("actors", actorId) as ActorDocument | undefined;
+      return actor === undefined ? [] : readQuickbar(actor);
+    },
     pf1eCardsContaining: (needle) => {
       const hits = client.store
         .getAll("messages")

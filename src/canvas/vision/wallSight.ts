@@ -62,6 +62,8 @@ export const WALL_COLORS = {
   doorClosed: 0x9aa0a8,
   doorOpen: 0x44cc66,
   doorLocked: 0xcc4444,
+  /** D-257: sight/light pass through a window; movement and sound do not. */
+  window: 0x7ee0ff,
 } as const;
 
 /** Dominant stroke color for a wall in the GM overlay. */

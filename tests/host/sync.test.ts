@@ -25,6 +25,7 @@ import type {
   ActorDocument,
   Json,
   MessageDocument,
+  NoteDocument,
   SceneDocument,
   TokenDocument,
   UserDocument,
@@ -1028,4 +1029,220 @@ test("selected roster edits and partial initiative replicate without modifying u
       turn: 0,
       combatants: [],
     });
+});
+
+/**
+ * D-256 map pins: a note lives *inside* a scene, and the scene is readable by every player, so
+ * the gate cannot be ownership arithmetic — it is the pin's own `visible` flag. The host has to
+ * rewrite the envelope per session either way: a hidden pin's create is projected away, so when
+ * the GM later reveals it the player must receive a full create (an update would target a
+ * document their replica never held), and hiding it again must retract the entry.
+ */
+test("D-256 pins: revealing a pin materializes it in the player's replica, hiding retracts it", async () => {
+  const h = await setup();
+  const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+  const sceneRef = { coll: "scenes" as const, id: "s1" };
+  const noteRef = { coll: "notes" as const, id: "pin-1", parent: sceneRef };
+  const pin = (over: Partial<NoteDocument> = {}): NoteDocument => ({
+    _id: "pin-1",
+    type: "note",
+    name: "Pin 1",
+    ownership: { default: 0 },
+    flags: {},
+    system: {},
+    x: 200,
+    y: 300,
+    text: "Cultists ambush the party",
+    playerText: "Gate is open",
+    icon: "pin",
+    visible: false,
+    ...over,
+  });
+  const playerNotes = (): NoteDocument[] =>
+    (player.store.get("scenes", "s1") as SceneDocument | undefined)?.notes ?? [];
+
+  h.gm.submit([{ kind: "create", coll: "notes", parent: sceneRef, data: pin() }]);
+  await flushMicrotasks();
+  expect(playerNotes()).toHaveLength(0); // hidden pin: projected away, not merely hidden in the UI
+
+  h.gm.submit([
+    {
+      kind: "update",
+      ref: noteRef,
+      diff: { visible: true, ownership: { default: 1 } },
+    },
+  ]);
+  await flushMicrotasks();
+  expect(playerNotes()).toHaveLength(1);
+  expect(playerNotes()[0]?.playerText).toBe("Gate is open");
+
+  h.gm.submit([
+    {
+      kind: "update",
+      ref: noteRef,
+      diff: { visible: false, ownership: { default: 0 } },
+    },
+  ]);
+  await flushMicrotasks();
+  expect(playerNotes()).toHaveLength(0); // no stale pin left in the replica
+});
+
+/**
+ * §2.2 item 3 (G-20, D-261) — applying a roll card's total is the host's decision, not the sender's.
+ *
+ * The intent (`roll.apply`) carries no number: the host re-reads `roll.total` from the card **it**
+ * evaluated, checks `can(user, "update", actor, "actors")`, applies the PF1e rules (temporary hit
+ * points absorb first, healing caps at the maximum and removes nonlethal) and commits one op
+ * envelope it can undo as a unit. These tests pin the three things that decision rests on: the
+ * number is the host's, the permission is the host's, and a card cannot be counted twice.
+ */
+test("roll.apply spends temporary hit points, writes only authorized hit points, and refuses a replay", async () => {
+  const h = await setup();
+  const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const rejections: Array<{ reason: string; detail: string }> = [];
+  bus.on("rejected", (r) => rejections.push({ reason: r.reason, detail: r.detail }));
+  // `players` is the actor Rex owns; `sealed` is one he can see but not update.
+  h.gm.submit([
+    {
+      kind: "create",
+      coll: "actors",
+      data: {
+        _id: "players",
+        type: "actor",
+        name: "Rex the Bold",
+        ownership: { default: 0, [PLAYER_ID]: 3 },
+        flags: {},
+        system: { pf1e: { hp: 20, hpMax: 20, tempHp: 8, nonlethalDamage: 6 } },
+        items: [],
+        effects: [],
+      } as ActorDocument,
+    },
+    {
+      kind: "create",
+      coll: "actors",
+      data: {
+        _id: "sealed",
+        type: "actor",
+        name: "Sealed vault",
+        ownership: { default: 1 },
+        flags: {},
+        system: { pf1e: { hp: 30, hpMax: 30 } },
+        items: [],
+        effects: [],
+      } as ActorDocument,
+    },
+  ]);
+  await flushMicrotasks();
+  const actor = () => h.hostStore.get("actors", "players") as ActorDocument;
+
+  // The card: the host evaluates it (rng 0.25 → 1d6 = 2), so `total` is the host's own number.
+  player.roll("1d6+2");
+  await flushMicrotasks();
+  const card = (h.hostStore.getAll("messages") as MessageDocument[]).find(
+    (m) => m.roll !== null && m.roll.formula === "1d6+2",
+  );
+  expect(card?.roll?.total).toBe(4);
+
+  // Damage: 4 through an 8-point pool — absorbed whole, so hit points do not move at all.
+  player.rollApply(card?._id ?? "", "players", "damage");
+  await flushMicrotasks();
+  expect(pf1eSheetView(actor()).derived).toMatchObject({
+    hp: 20,
+    hpMax: 20,
+    tempHp: 4,
+    nonlethalDamage: 6,
+  });
+  const appliedCard = h.hostStore.get("messages", card?._id ?? "") as MessageDocument;
+  expect(
+    (appliedCard.flags as { pf1e?: { applied?: unknown } }).pf1e?.applied,
+  ).toEqual({ players: { damage: 4 } });
+  // The audit line names the applied amount and the actor, and is authored by the applier.
+  const note = (h.hostStore.getAll("messages") as MessageDocument[]).find(
+    (m) => m.name === "Damage applied",
+  );
+  expect(note?.content).toContain("Rex the Bold");
+  expect(note?.author).toBe(PLAYER_ID);
+
+  // Replay: the same card cannot be counted twice against the same actor.
+  const before = h.hostStore.seq;
+  player.rollApply(card?._id ?? "", "players", "damage");
+  await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(before);
+  expect(pf1eSheetView(actor()).derived).toMatchObject({ hp: 20, tempHp: 4 });
+  expect(rejections.at(-1)?.reason).toBe("invalid_schema");
+  expect(rejections.at(-1)?.detail).toContain("already applied");
+
+  // Healing is a separate verb on the same card: it caps at the maximum and removes an equal
+  // amount of nonlethal damage (CRB p.191) — and it never touches the pool damage left behind.
+  player.rollApply(card?._id ?? "", "players", "healing");
+  await flushMicrotasks();
+  expect(pf1eSheetView(actor()).derived).toMatchObject({
+    hp: 20,
+    tempHp: 4,
+    nonlethalDamage: 2,
+  });
+
+  // Authorization: a card Rex can read is not a licence to write an actor he does not own.
+  const deniedBefore = h.hostStore.seq;
+  player.rollApply(card?._id ?? "", "sealed", "damage");
+  await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(deniedBefore);
+  expect(pf1eSheetView(h.hostStore.get("actors", "sealed") as ActorDocument).derived.hp).toBe(30);
+  expect(rejections.at(-1)?.reason).toBe("forbidden");
+  expect(rejections.at(-1)?.detail).toContain("Sealed vault");
+});
+
+test("roll.apply refuses a card that never carried a total, and an actor that is not there", async () => {
+  const h = await setup();
+  const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const rejections: string[] = [];
+  bus.on("rejected", (r) => rejections.push(r.detail));
+  h.gm.submit([
+    {
+      kind: "create",
+      coll: "actors",
+      data: {
+        _id: "players",
+        type: "actor",
+        name: "Rex the Bold",
+        ownership: { default: 0, [PLAYER_ID]: 3 },
+        flags: {},
+        system: { pf1e: { hp: 20, hpMax: 20 } },
+        items: [],
+        effects: [],
+      } as ActorDocument,
+    },
+  ]);
+  await flushMicrotasks();
+  h.gm.submit([
+    {
+      kind: "create",
+      coll: "messages",
+      data: {
+        _id: "prose",
+        type: "message",
+        name: "prose",
+        ownership: { default: 1 },
+        flags: {},
+        system: {},
+        author: GM_ID,
+        content: "just talking",
+        whisper: [],
+        roll: null,
+        flavor: "",
+      } as MessageDocument,
+    },
+  ]);
+  await flushMicrotasks();
+
+  const seq = h.hostStore.seq;
+  player.rollApply("prose", "players", "damage");
+  await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(seq);
+  expect(rejections.at(-1)).toContain("no rolled total");
+
+  player.rollApply("prose", "ghost", "damage");
+  await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(seq);
+  expect(pf1eSheetView(h.hostStore.get("actors", "players") as ActorDocument).derived.hp).toBe(20);
 });

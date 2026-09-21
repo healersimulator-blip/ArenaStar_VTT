@@ -8,6 +8,8 @@
   import { renderMarkdown } from "../../core/markdown";
   import RollCard from "./RollCard.svelte";
   import PendingRollCard from "./PendingRollCard.svelte";
+  import RollApplyRow from "./RollApplyRow.svelte";
+  import { rollApplyTarget } from "./applyTarget";
   import { tacticalLedgerTurn } from "../../packages/pf1e/rollLedger";
   import type { RollLedger } from "../../packages/pf1e/rollLedger";
   import type { PendingRoll } from "../../packages/pf1e/pendingRoll";
@@ -24,9 +26,15 @@
   let {
     client,
     bus,
+    targetTokenId = null,
   }: {
     client: ClientSync;
     bus: EventBus<ClientEvents>;
+    /**
+     * §2.2 item 3 (G-20/D-261): the token the shell has selected — the target an apply verb on a
+     * roll card would write to. Null (or a multi-selection) leaves the cards verbless.
+     */
+    targetTokenId?: string | null;
   } = $props();
 
   let messages = $state<MessageDocument[]>([]);
@@ -126,6 +134,18 @@
     void client.rollPending(messageId);
   }
 
+
+  // The apply verb's target is the selected token's actor; the shells hand over the selection so
+  // the chat panel never guesses at canvas state.
+  const applyTarget = $derived.by(() =>
+    rollApplyTarget(
+      client.store as unknown as {
+        getAll(coll: "scenes" | "actors"): readonly unknown[];
+      },
+      client.user,
+      targetTokenId === null ? [] : [targetTokenId],
+    ),
+  );
 
   function refresh(): void {
     messages = [...(client.store.getAll("messages") as readonly MessageDocument[])];
@@ -325,6 +345,7 @@
             {/if}
           </p>
         {/if}
+        <RollApplyRow {client} {message} target={applyTarget} />
       {:else if message.roll}
         <p class="line rollcard" data-mode={message.rollMode ?? "roll"}>
           <span class="author">{userName(message.author)}</span>
@@ -338,6 +359,7 @@
             <span class="tag">🔒 {message.whisper.map(userName).join(", ")}</span>
           {/if}
         </p>
+        <RollApplyRow {client} {message} target={applyTarget} />
       {:else}
         <p
           class="line"

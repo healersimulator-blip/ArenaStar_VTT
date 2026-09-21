@@ -10,10 +10,22 @@
  *
  * The host persists fog.put per [worldId, sceneId, userId] and answers fog.get from that
  * store, so a reload, a reconnect, or a world file opened elsewhere all come back with the
- * same explored map. Every step is serialised on one promise chain, so a scene switch can
+ * same explored map.
+ *
+ * §2.3 (G-25 remainder, D-262) — the loop runs as **whoever `options.user()` says**: a GM shell can
+ * hand it a player and the restore, the viewers, the radii and the gate all become that player's.
+ * A change of viewer re-enters the scene (a fresh surface, that user's stored map), so a preview
+ * never shows the previous viewer's accumulated exploration — and `options.visibilityFilter` is
+ * where the caller states what a gate needs on top of the rules (`core/viewAs`: the documents §5
+ * withheld). Every step is serialised on one promise chain, so a scene switch can
  * never read back a surface the next scene already replaced, and a stale polygon result
  * never lands on a newer scene. No pixi here: the surface is an interface, and the unit
  * tests drive the loop with a fake one.
+ *
+ * §2.1 (G-24) — darkness bounds sight: each viewer's reveal radius is
+ * `max(darkvision, min(sight, light at the viewer))`, and the visibility gate additionally
+ * requires the target to be lit (or within some eye's darkvision). A scene with `darkness: 0`
+ * and no sight ranges — every scene written before this slice — behaves exactly as before.
  *
  * D-251 — what the viewer is shown: `onVisibility` receives the set of token ids the user
  * may see (their own tokens plus whatever stands in current sight), recomputed on EVERY
@@ -22,6 +34,7 @@
  * scene is entered only the user's own tokens are listed, before any polygon exists. The
  * GM shell does not wire it (the GM sees everything under a translucent cover).
  */
+import { sceneLighting } from "../canvas/vision/darkness";
 import { sightSegments } from "../canvas/vision/wallSight";
 import type { ActorDocument, SceneDocument } from "../core/documents";
 import {
@@ -30,6 +43,7 @@ import {
   fogSightRadius,
   fogViewers,
   fogVisibleTokenIds,
+  maskHiddenTokenIds,
   sceneFogSettings,
 } from "../core/fogExploration";
 import type { PermissionUser } from "../core/ownership";
@@ -74,6 +88,15 @@ export interface FogExplorationOptions {
    * only when the set changes. Player shells wire it to the stage; the GM shell leaves it.
    */
   onVisibility?: (visible: ReadonlySet<string> | null) => void;
+  /**
+   * §2.3/D-262: the last word on the set the loop publishes — the caller's chance to state what
+   * the rules cannot know here (`withoutHiddenTokens`: the tokens §5 withheld from the viewer).
+   * `null` in stays `null` out; absent, the loop publishes the gate as computed.
+   */
+  visibilityFilter?: (
+    scene: SceneDocument | null,
+    visible: ReadonlySet<string> | null,
+  ) => ReadonlySet<string> | null;
   /** Quiet time after the last reveal before the map is uploaded (default 1500 ms). */
   saveDelayMs?: number;
   /**
@@ -115,6 +138,10 @@ export class FogExploration {
   private lastSaveBytes = 0;
   private enabled = false;
   private destroyed = false;
+  /** The scene the published set belongs to (the visibility filter's context). */
+  private scene: SceneDocument | null = null;
+  /** Who the loop is running as — a change re-enters the scene (D-262's viewer switch). */
+  private viewerKey: string | null = null;
   /** Polygons of the last reveal pass (current sight), for the visibility gate. */
   private polys: readonly Float32Array[] = [];
   private visibleKey: string | null = null;
@@ -205,18 +232,30 @@ export class FogExploration {
   private async syncInner(scene: SceneDocument | null, style: FogStyle): Promise<void> {
     if (this.destroyed) return;
     const settings = scene ? sceneFogSettings(scene) : { enabled: false, rangeSquares: null };
+    const user = this.options.user();
+    // D-262: who this loop runs as is part of the scene's identity — a GM pointing the loop at a
+    // different player must not inherit the previous viewer's surface or explored map.
+    const viewerKey = `${user?.id ?? "-"}:${user?.role ?? "-"}`;
     if (!scene || !settings.enabled) {
       await this.leaveScene();
+      this.scene = scene;
+      this.viewerKey = viewerKey;
       this.enabled = false;
       this.options.hideSurface();
-      this.publishVisibility(null);
+      // D-256: the GM's manual mask outlives the sight loop. With fog off there are no
+      // polygons to intersect, but a painted stroke still withholds the tokens under it
+      // (Roll20's Mask is static and independent of Dynamic Lighting) — `null` stays the
+      // answer only for a scene nobody painted.
+      this.publishVisibility(this.maskOnlyVisibility(scene));
       return;
     }
     this.enabled = true;
-    const user = this.options.user();
     const actors = this.options.actors();
-    if (scene._id !== this.sceneId) {
+    this.scene = scene;
+    if (scene._id !== this.sceneId || viewerKey !== this.viewerKey) {
       await this.leaveScene();
+      this.scene = scene;
+      this.viewerKey = viewerKey;
       const surface = this.options.surfaceFor(scene);
       surface.reset();
       surface.setStyle(style);
@@ -228,7 +267,9 @@ export class FogExploration {
       this.restored = false;
       this.restoredBytes = 0;
       // fail closed: until the first polygons exist only the user's own tokens are shown
-      this.publishVisibility(fogVisibleTokenIds(scene, user, [], { actors }));
+      this.publishVisibility(
+        fogVisibleTokenIds(scene, user, [], { actors, lighting: sceneLighting(scene) }),
+      );
       const stored = await this.fetchStored(scene._id);
       if (this.destroyed || this.sceneId !== scene._id) return;
       if (stored && stored.length > 0) {
@@ -243,13 +284,16 @@ export class FogExploration {
     surface.setShown(true);
 
     const viewers = fogViewers(scene, user, { actors });
+    const lighting = sceneLighting(scene);
     const radius = fogSightRadius(scene, settings);
     const key = fogRevealKey(scene, viewers, radius);
     if (key !== this.key) {
       this.key = key;
       const segments = flatSegments(sightSegments(scene.walls));
+      // §2.1: each viewer reveals within its own light-bounded radius — a token in an unlit
+      // room reveals nothing while a lit one next door reveals its torch's reach.
       const polys = await Promise.all(
-        viewers.map((v) => this.options.computer.compute(v.x, v.y, segments, radius)),
+        viewers.map((v) => this.options.computer.compute(v.x, v.y, segments, v.radiusPx)),
       );
       if (this.destroyed || this.sceneId !== scene._id || this.surface !== surface) return;
       for (const poly of polys) surface.reveal(poly);
@@ -262,16 +306,40 @@ export class FogExploration {
       }
     }
     // every replica change: a token may have walked into (or out of) an unmoved eye's sight
-    this.publishVisibility(fogVisibleTokenIds(scene, user, this.polys, { actors }));
+    // — or a light may have changed, which is why the lighting state and the viewers' senses
+    // ride the gate too (§2.1).
+    this.publishVisibility(
+      fogVisibleTokenIds(scene, user, this.polys, { actors, lighting, viewers }),
+    );
+  }
+
+  /**
+   * D-256: the visible-id set for a scene whose sight loop is idle — every token except the
+   * ones the GM's mask covers, or `null` ("no gate") when nothing is masked. Fails closed in
+   * the same direction as the loop: only the user's own tokens are ever spared by the mask.
+   */
+  private maskOnlyVisibility(scene: SceneDocument | null): Set<string> | null {
+    if (!scene) return null;
+    const masked = maskHiddenTokenIds(scene, this.options.user(), {
+      actors: this.options.actors(),
+    });
+    if (masked.size === 0) return null;
+    return new Set(scene.tokens.filter((t) => !masked.has(t._id)).map((t) => t._id));
   }
 
   /** Hand the shell the visible set, only when it changed (null = fog off, everything). */
   private publishVisibility(ids: Set<string> | null): void {
-    const key = ids === null ? null : [...ids].sort().join("\n");
+    // D-262: the caller's last word (the preview's §5 filter) — applied here, at the one funnel
+    // every publish goes through, so no path can hand a shell an unfiltered set.
+    const filtered = this.options.visibilityFilter
+      ? this.options.visibilityFilter(this.scene, ids)
+      : ids;
+    const key = filtered === null ? null : [...filtered].sort().join("\n");
     if (key === this.visibleKey) return;
     this.visibleKey = key;
-    this.visibleIds = ids;
-    this.options.onVisibility?.(ids);
+    this.visibleIds =
+      filtered === null ? null : filtered instanceof Set ? filtered : new Set(filtered);
+    this.options.onVisibility?.(this.visibleIds);
   }
 
   /** The stored map for a scene, or null on a miss, an error, or a host that stays silent. */
@@ -295,6 +363,7 @@ export class FogExploration {
     if (this.sceneId === null) return;
     await this.save();
     this.sceneId = null;
+    this.scene = null;
     this.surface = null;
     this.key = null;
     this.polys = [];

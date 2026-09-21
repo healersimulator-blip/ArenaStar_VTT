@@ -20,6 +20,42 @@ export type TemplateShape =
   | { kind: "polygon"; points: Pt[] } // cone (arc approximated), rect (4 corners), ray cap
   | { kind: "segment"; a: Pt; b: Pt; width: number }; // ray corridor (hit-test inflated)
 
+/**
+ * An outline (world points) for any template shape — the SVG overlays' polygon source. A
+ * circle is approximated with 32 segments; a ray corridor is its four corners, so a measure
+ * preview and the templates layer draw the same area.
+ */
+export function templateOutline(shape: TemplateShape): Pt[] {
+  switch (shape.kind) {
+    case "polygon":
+      return shape.points.map((p) => ({ x: p.x, y: p.y }));
+    case "circle": {
+      const out: Pt[] = [];
+      for (let i = 0; i < 32; i++) {
+        const angle = (i / 32) * Math.PI * 2;
+        out.push({
+          x: shape.center.x + Math.cos(angle) * shape.radius,
+          y: shape.center.y + Math.sin(angle) * shape.radius,
+        });
+      }
+      return out;
+    }
+    case "segment": {
+      const dx = shape.b.x - shape.a.x;
+      const dy = shape.b.y - shape.a.y;
+      const length = Math.hypot(dx, dy) || 1;
+      const px = (-dy / length) * (shape.width / 2);
+      const py = (dx / length) * (shape.width / 2);
+      return [
+        { x: shape.a.x + px, y: shape.a.y + py },
+        { x: shape.b.x + px, y: shape.b.y + py },
+        { x: shape.b.x - px, y: shape.b.y - py },
+        { x: shape.a.x - px, y: shape.a.y - py },
+      ];
+    }
+  }
+}
+
 /** Geometry of one template. */
 export function templateShape(
   t: Pick<TemplateDocument, "kind" | "x" | "y" | "distance" | "direction" | "width">,

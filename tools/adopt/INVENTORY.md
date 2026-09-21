@@ -6,6 +6,11 @@ fact at a pinned commit hash**, recorded as input to each case, not a verdict.
 
 `legalStatus`: `pending` → `approved` | `negotiated` | `rejected`.
 
+The two content sources this pipeline has actually fetched are pinned **in code** as well as here:
+`tools/content/sources.json` (repo URL + exact commit + sparse paths + the licence fact) is what
+`pnpm content:fetch` materialises and what the in-app credits panel shows. Changing a pin is
+therefore an edit to that file, reviewed like any other change. Repo-level summary: `LEGAL.md`.
+
 | # | Candidate | Target area | Consumer (phase) | License (verified @ commit) | legalStatus | Transfer approach (default) |
 |---|-----------|-------------|------------------|------------------------------|-------------|------------------------------|
 | 1 | `baileymh/pf1e-content` | Data (34 packs: feats, items, wondrous, class-abilities, traits, deities, magic, rules, …) | Phase 1b / 1c | OGL 1.0a content + GPLv3 code @ `baf5232c` (main, 2023-09-05) | pending | Adopt **data only** via converter (OGL notice + CREDITS); per-entry source JSON at `src/packs/<pack>/…` is the clean input |

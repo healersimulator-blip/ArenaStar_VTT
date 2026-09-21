@@ -11,8 +11,10 @@ import {
   fogSightRadius,
   fogViewers,
   fogVisibleTokenIds,
+  maskHiddenTokenIds,
   sceneFogSettings,
   tokenInSight,
+  type FogViewer,
 } from "../../src/core/fogExploration";
 import { applyDiff } from "../../src/core/diff";
 
@@ -156,7 +158,15 @@ describe("whose eyes reveal", () => {
   });
 
   test("viewers carry the token centre", () => {
-    expect(fogViewers(s, REX)[0]).toEqual({ tokenId: "own", x: 100, y: 100 });
+    // §2.1: a viewer also carries what it can see — with no darkness and no sight range that
+    // is the scene's diagonal (the whole scene), exactly as before this slice.
+    expect(fogViewers(s, REX)[0]).toEqual({
+      tokenId: "own",
+      x: 100,
+      y: 100,
+      radiusPx: fogSightRadius(s, { enabled: true, rangeSquares: null }),
+      darkvisionPx: 0,
+    });
   });
 });
 
@@ -175,12 +185,12 @@ describe("sight radius + reveal key", () => {
     const k0 = fogRevealKey(s, viewers, 2500);
     expect(fogRevealKey(scene({ ...s, name: "renamed" }), viewers, 2500)).toBe(k0);
     expect(fogRevealKey(s, viewers, 600)).not.toBe(k0);
-    expect(fogRevealKey(s, [{ tokenId: "t", x: 101, y: 100 }], 2500)).not.toBe(k0);
-    expect(fogRevealKey(s, [{ tokenId: "t", x: 100.2, y: 100.1 }], 2500)).toBe(k0); // sub-pixel jitter
+    expect(fogRevealKey(s, [viewer("t", 101, 100)], 2500)).not.toBe(k0);
+    expect(fogRevealKey(s, [viewer("t", 100.2, 100.1)], 2500)).toBe(k0); // sub-pixel jitter
     const opened = scene({ ...s, walls: [s.walls[0] as WallDocument, { ...door, door: 1 }] });
     expect(fogRevealKey(opened, viewers, 2500)).not.toBe(k0);
     // the order of the eyes does not matter
-    const two = [{ tokenId: "a", x: 1, y: 1 }, { tokenId: "b", x: 2, y: 2 }];
+    const two = [viewer("a", 1, 1), viewer("b", 2, 2)];
     expect(fogRevealKey(s, two, 2500)).toBe(fogRevealKey(s, [...two].reverse(), 2500));
   });
 
@@ -192,6 +202,15 @@ describe("sight radius + reveal key", () => {
 });
 
 // D-251 — what a player is shown on a fogged scene
+/** A hand-built fog viewer, as `fogViewers` would return one (radius in pixels). */
+const viewer = (
+  tokenId: string,
+  x: number,
+  y: number,
+  radiusPx = 2500,
+  darkvisionPx = 0,
+): FogViewer => ({ tokenId, x, y, radiusPx, darkvisionPx });
+
 describe("token gate", () => {
   /** A square sight polygon [x0,x1]×[y0,y1] as the worker would hand it back. */
   const square = (x0: number, y0: number, x1: number, y1: number): Float32Array =>
@@ -249,5 +268,54 @@ describe("token gate", () => {
     expect(fogVisibleTokenIds(s, { id: "gm", role: "GM" }, []).size).toBe(5);
     expect(fogVisibleTokenIds(s, { id: "asst", role: "ASSISTANT" }, []).size).toBe(5);
     expect(fogVisibleTokenIds(s, null, sight).size).toBe(0);
+  });
+
+  test("D-256: the manual mask withholds tokens under it, however clear the line of sight", () => {
+    const s = scene({
+      flags: {
+        core: {
+          fog: true,
+          fogMask: [{ mode: "hide", poly: [100, 100, 500, 100, 500, 500, 100, 500] }],
+        },
+      },
+      tokens: [
+        token("mine-under", { x: 200, y: 200, ownership: { default: 0, rex: 3 } }),
+        token("orc-under", { x: 300, y: 300 }),
+        token("orc-outside", { x: 700, y: 300 }),
+        token("edge", { x: 500, y: 300 }), // straddles the stroke: the centre is the probe
+      ],
+    });
+    const everywhere = [square(0, 0, 1000, 1000)];
+    const rex = { id: "rex", role: "PLAYER" as const };
+    // a mask covers the whole visible field: the orc under it is withheld, the one outside is not
+    expect([...fogVisibleTokenIds(s, rex, everywhere)].sort()).toEqual(["edge", "mine-under", "orc-outside"]);
+    expect([...maskHiddenTokenIds(s, rex)].sort()).toEqual(["orc-under"]);
+    // a player's own token is never swallowed by the mask (it is the eyes)
+    const mine = token("mine-under", { x: 200, y: 200, ownership: { default: 0, rex: 3 } });
+    expect(maskHiddenTokenIds(scene({ tokens: [mine], flags: s.flags }), rex).size).toBe(0);
+    // the GM and the assistant keep seeing everything, masked or not
+    expect([...maskHiddenTokenIds(s, { id: "gm", role: "GM" })].sort()).toEqual([]);
+    expect(fogVisibleTokenIds(s, { id: "gm", role: "GM" }, everywhere).size).toBe(4);
+    // a scene nobody painted is gated by sight alone; an empty log is zero cost
+    expect(maskHiddenTokenIds(scene(), rex).size).toBe(0);
+    expect(maskHiddenTokenIds(s, null).size).toBe(0);
+  });
+
+  test("D-256: a reveal stroke over a hidden one uncovers the token again", () => {
+    const s = scene({
+      flags: {
+        core: {
+          fog: true,
+          fogMask: [
+            { mode: "hide", poly: [100, 100, 500, 100, 500, 500, 100, 500] },
+            { mode: "reveal", poly: [150, 150, 450, 150, 450, 450, 150, 450] },
+          ],
+        },
+      },
+      tokens: [token("orc", { x: 300, y: 300 })],
+    });
+    const rex = { id: "rex", role: "PLAYER" as const };
+    expect(maskHiddenTokenIds(s, rex).size).toBe(0);
+    expect([...fogVisibleTokenIds(s, rex, [square(0, 0, 1000, 1000)])]).toEqual(["orc"]);
   });
 });

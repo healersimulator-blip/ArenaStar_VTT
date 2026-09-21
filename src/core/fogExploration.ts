@@ -9,8 +9,10 @@
  * [worldId, sceneId, userId]) — a player reveals with the tokens they control; the GM's map
  * accumulates every vision token, so with god view off it shows the union of what the table
  * has seen. Sight is bounded by sight-blocking walls (`wallSight`) and, optionally, a range
- * in grid squares (`flags.core.fogRange`; absent/0 = the whole scene). Darkness and light
- * sources do not shorten exploration yet (ROADMAP).
+ * in grid squares (`flags.core.fogRange`; absent/0 = the whole scene). Since plan §2.1,
+ * darkness and light shorten it too: each viewer reveals within
+ * `max(darkvision, min(sight, light-at-the-viewer))` (`canvas/vision/darkness.ts`), and a
+ * token standing in the dark shows only to an eye whose darkvision reaches it.
  *
  * Fog also decides what a player is shown (D-251): their own tokens always; any other token
  * only while it stands inside one of their current sight polygons (`fogVisibleTokenIds`). The
@@ -26,7 +28,17 @@ import type {
 import type { Op } from "./ops";
 import type { PermissionUser } from "./ownership";
 import { can } from "./permissions";
+import { fogMaskLog, pointInFogMask } from "./fogMask";
 import { pointInPolygon } from "../canvas/vision/polygon";
+import {
+  feetToPixels,
+  isLitAt,
+  sceneLightSources,
+  tokenVisionOf,
+  viewerSightRadiusPx,
+  withinDarkvision,
+  type PF1eLighting,
+} from "../canvas/vision/darkness";
 
 export interface FogSettings {
   enabled: boolean;
@@ -75,16 +87,31 @@ export function fogSettingsOps(scene: SceneDocument, next: FogSettings): Op[] {
   ];
 }
 
-/** A vision origin: one token's centre. */
+/** A vision origin: one token's centre, plus what that token can actually see. */
 export interface FogViewer {
   tokenId: string;
   x: number;
   y: number;
+  /**
+   * Plan §2.1 / G-24: the radius this viewer reveals within, in scene pixels — its sight
+   * range capped by the light reaching it, never below its darkvision. `0` means "sees
+   * nothing": total darkness, no darkvision, no light.
+   */
+  radiusPx: number;
+  /** The same viewer's darkvision range in pixels (0 = none), for the target-visibility term. */
+  darkvisionPx: number;
 }
 
 export interface FogViewerContext {
   /** Actors, for tokens whose ownership lives on the linked actor. */
   actors?: readonly ActorDocument[];
+  /**
+   * Plan §2.1: the scene's lighting. Absent, the visibility gate keeps its pre-2.1 meaning —
+   * line of sight alone — so a caller with no lighting state at hand is never guessed for.
+   */
+  lighting?: PF1eLighting;
+  /** Plan §2.1: the viewers *with* their senses — a dark token is visible only to darkvision. */
+  viewers?: readonly FogViewer[];
 }
 
 /**
@@ -98,11 +125,20 @@ export function fogViewers(
   context: FogViewerContext = {},
 ): FogViewer[] {
   if (!user) return [];
+  const cap = fogSightRadius(scene, sceneFogSettings(scene));
   const out: FogViewer[] = [];
   for (const token of scene.tokens) {
     if (!token.vision) continue;
     if (!controlsToken(user, token, scene, context.actors ?? [])) continue;
-    out.push({ tokenId: token._id, x: token.x, y: token.y });
+    out.push({
+      tokenId: token._id,
+      x: token.x,
+      y: token.y,
+      // §2.1: what this eye actually reaches — sight capped by the light at the token, floored
+      // by its darkvision, all capped by the scene's own range.
+      radiusPx: viewerSightRadiusPx(scene, token, cap),
+      darkvisionPx: feetToPixels(tokenVisionOf(token).darkvisionFeet, scene.grid),
+    });
   }
   return out;
 }
@@ -146,10 +182,41 @@ export function tokenInSight(
 }
 
 /**
+ * D-256: the tokens the GM's manual Hide/Reveal mask covers, for one user. Roll20's Mask is
+ * *static* — it hides whatever the GM painted over and no amount of vision paints it away — so
+ * it is a filter on top of sight, not part of it. The one exception is the tokens a player
+ * controls: the mask never swallows a player's own mini, which is also what makes a player
+ * walked under the cover still able to move.
+ *
+ * The probe is the token's centre — the grid cell it stands in — so a token straddling a mask
+ * edge keeps showing, mirroring `tokenInSight`'s rule for a token half behind a wall. GM and
+ * ASSISTANT are never gated (the mask is drawn translucent for them, everything visible).
+ */
+export function maskHiddenTokenIds(
+  scene: SceneDocument,
+  user: PermissionUser | null,
+  context: FogViewerContext = {},
+): Set<string> {
+  const out = new Set<string>();
+  if (!user || user.role === "GM" || user.role === "ASSISTANT") return out;
+  const log = fogMaskLog(scene);
+  if (log.length === 0) return out;
+  const actors = context.actors ?? [];
+  for (const token of scene.tokens) {
+    if (controlsToken(user, token, scene, actors)) continue;
+    if (pointInFogMask(log, token.x, token.y)) out.add(token._id);
+  }
+  return out;
+}
+
+/**
  * D-251: which tokens a user is shown on a fogged scene — the ones they control, always
  * (they are the eyes), and any other only while `tokenInSight` of the user's current
  * polygons. GM/ASSISTANT see everything. Tokens the host already withheld (`hidden`) never
  * reach a player's replica in the first place (§5 projection).
+ *
+ * D-256 layers the GM's manual mask on top: a token standing in a hidden stroke is withheld
+ * however clear the line of sight is.
  */
 export function fogVisibleTokenIds(
   scene: SceneDocument,
@@ -160,12 +227,26 @@ export function fogVisibleTokenIds(
   const out = new Set<string>();
   if (!user) return out;
   const actors = context.actors ?? [];
+  const masked = maskHiddenTokenIds(scene, user, context);
   for (const token of scene.tokens) {
     if (user.role === "GM" || user.role === "ASSISTANT") {
       out.add(token._id);
       continue;
     }
-    if (controlsToken(user, token, scene, actors) || tokenInSight(token, polys)) out.add(token._id);
+    if (controlsToken(user, token, scene, actors)) {
+      out.add(token._id);
+      continue;
+    }
+    if (masked.has(token._id)) continue;
+    if (!tokenInSight(token, polys)) continue;
+    // §2.1: line of sight is not enough in the dark — a token shows when it is *lit* (ambient
+    // light, a placed light, or the torch it carries) or when some eye's darkvision reaches it.
+    // Without a lighting state the gate keeps its pre-2.1 meaning.
+    if (context.lighting !== undefined) {
+      const darkvisionReaches = (context.viewers ?? []).some((v) => withinDarkvision(v, token));
+      if (!isLitAt(token, context.lighting) && !darkvisionReaches) continue;
+    }
+    out.add(token._id);
   }
   return out;
 }
@@ -193,13 +274,42 @@ export function fogRevealKey(
   radius: number,
 ): string {
   const eyes = viewers
-    .map((v) => `${v.tokenId}@${Math.round(v.x)},${Math.round(v.y)}`)
+    .map(
+      (v) =>
+        `${v.tokenId}@${Math.round(v.x)},${Math.round(v.y)}:${Math.round(v.radiusPx)}:${Math.round(v.darkvisionPx)}`,
+    )
     .sort()
     .join(";");
   const walls = scene.walls
     .map((w) => `${w._id}:${w.c.join(",")}:${w.sight}:${w.door}`)
     .join(";");
-  return `${scene._id}|${Math.round(radius)}|${eyes}|${walls}`;
+  // §2.1: darkness and the lights themselves change what is seen, so they belong in the key —
+  // lighting a torch (or raising the ambient darkness) must recompute, not wait for a move.
+  const darkness = Math.round((scene.darkness ?? 0) * 100);
+  const lights = sceneLightSources(scene)
+    .map(
+      (l) =>
+        `${l.id}:${Math.round(l.x)},${Math.round(l.y)}:${Math.round(l.bright)}:${Math.round(l.dim)}`,
+    )
+    .join(";");
+  return `${scene._id}|${Math.round(radius)}|${darkness}|${eyes}|${lights}|${walls}`;
+}
+
+/**
+ * Plan §2.1: the scene's ambient darkness, as one op — what the Settings window's slider
+ * submits. Clamped to 0…1 (a NaN reads as bright, i.e. 0); a scene that never carried the key
+ * reads as 0 too, which is why nothing changes for content written before this slice.
+ */
+export function sceneDarknessOp(
+  scene: SceneDocument,
+  darkness: number,
+): Extract<Op, { kind: "update" }> {
+  const value = Number.isFinite(darkness) ? Math.max(0, Math.min(1, darkness)) : 0;
+  return {
+    kind: "update",
+    ref: { coll: "scenes", id: scene._id },
+    diff: { darkness: value },
+  };
 }
 
 /** Flat [x1,y1,x2,y2,…] quads for the vision worker (transferable-friendly). */

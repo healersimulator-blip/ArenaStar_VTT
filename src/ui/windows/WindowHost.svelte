@@ -13,8 +13,12 @@
   import SettingsPanel from "../settings/SettingsPanel.svelte";
   import JournalPopout from "../journals/JournalPopout.svelte";
   import PF1eSheetWindow from "../sheets/PF1eSheetWindow.svelte";
+  import PF1eItemWindow from "../sheets/PF1eItemWindow.svelte";
+  import { openPF1eItemWindow } from "../sheets/pf1eItemWindow";
   import GmExtrasPanel from "../armies/GmExtrasPanel.svelte";
   import ArmiesTab from "../armies/ArmiesTab.svelte";
+  import CombatPanel from "../combat/CombatPanel.svelte";
+  import HelpPanel from "../canvas/HelpPanel.svelte";
   import ArmyWindow from "../armies/ArmyWindow.svelte";
   import { armyWindowRules } from "../armies/armyModel";
   import type { ClientSync } from "../../client/sync";
@@ -31,6 +35,8 @@
     onRedo,
     packages = null,
     rulesBoot = null,
+    bindings = {},
+    isGM = false,
   }: {
     manager: WindowManager;
     /** App-derived copy (manager.list() is a live ref — each{} needs fresh identity). */
@@ -43,6 +49,9 @@
     packages?: HostPackages | null;
     /** Which strategic ruleset booted (Settings → ruleset section status line). */
     rulesBoot?: HostRulesBoot | null;
+    /** §10 keybinding map for the help window (D-256). */
+    bindings?: Readonly<Record<string, string>>;
+    isGM?: boolean;
   } = $props();
 
   /**
@@ -88,6 +97,11 @@
     };
     globalThis.addEventListener("pointermove", onMove);
     globalThis.addEventListener("pointerup", up);
+  }
+
+  /** §1.3: the items tab asks for an item's own window; the manager owns where it lands. */
+  function openItemWindow(actorId: string, itemId: string): void {
+    openPF1eItemWindow(manager, client, actorId, itemId);
   }
 
   function startDrag(e: PointerEvent, win: WindowSpec): void {
@@ -163,7 +177,20 @@
             initialTab={typeof win.data.tab === "string"
               ? win.data.tab
               : "summary"}
+            onOpenItem={openItemWindow}
           />
+        {:else if win.kind === "item" && win.data}
+          <!-- Plan §1.3 item 2: an item's own window, opened from the sheet's Items tab. -->
+          <PF1eItemWindow
+            {client}
+            {bus}
+            actorId={win.data.actorId ?? ""}
+            itemId={win.data.itemId ?? ""}
+          />
+        {:else if win.kind === "combat"}
+          <CombatPanel {client} {bus} />
+        {:else if win.kind === "help"}
+          <HelpPanel {bindings} {isGM} />
         {:else if win.kind === "permissions"}
           <PermissionsPanel {client} {bus} />
         {:else if win.kind === "macros"}

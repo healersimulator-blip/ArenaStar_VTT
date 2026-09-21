@@ -44,6 +44,25 @@ export interface CoreWorldSettings {
   rollHighlightFadeSec?: number;
   /** F03 — how player reaction rolls are deferred: auto = host rolls instantly, savesChecksAuto = only attack/AoO/parry pending, manual = all pending. */
   playerPendingRollMode?: PlayerPendingRollMode;
+  /**
+   * Plan §1.3 / G-03 — whether Table 7-4/7-5 encumbrance applies at all. `"weight"` (the
+   * default) applies it; `"off"` is the table's own house rule ("we don't track weight"),
+   * which still *shows* the carried weight and capacity, it just applies no penalties.
+   */
+  encumbranceRule?: EncumbranceRule;
+  /**
+   * Plan §1.3 — a flat Strength bonus **for carrying capacity only** (Muleback Cords-style,
+   * applied to the whole table instead of one item). It never touches attack, damage or
+   * skills; `carryingCapacityOf` reads the table at `Str + this`.
+   */
+  encumbranceCapacityStrBonus?: number;
+  /**
+   * Plan §2.2/G-10a — **who draws token hit-point bars**: `"gm"` (the default: the GM's own
+   * canvas), `"all"` (every replica draws every token bar it can, players included) or
+   * `"hover"` (a bar appears only under the pointer). The numbers themselves are always the
+   * derived ones the sheet shows (`packages/pf1e/tokenHpBars`).
+   */
+  tokenHpBars?: TokenHpBarMode;
   /** Anything a package defines; never stripped by core. Absent means "unset", not `undefined`. */
   [key: string]: Json;
 }
@@ -81,6 +100,39 @@ export function worldSettingsFrom(docs: Iterable<unknown>): CoreWorldSettings {
 
 export const DEFAULT_SECONDS_PER_ROUND = 6;
 
+/** Encumbrance rule (plan §1.3): the table by weight, or switched off for a "we don't track it" table. */
+export type EncumbranceRule = "weight" | "off";
+
+export function encumbranceRuleOf(settings: CoreWorldSettings): EncumbranceRule {
+  return settings.encumbranceRule === "off" ? "off" : "weight";
+}
+
+export function encumbranceEnabledOf(settings: CoreWorldSettings): boolean {
+  return encumbranceRuleOf(settings) === "weight";
+}
+
+/**
+ * Plan §1.3 — the derivation-facing view of the settings: exactly the two fields
+ * `deriveFromActorDocument` (and through it `deriveFromDocuments`) reads, as a plain object
+ * so the rules package stays free of any core import.
+ */
+export function encumbranceOptionsOf(settings: CoreWorldSettings): {
+  encumbranceRule: EncumbranceRule;
+  encumbranceCapacityStrBonus: number;
+} {
+  return {
+    encumbranceRule: encumbranceRuleOf(settings),
+    encumbranceCapacityStrBonus: encumbranceCapacityStrBonusOf(settings),
+  };
+}
+
+/** Strength for carrying capacity only; clamped to a sane −20…+40 and floored. */
+export function encumbranceCapacityStrBonusOf(settings: CoreWorldSettings): number {
+  const v = settings.encumbranceCapacityStrBonus;
+  if (typeof v !== "number" || !Number.isFinite(v)) return 0;
+  return Math.min(40, Math.max(-20, Math.trunc(v)));
+}
+
 /** Seconds a round is worth, never zero and never absurd (1–3600). */
 export function secondsPerRoundOf(settings: CoreWorldSettings): number {
   const v = settings.secondsPerRound;
@@ -105,11 +157,22 @@ export function rollHighlightFadeSecOf(settings: CoreWorldSettings): number {
 }
 
 export type PlayerPendingRollMode = "auto" | "savesChecksAuto" | "manual";
-
 export function playerPendingRollModeOf(settings: CoreWorldSettings): PlayerPendingRollMode {
   const v = settings.playerPendingRollMode;
   if (v === "auto" || v === "savesChecksAuto" || v === "manual") return v;
   return "savesChecksAuto";
+}
+
+/** §2.2/G-10a — token HP-bar visibility. */
+export type TokenHpBarMode = "gm" | "all" | "hover";
+
+/**
+ * §2.2/G-10a — who draws token hit-point bars. Anything unset or unrecognised reads as `"gm"`:
+ * showing a monster's hit points to the whole table is the GM's decision, never a default.
+ */
+export function tokenHpBarsOf(settings: CoreWorldSettings): TokenHpBarMode {
+  const v = settings.tokenHpBars;
+  return v === "all" || v === "hover" ? v : "gm";
 }
 
 /** Values the settings bag may hold; objects/arrays would hide bugs from the diff, so they are refused. */
@@ -208,6 +271,34 @@ export function validateWorldSettingsPatch(patch: Record<string, unknown>): {
         return {
           ok: false,
           error: `${key} must be a boolean`,
+          clean: {},
+        };
+      }
+    }
+    if (key === "encumbranceRule") {
+      if (value !== "weight" && value !== "off") {
+        return {
+          ok: false,
+          error: "encumbranceRule must be weight or off",
+          clean: {},
+        };
+      }
+    }
+    if (key === "tokenHpBars") {
+      if (value !== "gm" && value !== "all" && value !== "hover") {
+        return {
+          ok: false,
+          error: "tokenHpBars must be gm, all, or hover",
+          clean: {},
+        };
+      }
+    }
+    if (key === "encumbranceCapacityStrBonus") {
+      const n = typeof value === "number" ? value : NaN;
+      if (!Number.isFinite(n) || n < -20 || n > 40) {
+        return {
+          ok: false,
+          error: "encumbranceCapacityStrBonus must be between -20 and 40",
           clean: {},
         };
       }

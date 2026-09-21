@@ -18,9 +18,8 @@ import {
   type MessageDocument,
   type Role,
   type UserDocument,
-  type Ownership,
 } from "../core/documents";
-import type { DocRef, Json } from "../core/documents";
+import type { ActorDocument, DocRef, Json } from "../core/documents";
 import type { Op, OpEnvelope } from "../core/ops";
 import type {
   AudioCmdMsg,
@@ -59,12 +58,18 @@ import {
   tacticalLedgerTurn,
 } from "../packages/pf1e/rollLedger";
 import type { RollLedger, RollLedgerRoll } from "../packages/pf1e/rollLedger";
+import { deriveFromActorDocument } from "../packages/pf1e/actor";
+import {
+  appliedWith,
+  planRollApply,
+  readRollApplications,
+} from "../packages/pf1e/rollApply";
 import type { AssetId, DocId, PeerId, TxId, UserId } from "../core/ids";
 import { DocumentStore } from "../core/store";
 import { OpLog } from "../core/oplog";
 import { UndoStack } from "../core/undo";
-import { can, getEffectiveOwnership } from "../core/permissions";
-import { projectEnvelope, projectWorld } from "../core/projection";
+import { can } from "../core/permissions";
+import { docVisibleTo, projectEnvelope, projectWorld, visibilityFields } from "../core/projection";
 import { applyDiff } from "../core/diff";
 import {
   TokenBucket,
@@ -187,31 +192,39 @@ function resolveInlineRolls(content: string, rng: RngFn): string {
   });
 }
 
-/** Top-level docs whose ownership field this envelope replaces. */
-interface OwnershipCrossing {
+/**
+ * A document whose read boundary this envelope moves: the update touches a
+ * visibility-bearing field (ownership, or a pin's `visible` flag), so some sessions gain or
+ * lose sight of it. `before` is the document with the inverse diff applied — the state the
+ * projection would have judged one envelope ago.
+ */
+interface VisibilityCrossing {
   key: string;
+  ref: DocRef;
   doc: BaseDocument;
-  prev: Ownership;
+  before: BaseDocument;
 }
 
-function ownershipCrossings(
+function visibilityCrossings(
   envelope: OpEnvelope,
   inverses: readonly Op[],
-  resolveTop: (ref: DocRef) => BaseDocument | undefined,
-): OwnershipCrossing[] {
-  const out: OwnershipCrossing[] = [];
+  resolve: (ref: DocRef) => BaseDocument | undefined,
+): VisibilityCrossing[] {
+  const out: VisibilityCrossing[] = [];
   for (let i = 0; i < envelope.ops.length; i += 1) {
     const op: Op | undefined = envelope.ops[i];
     const inverse: Op | undefined = inverses[i];
     if (!op || !inverse) continue;
     if (op.kind !== "update" || inverse.kind !== "update") continue;
-    if (!("ownership" in op.diff) || !("ownership" in inverse.diff)) continue;
-    const doc = resolveTop(op.ref);
+    const doc = resolve(op.ref);
     if (!doc) continue;
+    const fields = visibilityFields(doc);
+    if (!fields.some((f) => f in op.diff && f in inverse.diff)) continue;
     out.push({
       key: `${op.ref.coll}/${op.ref.id}`,
+      ref: op.ref,
       doc,
-      prev: inverse.diff.ownership as Ownership,
+      before: { ...doc, ...inverse.diff } as BaseDocument,
     });
   }
   return out;
@@ -222,11 +235,16 @@ function ownershipCrossings(
  * never saw the create becomes a full-doc create; a revoke becomes a delete
  * (the plain projection would DROP the update for the newly-blind session,
  * leaving a stale doc in the replica). Same seq, no protocol additions.
+ *
+ * Embedded documents (D-256 map pins under a scene) cross boundaries the same way, so the
+ * rewrite carries `parent` and the pre-image is compared with the shared visibility rule —
+ * `docVisibleTo` — rather than ownership arithmetic, which would disagree with the
+ * projection on a pin whose scene grants read access to every player.
  */
 function projectWithCrossings(
   envelope: OpEnvelope,
   user: PermissionUser,
-  crossings: OwnershipCrossing[],
+  crossings: VisibilityCrossing[],
   resolver: { resolve: (ref: DocRef) => BaseDocument | undefined },
 ): OpEnvelope | null {
   let modified = false;
@@ -238,12 +256,16 @@ function projectWithCrossings(
         ? crossings.find((c) => c.key === `${rawOp.ref.coll}/${rawOp.ref.id}`)
         : undefined;
     if (crossing) {
-      const nowVisible = getEffectiveOwnership(user, crossing.doc) >= OWNERSHIP_LEVELS.LIMITED;
-      const wasVisible =
-        getEffectiveOwnership(user, { ...crossing.doc, ownership: crossing.prev }) >=
-        OWNERSHIP_LEVELS.LIMITED;
+      const parent = crossing.ref.parent ? resolver.resolve(crossing.ref.parent) : undefined;
+      const nowVisible = docVisibleTo(user, crossing.doc, parent);
+      const wasVisible = docVisibleTo(user, crossing.before, parent);
       if (nowVisible && !wasVisible) {
-        ops.push({ kind: "create", coll: op.ref.coll, data: structuredClone(crossing.doc) });
+        ops.push({
+          kind: "create",
+          coll: crossing.ref.coll,
+          ...(crossing.ref.parent !== undefined ? { parent: crossing.ref.parent } : {}),
+          data: structuredClone(crossing.doc),
+        });
         modified = true;
         continue;
       }
@@ -479,6 +501,9 @@ export class HostSync {
         return;
       case "roll.reroll":
         void this.handleRollReroll(session, msg as unknown as import("../core/messages").RollRerollMsg);
+        return;
+      case "roll.apply":
+        this.handleRollApply(session, msg as unknown as import("../core/messages").RollApplyMsg);
         return;
       case "roll.revert":
         void this.handleRollRevert(session, msg as unknown as import("../core/messages").RollRevertMsg);
@@ -872,9 +897,7 @@ export class HostSync {
     // cross a session's read boundary. New viewers never received the create
     // (it was projected away) — rewrite as a full-doc create; revoked viewers
     // get a delete. Same seq, no protocol additions (D-064).
-    const crossings = ownershipCrossings(envelope, inverses, (ref) =>
-      ref.parent === undefined ? this.store.get(ref.coll as CollectionName, ref.id) : undefined,
-    );
+    const crossings = visibilityCrossings(envelope, inverses, (ref) => this.store.resolve(ref));
     for (const session of this.sessions.values()) {
       if (!session.user) continue;
       const resolver = { resolve: (ref: DocRef) => this.store.resolve(ref) };
@@ -1388,6 +1411,110 @@ export class HostSync {
     });
     const committed = this.commitOps(ops, session.user.id, "reroll-" + String(msg.messageId), false);
     if (!committed.ok) this.reject(session, String(msg.messageId), "invariant", committed.error);
+  }
+
+  /**
+   * §2.2 item 3 (G-20/D-261) — apply a roll card's total to one actor, host-authoritative.
+   *
+   * Three things make this the host's call and not the client's: the **amount** is re-read from the
+   * committed card (`message.roll.total`, evaluated by `handleRoll`), the **permission** is the
+   * sheet's own `can(user, "update", actor, "actors")`, and the **record of what was applied to
+   * whom** rides the card's own flags, so a second click cannot double-count a card. The intent
+   * carries no number at all (`roll.apply` in `messages.ts`).
+   */
+  private handleRollApply(session: Session, msg: import("../core/messages").RollApplyMsg): void {
+    const txId = `roll-apply-${String(msg.messageId)}`;
+    if (!session.user) {
+      this.reject(session, txId, "forbidden", "not authenticated");
+      return;
+    }
+    if (!session.intentBucket.tryRemove()) {
+      this.reject(session, txId, "rate_limited", "apply rate exceeded");
+      return;
+    }
+    const message = this.store.get("messages", String(msg.messageId)) as unknown as
+      | MessageDocument
+      | undefined;
+    if (!message) {
+      this.reject(session, txId, "invalid_schema", "roll card not found");
+      return;
+    }
+    const total = typeof message.roll?.total === "number" ? message.roll.total : null;
+    if (total === null) {
+      this.reject(session, txId, "invalid_schema", "that card carries no rolled total");
+      return;
+    }
+    const actor = this.store.get("actors", String(msg.actorId)) as unknown as
+      | ActorDocument
+      | undefined;
+    if (!actor) {
+      this.reject(session, txId, "invalid_schema", "actor not found");
+      return;
+    }
+    if (!can(session.user, "update", actor, "actors")) {
+      this.reject(session, txId, "forbidden", `you cannot update ${actor.name}`);
+      return;
+    }
+    const applied = readRollApplications(message);
+    if (applied[actor._id]?.[msg.mode] !== undefined) {
+      this.reject(
+        session,
+        txId,
+        "invalid_schema",
+        `this card's ${msg.mode} was already applied to ${actor.name}`,
+      );
+      return;
+    }
+    const derived = deriveFromActorDocument(actor);
+    const pf1e = ((actor.system as unknown as { pf1e?: Record<string, unknown> }).pf1e ?? {});
+    const planned = planRollApply({
+      mode: msg.mode,
+      amount: total,
+      hp: derived.hp,
+      hpMax: derived.hpMax,
+      nonlethalDamage: derived.nonlethalDamage,
+      tempHpSources: derived.tempHpSources,
+      legacyTempHp: pf1e.tempHpSources === undefined && typeof pf1e.tempHp === "number",
+    });
+    if (!planned.ok) {
+      this.reject(session, txId, "invalid_schema", planned.error);
+      return;
+    }
+    const ops: Op[] = [];
+    if (Object.keys(planned.plan.diff).length > 0) {
+      ops.push({ kind: "update", ref: { coll: "actors", id: actor._id }, diff: planned.plan.diff });
+    }
+    // The record rides the card's own flags so the table can see that a card was already counted
+    // (and the chat card can grey its verb out). Flat diffs never create intermediate objects, so
+    // the whole `flags` subtree is written — other flags keep their values.
+    const flags = (message.flags ?? {}) as Record<string, Json>;
+    const pf1eFlags = (flags.pf1e ?? {}) as Record<string, Json>;
+    ops.push({
+      kind: "update",
+      ref: { coll: "messages", id: message._id },
+      diff: {
+        flags: {
+          ...flags,
+          pf1e: {
+            ...pf1eFlags,
+            applied: appliedWith(applied, actor._id, msg.mode, total),
+          },
+        } as unknown as Json,
+      },
+    });
+    const roll = message.roll as { formula?: unknown } | null | undefined;
+    ops.push({
+      kind: "create",
+      coll: "messages",
+      data: this.ledgerFollowUp(
+        session.user.id,
+        `${msg.mode === "damage" ? "Damage" : "Healing"} applied`,
+        `${session.user.name} applied ${String(total)} ${msg.mode} from ${message.name} (${String(roll?.formula ?? "roll")}) → ${actor.name}: ${planned.plan.note}`,
+      ),
+    });
+    // Undoable as one envelope: the HP write, the card's record and the note move together.
+    const committed = this.commitOps(ops, session.user.id, txId);
+    if (!committed.ok) this.reject(session, txId, "invariant", committed.error);
   }
 
   private async handleRollRevert(session: Session, msg: import("../core/messages").RollRevertMsg): Promise<void> {

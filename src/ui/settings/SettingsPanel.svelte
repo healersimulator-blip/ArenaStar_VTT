@@ -8,20 +8,24 @@
   import type { ClientSync } from "../../client/sync";
   import type { ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
-  import type { SceneDocument, SceneGrid } from "../../core/documents";
+  import type { SceneDocument, SceneGrid, UserDocument } from "../../core/documents";
   import {
     fogSettingsOps,
+    sceneDarknessOp,
     sceneFogSettings,
     type FogSettings,
   } from "../../core/fogExploration";
   import { DEFAULT_BINDINGS } from "../../core/keys";
   import { gmState } from "../armies/gmState.svelte";
+  import { viewAsOptions } from "../../core/viewAs";
   import {
     advanceClockOnRoundOf,
     playerPendingRollModeOf,
     rollHighlightFadeSecOf,
     secondsPerRoundOf,
     strategicSimultaneousOf,
+    tokenHpBarsOf,
+    type TokenHpBarMode,
     validateWorldSettingsPatch,
     worldSettingsFrom,
     worldSettingsOps,
@@ -78,6 +82,8 @@
     rollHighlightFadeSec: number;
     /** F03 — player reaction rolls: auto / savesChecksAuto / manual */
     playerPendingRollMode: "auto" | "savesChecksAuto" | "manual";
+    /** §2.2/G-10a: who draws token hit-point bars (gm / all / hover). */
+    tokenHpBars: TokenHpBarMode;
   }
   /** E05 (D-146): the replicated world clock, seconds. */
   let clockSeconds = $state(0);
@@ -92,19 +98,29 @@
     strategicArmyInitiative: false,
     rollHighlightFadeSec: 4,
     playerPendingRollMode: "savesChecksAuto",
+    tokenHpBars: "gm",
   };
   // Initialize only after the defaults exist (opening the window executes this script).
   let rules = $state<RulesOptions>(DEFAULT_RULES);
   let scale = $state<"tactical" | "strategic">("tactical");
   /** D-250: the active scene's explored-fog flags. */
   let fog = $state<FogSettings>({ enabled: false, rangeSquares: null });
+  /** §2.1: the active scene's ambient darkness (0 = bright, 1 = pitch dark). */
+  let darkness = $state(0);
+  /** §2.3/G-25 (D-262): the players this GM can preview the table as. */
+  let viewAsChoices = $state<{ id: string; name: string }[]>([]);
 
   function refresh(): void {
+    viewAsChoices = viewAsOptions(
+      client.store.getAll("users") as readonly UserDocument[],
+      client.user,
+    );
     const scenes = client.store.getAll("scenes") as readonly SceneDocument[];
     const active = scenes.find((s) => s.active) ?? scenes[0] ?? null;
     sceneId = active?._id ?? "";
     grid = active ? { ...active.grid } : null;
     fog = sceneFogSettings(active);
+    darkness = clampDarkness(active?.darkness);
     scale =
       (active?.flags as { core?: { scale?: unknown } } | undefined)?.core
         ?.scale === "strategic"
@@ -128,6 +144,7 @@
       strategicArmyInitiative: settings.strategicArmyInitiative === true,
       rollHighlightFadeSec: rollHighlightFadeSecOf(settings),
       playerPendingRollMode: playerPendingRollModeOf(settings),
+      tokenHpBars: tokenHpBarsOf(settings),
     };
   }
 
@@ -206,11 +223,31 @@
     client.submit(fogSettingsOps(scene, next));
   }
 
+  /**
+   * §2.1 (G-24): the GM's darkness control. Darkness is a scene fact, not a client pref: it
+   * rides the `scenes` document, so every client's fog loop re-reads it and the torchless
+   * players stop seeing what no light reaches (see D-260 for the authority note).
+   */
+  function applyDarkness(value: number): void {
+    const scenes = client.store.getAll("scenes") as readonly SceneDocument[];
+    const scene = scenes.find((sc) => sc._id === sceneId);
+    if (!scene) return;
+    const next = clampDarkness(value);
+    darkness = next;
+    client.submit([sceneDarknessOp(scene, next)]);
+  }
+
   function apply(): void {
     if (!grid || !sceneId) return;
     client.submit([
       { kind: "update", ref: { coll: "scenes", id: sceneId }, diff: { grid } },
     ]);
+  }
+
+  /** One definition of "0…1, and a NaN reads as bright" for the field and the op. */
+  function clampDarkness(value: unknown): number {
+    if (typeof value !== "number" || !Number.isFinite(value)) return 0;
+    return Math.max(0, Math.min(1, value));
   }
 
   onMount(() => {
@@ -390,6 +427,42 @@
         God view — the GM's fog is see-through (every token and map feature stays visible
         under it); off: preview the opaque cover players get
       </label>
+      <label class="check">
+        View as player
+        <select data-gm-view-as bind:value={gmState.viewAsUser}>
+          <option value="">— the GM's own view</option>
+          {#each viewAsChoices as choice (choice.id)}
+            <option value={choice.id}>{choice.name}</option>
+          {/each}
+        </select>
+      </label>
+      {#if gmState.viewAsUser !== ""}
+        <p class="note" data-gm-view-as-note>
+          Seeing what this player sees: their fog (read from what they have explored, never
+          written), their tokens, their bars. Switch back to <em>the GM's own view</em> to run
+          the table again.
+        </p>
+      {/if}
+    </div>
+    <!-- §2.1: how far sight carries is bounded by light; this is the ambient share of it -->
+    <div class="row lighting">
+      <label class="check">
+        Ambient darkness
+        <input
+          data-scene-darkness
+          type="range"
+          min="0"
+          max="1"
+          step="0.05"
+          value={darkness}
+          aria-label="Ambient darkness"
+          oninput={(e) => (darkness = clampDarkness(Number((e.target as HTMLInputElement).value)))}
+          onchange={(e) => applyDarkness(Number((e.target as HTMLInputElement).value))}
+        />
+        <span class="readout" data-scene-darkness-value>{Math.round(darkness * 100)}%</span>
+        — 0% is broad daylight; at 100% a token sees only what a light reaches: the torch it
+        carries, a placed light, or its own darkvision (feet, on the token)
+      </label>
     </div>
   {/if}
 
@@ -486,6 +559,24 @@
         <option value="auto">Auto (host rolls)</option>
         <option value="savesChecksAuto">Saves & checks auto (AoO/parry pending)</option>
         <option value="manual">Manual (all pending)</option>
+      </select>
+    </label>
+    <label>
+      Token HP bars
+      <select
+        data-world-token-hp-bars
+        value={rules.tokenHpBars}
+        onchange={(e) => {
+          rules = {
+            ...rules,
+            tokenHpBars: (e.target as HTMLSelectElement).value as TokenHpBarMode,
+          };
+          applyRules({ tokenHpBars: rules.tokenHpBars });
+        }}
+      >
+        <option value="gm">GM only (default)</option>
+        <option value="all">Everyone (players see every bar)</option>
+        <option value="hover">On hover (every replica)</option>
       </select>
     </label>
   </div>
@@ -650,6 +741,20 @@
   }
   .fog .check input {
     width: auto;
+  }
+  .lighting .check {
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    flex-basis: 100%;
+  }
+  .lighting input[type="range"] {
+    width: 12em;
+  }
+  .lighting .readout {
+    width: 3em;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
   }
   input,
   select {

@@ -43,6 +43,7 @@
  *    such spell in any round"), is refused by name when the swift action is
  *    gone, and narrates the no-attack-of-opportunity timing on the card.
  */
+import type { PF1eItemCastSource } from "../../packages/pf1e/consumables";
 import type { Op } from "../../core/ops";
 import type { PermissionUser } from "../../core/ownership";
 import type {
@@ -198,7 +199,26 @@ export interface PF1eCastFlowParams {
    * swift/free/quickened cast. Without both, swift usage is the GM's call.
    */
   combatantId?: string;
+  /**
+   * Plan §1.3 (G-04, `consumables.ts`): cast **from an item** — a wand, scroll, potion or
+   * staff. Three things change and nothing else does:
+   *
+   * 1. no slot is spent (and no prepared row is expended): the charge is the cost, and the
+   *    flow writes the decrement on the item document;
+   * 2. the save DC is the **item's** (10 + spell level + the minimum ability modifier — a
+   *    wand of *fireball* is DC 14), not the caster's, because that is what the printed
+   *    item does;
+   * 3. the caster level is the **item's** (for SR and every "caster level" read), and the
+   *    actor does not need spellcasting data at all — anyone can use a wand.
+   */
+  source?: PF1eConsumableCastSource;
 }
+
+/**
+ * Casting from a consumable (`consumables.ts` owns the charge budgets and the DC rule; the
+ * type is re-exported here so a caller holding `PF1eCastFlowParams` needs one import).
+ */
+export type PF1eConsumableCastSource = PF1eItemCastSource;
 
 /**
  * A concentration trigger as the caller declares it — without the die, which
@@ -574,15 +594,27 @@ export async function resolveCastFlow(
   const fail = (error: string): PF1eCastFlowOutcome => ({ ok: false, error });
 
   // ── validation: nothing is rolled before the cast is well-formed ─────────
-  const { casterDerived, authored, spell } = params;
-  if (!casterDerived.casting)
+  const { authored, spell } = params;
+  const consumable = params.source ?? null;
+  if (consumable !== null) {
+    if (consumable.charges <= 0)
+      return fail(`"${consumable.itemName}" is out of charges.`);
+    if (consumable.itemId === "")
+      return fail("A consumable cast needs the item it comes from.");
+  }
+  // The item supplies its own caster level: every "caster level" read below (SR, cards,
+  // concentration) uses it, and the actor needs no spellcasting data of its own.
+  const casterDerived = consumable === null
+    ? params.casterDerived
+    : { ...params.casterDerived, spellCasterLevel: consumable.casterLevel };
+  if (!casterDerived.casting && consumable === null)
     return fail("This actor has no spellcasting data.");
   if (!Number.isInteger(spell.level) || spell.level < 0 || spell.level > 9)
     return fail("Spell level must be an integer 0–9.");
   const slotLevel = spell.slotLevel ?? spell.level;
   if (!Number.isInteger(slotLevel) || slotLevel < 0 || slotLevel > 9)
     return fail("Slot level must be an integer 0–9.");
-  const dc = casterDerived.spellSaveDc[spell.level];
+  const dc = consumable === null ? casterDerived.spellSaveDc[spell.level] : consumable.saveDc;
   if (dc === null || dc === undefined)
     return fail(
       `No DC for level ${spell.level}: the caster has no slots at that level.`,
@@ -706,14 +738,32 @@ export async function resolveCastFlow(
         : "cast as a swift action — does not provoke attacks of opportunity",
     );
   }
-  const spend = pf1eSpellbookEdit(params.casterActor, casterDerived, user, {
-    kind: "spend",
-    level: slotLevel,
-  });
-  if (spend.error !== null) return fail(spend.error);
-  if (spend.warning !== null) warnings.push(spend.warning);
-  ops.push(...spend.ops);
-  if (spell.preparedIndex !== undefined) {
+  if (consumable !== null) {
+    // The charge **is** the cost: no slot is spent, no prepared row is expended. The
+    // decrement lands with the other ops, so a refused cast (a gate failure below) spends
+    // nothing — the charge is only written when the cast actually resolved.
+    warnings.push(
+      `cast from ${consumable.itemName} — ${consumable.charges - 1} charge(s) left after this cast (item CL ${consumable.casterLevel}, DC ${dc})`,
+    );
+    ops.push({
+      kind: "update",
+      ref: {
+        coll: "items",
+        id: consumable.itemId,
+        parent: { coll: "actors", id: params.casterActor._id },
+      },
+      diff: { "system.uses.value": Math.max(0, consumable.charges - 1) },
+    } as unknown as Op);
+  } else {
+    const spend = pf1eSpellbookEdit(params.casterActor, casterDerived, user, {
+      kind: "spend",
+      level: slotLevel,
+    });
+    if (spend.error !== null) return fail(spend.error);
+    if (spend.warning !== null) warnings.push(spend.warning);
+    ops.push(...spend.ops);
+  }
+  if (consumable === null && spell.preparedIndex !== undefined) {
     const row = preparedRowAt(params.casterActor, spell.preparedIndex);
     if (row === null) return fail("That prepared spell no longer exists.");
     if (row.expended === true)
@@ -1360,6 +1410,9 @@ export async function resolveCastFlow(
       spellName: spell.name,
       spellLevel: spell.level,
       slotLevel,
+      ...(consumable !== null
+        ? { sourceLine: `Cast from ${consumable.itemName} (item CL ${consumable.casterLevel}, DC ${dc}) — ${Math.max(0, consumable.charges - 1)} charge(s) left.` }
+        : {}),
       targetName: params.targetName,
       damageFormula: authored.damageFormula,
       saveType: authored.saveType,
@@ -1775,6 +1828,8 @@ export function castResolutionCardContent(
     delivered?: boolean;
     /** D-161: a completed multi-round casting narrates its deferred timing. */
     pendingCompleted?: boolean;
+    /** Plan §1.3 (G-04): a cast from a wand/scroll/potion/staff names the item and its cost. */
+    sourceLine?: string;
   },
   res: {
     dc: number;
@@ -1789,6 +1844,7 @@ export function castResolutionCardContent(
   touchLine: string | null = null,
 ): { name: string; content: string } {
   const lines: string[] = [];
+  if (ctx.sourceLine !== undefined) lines.push(ctx.sourceLine);
   const slotNote =
     ctx.slotLevel === ctx.spellLevel
       ? `level ${ctx.spellLevel}`

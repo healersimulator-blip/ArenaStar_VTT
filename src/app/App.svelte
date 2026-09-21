@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { detectCapabilities } from "./capabilities";
   import { DEFAULT_SCENE_ID, GM_USER_ID, makeToken, type HostApp } from "./hostBoot";
   import { createStage, type Stage } from "../canvas/stage";
   import { tokenRect } from "../canvas/tokens";
   import type { RollHighlightRect } from "../canvas/layers/RollHighlightLayer";
   import { tokenBadgesMap } from "../packages/pf1e/tokenBadges";
+  import { tokenHpBarsMap } from "../packages/pf1e/tokenHpBars";
   import { isPF1eActor } from "../ui/sheets/pf1eSheetModel";
   import {
     pf1eAreaPreviewModel,
@@ -27,12 +28,18 @@
     exportWorldZip,
   } from "../host/worldFile";
   import { ChatPanel } from "../ui/chat";
+  import { QuickbarRow } from "../ui/quickbar";
+  import OnboardingPanel from "../ui/onboarding/OnboardingPanel.svelte";
   import { CombatPanel } from "../ui/combat";
   import {
     applyTokenMenuEntry,
     tokenContextMenuModel,
   } from "../ui/combat/tokenContextMenu";
-  import { selectedEncounter } from "../ui/combat/encounters";
+  import {
+    activateEncounter,
+    newEncounter,
+    selectedEncounter,
+  } from "../ui/combat/encounters";
   import { JournalsPanel } from "../ui/journals";
   import { WindowHost } from "../ui/windows";
   import { WindowManager } from "../ui/windows";
@@ -46,10 +53,24 @@
   import { verifyCommitRoll } from "../dice/commitReveal";
   import { PoolInterpolator } from "../sim/interpolate";
   import { TrustedModuleHost } from "../packages/trustedModule";
-  import { screenToWorld } from "../canvas/camera";
-  import CanvasToolbar, { type CanvasTool } from "../ui/canvas/CanvasToolbar.svelte";
+  import { screenToWorld, worldToScreen, zoomAt } from "../canvas/camera";
+  import CanvasToolbar, {
+    type CanvasAction,
+    type CanvasLayer,
+    type CanvasTool,
+    type RollMode,
+  } from "../ui/canvas/CanvasToolbar.svelte";
   import { ToolInteractionController } from "../canvas/tools/controller";
-  import { drawingForText } from "../canvas/tools/drawing";
+  import {
+    doorToggleDiff,
+    wallFieldsFor,
+    wallKindName,
+    wallPickAt,
+  } from "../canvas/vision/wallKinds";
+  import { displayDistance } from "../canvas/grid/measure";
+  import { rulerLabel } from "../canvas/ephemera";
+  import { canEditDrawing, drawingForText } from "../canvas/tools/drawing";
+  import { drawingBounds } from "../canvas/layers/drawingGeometry";
   import { buildChatMessage, parseChatCommand } from "../core/chat";
   import CompendiaPanel from "../ui/compendia/CompendiaPanel.svelte";
   import {
@@ -58,13 +79,36 @@
   } from "../packages/moduleHandlers";
   import type { ModuleHookName } from "../core/moduleApi";
   import { getFog, getSetting } from "../storage/idb";
+  import { viewAsOptions, viewAsUser, withoutHiddenTokens } from "../core/viewAs";
+  import { can } from "../core/permissions";
+  import { sceneFogSettings } from "../core/fogExploration";
+  import {
+    NO_ONBOARDING_FACTS,
+    onboardingSteps,
+    type OnboardingFacts,
+  } from "../core/onboarding";
+  import {
+    DEFAULT_TOOL_OPTIONS,
+    type MeasurePreview,
+    type ShapePreview,
+    type ToolOptions,
+    type WallKind,
+  } from "../canvas/tools/controller";
+  import { templateOutline } from "../canvas/layers/templateGeometry";
+  import {
+    appendFogMask,
+    fogMaskLog,
+    fogMaskOps,
+    sceneRectPoly,
+    type FogMaskOp,
+  } from "../core/fogMask";
   import { createMassBattleBasic } from "../packages/massBattleBasic";
   import type {
     ArmyDocument,
     FactionDocument,
     UnitDocument,
   } from "../core/strategic";
-  import { actionForCombo, comboOf, isTypingTarget } from "../core/keys";
+  import { DEFAULT_BINDINGS, actionForCombo, comboOf, isTypingTarget } from "../core/keys";
   import { globalHooks } from "../core/events";
   import type { GridSpec } from "../canvas/grid";
   import { TablesPanel } from "../ui/tables";
@@ -77,17 +121,26 @@
   import type {
     ActorDocument,
     CombatDocument,
+    LightDocument,
+    NoteDocument,
     SceneDocument,
     SceneGrid,
+    UserDocument,
+    WallDocument,
   } from "../core/documents";
+  import { OWNERSHIP_LEVELS } from "../core/documents";
   import type { Op } from "../core/ops";
-  import { worldSettingsFrom } from "../core/worldSettings";
+  import {
+    encumbranceOptionsOf,
+    tokenHpBarsOf,
+    worldSettingsFrom,
+  } from "../core/worldSettings";
   import { installGmFogE2e } from "./e2eHook";
   import { pf1eMovementOpportunities } from "../packages/pf1e/tacticalOpportunity";
   import { pf1eMovePlan } from "../packages/pf1e/movement";
   import { sceneDifficultCells } from "../core/rules";
   import { pf1eThreatModel } from "../packages/pf1e/threatPreview";
-  import { deriveFromDocuments } from "../packages/pf1e/actor";
+  import { deriveFromActorDocument } from "../packages/pf1e/actor";
   import { copyText } from "../ui/clipboard";
   import { autoResolveAoosOf } from "../packages/pf1e/aooSettings";
   import {
@@ -156,26 +209,380 @@
   let canvasError = $state<string | null>(null);
   let canvasTool = $state<CanvasTool>("select");
   let canvasToolbarCollapsed = $state(false);
+  /** D-256: Roll20's layer picker — the GM's active layer (players stay on `tokens`). */
+  let canvasLayer = $state<CanvasLayer>("tokens");
+  /** D-256: every sub-tool choice the rail edits (shapes, styles, brushes, sizes). */
+  let toolOptions = $state<ToolOptions>({ ...DEFAULT_TOOL_OPTIONS, drawingStyle: { ...DEFAULT_TOOL_OPTIONS.drawingStyle } });
+  /** D-256: the in-flight draw/fog/wall gesture, drawn as an SVG overlay. */
+  let shapePreview = $state<ShapePreview | null>(null);
+  /** D-256: the in-canvas text editor (Roll20 types in place instead of prompting). */
+  let textDraft = $state<{ at: { x: number; y: number }; value: string; editingId: string | null } | null>(null);
+  /** D-256: the open map-pin tooltip. */
+  let pinTooltip = $state<{ id: string; x: number; y: number; title: string; body: string; visible: boolean } | null>(null);
+  /** D-256: the GM's manual fog mask (strokes, newest last). */
+  let fogMask = $state<FogMaskOp[]>([]);
+  /** D-256: the last wall/light the rail placed, for "erase last". */
+  let lastPlacement = $state<{ kind: "wall" | "light"; id: string } | null>(null);
+  /** Screen-pixel pick radius for a map pin (the marker is drawn at a constant size). */
+  const PIN_PICK_RADIUS = 16;
+/** Wall pick tolerance in screen pixels (D-257). */
+const WALL_PICK_RADIUS = 12;
   let loadedMapHash: string | null = null;
-  let stage: Stage | null = null;
+  /** `$state.raw`: the stage is a Pixi object graph — assignment must re-run the
+   *  effects that read it, but it must never be deep-proxied. */
+  let stage = $state.raw<Stage | null>(null);
   let controller: CanvasController | null = null;
   let toolController: ToolInteractionController | null = null;
-  let measurePreview = $state<{ kind: "line" | "path" | "radius"; points: Array<{ x: number; y: number }>; distance: number; radiusPx?: number } | null>(null);
-  const rollFromToolbar = (formula: string) => {
+  /** Bumped when the (async) tool controller exists — the activation effect below re-runs. */
+  let toolReady = $state(0);
+  let measurePreview = $state<MeasurePreview | null>(null);
+  const rollFromToolbar = (formula: string, mode: RollMode = "roll") => {
     if (!app) return;
-    const built = buildChatMessage({ author: app.gm.client.user._id, parsed: parseChatCommand(`/roll ${formula}`) });
+    const built = buildChatMessage({ author: app.gm.client.user?.id ?? "", parsed: parseChatCommand(`/${mode} ${formula}`) });
     app.gm.client.submit([{ kind: "create", coll: "messages", data: built.message }]);
   };
+  /** D-256: the tools whose gesture owns the canvas (everything but select/pan/dice). */
+  const GESTURE_TOOLS: ReadonlySet<CanvasTool> = new Set<CanvasTool>([
+    "draw",
+    "text",
+    "measure",
+    "fog",
+    "wall",
+    "light",
+    "pin",
+  ]);
+  const currentGrid = () => {
+    const sc = activeScene();
+    return sc?.grid
+      ? {
+          type: sc.grid.type,
+          size: sc.grid.size,
+          distance: sc.grid.distance,
+          diagonals: sc.grid.diagonals,
+          layout: sc.grid.hexLayout,
+        }
+      : null;
+  };
+  const nextId = (prefix: string) => `${prefix}-${globalThis.crypto.randomUUID().slice(0, 8)}`;
+  const gmUserId = () => app?.gm.client.user?.id ?? "";
+  /** D-256: commit one GM fog brush stroke (op + the live layer). */
+  function paintFog(mode: "reveal" | "hide", poly: number[]) {
+    const scene = activeScene();
+    if (!scene || poly.length < 6) return;
+    fogMask = appendFogMask(fogMask, { mode, poly });
+    app?.gm.client.submit(fogMaskOps(scene, fogMask));
+    stage?.peekFogLayer()?.applyManualMask(fogMask);
+  }
+  function setWholeSceneFog(mode: "reveal" | "hide") {
+    const scene = activeScene();
+    if (!scene) return;
+    paintFog(mode, sceneRectPoly(scene));
+  }
+  /** D-256/D-257: place a wall/door/window — grid-snapped, committed as a create. */
+  function createWall(wall: {
+    kind: WallKind;
+    c: [number, number, number, number];
+    door: 0 | 1 | 2;
+  }) {
+    const scene = activeScene();
+    if (!scene) return;
+    const id = nextId("wall");
+    const doc: WallDocument = {
+      _id: id,
+      type: "wall",
+      name: wallKindName(wall.kind),
+      ownership: { default: 0 },
+      flags: {},
+      system: {},
+      ...wallFieldsFor(wall.kind, wall.c, wall.door),
+    };
+    app?.gm.client.submit([
+      { kind: "create", coll: "walls", parent: { coll: "scenes", id: scene._id }, data: doc },
+    ]);
+    lastPlacement = { kind: "wall", id };
+  }
+  function createLight(light: { x: number; y: number; radius: number; color: string }) {
+    const scene = activeScene();
+    if (!scene) return;
+    const id = nextId("light");
+    const doc: LightDocument = {
+      _id: id,
+      type: "light",
+      name: "Light",
+      ownership: { default: 0 },
+      flags: {},
+      system: {},
+      x: light.x,
+      y: light.y,
+      dim: light.radius,
+      bright: Math.max(1, Math.round(light.radius / 2)),
+      color: light.color,
+      alpha: 0.6,
+    };
+    app?.gm.client.submit([
+      { kind: "create", coll: "lights", parent: { coll: "scenes", id: scene._id }, data: doc },
+    ]);
+    lastPlacement = { kind: "light", id };
+  }
+  /** D-256 map pin: hidden by default (Roll20), visible = `ownership.default = LIMITED`. */
+  function createPin(at: { x: number; y: number }) {
+    const scene = activeScene();
+    if (!scene) return;
+    const doc: NoteDocument = {
+      _id: nextId("pin"),
+      type: "note",
+      name: "Map pin",
+      ownership: { default: OWNERSHIP_LEVELS.NONE },
+      flags: {},
+      system: {},
+      x: Math.round(at.x),
+      y: Math.round(at.y),
+      text: "New pin",
+      icon: "pin",
+      visible: false,
+    };
+    app?.gm.client.submit([
+      { kind: "create", coll: "notes", parent: { coll: "scenes", id: scene._id }, data: doc },
+    ]);
+    pinTooltip = { id: doc._id, x: doc.x, y: doc.y, title: doc.text, body: "", visible: false };
+  }
+  /** The GM's edit of the open pin (text + visibility; visibility is the ownership default). */
+  function updatePin(patch: { text?: string; playerText?: string; visible?: boolean; journalId?: string }) {
+    const scene = activeScene();
+    const pin = scene?.notes.find((n) => n._id === pinTooltip?.id);
+    if (!scene || !pin) return;
+    const next: NoteDocument = {
+      ...pin,
+      ...(patch.text !== undefined ? { text: patch.text } : {}),
+      ...(patch.playerText !== undefined ? { playerText: patch.playerText } : {}),
+      ...(patch.journalId !== undefined ? { journalId: patch.journalId } : {}),
+      ...(patch.visible !== undefined
+        ? { visible: patch.visible, ownership: { ...pin.ownership, default: patch.visible ? OWNERSHIP_LEVELS.LIMITED : OWNERSHIP_LEVELS.NONE } }
+        : {}),
+    };
+    app?.gm.client.submit([
+      {
+        kind: "update",
+        ref: { coll: "notes", id: pin._id, parent: { coll: "scenes", id: scene._id } },
+        diff: {
+          text: next.text,
+          playerText: next.playerText ?? null,
+          journalId: next.journalId ?? null,
+          visible: next.visible ?? false,
+          ownership: next.ownership,
+        },
+      },
+    ]);
+    pinTooltip = {
+      id: next._id,
+      x: next.x,
+      y: next.y,
+      title: next.text,
+      body: next.playerText ?? "",
+      visible: next.visible === true,
+    };
+  }
+  /** Commit the text editor's value as a label (or an edit of an existing one). */
+  function commitTextDraft() {
+    const draft = textDraft;
+    textDraft = null;
+    const scene = activeScene();
+    if (!draft || !scene || !draft.value.trim()) return;
+    if (draft.editingId) {
+      const existing = scene.drawings.find((d) => d._id === draft.editingId);
+      app?.gm.client.submit([
+        {
+          kind: "update",
+          ref: { coll: "drawings", id: draft.editingId, parent: { coll: "scenes", id: scene._id } },
+          diff: { text: draft.value, name: draft.value.slice(0, 80), strokeWidth: toolOptions.textSize, ...(existing ? {} : {}) },
+        },
+      ]);
+      return;
+    }
+    const drawing = drawingForText(nextId("drawing"), draft.at, draft.value, gmUserId(), {
+      color: toolOptions.drawingStyle.stroke,
+      width: Math.max(80, draft.value.length * toolOptions.textSize * 0.7),
+      height: toolOptions.textSize + 12,
+    });
+    drawing.strokeWidth = toolOptions.textSize;
+    app?.gm.client.submit([
+      { kind: "create", coll: "drawings", parent: { coll: "scenes", id: scene._id }, data: drawing },
+    ]);
+  }
+  /** Double-clicking a label re-opens it in the editor (Roll20's double-click to edit). */
+  function editTextAt(world: { x: number; y: number }): boolean {
+    const scene = activeScene();
+    if (!scene) return false;
+    for (let i = scene.drawings.length - 1; i >= 0; i--) {
+      const drawing = scene.drawings[i];
+      if (!drawing || drawing.kind !== "text" || !drawing.text) continue;
+      const bounds = drawingBounds(drawing);
+      if (!bounds) continue;
+      const inside =
+        world.x >= bounds.x &&
+        world.x <= bounds.x + bounds.width &&
+        world.y >= bounds.y &&
+        world.y <= bounds.y + bounds.height;
+      if (inside) {
+        canEditDrawing(drawing, gmUserId(), true);
+        textDraft = { at: { x: bounds.x, y: bounds.y }, value: drawing.text, editingId: drawing._id };
+        return true;
+      }
+    }
+    return false;
+  }
+  /** The rail's non-tool buttons (zoom, windows, fog-all, erase-last). */
+  function runCanvasAction(action: CanvasAction) {
+    const view = stage;
+    switch (action) {
+      case "zoom-in":
+      case "zoom-out": {
+        if (!view) return;
+        const host = canvasHost?.getBoundingClientRect();
+        const centre = {
+          x: (host?.width ?? view.app.canvas.width) / 2,
+          y: (host?.height ?? view.app.canvas.height) / 2,
+        };
+        view.setCamera(
+          zoomAt(view.camera, centre.x, centre.y, action === "zoom-in" ? 1.25 : 1 / 1.25),
+        );
+        break;
+      }
+      case "zoom-fit": {
+        const scene = activeScene();
+        if (view && scene) view.fit(scene.width, scene.height);
+        break;
+      }
+      case "turn-order":
+        openWindow("turn-order", "Turn order", "combat");
+        break;
+      case "add-turn":
+        addSelectionToTurnOrder();
+        break;
+      case "settings":
+        openWindow("settings", "Settings", "settings");
+        break;
+      case "help":
+        activeTab = "chat";
+        openWindow("help", "Keyboard shortcuts", "help");
+        break;
+      case "reveal-all":
+        setWholeSceneFog("reveal");
+        break;
+      case "hide-all":
+        setWholeSceneFog("hide");
+        break;
+      case "delete-last-placement":
+        deleteLastPlacement();
+        break;
+      case "recall-measure":
+        toolController?.recall();
+        break;
+      case "escape":
+        if (!toolController || toolController.current() === null) canvasTool = "select";
+        else toolController.dismissGesture();
+        break;
+    }
+  }
+  /**
+   * D-256: Roll20's `U` — put the current selection in the turn order. Reuses the token
+   * context menu's own `applyTokenMenuEntry("add-combatant")` so the rail and the menu can
+   * never disagree about what "add to encounter" means; with no encounter in the scene it
+   * starts one, exactly like opening the tracker and creating it.
+   */
+  function addSelectionToTurnOrder() {
+    const current = app;
+    const scene = activeScene();
+    if (!current || !scene) return;
+    const selected = tokenSelection.sceneId === scene._id ? tokenSelection.ids : [];
+    if (selected.length === 0) {
+      activeTab = "combat";
+      return;
+    }
+    let combat = activeCombat();
+    if (!combat) {
+      const created = newEncounter(scene, nextId("combat"), "Encounter", () => nextId("combatant"));
+      combat = created;
+      current.gm.client.submit([
+        { kind: "create", coll: "combats", data: created },
+        ...activateEncounter(scene, created, current.gm.client.user ?? null, scene._id).ops,
+      ]);
+    }
+    for (const tokenId of selected) {
+      const token = scene.tokens.find((tk) => tk._id === tokenId);
+      if (!token) continue;
+      const result = applyTokenMenuEntry({
+        combat,
+        scene,
+        token,
+        user: current.gm.client.user ?? null,
+        actors: current.gm.client.store.getAll("actors") as readonly ActorDocument[],
+        entryId: "add-combatant",
+        nextId: () => nextId("combatant"),
+      });
+      if (result.ops.length > 0) current.gm.client.submit(result.ops);
+    }
+    activeTab = "combat";
+  }
+  /** Open a pin's linked handout in its own window (§10 window host, kind "journal"). */
+  function openJournalFromPin(pin: NoteDocument) {
+    if (!pin.journalId) return;
+    const journal = app?.gm.client.store.get("journals", pin.journalId);
+    openWindow(`journal-${pin.journalId}`, journal?.name ?? "Handout", "journal", {
+      journalId: pin.journalId,
+    });
+  }
+  function deleteLastPlacement() {
+    const scene = activeScene();
+    const last = lastPlacement;
+    if (!scene || !last) return;
+    app?.gm.client.submit([
+      {
+        kind: "delete",
+        ref:
+          last.kind === "wall"
+            ? { coll: "walls", id: last.id, parent: { coll: "scenes", id: scene._id } }
+            : { coll: "lights", id: last.id, parent: { coll: "scenes", id: scene._id } },
+      },
+    ]);
+    lastPlacement = null;
+  }
   const eraseAllDrawings = () => {
     const scene = activeScene();
     if (!scene || !globalThis.confirm("Erase all drawings in this scene?")) return;
     app?.gm.client.submit(scene.drawings.map((drawing) => ({ kind: "delete" as const, ref: { coll: "drawings" as const, id: drawing._id, parent: { coll: "scenes" as const, id: scene._id } } })));
   };
-  const measurePoint = (point: { x: number; y: number }) => {
-    const camera = stage?.camera;
-    const rect = canvasHost?.getBoundingClientRect();
-    return { x: (point.x - (camera?.x ?? 0)) * (camera?.scale ?? 1) + (rect?.width ?? 0) / 2, y: (point.y - (camera?.y ?? 0)) * (camera?.scale ?? 1) + (rect?.height ?? 0) / 2 };
+  /** Overlay coordinates are the canvas's own screen space (stage root = top-left origin). */
+  const measurePoint = (point: { x: number; y: number }) =>
+    worldToScreen(stage?.camera ?? { x: 0, y: 0, scale: 1 }, point.x, point.y);
+  /** What the ruler reads out: world units → the scene grid's own distance units. */
+  const measureReadout = (distance: number): string => {
+    const grid = activeScene()?.grid;
+    if (!grid) return rulerLabel(distance, "ft");
+    return rulerLabel(
+      displayDistance(
+        { type: grid.type, size: grid.size, distance: grid.distance, diagonals: grid.diagonals },
+        distance,
+      ),
+      grid.units || "ft",
+    );
   };
+  /**
+   * The toolbar's active tool owns the next gesture: draw/text/measure arm the tool
+   * controller, select disarms it (and `interactionMode` below stops the token/marquee
+   * gestures from firing underneath a stroke).
+   */
+  $effect(() => {
+    void toolReady;
+    const tool = toolController;
+    if (!tool) return;
+    if (GESTURE_TOOLS.has(canvasTool)) {
+      tool.activate(canvasTool);
+    } else {
+      tool.cancel();
+      shapePreview = null;
+    }
+  });
   let tokenSelection = $state.raw<{
     sceneId: string | null;
     ids: readonly string[];
@@ -485,6 +892,31 @@
     if (macro && app) runChatMacro(app.gm.client, macro);
   }
 
+  /**
+   * §2.2 item 2 (G-10b/D-261): the quickbar plays the **selected** token's character — the same
+   * rule on both shells — and offers every actor the GM can read as the target (the selected one
+   * first), because a GM has no character of their own to play.
+   */
+  const quickbarActor = $derived.by(() => {
+    void storeVersion;
+    const current = app;
+    const scene = activeScene();
+    if (!current || !scene) return null;
+    const id = tokenSelection.ids.length === 1 ? tokenSelection.ids[0] : null;
+    if (id === null) return null;
+    const actorId = scene.tokens.find((t) => t._id === id)?.actorId ?? null;
+    if (actorId === null) return null;
+    return (current.gm.client.store.get("actors", actorId) as ActorDocument | undefined) ?? null;
+  });
+  const quickbarTargets = $derived.by(() => {
+    void storeVersion;
+    // The selected token's actor is in the list too: a self-buff (or a self-attack) is a table's
+    // business, and the bar chooses nothing on its own — an attack slot without a target refuses.
+    return [
+      ...((app?.gm.client.store.getAll("actors") ?? []) as readonly ActorDocument[]),
+    ];
+  });
+
   function activateScene(id: string): void {
     if (!app) return;
     const scenes = app.gm.client.store.getAll(
@@ -541,10 +973,75 @@
     ]);
   }
 
+  /**
+   * §2.3 (G-25 remainder, D-262): **view as player X** — the GM's canvas runs the fog loop, the
+   * token gate and the HP bars as the chosen player, so the GM sees the table that player sees.
+   * The picker is built from the users the host replicated (players only: previewing a GM or an
+   * assistant would show the GM's own view under another name), and the choice lives in `gmState`
+   * because it is a *view*, not world data — nothing about it is written anywhere.
+   */
+  const viewAsPlayer = $derived.by(() => {
+    void storeVersion;
+    const current = app;
+    if (!current || gmState.viewAsUser === "") return null;
+    return viewAsUser(
+      current.gm.client.store.getAll("users") as readonly UserDocument[],
+      gmState.viewAsUser,
+    );
+  });
+  const viewingAs = $derived(viewAsPlayer !== null);
+
+  /**
+   * §2.3 tail (D-263): the first-run checklist's facts. They are read from the same replica the
+   * shell renders, so a step ticks the moment the GM's own action lands — and a table set up
+   * before this feature existed arrives with most of them already satisfied.
+   */
+  const onboardingFacts = $derived.by((): OnboardingFacts => {
+    void storeVersion;
+    const current = app;
+    if (!current) return NO_ONBOARDING_FACTS;
+    const store = current.gm.client.store;
+    const user = current.gm.client.user;
+    const scene = activeScene();
+    const users = store.getAll("users") as readonly UserDocument[];
+    const data = (scene ?? null) as SceneDocument | null;
+    const owned = data
+      ? data.tokens.filter((t) =>
+          can(user, "update", t, "tokens", { parent: data }),
+        ).length
+      : 0;
+    return {
+      scenes: store.getAll("scenes").length,
+      map: typeof data?.img === "string" && data.img !== "",
+      tokens: data?.tokens.length ?? 0,
+      character: typeof user.character === "string" && user.character !== "",
+      owned,
+      players: users.filter((u) => u.role === "PLAYER").length,
+      invited: share !== null || users.some((u) => u.role === "PLAYER"),
+      fog: sceneFogSettings(data).enabled,
+      messages: store.getAll("messages").length,
+    };
+  });
+  const onboarding = $derived(
+    onboardingSteps(onboardingFacts, app?.gm.client.user.role ?? null),
+  );
+  /** What the previewed player's gate currently shows — the GM's own pick list follows it. */
+  let viewAsVisible = $state<ReadonlySet<string> | null>(null);
+
+  /** The cover this shell draws: a preview is always opaque (D-262), else god view decides. */
+  function fogStyle(): "opaque" | "translucent" {
+    return viewingAs ? "opaque" : gmState.godView ? "translucent" : "opaque";
+  }
+
   function tokenViews(): TokenView[] {
     const scene = activeScene();
     if (!scene) return [];
-    return scene.tokens.map((token) => ({ token, sceneId: scene._id }));
+    // A preview is a view of the table, not only of the pixels: under it the GM's pointer plays
+    // the player's part too, so a token the player cannot see is not selectable here either.
+    const gate = viewingAs ? viewAsVisible : null;
+    return scene.tokens
+      .filter((token) => gate === null || gate.has(token._id))
+      .map((token) => ({ token, sceneId: scene._id }));
   }
 
   /** §9 full grid spec for the stage + snapping (square/hex/gridless). */
@@ -669,7 +1166,7 @@
           ? (actors.find((a) => a._id === t.actorId) ?? null)
           : null;
         const derived = actor
-          ? deriveFromDocuments({ actor: { system: actor.system } })
+          ? deriveFromActorDocument(actor, encumbranceOptionsOf(worldSettingsFrom(app?.gm.client.store.getAll("settings") ?? [])))
           : null;
         return {
           _id: t._id,
@@ -753,6 +1250,20 @@
   }
 
   /** Re-render tokens + background from the GM client replica (never host internals). */
+  /**
+   * D-257: the **GM Info** layer draws the walls overlay — every segment with its restriction
+   * colour, door-state dots, window strokes. It is the map of what blocks sight and movement
+   * and the surface a door is clicked on, so it must be on screen exactly when the GM is
+   * working on that layer.
+   */
+  function syncWallsOverlay(): void {
+    const view = stage;
+    if (!view) return;
+    const scene = activeScene();
+    const show = canvasLayer === "gm";
+    view.getWallsLayer().sync(show ? (scene?.walls ?? []) : [], view.camera);
+  }
+
   function refresh(): void {
     storeVersion++;
     const current = app;
@@ -783,11 +1294,39 @@
         actors: current.gm.client.store.getAll("actors") as ActorDocument[],
         combats: current.gm.client.store.getAll("combats") as CombatDocument[],
       }),
+      // §2.2/G-10a: the GM's canvas is `isGM`, so the default `"gm"` setting draws bars here and
+      // nowhere else; `"hover"` hands the same numbers over and the stage hides all but one.
+      // D-262: under a preview it is **not** the GM's canvas any more — the bars follow the same
+      // rule the previewed player's shell would apply (a player under the default sees none).
+      tokenHpBarsMap(tokens, {
+        actors: current.gm.client.store.getAll("actors") as ActorDocument[],
+        mode: tokenHpBarsOf(
+          worldSettingsFrom(current.gm.client.store.getAll("settings")),
+        ),
+        isGM: viewAsPlayer === null,
+      }),
+    );
+    view.setTokenHpBarMode(
+      tokenHpBarsOf(worldSettingsFrom(current.gm.client.store.getAll("settings"))) ===
+        "hover"
+        ? "hover"
+        : "all",
     );
     // D-250/D-251: explored fog follows the replica — tokens moved, doors opened, scene
     // switched. The GM's cover is translucent (everything stays visible under it); god view
-    // off previews the opaque cover players get.
-    void fog?.sync(scene, { style: gmState.godView ? "translucent" : "opaque" });
+    // off previews the opaque cover players get — and a **view as** preview is always the
+    // opaque cover, because a see-through version of what a player sees is not what they see.
+    void fog?.sync(scene, { style: fogStyle() });
+    // D-256: the GM's manual Hide/Reveal mask is a replicated scene flag — replay it onto
+    // the fog layer on every replica change (idempotent: later strokes win).
+    const mask = fogMaskLog(scene);
+    if (mask.length !== fogMask.length) fogMask = mask;
+    view.peekFogLayer()?.applyManualMask(mask);
+    // D-256 map pins: the notes layer draws whatever this replica holds (players only ever
+    // hold pins the GM made visible — the projection withholds the rest).
+    view.getNotesLayer().sync(scene?.notes ?? [], view.camera);
+    // D-257: walls overlay follows the replica too (a door toggled anywhere redraws here).
+    syncWallsOverlay();
     // §9 tiles: roofs fade over tokens with vision (D-083)
     const occupied = (scene?.tokens ?? [])
       .filter((t) => t.vision)
@@ -1009,6 +1548,11 @@
   onMount(() => {
     const current = app;
     if (!current) return;
+    // Canvas tool listeners are attached after `await createStage(...)`, i.e. after the
+    // component-init context is gone — `onDestroy` may only be *called* synchronously
+    // (Svelte 5 throws `lifecycle_outside_component` otherwise, which aborted the rest of
+    // the boot wiring). The teardown is therefore registered here and fills itself in later.
+    let toolCleanup: (() => void) | null = null;
     // §7: GM audio player + periodic clock probes (NTP-style offset via pong)
     const audioPlayer = new AudioPlayer({
       client: current.gm.client,
@@ -1057,6 +1601,7 @@
       offRejected();
       offWm();
       globalThis.removeEventListener("keydown", onKey);
+      toolCleanup?.();
     });
     void (async () => {
       try {
@@ -1078,29 +1623,155 @@
         };
         toolController = new ToolInteractionController({
           nextId: () => `drawing-${globalThis.crypto.randomUUID().slice(0, 8)}`,
-          userId: current.gm.client.user._id,
+          userId: current.gm.client.user?.id ?? "",
           grid: () => {
             const sc = activeScene();
-            return sc?.grid ? { ...sc.grid, size: sc.grid.size, feetPerCell: sc.grid.distance } : null;
+            return sc?.grid
+              ? {
+                  type: sc.grid.type,
+                  size: sc.grid.size,
+                  distance: sc.grid.distance,
+                  diagonals: sc.grid.diagonals,
+                  layout: sc.grid.hexLayout,
+                }
+              : null;
           },
           createDrawing: (drawing) => {
             const sc = activeScene();
             if (sc) current.gm.client.submit([{ kind: "create", coll: "drawings", parent: { coll: "scenes", id: sc._id }, data: drawing }]);
           },
+          // D-256: the rail's live sub-tool settings (shapes, styles, brushes, light).
+          options: () => toolOptions,
           promptText: (at) => {
-            const text = globalThis.prompt("Text label");
-            const sc = activeScene();
-            if (text && sc) current.gm.client.submit([{ kind: "create", coll: "drawings", parent: { coll: "scenes", id: sc._id }, data: drawingForText(`drawing-${globalThis.crypto.randomUUID().slice(0, 8)}`, at, text, current.gm.client.user._id) }]);
+            // Roll20 types in place: the editor overlay opens here (Esc/click-away commits).
+            textDraft = { at: { ...at }, value: "", editingId: null };
           },
+          createWall: (wall) => createWall(wall),
+          createLight: (light) => createLight(light),
+          createNote: (at) => createPin(at),
           measurePreview: (value) => { measurePreview = value; },
+          shapePreview: (value) => { shapePreview = value; },
+          broadcastMeasure: (points) => {
+            view.getEffectsLayer().showRuler(current.gm.client.user?.id ?? "gm", points, currentGrid(), activeScene()?.grid.units ?? "ft");
+            current.gm.client.sendEphemeral("ruler", { points: points.map((p) => ({ x: p.x, y: p.y })) });
+          },
+          fogPaint: ({ mode, poly }) => paintFog(mode, poly),
         });
-        const onToolDown = (e: PointerEvent) => { if (canvasTool === "draw" || canvasTool === "text" || canvasTool === "measure") toolController?.pointerDown({ world: toWorld(e), button: e.button, ctrlKey: e.ctrlKey }); };
-        const onToolMove = (e: PointerEvent) => { if (canvasTool === "draw" || canvasTool === "measure") toolController?.pointerMove({ world: toWorld(e), button: e.button, ctrlKey: e.ctrlKey }); };
-        const onToolUp = (e: PointerEvent) => { if (canvasTool === "draw" || canvasTool === "measure") toolController?.pointerUp({ world: toWorld(e), button: e.button, ctrlKey: e.ctrlKey }); };
+        toolReady++;
+        // D-256: every gesture tool (draw/text/measure/fog/wall/light/pin) sees the pointer
+        // with its modifiers — Alt picks the ellipse, Shift snaps a shape to the grid.
+        const toolPointer = (e: PointerEvent) => ({
+          world: toWorld(e),
+          button: e.button,
+          ctrlKey: e.ctrlKey,
+          shiftKey: e.shiftKey,
+          altKey: e.altKey,
+        });
+        const onToolDown = (e: PointerEvent) => { if (GESTURE_TOOLS.has(canvasTool)) toolController?.pointerDown(toolPointer(e)); };
+        const onToolMove = (e: PointerEvent) => { if (GESTURE_TOOLS.has(canvasTool)) toolController?.pointerMove(toolPointer(e)); };
+        const onToolUp = (e: PointerEvent) => { if (GESTURE_TOOLS.has(canvasTool)) toolController?.pointerUp(toolPointer(e)); };
+        // Right-click / Escape finish a multi-click gesture instead of opening a menu.
+        const onToolContext = (e: MouseEvent) => {
+          if (!GESTURE_TOOLS.has(canvasTool)) return;
+          if (canvasTool !== "draw" && canvasTool !== "fog") return;
+          e.preventDefault();
+          toolController?.finishPoly();
+        };
+        const onToolKey = (e: KeyboardEvent) => {
+          if (e.key !== "Escape" || isTypingTarget(e.target)) return;
+          if (!GESTURE_TOOLS.has(canvasTool)) return;
+          toolController?.finishPoly();
+        };
         canvas.addEventListener("pointerdown", onToolDown);
         canvas.addEventListener("pointermove", onToolMove);
         canvas.addEventListener("pointerup", onToolUp);
-        onDestroy(() => { canvas.removeEventListener("pointerdown", onToolDown); canvas.removeEventListener("pointermove", onToolMove); canvas.removeEventListener("pointerup", onToolUp); });
+        canvas.addEventListener("contextmenu", onToolContext);
+        globalThis.addEventListener("keydown", onToolKey);
+        // The GM's text tool: double-clicking a label re-opens the editor (Roll20 behaviour).
+        const onTextEdit = (e: MouseEvent) => {
+          if (canvasTool !== "text" || e.button !== 0) return;
+          editTextAt(toWorld({ clientX: e.clientX, clientY: e.clientY } as PointerEvent));
+        };
+        canvas.addEventListener("dblclick", onTextEdit);
+        // Map pins: click shows the tooltip, double-click opens the linked handout.
+        const onPinClick = (e: MouseEvent) => {
+          const world = toWorld({ clientX: e.clientX, clientY: e.clientY } as PointerEvent);
+          const pin = view.getNotesLayer().pinAt(world, PIN_PICK_RADIUS / (view.camera.scale || 1));
+          if (!pin) {
+            pinTooltip = null;
+            return;
+          }
+          pinTooltip = {
+            id: pin._id,
+            x: pin.x,
+            y: pin.y,
+            title: pin.text,
+            body: pin.playerText ?? "",
+            visible: pin.visible === true,
+          };
+        };
+        const onPinOpen = (e: MouseEvent) => {
+          const world = toWorld({ clientX: e.clientX, clientY: e.clientY } as PointerEvent);
+          const pin = view.getNotesLayer().pinAt(world, PIN_PICK_RADIUS / (view.camera.scale || 1));
+          if (pin?.journalId) openJournalFromPin(pin);
+        };
+        canvas.addEventListener("click", onPinClick);
+        canvas.addEventListener("dblclick", onPinOpen);
+        // D-257 (G-43): with the wall tool, a *click* on an existing wall edits it — a door
+        // toggles closed ⇄ open, `Alt`-click deletes a wall, and a locked door ignores the
+        // click. A drag that placed a wall moves more than a few pixels and is ignored.
+        let wallDownAt: { x: number; y: number } | null = null;
+        const onWallDown = (e: PointerEvent) => {
+          wallDownAt = { x: e.clientX, y: e.clientY };
+        };
+        const onWallClick = (e: MouseEvent) => {
+          if (canvasTool !== "wall" || e.button !== 0 || canvasLayer !== "gm") return;
+          const down = wallDownAt;
+          if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) return;
+          const scene = activeScene();
+          if (!scene) return;
+          const world = toWorld({ clientX: e.clientX, clientY: e.clientY } as PointerEvent);
+          const pick = wallPickAt(scene.walls, world, WALL_PICK_RADIUS / (view.camera.scale || 1));
+          if (!pick) return;
+          const ref = {
+            coll: "walls" as const,
+            id: pick.wall._id,
+            parent: { coll: "scenes" as const, id: scene._id },
+          };
+          if (e.altKey) {
+            current.gm.client.submit([{ kind: "delete", ref }]);
+            if (lastPlacement?.kind === "wall" && lastPlacement.id === pick.wall._id) lastPlacement = null;
+            return;
+          }
+          const diff = doorToggleDiff(pick.wall);
+          if (diff) current.gm.client.submit([{ kind: "update", ref, diff }]);
+        };
+        canvas.addEventListener("pointerdown", onWallDown);
+        canvas.addEventListener("click", onWallClick);
+        // The overlay's stroke widths are screen-constant, so a pan/zoom redraws it (the key
+        // inside WallsLayer.sync keeps this cheap — nothing is rebuilt when the camera is still).
+        let lastCameraKey = "";
+        const onCameraTick = () => {
+          const cam = view.camera;
+          const key = `${cam.x}|${cam.y}|${cam.scale}`;
+          if (key === lastCameraKey) return;
+          lastCameraKey = key;
+          syncWallsOverlay();
+        };
+        view.app.ticker.add(onCameraTick);
+        toolCleanup = () => {
+          canvas.removeEventListener("pointerdown", onToolDown);
+          canvas.removeEventListener("pointermove", onToolMove);
+          canvas.removeEventListener("pointerup", onToolUp);
+          canvas.removeEventListener("contextmenu", onToolContext);
+          canvas.removeEventListener("dblclick", onTextEdit);
+          canvas.removeEventListener("click", onPinClick);
+          canvas.removeEventListener("dblclick", onPinOpen);
+          canvas.removeEventListener("pointerdown", onWallDown);
+          canvas.removeEventListener("click", onWallClick);
+          view.app.ticker.remove(onCameraTick);
+          globalThis.removeEventListener("keydown", onToolKey);
+        };
         // F01 — expose for chat roll-card highlights & e2e (canvasSmoke)
         (globalThis as unknown as { __stage?: unknown }).__stage = view;
         view.fit(scene?.width ?? 2000, scene?.height ?? 1500);
@@ -1110,10 +1781,37 @@
           surfaceFor: (sc) => view.getFogLayer({ width: sc.width, height: sc.height }),
           hideSurface: () => view.hideFogLayer(),
           computer: createVisionComputer(),
-          transport: current.gm.client,
-          user: () => current.gm.client.user,
+          // D-262: under a preview the transport is not the GM's session — the *previewed* player's
+          // stored map is read from the host's own fog store (the host is this very tab) and
+          // **nothing is ever uploaded for them**: a preview must not overwrite the map a player
+          // explored. With no preview this is the ordinary GM session, exactly as before.
+          transport: {
+            requestFog: async (sceneId) => {
+              const viewed = viewAsPlayer;
+              if (viewed === null) return current.gm.client.requestFog(sceneId);
+              try {
+                const stored = await getFog(current.db, current.worldId, sceneId, viewed.id);
+                return stored?.png ?? null;
+              } catch {
+                return null;
+              }
+            },
+            sendFogPng: (sceneId, png) => {
+              if (viewAsPlayer === null) current.gm.client.sendFogPng(sceneId, png);
+            },
+          },
+          user: () => viewAsPlayer ?? current.gm.client.user,
           actors: () =>
             current.gm.client.store.getAll("actors") as readonly ActorDocument[],
+          // §5: the host withholds `hidden` documents from a player's replica; the preview runs
+          // client-side on the GM's own store, so the gate has to withhold them too (core/viewAs).
+          visibilityFilter: (sc, ids) =>
+            viewAsPlayer === null ? ids : withoutHiddenTokens(sc, ids),
+          onVisibility: (ids) => {
+            viewAsVisible = ids;
+            // Only a preview gates the GM's canvas — the GM's own view stays ungated (`null`).
+            view.setTokenVisibility(viewAsPlayer === null ? null : ids);
+          },
           onError: (where, error) => console.warn(`fog ${where} failed`, error),
         });
         controller = new CanvasController({
@@ -1154,7 +1852,7 @@
                 ? (actors.find((a) => a._id === t.actorId) ?? null)
                 : null;
               const derived = actor
-                ? deriveFromDocuments({ actor: { system: actor.system } })
+                ? deriveFromActorDocument(actor, encumbranceOptionsOf(worldSettingsFrom(current.gm.client.store.getAll("settings"))))
                 : null;
               return {
                 _id: t._id,
@@ -1191,9 +1889,12 @@
               // drag owns no speed and no action economy, so it stays free.
               if (moverActor !== null && isPF1eActor(moverActor)) {
                 const moverDerived = moverActor
-                  ? deriveFromDocuments({
-                      actor: { system: moverActor.system },
-                    })
+                  ? deriveFromActorDocument(
+                      moverActor,
+                      encumbranceOptionsOf(
+                        worldSettingsFrom(current.gm.client.store.getAll("settings")),
+                      ),
+                    )
                   : null;
                 const sceneTerrain = sceneDifficultCells(scene);
                 const plan = pf1eMovePlan({
@@ -1368,6 +2069,12 @@
           },
           getTokens: tokenViews,
           getGrid: () => sceneGridSpec(activeScene()?.grid),
+          // §10/D-255: draw/text/measure own the canvas (no marquee or token drag under a
+          // stroke); the Pan tool pans on left-drag like Roll20's Pan mode.
+          interactionMode: () =>
+            canvasTool === "select" ? "select" : canvasTool === "pan" ? "pan" : "suppress",
+          // D-256: only the Objects & Tokens layer answers a token pointer (Roll20's layers).
+          tokenLayerActive: () => canvasLayer === "tokens",
           canMove: () => true, // GM (players get the ownership gate, §5/§10)
           onPing: (world) => {
             const at = { x: Math.round(world.x), y: Math.round(world.y) };
@@ -1381,6 +2088,7 @@
               ? {
                   type: grid.type,
                   size: grid.size,
+                  distance: scene?.grid.distance ?? 1,
                   diagonals: scene?.grid.diagonals ?? "555",
                 }
               : null;
@@ -1444,6 +2152,7 @@
               ? {
                   type: grid.type,
                   size: grid.size,
+                  distance: scene?.grid.distance ?? 1,
                   diagonals: scene?.grid.diagonals ?? "555",
                 }
               : null;
@@ -1633,6 +2342,14 @@
             return fog?.stats().saves ?? 0;
           },
           fogExploredAt: ({ x, y }) => view.peekFogLayer()?.exploredAt(x, y) ?? null,
+          fogStoredBytesFor: async ({ sceneId, userId }) => {
+            try {
+              const stored = await getFog(current.db, current.worldId, sceneId, userId);
+              return stored?.png.length ?? 0;
+            } catch {
+              return 0;
+            }
+          },
           pf1eAreaPreviewShow: (spec) => {
             const model = showPF1eAreaPreview({
               kind: spec.kind as PF1eAreaKind,
@@ -1681,8 +2398,25 @@
               ? { ...(core as Record<string, unknown>) }
               : {};
           },
+          sceneDarkness: () => {
+            const value = activeScene()?.darkness;
+            return typeof value === "number" && Number.isFinite(value)
+              ? Math.max(0, Math.min(1, value))
+              : 0;
+          },
           godView: () => gmState.godView,
           viewAsFaction: () => gmState.viewAsFaction,
+          viewAsState: () => ({
+            user: viewAsPlayer?.id ?? null,
+            followedPlayers: viewAsOptions(
+              current.gm.client.store.getAll("users") as readonly UserDocument[],
+              current.gm.client.user,
+            ).length,
+            drawnTokens: view.drawnTokenIds(),
+            pickableTokens: tokenViews().map((t) => t.token._id).sort(),
+            visibleTokenIds: fog?.stats().visibleTokenIds ?? null,
+            tokenHpBars: view.tokenHpBars().map((bar) => bar.id).sort(),
+          }),
           simCount: () => current.gm.client.simReplica?.count ?? null,
           turnPhase: () => lastTurnPhase,
           reportRulesVersion: () => lastRulesVersion,
@@ -1728,6 +2462,8 @@
           actorCount: () =>
             (current.gm.client.store.getAll("actors") as readonly unknown[])
               .length,
+          itemCount: () =>
+            (current.gm.client.store.getAll("items") as readonly unknown[]).length,
           importedTokens: () => [...importedTokens],
           dice3d: () => ({
             ...dice3dStats,
@@ -1842,6 +2578,8 @@
               tiles.map((t) => [t._id, layer.alphaOf(t._id)]),
             );
           },
+          // §2.2/G-10a: what the GM canvas actually drew — the mode's own gate, read back.
+          tokenHpBars: () => view.tokenHpBars(),
           seedTile: (spec) => {
             const scene = activeScene();
             if (!scene) return "";
@@ -1926,10 +2664,23 @@
     };
   });
 
-  // D-250/D-251: god view toggles (Settings / GM extras) restyle the cover at once.
+  // D-250/D-251: god view toggles (Settings / GM extras) restyle the cover at once — and so does
+  // choosing (or leaving) a player to view as (D-262): the loop re-enters the scene as that user.
   $effect(() => {
-    const style = gmState.godView ? "translucent" : "opaque";
+    const style = fogStyle();
     void fog?.sync(activeScene(), { style });
+  });
+
+  // D-262: a preview changes *who* the shell is for the parts of the paint that are not the fog
+  // loop — above all the hit-point bars, which a player under the default setting has none of.
+  // A view switch moves no document, so nothing else would re-run this. The dependency is the
+  // *switch* alone and the body is untracked: `refresh()` bumps the store version it also reads
+  // (`viewingAs` derives from it), and tracking that would be a self-feeding loop.
+  $effect(() => {
+    void gmState.viewAsUser;
+    untrack(() => {
+      refresh();
+    });
   });
 </script>
 
@@ -1986,6 +2737,11 @@
             rules instead: {app.rulesBoot.error}
           </p>
         {/if}
+        <OnboardingPanel
+          steps={onboarding}
+          storageKey="vtt-onboarding-gm"
+          title="Getting started"
+        />
         <label class="btn file-control" for="map-input">
           Import map
           <input
@@ -2165,9 +2921,22 @@
             </button>
           {/each}
         </div>
+        {#if app}
+          <QuickbarRow
+            client={app.gm.client}
+            actor={quickbarActor}
+            targets={quickbarTargets}
+          />
+        {/if}
         <div class="tabbody" data-active-tab={activeTab}>
           {#if activeTab === "chat"}
-            <ChatPanel client={app.gm.client} bus={app.gm.bus} />
+            <ChatPanel
+              client={app.gm.client}
+              bus={app.gm.bus}
+              targetTokenId={tokenSelection.ids.length === 1
+                ? (tokenSelection.ids[0] ?? null)
+                : null}
+            />
           {:else if activeTab === "combat"}
             <CombatPanel
               client={app.gm.client}
@@ -2255,7 +3024,22 @@
           {/each}
         </div>
         <div class="dice3d-host" bind:this={dice3dHost}></div>
-        <div
+        <div class="board">
+          <div class="toolrail">
+            <CanvasToolbar
+              bind:active={canvasTool}
+              bind:collapsed={canvasToolbarCollapsed}
+              bind:layer={canvasLayer}
+              isGM={true}
+              settings={toolOptions}
+              cellSize={activeScene()?.grid.size ?? 100}
+              fogStrokes={fogMask.length}
+              onEraseAll={eraseAllDrawings}
+              onRoll={rollFromToolbar}
+              onAction={runCanvasAction}
+            />
+          </div>
+          <div
           class="canvas-host"
           bind:this={canvasHost}
           role="application"
@@ -2271,18 +3055,95 @@
           ondrop={(ev) => void onCompendiumDrop(ev)}
           onpointerdown={() => closeTokenMenu()}
         >
-          <CanvasToolbar bind:active={canvasTool} bind:collapsed={canvasToolbarCollapsed} isGM={true} onEraseAll={eraseAllDrawings} onRoll={rollFromToolbar} />
           {#if measurePreview}
             {@const pts = measurePreview.points.map(measurePoint)}
-            <svg class="measure-preview" aria-label={`Measurement ${measurePreview.distance}`}>
+            {@const tail = pts.at(-1) ?? null}
+            {@const areaPts = measurePreview.area ? templateOutline(measurePreview.area).map(measurePoint) : null}
+            <svg class="measure-preview" aria-label={`Measurement ${measureReadout(measurePreview.distance)}`}>
               <polyline points={pts.map((p) => `${p.x},${p.y}`).join(" ")} fill="none" stroke="#f4c95d" stroke-width="3" stroke-dasharray="8 5" />
               {#if measurePreview.radiusPx && pts[0]}
                 <circle cx={pts[0].x} cy={pts[0].y} r={measurePreview.radiusPx * (stage?.camera.scale ?? 1)} fill="#f4c95d22" stroke="#f4c95d" stroke-width="2" />
               {/if}
-              {#if pts.at(-1)}
-                <text x={pts.at(-1)!.x + 8} y={pts.at(-1)!.y - 8} fill="#fff" stroke="#111" stroke-width="3" paint-order="stroke">{measurePreview.distance}</text>
+              {#if areaPts && areaPts.length > 1}
+                <polygon points={areaPts.map((p) => `${p.x},${p.y}`).join(" ")} fill="#f4c95d1a" stroke="#f4c95d" stroke-width="2" stroke-dasharray="4 4" />
+              {/if}
+              {#if tail}
+                <text x={tail.x + 8} y={tail.y - 8} fill="#fff" stroke="#111" stroke-width="3" paint-order="stroke">{measureReadout(measurePreview.distance)}</text>
               {/if}
             </svg>
+          {/if}
+          {#if shapePreview}
+            {@const preview = shapePreview}
+            <svg class="shape-preview" aria-label="Tool preview" data-shape-preview={preview.kind}>
+              {#if preview.kind === "draw"}
+                {@const a = measurePoint(preview.from)}
+                {@const b = measurePoint(preview.to)}
+                {#if preview.shape === "rect" || preview.shape === "ellipse"}
+                  <rect x={Math.min(a.x, b.x)} y={Math.min(a.y, b.y)} width={Math.abs(b.x - a.x)} height={Math.abs(b.y - a.y)} rx={preview.shape === "ellipse" ? Math.abs(b.x - a.x) / 2 : 0} ry={preview.shape === "ellipse" ? Math.abs(b.y - a.y) / 2 : 0} fill={`${preview.style.stroke}22`} stroke={preview.style.stroke} stroke-width={preview.style.strokeWidth} />
+                {:else}
+                  <polyline points={[...preview.points, preview.to].map((p) => { const q = measurePoint(p); return `${q.x},${q.y}`; }).join(" ")} fill="none" stroke={preview.style.stroke} stroke-width={preview.style.strokeWidth} stroke-dasharray="6 4" />
+                {/if}
+              {:else if preview.kind === "fog"}
+                {@const a = measurePoint(preview.from)}
+                {@const b = measurePoint(preview.to)}
+                {#if preview.shape === "rect"}
+                  <rect x={Math.min(a.x, b.x)} y={Math.min(a.y, b.y)} width={Math.abs(b.x - a.x)} height={Math.abs(b.y - a.y)} fill={preview.brush === "hide" ? "#0a0f1599" : "#ffd47933"} stroke={preview.brush === "hide" ? "#8892a6" : "#ffd479"} stroke-width="2" stroke-dasharray="6 4" />
+                {:else}
+                  <polyline points={preview.points.map((p) => { const q = measurePoint(p); return `${q.x},${q.y}`; }).join(" ")} fill={preview.brush === "hide" ? "#0a0f1599" : "#ffd47933"} stroke={preview.brush === "hide" ? "#8892a6" : "#ffd479"} stroke-width="2" stroke-dasharray="6 4" />
+                {/if}
+              {:else}
+                {@const a = measurePoint(preview.from)}
+                {@const b = measurePoint(preview.to)}
+                <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={preview.wallKind === "door" ? "#8ad9ff" : preview.wallKind === "window" ? "#7ee0ff" : "#ff9f6e"} stroke-width="4" stroke-dasharray="10 5" />
+              {/if}
+            </svg>
+          {/if}
+          {#if textDraft}
+            {@const anchor = measurePoint(textDraft.at)}
+            <div class="text-editor" style={`left:${anchor.x}px; top:${anchor.y}px;`}>
+              <!-- svelte-ignore a11y_autofocus -->
+              <textarea
+                data-text-editor
+                autofocus
+                aria-label="Text label"
+                bind:value={textDraft.value}
+                onkeydown={(event) => {
+                  if (event.key === "Escape") { event.preventDefault(); commitTextDraft(); }
+                  if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); commitTextDraft(); }
+                }}
+              ></textarea>
+              <div class="text-editor-actions">
+                <button type="button" data-text-commit onclick={() => commitTextDraft()}>Done</button>
+                <button type="button" onclick={() => (textDraft = null)}>Cancel</button>
+              </div>
+            </div>
+          {/if}
+          {#if pinTooltip}
+            {@const anchor = measurePoint(pinTooltip)}
+            <div class="pin-tooltip" data-pin-tooltip={pinTooltip.id} style={`left:${anchor.x}px; top:${anchor.y}px;`}>
+              <strong>{pinTooltip.title}</strong>
+              <input
+                aria-label="Pin title"
+                value={pinTooltip.title}
+                onchange={(event) => updatePin({ text: event.currentTarget.value })}
+              />
+              <input
+                aria-label="Player-facing note"
+                placeholder="Players read this…"
+                value={pinTooltip.body}
+                onchange={(event) => updatePin({ playerText: event.currentTarget.value })}
+              />
+              <button
+                type="button"
+                data-pin-visibility
+                onclick={() => updatePin({ visible: !pinTooltip?.visible })}>
+                {pinTooltip.visible ? "Visible to players" : "Hidden (GM only)"}
+              </button>
+              {#if activeScene()?.notes.find((n) => n._id === pinTooltip?.id)?.journalId}
+                <button type="button" data-pin-open-journal onclick={() => { const pin = activeScene()?.notes.find((n) => n._id === pinTooltip?.id); if (pin) openJournalFromPin(pin); }}>Open handout</button>
+              {/if}
+              <button type="button" data-pin-close onclick={() => (pinTooltip = null)}>Close</button>
+            </div>
           {/if}
           {#if tokenMenu && activeScene()}
             {@const menuScene = activeScene()}
@@ -2336,6 +3197,7 @@
               </div>
             {/if}
           {/if}
+          </div>
         </div>
         <WindowHost
           manager={wm}
@@ -2347,6 +3209,8 @@
           onRedo={redo}
           packages={app.packages}
           rulesBoot={app.rulesBoot}
+          bindings={DEFAULT_BINDINGS}
+          isGM={true}
         />
         {#if pendingReaction}
           <!--
@@ -2814,6 +3678,18 @@
     opacity: 0.45;
     cursor: not-allowed;
   }
+  .board {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+  }
+  /* D-255: the toolbar is its own column (Roll20's rail), so it never swallows a click
+     meant for the map, a token under it, or a window that opens over the board. */
+  .toolrail {
+    flex: 0 0 auto;
+    display: flex;
+  }
   .canvas-host {
     flex: 1;
     min-width: 0;
@@ -2821,6 +3697,13 @@
     background: #0a0f15;
   }
   .measure-preview { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; overflow: visible; }
+  /* D-256: draw/fog/wall gesture previews and the in-canvas editors */
+  .shape-preview { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 11; overflow: visible; }
+  .text-editor { position: absolute; z-index: 12; display: flex; flex-direction: column; gap: 4px; padding: 6px; border: 1px solid #4c5b7d; border-radius: 5px; background: #111827f2; }
+  .text-editor textarea { width: 220px; height: 62px; padding: 5px; color: #fff; background: #0c111b; border: 1px solid #3a455e; border-radius: 3px; resize: both; }
+  .text-editor-actions { display: flex; gap: 4px; }
+  .pin-tooltip { position: absolute; z-index: 12; display: flex; flex-direction: column; gap: 4px; width: 210px; padding: 7px; border: 1px solid #4c5b7d; border-radius: 5px; background: #111827f2; color: #dbe3f0; font-size: 12px; }
+  .pin-tooltip input { padding: 4px; color: #fff; background: #0c111b; border: 1px solid #3a455e; border-radius: 3px; }
   .canvas-host :global(canvas) {
     display: block;
   }

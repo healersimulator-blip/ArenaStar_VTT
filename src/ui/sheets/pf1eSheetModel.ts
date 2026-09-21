@@ -8,7 +8,9 @@ import type {
 import type { PermissionUser } from "../../core/ownership";
 import type { Op } from "../../core/ops";
 import { can } from "../../core/permissions";
-import { deriveFromDocuments } from "../../packages/pf1e/actor";
+import { deriveFromActorDocument } from "../../packages/pf1e/actor";
+import type { CoreWorldSettings } from "../../core/worldSettings";
+import { encumbranceOptionsOf } from "../../core/worldSettings";
 import type { PF1eAbilityKey, PF1eDerived } from "../../packages/pf1e/actor";
 import { combinedTacticalEffects } from "../../packages/pf1e/effectOps";
 import {
@@ -84,6 +86,8 @@ export type SheetField = (typeof SHEET_FIELDS)[number][0];
 export interface PF1eSheetContext {
   combat?: CombatDocument | null;
   combatantId?: string | null;
+  /** The world's settings: `encumbranceRule` decides whether a load penalizes at all. */
+  settings?: CoreWorldSettings | null;
 }
 
 export function pf1eSheetView(actor: ActorDocument, ctx?: PF1eSheetContext) {
@@ -94,7 +98,12 @@ export function pf1eSheetView(actor: ActorDocument, ctx?: PF1eSheetContext) {
   );
   return {
     authored: normalizePF1eSystem(actor.system.pf1e).system,
-    derived: deriveFromDocuments({ actor, effects: effects.effects }),
+    // §1.3: the actor document's own items and the table's encumbrance rule ride the
+    // derivation, so the AC/speed/skill numbers on the sheet are the worn-and-loaded ones.
+    derived: deriveFromActorDocument(actor, {
+      effects: effects.effects,
+      ...(ctx?.settings != null ? encumbranceOptionsOf(ctx.settings) : {}),
+    }),
     effectErrors: effects.rejected.map((e) => `${e.id}: ${e.error}`),
     /** Active effect list for the Effects tab (embedded + referenced, collision-safe). */
     effects: effects.effects,

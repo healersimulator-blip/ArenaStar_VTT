@@ -31,6 +31,7 @@ import type {
 import type { PermissionUser } from "../../core/ownership";
 import { can } from "../../core/permissions";
 import { err, okVal, type Result } from "../../core/result";
+import { actorItemEffects } from "./itemChanges";
 import {
   effectFlagsFor,
   readTacticalEffect,
@@ -466,11 +467,16 @@ export interface CombinedEffects {
 }
 
 /**
- * The derivation's read side: actor-embedded effects plus the linked combatant's
- * referenced ones, with the **combatant copy winning on an id collision** — it is the
- * instance the core tick decrements, so it is the live truth while the encounter runs.
- * The actor's embedded copy of the same id (the out-of-combat home) is shadowed, not
- * deleted, so it comes back when the effect is removed from the encounter.
+ * The derivation's read side: actor-embedded effects, the linked combatant's referenced ones,
+ * and — since plan §1.3 (G-04) — the **worn items' typed mods**, with the **combatant copy
+ * winning on an id collision** (it is the instance the core tick decrements, so it is the live
+ * truth while the encounter runs; the actor's embedded copy of the same id is shadowed, not
+ * deleted, and comes back when the effect is removed from the encounter).
+ *
+ * Items are read *here* rather than in the sheet because this function is the single funnel
+ * every tactical consumer already goes through (`actionBudget`, the AoO/maneuver/aid-feint
+ * flows, the sheet's view model). A ring of protection that changed AC on the sheet but not in
+ * an attack of opportunity would be a rules bug, not a UI detail.
  */
 export function combinedTacticalEffects(
   actor: ActorDocument,
@@ -485,6 +491,9 @@ export function combinedTacticalEffects(
   const combined = new Map<string, PF1eActiveEffect>(
     embedded.effects.map((e) => [e.id, e]),
   );
+  for (const effect of actorItemEffects(actor.items)) {
+    if (!combined.has(effect.id)) combined.set(effect.id, effect);
+  }
   const rejected = [...embedded.rejected];
   if (combat && combatantId) {
     const member = combat.combatants.find((c) => c._id === combatantId);
