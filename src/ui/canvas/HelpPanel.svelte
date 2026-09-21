@@ -5,6 +5,8 @@
    * the live binding map, so a rebound action shows its new combo.
    */
   import { DEFAULT_BINDINGS } from "../../core/keys";
+  import { NO_ONBOARDING_FACTS, onboardingSteps } from "../../core/onboarding";
+  import { RULES_REFERENCE_LINKS } from "../../core/docs";
   import {
     APP_LICENSE_NOTE,
     CONTENT_NOTICE_NOTE,
@@ -18,6 +20,10 @@
     bindings?: Readonly<Record<string, string>>;
     isGM?: boolean;
   } = $props();
+
+  // §2.3 tail (D-263): the same ordered steps the sidebar's checklist ticks off, shown here
+  // unticked — a GM who folded the checklist away still needs to know where to start.
+  const steps = $derived(onboardingSteps(NO_ONBOARDING_FACTS, isGM ? "GM" : "PLAYER"));
 
   const toolKeys: Array<{ keys: string; action: string }> = [
     { keys: "V or S", action: "Select" },
@@ -57,6 +63,17 @@
 </script>
 
 <div class="help" data-help-panel>
+  <section data-help-start>
+    <h4>Getting started</h4>
+    <ol class="steps">
+      {#each steps as step (step.id)}
+        <li data-help-step={step.id}>
+          <strong>{step.title}</strong>
+          <span class="prose">{step.hint}</span>
+        </li>
+      {/each}
+    </ol>
+  </section>
   <section>
     <h4>Tools</h4>
     <dl>
@@ -94,6 +111,29 @@
         <dd>{action}</dd>
       {/each}
     </dl>
+  </section>
+  <section data-help-links>
+    <h4>Rules reference</h4>
+    <p class="prose">
+      This app is a table, not a rules engine of record: where a number is contested, these are
+      the pages the tables it is built from cite.
+    </p>
+    <dl>
+      {#each RULES_REFERENCE_LINKS as link (link.id)}
+        <dt>
+          <a data-help-link={link.id} href={link.url} target="_blank" rel="noopener noreferrer"
+            >{link.label}</a
+          >
+        </dt>
+        <dd>{link.note}</dd>
+      {/each}
+    </dl>
+    <p class="prose" data-help-docs-note>
+      The design documents behind this app ship with its source repository, not inside the build.
+      What does ship beside the content is the notices: <span class="source">OGL.txt</span> and
+      <span class="source">CREDITS.md</span> inside every content package and world zip (see the
+      credits below).
+    </p>
   </section>
   <section data-credits>
     <h4>Licences &amp; credits</h4>
@@ -144,6 +184,21 @@
     margin: 0;
     color: #a8b2c4;
     line-height: 1.45;
+  }
+  .steps {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  li {
+    display: flex;
+    flex-direction: column;
+  }
+  a {
+    color: #66b7ff;
   }
   .source {
     font-family: ui-monospace, monospace;

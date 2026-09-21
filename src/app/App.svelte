@@ -29,6 +29,7 @@
   } from "../host/worldFile";
   import { ChatPanel } from "../ui/chat";
   import { QuickbarRow } from "../ui/quickbar";
+  import OnboardingPanel from "../ui/onboarding/OnboardingPanel.svelte";
   import { CombatPanel } from "../ui/combat";
   import {
     applyTokenMenuEntry,
@@ -79,6 +80,13 @@
   import type { ModuleHookName } from "../core/moduleApi";
   import { getFog, getSetting } from "../storage/idb";
   import { viewAsOptions, viewAsUser, withoutHiddenTokens } from "../core/viewAs";
+  import { can } from "../core/permissions";
+  import { sceneFogSettings } from "../core/fogExploration";
+  import {
+    NO_ONBOARDING_FACTS,
+    onboardingSteps,
+    type OnboardingFacts,
+  } from "../core/onboarding";
   import {
     DEFAULT_TOOL_OPTIONS,
     type MeasurePreview,
@@ -982,6 +990,41 @@ const WALL_PICK_RADIUS = 12;
     );
   });
   const viewingAs = $derived(viewAsPlayer !== null);
+
+  /**
+   * §2.3 tail (D-263): the first-run checklist's facts. They are read from the same replica the
+   * shell renders, so a step ticks the moment the GM's own action lands — and a table set up
+   * before this feature existed arrives with most of them already satisfied.
+   */
+  const onboardingFacts = $derived.by((): OnboardingFacts => {
+    void storeVersion;
+    const current = app;
+    if (!current) return NO_ONBOARDING_FACTS;
+    const store = current.gm.client.store;
+    const user = current.gm.client.user;
+    const scene = activeScene();
+    const users = store.getAll("users") as readonly UserDocument[];
+    const data = (scene ?? null) as SceneDocument | null;
+    const owned = data
+      ? data.tokens.filter((t) =>
+          can(user, "update", t, "tokens", { parent: data }),
+        ).length
+      : 0;
+    return {
+      scenes: store.getAll("scenes").length,
+      map: typeof data?.img === "string" && data.img !== "",
+      tokens: data?.tokens.length ?? 0,
+      character: typeof user.character === "string" && user.character !== "",
+      owned,
+      players: users.filter((u) => u.role === "PLAYER").length,
+      invited: share !== null || users.some((u) => u.role === "PLAYER"),
+      fog: sceneFogSettings(data).enabled,
+      messages: store.getAll("messages").length,
+    };
+  });
+  const onboarding = $derived(
+    onboardingSteps(onboardingFacts, app?.gm.client.user.role ?? null),
+  );
   /** What the previewed player's gate currently shows — the GM's own pick list follows it. */
   let viewAsVisible = $state<ReadonlySet<string> | null>(null);
 
@@ -2694,6 +2737,11 @@ const WALL_PICK_RADIUS = 12;
             rules instead: {app.rulesBoot.error}
           </p>
         {/if}
+        <OnboardingPanel
+          steps={onboarding}
+          storageKey="vtt-onboarding-gm"
+          title="Getting started"
+        />
         <label class="btn file-control" for="map-input">
           Import map
           <input

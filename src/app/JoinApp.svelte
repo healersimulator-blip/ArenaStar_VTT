@@ -27,6 +27,13 @@
     type TokenView,
   } from "../canvas/interactions";
   import { can } from "../core/permissions";
+  import { sceneFogSettings } from "../core/fogExploration";
+  import {
+    NO_ONBOARDING_FACTS,
+    onboardingSteps,
+    type OnboardingFacts,
+  } from "../core/onboarding";
+  import OnboardingPanel from "../ui/onboarding/OnboardingPanel.svelte";
   import { ChatPanel } from "../ui/chat";
   import { QuickbarRow } from "../ui/quickbar";
   import { WindowManager } from "../core/windows";
@@ -334,6 +341,34 @@
       null
     );
   }
+
+  /**
+   * §2.3 tail (D-263): the player's own first-run list. A player arrives at somebody else's table,
+   * so every fact here is read from *their* replica — what they can see, and what they may touch.
+   */
+  const onboardingFacts = $derived.by((): OnboardingFacts => {
+    void storeVersion;
+    const client = app?.client;
+    const user = client?.user;
+    if (!client || !user) return NO_ONBOARDING_FACTS;
+    const scene = activeScene();
+    const data = (scene ?? null) as SceneDocument | null;
+    const owned = data
+      ? data.tokens.filter((t) => can(user, "update", t, "tokens", { parent: data })).length
+      : 0;
+    return {
+      scenes: client.store.getAll("scenes").length,
+      map: typeof data?.img === "string" && data.img !== "",
+      tokens: data?.tokens.length ?? 0,
+      character: typeof user.character === "string" && user.character !== "",
+      owned,
+      players: 1,
+      invited: true,
+      fog: sceneFogSettings(data).enabled,
+      messages: client.store.getAll("messages").length,
+    };
+  });
+  const onboarding = $derived(onboardingSteps(onboardingFacts, "PLAYER"));
 
   /**
    * §2.2 item 2 (G-10b/D-261): a player plays **their own** character — the first token the fog
@@ -757,6 +792,11 @@
           <span>tokens {tokenCount}</span>
         </div>
         {#if app?.client}
+          <OnboardingPanel
+            steps={onboarding}
+            storageKey="vtt-onboarding-player"
+            title="Getting started"
+          />
           <QuickbarRow
             client={app.client}
             actor={quickbarActor}

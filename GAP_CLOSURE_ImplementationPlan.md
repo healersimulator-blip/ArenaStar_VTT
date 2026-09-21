@@ -388,7 +388,24 @@ omissions.
   the host's stored bytes for that player unchanged after a flush. Turning it off restores the GM's
   view with nothing placed. Unit: `tests/core/viewAs.test.ts` **11** + three new
   `tests/client/fogExploration.test.ts` cases (the re-entry, the no-op sync, the filter).
-- **Onboarding & help** (G-41 remainder): first-run tips, docs links from the Help window.
+- ~~**Onboarding & help** (G-41 remainder): first-run tips, docs links from the Help window.~~
+  **done (D-263).** The first-run aid is a **derived checklist** (`src/core/onboarding.ts`), not a
+  tracked one: five steps for a GM (map → party → invite → fog → first roll) and three for a
+  player (own token → sheet → the world is talking), each ticked from the replica the shell is
+  already rendering, each hint naming the control that does it. Rendered by
+  `src/ui/onboarding/OnboardingPanel.svelte` at the top of both sidebars (`data-onboarding`, one
+  `localStorage` key per role, collapse/reopen, and `[data-onboarding-complete]` when the table is
+  up and running); the Help window repeats the same list for the shell's own role plus a "Rules
+  reference" section (`[data-help-links]`: d20PFSRD, Archives of Nethys — public pages only, since
+  the app's own design documents ship with the repo, not the build).
+  **Acceptance — met.** `e2e/onboarding.spec.ts` **1/1 (14.0 s)**: a fresh world shows all five
+  steps open, and importing a map, adding a token, opening an invite, switching fog on and rolling
+  a die each tick exactly one step; collapsing writes nothing to the world (`seq` unchanged);
+  a joined player gets the three player steps — their token ticked because `Add token` grants
+  movement (D-061), their sheet not because no character is linked — and no GM step; the Help
+  window shows each shell its own list and both links (`href`/`target`/`rel`); and after a reload
+  the fold is remembered while the world it describes comes back with every step already ticked.
+  Unit: `tests/core/onboarding.test.ts` **9**.
 - **i18n extraction** (G-38): start `src/ui/i18n` (UI strings only; OGL content stays English with
   a later translation pass) — schedule when a non-English table is actually in scope.
 
@@ -422,7 +439,7 @@ omissions.
 | 1.4 | Compendium scale UX | 1.1 | S–M | G-45 |
 | 2.1 | Lighting-as-vision | — | L | G-24 — **done, D-260** (G-32 **decided**, D-260; G-26 open) |
 | 2.2 | Table flow (HP bars, quickbar, chat apply) | 1.3 for item-bound slots | M | G-22, G-10a, G-10b, G-20 — **done, D-261** |
-| 2.3 | Tails (view-as, onboarding, i18n) | 2.1 for view-as | S | G-25 tail — **view-as done, D-262**; G-41 tail, G-38 open |
+| 2.3 | Tails (view-as, onboarding, i18n) | 2.1 for view-as | S | G-25 tail (D-262 ✅), G-41 tail (D-263 ✅); G-38 open |
 | 3.1 | Character import | 1.3 (item/actor shape stable) | Med–L | G-39 |
 | 3.2 | Statblock import | — | S–M | G-08 |
 | 3.3 | Non-combat + condition tails | — | M | G-11, G-21 |

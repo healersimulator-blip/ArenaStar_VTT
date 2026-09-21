@@ -23,7 +23,8 @@ kind selector is cosmetic to the engine (flagged in G-27 too). **Two more gaps a
 Every entry below carries a file path or a test as its evidence, so the next pass can re-check it
 mechanically.
 
-**Follow-up (later):** **D-262** closed the G-25 remainder (GM "view as player X") — the fog
+**Follow-up (later):** **D-263** closed the G-41 remainder (first-run onboarding + docs links),
+and **D-262** closed the G-25 remainder (GM "view as player X") — the fog
 loop now runs as whichever user a shell points it at, so the GM can watch the table through one
 player's eyes, including the tokens the host withholds from them. **D-257** had closed the G-43
 lifecycle and G-27 — kinds now write
@@ -457,10 +458,16 @@ remaining work is different from what the original assumed, that is called out.
 ### H. UX & platform completeness
 
 - **G-40 — Visual polish / theming.** Low · ⛔ **Open** (no themes/dark mode; themed modules only).
-- **G-41 — In-app help, onboarding, docs links.** Low · 🟡 **Partial (D-256).**
+- **G-41 — In-app help, onboarding, docs links.** Low · ✅ **Closed (D-256, D-263).**
   `src/ui/canvas/HelpPanel.svelte` renders the live key bindings per role from
   `src/core/keys.ts` and opens from the rail's Help button (`e2e/canvas_rail.spec.ts` asserts the
-  window). Still missing: first-run onboarding, contextual tips, docs links.
+  window). D-263 added the other half: a **derived** first-run checklist
+  (`src/core/onboarding.ts` + `src/ui/onboarding/OnboardingPanel.svelte`) at the top of both
+  sidebars — five steps for a GM, three for a player, each ticked from live world state and
+  collapsible with the choice remembered — the same list repeated in the Help window for the
+  window's own role, and a short "Rules reference" section of public links (the app's own design
+  documents ship with the repository, not the build, and the window says so). Covered by
+  `e2e/onboarding.spec.ts` and `tests/core/onboarding.test.ts`.
 - **G-42 — Firefox/WebKit acceptance of the shipped app.** Med (quality) · 🟡 **Partial.**
   Day-to-day the suite runs the `chromium` project (174 specs); `playwright.config.ts` still
   defines opt-in `firefox`/`webkit` projects, and the M2 acceptance run (D-082) executed webkit
