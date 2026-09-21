@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { detectCapabilities } from "./capabilities";
   import { DEFAULT_SCENE_ID, GM_USER_ID, makeToken, type HostApp } from "./hostBoot";
   import { createStage, type Stage } from "../canvas/stage";
@@ -78,6 +78,7 @@
   } from "../packages/moduleHandlers";
   import type { ModuleHookName } from "../core/moduleApi";
   import { getFog, getSetting } from "../storage/idb";
+  import { viewAsOptions, viewAsUser, withoutHiddenTokens } from "../core/viewAs";
   import {
     DEFAULT_TOOL_OPTIONS,
     type MeasurePreview,
@@ -116,6 +117,7 @@
     NoteDocument,
     SceneDocument,
     SceneGrid,
+    UserDocument,
     WallDocument,
   } from "../core/documents";
   import { OWNERSHIP_LEVELS } from "../core/documents";
@@ -963,10 +965,40 @@ const WALL_PICK_RADIUS = 12;
     ]);
   }
 
+  /**
+   * §2.3 (G-25 remainder, D-262): **view as player X** — the GM's canvas runs the fog loop, the
+   * token gate and the HP bars as the chosen player, so the GM sees the table that player sees.
+   * The picker is built from the users the host replicated (players only: previewing a GM or an
+   * assistant would show the GM's own view under another name), and the choice lives in `gmState`
+   * because it is a *view*, not world data — nothing about it is written anywhere.
+   */
+  const viewAsPlayer = $derived.by(() => {
+    void storeVersion;
+    const current = app;
+    if (!current || gmState.viewAsUser === "") return null;
+    return viewAsUser(
+      current.gm.client.store.getAll("users") as readonly UserDocument[],
+      gmState.viewAsUser,
+    );
+  });
+  const viewingAs = $derived(viewAsPlayer !== null);
+  /** What the previewed player's gate currently shows — the GM's own pick list follows it. */
+  let viewAsVisible = $state<ReadonlySet<string> | null>(null);
+
+  /** The cover this shell draws: a preview is always opaque (D-262), else god view decides. */
+  function fogStyle(): "opaque" | "translucent" {
+    return viewingAs ? "opaque" : gmState.godView ? "translucent" : "opaque";
+  }
+
   function tokenViews(): TokenView[] {
     const scene = activeScene();
     if (!scene) return [];
-    return scene.tokens.map((token) => ({ token, sceneId: scene._id }));
+    // A preview is a view of the table, not only of the pixels: under it the GM's pointer plays
+    // the player's part too, so a token the player cannot see is not selectable here either.
+    const gate = viewingAs ? viewAsVisible : null;
+    return scene.tokens
+      .filter((token) => gate === null || gate.has(token._id))
+      .map((token) => ({ token, sceneId: scene._id }));
   }
 
   /** §9 full grid spec for the stage + snapping (square/hex/gridless). */
@@ -1221,12 +1253,14 @@ const WALL_PICK_RADIUS = 12;
       }),
       // §2.2/G-10a: the GM's canvas is `isGM`, so the default `"gm"` setting draws bars here and
       // nowhere else; `"hover"` hands the same numbers over and the stage hides all but one.
+      // D-262: under a preview it is **not** the GM's canvas any more — the bars follow the same
+      // rule the previewed player's shell would apply (a player under the default sees none).
       tokenHpBarsMap(tokens, {
         actors: current.gm.client.store.getAll("actors") as ActorDocument[],
         mode: tokenHpBarsOf(
           worldSettingsFrom(current.gm.client.store.getAll("settings")),
         ),
-        isGM: true,
+        isGM: viewAsPlayer === null,
       }),
     );
     view.setTokenHpBarMode(
@@ -1237,8 +1271,9 @@ const WALL_PICK_RADIUS = 12;
     );
     // D-250/D-251: explored fog follows the replica — tokens moved, doors opened, scene
     // switched. The GM's cover is translucent (everything stays visible under it); god view
-    // off previews the opaque cover players get.
-    void fog?.sync(scene, { style: gmState.godView ? "translucent" : "opaque" });
+    // off previews the opaque cover players get — and a **view as** preview is always the
+    // opaque cover, because a see-through version of what a player sees is not what they see.
+    void fog?.sync(scene, { style: fogStyle() });
     // D-256: the GM's manual Hide/Reveal mask is a replicated scene flag — replay it onto
     // the fog layer on every replica change (idempotent: later strokes win).
     const mask = fogMaskLog(scene);
@@ -1703,10 +1738,37 @@ const WALL_PICK_RADIUS = 12;
           surfaceFor: (sc) => view.getFogLayer({ width: sc.width, height: sc.height }),
           hideSurface: () => view.hideFogLayer(),
           computer: createVisionComputer(),
-          transport: current.gm.client,
-          user: () => current.gm.client.user,
+          // D-262: under a preview the transport is not the GM's session — the *previewed* player's
+          // stored map is read from the host's own fog store (the host is this very tab) and
+          // **nothing is ever uploaded for them**: a preview must not overwrite the map a player
+          // explored. With no preview this is the ordinary GM session, exactly as before.
+          transport: {
+            requestFog: async (sceneId) => {
+              const viewed = viewAsPlayer;
+              if (viewed === null) return current.gm.client.requestFog(sceneId);
+              try {
+                const stored = await getFog(current.db, current.worldId, sceneId, viewed.id);
+                return stored?.png ?? null;
+              } catch {
+                return null;
+              }
+            },
+            sendFogPng: (sceneId, png) => {
+              if (viewAsPlayer === null) current.gm.client.sendFogPng(sceneId, png);
+            },
+          },
+          user: () => viewAsPlayer ?? current.gm.client.user,
           actors: () =>
             current.gm.client.store.getAll("actors") as readonly ActorDocument[],
+          // §5: the host withholds `hidden` documents from a player's replica; the preview runs
+          // client-side on the GM's own store, so the gate has to withhold them too (core/viewAs).
+          visibilityFilter: (sc, ids) =>
+            viewAsPlayer === null ? ids : withoutHiddenTokens(sc, ids),
+          onVisibility: (ids) => {
+            viewAsVisible = ids;
+            // Only a preview gates the GM's canvas — the GM's own view stays ungated (`null`).
+            view.setTokenVisibility(viewAsPlayer === null ? null : ids);
+          },
           onError: (where, error) => console.warn(`fog ${where} failed`, error),
         });
         controller = new CanvasController({
@@ -2237,6 +2299,14 @@ const WALL_PICK_RADIUS = 12;
             return fog?.stats().saves ?? 0;
           },
           fogExploredAt: ({ x, y }) => view.peekFogLayer()?.exploredAt(x, y) ?? null,
+          fogStoredBytesFor: async ({ sceneId, userId }) => {
+            try {
+              const stored = await getFog(current.db, current.worldId, sceneId, userId);
+              return stored?.png.length ?? 0;
+            } catch {
+              return 0;
+            }
+          },
           pf1eAreaPreviewShow: (spec) => {
             const model = showPF1eAreaPreview({
               kind: spec.kind as PF1eAreaKind,
@@ -2293,6 +2363,17 @@ const WALL_PICK_RADIUS = 12;
           },
           godView: () => gmState.godView,
           viewAsFaction: () => gmState.viewAsFaction,
+          viewAsState: () => ({
+            user: viewAsPlayer?.id ?? null,
+            followedPlayers: viewAsOptions(
+              current.gm.client.store.getAll("users") as readonly UserDocument[],
+              current.gm.client.user,
+            ).length,
+            drawnTokens: view.drawnTokenIds(),
+            pickableTokens: tokenViews().map((t) => t.token._id).sort(),
+            visibleTokenIds: fog?.stats().visibleTokenIds ?? null,
+            tokenHpBars: view.tokenHpBars().map((bar) => bar.id).sort(),
+          }),
           simCount: () => current.gm.client.simReplica?.count ?? null,
           turnPhase: () => lastTurnPhase,
           reportRulesVersion: () => lastRulesVersion,
@@ -2540,10 +2621,23 @@ const WALL_PICK_RADIUS = 12;
     };
   });
 
-  // D-250/D-251: god view toggles (Settings / GM extras) restyle the cover at once.
+  // D-250/D-251: god view toggles (Settings / GM extras) restyle the cover at once — and so does
+  // choosing (or leaving) a player to view as (D-262): the loop re-enters the scene as that user.
   $effect(() => {
-    const style = gmState.godView ? "translucent" : "opaque";
+    const style = fogStyle();
     void fog?.sync(activeScene(), { style });
+  });
+
+  // D-262: a preview changes *who* the shell is for the parts of the paint that are not the fog
+  // loop — above all the hit-point bars, which a player under the default setting has none of.
+  // A view switch moves no document, so nothing else would re-run this. The dependency is the
+  // *switch* alone and the body is untracked: `refresh()` bumps the store version it also reads
+  // (`viewingAs` derives from it), and tracking that would be a self-feeding loop.
+  $effect(() => {
+    void gmState.viewAsUser;
+    untrack(() => {
+      refresh();
+    });
   });
 </script>
 

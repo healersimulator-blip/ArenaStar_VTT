@@ -259,6 +259,11 @@ export interface AppSurface {
       sightFeet?: number;
       darkvisionFeet?: number;
       lightCells?: number;
+      /**
+       * §2.3/D-262: write the token's `hidden` flag (§5 withholds such documents from every
+       * player — the one thing a client-side *view as* preview has to emulate itself).
+       */
+      hidden?: boolean;
     }>,
   ): { ok: boolean; placed: number; cellSize: number };
   /**
@@ -831,6 +836,19 @@ export interface GmFogSurface {
   sceneDarkness(): number;
   godView(): boolean;
   viewAsFaction(): string;
+  /**
+   * §2.3/G-25 (D-262): the GM's **view as player X** preview — the user it runs as (null = the
+   * GM's own view), how many players the picker offers, the tokens the gate leaves on the canvas,
+   * the ones the pointer can reach, the ids the fog loop published and which carry a bar.
+   */
+  viewAsState(): {
+    user: string | null;
+    followedPlayers: number;
+    drawnTokens: string[];
+    pickableTokens: string[];
+    visibleTokenIds: string[] | null;
+    tokenHpBars: string[];
+  };
   /** GM client pool replica model count (null before the first snapshot). */
   simCount(): number | null;
   /** Last turn.phase frame phase ("idle" before any campaign). */
@@ -1014,6 +1032,11 @@ export interface GmFogSurface {
   fogFlush(): Promise<number>;
   /** D-250: is the world point explored on the GM's texture? (null = no fog layer) */
   fogExploredAt(spec: { x: number; y: number }): boolean | null;
+  /**
+   * §2.3/D-262: the bytes the host's fog store holds for one user on a scene — what a *preview*
+   * must never change (it reads that player's map; every write stays the player's own).
+   */
+  fogStoredBytesFor(spec: { sceneId: string; userId: string }): Promise<number>;
 }
 
 export interface RulesPackageSmokeResult {
@@ -1715,6 +1738,8 @@ function appSurface(app: HostApp): AppSurface {
                 },
               }
             : {}),
+          // §2.3/D-262: a token the host withholds from players (§5 projection)
+          ...(t.hidden === true ? { hidden: true } : {}),
         };
         ops.push({
           kind: "create",

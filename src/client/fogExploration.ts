@@ -10,7 +10,14 @@
  *
  * The host persists fog.put per [worldId, sceneId, userId] and answers fog.get from that
  * store, so a reload, a reconnect, or a world file opened elsewhere all come back with the
- * same explored map. Every step is serialised on one promise chain, so a scene switch can
+ * same explored map.
+ *
+ * §2.3 (G-25 remainder, D-262) — the loop runs as **whoever `options.user()` says**: a GM shell can
+ * hand it a player and the restore, the viewers, the radii and the gate all become that player's.
+ * A change of viewer re-enters the scene (a fresh surface, that user's stored map), so a preview
+ * never shows the previous viewer's accumulated exploration — and `options.visibilityFilter` is
+ * where the caller states what a gate needs on top of the rules (`core/viewAs`: the documents §5
+ * withheld). Every step is serialised on one promise chain, so a scene switch can
  * never read back a surface the next scene already replaced, and a stale polygon result
  * never lands on a newer scene. No pixi here: the surface is an interface, and the unit
  * tests drive the loop with a fake one.
@@ -81,6 +88,15 @@ export interface FogExplorationOptions {
    * only when the set changes. Player shells wire it to the stage; the GM shell leaves it.
    */
   onVisibility?: (visible: ReadonlySet<string> | null) => void;
+  /**
+   * §2.3/D-262: the last word on the set the loop publishes — the caller's chance to state what
+   * the rules cannot know here (`withoutHiddenTokens`: the tokens §5 withheld from the viewer).
+   * `null` in stays `null` out; absent, the loop publishes the gate as computed.
+   */
+  visibilityFilter?: (
+    scene: SceneDocument | null,
+    visible: ReadonlySet<string> | null,
+  ) => ReadonlySet<string> | null;
   /** Quiet time after the last reveal before the map is uploaded (default 1500 ms). */
   saveDelayMs?: number;
   /**
@@ -122,6 +138,10 @@ export class FogExploration {
   private lastSaveBytes = 0;
   private enabled = false;
   private destroyed = false;
+  /** The scene the published set belongs to (the visibility filter's context). */
+  private scene: SceneDocument | null = null;
+  /** Who the loop is running as — a change re-enters the scene (D-262's viewer switch). */
+  private viewerKey: string | null = null;
   /** Polygons of the last reveal pass (current sight), for the visibility gate. */
   private polys: readonly Float32Array[] = [];
   private visibleKey: string | null = null;
@@ -212,8 +232,14 @@ export class FogExploration {
   private async syncInner(scene: SceneDocument | null, style: FogStyle): Promise<void> {
     if (this.destroyed) return;
     const settings = scene ? sceneFogSettings(scene) : { enabled: false, rangeSquares: null };
+    const user = this.options.user();
+    // D-262: who this loop runs as is part of the scene's identity — a GM pointing the loop at a
+    // different player must not inherit the previous viewer's surface or explored map.
+    const viewerKey = `${user?.id ?? "-"}:${user?.role ?? "-"}`;
     if (!scene || !settings.enabled) {
       await this.leaveScene();
+      this.scene = scene;
+      this.viewerKey = viewerKey;
       this.enabled = false;
       this.options.hideSurface();
       // D-256: the GM's manual mask outlives the sight loop. With fog off there are no
@@ -224,10 +250,12 @@ export class FogExploration {
       return;
     }
     this.enabled = true;
-    const user = this.options.user();
     const actors = this.options.actors();
-    if (scene._id !== this.sceneId) {
+    this.scene = scene;
+    if (scene._id !== this.sceneId || viewerKey !== this.viewerKey) {
       await this.leaveScene();
+      this.scene = scene;
+      this.viewerKey = viewerKey;
       const surface = this.options.surfaceFor(scene);
       surface.reset();
       surface.setStyle(style);
@@ -301,11 +329,17 @@ export class FogExploration {
 
   /** Hand the shell the visible set, only when it changed (null = fog off, everything). */
   private publishVisibility(ids: Set<string> | null): void {
-    const key = ids === null ? null : [...ids].sort().join("\n");
+    // D-262: the caller's last word (the preview's §5 filter) — applied here, at the one funnel
+    // every publish goes through, so no path can hand a shell an unfiltered set.
+    const filtered = this.options.visibilityFilter
+      ? this.options.visibilityFilter(this.scene, ids)
+      : ids;
+    const key = filtered === null ? null : [...filtered].sort().join("\n");
     if (key === this.visibleKey) return;
     this.visibleKey = key;
-    this.visibleIds = ids;
-    this.options.onVisibility?.(ids);
+    this.visibleIds =
+      filtered === null ? null : filtered instanceof Set ? filtered : new Set(filtered);
+    this.options.onVisibility?.(this.visibleIds);
   }
 
   /** The stored map for a scene, or null on a miss, an error, or a host that stays silent. */
@@ -329,6 +363,7 @@ export class FogExploration {
     if (this.sceneId === null) return;
     await this.save();
     this.sceneId = null;
+    this.scene = null;
     this.surface = null;
     this.key = null;
     this.polys = [];

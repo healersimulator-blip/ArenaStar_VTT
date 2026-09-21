@@ -23,7 +23,10 @@ kind selector is cosmetic to the engine (flagged in G-27 too). **Two more gaps a
 Every entry below carries a file path or a test as its evidence, so the next pass can re-check it
 mechanically.
 
-**Follow-up (same day):** **D-257** closed the G-43 lifecycle and G-27 — kinds now write
+**Follow-up (later):** **D-262** closed the G-25 remainder (GM "view as player X") — the fog
+loop now runs as whichever user a shell points it at, so the GM can watch the table through one
+player's eyes, including the tokens the host withholds from them. **D-257** had closed the G-43
+lifecycle and G-27 — kinds now write
 honest restriction axes, doors are placed closed and toggle on a click, locked doors ignore
 clicks, `Alt`-click deletes a wall, and the GM overlay that draws them is finally synced. Only
 wall reshaping (drag an endpoint / change a placed wall's kind) remains of G-43. **D-258** then
@@ -402,8 +405,11 @@ remaining work is different from what the original assumed, that is called out.
   `src/core/fogMask.ts` (ordered hide/reveal paint log in `flags.core.fogMask`, bounded, later
   strokes win), replayed on both shells by `FogLayer.applyManualMask`, replicated as a scene flag,
   hide-all/reveal-all from the rail, and token gating via `maskHiddenTokenIds` (a player's own
-  token is never swallowed). **Remainder:** GM "view as player X" — the existing `viewAsFaction`
-  is the *strategic* faction fog, not a per-player fog view. *(Internal: ROADMAP follow-up.)*
+  token is never swallowed). **The remainder — GM "view as player X" — closed in D-262:** the
+  Settings window's `[data-gm-view-as]` points the fog loop, the token gate, the pick list and the
+  HP bars at one player, re-enters the scene as that user (their stored map, read and never
+  written), always draws the opaque cover, and withholds exactly what §5 withholds
+  (`src/core/viewAs.ts`). *(Internal: ROADMAP follow-up.)*
 - **G-26 — Light source animation & richness.** Low · ⛔ **Open.** Static lights; no flicker,
   domes, darkness sources, priorities/thresholds.
 - **G-27 — Windows / wall variety.** Low · ✅ **Closed (D-257).**

@@ -8,7 +8,7 @@
   import type { ClientSync } from "../../client/sync";
   import type { ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
-  import type { SceneDocument, SceneGrid } from "../../core/documents";
+  import type { SceneDocument, SceneGrid, UserDocument } from "../../core/documents";
   import {
     fogSettingsOps,
     sceneDarknessOp,
@@ -17,6 +17,7 @@
   } from "../../core/fogExploration";
   import { DEFAULT_BINDINGS } from "../../core/keys";
   import { gmState } from "../armies/gmState.svelte";
+  import { viewAsOptions } from "../../core/viewAs";
   import {
     advanceClockOnRoundOf,
     playerPendingRollModeOf,
@@ -106,8 +107,14 @@
   let fog = $state<FogSettings>({ enabled: false, rangeSquares: null });
   /** §2.1: the active scene's ambient darkness (0 = bright, 1 = pitch dark). */
   let darkness = $state(0);
+  /** §2.3/G-25 (D-262): the players this GM can preview the table as. */
+  let viewAsChoices = $state<{ id: string; name: string }[]>([]);
 
   function refresh(): void {
+    viewAsChoices = viewAsOptions(
+      client.store.getAll("users") as readonly UserDocument[],
+      client.user,
+    );
     const scenes = client.store.getAll("scenes") as readonly SceneDocument[];
     const active = scenes.find((s) => s.active) ?? scenes[0] ?? null;
     sceneId = active?._id ?? "";
@@ -420,6 +427,22 @@
         God view — the GM's fog is see-through (every token and map feature stays visible
         under it); off: preview the opaque cover players get
       </label>
+      <label class="check">
+        View as player
+        <select data-gm-view-as bind:value={gmState.viewAsUser}>
+          <option value="">— the GM's own view</option>
+          {#each viewAsChoices as choice (choice.id)}
+            <option value={choice.id}>{choice.name}</option>
+          {/each}
+        </select>
+      </label>
+      {#if gmState.viewAsUser !== ""}
+        <p class="note" data-gm-view-as-note>
+          Seeing what this player sees: their fog (read from what they have explored, never
+          written), their tokens, their bars. Switch back to <em>the GM's own view</em> to run
+          the table again.
+        </p>
+      {/if}
     </div>
     <!-- §2.1: how far sight carries is bounded by light; this is the ambient share of it -->
     <div class="row lighting">

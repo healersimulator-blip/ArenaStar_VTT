@@ -368,10 +368,26 @@ omissions.
 
 ### 2.3 Tails · S
 
-- **GM "view as player X"** (G-25 remainder): the host already keeps explored fog **per user +
+- ~~**GM "view as player X"** (G-25 remainder): the host already keeps explored fog **per user +
   scene** (`src/host/sync.ts:130-140`, D-250) and `e2eHook` already exposes masked
   `fogMaskStrokes()`; the slice is a viewer switch in the fog layer, not new state. The existing
-  `viewAsFaction` is the *strategic* mass-battle fog and is *not* this.
+  `viewAsFaction` is the *strategic* mass-battle fog and is *not* this.~~ **done (D-262).** It was
+  exactly the viewer switch the note predicted — `core/viewAs.ts` (the picker: players only, never
+  the viewer; the identity the preview runs as; §5's withheld-document filter) plus a `viewerKey`
+  in `src/client/fogExploration.ts` so a change of viewer **re-enters the scene** (fresh surface,
+  that player's stored map, their eyes) and the App pointing the loop, the token gate, the pick
+  list and the HP bars at the chosen player. A preview is always the opaque cover, it **reads** the
+  previewed player's explored map and never writes it (the transport's `sendFogPng` is a no-op in
+  preview mode), and it adds exactly one rule the client-side gate cannot know: the tokens the host
+  withheld from that player (§5), applied through the loop's new `visibilityFilter`.
+  **Acceptance — met.** `e2e/gm_view_as.spec.ts` **1/1 (26.6 s)**: four tokens including a masked
+  one and one the host withholds; the GM's own view draws and bars all four, the joined player's
+  replica holds three and their gate shows two, and under the preview the GM's canvas publishes,
+  draws *and can click* exactly what that player's own canvas reports — with no bars (the default
+  `"gm"` setting gives a player none), the player's own explored map behind an opaque cover, and
+  the host's stored bytes for that player unchanged after a flush. Turning it off restores the GM's
+  view with nothing placed. Unit: `tests/core/viewAs.test.ts` **11** + three new
+  `tests/client/fogExploration.test.ts` cases (the re-entry, the no-op sync, the filter).
 - **Onboarding & help** (G-41 remainder): first-run tips, docs links from the Help window.
 - **i18n extraction** (G-38): start `src/ui/i18n` (UI strings only; OGL content stays English with
   a later translation pass) — schedule when a non-English table is actually in scope.
@@ -406,7 +422,7 @@ omissions.
 | 1.4 | Compendium scale UX | 1.1 | S–M | G-45 |
 | 2.1 | Lighting-as-vision | — | L | G-24 — **done, D-260** (G-32 **decided**, D-260; G-26 open) |
 | 2.2 | Table flow (HP bars, quickbar, chat apply) | 1.3 for item-bound slots | M | G-22, G-10a, G-10b, G-20 — **done, D-261** |
-| 2.3 | Tails (view-as, onboarding, i18n) | 2.1 for view-as | S | G-25 tail, G-41 tail, G-38 |
+| 2.3 | Tails (view-as, onboarding, i18n) | 2.1 for view-as | S | G-25 tail — **view-as done, D-262**; G-41 tail, G-38 open |
 | 3.1 | Character import | 1.3 (item/actor shape stable) | Med–L | G-39 |
 | 3.2 | Statblock import | — | S–M | G-08 |
 | 3.3 | Non-combat + condition tails | — | M | G-11, G-21 |
