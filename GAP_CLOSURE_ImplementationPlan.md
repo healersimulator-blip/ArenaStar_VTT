@@ -304,17 +304,67 @@ converter+actor+token-editor tail recorded in D-260 · the gate's light term is 
 with the reveal radius for today's single caller and is kept as the caller contract (the future
 host-side gate) and against a stale-polys race.
 
-### 2.2 Table flow — **G-22 / G-10a / G-10b / G-20** · M
+### 2.2 Table flow — **G-22 / G-10a / G-10b / G-20** · M · ✅ **done (D-261)**
 
-1. **Token HP bars** (Med): Pixi label under the token, driven by the derived HP the sheet already
-   computes; world setting for bar visibility (GM only / always / on hover).
-2. **Player quickbar** (Med): per-character action slots bound to item actions / attack actions and
-   spells; the core macro hotbar (slots 1–5) is the existing mechanism to generalize.
-3. **Chat-card apply buttons** (Med): apply/heal intent on arbitrary rolls, host-authoritative —
-   the verified-roll plumbing already exists; this is UI + one intent + a permission check.
+1. ~~**Token HP bars** (Med): Pixi label under the token, driven by the derived HP the sheet
+   already computes; world setting for bar visibility (GM only / always / on hover).~~ **done.**
+   `src/packages/pf1e/tokenHpBars.ts` is pure and deliberately thin: `tokenHpBarFor` hands back
+   *the numbers the sheet already reports* (`deriveFromActorDocument`'s `hp`/`hpMax`, plus temp HP
+   and nonlethal when they are non-zero) and `null` when there is no actor or `hpMax < 1`, so a
+   bar can never disagree with the sheet it is drawn from. The world setting is the plan's three
+   cases — `tokenHpBars: "gm"` (default) / `"all"` / `"hover"` in
+   `src/core/worldSettings.ts` — and it replicates like every other world setting, so the GM's
+   choice reaches players without a reload. `src/canvas/stage.ts` draws the label under the token
+   (`[data-world-token-hp-bars]`) for exactly the tokens the viewer may see: the GM shell bars
+   every token the canvas draws and re-bars on selection, the player shell follows the same
+   fog-visibility gate D-250/D-251 built, so a bar is not a leak the fog does not have.
+   **"hover"** is the stage's own hit-test, not a DOM overlay, so it works at any zoom.
+2. ~~**Player quickbar** (Med): per-character action slots bound to item actions / attack actions
+   and spells; the core macro hotbar (slots 1–5) is the existing mechanism to generalize.~~
+   **done.** The slots are the actor's own data — `flags.pf1e.quickbar` as
+   `{slot 1–5, kind: "attack" | "damage" | "item", label, attackIndex, itemId}` — so a binding is
+   a document write like any other (one op, host-validated, replicated to the GM, undoable) and
+   not client state that dies with the tab. `src/ui/quickbar/model.ts` reads/writes them
+   (`quickbarWriteOp` rewrites the whole `flags` subtree, because a flat diff cannot create an
+   intermediate path) and builds the candidate list from **the same derivation the sheet reads**
+   (`pf1eAttackRollGroups` → attack + damage lines, `pf1eItemView` → castable items), with a note
+   that names a binding gone stale. `run.ts` runs a slot through the sheet's own flows —
+   `resolveAttackFlow` for an attack against the chosen target, `resolveCastFlow` +
+   `consumableCastAuthored` for an item (charges, CL, save DC included), the public roll card for
+   a damage line (which the item-3 verb can then land on a token) — so a quickbar press and a
+   sheet press cannot diverge. Spells bind **through their item**; the converted corpus ships no
+   spell blocks, and inventing a save type for a prepared spell is exactly what D-259 refused.
+   `QuickbarRow.svelte` is mounted in both shells: the player's is their own character (the first
+   fog-visible token they may `update`), the GM's follows the **selected** token — and the
+   world-level macro hotbar keeps its slots 1–5 untouched.
+3. ~~**Chat-card apply buttons** (Med): apply/heal intent on arbitrary rolls,
+   host-authoritative — the verified-roll plumbing already exists; this is UI + one intent + a
+   permission check.~~ **done.** `roll.apply` (`0x34`, ops channel) carries `{messageId, actorId,
+   mode: "damage" | "healing"}` and **no amount**: the host re-reads the card's own
+   `message.roll.total` from its replica, checks `can(user, "update", actor, "actors")`, refuses a
+   replay through `flags.pf1e.applied` (per actor *and* mode) and commits one atomic envelope —
+   actor diff + whole `flags` + a `ledgerFollowUp` note — so a rejected follow-up rolls the whole
+   application back and the GM's Undo takes it off in one step. `src/packages/pf1e/rollApply.ts`
+   is the rules half (`planRollApply`: temp HP first, HP floored at 0; healing caps at `hpMax` and
+   strips an equal amount of nonlethal), `RollApplyRow.svelte` the surface, `applyTarget.ts` the
+   D-256-style single-selection target rule. Applying in *healing* mode to a card whose own flow
+   already wrote HP is deliberately allowed — the modes are the table's intent, not the card's.
 
-**Acceptance.** e2e per item, driven through the real UI and read back from the host replica (the
-D-255/D-256 pattern).
+**Acceptance — met.** e2e per item, driven through the real UI and read back from the host replica
+(the D-255/D-256 pattern): `e2e/token_hp.spec.ts` **1/1 (8.6 s)** — a GM sees `10/10` and `12/12`,
+lowers the orc to `4/12` through the *sheet's* combat tab and the bar follows; a really joined
+player sees `[]` under the default `"gm"`, their own hero under `"all"`, and the hero (never the
+GM's orc) under `"hover"`; `e2e/quickbar.spec.ts` **1/1 (13.7 s)** — the player's picker offers
+their greataxe, the bind replicates to the host replica, pressing the damage slot posts the card,
+the item-3 verb lands it on their own token (HP 20 → 20 − total), and an attack slot refuses
+without a target, then resolves against the GM's orc through `resolveAttackFlow` while the orc's
+own HP bar and the orc's *own* slots (a different character, bound by the GM) prove the bar
+follows the selection; `e2e/roll_apply.spec.ts` **1/1 (10.2 s)** — GM `/roll 1d4+4`, select the
+hero, *Damage* ⇒ `hp 20 − total` with nonlethal untouched and `applied {a-hero: {damage: total}}`
+on the card, *Healing* ⇒ `{hp: 20, hpMax: 20, tempHp: 0, nonlethalDamage: 0}`, a player's own card
+landing its damage as the player and replicating, a GM-only actor read back as unchanged (`12`),
+and an empty-canvas click taking the row away. **D-261** carries the evidence and the deliberate
+omissions.
 
 ### 2.3 Tails · S
 
@@ -355,7 +405,7 @@ D-255/D-256 pattern).
 | 1.3 | Inventory + items + encumbrance | 1.1 (packs to import) | M–L | G-03, G-04, G-05 tail, G-01 tail |
 | 1.4 | Compendium scale UX | 1.1 | S–M | G-45 |
 | 2.1 | Lighting-as-vision | — | L | G-24 — **done, D-260** (G-32 **decided**, D-260; G-26 open) |
-| 2.2 | Table flow (HP bars, quickbar, chat apply) | 1.3 for item-bound slots | M | G-22, G-10a, G-10b, G-20 |
+| 2.2 | Table flow (HP bars, quickbar, chat apply) | 1.3 for item-bound slots | M | G-22, G-10a, G-10b, G-20 — **done, D-261** |
 | 2.3 | Tails (view-as, onboarding, i18n) | 2.1 for view-as | S | G-25 tail, G-41 tail, G-38 |
 | 3.1 | Character import | 1.3 (item/actor shape stable) | Med–L | G-39 |
 | 3.2 | Statblock import | — | S–M | G-08 |
