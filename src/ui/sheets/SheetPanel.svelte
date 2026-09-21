@@ -3,6 +3,14 @@
   import PF1eActorSheet from "./PF1eActorSheet.svelte";
   import { isPF1eActor } from "./pf1eSheetModel";
   import { can } from "../../core/permissions";
+  import {
+    characterImportActorId,
+    characterImportOps,
+    characterImportReport,
+    formatLabel,
+    importCharacter,
+    type CharacterImportReport,
+  } from "../../packages/pf1e/import";
   import type { ClientSync } from "../../client/sync";
   import type { ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
@@ -91,6 +99,48 @@
     void update({ [`system.${key}`]: value });
   }
 
+  /**
+   * §3.1 (G-39/D-264): read a character export and create the actor it describes. The whole
+   * character — items and authored attack lines included — arrives as *one* create op, so the
+   * table sees one document appear rather than a character and then its gear, and an undo takes
+   * the whole thing back. The report stays on screen afterwards: an import that dropped a
+   * wizard's spellbook has to say so where the person who ran it is still looking.
+   */
+  let importReport = $state<{ ok: boolean; name: string; lines: string[]; warnings: string[] } | null>(
+    null,
+  );
+  let importBusy = $state(false);
+
+  async function importFile(file: File | undefined | null): Promise<void> {
+    if (!file) return;
+    importBusy = true;
+    try {
+      const text = await file.text();
+      const parsed = importCharacter(text, { fileName: file.name });
+      if (!parsed.ok) {
+        importReport = { ok: false, name: file.name, lines: [], warnings: [parsed.error] };
+        return;
+      }
+      const id = characterImportActorId(globalThis.crypto.randomUUID());
+      const report: CharacterImportReport = characterImportReport(parsed.value);
+      client.submit(
+        characterImportOps(parsed.value, { id, gmId: client.user?.id ?? undefined }),
+      );
+      importReport = {
+        ok: true,
+        name: `${report.name} (${formatLabel(report.format)})`,
+        lines: report.read,
+        warnings: report.warnings,
+      };
+      coll = "actors";
+      selectedId = id;
+      // the create lands through the store's own round trip, so the list refreshes with the op
+      globalThis.setTimeout(refresh, 50);
+    } finally {
+      importBusy = false;
+    }
+  }
+
   function users(): UserDocument[] {
     return client.store.getAll("users") as readonly UserDocument[] as UserDocument[];
   }
@@ -139,8 +189,50 @@
     </button>
     {#if client.user?.role === "GM" || client.user?.role === "ASSISTANT"}
       <button id="new-doc" class="tab" onclick={() => createDoc()}>+ New</button>
+      {#if coll === "actors"}
+        <label
+          class="tab import"
+          for="character-import"
+          data-import-character-trigger
+          title="Foundry PF1e actor JSON, Hero Lab XML, or a Roll20 sheet export"
+          >{importBusy ? "Reading…" : "Import"}
+          <input
+            id="character-import"
+            data-import-character
+            type="file"
+            accept=".json,.xml,.txt"
+            hidden
+            onchange={(event) => {
+              const input = event.currentTarget as HTMLInputElement;
+              void importFile(input.files?.[0] ?? null);
+              input.value = "";
+            }}
+          />
+        </label>
+      {/if}
     {/if}
   </div>
+
+  {#if importReport}
+    <div class="import-report" data-import-report data-import-ok={importReport.ok ? "true" : "false"}>
+      <div class="import-head">
+        <strong>{importReport.ok ? `Imported ${importReport.name}` : `Could not import ${importReport.name}`}</strong>
+        <button type="button" class="dismiss" data-import-dismiss onclick={() => (importReport = null)}>✕</button>
+      </div>
+      {#each importReport.lines as line, index (index)}
+        <p class="import-line">{line}</p>
+      {/each}
+      {#if importReport.warnings.length > 0}
+        <p class="import-note">
+          {importReport.warnings.length} thing{importReport.warnings.length === 1 ? "" : "s"} could not be
+          placed — author them on the sheet:
+        </p>
+        {#each importReport.warnings as warning, index (index)}
+          <p class="import-warning" data-import-warning>{warning}</p>
+        {/each}
+      {/if}
+    </div>
+  {/if}
 
   <div id="sheet-list">
     {#each docs as doc (doc._id)}
@@ -286,6 +378,53 @@
   .tab.active {
     background: #2b3a55;
     color: #fff;
+  }
+  .tab.import {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    white-space: nowrap;
+  }
+  .import-report {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px 8px;
+    border: 1px solid #3a3f4a;
+    border-left: 3px solid #63d471;
+    border-radius: 6px;
+    background: #1d2127;
+    font-size: 0.75rem;
+    max-height: 180px;
+    overflow-y: auto;
+  }
+  .import-report[data-import-ok="false"] {
+    border-left-color: #e06c75;
+  }
+  .import-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 6px;
+  }
+  .import-line {
+    margin: 0;
+    color: #cfd3dc;
+  }
+  .import-note {
+    margin: 4px 0 0;
+    color: #8b93a3;
+  }
+  .import-warning {
+    margin: 0;
+    color: #ffd479;
+  }
+  .dismiss {
+    border: none;
+    background: transparent;
+    color: #8b93a3;
+    cursor: pointer;
+    font-size: 0.75rem;
   }
   #sheet-list {
     display: flex;

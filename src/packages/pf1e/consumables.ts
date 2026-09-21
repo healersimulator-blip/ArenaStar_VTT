@@ -350,6 +350,16 @@ export function weaponItemsOf(items: readonly PF1eInventoryItem[]): Array<{
   return out;
 }
 
+/** A finite number out of a loosely-typed authored block (an item's raw `weapon` JSON), else 0. */
+function flatNumber(raw: unknown): number {
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : 0;
+  if (typeof raw === "string" && raw.trim() !== "") {
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+
 /** Melee reach in 5-ft. squares for a size, from the weapon's own flags (reach doubles it). */
 function reachSquaresFor(size: PF1eSize, reach: boolean): number {
   const natural: Record<PF1eSize, number> = {
@@ -389,6 +399,12 @@ export function attackEntryFromWeapon(input: {
     typeof input.item.weapon?.name === "string" && input.item.weapon.name.trim() !== ""
       ? input.item.weapon.name.trim()
       : "";
+  // A weapon described by a printed damage *total* (a stat block's `damageMod`, a Hero Lab
+  // `damage="1d8+4"`, a Roll20 damage field) carries the remainder of that total in the item's
+  // `damageBonus` and says the ability contribution is already inside it — the pair
+  // `statBlock.ts` authors for the same reason, so the derivation does not add Strength twice.
+  const authoredFlat = flatNumber(input.item.weapon?.damageBonus);
+  const authoredAbilityIncluded = input.item.weapon?.abilityDamageIncluded === true;
   const entry: PF1eAttackEntry = {
     name: authoredName !== "" ? authoredName : input.item.name !== "" ? input.item.name : weapon.name,
     itemId: input.item.id,
@@ -400,8 +416,13 @@ export function attackEntryFromWeapon(input: {
     offHand: weapon.handedness === "light" && !ranged,
     reachSquares: reachSquaresFor(size, weapon.reach),
     touchAttack: weapon.touch,
-    ...(weapon.enhancementBonus > 0 ? { damageBonus: weapon.enhancementBonus } : {}),
+    ...(weapon.enhancementBonus > 0
+      ? { damageBonus: weapon.enhancementBonus }
+      : authoredFlat !== 0
+        ? { damageBonus: authoredFlat }
+        : {}),
   };
+  if (authoredAbilityIncluded && entry.damageBonus !== undefined) entry.abilityDamageIncluded = true;
   if (weapon.damageDice !== null) entry.damageDice = weapon.damageDice;
   if (weapon.rangeIncrementFt !== null) entry.rangeIncrementFt = weapon.rangeIncrementFt;
   if (weapon.class === "firearm") {

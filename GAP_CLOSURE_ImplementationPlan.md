@@ -413,9 +413,20 @@ omissions.
 
 ## 3. Wave 3 — breadth and on-ramp
 
-1. **Character import — G-39** (Med–L). Hero Lab XML (R20's path), Foundry actor JSON, Roll20 sheet
-   export → our actor shape. Pairs with 1.1: a migrating table gets characters *and* content in one
-   move, which is the on-ramp both competitors win on today.
+1. ~~**Character import — G-39** (Med–L). Hero Lab XML (R20's path), Foundry actor JSON, Roll20
+   sheet export → our actor shape.~~ **done (D-264).** Three readers behind one contract
+   (`src/packages/pf1e/import/`: `foundry.ts`, `herolab.ts` — by label, not by path, because the
+   format's nesting has moved between versions — `roll20.ts` through an alias table), one output
+   shape (`ImportedCharacter`: the `system.pf1e` block `parsePF1eActorSystem` validates + embedded
+   items in the shape `resolveInventoryItem` reads), and the attack lines authored by the *sheet's
+   own* `attackEntryFromWeapon`, so an imported longsword and a hand-authored one cannot disagree.
+   Three rules: never invent a field the source does not state, never author a total this app
+   derives (a printed `1d8+4` is decomposed against the export's own Strength and the remainder
+   flagged `abilityDamageIncluded`), and report every field left behind in the source's words. The
+   front door validates its own product (`characterImportCheck`) and refuses rather than creating a
+   sheet that derives blank. The Sheets window's Actors tab imports one file as **one** create op
+   and shows the report. Unit: `tests/packages/pf1eCharacterImport.test.ts` **30**; e2e:
+   `e2e/pf1e_import.spec.ts` **1/1**.
 2. **Statblock import — G-08** (S–M). Pasted text → bestiary actor through the existing actor
    shape; the structured bestiary packs are already the reference for the target fields.
 3. **Non-combat resolution — G-11 / G-21** (M). Specify the mechanics first (traps/haunts,
@@ -440,7 +451,7 @@ omissions.
 | 2.1 | Lighting-as-vision | — | L | G-24 — **done, D-260** (G-32 **decided**, D-260; G-26 open) |
 | 2.2 | Table flow (HP bars, quickbar, chat apply) | 1.3 for item-bound slots | M | G-22, G-10a, G-10b, G-20 — **done, D-261** |
 | 2.3 | Tails (view-as, onboarding, i18n) | 2.1 for view-as | S | G-25 tail (D-262 ✅), G-41 tail (D-263 ✅); G-38 open |
-| 3.1 | Character import | 1.3 (item/actor shape stable) | Med–L | G-39 |
+| 3.1 | Character import | 1.3 (item/actor shape stable) | Med–L | G-39 — **done, D-264** (`.por` zip extraction open) |
 | 3.2 | Statblock import | — | S–M | G-08 |
 | 3.3 | Non-combat + condition tails | — | M | G-11, G-21 |
 | 3.4 | Breadth content (Mythic/companions/PFS) | 1.1 | M | G-14/15/16 |

@@ -450,10 +450,18 @@ remaining work is different from what the original assumed, that is called out.
   package-scoped; no campaign-scope script surface).
 - **G-38 — Localizations.** Med · ⛔ **Open.** `src/ui/i18n/index.ts` is still the empty barrel
   (`export {}`).
-- **G-39 — Import from Roll20 / Foundry / Hero Lab.** Med · 🟡 **Partial (content only).**
-  The build-time converter imports Foundry *content* packs; there is no **character** import:
-  Hero Lab XML (R20), Foundry actor JSON, Roll20 sheet export. Verified absent (`herolab`: no
-  hits in `src/` or `tools/`). High-friction on-ramp gap that pairs naturally with G-44.
+- **G-39 — Import from Roll20 / Foundry / Hero Lab.** Med · ✅ **Closed (D-264).**
+  `src/packages/pf1e/import/` reads all three: Foundry PF1e actor JSON (components, items, authored
+  attack lines through the sheet's own `attackEntryFromWeapon`), Hero Lab XML (read by label, since
+  the format's nesting has moved between versions; abilities, hp, BAB, hit dice, published AC and
+  saves, skills, weapons, and the printed damage total decomposed against the export's Strength),
+  and Roll20 sheet exports (the sheet's own field names through an alias table, `repeating_*` weapon
+  rows, stored totals published as such, stored attack modifiers refused). The front door validates
+  its own product and refuses rather than creating a sheet that derives blank; the Sheets window's
+  Actors tab imports a file as one create op and shows the report (what was read, what was left
+  behind). Still open: extracting a `.por` **zip** (the XML inside is read; the archive itself is
+  named in the error and left to Hero Lab's own "Save Custom Output"), and prepared spell lists
+  (deliberately not guessed — D-259/D-264).
 
 ### H. UX & platform completeness
 
