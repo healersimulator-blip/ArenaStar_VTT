@@ -23,6 +23,8 @@
     rollHighlightFadeSecOf,
     secondsPerRoundOf,
     strategicSimultaneousOf,
+    tokenHpBarsOf,
+    type TokenHpBarMode,
     validateWorldSettingsPatch,
     worldSettingsFrom,
     worldSettingsOps,
@@ -79,6 +81,8 @@
     rollHighlightFadeSec: number;
     /** F03 — player reaction rolls: auto / savesChecksAuto / manual */
     playerPendingRollMode: "auto" | "savesChecksAuto" | "manual";
+    /** §2.2/G-10a: who draws token hit-point bars (gm / all / hover). */
+    tokenHpBars: TokenHpBarMode;
   }
   /** E05 (D-146): the replicated world clock, seconds. */
   let clockSeconds = $state(0);
@@ -93,6 +97,7 @@
     strategicArmyInitiative: false,
     rollHighlightFadeSec: 4,
     playerPendingRollMode: "savesChecksAuto",
+    tokenHpBars: "gm",
   };
   // Initialize only after the defaults exist (opening the window executes this script).
   let rules = $state<RulesOptions>(DEFAULT_RULES);
@@ -132,6 +137,7 @@
       strategicArmyInitiative: settings.strategicArmyInitiative === true,
       rollHighlightFadeSec: rollHighlightFadeSecOf(settings),
       playerPendingRollMode: playerPendingRollModeOf(settings),
+      tokenHpBars: tokenHpBarsOf(settings),
     };
   }
 
@@ -530,6 +536,24 @@
         <option value="auto">Auto (host rolls)</option>
         <option value="savesChecksAuto">Saves & checks auto (AoO/parry pending)</option>
         <option value="manual">Manual (all pending)</option>
+      </select>
+    </label>
+    <label>
+      Token HP bars
+      <select
+        data-world-token-hp-bars
+        value={rules.tokenHpBars}
+        onchange={(e) => {
+          rules = {
+            ...rules,
+            tokenHpBars: (e.target as HTMLSelectElement).value as TokenHpBarMode,
+          };
+          applyRules({ tokenHpBars: rules.tokenHpBars });
+        }}
+      >
+        <option value="gm">GM only (default)</option>
+        <option value="all">Everyone (players see every bar)</option>
+        <option value="hover">On hover (every replica)</option>
       </select>
     </label>
   </div>

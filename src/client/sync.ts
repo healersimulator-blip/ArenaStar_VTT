@@ -331,6 +331,14 @@ export class ClientSync {
     });
   }
 
+  /**
+   * §2.2 item 3 (G-20/D-261) — ask the host to apply this card's total to `actorId`. No amount
+   * travels: the host owns the number (and the permission check).
+   */
+  rollApply(messageId: DocId, actorId: DocId, mode: "damage" | "healing"): void {
+    this.send({ kind: "roll.apply", messageId, actorId, mode });
+  }
+
   /** F01 — GM revert (inverse of ledgerOps). */
   rollRevert(messageId: DocId): void {
     this.send({ kind: "roll.revert", messageId });

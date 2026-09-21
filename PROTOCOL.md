@@ -158,6 +158,19 @@ interface RollDelegateMsg {
 }
 ```
 
+### roll.apply (0x34 · client → host · ops)
+
+§2.2/G-20 — apply an already-rolled chat card to a token's actor. The player presses **Damage**/**Healing** on a roll card targeting a token they may `update`; the message carries *what* to do, never *how much* — no amount crosses the wire, so a client cannot inflate a hit. The host re-reads `message.roll.total` from its own replica, checks `can(user, "update", actor, "actors")`, refuses a replay via `flags.pf1e.applied[actorId]` (per actor *and* mode), and commits one atomic envelope: the actor diff (temp HP first, then HP floored at 0 for damage; capped at max and stripping an equal amount of nonlethal for healing), the whole `flags` subtree, and a `ledgerFollowUp` note so the change is undoable as one step. The card's row then shows the applied amount to everyone; a card with no roll total or a sealed (player-unreachable) actor is refused.
+
+```ts
+interface RollApplyMsg {
+  kind: "roll.apply";
+  messageId: DocId;
+  actorId: DocId;
+  mode: "damage" | "healing";
+}
+```
+
 ### ephemeral (0x04 · both · ephemeral)
 
 Never persisted, rate-limited 20 Hz per peer (§5).

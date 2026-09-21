@@ -56,6 +56,13 @@ export interface CoreWorldSettings {
    * skills; `carryingCapacityOf` reads the table at `Str + this`.
    */
   encumbranceCapacityStrBonus?: number;
+  /**
+   * Plan §2.2/G-10a — **who draws token hit-point bars**: `"gm"` (the default: the GM's own
+   * canvas), `"all"` (every replica draws every token bar it can, players included) or
+   * `"hover"` (a bar appears only under the pointer). The numbers themselves are always the
+   * derived ones the sheet shows (`packages/pf1e/tokenHpBars`).
+   */
+  tokenHpBars?: TokenHpBarMode;
   /** Anything a package defines; never stripped by core. Absent means "unset", not `undefined`. */
   [key: string]: Json;
 }
@@ -150,11 +157,22 @@ export function rollHighlightFadeSecOf(settings: CoreWorldSettings): number {
 }
 
 export type PlayerPendingRollMode = "auto" | "savesChecksAuto" | "manual";
-
 export function playerPendingRollModeOf(settings: CoreWorldSettings): PlayerPendingRollMode {
   const v = settings.playerPendingRollMode;
   if (v === "auto" || v === "savesChecksAuto" || v === "manual") return v;
   return "savesChecksAuto";
+}
+
+/** §2.2/G-10a — token HP-bar visibility. */
+export type TokenHpBarMode = "gm" | "all" | "hover";
+
+/**
+ * §2.2/G-10a — who draws token hit-point bars. Anything unset or unrecognised reads as `"gm"`:
+ * showing a monster's hit points to the whole table is the GM's decision, never a default.
+ */
+export function tokenHpBarsOf(settings: CoreWorldSettings): TokenHpBarMode {
+  const v = settings.tokenHpBars;
+  return v === "all" || v === "hover" ? v : "gm";
 }
 
 /** Values the settings bag may hold; objects/arrays would hide bugs from the diff, so they are refused. */
@@ -262,6 +280,15 @@ export function validateWorldSettingsPatch(patch: Record<string, unknown>): {
         return {
           ok: false,
           error: "encumbranceRule must be weight or off",
+          clean: {},
+        };
+      }
+    }
+    if (key === "tokenHpBars") {
+      if (value !== "gm" && value !== "all" && value !== "hover") {
+        return {
+          ok: false,
+          error: "tokenHpBars must be gm, all, or hover",
           clean: {},
         };
       }

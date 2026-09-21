@@ -71,6 +71,7 @@ describe("channelFor (§6.1)", () => {
       "roll.reroll": "ops",
       "roll.revert": "ops",
       "roll.delegate": "ops",
+  "roll.apply": "ops",
       "roll.challenge": "ops",
       ephemeral: "ephemeral",
       "asset.get": "assets",

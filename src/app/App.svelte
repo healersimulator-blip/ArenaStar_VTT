@@ -6,6 +6,7 @@
   import { tokenRect } from "../canvas/tokens";
   import type { RollHighlightRect } from "../canvas/layers/RollHighlightLayer";
   import { tokenBadgesMap } from "../packages/pf1e/tokenBadges";
+  import { tokenHpBarsMap } from "../packages/pf1e/tokenHpBars";
   import { isPF1eActor } from "../ui/sheets/pf1eSheetModel";
   import {
     pf1eAreaPreviewModel,
@@ -27,6 +28,7 @@
     exportWorldZip,
   } from "../host/worldFile";
   import { ChatPanel } from "../ui/chat";
+  import { QuickbarRow } from "../ui/quickbar";
   import { CombatPanel } from "../ui/combat";
   import {
     applyTokenMenuEntry,
@@ -118,7 +120,11 @@
   } from "../core/documents";
   import { OWNERSHIP_LEVELS } from "../core/documents";
   import type { Op } from "../core/ops";
-  import { encumbranceOptionsOf, worldSettingsFrom } from "../core/worldSettings";
+  import {
+    encumbranceOptionsOf,
+    tokenHpBarsOf,
+    worldSettingsFrom,
+  } from "../core/worldSettings";
   import { installGmFogE2e } from "./e2eHook";
   import { pf1eMovementOpportunities } from "../packages/pf1e/tacticalOpportunity";
   import { pf1eMovePlan } from "../packages/pf1e/movement";
@@ -876,6 +882,31 @@ const WALL_PICK_RADIUS = 12;
     if (macro && app) runChatMacro(app.gm.client, macro);
   }
 
+  /**
+   * §2.2 item 2 (G-10b/D-261): the quickbar plays the **selected** token's character — the same
+   * rule on both shells — and offers every actor the GM can read as the target (the selected one
+   * first), because a GM has no character of their own to play.
+   */
+  const quickbarActor = $derived.by(() => {
+    void storeVersion;
+    const current = app;
+    const scene = activeScene();
+    if (!current || !scene) return null;
+    const id = tokenSelection.ids.length === 1 ? tokenSelection.ids[0] : null;
+    if (id === null) return null;
+    const actorId = scene.tokens.find((t) => t._id === id)?.actorId ?? null;
+    if (actorId === null) return null;
+    return (current.gm.client.store.get("actors", actorId) as ActorDocument | undefined) ?? null;
+  });
+  const quickbarTargets = $derived.by(() => {
+    void storeVersion;
+    // The selected token's actor is in the list too: a self-buff (or a self-attack) is a table's
+    // business, and the bar chooses nothing on its own — an attack slot without a target refuses.
+    return [
+      ...((app?.gm.client.store.getAll("actors") ?? []) as readonly ActorDocument[]),
+    ];
+  });
+
   function activateScene(id: string): void {
     if (!app) return;
     const scenes = app.gm.client.store.getAll(
@@ -1188,6 +1219,21 @@ const WALL_PICK_RADIUS = 12;
         actors: current.gm.client.store.getAll("actors") as ActorDocument[],
         combats: current.gm.client.store.getAll("combats") as CombatDocument[],
       }),
+      // §2.2/G-10a: the GM's canvas is `isGM`, so the default `"gm"` setting draws bars here and
+      // nowhere else; `"hover"` hands the same numbers over and the stage hides all but one.
+      tokenHpBarsMap(tokens, {
+        actors: current.gm.client.store.getAll("actors") as ActorDocument[],
+        mode: tokenHpBarsOf(
+          worldSettingsFrom(current.gm.client.store.getAll("settings")),
+        ),
+        isGM: true,
+      }),
+    );
+    view.setTokenHpBarMode(
+      tokenHpBarsOf(worldSettingsFrom(current.gm.client.store.getAll("settings"))) ===
+        "hover"
+        ? "hover"
+        : "all",
     );
     // D-250/D-251: explored fog follows the replica — tokens moved, doors opened, scene
     // switched. The GM's cover is translucent (everything stays visible under it); god view
@@ -2408,6 +2454,8 @@ const WALL_PICK_RADIUS = 12;
               tiles.map((t) => [t._id, layer.alphaOf(t._id)]),
             );
           },
+          // §2.2/G-10a: what the GM canvas actually drew — the mode's own gate, read back.
+          tokenHpBars: () => view.tokenHpBars(),
           seedTile: (spec) => {
             const scene = activeScene();
             if (!scene) return "";
@@ -2731,9 +2779,22 @@ const WALL_PICK_RADIUS = 12;
             </button>
           {/each}
         </div>
+        {#if app}
+          <QuickbarRow
+            client={app.gm.client}
+            actor={quickbarActor}
+            targets={quickbarTargets}
+          />
+        {/if}
         <div class="tabbody" data-active-tab={activeTab}>
           {#if activeTab === "chat"}
-            <ChatPanel client={app.gm.client} bus={app.gm.bus} />
+            <ChatPanel
+              client={app.gm.client}
+              bus={app.gm.bus}
+              targetTokenId={tokenSelection.ids.length === 1
+                ? (tokenSelection.ids[0] ?? null)
+                : null}
+            />
           {:else if activeTab === "combat"}
             <CombatPanel
               client={app.gm.client}

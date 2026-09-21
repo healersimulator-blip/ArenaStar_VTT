@@ -28,11 +28,16 @@
   } from "../canvas/interactions";
   import { can } from "../core/permissions";
   import { ChatPanel } from "../ui/chat";
+  import { QuickbarRow } from "../ui/quickbar";
   import { WindowManager } from "../core/windows";
   import { WindowHost } from "../ui/windows";
   import { openPF1eSheetWindow } from "../ui/sheets/pf1eSheetWindow";
   import { SheetPanel } from "../ui/sheets";
-  import type { ActorDocument, SceneDocument, SceneGrid } from "../core/documents";
+  import type {
+    ActorDocument,
+    SceneDocument,
+    SceneGrid,
+  } from "../core/documents";
   import type { Op } from "../core/ops";
   import { copyText } from "../ui/clipboard";
   import { FogExploration } from "../client/fogExploration";
@@ -40,6 +45,8 @@
   import { drawingBounds } from "../canvas/layers/drawingGeometry";
   import { createVisionComputer } from "../workers/visionComputer";
   import { buildChatMessage, parseChatCommand } from "../core/chat";
+  import { tokenHpBarsMap } from "../packages/pf1e/tokenHpBars";
+  import { tokenHpBarsOf, worldSettingsFrom } from "../core/worldSettings";
 
   let app = $state<PlayerApp | null>(null);
   let phase = $state<"invite" | "exchange" | "live" | "dead">("invite");
@@ -58,6 +65,8 @@
 
   const wm = new WindowManager({ width: 800, height: 600 });
   let wmVersion = $state(0);
+  /** Bumped by `refresh()` (snapshot/ops) so `$derived` blocks re-read the store. */
+  let storeVersion = $state(0);
   const wmWindows = $derived.by(() => {
     void wmVersion;
     return [...wm.list()];
@@ -76,6 +85,8 @@
 
   let canvasHost = $state<HTMLDivElement | null>(null);
   let canvasError = $state<string | null>(null);
+  /** §2.2 item 3 (G-20/D-261): the tokens this player has selected — an apply verb's target. */
+  let selection = $state<string[]>([]);
   let canvasTool = $state<CanvasTool>("select");
   let canvasToolbarCollapsed = $state(false);
   /** D-256: the player's sub-tool settings (players never get the GM-only tools). */
@@ -324,6 +335,36 @@
     );
   }
 
+  /**
+   * §2.2 item 2 (G-10b/D-261): a player plays **their own** character — the first token the fog
+   * shows them that they may update (a player whose tokens are all hidden keeps the bar empty
+   * rather than guessing). The target is a separate choice in the bar itself.
+   */
+  const quickbarActor = $derived.by(() => {
+    void storeVersion;
+    const client = app?.client;
+    const user = client?.user;
+    if (!client || !user) return null;
+    for (const view of tokenViews()) {
+      const actorId = view.token.actorId ?? null;
+      if (actorId === null) continue;
+      const scene = activeScene();
+      if (!can(user, "update", view.token, "tokens", scene ? { parent: scene } : {})) continue;
+      const actor = client.store.get("actors", actorId) as ActorDocument | undefined;
+      if (actor) return actor;
+    }
+    return null;
+  });
+  const quickbarTargets = $derived.by(() => {
+    void storeVersion;
+    const client = app?.client;
+    const user = client?.user;
+    if (!client || !user) return [];
+    return [
+      ...((client.store.getAll("actors") as readonly ActorDocument[]) ?? []),
+    ].filter((a) => can(user, "read", a, "actors"));
+  });
+
   function tokenViews(): TokenView[] {
     const scene = activeScene();
     if (!scene) return [];
@@ -346,11 +387,28 @@
     const view = stage;
     const client = current?.client;
     if (!current || !view || !client) return;
+    // §2.2 item 2: the quickbar's slots live on the actor document, so the sidebar has to re-derive
+    // them whenever a snapshot or an op lands (the GM shell tracks its store the same way).
+    storeVersion++;
     const scene = activeScene();
     worldName = client.world?.name ?? "—";
     seq = client.store.seq;
     tokenCount = scene?.tokens.length ?? 0;
-    view.syncTokens(scene?.tokens ?? []);
+    // §2.2/G-10a: a player's canvas draws the bars the world setting allows — none under the
+    // default `"gm"`, every bar it was handed under `"all"`/`"hover"` (the stage hides a
+    // `"hover"` bar until the pointer arrives).
+    const tokens = scene?.tokens ?? [];
+    const hpBarMode = tokenHpBarsOf(worldSettingsFrom(client.store.getAll("settings")));
+    view.setTokenHpBarMode(hpBarMode === "hover" ? "hover" : "all");
+    view.syncTokens(
+      tokens,
+      undefined,
+      tokenHpBarsMap(tokens, {
+        actors: client.store.getAll("actors") as ActorDocument[],
+        mode: hpBarMode,
+        isGM: false,
+      }),
+    );
     void fog?.sync(scene, { style: "opaque" });
     // D-256: the GM's manual mask + visible map pins (the projection already withheld every
     // pin the GM has not made visible, so this layer only ever draws player-visible pins).
@@ -448,6 +506,8 @@
                 };
               },
               drawnTokens: () => view.drawnTokenIds(),
+              // §2.2/G-10a: what this canvas drew (empty under the default `"gm"` setting).
+              tokenHpBars: () => view.tokenHpBars(),
               pickableTokens: () => tokenViews().map((t) => t.token._id).sort(),
             }),
           );
@@ -509,6 +569,9 @@
           globalThis.removeEventListener("keydown", onToolKey);
         };
         controller = new CanvasController({
+          onSelectionChange: (ids) => {
+            selection = [...ids];
+          },
           onTokenActivate: ({ token }) => {
             if (token.actorId) openActorSheet(token.actorId);
           },
@@ -694,7 +757,16 @@
           <span>tokens {tokenCount}</span>
         </div>
         {#if app?.client}
-          <ChatPanel client={app.client} bus={app.bus} />
+          <QuickbarRow
+            client={app.client}
+            actor={quickbarActor}
+            targets={quickbarTargets}
+          />
+          <ChatPanel
+            client={app.client}
+            bus={app.bus}
+            targetTokenId={selection.length === 1 ? (selection[0] ?? null) : null}
+          />
           <SheetPanel
             client={app.client}
             bus={app.bus}

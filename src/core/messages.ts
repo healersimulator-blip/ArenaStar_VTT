@@ -40,6 +40,8 @@ export const MsgKind = {
   "roll.delegate": 0x32,
   // F03 — player pending roll resolution (client → host, host → client commit-reveal)
   "roll.pending": 0x33,
+  // §2.2 item 3 (G-20/D-261) — apply a roll card's total to an actor (the amount stays host-side)
+  "roll.apply": 0x34,
   // D-250 — explored fog restore: the client asks, the host answers from its fog store
   "fog.get": 0x0e,
   // host → client
@@ -148,6 +150,19 @@ export interface RollRerollMsg {
 export interface RollRevertMsg {
   kind: "roll.revert";
   messageId: DocId;
+}
+
+/**
+ * §2.2 item 3 (G-20/D-261) — apply (or heal) a roll card's total to one actor. **The intent carries
+ * no number**: the host re-reads `roll.total` from the committed card and refuses the apply unless
+ * the sender may update the actor, so a client can ask for a verb but never invent a figure.
+ */
+export interface RollApplyMsg {
+  kind: "roll.apply";
+  /** The roll card to apply. */
+  messageId: DocId;
+  actorId: DocId;
+  mode: "damage" | "healing";
 }
 
 /** F01 — GM delegates a reroll window to a player (expires in 2 turns). */
@@ -442,6 +457,7 @@ export type WireMessage =
   | RollRerollMsg
   | RollRevertMsg
   | RollDelegateMsg
+  | RollApplyMsg
   | EphemeralMsg
   | AssetGetMsg
   | FogPutMsg

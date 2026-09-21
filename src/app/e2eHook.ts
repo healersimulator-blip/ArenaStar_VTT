@@ -6,11 +6,13 @@ import type { LoopbackResult } from "../net/webrtc";
 import { makeToken, type HostApp } from "./hostBoot";
 import type {
   ActorDocument,
+  MessageDocument,
   CombatDocument,
   Json,
   Ownership,
   TokenDocument,
 } from "../core/documents";
+import type { DocId } from "../core/ids";
 import type { FlatDiff } from "../core/ops";
 import type { PlayerApp } from "./joinBoot";
 import type { HostShare } from "./hostShare";
@@ -28,6 +30,8 @@ import {
   type PF1eAreaIssue,
 } from "../packages/pf1e/targeting";
 import { deriveFromActorDocument, deriveFromDocuments } from "../packages/pf1e/actor";
+import { readRollApplications } from "../packages/pf1e/rollApply";
+import { readQuickbar } from "../ui/quickbar/model";
 import { footprintSide } from "../packages/pf1e/geometry";
 import { pf1eThreatModel } from "../packages/pf1e/threatPreview";
 import {
@@ -329,6 +333,16 @@ export interface AppSurface {
     hp: number | null;
   } | null;
   /**
+   * §2.2/G-10a: the derived hit points the canvas bars draw, read from the **host replica** —
+   * the sheet's own derivation (`deriveFromActorDocument`), so a bar and a sheet cannot disagree.
+   */
+  pf1eDerivedHp(actorId: string): {
+    hp: number;
+    hpMax: number;
+    tempHp: number;
+    nonlethalDamage: number;
+  } | null;
+  /**
    * D-186: write one world rules option through `worldSettingsOps` — the same op the
    * settings window submits — so a spec can prove the replication path an option takes.
    */
@@ -338,6 +352,27 @@ export interface AppSurface {
   }): { ok: boolean; error: string | null; ops: number };
   /** D-186: the merged world settings bag as every replica derives it. */
   pf1eWorldSettings(): Record<string, unknown>;
+  /**
+   * §2.2 item 3 (G-20/D-261): the newest roll card as the **host replica** holds it — the total the
+   * host evaluated and the record of what that card has already applied to whom.
+   */
+  pf1eLastRoll(): {
+    id: string;
+    total: number;
+    formula: string;
+    applied: Record<string, { damage?: number; healing?: number }>;
+  } | null;
+  /**
+   * §2.2 item 2 (G-10b/D-261): one actor's quickbar bindings, as the **host replica** holds them —
+   * a binding is an ordinary op, so the replica is where the table's shared truth lives.
+   */
+  pf1eQuickbar(actorId: string): Array<{
+    slot: number;
+    kind: string;
+    label: string;
+    attackIndex: number;
+    itemId: string | null;
+  }>;
   /** D-186: the public chat cards containing `needle`, for the resolution cards. */
   pf1eCardsContaining(needle: string): { count: number; first: string | null };
   /**
@@ -700,6 +735,13 @@ export interface PlayerSurface {
   /** §11 distributions from the last received report (null before one). */
   reportByType(): Record<string, number> | null;
   cacheHas(hash: string): Promise<boolean>;
+  /**
+   * D-261 authority probe: ask the host to apply a roll card's total to an actor, bypassing the
+   * chat card's own target picker. `roll.apply` carries no amount — the host re-reads the total
+   * from the card it evaluated and re-checks the permission — so this is how a spec proves the
+   * *host* refuses an apply the UI would never have offered.
+   */
+  rollApply(arg: { messageId: string; actorId: string; mode: "damage" | "healing" }): void;
 }
 
 export interface ShareSurface {
@@ -797,6 +839,18 @@ export interface GmFogSurface {
   effectsSummary(): { pings: number; rulers: number };
   /** §9 tile occlusion alpha per tile id (null = not rendered). */
   tileAlphas(): Record<string, number | null>;
+  /**
+   * §2.2/G-10a: the token HP bars the GM canvas draws right now (what a `"hover"` mode hides
+   * shows up here as an empty list), with the label text each bar carries.
+   */
+  tokenHpBars(): Array<{
+    id: string;
+    hp: number;
+    hpMax: number;
+    tempHp: number;
+    nonlethalDamage: number;
+    label: string;
+  }>;
   /** §9 e2e: create a tile doc through the client op path; returns its id. */
   seedTile(spec: {
     x: number;
@@ -1028,6 +1082,15 @@ export interface PlayerCanvasSurface {
   drawnTokens(): string[];
   /** Token ids the controller can pick (select / sheet / menu) — fog-hidden ones are not. */
   pickableTokens(): string[];
+  /** §2.2/G-10a: the HP bars this canvas draws right now (empty under the default `"gm"`). */
+  tokenHpBars(): Array<{
+    id: string;
+    hp: number;
+    hpMax: number;
+    tempHp: number;
+    nonlethalDamage: number;
+    label: string;
+  }>;
 }
 
 function playerSurface(playerApp: PlayerApp): PlayerSurface {
@@ -1099,6 +1162,8 @@ function playerSurface(playerApp: PlayerApp): PlayerSurface {
     reportEvents: () => lastReportEvents,
     reportByType: () => lastByType,
     cacheHas: (hash) => playerApp.cacheHas(hash),
+    rollApply: (arg) =>
+      client()?.rollApply(arg.messageId as DocId, arg.actorId as DocId, arg.mode),
   };
 }
 
@@ -2120,6 +2185,23 @@ function appSurface(app: HostApp): AppSurface {
         hp,
       };
     },
+    pf1eDerivedHp: (actorId) => {
+      const actor =
+        (client.store.getAll("actors") as ActorDocument[]).find(
+          (a) => a._id === actorId,
+        ) ?? null;
+      if (actor === null) return null;
+      const derived = deriveFromActorDocument(
+        actor,
+        encumbranceOptionsOf(worldSettingsFrom(client.store.getAll("settings"))),
+      );
+      return {
+        hp: derived.hp,
+        hpMax: derived.hpMax,
+        tempHp: derived.tempHp,
+        nonlethalDamage: derived.nonlethalDamage,
+      };
+    },
     pf1eSetWorldSetting: (spec) => {
       const checked = validateWorldSettingsPatch({ [spec.key]: spec.value });
       if (!checked.ok) return { ok: false, error: checked.error, ops: 0 };
@@ -2133,6 +2215,23 @@ function appSurface(app: HostApp): AppSurface {
     pf1eWorldSettings: () => ({
       ...worldSettingsFrom(client.store.getAll("settings")),
     }),
+    pf1eLastRoll: () => {
+      const rolls = (client.store.getAll("messages") as MessageDocument[]).filter(
+        (m) => m.roll !== null && typeof m.roll?.total === "number",
+      );
+      const last = rolls[rolls.length - 1];
+      if (!last || !last.roll) return null;
+      return {
+        id: last._id,
+        total: last.roll.total,
+        formula: last.roll.formula,
+        applied: readRollApplications(last),
+      };
+    },
+    pf1eQuickbar: (actorId) => {
+      const actor = client.store.get("actors", actorId) as ActorDocument | undefined;
+      return actor === undefined ? [] : readQuickbar(actor);
+    },
     pf1eCardsContaining: (needle) => {
       const hits = client.store
         .getAll("messages")

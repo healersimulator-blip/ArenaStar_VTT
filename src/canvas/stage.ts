@@ -20,7 +20,7 @@ import {
 import "pixi.js/unsafe-eval";
 import type { TokenDocument } from "../core/documents";
 import type { Camera, Viewport } from "./camera";
-import { fitRect } from "./camera";
+import { fitRect, screenToWorld } from "./camera";
 import type { GridSpec, SquareGrid } from "./grid";
 import { hexCenter, hexCorners, hexesInView, squareGridLines } from "./grid";
 import type { TemplatesLayer } from "./layers/TemplatesLayer";
@@ -121,11 +121,24 @@ export interface Stage {
   /**
    * Sync tactical tokens; `badges` (E06, D-147) optionally carries the condition/effect chips
    * per token id — structural {code, tint} chips so core canvas never imports a package.
+   * `hpBars` (§2.2/G-10a) carries the derived hit points to draw under each token, structural
+   * for the same reason. Absent (the default) draws no bar.
    */
   syncTokens(
     tokens: readonly TokenDocument[],
     badges?: ReadonlyMap<string, readonly { code: string; tint: number }[]>,
+    hpBars?: ReadonlyMap<string, TokenHpBarNumbers>,
   ): void;
+  /**
+   * §2.2/G-10a: `"all"` draws every bar it was handed, `"hover"` draws only the bar of the token
+   * under the pointer. (Whether a replica was handed bars at all is the world setting's business —
+   * `tokenHpBarsMap` — not the stage's.)
+   */
+  setTokenHpBarMode(mode: "all" | "hover"): void;
+  /** §2.2/G-10a e2e readback: the bars drawn right now, with the label text each one shows. */
+  tokenHpBars(): Array<
+    TokenHpBarNumbers & { id: string; label: string }
+  >;
   /**
    * D-251: which token ids are drawn (null = all). Applied to the views now and to every
    * later `syncTokens`, so a token entering the replica while fog hides it never flashes.
@@ -150,6 +163,28 @@ export interface Stage {
 const MAX_TOKEN_CHIPS = 3;
 
 type BadgeChip = { code: string; tint: number };
+
+/**
+ * §2.2/G-10a (D-261): one token's bar. The numbers are derived package-side
+ * (`packages/pf1e/tokenHpBars`) and reach the stage structurally, exactly as the badge chips do —
+ * core canvas never imports a package.
+ */
+export type TokenHpBarNumbers = {
+  hp: number;
+  hpMax: number;
+  tempHp: number;
+  nonlethalDamage: number;
+};
+
+/** The child label the bar lives under, and the e2e readback walks. */
+const HP_BAR_LABEL = "hpBar";
+
+/** Green above half, amber above a quarter, red under it — the sheet's own injury bands. */
+function hpBarColor(fraction: number): number {
+  if (fraction > 0.5) return 0x4caf50;
+  if (fraction > 0.25) return 0xffc107;
+  return 0xe53935;
+}
 
 const badgeChips = new Map<string, string>();
 
@@ -197,6 +232,87 @@ function syncTokenBadges(
   chips.x = Math.max(0, (tokenWidth - x) / 2);
   chips.y = 0;
   view.addChild(chips);
+}
+
+/** The text one bar shows: `12/20`, plus temp HP and nonlethal when they are not zero. */
+function hpBarText(bar: TokenHpBarNumbers): string {
+  const parts = [`${bar.hp}/${bar.hpMax}`];
+  if (bar.tempHp > 0) parts.push(`+${bar.tempHp}`);
+  if (bar.nonlethalDamage > 0) parts.push(`NL ${bar.nonlethalDamage}`);
+  return parts.join(" ");
+}
+
+/**
+ * §2.2/G-10a — draw (or drop) one token's HP bar. Rebuilt only when the numbers change, so a pan
+ * or an unrelated document update never churns the display objects; the caller then applies the
+ * mode's visibility (a `"hover"` bar exists but starts hidden).
+ */
+function syncTokenHpBar(
+  tokenId: string,
+  view: Container,
+  tokenWidth: number,
+  tokenHeight: number,
+  bar: TokenHpBarNumbers | undefined,
+  signatures: Map<string, string>,
+): void {
+  const existing = view.getChildByLabel(HP_BAR_LABEL) as Container | null;
+  if (!bar) {
+    if (existing) existing.destroy({ children: true });
+    signatures.delete(tokenId);
+    return;
+  }
+  const signature = hpBarText(bar);
+  if (existing && signatures.get(tokenId) === signature) return;
+  if (existing) existing.destroy({ children: true });
+  signatures.set(tokenId, signature);
+
+  const width = Math.max(24, tokenWidth - 8);
+  const height = 5;
+  const x = Math.max(0, (tokenWidth - width) / 2);
+  const y = tokenHeight - height - 3;
+  const fraction = (value: number) => Math.max(0, Math.min(1, value / Math.max(1, bar.hpMax)));
+  const lethalWidth = Math.round(width * fraction(bar.hp));
+  const tempWidth = Math.min(Math.round(width * fraction(bar.tempHp)), width - lethalWidth);
+  const nonlethalWidth = Math.round(width * fraction(bar.nonlethalDamage));
+
+  const container = new Container();
+  container.label = HP_BAR_LABEL;
+  const track = new Graphics();
+  track
+    .roundRect(x, y, width, height, 2)
+    .fill({ color: 0x14171c, alpha: 0.92 })
+    .stroke({ width: 1, color: 0x000000, alpha: 0.55 });
+  container.addChild(track);
+  if (lethalWidth > 0) {
+    const lethal = new Graphics();
+    lethal
+      .roundRect(x, y, lethalWidth, height, 2)
+      .fill({ color: hpBarColor(fraction(bar.hp)) });
+    container.addChild(lethal);
+  }
+  if (tempWidth > 0) {
+    // Temporary hit points sit *beside* the lethal fill, never on top of it (H02/D-206).
+    const temp = new Graphics();
+    temp.rect(x + lethalWidth, y, tempWidth, height).fill({ color: 0x64b5f6 });
+    container.addChild(temp);
+  }
+  if (nonlethalWidth > 0) {
+    // Nonlethal damage is its own thin track under the bar (CRB p.187 — it is not subtracted
+    // from hit points, it is counted against them).
+    const nonlethal = new Graphics();
+    nonlethal
+      .rect(x, y + height + 1, nonlethalWidth, 2)
+      .fill({ color: 0x9ecbff, alpha: 0.9 });
+    container.addChild(nonlethal);
+  }
+  const text = new Text({
+    text: hpBarText(bar),
+    style: { fontSize: 9, fill: 0xffffff, fontFamily: "sans-serif" },
+  });
+  text.anchor.set(0.5, 1);
+  text.position.set(tokenWidth / 2, y - 1);
+  container.addChild(text);
+  view.addChild(container);
 }
 
 export async function createStage(options: StageOptions): Promise<Stage> {
@@ -269,6 +385,17 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   let tokenFilter: ReadonlySet<string> | null = null;
   /** Glide targets (§9 animated movement): views lerp here each tick. */
   const tokenTargets = new Map<string, { x: number; y: number }>();
+  // §2.2/G-10a — HP bars. This state is deliberately *per stage* (the badge signature cache above
+  // is module-level, which two stages in one page would share); `tokenRects` is what the hover
+  // hit-test walks, since the DOM pointer source does not make token bodies interactive.
+  let hpBarMode: "all" | "hover" = "all";
+  let hoveredTokenId: string | null = null;
+  const hpBarSignatures = new Map<string, string>();
+  const tokenHpBarNumbers = new Map<string, TokenHpBarNumbers>();
+  const tokenRects = new Map<
+    string,
+    { x: number; y: number; width: number; height: number }
+  >();
 
   // ── Models (§9A: between Tokens and Tiles(above); placeholder until used) ──
   const modelsLayer = new Container();
@@ -307,6 +434,52 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     root.scale.set(cam.scale);
     root.position.set(-cam.x * cam.scale, -cam.y * cam.scale);
   };
+
+  /**
+   * §2.2/G-10a — a `"hover"` bar is a bar the pointer is standing on. Token bodies are not
+   * interactive (the DOM pointer source in `canvas/interactions` owns picking), so the stage keeps
+   * the world rects it drew and hit-tests them here — topmost (last synced) wins, as on the canvas.
+   */
+  const tokenIdAtWorld = (world: { x: number; y: number }): string | null => {
+    let hit: string | null = null;
+    for (const [id, rect] of tokenRects) {
+      if (
+        world.x >= rect.x &&
+        world.x <= rect.x + rect.width &&
+        world.y >= rect.y &&
+        world.y <= rect.y + rect.height
+      )
+        hit = id;
+    }
+    return hit;
+  };
+
+  const applyHpBarVisibility = (): void => {
+    for (const [id, view] of tokenViews) {
+      const bar = view.getChildByLabel(HP_BAR_LABEL) as Container | null;
+      if (bar) bar.visible = hpBarMode === "all" || hoveredTokenId === id;
+    }
+  };
+
+  const onStagePointerMove = (event: PointerEvent): void => {
+    if (hpBarMode !== "hover") return;
+    const box = app.canvas.getBoundingClientRect();
+    const hit = tokenIdAtWorld(
+      screenToWorld(
+        state.camera,
+        event.clientX - box.left,
+        event.clientY - box.top,
+      ),
+    );
+    if (hit === hoveredTokenId) return;
+    hoveredTokenId = hit;
+    applyHpBarVisibility();
+    app.render();
+  };
+
+  // The hover readback is one passive listener on the stage canvas; the mode check is first so
+  // an `"all"` stage pays nothing per move.
+  app.canvas.addEventListener("pointermove", onStagePointerMove);
 
   const stage: Stage = {
     app,
@@ -424,6 +597,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     syncTokens(
       tokens: readonly TokenDocument[],
       badges?: ReadonlyMap<string, readonly { code: string; tint: number }[]>,
+      hpBars?: ReadonlyMap<string, TokenHpBarNumbers>,
     ): void {
       const seen = new Set<string>();
       for (const token of tokens) {
@@ -446,6 +620,12 @@ export async function createStage(options: StageOptions): Promise<Stage> {
         }
         const jump = !tokenViews.has(token._id);
         tokenTargets.set(token._id, { x: rect.x, y: rect.y });
+        tokenRects.set(token._id, {
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height,
+        });
         if (jump) view.position.set(rect.x, rect.y); // new tokens appear in place
         view.alpha = token.hidden ? 0.5 : 1;
         view.visible = tokenFilter === null || tokenFilter.has(token._id);
@@ -461,6 +641,17 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           Text | undefined;
         if (label && label.text !== token.name) label.text = token.name;
         syncTokenBadges(token._id, view, rect.width, badges?.get(token._id));
+        const hpBar = hpBars?.get(token._id);
+        if (hpBar) tokenHpBarNumbers.set(token._id, hpBar);
+        else tokenHpBarNumbers.delete(token._id);
+        syncTokenHpBar(
+          token._id,
+          view,
+          rect.width,
+          rect.height,
+          hpBar,
+          hpBarSignatures,
+        );
       }
       for (const [id, view] of tokenViews) {
         if (!seen.has(id)) {
@@ -468,9 +659,28 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           view.destroy({ children: true });
           tokenViews.delete(id);
           tokenTargets.delete(id);
+          tokenRects.delete(id);
           badgeChips.delete(id);
+          hpBarSignatures.delete(id);
+          tokenHpBarNumbers.delete(id);
         }
       }
+      applyHpBarVisibility();
+    },
+    setTokenHpBarMode(mode: "all" | "hover"): void {
+      hpBarMode = mode;
+      hoveredTokenId = null;
+      applyHpBarVisibility();
+    },
+    tokenHpBars(): Array<TokenHpBarNumbers & { id: string; label: string }> {
+      const out: Array<TokenHpBarNumbers & { id: string; label: string }> = [];
+      for (const [id, view] of tokenViews) {
+        const bar = view.getChildByLabel(HP_BAR_LABEL) as Container | null;
+        const numbers = tokenHpBarNumbers.get(id);
+        if (!bar || !bar.visible || !view.visible || !numbers) continue;
+        out.push({ id, label: hpBarText(numbers), ...numbers });
+      }
+      return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     },
     setTokenVisibility(visible: ReadonlySet<string> | null): void {
       tokenFilter = visible;
@@ -567,6 +777,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       fogLayer?.destroy();
       fogLayer = null;
       tokenViews.clear();
+      app.canvas.removeEventListener("pointermove", onStagePointerMove);
       app.destroy({ removeView: true }, { children: true });
       if (bgTextureUrl !== null) URL.revokeObjectURL(bgTextureUrl);
       bgTextureUrl = null;
