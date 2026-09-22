@@ -41,16 +41,34 @@ import {
   type PF1eTtl,
 } from "./effects";
 import { combatantEffectsRecord, withCombatantEffects } from "./effectOps";
+import {
+  DAY_SECONDS,
+  HOUR_SECONDS,
+  MINUTE_SECONDS,
+  ROUNDS_PER_DAY,
+  ROUNDS_PER_HOUR,
+  ROUNDS_PER_MINUTE,
+  SECONDS_PER_ROUND,
+} from "../../core/clock";
 
 /** The world-settings key carrying the replicated clock (elapsed seconds). */
 export const WORLD_CLOCK_KEY = "clockSeconds";
 
 /**
- * This world's duration ladder is the landed `ttlToTicks` abstraction: 1 minute = 10 rounds,
- * 1 hour = 100 rounds. A day is therefore 24 of those hours — 2 400 rounds, 14 400 s at the
- * default 6 s round — not the 6 000 rounds a real-clock day would imply.
+ * This world's duration ladder is real time, derived from the round: 1 minute = 10 rounds,
+ * 1 hour = 600 rounds, so a day is 24 of those hours — **14 400 rounds, 86 400 s** at the default
+ * 6 s round. D-268 corrected this from the earlier abstraction (an hour was 100 rounds, a day
+ * 2 400); the clock's own readout (`formatWorldClock`) was always a real 24-hour day, so the
+ * ladder was the thing that disagreed with it.
+ *
+ * The numbers themselves now live in `src/core/clock.ts` (the calendar half of the one clock)
+ * and are re-exported here so every existing caller — the Settings window's time buttons among
+ * them — keeps reading them from the PF1e clock that spends them. `TICKS_PER_DAY` is the PF1e
+ * package's own name for a day's worth of `flags.core.duration` ticks.
  */
-export const TICKS_PER_DAY = 2400;
+export const TICKS_PER_DAY = ROUNDS_PER_DAY;
+
+export { ROUNDS_PER_DAY, ROUNDS_PER_HOUR, ROUNDS_PER_MINUTE };
 
 /** Upper bound mirrored by `validateWorldSettingsPatch` (100 years of elapsed seconds). */
 export const MAX_CLOCK_SECONDS = 3_153_600_000;
@@ -117,7 +135,7 @@ export function wrapAdvanceOps(
 export function ttlSeconds(
   ttl: PF1eTtl | undefined,
   casterLevel = 1,
-  secondsPerRound = 6,
+  secondsPerRound = SECONDS_PER_ROUND,
 ): number | null {
   if (!ttl) return null;
   const level = Math.max(1, Math.trunc(casterLevel));
@@ -152,7 +170,7 @@ export function isClockCounted(ttl: PF1eTtl | undefined): boolean {
 export function clockExpiredIds(
   entries: ReadonlyArray<{ id: string; payload: PF1eEffectPayload }>,
   now: number,
-  secondsPerRound = 6,
+  secondsPerRound = SECONDS_PER_ROUND,
 ): string[] {
   const t =
     typeof now === "number" && Number.isFinite(now) ? Math.trunc(now) : 0;
@@ -187,7 +205,7 @@ export function pf1eClockSweepOps(
   actors: readonly ActorDocument[],
   combats: readonly CombatDocument[],
   now: number,
-  secondsPerRound = 6,
+  secondsPerRound = SECONDS_PER_ROUND,
 ): { ops: Array<Record<string, Json>>; expired: ClockExpiry[] } {
   const ops: Array<Record<string, Json>> = [];
   const expired: ClockExpiry[] = [];
@@ -281,10 +299,10 @@ export function formatWorldClock(total: number): string {
     typeof total === "number" && Number.isFinite(total)
       ? Math.max(0, Math.trunc(total))
       : 0;
-  const d = Math.floor(s / 86_400);
-  const h = Math.floor((s % 86_400) / 3_600);
-  const m = Math.floor((s % 3_600) / 60);
-  const sec = s % 60;
+  const d = Math.floor(s / DAY_SECONDS);
+  const h = Math.floor((s % DAY_SECONDS) / HOUR_SECONDS);
+  const m = Math.floor((s % HOUR_SECONDS) / MINUTE_SECONDS);
+  const sec = s % MINUTE_SECONDS;
   const pad = (n: number) => String(n).padStart(2, "0");
   const clock = `${pad(h)}:${pad(m)}:${pad(sec)}`;
   return d > 0 ? `${d}d ${clock}` : clock;

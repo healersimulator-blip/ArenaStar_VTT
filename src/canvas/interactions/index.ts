@@ -184,6 +184,16 @@ export interface ControllerOptions {
     world: { x: number; y: number };
     tokenId: string;
   }) => void;
+  /**
+   * D-271: the same gesture on *empty* ground. A hexcrawl scene wants a menu wherever the GM
+   * right-clicks — "open this hex", "describe it", "make it forest" — and a scene with no
+   * profile simply never registers this callback, which is why the token menu's contract (and
+   * every existing caller) is untouched.
+   */
+  onCanvasContextMenu?: (at: {
+    screen: { x: number; y: number };
+    world: { x: number; y: number };
+  }) => void;
   /** §9: ctrl+click appends a ruler waypoint ([] clears; snapped to grid). */
   onRulerChange?: (points: ReadonlyArray<{ x: number; y: number }>) => void;
   /**
@@ -450,8 +460,14 @@ export class CanvasController {
         return;
       }
       case "pan": {
-        // T01: a right-click that never dragged is a context-menu gesture, not a pan.
-        if (this.panButton === 2 && this.options.onContextMenu) {
+        // T01: a right-click that never dragged is a context-menu gesture, not a pan. Either
+        // menu counts — a shell that has no token menu (the player's) still wants the canvas one
+        // (D-271: "open this hex"), and gating the whole gesture on `onContextMenu` is how that
+        // silently does not happen.
+        if (
+          this.panButton === 2 &&
+          (this.options.onContextMenu || this.options.onCanvasContextMenu)
+        ) {
           const moved =
             Math.abs(ev.x - this.startScreen.x) > 4 ||
             Math.abs(ev.y - this.startScreen.y) > 4;
@@ -459,13 +475,22 @@ export class CanvasController {
             const camera = this.options.stage.camera;
             const world = screenToWorld(camera, ev.x, ev.y);
             const hit = pickToken(this.options.getTokens(), world);
-            if (hit) {
+            if (hit && this.options.onContextMenu) {
               this.mode = "idle";
               this.panButton = 0;
               this.options.onContextMenu({
                 screen: { x: ev.x, y: ev.y },
                 world: { x: world.x, y: world.y },
                 tokenId: hit.token._id,
+              });
+              return;
+            }
+            if (this.options.onCanvasContextMenu) {
+              this.mode = "idle";
+              this.panButton = 0;
+              this.options.onCanvasContextMenu({
+                screen: { x: ev.x, y: ev.y },
+                world: { x: world.x, y: world.y },
               });
               return;
             }

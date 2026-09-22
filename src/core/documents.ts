@@ -175,6 +175,75 @@ export interface NoteDocument extends BaseDocument {
   visible?: boolean;
 }
 
+/**
+ * A hidden feature of a cell (hexcrawl, D-269) — the shrine nobody has found yet.
+ *
+ * The reveal *rule* is data and the reveal *state* is a document field, which is what lets one
+ * replica decide ("the party spent four hours here") and every replica agree afterwards. The
+ * rule kinds are the ones a hexcrawl table asks for: the GM's own checkbox, a Perception DC, a
+ * stretch of time spent in the cell, or a dice check. `autoReveal` decides who flips the state:
+ * the client that evaluated the rule, or the GM in the hex window.
+ *
+ * **Projection is the gate, not the drawing** (D-256's lesson for pins): a feature whose
+ * `state.revealed` is false must be stripped from the cell document for every non-GM viewer, or
+ * the art it points at is readable from the asset manifest no matter what the canvas draws.
+ */
+export type CellFeatureReveal =
+  | { kind: "manual" }
+  | {
+      kind: "perception";
+      dc: number;
+      /**
+       * D-275: true = roll `1d20 + the party's Perception` against `dc` (an *active* check);
+       * absent = the party's passive Perception is the number compared (plan §9.5's default).
+       */
+      active?: boolean;
+    }
+  | { kind: "time"; seconds: number }
+  | { kind: "dice"; formula: string; target: number };
+
+export interface CellFeature {
+  id: string;
+  name: string;
+  text: string;
+  /** Asset hash or external URL (§7 allows both); absent = a text-only feature. */
+  img?: string;
+  reveal: CellFeatureReveal;
+  /** True = the client that evaluates the rule flips the state; false = the GM's checkbox does. */
+  autoReveal: boolean;
+  state: {
+    revealed: boolean;
+    /** World clock reading when it was revealed (audit; absent while hidden). */
+    atClock?: number;
+    by?: UserId;
+  };
+}
+
+/**
+ * One authored cell of a hexcrawl scene (D-269) — a hex, a square, or (on a gridless map) a
+ * drawn **zone**. Embedded in its scene, exactly like `walls`/`notes` (D-012), so ownership
+ * cascade, projection, the op log and the world file all apply with no new machinery.
+ *
+ * Cells are *sparse*: only the ones a GM authored exist, and a cell with no document reads as
+ * "unexplored, the scene's default terrain". `key` is `q,r` for hex and square grids and the
+ * zone's own id for gridless scenes.
+ */
+export interface CellDocument extends BaseDocument {
+  type: "cell";
+  key: string;
+  /** Zone geometry, flat `[x1,y1,…]` (gridless scenes only); absent for gridded cells. */
+  poly?: number[];
+  /** Terrain catalog id (world-scoped; see `core/hexcrawl/terrain.ts`). */
+  terrain?: string;
+  /** The GM's text: what is *actually* here. */
+  description?: string;
+  /** What players read once the GM opens the cell; never sent for a closed cell. */
+  playerText?: string;
+  /** Encounter table ids attached to this cell (`encounterTables`). */
+  tables?: string[];
+  features?: CellFeature[];
+}
+
 export interface EffectDocument extends BaseDocument {
   type: "effect";
   changes: Array<{ path: string; value: Json }>;
@@ -214,6 +283,65 @@ export interface RollTableDocument extends BaseDocument {
   type: "rollTable";
   formula: string;
   results: RollTableResult[];
+}
+
+/**
+ * What an encounter table's activation tags and the roll itself need (hexcrawl, D-269).
+ *
+ * `day`/`night` are the clock phase (`core/clock.ts` `phaseOf`); the other four are *triggers*:
+ * the party entered the cell, is moving through it, spent time exploring it, or a fight started
+ * on it. **Every tag defaults to true**, so a freshly created table fires on everything until
+ * the GM narrows it — the requirement's "by default all this tag should be ON", and the reason
+ * `encounterTagsOf` exists rather than callers reading the bag directly.
+ */
+export interface EncounterTags {
+  day: boolean;
+  night: boolean;
+  entering: boolean;
+  moving: boolean;
+  exploring: boolean;
+  fighting: boolean;
+}
+
+/** A rolled encounter's link to something the world already holds. */
+export type EncounterRef =
+  | { kind: "compendium"; packId: string; entryId: string }
+  | { kind: "actor"; actorId: DocId };
+
+/** One row of an encounter table: its weight (or range), its text, and what it points at. */
+export interface EncounterEntry {
+  /** Weighted tables: any positive integer (normalised to 100 by `weightsToRanges`). */
+  weight: number;
+  /** Dice tables: inclusive `[lo, hi]`, validated by `validateEncounterTable`. */
+  range?: [number, number];
+  /** What the GM reads — "Goblin bandits", "A merchant caravan, wary". */
+  text: string;
+  /** How many of each ref to place (`goblin warrior ×2` = 2). */
+  count: number;
+  /** Empty = pure text (nothing to place on the map). */
+  refs: EncounterRef[];
+}
+
+/**
+ * A random-encounter table (hexcrawl, D-269). Top-level collection, because a table outlives
+ * any one cell and several cells attach the same one.
+ *
+ * Two roll types, one storage shape: `"dice"` keeps the GM's own formula (`1d20`, `2d6+1`) and
+ * uses each entry's `range`; `"weighted"` uses the percentage ladder compiled from the entries'
+ * `weight` fields and rolls `1d100` (the attached generator's model). Both draw through the
+ * dice engine, so an encounter roll is as auditable as a chat roll.
+ */
+export interface EncounterTableDocument extends BaseDocument {
+  type: "encounterTable";
+  mode: "dice" | "weighted";
+  /** Dice mode only; weighted tables roll `1d100` at draw time. */
+  formula: string;
+  entries: EncounterEntry[];
+  tags: EncounterTags;
+  /** A battle scene to copy when the encounter resolves (requirement 5d). */
+  sceneId?: DocId;
+  /** Seconds before this table may fire again in the same cell; absent = one phase (§ encounter.ts). */
+  cooldownSeconds?: number;
 }
 
 export interface PlaylistSoundDocument extends BaseDocument {
@@ -329,6 +457,12 @@ export interface SceneDocument extends BaseDocument {
   /** flags.core.scale: "tactical" | "strategic" selects §9A behaviour. */
   tokens: TokenDocument[];
   walls: WallDocument[];
+  /**
+   * Hexcrawl cells (D-269). **Optional on purpose**: scenes written before this feature have no
+   * such field, so read it through `cellsOf(scene)` (`core/hexcrawl/cells.ts`) rather than
+   * touching it directly — a world file from yesterday must not crash today's reader.
+   */
+  cells?: CellDocument[];
   lights: LightDocument[];
   sounds: SoundDocument[];
   tiles: TileDocument[];
@@ -399,6 +533,7 @@ export type CollectionName =
   | "items"
   | "journals"
   | "rollTables"
+  | "encounterTables"
   | "playlists"
   | "macros"
   | "cards"
@@ -422,6 +557,7 @@ export const TOP_LEVEL_COLLECTIONS: readonly CollectionName[] = [
   "items",
   "journals",
   "rollTables",
+  "encounterTables",
   "playlists",
   "macros",
   "cards",
@@ -444,6 +580,7 @@ export const TOP_LEVEL_COLLECTIONS: readonly CollectionName[] = [
 export type EmbeddedCollectionName =
   | "tokens"
   | "walls"
+  | "cells"
   | "lights"
   | "sounds"
   | "tiles"
@@ -468,6 +605,7 @@ export interface WorldCollections {
   items: ItemDocument[];
   journals: JournalDocument[];
   rollTables: RollTableDocument[];
+  encounterTables: EncounterTableDocument[];
   playlists: PlaylistDocument[];
   macros: MacroDocument[];
   cards: CardDocument[];

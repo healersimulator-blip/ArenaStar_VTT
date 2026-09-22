@@ -1,6 +1,7 @@
 # Gap Analysis — ArenaStar_VTT vs. Roll20 & Foundry VTT (Pathfinder 1e focus)
 
 **Date:** 2026-09-20 — **verification pass over the 2026-09-19 original** · **Base:** `arena/01a0bc2f-arenastar-vtt` @ `13962e8`
+**Re-synced:** 2026-09-21 @ `19c821a` — §4's rows for G-03/G-04/G-05, G-10a/G-10b, G-20, G-22, G-24 and the §5 tier list were rewritten against D-259…D-264; the competitor inventories (§2–§3) and citations (§6) were **not** re-researched.
 **Status key:** ✅ closed · 🟡 partial (the remainder is named) · ⛔ open · 🏛 architectural (a design bet, not a gap) · **NEW** = added by the 2026-09-20 pass.
 
 **This pass re-verified every gap against the code at the stated commit.** The competitor
@@ -19,23 +20,39 @@ pass:** G-11 (traps/haunts/maladies) and G-14 (3PP/Mythic) claimed converted con
 28-pack table in D-253 does not contain, so both are now plain **open**. **One gap was created by
 our own D-256 rail**: G-43 — a placed "door" is written *open* and its axes hardcoded, so the
 kind selector is cosmetic to the engine (flagged in G-27 too). **Two more gaps are new**: G-44
-(the converted content is unreachable from a fresh clone) and G-45 (compendium UX at 20k entries).
+(the converted content is unreachable from a fresh clone) and G-45 (compendium UX at 20k entries —
+closed by D-266).
 Every entry below carries a file path or a test as its evidence, so the next pass can re-check it
 mechanically.
 
-**Follow-up (later):** **D-263** closed the G-41 remainder (first-run onboarding + docs links),
-and **D-262** closed the G-25 remainder (GM "view as player X") — the fog
-loop now runs as whichever user a shell points it at, so the GM can watch the table through one
-player's eyes, including the tokens the host withholds from them. **D-257** had closed the G-43
-lifecycle and G-27 — kinds now write
-honest restriction axes, doors are placed closed and toggle on a click, locked doors ignore
-clicks, `Alt`-click deletes a wall, and the GM overlay that draws them is finally synced. Only
-wall reshaping (drag an endpoint / change a placed wall's kind) remains of G-43. **D-258** then
-closed **G-44** — the pins moved into `tools/content/sources.json`, `pnpm content:fetch` makes
-them reproducible from a fresh clone, `pnpm content:package` produces the installable,
-checksummed artifact, and the licences are visible in the app (Help → *Licences & credits*), so
-"the content landed" is now a claim a person outside this machine can act on. The one deliberate
-hand-off is the release upload (no tags exist in the repo yet).
+**Follow-up — the same-day slice closed more of this list, and this pass re-synced it.** **D-263**
+closed the G-41 remainder (first-run onboarding + docs links), and **D-262** closed the G-25
+remainder (GM "view as player X") — the fog loop now runs as whichever user a shell points it at,
+so the GM can watch the table through one player's eyes, including the tokens the host withholds
+from them. **D-257** had closed the G-43 lifecycle and G-27 — kinds now write honest restriction
+axes, doors are placed closed and toggle on a click, locked doors ignore clicks, `Alt`-click
+deletes a wall, and the GM overlay that draws them is finally synced. Only wall reshaping (drag an
+endpoint / change a placed wall's kind) remains of G-43. **D-258** then closed **G-44** — the pins
+moved into `tools/content/sources.json`, `pnpm content:fetch` makes them reproducible from a fresh
+clone, `pnpm content:package` produces the installable, checksummed artifact, and the licences are
+visible in the app (Help → *Licences & credits*), so "the content landed" is now a claim a person
+outside this machine can act on. The one deliberate hand-off is the release upload (no tags exist
+in the repo yet).
+
+**2026-09-21 re-sync (base `19c821a`).** Four more closures landed after the verification pass that
+produced §4's verdicts, and their rows were still carrying the older status characters — so this
+pass re-checked each against the code and rewrote it: **D-259** closed **G-03** (inventory /
+encumbrance / currency — `src/packages/pf1e/inventory.ts`), the missing half of **G-04** (Items tab,
+item window, `uses` ledger, containers, item→attack, the mapped `changes[]` subset) and **G-05**
+(an equipped item's typed mods now reach `deriveFromActorDocument`); **D-260** closed **G-24**
+(sight bounded by lighting — `src/canvas/vision/darkness.ts`) and decided **G-32** explicitly rather
+than deferring it silently; **D-261** closed **G-20** (`roll.apply`), **G-10a** (token HP bars) and
+**G-10b** (player quickbar), which also finishes **G-22**'s "Still missing" sentence; and **D-264**
+closed **G-39** (character import). Rows whose remainder is *not* zero keep their named tail. What
+this pass re-verified as **still open**: G-06/G-07 (automation and variants, catalogs closed),
+G-09's trait application, three G-10 tails, G-11, G-12, G-13, G-14, G-15's progression,
+G-16, G-18's bestiary, G-19, G-21, G-26, G-29, G-30, G-31, G-32, G-36, G-37, G-38, G-40, G-42,
+G-43's reshaping tail (and G-45 and **G-08**, which have since closed — D-266 and D-267).
 
 **Purpose:** answer "what do Roll20 and Foundry VTT offer — especially their Pathfinder 1e
 character sheet / module / ruleset — that ArenaStar_VTT does not have?"
@@ -250,7 +267,8 @@ ecosystem pages [9]–[14]):
 
 ## 4. The gap list
 
-Format: **G-## — name** · severity · **status** (verified 2026-09-20 against `13962e8`).
+Format: **G-## — name** · severity · **status** (verified 2026-09-20 against `13962e8`; the rows
+rewritten by the 2026-09-21 re-sync cite the decision that closed them).
 "Us" is what the repo verifiably has today, with the file or test that proves it. Severities
 are unchanged from the original pass; where the verification pass found the *shape* of the
 remaining work is different from what the original assumed, that is called out.
@@ -276,29 +294,61 @@ remaining work is different from what the original assumed, that is called out.
   field), no custom classes (Foundry's "drag a class per level" for homebrew), and the
   level-up flow is a wizard run, not an incremental per-level drag. *(Internal: L01.)*
 
-- **G-03 — Inventory, encumbrance, currency.** High · ⛔ **Open.**
-  Verified: no `encumbrance` / `carryingCapacity` anywhere in `src/`. Weapons and armor remain
-  authored fields that feed combat math; the converted equipment packs are data with no sheet
-  surface. This is the largest remaining "a table can't play without it" sheet gap.
-  *(Internal: L01.)*
+- **G-03 — Inventory, encumbrance, currency.** High · ✅ **Closed (D-259).**
+  `src/packages/pf1e/inventory.ts` is the rules (pure, no DOM, no store): Table 7-4 capacity —
+  size and quadruped multipliers and Tremendous Strength included (`carryingCapacityOf`) — Table
+  7-5 load effects (`loadLevelFor`: max Dex, ACP, run), the reduced-speed table 5–120 ft, and the
+  CRB's "use the worse figure (from armor or from load) … do not stack" merge. Currency is
+  authored and weighed ("fifty coins to the pound"); the world settings `encumbranceRule`
+  (`weight`/`off`, absent = on) and `encumbranceCapacityStrBonus` (a Muleback-style allowance)
+  join `src/core/worldSettings.ts`, and dwarf **Slow and Steady** comes from either a trait or a
+  worn item. The surface is the actor sheet's **Items** tab (`PF1eItemsTab`: rows, quantity-aware
+  weight, price, `uses` ledger, containers one level deep, the pp/gp/sp/cp block, the load
+  readout) with the **item window** (`PF1eItemWindow`) beside it. Evidence:
+  `tests/packages/pf1eInventory.test.ts` **54** (every table transcribed row-for-row with its
+  AoN/CRB citation on the fixture) and `e2e/pf1e_inventory.spec.ts` **1/1** (import → add → equip
+  → 80 lb anvil ⇒ heavy → attack line → wand cast `50 → 49` → reload). **Remainder (deliberately
+  not in this slice):** item *use* automation (drinking a potion, reading a scroll, a recharge
+  roll) and equipment pricing/crafting — `PF1e_Unified_TODO.md` L01/L04, not a reopening of G-03.
 
-- **G-04 — Items as first-class automatable documents.** Med-High · 🟡 **Partial.**
-  We have: `ItemDocument` in core, `ActorDocument.items` (embedded), typed equipment descriptors
-  with the item arithmetic that needs no actor (`src/packages/pf1e/items.ts`: hardness before
-  object HP, broken at < ½ HP, armor/shield slots, authored shape per D-113 — derive on read),
-  item/actor effect editing (`PF1eEffectEditor.svelte`, typed `PF1E_MOD_KEYS`), attack authoring
-  (`PF1eAttackEditor.svelte` + `pf1eResolveFlow.ts`), spellbook/cast flow
-  (`pf1eSpellbook.ts`, `pf1eCastFlow.ts`) and compendium import. Missing: an Items tab and an
-  item sheet window, a charges (`uses`) ledger, containers, currency, encumbrance (G-03), an
-  item→attack link ("create attack from this weapon"), and evaluation of imported items' Foundry
-  `changes[]` (D-112 rules out a general path-overwrite mechanic, so the mapped subset has to be
-  chosen deliberately). Consumable-from-spell generation depends on this.
+- **G-04 — Items as first-class automatable documents.** Med-High · ✅ **Closed (D-259).**
+  Everything this row listed as missing landed. The **Items tab** and the **item sheet window**
+  (`WindowHost` kind `item`, id `pf1e-item:<actor>:<item>`, 420×520, description through the
+  markdown renderer, properties, the `changes[]` preview, the weapon line, the cast panel); the
+  **charges (`uses`) ledger** with use/recharge; **containers** (one level, a dangling container id
+  is named rather than hidden); **currency** (pp/gp/sp/cp, coin weight); **encumbrance** (G-03);
+  the **item→attack link** ("Attack" appends a real `PF1eAttackEntry` tagged `itemId` to
+  `system.pf1e.attacks`, which the existing attack editor reads unchanged); and the deliberate
+  choice on imported Foundry `changes[]` — D-112 still forbids a general path-overwrite mechanic,
+  so `src/packages/pf1e/itemChanges.ts` implements the **mapped subset** (`ac`, `aac`, `sac`,
+  `nac`, `tac`, the three saves + `allSavingThrows`, `attack`/`mattack`/`rattack`/`wattack`,
+  `damage`/`wdamage`, the six abilities, `landSpeed`, `skill.<code>`), reads both source shapes
+  (`system.foundry.changes` and the vendored `system.changes`), refuses `set` **by name**, and
+  reports every unmapped target, unevaluable formula and unknown bonus type into the item window
+  instead of dropping it. Measured over the 28 converted packs: **24,487 items, 248 with a
+  `changes[]` block, 416 changes**. Consumables-from-spell generation is
+  `planConsumable` (wand 50 charges CL 5 / staff 10 rechargeable / scroll / potion, each with the
+  item's own caster level and its own save DC). Evidence: `tests/packages/pf1eItemChanges.test.ts`
+  **20**, `tests/packages/pf1eInventory.test.ts` **54**, `e2e/pf1e_inventory.spec.ts` **1/1**.
+  **Remainder:** drag-and-drop from the compendium list onto a sheet (the Items tab's picker is
+  the supported gesture — there is no cross-window DnD channel), item stack splitting, item-HP
+  damage tracking beyond the authored fields, and mapping `scriptCalls` (P-6).
 
-- **G-05 — Magic items.** Med · 🟡 **Data landed, mechanics open.**
+- **G-05 — Magic items.** Med · ✅ **Closed (D-259).**
   The converter ships `magic-items` (790), `wondrous` (3,008) and `artifacts` (409) — pack ids from
-  D-253's 28-pack table, sources `pf-magic`/`pf-wondrous`/`pf-artifacts` — so the *catalog* half is
-  done. Still open: pricing/crafting, identify, item hints/auras, and any sheet surface that makes
-  them more than a description + typed mods (see G-04).
+  D-253's 28-pack table, sources `pf-magic`/`pf-wondrous`/`pf-artifacts` — so the *catalog* half was
+  already done. The mechanics half landed with D-259: an **equipped** item's typed mods reach
+  `deriveFromActorDocument` as an `EffectDocument`-shaped effect keyed `item:<item id>` (merged on
+  **id**, so a caller-supplied effect of the same id wins and nothing double-counts), applied vs.
+  kept-but-not-applied each shown with its reason in the item window; a consumable generated from
+  a spell carries its own charges/CL/DC and spends a charge through the existing cast flow as an
+  ordinary embedded-document op (a refused cast spends nothing); and `resistance` joined
+  `PF1E_BONUS_TYPES` so a converted cloak's `resist` is a typed bonus rather than a silently
+  promoted untyped one. The all-zero Foundry `armor` block (**3,956** converted rows carry one) is
+  read as **no armor** — reading it as armor would floor a wearer's AC through a slot's Dexterity
+  cap. Evidence: the D-259 e2e equips a Cloak of Resistance +1 and watches saves `0/2/0 → 1/3/1`
+  with AC unchanged, and the item window print the change as `saves · resistance +1`.
+  **Remainder:** identify/aura/item-hint surfacing and pricing/crafting (L01/L04).
 
 - **G-06 — Feat / class-feature catalog & automation.** Med · 🟡 **Catalog closed, automation partial.**
   Catalog: 3,541 feats + 4,727 class abilities converted. Automation today: Power Attack, Deadly
@@ -318,22 +368,65 @@ remaining work is different from what the original assumed, that is called out.
   **spell points**, and consumables auto-created from a spell (potion/wand/scroll with charges).
   *(Internal: L04.)*
 
-- **G-08 — Monster/NPC statblock import.** Med · ⛔ **Open.**
-  Verified: no `statblock` code in `src/` or `tools/`. We ship 40 hand-compiled bestiary actors in
-  git and have a *structured*-content path (bestiary packs → `actors`, converter already maps
-  creatures), but nothing turns a pasted statblock (R20's parser, Foundry's converter module) into
-  a sheet. Note the cheap half is now cheap: a text parser + the existing actor shape, no new
-  mechanics.
+- **G-08 — Monster/NPC statblock import.** Med · ✅ **Closed (D-267).**
+  `src/packages/pf1e/import/statblock.ts` is the **fourth reader** behind the D-264 front door, and
+  that is the whole point of it: a pasted block produces the same `ImportedCharacter` the three file
+  readers do, so `characterImportCheck`, the one-create-op actor document and the report are reused
+  unchanged rather than a second import pipeline being built beside them. The source has no schema to
+  sniff, so it is read **by label** the way `herolab.ts` reads XML: section headings, `;`-separated
+  clauses, comma-separated save lines, PDF-wrapped prose and multi-line spell-like ability lists all
+  arrive in the same paste, and the labels survive all of them. A stat block publishes *totals*, so AC
+  arrives as `acTotals` + `acMode: "published"` and the saves as `saves` + `savesAsTotal` (never
+  recomposed from components the block never stated — its printed AC breakdown is reported instead),
+  `hp 6 (1d10+1)` gives `hp`/`hpMax`/`hitDice`, and the two numbers this app **derives** from what the
+  block *does* state — the printed attack bonus on each line (including `+12/+7` sequences) and the
+  printed skill totals — are refused and named in the block's own words, exactly as D-264 treats Hero
+  Lab's printed attack bonus. A printed damage total is the line's damage, so `1d4+2` becomes
+  `damageDice` + `damageBonus` with `abilityDamageIncluded`, `2 claws +5 (1d4+2) and bite +5 (1d6+2)`
+  becomes three lines, and crit ranges/threat, natural weapons, touch attacks, DR (`5/good or silver`
+  → two bypass components), SR, mixed speeds and per-line reach all land in the existing fields.
+  Senses, languages, special attacks/qualities and treasure go to `system.pf1e.creature` — the
+  monster-details block the Details tab already edits — with `fast healing N` and `regeneration N (…)`
+  read out of that prose into the modelled `fastHealing`/`regeneration`/`regenSuppress`; everything
+  else (XP, environment, organization, gear, racial skill modifiers, a dash-printed ability score,
+  conditional CMB/CMD) is reported, not encoded. Refusals are deliberate: prose that merely mentions
+  `AC 15` is not a stat block, a nameless block says "paste it from the top", and a block with no
+  playable number creates nothing. The Sheets panel's Actors tab gained a **Stat block** box beside
+  **Import** for text, and a header line that is neither the creature's name nor its type line is now
+  *quoted in the report* rather than dropped. Unit `tests/packages/pf1eStatblockImport.test.ts` **25**;
+  e2e `e2e/statblock_import.spec.ts` **1/1**, inside a chromium project run of **187 tests → 186 passed /
+  1 failed** (the failure being this sandbox's recorded load-sensitive `fog_player.spec.ts:41`, green
+  standalone). Still open: 3.5-era blocks, swarm automatic damage, and spell-like ability automation
+  (the list is text on the details block).
 
 - **G-09 — Race catalog / racial traits.** Med · 🟡 **Partial.**
   Races: `races` pack (80) converted + the builder's race step. Racial traits: 1,214 converted but
   they arrive as items/descriptions — nothing applies them to an actor or gates them by race.
 
-- **G-10 — Sheet UX tails.** Med/Low · 🟡 **Partial.**
-  - **Token HP bars** — ⛔ verified absent (no `hpBar`/bar code; `tokenBadges.ts` renders condition
-    chips only). **Med.**
-  - **Player quickbar** (own-character one-click actions) — ⛔ verified absent (no `quickbar`);
-    core macros with hotbar slots 1–5 exist. **Med.**
+- **G-10 — Sheet UX tails.** Med/Low · 🟡 **Partial — both Med tails closed in D-261 (with G-20); the three Low tails remain.**
+  - **Token HP bars** — ✅ **Closed (D-261).** `src/packages/pf1e/tokenHpBars.ts`: `tokenHpBarFor`
+    hands back *the numbers the sheet already reports* (`deriveFromActorDocument`'s `hp`/`hpMax`,
+    plus temp HP and nonlethal when non-zero) and `null` when there is no actor or `hpMax < 1`
+    (a bar reading `0/0` says nothing), so a bar can never disagree with its sheet. `src/canvas/stage.ts`
+    draws it under the token (`[data-world-token-hp-bars]`) for exactly the tokens the viewer may
+    see — the player shell follows the same D-250/D-251 fog gate, so a bar is not a leak the fog
+    does not have — and the world setting `tokenHpBars: "gm"` (default) / `"all"` / `"hover"`
+    replicates to clients without a reload; `"hover"` is the stage's own hit-test rather than a DOM
+    overlay, so it holds at any zoom. Evidence: `tests/packages/pf1eTokenHpBars.test.ts` **9**,
+    `e2e/token_hp.spec.ts` **1/1** (a GM's bar follows the sheet's combat tab; a joined player sees
+    `[]` by default, their own hero under `"all"`, the hero but not the GM's orc under `"hover"`).
+  - **Player quickbar** (own-character one-click actions) — ✅ **Closed (D-261).** Bindings are
+    **character data**, not client state: `flags.pf1e.quickbar` on the actor carries
+    `{slot 1–5, kind: "attack" | "damage" | "item", label, attackIndex, itemId}`, so a bind is an
+    ordinary host-validated, replicated, undoable op that survives a reload; `quickbarWriteOp`
+    rewrites the whole `flags` subtree because a flat diff cannot create `flags.pf1e`.
+    `src/ui/quickbar/{model,run,QuickbarRow.svelte}` is mounted in both shells (the player's is
+    their own character — the first fog-visible token they may `update`; the GM's follows the
+    **selected** token) and `run.ts` is a dispatcher rather than a second rules engine: a slot
+    calls the sheet's own `resolveAttackFlow` / `resolveCastFlow` / public damage card, so a
+    quickbar press and a sheet press cannot diverge. A stale binding is *named* ("the bound item
+    is gone"), never silently re-run. The world-level macro hotbar (slots 1–5) is untouched — a
+    different scope. Evidence: `tests/ui/quickbar.test.ts` **12**, `e2e/quickbar.spec.ts` **1/1**.
   - **Per-character settings** (NPC/compact/rule toggles) — ⛔ open. **Low.**
   - **Sheet notes / description** — 🟡 the details editor (`PF1eDetailsEditor.svelte`) covers
     authored fields; a freeform notes block is not a first-class tab. **Low.**
@@ -380,29 +473,75 @@ remaining work is different from what the original assumed, that is called out.
 
 ### D. Combat & table flow
 
-- **G-20 — Chat-card apply buttons for arbitrary rolls.** Med · ⛔ **Open.**
-  Resolve flows write HP authoritatively, and commit–reveal rolls are verifiable, but a plain
-  `/roll` on a card cannot be applied to a token from chat (no apply/heal intent; verified: the
-  only `data-apply-*` in the UI is AC-conversion, unrelated).
+- **G-20 — Chat-card apply buttons for arbitrary rolls.** Med · ✅ **Closed (D-261).**
+  `roll.apply` (`0x34`, ops channel, the 38th `MsgKind`, documented in `PROTOCOL.md`) carries
+  `{messageId, actorId, mode: "damage" | "healing"}` and **no amount**: the host re-reads
+  `message.roll.total` from its own replica, checks `can(user, "update", actor, "actors")`, refuses
+  a card with no rolled total or a nonexistent actor, and refuses a **replay** per actor *and* mode
+  through the record it writes on the card (`flags.pf1e.applied`) — so the button's disabled state
+  and the host's refusal are the same field, and no client can claim a damage figure. The HP write,
+  the card's record and a ledger follow-up note commit as **one** envelope, so one Undo takes the
+  whole application off. `src/packages/pf1e/rollApply.ts` owns the arithmetic (temporary hit points
+  first, hit points floored at 0; healing caps at `hpMax` and strips an equal amount of nonlethal,
+  CRB p.191; a legacy scalar `tempHp` is spent in place rather than reinterpreted), and
+  `src/ui/chat/RollApplyRow.svelte` + `src/ui/chat/applyTarget.ts` are the surface and the
+  single-selection target rule. Evidence: `tests/packages/pf1eRollApply.test.ts` **16**,
+  `tests/ui/chatApplyTarget.test.ts` **7**, the two `roll.apply` cases in `tests/host/sync.test.ts`
+  (replay refused, `forbidden` for a sender without `update`, no-total and missing-actor refusals),
+  `e2e/roll_apply.spec.ts` **1/1**. **Remainder (deliberate):** no apply verb on the *sheet's* own
+  cards (its flows already write through the resolver), no multi-target application, no per-card
+  revert (the history's Undo is the revert), and no DR/resistance/hardness pass in the verb — an
+  attack card's numbers already went through them in the resolver, and a raw card is applied as
+  the table rolled it.
 - **G-21 — Condition-automation tails.** Low-Med · 🟡 **Partial.** Missing the ecosystem
   behaviours: blind-movement Acrobatics check, confused-round messages, auto-prone chains,
   total/normal concealment prompt. *(Internal: L02/P4.)*
-- **G-22 — Player-side table surface.** Med · 🟡 **Much improved (D-255/D-256).** The player shell
-  now has the full Roll20 rail (draw/text/measure/dice + zoom/fit/help), the Turn order window
-  (`src/app/JoinApp.svelte:191-197`, `kind: "combat"`), fog masks, map pins and the help panel. Still
-  missing: a player quickbar / macro bar (G-10b) and per-character action shortcuts.
+- **G-22 — Player-side table surface.** Med · ✅ **Closed (D-255, D-256, D-261).** The player shell
+  has the full Roll20 rail (draw/text/measure/dice + zoom/fit/help), the Turn order window
+  (`src/app/JoinApp.svelte:191-197`, `kind: "combat"`), fog masks, map pins and the help panel —
+  and the two things this row named as still missing landed with D-261: the per-character
+  **quickbar** is mounted in the player's own sidebar (playing *their* character, above chat and
+  the sheet) and token HP bars follow the player's fog gate, with the world setting deciding
+  whether a player sees them at all (`"gm"` default, `"all"`, `"hover"`). Evidence:
+  `e2e/quickbar.spec.ts` **1/1** (a joined player binds and fires their own greataxe),
+  `e2e/token_hp.spec.ts` **1/1** (the same joined player's bars under each mode). One shape
+  difference remains, and it is the §10 *sidebar tabs* item rather than a missing surface: the
+  player shell's sidebar is a stack (status → onboarding → quickbar → chat → sheet), not a tab
+  strip, so there is no player-side Compendia/Journals/Actors tab set.
 - **G-23 — Initiative micro-controls.** Low · ✅ **Closed.** `CombatPanel.svelte:1160` renders a
   numeric initiative input per combatant (`setInit`), with the recorded-roll receipt and the
   hidden-combatant concealment rule alongside it.
 
 ### E. Canvas, scene & map tools
 
-- **G-24 — Sight is not bounded by lighting.** High · ⛔ **Open (re-verified).**
-  `src/canvas/vision/lights.ts` is render-only (color parsing, viewport rejection, gradient
-  stops) and `LightingLayer` consumes only those; nothing in `fogVisibleTokenIds`
-  (`src/core/fogExploration.ts`), the vision worker or the fog loop reads darkness or light state.
-  Still the single biggest *platform* gap. *(Internal: ROADMAP fog follow-up.)*
-- **G-25 — Fog-of-war GM tools.** Med · ✅ **Closed for brushes (D-256).**
+- **G-24 — Sight is not bounded by lighting.** High · ✅ **Closed (D-260).**
+  `src/canvas/vision/darkness.ts` (new, pure — no pixi, no store, no worker) holds the rule, and it
+  now gates what a shell **draws, uncovers and lets a click reach**: a token sees by ambient light
+  (any `darkness < 1`; only `darkness === 1` is total darkness, because PF1e's ladder is
+  darkness/dim/normal and a binary threshold would make the first percent of a slider a trap), by
+  the lights it carries and the lights covering it (a light carries `dim − distance(viewer, light)`
+  past the viewer, so standing in a torch means seeing to its edge rather than infinitely), or by
+  darkvision — with the **optional sight range in squares** capping every sense. Line of sight is
+  still the other term: `fogVisibleTokenIds` requires an in-sight, lit-or-darkvision token, and the
+  gate keeps its own light term even though today's single caller's radii already imply it, so a
+  caller passing polygons computed elsewhere (a host-side gate, a replay, a test) gets the
+  light-correct answer. A context **without** a lighting field keeps the pre-2.1 meaning (line of
+  sight alone), which is why the older callers and their tests did not change. The GM's control is
+  the Settings window's `[data-scene-darkness]` slider (0–100 %, `sceneDarknessOp` clamping, NaN
+  read as bright), which rides the `scenes` document so every client's fog loop re-reads it live.
+  Evidence: `tests/canvas/darkness.test.ts` **19**, `tests/core/fogExploration.test.ts` **12**,
+  and `e2e/fog_lighting.spec.ts` **1/1** — a really joined player: daylight shows the hero, an orc
+  10 ft. away and a scout 40 ft. out; the GM's slider to 100 % leaves **only their own hero** with
+  the replica's token count, positions and explored map unchanged, and no move op anywhere in the
+  spec; a rail-placed six-cell torch brings back the orc but not the scout; *Erase last* shrinks it
+  again with nothing placed; back to 0 % returns all three. **Remainder → G-26:** no lighting
+  *render* (the player experiences the dark through the fog cover), light reach is a distance test
+  rather than a wall-clipped gradient, and no priorities/animation. Also open by D-260's own record:
+  a token's `sight`/`darkvision` are document/data fields with **no editor window** (the same state
+  the pre-existing `vision` flag and `TokenDocument.light` are in), so a bestiary's darkvision does
+  not reach the canvas yet — a converter→actor→token-editor slice of its own. *(Internal: ROADMAP
+  fog follow-up.)*
+- **G-25 — Fog-of-war GM tools.** Med · ✅ **Closed (D-256 brushes, D-262 the remainder).**
   `src/core/fogMask.ts` (ordered hide/reveal paint log in `flags.core.fogMask`, bounded, later
   strokes win), replayed on both shells by `FogLayer.applyManualMask`, replicated as a scene flag,
   hide-all/reveal-all from the rail, and token gating via `maskHiddenTokenIds` (a player's own
@@ -427,9 +566,16 @@ remaining work is different from what the original assumed, that is called out.
 - **G-30 — Screen sharing.** Low · ⛔ **Open** (voice/video mesh ≤ 6 exists; no `getDisplayMedia`).
 - **G-31 — Views/bookmarks; scene background video.** Low · ⛔ **Open** (images only, no
   bookmarks, no video backgrounds).
-- **G-32 — Host-side token hiding (anti-cheat fog).** Low · ⛔ **Open (known limitation).**
-  D-251/D-256 token gating is client-side; positions still reach the player replica.
-  *(Internal: ROADMAP follow-up.)*
+- **G-32 — Host-side token hiding (anti-cheat fog).** Low · ⛔ **Open — decided explicitly, not deferred (D-260).**
+  D-251/D-256/D-260 token gating is client-side: what it enforces is what a shell draws, uncovers
+  and lets a click reach, while every client's replica still holds every token's `x`/`y` — the
+  replication boundary §4/§5 has always drawn. Withholding positions per user is therefore a
+  **replication-layer** change (a per-user snapshot projection, or a redesigned op filter with its
+  own late-join, undo and host-migration story), and doing it badly would be worse than doing it
+  later; the path is cheap when taken, because the explored fog is already host-side and per
+  user+scene (D-250) and `fogVisibleTokenIds` is pure, so a host-side gate can call the same
+  function and project with no new rules code. Recorded in D-260 so nobody believes the boundary
+  is stronger than it is. *(Internal: ROADMAP follow-up.)*
 
 ### F. Communication & collaboration
 
@@ -477,7 +623,7 @@ remaining work is different from what the original assumed, that is called out.
   documents ship with the repository, not the build, and the window says so). Covered by
   `e2e/onboarding.spec.ts` and `tests/core/onboarding.test.ts`.
 - **G-42 — Firefox/WebKit acceptance of the shipped app.** Med (quality) · 🟡 **Partial.**
-  Day-to-day the suite runs the `chromium` project (174 specs); `playwright.config.ts` still
+  Day-to-day the suite runs the `chromium` project (**184 specs** as of D-264); `playwright.config.ts` still
   defines opt-in `firefox`/`webkit` projects, and the M2 acceptance run (D-082) executed webkit
   29/29 and firefox 20/20 non-RTC (firefox RTC was blocked by the sandbox's ICE/DTLS, not by the
   app). So the matrix exists as precedent and is one flag away — it is simply not a standing gate.
@@ -513,20 +659,43 @@ remaining work is different from what the original assumed, that is called out.
   opens the real 8 MB zip through the start screen and imports converted entries.
   **Remaining (hand-off, not a gap):** attaching the built zips to a release page; the repo has no
   tags yet and README names the upload set.
-- **G-45 — Compendium scale UX (NEW).** Med.
-  Search is a ranked full scan of every entry per keystroke (`src/core/compendium.ts:139-195`
-  builds only an id index), and browse mode caps the rendered list (the sheets spec notes "at
-  most 50 rows"). At the 20k-entry scale the content pipeline just unlocked, that is
-  "type the exact name" rather than "browse like Foundry". The plan's §2.5.2 targets (precomputed
-  buckets, virtualized rows, lazy per-pack parse, < 16 ms keystroke) were never implemented.
+- **G-45 — Compendium scale UX (NEW).** Med. ✅ **closed by D-266 — every §2.5.2 target built.**
+  Search *was* a ranked full scan of every entry per keystroke (`src/core/compendium.ts:139-195`
+  built only an id index) and browse mode capped the rendered list at 50 rows; at the 20k-entry
+  scale the content pipeline unlocked, that is "type the exact name" rather than "browse like
+  Foundry". Now: **precomputed buckets** — `src/core/compendiumIndex.ts` (new) interns each pack's
+  name/keyword tokens into flat typed-array postings plus 3-gram postings and reproduces
+  `searchCompendia`'s ranking rung for rung (`tests/core/compendiumIndex.test.ts` proves parity over
+  every scorer rung and limit, browse and explicit sorts); **virtualized rows** —
+  `src/ui/virtual.ts` (the army roster's `windowRows`, extracted to a shared module) drives the
+  reader, the picker and the character builder; **lazy per-pack parse** —
+  `src/core/compendiumCache.ts` parses on demand per package record and invalidates on import, so
+  reopening the compendia tab re-parses nothing; **< 16 ms keystroke** — measured **eight
+  keystrokes in 3.6-6.8 ms at 20,000 entries (worst 4.4 ms)** with a 5.36 MB accounted index footprint (budget
+  8 MB), and browsing all 20k rows ranks in 1-10 ms — over the **real 25,376-entry corpus** the same
+  measurement prints **7 keystrokes in 8.2 ms** and a **7.27 MB** accounted index footprint, still inside
+  the 8 MB budget, which is why `tests/scripts/testerRealZip.test.ts` asserts that bound on real data too.
+  The reader also gained facet filters (pack/kind/school/level), a sort control and a detail pane
+  (`CompendiaPanel.svelte` + `panelModel.ts`). **Executed in Chromium on this tree, not merely written:**
+  `e2e/compendium_scale.spec.ts` (340-entry package: windowing, facets, sorts, detail pane, both import
+  paths), `e2e/starter_compendia.spec.ts` (the **hand-authored starter world**, 5 packs / 162 entries
+  counted from the zip — the corpus whose spell and table shapes differ from the converter's) and
+  `e2e/content_world.spec.ts` (the **real 8 MB converted world**, with the **3rd ranked hit** of a
+  partial-name search drag-imported). That run is also what found the last two reader defects — the
+  virtual spacers collapsing to 0 px inside a flex list, and duplicate detail-pane keys killing the panel
+  on a real spell — and the real corpora corrected three facet mismatches; D-266 records both.
 
 ---
 
-## 5. Suggested prioritization (re-scored on the verified statuses)
+## 5. Suggested prioritization (re-scored 2026-09-21 on the re-synced statuses)
 
 The 2026-09-19 tiers were written when the content pipeline, the builder and the rail did not
-exist. Re-scored by "what is left", in the order the closure plan sequences it — **value per day
-first, dependencies second**, market-differentiating (non-parity) work last:
+exist, and the 2026-09-20 re-score was written before D-259…D-264 landed. Of its ten items,
+**seven of its ten items are done (1, 2, 3, 4, 5, 6, 8) and one more is half done** (7: G-25 ✅ D-262,
+G-41 ✅ D-263, G-38 open · 8: G-39 ✅ D-264 **and G-08 ✅ D-267**), so the list below keeps its numbering
+as a record and marks each entry; the open set is written out in §5.1. Re-scored by "what is left",
+in the order the closure plan sequences it — **value per day first, dependencies second**, market-differentiating
+(non-parity) work last:
 
 **Wave 1 — close the loops we already opened** (no new architecture; each item unblocks something
 that already exists)
@@ -534,23 +703,44 @@ that already exists)
    ✅ done by D-258 (fetch script, packaged artifact + checksums, `LEGAL.md` and in-app credits).
 2. ~~**G-43 / G-27** door & wall lifecycle + window primitive~~ — ✅ done by D-257 (wall
    reshaping remains, tracked in G-43).
-3. **G-03 / G-04** inventory + encumbrance + currency + item surface (the last Tier-1 sheet gap).
-4. **G-45** compendium scale UX (makes the 25k entries usable, not just present).
+3. ~~**G-03 / G-04** inventory + encumbrance + currency + item surface (the last Tier-1 sheet gap)~~
+   — ✅ done by D-259 (Items tab, item window, Table 7-4/7-5, the mapped `changes[]` subset,
+   generated consumables, `e2e/pf1e_inventory.spec.ts`).
+4. ~~**G-45** compendium scale UX (makes the 25k entries usable, not just present) — the only
+   Wave-1 item still open~~ — ✅ done by D-266 (index parity with the reference search, windowed
+   rows, facet filters + sorts + detail pane, parsed-pack memo; 20k-entry keystrokes 3.6-6.8 ms worst
+   4.4 ms against a 16 ms budget, 5.36 MB index against an 8 MB budget).
 
 **Wave 2 — platform parity a table feels within a session**
-5. **G-24** sight bounded by lighting (+ **G-26** light richness once the model exists; **G-32**
-   host-side token withholding is the same decision).
-6. **G-22 / G-10a / G-10b** table flow: player quickbar, token HP bars, chat-card apply buttons
-   (**G-20**).
-7. **G-25 tail** GM "view as player X"; **G-41 tail** onboarding; **G-38** UI-string extraction if a
-   non-English table is in scope.
+5. ~~**G-24** sight bounded by lighting~~ — ✅ done by D-260 (**G-32** decided there and still open
+   by design, above; **G-26** light richness is the named follow-up).
+6. ~~**G-22 / G-10a / G-10b** table flow: player quickbar, token HP bars, chat-card apply buttons
+   (**G-20**)~~ — ✅ done by D-261 (three e2e specs: `token_hp`, `quickbar`, `roll_apply`).
+7. ~~**G-25 tail** GM "view as player X"~~ ✅ D-262 · ~~**G-41 tail** onboarding~~ ✅ D-263;
+   **G-38** UI-string extraction if a non-English table is in scope — open.
 
 **Wave 3 — breadth and on-ramp**
-8. **G-08** statblock import · **G-39** character import from Roll20/Foundry/Hero Lab (the
-   migration story — pairs with G-44's artifact).
+8. ~~**G-08** statblock import~~ — ✅ done by D-267 (pasted text → bestiary actor through the same
+   import front door) · ~~**G-39** character import from Roll20/Foundry/Hero Lab~~ — ✅ done by D-264
+   (the `.por` zip extraction tail is named in the row).
 9. **G-11 / G-21** non-combat resolution + condition tails · **G-12** polymorph · **G-16** PFS.
 10. **G-29** soundboard/TTS · **G-31** views/bookmarks/video backgrounds · **G-40** theming ·
     **G-14 / G-15** breadth content (Mythic rules, companion progression).
+
+### 5.1 What is actually left (the open set, 2026-09-21)
+
+**Parity work, cheapest first:** ✅ **G-45** compendium scale UX — the last Wave-1 item — closed by
+D-266 · ✅ **G-08** statblock import — closed by D-267 (pasted text → bestiary actor through the same
+front door) · **G-18's bestiary** (the content pipeline's missing third; the largest single data
+hole) · **G-11 / G-21** non-combat resolution and condition tails · **G-43's tail** (drag a wall
+endpoint, change a placed wall's kind) · **G-26** light richness (the model D-260 landed is its input) · **G-06 / G-07** automation and variants
+(sneak attack, rage, smite; metamagic, spell points — catalogs are already converted) ·
+**G-09's tail** (apply racial traits), **G-15's tail** (companion progression), **G-12**, **G-16**,
+**G-37**, **G-38**, **G-40**, **G-42**, **G-29 / G-30 / G-31**, **G-36** (docs + one exemplar module
++ an install path — the API itself is done), **G-19**, **G-14 / G-15** breadth content.
+
+**Not in the open set, by decision** — kept here because "what is left?" also means what is
+deliberately *not* being done:
 
 **Opportunistic / differentiator track (not parity — do not schedule as gap closure)**
 FX engine (spell/attack animations), 3D dice polish, module-ecosystem enablement (**G-36**

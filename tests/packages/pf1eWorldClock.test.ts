@@ -38,6 +38,8 @@ import {
 } from "../../src/packages/pf1e/effectOps";
 import { pf1eNextTurn } from "../../src/packages/pf1e/combatState";
 import {
+  ROUNDS_PER_HOUR,
+  ROUNDS_PER_MINUTE,
   TICKS_PER_DAY,
   WORLD_CLOCK_KEY,
   advanceWorldClockOps,
@@ -200,20 +202,38 @@ describe("clock ops", () => {
 });
 
 describe("the duration ladder", () => {
-  test("round/minute/hour follow the landed ttlToTicks abstraction times the round", () => {
+  test("round/minute/hour are real time, derived from the 6-second round (D-268)", () => {
     expect(ttlSeconds(ttl("round", 3))).toBe(18); // 3 × 6 s
     expect(ttlSeconds(ttl("minute", 1))).toBe(60); // 10 rounds
-    expect(ttlSeconds(ttl("hour", 1))).toBe(600); // 100 rounds
+    expect(ttlSeconds(ttl("hour", 1))).toBe(3_600); // 600 rounds
     expect(ttlSeconds(ttl("minute", 1, true), 3)).toBe(180); // 1 min/level at CL 3
     expect(ttlSeconds(ttl("round", 1), 1, 60)).toBe(60); // configured round length
   });
 
+  test("the ladder's own arithmetic: the hour is 60 of its minutes, the day 24 of its hours", () => {
+    // This is the assertion the old abstraction could not pass, and the reason D-268 changed it:
+    // every rung is the same quantity of time, so a duration's *label* is what it says.
+    expect(ROUNDS_PER_MINUTE).toBe(10);
+    expect(ROUNDS_PER_HOUR).toBe(600);
+    expect(ROUNDS_PER_HOUR).toBe(ROUNDS_PER_MINUTE * 60);
+    expect(TICKS_PER_DAY).toBe(ROUNDS_PER_HOUR * 24);
+    expect(TICKS_PER_DAY * 6).toBe(86_400);
+    const minuteSeconds = ttlSeconds(ttl("minute", 1));
+    const hourSeconds = ttlSeconds(ttl("hour", 1));
+    const daySeconds = ttlSeconds(ttl("day", 1));
+    if (minuteSeconds === null || hourSeconds === null || daySeconds === null) {
+      throw new Error("the ladder priced a clock-counted unit as null");
+    }
+    expect(hourSeconds).toBe(minuteSeconds * 60);
+    expect(daySeconds).toBe(hourSeconds * 24);
+  });
+
   test("a day is 24 of this world's hours; configured rounds scale it", () => {
-    expect(TICKS_PER_DAY).toBe(2400);
-    expect(ttlSeconds(ttl("day", 1))).toBe(14_400);
-    expect(ttlSeconds(ttl("day", 2))).toBe(28_800);
-    expect(ttlSeconds(ttl("day", 1, true), 2)).toBe(28_800);
-    expect(ttlSeconds(ttl("day", 1), 1, 60)).toBe(144_000);
+    expect(TICKS_PER_DAY).toBe(14_400);
+    expect(ttlSeconds(ttl("day", 1))).toBe(86_400);
+    expect(ttlSeconds(ttl("day", 2))).toBe(172_800);
+    expect(ttlSeconds(ttl("day", 1, true), 2)).toBe(172_800);
+    expect(ttlSeconds(ttl("day", 1), 1, 60)).toBe(864_000);
   });
 
   test("instant, concentration and permanent are never clock-counted", () => {
@@ -313,12 +333,20 @@ describe("the sweep", () => {
     ).toEqual(["m"]);
     expect(clockExpiredIds([{ id: "m", payload: cl3 }], 179, 6)).toEqual([]);
     expect(clockExpiredIds([{ id: "m", payload: cl3 }], 180, 6)).toEqual(["m"]);
+    // D-268: a day is 14 400 rounds (86 400 s), so it ends at 86 399/86 400 — not at 14 400.
     expect(
-      clockExpiredIds([{ id: "d", payload: anchored(0, "day") }], 14_399, 6),
+      clockExpiredIds([{ id: "d", payload: anchored(0, "day") }], 86_399, 6),
     ).toEqual([]);
     expect(
-      clockExpiredIds([{ id: "d", payload: anchored(0, "day") }], 14_400, 6),
+      clockExpiredIds([{ id: "d", payload: anchored(0, "day") }], 86_400, 6),
     ).toEqual(["d"]);
+    // …and a bare hour now outlives a quarter-hour of game time (it used to end at 600 s).
+    expect(
+      clockExpiredIds([{ id: "h", payload: anchored(0, "hour") }], 3_599, 6),
+    ).toEqual([]);
+    expect(
+      clockExpiredIds([{ id: "h", payload: anchored(0, "hour") }], 3_600, 6),
+    ).toEqual(["h"]);
   });
 
   test("unanchored (pre-E05) effects are never swept; anchored non-counted units too", () => {

@@ -82,6 +82,81 @@
   import { viewAsOptions, viewAsUser, withoutHiddenTokens } from "../core/viewAs";
   import { can } from "../core/permissions";
   import { sceneFogSettings } from "../core/fogExploration";
+  import { createHexOverlaySync, repaintHexOverlay, syncHexOverlay } from "./hexOverlay";
+  import {
+    encounterCheck,
+    encounterPromptMessage,
+    encounterResultMessage,
+    openPromptFor,
+    rollTableNow,
+  } from "../core/hexcrawl/encounterFlow";
+  import { isCellOpen, partyCellKey } from "../core/hexcrawl/visibility";
+  import { cellCenterOf } from "../core/hexcrawl/cells";
+  import {
+    partyTokenOf,
+    routePointsOf,
+    stepCostOf,
+    routeSeconds,
+    stepSecondsOf,
+    partyPositionOps,
+    travelAdvance,
+    travelProgressOps,
+  } from "../core/hexcrawl/travel";
+  import {
+    encounterPhase,
+    triggersForExplore,
+    triggersForFight,
+    triggersForStep,
+    type EncounterTrigger,
+  } from "../core/hexcrawl/encounter";
+  import { hexcrawlProfileOf } from "../core/hexcrawl/types";
+  import { encounterPayloadOf } from "../core/hexcrawl/encounterFlow";
+  import {
+    advanceWorldClockOps,
+    pf1eClockSweepOps,
+    readWorldClock,
+  } from "../packages/pf1e/worldClock";
+  import {
+    secondsPerRoundOf,
+    worldSettingsFrom as coreWorldSettingsFrom,
+  } from "../core/worldSettings";
+  import { DAY_SECONDS, HOUR_SECONDS, secondsUntilHour } from "../core/clock";
+  import { EXPLORE_SECONDS } from "../core/hexcrawl/encounterFlow";
+  import {
+    encounterResultId,
+    encounterResultOf,
+    openEncounterResult,
+    resolveEncounterRefs,
+    type ResolvedRef,
+  } from "../ui/hexcrawl/encounterResult";
+  import {
+    encounterTokenData,
+    placeEncounterTokens,
+    type PlacementEntry,
+    type PlacementPoint,
+  } from "../core/hexcrawl/placement";
+  import { duplicateSceneOps } from "../core/sceneCopy";
+  import { logEncounterOps } from "../core/hexcrawl/encounter";
+  import { cellAtPoint } from "../core/hexcrawl/cells";
+  import { terrainCatalogOrDefault } from "../core/hexcrawl/terrain";
+  import {
+    formatDuration,
+    revealDueFeatures,
+    type FeatureFacts,
+  } from "../core/hexcrawl/features";
+  import {
+    DEFAULT_SPEED_PER_DAY,
+    readTravelPlan,
+    type TravelPace,
+    type TravelPlan,
+  } from "../core/hexcrawl/types";
+  import { isHexcrawlScene } from "../core/hexcrawl/types";
+  import { sightReconcileOps } from "../core/hexcrawl/visibility";
+  import {
+    applyHexMenuEntry,
+    hexContextMenuModel,
+    type HexMenuEntry,
+  } from "../ui/hexcrawl/hexContextMenu";
   import {
     NO_ONBOARDING_FACTS,
     onboardingSteps,
@@ -187,6 +262,20 @@
   let tokenMenu = $state<{ x: number; y: number; tokenId: string } | null>(
     null,
   );
+
+  /**
+   * D-271 (plan §5.2): the empty-ground menu — the same gesture as the token menu, on a hex.
+   * The *model* is captured when the menu opens (entries, labels, disabled reasons), so the DOM
+   * cannot disagree with what the click will do.
+   */
+  let hexMenu = $state<{
+    x: number;
+    y: number;
+    key: string;
+    title: string;
+    subtitle: string | null;
+    entries: HexMenuEntry[];
+  } | null>(null);
   let worldName = $state("—");
   let seq = $state(0);
   let tokenCount = $state(0);
@@ -507,6 +596,9 @@ const WALL_PICK_RADIUS = 12;
         { kind: "create", coll: "combats", data: created },
         ...activateEncounter(scene, created, current.gm.client.user ?? null, scene._id).ops,
       ]);
+      // D-273: a fight starting on a hex is the `fighting` trigger (plan §6 rule 2). Only on a
+      // *new* combat — adding combatants to a running one is not a new fight.
+      if (isHexcrawlScene(scene)) runEncounterTriggers(triggersForFight(), partyCellKey(scene) ?? undefined);
     }
     for (const tokenId of selected) {
       const token = scene.tokens.find((tk) => tk._id === tokenId);
@@ -553,8 +645,10 @@ const WALL_PICK_RADIUS = 12;
     app?.gm.client.submit(scene.drawings.map((drawing) => ({ kind: "delete" as const, ref: { coll: "drawings" as const, id: drawing._id, parent: { coll: "scenes" as const, id: scene._id } } })));
   };
   /** Overlay coordinates are the canvas's own screen space (stage root = top-left origin). */
-  const measurePoint = (point: { x: number; y: number }) =>
-    worldToScreen(stage?.camera ?? { x: 0, y: 0, scale: 1 }, point.x, point.y);
+  const measurePoint = (point: { x: number; y: number }) => {
+    void cameraEpoch; // a pan/zoom re-renders every screen-space overlay (see `cameraEpoch`)
+    return worldToScreen(stage?.camera ?? { x: 0, y: 0, scale: 1 }, point.x, point.y);
+  };
   /** What the ruler reads out: world units → the scene grid's own distance units. */
   const measureReadout = (distance: number): string => {
     const grid = activeScene()?.grid;
@@ -611,6 +705,14 @@ const WALL_PICK_RADIUS = 12;
   let fogTimer: ReturnType<typeof setInterval> | null = null;
   /** D-250: §9 explored fog loop (restore → reveal → persist) for the GM's own map. */
   let fog: FogExploration | null = null;
+  /** D-271: the hexcrawl overlay's plan cache (rebuilt only when `hexOverlayKey` moves). */
+  const hexOverlay = createHexOverlaySync();
+  /**
+   * D-275: the camera's own version. The SVG overlays (the travel route, and the measure/shape
+   * previews beside it) are drawn in **screen** space, so a pan or a zoom has to re-render them —
+   * the Pixi layers get `repaintHexOverlay`, and this is the DOM's half of the same tick.
+   */
+  let cameraEpoch = $state(0);
   let lastTurnPhase = "idle";
   let lastRulesVersion = "";
   let lastByType: Record<string, number> = {};
@@ -658,6 +760,986 @@ const WALL_PICK_RADIUS = 12;
 
   function closeTokenMenu(): void {
     tokenMenu = null;
+    closeHexMenu(); // one click cannot leave two menus on the canvas
+  }
+
+  function closeHexMenu(): void {
+    hexMenu = null;
+  }
+
+  /** D-271: the `hex` window, one per cell — the key is the window's identity. */
+  function openHexWindow(key: string): void {
+    const scene = activeScene();
+    if (!scene) return;
+    openWindow(`hex-${scene._id}-${key}`, `Hex ${key}`, "hex", {
+      sceneId: scene._id,
+      key,
+    });
+  }
+
+  /**
+   * D-272: the encounter-tables window. Without a hex it is the world's table library (the GM
+   * toolbar's *Tables* button); with `key` it is the attach flow for that hex, which is where the
+   * canvas menu's *Attach encounter table…* and the hex window's own button both land.
+   */
+  function openTablesWindow(options: { key?: string } = {}): void {
+    const scene = activeScene();
+    const key = options.key ?? "";
+    const attach = key !== "" && scene !== null;
+    openWindow(
+      attach ? `encounter-tables:${scene._id}:${key}` : "encounter-tables",
+      attach ? `Tables — hex ${key}` : "Encounter tables",
+      "encounterTables",
+      attach ? { sceneId: scene._id, key } : undefined,
+    );
+  }
+
+  /** Right-click on empty ground, inside a hexcrawl scene: what does this hex offer? */
+  function openHexMenu(
+    screen: { x: number; y: number },
+    world: { x: number; y: number },
+  ): void {
+    if (!app) return;
+    const scene = activeScene();
+    if (!scene || !isHexcrawlScene(scene)) return;
+    const key = cellAtPoint(scene, world.x, world.y);
+    if (!key) return;
+    const model = hexContextMenuModel({
+      scene,
+      key,
+      user: app.gm.client.user ?? null,
+      catalog: hexTerrainCatalog(),
+    });
+    // A player right-clicking ground they have not been shown gets no menu at all: there is no
+    // document for that hex on their replica, and nothing to open.
+    if (model.entries.length === 0) return;
+    hexMenu = { x: screen.x, y: screen.y, key, ...model };
+  }
+
+  function hexTerrainCatalog() {
+    return terrainCatalogOrDefault(
+      worldSettingsFrom(app?.gm.client.store.getAll("settings") ?? [])["hexTerrain"],
+    );
+  }
+
+  /** Apply one §5.2 entry. The model decides *what* the click means; this submits its ops. */
+  function runHexMenuEntry(entryId: string): void {
+    if (!hexMenu) return;
+    const key = hexMenu.key;
+    closeHexMenu();
+    const scene = activeScene();
+    if (!scene || !app) return;
+    const result = applyHexMenuEntry({
+      scene,
+      key,
+      entryId,
+      user: app.gm.client.user ?? null,
+      nextId: () => globalThis.crypto.randomUUID(),
+    });
+    if (result.error !== null) {
+      notifyLog = [
+        ...notifyLog.slice(-49),
+        { message: result.error, level: "error" },
+      ];
+      return;
+    }
+    if (result.ops.length) app.gm.client.submit(result.ops);
+    if (result.openWindow) openHexWindow(key);
+    if (result.openTables) openTablesWindow({ key });
+    if (result.note !== null) pushLog([result.note], "info");
+    // D-273: the clock envelope has to be submitted before the engine reads it back, so exploring
+    // is the shell's job — the menu entry only says which hex.
+    if (result.explore) exploreCell(key);
+    // D-275: the route is the shell's own draft (*Add to path*), and moving the party is one
+    // position op the model already built into `result.ops` — so the append is all that is left.
+    if (result.addPath) onPathClick(key);
+  }
+
+  // ─── D-273: the encounter engine (plan §6) ────────────────────────────────
+
+  /** Every encounter table in the world, for the engine's own filtering. */
+  function encounterTables() {
+    return app ? [...app.gm.client.store.getAll("encounterTables")] : [];
+  }
+
+  const encounterClock = () =>
+    readWorldClock(app?.gm.client.store.getAll("settings") ?? []);
+
+  /** The GM's own user ids — the audience of a pending prompt. */
+  function gmUserIds(): string[] {
+    if (!app) return [];
+    const ids = app.gm.client.store
+      .getAll("users")
+      .filter((u) => u.role === "GM" || u.role === "ASSISTANT")
+      .map((u) => u._id);
+    return ids.length > 0 ? ids : [GM_USER_ID];
+  }
+
+  /**
+   * One trigger, one decision (plan §6). `ops` is the ledger write; a `prompt` writes nothing, and
+   * an already-open prompt for the same hex is not posted twice — the ledger is what keeps a table
+   * quiet once it has fired, so only the *unanswered* case needs deduping.
+   */
+  function runEncounterTrigger(trigger: EncounterTrigger, keyOverride?: string) {
+    const current = app;
+    const scene = activeScene();
+    if (!current || !scene) return null;
+    const cellKey = keyOverride ?? partyCellKey(scene);
+    if (!cellKey || !isCellOpen(scene, cellKey)) return null;
+    const check = encounterCheck({
+      scene,
+      tables: encounterTables(),
+      cellKey,
+      trigger,
+      clockSeconds: encounterClock(),
+    });
+    if (check.ops.length > 0) current.gm.client.submit(check.ops);
+    if (check.action === "prompt") {
+      const log = current.gm.client.store.getAll("messages");
+      if (!openPromptFor(log, scene._id, cellKey)) {
+        current.gm.client.submit([
+          {
+            kind: "create",
+            coll: "messages",
+            data: encounterPromptMessage({
+              scene,
+              check,
+              authorId: current.gm.client.user?.id ?? GM_USER_ID,
+              gmIds: gmUserIds(),
+            }),
+          },
+        ]);
+      }
+    } else if (check.action === "roll" && check.table && check.roll) {
+      const profile = hexcrawlProfileOf(scene);
+      current.gm.client.submit([
+        {
+          kind: "create",
+          coll: "messages",
+          data: encounterResultMessage({
+            scene,
+            cellKey,
+            trigger,
+            phase: check.phase,
+            clockSeconds: check.clockSeconds,
+            table: check.table,
+            roll: check.roll,
+            authorId: current.gm.client.user?.id ?? GM_USER_ID,
+            gmIds: gmUserIds(),
+            gmOnly: false,
+            announceNames: profile?.encounterAnnounce !== "hidden",
+          }),
+        },
+      ]);
+    }
+    if (check.action !== "none") encounterTickFlash(`${cellKey} · ${check.action}`);
+    return check;
+  }
+
+  /**
+   * Several triggers from one event (a border crossing is `entering` **and** `moving`), asked in the
+   * plan's order and stopped at the first one that produced anything — one event is one encounter,
+   * never a roll per trigger.
+   */
+  function runEncounterTriggers(
+    triggers: readonly EncounterTrigger[],
+    keyOverride?: string,
+  ) {
+    for (const trigger of triggers) {
+      const check = runEncounterTrigger(trigger, keyOverride);
+      if (check && check.action !== "none") return check;
+    }
+    return null;
+  }
+
+  /** One line of feedback in the notification stack (the engine's whole UI footprint otherwise). */
+  function encounterTickFlash(text: string): void {
+    notifyLog = [...notifyLog.slice(-49), { message: `Encounter: ${text}`, level: "info" }];
+  }
+
+  /**
+   * The chat card's *Roll this* and the hex window's row (plan §6 rule 6): one named table, by
+   * hand. The draw and the ledger write are `rollTableNow`, which is the same pair `auto` uses — so
+   * a table rolled by hand is a table the next footstep will not roll again.
+   *
+   * `messageId` is the pending prompt being answered. With one, the card is GM-only (the prompt
+   * was GM-only, and the GM narrates the result) and the prompt is marked answered so its buttons
+   * never offer a second draw; without one — the hex window's row — the roll is the GM's own and
+   * the card is as public as an `auto` roll, names revealed or hidden by the scene's own flag.
+   *
+   * Both paths open the results window: the plan's Phase 4 e2e is "clicking it rolls and produces
+   * the results window", and the tokens it lists are dragged from there (Phase 5 owns placement).
+   */
+  function rollEncounterTable(
+    messageId: string | null,
+    tableId: string,
+    cellKeyOverride?: string,
+  ) {
+    const current = app;
+    const scene = activeScene();
+    if (!current || !scene) return;
+    const payload = messageId
+      ? encounterPayloadOf(current.gm.client.store.get("messages", messageId) ?? null)
+      : null;
+    const cellKey = payload?.cellKey ?? cellKeyOverride ?? partyCellKey(scene);
+    const table = encounterTables().find((t) => t._id === tableId);
+    if (!cellKey || !table) return;
+    const clockSeconds = encounterClock();
+    const { roll, ops } = rollTableNow({ scene, table, cellKey, clockSeconds });
+    const profile = hexcrawlProfileOf(scene);
+    current.gm.client.submit([
+      ...ops,
+      ...(messageId
+        ? [
+            {
+              kind: "update" as const,
+              ref: { coll: "messages" as const, id: messageId },
+              diff: {
+                "system.encounter.answered": true,
+                "system.encounter.answeredRoll": roll.roll,
+              },
+            },
+          ]
+        : []),
+      {
+        kind: "create",
+        coll: "messages",
+        data: encounterResultMessage({
+          scene,
+          cellKey,
+          trigger: payload?.trigger ?? "entering",
+          phase: payload?.phase ?? encounterPhase(clockSeconds, scene),
+          clockSeconds,
+          table,
+          roll,
+          authorId: current.gm.client.user?.id ?? GM_USER_ID,
+          gmIds: gmUserIds(),
+          gmOnly: messageId !== null,
+          announceNames: profile?.encounterAnnounce !== "hidden",
+        }),
+      },
+    ]);
+    encounterTickFlash(`${cellKey} · rolled ${roll.text}`);
+    openEncounterResult(wm, encounterResultId(table._id, cellKey, roll.roll), {
+      roll,
+      preview: false,
+      sceneId: scene._id,
+      cellKey,
+    });
+  }
+
+  /**
+   * The hex window's row, for a hex that may not be the party's: the window names its own scene and
+   * cell, so the roll happens on *that* hex. The engine works on the active scene (it reads the
+   * scene's mode and the world clock), so a window belonging to another scene says so instead of
+   * rolling something the shell cannot show.
+   *
+   * `SceneDocument.type` is `"scene"` — lowercase. The first version of this guard compared
+   * `"Scene"`, and the browser spec caught it: the row's click returned silently.
+   */
+  function rollHexTable(sceneId: string, cellKey: string, tableId: string) {
+    const current = app;
+    if (!current || !cellKey) return;
+    const scene = current.gm.client.store.get("scenes", sceneId) ?? null;
+    if (!scene) return;
+    if (scene._id !== activeScene()?._id) {
+      notifyLog = [
+        ...notifyLog.slice(-49),
+        { message: "Open that scene before rolling its tables", level: "info" },
+      ];
+      return;
+    }
+    rollEncounterTable(null, tableId, cellKey);
+  }
+
+  /**
+   * D-274 (plan §5.5): the creatures a roll named, as things to place. A compendium ref is *imported*
+   * — the same create the compendium drag does (`onCompendiumDrop`), so the token is a normal,
+   * sheet-linked token rather than a picture of one — and a world ref uses the actor it points at.
+   * The count applies per ref (the wizard's own rule), so a row of "3 × dire wolf" places three.
+   */
+  async function placementEntriesFor(
+    rows: readonly ResolvedRef[],
+    count: number,
+    opts: { importCompendium?: boolean } = {},
+  ): Promise<{ entries: PlacementEntry[]; ops: Op[] }> {
+    const current = app;
+    if (!current) return { entries: [], ops: [] };
+    const copies = Math.max(1, Math.trunc(count));
+    const entries: PlacementEntry[] = [];
+    const ops: Op[] = [];
+    const rows0 = rows.length > 0 ? rows : [];
+    if (rows0.length === 0) return { entries, ops };
+    // Resolving a compendium row means reading the packs; do it once for the whole roll.
+    const compendia = opts.importCompendium
+      ? await current.packages.compendia().catch(() => [])
+      : [];
+    for (const row of rows0) {
+      for (let i = 0; i < copies; i += 1) {
+        if (row.ref.kind === "actor") {
+          entries.push({
+            actorId: row.actor?._id ?? null,
+            name: row.name,
+            img: row.img,
+            width: row.token?.width,
+            height: row.token?.height,
+          });
+          continue;
+        }
+        // A compendium entry becomes a real actor document (the drag-import path), with the token
+        // linked to it, so the sheet opens from the board exactly as it does after a drag.
+        const pack = compendia.find((r) => r.pack.name === row.ref.packId) ?? null;
+        const entry = pack?.pack.entries.find((e) => e.id === row.ref.entryId) ?? null;
+        if (!pack || !entry) {
+          entries.push({ actorId: null, name: row.name, img: row.img });
+          continue;
+        }
+        const actorId = `${pack.pack.type.slice(0, -1)}-${globalThis.crypto.randomUUID().slice(0, 8)}`;
+        ops.push({
+          kind: "create",
+          coll: pack.pack.type,
+          data: { ...entry.data, _id: actorId },
+        });
+        entries.push({
+          actorId,
+          name: row.name,
+          img: row.img || pack.pack.entries.find((e) => e.id === row.ref.entryId)?.img || "",
+        });
+      }
+    }
+    return { entries, ops };
+  }
+
+  /** The origin a roll's tokens gather around: its own hex's centre, else the party, else the middle. */
+  function placementOrigin(scene: SceneDocument, cellKey: string | null): { x: number; y: number } {
+    const centre = cellKey ? cellCenterOf(scene, cellKey) : null;
+    if (centre) return centre;
+    const actor = partyTokenOf(scene);
+    if (actor) return { x: actor.x, y: actor.y };
+    return { x: Math.round(scene.width / 2), y: Math.round(scene.height / 2) };
+  }
+
+  /**
+   * D-274 (plan §5.5) — the roll's tokens, placed and created. `origin` is the drop point when a row
+   * was dragged onto the map, otherwise the encounter's own hex; `rowIndex` limits the placement to
+   * one row (the drag's payload) instead of everything the roll named.
+   */
+  async function placeEncounterAt(input: {
+    resultId: string;
+    rowIndex?: number | null;
+    origin?: { x: number; y: number } | null;
+  }): Promise<void> {
+    const current = app;
+    const scene = activeScene();
+    const result = encounterResultOf(input.resultId);
+    if (!current || !scene || !result) return;
+    const all = await resolveEncounterRefs(
+      current.gm.client.store,
+      result.roll.refs,
+      current.world?.id,
+    ).catch(() => []);
+    const rows = input.rowIndex === null || input.rowIndex === undefined
+      ? all
+      : all.filter((_, i) => i === input.rowIndex);
+    const { entries, ops } = await placementEntriesFor(rows, result.roll.count, {
+      importCompendium: true,
+    });
+    if (entries.length === 0) {
+      pushLog([`${result.roll.text} — nothing to place`], "info");
+      return;
+    }
+    const origin = input.origin ?? placementOrigin(scene, result.cellKey);
+    const points = placeEncounterTokens({ scene, origin, count: entries.length });
+    const tokens = encounterTokenData(entries, points, () => `t-${globalThis.crypto.randomUUID().slice(0, 8)}`);
+    current.gm.client.submit([
+      ...ops,
+      ...tokens.map((data) => ({
+        kind: "create" as const,
+        coll: "tokens" as const,
+        parent: { coll: "scenes" as const, id: scene._id },
+        data,
+      })),
+      ...(result.cellKey
+        ? logEncounterOps(scene, result.cellKey, {
+            tableId: result.roll.tableId,
+            tableName: result.roll.tableName,
+            roll: result.roll.roll,
+            text: result.roll.text,
+            sceneId: null,
+            atClock: encounterClock(),
+          })
+        : []),
+    ]);
+    const blocked = points.some((p: PlacementPoint) => p.blocked);
+    pushLog(
+      [
+        `Placed ${entries.length} × ${result.roll.text} at hex ${result.cellKey ?? "—"}${
+          blocked ? " (some on walls — drag them clear)" : ""
+        }`,
+      ],
+      "info",
+    );
+  }
+
+  /**
+   * D-274 (plan §5.6) — requirement 5d: *"optional linked battle scene (offer on trigger, copy,
+   * spread tokens)"*. The linked scene is copied (`duplicateSceneOps` — every child re-keyed, the map
+   * image shared), the encounter's tokens are created **inside the copy**, the copy becomes the active
+   * scene, one chat card says so, and the origin cell's log remembers the scene so the return trip is
+   * one click.
+   */
+  async function createBattleScene(input: { resultId: string; tableId?: string }): Promise<void> {
+    const current = app;
+    const scene = activeScene();
+    const result = encounterResultOf(input.resultId);
+    if (!current || !scene || !result) return;
+    const tableId = input.tableId ?? result.roll.tableId;
+    const table = encounterTables().find((t) => t._id === tableId) ?? null;
+    const sourceId = table?.sceneId ?? null;
+    const source = sourceId ? (current.gm.client.store.get("scenes", sourceId) ?? null) : null;
+    if (!source) {
+      pushLog(["That table links no battle scene to copy"], "info");
+      return;
+    }
+    const rows = await resolveEncounterRefs(
+      current.gm.client.store,
+      result.roll.refs,
+      current.world?.id,
+    ).catch(() => []);
+    const { entries, ops: actorOps } = await placementEntriesFor(rows, result.roll.count, {
+      importCompendium: true,
+    });
+    // The context's own tokens land in the **copy's** middle; the encounter's arrive on the spiral.
+    const centre = { x: Math.round(source.width / 2), y: Math.round(source.height / 2) };
+    const points = placeEncounterTokens({ scene: source, origin: centre, count: entries.length });
+    const tokens = encounterTokenData(entries, points, () => `t-${globalThis.crypto.randomUUID().slice(0, 8)}`);
+    const newId = `scene-${globalThis.crypto.randomUUID().slice(0, 8)}`;
+    const name = `${result.roll.tableName} — encounter`;
+    const ops = duplicateSceneOps({
+      scene: source,
+      id: newId,
+      name,
+      activate: true,
+      scenes: current.gm.client.store.getAll("scenes"),
+      extraTokens: tokens,
+    });
+    const cellOps = result.cellKey
+      ? logEncounterOps(scene, result.cellKey, {
+          tableId,
+          tableName: result.roll.tableName,
+          roll: result.roll.roll,
+          text: result.roll.text,
+          sceneId: newId,
+          atClock: encounterClock(),
+        })
+      : [];
+    current.gm.client.submit([
+      ...actorOps,
+      ...ops,
+      ...cellOps,
+      // The plan's own card: "Encounter: Goblin bandits — battle scene *Goblin ambush* created".
+      // It carries the roll, so the table is the card's own title line; with the table deleted out
+      // from under the card there is nothing to name it, and the log line below is the fallback.
+      ...(table
+        ? [
+            {
+              kind: "create" as const,
+              coll: "messages" as const,
+              data: encounterResultMessage({
+                scene,
+                cellKey: result.cellKey ?? "",
+                trigger: "entering",
+                phase: encounterPhase(encounterClock(), scene),
+                clockSeconds: encounterClock(),
+                table,
+                roll: result.roll,
+                authorId: current.gm.client.user?.id ?? GM_USER_ID,
+                gmIds: gmUserIds(),
+                gmOnly: false,
+                announceNames: true,
+              }),
+            },
+          ]
+        : []),
+    ]);
+    pushLog(
+      [`Battle scene “${name}” — ${entries.length} tokens placed (hex ${result.cellKey ?? "—"})`],
+      "info",
+    );
+  }
+
+  /**
+   * D-275: an asset hash → a URL a DOM `<img>` can load. The world's images are content-addressed
+   * bytes (an imported picture is a hash, §7), so the first ask starts the fetch and answers
+   * `null`; the moment the bytes are here the map has the URL and the asking component re-renders.
+   * URLs pass straight through — a feature's picture may be a link the GM pasted.
+   */
+  const assetUrls = new SvelteMap<string, string>();
+
+  function resolveAsset(hash: string | null | undefined): string | null {
+    if (!hash) return null;
+    if (/^(https?:|data:|blob:)/.test(hash)) return hash;
+    const ready = assetUrls.get(hash);
+    if (ready) return ready;
+    const current = app;
+    if (!current) return null;
+    void current.gm.fetcher
+      .request(hash, "ui")
+      .then((bytes) => {
+        // The same bytes → blob URL the tile textures use (`new Blob([bytes])`, App's own pattern).
+        const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)]));
+        assetUrls.set(hash, url);
+      })
+      .catch(() => undefined);
+    return null;
+  }
+
+  /**
+   * Advance the world clock by `delta` **and sweep what expired on the way** — the exact pair the
+   * settings window's own clock buttons perform (D-146/D-268). Travel is a consumer of the clock,
+   * not a second one: a party that marches for a day must end a day-long buff the same way pressing
+   * *+1 day* does, or the two ways of moving time would disagree about the rules.
+   */
+  function advanceClockWithSweep(delta: number): void {
+    const current = app;
+    const seconds = Math.trunc(delta);
+    if (!current || seconds <= 0) return;
+    const settingsDocs = current.gm.client.store.getAll("settings");
+    const settings = coreWorldSettingsFrom(settingsDocs);
+    const ops = advanceWorldClockOps(settingsDocs, seconds);
+    if (ops.length === 0) return;
+    const sweep = pf1eClockSweepOps(
+      current.gm.client.store.getAll("actors") as never,
+      current.gm.client.store.getAll("combats") as never,
+      readWorldClock(settingsDocs) + seconds,
+      secondsPerRoundOf(settings),
+    );
+    current.gm.client.submit([...ops, ...sweep.ops]);
+  }
+
+  // ─── D-275: travel, terrain time and hidden features (plan §5.7, §3.5) ─────
+
+  /**
+   * The route the GM is drawing in **path mode** (plan §5.7). A draft, not a document: it lives
+   * here until *Commit* writes it into the profile as a `TravelPlan`. `sceneId` is carried so a
+   * scene switch cannot leave half a route pointing at a map that is no longer in front of anyone.
+   */
+  let pathDraft = $state<{ sceneId: string; keys: string[] }>({ sceneId: "", keys: [] });
+  /** Whether the route being shown is the committed one (the profile's) or the draft. */
+  const planOf = (scene: SceneDocument | null): TravelPlan | null => {
+    if (!scene) return null;
+    const raw = (scene.flags?.["core"] as Record<string, unknown> | undefined)?.["hexcrawl"];
+    return typeof raw === "object" && raw !== null && !Array.isArray(raw)
+      ? readTravelPlan(raw as Record<string, unknown>)
+      : null;
+  };
+
+  /**
+   * The path the travel panel shows and travels: the draft while one is being drawn (the party's
+   * own cell first, because a route that does not start where the party stands is not a route),
+   * else the committed plan's.
+   */
+  function travelPathOf(scene: SceneDocument | null): string[] {
+    if (!scene) return [];
+    const draft = pathDraft.sceneId === scene._id ? pathDraft.keys : [];
+    if (draft.length > 0) {
+      const party = partyCellKey(scene);
+      const out: string[] = [];
+      const push = (key: string) => {
+        if (key !== "" && key !== out.at(-1)) out.push(key);
+      };
+      if (party) push(party);
+      for (const key of draft) push(key);
+      return out;
+    }
+    return planOf(scene)?.path ?? [];
+  }
+
+  /**
+   * Whether the toolbar should offer *Travel path* (§5.7): a hexcrawl scene is the active one.
+   * `storeVersion` is read on purpose — the toolbar is rendered once, before the wizard has made
+   * anything, and a prop computed off `activeScene()` alone would never see it arrive (the store is
+   * not a signal; D-271's `void storeVersion` convention is exactly this).
+   */
+  const pathToolAvailable = $derived.by(() => {
+    void storeVersion;
+    return isHexcrawlScene(activeScene());
+  });
+
+  /** The travel panel's own model: one row per step, priced by terrain, plus the total. */
+  interface TravelRow {
+    key: string;
+    terrainName: string;
+    cost: number;
+    seconds: number;
+  }
+
+  const travelPanel = $derived.by((): {
+    draft: boolean;
+    committed: boolean;
+    party: string | null;
+    rows: TravelRow[];
+    totalSeconds: number;
+    travelledSeconds: number;
+    units: string;
+  } | null => {
+    void storeVersion;
+    const scene = activeScene();
+    if (!app || !scene || !isHexcrawlScene(scene)) return null;
+    const keys = travelPathOf(scene);
+    const plan = planOf(scene);
+    if (keys.length < 2 && pathDraft.sceneId !== scene._id) return null;
+    if (keys.length === 0 && !plan) return null;
+    const catalog = hexTerrainCatalog();
+    const speed = plan?.speedPerDay ?? DEFAULT_SPEED_PER_DAY;
+    const pace = plan?.pace ?? travelPace;
+    const rows: TravelRow[] = [];
+    let total = 0;
+    for (let i = 0; i < keys.length - 1; i++) {
+      const from = keys[i] as string;
+      const to = keys[i + 1] as string;
+      const terrain = cellTerrainName(scene, to);
+      const seconds = stepSecondsOf(scene, catalog, from, to, speed, pace);
+      const cost = stepCostOfValue(catalog, scene, from, to);
+      total += seconds;
+      rows.push({ key: to, terrainName: terrain, cost, seconds });
+    }
+    return {
+      draft: keys.length > 0 && (plan === null || pathDraft.keys.length > 0),
+      committed: plan !== null,
+      party: partyCellKey(scene),
+      rows,
+      totalSeconds: total,
+      travelledSeconds: plan?.progressSeconds ?? 0,
+      units: scene.grid.units || "mi",
+    };
+  });
+
+  /** The catalog's name for a cell's terrain ("Forest / woods"), defaulted when unauthored. */
+  function cellTerrainName(scene: SceneDocument, key: string): string {
+    const catalog = hexTerrainCatalog();
+    const id = (scene.cells ?? []).find((c) => c.key === key)?.terrain ?? catalog.defaultTerrain;
+    return catalog.terrains.find((t) => t.id === id)?.name ?? id;
+  }
+
+  function stepCostOfValue(
+    catalog: ReturnType<typeof hexTerrainCatalog>,
+    scene: SceneDocument,
+    from: string,
+    to: string,
+  ): number {
+    const terrainOf = (key: string): string | null =>
+      (scene.cells ?? []).find((c) => c.key === key)?.terrain ?? null;
+    return stepCostOf(catalog, terrainOf(from), terrainOf(to));
+  }
+
+  /** The pace the route is drawn at and committed with (plan §5.7's itinerary reads it). */
+  let travelPace = $state<TravelPace>("normal");
+
+  const travelSpeedPerDay = $derived.by(() => {
+    void storeVersion;
+    return planOf(activeScene())?.speedPerDay ?? DEFAULT_SPEED_PER_DAY;
+  });
+
+  /** One click in path mode: extend the route, or take the last cell back. */
+  function onPathClick(key: string): void {
+    const scene = activeScene();
+    if (!scene) return;
+    const keys = pathDraft.sceneId === scene._id ? pathDraft.keys : [];
+    const next = keys.at(-1) === key ? keys.slice(0, -1) : [...keys, key];
+    pathDraft = { sceneId: scene._id, keys: next };
+  }
+
+  function clearPathDraft(): void {
+    pathDraft = { sceneId: activeScene()?._id ?? "", keys: [] };
+  }
+
+  /** Commit the drawn route: one profile write, cursor at the party's own cell. */
+  function commitTravelRoute(): void {
+    const current = app;
+    const scene = activeScene();
+    if (!current || !scene) return;
+    const keys = travelPathOf(scene);
+    if (keys.length < 2) {
+      pushLog(["A route needs at least a second hex — click one, then Commit."], "info");
+      return;
+    }
+    const plan: TravelPlan = {
+      path: keys,
+      cursor: 0,
+      progressSeconds: 0,
+      speedPerDay: travelSpeedPerDay,
+      pace: travelPace,
+    };
+    current.gm.client.submit(travelProgressOps(scene, plan));
+    clearPathDraft();
+    pushLog(
+      [
+        `Route committed: ${keys.length} hexes, ${formatDuration(
+          routeSeconds({
+            scene,
+            path: keys,
+            speedPerDay: plan.speedPerDay,
+            pace: plan.pace,
+            catalog: hexTerrainCatalog(),
+          }),
+        )} on the road.`,
+      ],
+      "info",
+    );
+  }
+
+  /** Give up on a route (committed or drawn): the party stops where it stands. */
+  function clearTravelRoute(): void {
+    const current = app;
+    const scene = activeScene();
+    if (!current || !scene) return;
+    if (planOf(scene)) current.gm.client.submit(travelProgressOps(scene, null));
+    clearPathDraft();
+    pushLog(["The march is called off."], "info");
+  }
+
+  /**
+   * **Travel** (plan §5.7). Every button is the same three steps: advance the world clock by
+   * exactly what the button says, walk the party as far as that time and the route's terrain
+   * allow, and let the encounter engine see every border that was crossed.
+   *
+   * The time is always `advanceWorldClockOps(delta)` — a "travel one day" click is a day of the
+   * clock, not a private timer — and the *party* stops when its route ends, spending the rest of
+   * the day where it arrived (`travelAdvance` charges that time to the cell, and the features that
+   * were waiting for it evaluate on the same pass). `next` and `route` are the two deltas that are
+   * *about* the route: the seconds to the next border, and the seconds the whole route still needs.
+   */
+  function advanceTravel(mode: "next" | "route" | "hour" | "dawn" | "dusk" | "day"): void {
+    const current = app;
+    const scene = activeScene();
+    if (!current || !scene) return;
+    const plan = planOf(scene);
+    if (!plan) {
+      pushLog(["No route is committed — draw one in path mode first."], "info");
+      return;
+    }
+    const catalog = hexTerrainCatalog();
+    const now = encounterClock();
+    const delta = travelDelta(mode, scene, plan, catalog, now);
+    if (delta <= 0) return;
+    const advance = travelAdvance({
+      scene,
+      plan,
+      elapsedSeconds: delta,
+      catalog,
+      startClock: now,
+    });
+    const party = partyTokenOf(scene);
+    // The party token's move is written *before* the clock, so a listener that wakes on either one
+    // sees the same picture; `lastPartyCell` is set first so the ops listener does not report the
+    // whole march as one crossing (the steps below already report each border, in order).
+    const arrivalKey = advance.cellKey;
+    lastPartyCell = arrivalKey ?? lastPartyCell;
+    const ops = [
+      ...(advance.plan ? travelProgressOps(scene, advance.plan) : travelProgressOps(scene, null)),
+      ...(party && arrivalKey
+        ? (() => {
+            const centre = cellCenterOf(scene, arrivalKey);
+            return centre ? partyPositionOps(scene, party._id, centre) : [];
+          })()
+        : []),
+      // Features are judged at the reading the march *ended* at: the party has been there by then.
+      ...advanceFeatureOps(scene, advance.spentSeconds, now + delta),
+    ];
+    if (ops.length > 0) current.gm.client.submit(ops);
+    advanceClockWithSweep(delta);
+    for (const step of advance.steps) {
+      runEncounterTriggers(step.triggers, step.cellKey);
+    }
+    const where = arrivalKey ?? "—";
+    pushLog(
+      [
+        advance.arrived
+          ? `The party arrives at ${where} — ${formatDuration(delta)} on the road, ${formatDuration(
+              advance.leftoverSeconds,
+            )} spent there.`
+          : `The party is at ${where} — ${formatDuration(delta)} on the road.`,
+      ],
+      "info",
+    );
+  }
+
+  /** What each travel button advances: the route's own steps are the two that mean "travel". */
+  function travelDelta(
+    mode: "next" | "route" | "hour" | "dawn" | "dusk" | "day",
+    scene: SceneDocument,
+    plan: TravelPlan,
+    catalog: ReturnType<typeof hexTerrainCatalog>,
+    clockSeconds: number,
+  ): number {
+    if (mode === "day") return DAY_SECONDS;
+    if (mode === "hour") return HOUR_SECONDS;
+    if (mode === "dawn") return secondsUntilHour(clockSeconds, 6);
+    if (mode === "dusk") return secondsUntilHour(clockSeconds, 18);
+    if (mode === "next") {
+      const from = plan.path[plan.cursor] ?? null;
+      const to = plan.path[plan.cursor + 1] ?? null;
+      if (!from || !to) return 0;
+      return Math.max(
+        0,
+        stepSecondsOf(scene, catalog, from, to, plan.speedPerDay, plan.pace) -
+          plan.progressSeconds,
+      );
+    }
+    // "Travel the route": exactly the seconds the rest of it needs, at its own pace and terrain.
+    const rest = plan.path.slice(plan.cursor);
+    return Math.max(
+      0,
+      routeSeconds({
+        scene,
+        path: rest,
+        speedPerDay: plan.speedPerDay,
+        pace: plan.pace,
+        catalog,
+      }) - plan.progressSeconds,
+    );
+  }
+
+  /**
+   * The time a march just spent, turned into feature reveals: the seconds `travelAdvance` charged
+   * to each cell, the rules that were waiting for exactly that, and one envelope for both (see
+   * `core/hexcrawl/features.ts`).
+   */
+  function advanceFeatureOps(
+    scene: SceneDocument,
+    spent: Record<string, number>,
+    clockSeconds: number,
+  ) {
+    const ops = [];
+    const notes: string[] = [];
+    const facts = featureFacts(clockSeconds);
+    for (const [key, seconds] of Object.entries(spent)) {
+      const result = revealDueFeatures({ scene, cellKey: key, facts, spentSeconds: seconds });
+      ops.push(...result.ops);
+      // Only the reveals are worth a line at the table; a march over a hex whose check failed is
+      // noise the GM did not ask for.
+      for (const feature of result.revealed) {
+        notes.push(`Found at ${key}: ${feature.name}`);
+      }
+    }
+    if (notes.length > 0) pushLog(notes, "info");
+    return ops;
+  }
+
+  /**
+   * The party's Perception, read off the PF1e derivation the sheets use: the party token's own
+   * actor when it has one (the scout), else the best of the world's characters — a party is a
+   * group, and the lookout who spots the shrine is a member of it. Passive is `10 + the modifier`
+   * (plan §9.5's "passive value by default").
+   */
+  function featureFacts(clockSeconds: number): FeatureFacts {
+    const derived = partyPerception();
+    return {
+      clockSeconds,
+      passivePerception: 10 + derived.modifier,
+      perceptionModifier: derived.modifier,
+      rng: currentRng,
+    };
+  }
+
+  /**
+   * The rng a `dice` rule rolls with: the same default the table draw uses (`drawEncounter`'s own
+   * `Math.random` when no rng is passed, D-273). A feature's roll is a client-side evaluation of a
+   * rule the GM authored, exactly like a table draw is.
+   */
+  const currentRng = (): number => Math.random();
+
+  function partyPerception(): { modifier: number; source: string } {
+    const scene = activeScene();
+    if (!app || !scene) return { modifier: 0, source: "none" };
+    const token = partyTokenOf(scene);
+    const actors = [...app.gm.client.store.getAll("actors")] as ActorDocument[];
+    const scoreOf = (actor: ActorDocument): number => {
+      const derived = deriveFromActorDocument(
+        actor,
+        encumbranceOptionsOf(
+          worldSettingsFrom(app?.gm.client.store.getAll("settings") ?? []),
+        ),
+      );
+      return derived.skills.perception?.total ?? 0;
+    };
+    const own = token?.actorId ? actors.find((a) => a._id === token.actorId) : undefined;
+    if (own) return { modifier: scoreOf(own), source: own.name };
+    let best = { modifier: 0, source: "none" };
+    for (const actor of actors) {
+      if (actor.type !== "character") continue;
+      const modifier = scoreOf(actor);
+      if (modifier > best.modifier) best = { modifier, source: actor.name };
+    }
+    return best;
+  }
+
+  /**
+   * *Explore this hex* (plan §5.2, §6 rule 2): the action costs real time on the world clock and
+   * then asks the `exploring` trigger. The time comes first, in its own envelope, because the
+   * engine reads the clock back off the store.
+   */
+  function exploreCell(key: string) {
+    const current = app;
+    const scene = activeScene();
+    if (!current || !scene) return;
+    const startClock = encounterClock();
+    // D-275: the hour the party spends here *is* the cell's `exploredSeconds` — the counter the
+    // `time` rule reads — so the clock, the counter and the reveal are one envelope's worth of
+    // story. The clock moves first, so the engine's own ledger records the reading the exploration
+    // happened at rather than the one before it.
+    advanceClockWithSweep(EXPLORE_SECONDS);
+    const facts = featureFacts(startClock + EXPLORE_SECONDS);
+    const due = revealDueFeatures({
+      scene,
+      cellKey: key,
+      facts,
+      spentSeconds: EXPLORE_SECONDS,
+    });
+    if (due.ops.length > 0) current.gm.client.submit(due.ops);
+    if (due.revealed.length > 0) {
+      pushLog(
+        due.revealed.map((feature) => `Found at ${key}: ${feature.name}`),
+        "info",
+      );
+    }
+    // The clock op is committed by now (submit is synchronous into the store), so the engine sees
+    // the new reading and the ledger records it.
+    runEncounterTriggers(triggersForExplore(), key);
+  }
+
+  /** The last cell the party was standing in — a crossing is a change of this value (D-273). */
+  let lastPartyCell: string | null = null;
+
+  /**
+   * The party moved: if it crossed a border into a cell the table can see, that is the `entering`
+   * trigger. Called from the ops listener (so the GM's drag, a player's drag, an undo and a rejoin
+   * all work) and deliberately *not* from the drag handler itself.
+   */
+  function encounterAfterPartyMove(): void {
+    const scene = activeScene();
+    if (!scene || !isHexcrawlScene(scene)) return;
+    const key = partyCellKey(scene);
+    const from = lastPartyCell;
+    lastPartyCell = key;
+    if (!key || from === key) return;
+    if (from === null) return; // the first reading is a starting point, not a crossing
+    runEncounterTriggers(triggersForStep(from, key), key);
+  }
+
+  /**
+   * D-271 (plan §4): after any batch of ops, the party's sight ring owes the world its cells.
+   * `sightReconcileOps` is a no-op for every scene that is not a `gm+party` hexcrawl map, and a
+   * no-op once the ring is already in the reveal set, so this can sit on the bus without any
+   * "did the party move?" bookkeeping — a drag, a undo, a rejoin all reconcile the same way.
+   */
+  function reconcilePartySight(): void {
+    if (!app) return;
+    const scene = activeScene();
+    if (!scene) return;
+    const ops = sightReconcileOps(scene);
+    if (ops.length > 0) app.gm.client.submit(ops);
   }
 
   /** Push lines onto the notification stack, newest last, capped like every other writer. */
@@ -828,9 +1910,10 @@ const WALL_PICK_RADIUS = 12;
       kind,
       x: 40 + (wm.list().length % 5) * 24,
       y: 40 + (wm.list().length % 5) * 24,
-      width: 380,
-      // Settings carries the ruleset section on top of the scene options (D-249): taller.
-      height: kind === "settings" ? 560 : 420,
+      width: kind === "hexcrawl-wizard" ? 520 : 380,
+      // Settings carries the ruleset section on top of the scene options (D-249): taller;
+      // the hexcrawl wizard has three steps and a readout to show at once (D-270).
+      height: kind === "settings" ? 560 : kind === "hexcrawl-wizard" ? 540 : 420,
       ...(data ? { data } : {}),
     });
   }
@@ -930,6 +2013,17 @@ const WALL_PICK_RADIUS = 12;
         diff: { active: sc._id === id },
       }));
     if (ops.length > 0) app.gm.client.submit(ops);
+  }
+
+  /** D-270: `+` asks *what kind* of scene — a blank board or a hexcrawl map. */
+  let sceneMenu = $state(false);
+
+  function toggleSceneMenu(): void {
+    sceneMenu = !sceneMenu;
+  }
+
+  function openHexcrawlWizard(): void {
+    openWindow("hexcrawl-wizard", "New hexcrawl scene", "hexcrawl-wizard");
   }
 
   function addScene(): void {
@@ -1325,6 +2419,16 @@ const WALL_PICK_RADIUS = 12;
     // D-256 map pins: the notes layer draws whatever this replica holds (players only ever
     // hold pins the GM made visible — the projection withholds the rest).
     view.getNotesLayer().sync(scene?.notes ?? [], view.camera);
+    // D-271: the hex overlay follows the replica — reveals, terrain, the party's ring. A scene
+    // without a hexcrawl profile clears it (the feature switch), and a *view as* preview paints
+    // what that player would see: the cover, not the GM's dimmed preparation view.
+    syncHexOverlay(
+      view,
+      hexOverlay,
+      scene,
+      viewAsPlayer === null ? "gm" : "player",
+      current.gm.client.store.getAll("settings"),
+    );
     // D-257: walls overlay follows the replica too (a door toggled anywhere redraws here).
     syncWallsOverlay();
     // §9 tiles: roofs fade over tokens with vision (D-083)
@@ -1438,29 +2542,79 @@ const WALL_PICK_RADIUS = 12;
     }
   }
 
-  async function importMap(ev: Event): Promise<void> {
+  /**
+   * D-270: the file goes into the world's assets and comes back as a hash — one helper, because
+   * both the sidebar's **Import map** and the hexcrawl wizard's map step need exactly this.
+   */
+  async function importMapFile(
+    file: File,
+  ): Promise<{ hash: string; width?: number; height?: number }> {
     const current = app;
-    const input = ev.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!current || !file) return;
+    if (!current) throw new Error("the world is not open");
     const bytes = new Uint8Array(await file.arrayBuffer());
     const { hash, entry } = await current.pipeline.importImage(
       bytes,
       file.name,
       file.type || "image/png",
     );
-    current.gm.client.submit([
+    return {
+      hash,
+      ...(entry.width !== undefined ? { width: entry.width } : {}),
+      ...(entry.height !== undefined ? { height: entry.height } : {}),
+    };
+  }
+
+  /**
+   * The sidebar's map import writes to the scene the GM is **looking at** (D-270). It used to
+   * hardcode `DEFAULT_SCENE_ID`, which meant a hexcrawl map uploaded while standing on a new
+   * scene landed on scene 1 — 1,000 px away and invisible.
+   */
+  async function importMap(ev: Event): Promise<void> {
+    const input = ev.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!app || !file) return;
+    const target = activeScene()?._id ?? DEFAULT_SCENE_ID;
+    const imported = await importMapFile(file);
+    app.gm.client.submit([
       {
         kind: "update",
-        ref: { coll: "scenes", id: DEFAULT_SCENE_ID },
+        ref: { coll: "scenes", id: target },
         diff: {
-          img: hash,
-          ...(entry.width !== undefined ? { width: entry.width } : {}),
-          ...(entry.height !== undefined ? { height: entry.height } : {}),
+          img: imported.hash,
+          ...(imported.width !== undefined ? { width: imported.width } : {}),
+          ...(imported.height !== undefined ? { height: imported.height } : {}),
         },
       },
     ]);
     input.value = "";
+  }
+
+  /**
+   * D-274 (plan §5.5): a row dragged out of the results window lands where the GM dropped it. The
+   * payload says *which* result and row (`ui/hexcrawl/EncounterResultWindow.svelte` sets it), so the
+   * placement runs the same code the window's *Place all* does — one implementation, two gestures.
+   */
+  function onEncounterDrop(ev: DragEvent): void {
+    const raw = ev.dataTransfer?.getData("application/x-vtt-encounter");
+    if (!raw) return;
+    ev.preventDefault();
+    let payload: { resultId?: unknown; rowIndex?: unknown };
+    try {
+      payload = JSON.parse(raw) as { resultId?: unknown; rowIndex?: unknown };
+    } catch {
+      return;
+    }
+    if (typeof payload.resultId !== "string") return;
+    const rect = stage?.app.canvas.getBoundingClientRect();
+    const origin =
+      stage && rect
+        ? screenToWorld(stage.camera, ev.clientX - rect.left, ev.clientY - rect.top)
+        : null;
+    void placeEncounterAt({
+      resultId: payload.resultId,
+      rowIndex: typeof payload.rowIndex === "number" ? payload.rowIndex : null,
+      origin: origin ? { x: Math.round(origin.x), y: Math.round(origin.y) } : null,
+    });
   }
 
   /** §12 compendium drag-import: drop an entry on the canvas → import the
@@ -1576,7 +2730,7 @@ const WALL_PICK_RADIUS = 12;
       if (isTypingTarget(e.target)) return;
       if (e.key === "Escape") {
         controller?.clearRuler(); // §9 ruler dismiss
-        closeTokenMenu(); // T01 menu dismiss
+        closeTokenMenu(); // T01 menu dismiss (which also drops the hex menu)
       }
       const action = actionForCombo(comboOf(e));
       if (action?.startsWith("hotbar.")) {
@@ -1667,7 +2821,21 @@ const WALL_PICK_RADIUS = 12;
           shiftKey: e.shiftKey,
           altKey: e.altKey,
         });
-        const onToolDown = (e: PointerEvent) => { if (GESTURE_TOOLS.has(canvasTool)) toolController?.pointerDown(toolPointer(e)); };
+        const onToolDown = (e: PointerEvent) => {
+          // D-275 path mode (plan §5.7): a left click on a hex extends the route — or takes the
+          // last one back when it is the same hex again. The tool owns no pointer capture: every
+          // click is one decision, and a drag is still the map's.
+          if (canvasTool === "path") {
+            if (e.button !== 0) return;
+            const sc = activeScene();
+            if (!sc || !isHexcrawlScene(sc)) return;
+            const world = toWorld(e);
+            const key = cellAtPoint(sc, world.x, world.y);
+            if (key) onPathClick(key);
+            return;
+          }
+          if (GESTURE_TOOLS.has(canvasTool)) toolController?.pointerDown(toolPointer(e));
+        };
         const onToolMove = (e: PointerEvent) => { if (GESTURE_TOOLS.has(canvasTool)) toolController?.pointerMove(toolPointer(e)); };
         const onToolUp = (e: PointerEvent) => { if (GESTURE_TOOLS.has(canvasTool)) toolController?.pointerUp(toolPointer(e)); };
         // Right-click / Escape finish a multi-click gesture instead of opening a menu.
@@ -1679,6 +2847,12 @@ const WALL_PICK_RADIUS = 12;
         };
         const onToolKey = (e: KeyboardEvent) => {
           if (e.key !== "Escape" || isTypingTarget(e.target)) return;
+          // D-275: Esc gives up the route being drawn (plan §5.7) — the same key that finishes a
+          // polygon gives up a path, and both leave the map as it was.
+          if (canvasTool === "path") {
+            clearPathDraft();
+            return;
+          }
           if (!GESTURE_TOOLS.has(canvasTool)) return;
           toolController?.finishPoly();
         };
@@ -1757,6 +2931,11 @@ const WALL_PICK_RADIUS = 12;
           if (key === lastCameraKey) return;
           lastCameraKey = key;
           syncWallsOverlay();
+          // D-271: the overlay's outlines are screen-constant, so a zoom restrokes them (the plan
+          // itself is untouched — that is what the identity cache is for).
+          repaintHexOverlay(view, hexOverlay);
+          // D-275: …and the DOM overlays (a route line, a measurement) follow the same tick.
+          cameraEpoch++;
         };
         view.app.ticker.add(onCameraTick);
         toolCleanup = () => {
@@ -1826,6 +3005,9 @@ const WALL_PICK_RADIUS = 12;
           onContextMenu: ({ screen, tokenId }) => {
             tokenMenu = { x: screen.x, y: screen.y, tokenId };
           },
+          // D-271: the same gesture where no token was hit — empty ground. Non-hexcrawl scenes
+          // have no cells, so this returns immediately and nothing changes for them.
+          onCanvasContextMenu: ({ screen, world }) => openHexMenu(screen, world),
           onTokenActivate: ({ token }) => {
             if (token.actorId) openActorSheet(token.actorId);
           },
@@ -2108,6 +3290,11 @@ const WALL_PICK_RADIUS = 12;
         current.gm.bus.on("snapshot", refresh);
         current.gm.bus.on("ops", (m) => {
           refresh();
+          // D-271: the party's ring is written by whoever has the scene's write permission —
+          // the GM's replica sees every move (their own drag and a player's alike) here.
+          reconcilePartySight();
+          // D-273: …and the same listener is where a border crossing becomes `entering`/`moving`.
+          encounterAfterPartyMove();
           // §11 3D dice: a created chat message with a roll record drives the
           // overlay — the animation settles on the ALREADY determined values
           for (const op of m.envelope.ops) {
@@ -2882,6 +4069,14 @@ const WALL_PICK_RADIUS = 12;
             Armies
           </button>
           <button
+            id="gm-tables"
+            type="button"
+            onclick={() => openTablesWindow()}
+            title="Encounter tables (hexcrawl)"
+          >
+            Tables
+          </button>
+          <button
             id="gm-undo"
             type="button"
             onclick={undo}
@@ -2936,6 +4131,8 @@ const WALL_PICK_RADIUS = 12;
               targetTokenId={tokenSelection.ids.length === 1
                 ? (tokenSelection.ids[0] ?? null)
                 : null}
+              onEncounterRoll={rollEncounterTable}
+              onEncounterExplore={exploreCell}
             />
           {:else if activeTab === "combat"}
             <CombatPanel
@@ -3011,10 +4208,34 @@ const WALL_PICK_RADIUS = 12;
           <button
             id="scene-add"
             type="button"
-            onclick={addScene}
+            onclick={toggleSceneMenu}
             title="New scene"
-            aria-label="New scene">+</button
+            aria-label="New scene"
+            aria-expanded={sceneMenu}>+</button
           >
+          {#if sceneMenu}
+            <div class="scene-menu" data-scene-menu role="menu" aria-label="New scene">
+              <button
+                id="scene-new-blank"
+                type="button"
+                role="menuitem"
+                onclick={() => {
+                  sceneMenu = false;
+                  addScene();
+                }}>Blank scene</button
+              >
+              <button
+                id="scene-new-hexcrawl"
+                type="button"
+                role="menuitem"
+                data-scene-new-hexcrawl
+                onclick={() => {
+                  sceneMenu = false;
+                  openHexcrawlWizard();
+                }}>Hexcrawl scene…</button
+              >
+            </div>
+          {/if}
         </nav>
         <div class="players" aria-label="Players">
           {#each playerUsers as u (u._id)}
@@ -3037,6 +4258,7 @@ const WALL_PICK_RADIUS = 12;
               onEraseAll={eraseAllDrawings}
               onRoll={rollFromToolbar}
               onAction={runCanvasAction}
+              pathTool={pathToolAvailable}
             />
           </div>
           <div
@@ -3047,14 +4269,85 @@ const WALL_PICK_RADIUS = 12;
           tabindex="-1"
           ondragover={(ev) => {
             if (
-              ev.dataTransfer?.types.includes("application/x-vtt-compendium")
+              ev.dataTransfer?.types.includes("application/x-vtt-compendium") ||
+              ev.dataTransfer?.types.includes("application/x-vtt-encounter")
             ) {
               ev.preventDefault();
             }
           }}
-          ondrop={(ev) => void onCompendiumDrop(ev)}
+          ondrop={(ev) => {
+            void onCompendiumDrop(ev);
+            onEncounterDrop(ev);
+          }}
           onpointerdown={() => closeTokenMenu()}
         >
+          {#if travelPanel && (travelPanel.rows.length > 0 || travelPanel.committed)}
+            {@const routeScene = activeScene()}
+            {@const routePts = routeScene
+              ? routePointsOf(routeScene, travelPathOf(routeScene)).map(measurePoint)
+              : []}
+            {#if routePts.length > 1}
+              <svg class="travel-route" aria-label="Travel route" data-travel-route={routePts.length}>
+                <polyline
+                  points={routePts.map((p) => `${p.x},${p.y}`).join(" ")}
+                  fill="none"
+                  stroke="#8ad9ff"
+                  stroke-width="3"
+                  stroke-dasharray="10 6"
+                />
+                {#each routePts as p, i (i)}
+                  <circle cx={p.x} cy={p.y} r={i === 0 ? 7 : 5} fill={i === 0 ? "#8ad9ff" : "#0b0f14"} stroke="#8ad9ff" stroke-width="2" />
+                {/each}
+              </svg>
+            {/if}
+            <div class="travel-panel" data-travel-panel data-travel-draft={travelPanel.draft} data-travel-committed={travelPanel.committed}>
+              <strong>Travel</strong>
+              <span class="static" data-travel-party>from {travelPanel.party ?? "—"}</span>
+              {#if travelPanel.rows.length === 0}
+                <span class="static" data-travel-empty>click hexes to draw a route</span>
+              {:else}
+                {#each travelPanel.rows as row, i (i)}
+                  <div class="travel-row" data-travel-row={row.key} data-travel-terrain={row.terrainName} data-travel-cost={row.cost} data-travel-seconds={row.seconds}>
+                    <span class="step">{i + 1}</span>
+                    <span class="key">{row.key}</span>
+                    <span class="terrain">{row.terrainName}</span>
+                    <span class="cost">×{row.cost}</span>
+                    <span class="time">{formatDuration(row.seconds)}</span>
+                  </div>
+                {/each}
+                <div class="travel-total" data-travel-total={travelPanel.totalSeconds}>
+                  {travelPanel.rows.length} hex(es) · {formatDuration(travelPanel.totalSeconds)} on the road
+                  {#if travelPanel.committed && travelPanel.travelledSeconds > 0}
+                    · {formatDuration(travelPanel.totalSeconds - travelPanel.travelledSeconds)} left
+                  {/if}
+                </div>
+              {/if}
+              <label class="pace">
+                Pace
+                <select
+                  data-travel-pace
+                  value={travelPace}
+                  onchange={(e) => (travelPace = (e.target as HTMLSelectElement).value as TravelPace)}
+                >
+                  <option value="normal">normal</option>
+                  <option value="forced">forced march</option>
+                </select>
+              </label>
+              <div class="travel-actions">
+                {#if travelPanel.draft}
+                  <button type="button" data-travel-commit onclick={() => commitTravelRoute()}>Commit route</button>
+                {/if}
+                {#if travelPanel.committed}
+                  <button type="button" data-travel-advance="next" onclick={() => advanceTravel("next")}>To the next hex</button>
+                  <button type="button" data-travel-advance="route" onclick={() => advanceTravel("route")}>Travel the route</button>
+                  <button type="button" data-travel-advance="dawn" onclick={() => advanceTravel("dawn")}>To dawn</button>
+                  <button type="button" data-travel-advance="dusk" onclick={() => advanceTravel("dusk")}>To dusk</button>
+                  <button type="button" data-travel-advance="day" onclick={() => advanceTravel("day")}>+1 day</button>
+                {/if}
+                <button type="button" data-travel-clear onclick={() => clearTravelRoute()}>Clear</button>
+              </div>
+            </div>
+          {/if}
           {#if measurePreview}
             {@const pts = measurePreview.points.map(measurePoint)}
             {@const tail = pts.at(-1) ?? null}
@@ -3199,18 +4492,61 @@ const WALL_PICK_RADIUS = 12;
           {/if}
           </div>
         </div>
+          {#if hexMenu}
+            <!--
+              D-271 (plan §5.2): the empty-ground menu, rendered from the model captured when the
+              pointer went down. Disabled rows carry their reason as a tooltip — the same honesty
+              rule the token menu follows — and a terrain row shows which terrain is current.
+            -->
+            <div
+              class="hex-menu"
+              data-hex-menu={hexMenu.key}
+              data-hex-menu-title={hexMenu.title}
+              onpointerdown={(ev) => ev.stopPropagation()}
+              style={`left: ${Math.round(hexMenu.x)}px; top: ${Math.round(hexMenu.y)}px;`}
+              role="menu"
+              tabindex="-1"
+              aria-label={`Hex ${hexMenu.key} actions`}
+            >
+              <span class="token-menu-title">{hexMenu.title}</span>
+              {#if hexMenu.subtitle}
+                <span class="token-menu-static" data-hex-menu-subtitle>{hexMenu.subtitle}</span>
+              {/if}
+              {#each hexMenu.entries as entry (entry.id)}
+                {#if entry.statik}
+                  <span class="token-menu-static" data-hex-menu-static={entry.id}>{entry.label}</span>
+                {:else}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    data-hex-menu-action={entry.id}
+                    disabled={entry.disabled}
+                    title={entry.reason ?? ""}
+                    onclick={() => runHexMenuEntry(entry.id)}
+                    >{entry.checked ? "● " : ""}{entry.label}</button
+                  >
+                {/if}
+              {/each}
+            </div>
+          {/if}
         <WindowHost
           manager={wm}
           windows={wmWindows}
           client={app.gm.client}
           bus={app.gm.bus}
           sceneId={activeScene()?._id ?? null}
+          importImage={importMapFile}
           onUndo={undo}
           onRedo={redo}
           packages={app.packages}
           rulesBoot={app.rulesBoot}
           bindings={DEFAULT_BINDINGS}
           isGM={true}
+          onHexRollTable={rollHexTable}
+          onHexOpenScene={activateScene}
+          onEncounterPlaceAll={(resultId) => void placeEncounterAt({ resultId })}
+          onEncounterBattleScene={(resultId) => void createBattleScene({ resultId })}
+          {resolveAsset}
         />
         {#if pendingReaction}
           <!--
@@ -3472,6 +4808,19 @@ const WALL_PICK_RADIUS = 12;
     background: #2c5a84;
     border-color: #71b9ef;
   }
+  /* D-270: the `+` button's chooser (blank scene vs hexcrawl scene). */
+  .scene-menu {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px;
+    border: 1px solid #49627d;
+    border-radius: 8px;
+    background: #182331;
+  }
+  .scene-menu button {
+    text-align: left;
+  }
   .players {
     display: flex;
     gap: 10px;
@@ -3678,6 +5027,33 @@ const WALL_PICK_RADIUS = 12;
     opacity: 0.45;
     cursor: not-allowed;
   }
+  .hex-menu {
+    position: absolute;
+    z-index: 40;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 250px;
+    max-height: 60vh;
+    overflow-y: auto;
+    padding: 8px;
+    background: #1a2a24;
+    border: 1px solid #4f7f66;
+    border-radius: 9px;
+    box-shadow: 0 8px 24px #0009;
+  }
+  .hex-menu button {
+    text-align: left;
+    background: transparent;
+    border: 1px solid transparent;
+    color: inherit;
+    padding: 5px 8px;
+    cursor: pointer;
+  }
+  .hex-menu button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
   .board {
     display: flex;
     flex: 1;
@@ -3696,6 +5072,60 @@ const WALL_PICK_RADIUS = 12;
     position: relative;
     background: #0a0f15;
   }
+  /* D-275: the route + itinerary. The line sits in the canvas-host's overlay space (the same
+     one the measure preview uses) and the panel is a small HUD box under the rail. */
+  .travel-route {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    overflow: visible;
+  }
+  .travel-panel {
+    position: absolute;
+    left: 12px;
+    bottom: 12px;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 260px;
+    max-width: 340px;
+    padding: 8px 10px;
+    border: 1px solid #2a3446;
+    border-radius: 8px;
+    background: #0e141dee;
+    color: #e7ecf5;
+    font-size: 0.78rem;
+  }
+  .travel-panel .static {
+    opacity: 0.75;
+  }
+  .travel-row {
+    display: grid;
+    grid-template-columns: 1.4rem 3.2rem 1fr 2.4rem 3.4rem;
+    gap: 4px;
+    align-items: baseline;
+  }
+  .travel-row .step {
+    opacity: 0.6;
+  }
+  .travel-row .terrain {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .travel-total {
+    border-top: 1px solid #2a3446;
+    padding-top: 4px;
+    opacity: 0.85;
+  }
+  .travel-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 4px;
+  }
+
   .measure-preview { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; overflow: visible; }
   /* D-256: draw/fog/wall gesture previews and the in-canvas editors */
   .shape-preview { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 11; overflow: visible; }

@@ -28,6 +28,14 @@
   } from "../canvas/interactions";
   import { can } from "../core/permissions";
   import { sceneFogSettings } from "../core/fogExploration";
+  import { createHexOverlaySync, repaintHexOverlay, syncHexOverlay } from "./hexOverlay";
+  import { cellAtPoint } from "../core/hexcrawl/cells";
+  import { terrainCatalogOrDefault } from "../core/hexcrawl/terrain";
+  import { isHexcrawlScene } from "../core/hexcrawl/types";
+  import {
+    hexContextMenuModel,
+    type HexMenuEntry,
+  } from "../ui/hexcrawl/hexContextMenu";
   import {
     NO_ONBOARDING_FACTS,
     onboardingSteps,
@@ -267,6 +275,8 @@
   });
   /** D-250: this player's explored fog — revealed by the tokens they control, kept by the host. */
   let fog: FogExploration | null = null;
+  /** D-271: the hexcrawl overlay's plan cache (a player always sees the covered view). */
+  const hexOverlay = createHexOverlaySync();
   /**
    * D-251: token ids fog lets this player see (null = fog off, all). The stage draws only
    * these, and the controller never picks a hidden one (no select, sheet or menu through fog).
@@ -331,13 +341,89 @@
     copyTimer = null;
   }
 
+  /**
+   * D-271 (plan §5.2): a player's right-click on ground they *have* been shown. The model gives
+   * them the one entry that is theirs (the hex's player text) plus the party's own marker, and
+   * returns nothing at all for a hex they have not been shown — so no menu appears there.
+   */
+  let hexMenu = $state<{
+    x: number;
+    y: number;
+    key: string;
+    title: string;
+    subtitle: string | null;
+    entries: HexMenuEntry[];
+  } | null>(null);
+
+  function closeHexMenu(): void {
+    hexMenu = null;
+  }
+
+  function openHexMenu(
+    screen: { x: number; y: number },
+    world: { x: number; y: number },
+  ): void {
+    if (!app?.client) return;
+    const scene = activeScene();
+    if (!scene || !isHexcrawlScene(scene)) return;
+    const key = cellAtPoint(scene, world.x, world.y);
+    if (!key) return;
+    const model = hexContextMenuModel({
+      scene,
+      key,
+      user: app.client.user ?? null,
+      catalog: terrainCatalogOrDefault(
+        worldSettingsFrom(app.client.store.getAll("settings"))["hexTerrain"],
+      ),
+    });
+    if (model.entries.length === 0) return;
+    hexMenu = { x: screen.x, y: screen.y, key, ...model };
+  }
+
+  function runHexMenuEntry(entryId: string): void {
+    const menu = hexMenu;
+    closeHexMenu();
+    if (!menu) return;
+    // A player's menu only ever offers "open" — everything else the model already refused to
+    // list (the GM's entries are gated by the scene's write permission).
+    if (entryId === "open") openHexWindow(menu.key);
+  }
+
+  function openHexWindow(key: string): void {
+    const scene = activeScene();
+    if (!scene) return;
+    const rect = canvasHost?.getBoundingClientRect();
+    if (rect) wm.setBounds({ width: rect.width, height: rect.height });
+    wm.open({
+      id: `hex-${scene._id}-${key}`,
+      title: `Hex ${key}`,
+      kind: "hex",
+      x: 40 + (wm.list().length % 5) * 24,
+      y: 40 + (wm.list().length % 5) * 24,
+      width: 380,
+      height: 460,
+      data: { sceneId: scene._id, key },
+    });
+  }
+
+  /**
+   * The scene the player is looking at — **the active one**, like the GM shell's (D-271).
+   *
+   * This used to read `scene-1` by id with a fallback, which was invisible for as long as every
+   * player-facing spec played in scene 1: a table whose GM switches to a second scene leaves its
+   * players staring at the first one's map, tokens and fog. The hexcrawl gate found it (the GM's
+   * map was a new scene, and the player's canvas kept painting scene 1), and the fix is the same
+   * expression `App.svelte` uses: the `active` flag wins, `scene-1` is only the fallback for a
+   * replica that has not been told yet.
+   */
   function activeScene(): SceneDocument | null {
     const client = app?.client;
     if (!client) return null;
-    const scene = client.store.get("scenes", "scene-1");
+    const scenes = client.store.getAll("scenes") as readonly SceneDocument[];
     return (
-      scene ??
-      (client.store.getAll("scenes") as readonly SceneDocument[])[0] ??
+      scenes.find((sc) => sc.active) ??
+      client.store.get("scenes", "scene-1") ??
+      scenes[0] ??
       null
     );
   }
@@ -449,6 +535,10 @@
     // pin the GM has not made visible, so this layer only ever draws player-visible pins).
     view.peekFogLayer()?.applyManualMask(fogMaskLog(scene));
     view.getNotesLayer().sync(scene?.notes ?? [], view.camera);
+    // D-271: the hexcrawl overlay — on a player's shell the closed cells are covered, and the
+    // cover is painted from this replica's open cells alone (a closed hex is not sent to a
+    // player at all, so there is nothing else to paint it from).
+    syncHexOverlay(view, hexOverlay, scene, "player", client.store.getAll("settings"));
     const img = scene?.img ?? null;
     if (img !== null && img !== loadedMapHash && current.fetcher) {
       loadedMapHash = img;
@@ -541,6 +631,25 @@
                 };
               },
               drawnTokens: () => view.drawnTokenIds(),
+              // D-271: what this player's hexcrawl overlay painted (its own cover included).
+              hexOverlay: () => {
+                const layer = view.peekHexOverlayLayer();
+                if (!layer) return null;
+                return {
+                  viewer: layer.planViewer ?? "player",
+                  cells: layer.cellCount,
+                  openCells: layer.openCells,
+                  cover: layer.coverWidth > 0,
+                  coverHoles: layer.coverHoles,
+                  coverWidth: layer.coverWidth,
+                  coverHeight: layer.coverHeight,
+                };
+              },
+              screenOf: (point: { x: number; y: number }) => {
+                const rect = view.app.canvas.getBoundingClientRect();
+                const p = worldToScreen(view.camera, point.x, point.y);
+                return { x: rect.left + p.x, y: rect.top + p.y };
+              },
               // §2.2/G-10a: what this canvas drew (empty under the default `"gm"` setting).
               tokenHpBars: () => view.tokenHpBars(),
               pickableTokens: () => tokenViews().map((t) => t.token._id).sort(),
@@ -585,6 +694,7 @@
         };
         const onToolKey = (e: KeyboardEvent) => {
           if (e.key !== "Escape" || isTypingTarget(e.target)) return;
+          closeHexMenu(); // D-271: the hex menu dismisses like every other canvas menu
           if (GESTURE_TOOLS.has(canvasTool)) toolController.finishPoly();
         };
         const onTextEdit = (e: MouseEvent) => {
@@ -606,10 +716,13 @@
         controller = new CanvasController({
           onSelectionChange: (ids) => {
             selection = [...ids];
+            closeHexMenu(); // any new gesture supersedes the menu
           },
           onTokenActivate: ({ token }) => {
             if (token.actorId) openActorSheet(token.actorId);
           },
+          // D-271: the same gesture where no token was hit — a hex a player has been shown.
+          onCanvasContextMenu: ({ screen, world }) => openHexMenu(screen, world),
           stage: view,
           source: domPointerSource(view.app.canvas as HTMLCanvasElement),
           client: {
@@ -638,6 +751,23 @@
         client.bus.on("snapshot", refresh);
         client.bus.on("ops", refresh);
         refresh();
+        // D-271: the hex overlay's outlines are screen-constant, so a zoom restrokes them; the
+        // plan itself is untouched (the layer's zoom bucket keeps this to one redraw per notch).
+        let lastHexCamera = "";
+        const onHexCameraTick = () => {
+          const cam = view.camera;
+          const key = `${cam.x}|${cam.y}|${cam.scale}`;
+          if (key === lastHexCamera) return;
+          lastHexCamera = key;
+          repaintHexOverlay(view, hexOverlay);
+        };
+        view.app.ticker.add(onHexCameraTick);
+        // The tool listeners' cleanup was installed earlier; chain rather than replace it.
+        const cleanupTools = toolCleanup;
+        toolCleanup = () => {
+          cleanupTools?.();
+          view.app.ticker.remove(onHexCameraTick);
+        };
         view.render();
       } catch (err) {
         canvasError = err instanceof Error ? err.message : String(err);
@@ -832,6 +962,7 @@
           role="application"
           aria-label="Game board"
           tabindex="-1"
+          onpointerdown={() => closeHexMenu()}
         >
           {#if measurePreview}
             {@const pts = measurePreview.points.map(measurePoint)}
@@ -890,6 +1021,39 @@
                 <button type="button" data-text-commit onclick={() => commitTextDraft()}>Done</button>
                 <button type="button" onclick={() => (textDraft = null)}>Cancel</button>
               </div>
+            </div>
+          {/if}
+          {#if hexMenu}
+            <!-- D-271: a player's reduced hex menu — the player text, and where the party is. -->
+            <div
+              class="hex-menu"
+              data-hex-menu={hexMenu.key}
+              data-hex-menu-title={hexMenu.title}
+              onpointerdown={(ev) => ev.stopPropagation()}
+              style={`left: ${Math.round(hexMenu.x)}px; top: ${Math.round(hexMenu.y)}px;`}
+              role="menu"
+              tabindex="-1"
+              aria-label={`Hex ${hexMenu.key} actions`}
+            >
+              <span class="hex-menu-title">{hexMenu.title}</span>
+              {#if hexMenu.subtitle}
+                <span class="hex-menu-static" data-hex-menu-subtitle>{hexMenu.subtitle}</span>
+              {/if}
+              {#each hexMenu.entries as entry (entry.id)}
+                {#if entry.statik}
+                  <span class="hex-menu-static" data-hex-menu-static={entry.id}>{entry.label}</span>
+                {:else}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    data-hex-menu-action={entry.id}
+                    disabled={entry.disabled}
+                    title={entry.reason ?? ""}
+                    onclick={() => runHexMenuEntry(entry.id)}
+                    >{entry.label}</button
+                  >
+                {/if}
+              {/each}
             </div>
           {/if}
           </div>
@@ -1137,6 +1301,40 @@
   }
   .canvas-host :global(canvas) {
     display: block;
+  }
+  /* D-271: the player's hex menu (the canvas area is the positioned ancestor). */
+  .hex-menu {
+    position: absolute;
+    z-index: 14;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 220px;
+    padding: 8px;
+    background: #1a2a24;
+    border: 1px solid #4f7f66;
+    border-radius: 9px;
+    box-shadow: 0 8px 24px #0009;
+  }
+  .hex-menu-title {
+    font-weight: 700;
+    padding: 4px 8px;
+  }
+  .hex-menu-static {
+    opacity: 0.85;
+    padding: 6px 8px;
+  }
+  .hex-menu button {
+    text-align: left;
+    background: transparent;
+    border: 1px solid transparent;
+    color: inherit;
+    padding: 6px 8px;
+    cursor: pointer;
+  }
+  .hex-menu button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
   }
   /* D-256: draw/fog gesture preview and the in-canvas text editor (player shell) */
   .shape-preview,

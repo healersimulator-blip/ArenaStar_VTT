@@ -13,6 +13,13 @@ import { strFromU8, unzipSync } from "fflate";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bootHostApp } from "../../src/app/hostBoot";
+import { searchCompendia } from "../../src/core/compendium";
+import {
+  buildCompendiumIndex,
+  indexFootprintBytes,
+  rankIndex,
+  searchIndex,
+} from "../../src/core/compendiumIndex";
 import { importWorldZip } from "../../src/host/worldFile";
 import { openVttDb } from "../../src/storage/idb";
 import { MemDirHandle } from "../../src/storage/opfs";
@@ -57,12 +64,114 @@ describe.skipIf(!existsSync(zipPath))("real tester zip (real converted content)"
       const content = pkgs.find((p) => p.id === "pf1e-content");
       expect(content).toBeDefined();
       expect(content?.missingDependencies.length ?? 0).toBe(0);
-      const compendia = (await app.packages.compendia()).filter((c) => c.packageId === "pf1e-content");
+      const allCompendia = await app.packages.compendia();
+      const compendia = allCompendia.filter((c) => c.packageId === "pf1e-content");
       expect(compendia.length).toBe(28);
       const spells = compendia.find((c) => c.pack.name === "PF1e Spells (Core)");
       expect(spells?.pack.entries.length).toBe(3028);
       const rulesRef = compendia.find((c) => c.pack.name === "PF1e Rules (Reference)");
       expect(rulesRef?.pack.entries.length).toBe(591);
+
+      // ── G-45: the real 25 k-entry corpus through the reader's index ──────────────
+      // The synthetic budget test (`tests/core/compendiumIndex.test.ts`) proves the arithmetic;
+      // this runs the *converted Foundry content itself* — the shapes the facet rules have to
+      // read (`system.category`, spell keywords vs `system.school`, string-keyed tables) and the
+      // queries the browser acceptance uses (`e2e/content_world.spec.ts`).
+      const converted = compendia.filter((c) => c.packageId === "pf1e-content").map((c) => c.pack);
+      const index = buildCompendiumIndex(converted);
+      expect(index.counts).toEqual({ packs: 28, entries: 25_376 });
+
+      // Kinds are read from the data — every group here is a real pack's shape, not a guess.
+      const kindCounts = new Map<string, number>();
+      for (const e of index.entries) kindCounts.set(e.facets.kind, (kindCounts.get(e.facets.kind) ?? 0) + 1);
+      const kinds = Object.fromEntries([...kindCounts.entries()].sort((a, b) => b[1] - a[1]));
+      expect(kinds["Class ability"]).toBe(4727); // class-abilities.json (category classFeat)
+      expect(kinds["Spell"]).toBe(3028); // spells-core.json (keyword `spell`, school on 1459)
+      expect(kinds.Feat).toBe(3609); // feats.json + feats-core.json, minus their racial-feat rows
+      expect(kinds.Trait).toBe(1915); // traits.json (category trait)
+      expect(kinds.Racial).toBe(1536); // 1214 racial traits + 322 racial feats
+      expect(kinds.Equipment).toBe(4357);
+      expect(kinds.Loot).toBe(1884);
+      expect(kinds.Weapon).toBe(916);
+      expect(kinds.Creature).toBe(399); // basic-npcs 15 + companions 209 + familiars 175
+      expect(kinds.Class).toBe(49);
+      expect(kinds["Roll table"]).toBe(288);
+      expect(kinds.Journal).toBe(601);
+      expect(kinds.Misc).toBe(333); // special-qualities.json (universal monster rules)
+      expect(kindCounts.size).toBeGreaterThanOrEqual(15);
+
+      // Facets: a school where the data states one (1459 of the 3028 spells), spell levels 0–9.
+      const evocation = index.facetOptions.schools.find((o) => o.value === "Evocation");
+      expect(evocation?.count).toBeGreaterThan(300);
+      expect(index.facetOptions.levels.map((o) => o.value)).toEqual(
+        expect.arrayContaining(["0", "1", "5", "9"]),
+      );
+      expect(index.facetOptions.packs).toHaveLength(28);
+
+      // The queries the browser acceptance runs, answered by the index.
+      const aboleth = searchIndex(index, "aboleth", { limit: 50 });
+      expect(aboleth.length).toBeGreaterThan(0);
+      expect(aboleth[0]?.entry.name).toMatch(/aboleth/i);
+      const weaponFocus = searchIndex(index, "weapon focus", { limit: 50 });
+      expect(weaponFocus.length).toBeGreaterThanOrEqual(2);
+      expect(weaponFocus.some((h) => h.entry.name === "Weapon Focus")).toBe(true);
+      expect(searchIndex(index, "goblin", { limit: 50 }).length).toBeGreaterThan(0);
+
+      // The world as the reader sees it: content pack + the hand-authored core pack beside it, so
+      // the two *authoring* styles (converter output and D-090 packs) share one index and one
+      // facet vocabulary.
+      const worldIndex = buildCompendiumIndex(allCompendia.map((c) => c.pack));
+      expect(worldIndex.counts).toEqual({ packs: 33, entries: 25_538 });
+      const table = searchIndex(worldIndex, "unarmed strike damage", { limit: 50 })[0];
+      expect(table?.entry.name).toBe("Unarmed Strike Damage by Size");
+      expect(table?.facets.kind).toBe("Table"); // the core pack's string-keyed rules table
+      expect(table?.facets.level).toBeNull();
+      // The core *spells* pack is "PF1e Spells"; the converted one is "PF1e Spells (Core)" — the
+      // core entry states a school and no `spell` keyword, which is the other way in.
+      const coreSpell = searchIndex(worldIndex, "fireball", { limit: 500 }).find(
+        (h) => h.pack.name === "PF1e Spells",
+      );
+      expect(coreSpell?.entry.name).toBe("Fireball");
+      expect(coreSpell?.facets.kind).toBe("Spell");
+      expect(coreSpell?.facets.school).toBe("Evocation");
+      expect(coreSpell?.facets.level).toBe(3); // lowest class level across the record
+
+      // Parity with the reference search on the real corpus — sample queries that hit different
+      // rungs (name prefix, word prefix, contains, keyword, multi-term, a 1-character term).
+      for (const q of ["aboleth", "weapon focus", "fireball", "magic missile", "evocation", "e", "zzzz"]) {
+        const reference = searchCompendia(converted, q, 50);
+        const indexed = searchIndex(index, q, { limit: 50 });
+        expect({
+          ids: indexed.map((h) => h.entry.id),
+          scores: indexed.map((h) => h.score),
+          packs: indexed.map((h) => h.pack.name),
+        }, `query "${q}"`).toEqual({
+          ids: reference.map((h) => h.entry.id),
+          scores: reference.map((h) => h.score),
+          packs: reference.map((h) => h.pack.name),
+        });
+      }
+
+      // Browse: one row per pack before any pack's second row (no large-pack starvation).
+      const browse = rankIndex(index, "", { cap: 40 });
+      expect(browse.total).toBe(25_376);
+      expect(new Set([...browse.indices].map((i) => index.packs[index.entries[i]?.packIndex ?? 0]?.name)).size).toBe(28);
+
+      // and the real-mode numbers, printed (the synthetic test owns the assertions).
+      const typed = ["f", "fi", "fir", "fire", "fireb", "firebal", "fireball"];
+      for (const q of typed) searchIndex(index, q, { limit: 50 });
+      let keystrokes = 0;
+      for (const q of typed) {
+        const t0 = performance.now();
+        searchIndex(index, q, { limit: 50 });
+        keystrokes += performance.now() - t0;
+      }
+      const footprint = indexFootprintBytes(index);
+      console.log(
+        `[G-45 real] 28 packs / ${index.counts.entries} entries · ${typed.length} keystrokes ` +
+          `${keystrokes.toFixed(1)} ms · index ${(footprint / 1024 / 1024).toFixed(2)} MB`,
+      );
+      expect(footprint).toBeLessThan(8 * 1024 * 1024);
 
       // ── G-44: the notices ship WITH the data, inside the same artifact ──
       // A licence notice that lives only in the repo does not travel with a world a GM downloads,

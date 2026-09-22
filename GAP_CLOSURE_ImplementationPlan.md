@@ -9,6 +9,16 @@ left. Gap statuses are from the same-day verification pass in `GAP_ANALYSIS_Roll
 (D-248…D-256, D-112, D-113, D-249, D-252), `PF1e_Unified_TODO.md` (L01–L07 backlog),
 `ROADMAP.md`, `TOOLBAR_PARITY_PLAN.md`.
 
+**Status 2026-09-21 @ `19c821a` (re-synced by D-265; D-266 and D-267 added):** of the twelve numbered
+items, **eight are done** — 1.1 (D-258), 1.2 (D-257), 1.3 (D-259), **1.4 (D-266)**, 2.1 (D-260),
+2.2 (D-261), 3.1 (D-264), **3.2 (D-267)** — and **2.3 is two of its three tails done** (G-25
+remainder, D-262 view-as; G-41 remainder, D-263 onboarding), leaving **G-38** (i18n) open. **The
+critical path 1.1 → 1.3 → 2.2 → 3.1 is complete, Wave 1 is complete, and Wave 3 has opened (3.1, 3.2
+done).** The open set is four numbered items — 2.3's G-38, 3.3 (G-11/G-21), 3.4 (G-14/G-15/G-16),
+3.5 (G-29/G-31/G-40) — plus the tails named in the done rows (wall reshaping, lighting richness,
+the `.por` archive, 3.5-era stat blocks and swarm/spell-like automation). The gap analysis carries the
+same re-sync (`GAP_ANALYSIS_Roll20_Foundry.md` §4, re-synced 2026-09-21).
+
 **How to read this plan.** Three waves, value-per-day first and dependencies second, then an
 **opportunistic track** that is explicitly *not* gap closure. Every item names the gap it closes,
 what already exists that it builds on, and the evidence that declares it done. Anything not here is
@@ -217,21 +227,50 @@ because the cast pipeline's damage grammar is bare `NdM`, so a formula like magi
 `1d4+1` is refused before any charge is spent — a pre-existing limit of `pf1eCastFlow`, recorded
 here rather than worked around inside the fixture.
 
-### 1.4 Compendium scale UX — **G-45** · S–M
+### 1.4 Compendium scale UX — **G-45** · S–M · ✅ **done (D-266)**
 
 **Problem.** Ranked full scan per keystroke, id-index only (`src/core/compendium.ts:139-195`),
 browse list capped rather than virtualized — at 20k entries this is "type the exact name".
 
-**Work.** (a) Per-pack prefix/word buckets computed **at parse time** and a name+keywords index
-kept in memory while the full entry bodies stay lazy per pack; (b) windowed row rendering — there
-is no virtualized list in the repo today (`grep` finds none; browse currently renders a capped
-list), so this is a small new component, not a reuse; (c) filters/sort (level, school, type, pack)
-that operate on the index, not on the rendered rows; (d) a budget test in the shape of
-`tests/ui/pf1eFrameBudget.test.ts` (V08): summed keystroke cost at 20k entries under 16 ms, plus a
-memory assertion for the hot set (≤ 8 MB).
+**Result — every step was built and executed (D-266).**
 
-**Acceptance.** Performance test in `pnpm test`; e2e opens the compendia tab on the full-content
-world, types a partial name, and drag-imports the 3rd hit.
+1. ~~**Per-pack buckets at parse time** + name/keywords index in memory, bodies kept lazy~~
+   **done.** `src/core/compendiumIndex.ts` (new) interns each pack's name/keyword tokens into flat
+   typed-array postings, adds 3-gram postings (so the reference's "name contains term" rung keeps
+   working rather than being silently replaced by prefix matching), and exposes `rankIndex`
+   (indices, not row objects, so a 25k-row list costs 100 KB/keystroke) and `searchIndex`.
+   **Parity is proved, not assumed:** `tests/core/compendiumIndex.test.ts` replays
+   `searchCompendia`'s own results over every scorer rung, at every limit, for browse and for the
+   explicit sorts. Per-pack parsing became `src/core/compendiumCache.ts` (memo keyed by
+   world/package/version/importedAt/file, invalidated on any package write), so a second visit to
+   the reader parses nothing.
+2. ~~**Windowed row rendering** — a small new component, not a reuse~~ **done, as a reuse.** The
+   plan's own `grep` missed it: the army roster already had tested virtualization math, so
+   `windowRows` moved to `src/ui/virtual.ts` and `armyModel.ts` re-exports it (its tests unchanged).
+   `CompendiaPanel.svelte` now renders a padTop/window/padBottom slice, grows its ranked window
+   geometrically on scroll, and the picker (`PF1eCompendiumPicker.svelte`) does the same.
+3. ~~**Filters/sort on the index** (level, school, type, pack)~~ **done.** `entryFacetsOf` derives
+   kind/level/school from authored fields (nothing invented), `facetOptions` carries counts, and
+   the panel's chips + sort control drive `rankIndex`; `PF1eCharacterBuilderModal.svelte` searches
+   the same index instead of scanning per keystroke.
+4. ~~**Budget test in the shape of V08** — summed keystroke cost at 20k entries < 16 ms, hot-set
+   memory ≤ 8 MB~~ **done.** `tests/core/compendiumIndex.test.ts` generates a 20,000-entry corpus
+   shaped like the converted packs and measures — **8 keystrokes in 3.6-6.8 ms (worst 4.4 ms) vs 89-113 ms
+   for the linear scan it replaced (14-30×), browse of all 20k rows in 1-10 ms, accounted footprint
+   5.36 MB** — printing the numbers and asserting the 16 ms/8 MB budgets directly.
+   Beyond the plan: a detail pane (`panelModel.ts` — data-derived fields, read-only document
+   preview, import), and `searchCompendia` kept as the documented reference the index is tested
+   against.
+
+**Acceptance — met and executed (D-266).** The performance test runs in `pnpm test`;
+`e2e/compendium_scale.spec.ts` covers windowing/facets/sorts/detail on a 340-entry package,
+`e2e/content_world.spec.ts` opens the compendia tab on the full-content world, types a partial
+name, and **drag-imports the 3rd ranked hit** (actor + linked token) exactly as written here, and
+`e2e/starter_compendia.spec.ts` does the same class of check on the **hand-authored starter world**
+the GM downloads — 5 packs / 162 entries, derived from the zip, including the two shapes that broke
+classification (a spell with `system.school` and no `spell` keyword, a roll table with `table` as a
+string and `rows` as an object). All three were run in Chromium on this tree, not merely written:
+that run is what found the collapsed spacers and the duplicate detail-pane keys (D-266).
 
 ---
 
@@ -427,8 +466,23 @@ omissions.
    sheet that derives blank. The Sheets window's Actors tab imports one file as **one** create op
    and shows the report. Unit: `tests/packages/pf1eCharacterImport.test.ts` **30**; e2e:
    `e2e/pf1e_import.spec.ts` **1/1**.
-2. **Statblock import — G-08** (S–M). Pasted text → bestiary actor through the existing actor
-   shape; the structured bestiary packs are already the reference for the target fields.
+2. **Statblock import — G-08** (S–M). Pasted text → bestiary actor through the existing actor shape;
+   the structured bestiary packs are already the reference for the target fields. **done (D-267)** as
+   the **fourth reader** behind the D-264 front door (`src/packages/pf1e/import/statblock.ts` returns
+   the same `ImportedCharacter`, so the check/one-create-op/report path is reused unchanged), read by
+   label because a paste has no schema: the block's published totals are authored as totals
+   (`acTotals` + `acMode: "published"`, `saves` + `savesAsTotal`, `hp (1d10+1)` → `hp`/`hpMax`/`hitDice`)
+   while the two figures this app *derives* from what the block states — each line's printed attack
+   bonus (including `+12/+7` sequences) and the printed skill totals — are refused and reported in the
+   block's own words; a printed damage total is decomposed into `damageDice` + `damageBonus` with
+   `abilityDamageIncluded: true`; DR/SR/speeds/reach/crit threat and multiplier land in their existing
+   fields; senses, languages, special attacks and qualities and treasure go to `system.pf1e.creature`
+   (the Details tab's own monster block) with `fast healing N`/`regeneration N (…)` read out of that
+   prose. Refusals keep the house rule that a plausible sheet is worse than an error (prose is not a
+   stat block; a nameless block says "paste it from the top"; no playable number creates nothing). The
+   Sheets panel's Actors tab gained a **Stat block** box beside **Import**, and a header line that is
+   neither the creature's name nor its type line is quoted in the report instead of dropped. Unit
+   `tests/packages/pf1eStatblockImport.test.ts` **25**; e2e `e2e/statblock_import.spec.ts` **1/1**.
 3. **Non-combat resolution — G-11 / G-21** (M). Specify the mechanics first (traps/haunts,
    maladies, curses — none of it is converted today, so a content pass rides behind a rules pass);
    the condition-automation tails ecosystems ship as modules come with it.
@@ -444,23 +498,28 @@ omissions.
 
 | Wave | Item | Depends on | Effort | Closes |
 |---|---|---|---|---|
-| 1.1 | Content fetch + publish + credits | — | S–M | G-44, (G-18 remainder) |
-| 1.2 | Door/wall lifecycle + window | — | S | G-43 (lifecycle), G-27 — **done, D-257** |
-| 1.3 | Inventory + items + encumbrance | 1.1 (packs to import) | M–L | G-03, G-04, G-05 tail, G-01 tail |
-| 1.4 | Compendium scale UX | 1.1 | S–M | G-45 |
+| 1.1 | Content fetch + publish + credits | — | S–M | G-44, (G-18 remainder) — **done, D-258** (release upload is the hand-off) |
+| 1.2 | Door/wall lifecycle + window | — | S | G-43 (lifecycle), G-27 — **done, D-257** (wall reshaping open) |
+| 1.3 | Inventory + items + encumbrance | 1.1 (packs to import) | M–L | G-03, G-04, G-05 tail, G-01 tail — **done, D-259** |
+| 1.4 | Compendium scale UX | 1.1 | S–M | G-45 — **done, D-266** |
 | 2.1 | Lighting-as-vision | — | L | G-24 — **done, D-260** (G-32 **decided**, D-260; G-26 open) |
 | 2.2 | Table flow (HP bars, quickbar, chat apply) | 1.3 for item-bound slots | M | G-22, G-10a, G-10b, G-20 — **done, D-261** |
 | 2.3 | Tails (view-as, onboarding, i18n) | 2.1 for view-as | S | G-25 tail (D-262 ✅), G-41 tail (D-263 ✅); G-38 open |
 | 3.1 | Character import | 1.3 (item/actor shape stable) | Med–L | G-39 — **done, D-264** (`.por` zip extraction open) |
-| 3.2 | Statblock import | — | S–M | G-08 |
+| 3.2 | Statblock import | — | S–M | G-08 — **done, D-267** |
 | 3.3 | Non-combat + condition tails | — | M | G-11, G-21 |
 | 3.4 | Breadth content (Mythic/companions/PFS) | 1.1 | M | G-14/15/16 |
 | 3.5 | Polish (sound, views, theming) | — | M | G-29/31/40 |
 
-**Critical path: 1.1 → 1.3 → 2.2 → 3.1.** Everything else parallelizes: 1.2 and 1.4 need nothing,
-2.1 is independent of the content track, 3.2/3.3/3.5 are standalone. Wave 1 is deliberately all
-"small, unblocks the already-built" work — it is the cheapest way to make the landed pipeline and
-sheet real for a GM.
+**Critical path: 1.1 → 1.3 → 2.2 → 3.1 — complete as of 2026-09-21** (D-258, D-259, D-261, D-264).
+Everything else parallelized as predicted: 1.2 and 1.4 needed nothing, 2.1 was independent of the
+content track, 3.2/3.3/3.5 are standalone. Wave 1 was deliberately all "small, unblocks the
+already-built" work — it is the cheapest way to make the landed pipeline and sheet real for a GM —
+and it is **complete**: 1.4 (G-45, compendium scale UX) closed in D-266 — the last Wave-1 item,
+and the cheapest item in the whole plan. Wave 3 then opened the same day with 3.2 (G-08, statblock
+import) closed in D-267. What remains is Wave 3's standalone breadth (3.3 non-combat, 3.4 breadth
+content, 3.5 polish), the named tails (G-43 wall reshaping, G-26 lighting richness, .por extraction,
+i18n/G-38) and the opportunistic track below — no item on the critical path.
 
 **Effort scale:** S ≈ 1–2 days · M ≈ 3–5 · L ≈ 1–2 weeks · XL ≈ 3+ weeks (v1's XL Phase 2 is
 already spent).
@@ -517,7 +576,7 @@ executed gate numbers, and the e2e/unit spec names — the pattern D-253…D-256
 analysis gets its status characters updated in the same commit that closes a gap, so the two
 documents cannot drift.
 
-**Test-environment reality (this sandbox).** 2 cores, 4 GB: the chromium suite (174 specs) must run
+**Test-environment reality (this sandbox).** 2 cores, 4 GB: the chromium suite (**184 specs** as of D-264) must run
 **serially**; four heavy specs (fog, fog_player, sheets, combat) time out when four browsers plus a
 vision worker share the box, and the heaviest fog polls need a 45 s budget. A "full suite" result
 should name the one load-sensitive spec that failed and show it green standalone, as D-256 does,

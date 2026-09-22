@@ -1,5 +1,6 @@
 import type { Page } from "@playwright/test";
 import { fileURLToPath } from "node:url";
+import { deflateSync as zlibDeflate } from "node:zlib";
 
 export const entry = "file://" + fileURLToPath(new URL("../dist/index.html", import.meta.url));
 
@@ -40,15 +41,15 @@ export async function waitForSurface(page: Page, surface: SurfaceName): Promise<
   }
 }
 
-/** Call a one-arg surface method (e.g. cacheHas(hash)). */
-export const surfaceCallArg = <T>(
+/** Call a surface method with any number of arguments (a readback that takes two, say). */
+export const surfaceCallArgs = <T>(
   page: Page,
   surface: SurfaceName,
   method: string,
-  arg: unknown,
+  args: unknown[],
 ): Promise<T> =>
   page.evaluate(
-    ({ surface, method, arg }) => {
+    ({ surface, method, args }) => {
       const e2e = (
         globalThis as {
           __vttE2E?: Record<string, Record<string, (...a: unknown[]) => T> | undefined>;
@@ -56,10 +57,18 @@ export const surfaceCallArg = <T>(
       ).__vttE2E;
       const fn = e2e?.[surface]?.[method];
       if (typeof fn !== "function") throw new Error(`${surface} surface missing: ${method}`);
-      return fn(arg) as T;
+      return fn(...args) as T;
     },
-    { surface, method, arg },
+    { surface, method, args },
   );
+
+/** Call a one-arg surface method (e.g. cacheHas(hash)). */
+export const surfaceCallArg = <T>(
+  page: Page,
+  surface: SurfaceName,
+  method: string,
+  arg: unknown,
+): Promise<T> => surfaceCallArgs<T>(page, surface, method, [arg]);
 
 /** Manual-only invite fragment (strips &h= so the join never rides relays). */
 export const manualFragment = (inviteLink: string): string => {
@@ -107,3 +116,56 @@ export async function importShippedCore(page: Page): Promise<void> {
   }
 }
 
+/**
+ * A real PNG of a given size, built here instead of checked in as a binary.
+ *
+ * Map-shaped specs need an image whose *dimensions* mean something (the hexcrawl wizard derives
+ * its cell count from them), and a 1×1 fixture like `TINY_PNG` would make every map one cell.
+ * A solid-colour truecolor PNG is a few kilobytes at any size, and `zlib` does the compression,
+ * so the spec carries no base64 blob. The CRC table is the PNG spec's own — `zlib.crc32` exists
+ * only on newer Node builds, and a spec must not depend on which one CI runs.
+ */
+export function solidPng(
+  width: number,
+  height: number,
+  rgb: [number, number, number] = [64, 92, 68],
+): Buffer {
+  const crcTable: number[] = [];
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    crcTable[n] = c >>> 0;
+  }
+  const crc32 = (buf: Buffer): number => {
+    let c = 0xffffffff;
+    for (const byte of buf) c = (crcTable[(c ^ byte) & 0xff] ?? 0) ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type: string, data: Buffer): Buffer => {
+    const head = Buffer.alloc(4);
+    head.writeUInt32BE(data.length, 0);
+    const body = Buffer.concat([Buffer.from(type, "latin1"), data]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(body), 0);
+    return Buffer.concat([head, body, crc]);
+  };
+
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 2; // truecolor RGB
+  const row = Buffer.alloc(1 + width * 3);
+  for (let x = 0; x < width; x++) {
+    row[1 + x * 3] = rgb[0];
+    row[2 + x * 3] = rgb[1];
+    row[3 + x * 3] = rgb[2];
+  }
+  const raw = Buffer.concat(Array.from({ length: height }, () => row));
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", ihdr),
+    chunk("IDAT", zlibDeflate(raw)),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}

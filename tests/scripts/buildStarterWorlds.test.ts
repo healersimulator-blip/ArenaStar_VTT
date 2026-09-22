@@ -18,6 +18,8 @@ import { fileURLToPath } from "node:url";
 import { strFromU8, unzipSync } from "fflate";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { bootHostApp, DEFAULT_SCENE_ID, type HostApp } from "../../src/app/hostBoot";
+import { searchCompendia } from "../../src/core/compendium";
+import { buildCompendiumIndex, searchIndex } from "../../src/core/compendiumIndex";
 import { importWorldZip, type WorldFileMeta } from "../../src/host/worldFile";
 import { classifyZip, describeWorldContents } from "../../src/host/zipKind";
 import { getWorld, listPackages, listWorlds, openVttDb } from "../../src/storage/idb";
@@ -155,6 +157,54 @@ describe("scripts/buildStarterWorlds.mjs", () => {
         ]),
       );
       expect((await listPackages(db, first.worldId)).length).toBe(2);
+
+      // ── G-45: the starter world's own compendium, through the reader's index ──────
+      // The starter ships `pf1e-core` alone (5 packs, 162 hand-authored entries). Its shapes are
+      // NOT the converter's: spells state a school and no `spell` keyword, the equipment pack
+      // authors `table` as a string key with rows as an *object*, and the bestiary/classes packs
+      // are the only actors. This is the check that the reader is not tuned to one producer.
+      const starterCompendia = await app.packages.compendia();
+      expect(starterCompendia.map((c) => c.pack.name).sort()).toEqual([
+        "PF1e Bestiary",
+        "PF1e Classes",
+        "PF1e Equipment",
+        "PF1e Feats",
+        "PF1e Spells",
+      ]);
+      const starterIndex = buildCompendiumIndex(starterCompendia.map((c) => c.pack));
+      expect(starterIndex.counts).toEqual({ packs: 5, entries: 162 });
+      const starterKinds = new Map<string, number>();
+      for (const e of starterIndex.entries) {
+        starterKinds.set(e.facets.kind, (starterKinds.get(e.facets.kind) ?? 0) + 1);
+      }
+      expect(Object.fromEntries([...starterKinds.entries()].sort((a, b) => b[1] - a[1]))).toEqual({
+        Spell: 75, // PF1e Spells — school stated, no `spell` keyword
+        Creature: 40, // PF1e Bestiary — `system.pf1e`
+        Feat: 33, // PF1e Feats — `feat` keyword + a feat category
+        Table: 8, // PF1e Equipment — `table` string + rows object
+        Class: 6, // PF1e Classes — `hd` + `babProgression`
+      });
+      // Levels and schools come from the core spell pack's own records.
+      expect(starterIndex.facetOptions.levels.map((o) => o.value)).toEqual(
+        expect.arrayContaining(["0", "1", "3", "9"]),
+      );
+      expect(starterIndex.facetOptions.schools.map((o) => o.value)).toContain("Evocation");
+      const fireball = searchIndex(starterIndex, "fireball", { limit: 10 })[0];
+      expect(fireball?.entry.name).toBe("Fireball");
+      expect(fireball?.facets).toMatchObject({ kind: "Spell", school: "Evocation", level: 3 });
+      const table = searchIndex(starterIndex, "unarmed strike damage", { limit: 10 })[0];
+      expect(table?.facets.kind).toBe("Table");
+      expect(table?.facets.level).toBeNull();
+      // and the reference search still agrees with the index on this corpus
+      for (const q of ["fireball", "goblin", "power", "e"]) {
+        const packs = starterCompendia.map((c) => c.pack);
+        expect(
+          searchIndex(starterIndex, q, { limit: 50 }).map((h) => `${h.pack.name}:${h.entry.id}:${h.score}`),
+          `query "${q}"`,
+        ).toEqual(
+          searchCompendia(packs, q, 50).map((h) => `${h.pack.name}:${h.entry.id}:${h.score}`),
+        );
+      }
       await app.persister.flush();
     } finally {
       await app.close();

@@ -111,6 +111,65 @@
   );
   let importBusy = $state(false);
 
+  /**
+   * G-08 (D-267): the same read, from text the GM pasted instead of a file. A stat block has no
+   * file behind it — it is copied out of a PDF, a wiki page or another table's handout — so the
+   * Actors tab also takes text, and everything after `importCharacter` is the path above
+   * unchanged: one create op, one report, the same list.
+   */
+  let pasteOpen = $state(false);
+  let pasteText = $state("");
+  /** What the box shows before anything is typed: the head of a real SRD block. */
+  const PASTE_EXAMPLE = [
+    "Goblin Warrior CR 1/3",
+    "NE Small humanoid (goblinoid)",
+    "Init +6; Senses darkvision 60 ft.; Perception -1",
+    "",
+    "DEFENSE",
+    "",
+    "AC 16, touch 13, flat-footed 14 (+2 armor, +2 Dex, +1 shield, +1 size)",
+    "hp 6 (1d10+1)",
+    "Fort +3, Ref +4, Will -1",
+    "",
+    "OFFENSE",
+    "",
+    "Speed 30 ft.",
+    "Melee short sword +2 (1d4/19-20)",
+    "Ranged short bow +4 (1d4/\u00d73)",
+    "",
+    "STATISTICS",
+    "",
+    "Str 11, Dex 15, Con 12, Int 10, Wis 9, Cha 6",
+    "Base Atk +1; CMB +1; CMD 12",
+    "Feats Improved Initiative",
+    "Languages Goblin",
+  ].join("\n");
+
+  function importPasted(): void {
+    const text = pasteText;
+    if (!text.trim()) return;
+    const source = text.trim().split(/\r?\n/, 1)[0]?.trim() || "pasted text";
+    const parsed = importCharacter(text, { fileName: source });
+    if (!parsed.ok) {
+      importReport = { ok: false, name: source, lines: [], warnings: [parsed.error] };
+      return;
+    }
+    const id = characterImportActorId(globalThis.crypto.randomUUID());
+    const report: CharacterImportReport = characterImportReport(parsed.value);
+    client.submit(characterImportOps(parsed.value, { id, gmId: client.user?.id ?? undefined }));
+    importReport = {
+      ok: true,
+      name: `${report.name} (${formatLabel(report.format)})`,
+      lines: report.read,
+      warnings: report.warnings,
+    };
+    pasteText = "";
+    pasteOpen = false;
+    coll = "actors";
+    selectedId = id;
+    globalThis.setTimeout(refresh, 50);
+  }
+
   async function importFile(file: File | undefined | null): Promise<void> {
     if (!file) return;
     importBusy = true;
@@ -190,6 +249,17 @@
     {#if client.user?.role === "GM" || client.user?.role === "ASSISTANT"}
       <button id="new-doc" class="tab" onclick={() => createDoc()}>+ New</button>
       {#if coll === "actors"}
+        <button
+          type="button"
+          class="tab import"
+          id="statblock-toggle"
+          data-import-paste-trigger
+          title="Paste a Pathfinder 1e monster stat block as text"
+          onclick={() => {
+            pasteOpen = !pasteOpen;
+            coll = "actors";
+          }}>{pasteOpen ? "Cancel" : "Stat block"}</button
+        >
         <label
           class="tab import"
           for="character-import"
@@ -212,6 +282,33 @@
       {/if}
     {/if}
   </div>
+
+  {#if pasteOpen}
+    <div class="paste">
+      <textarea
+        id="statblock-text"
+        data-import-paste
+        rows="8"
+        placeholder={PASTE_EXAMPLE}
+        bind:value={pasteText}
+        onkeydown={(event) => {
+          if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+            event.preventDefault();
+            importPasted();
+          }
+        }}></textarea>
+      <div class="paste-actions">
+        <button
+          type="button"
+          id="statblock-import"
+          data-import-paste-run
+          disabled={pasteText.trim() === ""}
+          onclick={() => importPasted()}>Import stat block</button
+        >
+        <span class="hint">or paste the block and press Ctrl/⌘+Enter</span>
+      </div>
+    </div>
+  {/if}
 
   {#if importReport}
     <div class="import-report" data-import-report data-import-ok={importReport.ok ? "true" : "false"}>
@@ -384,6 +481,46 @@
     display: inline-flex;
     align-items: center;
     white-space: nowrap;
+  }
+  .paste {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .paste textarea {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.75rem;
+    line-height: 1.35;
+    color: #cfd3dc;
+    background: #14171c;
+    border: 1px solid #3a3f4a;
+    border-radius: 6px;
+    padding: 6px;
+    resize: vertical;
+  }
+  .paste-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .paste-actions button {
+    padding: 4px 8px;
+    font-size: 0.8125rem;
+    border: 1px solid #3a3f4a;
+    border-radius: 6px;
+    background: #1d2127;
+    color: #cfd3dc;
+    cursor: pointer;
+  }
+  .paste-actions button:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .paste-actions .hint {
+    font-size: 0.6875rem;
+    color: #77808f;
   }
   .import-report {
     display: flex;

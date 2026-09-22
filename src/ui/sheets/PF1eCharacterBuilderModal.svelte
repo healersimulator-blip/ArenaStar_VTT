@@ -12,7 +12,7 @@
   } from "../../packages/pf1e/builder";
   import { babAtLevel, saveBonusAtLevel } from "../../packages/pf1e/rulesTables";
   import { loadWorldCompendia, type CompendiumPackRow } from "./compendiumLoader";
-  import { searchCompendia } from "../../core/compendium";
+  import { buildCompendiumIndex, searchIndex } from "../../core/compendiumIndex";
 
   let {
     doc,
@@ -110,22 +110,28 @@
     return scores;
   });
 
+  // G-45: the category filter picks the packs, the index answers the keystrokes. Both are
+  // derived separately so typing never rebuilds the pack index (it is ~150 ms at 25k entries)
+  // and the search itself is a slice of a ranked index instead of a 25k-entry linear scan.
+  const searchPacks = $derived.by(() => {
+    if (searchCategory === "all") return compendiaPacks.map((r) => r.pack);
+    return compendiaPacks
+      .filter((r) => {
+        const t = r.pack.type.toLowerCase();
+        const n = r.pack.name.toLowerCase();
+        if (searchCategory === "feat") return t.includes("feat") || n.includes("feat");
+        if (searchCategory === "spell") return t.includes("spell") || n.includes("spell");
+        if (searchCategory === "item") {
+          return t.includes("item") || n.includes("item") || t.includes("weapon");
+        }
+        return true;
+      })
+      .map((r) => r.pack);
+  });
+  const searchPackIndex = $derived(buildCompendiumIndex(searchPacks));
   const searchResults = $derived.by(() => {
     if (!searchQuery.trim()) return [];
-    const filtered = compendiaPacks.filter((r) => {
-      if (searchCategory === "all") return true;
-      const t = r.pack.type.toLowerCase();
-      const n = r.pack.name.toLowerCase();
-      if (searchCategory === "feat") return t.includes("feat") || n.includes("feat");
-      if (searchCategory === "spell") return t.includes("spell") || n.includes("spell");
-      if (searchCategory === "item") return t.includes("item") || n.includes("item") || t.includes("weapon");
-      return true;
-    });
-    return searchCompendia(
-      filtered.map((r) => r.pack),
-      searchQuery,
-      30,
-    );
+    return searchIndex(searchPackIndex, searchQuery, { limit: 30 });
   });
 
   function setStandardArray(): void {

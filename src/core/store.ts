@@ -68,6 +68,7 @@ export interface DocumentStoreOptions {
 const EMBEDDED_COLLECTION_NAMES: readonly EmbeddedCollectionName[] = [
   "tokens",
   "walls",
+  "cells",
   "lights",
   "sounds",
   "tiles",
@@ -92,6 +93,10 @@ function embeddedArray(doc: BaseDocument, name: EmbeddedCollectionName): BaseDoc
       return doc.type === "scene" ? (doc as SceneDocument).tokens : null;
     case "walls":
       return doc.type === "scene" ? (doc as SceneDocument).walls : null;
+    case "cells":
+      // Absent on scenes written before D-269; the store treats a missing array as empty and
+      // writes the field on the first create, so an old world needs no migration.
+      return doc.type === "scene" ? ((doc as SceneDocument).cells ?? []) : null;
     case "lights":
       return doc.type === "scene" ? (doc as SceneDocument).lights : null;
     case "sounds":
@@ -171,6 +176,7 @@ function emptyCollections(): WorldCollections {
     items: [],
     journals: [],
     rollTables: [],
+    encounterTables: [],
     playlists: [],
     macros: [],
     cards: [],

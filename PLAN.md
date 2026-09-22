@@ -90,11 +90,12 @@ DEVIATIONS.md (target: empty).
 - [x] Player join via Manual copy/paste signaling: GM share panel (invite + code exchange), player shell w/ ownership-gated canvas; two-context WebRTC e2e (§6.2, §6.4)
 - [x] Join via Nostr signaling (network stack lazy-imported at the share/join UI) (§19 M1) — invite `&h=<hostPubkey>`, local-relay e2e (D-066)
 - [x] Per-browser identity persisted (Ed25519→ECDSA fallback, IDB settings) (§6.4)
-- [ ] GM join-approval dialog + ban list UI (auto-approve PLAYER in M1) (§6.4) — §19 M1 needs only auto-approve ✓; dialog → ROADMAP (M2)
-- [ ] Sidebar tabs (Chat/Scenes/Actors/Items/Settings active in M1, full list §10), scene navigation, player list (§10) — Chat + sheet panels active ✓; remaining tabs → ROADMAP (M2, not §19-M1)
+- [ ] GM join-approval dialog + ban list UI (§6.4) — §19 M1 needs only auto-approve, which is what ships (a known pubkey is approved, an unknown PLAYER is auto-approved, the ban list exists as host state); the *dialog* and its list UI are the open half → ROADMAP (M2)
+- [x] Sidebar (full §10 surface): GM shell ships Chat / Combat / Journals / Tables / Playlists / Actors / Compendia tabs, scene navigation and the player list (D-079), with Settings and the sheet/item windows opening as windows — the item tab shape this line listed as pending landed as the sheet's **Items** tab in D-259; the player shell's sidebar is a stack (status → onboarding → quickbar → chat → sheet) rather than tabs. Remaining shape work (Scenes/Items *as* tabs, player-side tab set) is cosmetic and stays in ROADMAP
 - [x] Chat: inline rolls `[[1d20+5]]` resolved host-side, whispers, /roll /gmroll /emote, roll cards (§10, §11; markdown rendering = M2 polish) — markdown landed U31 (D-077)
 - [x] Generic actor/item sheets with reactive editing; UI gating via can(); GM assign-to-player with visibility crossings (§10)
-- [ ] Token HUD; basic world/client settings (§10)
+- [x] Basic world/client settings (§10) — the Settings window (scene/grid editor, D-079) grown by the world settings of D-259/D-260/D-261 (`encumbranceRule`, `encumbranceCapacityStrBonus`, scene `darkness`, `tokenHpBars`), each validated and replicated
+- [ ] Token HUD (§10) — still open: the verbs live in the token context menu (`src/ui/combat/tokenContextMenu.ts`), the sheet and the D-261 HP bars; no floating HUD is built
 
 ### assets (src/host, src/net, src/ui)
 
@@ -109,7 +110,7 @@ DEVIATIONS.md (target: empty).
 - [x] world.zip **format 2** — self-contained: `packages.json` + `packages/<id>/…` carry the §12 strategic ruleset and content packs with `rules.active`; format 1 still imports; trust never exported; one sniffing importer (world / ruleset / content pack) — D-248 (`tests/host/worldFilePackages.test.ts`, `tests/host/zipKind.test.ts`)
 - [x] import-as-copy (`importWorldZip({ mode: "copy", name })` → fresh `w-<id>`, the archive's world untouched, no trust carried), full `deleteWorldData` (every `[worldId, …]` store) + `deleteWorldFiles` (OPFS tree), `world.json.starter` — D-249 (`tests/host/worldLifecycle.test.ts`)
 - [x] starter worlds from the build — `pnpm build:worlds` → `dist/worlds/<id>-starter-<version>.zip` (format 2, `starter: true`, no documents, ruleset active + declared content packs installed; deterministic); part of `test:e2e` — D-249 (`tests/scripts/buildStarterWorlds.test.ts`, `e2e/start.spec.ts`)
-- [ ] File System Access "save to folder" alternative to the download (§8, M3 — ROADMAP)
+- [x] File System Access "save to folder" alternative to the download (§8, M3) — `exportWorldToFolder` in `src/host/worldFile.ts` (D-100, ROADMAP ticked; `tests/host/folderExport.test.ts`)
 
 ### e2e (§14)
 
@@ -188,7 +189,7 @@ e2e 14/14 incl. late join, token move, GM crash recovery.
 - [x] Package loader (folder/zip, manifest.json); data-only vs script packages (§12) — D-087: `packageManifest` contract + `packageLoader` (zip via fflate, nested root, text-only, referenced-file checks), IDB `packages` store (DB v4) + `WorldsRecord.activeRulesPackage`, hostBoot boots the sandboxed SimWorker (WorkerSimRunner w/ Inline fallback) + §12 load gate, GM panel section (import/activate), activation pinned per campaign; e2e: UI zip import → reload → package-ruled campaign (report 9.9.9)
 - [x] Sandboxed iframe RPC: game.*, Hooks, canvas.tokens (read+intent), ChatMessage.create, ui.notifications, settings (§12) — D-088: `moduleApi` (tagged postMessage RPC, method/hook whitelists, 64 KB cap, pure dispatcher), `moduleRuntimeSource` iframe globals + `ModuleIframe` host (sandbox=allow-scripts, opaque origin, hook subscribe/forward), manifest `module.entry` (system-only), App wiring (settings scope `module:<pkg>`, token list/move-intent ops, chat create op, toast stack), e2e proves the full API loop + sandbox probes (localStorage/parent DOM blocked)
 - [x] Trusted in-page execution opt-in (§12) — D-089: manifest `module.trusted` REQUEST + `WorldsRecord.trustedPackages` GM GRANT (two-step panel consent, grant/revoke API); ungranted → sandboxed iframe fallback; granted → `TrustedModuleHost` runs the SAME classic script in-page via blob `<script>` tag (CSP `blob:` allowed, no eval); handlers extracted to shared `moduleHandlers.ts` factory used by both tiers; e2e proves iframe→grant→inPage→revoke→iframe with module-side realm probes (parent===window, localStorage)
-- [x] Compendia: read-only compressed packs, indexed, drag import (§12) — D-090: `core/compendium` (pack parse/validate — entries never carry `_id`; WeakMap index; ranked search name-prefix>word>contains>keyword; importEntryOp create), `HostPackages.compendia()` parses packs from imported packages, Compendia sidebar tab (search box, ranked rows, Import button, HTML5 draggable), canvas-host drop → create op + linked token at drop point (actor packs); e2e covers search filtering, button import, dragTo canvas
+- [x] Compendia: read-only compressed packs, indexed, drag import (§12) — D-090: `core/compendium` (pack parse/validate — entries never carry `_id`; WeakMap index; ranked search name-prefix>word>contains>keyword; importEntryOp create), `HostPackages.compendia()` parses packs from imported packages, Compendia sidebar tab (search box, ranked rows, Import button, HTML5 draggable), canvas-host drop → create op + linked token at drop point (actor packs); e2e covers search filtering, button import, dragTo canvas — **scale pass D-266 (G-45):** the id-only WeakMap index plus per-keystroke full scan became `src/core/compendiumIndex.ts` (name/keyword token postings + 3-gram postings, data-derived facets, `rankIndex`/`searchIndex` with parity proved against `searchCompendia` in `tests/core/compendiumIndex.test.ts`), parsed packs are memoized per package record (`src/core/compendiumCache.ts`, invalidated on import), the panel gained facet filters, sorts, a detail pane and a windowed row list (`src/ui/virtual.ts`), the picker and the character builder search the same index, and the budget is measured in `pnpm test`: 20,000 entries, 8 keystrokes in 3.6-6.8 ms (worst 4.4 ms) against the 16 ms budget and a 5.36 MB index against the 8 MB budget
 - [x] Migrations per dataSchema version on world load (§12) — D-091: `core/migrations` (semver compare, explicit from→to chain planning with cycle/missing-link guards, declarative transforms set/default/move/remove with `*` fan-out paths — prototype-key blocked; code-step registry), manifest `migrations[]` (system-only, validated); boot compares `WorldsRecord.version` vs active system version → migrates the HYDRATED store via a normal op envelope (persisted/replayable/idempotent) + version bump; activate() baselines the world version; e2e: package upgrade 1.0.0→1.1.0 migrates armies (units.*.stats.drill default, system.schemaNote set), idempotent second reload
 - [x] Settings window (scene/grid editor drives canvas+measurement), keybindings (core/keys + default map + 1-5/Ctrl+Z/Y), scene nav bar, player list — D-079 (§10; client-pref + module + i18n sections land with their consumers)
 - [x] 3D dice (three.js, lazy Blob URL) driven by determined result (§11) — D-092: `dice3dMath` (settle quaternions per cube face — basis-vector verified; label plans where the top slot carries the rolled value; `diceFromTerms` extracts kept values per dice term), `dice3d` overlay (lazy `import("three")` → vite code-split → singlefile inlines as a Blob-URL module, parsed on first roll; tumble→slerp-to-target→hold→dispose; canvas label textures), App ops watcher fires it for created roll messages; e2e: /roll 2d6+1d20 → three loaded once, 3 dice settle on the determined values summing to the total, overlay disposes
@@ -218,7 +219,16 @@ e2e 14/14 incl. late join, token move, GM crash recovery.
 
 ## Continuous / cross-cutting
 
-- [ ] PROTOCOL.md consistency test stays green (§7, §13)
-- [ ] `pnpm size` gate in every unit (§0)
-- [ ] Performance budget benchmark tests wired as features land (§9, quality bar)
+These four are **standing gates, not units**: each is re-checked in every slice and its result is
+recorded in that slice's `DECISIONS.md` entry (e.g. D-264 records the typescript/svelte gate at 0
+blocking, lint at 0, the suite at 2,809 passing, the build at 2.82 MB raw inside the 6 MB budget,
+and the projection/rate-limit/sandboxing surfaces it touched), so the boxes below are never ticked
+— the evidence is per-decision. `tests/core/protocol-doc.test.ts` and `pnpm size` are wired into
+`pnpm test` / `pnpm size` and fail the build when they break (D-261: the `roll.apply` kind was
+caught by the protocol-doc test, not by review).
+
+- [ ] PROTOCOL.md consistency test stays green (§7, §13) — enforced by `pnpm test`
+- [ ] `pnpm size` gate in every unit (§0) — enforced by `pnpm size` (6 MB raw, app body only)
+- [ ] Performance budget benchmark tests wired as features land (§9, quality bar) — V08's frame
+      budget (D-242), `tests/canvas/lod100k.test.ts`, `tests/packages/pf1eDenseArmyBenchmark.test.ts`
 - [ ] §16 security review per unit: enforcement host-only, projection, rate limits, sandboxing

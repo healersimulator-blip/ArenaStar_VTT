@@ -20,10 +20,18 @@ export default defineConfig({
       name: "chromium",
       use: {
         browserName: "chromium",
-        // Optional local/system binary when the Playwright CDN is unavailable.
-        // Default CI still uses Playwright's pinned Chromium; no security flags are added.
+        // An optional local/system binary for environments where cdn.playwright.dev is
+        // unreachable (the npm registry alone is enough to get one: `@sparticuz/chromium`).
+        // CI keeps using Playwright's pinned Chromium, and nothing is relaxed unless asked for:
+        // PLAYWRIGHT_CHROMIUM_NO_SANDBOX=1 is the escape hatch for containers where the Chromium
+        // sandbox cannot start at all (no user namespaces), which is never set in CI.
         launchOptions: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
-          ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH }
+          ? {
+              executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+              ...(process.env.PLAYWRIGHT_CHROMIUM_NO_SANDBOX === "1"
+                ? { chromiumSandbox: false }
+                : {}),
+            }
           : {},
       },
     },

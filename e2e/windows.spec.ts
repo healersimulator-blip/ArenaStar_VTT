@@ -121,6 +121,7 @@ test.describe("window manager + GM tools (§10)", () => {
       .toBe(77);
 
     await page.click("#scene-add");
+    await page.click("#scene-new-blank");
     await expect(page.locator(".scenenav [data-scene]")).toHaveCount(2);
     const second = page.locator(".scenenav [data-scene]").nth(1);
     await second.click();

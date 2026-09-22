@@ -17,6 +17,7 @@ import type { PackageManifest } from "../core/packageManifest";
 import type { WorldId } from "../core/ids";
 import { readZipPackage, type LoadedPackage } from "../packages/packageLoader";
 import { putPackage, type PackageRecord } from "../storage/idb";
+import { clearParsedPackCache } from "../core/compendiumCache";
 import { HostPersister } from "../storage/persistence";
 import { BUILTIN_SYSTEM_ID, BUILTIN_SYSTEM_VERSION } from "./hostBoot";
 import { packageKindLabel } from "../host/zipKind";
@@ -154,6 +155,9 @@ export async function createWorldFromRecipe(
   try {
     const stamp = now();
     for (const pkg of recipe.content) await putPackage(options.db, recordOf(pkg, worldId, stamp));
+    // Seed writes invalidate the parsed-pack memo (G-45): the world may be seeded more than once
+    // in a session, and a stale parse is indistinguishable from a wrong pack.
+    clearParsedPackCache();
     if (ruleset) {
       await putPackage(options.db, recordOf(ruleset, worldId, stamp));
       // The pin: what hostBoot reads to pick the SimWorker's rules module. `version` is the

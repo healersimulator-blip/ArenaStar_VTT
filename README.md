@@ -141,7 +141,19 @@ PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/path/to/chromium \
   pnpm exec playwright test e2e/sheets.spec.ts e2e/windows.spec.ts --project=chromium --workers=1
 ```
 
-The override affects only the Chromium project and adds no browser-security bypass
-flags. Without it, Playwright uses its pinned browser as before. Record the actual
-browser version when using an alternate binary; this is not Firefox/WebKit or full
-supported-matrix acceptance. Browser executables and their libraries stay outside Git.
+No browser of your own? The npm registry alone is enough — `npm i @sparticuz/chromium`
+ships a compressed Chromium plus a tarball of the system libraries it needs; unpack both,
+point `LD_LIBRARY_PATH` at the library directory and pass its `executablePath()` to the
+variable above. That is how the acceptance runs in this repository's own sandbox were made
+(repeatedly, after the CDN turned out to be unreachable).
+
+Containers without user namespaces cannot start the Chromium sandbox; there,
+`PLAYWRIGHT_CHROMIUM_NO_SANDBOX=1` is the explicit opt-in that relaxes it. It is the only
+case in which the config passes a browser-security flag, it applies only alongside the
+executable override above, and CI never sets it. (It was not needed in the sandbox this
+repository's own acceptance runs used — the specs pass either way there.)
+
+The override affects only the Chromium project. Without it, Playwright uses its pinned
+browser as before. Record the actual browser version when using an alternate binary; this
+is not Firefox/WebKit or full supported-matrix acceptance. Browser executables and their
+libraries stay outside Git.

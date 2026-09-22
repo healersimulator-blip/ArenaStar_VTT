@@ -16,6 +16,28 @@
     type FogSettings,
   } from "../../core/fogExploration";
   import { DEFAULT_BINDINGS } from "../../core/keys";
+  import {
+    DEFAULT_SPEED_PER_DAY,
+    MAX_SIGHT_RADIUS,
+    MAX_SIGHT_WORLD_UNITS,
+    catalogToJson,
+    cellCensus,
+    disableHexcrawlOps,
+    enableHexcrawlOps,
+    hexcrawlProfileOf,
+    patchHexcrawlOps,
+    setDaylightOps,
+    setEncounterAnnounceOps,
+    setEncounterModeOps,
+    setPartyTokenOps,
+    setSightOps,
+    terrainCatalogOrDefault,
+    type EncounterMode,
+    type EncounterAnnounce,
+    type HexcrawlProfile,
+    type HexcrawlSightMode,
+    type TerrainCatalog,
+  } from "../../core/hexcrawl";
   import { gmState } from "../armies/gmState.svelte";
   import { viewAsOptions } from "../../core/viewAs";
   import {
@@ -31,6 +53,8 @@
     worldSettingsOps,
   } from "../../core/worldSettings";
   import {
+    ROUNDS_PER_HOUR,
+    ROUNDS_PER_MINUTE,
     TICKS_PER_DAY,
     advanceWorldClockOps,
     formatWorldClock,
@@ -107,6 +131,18 @@
   let fog = $state<FogSettings>({ enabled: false, rangeSquares: null });
   /** §2.1: the active scene's ambient darkness (0 = bright, 1 = pitch dark). */
   let darkness = $state(0);
+  /**
+   * D-270: the active scene's hexcrawl profile (null when this is not a hexcrawl scene), the
+   * census the overlay and the wizard both quote, and the world's terrain ladder.
+   */
+  let hex = $state<HexcrawlProfile | null>(null);
+  let hexCensus = $state<{ total: number; authored: number; gridless: boolean }>({
+    total: 0,
+    authored: 0,
+    gridless: false,
+  });
+  let hexTerrain = $state<TerrainCatalog | null>(null);
+  let sceneTokens = $state<Array<{ id: string; name: string; party: boolean }>>([]);
   /** §2.3/G-25 (D-262): the players this GM can preview the table as. */
   let viewAsChoices = $state<{ id: string; name: string }[]>([]);
 
@@ -129,6 +165,15 @@
     const settingsDocs = client.store.getAll("settings");
     const settings = worldSettingsFrom(settingsDocs);
     clockSeconds = readWorldClock(settingsDocs);
+    hex = active ? hexcrawlProfileOf(active) : null;
+    hexCensus = cellCensus(active);
+    hexTerrain = terrainCatalogOrDefault(settings["hexTerrain"]);
+    sceneTokens = (active?.tokens ?? []).map((t) => ({
+      id: t._id,
+      name: t.name || t._id,
+      party:
+        (t.flags as { core?: { party?: unknown } } | undefined)?.core?.party === true,
+    }));
     rules = {
       secondsPerRound: secondsPerRoundOf(settings),
       detectionMultiplier:
@@ -164,8 +209,11 @@
       if (reset.length > 0) client.submit(reset);
       return;
     }
+    // D-268: the buttons advance what the ladder says a minute/hour/day is, read from the same
+    // constants `ttlToTicks` converts with — an hour button that advanced 100 rounds would end a
+    // "1 hour" buff after ten minutes of game time.
     const ticks =
-      unit === "minute" ? 10 : unit === "hour" ? 100 : TICKS_PER_DAY;
+      unit === "minute" ? ROUNDS_PER_MINUTE : unit === "hour" ? ROUNDS_PER_HOUR : TICKS_PER_DAY;
     const delta = ticks * spr;
     const ops = advanceWorldClockOps(settingsDocs, delta);
     if (ops.length === 0) return;
@@ -235,6 +283,50 @@
     const next = clampDarkness(value);
     darkness = next;
     client.submit([sceneDarknessOp(scene, next)]);
+  }
+
+  /** The active scene document, or null (the panel edits the scene the GM is looking at). */
+  function activeSceneDoc(): SceneDocument | null {
+    const scenes = client.store.getAll("scenes") as readonly SceneDocument[];
+    return scenes.find((sc) => sc._id === sceneId) ?? null;
+  }
+
+  /** D-270: enable hexcrawl on the active scene, installing the world's terrain catalog once. */
+  function enableHexcrawl(): void {
+    const scene = activeSceneDoc();
+    if (!scene) return;
+    const ops = enableHexcrawlOps(scene, { speedPerDay: DEFAULT_SPEED_PER_DAY });
+    const settingsDocs = client.store.getAll("settings");
+    if (worldSettingsFrom(settingsDocs)["hexTerrain"] === undefined) {
+      ops.push(
+        ...worldSettingsOps(settingsDocs, {
+          hexTerrain: catalogToJson(terrainCatalogOrDefault(undefined)),
+        }),
+      );
+    }
+    client.submit(ops);
+  }
+
+  function disableHexcrawl(): void {
+    const scene = activeSceneDoc();
+    if (scene) client.submit(disableHexcrawlOps(scene));
+  }
+
+  /** One patch of the profile (`[]` back means the click changed nothing). */
+  function patchHex(patch: Partial<HexcrawlProfile>): void {
+    const scene = activeSceneDoc();
+    if (!scene) return;
+    client.submit(patchHexcrawlOps(scene, patch));
+  }
+
+  function applyHexSight(patch: {
+    mode?: HexcrawlSightMode;
+    radiusCells?: number;
+    radiusWorldUnits?: number;
+  }): void {
+    const scene = activeSceneDoc();
+    if (!scene || !hex) return;
+    client.submit(setSightOps(scene, { ...hex.sight, ...patch }));
   }
 
   function apply(): void {
@@ -464,6 +556,215 @@
         carries, a placed light, or its own darkvision (feet, on the token)
       </label>
     </div>
+  {/if}
+
+  <!--
+    D-270: the hexcrawl block. The *switch* is the profile's existence (`flags.core.hexcrawl`), so
+    one scene can be an overland map while its neighbours stay tactical boards; everything below is
+    the profile's own data plus the census the overlay will paint.
+  -->
+  <h4>Hexcrawl</h4>
+  {#if !hex}
+    <p class="hint" data-hex-off>
+      This scene is not a hexcrawl map. Enabling it turns the grid into cells with terrain, adds
+      encounter tables and a party token whose travel spends world time.
+    </p>
+    <button type="button" data-hex-enable onclick={enableHexcrawl}>
+      Enable hexcrawl on this scene
+    </button>
+  {:else}
+    <div class="row" data-hex-on>
+      <label>
+        Party sight
+        <select
+          data-hex-sight-mode
+          value={hex.sight.mode}
+          onchange={(e) =>
+            applyHexSight({
+              mode: (e.target as HTMLSelectElement).value as HexcrawlSightMode,
+            })}
+        >
+          <option value="gm">GM reveals hexes by hand</option>
+          <option value="gm+party">GM + the party's own ring</option>
+        </select>
+      </label>
+      {#if grid?.type === "gridless"}
+        <label>
+          Sight radius (units)
+          <input
+            data-hex-radius-units
+            type="number"
+            min="0"
+            max={MAX_SIGHT_WORLD_UNITS}
+            value={hex.sight.radiusWorldUnits}
+            onchange={(e) =>
+              applyHexSight({
+                radiusWorldUnits: Number((e.target as HTMLInputElement).value),
+              })}
+          />
+        </label>
+      {:else}
+        <label>
+          Sight radius (hexes)
+          <input
+            data-hex-radius
+            type="number"
+            min="0"
+            max={MAX_SIGHT_RADIUS}
+            value={hex.sight.radiusCells}
+            onchange={(e) =>
+              applyHexSight({
+                radiusCells: Number((e.target as HTMLInputElement).value),
+              })}
+          />
+        </label>
+      {/if}
+    </div>
+    <div class="row">
+      <label>
+        Encounters
+        <select
+          data-hex-encounter-mode
+          value={hex.encounterMode}
+          onchange={(e) => {
+            const scene = activeSceneDoc();
+            const mode = (e.target as HTMLSelectElement).value as EncounterMode;
+            if (scene) client.submit(setEncounterModeOps(scene, mode));
+          }}
+        >
+          <option value="auto">roll automatically</option>
+          <option value="prompt">offer the roll (GM only)</option>
+          <option value="manual">the GM rolls by hand</option>
+        </select>
+      </label>
+      <label>
+        Public encounter cards
+        <select
+          data-hex-encounter-announce
+          value={hex.encounterAnnounce}
+          onchange={(e) => {
+            const scene = activeSceneDoc();
+            const announce = (e.target as HTMLSelectElement).value as EncounterAnnounce;
+            if (scene) client.submit(setEncounterAnnounceOps(scene, announce));
+          }}
+        >
+          <option value="names">name the creatures</option>
+          <option value="hidden">say how many, not what</option>
+        </select>
+      </label>
+      <label>
+        Party token
+        <select
+          data-hex-party
+          value={hex.partyTokenId ?? ""}
+          onchange={(e) => {
+            const scene = activeSceneDoc();
+            if (scene)
+              client.submit(
+                setPartyTokenOps(scene, (e.target as HTMLSelectElement).value || null),
+              );
+          }}
+        >
+          <option value="">— none —</option>
+          {#each sceneTokens as token (token.id)}
+            <option value={token.id}>{token.name}{token.party ? " (party)" : ""}</option>
+          {/each}
+        </select>
+      </label>
+    </div>
+    <div class="row">
+      <label>
+        Dawn (hour)
+        <input
+          data-hex-dawn
+          type="number"
+          min="0"
+          max="24"
+          value={hex.daylight.dawnHour}
+          onchange={(e) => {
+            const scene = activeSceneDoc();
+            if (scene)
+              client.submit(
+                setDaylightOps(scene, {
+                  ...hex.daylight,
+                  dawnHour: Number((e.target as HTMLInputElement).value),
+                }),
+              );
+          }}
+        />
+      </label>
+      <label>
+        Dusk (hour)
+        <input
+          data-hex-dusk
+          type="number"
+          min="0"
+          max="24"
+          value={hex.daylight.duskHour}
+          onchange={(e) => {
+            const scene = activeSceneDoc();
+            if (scene)
+              client.submit(
+                setDaylightOps(scene, {
+                  ...hex.daylight,
+                  duskHour: Number((e.target as HTMLInputElement).value),
+                }),
+              );
+          }}
+        />
+      </label>
+      <label>
+        March (units/day)
+        <input
+          data-hex-speed
+          type="number"
+          min="1"
+          max="240"
+          value={hex.travel?.speedPerDay ?? DEFAULT_SPEED_PER_DAY}
+          onchange={(e) =>
+            patchHex({
+              travel: hex.travel
+                ? {
+                    ...hex.travel,
+                    speedPerDay: Number((e.target as HTMLInputElement).value),
+                  }
+                : null,
+            })}
+        />
+      </label>
+    </div>
+    <p class="readout" data-hex-census>
+      {#if hexCensus.gridless}
+        {hexCensus.authored} zones drawn
+      {:else}
+        <span data-hex-cells>{hexCensus.total}</span> cells ·
+        {hexCensus.authored} authored · reference scale
+        <b data-hex-scale>1 cell = {grid?.distance ?? 0} {grid?.units ?? ""}</b>
+      {/if}
+    </p>
+    {#if hexTerrain}
+      <details class="terrain">
+        <summary data-hex-terrain-summary
+          >Terrain ladder — {hexTerrain.name} ({hexTerrain.terrains.length})</summary
+        >
+        <ul data-hex-terrain>
+          {#each hexTerrain.terrains as t (t.id)}
+            <li data-hex-terrain-row={t.id}>
+              <span>{t.label ?? t.name}</span>
+              <b>{t.cost}× a day</b>
+              {#if t.road}<i>road — crosses as open ground</i>{/if}
+            </li>
+          {/each}
+        </ul>
+        <p class="hint">
+          Costs are the share of a travelling day one cell takes at {DEFAULT_SPEED_PER_DAY}
+          units/day; the catalog is world data (the terrain brush arrives with the overlay).
+        </p>
+      </details>
+    {/if}
+    <button type="button" data-hex-disable onclick={disableHexcrawl}>
+      Turn hexcrawl off for this scene
+    </button>
   {/if}
 
   <h4>Rules options</h4>
@@ -771,6 +1072,36 @@
   .hint {
     margin: 0;
     font-size: 0.8125rem;
+    color: #7d8ea6;
+  }
+  /* D-270: the hexcrawl block — a census line, and the world's terrain ladder folded away. */
+  [data-hex-census] {
+    margin: 4px 0 0;
+    font-size: 0.8125rem;
+    color: #a9bccd;
+  }
+  .terrain summary {
+    cursor: pointer;
+    font-size: 0.8125rem;
+  }
+  .terrain ul {
+    margin: 4px 0;
+    padding: 0;
+    list-style: none;
+    max-height: 12em;
+    overflow: auto;
+  }
+  .terrain li {
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+    font-size: 0.8125rem;
+    border-bottom: 1px solid #262e3a;
+  }
+  .terrain li span {
+    flex: 1;
+  }
+  .terrain li i {
     color: #7d8ea6;
   }
   .error {

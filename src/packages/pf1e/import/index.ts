@@ -2,10 +2,12 @@
  * §3.1 (G-39) — the character-import front door: sniff the format, read it, hand the caller a
  * document it can create.
  *
- * The three readers behind this module each produce the same `ImportedCharacter`, and everything
- * after that point is shared: the actor document, its embedded items, its authored attack lines
- * and the report the importing GM reads. Two consequences worth stating, because they are the
- * point of the shape:
+ * The readers behind this module each produce the same `ImportedCharacter`, and everything after
+ * that point is shared: the actor document, its embedded items, its authored attack lines and the
+ * report the importing GM reads. Four today — Foundry actor JSON, Hero Lab XML and Roll20 sheet
+ * exports for §3.1, and (G-08, §3.2) a monster stat block pasted as text, which carries no file
+ * name and no schema and is therefore the one path where the sniffer reads labels rather than
+ * structure. Two consequences worth stating, because they are the point of the shape:
  *
  * - **One place decides the actor's ownership.** An imported character belongs to the GM until the
  *   GM says otherwise (the same default a hand-made actor gets, `ownership: {default: 0, gm: 3}`),
@@ -23,6 +25,7 @@ import type { ActorDocument, ItemDocument } from "../../../core/documents";
 import { importFoundryCharacter, looksLikeFoundryActor } from "./foundry";
 import { importHeroLabCharacter, looksLikeHeroLabXml } from "./herolab";
 import { importRoll20Character, looksLikeRoll20Export } from "./roll20";
+import { importStatblock, looksLikeStatblock } from "./statblock";
 import type {
   CharacterImportFormat,
   ImportedCharacter,
@@ -36,6 +39,7 @@ export {
   parseXml,
 } from "./herolab";
 export { importRoll20Character, looksLikeRoll20Export } from "./roll20";
+export { importStatblock, looksLikeStatblock } from "./statblock";
 export { parseDamage, sizeRollToDice } from "./dice";
 export type {
   CharacterImportFormat,
@@ -77,6 +81,17 @@ export function detectCharacterFormat(
 }
 
 /**
+ * Everything `detectCharacterFormat` knows **plus** the one source that is not a document at all:
+ * a monster stat block pasted as prose (G-08). It is kept separate because the file-import path
+ * wants the document formats only, while the paste path wants exactly this.
+ */
+export function detectPastedFormat(text: string): CharacterImportFormat | null {
+  const detected = detectCharacterFormat(text);
+  if (detected !== null) return detected;
+  return looksLikeStatblock(text) ? "statblock" : null;
+}
+
+/**
  * Read one export into the app's own shape. `fileName` is only used in the error message: whoever
  * hands us a broken file deserves to be told what kind of file it was supposed to be.
  */
@@ -114,8 +129,14 @@ export function importCharacter(
       "that XML has no <character> element — export the character with Hero Lab's XML output",
     );
   }
+  // G-08: not a document at all — a stat block pasted as text.
+  if (looksLikeStatblock(text)) return played(importStatblock(text));
+  if (looksLikeStatblock(text.replace(/^[^\n]*\n/, "")))
+    return err(
+      "that text looks like a stat block without its first line — a stat block starts with the creature's name and its CR (`Goblin Warrior CR 1/3`); paste it from the top",
+    );
   return err(
-    "unrecognised file: expected a Foundry PF1e actor JSON, a Hero Lab XML export, or a Roll20 character sheet JSON",
+    "unrecognised file: expected a Foundry PF1e actor JSON, a Hero Lab XML export, a Roll20 character sheet JSON, or a pasted Pathfinder 1e monster stat block",
   );
 }
 
@@ -230,7 +251,9 @@ export function formatLabel(format: CharacterImportFormat): string {
     ? "Foundry PF1e actor"
     : format === "herolab"
       ? "Hero Lab XML"
-      : "Roll20 sheet";
+      : format === "statblock"
+        ? "stat block"
+        : "Roll20 sheet";
 }
 
 /** A `Result`-shaped parse for callers that only want the report (the UI's happy path). */
