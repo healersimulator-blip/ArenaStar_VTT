@@ -8089,3 +8089,71 @@ against 7.6 m and one failure before.
   **1 passed (34.6 s)**, and the six older hexcrawl specs re-run beside it in one command are
   **11 passed** — **12 hexcrawl tests, 4.5 m, no failures**, which also retires the `hexcrawl_fog`
   flake D-276 had to explain.
+
+## D-278 — 2026-09-22 — An LLM sits at the table: the MCP-shaped connector's skeleton, the capability gate, and the one-tab-one-sidecar bridge (connector Phase 0)
+
+**Context.** `MCP_CONNECTOR_SPEC_AND_PLAN.md` was a proposal dated 2026-09-21 and nothing in the tree
+answered it. It is the last unstarted document in the repo, and it is a **differentiator**, not a parity
+row — neither Roll20 nor Foundry ships an MCP surface, so per `GAP_ANALYSIS` §5.1's ordering it waits
+until the product says otherwise. Phase 0 is the skeleton: the wire, the transport, the gate and two
+read tools, with no UI and no writes yet (`HEXCRAWL_SCENE_SPEC_AND_PLAN.md` is complete and shipped as
+D-268…D-277; this is a separate feature with its own plan and its own phases).
+
+**Decision — architecture A, and the browser dials out.** `vtt-mcp` (`tools/mcp/server.mjs`, `pnpm mcp`)
+is a sidecar an MCP-speaking client launches over **stdio**; the GM's tab opens a **WebSocket to it**
+on loopback, presenting a one-time pairing token. The app never listens on a port — which is the whole
+reason it is a separate process, and the reason it works from `file://` and behind a router. The sidecar
+binds `127.0.0.1` by default and prints a warning when it is told otherwise (the sandbox's e2e harness
+needs `0.0.0.0`; the product default does not change).
+
+**Decision — one registry, one gate.** The tool table, the argument validation and the capability check
+live in the app's `core` (`src/core/agents/`), not in the sidecar. The sidecar answers `initialize` and
+`ping` itself — an MCP client handshakes the moment it spawns us, which is before any tab exists — and
+proxies everything else to the bridge by request id. A sidecar that kept its own copy of the catalogue
+would be a second place to forget to enforce a grant.
+
+**Decision — a refusal is a tool result, a malformed call is a protocol error.** "You may not delete
+documents — ask the GM to change its grant" (§4's plain words, one per capability) comes back as a
+normal result with `isError: true`, because a model that is told *why* a door is closed stops pushing on
+it. An unknown tool name, a non-object argument or an unknown argument key is `-32602`: that is a
+client bug, not a policy, and conflating the two is how an agent learns that the world is closed to it.
+
+**Decision — `whoami` names the session and the grant apart.** Phase 0 hosts the bridge in the GM's tab,
+so the session says `GM` while the grant may say `observer`; an agent that read "role GM" and stopped
+there would draw exactly the wrong conclusion. The answer reports both, and says which is the ceiling.
+Related and equally deliberate: **reads are the GM's replica today**, which is correct for a GM-scoped
+agent and wrong for a player-scoped one — that is the gap Phase 3 closes with `projectWorld()` and its
+field-by-field proof, and nothing in the code pretends otherwise.
+
+**Decision — no UI, no global, in Phase 0.** `connectAgentBridge()` is a function, not a `window`
+object: the Agents section in Settings (Phase 2) is the production entry point, and until then the only
+caller is the integration test. A connector whose bound identity is the whole design does not get a
+surface a page console can reach (the D-045 pattern is the precedent for gating test surfaces).
+
+**Two things the plan's Phase 0 did not say, decided here.** (1) The sidecar answers a tool call with
+`-32603` and a sentence naming the Settings button when **no tab is connected**, and times a forwarded
+call out after 30 s — an MCP client waiting on an id it will never see answered is the worst failure
+mode this shape has. (2) It refuses a **second** tab with HTTP 409: a world has one GM, and silently
+stealing the session from a browser the GM forgot about is worse than telling them.
+
+**Gates.**
+
+- **The unit gate:** `pnpm test` — **264 files / 3 125 tests passed** (2 files, 12 tests skipped).
+  New: `tests/core/agentsCapabilities.test.ts` (7 — the presets, the gate, the refusal wording) and
+  `tests/core/agentsTools.test.ts` (10 — the manifest, the three ways a call ends, the argument
+  validator, a tool that throws).
+- **The integration gate:** `tests/integration/mcpBridge.test.ts` (8) — a host booted in Node on the
+  in-memory wire (`tests/host/sync.test.ts` is the precedent), the **real sidecar as a child process**,
+  the **real WebSocket transport**, and a JSON-RPC client over stdio: `initialize` answers before any
+  tab exists; a call with no tab says what is missing instead of hanging; `tools/list` returns the two
+  tools; `tools/call world.info` returns the world's name and the counts that came out of the seeded
+  store; an unknown tool is `-32602`; a tool the grant does not cover is a refusal in plain words while
+  `whoami` still answers; `resources`/`prompts` answer honestly; an unknown method is `-32601`.
+- **Types and lint:** `pnpm typecheck` **50 components, 0 blocking, 1 advisory**
+  (`ReplayPanel.svelte:29`) · `pnpm lint` **exit 0** · `prettier --check` clean on every new file.
+- **The build and the size budget:** `pnpm build` → `pnpm size` **3 142 835 B raw / 904 095 B gzip —
+  byte-identical to the D-277 tree**. Nothing in the app graph imports the bridge yet, so the connector
+  costs the bundle nothing; it starts costing when Phase 2's Agents window imports it, and that is the
+  number to watch then. The sidecar is Node-only and never bundled.
+- **Not yet proven:** the WebSocket client has run under Node 22's `WebSocket` and nowhere else — the
+  browser transport and the Settings pairing flow are Phase 3's e2e (`agent_connector.spec.ts`).

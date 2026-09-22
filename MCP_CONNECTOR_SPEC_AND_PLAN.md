@@ -1,6 +1,7 @@
 # MCP-style LLM connector — specification additions and implementation plan
 
-**Status:** proposal, 2026-09-21 · **Reads with:** `PROTOCOL.md` (§4 ops, §5 projection, §6 transports,
+**Status:** proposal 2026-09-21 · **Phase 0 landed 2026-09-22 (D-278)**; Phases 1–6 unstarted.
+**Reads with:** `PROTOCOL.md` (§4 ops, §5 projection, §6 transports,
 §13 message reference), `PLAN.md` (§12 packages/modules), `DECISIONS.md` (D-013 roles, D-045 the typed
 `__vttE2E` surfaces, D-262 view-as), `HEXCRAWL_SCENE_SPEC_AND_PLAN.md` (the hexcrawl tools depend on it),
 `GAP_ANALYSIS_Roll20_Foundry.md` §5.1.
@@ -336,7 +337,7 @@ answered with the content hash. It must land with `PROTOCOL.md` updated in the s
 Effort scale as in `GAP_CLOSURE_ImplementationPlan.md` (S ≈ 1–2 days, M ≈ 3–5). Total **≈ 7–8 days**,
 each phase shippable, each ending with the standing gates + one `DECISIONS.md` entry.
 
-### Phase 0 — Skeleton and the bridge contract (1 day, S)
+### Phase 0 — Skeleton and the bridge contract (1 day, S) — ✅ landed 2026-09-22 (D-278)
 `tools/mcp/server.mjs` (JSON-RPC 2.0 framing, `initialize`, `tools/list`, `tools/call`,
 `notifications/*`), `BridgeTransport` interface + the loopback WS implementation, pairing token, and two
 read tools (`whoami`, `world.info`). The in-tab bridge with the capability gate stubbed to "deny
@@ -344,6 +345,37 @@ everything except the two".
 *Test:* `tests/integration/mcpBridge.test.ts` — a host booted in Node on the in-memory wire
 (`tests/host/sync.test.ts` is the precedent), a real MCP client over stdio, `tools/list` returns the two
 tools, `tools/call world.info` returns the world's name, a third tool name returns a JSON-RPC error.
+
+**As landed.** `tools/mcp/server.mjs` — stdio JSON-RPC with `initialize`/`ping` answered **locally**
+(an MCP client handshakes the instant it spawns us, which is before any tab exists) and everything else
+proxied to the tab by request id; a 30 s timeout and a `-32603` that names the Settings button when no
+tab is paired, because a client waiting on an id nobody will answer is the worst failure this shape has;
+HTTP **401** on a bad token and **409** on a second tab (a world has one GM, and silently stealing the
+session from a browser the GM forgot about is worse than saying so); every log line on **stderr**,
+because one `console.log` on stdout is a corrupt protocol stream · `src/core/agents/bridge.ts` — the
+JSON-RPC 2.0 + MCP method core over `BridgeTransport`. §7.3 put this in the app; it is in `core` so the
+method table, the error codes and the refusal semantics are unit-testable without a browser and
+identical in the tab and in Node · `src/core/agents/tools.ts` — the catalogue, the argument validator
+(a JSON-Schema subset with no dependency, §9 risk 1) and `callTool`; this is §7.3's `toolArgs.ts` under
+a name that says what it holds, because the two are one table · `src/core/agents/capabilities.ts` — the
+vocabulary, the four presets and `allows()` · `src/net/agentLink.ts` — the outbound WebSocket
+transport, beside the app's other transports, on the platform `WebSocket` so the integration test
+drives the real thing · `src/app/agentBridge.ts` — the app's wiring and nothing else: the
+`AgentWorldView` over `ClientSync` and `connectAgentBridge()`.
+*Deferred, and §7.3's file table updated accordingly:* `grants.ts` — the replicated `agents` settings
+document, the scene scope and the Agents window belong to Phase 2. A grant document with no UI to grant
+it from is a document nobody can explain.
+*Two decisions the plan left open, taken in D-278:* a **refusal is a tool result** (`isError` plus §4's
+plain words) while a **malformed call is `-32602`** — "you may not delete" is information, "no tool
+named `scene.delete`" is a client bug, and conflating them teaches an agent the world is closed to it;
+and `whoami` names the **session** (whose replica the reads come from) and the **grant** (the ceiling)
+apart, because Phase 0 hosts the bridge in the GM's tab and an agent that reads "role GM" and stops
+there would draw exactly the wrong conclusion.
+*Tests:* `tests/core/agentsCapabilities.test.ts` (7) · `tests/core/agentsTools.test.ts` (10) ·
+`tests/integration/mcpBridge.test.ts` (8 — host in Node, the **real sidecar as a child process**, a real
+socket, a JSON-RPC client over stdio). The bundle is **byte-identical** to the Phase 0 baseline
+(3 142 835 B raw): nothing in the app graph imports the bridge yet, and it starts costing when Phase 2's
+Agents window does.
 
 ### Phase 1 — The read surface and the representations (1.5 days, M)
 `scene.list/read/describe`, `map.render` (ASCII + JSON, with the legend and ids), `document.read/list`,
