@@ -779,6 +779,28 @@ describe("vtt-mcp ↔ agent bridge (MCP plan §8 Phase 0)", () => {
     expect(after.tokens.find((t) => t._id === "t-vex")?.x).toBe(350);
   }, 30_000);
 
+  test("the audit ring records what the agent did, in the GM's words (§6.4)", async () => {
+    const before = bridge?.audit().length ?? 0;
+    await started.client.request("tools/call", { name: "world.info", arguments: {} });
+    await started.client.request("tools/call", { name: "scene.delete", arguments: {} });
+    const entries = bridge?.audit() ?? [];
+    expect(entries.length).toBe(before + 2);
+
+    const info = entries[entries.length - 2];
+    expect(info).toMatchObject({ method: "tools/call", tool: "world.info", outcome: "answered" });
+    expect(info?.detail).toContain("World One");
+    expect(info?.ms).toBeGreaterThanOrEqual(0);
+
+    // A malformed call is recorded as invalid, not silently dropped: the GM's audit is the record
+    // of what was *attempted*, which is the half the OpLog cannot show.
+    const bad = entries[entries.length - 1];
+    expect(bad).toMatchObject({ tool: "scene.delete", outcome: "invalid" });
+    expect(bad?.detail).toContain("no tool named");
+
+    // And it is a ring: 200 entries is the window, not a leak.
+    expect(entries.length).toBeLessThanOrEqual(200);
+  }, 30_000);
+
   test("an unknown method is -32601, and a notification gets no answer at all", async () => {
     const reply = await started.client.request("does/not/exist");
     expect((reply["error"] as { code: number }).code).toBe(-32601);

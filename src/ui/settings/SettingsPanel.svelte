@@ -65,6 +65,9 @@
   import { autoResolveAoosOf } from "../../packages/pf1e/aooSettings";
   import type { HostPackages, HostRulesBoot } from "../../app/hostBoot";
   import RulesetSection from "../packages/RulesetSection.svelte";
+  import AgentsSection from "./AgentsSection.svelte";
+  import type { AgentManager } from "../../app/agentManager";
+  import type { AgentAuditEntry } from "../../core/agents/bridge";
 
   let {
     client,
@@ -73,6 +76,7 @@
     onRedo,
     packages = null,
     rulesBoot = null,
+    agents = null,
   }: {
     client: ClientSync;
     bus: EventBus<ClientEvents>;
@@ -81,6 +85,11 @@
     /** §12 host package surface (GM only; null hides the ruleset section). */
     packages?: HostPackages | null;
     rulesBoot?: HostRulesBoot | null;
+    /**
+     * §3.2 the connector's agent desk (GM only; null hides the Agents section). The window holds
+     * no transport handles of its own: sessions, grants and bridges are the manager's.
+     */
+    agents?: AgentManager | null;
   } = $props();
 
   let grid = $state<SceneGrid | null>(null);
@@ -145,8 +154,23 @@
   let sceneTokens = $state<Array<{ id: string; name: string; party: boolean }>>([]);
   /** §2.3/G-25 (D-262): the players this GM can preview the table as. */
   let viewAsChoices = $state<{ id: string; name: string }[]>([]);
+  /** §3.2 the agent rows (re-read on every op, because the grant is a document). */
+  let agentRows = $state<ReturnType<AgentManager["list"]>>([]);
+  let agentAudit = $state<AgentAuditEntry[]>([]);
+  let agentScenes = $state<Array<{ id: string; name: string }>>([]);
+
+  function refreshAgents(): void {
+    if (!agents) return;
+    agentRows = agents.list();
+    agentAudit = agents.audit();
+    agentScenes = (client.store.getAll("scenes") as readonly SceneDocument[]).map((scene) => ({
+      id: scene._id,
+      name: scene.name || scene._id,
+    }));
+  }
 
   function refresh(): void {
+    refreshAgents();
     viewAsChoices = viewAsOptions(
       client.store.getAll("users") as readonly UserDocument[],
       client.user,
@@ -346,9 +370,13 @@
     const offSnapshot = bus.on("snapshot", refresh);
     const offOps = bus.on("ops", refresh);
     refresh();
+    // The audit is not a document, so it does not arrive as an op: poll it while the window is
+    // open, which is the only time anyone can read it.
+    const timer = agents ? setInterval(refreshAgents, 1500) : null;
     return () => {
       offSnapshot();
       offOps();
+      if (timer !== null) clearInterval(timer);
     };
   });
 </script>
@@ -356,6 +384,33 @@
 <div class="settings">
   {#if packages}
     <RulesetSection {packages} {rulesBoot} />
+  {/if}
+  {#if agents}
+    <AgentsSection
+      rows={agentRows}
+      scenes={agentScenes}
+      audit={agentAudit}
+      onAdd={(name, preset) => {
+        agents?.add(name, preset);
+        refreshAgents();
+      }}
+      onGrant={(id, patch) => {
+        agents?.setGrant(id, patch);
+        refreshAgents();
+      }}
+      onRevoke={(id) => {
+        agents?.revoke(id);
+        refreshAgents();
+      }}
+      onForget={(id) => {
+        agents?.forget(id);
+        refreshAgents();
+      }}
+      onConnect={(id, url, token) => {
+        agents?.connect(id, url, token);
+        refreshAgents();
+      }}
+    />
   {/if}
   <h4>Scene grid</h4>
   {#if grid}

@@ -29,6 +29,7 @@
   import type { ClientSync } from "../../client/sync";
   import type { ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
+  import type { AgentManager } from "../../app/agentManager";
 
   let {
     manager,
@@ -40,6 +41,7 @@
     onRedo,
     packages = null,
     rulesBoot = null,
+    agents = null,
     bindings = {},
     isGM = false,
     importImage = null,
@@ -60,6 +62,8 @@
     packages?: HostPackages | null;
     /** Which strategic ruleset booted (Settings → ruleset section status line). */
     rulesBoot?: HostRulesBoot | null;
+    /** §3.2 the connector's agent desk (GM only; null hides the Agents section). */
+    agents?: AgentManager | null;
     /** §10 keybinding map for the help window (D-256). */
     bindings?: Readonly<Record<string, string>>;
     isGM?: boolean;
@@ -243,7 +247,15 @@
         {:else if win.kind === "macros"}
           <MacrosPanel {client} {bus} />
         {:else if win.kind === "settings"}
-          <SettingsPanel {client} {bus} {onUndo} {onRedo} {packages} {rulesBoot} />
+          <SettingsPanel
+            {client}
+            {bus}
+            {onUndo}
+            {onRedo}
+            {packages}
+            {rulesBoot}
+            {agents}
+          />
         {:else if win.kind === "journal" && win.data}
           <JournalPopout
             {client}

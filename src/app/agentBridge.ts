@@ -40,6 +40,7 @@ import type {
 import { cellAtPoint, parseCellKey } from "../core/hexcrawl/cells";
 import { paginate } from "../core/agents/paging";
 import type { AgentGrant } from "../core/agents/capabilities";
+import type { AgentWriter } from "../core/agents/types";
 import { createAgentBridge, type AgentBridge } from "../core/agents/bridge";
 import { readWorldClock } from "../packages/pf1e/worldClock";
 import { pf1eSheetView, isPF1eActor } from "../ui/sheets/pf1eSheetModel";
@@ -371,6 +372,13 @@ export interface ConnectAgentBridgeOptions extends AgentWorldViewOptions {
   token: string;
   client: ClientSync;
   grant: AgentGrant;
+  /**
+   * The agent's own write port (§6.2). **Absent means read-only** — the bridge will answer every
+   * write tool with "this connection cannot write" rather than pretending the verb is broken.
+   */
+  writer?: AgentWriter | undefined;
+  /** The user id the writes are attributed to; what `whoami` reports as the agent's own. */
+  agentId?: string | null | undefined;
   onStatus?: (status: AgentLinkStatus) => void;
 }
 
@@ -387,5 +395,9 @@ export function connectAgentBridge(
     transport,
     view: agentWorldView(client, options),
     grant,
+    // Phase 2: when the bridge belongs to an agent's own session, that session's writer and id
+    // come along, so writes are attributed and the reads are the agent's projection.
+    ...(options.writer ? { writer: options.writer } : {}),
+    agentId: options.agentId ?? null,
   });
 }

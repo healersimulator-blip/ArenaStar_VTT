@@ -60,9 +60,39 @@ export interface AgentBridgeOptions {
   protocolVersion?: string;
 }
 
+/**
+ * §6.4 — one line per call, for the GM's eyes. The plan asks for the txId; this records the **seq**
+ * as well, because the seq is what the OpLog and the undo stack are keyed by, and the GM's question
+ * after an agent does something odd is "which line of the log was that", not "which socket write".
+ */
+export interface AgentAuditEntry {
+  at: number;
+  method: string;
+  /** The tool, when the call was `tools/call`. */
+  tool: string | null;
+  /** One line of arguments — enough to recognise the call, never enough to be a data leak. */
+  args: string;
+  ms: number;
+  outcome: "answered" | "refused" | "invalid" | "error";
+  /** The first line of the answer, trimmed: what the model was told. */
+  detail: string;
+  seq: number | null;
+}
+
 export interface AgentBridge {
   dispose(): void;
+  /** The last `AUDIT_RING_SIZE` calls, oldest first. In-memory: a ring, not another document. */
+  audit(): readonly AgentAuditEntry[];
 }
+
+/** §6.4: the Agents window shows the last 200. */
+export const AUDIT_RING_SIZE = 200;
+
+const oneLine = (value: unknown, max = 160): string => {
+  const text =
+    typeof value === "string" ? value : JSON.stringify(value ?? null);
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+};
 
 type JsonRpcId = string | number | null;
 
@@ -110,6 +140,7 @@ const envelope = (
  */
 export function createAgentBridge(options: AgentBridgeOptions): AgentBridge {
   const { transport, view, grant, writer, agentId } = options;
+  const ring: AgentAuditEntry[] = [];
   const serverInfo = options.serverInfo ?? {
     name: "arenastar-vtt",
     version: "0.1.0",
@@ -124,6 +155,17 @@ export function createAgentBridge(options: AgentBridgeOptions): AgentBridge {
     const id = req.id ?? null;
     const method = typeof req.method === "string" ? req.method : "";
     const params = (req.params ?? {}) as Record<string, Json>;
+    const startedAt = Date.now();
+    // The audit is written on the way out, whatever the way out is — including the ones that throw,
+    // which is why the handle() wrapper records it rather than each case.
+    let audit: Omit<AgentAuditEntry, "ms"> | null = null;
+    const finish = (): void => {
+      if (audit === null) return;
+      const entry: AgentAuditEntry = { ...audit, ms: Date.now() - startedAt };
+      ring.push(entry);
+      if (ring.length > AUDIT_RING_SIZE) ring.shift();
+      audit = null;
+    };
 
     switch (method) {
       case "initialize":
@@ -148,8 +190,19 @@ export function createAgentBridge(options: AgentBridgeOptions): AgentBridge {
         );
         return;
       case "tools/call": {
+        const name = params["name"];
+        const toolArgs = params["arguments"];
+        audit = {
+          at: startedAt,
+          method: "tools/call",
+          tool: typeof name === "string" ? name : null,
+          args: oneLine(toolArgs),
+          outcome: "answered",
+          detail: "",
+          seq: null,
+        };
         const called = await callTool(
-          { name: params["name"], args: params["arguments"] },
+          { name, args: toolArgs },
           {
             view,
             grant,
@@ -158,9 +211,19 @@ export function createAgentBridge(options: AgentBridgeOptions): AgentBridge {
           },
         );
         if (called.kind === "invalid") {
+          audit.outcome = "invalid";
+          audit.detail = called.error;
+          finish();
           sendError(id, JSON_RPC_ERROR.invalidParams, called.error);
           return;
         }
+        const structured = called.result.structuredContent as
+          Record<string, unknown> | undefined;
+        audit.outcome = called.result.isError === true ? "refused" : "answered";
+        audit.detail = oneLine(called.result.content[0]?.text ?? "", 200);
+        audit.seq =
+          typeof structured?.["seq"] === "number" ? structured["seq"] : null;
+        finish();
         transport.send(JSON.stringify(envelope(id, { result: called.result })));
         return;
       }
@@ -176,8 +239,20 @@ export function createAgentBridge(options: AgentBridgeOptions): AgentBridge {
         }
         // §5.7: a resource is the same answer as the tool behind it, wearing a URI — so the grant
         // that refuses the tool refuses the resource, and there is one place to get it wrong.
+        audit = {
+          at: startedAt,
+          method: "resources/read",
+          tool: null,
+          args: uri,
+          outcome: "answered",
+          detail: "",
+          seq: null,
+        };
         const read = await readResource(view, grant, uri);
         if (!read.ok) {
+          audit.outcome = "refused";
+          audit.detail = read.message;
+          finish();
           sendError(
             id,
             read.code === "not_implemented"
@@ -262,6 +337,7 @@ export function createAgentBridge(options: AgentBridgeOptions): AgentBridge {
         continue;
       }
       void dispatch(req).catch((error: unknown) => {
+        void error;
         sendError(
           req.id ?? null,
           JSON_RPC_ERROR.internalError,
@@ -276,6 +352,9 @@ export function createAgentBridge(options: AgentBridgeOptions): AgentBridge {
     dispose(): void {
       transport.onMessage(() => undefined);
       transport.close();
+    },
+    audit(): readonly AgentAuditEntry[] {
+      return [...ring];
     },
   };
 }

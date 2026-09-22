@@ -2,6 +2,7 @@
   import { onMount, untrack } from "svelte";
   import { detectCapabilities } from "./capabilities";
   import { DEFAULT_SCENE_ID, GM_USER_ID, makeToken, type HostApp } from "./hostBoot";
+  import { createAgentManager, type AgentManager } from "./agentManager";
   import { createStage, type Stage } from "../canvas/stage";
   import { tokenRect } from "../canvas/tokens";
   import type { RollHighlightRect } from "../canvas/layers/RollHighlightLayer";
@@ -298,6 +299,12 @@
     { id: "compendia", label: "Compendia" },
   ];
   let canvasError = $state<string | null>(null);
+  /**
+   * §3.2 the agent desk. Null until a host app exists (and for a joined player, who has no host to
+   * mint agent users on — agents are a GM surface). The Settings window shows the section only
+   * when this is non-null, which is how a player's replica stays unable to grant anything.
+   */
+  let agents = $state<AgentManager | null>(null);
   let canvasTool = $state<CanvasTool>("select");
   let canvasToolbarCollapsed = $state(false);
   /** D-256: Roll20's layer picker — the GM's active layer (players stay on `tokens`). */
@@ -2765,6 +2772,13 @@ const WALL_PICK_RADIUS = 12;
   onMount(() => {
     const current = app;
     if (!current) return;
+    // §3.2 the agent desk, built here rather than in `$props` init: it needs the live HostSync to
+    // mint agent users on, and it is torn down with the app (onDestroy above).
+    agents = createAgentManager({
+      host: current.host,
+      client: current.gm.client,
+      meta: current.meta,
+    });
     // Canvas tool listeners are attached after `await createStage(...)`, i.e. after the
     // component-init context is gone — `onDestroy` may only be *called* synchronously
     // (Svelte 5 throws `lifecycle_outside_component` otherwise, which aborted the rest of
@@ -2809,6 +2823,8 @@ const WALL_PICK_RADIUS = 12;
     };
     globalThis.addEventListener("keydown", onKey);
     onDestroy(() => {
+      agents?.dispose();
+      agents = null;
       moduleHost?.dispose();
       if (rtSampleTimer !== null) globalThis.clearInterval(rtSampleTimer);
       offSimBus?.();
@@ -4606,6 +4622,7 @@ const WALL_PICK_RADIUS = 12;
           onRedo={redo}
           packages={app.packages}
           rulesBoot={app.rulesBoot}
+          {agents}
           bindings={DEFAULT_BINDINGS}
           isGM={true}
           onHexRollTable={rollHexTable}
