@@ -27,6 +27,13 @@ import type { SceneDocument, UserDocument } from "../../src/core/documents";
 import type { Op } from "../../src/core/ops";
 import { agentWorldView } from "../../src/app/agentBridge";
 import {
+  openAgentSession,
+  type AgentSession,
+} from "../../src/app/agentSession";
+import { agentRecordOf, agentRegistryFrom } from "../../src/core/agents/grants";
+import { buildChatMessage, parseChatCommand } from "../../src/core/chat";
+import type { MessageDocument } from "../../src/core/documents";
+import {
   createAgentBridge,
   type AgentBridge,
 } from "../../src/core/agents/bridge";
@@ -202,6 +209,11 @@ describe("vtt-mcp ↔ agent bridge (MCP plan §8 Phase 0)", () => {
   let started: Started;
   let bridge: AgentBridge | null = null;
   let gm: ClientSync;
+  // Host-side handles, hoisted: the attribution test reads the OpLog the host actually wrote.
+  let hostRef: HostSync;
+  let logRef: OpLog;
+  let storeRef: DocumentStore;
+  let agentSession: AgentSession | null = null;
 
   beforeAll(async () => {
     // ── a host in Node, with a world that has something in it ──
@@ -243,6 +255,10 @@ describe("vtt-mcp ↔ agent bridge (MCP plan §8 Phase 0)", () => {
       },
     ]);
 
+    hostRef = host;
+    logRef = log;
+    storeRef = store;
+
     const pair = createTransportPair();
     host.addSession("gm", pair.a, gmSessionUser(GM_ID));
     gm = new ClientSync({
@@ -259,6 +275,8 @@ describe("vtt-mcp ↔ agent bridge (MCP plan §8 Phase 0)", () => {
   afterAll(async () => {
     bridge?.dispose();
     bridge = null;
+    agentSession?.dispose();
+    agentSession = null;
     if (started) {
       started.child.stdin.end();
       started.child.kill("SIGTERM");
@@ -488,6 +506,61 @@ describe("vtt-mcp ↔ agent bridge (MCP plan §8 Phase 0)", () => {
   test("prompts/list is honest: there are none yet (§5.7, Phase 6)", async () => {
     const prompts = await started.client.request("prompts/list");
     expect(prompts["result"]).toEqual({ prompts: [] });
+  }, 30_000);
+
+  test("an agent writes as itself: one envelope, one op, by the agent (§3.1)", async () => {
+    // The claim Phase 2 has to make good on. The agent is a *user with a session*, not a mask on
+    // the GM's, so the host stamps `OpEnvelope.by` with the agent's id — attribution the OpLog,
+    // the undo stack and the world file all carry for free.
+    const opened = openAgentSession({
+      host: hostRef,
+      meta,
+      settings: storeRef.getAll("settings"),
+      users: storeRef.getAll("users"),
+      name: "Vex",
+      preset: "gm",
+      client: "vitest",
+    });
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    agentSession = opened.session;
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const agent = agentSession.user;
+    expect(agent.name).toBe("Vex (agent)");
+    expect(agent.role).toBe("GM");
+    // The grant is a document now, readable off any replica — including this one.
+    const registry = agentRegistryFrom(storeRef.getAll("settings"));
+    expect(agentRecordOf(registry, agent._id)).toMatchObject({
+      preset: "gm",
+      status: "active",
+      client: "vitest",
+    });
+
+    const built = buildChatMessage({
+      author: agent._id,
+      parsed: parseChatCommand("the agent speaks for itself"),
+    });
+    agentSession.client.submit([
+      { kind: "create", coll: "messages", data: built.message },
+    ]);
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const entry = logRef.at(storeRef.seq);
+    expect(entry).toBeDefined();
+    // One tool call, one envelope, one op — never a batch the GM cannot undo in one click.
+    expect(entry?.env.ops).toHaveLength(1);
+    expect(entry?.env.by).toBe(agent._id);
+    expect(entry?.env.by).not.toBe(GM_ID);
+
+    // And the card itself says who wrote it: the host re-stamps the author from the session, so a
+    // client cannot even claim to be someone it is not.
+    const card = storeRef.get("messages", built.message._id) as
+      MessageDocument | undefined;
+    expect(card?.author).toBe(agent._id);
+    expect(card?.content).toBe("the agent speaks for itself");
   }, 30_000);
 
   test("an unknown method is -32601, and a notification gets no answer at all", async () => {
