@@ -55,13 +55,23 @@ export function toolManifest(): Array<{
 
 export function inputSchemaOf(args: ToolArgsSchema): {
   type: "object";
-  properties: Record<string, { type: string; description: string }>;
+  properties: Record<
+    string,
+    { type: string; description: string; items?: { type: string } }
+  >;
   required?: string[];
   additionalProperties: false;
 } {
-  const properties: Record<string, { type: string; description: string }> = {};
+  const properties: Record<
+    string,
+    { type: string; description: string; items?: { type: string } }
+  > = {};
   for (const [key, spec] of Object.entries(args.properties)) {
-    properties[key] = { type: spec.type, description: spec.description };
+    properties[key] = {
+      type: spec.type,
+      description: spec.description,
+      ...(spec.items ? { items: { type: spec.items.type } } : {}),
+    };
   }
   const required =
     args.required && args.required.length > 0 ? [...args.required] : undefined;

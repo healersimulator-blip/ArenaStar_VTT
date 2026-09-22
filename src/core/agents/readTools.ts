@@ -614,8 +614,11 @@ function hexProse(cell: AgentHexCell, summary: AgentHexSummary | null): string {
     `Travel: cost ${cell.cost} — ${cell.cost === 1 ? "open ground" : `${cell.cost}× slower`}${march}.`,
   );
   if (!cell.open) lines.push("The table has not been shown this cell yet.");
-  const body = cell.playerText ?? cell.description;
-  if (body) lines.push(`Reads: ${body}`);
+  // Two texts, and which one this replica holds is the projection's decision: a player's cell
+  // carries what the table may read and never the GM's notes, and a GM's carries both. Showing the
+  // one that happens to be first would hide the GM's own text behind the party's.
+  if (cell.description !== null) lines.push(`Notes (GM): ${cell.description}`);
+  if (cell.playerText !== null) lines.push(`Reads (table): ${cell.playerText}`);
   if (cell.tables.length > 0)
     lines.push(`Encounter tables: ${cell.tables.join(", ")}.`);
   if (cell.features.length > 0) {

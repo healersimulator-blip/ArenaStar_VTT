@@ -29,6 +29,7 @@ import { TOP_LEVEL_COLLECTIONS } from "../core/documents";
 import type {
   AgentBestiaryHit,
   AgentCompendiumEntry,
+  AgentEncounterCheck,
   AgentHexCell,
   AgentHexFeature,
   AgentDocument,
@@ -39,15 +40,36 @@ import type {
   AgentSceneSummary,
   AgentSheet,
   AgentTokenRow,
+  AgentTravelAdvance,
+  AgentTravelPlan,
   AgentWorldView,
   PageOptions,
 } from "../core/agents/types";
 import type { Op } from "../core/ops";
 import type { DocumentStore } from "../core/store";
 import type { CellDocument, CellFeature } from "../core/documents";
-import { cellsOf } from "../core/hexcrawl/cells";
-import { openCellKeys, partyCellKey } from "../core/hexcrawl/visibility";
-import { profileOf } from "../core/hexcrawl/scene";
+import { cellCenterOf, cellsOf } from "../core/hexcrawl/cells";
+import {
+  openCellKeys,
+  partyCellKey,
+  partyPointOf,
+} from "../core/hexcrawl/visibility";
+import { profileOf, setTravelRouteOps, clearTravelOps } from "../core/hexcrawl/scene";
+import {
+  partyPositionOps,
+  partyTokenOf,
+  routeSeconds,
+  travelAdvance,
+  travelProgressOps,
+} from "../core/hexcrawl/travel";
+import { encounterCheck } from "../core/hexcrawl/encounterFlow";
+import {
+  encounterTokenData,
+  placeEncounterTokens,
+  type PlacementEntry,
+} from "../core/hexcrawl/placement";
+import { revealDueFeatures } from "../core/hexcrawl/features";
+import type { EncounterTableDocument } from "../core/documents";
 import {
   terrainById,
   terrainCatalogOrDefault,
@@ -58,14 +80,22 @@ import {
   exploredSecondsOf,
   featureRuleLabel,
 } from "../core/hexcrawl/features";
-import { worldSettingsFrom } from "../core/worldSettings";
+import {
+  secondsPerRoundOf,
+  worldSettingsFrom,
+  worldSettingsFrom as coreWorldSettingsFrom,
+} from "../core/worldSettings";
 import { terrainLetters, type HexGlyph } from "../core/agents/hexRender";
 import { cellAtPoint, parseCellKey } from "../core/hexcrawl/cells";
 import { paginate } from "../core/agents/paging";
 import type { AgentGrant } from "../core/agents/capabilities";
 import type { AgentWriter } from "../core/agents/types";
 import { createAgentBridge, type AgentBridge } from "../core/agents/bridge";
-import { readWorldClock } from "../packages/pf1e/worldClock";
+import {
+  advanceWorldClockOps,
+  pf1eClockSweepOps,
+  readWorldClock,
+} from "../packages/pf1e/worldClock";
 import { pf1eSheetView, isPF1eActor } from "../ui/sheets/pf1eSheetModel";
 import { createAgentLink, type AgentLinkStatus } from "../net/agentLink";
 import type { CompendiumIndex } from "../core/compendiumIndex";
@@ -308,6 +338,27 @@ function hexCellRowOf(
 }
 
 /**
+ * The party's Perception, read the way the UI reads it for the same rule: the party token's own
+ * actor when it has one (the scout), else the best of the world's characters — a party is a group,
+ * and the lookout who spots the shrine is a member of it. Read through this view's own `sheet()`
+ * so the number is the derivation the app shows, not a second one.
+ */
+function partyPerceptionOf(view: AgentWorldView, actorId: string | null): number {
+  const bonusOf = (id: string): number => {
+    const sheet = view.sheet(id);
+    return sheet?.skills.find((skill) => skill.name === "Perception")?.bonus ?? 0;
+  };
+  if (actorId !== null && actorId !== "") return bonusOf(actorId);
+  let best = 0;
+  for (const row of view.documents("actors", { limit: 500 }).rows) {
+    if (row.type !== "actor") continue;
+    const bonus = bonusOf(row.id);
+    if (bonus > best) best = bonus;
+  }
+  return best;
+}
+
+/**
  * The world as this tab holds it. Counts are non-empty collections only: an agent asking what the
  * world *is* wants to know it has 3 scenes and 41 actors, not that it has zero depots.
  */
@@ -316,6 +367,9 @@ export function agentWorldView(
   options: AgentWorldViewOptions = {},
 ): AgentWorldView {
   const store = client.store;
+  // Assigned once the object below exists: a view method that needs another view method (the
+  // party's Perception, read through `sheet()`) calls it without reaching past what is being built.
+  let thisView: AgentWorldView | null = null;
   /**
    * Who this replica is for. `token.list`'s "yours" and `token.move`'s permission to move are read
    * with it, and it is null until the session has been welcomed — an agent may be built before its
@@ -342,7 +396,7 @@ export function agentWorldView(
     return out;
   };
 
-  return {
+  const view: AgentWorldView = {
     worldInfo() {
       const meta = store.meta;
       return {
@@ -707,6 +761,226 @@ export function agentWorldView(
         glyphs,
       };
     },
+    hexTravel(sceneId): AgentTravelPlan | null {
+      const scene = pick(sceneId);
+      if (!scene) return null;
+      const plan = profileOf(scene).travel;
+      if (!plan) return null;
+      const catalog = hexCatalogOf(store);
+      const party = partyTokenOf(scene);
+      const rest = plan.path.slice(plan.cursor);
+      return {
+        sceneId: scene._id,
+        path: [...plan.path],
+        cursor: plan.cursor,
+        progressSeconds: plan.progressSeconds,
+        speedPerDay: plan.speedPerDay,
+        pace: plan.pace,
+        remaining: [...rest],
+        remainingSeconds: Math.max(
+          0,
+          routeSeconds({ scene, path: rest, speedPerDay: plan.speedPerDay, pace: plan.pace, catalog }) -
+            plan.progressSeconds,
+        ),
+        party:
+          party === null
+            ? null
+            : {
+                key: partyCellKey(scene) ?? plan.path[plan.cursor] ?? "",
+                tokenId: party._id,
+              },
+      };
+    },
+    travelPlanOps(sceneId, spec) {
+      const scene = pick(sceneId);
+      if (!scene) return { error: "there is no scene to plan a route on" };
+      const path = spec.path;
+      // A route of one cell is not a route: `setTravelRouteOps` clears the plan below two, which is
+      // also how the GM cancels a march — an empty path is "called off", not an error.
+      if (path.length > 1) {
+        for (const key of path) {
+          if (!cellsOf(scene).some((cell) => cell.key === key)) {
+            return {
+              error: `cell "${key}" is not an authored cell of ${scene.name} — hexcrawl.cells names them`,
+            };
+          }
+        }
+      }
+      if (path.length === 0) return clearTravelOps(scene);
+      return setTravelRouteOps(scene, path, {
+        ...(spec.speedPerDay === undefined ? {} : { speedPerDay: spec.speedPerDay }),
+        ...(spec.pace === "forced" || spec.pace === "normal"
+          ? { pace: spec.pace }
+          : {}),
+      });
+    },
+    travelAdvanceOps(sceneId, seconds) {
+      const scene = pick(sceneId);
+      if (!scene) return { error: "there is no hexcrawl scene to march on" };
+      const plan = profileOf(scene).travel;
+      if (!plan) {
+        return { error: "this scene has no route — travel.plan commits one first" };
+      }
+      if (!Number.isFinite(seconds) || seconds <= 0) {
+        return { error: "travel.advance needs a positive number of seconds" };
+      }
+      const catalog = hexCatalogOf(store);
+      const settingsDocs = store.getAll("settings");
+      const startClock = readWorldClock(settingsDocs);
+      const delta = Math.trunc(seconds);
+      const advance = travelAdvance({
+        scene,
+        plan,
+        elapsedSeconds: delta,
+        catalog,
+        startClock,
+      });
+      const party = partyTokenOf(scene);
+      const arrivalKey = advance.cellKey;
+      const centre = arrivalKey === null ? null : cellCenterOf(scene, arrivalKey);
+
+      // Feature reveals are judged at the reading the march *ended* at: the party has been there by
+      // then. The facts come from this view's own sheet, so a shrine found on foot is a shrine the
+      // GM's own march would have found.
+      const scoutBonus =
+        thisView === null ? 0 : partyPerceptionOf(thisView, party?.actorId ?? null);
+      const facts = {
+        clockSeconds: startClock + delta,
+        passivePerception: 10 + scoutBonus,
+        perceptionModifier: scoutBonus,
+        rng: Math.random,
+      };
+      const revealed: AgentTravelAdvance["revealed"] = [];
+      const featureOps: Op[] = [];
+      for (const [key, spent] of Object.entries(advance.spentSeconds)) {
+        const result = revealDueFeatures({ scene, cellKey: key, facts, spentSeconds: spent });
+        featureOps.push(...result.ops);
+        if (result.revealed.length > 0)
+          revealed.push({
+            cellKey: key,
+            names: result.revealed.map((feature) => feature.name),
+          });
+      }
+
+      const ops: Op[] = [
+        // The clock and its sweep first: the UI submits these as their own envelope because it has
+        // listeners to keep in step, and an agent has none — a march that moved the party but not
+        // the hour is a world nobody can describe.
+        ...advanceWorldClockOps(settingsDocs, delta),
+        ...(pf1eClockSweepOps(
+          store.getAll("actors") as never,
+          store.getAll("combats") as never,
+          startClock + delta,
+          secondsPerRoundOf(coreWorldSettingsFrom(settingsDocs)),
+        ).ops as unknown as Op[]),
+        ...travelProgressOps(scene, advance.plan),
+        ...(party && centre && arrivalKey
+          ? partyPositionOps(scene, party._id, centre)
+          : []),
+        ...featureOps,
+      ];
+      return {
+        ops,
+        seconds: delta,
+        arrival: arrivalKey,
+        arrived: advance.arrived,
+        steps: advance.steps.map((step) => ({
+          cellKey: step.cellKey,
+          seconds: step.seconds,
+          triggers: [...step.triggers],
+        })),
+        revealed,
+        spent: { ...advance.spentSeconds },
+      };
+    },
+    encounterCheckOps(sceneId, spec): AgentEncounterCheck | { error: string } {
+      const scene = pick(sceneId);
+      if (!scene) return { error: "there is no hexcrawl scene here" };
+      const key = spec.cellKey ?? partyCellKey(scene);
+      if (key === null) {
+        return { error: "no cell to check — name one with key, or place the party" };
+      }
+      const tables = store.getAll("encounterTables") as unknown as EncounterTableDocument[];
+      const check = encounterCheck({
+        scene,
+        tables,
+        cellKey: key,
+        trigger: (spec.trigger ?? "moving") as never,
+        clockSeconds: readWorldClock(store.getAll("settings")),
+        rng: Math.random,
+      });
+      const roll = check.roll;
+      return {
+        ops: [...check.ops],
+        action: check.action,
+        reason: check.reason,
+        cellKey: check.cellKey,
+        phase: check.phase,
+        eligible: check.eligible.map((table) => ({ id: table._id, name: table.name })),
+        roll:
+          roll === null
+            ? null
+            : {
+                tableId: roll.tableId,
+                tableName: roll.tableName,
+                formula: roll.formula,
+                roll: roll.roll,
+                die: roll.die,
+                text: roll.text,
+                count: roll.count,
+                actorIds: roll.refs
+                  .map((ref) => String((ref as { id?: string }).id ?? ""))
+                  .filter((id) => id !== ""),
+              },
+      };
+    },
+    encounterPlaceOps(sceneId, spec) {
+      const scene = pick(sceneId);
+      if (!scene) return { error: "there is no scene to place an encounter on" };
+      const actors = spec.actors.filter((entry) => entry.count > 0);
+      if (actors.length === 0) {
+        return { error: "encounter.place needs at least one actor with a count" };
+      }
+      const docs = store.getAll("actors") as unknown as ActorDocument[];
+      const entries: PlacementEntry[] = [];
+      for (const entry of actors) {
+        const actor = docs.find((row) => row._id === entry.actorId);
+        if (!actor) {
+          return { error: `no actor "${entry.actorId}" — document.list actors names them` };
+        }
+        for (let i = 0; i < Math.min(entry.count, 25); i++) {
+          entries.push({ actorId: actor._id, name: actor.name, img: "" });
+        }
+      }
+      // Every branch below assigns; the `if (!origin)` after them is the exhaustiveness check.
+      let origin: { x: number; y: number } | null;
+      if (spec.cellKey !== undefined && spec.cellKey !== null) {
+        origin = cellCenterOf(scene, spec.cellKey) ?? null;
+        if (!origin) {
+          return {
+            error: `cell "${spec.cellKey}" is not a cell of ${scene.name} — hexcrawl.cells names them`,
+          };
+        }
+      } else if (spec.col !== undefined && spec.row !== undefined) {
+        const size = scene.grid.size > 0 ? scene.grid.size : 100;
+        origin = { x: (spec.col + 0.5) * size, y: (spec.row + 0.5) * size };
+      } else {
+        origin = partyPointOf(scene);
+      }
+      if (!origin) {
+        return { error: "no origin — name a cell, a col/row, or place the party" };
+      }
+      const points = placeEncounterTokens({ scene, origin, count: entries.length });
+      const tokens = encounterTokenData(entries, points, () => newId());
+      return tokens.map(
+        (token): Op => ({
+          kind: "create",
+          coll: "tokens",
+          parent: { coll: "scenes", id: scene._id },
+          data: token,
+        }),
+      );
+    },
     tokenCreate(spec): Op | { error: string } {
       const scene = scenes().find((row) => row._id === spec.sceneId);
       if (!scene) {
@@ -740,6 +1014,9 @@ export function agentWorldView(
       };
     },
   };
+
+  thisView = view;
+  return view;
 }
 
 /** The connect URL, with the pairing token in the query the sidecar checks on upgrade. */

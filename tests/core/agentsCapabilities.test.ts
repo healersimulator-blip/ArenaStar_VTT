@@ -43,7 +43,12 @@ describe("agent capabilities (MCP plan §4)", () => {
     );
     for (const capability of writes)
       expect(PRESETS.observer.includes(capability)).toBe(false);
-    expect(PRESETS.observer).toEqual(["world.read", "chat.read"]);
+    // An observer reads the world and the party's map, and nothing else.
+    expect(PRESETS.observer).toEqual(["world.read", "hexcrawl.read", "chat.read"]);
+    // …and a player agent reads the hexcrawl but does not walk the party: a march spends the
+    // table's clock, which is the GM's to spend unless the GM narrows a grant to say otherwise.
+    expect(PRESETS.player).toContain("hexcrawl.read");
+    expect(PRESETS.player.includes("hexcrawl.travel")).toBe(false);
   });
 
   test("a preset's role is the ceiling, never something the mask widens", () => {

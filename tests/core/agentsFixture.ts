@@ -482,6 +482,86 @@ export function fakeView(
         glyphs,
       };
     },
+    hexTravel: (sceneId) =>
+      sceneId === null || sceneId === "s1"
+        ? {
+            sceneId: "s1",
+            path: ["0,0", "1,0", "1,1"],
+            cursor: 0,
+            progressSeconds: 0,
+            speedPerDay: 24,
+            pace: "normal",
+            remaining: ["0,0", "1,0", "1,1"],
+            remainingSeconds: 3 * 3600,
+            party: { key: "1,1", tokenId: "t-vex" },
+          }
+        : null,
+    travelPlanOps: (_sceneId, spec) =>
+      spec.path.length === 0
+        ? []
+        : [
+            {
+              kind: "update" as const,
+              ref: { coll: "scenes" as const, id: "s1" },
+              diff: { "flags.core.hexcrawl.travel.path": spec.path },
+            },
+          ],
+    travelAdvanceOps: (_sceneId, seconds) => ({
+      ops: [
+        {
+          kind: "update" as const,
+          ref: { coll: "scenes" as const, id: "s1" },
+          diff: { "flags.core.hexcrawl.travel.cursor": 1 },
+        },
+      ],
+      seconds,
+      arrival: "1,0",
+      arrived: false,
+      steps: [{ cellKey: "1,0", seconds, triggers: ["moving"] }],
+      revealed: [],
+      spent: { "1,0": seconds },
+    }),
+    encounterCheckOps: (_sceneId, spec) => ({
+      // A firing table writes the ledger, so the fixture writes one too: the cooldown is the point.
+      ops: [
+        {
+          kind: "update" as const,
+          ref: { coll: "scenes" as const, id: "s1" },
+          diff: { "flags.core.encounters.ledger": "1" },
+        },
+      ],
+      action: "roll" as const,
+      reason: null,
+      cellKey: spec.cellKey ?? "1,0",
+      phase: "day",
+      eligible: [{ id: "tbl-goblin", name: "Goblinwood raids" }],
+      roll: {
+        tableId: "tbl-goblin",
+        tableName: "Goblinwood raids",
+        formula: "1d20",
+        roll: 12,
+        die: 20,
+        text: "Goblin warband",
+        count: 3,
+        actorIds: ["a-goblin"],
+      },
+    }),
+    encounterPlaceOps: (_sceneId, spec) =>
+      spec.actors.length === 0
+        ? { error: "encounter.place needs at least one actor with a count" }
+        : [
+            {
+              kind: "create" as const,
+              coll: "tokens" as const,
+              parent: { coll: "scenes" as const, id: "s1" },
+              data: {
+                _id: "t-enc",
+                type: "token",
+                name: "Goblin",
+                actorId: spec.actors[0]?.actorId ?? null,
+              } as unknown as BaseDocument,
+            },
+          ],
     tokenCreate: (spec) => ({
       kind: "create" as const,
       coll: "tokens" as const,

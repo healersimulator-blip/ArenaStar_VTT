@@ -93,15 +93,21 @@ const without = (...drop: AgentCapability[]): readonly AgentCapability[] =>
   AGENT_CAPABILITIES.filter((c) => !drop.includes(c));
 
 /**
- * §4's `PRESETS`. `player` is deliberately thin: it reads its own projection, speaks and rolls, and
- * moves the tokens it owns — ownership, not the mask, is what stops it touching anyone else's, and
- * that is the host's `can()` doing the work (proved field-by-field in Phase 3).
+ * §4's `PRESETS`. `player` is deliberately thin: it reads its own projection — the world **and the
+ * hexcrawl map the party has revealed** — speaks and rolls, and moves the tokens it owns.
+ * Ownership, not the mask, is what stops it touching anyone else's, and that is the host's `can()`
+ * doing the work (proved field-by-field in Phase 3).
+ *
+ * It does **not** hold `hexcrawl.travel`: a march spends the table's clock and moves the party
+ * token every player shares, so walking is the GM's call unless the GM narrows a grant to say
+ * otherwise. Reading where the party is and what the ground costs is not.
  */
 export const PRESETS: Record<AgentPreset, readonly AgentCapability[]> = {
   gm: AGENT_CAPABILITIES,
   "gm-no-delete": without("doc.delete"),
   player: [
     "world.read",
+    "hexcrawl.read",
     "chat.read",
     "chat.speak",
     "chat.whisper",
@@ -109,7 +115,7 @@ export const PRESETS: Record<AgentPreset, readonly AgentCapability[]> = {
     "token.move",
     "undo",
   ],
-  observer: ["world.read", "chat.read"],
+  observer: ["world.read", "hexcrawl.read", "chat.read"],
 };
 
 /** What a capability lets an agent do, in the words a refusal should use. */

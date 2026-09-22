@@ -8434,3 +8434,54 @@ agent needs before it can say whether the shrine has been found yet.
   carries the cells, and the projection's half of the claim (a closed cell absent from a player's
   replica) is proved for tokens, journals and chat in D-281 but not yet for cells. That is the first
   thing the travel half should close, since it needs a real hexcrawl world to test against anyway.
+
+## D-283 — MCP connector Phase 5, part 2: the march and the encounter (2026-09-22)
+
+Four write tools (`travel.plan`, `travel.advance`, `encounter.roll`, `encounter.place`) and the
+proof, against a real host, that a closed cell is absent from a player's replica.
+
+**Decision — the walk is one envelope, with the clock first.** `travel.advance` builds a single
+envelope: `advanceWorldClockOps` + the PF1e sweep **first**, then the travel progress, the party's
+new position, and finally the feature reveals. Order matters, because a feature that is "found after
+1 hour" is judged at `startClock + delta`, and an agent that reads the world between the clock move
+and the party move would see a party in the wrong hex with the right time on it. One envelope also
+means **one undo entry**: `undo` takes back the whole march — time, party and reveals — rather than
+leaving a table half-walked.
+
+**Decision — reveals are judged with the party's own eyes, not a fixed number.**
+`passivePerception = 10 + <the party token's own actor, or the best Perception among the party's
+character sheets>`. A scout in the party changes what the march finds, and the tool does not have to
+be told which hex the scout is in — that is what the party token *is*.
+
+**Decision — `encounter.roll` rolls and reports; `encounter.place` places.** They are two tools on
+purpose. A roll that fires writes its ledger (`check.ops`), so the same check cannot be re-rolled
+until the cooldown expires, and it **puts nothing on the map** — a GM agent may want to describe the
+goblin warband before three goblins appear. Placing needs `hexcrawl.travel` *and* `token.move`, and
+refuses in words when it has the first and not the second ("this agent may run the hexcrawl but not
+place tokens"), because placing is token creation and a narrower grant must still be a narrower
+grant.
+
+**Decision — a player agent may read the hexcrawl but not walk the party.** `hexcrawl.read` joins
+the `player` and `observer` presets — the party's map is part of the table's world, and the
+projection already decides how much of it a player sees. `hexcrawl.travel` does not: a march spends
+the table's clock and moves the token every player shares, so walking is the GM's call unless the GM
+narrows a grant to say otherwise. Reading where the party is and what the ground costs is not.
+
+**Decision — the GM's text and the table's text are different facts, so both are shown.** `hex.read`
+prints `Notes (GM): …` and `Reads (table): …` rather than "whichever text this replica happens to
+carry". A GM's replica holds both and needs both; a player's holds only the table's, and the
+sentence that names it is what tells the model which one it is reading.
+
+**Gates.**
+
+- `pnpm test` — **3 258 tests passed** (12 skipped). New: 4 integration cases in
+  `tests/integration/agentProjection.test.ts` over a *real* hexcrawl world — a player replica holds
+  one cell of three and `hex.read` of a closed one refuses; the GM's replica of the same world holds
+  all three and the GM's own text; `travel.advance` moves the clock by exactly the seconds marched
+  and the party token with it, in one envelope `by` the agent; and the write is refused for a
+  `player` grant with nothing moved and no time passed. Plus 7 tool cases in
+  `tests/core/agentsWriteTools.test.ts`.
+- `pnpm typecheck` **51 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`) ·
+  `pnpm lint` **exit 0**.
+- `pnpm build` → `pnpm size` **3 243 190 B raw / 935 107 B gzip — +12 059 B**, inside the 6 MB
+  budget.

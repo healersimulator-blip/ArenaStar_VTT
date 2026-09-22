@@ -29,6 +29,9 @@ import type { AgentGrant } from "../../src/core/agents/capabilities";
 import { refusalFor } from "../../src/core/agents/capabilities";
 import type { ToolContext } from "../../src/core/agents/types";
 import type { AgentSession } from "../../src/app/agentSession";
+import { createCellOps, enableHexcrawlOps } from "../../src/core/hexcrawl/scene";
+import { readWorldClock } from "../../src/packages/pf1e/worldClock";
+import type { CellDocument } from "../../src/core/documents";
 import { agentRegistryFrom, agentRecordOf, grantOfRecord } from "../../src/core/agents/grants";
 import { agentWorldView } from "../../src/app/agentBridge";
 import { callTool } from "../../src/core/agents/tools";
@@ -254,6 +257,47 @@ Languages Goblin`;
 /** A tool context over the real session: its own replica, the compendia above, and its writer. */
 const ctxOf = (session: AgentSession, grant: AgentGrant): ToolContext => ({
   view: agentWorldView(session.client, { compendia: async () => [BESTIARY] }),
+  grant,
+  writer: session.writer,
+});
+
+/**
+ * A hexcrawl world: three authored cells, one of them still under cover, and a committed route of
+ * two steps. Seeded with the app's own builders (`enableHexcrawlOps`, `createCellOps`,
+ * `setTravelRouteOps`) so what the test proves is the connector's reading of a real scene, not a
+ * scene shaped to fit.
+ */
+async function bootHexcrawl(): Promise<Booted> {
+  const boot = await bootWorld();
+  const scene = boot.store.get("scenes", "s1") as unknown as SceneDocument;
+  const cell = (key: string, name: string, text: string): Partial<CellDocument> => ({
+    key,
+    name,
+    terrain: key === "1,0" ? "forest" : "plains",
+    description: text,
+    playerText: `the party can read: ${name}`,
+    tables: [],
+    features: [],
+  });
+  const ops = [
+    ...enableHexcrawlOps(scene, {
+      revealed: ["0,0"],
+      partyTokenId: "t-party",
+      // The route is set in the same breath: one envelope, one scene to read it back from.
+      travel: { path: ["0,0", "1,0"], cursor: 0, progressSeconds: 0, speedPerDay: 24, pace: "normal" },
+    }),
+    ...createCellOps(scene, "c-1", cell("0,0", "Threshold", "the GM's notes on the threshold")),
+    ...createCellOps(scene, "c-2", cell("1,0", "Treeline", "the GM's notes on the treeline")),
+    ...createCellOps(scene, "c-3", cell("0,1", "Ford", "the GM's notes on the ford")),
+  ];
+  boot.gm.submit(ops);
+  for (let i = 0; i < 6; i++) await flushMicrotasks();
+  expect(boot.store.seq).toBe(2);
+  return boot;
+}
+
+const hexCtxOf = (session: AgentSession, grant: AgentGrant): ToolContext => ({
+  view: agentWorldView(session.client),
   grant,
   writer: session.writer,
 });
@@ -539,5 +583,102 @@ describe("the library and the paste buffer, through a real host (§5.4)", () => 
     expect(answered.result.isError).toBe(true);
     expect(answered.result.content[0]?.text).toBe(refusalFor("doc.create"));
     expect(boot.store.getAll("actors")).toHaveLength(0);
+  });
+});
+
+describe("the hexcrawl, through a real host and a real projection (§5.6, F1)", () => {
+  test("a closed cell is not on a player's replica at all — and the tools say which", async () => {
+    const boot = await bootHexcrawl();
+    const { session, grant } = await openAgent(boot, "player");
+    const ctx = hexCtxOf(session, grant);
+
+    const listed = await callTool({ name: "hexcrawl.cells", args: {} }, ctx);
+    expect(listed.kind).toBe("result");
+    if (listed.kind !== "result") return;
+    const body = listed.result.content[0]?.text ?? "";
+    // Two of the three cells are open (0,0 revealed by the GM, 0,1 open as a neighbour of the
+    // party's ring is not — only what the profile revealed is open): whichever it is, the closed
+    // one is not listed, and that is the whole claim.
+    expect(body).not.toContain("1,0");
+    expect(body).toContain("0,0");
+
+    const closed = await callTool({ name: "hex.read", args: { key: "1,0" } }, ctx);
+    expect(closed.kind).toBe("result");
+    if (closed.kind !== "result") return;
+    expect(closed.result.isError).toBe(true);
+    expect(closed.result.content[0]?.text).toContain("no cell \"1,0\" on this replica");
+
+    const open = await callTool({ name: "hex.read", args: { key: "0,0" } }, ctx);
+    expect(open.kind).toBe("result");
+    if (open.kind !== "result") return;
+    expect(open.result.isError).toBeUndefined();
+    const text = open.result.content[0]?.text ?? "";
+    expect(text).toContain("Threshold");
+    // The GM's own text is not on a player's replica; the table's is.
+    expect(text).not.toContain("the GM's notes");
+    expect(text).toContain("the party can read");
+
+    const map = await callTool({ name: "hexmap.render", args: {} }, ctx);
+    expect(map.kind).toBe("result");
+    if (map.kind !== "result") return;
+    expect(map.result.content[0]?.text).toContain("▓ unrevealed");
+  });
+
+  test("the same world read by a GM agent carries the closed cell and the GM's text", async () => {
+    const boot = await bootHexcrawl();
+    const { session, grant } = await openAgent(boot, "gm", "Warden");
+    const ctx = hexCtxOf(session, grant);
+
+    const listed = await callTool({ name: "hexcrawl.cells", args: {} }, ctx);
+    expect(listed.kind).toBe("result");
+    if (listed.kind !== "result") return;
+    expect(listed.result.content[0]?.text).toContain("1,0");
+    expect(listed.result.content[0]?.text).toContain("All 3 cells.");
+
+    const read = await callTool({ name: "hex.read", args: { key: "1,0" } }, ctx);
+    expect(read.kind).toBe("result");
+    if (read.kind !== "result") return;
+    expect(read.result.content[0]?.text).toContain("the GM's notes on the treeline");
+  });
+
+  test("a march is one envelope, by the agent, and it moves the clock and the party", async () => {
+    const boot = await bootHexcrawl();
+    const { session, grant } = await openAgent(boot, "gm", "Guide");
+    const ctx = hexCtxOf(session, grant);
+    const before = readWorldClock(boot.store.getAll("settings"));
+
+    const marched = await callTool(
+      { name: "travel.advance", args: { seconds: 3600 } },
+      ctx,
+    );
+    expect(marched.kind).toBe("result");
+    if (marched.kind !== "result") return;
+    expect(marched.result.isError, marched.result.content[0]?.text).toBeUndefined();
+
+    // The clock moved by exactly what the march cost, and the party moved with it.
+    expect(readWorldClock(boot.store.getAll("settings"))).toBe(before + 3600);
+    const envelope = boot.log.at(boot.store.seq);
+    expect(envelope?.env.by).toBe(session.user._id);
+    expect(envelope?.env.ops.length).toBeGreaterThan(1);
+    const scene = boot.store.get("scenes", "s1") as unknown as SceneDocument | undefined;
+    const party = (scene?.tokens ?? []).find((token) => token._id === "t-party");
+    expect(party?.x).toBeGreaterThan(0);
+    expect(marched.result.content[0]?.text).toContain("marched 1 h");
+  });
+
+  test("travel.plan and travel.advance need the capability, not just the route", async () => {
+    const boot = await bootHexcrawl();
+    const { session, grant } = await openAgent(boot, "player");
+    const seqBefore = boot.store.seq;
+    const answered = await callTool(
+      { name: "travel.advance", args: { seconds: 3600 } },
+      { view: agentWorldView(session.client), grant, writer: session.writer },
+    );
+    expect(answered.kind).toBe("result");
+    if (answered.kind !== "result") return;
+    expect(answered.result.isError).toBe(true);
+    expect(answered.result.content[0]?.text).toBe(refusalFor("hexcrawl.travel"));
+    // Nothing moved, and no time passed.
+    expect(boot.store.seq).toBe(seqBefore);
   });
 });

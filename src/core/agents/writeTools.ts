@@ -1030,6 +1030,342 @@ const actorFromStatblock: ToolDefinition = {
   },
 };
 
+// ─── the march and the encounter (§5.6, F1) ────────────────────────────────────────────────────
+
+/**
+ * §5.6 — the route. A march is not a token drag: the party walks a *path*, the terrain prices it,
+ * and the clock moves by the price. Committed as one envelope, because a route that is half written
+ * is a march nobody can describe.
+ */
+const travelPlan: ToolDefinition = {
+  name: "travel.plan",
+  description:
+    'Commit a route for the party: an ordered list of cell keys ("col,row"), with an optional pace and speed. An empty path calls the march off. One call, one envelope. Answer: the route as it now stands, and the seconds walking the rest of it costs.',
+  args: {
+    properties: {
+      path: {
+        type: "array",
+        description: 'the cell keys, in order — ["0,0", "1,0", "1,1"]',
+        items: { type: "string" },
+      },
+      sceneId: {
+        type: "string",
+        description: "the hexcrawl scene; the active one when omitted",
+      },
+      speedPerDay: {
+        type: "integer",
+        description: "cells a day at open-ground cost (the scene's own when omitted)",
+      },
+      pace: {
+        type: "string",
+        description: '"normal" or "forced"',
+      },
+      dryRun: {
+        type: "boolean",
+        description: "describe the ops without applying them",
+      },
+    },
+  },
+  capability: "hexcrawl.travel",
+  async run(args, ctx): Promise<ToolOutcome> {
+    const begun = beginWrite(ctx);
+    if ("refused" in begun) return begun.refused;
+    const sceneId = str(args["sceneId"]) ?? null;
+    const raw = args["path"];
+    const path = Array.isArray(raw)
+      ? raw.filter((key): key is string => typeof key === "string")
+      : [];
+    if (raw !== undefined && !Array.isArray(raw))
+      return invalid("travel.plan needs `path` as a list of cell keys");
+    const made = ctx.view.travelPlanOps(sceneId, {
+      path,
+      ...(num(args["speedPerDay"]) === undefined
+        ? {}
+        : { speedPerDay: Math.trunc(num(args["speedPerDay"]) as number) }),
+      ...(str(args["pace"]) === undefined ? {} : { pace: str(args["pace"]) as string }),
+    });
+    if ("error" in made) return refusal(made.error);
+    if (made.length === 0) {
+      return text(
+        "the march is called off — there is no route on this scene now.",
+        { route: null } as unknown as Json,
+      );
+    }
+    if (bool(args["dryRun"]) === true)
+      return dryRunAnswer(made, `committing a route of ${path.length} cells`);
+    const done = await submit(made, begun.writer);
+    if (!done.ok) return done.answered;
+    const plan = ctx.view.hexTravel(sceneId);
+    if (!plan) {
+      return text(
+        `route committed (seq ${done.seq}), but this agent cannot read it back.`,
+        { seq: done.seq } as unknown as Json,
+      );
+    }
+    return text(
+      [
+        `route committed: ${plan.path.length} cells, ${plan.pace} pace at ${plan.speedPerDay} cells/day (seq ${done.seq}).`,
+        `  path: ${plan.path.join(" → ")}`,
+        `  party at ${plan.party?.key ?? "—"} · ${plan.remaining.length} cells ahead · ${formatHours(plan.remainingSeconds / 3600)} of marching left.`,
+      ].join("\n"),
+      { seq: done.seq, plan } as unknown as Json,
+    );
+  },
+};
+
+/**
+ * §5.6 — one march. The party walks as far as the time and the terrain allow; the clock, the route's
+ * progress, the party's move, the time charged to each cell and the features that time earned all
+ * land in **one envelope** — the UI submits them as two because it has listeners to keep in step,
+ * and an agent has none.
+ */
+const travelAdvance: ToolDefinition = {
+  name: "travel.advance",
+  description:
+    "Advance the world clock by `seconds` and walk the party along its route for exactly that long: the terrain prices each step, the party stops where the time ran out, and any feature whose time has come is revealed. One call, one envelope. Answer: where the party stands, the borders crossed, and what was found.",
+  args: {
+    properties: {
+      seconds: {
+        type: "integer",
+        description: "how long to march (seconds; an hour is 3600, a day 86400)",
+      },
+      sceneId: {
+        type: "string",
+        description: "the hexcrawl scene; the active one when omitted",
+      },
+      dryRun: {
+        type: "boolean",
+        description: "describe the ops without applying them",
+      },
+    },
+    required: ["seconds"],
+  },
+  capability: "hexcrawl.travel",
+  async run(args, ctx): Promise<ToolOutcome> {
+    const begun = beginWrite(ctx);
+    if ("refused" in begun) return begun.refused;
+    const seconds = num(args["seconds"]);
+    if (seconds === undefined || seconds <= 0) {
+      return invalid(
+        "travel.advance needs a positive number of seconds — an hour is 3600, a day 86400",
+      );
+    }
+    const sceneId = str(args["sceneId"]) ?? null;
+    const made = ctx.view.travelAdvanceOps(sceneId, Math.trunc(seconds));
+    if ("error" in made) return refusal(made.error);
+    if (bool(args["dryRun"]) === true)
+      return dryRunAnswer(made.ops, `marching for ${formatHours(made.seconds / 3600)}`);
+    const done = await submit(made.ops, begun.writer);
+    if (!done.ok) return done.answered;
+
+    const lines = [
+      `the party marched ${formatHours(made.seconds / 3600)} and stands at ${made.arrival ?? "—"} (seq ${done.seq}).`,
+      ...(made.arrived ? [`  the route ends here — the rest of the day was spent in ${made.arrival}.`] : []),
+      ...(made.steps.length > 0
+        ? [
+            "  crossed:",
+            ...made.steps.map(
+              (step) =>
+                `    ${step.cellKey} — ${formatHours(step.seconds / 3600)}${step.triggers.length > 0 ? ` · triggers ${step.triggers.join(", ")}` : ""}`,
+            ),
+          ]
+        : []),
+      ...(made.revealed.length > 0
+        ? [
+            "  revealed:",
+            ...made.revealed.map(
+              (found) => `    ${found.cellKey} — ${found.names.join(", ")}`,
+            ),
+          ]
+        : []),
+    ];
+    return text(lines.join("\n"), {
+      seq: done.seq,
+      arrival: made.arrival,
+      steps: made.steps,
+      revealed: made.revealed,
+    } as unknown as Json);
+  },
+};
+
+/** Hours, in the shape a table says them in: "45 m", "2 h", "1 h 30 m". */
+function formatHours(hours: number): string {
+  if (!Number.isFinite(hours) || hours <= 0) return "0 m";
+  const total = Math.round(hours * 3600);
+  const h = Math.floor(total / 3600);
+  const m = Math.round((total % 3600) / 60);
+  if (h === 0) return `${m} m`;
+  return m === 0 ? `${h} h` : `${h} h ${m} m`;
+}
+
+/**
+ * §5.6 — the encounter engine's own check, at the clock as it reads now. A `roll` writes the
+ * ledger, because a die you can roll again until it comes up goblins is not a die; the answer names
+ * the die face and the table, so the GM's table and the agent's roll tell the same story.
+ */
+const encounterRoll: ToolDefinition = {
+  name: "encounter.roll",
+  description:
+    "Ask the encounter engine what happens in one cell right now: the tables attached to it, the daylight band, and — when one fires — the die face, the table it came from and the entry it drew. A firing table writes its ledger entry (cooldown included) in one envelope. Nothing is put on the map: encounter.place does that.",
+  args: {
+    properties: {
+      key: {
+        type: "string",
+        description:
+          "the cell key, \"col,row\"; the party's own cell when omitted",
+      },
+      sceneId: {
+        type: "string",
+        description: "the hexcrawl scene; the active one when omitted",
+      },
+      trigger: {
+        type: "string",
+        description:
+          'what the party did — "entering", "moving" (default), "exploring" or "fighting"',
+      },
+    },
+  },
+  capability: "hexcrawl.read",
+  async run(args, ctx): Promise<ToolOutcome> {
+    const begun = beginWrite(ctx);
+    if ("refused" in begun) return begun.refused;
+    const sceneId = str(args["sceneId"]) ?? null;
+    const trigger = str(args["trigger"]) ?? "moving";
+    const check = ctx.view.encounterCheckOps(sceneId, {
+      ...(str(args["key"]) === null ? {} : { cellKey: str(args["key"]) ?? null }),
+      trigger,
+    });
+    if ("error" in check) return refusal(check.error);
+
+    const lines = [`${check.cellKey} (${check.phase}, ${trigger}):`];
+    if (check.action !== "roll" || check.roll === null) {
+      // Nothing happened, and the engine says why: "cooldown" and "no-tables" are answers an agent
+      // routes around, where a silent empty result is one it cannot.
+      lines.push(`  nothing fires — ${check.reason ?? check.action}.`);
+      if (check.eligible.length > 0)
+        lines.push(
+          `  tables attached: ${check.eligible.map((t) => `${t.name} [${t.id}]`).join(", ")}.`,
+        );
+      return text(lines.join("\n"), { action: check.action } as unknown as Json);
+    }
+    const roll = check.roll;
+    lines.push(
+      `  ${roll.tableName} [${roll.tableId}] rolled ${roll.roll} on ${roll.formula} — ${roll.text} ×${roll.count}.`,
+    );
+    if (roll.actorIds.length > 0)
+      lines.push(`  actors: ${roll.actorIds.join(", ")} — encounter.place puts them on the map.`);
+    else lines.push("  nothing to place: this entry names no actors.");
+
+    if (check.ops.length === 0)
+      return text(lines.join("\n"), { roll } as unknown as Json);
+    const done = await submit(check.ops, begun.writer);
+    if (!done.ok) return done.answered;
+    lines.push(`  ledger written (seq ${done.seq}).`);
+    return text(lines.join("\n"), { seq: done.seq, roll } as unknown as Json);
+  },
+};
+
+/**
+ * §5.6 — put the rolled creatures on the map. The geometry is the app's own (`placeEncounterTokens`:
+ * the drop point first, then a spiral that respects walls), so a warband lands the way it would if
+ * the GM had dropped it there.
+ */
+const encounterPlace: ToolDefinition = {
+  name: "encounter.place",
+  description:
+    "Put creatures on a hexcrawl scene: one actor id with a count (or several), placed spiralling out from a cell — the drop point first, then outwards, never inside a wall. One call, one envelope. Answer: the tokens as they now stand.",
+  args: {
+    properties: {
+      actors: {
+        type: "array",
+        description: 'e.g. [{"actorId": "a-goblin", "count": 3}]',
+        items: { type: "object" },
+      },
+      key: {
+        type: "string",
+        description:
+          "the cell to drop them on, \"col,row\"; the party's cell when omitted",
+      },
+      col: { type: "integer", description: "instead of a key: the column" },
+      row: { type: "integer", description: "instead of a key: the row" },
+      sceneId: {
+        type: "string",
+        description: "the hexcrawl scene; the active one when omitted",
+      },
+      dryRun: {
+        type: "boolean",
+        description: "describe the ops without applying them",
+      },
+    },
+    required: ["actors"],
+  },
+  capability: "hexcrawl.travel",
+  async run(args, ctx): Promise<ToolOutcome> {
+    const begun = beginWrite(ctx);
+    if ("refused" in begun) return begun.refused;
+    // Placing is a second capability: an agent allowed to run the hexcrawl is not automatically
+    // allowed to put tokens on the table.
+    if (!ctx.grant.capabilities.includes("token.move")) {
+      return refusal(
+        "this agent may run the hexcrawl but not place tokens — ask the GM to change its grant",
+      );
+    }
+    const raw = args["actors"];
+    if (!Array.isArray(raw))
+      return invalid('encounter.place needs `actors` — [{"actorId": "a-goblin", "count": 3}]');
+    const actors: Array<{ actorId: string; count: number }> = [];
+    for (const entry of raw) {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
+      const row = entry as Record<string, Json>;
+      const actorId = str(row["actorId"]);
+      const count = num(row["count"]) ?? 1;
+      if (actorId === undefined) continue;
+      actors.push({ actorId, count: Math.max(1, Math.trunc(count)) });
+    }
+    if (actors.length === 0) {
+      return invalid(
+        'encounter.place needs at least one actor id — [{"actorId": "a-vex", "count": 2}]',
+      );
+    }
+    const sceneId = str(args["sceneId"]) ?? null;
+    const col = numIn(args["col"], -1_000_000, 1_000_000);
+    const rowIndex = numIn(args["row"], -1_000_000, 1_000_000);
+    if ((col === undefined) !== (rowIndex === undefined)) {
+      return invalid("encounter.place needs both col and row — a cell is a pair");
+    }
+    const made = ctx.view.encounterPlaceOps(sceneId, {
+      actors,
+      ...(str(args["key"]) === null || str(args["key"]) === undefined
+        ? {}
+        : { cellKey: str(args["key"]) as string }),
+      ...(col === undefined || rowIndex === undefined
+        ? {}
+        : { col, row: rowIndex }),
+    });
+    if ("error" in made) return refusal(made.error);
+    const total = actors.reduce((sum, entry) => sum + entry.count, 0);
+    if (bool(args["dryRun"]) === true)
+      return dryRunAnswer(made, `placing ${total} token(s)`);
+    const done = await submit(made, begun.writer);
+    if (!done.ok) return done.answered;
+
+    const detail = ctx.view.scene(sceneId);
+    const placed = (detail?.tokenRows ?? []).filter((token) =>
+      actors.some((entry) => entry.actorId === token.actorId),
+    );
+    return text(
+      [
+        `placed ${made.length} token(s) on ${detail?.name ?? "the scene"} (seq ${done.seq}).`,
+        ...placed.map(
+          (token) =>
+            `  ${token.name} [${token.id}] — cell ${token.col},${token.row}`,
+        ),
+      ].join("\n"),
+      { seq: done.seq, tokens: placed } as unknown as Json,
+    );
+  },
+};
+
 // ─── scenes (§5.2) ────────────────────────────────────────────────────────────────────────────
 
 const gridOf = (args: Record<string, Json>): SceneGrid => ({
@@ -1337,6 +1673,10 @@ export const WRITE_TOOLS: readonly ToolDefinition[] = [
   documentDelete,
   actorFromCompendium,
   actorFromStatblock,
+  travelPlan,
+  travelAdvance,
+  encounterRoll,
+  encounterPlace,
   tokenMove,
   tokenProperties,
   sceneCreate,

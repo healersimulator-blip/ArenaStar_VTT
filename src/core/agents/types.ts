@@ -42,6 +42,33 @@ export interface AgentWorldView {
     sceneId: string | null,
     options: { around?: string | null; radius?: number },
   ): AgentHexMapPlan | null;
+  /** The party's route, when the scene has one. */
+  hexTravel(sceneId: string | null): AgentTravelPlan | null;
+  /** Commit a route (or, with an empty path, drop it). */
+  travelPlanOps(
+    sceneId: string | null,
+    spec: { path: string[]; speedPerDay?: number; pace?: string },
+  ): Op[] | { error: string };
+  /** One march: the ops, and what they did. */
+  travelAdvanceOps(
+    sceneId: string | null,
+    seconds: number,
+  ): AgentTravelAdvance | { error: string };
+  /** What the encounter engine says about a cell now — a check, not yet a placement. */
+  encounterCheckOps(
+    sceneId: string | null,
+    spec: { cellKey?: string | null; trigger?: string },
+  ): AgentEncounterCheck | { error: string };
+  /** Put N of each named actor on the map, spiralling out from a cell. */
+  encounterPlaceOps(
+    sceneId: string | null,
+    spec: {
+      actors: Array<{ actorId: string; count: number }>;
+      cellKey?: string | null;
+      col?: number;
+      row?: number;
+    },
+  ): Op[] | { error: string };
   /**
    * Optional: one compendium entry by id, in the shape its pack authors it. Only a replica with
    * the compendium runtime can answer it.
@@ -187,6 +214,71 @@ export interface AgentHexSummary {
   catalog: string;
   /** The scene's travel plan, when it has one — the numbers a march is priced with. */
   travel: { speedPerDay: number; pace: string } | null;
+}
+
+/** The route the party is walking, and what walking the rest of it costs. */
+export interface AgentTravelPlan {
+  sceneId: string;
+  /** The committed route, cell keys in order. */
+  path: string[];
+  /** How far along it the party is: the cell it is walking *from*, and the progress into that step. */
+  cursor: number;
+  progressSeconds: number;
+  speedPerDay: number;
+  pace: string;
+  /** The cells still ahead, and the seconds the whole remainder costs at this pace. */
+  remaining: string[];
+  remainingSeconds: number;
+  /** The party token, when the profile names one that still exists. */
+  party: { key: string; tokenId: string } | null;
+}
+
+/**
+ * What one march is: the ops, and the facts about them. The agent's advance is **one envelope**
+ * where the UI's is two — the clock and the sweep, the route's progress, the party's move, the
+ * feature reveals and the chat cards that announce them all land together, because a model has no
+ * listeners to keep in step and a half-applied march is a world nobody can describe.
+ */
+export interface AgentTravelAdvance {
+  ops: Op[];
+  /** Seconds the march took. */
+  seconds: number;
+  /** Where the party ended up. */
+  arrival: string | null;
+  /** True when it ran out of route (the rest of the time was spent where it arrived). */
+  arrived: boolean;
+  /** Every border crossed, in order — the encounter engine's own input. */
+  steps: Array<{ cellKey: string; seconds: number; triggers: string[] }>;
+  /** Features the march's time earned, and the hex they are in. */
+  revealed: Array<{ cellKey: string; names: string[] }>;
+  /** Seconds charged to each cell — the clock a "found after N hours" rule measures. */
+  spent: Record<string, number>;
+}
+
+/** What the encounter engine says about one cell right now. */
+export interface AgentEncounterCheck {
+  /** The ledger write, empty unless a table actually fired. */
+  ops: Op[];
+  action: "none" | "roll" | "prompt" | "manual";
+  /** Why nothing happened, when nothing did (`no-tables`, `cooldown`, …). */
+  reason: string | null;
+  cellKey: string;
+  /** Daylight band the engine read the clock as (`day` / `night`). */
+  phase: string;
+  /** The tables attached here that *would* fire — what a `manual` mode hands the GM. */
+  eligible: Array<{ id: string; name: string }>;
+  /** Set when a table fired: the die, the entry, and the actors it names. */
+  roll: {
+    tableId: string;
+    tableName: string;
+    formula: string;
+    roll: number;
+    die: number;
+    text: string;
+    count: number;
+    /** Resolved actor ids from the entry's refs — what `encounter.place` puts on the map. */
+    actorIds: string[];
+  } | null;
 }
 
 /**
@@ -376,6 +468,12 @@ export interface ToolArgsSchema {
     {
       type: "string" | "number" | "integer" | "boolean" | "array" | "object";
       description: string;
+      /**
+       * For `array`: what is in it. A model told "actors is an array" has to guess the element, and
+       * a guess is a malformed call — the description says it in words, this says it in the schema
+       * the client validates against.
+       */
+      items?: { type: "string" | "number" | "integer" | "boolean" | "object" };
     }
   >;
   required?: string[];

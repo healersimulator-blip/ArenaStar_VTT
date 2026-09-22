@@ -515,7 +515,7 @@ real actor (hp 6, Dex 15, owned by the session that imported it) with a token on
 exactly `secondsPerRound`; a `time.advance` of 3 days sweeps the clock-counted effects exactly as the
 Settings buttons do.
 
-### Phase 5 — Hexcrawl tools (1 day, S) — 🚧 read half landed 2026-09-22 (D-282) — **depends on `HEXCRAWL_SCENE_SPEC_AND_PLAN.md`**
+### Phase 5 — Hexcrawl tools (1 day, S) — ✅ landed 2026-09-22 (D-282, D-283) — **depends on `HEXCRAWL_SCENE_SPEC_AND_PLAN.md`**
 `hexmap.render`, `hex.read/describe` (GM fields withheld from a player agent), `hexcrawl.cells`,
 `travel.plan/advance`, `encounter.roll/place`.
 *e2e:* the agent walks the party three hexes along a path, the clock advances by the terrain-priced
@@ -534,7 +534,26 @@ model quotes, and the JSON grid (a key per glyph) it points with. Terrain letter
 catalog's own names, so a custom catalog reads the same way, and the legend counts only the glyphs
 actually drawn — a hex under cover is not a "P" the reader can find on the map. The renderer is pure
 (`src/core/agents/hexRender.ts`, byte-exact tested); the region is decided in the view, where the data
-is. **Still to come:** `travel.plan` / `travel.advance` and `encounter.roll` / `encounter.place`.
+is. `hex.read` prints the GM's text and the table's text as two lines (`Notes (GM):` / `Reads (table):`)
+rather than whichever the replica happens to carry, because they are different facts and only one of
+them is on a player's replica.
+
+**As landed so far — the walk and the fight (D-283).** `travel.plan`, `travel.advance`,
+`encounter.roll` and `encounter.place`. A march is **one envelope** — clock sweep, then progress,
+then the party's new position, then the feature reveals — so there is no moment at which the world
+says the party is in the next hex with the old time on the clock, and `undo` takes the whole march
+back rather than half of one. Reveals are judged at `startClock + delta` with the **party's own
+perception** (the party token's actor, else the best Perception among the party's sheets), so a
+scout in the party changes what a march finds and no tool call has to say who. `encounter.roll`
+rolls and reports — and writes the check's ledger, so the same check cannot be re-rolled inside its
+cooldown — while `encounter.place` is what puts tokens on the table; the split is deliberate, since
+a GM agent may want to describe the warband before three goblins appear. Placing needs
+`hexcrawl.travel` **and** `token.move`, and says which is missing. `hexcrawl.read` joins the `player`
+and `observer` presets (the party's map is part of the world a player sees, and the projection
+decides how much of it); `hexcrawl.travel` does not, because a march spends the table's clock and
+moves the token every player shares. Phase 5 is **complete**, and it is proved end-to-end on a real
+`HostSync` hexcrawl world: a player replica holding one cell of three, and a march that moves the
+clock and the party in one envelope by the agent.
 
 ### Phase 6 — Hardening, budgets, docs (1 day, S)
 Rate classes and read caps tuned against a real 25k-entry world; the `dryRun`/`confirm` ergonomics; the

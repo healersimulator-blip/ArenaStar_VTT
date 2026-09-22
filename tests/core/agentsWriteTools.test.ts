@@ -71,6 +71,10 @@ describe("the gate: the grant matrix (§8 Phase 2)", () => {
       "document.delete": { coll: "scenes", id: "s2", confirm: true },
       "actor.from_compendium": { entryId: "goblin" },
       "actor.from_statblock": { text: "Goblin Warrior CR 1/3" },
+      "travel.plan": { path: ["0,0", "1,0"] },
+      "travel.advance": { seconds: 3600 },
+      "encounter.roll": { key: "1,0" },
+      "encounter.place": { actors: [{ actorId: "a-vex", count: 1 }] },
       "token.move": { tokenId: "t-vex", col: 2, row: 2 },
       "token.properties": { tokenId: "t-vex", disposition: "hostile" },
       "scene.create": { name: "Camp" },
@@ -118,6 +122,10 @@ describe("the gate: the grant matrix (§8 Phase 2)", () => {
       "document.delete": { coll: "scenes", id: "s2", confirm: true },
       "actor.from_compendium": { entryId: "goblin" },
       "actor.from_statblock": { text: "Goblin Warrior CR 1/3" },
+      "travel.plan": { path: ["0,0", "1,0"] },
+      "travel.advance": { seconds: 3600 },
+      "encounter.roll": { key: "1,0" },
+      "encounter.place": { actors: [{ actorId: "a-vex", count: 1 }] },
       "token.move": { tokenId: "t-vex", col: 2, row: 2 },
       "token.properties": { tokenId: "t-vex", disposition: "hostile" },
       "scene.create": { name: "Camp" },
@@ -570,6 +578,123 @@ describe("actors from the library and from text (§5.4)", () => {
   });
 });
 
+describe("the march and the encounter (§5.6, F1)", () => {
+  test("travel.plan commits a route in one envelope and reads it back", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf(
+      "travel.plan",
+      { path: ["0,0", "1,0", "1,1"] },
+      ctxWith(writer),
+    );
+    expect(calls).toHaveLength(1);
+    expect(body).toContain("route committed: 3 cells");
+    // The answer is the world as it now is, including what walking the rest costs.
+    expect(body).toContain("3 cells ahead");
+    expect(body).toContain("of marching left");
+  });
+
+  test("an empty path calls the march off, and that is not an error", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf("travel.plan", { path: [] }, ctxWith(writer));
+    expect(body).toContain("called off");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("travel.advance walks the party and says what the march found", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf(
+      "travel.advance",
+      { seconds: 3600 },
+      ctxWith(writer),
+    );
+    // One call, one envelope: the clock, the route, the party and the reveals land together.
+    expect(calls).toHaveLength(1);
+    expect(body).toContain("marched 1 h");
+    expect(body).toContain("stands at 1,0");
+    expect(body).toContain("crossed:");
+    expect(body).toContain("1,0 — 1 h · triggers moving");
+  });
+
+  test("a march of no time at all is a malformed call", async () => {
+    const answered = await call(
+      "travel.advance",
+      { seconds: 0 },
+      ctxWith(fakeWriter().writer),
+    );
+    expect(answered.kind).toBe("invalid");
+    if (answered.kind === "invalid")
+      expect(answered.error).toContain("positive number of seconds");
+  });
+
+  test("encounter.roll names the die, the table and the entry", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf(
+      "encounter.roll",
+      { key: "1,0" },
+      ctxWith(writer),
+    );
+    expect(body).toContain("Goblinwood raids [tbl-goblin] rolled 12 on 1d20");
+    expect(body).toContain("Goblin warband ×3");
+    expect(body).toContain("encounter.place puts them on the map");
+    // A firing table writes its ledger: a die you may roll again is not a die.
+    expect(calls).toHaveLength(1);
+  });
+
+  test("encounter.place puts the actors down, and needs token.move to do it", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf(
+      "encounter.place",
+      { actors: [{ actorId: "a-vex", count: 2 }], key: "1,0" },
+      ctxWith(writer),
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[0]).toMatchObject({
+      kind: "create",
+      coll: "tokens",
+      parent: { coll: "scenes", id: "s1" },
+    });
+    expect(body).toContain("placed");
+
+    // hexcrawl.travel alone is not permission to put tokens on the table.
+    const narrow_ = narrow(grantFor("gm"), ["hexcrawl.travel"]);
+    const refused = await textOf(
+      "encounter.place",
+      { actors: [{ actorId: "a-vex", count: 1 }] },
+      { view, grant: narrow_, writer: fakeWriter().writer },
+    );
+    expect(refused).toContain("not place tokens");
+  });
+
+  test("both dryRun before either of them touches the world", async () => {
+    const { writer, calls } = fakeWriter();
+    const planned = await textOf(
+      "travel.plan",
+      { path: ["0,0", "1,0"], dryRun: true },
+      ctxWith(writer),
+    );
+    expect(planned).toContain("dry run");
+    const marched = await textOf(
+      "travel.advance",
+      { seconds: 7200, dryRun: true },
+      ctxWith(writer),
+    );
+    expect(marched).toContain("dry run");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("a grant without hexcrawl.read does not get to roll the tables", async () => {
+    const grant = narrow(grantFor("observer"), ["world.read"]);
+    const { writer, calls } = fakeWriter();
+    const body = await textOf(
+      "encounter.roll",
+      { key: "1,0" },
+      { view, grant, writer },
+    );
+    expect(body).toBe(refusalFor("hexcrawl.read"));
+    expect(calls).toHaveLength(0);
+  });
+});
+
 describe("token.move is ownership-scoped (§8 Phase 3)", () => {
   test("a grant that is not the GM's moves its own token", async () => {
     const mover = narrow(grantFor("player"), ["token.move"]);
@@ -736,8 +861,8 @@ describe("chat and undo (§5.5, §5.1)", () => {
 });
 
 describe("the catalogue", () => {
-  test("every write tool names one capability, and all twelve are registered", () => {
-    expect(WRITE_TOOLS).toHaveLength(12);
+  test("every write tool names one capability, and all sixteen are registered", () => {
+    expect(WRITE_TOOLS).toHaveLength(16);
     for (const tool of WRITE_TOOLS) expect(tool.capability).not.toBeNull();
     for (const tool of WRITE_TOOLS) {
       expect(AGENT_TOOLS.map((t) => t.name)).toContain(tool.name);
