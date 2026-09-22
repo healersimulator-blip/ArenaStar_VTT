@@ -38,6 +38,7 @@ import {
 import { canReadGmOnly } from "./capabilities";
 import type {
   AgentCombatTurn,
+  AgentFogOps,
   AgentTimeOps,
   AgentTokenRow,
   AgentWorldView,
@@ -2119,6 +2120,132 @@ const diceApplyTool: ToolDefinition = {
   },
 };
 
+// ── fog (§5.5) ───────────────────────────────────────────────────────────────────────────────
+//
+// Painting fog is one call that writes **both** records when cells are involved: the mask the
+// players' canvas paints, and the hex list the tools read. Doing one without the other is how a
+// map ends up open on one screen and shut on another — and it is the kind of split no amount of
+// reading the state back would reveal, because both halves look right from where they stand.
+
+const fogArgs = {
+  properties: {
+    sceneId: { type: "string", description: "the scene; the active one when omitted" },
+    cells: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        'cell keys to open or close — ["0,0", "1,0"]; on a hexcrawl scene this is the reveal set, not just a shape to paint',
+    },
+    rect: {
+      type: "array",
+      items: { type: "number" },
+      description: "a world-space rectangle as [x1, y1, x2, y2]",
+    },
+    poly: {
+      type: "array",
+      items: { type: "number" },
+      description: "an explicit polygon as a flat list — [x1, y1, x2, y2, x3, y3]",
+    },
+    all: { type: "boolean", description: "paint the whole scene" },
+    dryRun: { type: "boolean", description: "describe the ops without applying them" },
+  },
+} as const;
+
+const numbersOf = (raw: Json | undefined): number[] | undefined =>
+  Array.isArray(raw)
+    ? raw.filter((value): value is number => typeof value === "number" && Number.isFinite(value))
+    : undefined;
+
+/** One answer for both verbs: what was painted, and the fog as it now stands. */
+async function answerFog(
+  made: AgentFogOps,
+  sceneId: string | null,
+  writer: AgentWriter,
+  dry: boolean,
+  ctx: ToolContext,
+): Promise<ToolOutcome> {
+  if (dry)
+    return dryRunAnswer(
+      made.ops,
+      `${made.mode === "reveal" ? "revealing" : "hiding"} ${made.what} on ${made.sceneName}`,
+    );
+  const done = await submit(made.ops, writer);
+  if (!done.ok) return done.answered;
+  const after = ctx.view.fogState(sceneId);
+  const lines = [
+    `${made.mode === "reveal" ? "revealed" : "hid"} ${made.what} on ${made.sceneName} — ${made.strokes} stroke(s) (seq ${done.seq}).`,
+  ];
+  if (made.cells.length > 0)
+    lines.push(`  cells ${made.mode === "reveal" ? "opened" : "closed"}: ${made.cells.join(", ")}.`);
+  if (after)
+    lines.push(
+      `  mask now: ${after.revealStrokes} reveal, ${after.hideStrokes} hide${
+        after.cellsTotal === null ? "" : ` · ${after.cellsRevealed} of ${after.cellsTotal} cells shown`
+      }.`,
+    );
+  return text(lines.join("\n"), { seq: done.seq, fog: after ?? made } as unknown as Json);
+}
+
+const fogReveal: ToolDefinition = {
+  name: "fog.reveal",
+  description:
+    "Show the table part of a scene: named cells, a rectangle, a polygon, or the whole scene. On a hexcrawl map, opening cells writes **both** the mask and the reveal set, so the map cannot end up open on one screen and shut on another. Answer: what was painted, and the fog as it stands.",
+  args: fogArgs,
+  capability: "fog.reveal",
+  async run(args, ctx): Promise<ToolOutcome> {
+    const begun = beginWrite(ctx);
+    if ("refused" in begun) return begun.refused;
+    const sceneId = str(args["sceneId"]) ?? null;
+    // Bound to names first: with `exactOptionalPropertyTypes`, a key present with an `undefined`
+    // value is not the same as a key absent, and the view decides on absence.
+    const cells = Array.isArray(args["cells"])
+      ? args["cells"].filter((key): key is string => typeof key === "string")
+      : undefined;
+    const rect = numbersOf(args["rect"]);
+    const poly = numbersOf(args["poly"]);
+    const all = bool(args["all"]);
+    const made = ctx.view.fogOps(sceneId, {
+      mode: "reveal",
+      ...(cells === undefined ? {} : { cells }),
+      ...(rect === undefined ? {} : { rect }),
+      ...(poly === undefined ? {} : { poly }),
+      ...(all === undefined ? {} : { all }),
+    });
+    if ("error" in made) return refusal(made.error);
+    return await answerFog(made, sceneId, begun.writer, bool(args["dryRun"]) === true, ctx);
+  },
+};
+
+const fogHide: ToolDefinition = {
+  name: "fog.hide",
+  description:
+    "Put part of a scene back under cover: named cells, a rectangle, a polygon, or the whole scene. On a hexcrawl map, closing cells writes **both** the mask and the reveal set, so a hex shut here is shut for the tools too.",
+  args: fogArgs,
+  capability: "fog.reveal",
+  async run(args, ctx): Promise<ToolOutcome> {
+    const begun = beginWrite(ctx);
+    if ("refused" in begun) return begun.refused;
+    const sceneId = str(args["sceneId"]) ?? null;
+    // Bound to names first: with `exactOptionalPropertyTypes`, a key present with an `undefined`
+    // value is not the same as a key absent, and the view decides on absence.
+    const cells = Array.isArray(args["cells"])
+      ? args["cells"].filter((key): key is string => typeof key === "string")
+      : undefined;
+    const rect = numbersOf(args["rect"]);
+    const poly = numbersOf(args["poly"]);
+    const all = bool(args["all"]);
+    const made = ctx.view.fogOps(sceneId, {
+      mode: "hide",
+      ...(cells === undefined ? {} : { cells }),
+      ...(rect === undefined ? {} : { rect }),
+      ...(poly === undefined ? {} : { poly }),
+      ...(all === undefined ? {} : { all }),
+    });
+    if ("error" in made) return refusal(made.error);
+    return await answerFog(made, sceneId, begun.writer, bool(args["dryRun"]) === true, ctx);
+  },
+};
+
 export const WRITE_TOOLS: readonly ToolDefinition[] = [
   documentCreate,
   documentUpdate,
@@ -2137,6 +2264,8 @@ export const WRITE_TOOLS: readonly ToolDefinition[] = [
   combatEnd,
   diceRollTool,
   diceApplyTool,
+  fogReveal,
+  fogHide,
   tokenMove,
   tokenProperties,
   sceneCreate,

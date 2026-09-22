@@ -11,6 +11,8 @@ import { paginate } from "../../src/core/agents/paging";
 import type {
   AgentClock,
   AgentCombatTurn,
+  AgentFogOps,
+  AgentFogState,
   AgentCompendiumEntry,
   AgentDiceApply,
   AgentDiceRoll,
@@ -771,6 +773,69 @@ export function fakeView(
         hpBefore: 12,
         hpAfter: spec.mode === "damage" ? 0 : 12,
         note: null,
+      };
+    },
+    fogState: (sceneId): AgentFogState | null =>
+      sceneId === null || sceneId === "s1"
+        ? {
+            sceneId: "s1",
+            sceneName: "Goblinwood",
+            enabled: true,
+            rangeSquares: null,
+            revealStrokes: 2,
+            hideStrokes: 1,
+            cellsRevealed: 1,
+            cellsTotal: 3,
+          }
+        : null,
+    fogOps: (_sceneId, spec): AgentFogOps | { error: string } => {
+      if (
+        spec.all !== true &&
+        spec.rect === undefined &&
+        spec.poly === undefined &&
+        spec.cells === undefined
+      ) {
+        return {
+          error: "say what to paint — `cells`, a `rect`, a `poly`, or `all` for the whole scene",
+        };
+      }
+      if (spec.cells !== undefined && spec.cells.length === 0) {
+        return { error: "name at least one cell, or paint the whole scene with `all`" };
+      }
+      const what =
+        spec.all === true
+          ? "the whole of Goblinwood"
+          : spec.cells !== undefined
+            ? `${spec.cells.length} cell(s)`
+            : spec.rect !== undefined
+              ? "a rectangle"
+              : "a polygon";
+      return {
+        sceneId: "s1",
+        sceneName: "Goblinwood",
+        mode: spec.mode,
+        // A cell edit is two records at once: the mask, and the hex list the tools read.
+        ops: [
+          ...(spec.cells === undefined
+            ? []
+            : [
+                {
+                  kind: "update" as const,
+                  ref: { coll: "scenes" as const, id: "s1" },
+                  diff: {
+                    "flags.core.hexcrawl.revealed": spec.cells,
+                  },
+                },
+              ]),
+          {
+            kind: "update" as const,
+            ref: { coll: "scenes" as const, id: "s1" },
+            diff: { "flags.core.fogMask": [{ mode: spec.mode, poly: [0, 0, 100, 0, 100, 100] }] },
+          },
+        ],
+        strokes: spec.cells?.length ?? 1,
+        what,
+        cells: spec.cells === undefined ? [] : [...spec.cells],
       };
     },
     tokenCreate: (spec) => ({

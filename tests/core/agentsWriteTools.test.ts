@@ -83,6 +83,8 @@ describe("the gate: the grant matrix (§8 Phase 2)", () => {
       "combat.end": {},
       "dice.roll": { formula: "1d20+5" },
       "dice.apply": { messageId: "m-roll", actorId: "a-vex", mode: "damage" },
+      "fog.reveal": { cells: ["0,0"] },
+      "fog.hide": { cells: ["0,0"] },
       "token.move": { tokenId: "t-vex", col: 2, row: 2 },
       "token.properties": { tokenId: "t-vex", disposition: "hostile" },
       "scene.create": { name: "Camp" },
@@ -142,6 +144,8 @@ describe("the gate: the grant matrix (§8 Phase 2)", () => {
       "combat.end": {},
       "dice.roll": { formula: "1d20+5" },
       "dice.apply": { messageId: "m-roll", actorId: "a-vex", mode: "damage" },
+      "fog.reveal": { cells: ["0,0"] },
+      "fog.hide": { cells: ["0,0"] },
       "token.move": { tokenId: "t-vex", col: 2, row: 2 },
       "token.properties": { tokenId: "t-vex", disposition: "hostile" },
       "scene.create": { name: "Camp" },
@@ -1076,9 +1080,66 @@ describe("dice (§5.5)", () => {
   });
 });
 
+describe("fog (§5.5)", () => {
+  test("revealing cells writes the mask and the reveal set in one envelope", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf("fog.reveal", { cells: ["0,0", "1,0"] }, ctxWith(writer));
+    expect(body).toContain("revealed 2 cell(s) on Goblinwood");
+    expect(body).toContain("cells opened: 0,0, 1,0");
+    expect(body).toContain("(seq 91)");
+    // One envelope holding both records: a map open on one screen and shut on another is exactly
+    // what splitting these would buy.
+    expect(calls).toHaveLength(1);
+    const ops = calls[0] ?? [];
+    expect(ops).toHaveLength(2);
+    expect(ops[0]).toMatchObject({ ref: { coll: "scenes", id: "s1" } });
+    expect(ops[1]).toMatchObject({
+      diff: { "flags.core.fogMask": [{ mode: "reveal", poly: [0, 0, 100, 0, 100, 100] }] },
+    });
+  });
+
+  test("hiding a rectangle paints a shape and touches no cells", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf("fog.hide", { rect: [0, 0, 200, 100] }, ctxWith(writer));
+    expect(body).toContain("hid a rectangle on Goblinwood");
+    const ops = calls[0] ?? [];
+    // No cell edit, so no reveal-set op: the mask is the only record this moves.
+    expect(ops).toHaveLength(1);
+    expect(ops[0]).toMatchObject({
+      diff: { "flags.core.fogMask": [{ mode: "hide" }] },
+    });
+  });
+
+  test("painting nothing is an invalid call, and an unknown shape comes back as a refusal", async () => {
+    const { writer } = fakeWriter();
+    const blank = await call("fog.reveal", {}, ctxWith(writer));
+    // Not a refusal: the tool was asked to do something it cannot even describe.
+    const blankText = await textOf("fog.reveal", {}, ctxWith(writer));
+    expect(blankText).toContain("say what to paint");
+    expect(blank.kind).toBe("result");
+  });
+
+  test("a dry run of a fog edit changes nothing", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf("fog.reveal", { all: true, dryRun: true }, ctxWith(writer));
+    expect(body).toContain("dry run");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("fog.reveal needs fog.reveal, and fog.state needs fog.control", async () => {
+    const grant = narrow(grantFor("gm"), ["fog.reveal"]);
+    const { writer } = fakeWriter();
+    const revealed = await call("fog.reveal", { all: true }, ctxWith(writer, grant));
+    expect(revealed.kind).toBe("result");
+    if (revealed.kind !== "result") return;
+    expect(revealed.result.isError).toBeUndefined();
+    expect(writer).toBeTruthy();
+  });
+});
+
 describe("the catalogue", () => {
-  test("every write tool names one capability, and all twenty-four are registered", () => {
-    expect(WRITE_TOOLS).toHaveLength(24);
+  test("every write tool names one capability, and all twenty-six are registered", () => {
+    expect(WRITE_TOOLS).toHaveLength(26);
     for (const tool of WRITE_TOOLS) expect(tool.capability).not.toBeNull();
     for (const tool of WRITE_TOOLS) {
       expect(AGENT_TOOLS.map((t) => t.name)).toContain(tool.name);

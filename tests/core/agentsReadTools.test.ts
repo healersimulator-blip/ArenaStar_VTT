@@ -72,9 +72,10 @@ describe("the catalogue after Phase 1 (§5)", () => {
         "time.get",
         "time.of_day",
         "combat.state",
+        "fog.state",
       ]),
     );
-    expect(READ_TOOLS).toHaveLength(17);
+    expect(READ_TOOLS).toHaveLength(18);
   });
 
   test("every tool declares a capability, and the identity probe declares none", () => {
@@ -137,6 +138,27 @@ describe("the clock and the tracker (§5.5)", () => {
     if (answered.kind !== "result") return;
     expect(answered.result.isError).toBe(true);
     expect(answered.result.content[0]?.text).toContain("no encounter on scene \"s2\"");
+  });
+});
+
+describe("fog (§5.5)", () => {
+  test("fog.state reads the mask and the reveal set off the replica", async () => {
+    const answered = await call("fog.state");
+    expect(answered.kind).toBe("result");
+    if (answered.kind !== "result") return;
+    const body = answered.result.content[0]?.text ?? "";
+    expect(body).toContain("Goblinwood: fog on, sight unbounded.");
+    expect(body).toContain("2 reveal stroke(s), 1 hide stroke(s)");
+    // A hexcrawl map's fog and its reveal set are the same question to a GM.
+    expect(body).toContain("cells: 1 of 3 shown to the table");
+  });
+
+  test("fog is a control, not a read — a player agent is refused", async () => {
+    const answered = await call("fog.state", {}, { view, grant: grantFor("player") });
+    expect(answered.kind).toBe("result");
+    if (answered.kind !== "result") return;
+    expect(answered.result.isError).toBe(true);
+    expect(answered.result.content[0]?.text).toBe(refusalFor("fog.control"));
   });
 });
 

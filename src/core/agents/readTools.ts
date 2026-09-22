@@ -947,6 +947,48 @@ const combatStateTool: ToolDefinition = {
   },
 };
 
+// ── fog (§5.5) ───────────────────────────────────────────────────────────────────────────────
+//
+// What the table can see is two records on the scene: the manual mask (a log of strokes) and, on a
+// hexcrawl scene, the list of cells the party has been shown. This tool reads both and edits
+// neither — and it reads them off the replica, so a player agent's answer is the player's fog.
+
+const fogStateTool: ToolDefinition = {
+  name: "fog.state",
+  description:
+    "A scene's fog: whether it is on, the sight range, how many manual reveal/hide strokes the mask carries, and — on a hexcrawl map — how many cells the table has been shown out of how many. Read-only: fog.reveal and fog.hide do the painting.",
+  args: {
+    properties: {
+      sceneId: {
+        type: "string",
+        description: "the scene; the active one when omitted",
+      },
+    },
+  },
+  capability: "fog.control",
+  run(args, ctx): ToolOutcome {
+    const sceneId = str(args["sceneId"]) ?? null;
+    const fog = ctx.view.fogState(sceneId);
+    if (!fog) {
+      return refusal(
+        sceneId
+          ? `no scene "${sceneId}" — scene.list names the ones you may see`
+          : "there is no scene here — scene.list names them",
+      );
+    }
+    return text(
+      [
+        `${fog.sceneName}: fog ${fog.enabled ? "on" : "off"}, sight ${fog.rangeSquares === null ? "unbounded" : `${fog.rangeSquares} squares`}.`,
+        `  mask: ${fog.revealStrokes} reveal stroke(s), ${fog.hideStrokes} hide stroke(s).`,
+        ...(fog.cellsTotal === null
+          ? []
+          : [`  cells: ${fog.cellsRevealed} of ${fog.cellsTotal} shown to the table.`]),
+      ].join("\n"),
+      fog as unknown as Json,
+    );
+  },
+};
+
 export const READ_TOOLS: readonly ToolDefinition[] = [
   sceneList,
   sceneRead,
@@ -965,4 +1007,5 @@ export const READ_TOOLS: readonly ToolDefinition[] = [
   timeGet,
   timeOfDayTool,
   combatStateTool,
+  fogStateTool,
 ];

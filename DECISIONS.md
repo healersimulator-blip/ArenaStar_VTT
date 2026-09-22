@@ -8580,3 +8580,43 @@ the `player` and `observer` presets and `dice.apply` is not.
   `pnpm lint` **exit 0**.
 - `pnpm build` → `pnpm size` **3 264 620 B raw / 941 607 B gzip — +5 064 B**, inside the 6 MB
   budget.
+
+## D-286 — MCP connector Phase 4, part 3: fog (2026-09-22)
+
+`fog.state`, `fog.reveal`, `fog.hide` — and a host bug they walked straight into.
+
+**Decision — a cell edit writes both records, in one envelope.** On a hexcrawl scene, "show them the
+clearing" is two facts: the mask the players' canvas paints (`flags.core.fogMask`) and the hex list
+the tools read (the profile's `revealed`). `fog.reveal` of a set of cells writes **both** — painting
+one without the other is how a map ends up open on one screen and shut on another, and no amount of
+reading the state back would reveal the split, because each half looks right from where it stands.
+
+**Decision — the geometry is the view's, not the agent's.** The tools name cells (`["0,0", "1,0"]`),
+a rectangle, a polygon, or the whole scene; a cell is a hexagon on a hex grid and a square on a
+square one, and that is the app's `cellPolygonOf` to build. An agent that had to supply world
+coordinates would need to know the grid, which is precisely the knowledge typed tools exist to
+remove.
+
+**Bug found and fixed — the host duplicated a cell reveal.** `withCellReveals` inserted each
+crossing's cell ops after **every** scene update in the envelope rather than after the op that moved
+the boundary, so an envelope carrying two `flags` writes on one scene — which is exactly what a fog
+edit is — sent the same cell `create` twice. A duplicated create inside one envelope is refused by
+the receiving store, which takes the *whole* envelope with it: the player's replica silently kept
+the old scene. The crossing now carries the index of the op that produced it
+(`src/host/sync.ts`, D-271's hook). It was invisible until a tool wrote two flag ops at once, and it
+would have bitten any GM UI that did the same.
+
+**Decision — `fog.state` is a control (`fog.control`), and painting is `fog.reveal`.** Reading what
+the table can see is not the same power as changing it, and a player agent has neither.
+
+**Gates.**
+
+- `pnpm test` — **3 292 tests passed** (12 skipped). New: 2 integration cases — opening a cell on a
+  real hexcrawl world **sends the document to the player's replica** (`hexcrawl.cells` gains `1,0`,
+  and closing it takes the cell away again), in one envelope `by` the agent with more than one op;
+  and a `player` grant refused on `fog.reveal` with the fog unmoved. Plus 3 read cases and 5 write
+  cases over the fixture.
+- `pnpm typecheck` **51 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`) ·
+  `pnpm lint` **exit 0**.
+- `pnpm build` → `pnpm size` **3 270 115 B raw / 943 124 B gzip — +5 495 B**, inside the 6 MB
+  budget.

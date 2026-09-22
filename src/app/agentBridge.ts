@@ -37,6 +37,8 @@ import type {
   AgentDiceApply,
   AgentDiceRoll,
   AgentEncounterCheck,
+  AgentFogOps,
+  AgentFogState,
   AgentTimeOps,
   AgentHexCell,
   AgentHexFeature,
@@ -62,7 +64,12 @@ import {
   partyCellKey,
   partyPointOf,
 } from "../core/hexcrawl/visibility";
-import { profileOf, setTravelRouteOps, clearTravelOps } from "../core/hexcrawl/scene";
+import {
+  profileOf,
+  revealCellsOps,
+  setTravelRouteOps,
+  clearTravelOps,
+} from "../core/hexcrawl/scene";
 import {
   partyPositionOps,
   partyTokenOf,
@@ -119,6 +126,14 @@ import {
   startWithSurprise,
 } from "../packages/pf1e/combatState";
 import { readRollApplications } from "../packages/pf1e/rollApply";
+import {
+  appendFogMask,
+  fogMaskLog,
+  fogMaskOps,
+  sceneRectPoly,
+} from "../core/fogMask";
+import { sceneFogSettings } from "../core/fogExploration";
+import { cellPolygonOf } from "../core/hexcrawl/overlay";
 import { isPf1eEncounter } from "../ui/combat/actionBudget";
 import {
   activateEncounter,
@@ -1459,6 +1474,110 @@ export function agentWorldView(
         hpBefore: before,
         hpAfter: after,
         note: null,
+      };
+    },
+    // ── fog (§5.5) ───────────────────────────────────────────────────────────────────────────
+    //
+    // The manual mask is a log of strokes on the scene (`flags.core.fogMask`), and the hexcrawl's
+    // open cells are the profile's own list. Painting one and opening the other are the same act to
+    // a GM — "show them the clearing" — so a cell edit does both, and the geometry (a cell is a
+    // hexagon on a hex grid and a square on a square one) is the app's to build, not the agent's
+    // to guess.
+    fogState(sceneId): AgentFogState | null {
+      const scene = pick(sceneId);
+      if (!scene) return null;
+      const settings = sceneFogSettings(scene);
+      const log = fogMaskLog(scene);
+      const cells = cellsOf(scene);
+      return {
+        sceneId: scene._id,
+        sceneName: scene.name,
+        enabled: settings.enabled,
+        rangeSquares: settings.rangeSquares,
+        revealStrokes: log.filter((op) => op.mode === "reveal").length,
+        hideStrokes: log.filter((op) => op.mode === "hide").length,
+        cellsRevealed: cells.length > 0 ? openCellKeys(scene).size : null,
+        cellsTotal: cells.length > 0 ? cells.length : null,
+      };
+    },
+    fogOps(sceneId, spec): AgentFogOps | { error: string } {
+      const scene = pick(sceneId);
+      if (!scene) return { error: "there is no scene here — scene.list names them" };
+      const polys: number[][] = [];
+      // Every branch assigns; the error returns are the ones that never reach the write.
+      let what: string;
+      if (spec.all === true) {
+        polys.push(sceneRectPoly(scene));
+        what = `the whole of ${scene.name}`;
+      } else if (spec.rect !== undefined) {
+        const rect = spec.rect;
+        if (rect.length !== 4 || rect.some((n) => !Number.isFinite(n))) {
+          return { error: "`rect` is four numbers — [x1, y1, x2, y2] in world units" };
+        }
+        const [x1, y1, x2, y2] = [rect[0] as number, rect[1] as number, rect[2] as number, rect[3] as number];
+        polys.push([x1, y1, x2, y1, x2, y2, x1, y2]);
+        what = `the rectangle ${x1},${y1} → ${x2},${y2}`;
+      } else if (spec.poly !== undefined) {
+        const poly = spec.poly;
+        if (poly.length < 6 || poly.length % 2 !== 0 || poly.some((n) => !Number.isFinite(n))) {
+          return {
+            error: "`poly` is a flat list of at least three points — [x1, y1, x2, y2, x3, y3]",
+          };
+        }
+        polys.push([...poly]);
+        what = `a ${poly.length / 2}-sided polygon`;
+      } else if (spec.cells !== undefined) {
+        if (spec.cells.length === 0) {
+          return { error: "name at least one cell, or paint the whole scene with `all`" };
+        }
+        for (const key of spec.cells) {
+          const poly = cellPolygonOf(scene, key);
+          if (!poly) {
+            return {
+              error: `"${key}" is not a cell of ${scene.name} — hexcrawl.cells names them`,
+            };
+          }
+          polys.push(poly);
+        }
+        what = `${spec.cells.length} cell(s)`;
+      } else {
+        return {
+          error: "say what to paint — `cells`, a `rect`, a `poly`, or `all` for the whole scene",
+        };
+      }
+      const ops: Op[] = [];
+      let working = scene;
+      if (spec.cells !== undefined && cellsOf(scene).length > 0) {
+        // A cell edit is two records at once: the mask the players' canvas paints, and the hex
+        // list the tools read. Doing one without the other is how a map ends up open on one
+        // screen and shut on another.
+        const cellOps = revealCellsOps(
+          scene,
+          spec.mode === "reveal" ? spec.cells : [],
+          spec.mode === "hide" ? spec.cells : [],
+        );
+        ops.push(...cellOps);
+        // Both writes replace the whole `flags` object (D-012: a flat diff cannot create the
+        // intermediates), so the second must be built from the document the first produced —
+        // otherwise the mask stroke quietly erases the reveal it was painted beside.
+        for (const op of cellOps) {
+          if (op.kind !== "update") continue;
+          const flags = (op.diff as Record<string, unknown> | undefined)?.["flags"];
+          if (flags !== undefined && flags !== null)
+            working = { ...working, flags: flags as SceneDocument["flags"] };
+        }
+      }
+      let log = fogMaskLog(working);
+      for (const poly of polys) log = appendFogMask(log, { mode: spec.mode, poly });
+      ops.push(...fogMaskOps(working, log));
+      return {
+        sceneId: scene._id,
+        sceneName: scene.name,
+        mode: spec.mode,
+        ops,
+        strokes: polys.length,
+        what,
+        cells: spec.cells === undefined ? [] : [...spec.cells],
       };
     },
     tokenCreate(spec): Op | { error: string } {

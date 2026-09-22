@@ -995,3 +995,67 @@ describe("dice, through the host's own dice (§5.5)", () => {
     ).toBe(30);
   });
 });
+
+describe("fog, through a real host (§5.5)", () => {
+  test("opening a cell opens it for the table — the mask and the reveal set move together", async () => {
+    const boot = await bootHexcrawl();
+    const { session, grant } = await openAgent(boot, "gm", "Cartographer");
+    const ctx = hexCtxOf(session, grant);
+    const player = await openAgent(boot, "player", "Scout");
+    const playerCtx = hexCtxOf(player.session, player.grant);
+
+    const before = await callTool({ name: "hexcrawl.cells", args: {} }, playerCtx);
+    expect(before.kind).toBe("result");
+    if (before.kind !== "result") return;
+    expect(before.result.content[0]?.text).not.toContain("1,0");
+
+    const seqBefore = boot.store.seq;
+    const revealed = await callTool({ name: "fog.reveal", args: { cells: ["1,0"] } }, ctx);
+    expect(revealed.kind).toBe("result");
+    if (revealed.kind !== "result") return;
+    expect(revealed.result.isError, revealed.result.content[0]?.text).toBeUndefined();
+    expect(revealed.result.content[0]?.text).toContain("revealed 1 cell(s) on Goblinwood");
+    // One envelope: the mask a canvas paints and the hex list the tools read are the same act.
+    expect(boot.store.seq).toBe(seqBefore + 1);
+    const envelope = boot.log.at(boot.store.seq);
+    expect(envelope?.env.by).toBe(session.user._id);
+    expect(envelope?.env.ops.length).toBeGreaterThan(1);
+
+    const state = await callTool({ name: "fog.state", args: {} }, ctx);
+    expect(state.kind).toBe("result");
+    if (state.kind !== "result") return;
+    expect(state.result.content[0]?.text).toContain("2 of 3 shown to the table");
+
+    // …and the player's replica **received the document**: a hex the party has not been shown is
+    // not sent at all (D-271), so this is what "opening a cell" means to a player agent.
+    for (let i = 0; i < 6; i++) await flushMicrotasks();
+    const after = await callTool({ name: "hexcrawl.cells", args: {} }, playerCtx);
+    expect(after.kind).toBe("result");
+    if (after.kind !== "result") return;
+    expect(after.result.content[0]?.text).toContain("1,0");
+
+    // Closing it puts it back under cover, and the player's replica loses the document again.
+    const hidden = await callTool({ name: "fog.hide", args: { cells: ["1,0"] } }, ctx);
+    expect(hidden.kind).toBe("result");
+    if (hidden.kind !== "result") return;
+    expect(hidden.result.isError, hidden.result.content[0]?.text).toBeUndefined();
+    for (let i = 0; i < 6; i++) await flushMicrotasks();
+    const closed = await callTool({ name: "hexcrawl.cells", args: {} }, playerCtx);
+    expect(closed.kind).toBe("result");
+    if (closed.kind !== "result") return;
+    expect(closed.result.content[0]?.text).not.toContain("1,0");
+  });
+
+  test("a player agent cannot paint the mask, and the fog does not move", async () => {
+    const boot = await bootHexcrawl();
+    const { session, grant } = await openAgent(boot, "player", "Scout");
+    const ctx = hexCtxOf(session, grant);
+    const seqBefore = boot.store.seq;
+    const answered = await callTool({ name: "fog.reveal", args: { all: true } }, ctx);
+    expect(answered.kind).toBe("result");
+    if (answered.kind !== "result") return;
+    expect(answered.result.isError).toBe(true);
+    expect(answered.result.content[0]?.text).toBe(refusalFor("fog.reveal"));
+    expect(boot.store.seq).toBe(seqBefore);
+  });
+});

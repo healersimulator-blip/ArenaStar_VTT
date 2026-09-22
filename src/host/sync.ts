@@ -336,6 +336,13 @@ function projectWithCrossings(
  */
 interface CellRevealCrossing {
   sceneRef: DocRef;
+  /**
+   * Which op in the envelope moved the boundary. Two flag writes on one scene in one envelope
+   * (a fog stroke beside a reveal, say) each get their own crossing, and inserting both after
+   * every scene update would send the same cell create twice — a duplicated create inside one
+   * envelope, which the receiving store refuses, taking the whole envelope with it.
+   */
+  index: number;
   opened: string[];
   closed: string[];
   /** The scene after the write — the projection rule reads its reveal set. */
@@ -372,6 +379,7 @@ function cellRevealCrossings(
     if (opened.length === 0 && closed.length === 0) continue;
     out.push({
       sceneRef: op.ref,
+      index: i,
       opened,
       closed,
       scene: after as SceneDocument,
@@ -410,18 +418,22 @@ function cellRevealOps(
   return ops;
 }
 
-/** Insert each crossing's cell ops right after the op that moved the boundary, per session. */
+/**
+ * Insert each crossing's cell ops right after **the op that moved the boundary** — not after every
+ * scene update in the envelope, which would duplicate a reveal whenever one envelope carries two
+ * flag writes on the same scene.
+ */
 function withCellReveals(
   envelope: OpEnvelope,
   user: PermissionUser,
   crossings: readonly CellRevealCrossing[],
 ): OpEnvelope {
   const ops: Op[] = [];
-  for (const op of envelope.ops) {
-    ops.push(op);
-    if (op.kind !== "update" || op.ref.coll !== "scenes") continue;
+  for (let i = 0; i < envelope.ops.length; i += 1) {
+    const op = envelope.ops[i];
+    if (op) ops.push(op);
     for (const crossing of crossings) {
-      if (crossing.sceneRef.id !== op.ref.id) continue;
+      if (crossing.index !== i) continue;
       ops.push(...cellRevealOps(crossing, user));
     }
   }

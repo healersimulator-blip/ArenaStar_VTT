@@ -509,7 +509,7 @@ here is a real-host integration test: `bestiary.search → actor.from_compendium
 token in **one envelope stamped `by` the agent**, and a pasted `Goblin Warrior` stat block becomes a
 real actor (hp 6, Dex 15, owned by the session that imported it) with a token on the table.
 
-### Phase 4 — Table flow, time, strategic (1 day, S) — 🚧 clock, tracker and dice landed 2026-09-22 (D-284, D-285)
+### Phase 4 — Table flow, time, strategic (1 day, S) — 🚧 all but the strategic layer landed 2026-09-22 (D-284, D-285, D-286)
 `combat.*`, `time.*`, `dice.apply`, `fog.*` (mask + state), `strategic.snapshot/order/report`.
 
 **As landed so far — the clock and the tracker (D-284).** `time.get` / `time.of_day` /
@@ -531,8 +531,17 @@ then a refusal in words). `dice.apply` names a card and an actor and **never an 
 re-reads the card's own total and does the arithmetic, exactly as the chat card's *Apply* button
 does. A player agent may roll; it may not apply. **Still to come:** `fog.reveal` / `fog.hide` /
 `fog.state` (the manual mask, and the cell reveal set on a hexcrawl scene), and
-`strategic.snapshot` / `strategic.order` / `strategic.report` — the last behind the plan's explicit
-opt-in, since one order is a 10k-model turn.
+**As landed so far — fog (D-286).** `fog.state` (a control: what the table can see is not a read),
+`fog.reveal` and `fog.hide`. Cells, a rectangle, a polygon or the whole scene — the geometry is the
+view's (`cellPolygonOf`), because a cell is a hexagon on a hex grid and a square on a square one. On
+a hexcrawl scene a cell edit writes **both** records in one envelope: the mask the canvas paints and
+the hex list the tools read, since painting one without the other is how a map ends up open on one
+screen and shut on another. That envelope found a real host bug (D-286): D-271's reveal hook
+inserted each crossing's cell creates after *every* scene update in an envelope, so two flag writes
+on one scene sent the same create twice and the receiving store refused the whole envelope — the
+player's replica silently kept the old scene. **Still to come:** the strategic layer —
+`strategic.snapshot` / `strategic.order` / `strategic.report` — behind the plan's explicit opt-in,
+since one order is a 10k-model turn.
 *Test:* the agent runs a full round (start combat, next turn, apply damage) and the clock advances by
 exactly `secondsPerRound`; a `time.advance` of 3 days sweeps the clock-counted effects exactly as the
 Settings buttons do.

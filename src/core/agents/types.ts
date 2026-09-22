@@ -101,6 +101,23 @@ export interface AgentWorldView {
   combatNextOps(sceneId: string | null, count: number): AgentCombatTurn | { error: string };
   /** End it: the tracker stops and the round structure is cleared. */
   combatEndOps(sceneId: string | null): AgentCombatTurn | { error: string };
+  /** Fog on a scene: the settings, the manual mask's strokes, and the cells the table has seen. */
+  fogState(sceneId: string | null): AgentFogState | null;
+  /**
+   * Paint the mask — by cell, by rectangle, by polygon, or the whole scene — and, on a hexcrawl
+   * scene, open or close the cells too. The geometry is the view's to build; the tool only names
+   * what the table said.
+   */
+  fogOps(
+    sceneId: string | null,
+    spec: {
+      mode: "reveal" | "hide";
+      cells?: string[];
+      rect?: number[];
+      poly?: number[];
+      all?: boolean;
+    },
+  ): AgentFogOps | { error: string };
   /**
    * Roll dice **through the host** (§5.5). The formula travels; the number comes back from the
    * host's own dice, which is why this is async — and why an agent cannot claim a total.
@@ -357,6 +374,36 @@ export interface AgentDiceApply {
   hpAfter: number;
   /** The host's own one-line account: `8 damage — hp 12 → 4 (temporary hit points absorbed 4)`. */
   note: string | null;
+}
+
+/** What a scene's fog looks like from the outside (§5.5). */
+export interface AgentFogState {
+  sceneId: string;
+  sceneName: string;
+  /** Fog is off on scenes that never switched it on, whatever the mask says. */
+  enabled: boolean;
+  /** Sight range in grid squares; null is unbounded (walls only). */
+  rangeSquares: number | null;
+  /** Manual paint strokes, in the order a fog layer replays them. */
+  revealStrokes: number;
+  hideStrokes: number;
+  /** Hexcrawl only: how much of the map the table has been shown. */
+  cellsRevealed: number | null;
+  cellsTotal: number | null;
+}
+
+/** One fog edit, ready to submit (§5.5). */
+export interface AgentFogOps {
+  sceneId: string;
+  sceneName: string;
+  mode: "reveal" | "hide";
+  ops: Op[];
+  /** How many strokes this call paints. */
+  strokes: number;
+  /** What was painted, in the words the caller used: "3 cells", "the whole scene", "a rectangle". */
+  what: string;
+  /** The cells opened or closed, when it was a cell edit. */
+  cells: string[];
 }
 
 export interface AgentHexSummary {
