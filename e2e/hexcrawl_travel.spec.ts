@@ -268,9 +268,13 @@ test.describe("travel & features (§8 Phase 6, D-275)", () => {
     expect(spent[step1]).toBe(FOREST_BORDER);
     expect(spent[step2]).toBe(FOREST_BORDER);
     expect(spent[step3]).toBe(DAY - 2 * FOREST_BORDER);
-    // …and it all adds up to the day the clock advanced.
+    // …and it all adds up to what the clock advanced — **both** clicks' worth. The three
+    // crossings do not belong to one advance: the first was paid for by *To the next hex*
+    // (7 200 s), and the day bought the two that were left plus the hours spent standing at
+    // the end. The invariant is "the ledger sums to the clock", and the clock moved by a
+    // border and a day.
     const travelled = FOREST_BORDER * 3 + (DAY - 2 * FOREST_BORDER);
-    expect(travelled).toBe(DAY);
+    expect(travelled).toBe(DAY + FOREST_BORDER);
   });
 
   test("a feature ruled by time reveals itself on the third day in the same hex", async ({

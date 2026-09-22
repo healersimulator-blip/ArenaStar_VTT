@@ -140,13 +140,13 @@
   import { cellAtPoint } from "../core/hexcrawl/cells";
   import { terrainCatalogOrDefault } from "../core/hexcrawl/terrain";
   import {
+    featureFoundMessage,
     formatDuration,
     revealDueFeatures,
     type FeatureFacts,
   } from "../core/hexcrawl/features";
   import {
     DEFAULT_SPEED_PER_DAY,
-    readTravelPlan,
     type TravelPace,
     type TravelPlan,
   } from "../core/hexcrawl/types";
@@ -195,6 +195,7 @@
   import { startHostShare, type HostShare } from "./hostShare";
   import type {
     ActorDocument,
+    CellFeature,
     CombatDocument,
     LightDocument,
     NoteDocument,
@@ -568,6 +569,14 @@ const WALL_PICK_RADIUS = 12;
         toolController?.recall();
         break;
       case "escape":
+        // D-275: in path mode the route being drawn *is* the pending gesture (plan §5.7's
+        // "Esc clears"), so the key gives it up and leaves the tool armed for the next click
+        // — falling through to `select` here would disarm the tool *before* the canvas key
+        // layer could see `canvasTool === "path"` and clear the draft it owns.
+        if (canvasTool === "path") {
+          clearPathDraft();
+          break;
+        }
         if (!toolController || toolController.current() === null) canvasTool = "select";
         else toolController.dismissGesture();
         break;
@@ -1325,14 +1334,14 @@ const WALL_PICK_RADIUS = 12;
    * scene switch cannot leave half a route pointing at a map that is no longer in front of anyone.
    */
   let pathDraft = $state<{ sceneId: string; keys: string[] }>({ sceneId: "", keys: [] });
-  /** Whether the route being shown is the committed one (the profile's) or the draft. */
-  const planOf = (scene: SceneDocument | null): TravelPlan | null => {
-    if (!scene) return null;
-    const raw = (scene.flags?.["core"] as Record<string, unknown> | undefined)?.["hexcrawl"];
-    return typeof raw === "object" && raw !== null && !Array.isArray(raw)
-      ? readTravelPlan(raw as Record<string, unknown>)
-      : null;
-  };
+  /**
+   * The route the party is walking (plan §5.7), read through the profile's own tolerant reader
+   * rather than off the raw flag: `travel` is a **field of** `flags.core.hexcrawl`, not the
+   * profile itself, so a reader handed the whole profile sees no `path` and answers "no route"
+   * for a march that is already in the document.
+   */
+  const planOf = (scene: SceneDocument | null): TravelPlan | null =>
+    hexcrawlProfileOf(scene)?.travel ?? null;
 
   /**
    * The path the travel panel shows and travels: the draft while one is being drawn (the party's
@@ -1611,16 +1620,31 @@ const WALL_PICK_RADIUS = 12;
     spent: Record<string, number>,
     clockSeconds: number,
   ) {
+    const current = app;
     const ops = [];
     const notes: string[] = [];
+    const found: Array<{ cellKey: string; features: CellFeature[] }> = [];
     const facts = featureFacts(clockSeconds);
     for (const [key, seconds] of Object.entries(spent)) {
       const result = revealDueFeatures({ scene, cellKey: key, facts, spentSeconds: seconds });
       ops.push(...result.ops);
-      // Only the reveals are worth a line at the table; a march over a hex whose check failed is
-      // noise the GM did not ask for.
-      for (const feature of result.revealed) {
-        notes.push(`Found at ${key}: ${feature.name}`);
+      notes.push(...result.notes);
+      if (result.revealed.length > 0) found.push({ cellKey: key, features: result.revealed });
+    }
+    // A reveal is a line in the chat, not only a toast: the table hears it. One card per hex, in
+    // the same envelope as the feature flip and the time that earned it — the log, the counter
+    // and the document can never tell three different stories.
+    if (current) {
+      for (const card of found) {
+        ops.push({
+          kind: "create",
+          coll: "messages",
+          data: featureFoundMessage({
+            authorId: current.gm.client.user?.id ?? GM_USER_ID,
+            cellKey: card.cellKey,
+            features: card.features,
+          }),
+        });
       }
     }
     if (notes.length > 0) pushLog(notes, "info");
@@ -1698,11 +1722,19 @@ const WALL_PICK_RADIUS = 12;
       spentSeconds: EXPLORE_SECONDS,
     });
     if (due.ops.length > 0) current.gm.client.submit(due.ops);
+    // The same card the travel advance posts: one reveal, one line at the table (D-275).
     if (due.revealed.length > 0) {
-      pushLog(
-        due.revealed.map((feature) => `Found at ${key}: ${feature.name}`),
-        "info",
-      );
+      current.gm.client.submit([
+        {
+          kind: "create",
+          coll: "messages",
+          data: featureFoundMessage({
+            authorId: current.gm.client.user?.id ?? GM_USER_ID,
+            cellKey: key,
+            features: due.revealed,
+          }),
+        },
+      ]);
     }
     // The clock op is committed by now (submit is synchronous into the store), so the engine sees
     // the new reading and the ledger records it.

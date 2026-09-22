@@ -728,7 +728,7 @@ pre-batch store, refused the intent, and the scene, the log and the card disappe
 over the canvas still eats the next right-click (the spec closes the results window before the canvas
 gesture, and the still-open hex window is what proves the log's one-click row).
 
-### Phase 6 — Travel, terrain, hidden features (1.5 days, M)
+### Phase 6 — Travel, terrain, hidden features (1.5 days, M) — ✅ landed 2026-09-22 (D-275)
 Path mode, itinerary preview, the `travelAdvance` call site (the model landed in Phase 0b, this is the
   clock/UI wiring), terrain brush, feature model and
 evaluator (manual / perception / time / dice), auto vs manual reveal, the projection gate.
@@ -745,6 +745,20 @@ unless the product decision is otherwise), and the closing `DECISIONS.md` entrie
 ### Sequencing note
 Phases 0–2 are the *walking skeleton* (a hexcrawl scene you can look at); 3–5 make it a game; 6 makes it a
 campaign. If the product wants a demo sooner, ship 0–2 + a hand-authored encounter table (3) and stop.
+
+*Status after Phase 6 (2026-09-22):* Phases 0–6 are landed (D-268…D-275). The party now **walks**: path
+mode draws a route one hex at a time (`Esc` gives it up, *Commit route* writes it), the itinerary prices it
+per cell off the same `stepSecondsOf` the march will charge, and the six travel buttons spend the **world
+clock** — *To the next hex*, *Travel the route*, *To dawn*, *To dusk*, *+1 day* — walking the party as far
+as that time and the terrain allow and leaving the rest of it spent where the party stopped. Every cell the
+march touched keeps the seconds it was given (`flags.core.exploredSeconds`), which is the counter a hidden
+feature's *time* rule reads: a shrine that waits for 40 h in a hex reveals itself on the third day with no
+GM click, and posts one plain card in the chat — `Found at 6,3: the old well` — because a feature the
+players are allowed to hold is not a secret. The three canvas-menu rows that were disabled after Phase 5
+are live: *Features of this hex…*, *Move party here* and *Add to path*. What is left is Phase 7 (polish,
+help, the closing docs), and the acceptance line is the Phase 6 e2e spec: **a three-cell forest path, one
+border and one day, and the ledger summing to exactly what the clock advanced** — plus the third-day
+reveal.
 
 *Status after Phase 5 (2026-09-22):* Phases 0–5 are landed (D-268…D-274). A table a GM writes now fires —
 automatically when the party enters or moves through a tagged hex, as a GM-only pending card whose roll the

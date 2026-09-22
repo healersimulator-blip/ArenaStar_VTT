@@ -31,9 +31,16 @@
  * the whole hexcrawl feature. This module is the other side of it: the client that holds the
  * feature deciding to reveal it.
  */
-import type { CellDocument, CellFeature, SceneDocument } from "../documents";
+import type {
+  CellDocument,
+  CellFeature,
+  FlagStore,
+  MessageDocument,
+  SceneDocument,
+} from "../documents";
 import type { FlatDiff, Op } from "../ops";
 import { evaluateFormula, type RngFn } from "../../dice/engine";
+import { createCellOps } from "./scene";
 
 /** Where the accumulated "time spent here" lives on a cell (`flags.core`). */
 export const EXPLORED_FLAG = "exploredSeconds";
@@ -72,10 +79,16 @@ export function exploredSecondsOf(cell: CellDocument | null | undefined): number
 }
 
 /**
- * Add elapsed time to a cell's counter — the write side of the `time` rule. Returns `[]` for a
- * non-positive amount (a zero-second advance is not a write) and for a cell nobody authored (there
- * is nothing to patch), and one `update` carrying the whole `flags` object otherwise (D-012:
- * `FlatDiff` cannot create a missing intermediate).
+ * Add elapsed time to a cell's counter — the write side of the `time` rule.
+ *
+ * Returns `[]` for a non-positive amount (a zero-second advance is not a write). For a cell nobody
+ * authored it **authors the hex first and writes the time in the same envelope**: the counter is a
+ * fact about where the party has *stood*, not about what the GM has painted, and a march that
+ * sleeps in an unauthored hex must still find those hours there when the GM opens it later (plan
+ * §3.5's `time` rule reads this counter). The create carries the flag with it — D-270/D-271's
+ * two-envelope lesson again: an op that patches a document it is creating in the same breath is
+ * one op, not two. An unauthored hex is still invisible to a player: `projectCellForViewer` drops
+ * every cell the profile has not opened, whatever it carries.
  */
 export function addExploredTimeOps(
   scene: SceneDocument,
@@ -83,14 +96,21 @@ export function addExploredTimeOps(
   seconds: number,
   atClock?: number,
 ): Op[] {
-  const cell = (scene.cells ?? []).find((c) => c.key === cellKey);
   const delta = Math.trunc(seconds);
-  if (!cell || !Number.isFinite(delta) || delta <= 0) return [];
-  const flags = cell.flags ?? {};
+  if (!Number.isFinite(delta) || delta <= 0) return [];
+  const cell = (scene.cells ?? []).find((c) => c.key === cellKey);
+  const flags = cell?.flags ?? {};
   const core = { ...(flagCore(flags) ?? {}) };
   core[EXPLORED_FLAG] = exploredSecondsOf(cell) + delta;
   if (typeof atClock === "number" && Number.isFinite(atClock)) {
     core["exploredAtClock"] = Math.trunc(atClock);
+  }
+  const next = { ...flags, core } as FlagStore;
+  if (!cell) {
+    return createCellOps(scene, globalThis.crypto.randomUUID(), {
+      key: cellKey,
+      flags: next,
+    });
   }
   return [
     {
@@ -100,7 +120,7 @@ export function addExploredTimeOps(
         id: cell._id,
         parent: { coll: "scenes", id: scene._id },
       },
-      diff: { flags: { ...flags, core } } as FlatDiff,
+      diff: { flags: next } as FlatDiff,
     },
   ];
 }
@@ -245,8 +265,16 @@ export function revealDueFeatures(input: {
   spentSeconds?: number;
 }): FeatureRevealResult {
   const cell = (input.scene.cells ?? []).find((c) => c.key === input.cellKey);
-  if (!cell) return { ops: [], revealed: [], notes: [] };
   const added = Math.max(0, Math.trunc(input.spentSeconds ?? 0));
+  // An unauthored hex holds no features to judge — but the hours were still spent, and the walk
+  // writes them here rather than dropping them (see `addExploredTimeOps`).
+  if (!cell) {
+    return {
+      ops: addExploredTimeOps(input.scene, input.cellKey, added, input.facts.clockSeconds),
+      revealed: [],
+      notes: [],
+    };
+  }
   const spent = exploredSecondsOf(cell) + added;
   const features = cell.features ?? [];
   const revealed: CellFeature[] = [];
@@ -301,6 +329,36 @@ function updateCellFieldOps(
       parent: { coll: "scenes", id: scene._id },
     },
     diff: { [field]: value } as unknown as FlatDiff,
+  };
+}
+
+/**
+ * The card a reveal leaves in the chat — the table hears about the shrine when the party finds it,
+ * not only the GM (requirement 8's "the reveal is in the log as the table would hear it").
+ *
+ * Plain text and **public**: a revealed feature is a document the players are allowed to hold
+ * (`projectCellForViewer` keeps it), so whispering its name would be a secret about a thing that
+ * is no longer one. A GM-authored feature whose `autoReveal` is off never reaches here — that one
+ * is the GM's checkbox, and the GM's alone.
+ */
+export function featureFoundMessage(input: {
+  authorId: string;
+  cellKey: string;
+  features: readonly CellFeature[];
+}): MessageDocument {
+  const names = input.features.map((feature) => feature.name);
+  return {
+    _id: globalThis.crypto.randomUUID(),
+    type: "message",
+    name: `Found ${input.cellKey}`.slice(0, 40),
+    ownership: { default: 1 },
+    flags: {},
+    system: {},
+    author: input.authorId,
+    content: names.map((name) => `Found at ${input.cellKey}: ${name}`).join("\n"),
+    whisper: [],
+    roll: null,
+    flavor: "hexcrawl",
   };
 }
 

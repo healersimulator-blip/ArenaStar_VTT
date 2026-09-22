@@ -7873,3 +7873,88 @@ bare text row legitimately places a token with no `actorId`.
   (39.2 s — the spec that exercises the hex window and the canvas menu this change touched) passes in the
   same run: **4 passed (2.3 m)**. `e2e/hexcrawl_tables.spec.ts` and `e2e/hexcrawl_scene.spec.ts` re-run
   after the hex-window change: **2 passed (53.2 s)**.
+
+## D-275 — 2026-09-22 — The party walks: a route the GM draws, priced by the terrain, paid for by the world clock, and the things waiting in the hex that give themselves up (hexcrawl Phase 6)
+
+**Context.** Phase 5 put an encounter's creatures on the map; Phase 6 turns the map into a *campaign*. Plan
+§8's Phase 6 is "path mode, itinerary preview, the `travelAdvance` call site, terrain brush, feature model
+and evaluator (manual / perception / time / dice), auto vs manual reveal, the projection gate", and its e2e
+line is *"commit a three-cell forest path, advance one day on the clock, and assert the party moved by the
+terrain-priced amount, the clock advanced exactly that, and an exploration-timed feature revealed itself on
+the third day"*. Two requirements hang off it: **7** (travel priced by terrain, advanced by the clock) and
+**8's automatic half** (a hidden feature that reveals itself by its own rule, with no GM click). The PR
+that carried the code (#29) was merged with this spec red, and this entry is what closing it cost.
+
+**Decision — a route is a draft until it is committed.** Path mode is one click per decision: a hex
+extends the route, the same hex again takes the last cell back, `Esc` gives the whole thing up, and
+*Commit route* is the single write that turns it into a `TravelPlan` under `flags.core.hexcrawl.travel`
+(`travelProgressOps`, which carries the profile's every other field through untouched). While a draft
+exists the party's own cell is prepended — a route that does not start where the party stands is not a
+route — and the itinerary prices each crossing with the **same `stepSecondsOf` the march will charge**, so
+the number the GM reads before committing is the number the clock moves by afterwards.
+
+**Decision — travel spends the world clock, never a private timer.** Every button is `advanceWorldClockOps`
+plus `travelAdvance`: *To the next hex*, *Travel the route*, *To dawn*, *To dusk*, *+1 day*, *+1 hour*. The
+party walks as far as that time and the terrain allow and then **spends the rest of it standing where it
+arrived** — it camps there, and those hours count. `travelAdvance.spentSeconds` is the per-cell ledger: a
+completed step charges the cell the party walked *out of*, a step that ended mid-crossing charges the cell
+it is still in, and the leftover charges the destination. Its invariant is the one the spec asserts: **the
+ledger sums to the clock's advance**, so "2 h spent here" and the world's own time can never drift apart.
+A finished march clears the plan — a walked-out route is not a route any more.
+
+**Decision — the ledger belongs to the hex, not to the GM's authoring.** `addExploredTimeOps` used to
+return `[]` for a cell nobody had authored ("there is nothing to patch"), which silently broke the `time`
+rule for exactly the hexes a party is most likely to camp in — including the one it started on. A march now
+authors the hex it slept in and writes the hours in the same op (D-270/D-271's two-envelope lesson, one
+more time), and `revealDueFeatures` writes the time even when it has no feature to judge. An unauthored hex
+is still invisible to a player: `projectCellForViewer` drops every cell the profile has not opened,
+whatever it carries.
+
+**Decision — a reveal is a line in the chat, not only a toast.** `featureFoundMessage` posts one plain,
+public card per hex — `Found at 6,3: the old well` — in the **same envelope** as the feature flip and the
+hours that earned it, so the log, the counter and the document cannot tell three different stories. It is
+plain text because a GM-authored name should read as written, and public because a revealed feature is a
+document the players are allowed to hold — whispering its name would keep a secret about a thing that is no
+longer one. A feature with `autoReveal` off never reaches here: that one is the GM's checkbox alone.
+
+**What the browser found that the unit tests could not.** The phase's two e2e tests were red at #29, and
+all four causes are the kind a unit test is blind to:
+
+1. **The reader looked in the wrong place.** `planOf()` handed the whole `flags.core.hexcrawl` profile to
+   `readTravelPlan`, which expects the `travel` field — so it saw no `path` and answered "no route" for a
+   march already in the document. Commit worked all along; the panel, the advance buttons and the ledger
+   never saw the plan. It now reads `hexcrawlProfileOf(scene)?.travel`, through the tolerant reader.
+2. **`Esc` disarmed the tool before it cleared the draft.** The rail's keydown handler is registered at
+   mount, so its `escape` action ran first and set `canvasTool = "select"`; by the time the canvas key
+   layer's `canvasTool === "path"` branch ran, the branch was unreachable and the draft survived. The
+   shell's `escape` case now handles path mode itself (clear the draft, leave the tool armed) before the
+   "nothing armed → back to Select" fallback.
+3. **Hours were dropped for unauthored hexes** — the ledger decision above.
+4. **The acceptance spec's own final sum was wrong.** Three crossings do not belong to one advance: the
+   first is paid for by *To the next hex* and the day buys the two that are left, so the ledger sums to a
+   day **and a border**. The four ledger lines above it were right and passing all along; the invariant is
+   "the ledger sums to the clock", and that is what the line now says.
+
+**Gates.**
+
+- **The unit gate:** `pnpm test` — **261 files: 261 passed / 2 skipped**, **3 112 tests: 3 100 passed /
+  12 skipped**, exit 0. The tree this entry started from (`0a48ced`, PR #29) was 261 / 3 098, so this
+  entry's own slice is **+2 tests** in `tests/core/hexcrawlFeatures.test.ts` — the march that authors
+  the hex it slept in, and the walk over an unauthored hex that still writes its hours.
+- **Types and lint:** `tsc --noEmit` **exit 0** · `pnpm typecheck` **50 components, 0 blocking, 1
+  advisory** (the same pre-existing `ReplayPanel.svelte:29`) · `pnpm lint` **exit 0**.
+- **The build and the size budget:** `pnpm build` → `pnpm size` **3 139 370 B raw / 902 902 B gzip,
+  OK: within the 6 MB raw budget** (the `0a48ced` tree: 3 138 770 / 902 715 — **+600 B raw** for the
+  chat card, the ledger's create path and the shell's `escape` branch).
+- **The browser gate, chromium only** (this sandbox has no firefox/webkit runtime): the phase's own
+  acceptance spec `e2e/hexcrawl_travel.spec.ts` is **2 passed** — the three-hex forest route at 56.7 s
+  and the third-day reveal at 1.4 m — and the four Phase 0–5 hexcrawl specs beside it
+  (`hexcrawl_scene`, `hexcrawl_tables`, `hexcrawl_encounters`, `hexcrawl_fog`) are **6 passed** in the
+  same run: **8 passed (6.6 m, `--workers=1`)**. The **full** chromium suite is **183 passed / 10
+  failed / 2 skipped (16.5 m, `--workers=2` on 2 cores)**, and all ten are environmental, not this
+  change: two ask for `pnpm build:systems` / `pnpm build:worlds` first (`pf1e_mass_battles`, `start`),
+  seven are the load-sensitive two-peer specs that pass when they are not racing each other
+  (`commitroll`, `fog_player`, `onboarding`, `packages`, `pf1e_acceptance` ×2, `pf1e_join` — re-run
+  alone: **19 passed, 2.8 m**), and `webrtc.spec.ts`'s PixiJS layer-order test fails on the *pristine*
+  `0a48ced` tree here too (checked by stashing this entry's diff and rebuilding) — a WebGL limitation
+  of the headless Chromium in this box, the same class the 2026-09-21 assessment records.
