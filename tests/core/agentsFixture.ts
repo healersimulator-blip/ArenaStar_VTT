@@ -12,6 +12,8 @@ import type {
   AgentClock,
   AgentCombatTurn,
   AgentCompendiumEntry,
+  AgentDiceApply,
+  AgentDiceRoll,
   AgentHexCell,
   AgentHexMapPlan,
   AgentHexSummary,
@@ -732,6 +734,45 @@ export function fakeView(
       };
     },
     combatEndOps: () => ({ ...ENDED, ops: COMBAT_UPDATE }),
+    async diceRoll(spec): Promise<AgentDiceRoll | { error: string }> {
+      // The fixture is not a dice engine, and it does not pretend to be one: it answers with the
+      // one thing a fake can honestly claim — that the number came from somewhere else.
+      if (spec.formula.trim() === "" || !/^[0-9d+\- */()]+$/i.test(spec.formula)) {
+        return { error: `"${spec.formula}" is not a formula this world can roll` };
+      }
+      return {
+        messageId: "m-roll",
+        formula: spec.formula,
+        total: 17,
+        terms: [
+          { faces: 20, result: 12 },
+          { operator: "+", value: 5 },
+        ] as unknown as Json[],
+        mode: spec.mode ?? "roll",
+        to: spec.to ?? [],
+        flavor: spec.flavor ?? null,
+      };
+    },
+    async diceApply(spec): Promise<AgentDiceApply | { error: string }> {
+      if (spec.messageId !== "m-roll") {
+        return { error: `no message "${spec.messageId}" — chat.read names the cards you may see` };
+      }
+      if (spec.actorId !== "a-vex") {
+        return { error: `no actor "${spec.actorId}" — document.list actors names them` };
+      }
+      // The card's total is 17, and Vex has 12 hp with 4 temporary: temp absorbs first, so four
+      // points vanish into the pool and the rest comes off the hit points.
+      return {
+        messageId: spec.messageId,
+        actorId: spec.actorId,
+        actorName: "Vex",
+        mode: spec.mode,
+        amount: 17,
+        hpBefore: 12,
+        hpAfter: spec.mode === "damage" ? 0 : 12,
+        note: null,
+      };
+    },
     tokenCreate: (spec) => ({
       kind: "create" as const,
       coll: "tokens" as const,

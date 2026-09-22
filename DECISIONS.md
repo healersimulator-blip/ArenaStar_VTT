@@ -8540,3 +8540,43 @@ replica holds (a hidden combatant is not on it).
   `pnpm lint` **exit 0**.
 - `pnpm build` → `pnpm size` **3 259 556 B raw / 939 973 B gzip — +16 366 B**, inside the 6 MB
   budget.
+
+## D-285 — MCP connector Phase 4, part 2: dice (2026-09-22)
+
+`dice.roll` and `dice.apply`.
+
+**Decision — dice are the host's, so these are the only two tools that wait.** Every other tool
+builds ops and submits them. A roll cannot: the host owns the RNG, the seed and the card, and it
+commits the total as a `messages` document carrying `flags.core.rollId`. So `dice.roll` sends the
+formula through the commit-reveal path (`rollVerified`) and then **waits for the host's card to land
+on the replica**, reading the number back off it — a four-second ceiling, after which the tool
+refuses in words ("the host did not answer the roll … try again, or chat.post the result you need").
+An agent that could roll its own dice could quietly roll again until it liked the answer, which is
+exactly the temptation the verified path exists to remove.
+
+**Decision — `dice.apply` names a card and an actor, and never an amount.** The host re-reads the
+card's own total, checks the permission, and does the arithmetic (temporary hit points absorb
+first; healing also removes nonlethal) — the same intent the chat card's *Apply* button sends, and
+the same reason a client cannot claim a damage figure. The answer reports what the host did: the
+amount, the hit points before and after, and the sentence "this agent named no number".
+
+**Decision — the wait re-reads the document.** The store hands out a new document when the host
+updates one, so a captured card waits forever for a flag that has already landed. (Found the hard
+way: the first apply test timed out at four seconds with the update sitting in the store.)
+
+**Decision — a player agent may roll, and may not apply.** Rolling is what a player does at the
+table; applying a number to a character sheet is the GM's side of the card, so `dice.roll` is on
+the `player` and `observer` presets and `dice.apply` is not.
+
+**Gates.**
+
+- `pnpm test` — **3 283 tests passed** (12 skipped). New: 2 integration cases in
+  `tests/integration/agentProjection.test.ts` against a real host — `dice.roll` produces a card
+  **authored by the agent** carrying the host's total (asserted only to be a legal `1d20+5`, since
+  the number is not the test's to choose), and `dice.apply` takes the actor's hit points from 30 to
+  exactly `30 − total` with the card recording the application, so it cannot be counted twice. Plus
+  6 fixture cases (the four modes, an unrollable formula, an unknown card, and the player gate).
+- `pnpm typecheck` **51 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`) ·
+  `pnpm lint` **exit 0**.
+- `pnpm build` → `pnpm size` **3 264 620 B raw / 941 607 B gzip — +5 064 B**, inside the 6 MB
+  budget.

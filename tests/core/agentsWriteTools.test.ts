@@ -81,6 +81,8 @@ describe("the gate: the grant matrix (§8 Phase 2)", () => {
       "combat.add": { combatants: [{ tokenId: "t-vex", initiative: 18 }] },
       "combat.next": { count: 1 },
       "combat.end": {},
+      "dice.roll": { formula: "1d20+5" },
+      "dice.apply": { messageId: "m-roll", actorId: "a-vex", mode: "damage" },
       "token.move": { tokenId: "t-vex", col: 2, row: 2 },
       "token.properties": { tokenId: "t-vex", disposition: "hostile" },
       "scene.create": { name: "Camp" },
@@ -138,6 +140,8 @@ describe("the gate: the grant matrix (§8 Phase 2)", () => {
       "combat.add": { combatants: [{ tokenId: "t-vex", initiative: 18 }] },
       "combat.next": { count: 1 },
       "combat.end": {},
+      "dice.roll": { formula: "1d20+5" },
+      "dice.apply": { messageId: "m-roll", actorId: "a-vex", mode: "damage" },
       "token.move": { tokenId: "t-vex", col: 2, row: 2 },
       "token.properties": { tokenId: "t-vex", disposition: "hostile" },
       "scene.create": { name: "Camp" },
@@ -994,9 +998,87 @@ describe("the clock and the tracker (§5.5)", () => {
   });
 });
 
+describe("dice (§5.5)", () => {
+  test("dice.roll answers with the host's number, and the dice it fell on", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf("dice.roll", { formula: "1d20+5" }, ctxWith(writer));
+    expect(body).toContain("1d20+5 = 17 (d20: 12, +5)");
+    expect(body).toContain("card m-roll");
+    // The roll is a card in chat, not an op envelope: the host owns the dice and the ledger.
+    expect(body).toContain("nothing has been applied");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("dice.roll knows the four modes and says so when it is given another", async () => {
+    const { writer } = fakeWriter();
+    const self = await textOf("dice.roll", { formula: "1d20", mode: "selfroll" }, ctxWith(writer));
+    expect(self).toContain("selfroll, rolled by the host");
+    const bad = await call("dice.roll", { formula: "1d20", mode: "loudly" }, ctxWith(writer));
+    expect(bad.kind).toBe("invalid");
+    if (bad.kind === "invalid")
+      expect(bad.error).toContain('dice.roll knows the modes "roll", "gmroll", "blindroll", "selfroll"');
+  });
+
+  test("a formula the world cannot roll comes back as the view's refusal, not as a number", async () => {
+    const { writer } = fakeWriter();
+    const body = await textOf("dice.roll", { formula: "the moon" }, ctxWith(writer));
+    expect(body).toContain("is not a formula this world can roll");
+  });
+
+  test("dice.apply names the card and the actor, and never states an amount", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf(
+      "dice.apply",
+      { messageId: "m-roll", actorId: "a-vex", mode: "damage" },
+      ctxWith(writer),
+    );
+    expect(body).toContain("Damage of 17 from m-roll → Vex.");
+    expect(body).toContain("hit points 12 → 0 (-12)");
+    // The whole point of the intent: the host re-reads the card's own total.
+    expect(body).toContain("this agent named no number");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("dice.apply refuses a card it cannot see, and an invalid mode is an invalid call", async () => {
+    const { writer } = fakeWriter();
+    const gone = await textOf(
+      "dice.apply",
+      { messageId: "m-nope", actorId: "a-vex", mode: "healing" },
+      ctxWith(writer),
+    );
+    expect(gone).toContain('no message "m-nope"');
+    const bad = await call(
+      "dice.apply",
+      { messageId: "m-roll", actorId: "a-vex", mode: "bless" },
+      ctxWith(writer),
+    );
+    expect(bad.kind).toBe("invalid");
+    if (bad.kind === "invalid") expect(bad.error).toContain('"damage" or "healing"');
+  });
+
+  test("a player agent may roll dice and may not apply them", async () => {
+    const grant = grantFor("player");
+    const { writer } = fakeWriter();
+    const rolled = await call("dice.roll", { formula: "1d20+5" }, ctxWith(writer, grant));
+    expect(rolled.kind).toBe("result");
+    if (rolled.kind !== "result") return;
+    expect(rolled.result.isError).toBeUndefined();
+
+    const applied = await call(
+      "dice.apply",
+      { messageId: "m-roll", actorId: "a-vex", mode: "damage" },
+      ctxWith(writer, grant),
+    );
+    expect(applied.kind).toBe("result");
+    if (applied.kind !== "result") return;
+    expect(applied.result.isError).toBe(true);
+    expect(applied.result.content[0]?.text).toBe(refusalFor("dice.apply"));
+  });
+});
+
 describe("the catalogue", () => {
-  test("every write tool names one capability, and all twenty-two are registered", () => {
-    expect(WRITE_TOOLS).toHaveLength(22);
+  test("every write tool names one capability, and all twenty-four are registered", () => {
+    expect(WRITE_TOOLS).toHaveLength(24);
     for (const tool of WRITE_TOOLS) expect(tool.capability).not.toBeNull();
     for (const tool of WRITE_TOOLS) {
       expect(AGENT_TOOLS.map((t) => t.name)).toContain(tool.name);

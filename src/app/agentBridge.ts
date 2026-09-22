@@ -34,6 +34,8 @@ import type {
   AgentCombatTurn,
   AgentCombatantRow,
   AgentCompendiumEntry,
+  AgentDiceApply,
+  AgentDiceRoll,
   AgentEncounterCheck,
   AgentTimeOps,
   AgentHexCell,
@@ -116,6 +118,7 @@ import {
   readRoundState,
   startWithSurprise,
 } from "../packages/pf1e/combatState";
+import { readRollApplications } from "../packages/pf1e/rollApply";
 import { isPf1eEncounter } from "../ui/combat/actionBudget";
 import {
   activateEncounter,
@@ -424,6 +427,42 @@ export function agentWorldView(
       if (count > 0) out[coll] = count;
     }
     return out;
+  };
+
+  // ── dice: waiting on the host ───────────────────────────────────────────────────────────────
+  const ROLL_MODES = new Set(["roll", "gmroll", "blindroll", "selfroll"]);
+
+  /** A roll card is the host's answer, and it arrives as a document — find it by its roll id. */
+  const rollCardOf = (rollId: string): BaseDocument | null =>
+    (store.getAll("messages") as unknown as BaseDocument[]).find(
+      (doc) =>
+        ((doc.flags as { core?: { rollId?: unknown } } | undefined)?.core?.rollId ?? null) ===
+        rollId,
+    ) ?? null;
+
+  /**
+   * Poll the replica until the host's answer lands. A tool that rolls is the only place in this
+   * file that cannot build its own ops, so it is also the only place that waits — four seconds,
+   * because a card the host has not committed in four seconds is not coming.
+   */
+  const waitForDoc = async (
+    found: () => BaseDocument | boolean | null,
+    timeoutMs = 4_000,
+  ): Promise<boolean> => {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const hit = found();
+      if (hit) return true;
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
+
+  /** The hit points a card is applied to, read the way the host's own planner reads them. */
+  const hpOf = (actor: ActorDocument | undefined): number => {
+    if (!actor) return 0;
+    const derived = pf1eSheetView(actor);
+    return derived?.derived?.hp ?? 0;
   };
 
   // ── the turn tracker, as this view reads it ─────────────────────────────────────────────────
@@ -1341,6 +1380,86 @@ export function agentWorldView(
       }
       const ended = endCombat(combat).combat;
       return stateOf(ended, "combat ended", combatUpdateOps(ended), 0);
+    },
+    // ── dice (§5.5) ──────────────────────────────────────────────────────────────────────────
+    //
+    // Dice are the host's, and that is the whole design: the formula travels out, the number comes
+    // back from the host's own RNG through the commit-reveal path, and the card it commits is a
+    // document on the replica. So these two are **async** where every other tool is not — and they
+    // are the only two that ask the host for something instead of submitting ops for it. An agent
+    // that could roll its own dice could quietly roll again until it liked the answer.
+    async diceRoll(spec): Promise<AgentDiceRoll | { error: string }> {
+      const mode = ROLL_MODES.has(spec.mode ?? "roll") ? (spec.mode ?? "roll") : "roll";
+      const rollId = await client.rollVerified(
+        spec.formula,
+        mode as "roll" | "gmroll" | "blindroll" | "selfroll",
+        spec.to,
+        spec.flavor,
+      );
+      // The host commits a card carrying this id; the wait is the price of the number being the
+      // host's rather than ours, and a timeout is a refusal an agent can route around.
+      const answered = await waitForDoc(() => rollCardOf(rollId) !== null);
+      if (!answered) {
+        return {
+          error: `the host did not answer the roll of ${spec.formula} — try again, or chat.post the result you need`,
+        };
+      }
+      const card = rollCardOf(rollId) as unknown as MessageDocument | null;
+      if (!card) return { error: `the host did not answer the roll of ${spec.formula}` };
+      const roll = (card.roll ?? null) as { total?: unknown; terms?: unknown } | null;
+      return {
+        messageId: card._id,
+        formula: spec.formula,
+        total: typeof roll?.total === "number" ? roll.total : 0,
+        terms: Array.isArray(roll?.terms) ? (roll?.terms as Json[]) : [],
+        mode,
+        to: [...(card.whisper ?? [])],
+        flavor: card.flavor ?? null,
+      };
+    },
+    async diceApply(spec): Promise<AgentDiceApply | { error: string }> {
+      const card = store.get("messages", spec.messageId) as unknown as
+        | MessageDocument
+        | undefined;
+      if (!card) {
+        return { error: `no message "${spec.messageId}" — chat.read names the cards you may see` };
+      }
+      const actor = store.get("actors", spec.actorId) as unknown as ActorDocument | undefined;
+      if (!actor) {
+        return { error: `no actor "${spec.actorId}" — document.list actors names them` };
+      }
+      const total = typeof card.roll?.total === "number" ? card.roll.total : null;
+      if (total === null) {
+        return { error: `that card carries no rolled total — dice.roll makes one` };
+      }
+      const before = hpOf(actor);
+      // No amount travels: the host re-reads the card's own total and decides, exactly as the chat
+      // card's *Apply* button does. The number above is only for reporting what the host did.
+      client.rollApply(spec.messageId, spec.actorId, spec.mode);
+      // Re-read the card each poll: the store hands out a new document when the host updates it,
+      // so a captured one would wait forever for a flag that has already landed.
+      const done = await waitForDoc(() => {
+        const now = store.get("messages", spec.messageId);
+        return now === undefined
+          ? false
+          : readRollApplications(now)[spec.actorId]?.[spec.mode] !== undefined;
+      });
+      if (!done) {
+        return {
+          error: `the host did not apply ${spec.mode} from "${spec.messageId}" — it may have been refused, or the card already counted against ${actor.name}`,
+        };
+      }
+      const after = hpOf(store.get("actors", spec.actorId) as unknown as ActorDocument | undefined);
+      return {
+        messageId: spec.messageId,
+        actorId: spec.actorId,
+        actorName: actor.name,
+        mode: spec.mode,
+        amount: total,
+        hpBefore: before,
+        hpAfter: after,
+        note: null,
+      };
     },
     tokenCreate(spec): Op | { error: string } {
       const scene = scenes().find((row) => row._id === spec.sceneId);

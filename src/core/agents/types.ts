@@ -102,6 +102,25 @@ export interface AgentWorldView {
   /** End it: the tracker stops and the round structure is cleared. */
   combatEndOps(sceneId: string | null): AgentCombatTurn | { error: string };
   /**
+   * Roll dice **through the host** (§5.5). The formula travels; the number comes back from the
+   * host's own dice, which is why this is async — and why an agent cannot claim a total.
+   */
+  diceRoll(spec: {
+    formula: string;
+    mode?: string;
+    to?: string[];
+    flavor?: string;
+  }): Promise<AgentDiceRoll | { error: string }>;
+  /**
+   * Ask the host to apply a roll card's own total to an actor. No amount travels: the host reads
+   * the card and decides, exactly as the chat card's *Apply* button does.
+   */
+  diceApply(spec: {
+    messageId: string;
+    actorId: string;
+    mode: "damage" | "healing";
+  }): Promise<AgentDiceApply | { error: string }>;
+  /**
    * Optional: one compendium entry by id, in the shape its pack authors it. Only a replica with
    * the compendium runtime can answer it.
    */
@@ -303,6 +322,41 @@ export interface AgentCombatTurn extends AgentCombatState {
    * silently skipping a rule.
    */
   dyingChecks: Array<{ combatantId: string; actorId: string; actorName: string; hp: number }>;
+}
+
+/**
+ * One roll, as the host rolled it (§5.5). The terms are the host's, so the answer can show the
+ * individual dice — a model that has to describe "a 6 and a 3" needs more than the total, and a
+ * total it computed itself would not be the table's.
+ */
+export interface AgentDiceRoll {
+  messageId: string;
+  formula: string;
+  total: number;
+  /** The individual dice and modifiers, in the dice engine's own shape. */
+  terms: Json[];
+  mode: string;
+  /** Who the roll was whispered to, when it was one. */
+  to: string[];
+  /** The card's flavor line, when the caller set one. */
+  flavor: string | null;
+}
+
+/**
+ * The result of applying a card (§5.5): the host's own arithmetic, read back after the fact.
+ * `amount` is the card's total — the agent never states a number — and the hit points are what the
+ * actor's sheet says before and after, because temp HP absorbs first and that is the host's rule.
+ */
+export interface AgentDiceApply {
+  messageId: string;
+  actorId: string;
+  actorName: string;
+  mode: "damage" | "healing";
+  amount: number;
+  hpBefore: number;
+  hpAfter: number;
+  /** The host's own one-line account: `8 damage — hp 12 → 4 (temporary hit points absorbed 4)`. */
+  note: string | null;
 }
 
 export interface AgentHexSummary {

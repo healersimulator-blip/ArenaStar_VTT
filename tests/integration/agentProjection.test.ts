@@ -43,6 +43,7 @@ import type {
   EffectDocument,
 } from "../../src/core/documents";
 import { secondsPerRoundOf, worldSettingsFrom } from "../../src/core/worldSettings";
+import { readRollApplications } from "../../src/packages/pf1e/rollApply";
 import { agentRegistryFrom, agentRecordOf, grantOfRecord } from "../../src/core/agents/grants";
 import { agentWorldView } from "../../src/app/agentBridge";
 import { callTool } from "../../src/core/agents/tools";
@@ -336,7 +337,13 @@ async function bootCombat(): Promise<Booted> {
       flags: {},
       // `system.pf1e` is what makes it a PF1e actor (`isPF1eActor`), and that is what routes the
       // encounter through PF1e's round structure instead of the generic tracker's.
-      system: { pf1e: { abilities: { str: 10, dex: 10, con: 10 } } },
+      system: {
+        pf1e: {
+          abilities: { str: 10, dex: 10, con: 10 },
+          hp: id === "a-vex" ? 30 : 6,
+          hpMax: id === "a-vex" ? 30 : 6,
+        },
+      },
       items: [],
       effects: withEffects ? effects : [],
     }) as unknown as ActorDocument;
@@ -908,5 +915,83 @@ describe("the clock and the turn tracker, through a real host (§5.5)", () => {
     if (tod.kind !== "result") return;
     expect(tod.result.isError).toBeUndefined();
     expect(tod.result.content[0]?.text).toContain("It is 00:00 on day 0 — night");
+  });
+});
+
+describe("dice, through the host's own dice (§5.5)", () => {
+  test("the number is the host's, the card is the agent's, and applying it lands on the actor", async () => {
+    const boot = await bootCombat();
+    const { session, grant } = await openAgent(boot, "gm", "Roller");
+    const ctx = hexCtxOf(session, grant);
+
+    const rolled = await callTool(
+      { name: "dice.roll", args: { formula: "1d20+5", flavor: "attack: goblin" } },
+      ctx,
+    );
+    expect(rolled.kind).toBe("result");
+    if (rolled.kind !== "result") return;
+    expect(rolled.result.isError, rolled.result.content[0]?.text).toBeUndefined();
+    const body = rolled.result.content[0]?.text ?? "";
+    const total = Number(/1d20\+5 = (-?\d+)/.exec(body)?.[1] ?? "NaN");
+    // The number came from the host's dice, so all this can assert is that it is a legal one.
+    expect(total).toBeGreaterThanOrEqual(6);
+    expect(total).toBeLessThanOrEqual(25);
+    expect(body).toContain("rolled by the host");
+
+    // …and it is a card on the replica, authored by the agent and carrying the same total: the
+    // roll is not a number the bridge computed and whispered back.
+    const card = (boot.store.getAll("messages") as unknown as MessageDocument[])
+      .filter((row) => (row as unknown as { roll?: { total?: number } | null }).roll !== null)
+      .at(-1);
+    expect(card).toBeDefined();
+    expect(card?.author).toBe(session.user._id);
+    expect(card?.roll?.total).toBe(total);
+    expect(card?.flavor).toBe("attack: goblin");
+
+    const applied = await callTool(
+      {
+        name: "dice.apply",
+        args: { messageId: card?._id ?? "", actorId: "a-vex", mode: "damage" },
+      },
+      ctx,
+    );
+    expect(applied.kind).toBe("result");
+    if (applied.kind !== "result") return;
+    expect(applied.result.isError, applied.result.content[0]?.text).toBeUndefined();
+    expect(applied.result.content[0]?.text).toContain(`hit points 30 → ${30 - total}`);
+
+    // The host's own arithmetic, read back off the actor: the agent named a card, never an amount.
+    const vex = boot.store.get("actors", "a-vex") as unknown as ActorDocument | undefined;
+    expect(
+      ((vex?.system as { pf1e?: { hp?: number } } | undefined)?.pf1e?.hp ?? -1) as number,
+    ).toBe(30 - total);
+    // …and the card records it, so the same card cannot be counted twice against the same actor.
+    const after = boot.store.get("messages", card?._id ?? "") as unknown as MessageDocument | undefined;
+    expect(readRollApplications(after as never)["a-vex"]?.damage).toBe(total);
+  });
+
+  test("a player agent may roll, and may not apply the number it rolled", async () => {
+    const boot = await bootCombat();
+    const { session, grant } = await openAgent(boot, "player", "Vex");
+    const ctx = hexCtxOf(session, grant);
+
+    const rolled = await callTool({ name: "dice.roll", args: { formula: "1d20" } }, ctx);
+    expect(rolled.kind).toBe("result");
+    if (rolled.kind !== "result") return;
+    expect(rolled.result.isError, rolled.result.content[0]?.text).toBeUndefined();
+
+    const applied = await callTool(
+      { name: "dice.apply", args: { messageId: "m-1", actorId: "a-vex", mode: "damage" } },
+      ctx,
+    );
+    expect(applied.kind).toBe("result");
+    if (applied.kind !== "result") return;
+    expect(applied.result.isError).toBe(true);
+    expect(applied.result.content[0]?.text).toBe(refusalFor("dice.apply"));
+    expect(
+      ((boot.store.get("actors", "a-vex") as unknown as ActorDocument | undefined)?.system as
+        | { pf1e?: { hp?: number } }
+        | undefined)?.pf1e?.hp ?? 0,
+    ).toBe(30);
   });
 });

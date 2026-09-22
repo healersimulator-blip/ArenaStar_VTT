@@ -509,7 +509,7 @@ here is a real-host integration test: `bestiary.search → actor.from_compendium
 token in **one envelope stamped `by` the agent**, and a pasted `Goblin Warrior` stat block becomes a
 real actor (hp 6, Dex 15, owned by the session that imported it) with a token on the table.
 
-### Phase 4 — Table flow, time, strategic (1 day, S) — 🚧 clock + tracker landed 2026-09-22 (D-284)
+### Phase 4 — Table flow, time, strategic (1 day, S) — 🚧 clock, tracker and dice landed 2026-09-22 (D-284, D-285)
 `combat.*`, `time.*`, `dice.apply`, `fog.*` (mask + state), `strategic.snapshot/order/report`.
 
 **As landed so far — the clock and the tracker (D-284).** `time.get` / `time.of_day` /
@@ -524,9 +524,15 @@ unresolved initiative tie are the rules' own verdicts — moves the world clock 
 `clockDeltaSeconds` **only** where the world advances it on a round wrap, and reports a dying
 creature's stabilization check instead of rolling it. `combat.state` is an addition to §5.5's table:
 `combat.next` without a way to read the order advances a tracker it cannot see. **Still to come:**
-`dice.roll` / `dice.apply` (host-executed, so these two are async: the client sends, the host rolls
-and commits the card, and the tool reads the number back off the replica), `fog.*`, and
-`strategic.*`.
+**As landed so far — dice (D-285).** `dice.roll` and `dice.apply` are the only two tools that
+**wait**: the host owns the RNG, the seed and the card, so a roll sends its formula through the
+commit-reveal path and reads the total back off the card the host commits (four-second ceiling,
+then a refusal in words). `dice.apply` names a card and an actor and **never an amount** — the host
+re-reads the card's own total and does the arithmetic, exactly as the chat card's *Apply* button
+does. A player agent may roll; it may not apply. **Still to come:** `fog.reveal` / `fog.hide` /
+`fog.state` (the manual mask, and the cell reveal set on a hexcrawl scene), and
+`strategic.snapshot` / `strategic.order` / `strategic.report` — the last behind the plan's explicit
+opt-in, since one order is a 10k-model turn.
 *Test:* the agent runs a full round (start combat, next turn, apply damage) and the clock advances by
 exactly `secondsPerRound`; a `time.advance` of 3 days sweeps the clock-counted effects exactly as the
 Settings buttons do.

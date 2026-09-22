@@ -62,6 +62,8 @@ describe("the tool manifest (MCP plan §5)", () => {
       "combat.add",
       "combat.next",
       "combat.end",
+      "dice.roll",
+      "dice.apply",
       "token.move",
       "token.properties",
       "scene.create",

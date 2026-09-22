@@ -435,6 +435,8 @@ describe("vtt-mcp ↔ agent bridge (MCP plan §8 Phase 0)", () => {
       "combat.add",
       "combat.next",
       "combat.end",
+      "dice.roll",
+      "dice.apply",
       "token.move",
       "token.properties",
       "scene.create",

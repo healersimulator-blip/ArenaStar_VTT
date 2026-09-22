@@ -1992,6 +1992,133 @@ const combatEnd: ToolDefinition = {
   },
 };
 
+// ── dice (§5.5) ──────────────────────────────────────────────────────────────────────────────
+//
+// The two tools here are the only ones that **ask the host** instead of submitting ops, and they
+// are async for exactly that reason. Dice are the table's: the host owns the RNG, the seed and the
+// card, and an agent that could roll its own could quietly roll again until it liked the number.
+// So `dice.roll` sends a formula and reads the host's card back, and `dice.apply` names a card and
+// an actor — never an amount — and lets the host re-read its own total.
+
+const DICE_MODES = ["roll", "gmroll", "blindroll", "selfroll"] as const;
+
+const diceRollTool: ToolDefinition = {
+  name: "dice.roll",
+  description:
+    'Roll dice as this agent, through the host\'s own dice (commit-reveal, so the number is the table\'s and not the agent\'s to choose): "1d20+5", "2d6+3", "4d6k3". The card lands in chat as this agent unless the mode says otherwise, and the answer is the total plus the individual dice. The one tool here that waits, because the host rolls it.',
+  args: {
+    properties: {
+      formula: {
+        type: "string",
+        description: 'the dice expression — "1d20+5", "2d6", "1d8+1d4+2"',
+      },
+      mode: {
+        type: "string",
+        description:
+          'who sees it: "roll" (public, default), "gmroll" (GM only), "blindroll" (GM sees, players see a hidden roll) or "selfroll" (only this agent)',
+      },
+      to: {
+        type: "array",
+        items: { type: "string" },
+        description: "user ids to whisper the roll to",
+      },
+      flavor: {
+        type: "string",
+        description: 'why the roll was made — "attack: goblin 2"; it rides the card as its flavor',
+      },
+    },
+    required: ["formula"],
+  },
+  capability: "dice.roll",
+  async run(args, ctx): Promise<ToolOutcome> {
+    const begun = beginWrite(ctx);
+    if ("refused" in begun) return begun.refused;
+    const formula = str(args["formula"]);
+    if (!formula) return invalid('dice.roll needs a formula — "1d20+5"');
+    const mode = str(args["mode"]) ?? "roll";
+    if (!DICE_MODES.includes(mode as (typeof DICE_MODES)[number])) {
+      return invalid(
+        `dice.roll knows the modes ${DICE_MODES.map((m) => `"${m}"`).join(", ")} — not "${mode}"`,
+      );
+    }
+    const rolled = await ctx.view.diceRoll({
+      formula,
+      mode,
+      ...(Array.isArray(args["to"])
+        ? { to: args["to"].filter((id): id is string => typeof id === "string") }
+        : {}),
+      ...(str(args["flavor"]) === undefined ? {} : { flavor: str(args["flavor"]) as string }),
+    });
+    if ("error" in rolled) return refusal(rolled.error);
+    const dice = rolled.terms
+      .map((term) => {
+        const row = obj(term);
+        if (!row) return null;
+        if (typeof row["result"] === "number" && typeof row["faces"] === "number")
+          return `d${row["faces"]}: ${row["result"]}`;
+        if (typeof row["operator"] === "string")
+          return `${row["operator"]}${String(row["value"] ?? "")}`;
+        return null;
+      })
+      .filter((row): row is string => row !== null);
+    return text(
+      [
+        `${rolled.formula} = ${rolled.total}${dice.length > 0 ? ` (${dice.join(", ")})` : ""} — ${rolled.mode}, rolled by the host.`,
+        `  card ${rolled.messageId}${rolled.flavor ? ` — ${rolled.flavor}` : ""}${
+          rolled.to.length > 0 ? ` · whispered to ${rolled.to.join(", ")}` : ""
+        }`,
+        `  dice.apply puts this number on an actor; nothing has been applied.`,
+      ].join("\n"),
+      rolled as unknown as Json,
+    );
+  },
+};
+
+const diceApplyTool: ToolDefinition = {
+  name: "dice.apply",
+  description:
+    "Apply a roll card's own total to an actor as damage or healing. No amount travels: the agent names the card and the actor, and the host re-reads the card's total and does the arithmetic (temporary hit points absorb first; healing also removes nonlethal). Answer: the amount, and the hit points before and after.",
+  args: {
+    properties: {
+      messageId: {
+        type: "string",
+        description: "the roll card — dice.roll and chat.read name them",
+      },
+      actorId: { type: "string", description: "the actor it lands on" },
+      mode: {
+        type: "string",
+        description: '"damage" or "healing"',
+      },
+    },
+    required: ["messageId", "actorId", "mode"],
+  },
+  capability: "dice.apply",
+  async run(args, ctx): Promise<ToolOutcome> {
+    const begun = beginWrite(ctx);
+    if ("refused" in begun) return begun.refused;
+    const messageId = str(args["messageId"]);
+    const actorId = str(args["actorId"]);
+    const mode = str(args["mode"]) ?? "";
+    if (!messageId) return invalid("dice.apply needs `messageId` — the roll card");
+    if (!actorId) return invalid("dice.apply needs `actorId` — who it lands on");
+    if (mode !== "damage" && mode !== "healing")
+      return invalid('dice.apply needs `mode` — "damage" or "healing"');
+    const applied = await ctx.view.diceApply({ messageId, actorId, mode });
+    if ("error" in applied) return refusal(applied.error);
+    const moved = applied.hpAfter - applied.hpBefore;
+    return text(
+      [
+        `${applied.mode === "damage" ? "Damage" : "Healing"} of ${applied.amount} from ${applied.messageId} → ${applied.actorName}.`,
+        `  hit points ${applied.hpBefore} → ${applied.hpAfter} (${moved >= 0 ? `+${moved}` : moved}).`,
+        applied.note === null
+          ? "  the host applied the card's own total — this agent named no number."
+          : `  ${applied.note}`,
+      ].join("\n"),
+      applied as unknown as Json,
+    );
+  },
+};
+
 export const WRITE_TOOLS: readonly ToolDefinition[] = [
   documentCreate,
   documentUpdate,
@@ -2008,6 +2135,8 @@ export const WRITE_TOOLS: readonly ToolDefinition[] = [
   combatAdd,
   combatNext,
   combatEnd,
+  diceRollTool,
+  diceApplyTool,
   tokenMove,
   tokenProperties,
   sceneCreate,
