@@ -509,7 +509,7 @@ here is a real-host integration test: `bestiary.search → actor.from_compendium
 token in **one envelope stamped `by` the agent**, and a pasted `Goblin Warrior` stat block becomes a
 real actor (hp 6, Dex 15, owned by the session that imported it) with a token on the table.
 
-### Phase 4 — Table flow, time, strategic (1 day, S) — 🚧 all but the strategic layer landed 2026-09-22 (D-284, D-285, D-286)
+### Phase 4 — Table flow, time, strategic (1 day, S) — ✅ landed 2026-09-22 (D-284, D-285, D-286, D-287)
 `combat.*`, `time.*`, `dice.apply`, `fog.*` (mask + state), `strategic.snapshot/order/report`.
 
 **As landed so far — the clock and the tracker (D-284).** `time.get` / `time.of_day` /
@@ -539,9 +539,15 @@ the hex list the tools read, since painting one without the other is how a map e
 screen and shut on another. That envelope found a real host bug (D-286): D-271's reveal hook
 inserted each crossing's cell creates after *every* scene update in an envelope, so two flag writes
 on one scene sent the same create twice and the receiving store refused the whole envelope — the
-player's replica silently kept the old scene. **Still to come:** the strategic layer —
-`strategic.snapshot` / `strategic.order` / `strategic.report` — behind the plan's explicit opt-in,
-since one order is a 10k-model turn.
+player's replica silently kept the old scene. **As landed so far — the strategic layer (D-287).** `strategic.snapshot`, `strategic.report` and
+`strategic.order`. A unit's *models* are the §5A pool's truth, not the document's: `96/120 standing,
+at 400,300` when the replica holds the pool, and a sentence saying it does not when it does not. The
+turn report is **retained** (`ClientSync.lastTurnReport`), because a bus event is a moment and an
+agent asked "what happened?" after the fact had nothing to read. `strategic.order` checks the *shape*
+of an order and never its outcome — a move needs a path, an attack a target, and whether the charge
+is legal is the rules module's verdict at resolution — writes the same embedded record the Army
+window writes, in one envelope, and names the units this replica does not hold. §8's opt-in stands:
+a capability the GM grants, `MAX_OPS_PER_CALL` orders per call. **Phase 4 is complete.**
 *Test:* the agent runs a full round (start combat, next turn, apply damage) and the clock advances by
 exactly `secondsPerRound`; a `time.advance` of 3 days sweeps the clock-counted effects exactly as the
 Settings buttons do.

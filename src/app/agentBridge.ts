@@ -39,7 +39,11 @@ import type {
   AgentEncounterCheck,
   AgentFogOps,
   AgentFogState,
+  AgentStrategicOrders,
+  AgentStrategicReport,
+  AgentStrategicSnapshot,
   AgentTimeOps,
+  AgentUnitRow,
   AgentHexCell,
   AgentHexFeature,
   AgentDocument,
@@ -142,6 +146,15 @@ import {
   selectedEncounter,
 } from "../ui/combat/encounters";
 import { timeOfDay } from "../core/clock";
+import type {
+  ArmyDocument,
+  FactionDocument,
+  ModelPool,
+  Order,
+  TurnDocument,
+  UnitDocument,
+  Vec2,
+} from "../core/strategic";
 import { daylightOf } from "../core/hexcrawl/encounter";
 import { advanceClockOnRoundOf } from "../core/worldSettings";
 import { pf1eSheetView, isPF1eActor } from "../ui/sheets/pf1eSheetModel";
@@ -442,6 +455,140 @@ export function agentWorldView(
       if (count > 0) out[coll] = count;
     }
     return out;
+  };
+
+  // ── the strategic layer: one unit as a commander reads it ───────────────────────────────────
+  const unitRow = (
+    army: ArmyDocument,
+    unit: UnitDocument,
+    pool: ModelPool | null,
+  ): AgentUnitRow => {
+    // The document's range is the truth about how many models a unit *has*; the pool is the truth
+    // about how many are still standing. Without a pool the range is still worth reporting.
+    const size = unit.modelRange
+      ? Math.max(0, (unit.modelRange[1] as number) - (unit.modelRange[0] as number))
+      : null;
+    let alive: number | null = null;
+    let at: AgentUnitRow["at"] = null;
+    if (pool && unit.modelRange) {
+      let sx = 0;
+      let sy = 0;
+      alive = 0;
+      for (let i = unit.modelRange[0]; i < Math.min(unit.modelRange[1], pool.count); i++) {
+        // Status bits 0–1 are dead/routed: a routed model is still a model, but it is not one the
+        // commander can order, so the centre of mass is the centre of the ones that answer.
+        if (((pool.status[i] ?? 0) & 3) !== 0) continue;
+        sx += pool.x[i] ?? 0;
+        sy += pool.y[i] ?? 0;
+        alive += 1;
+      }
+      at = alive > 0 ? { x: Math.round(sx / alive), y: Math.round(sy / alive) } : null;
+    }
+    const stats = unit.stats ?? { strength: 0, morale: 0, supply: 0, fatigue: 0 };
+    return {
+      id: unit._id,
+      armyId: army._id,
+      armyName: army.name,
+      name: unit.name,
+      type: typeof unit.profile?.["type"] === "string" ? (unit.profile["type"] as string) : null,
+      sceneId: unit.sceneId ?? null,
+      formation: unit.formation ?? "",
+      models: size,
+      modelsAlive: alive,
+      at,
+      stats: {
+        strength: stats.strength ?? 0,
+        morale: stats.morale ?? 0,
+        supply: stats.supply ?? 0,
+        fatigue: stats.fatigue ?? 0,
+      },
+      doctrine: unit.doctrine ?? null,
+      activeOrder: unit.orders?.active?.kind ?? null,
+      pendingOrders: (unit.orders?.pending ?? []).map((order) => order.kind),
+      issuedBy: unit.orders?.issuedBy ?? null,
+      issuedTurn: unit.orders?.issuedTurn ?? null,
+    };
+  };
+
+  /** One order, from the tool's flat arguments to the §4A union — validated, never guessed. */
+  const buildOrder = (
+    request: {
+      kind: string;
+      path?: number[];
+      pace?: string;
+      facing?: number;
+      targetUnitId?: string;
+      mode?: string;
+      stance?: string;
+      formation?: string;
+      toward?: number[];
+      action?: string;
+      type?: string;
+      data?: Json;
+    },
+  ): { kind: string; order: Order } | { error: string } => {
+    const flat = (points: number[] | undefined): Vec2[] | null => {
+      if (!points || points.length < 4 || points.length % 2 !== 0) return null;
+      const out: Vec2[] = [];
+      for (let i = 0; i < points.length; i += 2)
+        out.push({ x: points[i] as number, y: points[i + 1] as number });
+      return out;
+    };
+    switch (request.kind) {
+      case "move": {
+        const path = flat(request.path);
+        if (!path) return { error: "a move order needs `path` — a flat list of x,y waypoints" };
+        const pace =
+          request.pace === "run" || request.pace === "charge" || request.pace === "march"
+            ? request.pace
+            : "march";
+        return {
+          kind: "move",
+          order: {
+            kind: "move",
+            path,
+            pace,
+            ...(request.facing === undefined ? {} : { facing: request.facing }),
+          },
+        };
+      }
+      case "attack": {
+        if (!request.targetUnitId)
+          return { error: "an attack order needs `targetUnitId` — strategic.snapshot names them" };
+        return {
+          kind: "attack",
+          order: {
+            kind: "attack",
+            targetUnitId: request.targetUnitId,
+            ...(request.mode === undefined ? {} : { mode: request.mode }),
+          },
+        };
+      }
+      case "hold":
+        return { kind: "hold", order: { kind: "hold", stance: request.stance ?? "defend" } };
+      case "formation":
+        if (!request.formation) return { error: "a formation order needs `formation`" };
+        return { kind: "formation", order: { kind: "formation", formation: request.formation } };
+      case "retreat": {
+        const toward = flat(request.toward);
+        if (!toward || toward.length === 0)
+          return { error: "a retreat order needs `toward` — [x, y] to fall back to" };
+        return { kind: "retreat", order: { kind: "retreat", toward: toward[0] as Vec2 } };
+      }
+      case "supply":
+        if (!request.action) return { error: "a supply order needs `action`" };
+        return { kind: "supply", order: { kind: "supply", action: request.action } };
+      case "custom":
+        if (!request.type) return { error: 'a custom order needs `type` — the module names them' };
+        return {
+          kind: "custom",
+          order: { kind: "custom", type: request.type, data: request.data ?? null },
+        };
+      default:
+        return {
+          error: `unknown order "${request.kind}" — the kinds are move, attack, hold, formation, retreat, supply and custom`,
+        };
+    }
   };
 
   // ── dice: waiting on the host ───────────────────────────────────────────────────────────────
@@ -1579,6 +1726,131 @@ export function agentWorldView(
         what,
         cells: spec.cells === undefined ? [] : [...spec.cells],
       };
+    },
+    // ── the strategic layer (§5.6) ───────────────────────────────────────────────────────────
+    //
+    // Armies, units and factions are documents, and orders are an ordinary embedded update — so
+    // this layer is the least exotic in the catalogue. What it adds is the pool: a unit's *models*
+    // are columns in the §5A replica, so "how many are still standing" and "where are they" are
+    // read off the pool rather than off the document, which only ever names a range.
+    strategicSnapshot(): AgentStrategicSnapshot {
+      const armies = store.getAll("armies") as unknown as ArmyDocument[];
+      const factions = store.getAll("factions") as unknown as FactionDocument[];
+      const turns = store.getAll("turns") as unknown as TurnDocument[];
+      const turn = turns[0] ?? null;
+      const pool = client.simReplica;
+      const rows: AgentUnitRow[] = [];
+      const armyRows = armies.map((army) => {
+        const faction = army.factionId
+          ? factions.find((row) => row._id === army.factionId)
+          : undefined;
+        for (const unit of army.units ?? []) rows.push(unitRow(army, unit, pool));
+        return {
+          id: army._id,
+          name: army.name,
+          factionId: army.factionId ?? null,
+          factionName: faction?.name ?? null,
+          factionColor: faction?.color ?? null,
+          commanders: (army.commander ?? []).length,
+          units: (army.units ?? []).length,
+          supply: Object.keys(army.supply ?? {}),
+        };
+      });
+      return {
+        armies: armyRows,
+        units: rows,
+        factions: factions.map((faction) => ({
+          id: faction._id,
+          name: faction.name,
+          color: faction.color,
+          allies: (faction.allies ?? []).length,
+        })),
+        turn: turn
+          ? {
+              id: turn._id,
+              number: turn.number,
+              phase: turn.phase,
+              mode: turn.mode,
+              sceneId: turn.sceneId ?? null,
+              readyUsers: (turn.readyUsers ?? []).length,
+            }
+          : null,
+        models: pool?.count ?? null,
+      };
+    },
+    strategicReport(): AgentStrategicReport | null {
+      const last = client.lastTurnReport;
+      if (!last) return null;
+      const report = last.report;
+      return {
+        turnId: last.turnId,
+        turn: report.turn,
+        sceneId: report.sceneId ?? null,
+        subPhases: [...report.subPhases],
+        // Every event, but only the fields an agent reads: the model indices a 10k-model battle
+        // reports are not an answer, they are a second copy of the pool.
+        events: report.events.map((event) => ({
+          subPhase: event.subPhase,
+          type: event.type,
+          unitId: event.unitId,
+          text: event.text,
+        })),
+        summary: { ...report.summary },
+        rulesVersion: report.rulesVersion,
+      };
+    },
+    strategicOrderOps(spec): AgentStrategicOrders | { error: string } {
+      if (spec.orders.length === 0) {
+        return { error: "strategic.order needs at least one order" };
+      }
+      const armies = store.getAll("armies") as unknown as ArmyDocument[];
+      const turns = store.getAll("turns") as unknown as TurnDocument[];
+      const issuedTurn = turns[0]?.number ?? 0;
+      const issuedBy = client.user?.id ?? "";
+      const ops: Op[] = [];
+      const issued: AgentStrategicOrders["issued"] = [];
+      const missing: string[] = [];
+      for (const request of spec.orders) {
+        let found: { army: ArmyDocument; unit: UnitDocument } | null = null;
+        for (const army of armies) {
+          const unit = (army.units ?? []).find((row) => row._id === request.unitId);
+          if (!unit) continue;
+          if (request.armyId !== undefined && request.armyId !== army._id) continue;
+          found = { army, unit };
+          break;
+        }
+        if (!found) {
+          missing.push(request.unitId);
+          continue;
+        }
+        const built = buildOrder(request);
+        if ("error" in built) return { error: built.error };
+        issued.push({
+          unitId: found.unit._id,
+          armyId: found.army._id,
+          kind: built.kind,
+          unitName: found.unit.name,
+        });
+        ops.push({
+          kind: "update",
+          ref: {
+            coll: "units",
+            id: found.unit._id,
+            parent: { coll: "armies", id: found.army._id },
+          },
+          diff: {
+            "orders.pending": [built.order as unknown as Json],
+            "orders.issuedBy": issuedBy,
+            "orders.issuedTurn": issuedTurn,
+          },
+        });
+      }
+      if (ops.length === 0) {
+        return {
+          error: `no unit on this replica answers to ${missing.join(", ")} — strategic.snapshot names the ones you may see`,
+        };
+      }
+      return { ops, issued, missing, issuedTurn };
     },
     tokenCreate(spec): Op | { error: string } {
       const scene = scenes().find((row) => row._id === spec.sceneId);

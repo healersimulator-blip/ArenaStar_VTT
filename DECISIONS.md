@@ -8620,3 +8620,39 @@ the table can see is not the same power as changing it, and a player agent has n
   `pnpm lint` **exit 0**.
 - `pnpm build` → `pnpm size` **3 270 115 B raw / 943 124 B gzip — +5 495 B**, inside the 6 MB
   budget.
+
+## D-287 — MCP connector Phase 4, part 4: the strategic layer (2026-09-22)
+
+`strategic.snapshot`, `strategic.report`, `strategic.order` — Phase 4 is **complete**.
+
+**Decision — a unit's models are the pool's truth, not the document's.** An army's units name a
+`modelRange`; how many are still standing and where they are is the §5A pool's business. So the
+snapshot reads both and says which it got: `96/120 standing, at 400,300` when the replica holds the
+pool, `120 models (the pool is not on this replica)` when it does not. A document-only answer would
+report a full-strength unit that has been shot to pieces.
+
+**Decision — the turn report is retained, not streamed.** A bus event is a moment: an agent asked
+"what happened?" after the fact has nothing to read if the report was only ever emitted. `ClientSync`
+now keeps the last `turn.report` (`lastTurnReport`) beside emitting it — the turn's own record, not
+state the client invented — and `strategic.report` refuses honestly before the first turn resolves
+rather than answering with an empty one.
+
+**Decision — `strategic.order` checks the shape, never the outcome.** The tool validates what each
+kind needs (a move needs a path, an attack a target) and writes the same embedded record the Army
+window writes — `orders.pending`, `orders.issuedBy`, `orders.issuedTurn` — in **one envelope**, so a
+turn's orders are one act of command and one undo. Whether a charge is *legal* is the rules module's
+verdict at resolution; a connector that pre-adjudicated orders would be a second referee with no
+rules. §8's opt-in stands: `strategic.order` is a capability the GM grants, one call is at most
+`MAX_OPS_PER_CALL` orders, and a unit this replica does not hold is **named**, not dropped.
+
+**Gates.**
+
+- `pnpm test` — **3 304 tests passed** (12 skipped). New: 3 integration cases over a real host with
+  two armies and a turn open in the orders phase — the order of battle read back, two orders issued
+  in **one envelope `by` the agent** and stamped on the documents with the turn and the user, a
+  unit the replica does not hold named while the other order still lands, a `player` grant refused
+  with nothing submitted, and no report before a turn resolves. Plus 3 read and 6 write cases.
+- `pnpm typecheck` **51 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`) ·
+  `pnpm lint` **exit 0**.
+- `pnpm build` → `pnpm size` **3 279 848 B raw / 946 487 B gzip — +9 733 B**, inside the 6 MB
+  budget.

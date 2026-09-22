@@ -118,6 +118,29 @@ export interface AgentWorldView {
       all?: boolean;
     },
   ): AgentFogOps | { error: string };
+  /** The strategic layer: armies, their units, the factions and the theatre's turn (§5.6). */
+  strategicSnapshot(): AgentStrategicSnapshot;
+  /** The last turn report this replica received — null before the first turn resolves. */
+  strategicReport(): AgentStrategicReport | null;
+  /** Issue orders: one envelope, one record per unit, never adjudicated here (§5.6, §8). */
+  strategicOrderOps(spec: {
+    orders: Array<{
+      unitId: string;
+      armyId?: string;
+      kind: string;
+      path?: number[];
+      pace?: string;
+      facing?: number;
+      targetUnitId?: string;
+      mode?: string;
+      stance?: string;
+      formation?: string;
+      toward?: number[];
+      action?: string;
+      type?: string;
+      data?: Json;
+    }>;
+  }): AgentStrategicOrders | { error: string };
   /**
    * Roll dice **through the host** (§5.5). The formula travels; the number comes back from the
    * host's own dice, which is why this is async — and why an agent cannot claim a total.
@@ -404,6 +427,83 @@ export interface AgentFogOps {
   what: string;
   /** The cells opened or closed, when it was a cell edit. */
   cells: string[];
+}
+
+/** One army on the strategic layer (§5.6). */
+export interface AgentArmyRow {
+  id: string;
+  name: string;
+  factionId: string | null;
+  factionName: string | null;
+  factionColor: string | null;
+  /** How many commanders the army answers to. */
+  commanders: number;
+  units: number;
+  /** Supply keys the army carries, not their values — a value is a rules module's business. */
+  supply: string[];
+}
+
+/** One unit, with the strength a commander actually commands against (§5.6). */
+export interface AgentUnitRow {
+  id: string;
+  armyId: string;
+  armyName: string;
+  name: string;
+  /** The unit's system-defined type, when its profile names one. */
+  type: string | null;
+  sceneId: string | null;
+  formation: string;
+  /** Living models out of the unit's whole range — the pool is the truth, not the document. */
+  models: number | null;
+  modelsAlive: number | null;
+  /** Centre of the living models, when this replica holds the pool (§5A). */
+  at: { x: number; y: number } | null;
+  stats: { strength: number; morale: number; supply: number; fatigue: number };
+  doctrine: string | null;
+  /** The order being carried out, and the ones queued behind it, by kind. */
+  activeOrder: string | null;
+  pendingOrders: string[];
+  issuedBy: string | null;
+  issuedTurn: number | null;
+}
+
+export interface AgentStrategicSnapshot {
+  armies: AgentArmyRow[];
+  units: AgentUnitRow[];
+  factions: Array<{ id: string; name: string; color: string; allies: number }>;
+  /** The theatre's turn, when there is one — its phase is what makes an order legal. */
+  turn: {
+    id: string;
+    number: number;
+    phase: string;
+    mode: string;
+    sceneId: string | null;
+    readyUsers: number;
+  } | null;
+  /** Models in this replica's pool; null when the replica holds none (no positions, then). */
+  models: number | null;
+}
+
+/** A turn report, trimmed to what an agent reads (§5.6): the events are the story. */
+export interface AgentStrategicReport {
+  turnId: string;
+  turn: number;
+  sceneId: string | null;
+  subPhases: string[];
+  events: Array<{ subPhase: string; type: string; unitId: string; text: string }>;
+  summary: Record<string, Json>;
+  rulesVersion: string;
+}
+
+/** Orders, built and ready to submit (§5.6). */
+export interface AgentStrategicOrders {
+  ops: Op[];
+  /** One per unit that got an order, in the caller's order. */
+  issued: Array<{ unitId: string; armyId: string; kind: string; unitName: string }>;
+  /** Units named but not on this replica — refused rather than silently dropped. */
+  missing: string[];
+  /** The turn number the orders are stamped with, when the theatre has one. */
+  issuedTurn: number;
 }
 
 export interface AgentHexSummary {

@@ -73,9 +73,11 @@ describe("the catalogue after Phase 1 (§5)", () => {
         "time.of_day",
         "combat.state",
         "fog.state",
+        "strategic.snapshot",
+        "strategic.report",
       ]),
     );
-    expect(READ_TOOLS).toHaveLength(18);
+    expect(READ_TOOLS).toHaveLength(20);
   });
 
   test("every tool declares a capability, and the identity probe declares none", () => {
@@ -159,6 +161,46 @@ describe("fog (§5.5)", () => {
     if (answered.kind !== "result") return;
     expect(answered.result.isError).toBe(true);
     expect(answered.result.content[0]?.text).toBe(refusalFor("fog.control"));
+  });
+});
+
+describe("the strategic layer (§5.6)", () => {
+  test("strategic.snapshot reads armies, their units and the turn that is open", async () => {
+    const answered = await call("strategic.snapshot");
+    expect(answered.kind).toBe("result");
+    if (answered.kind !== "result") return;
+    const body = answered.result.content[0]?.text ?? "";
+    expect(body).toContain("1 army(ies), 2 unit(s), 1 faction(s) · 180 model(s) in the pool.");
+    // The phase is the thing that makes an order legal — an agent must be able to read it.
+    expect(body).toContain("turn 4 — orders (stepwise), 1 commander(s) ready.");
+    expect(body).toContain("The Black Arrow [Vandria] [army-1] — 2 unit(s).");
+    // Models come from the pool, not the document: 96 of 120 still answer.
+    expect(body).toContain("1st Spears [unit-1] — spear, line, 96/120 standing, at 400,300.");
+    expect(body).toContain("str 120 · morale 80 · supply 4 · fatigue 1 · advance");
+    // A unit with nothing queued says so, and one with an order pending behind an active one says
+    // which: "no orders" and "I forgot to read them" look identical otherwise.
+    expect(body).toContain("· no orders");
+    expect(body).toContain("queued move");
+  });
+
+  test("strategic.report is the turn's own record, retained after the fact", async () => {
+    const answered = await call("strategic.report");
+    expect(answered.kind).toBe("result");
+    if (answered.kind !== "result") return;
+    const body = answered.result.content[0]?.text ?? "";
+    expect(body).toContain("Turn 3 (mass-battle-pf1e-1) — move → shoot → melee.");
+    expect(body).toContain("shoot/casualty: 1st Spears lose 24 models to arrow fire");
+    expect(body).toContain("summary: attacks 342 · hits 121 · savesFailed 37");
+  });
+
+  test("both are strategic.read, and a player agent has none of it", async () => {
+    for (const tool of ["strategic.snapshot", "strategic.report"]) {
+      const answered = await call(tool, {}, { view, grant: grantFor("player") });
+      expect(answered.kind).toBe("result");
+      if (answered.kind !== "result") return;
+      expect(answered.result.isError).toBe(true);
+      expect(answered.result.content[0]?.text).toBe(refusalFor("strategic.read"));
+    }
   });
 });
 

@@ -2246,6 +2246,91 @@ const fogHide: ToolDefinition = {
   },
 };
 
+// ── the strategic layer (§5.6) ────────────────────────────────────────────────────────────────
+//
+// §8 of the plan: **keep `strategic.order` behind an explicit opt-in and never batch it.** One call
+// is one envelope of one turn's orders, stamped with the turn that is open and the user who gave
+// them — the same record the Army window writes, so the adjudication and the undo stay the module's
+// and the table's. The tool validates the *shape* of an order (a move needs a path, an attack a
+// target) and nothing about its outcome: whether a charge is legal is the rules module's verdict at
+// resolution, not a connector's guess at issue time.
+
+const strategicOrder: ToolDefinition = {
+  name: "strategic.order",
+  description:
+    "Issue orders to units for the turn: move along a path, attack a named unit, hold with a stance, change formation, retreat toward a point, or a supply action. One call is one envelope of one turn's orders, stamped with the turn that is open and the user who gave them. The shape is checked here; whether the order is *legal* is the rules module's verdict when the turn resolves.",
+  args: {
+    properties: {
+      orders: {
+        type: "array",
+        items: { type: "object" },
+        description:
+          'one per unit: { unitId, kind, … }. `move` needs a flat `path` [x1,y1,x2,y2] and an optional `pace` ("march"|"run"|"charge"); `attack` needs `targetUnitId`; `hold` takes an optional `stance`; `formation` needs `formation`; `retreat` needs `toward` [x,y]; `supply` needs `action`; `custom` needs `type`.',
+      },
+      dryRun: { type: "boolean", description: "describe the ops without applying them" },
+    },
+    required: ["orders"],
+  },
+  capability: "strategic.order",
+  async run(args, ctx): Promise<ToolOutcome> {
+    const begun = beginWrite(ctx);
+    if ("refused" in begun) return begun.refused;
+    const raw = args["orders"];
+    if (!Array.isArray(raw)) return invalid("strategic.order needs `orders` as a list");
+    if (raw.length > MAX_OPS_PER_CALL)
+      return invalid(
+        `strategic.order takes at most ${MAX_OPS_PER_CALL} orders — one turn's orders is a conversation, not a batch`,
+      );
+    const orders = raw.map((entry) => {
+      const row = obj(entry) ?? {};
+      return {
+        unitId: str(row["unitId"]) ?? "",
+        ...(str(row["armyId"]) === undefined ? {} : { armyId: str(row["armyId"]) as string }),
+        kind: str(row["kind"]) ?? "",
+        ...(Array.isArray(row["path"])
+          ? { path: row["path"].filter((n): n is number => typeof n === "number") }
+          : {}),
+        ...(str(row["pace"]) === undefined ? {} : { pace: str(row["pace"]) as string }),
+        ...(num(row["facing"]) === undefined ? {} : { facing: num(row["facing"]) as number }),
+        ...(str(row["targetUnitId"]) === undefined
+          ? {}
+          : { targetUnitId: str(row["targetUnitId"]) as string }),
+        ...(str(row["mode"]) === undefined ? {} : { mode: str(row["mode"]) as string }),
+        ...(str(row["stance"]) === undefined ? {} : { stance: str(row["stance"]) as string }),
+        ...(str(row["formation"]) === undefined
+          ? {}
+          : { formation: str(row["formation"]) as string }),
+        ...(Array.isArray(row["toward"])
+          ? { toward: row["toward"].filter((n): n is number => typeof n === "number") }
+          : {}),
+        ...(str(row["action"]) === undefined ? {} : { action: str(row["action"]) as string }),
+        ...(str(row["type"]) === undefined ? {} : { type: str(row["type"]) as string }),
+        ...(row["data"] === undefined ? {} : { data: row["data"] }),
+      };
+    });
+    if (orders.length === 0) return invalid("strategic.order needs at least one order");
+    for (const order of orders)
+      if (order.unitId === "") return invalid("every order needs a `unitId`");
+
+    const made = ctx.view.strategicOrderOps({ orders });
+    if ("error" in made) return refusal(made.error);
+    if (bool(args["dryRun"]) === true)
+      return dryRunAnswer(made.ops, `issuing ${made.issued.length} order(s) for turn ${made.issuedTurn}`);
+    const done = await submit(made.ops, begun.writer);
+    if (!done.ok) return done.answered;
+    const lines = [
+      `${made.issued.length} order(s) issued for turn ${made.issuedTurn} (seq ${done.seq}):`,
+      ...made.issued.map((row) => `  ${row.unitName} [${row.unitId}] — ${row.kind}.`),
+      // Named rather than dropped: an agent that ordered three units and moved two has to be told.
+      ...(made.missing.length > 0
+        ? [`  not on this replica: ${made.missing.join(", ")} — strategic.snapshot names the ones you may see.`]
+        : []),
+      `  the rules module adjudicates them when the turn resolves — nothing has been resolved here.`,
+    ];
+    return text(lines.join("\n"), { seq: done.seq, issued: made.issued } as unknown as Json);
+  },
+};
+
 export const WRITE_TOOLS: readonly ToolDefinition[] = [
   documentCreate,
   documentUpdate,
@@ -2266,6 +2351,7 @@ export const WRITE_TOOLS: readonly ToolDefinition[] = [
   diceApplyTool,
   fogReveal,
   fogHide,
+  strategicOrder,
   tokenMove,
   tokenProperties,
   sceneCreate,

@@ -13,6 +13,9 @@ import type {
   AgentCombatTurn,
   AgentFogOps,
   AgentFogState,
+  AgentStrategicOrders,
+  AgentStrategicReport,
+  AgentStrategicSnapshot,
   AgentCompendiumEntry,
   AgentDiceApply,
   AgentDiceRoll,
@@ -836,6 +839,139 @@ export function fakeView(
         strokes: spec.cells?.length ?? 1,
         what,
         cells: spec.cells === undefined ? [] : [...spec.cells],
+      };
+    },
+    strategicSnapshot: (): AgentStrategicSnapshot => ({
+      armies: [
+        {
+          id: "army-1",
+          name: "The Black Arrow",
+          factionId: "fac-1",
+          factionName: "Vandria",
+          factionColor: "#c0392b",
+          commanders: 1,
+          units: 2,
+          supply: ["rations"],
+        },
+      ],
+      units: [
+        {
+          id: "unit-1",
+          armyId: "army-1",
+          armyName: "The Black Arrow",
+          name: "1st Spears",
+          type: "spear",
+          sceneId: "s1",
+          formation: "line",
+          models: 120,
+          modelsAlive: 96,
+          at: { x: 400, y: 300 },
+          stats: { strength: 120, morale: 80, supply: 4, fatigue: 1 },
+          doctrine: "advance",
+          activeOrder: null,
+          pendingOrders: [],
+          issuedBy: null,
+          issuedTurn: null,
+        },
+        {
+          id: "unit-2",
+          armyId: "army-1",
+          armyName: "The Black Arrow",
+          name: "2nd Bows",
+          type: "bow",
+          sceneId: "s1",
+          formation: "skirmish",
+          models: 60,
+          modelsAlive: 60,
+          at: { x: 500, y: 320 },
+          stats: { strength: 60, morale: 90, supply: 6, fatigue: 0 },
+          doctrine: "hold",
+          activeOrder: "hold",
+          pendingOrders: ["move"],
+          issuedBy: "u-vex",
+          issuedTurn: 3,
+        },
+      ],
+      factions: [{ id: "fac-1", name: "Vandria", color: "#c0392b", allies: 0 }],
+      turn: {
+        id: "turn-1",
+        number: 4,
+        phase: "orders",
+        mode: "stepwise",
+        sceneId: null,
+        readyUsers: 1,
+      },
+      models: 180,
+    }),
+    strategicReport: (): AgentStrategicReport | null => ({
+      turnId: "turn-1",
+      turn: 3,
+      sceneId: "s1",
+      subPhases: ["move", "shoot", "melee"],
+      events: [
+        {
+          subPhase: "shoot",
+          type: "casualty",
+          unitId: "unit-1",
+          text: "1st Spears lose 24 models to arrow fire",
+        },
+      ],
+      summary: { attacks: 342, hits: 121, savesFailed: 37 },
+      rulesVersion: "mass-battle-pf1e-1",
+    }),
+    strategicOrderOps: (spec): AgentStrategicOrders | { error: string } => {
+      if (spec.orders.length === 0) {
+        return { error: "strategic.order needs at least one order" };
+      }
+      const known = new Set(["unit-1", "unit-2"]);
+      const issued: AgentStrategicOrders["issued"] = [];
+      const missing: string[] = [];
+      for (const request of spec.orders) {
+        if (!known.has(request.unitId)) {
+          missing.push(request.unitId);
+          continue;
+        }
+        if (request.kind === "move" && request.path === undefined) {
+          return { error: "a move order needs `path` — a flat list of x,y waypoints" };
+        }
+        if (request.kind === "attack" && request.targetUnitId === undefined) {
+          return { error: "an attack order needs `targetUnitId`" };
+        }
+        if (!["move", "attack", "hold", "formation", "retreat", "supply", "custom"].includes(request.kind)) {
+          return {
+            error: `unknown order "${request.kind}" — the kinds are move, attack, hold, formation, retreat, supply and custom`,
+          };
+        }
+        issued.push({
+          unitId: request.unitId,
+          armyId: "army-1",
+          kind: request.kind,
+          unitName: request.unitId === "unit-1" ? "1st Spears" : "2nd Bows",
+        });
+      }
+      if (issued.length === 0) {
+        return {
+          error: `no unit on this replica answers to ${missing.join(", ")} — strategic.snapshot names the ones you may see`,
+        };
+      }
+      return {
+        // One op per unit, all in one envelope: a turn's orders are one act of command.
+        ops: issued.map((row) => ({
+          kind: "update" as const,
+          ref: {
+            coll: "units" as const,
+            id: row.unitId,
+            parent: { coll: "armies" as const, id: row.armyId },
+          },
+          diff: {
+            "orders.pending": [{ kind: row.kind }],
+            "orders.issuedBy": "u-agent",
+            "orders.issuedTurn": 4,
+          },
+        })),
+        issued,
+        missing,
+        issuedTurn: 4,
       };
     },
     tokenCreate: (spec) => ({

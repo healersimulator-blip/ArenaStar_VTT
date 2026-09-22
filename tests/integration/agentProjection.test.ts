@@ -38,10 +38,16 @@ import {
 import { buildEffectDoc } from "../../src/packages/pf1e/effectOps";
 import type {
   ActorDocument,
+  BaseDocument,
   CellDocument,
   CombatDocument,
   EffectDocument,
 } from "../../src/core/documents";
+import type {
+  ArmyDocument,
+  TurnDocument,
+  UnitDocument,
+} from "../../src/core/strategic";
 import { secondsPerRoundOf, worldSettingsFrom } from "../../src/core/worldSettings";
 import { readRollApplications } from "../../src/packages/pf1e/rollApply";
 import { agentRegistryFrom, agentRecordOf, grantOfRecord } from "../../src/core/agents/grants";
@@ -394,6 +400,94 @@ async function bootCombat(): Promise<Booted> {
       ref: { coll: "scenes", id: "s1" },
       diff: { "flags.core": { activeCombatId: "cb-1" } },
     },
+  ]);
+  for (let i = 0; i < 6; i++) await flushMicrotasks();
+  return boot;
+}
+
+/**
+ * A strategic world: two armies on a scene, one with two units and one with one, and a turn open in
+ * the orders phase. Seeded as documents (armies carry their units), so the snapshot the agent reads
+ * is the same one the Army window draws.
+ */
+async function bootStrategic(): Promise<Booted> {
+  const boot = await bootWorld();
+  const unit = (id: string, name: string, type: string): UnitDocument =>
+    ({
+      _id: id,
+      type: "unit",
+      name,
+      ownership: { default: 1 },
+      flags: {},
+      system: {},
+      profile: { type },
+      formation: "line",
+      sceneId: "s1",
+      modelRange: null,
+      orders: { pending: [], issuedBy: "", issuedTurn: 0 },
+      stats: { strength: 100, morale: 80, supply: 5, fatigue: 0 },
+    }) as unknown as UnitDocument;
+  const army = (id: string, name: string, factionId: string, units: UnitDocument[]): ArmyDocument =>
+    ({
+      _id: id,
+      type: "army",
+      name,
+      ownership: { default: 1 },
+      flags: {},
+      system: {},
+      factionId,
+      commander: [GM_ID],
+      supply: { rations: 10 },
+      units,
+    }) as unknown as ArmyDocument;
+  const turn: TurnDocument = {
+    _id: "turn-1",
+    type: "turn",
+    name: "Turn 1",
+    ownership: { default: 1 },
+    flags: {},
+    system: {},
+    sceneId: null,
+    number: 1,
+    phase: "orders",
+    mode: "stepwise",
+    seed: 42,
+    readyUsers: [],
+    startedAt: 0,
+    checkpointRef: null,
+    reportRef: null,
+  } as unknown as TurnDocument;
+  boot.gm.submit([
+    {
+      kind: "create",
+      coll: "factions",
+      data: {
+        _id: "fac-1",
+        type: "faction",
+        name: "Vandria",
+        ownership: { default: 1 },
+        flags: {},
+        system: {},
+        color: "#c0392b",
+        allies: [],
+      } as unknown as BaseDocument,
+    },
+    {
+      kind: "create",
+      coll: "armies",
+      data: army("army-1", "The Black Arrow", "fac-1", [
+        unit("unit-1", "1st Spears", "spear"),
+        unit("unit-2", "2nd Bows", "bow"),
+      ]) as unknown as BaseDocument,
+    },
+    {
+      kind: "create",
+      coll: "armies",
+      data: army("army-2", "The Green Shield", "fac-1", [
+        unit("unit-3", "1st Swords", "sword"),
+      ]) as unknown as BaseDocument,
+    },
+    { kind: "create", coll: "turns", data: turn as unknown as BaseDocument },
   ]);
   for (let i = 0; i < 6; i++) await flushMicrotasks();
   return boot;
@@ -1057,5 +1151,124 @@ describe("fog, through a real host (§5.5)", () => {
     expect(answered.result.isError).toBe(true);
     expect(answered.result.content[0]?.text).toBe(refusalFor("fog.reveal"));
     expect(boot.store.seq).toBe(seqBefore);
+  });
+});
+
+describe("the strategic layer, through a real host (§5.6)", () => {
+  test("an agent reads the order of battle and issues a turn's orders in one envelope", async () => {
+    const boot = await bootStrategic();
+    const { session, grant } = await openAgent(boot, "gm", "General");
+    const ctx = hexCtxOf(session, grant);
+
+    const read = await callTool({ name: "strategic.snapshot", args: {} }, ctx);
+    expect(read.kind).toBe("result");
+    if (read.kind !== "result") return;
+    const body = read.result.content[0]?.text ?? "";
+    expect(body).toContain("2 army(ies), 3 unit(s), 1 faction(s)");
+    expect(body).toContain("turn 1 — orders (stepwise)");
+    expect(body).toContain("The Black Arrow [Vandria] [army-1] — 2 unit(s).");
+    expect(body).toContain("1st Spears [unit-1] — spear, line");
+
+    const seqBefore = boot.store.seq;
+    const ordered = await callTool(
+      {
+        name: "strategic.order",
+        args: {
+          orders: [
+            { unitId: "unit-1", kind: "move", path: [0, 0, 200, 200], pace: "march" },
+            { unitId: "unit-3", kind: "attack", targetUnitId: "unit-1" },
+          ],
+        },
+      },
+      ctx,
+    );
+    expect(ordered.kind).toBe("result");
+    if (ordered.kind !== "result") return;
+    expect(ordered.result.isError, ordered.result.content[0]?.text).toBeUndefined();
+    expect(ordered.result.content[0]?.text).toContain("2 order(s) issued for turn 1");
+    // One envelope, by the agent, holding both orders.
+    expect(boot.store.seq).toBe(seqBefore + 1);
+    const envelope = boot.log.at(boot.store.seq);
+    expect(envelope?.env.by).toBe(session.user._id);
+    expect(envelope?.env.ops).toHaveLength(2);
+
+    // …and the orders are on the documents, stamped with the turn and the user who gave them.
+    // Units are embedded in their army, so they are resolved through the parent — the same way
+    // the store hands them to the projection.
+    const unit1 = boot.store.resolve({
+      coll: "units",
+      id: "unit-1",
+      parent: { coll: "armies", id: "army-1" },
+    }) as unknown as UnitDocument | undefined;
+    expect(unit1?.orders?.pending?.[0]?.kind).toBe("move");
+    expect(unit1?.orders?.issuedBy).toBe(session.user._id);
+    expect(unit1?.orders?.issuedTurn).toBe(1);
+
+    // The snapshot now reads them back: an order given is an order the next reader can see.
+    const after = await callTool({ name: "strategic.snapshot", args: {} }, ctx);
+    expect(after.kind).toBe("result");
+    if (after.kind !== "result") return;
+    expect(after.result.content[0]?.text).toContain("queued move");
+  });
+
+  test("a unit this replica does not hold is named, and a player agent cannot command at all", async () => {
+    const boot = await bootStrategic();
+    const { session, grant } = await openAgent(boot, "gm", "General");
+    const ctx = hexCtxOf(session, grant);
+
+    const mixed = await callTool(
+      {
+        name: "strategic.order",
+        args: {
+          orders: [
+            { unitId: "unit-1", kind: "hold" },
+            { unitId: "unit-nope", kind: "hold" },
+          ],
+        },
+      },
+      ctx,
+    );
+    expect(mixed.kind).toBe("result");
+    if (mixed.kind !== "result") return;
+    expect(mixed.result.content[0]?.text).toContain("not on this replica: unit-nope");
+    // The one that landed is stamped; the one that did not is not silently dropped.
+    const unit1 = boot.store.resolve({
+      coll: "units",
+      id: "unit-1",
+      parent: { coll: "armies", id: "army-1" },
+    }) as unknown as UnitDocument | undefined;
+    expect(unit1?.orders?.pending?.[0]?.kind).toBe("hold");
+
+    const afterOrder = boot.store.seq;
+    const player = await openAgent(boot, "player", "Vex");
+    const playerCtx = hexCtxOf(player.session, player.grant);
+    const refused = await callTool(
+      { name: "strategic.order", args: { orders: [{ unitId: "unit-2", kind: "hold" }] } },
+      playerCtx,
+    );
+    expect(refused.kind).toBe("result");
+    if (refused.kind !== "result") return;
+    expect(refused.result.isError).toBe(true);
+    expect(refused.result.content[0]?.text).toBe(refusalFor("strategic.order"));
+    // Only the new agent's own session moved: a refused order submits nothing.
+    expect(boot.store.seq).toBe(afterOrder + 1);
+    const unit2 = boot.store.resolve({
+      coll: "units",
+      id: "unit-2",
+      parent: { coll: "armies", id: "army-1" },
+    }) as unknown as UnitDocument | undefined;
+    expect(unit2?.orders?.pending ?? []).toHaveLength(0);
+  });
+
+  test("the report is the turn's own record, and there is none before a turn resolves", async () => {
+    const boot = await bootStrategic();
+    const { session, grant } = await openAgent(boot, "gm", "General");
+    const ctx = hexCtxOf(session, grant);
+    const answered = await callTool({ name: "strategic.report", args: {} }, ctx);
+    expect(answered.kind).toBe("result");
+    if (answered.kind !== "result") return;
+    // Not an error and not a fabrication: the honest answer before the first turn is "none yet".
+    expect(answered.result.isError).toBe(true);
+    expect(answered.result.content[0]?.text).toContain("no turn report on this replica yet");
   });
 });

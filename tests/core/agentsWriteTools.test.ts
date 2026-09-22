@@ -85,6 +85,7 @@ describe("the gate: the grant matrix (§8 Phase 2)", () => {
       "dice.apply": { messageId: "m-roll", actorId: "a-vex", mode: "damage" },
       "fog.reveal": { cells: ["0,0"] },
       "fog.hide": { cells: ["0,0"] },
+      "strategic.order": { orders: [{ unitId: "unit-1", kind: "hold" }] },
       "token.move": { tokenId: "t-vex", col: 2, row: 2 },
       "token.properties": { tokenId: "t-vex", disposition: "hostile" },
       "scene.create": { name: "Camp" },
@@ -146,6 +147,7 @@ describe("the gate: the grant matrix (§8 Phase 2)", () => {
       "dice.apply": { messageId: "m-roll", actorId: "a-vex", mode: "damage" },
       "fog.reveal": { cells: ["0,0"] },
       "fog.hide": { cells: ["0,0"] },
+      "strategic.order": { orders: [{ unitId: "unit-1", kind: "hold" }] },
       "token.move": { tokenId: "t-vex", col: 2, row: 2 },
       "token.properties": { tokenId: "t-vex", disposition: "hostile" },
       "scene.create": { name: "Camp" },
@@ -1137,9 +1139,117 @@ describe("fog (§5.5)", () => {
   });
 });
 
+describe("the strategic layer (§5.6)", () => {
+  test("one turn's orders are one envelope", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf(
+      "strategic.order",
+      {
+        orders: [
+          { unitId: "unit-1", kind: "move", path: [0, 0, 100, 100], pace: "run" },
+          { unitId: "unit-2", kind: "attack", targetUnitId: "unit-1" },
+        ],
+      },
+      ctxWith(writer),
+    );
+    expect(body).toContain("2 order(s) issued for turn 4");
+    expect(body).toContain("1st Spears [unit-1] — move.");
+    expect(body).toContain("2nd Bows [unit-2] — attack.");
+    expect(body).toContain("the rules module adjudicates them when the turn resolves");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toHaveLength(2);
+  });
+
+  test("an order without the field its kind needs is refused, not guessed", async () => {
+    const { writer } = fakeWriter();
+    const move = await textOf(
+      "strategic.order",
+      { orders: [{ unitId: "unit-1", kind: "move" }] },
+      ctxWith(writer),
+    );
+    expect(move).toContain("a move order needs `path`");
+    const attack = await textOf(
+      "strategic.order",
+      { orders: [{ unitId: "unit-2", kind: "attack" }] },
+      ctxWith(writer),
+    );
+    expect(attack).toContain("an attack order needs `targetUnitId`");
+    const nonsense = await textOf(
+      "strategic.order",
+      { orders: [{ unitId: "unit-1", kind: "sing" }] },
+      ctxWith(writer),
+    );
+    expect(nonsense).toContain("unknown order \"sing\"");
+  });
+
+  test("a unit this replica does not hold is named, not silently dropped", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf(
+      "strategic.order",
+      {
+        orders: [
+          { unitId: "unit-1", kind: "hold" },
+          { unitId: "unit-99", kind: "hold" },
+        ],
+      },
+      ctxWith(writer),
+    );
+    expect(body).toContain("not on this replica: unit-99");
+    expect(calls[0]).toHaveLength(1);
+    const all = await textOf(
+      "strategic.order",
+      { orders: [{ unitId: "unit-99", kind: "hold" }] },
+      ctxWith(writer),
+    );
+    expect(all).toContain("no unit on this replica answers to unit-99");
+  });
+
+  test("a batch is refused before it is issued — one turn's orders is not a batch job", async () => {
+    const { writer } = fakeWriter();
+    const many = Array.from({ length: MAX_OPS_PER_CALL + 1 }, (_, i) => ({
+      unitId: `unit-${i}`,
+      kind: "hold",
+    }));
+    const answered = await call("strategic.order", { orders: many }, ctxWith(writer));
+    expect(answered.kind).toBe("invalid");
+    if (answered.kind === "invalid")
+      expect(answered.error).toContain(`at most ${MAX_OPS_PER_CALL} orders`);
+  });
+
+  test("a dry run of an order changes nothing", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf(
+      "strategic.order",
+      { orders: [{ unitId: "unit-1", kind: "hold" }], dryRun: true },
+      ctxWith(writer),
+    );
+    expect(body).toContain("dry run");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("strategic.order is an opt-in even for a GM agent", async () => {
+    const grant = narrow(grantFor("gm"), ["strategic.order"]);
+    const { writer } = fakeWriter();
+    const allowed = await call(
+      "strategic.order",
+      { orders: [{ unitId: "unit-1", kind: "hold" }] },
+      ctxWith(writer, grant),
+    );
+    expect(allowed.kind).toBe("result");
+    if (allowed.kind !== "result") return;
+    expect(allowed.result.isError).toBeUndefined();
+
+    const reading = await call("strategic.snapshot", {}, ctxWith(writer, grant));
+    expect(reading.kind).toBe("result");
+    if (reading.kind !== "result") return;
+    expect(reading.result.isError).toBe(true);
+    expect(reading.result.content[0]?.text).toBe(refusalFor("strategic.read"));
+  });
+});
+
 describe("the catalogue", () => {
-  test("every write tool names one capability, and all twenty-six are registered", () => {
-    expect(WRITE_TOOLS).toHaveLength(26);
+  test("every write tool names one capability, and all twenty-seven are registered", () => {
+    expect(WRITE_TOOLS).toHaveLength(27);
     for (const tool of WRITE_TOOLS) expect(tool.capability).not.toBeNull();
     for (const tool of WRITE_TOOLS) {
       expect(AGENT_TOOLS.map((t) => t.name)).toContain(tool.name);

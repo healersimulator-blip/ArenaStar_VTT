@@ -989,6 +989,99 @@ const fogStateTool: ToolDefinition = {
   },
 };
 
+// ── the strategic layer (§5.6) ────────────────────────────────────────────────────────────────
+//
+// Armies, units and factions are documents, so the snapshot reads them off the replica like any
+// other — with one exception worth naming: a unit's *models* live in the §5A pool, not in the
+// document, which only names a range. So "how many are still standing" and "where are they" are
+// answered from the pool, and the answer says when the replica holds none.
+
+const strategicSnapshotTool: ToolDefinition = {
+  name: "strategic.snapshot",
+  description:
+    "The strategic layer: the armies, their units with strengths, morale, supply and fatigue, where each unit stands (the centre of its living models), the orders it is carrying out and the ones queued behind them, the factions, and the theatre's turn with its phase. A unit's models are counted in the simulation pool, not the document — so the numbers here are the ones a commander would see.",
+  args: { properties: {} },
+  capability: "strategic.read",
+  run(_args, ctx): ToolOutcome {
+    const world = ctx.view.strategicSnapshot();
+    if (world.armies.length === 0) {
+      return refusal(
+        "there is no strategic layer on this replica — no armies, so nothing to command",
+      );
+    }
+    const lines: string[] = [
+      `${world.armies.length} army(ies), ${world.units.length} unit(s), ${world.factions.length} faction(s)${
+        world.models === null ? "" : ` · ${world.models} model(s) in the pool`
+      }.`,
+    ];
+    if (world.turn)
+      lines.push(
+        `  turn ${world.turn.number} — ${world.turn.phase} (${world.turn.mode}), ${world.turn.readyUsers} commander(s) ready.`,
+      );
+    for (const army of world.armies) {
+      const faction = army.factionName ? ` [${army.factionName}]` : "";
+      lines.push(`${army.name}${faction} [${army.id}] — ${army.units} unit(s).`);
+      for (const unit of world.units.filter((row) => row.armyId === army.id)) {
+        const at = unit.at === null ? "no position" : `at ${unit.at.x},${unit.at.y}`;
+        const models =
+          unit.models === null
+            ? "no models"
+            : unit.modelsAlive === null
+              ? `${unit.models} models (the pool is not on this replica)`
+              : `${unit.modelsAlive}/${unit.models} standing`;
+        const orders =
+          unit.pendingOrders.length > 0
+            ? ` · queued ${unit.pendingOrders.join(", ")}`
+            : unit.activeOrder
+              ? ` · carrying out ${unit.activeOrder}`
+              : " · no orders";
+        lines.push(
+          `  ${unit.name} [${unit.id}] — ${unit.type ?? "unit"}, ${unit.formation}, ${models}, ${at}.`,
+          `    str ${unit.stats.strength} · morale ${unit.stats.morale} · supply ${unit.stats.supply} · fatigue ${unit.stats.fatigue}${unit.doctrine ? ` · ${unit.doctrine}` : ""}${orders}`,
+        );
+      }
+    }
+    return text(lines.join("\n"), world as unknown as Json);
+  },
+};
+
+const strategicReportTool: ToolDefinition = {
+  name: "strategic.report",
+  description:
+    "The last turn report this replica received: the sub-phases in the order they ran, every event with the unit it happened to, and the summary counts. It is the turn's own record, retained on the replica after the fact — not a live feed, so an agent can ask what happened without having been watching when it did.",
+  args: {
+    properties: {
+      limit: {
+        type: "integer",
+        description: "Events to print (default 40, max 200) — the JSON carries them all",
+      },
+    },
+  },
+  capability: "strategic.read",
+  run(args, ctx): ToolOutcome {
+    const report = ctx.view.strategicReport();
+    if (!report) {
+      return refusal(
+        "no turn report on this replica yet — the GM resolves a turn and the host broadcasts its report",
+      );
+    }
+    const limit = Math.min(Math.max(Math.trunc(num(args["limit"]) ?? 40), 1), 200);
+    const shown = report.events.slice(0, limit);
+    const summary = Object.entries(report.summary)
+      .map(([key, value]) => `${key} ${String(value)}`)
+      .join(" · ");
+    return text(
+      [
+        `Turn ${report.turn} (${report.rulesVersion}) — ${report.subPhases.join(" → ")}.`,
+        `  ${report.events.length} event(s)${report.events.length > shown.length ? `, showing the first ${shown.length}` : ""}:`,
+        ...shown.map((event) => `  ${event.subPhase}/${event.type}: ${event.text}`),
+        ...(summary ? [`  summary: ${summary}`] : []),
+      ].join("\n"),
+      report as unknown as Json,
+    );
+  },
+};
+
 export const READ_TOOLS: readonly ToolDefinition[] = [
   sceneList,
   sceneRead,
@@ -1008,4 +1101,6 @@ export const READ_TOOLS: readonly ToolDefinition[] = [
   timeOfDayTool,
   combatStateTool,
   fogStateTool,
+  strategicSnapshotTool,
+  strategicReportTool,
 ];

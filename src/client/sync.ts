@@ -127,6 +127,8 @@ export class ClientSync {
   private echoImpl: DocumentStore;
   private transport: Transport;
   private readonly bus: EventBus<ClientEvents>;
+  /** §5A: the retained last turn report (see `lastTurnReport`). */
+  private lastTurnReportMsg: TurnReportMsg | null = null;
   private readonly policy: OptimisticPolicy;
   private readonly now: () => number;
   private readonly ephemeralBucket: TokenBucket;
@@ -451,6 +453,11 @@ export class ClientSync {
         this.bus.emit("turnPhase", msg);
         return;
       case "turn.report":
+        // Retained as well as emitted (D-287): a bus event is a moment, and a reader that was not
+        // listening at that moment — an agent asked "what happened?" after the fact — has nothing
+        // to read. The report is the turn's own record, so keeping the last one is not state the
+        // client invented.
+        this.lastTurnReportMsg = msg;
         this.bus.emit("turnReport", msg);
         return;
       case "pong": {
@@ -479,6 +486,11 @@ export class ClientSync {
   // ─── §5A strategic replica ─────────────────────────────────────────────────
 
   /** The local ModelPool replica (rendering reads this; null before sync). */
+  /** §5A: the last turn report this replica received; null until the first turn is resolved. */
+  get lastTurnReport(): TurnReportMsg | null {
+    return this.lastTurnReportMsg;
+  }
+
   get simReplica(): ModelPool | null {
     return this.simPool;
   }
