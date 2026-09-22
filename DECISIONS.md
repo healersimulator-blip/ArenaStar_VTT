@@ -8222,3 +8222,82 @@ three tokens is a lie by omission, and a model cannot ask for what it does not k
   answers today — Phase 3's `projectWorld()` routing and its field-by-field proof are what make that
   claim true, and no agent should meet a live table before it lands. There is still **no UI** (Phase 2),
   so the bridge is reachable only from a test or a console.
+
+## D-280 — 2026-09-22 — An agent is a user with its own session: the writes, the grants and the Agents window (connector Phase 2)
+
+**Context.** Phase 1 (D-279) gave an LLM the whole read surface, but it read the GM's replica and
+could not write anything. Phase 2 of `MCP_CONNECTOR_SPEC_AND_PLAN.md` is the writes, the grants and
+the GM surface — and it opens with one question that decides the rest: **who wrote this?**
+
+**Decision — the agent is a user with its own session, not a mask on the GM's.** The host stamps
+`OpEnvelope.by` from the *session's* user id (`host/sync.ts:842`), and clients cannot create `users`,
+so there is no way to claim a different author. A write made through the GM's `ClientSync` is the
+GM's write: the OpLog, the undo stack and the world file would all blame the GM for the agent. So
+`src/app/agentSession.ts` mints a user document (`"Vex (agent)"`, role from the preset) **and** the
+grant in one system envelope, then opens a second `ClientSync` in the GM's tab over the same
+in-memory loopback the GM's own session rides (`hostBoot.ts:552`). Three things fall out of it rather
+than being implemented:
+
+- **attribution** — `by` is the agent, so the OpLog and undo need nothing new;
+- **projection** — the host sends this session a *projected* envelope (`host/sync.ts:1004`), so
+  Phase 3's redaction proof is the projection's job, done once, in the place it is already proved;
+- **authority** — the host validates against the agent's **role**, so the capability mask stays the
+  UX of the boundary plus defence in depth, exactly as §3.1 says it should be.
+
+The cost is one more `ClientSync` per agent, which is what this app is made of.
+
+**Decision — the grant is a replicated document, and revoking is not deleting.** `settings/_id:
+"agents"` (§3.2): it survives a reload, every replica can read what is allowed, and a grant changed
+by accident is one Ctrl+Z away — asserted by a test that undoes a grant edit through the host. A
+revoked record is **kept**, because the world file remembering what was *allowed* is the audit a GM
+reads afterwards; "forget" is a separate, explicit act. A pending or revoked agent holds **no**
+capabilities at all — not the preset's defaults — because an agent that connects before the GM has
+looked at it must not be able to read the world.
+
+**Decision — one call, one envelope; the answer is the post-state; a refusal is the host's sentence.**
+Every write tool builds one `Op[]` and submits it once (capped at 25), so the GM's undo is one click.
+The answer is what the world **is now**, read back — and when a committed write is not visible to
+this agent's projection, the tool says exactly that instead of claiming success. And when the host
+refuses, the bridge passes the host's reason through verbatim (`the host refused this change
+(forbidden): delete scenes`): the reason is what a model routes around. The §6.2 port therefore
+**waits for the verdict** — `ClientSync.submit` returns a txId and moves on, and answering "done" at
+submit time would be a lie about the world.
+
+**Decision — typed means whitelisted, on the way in as well as out.** `name` and `system.*` are
+writable; `ownership`, `_id` and `flags` never are, and the refusal names the paths that are. The
+redaction gate applies to writes too: an agent that cannot read a hidden token cannot move it,
+wherever it guessed the id from. `users` has no create at all — an agent that can mint an identity is
+the security model inverted.
+
+**Decision — `undo.last` is scoped, and deliberately shallow.** `HostSync.undoOwn(user)` pops only
+when the top of the undo stack is that user's own envelope. Not a search for their last change: the
+inverses stored for an older envelope were computed against a world that has moved on since, and an
+agent undoing the GM's move is worse than an agent that cannot undo.
+
+**Decision — the audit records attempts, not just successes** (§6.4). One line per call, the last
+200, in memory: tool, one-line arguments, outcome, the first line of the answer. A *refused* call is
+a line too, because "the agent tried to delete a scene three times" is what a GM wants to know and
+the OpLog can never show.
+
+**Gates.**
+
+- **The unit gate:** `pnpm test` — **269 files / 3 208 tests passed** (2 files, 12 tests skipped).
+  New: `tests/core/agentsGrants.test.ts` (12) and `tests/core/agentsWriteTools.test.ts` (28 — the
+  grant matrix over four presets × ten tools, the whitelist, dryRun/confirm, the op cap, cell→pixel,
+  the host's refusal passed through).
+- **The integration gate:** `tests/integration/agentManager.test.ts` (8 — a user and a grant in one
+  envelope, one agent per name across a reload, preset changes re-intersecting the ticked boxes, a
+  grant edit undone by the host, revoke ≠ forget) and `tests/integration/mcpBridge.test.ts` (14 —
+  **a write tool lands as one envelope, one op, `by = agent`**, `undo.last` takes it back, the mask
+  refuses a `gm-no-delete` delete, and the plan's named two-layer proof: a `player` agent whose
+  grant *allows* `token.move` is still refused **by the host**, because the token is the GM's and
+  `can()` wants OWNER).
+- **Types and lint:** `pnpm typecheck` **51 components, 0 blocking, 1 advisory**
+  (`ReplayPanel.svelte:29`) · `pnpm lint` **exit 0**.
+- **The build and the size budget:** `pnpm build` → `pnpm size` **3 213 166 B raw / 926 492 B gzip —
+  +70 331 B**, inside the 6 MB budget. The connector is in the app graph for the first time (the
+  Agents window imports it), which is the cost Phase 0 said to watch; it has been byte-identical
+  until now.
+- **Not yet proven:** no browser has rendered the Agents window — the section passes `svelte check`
+  and its logic is tested through the manager, but the e2e (`agent_connector.spec.ts`) is Phase 3's,
+  and it is the same run that must prove a `PLAYER` agent's replica against `projectWorld()`.

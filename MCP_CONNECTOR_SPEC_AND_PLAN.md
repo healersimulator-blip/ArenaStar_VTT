@@ -1,7 +1,7 @@
 # MCP-style LLM connector — specification additions and implementation plan
 
 **Status:** proposal 2026-09-21 · **Phase 0 landed 2026-09-22 (D-278)** · **Phase 1 landed 2026-09-22
-(D-279)**; Phases 2–6 unstarted.
+(D-279)** · **Phase 2 landed 2026-09-22 (D-280)**; Phases 3–6 unstarted.
 **Reads with:** `PROTOCOL.md` (§4 ops, §5 projection, §6 transports,
 §13 message reference), `PLAN.md` (§12 packages/modules), `DECISIONS.md` (D-013 roles, D-045 the typed
 `__vttE2E` surfaces, D-262 view-as), `HEXCRAWL_SCENE_SPEC_AND_PLAN.md` (the hexcrawl tools depend on it),
@@ -420,13 +420,56 @@ The bundle stays **byte-identical** (3 142 835 B raw): still nothing in the app 
 **no UI**: Phase 2's Agents window is the production entry point, so today the bridge is reachable only
 from a test or a console.
 
-### Phase 2 — Writes, grants and the GM surface (1.5 days, M)
+### Phase 2 — Writes, grants and the GM surface (1.5 days, M) — ✅ landed 2026-09-22 (D-280)
 `document.create/update/delete`, `token.*`, `scene.create/update/duplicate/activate`, `chat.post`,
 `dice.roll`, one-envelope-per-call, `dryRun`/`confirm`, the Agents window (pending, role picker,
 capability checkboxes, scene scope, audit ring, revoke), and the GM-only chat note option.
 *Test:* grant matrix (each preset × each tool class → allowed/refused with the documented reason);
 an agent with `gm-no-delete` gets a refusal from *both* the bridge and the host; a `doc.create` call
 appears as exactly one `OpEnvelope` with `by = agent`, undoable by the GM in one click.
+
+**As landed — and the decision everything else follows from: the agent is a *user with its own
+session*, not a mask on the GM's.** `OpEnvelope.by` is host-stamped from the session's user id
+(`host/sync.ts:842`), so there is no way to claim a different author, and a write made through the
+GM's `ClientSync` is the GM's write. `src/app/agentSession.ts` therefore mints a user document
+(`"Vex (agent)"`, role from the preset) **and** the grant in one system envelope, then opens a second
+`ClientSync` over the same in-memory loopback the GM's own session rides. Three things fall out of
+it rather than being implemented: attribution is free; the host sends this session a *projected*
+envelope (`host/sync.ts:1004`), so Phase 3's redaction is the projection's job in the one place it is
+already proved; and the host validates against the agent's role, so the mask stays UX plus defence in
+depth.
+
+- **`src/core/agents/grants.ts`** (§3.2) — the grant is a replicated `settings` document
+  (`_id = "agents"`): it survives a reload, every replica can read what is allowed, and a grant
+  changed by accident is one Ctrl+Z away. Revoked records are kept.
+- **`src/core/agents/writeTools.ts`** — ten tools. **One call, one envelope** (capped at 25 ops);
+  the answer is the **post-state read back**, never an echo; `dryRun` before `confirm`; and a refusal
+  is the **host's own sentence** (`the host refused this change (forbidden): delete scenes`), not a
+  summary of it. The whitelist is why they are typed: `name` and `system.*` are writable, `ownership`
+  /`_id`/`flags` never are. Redaction gates writes too — an agent that cannot read a hidden token
+  cannot move it, wherever it guessed the id from.
+- **`src/core/agents/types.ts`** — the §6.2 write port. `submit()` **waits for the host's verdict**:
+  `ClientSync.submit` only returns a txId, and answering "done" at submit time would be a lie about
+  the world.
+- **`src/app/agentManager.ts` + `src/ui/settings/AgentsSection.svelte`** — the GM surface: presets
+  with §7.4's warning on screen, capability boxes that can only narrow a preset, scene scope, the
+  GM-only chat note, and the §6.4 **audit ring** — which records *attempts*, not just successes,
+  because what an agent tried is the half the OpLog cannot show.
+
+*Three decisions the plan left open, taken in D-280:* a **pending or revoked agent holds no
+capabilities at all** (an agent that connects before the GM has looked at it must not be able to read
+the world); `undo.last` pops only when the top of the stack is the agent's **own** change, because
+inverses for an older envelope were computed against a world that has moved on; and **`users` is
+never creatable by an agent** — an agent that can mint an identity is the security model inverted.
+
+*Tests:* `tests/core/agentsGrants.test.ts` (12) · `tests/core/agentsWriteTools.test.ts` (28 — the
+grant matrix over four presets × ten tools, the whitelist, dryRun/confirm, the cap, cell→pixel, the
+host's refusal verbatim) · `tests/integration/agentManager.test.ts` (8) ·
+`tests/integration/mcpBridge.test.ts` (14 — a write tool lands as **one envelope, one op, `by =
+agent`**, `undo.last` takes it back, the mask refuses a `gm-no-delete` delete, and a `player` agent
+whose grant *allows* `token.move` is still refused **by the host**, because the token is the GM's and
+`can()` wants OWNER). **The bundle moves for the first time: 3 213 166 B raw / 926 492 B gzip
+(+70 331 B)** — the connector is now in the app graph, and that is the number to watch.
 
 ### Phase 3 — Player-scoped agents and the projection proof (1 day, S)
 `actor.from_compendium` / `actor.from_statblock` (the D-264/D-267 importers), `token.move` restricted to
