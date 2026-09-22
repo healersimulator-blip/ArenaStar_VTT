@@ -7,6 +7,7 @@
  */
 import type { Json, Role } from "../documents";
 import type { Op } from "../ops";
+import type { HexGlyph, HexMapOptions } from "./hexRender";
 import type { RejectionReason } from "../messages";
 import type { AgentCapability, AgentGrant } from "./capabilities";
 
@@ -33,6 +34,14 @@ export interface AgentWorldView {
   /** Optional: only a replica with the compendium runtime can answer it. */
   bestiary?(query: string, limit: number): Promise<AgentBestiaryHit[]>;
   packages?(): AgentPackageRow[];
+  /** The hexcrawl layer of a scene: a summary, its cells, one cell, and a rendered map. */
+  hexSummary(sceneId: string | null): AgentHexSummary | null;
+  hexCells(sceneId: string | null, options: PageOptions): Page<AgentHexCell>;
+  hexCell(sceneId: string | null, key: string): AgentHexCell | null;
+  hexMap(
+    sceneId: string | null,
+    options: { around?: string | null; radius?: number },
+  ): AgentHexMapPlan | null;
   /**
    * Optional: one compendium entry by id, in the shape its pack authors it. Only a replica with
    * the compendium runtime can answer it.
@@ -126,6 +135,68 @@ export interface AgentTokenRow {
    * the agent's to move. A GM/ASSISTANT session owns everything, because its role says so.
    */
   owned: boolean;
+}
+
+/** One feature of a cell, in the words the GM authored its rule in. */
+export interface AgentHexFeature {
+  id: string;
+  name: string;
+  /** Shown to the table yet? An unrevealed feature is simply not on a player's replica (D-271). */
+  revealed: boolean;
+  /** The rule, as the UI words it: "found after 1 hour", "found on a Perception check (DC 15)". */
+  rule: string;
+}
+
+/** One authored cell of a hexcrawl scene — what this replica holds of it. */
+export interface AgentHexCell {
+  /** `q,r`. The id every other hexcrawl tool takes. */
+  key: string;
+  col: number;
+  row: number;
+  /** Terrain catalog id; null when the cell names none (the catalog's default covers it). */
+  terrain: string | null;
+  terrainName: string | null;
+  /** Travel cost multiplier: 1 = open ground, 2 = half speed (§ the terrain catalog). */
+  cost: number;
+  /** Revealed to the table. A closed cell is absent from a player's replica, not flagged on it. */
+  open: boolean;
+  /** The GM's text — never present on a player's replica. */
+  description: string | null;
+  /** What the table reads once the cell is open. */
+  playerText: string | null;
+  /** Encounter table ids bound to this cell. */
+  tables: string[];
+  features: AgentHexFeature[];
+  /** Seconds the party has spent here — the clock a "found after N hours" rule measures. */
+  exploredSeconds: number;
+}
+
+/** The hexcrawl layer of one scene, before any single cell is read. */
+export interface AgentHexSummary {
+  sceneId: string;
+  sceneName: string;
+  grid: AgentSceneSummary["grid"];
+  /** Authored cells this replica holds: a player's are the open ones only. */
+  cells: number;
+  open: number;
+  /** Cells per terrain, in catalog order. */
+  byTerrain: Array<{ id: string; name: string; count: number; cost: number }>;
+  /** Where the party stands, when the scene has a party token. */
+  party: { key: string; col: number; row: number } | null;
+  /** The terrain catalog these names came from, so an answer can be traced to it. */
+  catalog: string;
+  /** The scene's travel plan, when it has one — the numbers a march is priced with. */
+  travel: { speedPerDay: number; pace: string } | null;
+}
+
+/**
+ * Everything `hexmap.render` needs, decided where the data is: the region, the legend and the
+ * glyphs. The renderer stays pure, and a 20 000-hex world is clamped here rather than in the tool's
+ * answer — the map is a window, and it says so.
+ */
+export interface AgentHexMapPlan {
+  options: HexMapOptions;
+  glyphs: HexGlyph[];
 }
 
 /** One compendium entry, as the packs hold it — what `actor.from_compendium` creates. */

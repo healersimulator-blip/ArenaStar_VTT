@@ -413,6 +413,10 @@ describe("vtt-mcp ↔ agent bridge (MCP plan §8 Phase 0)", () => {
       "chat.read",
       "sheet.read",
       "bestiary.search",
+      "hexcrawl.cells",
+      "hex.read",
+      "hex.describe",
+      "hexmap.render",
       "document.create",
       "document.update",
       "document.delete",
@@ -557,13 +561,14 @@ describe("vtt-mcp ↔ agent bridge (MCP plan §8 Phase 0)", () => {
       .contents;
     expect(contents[0]?.text).toContain("map 10×10 cells");
 
-    // A guessed URI is answered with the grammar, and Phase 5's work says so rather than 404-ing.
+    // Phase 5's [F1] resource: it answers through the tool, so a world with no hexcrawl says so in
+    // the tool's own words rather than 404-ing — the same posture as every other resource.
     const guessed = await started.client.request("resources/read", {
       uri: "vtt://world/w1/hexmap",
     });
-    const error = guessed["error"] as { code: number; message: string };
-    expect(error.code).toBe(-32601);
-    expect(error.message).toContain("Phase 5");
+    const hexmap = (guessed["result"] as { contents: Array<{ text: string }> })
+      .contents;
+    expect(hexmap[0]?.text).toContain("no hexcrawl scene active");
   }, 30_000);
 
   test("prompts/list is honest: there are none yet (§5.7, Phase 6)", async () => {

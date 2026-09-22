@@ -1,7 +1,11 @@
 // MCP connector §5.2–5.7 — the read surface: scenes, maps, documents, tokens, chat, sheets,
 // bestiary, and the resources that wrap them. The fixture world is `agentsFixture.ts`.
 import { describe, expect, test } from "vitest";
-import { grantFor, narrow } from "../../src/core/agents/capabilities";
+import {
+  grantFor,
+  narrow,
+  refusalFor,
+} from "../../src/core/agents/capabilities";
 import {
   readResource,
   resourceList,
@@ -61,9 +65,13 @@ describe("the catalogue after Phase 1 (§5)", () => {
         "chat.read",
         "sheet.read",
         "bestiary.search",
+        "hexcrawl.cells",
+        "hex.read",
+        "hex.describe",
+        "hexmap.render",
       ]),
     );
-    expect(READ_TOOLS).toHaveLength(10);
+    expect(READ_TOOLS).toHaveLength(14);
   });
 
   test("every tool declares a capability, and the identity probe declares none", () => {
@@ -232,6 +240,95 @@ describe("pagination and the read caps (§7.4)", () => {
     expect(answered.result.content[0]?.text).toContain(
       'no collection "spells" — collections: users',
     );
+  });
+});
+
+describe("the hexcrawl layer (§5.6, F1)", () => {
+  test("hexcrawl.cells lists what the replica holds, and counts the cover", async () => {
+    const read = await call("hexcrawl.cells");
+    expect(read.kind).toBe("result");
+    if (read.kind !== "result") return;
+    const body = read.result.content[0]?.text ?? "";
+    expect(body).toContain("Goblinwood: All 5 cells.");
+    expect(body).toContain("4 revealed, 1 still under cover");
+    expect(body).toContain("party at 1,1");
+    expect(body).toContain("1,0 — Forest / woods (cost 2) · tables tbl-goblin");
+    // A closed cell is listed for a GM grant, and marked — the projection, not the tool, decides
+    // whether it is on the replica at all.
+    expect(body).toContain("2,0 — Hills / scrub (cost 1.5), unrevealed");
+  });
+
+  test("hex.read gives one cell with the numbers a march is priced with", async () => {
+    const read = await call("hex.read", { key: "1,0" });
+    expect(read.kind).toBe("result");
+    if (read.kind !== "result") return;
+    const body = read.result.content[0]?.text ?? "";
+    expect(body).toContain("1,0 — Forest / woods.");
+    // cost 2 at 24 cells a day is two hours a cell, not two minutes.
+    expect(body).toContain("at 24 cells/day (normal) that is 2 h a cell");
+    expect(body).toContain("Encounter tables: tbl-goblin.");
+    expect(body).toContain("Ruined shrine — found after 1 hour (not found yet)");
+    expect(body).toContain("Time spent here: 30 m.");
+  });
+
+  test("a cell the replica does not hold is a refusal that says what to ask for", async () => {
+    const read = await call("hex.read", { key: "9,9" });
+    expect(read.kind).toBe("result");
+    if (read.kind !== "result") return;
+    expect(read.result.isError).toBe(true);
+    expect(read.result.content[0]?.text).toContain("hexcrawl.cells names the ones you may see");
+  });
+
+  test("hex.describe adds the ground around it", async () => {
+    const read = await call("hex.describe", { key: "1,0" });
+    expect(read.kind).toBe("result");
+    if (read.kind !== "result") return;
+    const body = read.result.content[0]?.text ?? "";
+    expect(body).toContain("Around it:");
+    expect(body).toContain("2,0 — Hills / scrub (unrevealed)");
+    // The party's own cell is a neighbour here, and it is named.
+    expect(body).toContain("1,1 — Highway / road");
+  });
+
+  test("hexmap.render draws terrain letters, the party and cover", async () => {
+    const read = await call("hexmap.render");
+    expect(read.kind).toBe("result");
+    if (read.kind !== "result") return;
+    const body = read.result.content[0]?.text ?? "";
+    expect(body).toContain("hexmap Goblinwood 3×2 cells (hex oddQ, 1 cell = 6 mi)");
+    expect(body).toContain("0  P F ▓");
+    expect(body).toContain("1  P @ ·");
+    expect(body).toContain("P Plains / farmland — 2 cell(s)");
+    // And the JSON grid comes back on the same call, so the model can point rather than count.
+    const structured = read.result.structuredContent as {
+      cells: Array<{ key: string; glyph: string; party: boolean }>;
+    };
+    expect(structured.cells.find((c) => c.party)?.key).toBe("1,1");
+  });
+
+  test("hexmap.render needs hexcrawl.read, like any other tool", async () => {
+    const read = await call(
+      "hexmap.render",
+      {},
+      { view, grant: narrow(grantFor("observer"), ["world.read"]) },
+    );
+    expect(read.kind).toBe("result");
+    if (read.kind !== "result") return;
+    expect(read.result.isError).toBe(true);
+    expect(read.result.content[0]?.text).toBe(refusalFor("hexcrawl.read"));
+  });
+
+  test("a scene with no cells says so, rather than drawing an empty map", async () => {
+    const bare = fakeView({ hexMap: () => null, hexSummary: () => null });
+    const read = await call(
+      "hexmap.render",
+      {},
+      { view: bare, grant: grantFor("gm") },
+    );
+    expect(read.kind).toBe("result");
+    if (read.kind !== "result") return;
+    expect(read.result.isError).toBe(true);
+    expect(read.result.content[0]?.text).toContain("no hexcrawl scene active");
   });
 });
 
@@ -404,9 +501,12 @@ describe("resources (§5.7)", () => {
     expect(elsewhere).toMatchObject({ ok: false, code: "not_found" });
     if (!elsewhere.ok) expect(elsewhere.message).toContain('holds world "w1"');
 
-    // Reserved for Phase 5: "not yet" is a roadmap, "not found" would be a gap.
-    const later = await readResource(view, gm, "vtt://world/w1/hexmap");
-    expect(later).toMatchObject({ ok: false, code: "not_implemented" });
+    // Phase 5 landed: the [F1] resource is the overworld map, and it answers with the real one.
+    const hexmap = await readResource(view, gm, "vtt://world/w1/hexmap");
+    expect(hexmap.ok).toBe(true);
+    if (!hexmap.ok) return;
+    expect(hexmap.resource.text).toContain("hexmap Goblinwood");
+    expect(hexmap.resource.text).toContain("@ party");
   });
 
   test("chat?since= reads only what is new to the agent", async () => {

@@ -29,6 +29,8 @@ import { TOP_LEVEL_COLLECTIONS } from "../core/documents";
 import type {
   AgentBestiaryHit,
   AgentCompendiumEntry,
+  AgentHexCell,
+  AgentHexFeature,
   AgentDocument,
   AgentImportPlan,
   AgentMessageRow,
@@ -41,6 +43,23 @@ import type {
   PageOptions,
 } from "../core/agents/types";
 import type { Op } from "../core/ops";
+import type { DocumentStore } from "../core/store";
+import type { CellDocument, CellFeature } from "../core/documents";
+import { cellsOf } from "../core/hexcrawl/cells";
+import { openCellKeys, partyCellKey } from "../core/hexcrawl/visibility";
+import { profileOf } from "../core/hexcrawl/scene";
+import {
+  terrainById,
+  terrainCatalogOrDefault,
+  terrainCost,
+  type TerrainCatalog,
+} from "../core/hexcrawl/terrain";
+import {
+  exploredSecondsOf,
+  featureRuleLabel,
+} from "../core/hexcrawl/features";
+import { worldSettingsFrom } from "../core/worldSettings";
+import { terrainLetters, type HexGlyph } from "../core/agents/hexRender";
 import { cellAtPoint, parseCellKey } from "../core/hexcrawl/cells";
 import { paginate } from "../core/agents/paging";
 import type { AgentGrant } from "../core/agents/capabilities";
@@ -214,6 +233,15 @@ function sheetOf(actor: ActorDocument): AgentSheet {
 /** A fresh document id, in the app's own shape. */
 const newId = (): string => globalThis.crypto.randomUUID();
 
+/**
+ * The hexmap's window. A 20 000-hex world rendered one character at a time is not an answer, it is
+ * a denial of service on a context; 48×24 is a screen, which is what a map is for.
+ */
+const HEXMAP_COLS = 48;
+const HEXMAP_ROWS = 24;
+/** How far around a named cell `hexmap.render` draws when the agent asks for one region. */
+const HEXMAP_RADIUS = 6;
+
 /** `[[16|1d20+5]]` — the inline chip the chat renders; the total is the first half. */
 const ROLL_CHIP = /\[\[[^[\]|]{1,120}\|([^[\]|]{1,120})\]\]/g;
 
@@ -236,6 +264,47 @@ function stripRollChips(content: string): string {
 function resultWithheld(message: MessageDocument): boolean {
   if (message.roll !== null) return false;
   return message.rollMode === "gmroll" || message.rollMode === "blindroll";
+}
+
+/**
+ * The terrain catalog the hexcrawl reads names from: the world's own setting, defaulted the way
+ * every other reader in the app defaults it (D-252's discipline — a bad entry is dropped, not
+ * thrown). Read per call because a GM can edit it while an agent is connected.
+ */
+function hexCatalogOf(store: DocumentStore): TerrainCatalog {
+  return terrainCatalogOrDefault(worldSettingsFrom(store.getAll("settings"))["hexTerrain"]);
+}
+
+/** One cell, as this replica holds it — the projection already decided what is here. */
+function hexCellRowOf(
+  catalog: TerrainCatalog,
+  cell: CellDocument,
+  open: ReadonlySet<string>,
+): AgentHexCell {
+  const def = terrainById(catalog, cell.terrain);
+  const coords = parseCellKey(cell.key);
+  const explored = exploredSecondsOf(cell);
+  const features: AgentHexFeature[] = (cell.features ?? []).map((feature: CellFeature) => ({
+    id: feature.id,
+    name: feature.name,
+    revealed: feature.state?.revealed === true,
+    rule: featureRuleLabel(feature),
+  }));
+  return {
+    key: cell.key,
+    col: coords?.q ?? 0,
+    row: coords?.r ?? 0,
+    terrain: cell.terrain ?? null,
+    terrainName: def?.name ?? null,
+    cost: terrainCost(catalog, cell.terrain),
+    open: open.has(cell.key),
+    // null, not "": an absent field and an empty one are different facts about a cell.
+    description: typeof cell.description === "string" ? cell.description : null,
+    playerText: typeof cell.playerText === "string" ? cell.playerText : null,
+    tables: [...(cell.tables ?? [])],
+    features,
+    exploredSeconds: explored,
+  };
 }
 
 /**
@@ -469,6 +538,173 @@ export function agentWorldView(
         }),
         read: [...report.read],
         warnings: [...report.warnings],
+      };
+    },
+    hexSummary(sceneId) {
+      const scene = pick(sceneId);
+      if (!scene) return null;
+      const catalog = hexCatalogOf(store);
+      const rows = cellsOf(scene);
+      if (rows.length === 0) return null;
+      const open = openCellKeys(scene);
+      const counts = new Map<string, number>();
+      for (const cell of rows) {
+        const id = cell.terrain ?? "";
+        counts.set(id, (counts.get(id) ?? 0) + 1);
+      }
+      // The legend is the catalog's own order, with the catalog's default standing in for a cell
+      // that names none — which is how the overlay paints it too.
+      const byTerrain = catalog.terrains.map((def) => ({
+        id: def.id,
+        name: def.name,
+        count: counts.get(def.id) ?? 0,
+        cost: def.cost,
+      }));
+      const unauthored = counts.get("") ?? 0;
+      if (unauthored > 0) {
+        const def = terrainById(catalog, catalog.defaultTerrain);
+        byTerrain.unshift({
+          id: "",
+          name: def ? `${def.name} (the catalog's default)` : "no terrain set",
+          count: unauthored,
+          cost: terrainCost(catalog, null),
+        });
+      }
+      const partyKey = partyCellKey(scene);
+      const partyCoords = partyKey === null ? null : parseCellKey(partyKey);
+      const travel = profileOf(scene).travel;
+      return {
+        sceneId: scene._id,
+        sceneName: scene.name,
+        grid: gridOf(scene),
+        cells: rows.length,
+        open: open.size,
+        byTerrain: byTerrain.filter((entry) => entry.count > 0),
+        party:
+          partyKey === null || partyCoords === null
+            ? null
+            : { key: partyKey, col: partyCoords.q, row: partyCoords.r },
+        catalog: catalog.name,
+        travel: travel
+          ? { speedPerDay: travel.speedPerDay, pace: travel.pace }
+          : null,
+      };
+    },
+    hexCells(sceneId, paging) {
+      const scene = pick(sceneId);
+      if (!scene) return { rows: [], total: 0, next: null, cap: 0 };
+      const catalog = hexCatalogOf(store);
+      const open = openCellKeys(scene);
+      const rows = cellsOf(scene).map((cell) => hexCellRowOf(catalog, cell, open));
+      const page = paginate(rows, paging);
+      return {
+        rows: page.rows,
+        total: page.total,
+        next: page.next,
+        cap: page.cap,
+      };
+    },
+    hexCell(sceneId, key) {
+      const scene = pick(sceneId);
+      if (!scene) return null;
+      const cell = cellsOf(scene).find((row) => row.key === key);
+      // A cell the projection did not send is not "a cell with nothing in it" — it is absent, and
+      // the tool's refusal says so rather than inventing an empty hex.
+      if (!cell) return null;
+      return hexCellRowOf(hexCatalogOf(store), cell, openCellKeys(scene));
+    },
+    hexMap(sceneId, spec) {
+      const scene = pick(sceneId);
+      if (!scene) return null;
+      const catalog = hexCatalogOf(store);
+      const letters = terrainLetters(catalog.terrains);
+      const open = openCellKeys(scene);
+      const party = partyCellKey(scene);
+      const cells = cellsOf(scene);
+      if (cells.length === 0) return null;
+
+      // The region: the whole authored set when it fits, otherwise a window on the party (or on
+      // the cell the agent named). A 20 000-hex world is not a thing to paste into a context.
+      let minCol = Infinity;
+      let maxCol = -Infinity;
+      let minRow = Infinity;
+      let maxRow = -Infinity;
+      for (const cell of cells) {
+        const coords = parseCellKey(cell.key);
+        if (!coords) continue;
+        if (coords.q < minCol) minCol = coords.q;
+        if (coords.q > maxCol) maxCol = coords.q;
+        if (coords.r < minRow) minRow = coords.r;
+        if (coords.r > maxRow) maxRow = coords.r;
+      }
+      const centre =
+        spec.around !== undefined && spec.around !== null
+          ? parseCellKey(spec.around)
+          : party === null
+            ? null
+            : parseCellKey(party);
+      const radius = spec.radius ?? HEXMAP_RADIUS;
+      let col0 = minCol;
+      let row0 = minRow;
+      let cols = maxCol - minCol + 1;
+      let rows = maxRow - minRow + 1;
+      let clamped = false;
+      if (centre !== null && spec.around !== undefined && spec.around !== null) {
+        col0 = centre.q - radius;
+        row0 = centre.r - radius;
+        cols = radius * 2 + 1;
+        rows = radius * 2 + 1;
+      }
+      if (cols > HEXMAP_COLS || rows > HEXMAP_ROWS) {
+        const c = centre ?? { q: Math.round((minCol + maxCol) / 2), r: Math.round((minRow + maxRow) / 2) };
+        cols = Math.min(cols, HEXMAP_COLS);
+        rows = Math.min(rows, HEXMAP_ROWS);
+        col0 = c.q - Math.floor(cols / 2);
+        row0 = c.r - Math.floor(rows / 2);
+        clamped = true;
+      }
+
+      const glyphs: HexGlyph[] = cells.map((cell) => {
+        const coords = parseCellKey(cell.key);
+        const def = terrainById(catalog, cell.terrain);
+        return {
+          key: cell.key,
+          col: coords?.q ?? 0,
+          row: coords?.r ?? 0,
+          letter: (cell.terrain === undefined ? "" : letters[cell.terrain]) ?? "",
+          name: def?.name ?? "",
+          open: open.has(cell.key),
+          party: cell.key === party,
+        };
+      });
+      return {
+        options: {
+          sceneName: scene.name,
+          // The scene's own grid, not the summary's widened one: the renderer wants the hex
+          // layout it was written with, and a "hex" that renders as a square is worse than a
+          // refusal.
+          grid: {
+            type: scene.grid.type,
+            size: scene.grid.size,
+            distance: scene.grid.distance,
+            units: scene.grid.units,
+            hexLayout: scene.grid.hexLayout,
+          },
+          col0,
+          row0,
+          cols,
+          rows,
+          totalCells: cells.length,
+          terrains: catalog.terrains.map((def) => ({
+            id: def.id,
+            name: def.name,
+            letter: letters[def.id] ?? "?",
+            count: 0,
+            cost: def.cost,
+          })),
+          ...(clamped ? { clamped: true } : {}),
+        },
+        glyphs,
       };
     },
     tokenCreate(spec): Op | { error: string } {

@@ -8381,3 +8381,56 @@ refusal stays for the case it was written for: a replica with no packages runtim
 - **Not yet proven:** the Phase 3 e2e (`agent_connector.spec.ts`) — this environment has no Chromium
   and the repo's e2e needs Playwright's, so **no browser has rendered the Agents window**. The security
   claim is proved without it; the UI's own run is the debt this phase leaves behind.
+
+## D-282 — 2026-09-22 — The overworld, read: the hexcrawl surface, a map that is a window, and the projection doing the hiding (connector Phase 5, part 1)
+
+**Context.** Phase 5's dependency (`HEXCRAWL_SCENE_SPEC_AND_PLAN.md`) is complete — Phases 0–7,
+D-268…D-277 — so the [F1] tools are the last gap between "an agent can run a tactical table" and
+"an agent can run an overland campaign". This entry lands the **read** half (`hexcrawl.cells`,
+`hex.read`, `hex.describe`, `hexmap.render`, and the `vtt://world/<id>/hexmap` resource); the
+travel and encounter half follows.
+
+**Decision — the tools read the replica, and the projection has already decided what is on it.** A
+closed cell is **not on a player's replica at all** (D-271): opening one is a create for that
+session. So no hexcrawl tool checks a "revealed" flag — a cell the party has not been shown is
+absent, and `hex.read` answers *"no cell \"9,9\" on this replica — hexcrawl.cells names the ones you
+may see"*. The tools' one addition to the projection's rule is saying which of the two things
+happened, because "no such cell" and "not yours to read" are different sentences to a model choosing
+what to ask next.
+
+**Decision — `hexmap.render` draws a window, not the world.** 48×24 cells, centred on the party, or
+on whatever cell the agent names with `around`; a bigger region is clamped and the map says so
+(`— a 48×24 window of 20000 cells; ask for one region at a time`). A 20 000-hex world rendered one
+character at a time is not an answer, it is a denial of service on a context. Both forms come back
+on **every** call rather than behind a `format` flag: the ASCII a model quotes, and the JSON grid —
+a key per glyph — it points with, because a model that wants to act should not need a second round
+trip to get the half it did not ask for.
+
+**Decision — the map's letters come from the world's own catalog, and the legend counts what is
+drawn.** Terrain letters are derived (the first free letter of the label, then of the name, then a
+digit), so a GM's custom catalog reads the way they named it; and the legend counts only the glyphs
+actually on the map — a hex under cover or under the party is not a "P" the reader can find, and a
+legend claiming three when one is drawn is a model pointing at terrain that is not there. The
+renderer (`src/core/agents/hexRender.ts`) is pure and byte-exact tested; the region is decided in
+the view, where the data is.
+
+**Decision — `hex.describe` prices a march in the units the table uses.** Cost is the catalog's
+multiplier; `speedPerDay` from the scene's travel plan turns it into hours a cell (24 cells a day at
+cost 1 is an hour a cell, the same ground at cost 2 is two). A cell also reports the seconds the
+party has spent in it, which is the clock a "found after 1 hour" feature measures — the number an
+agent needs before it can say whether the shrine has been found yet.
+
+**Gates.**
+
+- `pnpm test` — **3 246 tests passed** (12 skipped). New: `tests/core/agentsHexRender.test.ts` (7 —
+  byte-exact, including the collision rule for two terrains that share a first letter and the
+  two-digit ruler) and seven cases in `tests/core/agentsReadTools.test.ts` (the cell list and its
+  cover count, one cell with its march price, the refusal for a cell the replica does not hold, the
+  neighbourhood, the map's glyphs and legend, the capability gate, and a scene with no cells).
+- `pnpm typecheck` **51 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`) ·
+  `pnpm lint` **exit 0**.
+- `pnpm build` → `pnpm size` **3 231 131 B raw / 931 936 B gzip — +10 647 B**, inside the 6 MB budget.
+- **Not yet proven:** no integration test yet against a *real* hexcrawl scene — the fixture world
+  carries the cells, and the projection's half of the claim (a closed cell absent from a player's
+  replica) is proved for tokens, journals and chat in D-281 but not yet for cells. That is the first
+  thing the travel half should close, since it needs a real hexcrawl world to test against anyway.

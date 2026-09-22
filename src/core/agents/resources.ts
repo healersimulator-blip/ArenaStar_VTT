@@ -67,6 +67,13 @@ export function resourceList(view: AgentWorldView): AgentResource[] {
       mimeType: "text/plain",
       description: "The installed rulesets and content packs (§12).",
     },
+    {
+      uri: `vtt://world/${id}/hexmap`,
+      name: "Hexcrawl map",
+      mimeType: "text/plain",
+      description:
+        "The active hexcrawl scene as a text map — terrain letters, the party, unrevealed ground as cover (§5.6).",
+    },
   ];
   for (const scene of view.scenes().slice(0, SCENE_RESOURCE_CAP)) {
     const sceneId = encodeURIComponent(scene.id);
@@ -232,6 +239,11 @@ export async function readResource(
       await call("chat.read", since === null ? {} : { since: Number(since) }),
       "text/plain",
     );
+  }
+  if (head === "hexmap") {
+    // The one resource the plan marks [F1]: the overworld, not the tactical scene. Absent when no
+    // scene is a hexcrawl, which `hexmap.render` says in its own words.
+    return asText(await call("hexmap.render", {}), "text/plain");
   }
   if (head === "packages") {
     const packs = view.packages?.() ?? [];

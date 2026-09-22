@@ -10,6 +10,9 @@
 import { paginate } from "../../src/core/agents/paging";
 import type {
   AgentCompendiumEntry,
+  AgentHexCell,
+  AgentHexMapPlan,
+  AgentHexSummary,
   AgentDocument,
   AgentDocumentRow,
   AgentMessageRow,
@@ -22,6 +25,7 @@ import type {
   PageOptions,
 } from "../../src/core/agents/types";
 import type { BaseDocument, Json } from "../../src/core/documents";
+import { terrainLetters, type HexGlyph } from "../../src/core/agents/hexRender";
 
 const SCENE_ONE: AgentSceneSummary = {
   id: "s1",
@@ -143,6 +147,125 @@ export const SHEET: AgentSheet = {
     { name: "Stealth", bonus: 8 },
   ],
   feats: ["Weapon Focus (longsword)"],
+};
+
+
+/**
+ * A hexcrawl small enough to read at a glance: five authored cells, one of them still under cover
+ * (which for a player's replica means absent, not flagged — D-271), one carrying a table and a
+ * feature that has not been found yet.
+ */
+export const HEX_CELLS: AgentHexCell[] = [
+  {
+    key: "0,0",
+    col: 0,
+    row: 0,
+    terrain: "plains",
+    terrainName: "Plains / farmland",
+    cost: 1,
+    open: true,
+    description: "The road west, and a milestone nobody has read.",
+    playerText: "A road runs west.",
+    tables: [],
+    features: [],
+    exploredSeconds: 0,
+  },
+  {
+    key: "1,0",
+    col: 1,
+    row: 0,
+    terrain: "forest",
+    terrainName: "Forest / woods",
+    cost: 2,
+    open: true,
+    description: null,
+    playerText: null,
+    tables: ["tbl-goblin"],
+    features: [
+      {
+        id: "f-shrine",
+        name: "Ruined shrine",
+        revealed: false,
+        rule: "found after 1 hour",
+      },
+    ],
+    exploredSeconds: 1800,
+  },
+  {
+    key: "2,0",
+    col: 2,
+    row: 0,
+    terrain: "hills",
+    terrainName: "Hills / scrub",
+    cost: 1.5,
+    open: false,
+    description: "The ambush the party has not walked into yet.",
+    playerText: null,
+    tables: [],
+    features: [],
+    exploredSeconds: 0,
+  },
+  {
+    key: "0,1",
+    col: 0,
+    row: 1,
+    terrain: "plains",
+    terrainName: "Plains / farmland",
+    cost: 1,
+    open: true,
+    description: null,
+    playerText: null,
+    tables: [],
+    features: [],
+    exploredSeconds: 0,
+  },
+  {
+    key: "1,1",
+    col: 1,
+    row: 1,
+    terrain: "road",
+    terrainName: "Highway / road",
+    cost: 1,
+    open: true,
+    description: null,
+    playerText: null,
+    tables: [],
+    features: [],
+    exploredSeconds: 0,
+  },
+];
+
+export const HEX_TERRAINS = [
+  { id: "plains", name: "Plains / farmland", cost: 1 },
+  { id: "road", name: "Highway / road", cost: 1 },
+  { id: "hills", name: "Hills / scrub", cost: 1.5 },
+  { id: "forest", name: "Forest / woods", cost: 2 },
+];
+
+/** `as const`, so the map's options keep their literal grid type (the renderer wants the real one). */
+const HEX_GRID = {
+  type: "hex",
+  size: 100,
+  distance: 6,
+  units: "mi",
+  hexLayout: "oddQ",
+} as const;
+
+export const HEX_SUMMARY: AgentHexSummary = {
+  sceneId: "s1",
+  sceneName: "Goblinwood",
+  grid: HEX_GRID,
+  cells: HEX_CELLS.length,
+  open: HEX_CELLS.filter((cell) => cell.open).length,
+  byTerrain: [
+    { id: "plains", name: "Plains / farmland", count: 2, cost: 1 },
+    { id: "road", name: "Highway / road", count: 1, cost: 1 },
+    { id: "hills", name: "Hills / scrub", count: 1, cost: 1.5 },
+    { id: "forest", name: "Forest / woods", count: 1, cost: 2 },
+  ],
+  party: { key: "1,1", col: 1, row: 1 },
+  catalog: "Pathfinder overland",
+  travel: { speedPerDay: 24, pace: "normal" },
 };
 
 function page<T>(rows: readonly T[], options: PageOptions) {
@@ -310,6 +433,55 @@ export function fakeView(
             warnings: ["no ability scores in the text — left unauthored"],
           }
         : { error: "that text is not a stat block — a stat block starts with the creature's name and its CR" },
+    hexSummary: (sceneId) =>
+      sceneId === null || sceneId === "s1" ? HEX_SUMMARY : null,
+    hexCells: (sceneId, options) => {
+      if (sceneId !== null && sceneId !== "s1")
+        return { rows: [], total: 0, next: null, cap: 0 };
+      const paged = page(HEX_CELLS, options);
+      return {
+        rows: paged.rows,
+        total: paged.total,
+        next: paged.next,
+        cap: paged.cap,
+      };
+    },
+    hexCell: (sceneId, key) =>
+      sceneId !== null && sceneId !== "s1"
+        ? null
+        : (HEX_CELLS.find((cell) => cell.key === key) ?? null),
+    // Drawn by the real renderer: a fixture that hand-wrote its map could drift from the one the
+    // app draws, and the map is the one answer a model reads as picture rather than as records.
+    hexMap: (sceneId): AgentHexMapPlan | null => {
+      if (sceneId !== null && sceneId !== "s1") return null;
+      const letters = terrainLetters(HEX_TERRAINS);
+      const glyphs: HexGlyph[] = HEX_CELLS.map((cell) => ({
+        key: cell.key,
+        col: cell.col,
+        row: cell.row,
+        letter: cell.terrain === null ? "" : (letters[cell.terrain] ?? ""),
+        name: cell.terrainName ?? "",
+        open: cell.open,
+        party: cell.key === HEX_SUMMARY.party?.key,
+      }));
+      return {
+        options: {
+          sceneName: HEX_SUMMARY.sceneName,
+          grid: HEX_GRID,
+          col0: 0,
+          row0: 0,
+          cols: 3,
+          rows: 2,
+          totalCells: HEX_CELLS.length,
+          terrains: HEX_TERRAINS.map((terrain) => ({
+            ...terrain,
+            letter: letters[terrain.id] ?? "?",
+            count: 0,
+          })),
+        },
+        glyphs,
+      };
+    },
     tokenCreate: (spec) => ({
       kind: "create" as const,
       coll: "tokens" as const,

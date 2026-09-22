@@ -30,9 +30,12 @@ import {
   type RenderToken,
   type RenderWall,
 } from "./mapRender";
+import { renderHexmap } from "./hexRender";
 import { TOP_LEVEL_COLLECTIONS } from "../documents";
-import { num, refusal, str, text } from "./answer";
+import { invalid, num, refusal, str, text } from "./answer";
 import type {
+  AgentHexCell,
+  AgentHexSummary,
   AgentTokenRow,
   Page,
   ToolContext,
@@ -522,6 +525,251 @@ const chatRead: ToolDefinition = {
   },
 };
 
+// ── hexcrawl (§5.6, F1) ────────────────────────────────────────────────────────────────────────
+
+/**
+ * The hexcrawl layer reads exactly what the replica holds, and the replica is the projection: a
+ * **closed cell is not on a player's replica at all** (D-271), so "the party has not been there" is
+ * not a flag these tools check — it is the reason a row is missing. Nothing here re-decides it.
+ * What the tools add is saying so, because "no such cell" and "not yours to read" are different
+ * sentences to a model choosing what to ask next.
+ */
+const hexcrawlCells: ToolDefinition = {
+  name: "hexcrawl.cells",
+  description:
+    'The authored cells of a hexcrawl scene: key ("col,row"), terrain, travel cost, whether the table has been shown it, encounter tables and features. Paged — ask for a page, not for the world. A cell the party has not been shown is not here at all, not flagged.',
+  args: {
+    properties: {
+      sceneId: {
+        type: "string",
+        description: "the hexcrawl scene; the active one when omitted",
+      },
+      limit: {
+        type: "integer",
+        description: "Cells to return (default 50, max 500)",
+      },
+      cursor: {
+        type: "string",
+        description: 'Cursor from a previous call, e.g. "o:50"',
+      },
+    },
+  },
+  capability: "hexcrawl.read",
+  run(args, ctx): ToolOutcome {
+    const sceneId = str(args["sceneId"]) ?? null;
+    const summary = ctx.view.hexSummary(sceneId);
+    if (!summary) {
+      return refusal(
+        sceneId
+          ? `scene "${sceneId}" has no hexcrawl cells — scene.list names the scenes, and hexcrawl is a flag the GM switches on`
+          : "there is no hexcrawl scene active — hexcrawl.cells names one with sceneId",
+      );
+    }
+    const page = ctx.view.hexCells(sceneId, {
+      limit: args["limit"],
+      cursor: args["cursor"],
+    });
+    const lines = page.rows.map((cell) => {
+      const terrain = cell.terrainName ?? "no terrain";
+      const cover = cell.open ? "" : ", unrevealed";
+      const tables =
+        cell.tables.length > 0 ? ` · tables ${cell.tables.join(", ")}` : "";
+      const features =
+        cell.features.length > 0 ? ` · ${cell.features.length} feature(s)` : "";
+      return `  ${cell.key} — ${terrain} (cost ${cell.cost})${cover}${tables}${features}`;
+    });
+    const closed = summary.cells - summary.open;
+    return text(
+      [
+        `${summary.sceneName}: ${pageNote(page, "cells")} — ${summary.open} revealed${closed > 0 ? `, ${closed} still under cover` : ""} · catalog ${summary.catalog}${summary.party ? ` · party at ${summary.party.key}` : ""}`,
+        ...(lines.length > 0 ? lines : ["  none"]),
+      ].join("\n"),
+      page as unknown as Json,
+    );
+  },
+};
+
+/** Hours, in the shape a table says them in: "45 m", "2 h", "1 h 30 m". */
+function formatHours(hours: number): string {
+  if (!Number.isFinite(hours) || hours <= 0) return "0 m";
+  const total = Math.round(hours * 3600);
+  const h = Math.floor(total / 3600);
+  const m = Math.round((total % 3600) / 60);
+  if (h === 0) return `${m} m`;
+  return m === 0 ? `${h} h` : `${h} h ${m} m`;
+}
+
+/** The sentence a model quotes: one cell, in the GM's words, plus the numbers a march needs. */
+function hexProse(cell: AgentHexCell, summary: AgentHexSummary | null): string {
+  const lines: string[] = [];
+  lines.push(`${cell.key} — ${cell.terrainName ?? "no terrain set"}.`);
+  const travel = summary?.travel ?? null;
+  // `speedPerDay` is cells per *day*, and a day is 24 h of world clock: 24 cells a day at cost 1 is
+  // an hour a cell, and the same ground at cost 2 is two.
+  const march =
+    travel === null || travel.speedPerDay <= 0
+      ? ""
+      : ` · at ${travel.speedPerDay} cells/day (${travel.pace}) that is ${formatHours((cell.cost / travel.speedPerDay) * 24)} a cell`;
+  lines.push(
+    `Travel: cost ${cell.cost} — ${cell.cost === 1 ? "open ground" : `${cell.cost}× slower`}${march}.`,
+  );
+  if (!cell.open) lines.push("The table has not been shown this cell yet.");
+  const body = cell.playerText ?? cell.description;
+  if (body) lines.push(`Reads: ${body}`);
+  if (cell.tables.length > 0)
+    lines.push(`Encounter tables: ${cell.tables.join(", ")}.`);
+  if (cell.features.length > 0) {
+    lines.push("Features:");
+    for (const feature of cell.features) {
+      lines.push(
+        `  ${feature.name} — ${feature.rule}${feature.revealed ? " (revealed)" : " (not found yet)"}`,
+      );
+    }
+  }
+  if (cell.exploredSeconds > 0)
+    lines.push(`Time spent here: ${formatHours(cell.exploredSeconds / 3600)}.`);
+  return lines.join("\n");
+}
+
+const hexRead: ToolDefinition = {
+  name: "hex.read",
+  description:
+    "One cell of a hexcrawl scene, as this agent may read it: terrain and travel cost, the text the table may see (or the GM's own, when the grant covers it), the encounter tables bound to it, and its features with the rule each is found by. A cell the party has not been shown is not here at all.",
+  args: {
+    properties: {
+      key: {
+        type: "string",
+        description: 'the cell key, "col,row" — hexcrawl.cells lists them',
+      },
+      sceneId: {
+        type: "string",
+        description: "the hexcrawl scene; the active one when omitted",
+      },
+    },
+    required: ["key"],
+  },
+  capability: "hexcrawl.read",
+  run(args, ctx): ToolOutcome {
+    const key = str(args["key"]);
+    if (!key) return invalid('hex.read needs a cell key — "col,row"');
+    const sceneId = str(args["sceneId"]) ?? null;
+    const cell = ctx.view.hexCell(sceneId, key);
+    if (!cell) {
+      return refusal(
+        `no cell "${key}" on this replica — hexcrawl.cells names the ones you may see, and a cell the party has not been shown is not sent at all`,
+      );
+    }
+    return text(
+      hexProse(cell, ctx.view.hexSummary(sceneId)),
+      cell as unknown as Json,
+    );
+  },
+};
+
+const hexDescribe: ToolDefinition = {
+  name: "hex.describe",
+  description:
+    "The same cell as `hex.read`, plus the ground around it — the paragraph to quote when the party arrives somewhere: what the land is, what a march costs here, what is written, what is still hidden, and what the neighbouring cells are.",
+  args: {
+    properties: {
+      key: {
+        type: "string",
+        description: 'the cell key, "col,row"',
+      },
+      sceneId: {
+        type: "string",
+        description: "the hexcrawl scene; the active one when omitted",
+      },
+      radius: {
+        type: "integer",
+        description: "how many rings of neighbours to include (default 1, max 3)",
+      },
+    },
+    required: ["key"],
+  },
+  capability: "hexcrawl.read",
+  run(args, ctx): ToolOutcome {
+    const key = str(args["key"]);
+    if (!key) return invalid('hex.describe needs a cell key — "col,row"');
+    const sceneId = str(args["sceneId"]) ?? null;
+    const cell = ctx.view.hexCell(sceneId, key);
+    if (!cell) {
+      return refusal(
+        `no cell "${key}" on this replica — hexcrawl.cells names the ones you may see`,
+      );
+    }
+    const radius = Math.min(Math.max(Math.trunc(num(args["radius"]) ?? 1), 0), 3);
+    const lines = [hexProse(cell, ctx.view.hexSummary(sceneId))];
+    if (radius > 0) {
+      const around = ctx.view
+        .hexCells(sceneId, { limit: 500 })
+        .rows.filter(
+          (other) =>
+            other.key !== cell.key &&
+            Math.abs(other.col - cell.col) <= radius &&
+            Math.abs(other.row - cell.row) <= radius,
+        );
+      lines.push(
+        around.length === 0
+          ? "Around it: nothing this agent may read."
+          : [
+              "Around it:",
+              ...around.map(
+                (other) =>
+                  `  ${other.key} — ${other.terrainName ?? "no terrain"}${other.open ? "" : " (unrevealed)"}${other.tables.length > 0 ? ` · tables ${other.tables.join(", ")}` : ""}`,
+              ),
+            ].join("\n"),
+      );
+    }
+    return text(lines.join("\n"), cell as unknown as Json);
+  },
+};
+
+const hexmapRender: ToolDefinition = {
+  name: "hexmap.render",
+  description:
+    'The hexcrawl as a text map: one character per cell, lettered by terrain, the party marked, unrevealed ground left as cover. Column and row rulers and a legend of the terrain letters, so "12,7" in the legend and "12,7" on the map are the same hex. A big world is drawn as a window around the party — name `around` to look elsewhere. The answer always carries the JSON grid (a key per glyph), so you can point instead of count.',
+  args: {
+    properties: {
+      sceneId: {
+        type: "string",
+        description: "the hexcrawl scene; the active one when omitted",
+      },
+      around: {
+        type: "string",
+        description: 'centre the map on this cell key, "col,row"',
+      },
+      radius: {
+        type: "integer",
+        description: "with `around`: how many cells either way (default 6, max 12)",
+      },
+    },
+  },
+  capability: "hexcrawl.read",
+  run(args, ctx): ToolOutcome {
+    const sceneId = str(args["sceneId"]) ?? null;
+    const around = str(args["around"]) ?? null;
+    const radius = num(args["radius"]);
+    const plan = ctx.view.hexMap(sceneId, {
+      ...(around !== null ? { around } : {}),
+      ...(radius === undefined
+        ? {}
+        : { radius: Math.min(Math.max(Math.trunc(radius), 1), 12) }),
+    });
+    if (!plan) {
+      return refusal(
+        sceneId
+          ? `scene "${sceneId}" has no hexcrawl cells to draw`
+          : "there is no hexcrawl scene active — hexmap.render draws one named with sceneId",
+      );
+    }
+    const drawn = renderHexmap(plan.glyphs, plan.options);
+    // The ASCII is what a model quotes and the JSON is what it points with, so both come back on
+    // every call: a `format` flag would mean a second round trip to get the half it did not ask for.
+    return text(drawn.ascii, drawn.json as unknown as Json);
+  },
+};
+
 // ── actors, sheets, bestiary ────────────────────────────────────────────────────────────────────
 
 const sheetRead: ToolDefinition = {
@@ -622,4 +870,8 @@ export const READ_TOOLS: readonly ToolDefinition[] = [
   chatRead,
   sheetRead,
   bestiarySearch,
+  hexcrawlCells,
+  hexRead,
+  hexDescribe,
+  hexmapRender,
 ];

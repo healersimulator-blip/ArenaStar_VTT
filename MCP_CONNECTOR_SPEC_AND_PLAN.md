@@ -515,12 +515,26 @@ real actor (hp 6, Dex 15, owned by the session that imported it) with a token on
 exactly `secondsPerRound`; a `time.advance` of 3 days sweeps the clock-counted effects exactly as the
 Settings buttons do.
 
-### Phase 5 — Hexcrawl tools (1 day, S) — **depends on `HEXCRAWL_SCENE_SPEC_AND_PLAN.md`**
+### Phase 5 — Hexcrawl tools (1 day, S) — 🚧 read half landed 2026-09-22 (D-282) — **depends on `HEXCRAWL_SCENE_SPEC_AND_PLAN.md`**
 `hexmap.render`, `hex.read/describe` (GM fields withheld from a player agent), `hexcrawl.cells`,
 `travel.plan/advance`, `encounter.roll/place`.
 *e2e:* the agent walks the party three hexes along a path, the clock advances by the terrain-priced
 amount, the encounter engine fires the expected table, and the rolled tokens land on the copied battle
 scene (the F1 acceptance, driven by the agent instead of the UI).
+
+**As landed so far — the read surface (D-282).** `hexcrawl.cells`, `hex.read`, `hex.describe` and
+`hexmap.render`, all `hexcrawl.read`, plus the `vtt://world/<worldId>/hexmap` resource. They read the
+replica and add nothing to it: **a closed cell is not on a player's replica at all** (D-271), so the
+tools never check a "revealed" flag — a cell the party has not been shown is simply not there, and
+`hex.read` refuses with "hexcrawl.cells names the ones you may see" rather than inventing an empty hex.
+`hexmap.render` draws a **window, not the world** — 48×24 cells, centred on the party or on the cell
+the agent names with `around`, and it says when it clamped, because a 20 000-hex map pasted into a
+context is a denial of service dressed as an answer. Both forms come back on every call: the ASCII a
+model quotes, and the JSON grid (a key per glyph) it points with. Terrain letters are derived from the
+catalog's own names, so a custom catalog reads the same way, and the legend counts only the glyphs
+actually drawn — a hex under cover is not a "P" the reader can find on the map. The renderer is pure
+(`src/core/agents/hexRender.ts`, byte-exact tested); the region is decided in the view, where the data
+is. **Still to come:** `travel.plan` / `travel.advance` and `encounter.roll` / `encounter.place`.
 
 ### Phase 6 — Hardening, budgets, docs (1 day, S)
 Rate classes and read caps tuned against a real 25k-entry world; the `dryRun`/`confirm` ergonomics; the
