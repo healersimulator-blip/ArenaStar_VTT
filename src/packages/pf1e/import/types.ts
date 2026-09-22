@@ -44,7 +44,12 @@ import { normalizeSkillId } from "../skills";
 import { normalizeSize } from "../rulesTables";
 import { DICE_FORMULA } from "./dice";
 
-export type CharacterImportFormat = "foundry" | "herolab" | "roll20";
+export type CharacterImportFormat =
+  | "foundry"
+  | "herolab"
+  | "roll20"
+  /** G-08: a monster stat block pasted as text — the one source with no file behind it. */
+  | "statblock";
 
 /** One embedded item, in the shape `resolveInventoryItem` reads (`system.*`, not `system.pf1e`). */
 export interface ImportedItem {

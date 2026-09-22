@@ -127,7 +127,12 @@ export function parseCompendiumPack(
 
 // ─── index + search ───────────────────────────────────────────────────────────
 
-const tokenize = (s: string): string[] =>
+/**
+ * Split a string into lowercased alphanumeric tokens. Exported because the compendium
+ * **index** (`core/compendiumIndex.ts`, G-45) has to tokenize exactly the way the reference
+ * search does — a second tokenizer would be a second set of search semantics.
+ */
+export const tokenize = (s: string): string[] =>
   s
     .toLowerCase()
     .split(/[^a-z0-9]+/)

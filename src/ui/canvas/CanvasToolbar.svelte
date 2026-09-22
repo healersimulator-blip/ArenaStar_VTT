@@ -20,7 +20,9 @@
     | "fog"
     | "wall"
     | "light"
-    | "pin";
+    | "pin"
+    /** D-275: the hexcrawl travel route — click hexes to extend it (plan §5.7). */
+    | "path";
   /** Roll20's four layers: Map & Background (map), Objects & Tokens (tokens), GM Info (gm), Dynamic Lighting (lighting). */
   export type CanvasLayer = "map" | "tokens" | "gm" | "lighting";
   export type CanvasAction =
@@ -49,6 +51,7 @@
     onAction = () => {},
     onRoll = () => {},
     onEraseAll = () => {},
+    pathTool = false,
   }: {
     active?: CanvasTool;
     collapsed?: boolean;
@@ -62,6 +65,12 @@
     onAction?: (action: CanvasAction) => void;
     onRoll?: (formula: string, mode: RollMode) => void;
     onEraseAll?: () => void;
+    /**
+     * D-275: show the *Travel path* tool. It is a hexcrawl tool — a route means nothing on a
+     * tactical map — so the shell says whether the active scene has a hexcrawl profile, rather
+     * than the rail guessing from the scene it cannot see.
+     */
+    pathTool?: boolean;
   } = $props();
 
   let formula = $state("1d20");
@@ -117,9 +126,16 @@
     { id: "wall", label: "Walls & doors", icon: "▤", shortcut: "W", gmOnly: true },
     { id: "light", label: "Lighting", icon: "☀", shortcut: "L", gmOnly: true },
     { id: "pin", label: "Place pin", icon: "⚑", shortcut: "P", gmOnly: true },
+    // D-275 (plan §5.7): path mode. Hexcrawl maps only, and the GM's alone — the route is
+    // authored for the party, not by it.
+    { id: "path", label: "Travel path", icon: "⇢", shortcut: "Y", gmOnly: true },
   ];
 
-  const visibleTools = $derived(tools.filter((tool) => isGM || !tool.gmOnly));
+  const visibleTools = $derived(
+    tools.filter(
+      (tool) => (isGM || !tool.gmOnly) && (tool.id !== "path" || pathTool),
+    ),
+  );
 
   function choose(toolId: CanvasTool) {
     active = toolId;
@@ -248,7 +264,12 @@
     </div>
 
     <div class="group subpanel" role="group" aria-label="Tool options">
-      {#if active === "draw"}
+      {#if active === "path"}
+        <p class="hint" data-path-hint>
+          Click hexes to extend the route; click the last one again to take it back. Esc clears,
+          and the itinerary under the rail commits it.
+        </p>
+      {:else if active === "draw"}
         <div class="swatches">
           {#each drawShapes as shape (shape.id)}
             <button

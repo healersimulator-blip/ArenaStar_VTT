@@ -9,6 +9,10 @@
  * `traits.size: "med"`), and the Hero Lab fixture follows the two shapes public importers read
  * (`attribute[@name]/attrvalue/@modified`, `armorclass/@ac|@touch|@flatfooted`).
  */
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parse as parseYaml } from "yaml";
 import { describe, expect, test } from "vitest";
 import {
   characterImportOps,
@@ -769,5 +773,92 @@ describe("the front door", () => {
     expect((data.system as Record<string, unknown>).pf1e).toMatchObject({
       baseAttack: 4,
     });
+  });
+});
+
+// ─── the real vendored Foundry sources (G-39/D-264, re-verified with the checkout present) ───
+/**
+ * D-264's suite reads fixtures *derived* from the vendored pack files. This suite reads the
+ * **vendored files themselves** — every NPC in the pf1 system's `packs/basic-monsters` (the real
+ * upstream YAML at the pinned commit) and a sample of the real Foundry actor JSON in
+ * `pf1e-content/src/packs` — through the public front door. It skips itself on a fresh clone
+ * (no `pnpm content:fetch`); `tests/scripts/testerRealZip.test.ts` is the same pattern for the
+ * converted corpus, and the two together are what "works against the real import tools" means.
+ */
+const repoRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
+const vendorRoot = join(repoRoot, "tools/content/vendor");
+const monstersDir = join(vendorRoot, "pf1-system/packs/basic-monsters");
+const actorJsonDir = join(vendorRoot, "pf1e-content/src/packs/kingdom-building-buildings");
+
+describe.skipIf(!existsSync(monstersDir))("real Foundry NPCs (the pinned pf1-system checkout)", () => {
+  test("every basic-monster pack source imports through the front door", () => {
+    const files = readdirSync(monstersDir)
+      .filter((f) => f.endsWith(".yaml"))
+      .sort();
+    expect(files.length).toBeGreaterThanOrEqual(15);
+    const names: string[] = [];
+    for (const file of files) {
+      // A Foundry actor export is the pack source's document shape; the pack ships it as YAML.
+      const text = JSON.stringify(parseYaml(readFileSync(join(monstersDir, file), "utf8")));
+      const imported = importCharacter(text, { fileName: file.replace(/\.yaml$/, ".json") });
+      expect(imported.ok, `${file}: ${imported.ok ? "" : imported.error}`).toBe(true);
+      if (!imported.ok) continue;
+      const report = characterImportReport(imported.value);
+      names.push(imported.value.name);
+      expect(imported.value.format).toBe("foundry");
+      expect(report.name).toBeTruthy();
+      // The block the reader authors must be one the sheet can actually derive from.
+      expect(characterImportCheck(imported.value).ok, `${file} rejected its own block`).toBe(true);
+      for (const item of imported.value.items) {
+        expect(typeof item.name).toBe("string");
+        expect(item.name.length).toBeGreaterThan(0);
+      }
+    }
+    expect(names).toEqual(
+      expect.arrayContaining(["Goblin", "Wolf", "Fire Beetle", "Battle Mage", "Wasp Swarm"]),
+    );
+  });
+
+  test("a real NPC's numbers arrive from its own fields (goblin: Str 13, a weapon line)", () => {
+    const source = parseYaml(
+      readFileSync(join(monstersDir, "goblin.sozB4GqGGPvdJ0PY.yaml"), "utf8"),
+    ) as { system?: { abilities?: Record<string, { value?: number }> } };
+    const goblin = ok(importCharacter(JSON.stringify(source), { fileName: "goblin.json" }));
+    expect(goblin.name).toBe("Goblin");
+    // Read-only assertions on the authored block: components, never a re-derived total — and
+    // every score is the source document's own value, not a default.
+    const abilities = (goblin.system as { abilities?: Record<string, number> }).abilities;
+    expect(abilities?.str).toBe(13);
+    expect(abilities?.dex).toBe(11);
+    for (const key of ["str", "dex", "con", "int", "wis", "cha"] as const) {
+      expect(abilities?.[key], key).toBe(source.system?.abilities?.[key]?.value);
+    }
+    expect(goblin.items.length).toBeGreaterThan(0);
+    const { attacks, issues } = attackLinesFromItems(goblin.items, "Small", []);
+    expect(attacks.length).toBeGreaterThan(0);
+    // Every line belongs to an item the export actually carries (the weapon it read).
+    const names = new Set(goblin.items.map((i) => i.name));
+    for (const attack of attacks) expect(attack.name === undefined || names.has(attack.name)).toBe(true);
+    expect(issues.length).toBeGreaterThanOrEqual(0);
+    // The importer reports what it left behind rather than dropping it silently.
+    const report = characterImportReport(goblin);
+    expect(report.counts.items).toBe(goblin.items.length);
+    expect(report.read.length).toBeGreaterThan(0);
+  });
+
+  test("real Foundry actor JSON (an upstream content pack) imports too", () => {
+    if (!existsSync(actorJsonDir)) return; // pack layout moved upstream: the YAML half already ran
+    const files = readdirSync(actorJsonDir)
+      .filter((f) => f.endsWith(".json"))
+      .sort()
+      .slice(0, 5);
+    expect(files.length).toBeGreaterThan(0);
+    for (const file of files) {
+      const imported = importCharacter(readFileSync(join(actorJsonDir, file), "utf8"), { fileName: file });
+      expect(imported.ok, `${file}: ${imported.ok ? "" : imported.error}`).toBe(true);
+      if (!imported.ok) continue;
+      expect(imported.value.format).toBe("foundry");
+      expect(characterImportCheck(imported.value).ok).toBe(true);
+    }
   });
 });

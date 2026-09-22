@@ -19,7 +19,7 @@ import {
   type Role,
   type UserDocument,
 } from "../core/documents";
-import type { ActorDocument, DocRef, Json } from "../core/documents";
+import type { ActorDocument, DocRef, Json, SceneDocument } from "../core/documents";
 import type { Op, OpEnvelope } from "../core/ops";
 import type {
   AudioCmdMsg,
@@ -70,6 +70,7 @@ import { OpLog } from "../core/oplog";
 import { UndoStack } from "../core/undo";
 import { can } from "../core/permissions";
 import { docVisibleTo, projectEnvelope, projectWorld, visibilityFields } from "../core/projection";
+import { cellVisibilityChanges, openCellKeys, projectCellForViewer } from "../core/hexcrawl/visibility";
 import { applyDiff } from "../core/diff";
 import {
   TokenBucket,
@@ -285,6 +286,97 @@ function projectWithCrossings(
   }
   if (ops.length === 0) return null;
   return modified || ops.length !== envelope.ops.length ? { ...envelope, ops } : envelope;
+}
+
+/**
+ * D-271 — the hexcrawl boundary crossing.
+ *
+ * Cells are not visible documents, they are visible *cells*: a closed cell is not projected to a
+ * player at all (D-256's rule for a hidden pin, for the same reason — the asset manifest lists
+ * every hash), so a reveal is a **create** for a session that never had the cell and a close is
+ * a **delete**. The pivot is the scene's own `flags` write, because that is where the revealed
+ * set lives (`core/hexcrawl/scene.ts` writes the whole `flags` object); the comparison itself is
+ * pure core (`cellVisibilityChanges`), which is why this stays a twenty-line hook rather than a
+ * second visibility engine.
+ */
+interface CellRevealCrossing {
+  sceneRef: DocRef;
+  opened: string[];
+  closed: string[];
+  /** The scene after the write — the projection rule reads its reveal set. */
+  scene: SceneDocument;
+}
+
+function cellRevealCrossings(
+  envelope: OpEnvelope,
+  inverses: readonly Op[],
+  resolve: (ref: DocRef) => BaseDocument | undefined,
+): CellRevealCrossing[] {
+  const out: CellRevealCrossing[] = [];
+  for (let i = 0; i < envelope.ops.length; i += 1) {
+    const op: Op | undefined = envelope.ops[i];
+    const inverse: Op | undefined = inverses[i];
+    if (!op || !inverse) continue;
+    if (op.kind !== "update" || inverse.kind !== "update") continue;
+    if (op.ref.coll !== "scenes") continue;
+    const touchesFlags = Object.keys(op.diff).some(
+      (key) => key === "flags" || key.startsWith("flags.") || key.startsWith("-=flags."),
+    );
+    if (!touchesFlags) continue;
+    const after = resolve(op.ref);
+    if (!after || after.type !== "scene") continue;
+    const before = { ...after, ...inverse.diff } as BaseDocument;
+    if (before.type !== "scene") continue;
+    const { opened, closed } = cellVisibilityChanges(
+      before as SceneDocument,
+      after as SceneDocument,
+    );
+    if (opened.length === 0 && closed.length === 0) continue;
+    out.push({ sceneRef: op.ref, opened, closed, scene: after as SceneDocument });
+  }
+  return out;
+}
+
+/** The synthetic ops one crossing owes one viewer (empty for a GM, who holds every cell anyway). */
+function cellRevealOps(crossing: CellRevealCrossing, user: PermissionUser): Op[] {
+  if (user.role === "GM" || user.role === "ASSISTANT") return [];
+  const ops: Op[] = [];
+  const open = openCellKeys(crossing.scene);
+  for (const cell of crossing.scene.cells ?? []) {
+    if (!crossing.opened.includes(cell.key)) continue;
+    const projected = projectCellForViewer(cell, open);
+    if (!projected) continue;
+    ops.push({
+      kind: "create",
+      coll: "cells",
+      parent: crossing.sceneRef,
+      data: projected as unknown as BaseDocument,
+    });
+  }
+  for (const key of crossing.closed) {
+    const cell = (crossing.scene.cells ?? []).find((c) => c.key === key);
+    if (!cell) continue;
+    ops.push({ kind: "delete", ref: { coll: "cells", id: cell._id, parent: crossing.sceneRef } });
+  }
+  return ops;
+}
+
+/** Insert each crossing's cell ops right after the op that moved the boundary, per session. */
+function withCellReveals(
+  envelope: OpEnvelope,
+  user: PermissionUser,
+  crossings: readonly CellRevealCrossing[],
+): OpEnvelope {
+  const ops: Op[] = [];
+  for (const op of envelope.ops) {
+    ops.push(op);
+    if (op.kind !== "update" || op.ref.coll !== "scenes") continue;
+    for (const crossing of crossings) {
+      if (crossing.sceneRef.id !== op.ref.id) continue;
+      ops.push(...cellRevealOps(crossing, user));
+    }
+  }
+  return { ...envelope, ops };
 }
 
 export class HostSync {
@@ -898,6 +990,11 @@ export class HostSync {
     // (it was projected away) — rewrite as a full-doc create; revoked viewers
     // get a delete. Same seq, no protocol additions (D-064).
     const crossings = visibilityCrossings(envelope, inverses, (ref) => this.store.resolve(ref));
+    // D-271: a reveal set changes which *cells* a player may hold — the same rewrite shape, one
+    // level down (cells are embedded in the scene whose flags moved).
+    const cellCrossings = cellRevealCrossings(envelope, inverses, (ref) =>
+      this.store.resolve(ref),
+    );
     for (const session of this.sessions.values()) {
       if (!session.user) continue;
       const resolver = { resolve: (ref: DocRef) => this.store.resolve(ref) };
@@ -905,7 +1002,12 @@ export class HostSync {
         crossings.length > 0
           ? projectWithCrossings(envelope, session.user, crossings, resolver)
           : projectEnvelope(envelope, session.user, resolver);
-      if (projected) this.send(session, { kind: "ops", envelope: projected });
+      if (!projected) continue;
+      const withCells =
+        cellCrossings.length > 0
+          ? withCellReveals(projected, session.user, cellCrossings)
+          : projected;
+      this.send(session, { kind: "ops", envelope: withCells });
     }
   }
 

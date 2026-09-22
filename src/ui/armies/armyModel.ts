@@ -261,24 +261,13 @@ export function rosterRows(
   return rows;
 }
 
-/** Virtualization math (fixed row height): which slice to render, and pads. */
-export function windowRows(
-  total: number,
-  scrollTop: number,
-  viewportHeight: number,
-  rowHeight: number,
-  overscan = 6,
-): { start: number; end: number; padTop: number; padBottom: number } {
-  const first = Math.max(0, Math.floor(scrollTop / rowHeight) - overscan);
-  const visible = Math.ceil(viewportHeight / rowHeight) + overscan * 2;
-  const end = Math.min(total, first + visible);
-  return {
-    start: first,
-    end,
-    padTop: first * rowHeight,
-    padBottom: Math.max(0, (total - end) * rowHeight),
-  };
-}
+/**
+ * Virtualization math — identical to `ui/virtual.ts`, re-exported here so the army roster keeps
+ * importing it from its own model (§G-45 moved the function to a shared module because the
+ * compendium reader needs the same math; the arithmetic and its tests are unchanged).
+ */
+export { windowRows } from "../virtual";
+export type { RowWindow } from "../virtual";
 
 export type SortKey = "name" | "type" | "strength" | "morale";
 

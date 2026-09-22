@@ -37,6 +37,8 @@ import type { LightingLayer } from "./layers/LightingLayer";
 import { LightingLayer as LightingLayerImpl } from "./layers/LightingLayer";
 import type { FogLayer } from "./layers/FogLayer";
 import { FogLayer as FogLayerImpl } from "./layers/FogLayer";
+import type { HexOverlayLayer } from "./layers/HexOverlayLayer";
+import { HexOverlayLayer as HexOverlayLayerImpl } from "./layers/HexOverlayLayer";
 import type { StrategicFogLayer } from "./layers/StrategicFogLayer";
 import { StrategicFogLayer as StrategicFogLayerImpl } from "./layers/StrategicFogLayer";
 import type { EffectsLayer } from "./layers/EffectsLayer";
@@ -96,6 +98,13 @@ export interface Stage {
   peekFogLayer(): FogLayer | null;
   /** §9A faction fog cover (strategic scenes). */
   getStrategicFogLayer(): StrategicFogLayer;
+  /**
+   * D-271 hexcrawl overlay: cell grid + terrain tints below the tokens, and the cover players see
+   * over unopened ground above them. Mounted on first use; `sync(null)` clears it.
+   */
+  getHexOverlayLayer(): HexOverlayLayer;
+  /** The mounted hexcrawl overlay, if any (readbacks for e2e). */
+  peekHexOverlayLayer(): HexOverlayLayer | null;
   /** §9 pings + rulers (ephemeral overlays, ticker-driven). */
   getEffectsLayer(): EffectsLayer;
   /** §9 tiles below/above with roof/fade occlusion. */
@@ -354,6 +363,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   let templatesLayer: TemplatesLayerImpl | null = null;
   let drawingsLayer: DrawingsLayerImpl | null = null;
   let strategicFogLayer: StrategicFogLayerImpl | null = null;
+  let hexOverlayLayer: HexOverlayLayerImpl | null = null;
   let effectsLayer: EffectsLayerImpl | null = null;
   let tilesLayer: TilesLayerImpl | null = null;
   let areaPreviewLayer: AreaPreviewLayerImpl | null = null;
@@ -375,6 +385,11 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   lightingHolder.label = "lighting";
   root.addChild(lightingHolder);
   let lightingLayer: LightingLayerImpl | null = null;
+
+  // ── §20 hexcrawl overlay (D-271): tints + cell grid under the tokens ─────────
+  const hexOverlayHolder = new Container();
+  hexOverlayHolder.label = "hexcrawl";
+  root.addChild(hexOverlayHolder);
 
   // ── Tokens ──────────────────────────────────────────────────────────────────
   const tokenLayer = new Container();
@@ -518,6 +533,19 @@ export async function createStage(options: StageOptions): Promise<Stage> {
         fogHolder.addChild(strategicFogLayer.container);
       }
       return strategicFogLayer;
+    },
+    getHexOverlayLayer(): HexOverlayLayer {
+      if (!hexOverlayLayer) {
+        hexOverlayLayer = new HexOverlayLayerImpl();
+        hexOverlayHolder.addChild(hexOverlayLayer.container);
+        // The cover goes above the tokens, at the *bottom* of the fog holder, so a scene that
+        // also uses the freehand fog keeps that mask on top of it.
+        fogHolder.addChildAt(hexOverlayLayer.coverContainer, 0);
+      }
+      return hexOverlayLayer;
+    },
+    peekHexOverlayLayer(): HexOverlayLayer | null {
+      return hexOverlayLayer;
     },
     getEffectsLayer(): EffectsLayer {
       if (!effectsLayer) {
@@ -764,6 +792,8 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       modelLayer = null;
       strategicFogLayer?.destroy();
       strategicFogLayer = null;
+      hexOverlayLayer?.destroy();
+      hexOverlayLayer = null;
       templatesLayer?.destroy();
       templatesLayer = null;
       drawingsLayer?.destroy();

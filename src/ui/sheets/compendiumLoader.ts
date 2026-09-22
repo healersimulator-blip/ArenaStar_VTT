@@ -1,6 +1,7 @@
 import { openDB } from "idb";
 import { DB_NAME, DB_VERSION, listPackages } from "../../storage/idb";
-import { parseCompendiumPack, type CompendiumPack } from "../../core/compendium";
+import { type CompendiumPack } from "../../core/compendium";
+import { packCacheKey, parsePackCached } from "../../core/compendiumCache";
 import type { WorldId } from "../../core/ids";
 
 export interface CompendiumPackRow {
@@ -42,12 +43,22 @@ export async function loadWorldCompendia(worldId?: WorldId | string): Promise<Co
           } catch {
             continue;
           }
-          const pack = parseCompendiumPack(parsed, { origin: "world" });
-          if (pack.ok) {
-            const key = `${rec.id}:${pack.value.name}`;
+          // Memoized per package record (G-45): a picker opened twice parses nothing twice.
+          const pack = parsePackCached(
+            packCacheKey({
+              worldId: wId,
+              packageId: rec.id,
+              version: rec.version,
+              importedAt: rec.importedAt,
+              file: descriptor.file,
+            }),
+            parsed,
+          );
+          if (pack) {
+            const key = `${rec.id}:${pack.name}`;
             if (!seenPackKeys.has(key)) {
               seenPackKeys.add(key);
-              out.push({ packageId: rec.id, pack: pack.value });
+              out.push({ packageId: rec.id, pack });
             }
           }
         }

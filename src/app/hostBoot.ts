@@ -34,7 +34,8 @@ import SimWorkerCtor from "../workers/sim.worker.ts?worker&inline";
 import { InlineSimRunner, WorkerSimRunner, type SimRunner } from "../workers/simWorkerClient";
 import { MASS_BATTLE_SCHEMA_COLUMNS } from "../packages";
 import { readZipPackage } from "../packages/packageLoader";
-import { parseCompendiumPack, type CompendiumPack } from "../core/compendium";
+import { type CompendiumPack } from "../core/compendium";
+import { clearParsedPackCache, packCacheKey, parsePackCached } from "../core/compendiumCache";
 import {
   codeSteps,
   compareVersions,
@@ -644,6 +645,9 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
         files,
       };
       await putPackage(db, rec);
+      // A package write invalidates the parsed-pack memo outright: two imports inside the same
+      // millisecond would otherwise share an `importedAt` and serve the previous parse (G-45).
+      clearParsedPackCache();
       return {
         ok: true,
         summary: summarize(rec, await activePackageId(), await trustedIds(), await importedIds()),
@@ -720,8 +724,19 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
           }
           // World-origin packs: parsed from this world's own package records (world zip),
           // so the 2,000-entry app-body cap does not apply (size-domain decision, D-252).
-          const pack = parseCompendiumPack(parsed, { origin: "world" });
-          if (pack.ok) out.push({ packageId: rec.id, pack: pack.value });
+          // Memoized per package record (G-45): reopening the compendium does not re-parse the
+          // converted world, and a re-import wins because `importedAt` is part of the key.
+          const pack = parsePackCached(
+            packCacheKey({
+              worldId: meta.worldId,
+              packageId: rec.id,
+              version: rec.version,
+              importedAt: rec.importedAt,
+              file: descriptor.file,
+            }),
+            parsed,
+          );
+          if (pack) out.push({ packageId: rec.id, pack });
         }
       }
       return out;

@@ -607,6 +607,12 @@ test.describe("Package loader (§12)", () => {
 
       // drag import onto the canvas → actor copy + linked token at the drop
       await page.fill("#compendium-search", "");
+      // Settle the page scroll *before* the drag. The document is taller than the viewport (the
+      // canvas extends past the fold), so `dragTo` would otherwise scroll the target into view
+      // while the button is already down — and the row would slide out from under the pointer
+      // mid-gesture, making the browser pick whichever row moved up into that spot as the drag
+      // source. A real GM drags with both ends visible; this makes the spec do the same.
+      await page.locator(".canvas-host").scrollIntoViewIfNeeded();
       const before = await appCall<number>(page, "tokenCount");
       await page.locator('[data-entry-id="goblin-warrior"]').dragTo(page.locator(".canvas-host"));
       await expect.poll(() => gmCall<number>(page, "actorCount")).toBe(2);

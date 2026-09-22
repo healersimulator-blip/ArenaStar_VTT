@@ -711,6 +711,7 @@ test("canvas selection creates scoped rosters, adds/removes members and rolls on
     "Round 1 · No combatants",
   );
   await page.click("#scene-add");
+  await page.click("#scene-new-blank");
   await page.locator(".scenenav [data-scene]").nth(1).click();
   await expect(page.locator("[data-combat-selection]")).toContainText(
     "0 selected",

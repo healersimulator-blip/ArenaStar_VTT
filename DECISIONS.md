@@ -3119,6 +3119,10 @@ transcription (which agrees); no other new research.
   1 day = 2 400 rounds × the configured `secondsPerRound`) rather than real-clock units.
   Calendar dates, real-time tickers and per-level _display_ conversion remain open (P5/E06+
   seams); the E04 "per-level conversion" deferral is closed by this ladder.
+  — **Ladder superseded by D-268 (2026-09-21):** the abstraction became real time derived from the
+  round (1 min = 10 rounds, 1 h = 600 rounds, 1 day = 14 400 rounds). Everything else this entry
+  landed — the replicated `clockSeconds`, the op shapes, the anchor stamping, the sweep, the clock
+  UI — still stands; only the rung values and the two doc comments changed.
 - **Evidence:** 21 new tests in `tests/packages/pf1eWorldClock.test.ts` (read/normalize/joiner
   merge, op shapes incl. create-from-empty and no-op, wrap→clock integration through a real
   `pf1eNextTurn` round wrap, tick ladder with per-level and configured rounds, anchor
@@ -6773,3 +6777,1099 @@ Measured under `bench:dense` on an idle box: 20 × 500 p50 51.0 ms / p95 78.8 ms
 **Evidence, all executed.** `corepack pnpm exec tsc --noEmit` exit 0 · `corepack pnpm lint` exit 0 · `corepack pnpm check:svelte` **44 component(s), 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`, pre-existing) · `corepack pnpm test` **244 files (242 passed, 1 skipped — `tests/net/webrtc.test.ts`; the second skip is the content converter's own, below) / 2,809 passed / 9 skipped** — and re-run with the pinned vendor checkout fetched (`pnpm content:fetch`), which un-skips the content specs: **244 files (243 passed, 1 skipped) / 2,812 passed / 6 skipped**, of which the slice's own `tests/packages/pf1eCharacterImport.test.ts` **30** — the dice spellings (`sizeRoll(1, 6, @size)` → `1d6`, four-argument form, plain `NdM`, and `null` for anything else, `1d8+3` → dice + flat, `+5` → flat only), Foundry: abilities from `.value`, the pack's hp **pool** (`hp=hpMax` + the "no hit-point maximum" warning), AC read as components with `ac.{armor,shield,natural,misc,dodge}`, `attributes.naturalAC` as a bare number, saves from `.total` + `savesAsTotal`, `bab.total`, speeds, the short size key normalized, skills through `normalizeSkillId` (ranks + class-skill only), the system's own *Shortspear* read from `packs/basic-monsters/acolyte…yaml` (one thrown line, `1d6` piercing, increment 20) with the attack entry cross-checked against `attackEntryFromWeapon` on the sheet's own `readInventoryItems` output, feats by name, spells named, currency, initiative/personal details warned; Hero Lab: `attrvalue/@modified` **and** the element-text shape, `armorclass ac/touch/flatfooted` published, saves by label (`fortitude`/`reflex`/`willpower`), hit points, BAB, hit dice as a number *and* as `5d8`, a printed damage total decomposed against the export's Strength, printed attack bonuses refused, a portfolio's second character named, unknown skills listed; Roll20: the alias tables, the `max` column of `hp`, stored AC/saves published, the `repeating_melee_…` row read into a weapon + line, stored attack modifiers refused, the leftover sheet fields named (max 8 + "…more"); the front door: structure decides the format, a `.por` is explained, an unrecognised file is refused, **every reader's product passes the actor validator**, and a block the validator refuses is refused loudly · e2e `e2e/pf1e_import.spec.ts` **1/1 (2.9 s)** through the real UI: three exports picked with the file chooser, each read back from the host's own store (`abilities/hp/hpMax/baseAttack/speedFt/attacks`, the Hero Lab AC triple and save totals, the Roll20 `27/31`), the *Mara Vex* sheet showing `17 / 13 / 14` and `3 / 3 / 4` on the summary and its authored *Shortspear* line on the combat tab, the feats line and the "spell item(s)" warning in the report, and a `notes.json` refused by name with the character count unchanged and no page error · the specs that render this panel and share the attack-line path: `e2e/sheets.spec.ts` **11** + `e2e/pf1e_inventory.spec.ts` **1** — 11 passed together in 1.4 m (including the 31.6 s bestiary sweep) · full chromium suite on exactly this `dist/` (`--workers=1`): **184 tests, 183 passed / 1 failed (16.8 m)** — the sole failure is `e2e/fog_player.spec.ts:41`, the recorded load-sensitive case: in-suite it times out on a fog readback after the hero moves (`drawn(player)` at :110, 1.2 m) while **standalone it is 2/2 in 59.7 s** (22.7 s + 36.2 s), the same class D-262/D-263 recorded for this spec and `fog_lighting` · build `dist/index.html` **2,957,981 B raw (2.821 MB) / 847,978 B gzip (0.809 MB)**, `pnpm size` OK inside the 6 MB budget, with `build:systems` + `content:convert` (**28 packs / 25,376 entries**) + `build:worlds` + `content:package` re-run after it.
 
 **Status: accepted 2026-09-21.**
+## D-265 — 2026-09-21 — The status documents catch up with D-259…D-264: eight gap rows re-verified against the code, the tier list re-scored, and the open set written down where it can be read
+
+**Context.** D-259…D-264 shipped eight gap closures in two days, and the closure plan recorded each
+one inline (`done (D-259)` … `done (D-264)`) — but `GAP_ANALYSIS_Roll20_Foundry.md` §4 kept the
+verdicts of the **2026-09-20 verification pass** (`13962e8`), which predates all of them. The result
+was a document that said the opposite of the code in eight places, and §5 then told a reader to
+start the remaining work with **G-03** and **G-24** — both already closed. That is exactly the drift
+the plan's own §6 *Evidence convention* forbids ("the gap analysis gets its status characters
+updated in the same commit that closes a gap, so the two documents cannot drift"). Because the
+tracking documents are this project's control system — the thing that decides what gets built next —
+the drift is a defect in the plan, not cosmetics: it inflates the remaining-work estimate and points
+the next slice at finished work.
+
+**Decision — every rewritten status was re-verified against the code in this pass, and nothing was
+marked closed that a file or a test does not prove.** The rows were not rewritten from the
+decisions' prose; each claim was re-checked against the tree, and the rewritten rows cite the file
+and the test that carry it:
+
+| Row | Was | Now (verified this pass) |
+|---|---|---|
+| G-03 inventory/encumbrance/currency | ⛔ Open — "no `encumbrance`/`carryingCapacity` anywhere in `src/`" | ✅ D-259 — `src/packages/pf1e/inventory.ts` (`carryingCapacityOf`, `loadLevelFor`, `encumbranceReadout`), world settings, `PF1eItemsTab`; `tests/packages/pf1eInventory.test.ts` **54**, `e2e/pf1e_inventory.spec.ts` |
+| G-04 items as documents | 🟡 Partial — "Missing: an Items tab and an item sheet window, a charges ledger, containers, currency, encumbrance, item→attack link, `changes[]`" | ✅ D-259 — every named piece exists; the `changes[]` answer is the mapped subset with `set` refused by name (24,487 items / 248 with a block / 416 changes); `tests/packages/pf1eItemChanges.test.ts` **20** |
+| G-05 magic items | 🟡 "any sheet surface that makes them more than a description" | ✅ D-259 — `item:<id>` effects reach `deriveFromActorDocument`, consumables carry their own CL/DC and spend a charge, `resistance` joined `PF1E_BONUS_TYPES`, the all-zero `armor` block is not armor |
+| G-10a token HP bars | ⛔ "verified absent (no `hpBar`/bar code)" | ✅ D-261 — `src/packages/pf1e/tokenHpBars.ts` + stage label + `tokenHpBars` world setting; `tests/packages/pf1eTokenHpBars.test.ts` **9**, `e2e/token_hp.spec.ts` |
+| G-10b player quickbar | ⛔ "verified absent (no `quickbar`)" | ✅ D-261 — `flags.pf1e.quickbar` + `src/ui/quickbar/*` in both shells; `tests/ui/quickbar.test.ts` **12**, `e2e/quickbar.spec.ts` |
+| G-20 chat-card apply | ⛔ Open — "no apply/heal intent" | ✅ D-261 — `roll.apply` `0x34` (in `messages.ts` **and** `PROTOCOL.md`), `rollApply.ts`, `RollApplyRow.svelte`; `tests/packages/pf1eRollApply.test.ts` **16**, `e2e/roll_apply.spec.ts` |
+| G-22 player table surface | 🟡 "Still missing: a player quickbar / macro bar (G-10b)" | ✅ D-261 — the named remainder landed; the row now records the one real shape difference (the player sidebar is a stack, not a tab strip, which belongs to the §10 tabs item) |
+| G-24 sight bounded by lighting | ⛔ "Open (re-verified) … nothing reads darkness or light state" | ✅ D-260 — `src/canvas/vision/darkness.ts` gate; `tests/canvas/darkness.test.ts` **19**, `e2e/fog_lighting.spec.ts` |
+| G-32 token withholding | ⛔ "Open (known limitation)" | ⛔ **still open** — but rewritten to carry D-260's explicit decision (replication-layer change; the host-side path is cheap because the explored fog is already per user+scene) instead of reading as an oversight |
+| G-25 heading | "Closed for brushes (D-256)" | ✅ "Closed (D-256 brushes, D-262 the remainder)" — the body already said so |
+| G-42 spec count | "174 specs" | **184** (D-264) — the same stale number in the closure plan's §6 |
+
+**Decision — the open set gets written down once, where a reader lands.** §5 keeps its numbering as
+a record — five of its ten items are struck through with the decision that closed them and two more
+are marked half done (7: G-25 is D-262 and G-41 is D-263, G-38 open · 8: G-39 is D-264, G-08 open)
+— and a new **§5.1 "What is actually left"** states the remaining parity work in cheapest-first order
+(G-45 first: the last Wave-1 item), so the answer to "what is left?" no longer requires reading 45
+rows to infer it. The doc header gains a dated re-sync note naming the rewritten rows, the §4 format
+line says which rows the re-sync touched, and the closure plan gains a **Status 2026-09-21** line
+plus the two done-markers its own §4 table was missing (1.1 → D-258, 1.3 → D-259) and a corrected
+critical-path paragraph: **1.1 → 1.3 → 2.2 → 3.1 is complete**, and 1.4 is the only Wave-1 item
+left.
+
+**Decision — `PLAN.md`, four stale rows, each resolved to what exists rather than to what was
+planned.** *File System Access "save to folder"* is **ticked** — `exportWorldToFolder`
+(`src/host/worldFile.ts`) with `tests/host/folderExport.test.ts`, already ticked in ROADMAP and in
+the M3 section: the duplicate checkbox was the drift, not the feature. *"Token HUD; basic
+world/client settings"* is **split**: the settings half is ticked with the settings it has grown
+(D-079; `encumbranceRule`, `encumbranceCapacityStrBonus`, scene `darkness`, `tokenHpBars`), and the
+token HUD stays open with its verbs named (context menu, sheet, HP bars — no floating HUD is built).
+*Sidebar tabs* is **ticked narrowly**: the GM shell ships Chat/Combat/Journals/Tables/Playlists/
+Actors/Compendia, scene navigation and the player list (D-079), the item shape landed as the sheet's
+Items tab (D-259), and what remains is tab *shape* (Scenes/Items as tabs, a player-side tab set),
+which stays in ROADMAP. *GM join-approval dialog* stays open with its precise state (auto-approve
+ships; the dialog and its list UI do not). The **Continuous / cross-cutting** list gains a note that
+its four boxes are standing per-unit gates whose evidence is recorded in each slice's decision
+entry, not checklist units — three of them are enforced by `pnpm test`/`pnpm size` and fail loudly
+(D-261's `roll.apply` omission in `PROTOCOL.md` was caught by the protocol-doc test, not by review).
+
+**What was deliberately not done.** No competitor research: §2–§3's Roll20/Foundry inventories and
+§6's citations stand as written — only *our* side of every comparison was re-checked · **no
+re-numbering or deletion of any gap**: a closed row keeps its number, its severity and its evidence,
+so the counts stay comparable across passes, and a gap that reopens later reopens in place · **no
+Prettier reformat of the documents**: these files are hand-formatted and were already not
+Prettier-clean at `19c821a` (`PLAN.md` 4 diff lines, the gap analysis 142, the closure plan 217, the
+README 24, `DECISIONS.md` 1,178 — verified with `prettier --stdin-filepath`), so running
+`prettier --write` would have buried a 60-line status fix inside a 1,500-line reflow · **no edit to
+`PF1e_Unified_TODO.md`**: it is already in sync (L01 carries the D-259 partial closure in its own
+words), and `scripts/coverage.mjs` parses its checkboxes as the coverage dashboard's input, so
+touching boxes there would change a derived report for no reason · **no claim of execution I did not
+perform**: the browser suite, the content conversion and the Firefox/WebKit matrix are marked
+*claimed* in the assessment with their source decision, because this sandbox has no browser binary
+(the Playwright CDN is unreachable) and no 262 MB pinned vendor checkout — the same environment
+D-264 recorded.
+
+**Evidence, all executed on this tree (`19c821a` + this pass).** Every rewritten row's file or test
+was re-checked to exist by path (27/27 paths present, including the five e2e specs and the six unit
+files the table names, `src/core/worldSettings.ts`, `src/canvas/stage.ts`,
+`src/ui/combat/tokenContextMenu.ts` and `src/host/worldFile.ts`) · `roll.apply` present in both
+`src/core/messages.ts` and `PROTOCOL.md` · `corepack pnpm lint` **exit 0** · `corepack pnpm typecheck`
+**exit 0** (`checkSvelte`: **44 component(s), 0 blocking, 1 advisory** — `ReplayPanel.svelte:29`,
+pre-existing) · `corepack pnpm test` **244 files (242 passed, 2 skipped) / 2,818 tests → 2,809
+passed / 9 skipped** (72.8 s; the skips are `webrtc`, the content-converter pair and the dense-army
+benchmark's two opt-ins, unchanged from D-264) · `corepack pnpm build` **2,957,981 B raw (2.821 MB) /
+847,978 B gzip (0.809 MB)**, `pnpm size` OK inside the 6 MB budget · `pnpm build:systems` (both PF1e
+packages) and `pnpm build:worlds` (`pf1e-mass-battles-starter-1.0.0.zip`, the tester world correctly
+skipped with its note because the pinned content checkout is absent) re-run after it · the diff is
+documentation only — no source file, test, script or artifact changed, which is why the gate numbers
+are identical to D-264's.
+
+**Status: accepted 2026-09-21.** The documents and the tree now agree; `GAP_ANALYSIS_Roll20_Foundry.md`
+§5.1 is the single place that answers "what is left".
+
+## D-266 — 2026-09-21 — The compendium becomes browsable at 25,000 entries: an index that answers the reference search's own question, and a reader that renders a window (plan 1.4, gap G-45)
+
+**Context.** The gap read: *"Compendium scale UX. Med. Search is a ranked full scan of every entry per keystroke (builds only an id index), and browse mode caps the rendered list (at most 50 rows). At the 20k-entry scale the content pipeline just unlocked, that is 'type the exact name' rather than 'browse like Foundry'. The plan's §2.5.2 targets (precomputed buckets, virtualized rows, lazy per-pack parse, < 16 ms keystroke) were never implemented."* That was measured, not estimated: `searchCompendia` tokenized every entry on every keystroke, the WeakMap `indexPack` it built was an id lookup that no search path ever consulted, and the 8 MB / 28-pack / 25,376-entry world that D-253's converter produces was therefore *present* in the reader and unpleasant to use — which is the difference between a feature existing and a feature being real. This was the last Wave-1 item and the cheapest item in the whole closure plan.
+
+**Decision — the index must answer `searchCompendia`'s question, not a better question.** The temptation in a scale pass is to swap the ranker for something fuzzy and modern; that would change what every user sees and silently invalidate the documented search semantics (name prefix > word prefix > contains > keyword, all terms required, round-robin browse so one large pack cannot starve the others — the V03/V05 property). So the reference implementation stays in `src/core/compendium.ts` as the **oracle**, and `src/core/compendiumIndex.ts` (new) has to agree with it exactly: `tests/core/compendiumIndex.test.ts` replays `searchCompendia` over a 20,000-entry corpus and compares **hit ids, order and scores**, at every rung of the scorer (name prefix, word prefix, contains-in-the-middle-of-a-token, keyword substring, multi-term AND, 1- and 2-character terms, apostrophes/hyphens/possessives), at every limit (`1, 3, 17, 50, unlimited`), for browse and for each explicit sort. Parity is a test, not an argument.
+
+**Decision — flat postings at parse time, and 3-grams because "contains" is a substring test.** `buildCompendiumIndex` interns every distinct name/keyword token once and stores each token's entries in flat typed arrays (a third of the memory a `Map<string, number[]>` costs, and no per-keystroke allocation); one posting per entry per distinct token, so a name token that is also a keyword token cannot inflate a score. The reference's third rung asks whether the *string* contains the term, so a prefix-only bucket tree would answer a different question; terms of ≥ 3 characters intersect the 3-gram postings of their own grams (a superset by construction), shorter terms walk the distinct-token list, and the exact rung-by-rung scorer then decides. The ranking itself is produced by **score bucketing**, not a comparison sort: scores are integers in `[1, 4 × terms]`, so walking score classes from the top and stopping when the page is full is exact — this is what keeps a 1-character query that matches thousands of entries at rung 2 from sorting all of them for a 50-row page. Rows are returned as **indices** (`rankIndex`), not hit objects: a 25k-row ranking costs 100 KB per keystroke instead of 25k allocations, and `searchIndex` remains the materializing wrapper the parity tests and the picker use.
+
+**Decision — the reader renders a window; the numbers it shows are exact.** `CompendiaPanel.svelte` was rebuilt around three derived values — the index (rebuilt only when packs change), the ranking (capped, `INITIAL_CAP = 600`, doubling as the scroll window grows, so re-rank frequency stays logarithmic), and the row window. The DOM therefore holds `min(total, viewport + overscan)` rows while the stats line still reports the true match count (`{packs} pack(s) · {entries} entries · {total} shown` — same shape as before, the selectors `#compendium-search`, `[data-compendium-stats]`, `[data-entry-id]`, `[data-entry-import]` and the `application/x-vtt-compendium` drag payload are unchanged, because `e2e/packages.spec.ts` and `e2e/content_world.spec.ts` are contracts). The virtualization math is **not** new code: the army roster already carried the tested `windowRows` (V08-era, `tests/ui/armyModel.test.ts`), so it moved to `src/ui/virtual.ts` and `armyModel.ts` re-exports it — the plan's own note ("`grep` finds none; this is a small new component, not a reuse") was wrong about its own repository. Facets are read from authored fields only (`entryFacetsOf`) with counts in `facetOptions`; level records report the **lowest** class level (the level a player looks for); nothing is defaulted into existence, so a longsword has no level row and is excluded only while a level filter is active. Run over the two corpora that actually ship — not over fixtures — the classifier needed three corrections that only real content could expose: **1,569 of the converter's 3,028 spells carry no `system.school`** (they are Spells by the `spell` keyword) while **the hand-authored core pack's 75 spells carry a school and no keyword**, so Spell is `system.school` **or** the keyword; the converter's `feat`-keyword items are bucketed by `system.category`, so `classFeat` (4,727), `trait` (1,915), `racial` (1,536) and `misc` (333) report as Class ability / Trait / Racial / Misc instead of as 8,511 feats; and the starter world authors a roll table's **`system.table` as a string with `rows` as an object**, so Table is a string/record `table` **or** an array/record `rows`. Each shape keeps a case in `tests/core/compendiumIndex.test.ts`, and the censuses are asserted against the real artifacts: `tests/scripts/testerRealZip.test.ts` over the 25,376-entry converted corpus (Class ability 4,727 · Spell 3,028 · Feat 3,609 · Trait 1,915 · Racial 1,536 · Equipment 4,357 · Loot 1,884 · Weapon 916 · Creature 399 · Class 49 · Roll table 288 · Journal 601 · Misc 333) and `tests/scripts/buildStarterWorlds.test.ts` over the 162-entry starter corpus (Spell 75 · Creature 40 · Feat 33 · Roll table 8 · Class 6). The panel gained pack/kind/school/level chips, four sorts, and a detail pane (`panelModel.ts`: data-derived fields, `value`/`documentPreview` summaries that describe shape rather than dumping arrays, read-only, never `{@html}`).
+
+**Decision — the other two readers search the same index, and packs are parsed once.** `PF1eCompendiumPicker.svelte` (the sheet's *Add from compendium*) had the same full-scan-per-keystroke and a hard 60-row cap, and `PF1eCharacterBuilderModal.svelte` scanned up to 30 hits per keystroke through `searchCompendia`; both now rank through `rankIndex`/`searchIndex` (the builder keeps its category pre-filter and its `.compendium-hit-row` contract, the picker keeps `.result-row` and `[data-add-compendium-entry]`). Parsing became the plan's fourth target: `src/core/compendiumCache.ts` memoizes the parsed pack per **package record** — `worldId:packageId@version#importedAt:file`, because version is the upgrade signal and `importedAt` is what makes a same-version re-import win — and any package write (`HostPackages.importZip`, the world-recipe seed) clears the memo outright, so two imports inside one millisecond cannot serve a stale parse. Before this, every visit to the compendia tab and every picker opened from a sheet re-`JSON.parse`d and re-validated the whole converted world.
+
+**Decision — the acceptance runs are executed against the shipped corpora, and the browser was allowed to disagree.** Everything above was first built and gated against fixtures. This pass re-ran it against the two artifacts a GM can actually download — the converted tester world (28 packs / 25,376 entries, built by `content:fetch`'s pinned checkouts `pf1-system@681929d` and `pf1e-content@baf5232` → `content:convert`) and the hand-authored starter world (5 packs / 162 entries) — and in a real Chromium rather than in prose. Two defects fell out that no unit test could have seen, both in `CompendiaPanel.svelte`. **(1)** The row list was a column flex container with a `max-height`, so the virtual spacers inherited the default `flex-shrink: 1` and computed to **0 px**: the scroll range was one window deep (`scrollHeight` 848 px for 340 rows of 26 px), no scroll event ever fired again and the far end of the corpus was unreachable — the exact failure this gap exists to remove. The list is now a **block** container whose rows carry a 4 px bottom margin (pitch == `ROW_H`, so the window math is exact) with `overflow-anchor: none`, and `e2e/compendium_scale.spec.ts` asserts that `scrollHeight` grows with the corpus, so the collapse cannot come back silently. **(2)** The detail pane keys its field rows by label, and a real spell repeats `Level`/`School` between the facet identity rows and the entry's own `system` keys — Svelte refuses a duplicate key at runtime (`each_key_duplicate`), which killed the panel the moment a spell was opened. The second occurrence is now qualified (`Level (system.level)`), the values stay distinct, and `tests/ui/compendiumPanelModel.test.ts` pins label uniqueness — a DOM-free test for a bug only a browser run could reveal. A third finding was a *spec* infidelity rather than a product bug: the drag-import steps in `packages.spec.ts` and `content_world.spec.ts` let Playwright scroll the drop target into view *after* the mouse button was already down, and since the document is 1,035 px tall in the 960 px acceptance viewport the row slid 38 px out from under the pointer — the browser hit-tests the drag source at the *current* pointer position, so it picked the row below as the source. The compact 26 px rows of this change exposed it (the previous wrapping 52 px rows absorbed the shift by luck); both specs now settle the page scroll before the gesture, and the panel builds its drag payload from the row that was **pressed** rather than from the row under the pointer at drag start, so a pointer jump cannot import the wrong entry.
+
+**What was deliberately not done.** No change to the search semantics or to `searchCompendia` itself — it stays as the documented reference the index is proved against, and `tests/core/compendium.test.ts` (12 tests) keeps passing untouched · no fuzzy matching, no relevance tuning, no server-side or worker search (worst measured keystroke is 4.4 ms; a worker would add a protocol for no measurable gain) · no index persistence in IndexedDB/localStorage — it is rebuilt at parse time (~130-190 ms at 20k entries, once per package record, off the keystroke path) and a stored index would need its own invalidation story for a cost paid once per session · no per-entry lazy body loading beyond that: a global search needs every *name*, and the bodies ride along in the packs exactly as they did before; the index itself retains none, and `indexFootprintBytes` accounts only what it does retain (5.36 MB at 20k entries against the plan's 8 MB) · no new filters beyond pack/kind/school/level, no saved searches, no click-to-roll, no detail-pane editing (entries stay read-only copies — the create-op import path is unchanged) · no pack-format or converter change (the corpus the acceptance runs against is byte-identical) · no firefox/webkit run — those browser bundles come from the same unreachable CDN as Chromium did (Chromium was obtained from the npm registry instead, see Evidence) · no edit to `PF1e_Unified_TODO.md` (`scripts/coverage.mjs` derives from its checkboxes).
+
+**Evidence, all executed on this tree (`19c821a` + D-265 + this pass).** `corepack pnpm exec tsc --noEmit` **exit 0** · `corepack pnpm typecheck` (`checkSvelte`) **44 component(s), 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`, pre-existing) · `corepack pnpm lint` **exit 0** · `corepack pnpm test` **247 files (246 passed, 1 skipped) / 2,847 passed / 6 skipped** (86.0 s; +9 over the pre-fetch run = `tests/ui/compendiumPanelModel.test.ts` **9 → 12** with the chip-invariant cases + `tests/packages/pf1eCharacterImport.test.ts` **30 → 33** with the real-vendor imports, plus three content tests that used to self-skip and now run because the pinned checkout is present — `tests/net/webrtc.test.ts` is the only skipped file, and the 6 remaining skips are `webrtc` 3, the dense-army benchmark 2 and the content package 1) · the budget test prints and asserts its own numbers at **20,000 entries**: **8 keystrokes in 3.6-6.8 ms (worst 4.4 ms)** against the plan's 16 ms/keystroke, **browse of all 20,000 rows in 1-10 ms**, index build 98-190 ms, **accounted footprint 5.36 MB** against the plan's 8 MB, and the same eight queries through the linear scan the index replaced take 89-113 ms (**14-30×**) · `pnpm build` **2,976,693 B raw (2.839 MB) / 854,374 B gzip (0.815 MB)** — +19.0 KB raw / +6.4 KB gzip over D-264's 2,957,981/847,978, which is the index plus the reader and its detail pane — and `pnpm size` **OK inside the 6 MB budget** · `pnpm build:systems` and `pnpm build:worlds` re-run (systems 25.6 kB + 78.5 kB; worlds **both** — `pf1e-mass-battles-starter-1.0.0.zip` 108.1 kB and `pf1e-mass-battles-tester-1.0.0.zip` 8,013.9 kB, which only builds with the pinned checkout present) · `tests/core/compendium.test.ts` **12/12** unchanged, `tests/ui/armyModel.test.ts` **16/16** with `windowRows` now coming from `src/ui/virtual.ts` · **the browser gates were executed, not claimed.** A Chromium from the npm registry (`@sparticuz/chromium` + its brotli'd system libraries, launched through the config's own `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` seam — the Playwright CDN stays unreachable, so firefox/webkit remain unrun; and **no security flag was needed**: the `PLAYWRIGHT_CHROMIUM_NO_SANDBOX` opt-in added to the config for containers without user namespaces is *unset* in every run below, verified both ways — the compendia specs pass with it and without it): `e2e/compendium_scale.spec.ts` **1/1** (340-entry package: windowed rows with an exact count, a scroll range that grows with the corpus, kind facet narrowing and clearing, partial-name search, level sort ordering level-less rows last, detail pane fields and import, row-button import) · `e2e/content_world.spec.ts` **1/1** against the **real 8 MB converted world** (the plan's acceptance: start screen → 33 packs / 25,538 entries in the reader, partial-name search, and the **3rd ranked hit** imported by drag — its consequence asserted for the pack type the row actually came from, a Trait *item*, so `itemCount` +1 and deliberately **no** token) · `e2e/starter_compendia.spec.ts` **1/1**, new: the **hand-authored starter world** opened through the real start screen, its 5 packs / 162 entries counted *from the zip*, the `Spell` and `Table` chips present for the two shapes that corpus authors, a real spell's detail pane opened and imported, and **zero page errors** for the whole browse — the assertion that would have caught the duplicate-key crash · `e2e/packages.spec.ts` **5/5** (its compendia case is the §12 import + drag contract the reader had to keep) · plus focused runs of `e2e/armies.spec.ts` and `e2e/pf1e_sheet_features.spec.ts` (the roster windowing and the sheet's compendium picker/builder) · and the real corpora the assertions run against are themselves verified: `tests/scripts/testerRealZip.test.ts` censuses the 25,376 converted entries by kind and checks search parity with `searchCompendia` on real queries, `tests/scripts/buildStarterWorlds.test.ts` does the same for the 162-entry starter corpus, and `tests/packages/pf1eCharacterImport.test.ts` imports **all 15 vendored `basic-monsters` YAML actors** plus 5 real `kingdom-building-buildings` actors through `importCharacter` (goblin scores equal to the source: str 13, dex 11) · **and the whole project, once**: the full chromium suite with `--workers=2` on this 2-core box — **186 tests, 183 passed / 3 failed (11.0 m)**. The three failures are `e2e/fog_lighting.spec.ts:57`, `e2e/fog_player.spec.ts:41` and `e2e/parity.spec.ts:7` — the vision/parity specs the repo's own D-entries already record as load-sensitive on this box, none of them touched by this slice, and **all five of their tests pass standalone** (`--workers=1`: 5/5 in 1.3 m, including `fog_player` at 18.7 s against the 45 s it could not hold under two workers). The specs this slice adds or extends passed inside that same parallel run: `compendium_scale` 1/1 (7.5 s), `content_world` 1/1 (15.7 s), `packages` 5/5, `armies` and `pf1e_sheet_features` 1/1 each. A single-worker full run was not repeated: 11 minutes of 2-worker load already reproduced the documented alternators, and the fix for those is reviewer patience, not a smaller diff. **On the later G-08 tree** — D-267's statblock reader, its paste box and its reporting fix added, same environment — the same gates re-ran and only the counts moved: `corepack pnpm test` **248 files (247 passed, 1 skipped) / 2,878 tests → 2,872 passed / 6 skipped** (86.4 s), `pnpm build` **2,997,285 B raw / 860,807 B gzip** (+20,592 B raw / +6,433 B gzip over the number above), `content:convert` **28 packs / 25,376 entries**, and the chromium suite **187 tests → 186 passed / 1 failed (11.2 m)** — the failure being the same `e2e/fog_player.spec.ts:41` alternator, green standalone with `fog_lighting` and `parity` at `--workers=1` (**5/5, 1.3 m**).
+
+**Status: accepted 2026-09-21.** With 1.4 closed, **Wave 1 of the closure plan is complete** (1.1 D-258, 1.2 D-257, 1.3 D-259, 1.4 D-266), the critical path 1.1 → 1.3 → 2.2 → 3.1 remains complete, and the open set is five numbered items — 2.3's G-38, 3.2 (G-08), 3.3 (G-11/G-21), 3.4 (G-14/G-15/G-16), 3.5 (G-29/G-31/G-40) — plus the named tails (G-43 wall reshaping, G-26 lighting richness, the `.por` archive, i18n). `GAP_ANALYSIS_Roll20_Foundry.md` §5.1 is the single place that answers "what is left".
+
+---
+
+## D-267 — 2026-09-21 — A pasted stat block becomes a bestiary actor: the fourth reader behind the D-264 import front door (plan 3.2, gap G-08)
+
+**Context.** G-08 named the one way into this project that never existed: *text* → actor. The content
+that ships is structured — 40 hand-compiled actors in `systems/pf1e-core/packs/bestiary.json` (the flat
+profile `{size, bab, strMod, ac, touchAc, weapon}` `statBlock.ts` adapts for the strategic sim) and 399
+converted creatures carrying a component-shaped `system.pf1e` (plus `system.foundry` details/biography)
+— and both are reachable through the compendium and, since D-264, through an import front door that
+takes a *file*. What a GM actually has, when the monster they need is not in the converted 25,376
+entries, is a stat block copied out of a PDF, a wiki page or another table's handout: no file name, no
+schema, nothing to sniff. The plan's own note was right that this is the cheap half — the actor shape
+and the import plumbing already exist — provided the reader is written **behind** that plumbing instead
+of beside it.
+
+**Decision — the fourth reader, not a fourth pipeline.** `src/packages/pf1e/import/statblock.ts` returns
+the same `ImportedCharacter` the three document readers do (`{format, name, system, items, read,
+warnings}`, `format: "statblock"`, `items: []`), so everything after the read is reused unchanged:
+`characterImportCheck` still refuses a block whose authored `system.pf1e` `parsePF1eActorSystem` would
+not accept (rather than creating a sheet that derives blank), `characterImportOps` still submits **one**
+create op (ownership `{default: 0, gm: 3}`, `flags.core.importedFrom: "statblock"`), and
+`characterImportReport` supplies the same report the file path shows. `detectCharacterFormat` keeps its
+file semantics exactly (a `.json`, `.xml` or `.txt` is still read as the document it names, and its
+error text now mentions pasted blocks); the paste path calls the new `detectPastedFormat`, which is the
+document sniffer *plus* stat blocks, so the UI asks one question and gets one answer.
+
+**Decision — read by label, because a stat block has no schema to sniff.** The reader flattens a paste
+into labelled clauses (`clausesOf`) the way `herolab.ts` reads XML by label rather than by path, and for
+the same reason: printings differ. Section headings (`DEFENSE`/`OFFENSE`/`STATISTICS`/`ECOLOGY`/`Source`)
+are skipped, clauses may be `;`- or `|`-separated or share a line with another, markdown emphasis is
+stripped, and labels are matched longest-first so `Base Atk` is not read as `Atk` and `Spell-Like
+Abilities` is not read as `Spells`. Continuation is decided by two rules rather than by indentation: an
+unlabelled piece *on the same line* belongs to the clause before it (`Init +6; Senses darkvision 60 ft.;
+Perception -1` — the trailing `Perception -1` is part of the Senses clause, which is where the reader
+finds the Perception figure it has to refuse), and an unlabelled *line* continues the previous clause
+when that clause is one that is a list (`Spell-Like Abilities (CL 6th; concentration +7)` followed by
+`Constant—…` and `1/day—…`) or when its value stops mid-sentence on a comma, colon, dash or open
+parenthesis — which is what a PDF paste does at 90 columns, and what the wrapped ability line `Str 14,
+Dex 12, Con -, Int 11,` / `Wis 13, Cha 15` needs (the second half arrives labelled `Wis`, and its own
+value carries a `Cha` that a value-only read would lose). Everything else on its own line is the header
+block, which is why `Goblin warrior 1` and the type line are not swallowed by the `XP 135` clause.
+
+**Decision — the three house rules, applied where a stat block makes them bite.** A stat block publishes
+*totals*, so the reader authors totals as totals: AC becomes `acTotals {normal, touch, flatFooted}` with
+`acMode: "published"` (never decomposed into components the block did not state — the printed breakdown
+`(+2 armor, +2 Dex, +1 shield, +1 size)` is carried into the report as a read line instead), saves become
+`saves` with `savesAsTotal: true`, `hp`/`hpMax` from `hp 6 (1d10+1)` with `hitDice` from the parenthetical,
+`Base Atk` → `baseAttack`, and `CMB`/`CMD` as the printed totals with their conditional parentheticals
+(`CMB +9 (+13 grapple)`, `CMD 20 (24 vs. trip)`) named in the report rather than authored — the app
+derives those, and has no field for a maneuver-specific bonus. Two printed numbers are deliberately **not**
+imported, because this app derives them from the very components the same block states: the **attack
+bonus** on each line (`+2`, or a full-attack sequence `+12/+7`, which is one line here since iterative
+attacks are derived from Base Atk) and the **skill totals** (`Ride +6, Stealth +10`, with `Racial
+Modifiers` folded into the same sentence). Both are reported in the source's own words, exactly as D-264
+treats Hero Lab's printed attack bonus and Roll20's stored attack modifier. A printed damage total *is*
+the line's damage, so `1d4+2` becomes `damageDice: "1d4"` + `damageBonus: 2` with
+`abilityDamageIncluded: true`; `2 claws +5 (1d4+2) and bite +5 (1d6+2)` becomes three lines (the count is
+part of the attack, the `and` a separator at parenthesis depth 0, `or` likewise); `/19-20` → `critThreatMin`,
+`/×3` → `critMultiplier`; a natural weapon's name (`bite`, `claw`, `sting`, `slam`, …) sets `natural`, and
+`touch` sets `touchAttack`; extra effect text (`plus poison`, `plus grab`) is refused by name. DR becomes
+`dr` + `drBypass` (split on `or`/`and`/`,` so `5/good or silver` is two bypass components), SR becomes
+`spellResistance`, and the printed speeds become `speedFt`/`flySpeedFt`/`swimSpeedFt`/`climbSpeedFt`/
+`burrowSpeedFt` with a flight manoeuvrability word reported as unmodelled. Reach is authored per attack
+line (`10 ft.` → `reachSquares: 2`).
+
+**Decision — what has no field is *prose on the sheet*, not silence.** Senses, languages, special attacks
+(including a multi-line spell-like ability list and a `Spells` line), special qualities (`Defensive
+Abilities`, `Immune`, `Resist`, `Weaknesses`, `SQ`) and treasure land in `system.pf1e.creature` — the
+monster-details block the Details tab already edits and displays, with the label prefix kept when two
+lines share the block (`Immune: fire, poison` next to `SQ: regeneration 5 (acid or fire), scent`). Senses
+stay **descriptive** on purpose: recording what the block printed is a fact about the creature, while
+skipping the token's vision would claim the converter → actor → token inheritance chain that D-260 left
+as G-24's open tail. Two qualities that *are* modelled fields are read out of that prose rather than
+left to be retyped — `fast healing 2` → `fastHealing`, `regeneration 5 (acid or fire)` → `regeneration`
++ `regenSuppress: ["acid", "fire"]` — and everything with no home at all (XP, `Environment`,
+`Organization`, gear, `Racial Modifiers`, a dash-printed ability score, conditional CMB/CMD and any
+clause the label table does not know) is named in the report in the block's own words.
+
+**Decision — refusals, because a plausible sheet is worse than an error.** `looksLikeStatblock` requires
+**two** independent markers (a header `CR`, a section heading, `AC`/`hp`/`Init`/save lines, `Melee`, an
+ability line, `Base Atk`/`CMB`/`CMD`) and refuses anything that opens as JSON or XML, so a paragraph of
+campaign notes that happens to contain `AC 15` cannot become an actor. A block with no name line is
+refused with "paste it from the top" (the reader will not name a creature after its own type line), a
+block whose lines parse but author no number this app can play is refused with the reason (prose alone
+would open as a blank sheet), and a missing ability line leaves `abilities` absent — with a warning
+naming the consequence — rather than filling in 10s; a score printed as a dash (an undead's `Con —`)
+leaves that score unauthored and says why.
+
+**Decision — the paste box lives where the file import already is.** The Sheets panel's Actors tab gained
+a **Stat block** button beside **Import**: it opens a monospace textarea whose placeholder is a real
+goblin block, submits on the button or Ctrl/⌘+Enter, and then runs the *same* `importCharacter` →
+`characterImportOps` → report path, so a pasted creature appears in the same list, with the same one-create-op
+undo, and the report is read in the same place (the panel keeps the D-264 rule that an import which
+dropped something has to say so where the person who ran it is still looking).
+
+**What was deliberately not done.** No new mechanics and no new fields: the reader authors only what
+`parsePF1eActorSystem` already models, and prose it cannot model is reported instead of encoded · no
+automatic spell-like abilities or spell lists (the Casting tab is where slots and prepared spells live;
+the block's list is text on the monster details, and the report says so) · no swarm automatic damage or
+`swarm traits` modelling (the Melee line imports as a line; the trait stays prose) · no "no ability
+score" mode for undead or constructs (a missing score is unauthored and reported, the same answer D-264
+gave the Foundry reader) · no 3.5-era or Pathfinder-2 block support (the label table is the PF1e
+`Bestiary` printing's: there is no `Hit Dice`, `Grapple`, `Special Quality` or `SQ (Ex)` handling) · no
+PDF/OCR/`.por`-style extraction and no clipboard watching — the text is pasted by a person, and the file
+import keeps its own formats · no new document kind, no pack or archive format change, no touch of the
+compendium index or its cache (a pasted block never enters a compendium; it becomes an actor) · no edit
+to `PF1e_Unified_TODO.md` (`scripts/coverage.mjs` derives from its checkboxes).
+
+**Evidence, all executed on this tree (`7c237d0` + this pass; D-266's own gates were re-run here and its
+entry carries them, so the numbers below are this pass's additions — one file and 25 tests, one spec, and
++20,270 B raw / +6,290 B gzip over the build D-266 measured).** `tests/packages/pf1eStatblockImport.test.ts`
+**25/25** — fixtures are the SRD's printed blocks, not invented shapes: a goblin warrior (published AC
+16/13/14, saves +3/+4/−1, `hp 6 (1d10+1)`, two weapon lines, a `Racial Modifiers` line, prose in the
+`ECOLOGY` block), an imp (multi-line spell-like abilities, `DR 5/good or silver`, `SR 12`, mixed speeds
+with a manoeuvrability word, `sting +8 (1d4+1 plus poison)`, `Space`/`Reach`), a brown bear (`CMB +9 (+13
+grapple)`, `CMD 20 (24 vs. trip)`, spell-like `plus grab`), a wight whose ability line is wrapped across
+two lines, a hill giant sniper with `+12/+7`/`+13/+8` sequences, an ettercap whose two attacks are joined
+by `or`, a bat swarm, and the refusals (no ability line, a dash-printed score, prose-only, nameless,
+prose-that-mentions-AC, and the file formats still winning the sniffer) · `corepack pnpm test` **248 files
+(247 passed, 1 skipped) / 2,878 tests → 2,872 passed / 6 skipped** (86.4 s — the new file's 25 tests are
+the delta against D-266's 2,847, the remaining +6 being the same session's chip-invariant and real-vendor
+cases) · `corepack pnpm exec
+tsc --noEmit` **exit 0** · `corepack pnpm typecheck` **44 components, 0 blocking, 1 advisory** (the
+pre-existing `ReplayPanel.svelte:29`) · `corepack pnpm lint` **exit 0** — after the run caught one real
+lint error in this pass (`svelte/no-useless-mustaches` on the placeholder literal, fixed by hoisting the
+example into a script constant) · `pnpm build` **2,997,285 B raw (2.858 MB) / 860,807 B gzip (0.821 MB)**,
++20,592 B raw and +6,433 B gzip over D-266's 2,976,693/854,374 (and +20,270/+6,290 over the build measured
+mid-pass) — the parser, the format tag and the paste box — with `pnpm size` **OK** inside the
+6 MB budget · the content pipeline re-run end to end (`build:systems` → `content:convert` **28 packs /
+25,376 entries** → `build:worlds`: starter 108.1 kB and tester 8,013.9 kB, both worlds present, since the
+pinned checkouts are in place) · and the browser gate, executed rather than claimed:
+`e2e/statblock_import.spec.ts` **1/1** in Chromium — paste the goblin block into the box, read the report (`Imported
+Goblin Warrior (stat block)`, `hit points: 6 (1 Hit Dice)`, `armor class: 16, touch 13, flat-footed 14 (published
+totals)`, and the refusals in the source's words), read the authored `system.pf1e` back through the host surface
+(abilities, `acTotals`, `acMode: "published"`, `saves` + `savesAsTotal`, `hp`/`hitDice`, `baseAttack`/`cmb`/`cmd`,
+`speedFt`, `initiative: 4`, `feats`, the `creature` block, and two attack lines with their crit ranges — while
+`armorClass` and the flat `ac` stay **unwritten**, so `normalizePF1eSystem` passes the block through untouched), open
+the sheet and read `16 / 13 / 14` and `3 / 4 / -1` off it, find both lines on the combat tab, and confirm that a
+pasted paragraph creates no row — with **zero page errors** · and the **whole chromium project re-run on this tree**
+at `--workers=2` on the 2-core box: **187 tests, 186 passed / 1 failed (11.2 m)**, the single failure being
+`e2e/fog_player.spec.ts:41` — the same load-sensitive vision spec D-264 and D-266 both record as this box's alternator
+— which passes standalone: the trio (`fog_lighting`, `fog_player`, `parity`) re-run at `--workers=1` gave **5/5 in 1.3
+m** with `fog_player:41` included, and `e2e/statblock_import.spec.ts` passed inside the parallel run as well.
+
+**Status: accepted 2026-09-21.** G-08 is closed; plan Wave 3 is now 2 of 5 (3.1 D-264, 3.2 D-267) and the
+open set is 3.3 (G-11/G-21 non-combat + condition tails), 3.4 (G-14/G-15/G-16 breadth content) and 3.5
+(G-29/G-31/G-40 polish), plus the named tails (G-43 wall reshaping, G-26 lighting richness, the `.por`
+archive, i18n/G-38). `GAP_ANALYSIS_Roll20_Foundry.md` §5.1 remains the single place that answers "what
+is left".
+
+## D-268 — 2026-09-21 — An hour is an hour: the duration ladder becomes real time derived from the 6-second round (hexcrawl Phase 0a, plan §3.7)
+
+**Context.** Two things in this codebase have been speaking different languages about time since E05. The
+replicated world clock is a real one: `world-settings:clockSeconds` counts seconds, `formatWorldClock`
+draws a 24-hour day over it, and the Settings window's `+1 min` / `+1 h` / `+1 day` buttons advance it.
+The *duration ladder* on top of it was an abstraction: `ttlToTicks` priced an hour at 100 rounds and a day
+at 2 400, `worldClock.ts` documented the divergence as deliberate ("not the 6,000 rounds a real-clock day
+would imply"), and the effect sweep inherited it through `ttlSeconds`. So a 1-hour/level spell lasted ten
+in-game minutes, and a 24-hour ward four hours — while the clock in the corner said otherwise. The
+product owner's directive for this pass is the reason it changed: the clock is "currently implemented
+wrongly… it should allow for normal 60 minutes hour and 24 hour day, because a lot of abilities work on
+per hour and per 24 hour basis", with the derivation given outright: 1 round = 6 s → 10 rounds = 1 minute,
+600 rounds = 1 hour. Because the hexcrawl plan measures every travel cost, encounter cooldown and reveal
+rule in this clock, the ladder correction is its **Phase 0a** — before the model, before any UI.
+
+**Decision — the rungs are arithmetic, in one place.** `src/core/clock.ts` owns them once:
+`SECONDS_PER_ROUND 6`, `MINUTE_SECONDS 60`, `HOUR_SECONDS 3_600`, `DAY_SECONDS 86_400`,
+`ROUNDS_PER_MINUTE 10`, `ROUNDS_PER_HOUR = ROUNDS_PER_MINUTE * 60` (**600**), `ROUNDS_PER_DAY =
+ROUNDS_PER_HOUR * 24` (**14 400**). The hour is not a second literal; it is sixty of the minute, which is
+what makes the next divergence fail loudly in the test instead of quietly in a game. The PF1e package
+re-exports the rungs it already sold (`worldClock.ts`: `TICKS_PER_DAY = ROUNDS_PER_DAY` — 14 400, was 2 400
+— plus `ROUNDS_PER_DAY`/`ROUNDS_PER_HOUR`/`ROUNDS_PER_MINUTE`), so every existing caller keeps importing
+from the clock that spends them and no other file has to learn a new path. `effects.ts:ttlToTicks` prices
+minute and hour through the rungs (10 and 600, was 10 and 100), `secondsPerRound` defaults to
+`SECONDS_PER_ROUND` instead of a magic `6`, and the Settings window's "add an hour" button advances 600
+rounds.
+
+**Decision — the calendar half lands with it, and there is still exactly one clock.** The same module
+carries the derived readout every later slice needs: `hourOfDay`, `minuteOfHour`, `secondOfMinute`,
+`dayNumber`, `hourFractionOfDay`, `formatClockTime` (`"14:30"`) and `formatClockStamp` (`"Day 2, 14:30"`),
+`phaseOf` / `timeOfDay` (day|night against a `Daylight` window), `secondsUntilHour`, `secondsUntilPhaseEnd`,
+`elapsedBetween` and `normalizeClock`, with `DEFAULT_DAYLIGHT {dawnHour: 6, duskHour: 18}` as the default a
+scene's later `hexcrawl.daylight` overrides. No `calendar` field, no month/day table, no second time
+source: hours and days are *derived* from the 6-second round, which is the point of an integral clock —
+one number replicates, everything else is a function of it.
+
+**Decision — the one consequence is stated, not hidden: effects already in flight end later.** The sweep
+(`clockExpiredIds` → `ttlSeconds`) derives seconds from the effect's own `ttl` payload, while the turn
+engine counts down `flags.core.duration` ticks. An effect applied *before* this change keeps its stored
+ticks and gains the corrected clock reading, so its two ends no longer coincide: a "1 hour" buff anchored
+under the old ladder is swept after 3 600 s of world time (a real hour) but still expires after 100 combat
+rounds. **Accepted**, and it is the honest split D-146 already drew — the sweep is the out-of-combat
+authority, the turn engine the in-combat one, and neither rewrites the other (the sweep never rewrites
+ticks). No migration, no in-flight rewrite; the deterministic alternative the plan recorded — recompute
+`flags.core.duration` for clock-counted effects from their payloads once — remains available to a GM who
+wants the two ends re-aligned mid-campaign, and is deliberately not run for them. Unanchored payloads are
+still never swept.
+
+**What was deliberately not done.** No calendar or dates, no month/weekday, no real-time ticker (P5/E06
+stay open) · no change to `advanceClockOnRound`, `setWorldClockOps`, `advanceWorldClockOps`'s op shape,
+`MAX_CLOCK_SECONDS` (100 years), the round wrap in the combat tracker, or the min/hour/day buttons'
+plumbing — only the hour's own value changed · no effect-document schema change and no world migration ·
+no new collection, no new message kind, no protocol field (the clock still rides the ordinary
+`world-settings` diff) · no reformatting of unrelated files · nothing in `PF1e_Unified_TODO.md`.
+
+**Evidence, all executed on this tree.** `tests/packages/pf1eWorldClock.test.ts` **22/22** and
+`tests/packages/pf1eEffects.test.ts` **26/26** (**48** focused, the two files that pin the ladder) — the
+updated assertions are the ladder's own arithmetic: `ttlSeconds("hour", 1) === 3_600` (was 600),
+`TICKS_PER_DAY === 14_400` (was 2 400), a day at 86 400 s and 864 000 s at a configured 60 s round, the
+sweep's day case now ending at 86 399/86 400 s (was 14 399/14 400 — the old expectation was a *four-hour*
+day), plus a new test asserting `ROUNDS_PER_HOUR === ROUNDS_PER_MINUTE * 60`,
+`TICKS_PER_DAY === ROUNDS_PER_HOUR * 24` and `hour = 60 × minute`, `day = 24 × hour` in seconds, so the
+next divergence is a red test rather than a table nobody re-reads · `corepack pnpm test` **252 files (250
+passed, 2 skipped) / 2 968 tests → 2 956 passed / 12 skipped** (76.2 s) · `corepack pnpm exec tsc --noEmit`
+**exit 0** · `corepack pnpm typecheck` **44 components, 0 blocking, 1 advisory** (the pre-existing
+`ReplayPanel.svelte:29`) · `corepack pnpm lint` **exit 0** · `pnpm build` **2 997 442 B raw / 860 910 B
+gzip**, +157 B raw and +103 B gzip over D-267's 2 997 285/860 807 — the corrected constants and the changed
+button literal, with `pnpm size` **OK** inside the 6 MB budget · and the browser gate: the whole chromium project re-run on this tree, because the change is in shipped behaviour:
+**187 tests, 183 passed / 3 failed / 1 skipped (12.8 m)** at `--workers=2`, and the three failures are
+this sandbox's recorded load-sensitive specs — `e2e/fog_player.spec.ts:41` and `:141` (the vision pair
+D-264, D-266 and D-267 all record as the alternator on a 2-core box) and `e2e/onboarding.spec.ts:30`,
+which times out while the app is still on the boot screen under parallel load. All three pass standalone:
+re-run at `--workers=1`, **3/3 in 1.4 m**. The run was executed against this tree's built single-file
+`dist/index.html`; chromium had to be re-provisioned in the sandbox first (`cdn.playwright.dev` and the
+distro's apt mirrors are unreachable from here, so the binary comes from the npm registry —
+`@sparticuz/chromium`, extracted to `/tmp/chromium` with its `al2023` libs on `LD_LIBRARY_PATH`, exactly
+what `playwright.config.ts`'s `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` hook documents). firefox and webkit
+remain [claimed], not executed. No spec pins the duration ladder, and the two clock-adjacent specs
+(`realtime`, `parity`) concern the host's media clock, which this change does not touch.
+
+**Status: accepted 2026-09-21.** The hexcrawl plan's Phase 0a is closed; the ladder is now a conversion,
+not a convention. The D-146 entry (P4/E05, `DECISIONS.md:3094`) carries a supersede marker on its ladder
+sentence; everything else that entry landed — the replicated clock, its op shapes, anchor stamping, the
+sweep, the clock UI — is untouched.
+
+## D-269 — 2026-09-21 — The hexcrawl model's first half: cells, terrain, tables, encounters and travel as pure functions and op builders (hexcrawl Phase 0b)
+
+**Context.** `HEXCRAWL_SCENE_SPEC_AND_PLAN.md` (committed `bd008a6`, extended `12d6005`) fixed the shape of
+the feature — one integral clock, a `hexcrawl` profile on the scene flag, cells embedded in the scene,
+encounter tables a top-level collection, fog as a revealed set, travel as clock seconds spent against a
+committed route — and then split the work into phases whose first two are pure. Phase 0b is deliberately
+the part with no pixels: if the model is right, the overlay, the hex window, the wizard and the fog layer
+are compositions of it; if the model is wrong, nothing has to be un-drawn. This entry closes that phase
+and records the handful of places where the code had to decide something the plan had only sketched.
+
+**Decision — cells and encounter tables are documents, in the existing collections machinery.** `documents.ts`
+gains `CellDocument` (`key` = `"q,r"` on a hex/square grid or a zone id on a gridless map; optional `poly`
+for that zone; `terrain`, the GM's `description`, the players' `playerText`, `tables[]`, and `features[]`
+carrying `reveal: manual | perception{dc} | time{seconds} | dice{formula,target}` plus `autoReveal` and the
+reveal `state {revealed, atClock?, by?}` — the rule is data, the state is a document field, which is what
+lets one replica evaluate "the party spent four hours here" and every replica agree afterwards) and
+`EncounterTableDocument` (`mode: "dice" | "weighted"`, `formula`, `entries{weight, range?, text, count,
+refs}`, the six activation tags, `cooldownSeconds?`, optional `sceneId` for the linked battle scene). Cells
+are embedded in the scene, tables are top-level, and `store.ts` learns exactly two things: `cells` is an
+embedded collection (whose array a pre-D-269 scene simply does not have — the store reads it as empty and
+writes it on the first create, so **no world migration exists or is needed**) and `emptyCollections()`
+gains `encounterTables`. Every op rides the landed envelope untreated: `create {coll, parent?, data}`,
+`update {ref, diff}` with **flat** `FlatDiff` keys (`"flags.core.hexcrawl"`, never nested), `delete {ref}`.
+
+**Decision — the model is pure, and a patch that changes nothing is not an op.** `src/core/hexcrawl/` is
+`types.ts` (profile v1 — `revealed[]`, `sight {mode: "gm" | "gm+party", radiusCells, radiusWorldUnits}`,
+`partyTokenId`, `encounterMode: "auto" | "prompt" | "manual"`, `daylight`, `terrain`, `travel {path,
+cursor, progressSeconds, speedPerDay, pace}` — with a tolerant reader that fills defaults, clamps and
+counts, and caps: 20 000 revealed cells, ring radius 12, 512 path cells, 1–240 miles a day, 100 000 sight
+units), `cells.ts`, `terrain.ts`, `tables.ts`, `encounter.ts`, `travel.ts`, `scene.ts` (the op builders)
+and `index.ts` (an explicit name list rather than `export *`, because `partyTokenOf` legitimately exists in
+both `types.ts` and `travel.ts` and a wildcard re-export is a TS2308). Every builder returns `[]` when the
+patch would change nothing — a second `setPartyTokenOps(scene, null)` on a party-less scene, a
+`setTravelRouteOps` on a scene that is not travelling — because in a replicated ledger an empty envelope
+is not a no-op: it spends a sequence number and lands in everyone's undo history.
+
+**Decision — the arithmetic, decided here so no later slice re-decides it.** *Terrain* (`terrain.ts`): a
+catalog is world data with a shipped PF1e default; a terrain's `cost` is the **share of a travelling day**
+one grid unit takes at `speedPerDay = 24`, so plains cost 3 600 s, forest 7 200 s and mountains 10 800 s,
+and a **road is `road: true` with `ROAD_COST 1`** — `travelCost` lets a road replace the terrain's cost
+instead of multiplying it, so a highway through mountains is fast, but a road never beats open ground and
+therefore never beats a clear plains day. (The plan's first draft had `road 0.75` and `highway 0.5`; the
+0.75 made a mountain road *faster* than open plains, which is not a rule any of this project's sources
+state. Superseded in the same commit that landed the catalog, in both the code and §3.3 of the plan.) A
+forced march is +10 % a day (`FORCED_MARCH_BONUS`, PF1e's forced march) and the catalog validator clamps
+what a world actually stores. *Tables* (`tables.ts`): a weighted table compiles to a `1d100` ladder that
+totals **exactly** 100 — weights scaled when they do not sum to 100, the remainder to the largest
+fractional parts with the earliest row winning a tie, weight 0 a note that never takes space, and a tiny
+weight that scaled to zero faces gets one **moved from the largest donor** rather than added, so the die
+never grows and no row silently becomes unreachable; dice-mode tables use the formula's own ranges, sorted
+with author order as the tie-break. *Encounters* (`encounter.ts`): eligibility is
+`tags[trigger] && tags[phase]` — the triggers are `entering` / `moving` / `exploring` / `fighting`, the
+phases day and night from `timeOfDay` with the scene's own daylight hours — with per-table cooldown
+(`> 0` seconds overrides the default; `0` or absent means the rest of the current phase, and the ledger is
+`cell.flags.core.encounters = {tableId: atClock}`, so "night" means one night); a tie between two eligible
+tables, or any mode other than `auto`, is a GM prompt, never a silent roll. *Travel* (`travel.ts`): a
+`TravelPlan` is spent against the clock — `travelAdvance(plan, {clock, seconds, …})` walks the cursor
+forward, converting elapsed seconds into `progressSeconds` at each step's cost and emitting ordered
+`TravelStep`s (crossing a border is `entering` **and** `moving`; moving inside one cell is `moving`); a
+completed step advances the clock, a partial step only accumulates progress; arrival clears `travel` and
+centres the party token (`partyPositionOps`), and `departedAtClock = max(0, arrival − the step's own
+seconds)` so an itinerary reads correctly even when the party was already mid-hex. `plan: TravelPlan |
+null` is an accepted input — a scene can be a hexcrawl map nobody has marched on yet — and a one-cell
+"path" is normalised to `null`, because a route with no crossing is not a route.
+
+**What was deliberately not done.** No UI of any kind: no canvas overlay, no context menu, no hex window,
+no wizard, no fog layer, no settings editor — this phase is pure functions and op builders, and the only
+reason the shipped bundle moves at all is the clock · **no projection rule yet**: unrevealed
+`CellFeature`s and a closed cell's `playerText` must be *stripped from the document* for a non-GM viewer
+(D-256's lesson — the art behind a hidden pin is readable from the asset manifest no matter what the canvas
+draws), and that rule belongs with the layer that first sends a cell to a player (Phase 2), where it can be
+asserted against a real player replica · no scene-copy helper (the linked battle scene of requirement 5d
+needs one; `core/sceneLink.ts` is unrelated and no duplication path exists yet) · no `hexTerrain` world
+setting write path or editor (the catalog exists, validates and has a default; the setting and its UI are
+Phase 1) · no e2e spec — nothing user-visible changed, and `e2e/hexcrawl_scene.spec.ts` arrives with the
+wizard · no touch of `ui/combat/encounters.ts`, which is the turn tracker and shares only a word · no edit
+to `PF1e_Unified_TODO.md`.
+
+**Plan corrections in the same commit** (the plan is the spec for the phases that follow, so it must not
+contradict the code that just landed): §3.3's terrain table now lists the shipped catalog with `cost` as a
+day share and `road: true` / `ROAD_COST 1` — the 0.5/0.75 multipliers are marked superseded and the reason
+is written down; §3.4's compiler paragraph now states the scaled-remainder and moved-face rules instead of
+"the remainder goes to the last entry"; §3.7's ladder table is re-read as before → after with the landed
+D-268 numbers and the calendar half's own list of helpers; §8's Phase 0 is marked ✅ landed with the module
+list and the test tally, and the phase's "gate to leave" (the fake-host test) is named as what it became:
+`tests/core/hexcrawlTravel.test.ts` pumping the real `advanceWorldClockOps` through a real `DocumentStore`.
+
+**Evidence, all executed on this tree.** The six focused files, `corepack pnpm exec vitest run
+tests/core/hexcrawl` — **6 files / 89 tests passed**: `hexcrawlCells.test.ts` **18** (keys and the
+key ⇄ coords round trip, `cellAtPoint`/`cellCenterOf` on flat and pointy hexes, square and gridless,
+`cellsWithin` rings 0/1/2, `zonesWithinRadius`, `cellsInMap`'s deliberate over-inclusiveness by a hex
+diameter, `cellCensus`, the 20 000-cell cap), `hexcrawlTerrain.test.ts` **10** (the shipped ladder's own
+numbers at 24 miles a day, the road rule — a mountain road costs a plains day and **never less** — forced
+march, unknown-id fallback, the validator's clamps), `hexcrawlTables.test.ts` **12** (ladder totals 100 for
+a single row, for 25/25/25, for 30 rows, for 200/200, for a 10 000:1 row whose tiny side keeps exactly one
+face *moved* from the donor, weight-0 rows dropped, dice ranges and ties, `validateEncounterTable`), 
+`hexcrawlEncounter.test.ts` **21** (the tag × phase × trigger eligibility matrix, `timeOfDay` across the
+dawn/dusk boundaries, per-table cooldown incl. `0`/absent meaning the rest of the phase, the ledger read and
+`ledgerOps`, ties and modes resolving to a prompt, `drawEncounter` with a seeded rng), 
+`hexcrawlTravel.test.ts` **12** (the fake-host march — a real `DocumentStore`, a hexcrawl scene, revealed
+cells, a table attached, then three 14 400-round days pumped through the real `advanceWorldClockOps`,
+asserting the emitted op stream, the border triggers, mid-hex resume and the arrival that clears the route —
+plus `plan: null`, a one-cell path, pace and terrain pricing, the 30-day and 512-event caps), and
+`hexcrawlScene.test.ts` **16** (the profile's tolerant read/normalize/serialize round trip, and every op
+builder: enable/disable, sight, encounter mode, daylight, terrain, party token, reveal/close-all, cell
+create/update/delete, tables, features add/patch/remove/reveal, route set/clear, and the no-op builders
+returning `[]`) · `corepack pnpm exec tsc --noEmit` **exit 0** — which took real work in the tests, because
+the op union is a union: the six files narrow through per-file helpers (`flagOf`/`createdDoc`/`diffOf`,
+`profileFromOps`) instead of casting a union member · `corepack pnpm lint` **exit 0** — after the run caught
+four real errors and their proper fixes (a computed-key `delete` of a flag is `no-dynamic-delete`, and the
+`_`-prefixed rest-destructure that replaced it trips `no-unused-vars`, so a flag key is dropped with
+`Object.fromEntries(Object.entries(bag).filter(...))`; a partial-step `clock += remaining` was dead code) ·
+`corepack pnpm test` **252 files (250 passed, 2 skipped) / 2 968 tests → 2 956 passed / 12 skipped** ·
+`corepack pnpm typecheck` **44 components, 0 blocking, 1 advisory** · `pnpm build` **2 997 442 B raw /
+860 910 B gzip** — +157 B/+103 B over D-267, because nothing in `src/` outside `core/hexcrawl/` imports it
+yet and the modules tree-shake away; `pnpm size` **OK** · the touched files pass `prettier --check`, and the
+five files that already drifted from Prettier before this pass (`documents.ts`, `store.ts`, `effects.ts`,
+`tests/net/fixtures.ts`) were **not** reformatted — their existing drift is untouched, the new hunks are
+Prettier-clean · and the browser gate: the same run covers this phase, and says the honest thing about it — **187 chromium tests, 183 passed /
+3 failed / 1 skipped (12.8 m)** at `--workers=2`, the three failures being the load flakes named in
+D-268 (`fog_player:41`, `fog_player:141`, `onboarding:30`), all three green standalone at `--workers=1`
+(**3/3, 1.4 m**). There is no hexcrawl spec in that number because Phase 0b ships no UI to drive; the
+feature's browser gate starts with `e2e/hexcrawl_scene.spec.ts` in Phase 1, against the same built
+`dist/index.html` this run used.
+
+**Status: accepted 2026-09-21.** Phase 0b is closed and the hexcrawl plan's Phase 0 is complete. Next is
+Phase 1 (the scene wizard and map upload, the grid choice, `cellsInMap` in the panel, the scene editor's
+hexcrawl block), then Phase 2 (overlay, context menu, hex window, fog and party sight) — the first phase
+that draws anything, and the first that has to strip unrevealed features in projection.
+
+## D-270 — 2026-09-21 — A hexcrawl map becomes a scene a GM can actually make: the wizard, the map upload, the grid, and the editor's hexcrawl block (hexcrawl Phase 1)
+
+**Context.** Phase 0b (D-269) left the model pure and unreachable — nothing in `src/` outside
+`core/hexcrawl/` imported it, which is why that phase moved the shipped bundle by 157 bytes. Phase 1 is the
+first slice a GM can touch, and its job in the plan (§8) is deliberately narrow: get a map into the world as
+a *hexcrawl scene*, choose how it is gridded, and let the scene editor say what that scene now is. No
+overlay, no context menu, no fog, no encounter tables, no travel UI — those are Phases 2–5. So this entry is
+about the front door, plus the two things the browser gate found that pure Node tests could not.
+
+**Decision — the `+` in the scene nav is a menu, not a button.** `#scene-add` used to create a blank scene
+on click. A hexcrawl scene is not a blank scene — it wants a map, a grid choice and (optionally) a party —
+so the button now opens a two-item menu: `#scene-new-blank` (the old behaviour, unchanged) and
+`#scene-new-hexcrawl`, which opens `ui/hexcrawl/HexcrawlWizard.svelte` as a normal window
+(`openWindow("hexcrawl-wizard", …)`, 520×540, mounted by `WindowHost`'s `hexcrawl-wizard` branch). Three
+specs clicked `#scene-add` and then expected a scene (`combat.spec.ts:92`, `sheets.spec.ts:713`,
+`windows.spec.ts:123`); they now click through the blank item and get exactly the scene they always got. The
+alternative — teaching `#scene-add` to guess — would have buried the feature behind a button labelled `+`.
+
+**Decision — the wizard is three steps of things the model already understands.** `map → grid → party`
+(`data-hx-step` on the root, `data-hx-name`, `data-hx-map`/`data-hx-map-input`, `data-hx-grid-type` =
+hex/square/gridless, `data-hx-layout` = the four hex layouts and disabled unless hex, `data-hx-cell-size`,
+`data-hx-distance`, `data-hx-units`), with a live readout of `data-hx-cells` and `data-hx-scale` computed by
+`cellCensus` against a **preview scene built in memory** — `cellsInMap`/`cellCensus` are pure, so the GM sees
+how many cells their map will have, and how many cells a day the scale implies, *before* anything exists.
+Map upload rides the app's ordinary asset pipeline: `App.svelte` grew `importMapFile(file)` (hash in, real
+`width`/`height` out) and passes it to the window as `importImage`, so a hexcrawl map is an asset like any
+other map — same hashing, same thumbnail-first streaming, no second path. Gridless is first-class: the
+reference scale ("1 cell = N units") is stored on `SceneGrid`, which is what requirement 2's "GM reference
+scale, vector-crawl distance" needs from Phase 1. The wizard builds its ops with the *same* functions the
+Node tests drive (`newHexcrawlSceneOps` / `newHexcrawlPartyOps`), so the browser path and the unit path
+cannot drift apart.
+
+**Decision — two envelopes, because the host validates an intent against the store as it stands.** The first
+browser run of `e2e/hexcrawl_scene.spec.ts` was a *silent no-op*: the wizard advanced through all three
+steps, closed, and nothing happened — no page error, no console error, `seq` still 1, one scene. The only
+trace was the `rejected` bus (which the app mirrors into `localStorage["vtt-e2e-last-rejected"]`, a hook that
+predates this phase), and it said `invalid_schema: create: parent not found`: an op may not reference a
+document created in the same envelope. The party token's update is exactly that op — the profile has to name
+a token that does not exist yet — so `scene.ts` is split in two: `newHexcrawlSceneOps` (create the scene,
+deactivate the previously active scene, install the terrain catalog when the world has none) and
+`newHexcrawlPartyOps(scene, …)` (the party token at the map centre + the profile that names it), submitted by
+the wizard from the `ops` bus once the scene has landed. The wizard now takes a `bus` prop, keeps itself open
+when the host refuses, and prints the host's own words (`reason: detail`) — a browser-only failure the Node
+tests structurally could not see, because a `DocumentStore` applies both batches happily. The same run taught
+a smaller lesson in the harness: `__vttE2E.app.hexcrawl()` read `scene-1` by design (like the older
+readbacks), which made a *working* wizard look broken; it reads the **active** scene now, which is the
+question a wizard spec is asking.
+
+**Decision — the terrain catalog is installed once, by check-then-write, and it must survive the round
+trip.** `worldSettingsOps` compares catalog values by reference, so a freshly serialized ladder never equals
+the stored one and a naive write-then-diff would rewrite the setting (and spend a sequence number) on every
+wizard run; the builder therefore reads `worldSettingsFrom(docs)["hexTerrain"] === undefined` and writes only
+when the world genuinely has no ladder — a world's edited catalog is the GM's, and a second hexcrawl scene
+must not overwrite it. Writing that path exposed a real bug in `catalogToJson`: it dropped `road`, so a
+catalog read back out of a world setting priced a highway as ordinary terrain — the road rule is a flag, not
+a number (`isRoadTerrain`, `ROAD_COST 1`), and the browser spec caught it by reading the terrain row a GM
+reads. Fixed in `terrain.ts` and pinned by a round-trip test that also asserts the rule the flag exists for:
+a mountain road costs a plains day and a mountain-to-mountain step costs more.
+
+**Decision — the scene editor says what a hexcrawl scene is, and the map import follows the GM.** The
+Settings window's scene section gained a hexcrawl block: on/off (`enableHexcrawlOps`/`disableHexcrawlOps`),
+sight mode and radius (`setSightOps`, clamped by `MAX_SIGHT_RADIUS`/`MAX_SIGHT_WORLD_UNITS`), encounter mode
+(`setEncounterModeOps`), the party token `<select>` off the scene's real tokens with `setPartyTokenOps`,
+dawn/dusk hours (`setDaylightOps`), march speed, the cell census, and a terrain table rendering the world's
+ladder with costs and the road rule (`data-hex-on`/`data-hex-off`, `data-hex-sight`, `data-hex-sight-radius`,
+`data-hex-encounter-mode`, `data-hex-party`, `data-hex-dawn`/`data-hex-dusk`, `data-hex-speed`,
+`data-hex-cells`, `data-hex-terrain-row`). Separately, the sidebar's **Import map** no longer hardcodes
+`DEFAULT_SCENE_ID`: uploading a map writes to the scene the GM is *looking at* (`activeScene()?._id`), which
+is what makes a hexcrawl map usable at all — before this, a map imported while standing on a new scene landed
+on scene 1, a thousand pixels away and invisible.
+
+**What was deliberately not done.** No canvas overlay, no hex context menu, no hex window, no fog, no reveal
+UI, no encounter-table collection or wizard, no travel UI and no battle scene — Phases 2–5, and Phase 2 is
+where the projection rule that strips unrevealed features must land · no change to `core/registry.ts`,
+`PROTOCOL.md` or the wire: a hexcrawl scene is documents and the ops that already exist · no world migration
+(a pre-D-270 world has no `hexTerrain` setting and simply gets the shipped catalog on its first hexcrawl
+scene) · no edit to `PF1e_Unified_TODO.md` · and the four files that already drifted from Prettier stayed
+drifted (this diff hand-formats its hunks; `e2e/lib.ts` and `e2eHook.ts` were already drift-listed at HEAD).
+
+**Plan corrections in the same commit.** `HEXCRAWL_SCENE_SPEC_AND_PLAN.md` §8's Phase 1 is marked ✅ landed
+with what actually shipped: the `+` menu, the three wizard steps, the two-envelope submit and the reason for
+it, the terrain-catalog install rule, the retargeted map import, the editor block with its data hooks, and
+the `catalogToJson` road bug — so Phase 2 starts against a spec that matches the code.
+
+**Evidence, all executed on this tree.** `corepack pnpm exec vitest run tests/core/hexcrawl` — **6 files /
+95 tests passed**: `hexcrawlTerrain.test.ts` **11** (10 + the catalog round trip: after
+`catalogToJson` → `terrainCatalogOrDefault` a road is still a road, a mountain-to-road step costs a plains
+day and a mountain-to-mountain step costs more) and `hexcrawlScene.test.ts` **21** (16 + the split builders —
+batch 1 carries the scene, the deactivation of the previously active scene and the catalog install only;
+batch 2 carries the party token, the profile and the flag — plus a *two-envelope* test that applies **both**
+envelopes through a real `DocumentStore` and then reads the profile back off the stored scene, which is the
+Node half of the bug the browser found), with `hexcrawlCells` 18, `hexcrawlEncounter` 21,
+`hexcrawlTables` 12 and `hexcrawlTravel` 12 unchanged · `corepack pnpm test` **254 files (252 passed,
+2 skipped) / 2 974 tests → 2 962 passed / 12 skipped**, exit 0 · `corepack pnpm exec tsc --noEmit` **exit
+0** · `corepack pnpm typecheck` **45 components, 0 blocking, 1 advisory** (the same pre-existing
+`ReplayPanel.svelte:29` as D-268/D-269) · `corepack pnpm lint` **exit 0** · `corepack pnpm build` →
+`pnpm size` **3 022 912 B raw / 868 986 B gzip, OK: within the 6 MB raw budget** — and the dist the browser
+gate ran against is **byte-identical** to the final tree, because the only edit after that run was a
+doc-comment the Svelte compiler strips · the touched files pass `prettier --check`; `e2e/combat.spec.ts`,
+`e2e/windows.spec.ts` and `e2e/lib.ts` already drifted at HEAD and were **not** reformatted (their new
+hunks are hand-formatted to match) · and the browser gate, on that built `dist/index.html`:
+**`e2e/hexcrawl_scene.spec.ts` passes standalone (1 passed, 8.1 s)** and inside the project; the whole
+chromium project at `--workers=1` is **188 tests → 179 passed / 7 failed / 2 skipped (21.3 m)**, and every
+failure is explained: **five** are artifact specs (`pf1e_acceptance:219`, `pf1e_acceptance:347`,
+`pf1e_join:91`, `pf1e_mass_battles:86`, `start:171`) that failed with "run `pnpm build:systems` /
+`pnpm build:worlds`" because `pnpm build`'s `emptyOutDir` had emptied `dist/packages` and `dist/worlds` —
+after the real chain (`build:systems` → `content:convert --allow-missing` → `build:worlds`) that set is
+**9/9 green in 56.1 s**; **two** are this box's recorded load flakes, load-shaped and not code-shaped
+(`fog_lighting:57` at 2.0 m, `onboarding:30`), **2/2 green standalone at `--workers=1` in 1.1 m**. The
+change's own regression net is the focused run of the four files it edits plus the new spec —
+`hexcrawl_scene` · `combat` · `windows` · `sheets` — **20 passed (2.9 m)**; the first pass of that run
+failed three of them (`combat:92`, `sheets:713`, `windows:123`) precisely because `#scene-add` became a
+menu, which is how those call sites were found and updated.
+
+**Status: accepted 2026-09-21.** Phase 1 is closed: a GM can make a hexcrawl scene from a real map, choose
+its grid and reference scale, get a party token, see and edit the profile in the Settings window, and the
+map import lands on the scene they are looking at. Phase 2 (hex overlay, canvas context menu, the `hex`
+window, fog and party sight) is next — the first phase that draws cells and the first that must strip
+unrevealed features and a closed cell's `playerText` in projection.
+
+## D-271 — 2026-09-21 — The hexcrawl map becomes a map: the overlay, the empty-ground menu, the hex window, and the projection rule that keeps an unopened hex out of a player's replica (hexcrawl Phase 2)
+
+**Context.** Phase 1 (D-270) made a hexcrawl *scene* — a map, a grid, a party, a profile a GM can edit — and
+drew none of it. Phase 2 is the first phase that changes what the table sees: a cell grid with terrain tints
+under the tokens, a cover over the ground the table has not opened, a right-click menu on empty canvas and a
+`hex` window behind it, and — the security-relevant half — the projection rule that decides what a *player*
+may be handed of a cell. Plan §8's Phase 2 is exactly that list, and §3.5/§4 is the rule underneath it.
+
+**Decision — a closed cell is never sent; opening it is a `create`, closing it is a `delete`.** This is
+D-256's map-pin rule (a hidden pin never leaves the host) generalised to a document that is *bigger* than a
+pin: a cell carries the GM's description, the player text, the tables and the features, and the world's
+asset manifest lists every hash a feature could point at. So the gate is not the drawing and not the window —
+it is which documents a session holds. `projectCellForViewer` returns `null` for a cell that is not open, and
+`host/sync.ts` grew a boundary rewrite (`cellRevealCrossings` → `withCellReveals`) that reads the scene-flag
+update an open/close produces and, *per session*, sends a full `create` for every cell that just opened and
+a `delete` for every cell that closed. The same rule is why the player's cover is painted from the grid
+rather than from documents: `HexOverlayLayer` fills the map and `Graphics.cut()`s the open cells out of it,
+so a player's replica needs no closed cell to exist for the map to look right. An open cell keeps its
+`playerText` and its `tables`, always loses the GM's `description`, and keeps only the features whose own
+`state.revealed` is true (`projectCellForViewer`, pinned by `tests/core/hexcrawlVisibility.test.ts` and
+`tests/core/hexcrawlProjection.test.ts`).
+
+**Decision — one overlay, two viewers, and the layer stays dumb.** `core/hexcrawl/overlay.ts` answers "which
+cells exist, which are open, what colour is each" (`hexOverlayPlan`) and `HexOverlayLayer` only strokes and
+fills polygons. That split is what keeps the GM's view and a player's view one code path: the difference is
+`plan.viewer`, not a second renderer. `src/app/hexOverlay.ts` is the single call site both shells use
+(`syncHexOverlay(view, cache, scene, viewer, settings)`), with `hexOverlayKey` as the cheap signature so a
+rebuild happens only when the reveal set, the authored terrain, the grid or the map size moves. The
+containers sit where the plan says they must: terrain tints and outlines **below the tokens** (a tint never
+washes a token), the cover **inside the fog holder at its bottom** (above tokens, below the freehand fog a
+scene may also use). A `view as` preview paints the *player's* plan, because a see-through version of what a
+player sees is not what they see — the same rule the fog already follows.
+
+**Decision — the canvas menu is a model, and Phase 3–6 entries ship disabled with their reason.** Right-click
+on empty ground reaches `hexContextMenuModel` (`ui/hexcrawl/hexContextMenu.ts`) through a new
+`onCanvasContextMenu` callback on the canvas controller — the token menu's gesture, on ground where no token
+was hit. What a GM gets: **Open hex description**, **Open/Close hex**, the terrain submenu (the one §5.2 entry
+Phase 2 can honour in full — the catalog is world data and a cell's terrain is one field), and then **Attach
+encounter table… · Roll from a table… · Explore this hex · Reveal feature… · Move party here · Add to path**
+as *disabled rows that name the phase they are waiting for*. That is the token menu's own honesty rule (a
+disabled entry says why), and it is the opposite of shipping a menu whose other half silently does nothing.
+Mutating entries are gated by `can(user, "update", scene, "scenes")` rather than by a `viewer` flag, so the
+reduced menu a player gets is a consequence of the permission model, not a second list to keep in sync: a
+player sees **Open hex description** (and "the party is here" where it applies) and — on ground they have not
+been shown — *nothing at all*, because there is no document for that hex on their replica and offering "open
+hex" would be a lie twice over.
+
+**Decision — the `hex` window is one cell, and the cell is created by its first edit.** Kind `hex`, `data:
+{sceneId, key}` (the key is the window's identity, so two hexes are two windows). Phase 2's slice of §5.3: the
+terrain select, the GM's description, the player description, the attached tables as rows with their **tag
+chips** (a chip that is off *looks* off — requirement 5's "the GM can turn Night off", readable from the hex
+that uses it), the feature rows with their reveal rule and the GM's reveal checkbox (requirement 8's manual
+path), and the roll button — present, disabled, and naming Phase 3. Every field goes through
+`core/hexcrawl/scene.ts`'s builders, the terrain row goes through the *same* `applyHexMenuEntry` the canvas
+menu calls (so the window and the menu cannot disagree about "make this hex forest"), and a cell nobody has
+authored yet is created **by the first edit** — with the edit inside the create, because the host refuses an
+op that references a document created beside it (D-270's two-envelope lesson, now a general rule for cells).
+
+**Decision — `gm+party` sight reconciles off the ops bus.** Plan §4's "the ring adds to the set every time the
+party moves" is `sightReconcileOps(scene)`: one `revealCellsOps` call, or `[]` when there is nothing to add.
+It hangs off the GM app's `ops` listener, so it does not matter *who* moved the token — the GM's drag, a
+player's, an undo, a rejoin — and it is a no-op for every scene that is not a `gm+party` hexcrawl map. The
+ring is `radiusCells` on a gridded map (`0` = the party's own hex) and `radiusWorldUnits` on a gridless one,
+capped by `cellsWithin`/`zonesWithinRadius` as Phase 0b defined them. **The reveal set is the party's, not a
+per-user explored map** — mixing the two is the classic "one player sees the map, the other does not" bug.
+
+**What the browser found that Node could not.** Three of this phase's four real fixes came from the Chromium
+gate, and each is a bug that all 3 002 green unit tests were structurally blind to:
+
+- **A player's shell never followed the GM to another scene.** `JoinApp.activeScene()` read `scene-1` by id
+  with a fallback, so a table whose GM activates a second scene leaves its players staring at the *first*
+  scene's map, tokens and fog. Invisible for as long as every player-facing spec played in scene 1 — and
+  fatal the moment a hexcrawl map is a new scene. Fixed to the same expression `App.svelte` uses: the
+  `active` flag wins, `scene-1` is only the fallback for a replica that has not been told yet.
+- **The context-menu gesture was gated on the token menu's callback.** `CanvasController`'s right-click path
+  opened a menu only `if (this.options.onContextMenu)`, and the player shell has no token menu — so adding
+  `onCanvasContextMenu` there changed nothing at all. The gesture now needs *either* callback.
+- **`TokenDocument.x/y` is the token's CENTRE and `width`/`height` are pixels** (`src/canvas/tokens.ts`
+  `tokenRect`, and `pf1eMoveToken` writes `(col + 0.5) * cellSize`). `partyPointOf`, `partyCellOf` and
+  `partyPositionOps` read `x/y` as a top-left corner and scaled `width` by the grid size, so a real party
+  token — a 100 px token on a 100 px grid — counted from a point **a hundred cells away from where it is
+  drawn**. Both the sight ring and (later) travel would have been wrong. There is now one reader,
+  `partyCentreOf` (`core/hexcrawl/travel.ts`), and the Phase 0b tests that encoded the wrong convention were
+  corrected rather than the code.
+- The fourth fix predates this phase's browser gate but belongs to its story: `createCellOps` wrote a cell
+  without a `name`, and a `create` op without `data.name` is refused **for the whole envelope** — a
+  reveal-with-terrain did nothing at all, with the only trace on the `rejected` bus. The op-shape unit tests
+  could not see it; the app-level reveal test (`tests/app/hexcrawlReveal.test.ts`, two real shells joined)
+  drove a real `DocumentStore` and found it in one run.
+
+**What was deliberately not done.** No encounter-table editor, no test roll, no results window (Phase 3) · no
+trigger wiring, cooldown ledger or GM prompt (Phase 4) · no token placement, drag payload or battle-scene
+hand-off (Phase 5) · no path mode, terrain brush, travel UI or automatic feature reveal (Phase 6) · no
+polish, help entries or i18n table (Phase 7) · no new document kind, no change to `core/registry.ts`,
+`PROTOCOL.md` or the wire — a hexcrawl scene is still documents and the ops that already exist · no world
+migration (a pre-D-271 world has no cells at all and simply shows its unrevealed map) · no edit to
+`PF1e_Unified_TODO.md` · and the four files already drifted from Prettier at HEAD (`core/documents.ts`,
+`core/store.ts`, `packages/pf1e/effects.ts`, `tests/net/fixtures.ts`) stayed drifted — worse, `stage.ts`,
+`interactions/index.ts`, `projection.ts`, `hexcrawl/scene.ts` and `host/sync.ts` were *already* drifting
+before this phase touched them (checked against `git show HEAD`), so their hunks are hand-formatted to
+match the surrounding style and were not handed to `prettier --write`.
+
+**Plan corrections in the same commit.** `HEXCRAWL_SCENE_SPEC_AND_PLAN.md` §8's Phase 2 is marked ✅ landed
+with an "As landed" block naming what actually shipped, including the two things the phase's own e2e test
+drove that the plan text did not name: the `active`-scene rule in the player shell and the centre/pixel
+convention for a party token. The tracker notes the plan assigns to Phase 7 (`STATUS_ASSESSMENT`, GAP §5.1,
+the help panel's entries) are deliberately still Phase 7's — this entry and the plan doc are the record for
+now.
+
+**Evidence, all executed on this tree.** `corepack pnpm test` **257 files passed / 2 skipped (259) / 3 002
+tests passed / 12 skipped**, exit 0 (baseline 2 962 passed; the +40 are this phase's new suites —
+`hexContextMenu` 8, `hexcrawlVisibility` 14, `hexcrawlOverlay` 6, `hexcrawlProjection` 10,
+`hexcrawlReveal` 2 — and the hexcrawl subset re-ran green after every fix along the way) ·
+`corepack pnpm exec tsc --noEmit` **exit 0** · `corepack pnpm typecheck` **46 components, 0 blocking, 1
+advisory** (the same pre-existing `ReplayPanel.svelte:29` as D-268/269/270) · `corepack pnpm lint` **exit 0**
+(the first run after the new test file failed on eight `@typescript-eslint/no-non-null-assertion` errors;
+they are gone, and the test uses an explicit `at()` reader instead — nothing in this repo has a `!`) ·
+`corepack pnpm build` → `pnpm size` **3 054 067 B raw / 877 468 B gzip, OK: within the 6 MB raw budget**
+(baseline 3 022 912 / 868 986: +31 155 B raw for the overlay, the plan/cover renderer, the menu, the window
+and the e2e readbacks) · the dist the browser gate ran against is the dist of this tree, because `pnpm build`'s
+`emptyOutDir` was followed by the real chain (`build:systems` → `convert --allow-missing` → `build:worlds`,
+which restores `dist/packages` and `dist/worlds` for the artifact specs) · the browser gate, on that
+`dist/index.html`, chromium only (this box has no firefox/webkit runtime): **`e2e/hexcrawl_fog.spec.ts` passes
+(1 passed, 43.3 s)**
+— the GM's overlay paints 133 cells of the scene the wizard made, the terrain entry creates a cell that
+crosses the host, the hex window's two texts and its hidden feature round-trip, the reveal is a `create` for
+the player (who receives `playerText` and *not* the `description` and *not* the unrevealed feature), the
+player's cover paints whole-map-minus-one-hex, the player's own menu offers one entry and their window is
+read-only, closing the hex is a `delete` that empties their replica — and the `gm+party` ring is written by
+the reconcile hook, extends when the party token is dragged a hex east, and the cover's holes follow it ·
+plus the regression set of the eight specs this change can reach (`hexcrawl_scene`, `fog_player`,
+`canvas_rail`, `combat`, `windows`, `sheets`, `join`, `gm_view_as`): **34 passed / 1 failed (7.0 m)**, and the
+one failure is this box's recorded load flake exactly — `fog_player:41` at its vision-loop poll (`the hero
+walks next to the orc`, 1.4 m, "`orc` never appeared"), **green standalone at `--workers=1` (2 passed,
+1.0 m)** in the same run of the same dist, which is the pre-existing `.spec:41`/`:141` flake D-251/D-256
+recorded, not this change. That gate found the three real bugs above (the player shell's `scene-1` default,
+the right-click gesture gate, the centre/pixel convention) — which is the whole argument for having one.
+
+**Status: accepted 2026-09-21.** Phase 2 is closed: a GM can see their hexcrawl grid and its terrain, open and
+close hexes, describe them, hide features in them and let the party's own eyes (or their own hand) decide what
+the table has been told — and a player's replica holds **only** what the table has opened. Phase 3 (encounter
+tables and their wizard) is next.
+
+## D-272 — 2026-09-21 — An encounter table a GM can write: dice or a live percentage ladder, tags, entity refs, a test roll, and the results window behind it (hexcrawl Phase 3)
+
+**Context.** Phase 2 put the map on the screen and made it openable. Phase 3 is requirement 5's *data* half:
+the tables themselves — several per hex, tagged for when they may fire, written either as a dice formula or
+as the weighted-percentage model the requirement asks for, pointing at text, at a bestiary entry or at an
+entity in this world, previewable without touching the world, and readable back. Plan §8's Phase 3 is
+"collection + wizard + validation + test roll + tag chips + the results-window shell"; §5.4 is the wizard,
+§5.5 the window behind the roll.
+
+**Decision — a table is a top-level document, and the wizard is a form over a pure model.** `encounterTables`
+already existed as a collection (D-269) and the cell's `tables` list already attached ids to hexes; what
+Phase 3 adds is the editor. Every semantic decision lives in `ui/hexcrawl/tableEditor.ts` — what a typed
+weight means, what a mode switch converts, what a paste reads, what a save writes, what attaching does — and
+`EncounterTableWizard.svelte` (kind `encounterTable`), `EncounterTablesWindow.svelte` (kind
+`encounterTables`) and `EncounterResultWindow.svelte` (kind `encounterResult`) only paint it. That is the
+`hexContextMenu.ts` split from Phase 2, for the same reason: 33 of this phase's 34 new unit tests are about
+table *meaning*, and a `.svelte` file cannot be unit-tested in this repo.
+
+**Decision — the `%` column is the compiled ladder, not the weight.** `rowPercents` counts the faces
+`weightsToRanges` gave each row, so a GM who types 30/30/30 sees **34 % / 33 % / 33 %** and a column that
+always totals exactly 100 (`rowShares` sums faces, so there is no rounding drift to explain). Showing "30 %"
+beside a row that rolls 34 % of the time would be the editor lying about its own table; the rounding
+remainder goes to the largest share, never to a row with no ladder space. This is also why the wizard ships
+**no "weights must total 100" wall**: the ladder is the GM's own numbers normalised, and the honest check is
+*Test roll*.
+
+**Decision — the mode switch is lossless in one direction only.** Dice → weighted reads a **single flat die**
+(`1d20`, `d100`) as percentages exactly (`k` faces of `N` = `100k/N`), and *refuses* everything else in the
+GM's own words: "`2d6` rolls several dice, so its faces are not equally likely — it has no percentage
+reading." Weighted → dice writes `1d100` plus the ranges the compiler already computed, so the "express it as
+a formula" direction is exact rather than approximate. Plan §5.4's rule, implemented literally, including
+the refusal text.
+
+**Decision — validation is the engine's own check, shown where the GM is typing.** `validateEncounterTable`
+already knew about gaps, overlaps, a formula that is not a dice expression and a table with no entries; the
+wizard calls it on the draft (`draftView().check`) and renders errors and warnings as two lines under the
+rows. Save is gated on `check.ok`, and a refusal quotes the engine's sentence.
+
+**Decision — paste reports what it could not read.** `parsePastedRows` takes one row per line, TSV **or** CSV
+(a tab wins when the line has one, so "Wolves, hunting" keeps its comma), reads a leading number as a
+**weight in weighted mode** and as a **die face in dice mode** (`7, Wolf` is the row for a roll of 7),
+accepts `@pack/entry` and `@actor` reference tokens, and returns the unparseable lines with their 1-based
+numbers. A paste that half-works is the one case where a GM cannot see what happened, so the skipped lines
+are counted and shown.
+
+**Decision — a reference stores the pack's *name*, and resolves through the picker's own index.** An
+`EncounterRef` is `{kind:"compendium", packId, entryId}` where `packId` is the pack **name** — the same
+thing the compendium drag payload carries (`packName`, `App.svelte`'s `onCompendiumDrop`), because that is
+what `PF1eCompendiumPicker` hands its caller and what survives a world export/import. `resolveEncounterRefs`
+looks the entry up in that pack first, then in any pack of the world, and otherwise says "not found in this
+world" — a results row never silently disappears. The picker gained a fourth `kind`, `"actor"`: an
+encounter entry has to be able to point at a creature, and the pack's own `type` is the only honest signal
+for which packs hold actors.
+
+**Decision — a test roll draws with the real engine and writes nothing.** *Test roll* runs `drawEncounter` on
+the **draft** and opens the results window with `preview: true`: a banner saying so, no ledger entry, no
+chat card, no document. The browser spec asserts the world still holds **zero** tables after a test roll,
+which is what makes "the fastest way to sanity-check a ladder" true rather than hopeful.
+
+**Decision — attaching is a checkbox list, and saving from a hex attaches in the same envelope.** The tables
+window is one window with two faces: the world's library (GM toolbar's *Tables* → `New/Edit/Duplicate/
+Delete`), or the attach flow for one hex (opened from the canvas menu's *Attach encounter table…*, from the
+hex window's own button, or by a hex's *New…*). Several tables per hex is the checkbox list; which of them
+may fire is each table's tags. Attaching to a hex **nobody has described** creates the cell
+(`createCellOps`) instead of writing nothing — `updateCellOps` has nothing to update and returns `[]`, the
+same trap the hex window's first edit solves. Deleting a table detaches it from every cell that names it
+(`detachTableFromCellsOps`), so no hex keeps a dangling id.
+
+**Decision — the results window carries its payload out-of-band.** `WindowSpec.data` is
+`Record<string, string>`, so a drawn roll cannot travel inside the spec the way a document id can. It lives
+in a module registry keyed by window id (`ui/hexcrawl/encounterResult.ts`), the shape `pf1eItemWindow.ts`
+already uses for items — and it is the only shape that works for a **test roll**, whose table may not exist
+in the store at all. §5.5's two ways out (**drag a row** onto the map, **Place all** as a non-overlapping
+scatter) and §5.6's **Create battle scene** are Phase 5: both buttons are present, disabled, and name the
+phase they wait for, which is the context menu's own honesty rule.
+
+**What the browser found that Node could not.** Two real bugs, both in the wiring the unit tests cannot see:
+
+- **An unguarded `win.data` made a whole window unrenderable.** `WindowSpec.data` is optional, and the new
+  `encounterTables`/`encounterTable` branches read `win.data.sceneId` directly — so opening the library
+  (which has no data at all) threw `Cannot read properties of undefined (reading 'sceneId')` and left an
+  empty window manager, with the only trace a `pageerror` in the console. Every branch reads `win.data?.…`
+  now. The player-of-a-window trap is worth recording: the failure looked like "the button did nothing".
+- **The tables window handed the hex over under the wrong key.** It passed `cellKey` in the window data while
+  the host reads `data.key` (`openHexWindow`, and the `hex` branch) — so the wizard opened from a hex lost
+  its attach target: no "attaches to hex K on save" line, and Save would have created the table **without**
+  attaching it. The spec asserted the line, which is the only reason it was caught; the fix carries a comment
+  naming the host's key so the next window does not repeat it.
+- The third lesson is about the gate itself: **a window over the canvas eats the next right-click**. Both the
+  results window (opened by *Test roll*) and the tables window had to be closed before the map's own gesture
+  could land — the spec now closes each one explicitly instead of relying on where it happens to sit.
+
+**What was deliberately not done.** No trigger wiring (token move, travel step, explore, combat start), no
+cooldown-ledger writes, no auto/prompt cards and no GM-pending message flow (Phase 4 — the engine's
+`encounterDecision`/`ledgerOps` are ready and untouched) · no token placement, drag payload, scatter geometry
+or `duplicateSceneOps` battle hand-off (Phase 5) · no path mode, travel UI, terrain brush or automatic feature
+reveal (Phase 6) · no change to the pre-existing sidebar **Tables** tab (that is the roll-table panel; the
+encounter library is a window, and two things called "Tables" is already one too many) · no new document kind,
+no `core/registry.ts` change, no `PROTOCOL.md` edit, no wire change — a table is a top-level document that
+already existed · no world migration (a world from Phase 2 has no tables and simply shows an empty library) ·
+no edit to `PF1e_Unified_TODO.md` · and the Prettier-drifted files stayed drifted: the four recorded ones
+(`core/documents.ts`, `core/store.ts`, `packages/pf1e/effects.ts`, `tests/net/fixtures.ts`) plus the five
+verified at HEAD in Phase 2 (`stage.ts`, `interactions/index.ts`, `projection.ts`, `hexcrawl/scene.ts`,
+`host/sync.ts`), and this phase's own new files were formatted **except** the two that were already drifted
+at HEAD and are hand-patched (`e2e/hexcrawl_fog.spec.ts`, `src/app/e2eHook.ts`).
+
+**Plan corrections in the same commit.** `HEXCRAWL_SCENE_SPEC_AND_PLAN.md` §8's Phase 3 is marked ✅ landed
+with an "As landed" block, and §5.4 keeps its note that the attached `EncounterGen4_GPT.html` never reached
+this workspace: the layout is written from the requirement's own description ("either by choosing dice to
+roll, or by using weighted percentage system"), which is exactly what shipped — a `Roll type` radio, a
+weight column, a live `%` column with a total, per-row count and reference, six tag chips, a linked battle
+scene and a cooldown. What a re-send could still settle is the attachment's own column set and labels; the
+model underneath does not change. Tracker notes the plan assigns to Phase 7
+(`STATUS_ASSESSMENT`, GAP §5.1, the help panel's entries) stay Phase 7's.
+
+**Evidence, all executed on this tree.** `corepack pnpm test` **258 files passed / 2 skipped (260) / 3 036
+tests passed / 12 skipped**, exit 0 (baseline 3 002 passed; the +34 are `tests/ui/tableEditor.test.ts` (33)
+and one new menu test pinning that *Attach encounter table…* asks the shell for the tables window and writes
+nothing itself) · `corepack pnpm exec tsc --noEmit` **exit 0** · `corepack pnpm typecheck` **49 components,
+0 blocking, 1 advisory** (the same pre-existing `ReplayPanel.svelte:29`) · `corepack pnpm lint` **exit 0**
+(one intermediate run failed on an unused `SceneDocument` import in the wizard; it is gone) · the real build
+chain (`vite build` → `build:systems` → `convert --allow-missing` → `build:worlds`) then `pnpm size`
+**3 093 056 B raw / 888 638 B gzip, OK: within the 6 MB raw budget** (baseline 3 054 067 / 877 468: +38 989 B
+raw for the wizard, the two windows, the result registry and the actor picker kind) · the browser gate, on
+that `dist/index.html`, chromium only (this box has no firefox/webkit runtime):
+**`e2e/hexcrawl_tables.spec.ts` passes (1 passed, 22.1 s)** — twelve hexes of a fresh hexcrawl scene, the
+canvas menu's *Attach encounter table…* into the attach-mode library, *New table…* into the wizard carrying
+the hex, a 30/70 weighted table with a live `30 %`/`70 %` ladder and a bestiary ref picked through the real
+picker ("Dire Wolf Pack" of the shipped `PF1e Bestiary`), Night unchecked, a *Test roll* that opens the
+results window in preview and leaves the world with zero tables, Save writing one create **and** one attach,
+the store read back with its weights, counts, ref, tag mask and null cooldown, the hex window listing the
+table with its night chip visibly off, and the library listing the same row with its `weighted % · off:
+night` summary · `e2e/hexcrawl_fog.spec.ts` **1 passed (39.0 s)** on this dist, unchanged · and the
+regression set of the specs this change can reach (`hexcrawl_tables`, `hexcrawl_fog`, `hexcrawl_scene`,
+`fog_player`, `canvas_rail`, `windows`, `join`), all in one `--workers=1` run: **21 passed / 2 failed
+(4.7 m)** — and both failures are green standalone in the same run of the same dist: `fog_player:141` is the
+recorded load flake (its 45 s `fogMaskStrokes` poll, the `:41`/`:141` family D-251/D-256 recorded), and
+`hexcrawl_scene:46` ran out of the repo's default 30 s test budget inside the settings panel's terrain
+section on this 2-core box — that spec now sets the explicit 90 s budget its slow siblings already carry
+(12.5 s green afterwards), which is a gate fix, not a behaviour change.
+
+**Status: accepted 2026-09-21.** Phase 3 is closed: a GM can write an encounter table as a dice formula or
+as a weighted ladder, see the probability they just typed, point rows at bestiary entries or world entities,
+tag the table for day/night and the four triggers, attach several tables to a hex, roll one without changing
+the world, and read the whole thing back out of the store. Phase 4 (the encounter engine's three modes —
+trigger wiring, the cooldown ledger, the auto card, the GM-pending prompt and the manual roll) is next.
+
+## D-273 — 2026-09-22 — The encounter engine plays: a border crossing becomes a card, a ledger keeps a table quiet, and the three modes are three behaviours (hexcrawl Phase 4)
+
+**Context.** Phase 3 gave the GM tables; Phase 4 makes them *fire*. Plan §8's Phase 4 is "trigger wiring (token
+move, travel step, explore, combat start), cooldown ledger, tie popup, `auto` chat card, `prompt` GM-only
+pending message, `manual` roll from the hex window", and its e2e line is the whole story of this entry: *with
+`prompt` mode, walking the party into a tagged hex posts a GM-only card naming the eligible table; the player
+shell never receives it; clicking it rolls and produces the results window*. §6 is the rule list (eligibility
+`tags[trigger] && tags[phase]`, the ledger at `cell.flags.core.encounters`, ties as a list, host-seeded rolls,
+`manual` doing nothing on its own) and requirement 5a's three modes are what the scene's own option selects.
+
+**Decision — the engine is two modules, and the shell only wires them.** `core/hexcrawl/encounter.ts` (D-269)
+decides *what is eligible*; `core/hexcrawl/encounterFlow.ts` is this phase's addition and decides *what
+happens next*: `encounterCheck` narrows to the cell's own attached tables and hands them to `encounterDecision`,
+`rollTableNow` is the one draw-plus-ledger pair, and the card builders are pure. `App.svelte` holds exactly
+three verbs — `runEncounterTrigger(trigger, key)`, `rollEncounterTable(messageId | null, tableId, key)` and
+`exploreCell(key)` — and every trigger point is one line at an existing hook. That is why the unit suite can
+hold the contract (24 tests in `tests/core/hexcrawlEncounterFlow.test.ts`) while the browser spec only has to
+prove the *wiring*: that a drag is a trigger, that a whisper is absent, and that the window opens.
+
+**Decision — one ledger write for both the automatic and the hand-rolled roll.** The manual row in the hex
+window and the `auto` card call the same `rollTableNow`; the only difference is who asked and who is told. A
+table rolled by hand therefore starts its cooldown exactly as one that fired by itself, so the GM cannot roll
+the same forest band twice in a night by clicking and then walking. The ledger is `flags.core.encounters` on
+the **cell** (`{tableId: atClock}`), replicated like every other cell write, which is also what keeps two GMs
+from double-firing (plan §6 rule 3). `readyIn`/`firedAtIn`/`formatCooldown` render it in the GM's units, and
+`e2eHook.hexEncounterLedger()` reads it back, so the spec asserts *why* a second crossing was quiet instead of
+only that it was.
+
+**Decision — a crossing is a change of `partyCellKey`, not a drag handler.** `encounterAfterPartyMove()` is
+called from the ops listener, after `reconcilePartySight()`, and compares the party's current cell with the
+last reading it saw; the first reading is a baseline, not a crossing. A GM's drag, a player's drag, an undo,
+a rejoin and a scene load therefore all trigger the same way, in the same order as the sight ring (so the cell
+the party just entered is already open to the table when the `entering` check asks `isCellOpen`). One event is
+one encounter: `runEncounterTriggers` asks `entering` then `moving` and stops at the first decision that was
+not `none`, so a border crossing cannot roll twice.
+
+**Decision — `auto` is public, `prompt` is a whisper, and the pending card is a message.** The plan's modes
+map onto the chat system that already exists: `auto` posts an ordinary result card (names revealed or not per
+the scene's new `encounterAnnounce` flag, which the settings panel can now set — a flag nothing can set is not
+a flag); `prompt` posts a *card whispered to the GM ids*, which is what makes the player shell's silence a
+projection rule rather than a CSS accident (`core/projection.ts` drops a whisper for anyone who is neither
+author nor target, and the spec proves it off the player's own DOM and store). Answering is an `update` on that
+message (`system.encounter.answered` plus `answeredRoll`) — testable, auditable, visible in the log afterwards,
+and deduped by `openPromptFor` so a second crossing cannot post a second pending card for the same hex. A tie
+is the same card with every candidate listed and one *Roll this* per row: never a silent first match
+(requirement 5's explicit ask).
+
+**Decision — a prompt is GM-only, a hand-rolled roll is not.** Both paths go through `rollEncounterTable`, but
+the audience differs, and that difference is the point: answering a GM-only prompt produces a GM-only result
+card (the GM narrates what the party sees), while the hex window's row is the GM's own roll and produces a card
+as public as `auto`'s. Both open the **results window** — §8's e2e sentence asks for exactly that, and the
+window is where Phase 5's placement will start from.
+
+**Decision — *Roll from a table…* opens the hex window instead of rolling in a menu.** §6 rule 6 says the
+window's rows are the manual trigger; duplicating the draw in the canvas menu would give the same sentence two
+implementations and two id rules (the D-272 lesson about `openTablesFor`). So the menu entry opens the window,
+the window states the scene's own mode above the rows, and *Explore this hex* is a third thing: it submits the
+**clock envelope first** (`EXPLORE_SECONDS = 3600`, one hour in a hex) and only then asks the `exploring`
+trigger, because the engine reads the clock back off the store and a reading that is not committed yet is a
+reading the ledger would record wrongly.
+
+**Two bugs the browser found.** (1) The prompt card carried no `gmOnly`, so the card that is *by construction*
+GM-only did not say so — the whisper enforced the secrecy, but the label is what the GM reads; the flag is now
+on the payload (the whisper stays the enforcement). (2) The results window's *Close* button only called
+`forgetEncounterResult`, leaving the frame on screen reading "This result is no longer available" — a button
+that does not do what it says. The window now takes an `onClose` from the host (which owns frames) and its
+`onDestroy` does the forgetting.
+
+**A note on this commit's shape.** This sandbox re-cloned the repository between sessions: the commit objects
+of D-266…D-272 (recorded in their own entries below, with their own gate numbers) were no longer in the object
+database, while the working tree — the source of truth for this workspace — held all of their changes intact.
+Rather than silently re-writing five entries' worth of work as if it were new, this commit re-lands the
+accumulated tree (compendium index + statblock import + world clock + hexcrawl Phases 0–4) in one envelope,
+and says so here. The per-decision record below is unchanged and still the authority on what each phase did and
+what its gates measured.
+
+**Gates.**
+
+- **The unit gate, on the final tree:** `corepack pnpm test` — **259 files, 3 061 passed / 12 skipped**, exit 0
+  (D-272's baseline was 258 / 3 036: +24 in `tests/core/hexcrawlEncounterFlow.test.ts` and +1 in
+  `tests/ui/hexContextMenu.test.ts`, which now also pins that *Roll from a table…* opens the window and
+  *Explore this hex* asks the shell for the clock envelope while a player gets neither).
+- **Types and lint:** `corepack pnpm exec tsc --noEmit` **exit 0** · `corepack pnpm typecheck` **50 components,
+  0 blocking, 1 advisory** (the same pre-existing `ReplayPanel.svelte:29`) · `corepack pnpm lint` **exit 0**
+  (an intermediate run failed on two unused locals in `EncounterCard.svelte` — a `single` derived value and an
+  `onPlace` prop nothing passes — both removed rather than silenced).
+- **The build chain and the size budget:** `vite build` → `build:systems` → `convert --allow-missing` →
+  `build:worlds`, then `pnpm size` **3 108 904 B raw / 893 438 B gzip, OK: within the 6 MB raw budget**
+  (D-272: 3 093 056 / 888 638; **+15 848 B raw** for the engine, the card, the results-window close path and
+  the settings control).
+- **The browser gate, chromium only** (this box has no firefox/webkit runtime), on that `dist/index.html`:
+  **`e2e/hexcrawl_encounters.spec.ts` — both tests pass**, and they are the phase's own acceptance line.
+  *Prompt mode* (50.6 s): a fresh hexcrawl scene, the world clock advanced one hour through the settings
+  panel, a 100 % single-entry table authored from the hex menu and attached to the neighbouring hex, that
+  hex opened to the table, a peer join, one **real drag** of the party token across the border — and then the
+  GM's log holds one pending card (`data-encounter-card="prompt"`, `gm-only="true"`, cell `6,3`, trigger
+  `entering`, *1 eligible*, the table's name) while the player's log holds **no** encounter card and no
+  "Encounter check" text at all; clicking *Roll this* opens the results window (`Goblin scouts`, `hex 6,3`,
+  `1d100 →`), marks the asking card answered, posts the GM-only result card the player never receives, and
+  leaves exactly one ledger entry — `{cellKey: "6,3", tableId, atClock: 3600}`, the world clock's own reading;
+  leaving and walking back inside the cooldown posts nothing and leaves the ledger at one entry.
+  *Manual mode* (23.4 s): the same walk through *Encounters → the GM rolls by hand* posts nothing at all, the
+  hex window states its mode and its row rolls — a **public** result card, a results window, and the same
+  single ledger write.
+- **The regression set this change can reach** (`hexcrawl_encounters`, `hexcrawl_fog`, `hexcrawl_scene`,
+  `hexcrawl_tables`, `fog_player`, `canvas_rail`, `windows`, `join`) in one `--workers=1` run, on that dist:
+  **23 passed / 2 failed (7.1 m)** — and both failures are green standalone in the same session and the same
+  dist: `fog_player:141` is the recorded vision-worker load flake (its 45 s `fogMaskStrokes` poll — the
+  `:41`/`:141` family D-251/D-256 recorded, and the family rotates with the box's load), and `join.spec.ts`
+  exceeded the repo's default 30 s budget inside an eight-spec run (8.1 s standalone). Both hexcrawl encounter
+  tests passed in the crowded run itself (47.2 s and 22.4 s).
+- **And one failure that *was* behaviour, found by that grep:** the hex window's row returned silently — the
+  manual roll never reached the engine — because the guard that decides whether the window's hex belongs to
+  the scene the shell is showing compared `SceneDocument.type` against `"Scene"` when the document's own type
+  is `"scene"`. The manual-mode browser test caught it on its first crowded run; the model cannot, and that is
+  the argument for keeping a second, deliberately *redundant* test in the same spec as the acceptance line.
+
+## D-274 — 2026-09-22 — An encounter's creatures reach the map: the spiral, the row you can drag, the copy that is a battle scene, and the hex that remembers it (hexcrawl Phase 5)
+
+**Context.** Phase 4 made a table *fire*; Phase 5 makes its result *land*. Plan §8's Phase 5 is "results
+window, drag payload, `Place all` scatter, `duplicateSceneOps`, the linked-scene confirm flow, the cell's
+encounter log", its e2e line is *"roll a two-entry table, `Place all`, assert both tokens exist and are not
+co-located (distance ≥ one cell), then create the battle scene and assert the copy has the original's walls
+and the new tokens"*, and §5.5/§5.6 are the two mechanisms: a row dragged onto the map is "the same create
+path a compendium drag uses", *Place all* is a wall-aware ring/spiral with at least a cell between tokens,
+and *Create battle scene* is a **copy** — children re-keyed, the image shared by asset hash, the new scene
+active, one chat card, and the origin cell linking back to it.
+
+**Decision — placement is arithmetic, not a window.** `core/hexcrawl/placement.ts` (new) holds the whole
+geometry: `placementSpacing(scene)` is the grid's cell size, or 100 px on a gridless map;
+`placeEncounterTokens({scene, origin, count, spacing?, maxRings?})` walks the origin and then rings of
+`6·r` points at `r·spacing`, dropping positions that a wall cuts through (`wallDistance`, built on the
+vision layer's own `distanceToSegment` — the primitive `wallPickAt` uses, so "blocked" means the same thing
+to the placer and to the sight code); when the rings run out it takes the wall-adjacent points anyway,
+because a GM who asked for eight wolves must get eight tokens, not six and a shrug (the window says "some on
+walls — drag them clear" in the log). `encounterTokenData` turns rows into hostile tokens with
+`ownership {default: 3}`; it builds the token literal itself rather than importing the app's `makeToken`
+(core does not depend on `app/`). That purity is why the phase's contract lives in
+`tests/core/hexcrawlPlacement.test.ts` (13 tests: pairs ≥ spacing apart, a wall in the first ring, a drop
+near the map edge, a count of zero, the three spacing cases, hostile ownership, and the log's own bound).
+
+**Decision — a row is a drag payload, and *Place all* is the compendium create path.** The results window
+carries `application/x-vtt-encounter` (`{resultId, rowIndex, name, count}`) on `dragstart`; the canvas
+accepts that mime type beside the compendium's own and routes the drop to `onEncounterDrop`, which resolves
+the row's refs, imports the bestiary actor through the packages path exactly as a compendium drag does, and
+places one token per creature on the spiral around the drop point. "Place all" is the same function with
+every row and the hex's own centre as the origin. So the creature in the map is an **actor-backed** token —
+the sheet opens from it, the turn tracker can take it — and a bare text row still places a plain token
+(its `actorId` is absent, not null). The window derives the linked battle scene's *name* itself, from
+`client.store` (`roll.tableId` → the table's `sceneId` → that scene's name) instead of taking it as a prop:
+the shell owns the ops (D-273's rule), the window owns its own reading, and there is one fewer prop to keep
+in sync.
+
+**Decision — the copy is one `create`, and the copy's `active` rides inside it.** `core/sceneCopy.ts` (new)
+`duplicateSceneOps` re-keys every embedded child in one fixed order (tokens → walls → notes → cells →
+lights → sounds → tiles → drawings → templates) inside a single `create`, so the host sees one document
+appear; `img` is copied by hash, not by bytes (a battle scene shares its parent's picture — §5.6 is explicit
+about that being the point). The bug the browser found is worth recording because the model cannot see it:
+the first version marked the copy active with a **follow-up `update`** in the same envelope, and
+`host/sync.ts`'s `validateOps` resolves every `update` ref against the store *as it stands before the
+batch* — so the update was refused, the whole intent was rejected, and the scene, its log row and its chat
+card all vanished together ("Create battle scene" did nothing at all). It is D-270/D-272's
+"a create may not reference a document created beside it" rule arriving from the other side: a document
+created in this batch cannot be *updated* in it either. Fix: `active` is set inside the data of the create,
+where it costs nothing and cannot be refused.
+
+**Decision — the confirm is a row of buttons, and the return trip is a click.** §5.6's prompt
+(*Create "Goblin ambush" from "Forest road"?*) is not a `window.confirm`: the two verbs and a *Cancel* sit
+in the window footer (`data-result-battle-confirm` / `-yes` / `-no`), so the offer is visible, assertable and
+testable, and a GM who says no is back where they were with the roll still in hand. And the encounter is
+remembered where it happened: `logEncounterOps` appends `{tableId, tableName, roll, text, sceneId, atClock}`
+to the cell's `flags.core.encounterLog` (bounded to the last 20 — a hex visited for a campaign must not grow
+an unbounded array in a replicated document), and the **hex window lists it** (GM-only, because the log
+names tables and rolls). Its scene row is the click back: it activates the copy. A log nobody can read is a
+log that does not exist, and "so the return trip is one click" was promise until this window section made it
+true.
+
+**What the browser spec now proves** (`e2e/hexcrawl_encounters.spec.ts`, third test, 24.0 s, on a scene
+that links a battle scene): the roll's window offers *Place all* and *Create battle scene*; *Place all*
+scatters two **actor-backed** "Dire Wolf Pack" tokens ≥ one 100 px cell apart on the hexcrawl map and writes
+one log row (`sceneId: null`); *Create battle scene* asks first, and then a third scene exists, named
+`Goblin scouts — encounter`, active, carrying the original's wall with a **new id** and the same `img` hash,
+with the encounter's two creatures inside it, at least a cell apart; and the origin cell's log row now names
+the copy, which the still-open hex window lists and opens in one click. Two notes from writing it: a window
+over the canvas eats the next right-click (D-272's lesson, still true — the spec closes the results window
+before the canvas gesture, and the hex window sits over it too), and the row that proves the "real actor"
+claim has to be a *real* bestiary ref (`data-table-ref-bestiary` → the shipped mass-battle pack), because a
+bare text row legitimately places a token with no `actorId`.
+
+**Gates.**
+
+- **The unit gate, on the final tree:** `corepack pnpm test` — **262 files: 260 passed / 2 skipped**, **3 086
+  tests: 3 074 passed / 12 skipped**, exit 0 (D-273's baseline was 261 / 3 073: +1 file and +13 tests, all of
+  them `tests/core/hexcrawlPlacement.test.ts` — the spiral, the obstacle rule, the token shape, the copy's
+  re-keying and shared image, and the log's bound).
+- **Types and lint:** `corepack pnpm exec tsc --noEmit` **exit 0** · `corepack pnpm typecheck` **50
+  components, 0 blocking, 1 advisory** (the same pre-existing `ReplayPanel.svelte:29`) · `corepack pnpm lint`
+  **exit 0**.
+- **The build chain and the size budget:** `vite build` → `build:systems` → `convert --allow-missing` →
+  `build:worlds`, then `pnpm size` **3 119 463 B raw / 896 671 B gzip, OK: within the 6 MB raw budget**
+  (D-273: 3 108 904 / 893 438; **+10 559 B raw** for the placement module, the copy module, the results
+  window's footer and the hex window's log list).
+- **The browser gate, chromium only** (this box has no firefox/webkit runtime), on that `dist/index.html`:
+  the third test of `e2e/hexcrawl_encounters.spec.ts` passes at **24.0 s** and is the phase's own acceptance
+  line; the two Phase 4 tests beside it still pass at 49.5 s and 23.8 s, and `e2e/hexcrawl_fog.spec.ts`
+  (39.2 s — the spec that exercises the hex window and the canvas menu this change touched) passes in the
+  same run: **4 passed (2.3 m)**. `e2e/hexcrawl_tables.spec.ts` and `e2e/hexcrawl_scene.spec.ts` re-run
+  after the hex-window change: **2 passed (53.2 s)**.

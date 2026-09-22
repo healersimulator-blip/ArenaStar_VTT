@@ -7,6 +7,8 @@
   import { buildChatMessage, parseChatCommand } from "../../core/chat";
   import { renderMarkdown } from "../../core/markdown";
   import RollCard from "./RollCard.svelte";
+  import EncounterCard from "./EncounterCard.svelte";
+  import { encounterPayloadOf } from "../../core/hexcrawl/encounterFlow";
   import PendingRollCard from "./PendingRollCard.svelte";
   import RollApplyRow from "./RollApplyRow.svelte";
   import { rollApplyTarget } from "./applyTarget";
@@ -27,9 +29,21 @@
     client,
     bus,
     targetTokenId = null,
+    onEncounterRoll = null,
+    onEncounterExplore = null,
   }: {
     client: ClientSync;
     bus: EventBus<ClientEvents>;
+    /**
+     * D-273: answer an encounter prompt — the shell owns the roll, the ledger write and the result
+     * card, because it is the shell that knows the active scene and the world clock.
+     */
+    onEncounterRoll?: ((messageId: string, tableId: string) => void) | null;
+    /**
+     * D-273: *Explore this hex instead* — exploring is its own trigger with its own clock cost, so
+     * the card asks the shell rather than rolling anything itself.
+     */
+    onEncounterExplore?: ((cellKey: string) => void) | null;
     /**
      * §2.2 item 3 (G-20/D-261): the token the shell has selected — the target an apply verb on a
      * roll card would write to. Null (or a multi-selection) leaves the cards verbless.
@@ -289,7 +303,19 @@
     {#each messages as message (message._id)}
       {@const pendingRoll = (message.system as unknown as { pendingRoll?: PendingRoll } | undefined)?.pendingRoll}
       {@const ledger = (message.system as unknown as { rollLedger?: RollLedger } | undefined)?.rollLedger}
-      {#if pendingRoll}
+      {@const encounter = encounterPayloadOf(message)}
+      {#if encounter}
+        <!-- D-273: the GM's pending encounter message, or the result of a roll. A prompt is
+             whispered to the GM ids, so a player's replica never holds this document at all. -->
+        <EncounterCard
+          {message}
+          isGM={isGMDerived}
+          onRoll={(tableId) => onEncounterRoll?.(message._id, tableId)}
+          onExplore={
+            onEncounterExplore ? () => onEncounterExplore(encounter.cellKey) : undefined
+          }
+        />
+      {:else if pendingRoll}
         <PendingRollCard
           pending={pendingRoll}
           currentTurn={currentTurn}

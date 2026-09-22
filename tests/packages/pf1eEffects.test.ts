@@ -169,9 +169,16 @@ describe("durations (A.1: 1 round = 6 seconds)", () => {
         5,
       ),
     ).toBe(50);
+    // D-268: the ladder is real time — an hour is 600 rounds (was 100, i.e. ten minutes).
     expect(ttlToTicks({ unit: "hour", value: 1, endsOn: "own-turn" }, 3)).toBe(
-      100,
+      600,
     );
+    expect(
+      ttlToTicks(
+        { unit: "hour", value: 2, perLevel: true, endsOn: "own-turn" },
+        3,
+      ),
+    ).toBe(3600);
     expect(ttlToTicks({ unit: "round", value: 3, endsOn: "round-start" })).toBe(
       3,
     );

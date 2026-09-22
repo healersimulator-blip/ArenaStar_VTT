@@ -12,6 +12,7 @@
  * Nothing here writes to a document. Derived numbers are computed on read by
  * `actor.ts:derivePF1eActor`, which is what makes expiry free (no undo, no restore).
  */
+import { ROUNDS_PER_HOUR, ROUNDS_PER_MINUTE } from "../../core/clock";
 import type { Json } from "../../core/documents";
 import { err, okVal, type Result } from "../../core/result";
 import {
@@ -479,9 +480,15 @@ export function readTacticalEffects(
 
 /**
  * The tick count to seed `flags.core.duration` with, so core's per-turn ticking matches the
- * spell's written duration. 1 round = 6 s (A.1), so a minute is 10 rounds and an hour is 100;
- * day/permanent/concentration/instant durations are not per-turn countdowns and return null
- * (the world clock or an event ends them — P4/P5).
+ * spell's written duration. **The ladder is real time, derived from the round** (A.1: 1 round =
+ * 6 s → 1 minute = 10 rounds, 1 hour = 600 rounds, 1 day = 14 400 rounds — the constants live in
+ * `src/core/clock.ts`). This is the correction D-268 makes: the previous table made an hour 100
+ * rounds (ten minutes) and a day 2 400 rounds (four hours), which no ability printed on a
+ * per-hour or per-24-hour basis could live with — `haste`'s 1 round/level, `mage armor`'s
+ * 1 hour/level and a 24-hour ward now mean what the book says in the same seconds the combat
+ * tracker and the world clock spend.
+ * day/permanent/concentration/instant durations are still not per-turn countdowns and return null
+ * (the world clock or an event ends them — P4/P5); a day is priced by `TICKS_PER_DAY`.
  */
 export function ttlToTicks(
   ttl: PF1eTtl | undefined,
@@ -494,9 +501,9 @@ export function ttlToTicks(
     case "round":
       return n;
     case "minute":
-      return n * 10;
+      return n * ROUNDS_PER_MINUTE;
     case "hour":
-      return n * 100;
+      return n * ROUNDS_PER_HOUR;
     default:
       return null;
   }

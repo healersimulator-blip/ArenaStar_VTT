@@ -191,6 +191,7 @@ export function emptyWorld(): WorldCollections {
     items: [],
     journals: [],
     rollTables: [],
+    encounterTables: [],
     playlists: [],
     macros: [],
     cards: [],

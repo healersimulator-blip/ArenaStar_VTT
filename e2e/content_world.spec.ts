@@ -15,7 +15,7 @@ import { expect, test } from "@playwright/test";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { entry, gmCall, waitForSurface } from "./lib";
+import { entry, gmCall, hostCall, waitForSurface } from "./lib";
 
 const distWorlds = fileURLToPath(new URL("../dist/worlds", import.meta.url));
 const testerZip = (): string | null => {
@@ -79,5 +79,48 @@ test.describe("converted content world (G-44)", () => {
     await expect(page.locator("[data-entry-id]").first()).toBeVisible({ timeout: 30_000 });
     await page.locator("[data-entry-id]").first().locator("[data-entry-import]").click();
     await expect.poll(() => gmCall<number>(page, "itemCount"), { timeout: 60_000 }).toBe(2);
+
+    // G-45 (D-266): a *partial* name over the converted corpus, and the **third** ranked hit
+    // dragged onto the canvas. The list is virtualized now, so this also proves the ranked
+    // window renders the rows a search actually ranks — and that a deep result row is draggable
+    // (the drop handler re-resolves the pack by name through the parsed-pack memo).
+    // The world is not empty (the tester seeds hero/goblin-a/goblin-b and their tokens), so the
+    // drag is measured as a delta, the way packages.spec.ts measures its own drag.
+    const actorsBefore = await gmCall<number>(page, "actorCount");
+    const tokensBefore = await hostCall<number>(page, "tokenCount");
+    const itemsBefore = await gmCall<number>(page, "itemCount");
+    await page.fill("#compendium-search", "goblin");
+    const ranked = page.locator("[data-entry-id]");
+    await expect(ranked.first()).toBeVisible({ timeout: 30_000 });
+    expect(await ranked.count()).toBeGreaterThanOrEqual(3);
+    // Settle the page scroll *before* the drag: the canvas extends past the fold, and a scroll
+    // mid-gesture would slide the row out from under the pointer (packages.spec.ts carries the
+    // full explanation — the browser then picks whichever row moved up as the drag source).
+    await page.locator(".canvas-host").scrollIntoViewIfNeeded();
+    // The row states which pack it came from, so the spec asserts the consequence the drop must
+    // have for *that* kind of entry instead of assuming one: an actor pack also places a linked
+    // token (the §12 contract packages.spec.ts covers on a small package).
+    const third = ranked.nth(2);
+    const thirdId = await ranked.nth(2).getAttribute("data-entry-id");
+    const thirdType = await ranked.nth(2).getAttribute("data-entry-type");
+    expect(thirdId, "the ranked window renders the 3rd hit with its entry id").toBeTruthy();
+    await third.dragTo(page.locator(".canvas-host"));
+    await expect
+      .poll(
+        async () =>
+          (await gmCall<number>(page, "actorCount")) + (await gmCall<number>(page, "itemCount")),
+        { timeout: 60_000 },
+      )
+      .toBe(actorsBefore + itemsBefore + 1);
+    if (thirdType === "actors") {
+      await expect
+        .poll(() => hostCall<number>(page, "tokenCount"), { timeout: 60_000 })
+        .toBe(tokensBefore + 1);
+    } else {
+      await expect
+        .poll(() => hostCall<number>(page, "tokenCount"), { timeout: 30_000 })
+        .toBe(tokensBefore);
+      await expect.poll(() => gmCall<number>(page, "actorCount"), { timeout: 30_000 }).toBe(actorsBefore);
+    }
   });
 });

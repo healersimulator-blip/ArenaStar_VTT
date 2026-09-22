@@ -10,6 +10,7 @@ import type {
   CombatDocument,
   Json,
   Ownership,
+  SceneDocument,
   TokenDocument,
 } from "../core/documents";
 import type { DocId } from "../core/ids";
@@ -19,6 +20,10 @@ import type { HostShare } from "./hostShare";
 import { sightSegments } from "../canvas/vision/wallSight";
 import { wallKindOf } from "../canvas/vision/wallKinds";
 import { worldToScreen } from "../canvas/camera";
+import { cellAtPoint, cellCenterOf } from "../core/hexcrawl/cells";
+import { isCellOpen, partyCellKey, partyPointOf } from "../core/hexcrawl/visibility";
+import { encounterLogOf, readLedger } from "../core/hexcrawl/encounter";
+import { exploredSecondsOf, featureRuleLabel } from "../core/hexcrawl/features";
 import { fogMaskLog, pointInFogMask } from "../core/fogMask";
 import {
   affectedTokens,
@@ -52,6 +57,10 @@ import {
 } from "../ui/combat/pf1eActionProvoke";
 import { resolveReadiedAction } from "../ui/combat/pf1eReadyAction";
 import { autoResolveAoosOf } from "../packages/pf1e/aooSettings";
+import { cellCensus } from "../core/hexcrawl/cells";
+import { encounterTagsOf } from "../core/hexcrawl/tables";
+import { hexcrawlProfileOf } from "../core/hexcrawl/types";
+import { readWorldClock } from "../packages/pf1e/worldClock";
 import { selectedEncounter } from "../ui/combat/encounters";
 import {
   readCombatantState,
@@ -111,8 +120,169 @@ export interface AppSurface {
   tokenPos(): { x: number; y: number } | null;
   sceneImg(): string | null;
   activeSceneId(): string | null;
+  /** D-270: one scene's map hash by id — what "import targets the active scene" is asserted with. */
+  sceneImgById(id: string): string | null;
   gridSize(): number | null;
+  /**
+   * D-270 — the active scene's hexcrawl state as a browser can read it: the profile (null when
+   * the scene is not a hexcrawl scene), the grid it is played on, and the census the overlay and
+   * the settings block both display. The spec asserts this *after* driving the real wizard.
+   */
+  hexcrawl(): {
+    sceneId: string | null;
+    sceneName: string | null;
+    enabled: boolean;
+    grid: { type: string; size: number; distance: number; units: string; hexLayout: string } | null;
+    width: number;
+    height: number;
+    cells: number;
+    authored: number;
+    img: string | null;
+    sight: string | null;
+    radiusCells: number | null;
+    encounterMode: string | null;
+    daylight: { dawnHour: number; duskHour: number } | null;
+    partyTokenId: string | null;
+    partyFlagged: string | null;
+  } | null;
+  /**
+   * D-271 (plan §4) — what the hexcrawl overlay actually painted: the plan the layer was handed
+   * (viewer, open/closed counts, cover flag) plus the layer's own draw readbacks. `coverHoles` is
+   * the one that matters — it counts the open cells cut out of the player's cover.
+   */
+  hexOverlay(): {
+    viewer: "gm" | "player";
+    cells: number;
+    open: number;
+    closed: number;
+    authored: number;
+    terrainCells: number;
+    openCells: number;
+    cover: boolean;
+    coverHoles: number;
+    coverWidth: number;
+    coverHeight: number;
+  } | null;
+  /** D-271: the cells *this replica* holds — the projection's output, not the GM's truth. */
+  hexCells(): Array<{
+    key: string;
+    name: string;
+    terrain: string | null;
+    // (a player's rows carry the same shape as the GM's: features & explored are what *their*
+    //  replica holds, which is the whole point of asserting projection from here)
+    description: string | null;
+    playerText: string | null;
+    features: number;
+    revealedFeatures: number;
+    /** D-275: the `time` rule's counter — the seconds the party has spent in this hex. */
+    exploredSeconds: number;
+    /** D-275: one row per feature *this replica holds* (projection strips the unrevealed ones). */
+    featureRows: Array<{
+      id: string;
+      name: string;
+      rule: string;
+      autoReveal: boolean;
+      revealed: boolean;
+      img: string | null;
+    }>;
+    tables: number;
+    open: boolean;
+  }>;
+  /**
+   * D-275: the world clock, in seconds (the same integer `readWorldClock` answers — the ladder the
+   * whole hexcrawl feature is priced in, D-268). A travel advance must move it by *exactly* the
+   * terrain's price, so the spec needs the number, not the settings window's rendering of it.
+   */
+  hexClock(): number;
+  /**
+   * D-275: the committed travel route (plan §5.7) — the plan as the profile holds it, or null when
+   * the party is standing still. The draft a GM is drawing is UI state and is asserted from the DOM.
+   */
+  hexTravel(): {
+    path: string[];
+    cursor: number;
+    progressSeconds: number;
+    speedPerDay: number;
+    pace: string;
+  } | null;
+  /** D-271: a cell's centre in world pixels (feed it to `screenOf` and right-click for real). */
+  hexCellCenter(key: string): { x: number; y: number } | null;
+  /** D-271: the cell the party token stands in — the key a sight test moves *from*. */
+  hexPartyKey(): string | null;
+  /** D-271: the cell key under a world point (null off a grid cell / outside every zone). */
+  hexCellAt(point: { x: number; y: number }): string | null;
+  /** D-271: the party token's centre in world pixels — where a sight test drags from. */
+  hexPartyPoint(): { x: number; y: number } | null;
+  /** D-271: this replica's own hexcrawl profile — the reveal set the host published. */
+  hexProfile(): { revealed: string[]; sight: string; partyTokenId: string | null } | null;
+  /**
+   * D-273: the encounter ledger as the cells hold it. This is the cooldown's whole storage —
+   * `(cellKey, tableId, atClock)` per entry — so a spec can assert *why* a second crossing was
+   * quiet rather than that it was.
+   */
+  hexEncounterLedger(): Array<{ cellKey: string; tableId: string; atClock: number }>;
+  /**
+   * D-274: one scene's own children, by id — the readback a battle-scene copy is asserted with
+   * (its walls, its tokens and the map image it *shares* rather than duplicates). With no id it
+   * answers for the active scene.
+   */
+  /** D-274: the encounters a hex remembers (its `flags.core.encounterLog`), newest last. */
+  /** The cell's encounter log. `sceneId` names the hexcrawl scene when it is no longer the active
+   * one (a linked battle scene takes over the active slot). */
+  hexEncounterLog(
+    cellKey: string,
+    sceneId?: string,
+  ): Array<{
+    tableId: string;
+    tableName: string;
+    roll: number;
+    text: string;
+    sceneId: string | null;
+    atClock: number;
+  }>;
+  sceneChildren(id?: string): {
+    id: string;
+    name: string;
+    active: boolean;
+    img: string | null;
+    width: number;
+    height: number;
+    tokens: Array<{
+      id: string;
+      name: string;
+      x: number;
+      y: number;
+      actorId: string | null;
+      disposition: string;
+      img: string;
+    }>;
+    walls: Array<{ id: string; c: [number, number, number, number]; door: number }>;
+    counts: Record<string, number>;
+  } | null;
   sceneCount(): number;
+  /**
+   * D-272 — the encounter tables as the store holds them: what the table wizard wrote, read back
+   * the way a second client would see it (entries, weights, ranges, refs, tags, links).
+   */
+  encounterTables(): Array<{
+    id: string;
+    name: string;
+    mode: string;
+    formula: string;
+    entries: Array<{
+      weight: number;
+      range: [number, number] | null;
+      text: string;
+      count: number;
+      refs: Array<
+        | { kind: "compendium"; packId: string; entryId: string }
+        | { kind: "actor"; actorId: string }
+      >;
+    }>;
+    tags: Record<string, boolean>;
+    sceneId: string | null;
+    cooldownSeconds: number | null;
+  }>;
   /** D-255/D-256: the active scene's drawings — what the canvas Draw tool must produce. */
   drawings(): Array<{
     id: string;
@@ -714,6 +884,47 @@ export interface PlayerSurface {
   /** D-256: what the GM's placements look like on this replica. */
   walls(): Array<{ id: string; door: number }>;
   camera(): { x: number; y: number; scale: number } | null;
+  /** D-271: the cell keys this replica holds. A closed cell is never sent, so this is the
+   *  reveal set and nothing else — the browser half of the projection rule. */
+  hexCellKeys(): string[];
+  /** D-271: a cell's centre in world pixels on *this* replica (feed it to the canvas's
+   *  `screenOf` and right-click a hex as the player). */
+  hexCellCenter(key: string): { x: number; y: number } | null;
+  /** D-271: the same rows the GM's readback returns, read off *this* replica — a closed cell's
+   *  `description` and `playerText` are simply not here. */
+  hexCells(): Array<{
+    key: string;
+    name: string;
+    terrain: string | null;
+    description: string | null;
+    playerText: string | null;
+    features: number;
+    revealedFeatures: number;
+    /** D-275: the same shape the GM's rows have — read off *this* replica, which is the point. */
+    exploredSeconds: number;
+    featureRows: Array<{
+      id: string;
+      name: string;
+      rule: string;
+      autoReveal: boolean;
+      revealed: boolean;
+      img: string | null;
+    }>;
+    tables: number;
+    open: boolean;
+  }>;
+  /** D-275: the world clock as this replica holds it (the same ladder the GM's readback answers). */
+  hexClock(): number;
+  /** D-275: the committed route as this replica holds it (null when the party is standing still). */
+  hexTravel(): {
+    path: string[];
+    cursor: number;
+    progressSeconds: number;
+    speedPerDay: number;
+    pace: string;
+  } | null;
+  /** D-271: what this player knows of the hexcrawl profile. */
+  hexProfile(): { revealed: string[]; sight: string; partyTokenId: string | null } | null;
   role(): string | null;
   connected(): boolean;
   /** Test-only direct manual-signaling access (atomic code exchange). */
@@ -1105,6 +1316,21 @@ export interface PlayerCanvasSurface {
   drawnTokens(): string[];
   /** Token ids the controller can pick (select / sheet / menu) — fog-hidden ones are not. */
   pickableTokens(): string[];
+  /**
+   * D-271: what this player's hexcrawl overlay painted. The cover is built from *this* replica's
+   * open cells, so `coverHoles` is the number of hexes the player has actually been shown.
+   */
+  hexOverlay(): {
+    viewer: "gm" | "player";
+    cells: number;
+    openCells: number;
+    cover: boolean;
+    coverHoles: number;
+    coverWidth: number;
+    coverHeight: number;
+  } | null;
+  /** D-271: viewport coordinates of a world point on the player's own canvas. */
+  screenOf(point: { x: number; y: number }): { x: number; y: number } | null;
   /** §2.2/G-10a: the HP bars this canvas draws right now (empty under the default `"gm"`). */
   tokenHpBars(): Array<{
     id: string;
@@ -1114,6 +1340,80 @@ export interface PlayerCanvasSurface {
     nonlethalDamage: number;
     label: string;
   }>;
+}
+
+/** D-271: the cell rows both shells' `hexCells()` readbacks return. */
+function hexCellRows(
+  store: { getAll: (coll: "scenes") => readonly SceneDocument[] },
+): Array<{
+  key: string;
+  name: string;
+  terrain: string | null;
+  description: string | null;
+  playerText: string | null;
+  features: number;
+  revealedFeatures: number;
+  exploredSeconds: number;
+  featureRows: Array<{
+    id: string;
+    name: string;
+    rule: string;
+    autoReveal: boolean;
+    revealed: boolean;
+    img: string | null;
+  }>;
+  tables: number;
+  open: boolean;
+}> {
+  const scenes = store.getAll("scenes");
+  const active = scenes.find((sc) => sc.active) ?? scenes[0] ?? null;
+  return (active?.cells ?? []).map((c) => ({
+    key: c.key,
+    name: c.name,
+    terrain: c.terrain ?? null,
+    description: c.description ?? null,
+    playerText: c.playerText ?? null,
+    features: (c.features ?? []).length,
+    revealedFeatures: (c.features ?? []).filter((f) => f.state?.revealed === true).length,
+    // D-275: the rule in the GM's own words, so a spec can assert what a feature *waits for*
+    // rather than only that it was or was not revealed.
+    exploredSeconds: exploredSecondsOf(c),
+    featureRows: (c.features ?? []).map((f) => ({
+      id: f.id,
+      name: f.name,
+      rule: featureRuleLabel(f),
+      autoReveal: f.autoReveal === true,
+      revealed: f.state?.revealed === true,
+      img: f.img ?? null,
+    })),
+    tables: (c.tables ?? []).length,
+    open: active ? isCellOpen(active, c.key) : false,
+  }));
+}
+
+/** D-275: the active scene's committed route, exactly as the profile holds it. */
+function hexTravelOf(
+  store: { getAll: (coll: "scenes") => readonly SceneDocument[] },
+): {
+  path: string[];
+  cursor: number;
+  progressSeconds: number;
+  speedPerDay: number;
+  pace: string;
+} | null {
+  const scenes = store.getAll("scenes");
+  const active = scenes.find((sc) => sc.active) ?? scenes[0] ?? null;
+  if (!active) return null;
+  const plan = hexcrawlProfileOf(active)?.travel ?? null;
+  return plan
+    ? {
+        path: [...plan.path],
+        cursor: plan.cursor,
+        progressSeconds: plan.progressSeconds,
+        speedPerDay: plan.speedPerDay,
+        pace: plan.pace,
+      }
+    : null;
 }
 
 function playerSurface(playerApp: PlayerApp): PlayerSurface {
@@ -1170,6 +1470,32 @@ function playerSurface(playerApp: PlayerApp): PlayerSurface {
       const stage = (globalThis as { __canvasStage?: { camera: { x: number; y: number; scale: number } } })
         .__canvasStage;
       return stage ? { ...stage.camera } : null;
+    },
+    hexCellKeys: () => {
+      const scenes = client()?.store.getAll("scenes") ?? [];
+      const active = scenes.find((sc) => sc.active) ?? scenes[0] ?? null;
+      return (active?.cells ?? []).map((c) => c.key).sort();
+    },
+    hexCells: () => hexCellRows(client()?.store ?? { getAll: () => [] }),
+    hexClock: () =>
+      readWorldClock(client()?.store.getAll("settings") ?? []),
+    hexTravel: () => hexTravelOf(client()?.store ?? { getAll: () => [] }),
+    hexCellCenter: (key: string) => {
+      const scenes = client()?.store.getAll("scenes") ?? [];
+      const active = scenes.find((sc) => sc.active) ?? scenes[0] ?? null;
+      return cellCenterOf(active, key);
+    },
+    hexProfile: () => {
+      const scenes = client()?.store.getAll("scenes") ?? [];
+      const active = scenes.find((sc) => sc.active) ?? scenes[0] ?? null;
+      const profile = active ? hexcrawlProfileOf(active) : null;
+      return profile
+        ? {
+            revealed: [...profile.revealed],
+            sight: profile.sight.mode,
+            partyTokenId: profile.partyTokenId,
+          }
+        : null;
     },
     role: () => client()?.user?.role ?? null,
     connected: () => playerApp.session.stats.state === "connected",
@@ -1507,11 +1833,200 @@ function appSurface(app: HostApp): AppSurface {
       return token ? { x: token.x, y: token.y } : null;
     },
     sceneImg: () => scene()?.img ?? null,
+    sceneImgById: (id: unknown) => {
+      const doc = client.store.get("scenes", String(id));
+      return doc?.img ?? null;
+    },
     activeSceneId: () => {
       const scenes = client.store.getAll("scenes");
       return (scenes.find((sc) => sc.active) ?? scenes[0])?._id ?? null;
     },
     sceneCount: () => client.store.getAll("scenes").length,
+    /**
+     * D-272: the encounter tables as the store holds them — the wizard's readback. Entries are
+     * returned whole (weights, ranges, counts, refs) because the point of the browser gate is
+     * "what the GM typed is what the world stored", which a summary line cannot prove.
+     */
+    encounterTables: () =>
+      client.store.getAll("encounterTables").map((t) => ({
+        id: t._id,
+        name: t.name,
+        mode: t.mode,
+        formula: t.formula ?? "",
+        entries: (t.entries ?? []).map((e) => ({
+          weight: e.weight,
+          range: e.range ?? null,
+          text: e.text,
+          count: e.count,
+          refs: (e.refs ?? []).map((r) =>
+            r.kind === "compendium"
+              ? { kind: r.kind, packId: r.packId, entryId: r.entryId }
+              : { kind: r.kind, actorId: r.actorId },
+          ),
+        })),
+        tags: { ...encounterTagsOf(t) },
+        sceneId: t.sceneId ?? null,
+        cooldownSeconds: t.cooldownSeconds ?? null,
+      })),
+    hexEncounterLog: (cellKey: string, sceneId?: string) => {
+      const scenes = client.store.getAll("scenes");
+      const doc = sceneId
+        ? (scenes.find((sc) => sc._id === sceneId) ?? null)
+        : (scenes.find((sc) => sc.active) ?? scenes[0] ?? null);
+      return encounterLogOf(doc, String(cellKey)).map((e) => ({ ...e }));
+    },
+    sceneChildren: (id?: string) => {
+      const scenes = client.store.getAll("scenes");
+      const doc = id
+        ? (scenes.find((sc) => sc._id === id) ?? null)
+        : (scenes.find((sc) => sc.active) ?? scenes[0] ?? null);
+      if (!doc) return null;
+      return {
+        id: doc._id,
+        name: doc.name,
+        active: doc.active === true,
+        img: doc.img ?? null,
+        width: doc.width,
+        height: doc.height,
+        tokens: (doc.tokens ?? []).map((t) => ({
+          id: t._id,
+          name: t.name,
+          x: t.x,
+          y: t.y,
+          actorId: t.actorId ?? null,
+          disposition: t.disposition,
+          img: t.img,
+        })),
+        walls: (doc.walls ?? []).map((w) => ({ id: w._id, c: w.c, door: w.door })),
+        counts: {
+          cells: (doc.cells ?? []).length,
+          lights: (doc.lights ?? []).length,
+          notes: (doc.notes ?? []).length,
+          tiles: (doc.tiles ?? []).length,
+          drawings: (doc.drawings ?? []).length,
+          templates: (doc.templates ?? []).length,
+          sounds: (doc.sounds ?? []).length,
+        },
+      };
+    },
+    hexcrawl: () => {
+      // The *active* scene, not `scene()` (which is scene-1 by design for the older specs):
+      // this readback answers "what did the wizard just make the table's map".
+      const scenes = client.store.getAll("scenes");
+      const s = scenes.find((sc) => sc.active) ?? scenes[0] ?? null;
+      if (!s) return null;
+      const profile = hexcrawlProfileOf(s);
+      const census = cellCensus(s);
+      const flagged = (s.tokens ?? []).find(
+        (t) =>
+          (t.flags as { core?: { party?: unknown } } | undefined)?.core
+            ?.party === true,
+      );
+      return {
+        sceneId: s._id,
+        sceneName: s.name,
+        enabled: profile !== null,
+        grid: {
+          type: s.grid.type,
+          size: s.grid.size,
+          distance: s.grid.distance,
+          units: s.grid.units,
+          hexLayout: s.grid.hexLayout,
+        },
+        width: s.width,
+        height: s.height,
+        cells: census.total,
+        authored: census.authored,
+        img: s.img ?? null,
+        sight: profile?.sight.mode ?? null,
+        radiusCells: profile?.sight.radiusCells ?? null,
+        encounterMode: profile?.encounterMode ?? null,
+        daylight: profile ? { ...profile.daylight } : null,
+        partyTokenId: profile?.partyTokenId ?? null,
+        partyFlagged: flagged?._id ?? null,
+      };
+    },
+    hexOverlay: () => {
+      const stage = (
+        globalThis as {
+          __stage?: {
+            peekHexOverlayLayer?: () => {
+              planViewer: "gm" | "player" | null;
+              cellCount: number;
+              terrainCells: number;
+              openCells: number;
+              coverHoles: number;
+              coverWidth: number;
+              coverHeight: number;
+            } | null;
+          };
+        }
+      ).__stage;
+      const layer = stage?.peekHexOverlayLayer?.() ?? null;
+      if (!layer) return null;
+      const scenes = client.store.getAll("scenes");
+      const active = scenes.find((sc) => sc.active) ?? scenes[0] ?? null;
+      const profile = active ? hexcrawlProfileOf(active) : null;
+      const openKeys = profile?.revealed ?? [];
+      const total = layer.cellCount;
+      return {
+        viewer: layer.planViewer ?? "gm",
+        cells: total,
+        open: openKeys.length,
+        closed: Math.max(0, total - openKeys.length),
+        authored: (active?.cells ?? []).length,
+        terrainCells: layer.terrainCells,
+        openCells: layer.openCells,
+        cover: layer.coverWidth > 0,
+        coverHoles: layer.coverHoles,
+        coverWidth: layer.coverWidth,
+        coverHeight: layer.coverHeight,
+      };
+    },
+    hexCells: () => hexCellRows(client.store),
+    hexClock: () => readWorldClock(client.store.getAll("settings")),
+    hexTravel: () => hexTravelOf(client.store),
+    hexEncounterLedger: () => {
+      const scenes = client.store.getAll("scenes");
+      const active = scenes.find((sc) => sc.active) ?? scenes[0] ?? null;
+      return readLedger(active).map((e) => ({
+        cellKey: e.cellKey,
+        tableId: e.tableId,
+        atClock: e.atClock,
+      }));
+    },
+    hexPartyKey: () => {
+      const scenes = client.store.getAll("scenes");
+      const active = scenes.find((sc) => sc.active) ?? scenes[0] ?? null;
+      return partyCellKey(active);
+    },
+    hexCellCenter: (key: string) => {
+      const scenes = client.store.getAll("scenes");
+      const active = scenes.find((sc) => sc.active) ?? scenes[0] ?? null;
+      return cellCenterOf(active, key);
+    },
+    hexPartyPoint: () => {
+      const scenes = client.store.getAll("scenes");
+      const active = scenes.find((sc) => sc.active) ?? scenes[0] ?? null;
+      return partyPointOf(active);
+    },
+    hexCellAt: (point: { x: number; y: number }) => {
+      const scenes = client.store.getAll("scenes");
+      const active = scenes.find((sc) => sc.active) ?? scenes[0] ?? null;
+      return cellAtPoint(active, point.x, point.y);
+    },
+    hexProfile: () => {
+      const scenes = client.store.getAll("scenes");
+      const active = scenes.find((sc) => sc.active) ?? scenes[0] ?? null;
+      const profile = active ? hexcrawlProfileOf(active) : null;
+      return profile
+        ? {
+            revealed: [...profile.revealed],
+            sight: profile.sight.mode,
+            partyTokenId: profile.partyTokenId,
+          }
+        : null;
+    },
     drawings: () =>
       (scene()?.drawings ?? []).map((d) => ({
         id: d._id,

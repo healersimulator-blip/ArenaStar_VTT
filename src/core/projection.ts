@@ -12,6 +12,8 @@
  *   stripped;
  * - walls and lights sent to everyone (within any scene the user receives,
  *   D-022);
+ * - hexcrawl cells are per-user too (D-271): a closed cell is not sent to a player at all, and
+ *   an open cell arrives without the GM's `description` and without unrevealed features;
  * - GM (and ASSISTANT, D-013) receive everything unfiltered.
  *
  * `resolver` (D-023) lets the host supply current documents for update/delete
@@ -21,6 +23,8 @@ import {
   OWNERSHIP_LEVELS,
   TOP_LEVEL_COLLECTIONS,
   type BaseDocument,
+  type CellDocument,
+  type CellFeature,
   type DocRef,
   type JournalDocument,
   type MessageDocument,
@@ -33,6 +37,7 @@ import type { Op, OpEnvelope } from "./ops";
 import { getEffectiveOwnership } from "./permissions";
 import type { PermissionUser } from "./ownership";
 import type { Json } from "./documents";
+import { openCellKeys, projectCellForViewer } from "./hexcrawl/visibility";
 
 export interface ProjectedWorld {
   seq: number;
@@ -144,11 +149,37 @@ export function visibilityFields(doc: BaseDocument): readonly string[] {
   return doc.type === "note" ? ["ownership", "visible"] : ["ownership"];
 }
 
+/**
+ * D-271: the hexcrawl half of a scene's projection. A cell the table has not opened is **not
+ * sent** (D-256's rule for pins), and an open one arrives without the GM's text. The array is
+ * rebuilt only when a cell actually needed projecting, so a scene whose cells are already
+ * player-shaped keeps its identity.
+ */
+function projectSceneCells(scene: SceneDocument): CellDocument[] | null {
+  const cells = scene.cells;
+  if (!cells || cells.length === 0) return null;
+  const open = openCellKeys(scene);
+  let changed = false;
+  const out: CellDocument[] = [];
+  for (const cell of cells) {
+    const projected = projectCellForViewer(cell, open);
+    if (projected === null) {
+      changed = true;
+      continue;
+    }
+    if (projected !== cell) changed = true;
+    out.push(projected);
+  }
+  return changed ? out : null;
+}
+
 function projectScene(user: PermissionUser, scene: SceneDocument): SceneDocument {
   const tokens = scene.tokens.filter((t) => tokenVisible(user, t, scene));
   const notes = scene.notes.filter((n) => docVisibleTo(user, n, scene));
-  if (tokens.length === scene.tokens.length && notes.length === scene.notes.length) return scene;
-  return { ...scene, tokens, notes };
+  const cells = projectSceneCells(scene);
+  if (tokens.length === scene.tokens.length && notes.length === scene.notes.length && !cells)
+    return scene;
+  return { ...scene, tokens, notes, ...(cells ? { cells } : {}) };
 }
 
 function projectJournal(journal: JournalDocument): JournalDocument {
@@ -261,6 +292,15 @@ function createVisible(
   if (op.coll === "notes" && !docVisibleTo(user, data, parent)) {
     return null; // D-256: a hidden pin never reaches a player, even as a create op
   }
+  if (op.coll === "cells") {
+    // D-271: a closed cell never reaches a player, even as a create. The reveal set lives on
+    // the parent scene, so without it we cannot answer the question — and refusing to guess is
+    // the only safe default.
+    const scene = parent?.type === "scene" ? (parent as SceneDocument) : undefined;
+    if (!scene) return null;
+    const projected = projectCellForViewer(data as CellDocument, openCellKeys(scene));
+    return projected === null ? null : { ...op, data: projected as BaseDocument };
+  }
   if (getEffectiveOwnership(user, data, parent) >= OWNERSHIP_LEVELS.LIMITED) return op;
   // Embedded create in a parent we cannot resolve (envelope-only mode): the
   // recipient sees the parent (host projects to connected users only), keep.
@@ -296,7 +336,55 @@ function updateVisible(
     const diff = stripSecretsFromDiff(op.diff);
     if (diff !== op.diff) return { ...op, diff };
   }
+  if (op.ref.coll === "cells") {
+    // D-271: a cell that is closed, or has just been closed, leaves this session's replica —
+    // the same rewrite D-256 gives a pin that is hidden again.
+    const scene = parent?.type === "scene" ? (parent as SceneDocument) : undefined;
+    if (!scene) return null;
+    const open = openCellKeys(scene);
+    if (!open.has((doc as CellDocument).key)) return { kind: "delete", ref: op.ref };
+    const diff = projectCellDiff(op.diff, open.has((doc as CellDocument).key));
+    if (!diff) return null;
+    return diff === op.diff ? op : { ...op, diff };
+  }
   return op;
+}
+
+/**
+ * The player-shaped subset of a cell diff: the GM's `description` never travels, and the
+ * `features` array travels only with the entries this viewer may see. Returns null when nothing
+ * is left to say.
+ */
+function projectCellDiff(
+  diff: Record<string, Json | null>,
+  open: boolean,
+): Record<string, Json | null> | null {
+  const out: Record<string, Json | null> = {};
+  let changed = false;
+  for (const [key, value] of Object.entries(diff)) {
+    const path = key.startsWith("-=") ? key.slice(2) : key;
+    if (path === "description") {
+      changed = true;
+      continue;
+    }
+    if (!open && (path === "playerText" || path === "tables")) {
+      changed = true;
+      continue;
+    }
+    if (path === "features" && Array.isArray(value)) {
+      const kept = value.filter(
+        (f) => (f as CellFeature | null)?.state?.revealed === true,
+      );
+      if (kept.length !== value.length) {
+        out[key] = kept as unknown as Json;
+        changed = true;
+        continue;
+      }
+    }
+    out[key] = value;
+  }
+  if (Object.keys(out).length === 0) return null;
+  return changed ? out : diff;
 }
 
 function deleteVisible(

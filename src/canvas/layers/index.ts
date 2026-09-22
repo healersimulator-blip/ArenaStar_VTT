@@ -9,3 +9,4 @@ export * from "./DrawingsLayer";
 export * from "./templateGeometry";
 export * from "./drawingGeometry";
 export * from "./StrategicFogLayer";
+export * from "./HexOverlayLayer";

@@ -19,6 +19,11 @@
   import ArmiesTab from "../armies/ArmiesTab.svelte";
   import CombatPanel from "../combat/CombatPanel.svelte";
   import HelpPanel from "../canvas/HelpPanel.svelte";
+  import HexcrawlWizard from "../hexcrawl/HexcrawlWizard.svelte";
+  import HexWindow from "../hexcrawl/HexWindow.svelte";
+  import EncounterTableWizard from "../hexcrawl/EncounterTableWizard.svelte";
+  import EncounterTablesWindow from "../hexcrawl/EncounterTablesWindow.svelte";
+  import EncounterResultWindow from "../hexcrawl/EncounterResultWindow.svelte";
   import ArmyWindow from "../armies/ArmyWindow.svelte";
   import { armyWindowRules } from "../armies/armyModel";
   import type { ClientSync } from "../../client/sync";
@@ -37,6 +42,12 @@
     rulesBoot = null,
     bindings = {},
     isGM = false,
+    importImage = null,
+    onHexRollTable = null,
+    onHexOpenScene = null,
+    onEncounterPlaceAll = null,
+    onEncounterBattleScene = null,
+    resolveAsset = null,
   }: {
     manager: WindowManager;
     /** App-derived copy (manager.list() is a live ref — each{} needs fresh identity). */
@@ -52,6 +63,24 @@
     /** §10 keybinding map for the help window (D-256). */
     bindings?: Readonly<Record<string, string>>;
     isGM?: boolean;
+    /** D-270: the app's asset pipeline, for the hexcrawl wizard's map step. */
+    importImage?: ((file: File) => Promise<{ hash: string; width?: number; height?: number }>) | null;
+    /**
+     * D-273: a hex window's table row. The roll needs the engine's ledger, card and result
+     * window — all three live in the shell — so the window asks up rather than drawing dice of
+     * its own.
+     */
+    onHexRollTable?: ((sceneId: string, cellKey: string, tableId: string) => void) | null;
+    /** D-274: the hex window's encounter log click — the shell owns scene activation. */
+    onHexOpenScene?: ((sceneId: string) => void) | null;
+    /** D-274: the results window's two ways out (plan §5.5/§5.6) — the shell owns the ops. */
+    onEncounterPlaceAll?: ((resultId: string) => void) | null;
+    onEncounterBattleScene?: ((resultId: string) => void) | null;
+    /**
+     * D-275: an asset hash (or URL) → a URL for an `<img>`, when the app already holds the bytes.
+     * Null means "not ready yet": the caller kicks off the fetch and the next render has it.
+     */
+    resolveAsset?: ((hash: string) => string | null) | null;
   } = $props();
 
   /**
@@ -102,6 +131,24 @@
   /** §1.3: the items tab asks for an item's own window; the manager owns where it lands. */
   function openItemWindow(actorId: string, itemId: string): void {
     openPF1eItemWindow(manager, client, actorId, itemId);
+  }
+
+  /**
+   * D-272: a hex's *Attach encounter table…* — the tables window for that hex, opened from inside
+   * a window. The shell's own opener (`App.openTablesWindow`) cannot be reached from here, and
+   * duplicating it would be a second place that decides the window id; this *is* that id rule.
+   */
+  function openTablesFor(hexSceneId: string, key: string): void {
+    manager.open({
+      id: `encounter-tables:${hexSceneId}:${key}`,
+      title: `Tables — hex ${key}`,
+      kind: "encounterTables",
+      x: 60 + (manager.list().length % 5) * 24,
+      y: 60 + (manager.list().length % 5) * 24,
+      width: 460,
+      height: 420,
+      data: { sceneId: hexSceneId, key },
+    });
   }
 
   function startDrag(e: PointerEvent, win: WindowSpec): void {
@@ -222,6 +269,63 @@
                 data: { armyId },
               });
             }}
+          />
+        {:else if win.kind === "hex" && win.data}
+          <!-- D-271: one hex, everything the table knows about it (plan §5.3). The key is the
+               window's identity, so opening a second hex opens a second window. -->
+          <HexWindow
+            {client}
+            {bus}
+            sceneId={win.data.sceneId ?? sceneId ?? ""}
+            cellKey={win.data.key ?? ""}
+            onAttachTable={() => openTablesFor(win.data.sceneId ?? sceneId ?? "", win.data.key ?? "")}
+            onRollTable={(tableId) =>
+              onHexRollTable?.(
+                win.data?.sceneId ?? sceneId ?? "",
+                win.data?.key ?? "",
+                tableId,
+              )}
+            onOpenScene={(id) => onHexOpenScene?.(id)}
+            {importImage}
+            {resolveAsset}
+          />
+        {:else if win.kind === "encounterTables"}
+          <!-- D-272: the tables list. With a scene+key it is the *attach* flow (each row a
+               checkbox); without one it is the world's table library. -->
+          <EncounterTablesWindow
+            {client}
+            {bus}
+            {manager}
+            sceneId={win.data?.sceneId ?? ""}
+            cellKey={win.data?.key ?? ""}
+          />
+        {:else if win.kind === "encounterTable"}
+          <!-- D-272: the wizard (§5.4) — one screen, no steps. -->
+          <EncounterTableWizard
+            {client}
+            {bus}
+            {manager}
+            tableId={win.data?.tableId ?? ""}
+            sceneId={win.data?.sceneId ?? ""}
+            cellKey={win.data?.key ?? ""}
+            onClose={() => manager.close(win.id)}
+          />
+        {:else if win.kind === "encounterResult" && win.data}
+          <!-- D-272: the results window (§5.5). The roll itself lives in `encounterResult.ts`
+               (window data is a string map), looked up by the id in the spec. -->
+          <EncounterResultWindow
+            {client}
+            resultId={win.data.resultId ?? ""}
+            onClose={() => manager.close(win.id)}
+            onPlaceAll={onEncounterPlaceAll}
+            onBattleScene={onEncounterBattleScene}
+          />
+        {:else if win.kind === "hexcrawl-wizard"}
+          <HexcrawlWizard
+            {client}
+            {bus}
+            {importImage}
+            onCreated={() => manager.close(win.id)}
           />
         {:else if win.kind === "army" && win.data}
           {#await armyWindowRules(packages) then rules}
