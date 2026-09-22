@@ -19,7 +19,12 @@ import {
   type Role,
   type UserDocument,
 } from "../core/documents";
-import type { ActorDocument, DocRef, Json, SceneDocument } from "../core/documents";
+import type {
+  ActorDocument,
+  DocRef,
+  Json,
+  SceneDocument,
+} from "../core/documents";
 import type { Op, OpEnvelope } from "../core/ops";
 import type {
   AudioCmdMsg,
@@ -36,7 +41,11 @@ import type {
   WelcomeSimInfo,
   WireMessage,
 } from "../core/messages";
-import { evaluateCommitRoll, randomSeedHex, sha256Hex } from "../dice/commitReveal";
+import {
+  evaluateCommitRoll,
+  randomSeedHex,
+  sha256Hex,
+} from "../dice/commitReveal";
 import { worldSettingsFrom } from "../core/worldSettings";
 import {
   isPendingExpired,
@@ -69,8 +78,17 @@ import { DocumentStore } from "../core/store";
 import { OpLog } from "../core/oplog";
 import { UndoStack } from "../core/undo";
 import { can } from "../core/permissions";
-import { docVisibleTo, projectEnvelope, projectWorld, visibilityFields } from "../core/projection";
-import { cellVisibilityChanges, openCellKeys, projectCellForViewer } from "../core/hexcrawl/visibility";
+import {
+  docVisibleTo,
+  projectEnvelope,
+  projectWorld,
+  visibilityFields,
+} from "../core/projection";
+import {
+  cellVisibilityChanges,
+  openCellKeys,
+  projectCellForViewer,
+} from "../core/hexcrawl/visibility";
 import { applyDiff } from "../core/diff";
 import {
   TokenBucket,
@@ -125,14 +143,21 @@ export interface HostSyncOptions {
   /** Injectable verifier (tests); default verifies via WebCrypto (§6.4). */
   verifyHelloSig?: (hello: HelloMsg, roomId: string) => Promise<boolean>;
   /** Asset manifest source for snapshots (AssetServer wiring; default: store's). */
-  manifest?: () => Record<AssetId, { name: string; mime: string; size: number; chunks: number }>;
+  manifest?: () => Record<
+    AssetId,
+    { name: string; mime: string; size: number; chunks: number }
+  >;
   /**
    * §7: when present, asset.get requests are served from this server via an
    * AssetTransfer (priority queue + per-peer bandwidth cap).
    */
   assets?: AssetServer;
   /** Transfer overrides (tests): chunk size, bandwidth cap, clock. */
-  assetTransfer?: { chunkSize?: number; bytesPerSecond?: number; now?: () => number };
+  assetTransfer?: {
+    chunkSize?: number;
+    bytesPerSecond?: number;
+    now?: () => number;
+  };
   /**
    * D-250: where explored-fog maps live between sessions (hostBoot wires the IDB `fog`
    * store). Absent → fog.put is kept in memory only and fog.get answers from that.
@@ -257,14 +282,18 @@ function projectWithCrossings(
         ? crossings.find((c) => c.key === `${rawOp.ref.coll}/${rawOp.ref.id}`)
         : undefined;
     if (crossing) {
-      const parent = crossing.ref.parent ? resolver.resolve(crossing.ref.parent) : undefined;
+      const parent = crossing.ref.parent
+        ? resolver.resolve(crossing.ref.parent)
+        : undefined;
       const nowVisible = docVisibleTo(user, crossing.doc, parent);
       const wasVisible = docVisibleTo(user, crossing.before, parent);
       if (nowVisible && !wasVisible) {
         ops.push({
           kind: "create",
           coll: crossing.ref.coll,
-          ...(crossing.ref.parent !== undefined ? { parent: crossing.ref.parent } : {}),
+          ...(crossing.ref.parent !== undefined
+            ? { parent: crossing.ref.parent }
+            : {}),
           data: structuredClone(crossing.doc),
         });
         modified = true;
@@ -276,7 +305,11 @@ function projectWithCrossings(
         continue;
       }
     }
-    const single = projectEnvelope({ ...envelope, ops: [rawOp] }, user, resolver);
+    const single = projectEnvelope(
+      { ...envelope, ops: [rawOp] },
+      user,
+      resolver,
+    );
     if (single) {
       if (single.ops.length !== 1 || single.ops[0] !== rawOp) modified = true;
       ops.push(...single.ops);
@@ -285,7 +318,9 @@ function projectWithCrossings(
     }
   }
   if (ops.length === 0) return null;
-  return modified || ops.length !== envelope.ops.length ? { ...envelope, ops } : envelope;
+  return modified || ops.length !== envelope.ops.length
+    ? { ...envelope, ops }
+    : envelope;
 }
 
 /**
@@ -320,7 +355,10 @@ function cellRevealCrossings(
     if (op.kind !== "update" || inverse.kind !== "update") continue;
     if (op.ref.coll !== "scenes") continue;
     const touchesFlags = Object.keys(op.diff).some(
-      (key) => key === "flags" || key.startsWith("flags.") || key.startsWith("-=flags."),
+      (key) =>
+        key === "flags" ||
+        key.startsWith("flags.") ||
+        key.startsWith("-=flags."),
     );
     if (!touchesFlags) continue;
     const after = resolve(op.ref);
@@ -332,13 +370,21 @@ function cellRevealCrossings(
       after as SceneDocument,
     );
     if (opened.length === 0 && closed.length === 0) continue;
-    out.push({ sceneRef: op.ref, opened, closed, scene: after as SceneDocument });
+    out.push({
+      sceneRef: op.ref,
+      opened,
+      closed,
+      scene: after as SceneDocument,
+    });
   }
   return out;
 }
 
 /** The synthetic ops one crossing owes one viewer (empty for a GM, who holds every cell anyway). */
-function cellRevealOps(crossing: CellRevealCrossing, user: PermissionUser): Op[] {
+function cellRevealOps(
+  crossing: CellRevealCrossing,
+  user: PermissionUser,
+): Op[] {
   if (user.role === "GM" || user.role === "ASSISTANT") return [];
   const ops: Op[] = [];
   const open = openCellKeys(crossing.scene);
@@ -356,7 +402,10 @@ function cellRevealOps(crossing: CellRevealCrossing, user: PermissionUser): Op[]
   for (const key of crossing.closed) {
     const cell = (crossing.scene.cells ?? []).find((c) => c.key === key);
     if (!cell) continue;
-    ops.push({ kind: "delete", ref: { coll: "cells", id: cell._id, parent: crossing.sceneRef } });
+    ops.push({
+      kind: "delete",
+      ref: { coll: "cells", id: cell._id, parent: crossing.sceneRef },
+    });
   }
   return ops;
 }
@@ -386,7 +435,10 @@ export class HostSync {
   readonly bus: EventBus<HostEvents>;
   private readonly systemUserId: UserId;
   private readonly roomId: string;
-  private readonly verifySig: (hello: HelloMsg, roomId: string) => Promise<boolean>;
+  private readonly verifySig: (
+    hello: HelloMsg,
+    roomId: string,
+  ) => Promise<boolean>;
   private readonly manifestSource: NonNullable<HostSyncOptions["manifest"]>;
   private readonly transfer: AssetTransfer | null;
   private readonly rng: RngFn;
@@ -431,7 +483,11 @@ export class HostSync {
       if (!session.user) continue;
       this.send(session, {
         kind: "welcome",
-        user: { id: session.user.id, role: session.user.role, name: session.user.name },
+        user: {
+          id: session.user.id,
+          role: session.user.role,
+          name: session.user.name,
+        },
         world: this.welcomeWorld(),
         snapshotSeq: this.store.seq,
         sim: info,
@@ -457,11 +513,19 @@ export class HostSync {
     ops: Op[],
     recordUndo = false,
   ): { ok: true; seq: number } | { ok: false; error: string } {
-    return this.commitOps(ops, this.systemUserId, `sys-${randomId()}`, recordUndo);
+    return this.commitOps(
+      ops,
+      this.systemUserId,
+      `sys-${randomId()}`,
+      recordUndo,
+    );
   }
 
   /** Send a sim/turn wire message to authenticated sessions (GM always). */
-  broadcastSim(msg: WireMessage, include?: (user: SessionUser) => boolean): void {
+  broadcastSim(
+    msg: WireMessage,
+    include?: (user: SessionUser) => boolean,
+  ): void {
     for (const session of this.sessions.values()) {
       if (!session.user) continue;
       if (include && !include(session.user)) continue;
@@ -477,7 +541,8 @@ export class HostSync {
     this.systemUserId = options.systemUserId;
     this.roomId = options.roomId;
     this.verifySig = options.verifyHelloSig ?? verifyHello;
-    this.manifestSource = options.manifest ?? (() => this.store.world.assetManifest);
+    this.manifestSource =
+      options.manifest ?? (() => this.store.world.assetManifest);
     this.transfer = options.assets
       ? new AssetTransfer(
           options.assets.read,
@@ -589,19 +654,34 @@ export class HostSync {
         this.handleRollReveal(session, msg as RollRevealMsg);
         return;
       case "roll.pending":
-        void this.handleRollPending(session, msg as unknown as import("../core/messages").RollPendingMsg);
+        void this.handleRollPending(
+          session,
+          msg as unknown as import("../core/messages").RollPendingMsg,
+        );
         return;
       case "roll.reroll":
-        void this.handleRollReroll(session, msg as unknown as import("../core/messages").RollRerollMsg);
+        void this.handleRollReroll(
+          session,
+          msg as unknown as import("../core/messages").RollRerollMsg,
+        );
         return;
       case "roll.apply":
-        this.handleRollApply(session, msg as unknown as import("../core/messages").RollApplyMsg);
+        this.handleRollApply(
+          session,
+          msg as unknown as import("../core/messages").RollApplyMsg,
+        );
         return;
       case "roll.revert":
-        void this.handleRollRevert(session, msg as unknown as import("../core/messages").RollRevertMsg);
+        void this.handleRollRevert(
+          session,
+          msg as unknown as import("../core/messages").RollRevertMsg,
+        );
         return;
       case "roll.delegate":
-        void this.handleRollDelegate(session, msg as unknown as import("../core/messages").RollDelegateMsg);
+        void this.handleRollDelegate(
+          session,
+          msg as unknown as import("../core/messages").RollDelegateMsg,
+        );
         return;
       case "ephemeral":
         this.handleEphemeral(session, msg);
@@ -643,16 +723,20 @@ export class HostSync {
       case "fog.state":
         return; // host → client only
       case "turn.ready":
-        if (session.user && this.sim) this.sim.handleTurnReady(session.user, msg);
+        if (session.user && this.sim)
+          this.sim.handleTurnReady(session.user, msg);
         return;
       case "sim.control":
-        if (session.user && this.sim) this.sim.handleSimControl(session.user, msg);
+        if (session.user && this.sim)
+          this.sim.handleSimControl(session.user, msg);
         return;
       case "report.detail":
-        if (session.user && this.sim) this.sim.handleReportDetail(session.user, msg);
+        if (session.user && this.sim)
+          this.sim.handleReportDetail(session.user, msg);
         return;
       case "sim.snapshot.get":
-        if (session.user && this.sim) this.sim.handleSimSnapshotGet(session.user, msg);
+        if (session.user && this.sim)
+          this.sim.handleSimSnapshotGet(session.user, msg);
         return;
     }
   }
@@ -682,7 +766,8 @@ export class HostSync {
     const user = session.user;
     if (!user) return;
     if (typeof msg.sceneId !== "string" || msg.sceneId.length === 0) return;
-    let png: Uint8Array | null = this.fogPngs.get(`${msg.sceneId}:${user.id}`) ?? null;
+    let png: Uint8Array | null =
+      this.fogPngs.get(`${msg.sceneId}:${user.id}`) ?? null;
     if (png === null && this.fogStore) {
       try {
         png = await this.fogStore.get(user.id, msg.sceneId);
@@ -744,7 +829,8 @@ export class HostSync {
     known: boolean,
     role: Role = "PLAYER",
   ): void {
-    let user = this.store.get("users", hello.pubkey) as UserDocument | undefined;
+    let user = this.store.get("users", hello.pubkey) as
+      UserDocument | undefined;
     if (!user) {
       user = {
         _id: hello.pubkey,
@@ -771,12 +857,20 @@ export class HostSync {
     }
     session.user = { id: user._id, role: user.role, name: user.name };
     session.pendingHello = null;
-    this.bus.emit("join:approved", { peerId: session.peerId, userId: user._id, known });
+    this.bus.emit("join:approved", {
+      peerId: session.peerId,
+      userId: user._id,
+      known,
+    });
     this.welcomeSession(session, session.user, hello);
   }
 
   /** welcome + (snapshot | ops-since-seq) for an authenticated session. */
-  private welcomeSession(session: Session, user: SessionUser, hello: HelloMsg | undefined): void {
+  private welcomeSession(
+    session: Session,
+    user: SessionUser,
+    hello: HelloMsg | undefined,
+  ): void {
     this.send(session, {
       kind: "welcome",
       user: { id: user.id, role: user.role, name: user.name },
@@ -808,7 +902,11 @@ export class HostSync {
     this.send(session, {
       kind: "snapshot",
       seq: this.store.seq,
-      world: projectWorld(this.store.world, this.store.seq, session.user as SessionUser),
+      world: projectWorld(
+        this.store.world,
+        this.store.seq,
+        session.user as SessionUser,
+      ),
       manifest: this.manifestSource(),
     });
     return this.store.seq;
@@ -816,8 +914,18 @@ export class HostSync {
 
   // ─── Intents (§5) ───────────────────────────────────────────────────────────
 
-  private reject(session: Session, txId: TxId, reason: string, detail: string): void {
-    this.send(session, { kind: "rejected", txId, reason: reason as never, detail });
+  private reject(
+    session: Session,
+    txId: TxId,
+    reason: string,
+    detail: string,
+  ): void {
+    this.send(session, {
+      kind: "rejected",
+      txId,
+      reason: reason as never,
+      detail,
+    });
   }
 
   private handleIntent(session: Session, txId: TxId, ops: Op[]): void {
@@ -863,7 +971,10 @@ export class HostSync {
           data.ownership.default < OWNERSHIP_LEVELS.LIMITED &&
           Object.keys(data.ownership).length <= 1
         ) {
-          data.ownership = { ...data.ownership, default: OWNERSHIP_LEVELS.LIMITED };
+          data.ownership = {
+            ...data.ownership,
+            default: OWNERSHIP_LEVELS.LIMITED,
+          };
         }
         out.push({ ...op, data });
         continue;
@@ -877,47 +988,87 @@ export class HostSync {
   private validateOps(
     user: SessionUser,
     ops: Op[],
-  ): { ok: true } | { ok: false; reason: "forbidden" | "invalid_schema"; error: string } {
+  ):
+    | { ok: true }
+    | { ok: false; reason: "forbidden" | "invalid_schema"; error: string } {
     for (const op of ops) {
       switch (op.kind) {
         case "create": {
-          const parent = op.parent !== undefined ? this.store.resolve(op.parent) : undefined;
+          const parent =
+            op.parent !== undefined ? this.store.resolve(op.parent) : undefined;
           const canOpts = parent ? { parent } : {};
           if (op.parent !== undefined && !parent) {
-            return { ok: false, reason: "invalid_schema", error: `create: parent not found` };
+            return {
+              ok: false,
+              reason: "invalid_schema",
+              error: `create: parent not found`,
+            };
           }
           const collName = (op.parent ? op.coll : op.coll) as CollectionName;
           if (!can(user, "create", op.data, collName, canOpts)) {
-            return { ok: false, reason: "forbidden", error: `create ${op.coll}` };
+            return {
+              ok: false,
+              reason: "forbidden",
+              error: `create ${op.coll}`,
+            };
           }
           if (op.coll === "users") {
-            return { ok: false, reason: "forbidden", error: "users are assigned by the host only" };
+            return {
+              ok: false,
+              reason: "forbidden",
+              error: "users are assigned by the host only",
+            };
           }
           continue;
         }
         case "update": {
           const doc = this.store.resolve(op.ref);
           if (!doc)
-            return { ok: false, reason: "invalid_schema", error: `update: target not found` };
+            return {
+              ok: false,
+              reason: "invalid_schema",
+              error: `update: target not found`,
+            };
           const parent =
-            op.ref.parent !== undefined ? this.store.resolve(op.ref.parent) : undefined;
+            op.ref.parent !== undefined
+              ? this.store.resolve(op.ref.parent)
+              : undefined;
           const canOpts = parent ? { parent } : {};
-          if (!can(user, "update", doc, this.embeddedCollName(op.ref), canOpts)) {
-            return { ok: false, reason: "forbidden", error: `update ${op.ref.coll}/${op.ref.id}` };
+          if (
+            !can(user, "update", doc, this.embeddedCollName(op.ref), canOpts)
+          ) {
+            return {
+              ok: false,
+              reason: "forbidden",
+              error: `update ${op.ref.coll}/${op.ref.id}`,
+            };
           }
           const dry = applyDiff(doc, op.diff);
-          if (!dry.ok) return { ok: false, reason: "invalid_schema", error: dry.error };
+          if (!dry.ok)
+            return { ok: false, reason: "invalid_schema", error: dry.error };
           continue;
         }
         case "delete": {
           const doc = this.store.resolve(op.ref);
           if (!doc)
-            return { ok: false, reason: "invalid_schema", error: `delete: target not found` };
+            return {
+              ok: false,
+              reason: "invalid_schema",
+              error: `delete: target not found`,
+            };
           const parent =
-            op.ref.parent !== undefined ? this.store.resolve(op.ref.parent) : undefined;
+            op.ref.parent !== undefined
+              ? this.store.resolve(op.ref.parent)
+              : undefined;
           const canOpts = parent ? { parent } : {};
-          if (!can(user, "delete", doc, this.embeddedCollName(op.ref), canOpts)) {
-            return { ok: false, reason: "forbidden", error: `delete ${op.ref.coll}/${op.ref.id}` };
+          if (
+            !can(user, "delete", doc, this.embeddedCollName(op.ref), canOpts)
+          ) {
+            return {
+              ok: false,
+              reason: "forbidden",
+              error: `delete ${op.ref.coll}/${op.ref.id}`,
+            };
           }
           continue;
         }
@@ -941,7 +1092,13 @@ export class HostSync {
     txId: TxId,
     recordUndo = true,
   ): { ok: true; seq: number } | { ok: false; error: string } {
-    const envelope: OpEnvelope = { seq: this.store.seq + 1, ts: this.now(), by, ops, txId };
+    const envelope: OpEnvelope = {
+      seq: this.store.seq + 1,
+      ts: this.now(),
+      by,
+      ops,
+      txId,
+    };
     const applied = this.store.applyEnvelope(envelope);
     if (!applied.ok) return { ok: false, error: applied.error };
     const appended = this.log.append(envelope, applied.value.inverses);
@@ -955,24 +1112,45 @@ export class HostSync {
         if (op.kind === "update" && op.ref.coll === "combats") {
           const diff = op.diff as Record<string, unknown>;
           const rd = diff["round"];
-          if (typeof rd === "number" && Number.isFinite(rd as number)) pruneTurn = Math.max(pruneTurn ?? 0, Math.trunc(rd as number));
+          if (typeof rd === "number" && Number.isFinite(rd as number))
+            pruneTurn = Math.max(pruneTurn ?? 0, Math.trunc(rd as number));
           const td = diff["turn"];
-          if (typeof td === "number" && Number.isFinite(td as number) && pruneTurn === null) pruneTurn = Math.max(pruneTurn ?? 0, Math.trunc(td as number));
+          if (
+            typeof td === "number" &&
+            Number.isFinite(td as number) &&
+            pruneTurn === null
+          )
+            pruneTurn = Math.max(pruneTurn ?? 0, Math.trunc(td as number));
         }
         if (op.kind === "create" && op.coll === "combats") {
           const data = op.data as unknown as Record<string, unknown>;
           const rd = data["round"];
-          if (typeof rd === "number" && Number.isFinite(rd as number)) pruneTurn = Math.max(pruneTurn ?? 0, Math.trunc(rd as number));
+          if (typeof rd === "number" && Number.isFinite(rd as number))
+            pruneTurn = Math.max(pruneTurn ?? 0, Math.trunc(rd as number));
         }
       }
       if (pruneTurn !== null) {
-        const msgs = [...this.store.getAll("messages")] as unknown as Array<{ _id: string; system?: { pendingRoll?: import("../packages/pf1e/pendingRoll").PendingRoll } }>;
-        const prune = pendingPruneOps(msgs as unknown as Parameters<typeof pendingPruneOps>[0], pruneTurn);
+        const msgs = [...this.store.getAll("messages")] as unknown as Array<{
+          _id: string;
+          system?: {
+            pendingRoll?: import("../packages/pf1e/pendingRoll").PendingRoll;
+          };
+        }>;
+        const prune = pendingPruneOps(
+          msgs as unknown as Parameters<typeof pendingPruneOps>[0],
+          pruneTurn,
+        );
         if (prune.length > 0) this.commitSystem(prune, false);
         // F01: prune expired roll ledgers alongside pending rolls
         try {
-          const msgs2 = [...this.store.getAll("messages")] as unknown as Array<{ _id: string; system?: { rollLedger?: RollLedger } }>;
-          const prune2 = rollLedgerPruneOps(msgs2 as unknown as Parameters<typeof rollLedgerPruneOps>[0], pruneTurn);
+          const msgs2 = [...this.store.getAll("messages")] as unknown as Array<{
+            _id: string;
+            system?: { rollLedger?: RollLedger };
+          }>;
+          const prune2 = rollLedgerPruneOps(
+            msgs2 as unknown as Parameters<typeof rollLedgerPruneOps>[0],
+            pruneTurn,
+          );
           if (prune2.length > 0) this.commitSystem(prune2, false);
         } catch {
           // Pruning is best-effort: a malformed historical card never blocks the turn.
@@ -984,12 +1162,17 @@ export class HostSync {
     return { ok: true, seq: envelope.seq };
   }
 
-  private broadcastEnvelope(envelope: OpEnvelope, inverses: readonly Op[] = []): void {
+  private broadcastEnvelope(
+    envelope: OpEnvelope,
+    inverses: readonly Op[] = [],
+  ): void {
     // §5 visibility crossings: updates whose diff replaces `ownership` may
     // cross a session's read boundary. New viewers never received the create
     // (it was projected away) — rewrite as a full-doc create; revoked viewers
     // get a delete. Same seq, no protocol additions (D-064).
-    const crossings = visibilityCrossings(envelope, inverses, (ref) => this.store.resolve(ref));
+    const crossings = visibilityCrossings(envelope, inverses, (ref) =>
+      this.store.resolve(ref),
+    );
     // D-271: a reveal set changes which *cells* a player may hold — the same rewrite shape, one
     // level down (cells are embedded in the scene whose flags moved).
     const cellCrossings = cellRevealCrossings(envelope, inverses, (ref) =>
@@ -1017,7 +1200,12 @@ export class HostSync {
     if (!session.user) return; // requires an approved session (§16)
     if (!session.assetBucket.tryRemove()) return; // §16: silently dropped
     if (!this.transfer) return; // no asset server wired (unit: assets)
-    this.transfer.request(session.peerId, msg.assetId, msg.offset, msg.priority);
+    this.transfer.request(
+      session.peerId,
+      msg.assetId,
+      msg.offset,
+      msg.priority,
+    );
   }
 
   // ─── §7 audio + clock ───────────────────────────────────────────────────────
@@ -1071,7 +1259,12 @@ export class HostSync {
       return;
     }
     if (!validateFormula(msg.formula).ok) {
-      this.reject(session, msg.rollId, "invalid_schema", `bad formula: ${msg.formula}`);
+      this.reject(
+        session,
+        msg.rollId,
+        "invalid_schema",
+        `bad formula: ${msg.formula}`,
+      );
       return;
     }
     if (msg.commit !== undefined) {
@@ -1090,7 +1283,11 @@ export class HostSync {
         seedHost,
         ts: this.now(),
       });
-      this.send(session, { kind: "roll.challenge", rollId: msg.rollId, seedHost });
+      this.send(session, {
+        kind: "roll.challenge",
+        rollId: msg.rollId,
+        seedHost,
+      });
       return;
     }
     const evaluation = evaluateFormula(msg.formula, msg.rollData, this.rng);
@@ -1107,7 +1304,8 @@ export class HostSync {
       system: {},
       author: session.user.id,
       content: msg.formula,
-      whisper: msg.mode === "gmroll" || msg.mode === "blindroll" ? [] : (msg.to ?? []),
+      whisper:
+        msg.mode === "gmroll" || msg.mode === "blindroll" ? [] : (msg.to ?? []),
       roll: {
         formula: msg.formula,
         total: evaluation.value.total,
@@ -1155,13 +1353,23 @@ export class HostSync {
   private handleRollReveal(session: Session, msg: RollRevealMsg): void {
     const pending = this.pendingRolls.get(msg.rollId);
     if (!pending || pending.session !== session) {
-      this.reject(session, msg.rollId, "invalid_schema", "no pending committed roll");
+      this.reject(
+        session,
+        msg.rollId,
+        "invalid_schema",
+        "no pending committed roll",
+      );
       return;
     }
     this.pendingRolls.delete(msg.rollId);
     void (async () => {
       if ((await sha256Hex(msg.seedClient)) !== pending.commit) {
-        this.reject(session, msg.rollId, "invalid_schema", "commit-reveal: commitment mismatch");
+        this.reject(
+          session,
+          msg.rollId,
+          "invalid_schema",
+          "commit-reveal: commitment mismatch",
+        );
         return;
       }
       const evaluation = await evaluateCommitRoll(
@@ -1183,7 +1391,10 @@ export class HostSync {
         system: {},
         author: session.user?.id ?? this.systemUserId,
         content: pending.formula,
-        whisper: pending.mode === "gmroll" || pending.mode === "blindroll" ? [] : (pending.to ?? []),
+        whisper:
+          pending.mode === "gmroll" || pending.mode === "blindroll"
+            ? []
+            : (pending.to ?? []),
         roll: {
           formula: pending.formula,
           total: evaluation.value.total,
@@ -1193,7 +1404,10 @@ export class HostSync {
           commit: pending.commit,
         },
         rollMode: pending.mode,
-        flavor: typeof pending.flavor === "string" ? pending.flavor.slice(0, 300) : "",
+        flavor:
+          typeof pending.flavor === "string"
+            ? pending.flavor.slice(0, 300)
+            : "",
       };
       this.commitOps(
         [{ kind: "create", coll: "messages", data: message }],
@@ -1222,40 +1436,73 @@ export class HostSync {
     msg: import("../core/messages").RollPendingMsg,
   ): Promise<void> {
     if (!session.user) {
-      this.reject(session, String(msg.messageId), "forbidden", "not authenticated");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "forbidden",
+        "not authenticated",
+      );
       return;
     }
     if (!session.intentBucket.tryRemove()) {
-      this.reject(session, String(msg.messageId), "rate_limited", "roll rate exceeded");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "rate_limited",
+        "roll rate exceeded",
+      );
       return;
     }
     const doc = this.store.get("messages", String(msg.messageId)) as unknown as
-      | MessageDocument
-      | undefined;
+      MessageDocument | undefined;
     if (!doc) {
-      this.reject(session, String(msg.messageId), "invalid_schema", "pending card not found");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "invalid_schema",
+        "pending card not found",
+      );
       return;
     }
-    const pending = (doc.system as unknown as { pendingRoll?: PendingRoll } | undefined)?.pendingRoll;
+    const pending = (
+      doc.system as unknown as { pendingRoll?: PendingRoll } | undefined
+    )?.pendingRoll;
     if (!pending) {
-      this.reject(session, String(msg.messageId), "invalid_schema", "no pendingRoll on that message");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "invalid_schema",
+        "no pendingRoll on that message",
+      );
       return;
     }
     if (pending.resolved) {
-      this.reject(session, String(msg.messageId), "invalid_schema", "pending already resolved");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "invalid_schema",
+        "pending already resolved",
+      );
       return;
     }
     const currentTurn = this.currentTurnNumber();
     if (isPendingExpired(pending, currentTurn)) {
-      this.reject(session, String(msg.messageId), "invalid_schema", "pending expired — window closed (2 rounds)");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "invalid_schema",
+        "pending expired — window closed (2 rounds)",
+      );
       return;
     }
     const isGM = session.user.role === "GM";
     // Roller is initiator for attacks (AoO) and target for saves/checks/concentration.
-    const rollerId = pending.kind === "attack" ? pending.initiator.actorId : pending.target.actorId;
+    const rollerId =
+      pending.kind === "attack"
+        ? pending.initiator.actorId
+        : pending.target.actorId;
     const rollerActor = this.store.get("actors", rollerId) as unknown as
-      | { ownership?: Record<string, number> }
-      | undefined;
+      { ownership?: Record<string, number> } | undefined;
     const ownership = rollerActor?.ownership ?? null;
     let isOwner = false;
     if (ownership && typeof ownership === "object") {
@@ -1263,7 +1510,12 @@ export class HostSync {
       if (typeof lvl === "number" && lvl >= 1) isOwner = true;
     }
     if (!isOwner && !isGM) {
-      this.reject(session, String(msg.messageId), "forbidden", "you do not own this pending roll");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "forbidden",
+        "you do not own this pending roll",
+      );
       return;
     }
     // Validate shouldDefer predicate (mode + strategic gate). The card's existence
@@ -1274,7 +1526,9 @@ export class HostSync {
       const worldSettings = worldSettingsFrom(settingsDocs);
       const targetIsPlayerOwned = (() => {
         if (!ownership) return false;
-        for (const [key, lvl] of Object.entries(ownership as Record<string, number>)) {
+        for (const [key, lvl] of Object.entries(
+          ownership as Record<string, number>,
+        )) {
           if (key === "default") continue;
           if (typeof lvl === "number" && lvl >= 1) return true;
         }
@@ -1289,7 +1543,12 @@ export class HostSync {
       });
       // If the world is auto, pending should not have existed — refuse unless GM.
       if (!should && !isGM) {
-        this.reject(session, String(msg.messageId), "forbidden", "that reaction is not pending in this world's mode");
+        this.reject(
+          session,
+          String(msg.messageId),
+          "forbidden",
+          "that reaction is not pending in this world's mode",
+        );
         return;
       }
     } catch {
@@ -1299,18 +1558,38 @@ export class HostSync {
     if (msg.seedClientCommit) {
       const calc = await sha256Hex(msg.seedClient);
       if (calc !== msg.seedClientCommit) {
-        this.reject(session, String(msg.messageId), "invalid_schema", "commit-reveal: commitment mismatch");
+        this.reject(
+          session,
+          String(msg.messageId),
+          "invalid_schema",
+          "commit-reveal: commitment mismatch",
+        );
         return;
       }
     }
     if (!validateFormula(pending.formula).ok) {
-      this.reject(session, String(msg.messageId), "invalid_schema", `bad formula: ${pending.formula}`);
+      this.reject(
+        session,
+        String(msg.messageId),
+        "invalid_schema",
+        `bad formula: ${pending.formula}`,
+      );
       return;
     }
     const seedHost = randomSeedHex();
-    const evaluation = await evaluateCommitRoll(pending.formula, msg.seedClient, seedHost, undefined);
+    const evaluation = await evaluateCommitRoll(
+      pending.formula,
+      msg.seedClient,
+      seedHost,
+      undefined,
+    );
     if (!evaluation.ok) {
-      this.reject(session, String(msg.messageId), "invalid_schema", evaluation.error);
+      this.reject(
+        session,
+        String(msg.messageId),
+        "invalid_schema",
+        evaluation.error,
+      );
       return;
     }
     const total = evaluation.value.total;
@@ -1329,7 +1608,11 @@ export class HostSync {
       system: {},
       author: session.user.id,
       content: `${pending.target.name} rolled ${String(total)} vs ${pending.dc !== null ? `DC ${pending.dc}` : "—"} — ${
-        pending.dc !== null && total >= pending.dc ? "Success" : pending.dc !== null && total < pending.dc ? "Failure" : "rolled"
+        pending.dc !== null && total >= pending.dc
+          ? "Success"
+          : pending.dc !== null && total < pending.dc
+            ? "Failure"
+            : "rolled"
       } (${pending.formula})`,
       whisper: [],
       roll: null,
@@ -1361,11 +1644,23 @@ export class HostSync {
       flavor: pending.initiator.actionLabel.slice(0, 300),
     };
     const ops: Op[] = [
-      { kind: "update", ref: { coll: "messages", id: String(msg.messageId) }, diff: { "system.pendingRoll": updated as unknown as Json } as Record<string, Json> },
+      {
+        kind: "update",
+        ref: { coll: "messages", id: String(msg.messageId) },
+        diff: { "system.pendingRoll": updated as unknown as Json } as Record<
+          string,
+          Json
+        >,
+      },
       { kind: "create", coll: "messages", data: rollMessage },
       { kind: "create", coll: "messages", data: followUp },
     ];
-    const committed = this.commitOps(ops, session.user.id, `pending-${String(msg.messageId)}`, false);
+    const committed = this.commitOps(
+      ops,
+      session.user.id,
+      `pending-${String(msg.messageId)}`,
+      false,
+    );
     if (!committed.ok) {
       this.reject(session, String(msg.messageId), "invariant", committed.error);
     }
@@ -1373,7 +1668,10 @@ export class HostSync {
 
   // ─── F01 roll ledger (0x30-0x32) — host-evaluated, 2-round window, can(update) on touched docs ──
 
-  private canUpdateAllLedgerDocs(user: SessionUser, ledger: RollLedger): boolean {
+  private canUpdateAllLedgerDocs(
+    user: SessionUser,
+    ledger: RollLedger,
+  ): boolean {
     if (user.role === "GM") return true;
     const ops = [...ledger.ledgerOps, ...ledger.ledgerInverses];
     for (const op of ops) {
@@ -1382,13 +1680,19 @@ export class HostSync {
       else if (op.kind === "create") {
         const id = (op.data as { _id?: unknown })._id;
         if (typeof id === "string")
-          ref = { coll: op.coll, id, ...(op.parent !== undefined ? { parent: op.parent } : {}) };
+          ref = {
+            coll: op.coll,
+            id,
+            ...(op.parent !== undefined ? { parent: op.parent } : {}),
+          };
       }
       if (ref === null) continue;
       const doc = this.store.resolve(ref);
       if (!doc) continue;
-      const parent = ref.parent !== undefined ? this.store.resolve(ref.parent) : undefined;
-      if (!can(user, "update", doc, ref.coll, parent ? { parent } : {})) return false;
+      const parent =
+        ref.parent !== undefined ? this.store.resolve(ref.parent) : undefined;
+      if (!can(user, "update", doc, ref.coll, parent ? { parent } : {}))
+        return false;
     }
     return true;
   }
@@ -1413,7 +1717,11 @@ export class HostSync {
   }
 
   /** System-line message shared by reroll/revert follow-ups (public audit). */
-  private ledgerFollowUp(authorId: UserId, name: string, content: string): MessageDocument {
+  private ledgerFollowUp(
+    authorId: UserId,
+    name: string,
+    content: string,
+  ): MessageDocument {
     return {
       _id: randomId(),
       type: "message",
@@ -1429,35 +1737,72 @@ export class HostSync {
     };
   }
 
-  private async handleRollReroll(session: Session, msg: import("../core/messages").RollRerollMsg): Promise<void> {
+  private async handleRollReroll(
+    session: Session,
+    msg: import("../core/messages").RollRerollMsg,
+  ): Promise<void> {
     if (!session.user) {
-      this.reject(session, String(msg.messageId), "forbidden", "not authenticated");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "forbidden",
+        "not authenticated",
+      );
       return;
     }
     if (!session.intentBucket.tryRemove()) {
-      this.reject(session, String(msg.messageId), "rate_limited", "reroll rate exceeded");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "rate_limited",
+        "reroll rate exceeded",
+      );
       return;
     }
-    const doc = this.store.get("messages", String(msg.messageId)) as unknown as MessageDocument | undefined;
+    const doc = this.store.get("messages", String(msg.messageId)) as unknown as
+      MessageDocument | undefined;
     if (!doc) {
-      this.reject(session, String(msg.messageId), "invalid_schema", "ledger card not found");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "invalid_schema",
+        "ledger card not found",
+      );
       return;
     }
-    const ledger = (doc.system as unknown as { rollLedger?: RollLedger } | undefined)?.rollLedger;
+    const ledger = (
+      doc.system as unknown as { rollLedger?: RollLedger } | undefined
+    )?.rollLedger;
     if (!ledger) {
-      this.reject(session, String(msg.messageId), "invalid_schema", "no rollLedger on that message");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "invalid_schema",
+        "no rollLedger on that message",
+      );
       return;
     }
     const currentTurn = this.currentTurnNumber();
     const isGM = session.user.role === "GM";
-    const viaDelegation = !isGM && canLedgerPlayerReroll(ledger, session.user.id, currentTurn);
+    const viaDelegation =
+      !isGM && canLedgerPlayerReroll(ledger, session.user.id, currentTurn);
     const allowed = isGM ? canLedgerReroll(ledger, currentTurn) : viaDelegation;
     if (!allowed) {
-      this.reject(session, String(msg.messageId), "invalid_schema", "reroll window closed or already reverted");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "invalid_schema",
+        "reroll window closed or already reverted",
+      );
       return;
     }
     if (!this.canUpdateAllLedgerDocs(session.user, ledger)) {
-      this.reject(session, String(msg.messageId), "forbidden", "you cannot update the touched documents");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "forbidden",
+        "you cannot update the touched documents",
+      );
       return;
     }
     // F01 spec: the inverse must still apply — a later unrelated write touching a
@@ -1473,7 +1818,11 @@ export class HostSync {
       if (first) {
         const extra = msg.newModifiers.reduce((s, m) => s + m.value, 0);
         newRolls = [
-          { ...first, modifiers: [...first.modifiers, ...msg.newModifiers], total: first.total + extra },
+          {
+            ...first,
+            modifiers: [...first.modifiers, ...msg.newModifiers],
+            total: first.total + extra,
+          },
           ...rest,
         ];
       }
@@ -1482,14 +1831,21 @@ export class HostSync {
     // of the old Ops. Non-HP ledgers are refused by name, not silently skipped.
     const plan = planDamageDeltaReroll({ ledger, newRolls });
     if (!plan.ok) {
-      this.reject(session, String(msg.messageId), "invalid_schema", plan.reason);
+      this.reject(
+        session,
+        String(msg.messageId),
+        "invalid_schema",
+        plan.reason,
+      );
       return;
     }
     // After inverse(old) the world is back at the recorded pre-state, so the new
     // envelope's pre-images ARE the original pre-images.
     const newLedgerInverses: Op[] = [...ledger.ledgerInverses];
     const ops = ledgerRerollOps({
-      messageId: String(msg.messageId) as unknown as import("../core/ids").DocId,
+      messageId: String(
+        msg.messageId,
+      ) as unknown as import("../core/ids").DocId,
       ledger,
       currentTurn,
       newLedgerOps: plan.ops,
@@ -1497,11 +1853,20 @@ export class HostSync {
       newRolls,
     });
     if (!ops) {
-      this.reject(session, String(msg.messageId), "invalid_schema", "reroll refused by ledger window");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "invalid_schema",
+        "reroll refused by ledger window",
+      );
       return;
     }
-    const oldSummary = ledger.rolls.map((r) => `${String(r.total)} (${r.formula})`).join(", ");
-    const newSummary = newRolls.map((r) => `${String(r.total)} (${r.formula})`).join(", ");
+    const oldSummary = ledger.rolls
+      .map((r) => `${String(r.total)} (${r.formula})`)
+      .join(", ");
+    const newSummary = newRolls
+      .map((r) => `${String(r.total)} (${r.formula})`)
+      .join(", ");
     ops.push({
       kind: "create",
       coll: "messages",
@@ -1511,8 +1876,14 @@ export class HostSync {
         `Rerolled: ${oldSummary} → ${newSummary}${viaDelegation ? ` (delegated to ${session.user.name})` : ""}`,
       ),
     });
-    const committed = this.commitOps(ops, session.user.id, "reroll-" + String(msg.messageId), false);
-    if (!committed.ok) this.reject(session, String(msg.messageId), "invariant", committed.error);
+    const committed = this.commitOps(
+      ops,
+      session.user.id,
+      "reroll-" + String(msg.messageId),
+      false,
+    );
+    if (!committed.ok)
+      this.reject(session, String(msg.messageId), "invariant", committed.error);
   }
 
   /**
@@ -1524,7 +1895,10 @@ export class HostSync {
    * whom** rides the card's own flags, so a second click cannot double-count a card. The intent
    * carries no number at all (`roll.apply` in `messages.ts`).
    */
-  private handleRollApply(session: Session, msg: import("../core/messages").RollApplyMsg): void {
+  private handleRollApply(
+    session: Session,
+    msg: import("../core/messages").RollApplyMsg,
+  ): void {
     const txId = `roll-apply-${String(msg.messageId)}`;
     if (!session.user) {
       this.reject(session, txId, "forbidden", "not authenticated");
@@ -1534,27 +1908,38 @@ export class HostSync {
       this.reject(session, txId, "rate_limited", "apply rate exceeded");
       return;
     }
-    const message = this.store.get("messages", String(msg.messageId)) as unknown as
-      | MessageDocument
-      | undefined;
+    const message = this.store.get(
+      "messages",
+      String(msg.messageId),
+    ) as unknown as MessageDocument | undefined;
     if (!message) {
       this.reject(session, txId, "invalid_schema", "roll card not found");
       return;
     }
-    const total = typeof message.roll?.total === "number" ? message.roll.total : null;
+    const total =
+      typeof message.roll?.total === "number" ? message.roll.total : null;
     if (total === null) {
-      this.reject(session, txId, "invalid_schema", "that card carries no rolled total");
+      this.reject(
+        session,
+        txId,
+        "invalid_schema",
+        "that card carries no rolled total",
+      );
       return;
     }
     const actor = this.store.get("actors", String(msg.actorId)) as unknown as
-      | ActorDocument
-      | undefined;
+      ActorDocument | undefined;
     if (!actor) {
       this.reject(session, txId, "invalid_schema", "actor not found");
       return;
     }
     if (!can(session.user, "update", actor, "actors")) {
-      this.reject(session, txId, "forbidden", `you cannot update ${actor.name}`);
+      this.reject(
+        session,
+        txId,
+        "forbidden",
+        `you cannot update ${actor.name}`,
+      );
       return;
     }
     const applied = readRollApplications(message);
@@ -1568,7 +1953,9 @@ export class HostSync {
       return;
     }
     const derived = deriveFromActorDocument(actor);
-    const pf1e = ((actor.system as unknown as { pf1e?: Record<string, unknown> }).pf1e ?? {});
+    const pf1e =
+      (actor.system as unknown as { pf1e?: Record<string, unknown> }).pf1e ??
+      {};
     const planned = planRollApply({
       mode: msg.mode,
       amount: total,
@@ -1576,7 +1963,8 @@ export class HostSync {
       hpMax: derived.hpMax,
       nonlethalDamage: derived.nonlethalDamage,
       tempHpSources: derived.tempHpSources,
-      legacyTempHp: pf1e.tempHpSources === undefined && typeof pf1e.tempHp === "number",
+      legacyTempHp:
+        pf1e.tempHpSources === undefined && typeof pf1e.tempHp === "number",
     });
     if (!planned.ok) {
       this.reject(session, txId, "invalid_schema", planned.error);
@@ -1584,7 +1972,11 @@ export class HostSync {
     }
     const ops: Op[] = [];
     if (Object.keys(planned.plan.diff).length > 0) {
-      ops.push({ kind: "update", ref: { coll: "actors", id: actor._id }, diff: planned.plan.diff });
+      ops.push({
+        kind: "update",
+        ref: { coll: "actors", id: actor._id },
+        diff: planned.plan.diff,
+      });
     }
     // The record rides the card's own flags so the table can see that a card was already counted
     // (and the chat card can grey its verb out). Flat diffs never create intermediate objects, so
@@ -1619,36 +2011,77 @@ export class HostSync {
     if (!committed.ok) this.reject(session, txId, "invariant", committed.error);
   }
 
-  private async handleRollRevert(session: Session, msg: import("../core/messages").RollRevertMsg): Promise<void> {
+  private async handleRollRevert(
+    session: Session,
+    msg: import("../core/messages").RollRevertMsg,
+  ): Promise<void> {
     if (!session.user) {
-      this.reject(session, String(msg.messageId), "forbidden", "not authenticated");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "forbidden",
+        "not authenticated",
+      );
       return;
     }
     if (!session.intentBucket.tryRemove()) {
-      this.reject(session, String(msg.messageId), "rate_limited", "revert rate exceeded");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "rate_limited",
+        "revert rate exceeded",
+      );
       return;
     }
-    const doc = this.store.get("messages", String(msg.messageId)) as unknown as MessageDocument | undefined;
+    const doc = this.store.get("messages", String(msg.messageId)) as unknown as
+      MessageDocument | undefined;
     if (!doc) {
-      this.reject(session, String(msg.messageId), "invalid_schema", "ledger card not found");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "invalid_schema",
+        "ledger card not found",
+      );
       return;
     }
-    const ledger = (doc.system as unknown as { rollLedger?: RollLedger } | undefined)?.rollLedger;
+    const ledger = (
+      doc.system as unknown as { rollLedger?: RollLedger } | undefined
+    )?.rollLedger;
     if (!ledger) {
-      this.reject(session, String(msg.messageId), "invalid_schema", "no rollLedger on that message");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "invalid_schema",
+        "no rollLedger on that message",
+      );
       return;
     }
     const currentTurn = this.currentTurnNumber();
     if (!canLedgerRevert(ledger, currentTurn)) {
-      this.reject(session, String(msg.messageId), "invalid_schema", "revert window closed or already reverted");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "invalid_schema",
+        "revert window closed or already reverted",
+      );
       return;
     }
     if (session.user.role !== "GM") {
-      this.reject(session, String(msg.messageId), "forbidden", "only GM can revert");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "forbidden",
+        "only GM can revert",
+      );
       return;
     }
     if (!this.canUpdateAllLedgerDocs(session.user, ledger)) {
-      this.reject(session, String(msg.messageId), "forbidden", "you cannot update the touched documents");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "forbidden",
+        "you cannot update the touched documents",
+      );
       return;
     }
     const stale = ledgerStaleReason(ledger, this.store);
@@ -1656,55 +2089,130 @@ export class HostSync {
       this.reject(session, String(msg.messageId), "invalid_schema", stale);
       return;
     }
-    const ops = ledgerRevertOps({ messageId: String(msg.messageId) as unknown as import("../core/ids").DocId, ledger, currentTurn });
+    const ops = ledgerRevertOps({
+      messageId: String(
+        msg.messageId,
+      ) as unknown as import("../core/ids").DocId,
+      ledger,
+      currentTurn,
+    });
     if (!ops) {
-      this.reject(session, String(msg.messageId), "invalid_schema", "ledger has no pre-images — revert is impossible by design");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "invalid_schema",
+        "ledger has no pre-images — revert is impossible by design",
+      );
       return;
     }
     ops.push({
       kind: "create",
       coll: "messages",
-      data: this.ledgerFollowUp(session.user.id, `Reverted: ${doc.name}`, `Reverted: ${doc.name} — its effects were removed as if the roll never happened.`),
+      data: this.ledgerFollowUp(
+        session.user.id,
+        `Reverted: ${doc.name}`,
+        `Reverted: ${doc.name} — its effects were removed as if the roll never happened.`,
+      ),
     });
-    const committed = this.commitOps(ops, session.user.id, "revert-" + String(msg.messageId), false);
-    if (!committed.ok) this.reject(session, String(msg.messageId), "invariant", committed.error);
+    const committed = this.commitOps(
+      ops,
+      session.user.id,
+      "revert-" + String(msg.messageId),
+      false,
+    );
+    if (!committed.ok)
+      this.reject(session, String(msg.messageId), "invariant", committed.error);
   }
 
-  private async handleRollDelegate(session: Session, msg: import("../core/messages").RollDelegateMsg): Promise<void> {
+  private async handleRollDelegate(
+    session: Session,
+    msg: import("../core/messages").RollDelegateMsg,
+  ): Promise<void> {
     if (!session.user) {
-      this.reject(session, String(msg.messageId), "forbidden", "not authenticated");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "forbidden",
+        "not authenticated",
+      );
       return;
     }
     if (!session.intentBucket.tryRemove()) {
-      this.reject(session, String(msg.messageId), "rate_limited", "delegate rate exceeded");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "rate_limited",
+        "delegate rate exceeded",
+      );
       return;
     }
-    const doc = this.store.get("messages", String(msg.messageId)) as unknown as MessageDocument | undefined;
+    const doc = this.store.get("messages", String(msg.messageId)) as unknown as
+      MessageDocument | undefined;
     if (!doc) {
-      this.reject(session, String(msg.messageId), "invalid_schema", "ledger card not found");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "invalid_schema",
+        "ledger card not found",
+      );
       return;
     }
-    const ledger = (doc.system as unknown as { rollLedger?: RollLedger } | undefined)?.rollLedger;
+    const ledger = (
+      doc.system as unknown as { rollLedger?: RollLedger } | undefined
+    )?.rollLedger;
     if (!ledger) {
-      this.reject(session, String(msg.messageId), "invalid_schema", "no rollLedger on that message");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "invalid_schema",
+        "no rollLedger on that message",
+      );
       return;
     }
     const currentTurn = this.currentTurnNumber();
     if (!canLedgerReroll(ledger, currentTurn)) {
-      this.reject(session, String(msg.messageId), "invalid_schema", "delegate window closed or reverted");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "invalid_schema",
+        "delegate window closed or reverted",
+      );
       return;
     }
     if (session.user.role !== "GM") {
-      this.reject(session, String(msg.messageId), "forbidden", "only GM can delegate rerolls");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "forbidden",
+        "only GM can delegate rerolls",
+      );
       return;
     }
-    const ops = delegateRerollOps({ messageId: String(msg.messageId) as unknown as import("../core/ids").DocId, ledger, currentTurn, playerId: msg.playerId });
+    const ops = delegateRerollOps({
+      messageId: String(
+        msg.messageId,
+      ) as unknown as import("../core/ids").DocId,
+      ledger,
+      currentTurn,
+      playerId: msg.playerId,
+    });
     if (!ops) {
-      this.reject(session, String(msg.messageId), "invalid_schema", "delegate refused by ledger window");
+      this.reject(
+        session,
+        String(msg.messageId),
+        "invalid_schema",
+        "delegate refused by ledger window",
+      );
       return;
     }
-    const committed = this.commitOps(ops, session.user.id, "delegate-" + String(msg.messageId), false);
-    if (!committed.ok) this.reject(session, String(msg.messageId), "invariant", committed.error);
+    const committed = this.commitOps(
+      ops,
+      session.user.id,
+      "delegate-" + String(msg.messageId),
+      false,
+    );
+    if (!committed.ok)
+      this.reject(session, String(msg.messageId), "invariant", committed.error);
   }
 
   // ─── Ephemeral relay (§5) ───────────────────────────────────────────────────
@@ -1726,27 +2234,73 @@ export class HostSync {
   undo(): { ok: boolean; error?: string } {
     const item = this.undoStackApply("undo");
     if (!item.ok) return item;
-    const committed = this.commitOps(item.ops, this.systemUserId, `undo-${randomId()}`, false);
+    const committed = this.commitOps(
+      item.ops,
+      this.systemUserId,
+      `undo-${randomId()}`,
+      false,
+    );
     return committed.ok ? { ok: true } : { ok: false, error: committed.error };
   }
 
   redo(): { ok: boolean; error?: string } {
     const item = this.undoStackApply("redo");
     if (!item.ok) return item;
-    const committed = this.commitOps(item.ops, this.systemUserId, `redo-${randomId()}`, false);
+    const committed = this.commitOps(
+      item.ops,
+      this.systemUserId,
+      `redo-${randomId()}`,
+      false,
+    );
     return committed.ok ? { ok: true } : { ok: false, error: committed.error };
+  }
+
+  /**
+   * §5.1 `undo.last` — undo, but only if **this** user authored the top of the stack.
+   *
+   * The stack can only pop its top, so this is not a search for the caller's last change: it is a
+   * check that the last undoable thing in the world is theirs. Anything else is refused, because
+   * an agent undoing the GM's move (or another player's) is worse than an agent that cannot undo
+   * at all — and the inverses stored for an older envelope were computed against a world that has
+   * moved on since.
+   */
+  undoOwn(user: SessionUser): { ok: boolean; error?: string; what?: string } {
+    const top = this.undoStack.peekUndo();
+    if (!top) return { ok: false, error: "nothing to undo" };
+    const entry = this.log.at(top.refSeq);
+    if (!entry)
+      return { ok: false, error: "the change to undo is no longer in the log" };
+    if (entry.env.by !== user.id) {
+      return {
+        ok: false,
+        error: "the last undoable change was not yours — undo is the GM's call",
+      };
+    }
+    const what = `${entry.env.ops.length} op(s) from seq ${entry.env.seq}`;
+    const done = this.undo();
+    return done.ok
+      ? { ok: true, what }
+      : { ok: false, error: done.error ?? "could not undo" };
   }
 
   private undoStackApply(
     which: "undo" | "redo",
   ): { ok: true; ops: Op[] } | { ok: false; error: string } {
-    const item = which === "undo" ? this.undoStack.applyUndo() : this.undoStack.applyRedo();
+    const item =
+      which === "undo"
+        ? this.undoStack.applyUndo()
+        : this.undoStack.applyRedo();
     if (!item) return { ok: false, error: `nothing to ${which}` };
     return { ok: true, ops: item.ops };
   }
 
   /** World info for welcome messages (exposed for tests/UI). */
-  get worldInfo(): { id: string; name: string; system: string; version: string } {
+  get worldInfo(): {
+    id: string;
+    name: string;
+    system: string;
+    version: string;
+  } {
     return {
       id: this.store.meta.worldId,
       name: this.store.meta.name,

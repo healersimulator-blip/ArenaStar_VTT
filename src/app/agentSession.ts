@@ -18,7 +18,18 @@
  * made of.
  */
 import { ClientSync } from "../client/sync";
-import { createEventBus } from "../core/events";
+import {
+  createEventBus,
+  type EventBus,
+  type Unsubscribe,
+} from "../core/events";
+import type { ClientEvents } from "../client/sync";
+import type { RejectionReason } from "../core/messages";
+import type {
+  AgentSubmitResult,
+  AgentUndoResult,
+  AgentWriter,
+} from "../core/agents/types";
 import { createTransportPair } from "../net/memory";
 import type { HostSync } from "../host/sync";
 import type { StoreMeta } from "../core/store";
@@ -115,11 +126,77 @@ export interface AgentSession {
   client: ClientSync;
   record: AgentRecord;
   /**
+   * The write port §6.2: one call builds one `Op[]`, this submits it as one envelope and waits
+   * for the host's verdict.
+   */
+  writer: AgentWriter;
+  /**
    * Drop the session. The **grant is untouched** — revoking is an edit to a replicated document
    * (`revokeAgentOps`) and undoing a revoke is one Ctrl+Z, which is the whole reason the grant is
    * a document at all.
    */
   dispose(): void;
+}
+
+/**
+ * The app's implementation of §6.2's write port: submit, then **wait for the host's verdict**.
+ *
+ * The wait is the honest part. `ClientSync.submit` returns a `txId` and moves on — the host may
+ * still refuse the envelope (permissions, invariants, rate limits), and a tool that answered
+ * "done" at submit time would be lying about the world. So this resolves on the first of: the
+ * envelope coming back with this txId reconciled (`ok`), a `rejected` message for it (the host's
+ * own reason, passed through verbatim), or the timeout.
+ *
+ * The timeout is a refusal, not a hang: an MCP client waiting on an id nobody answers is the
+ * worst failure this shape has (Phase 0's `-32603` when no tab is paired is the same judgement
+ * one layer up).
+ */
+const SUBMIT_TIMEOUT_MS = 5_000;
+
+export function agentWriter(
+  client: ClientSync,
+  bus: EventBus<ClientEvents>,
+  host: HostSync,
+  userId: string,
+): AgentWriter {
+  return {
+    submit(ops: Op[]): Promise<AgentSubmitResult> {
+      const txId = client.submit(ops);
+      return new Promise<AgentSubmitResult>((resolve) => {
+        let offOps: Unsubscribe | null = null;
+        let offRejected: Unsubscribe | null = null;
+        const done = (result: AgentSubmitResult): void => {
+          if (timer !== null) clearTimeout(timer);
+          offOps?.();
+          offRejected?.();
+          resolve(result);
+        };
+        const timer = setTimeout(
+          () =>
+            done({
+              ok: false,
+              reason: "timeout",
+              error: `the host did not answer within ${SUBMIT_TIMEOUT_MS} ms`,
+            }),
+          SUBMIT_TIMEOUT_MS,
+        );
+        offOps = bus.on("ops", ({ envelope, reconciled }) => {
+          if (reconciled !== txId) return;
+          done({ ok: true, seq: envelope.seq, txId });
+        });
+        offRejected = bus.on("rejected", ({ txId: id, reason, detail }) => {
+          if (id !== txId) return;
+          done({ ok: false, reason: reason as RejectionReason, error: detail });
+        });
+      });
+    },
+    async undoOwn(): Promise<AgentUndoResult> {
+      const done = host.undoOwn({ id: userId, role: "GM", name: userId });
+      return done.ok
+        ? { ok: true, what: done.what ?? "your last change" }
+        : { ok: false, error: done.error ?? "nothing to undo" };
+    },
+  };
 }
 
 export type OpenAgentSession =
@@ -171,9 +248,10 @@ export function openAgentSession(
     role: user.role,
     name: user.name,
   });
+  const bus = createEventBus<ClientEvents>();
   const client = new ClientSync({
     transport: pair.b,
-    bus: createEventBus(),
+    bus,
     meta: options.meta,
   });
 
@@ -185,6 +263,7 @@ export function openAgentSession(
       user,
       client,
       record,
+      writer: agentWriter(client, bus, options.host, user._id),
       dispose: () => options.host.removeSession(id, "agent disconnected"),
     },
   };

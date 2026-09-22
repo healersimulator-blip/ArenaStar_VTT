@@ -40,6 +40,16 @@ describe("the tool manifest (MCP plan §5)", () => {
       "chat.read",
       "sheet.read",
       "bestiary.search",
+      "document.create",
+      "document.update",
+      "document.delete",
+      "token.move",
+      "token.properties",
+      "scene.create",
+      "scene.update",
+      "scene.activate",
+      "chat.post",
+      "undo.last",
     ]);
     for (const tool of manifest) {
       expect(tool.description.length).toBeGreaterThan(20);

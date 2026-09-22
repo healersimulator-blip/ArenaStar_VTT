@@ -6,6 +6,8 @@
  * `tools.ts`, and no cycles between the modules that contribute to it.
  */
 import type { Json, Role } from "../documents";
+import type { Op } from "../ops";
+import type { RejectionReason } from "../messages";
 import type { AgentCapability, AgentGrant } from "./capabilities";
 
 export type { AgentCapability, AgentGrant };
@@ -179,9 +181,50 @@ export interface ToolResult {
   isError?: boolean;
 }
 
+/**
+ * §6.2 — the write path. One tool call builds one `Op[]` and submits it as **one envelope**, so
+ * the GM's undo is one click and the OpLog has exactly one line to attribute.
+ *
+ * It is a narrow port on purpose: the tool table never sees `ClientSync`, and a test can hand a
+ * tool a writer that records what it was asked to do.
+ */
+export interface AgentWriter {
+  /**
+   * Submit one envelope and wait for the host's verdict. The answer is the *host's*, not an echo
+   * of the request: a refusal carries the reason the host gave (`forbidden`, `rate_limited`, …),
+   * which is the sentence a model needs in order to stop retrying.
+   */
+  submit(ops: Op[]): Promise<AgentSubmitResult>;
+  /**
+   * §5.1 — undo the last undoable change, **if this agent authored it**. The stack is the host's
+   * and only its top can be popped, so "not yours" is a refusal, not a search: an agent may never
+   * undo the GM's move or another player's.
+   */
+  undoOwn?(): Promise<AgentUndoResult>;
+}
+
+export type AgentUndoResult =
+  { ok: true; what: string } | { ok: false; error: string };
+
+export type AgentSubmitResult =
+  | { ok: true; seq: number; txId: string }
+  | {
+      ok: false;
+      reason: RejectionReason | "timeout" | "offline";
+      error: string;
+    };
+
 export interface ToolContext {
   view: AgentWorldView;
   grant: AgentGrant;
+  /**
+   * Absent on a read-only connection, and every write tool says so in those words: "this
+   * connection cannot write" is a fact an agent can route around, "document.update is broken" is
+   * not.
+   */
+  writer?: AgentWriter;
+  /** The identity the write will be attributed to (§3.1) — null before the session is bound. */
+  agentId?: string | null;
 }
 
 /**

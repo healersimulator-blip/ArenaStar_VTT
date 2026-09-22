@@ -163,13 +163,24 @@ export function narrow(
  * The gate. A `null` capability is a tool that needs nothing (the identity probe) and is always
  * allowed — an agent that cannot ask who it is cannot route around any other refusal.
  */
+/**
+ * May this grant read the GM's own data — hidden tokens, secret text, blind rolls? Reads and
+ * writes share the predicate: an agent that cannot *see* a hidden token must not be able to move
+ * it either.
+ */
+export const canReadGmOnly = (grant: AgentGrant): boolean =>
+  allows(grant, "gmOnly.read").ok;
+
+/** §4's plain words, in one place: the gate and the tests must never disagree on the sentence. */
+export function refusalFor(capability: AgentCapability): string {
+  return `this agent may not ${PHRASE[capability]} — ask the GM to change its grant`;
+}
+
 export function allows(
   grant: AgentGrant,
   capability: AgentCapability | null,
 ): OkOrErr {
   if (capability === null) return ok;
   if (grant.capabilities.includes(capability)) return ok;
-  return err(
-    `this agent may not ${PHRASE[capability]} — ask the GM to change its grant`,
-  );
+  return err(refusalFor(capability));
 }

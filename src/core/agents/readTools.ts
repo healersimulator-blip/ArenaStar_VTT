@@ -14,7 +14,7 @@
  *    describing it again.
  */
 import type { Json } from "../documents";
-import { allows } from "./capabilities";
+import { canReadGmOnly } from "./capabilities";
 import {
   capOf,
   cursorFor,
@@ -31,6 +31,7 @@ import {
   type RenderWall,
 } from "./mapRender";
 import { TOP_LEVEL_COLLECTIONS } from "../documents";
+import { num, refusal, str, text } from "./answer";
 import type {
   AgentTokenRow,
   Page,
@@ -40,19 +41,8 @@ import type {
   ToolResult,
 } from "./types";
 
-const text = (body: string, structured?: Json): ToolResult => ({
-  content: [{ type: "text", text: body }],
-  ...(structured === undefined ? {} : { structuredContent: structured }),
-});
-
-const refusal = (reason: string): ToolResult => ({
-  content: [{ type: "text", text: reason }],
-  isError: true,
-});
-
 /** Does this grant let the agent read the GM's own data (hidden tokens, secret text, blind rolls)? */
-const gmOnly = (ctx: ToolContext): boolean =>
-  allows(ctx.grant, "gmOnly.read").ok;
+const gmOnly = (ctx: ToolContext): boolean => canReadGmOnly(ctx.grant);
 
 /**
  * The redaction gate. A hidden token is the classic one: the replica has it, the grant may not.
@@ -102,11 +92,6 @@ function pageOf<T>(
     },
   };
 }
-
-const str = (value: Json | undefined): string | undefined =>
-  typeof value === "string" ? value : undefined;
-const num = (value: Json | undefined): number | undefined =>
-  typeof value === "number" && Number.isFinite(value) ? value : undefined;
 
 const sceneLine = (scene: {
   id: string;

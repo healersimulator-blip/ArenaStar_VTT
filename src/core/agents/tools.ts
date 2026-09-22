@@ -1,8 +1,9 @@
 /**
  * MCP connector §5 — the tool catalogue, assembled, and the one place a tool call is answered.
  *
- * The tools themselves live in `baseTools.ts` (session and world) and `readTools.ts` (the read
- * surface, Phase 1); writes will join them in Phase 2. This module is the registry and the rules:
+ * The tools themselves live in `baseTools.ts` (session and world), `readTools.ts` (the read
+ * surface, Phase 1) and `writeTools.ts` (the writes, Phase 2). This module is the registry and the
+ * rules:
  *
  * 1. **Typed tools, never a raw op channel.** The plan's own argument for §12 modules having eight
  *    methods instead of the document store applies here with more force: an LLM that can submit
@@ -17,6 +18,7 @@ import type { Json } from "../documents";
 import { allows, type AgentCapability } from "./capabilities";
 import { BASE_TOOLS } from "./baseTools";
 import { READ_TOOLS } from "./readTools";
+import { WRITE_TOOLS } from "./writeTools";
 import type {
   ToolArgsSchema,
   ToolContext,
@@ -29,11 +31,13 @@ import { isInvalid } from "./types";
 export * from "./types";
 export { BASE_TOOLS } from "./baseTools";
 export { READ_TOOLS } from "./readTools";
+export { WRITE_TOOLS } from "./writeTools";
 
 /** The catalogue, in the order `tools/list` shows it: identity first, then reads, then writes. */
 export const AGENT_TOOLS: readonly ToolDefinition[] = [
   ...BASE_TOOLS,
   ...READ_TOOLS,
+  ...WRITE_TOOLS,
 ];
 
 /** The `tools/list` answer. */

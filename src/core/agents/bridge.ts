@@ -22,7 +22,8 @@
 import type { Json } from "../documents";
 import type { AgentGrant } from "./capabilities";
 import { RESOURCE_TEMPLATES, readResource, resourceList } from "./resources";
-import { callTool, toolManifest, type AgentWorldView } from "./tools";
+import { callTool, toolManifest } from "./tools";
+import type { AgentWorldView, AgentWriter } from "./types";
 
 export interface BridgeTransport {
   /** One JSON-RPC message per call. Framing is the transport's business (a WS text frame, a line). */
@@ -48,6 +49,13 @@ export interface AgentBridgeOptions {
   transport: BridgeTransport;
   view: AgentWorldView;
   grant: AgentGrant;
+  /**
+   * The write port (§6.2). **Absent means read-only**, and every write tool says so in those
+   * words rather than pretending the verb is broken.
+   */
+  writer?: AgentWriter | undefined;
+  /** The user id the writes will be attributed to — what `whoami` reports as the agent's own. */
+  agentId?: string | null | undefined;
   serverInfo?: { name: string; version: string };
   protocolVersion?: string;
 }
@@ -101,7 +109,7 @@ const envelope = (
  * the GM pulled the grant.
  */
 export function createAgentBridge(options: AgentBridgeOptions): AgentBridge {
-  const { transport, view, grant } = options;
+  const { transport, view, grant, writer, agentId } = options;
   const serverInfo = options.serverInfo ?? {
     name: "arenastar-vtt",
     version: "0.1.0",
@@ -142,7 +150,12 @@ export function createAgentBridge(options: AgentBridgeOptions): AgentBridge {
       case "tools/call": {
         const called = await callTool(
           { name: params["name"], args: params["arguments"] },
-          { view, grant },
+          {
+            view,
+            grant,
+            ...(writer ? { writer } : {}),
+            agentId: agentId ?? null,
+          },
         );
         if (called.kind === "invalid") {
           sendError(id, JSON_RPC_ERROR.invalidParams, called.error);

@@ -23,21 +23,31 @@ import {
   type StoreMeta,
 } from "../../src/core";
 import { createTransportPair, flushMicrotasks } from "../../src/net/memory";
-import type { SceneDocument, UserDocument } from "../../src/core/documents";
+import type {
+  SceneDocument,
+  TokenDocument,
+  UserDocument,
+} from "../../src/core/documents";
 import type { Op } from "../../src/core/ops";
 import { agentWorldView } from "../../src/app/agentBridge";
 import {
   openAgentSession,
   type AgentSession,
 } from "../../src/app/agentSession";
-import { agentRecordOf, agentRegistryFrom } from "../../src/core/agents/grants";
 import { buildChatMessage, parseChatCommand } from "../../src/core/chat";
 import type { MessageDocument } from "../../src/core/documents";
+import type { AgentWriter } from "../../src/core/agents/types";
+import {
+  grantOfRecord,
+  agentRecordOf,
+  agentRegistryFrom,
+} from "../../src/core/agents/grants";
 import {
   createAgentBridge,
   type AgentBridge,
 } from "../../src/core/agents/bridge";
 import { grantFor, narrow } from "../../src/core/agents/capabilities";
+import { callTool } from "../../src/core/agents/tools";
 import { createAgentLink } from "../../src/net/agentLink";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -68,6 +78,31 @@ function userDoc(
     character: null,
     color: "#88c0d0",
   };
+}
+
+/**
+ * A token the GM owns (OWNER for its author, NONE for everyone else) — the fixture the
+ * two-layer proof needs: the grant *allows* `token.move`, and the host still says no.
+ */
+function tokenDoc(id: string, name: string): TokenDocument {
+  return {
+    _id: id,
+    type: "token",
+    name,
+    ownership: { default: 0, [GM_ID]: 3 },
+    flags: {},
+    system: {},
+    x: 350,
+    y: 150,
+    rotation: 0,
+    width: 100,
+    height: 100,
+    img: null,
+    hidden: false,
+    disposition: "friendly",
+    vision: false,
+    light: { radius: 0, color: "#ffffff", intensity: 0.5 },
+  } as unknown as TokenDocument;
 }
 
 function sceneDoc(id: string): SceneDocument {
@@ -245,14 +280,17 @@ describe("vtt-mcp ↔ agent bridge (MCP plan §8 Phase 0)", () => {
       );
       if (!appended.ok) throw new Error(appended.error);
     };
+    // Named, so the object literals are not fresh: `Op.data` is a `BaseDocument`, and a literal
+    // carrying a scene's fourteen extra fields in that position is an excess-property error.
+    const scene1: SceneDocument = {
+      ...sceneDoc("s1"),
+      tokens: [tokenDoc("t-vex", "Vex")],
+    };
+    const scene2: SceneDocument = { ...sceneDoc("s2"), active: false };
     seed(1, [
       { kind: "create", coll: "users", data: userDoc(GM_ID, "GM", "GM") },
-      { kind: "create", coll: "scenes", data: sceneDoc("s1") },
-      {
-        kind: "create",
-        coll: "scenes",
-        data: { ...sceneDoc("s2"), active: false },
-      },
+      { kind: "create", coll: "scenes", data: scene1 },
+      { kind: "create", coll: "scenes", data: scene2 },
     ]);
 
     hostRef = host;
@@ -284,8 +322,19 @@ describe("vtt-mcp ↔ agent bridge (MCP plan §8 Phase 0)", () => {
     await new Promise((done) => setTimeout(done, 50));
   });
 
-  /** Dial the sidecar from the "tab" side and hand the socket to the bridge. */
-  async function connect(grant = grantFor("gm")): Promise<void> {
+  /**
+   * Dial the sidecar from the "tab" side and hand the socket to the bridge. `as` binds the bridge
+   * to an **agent's own session** instead of the GM's — the Phase 2 shape, where reads are that
+   * agent's projection and writes are attributed to it.
+   */
+  async function connect(
+    grant = grantFor("gm"),
+    as?: {
+      view: Parameters<typeof createAgentBridge>[0]["view"];
+      writer?: AgentWriter;
+      agentId?: string;
+    },
+  ): Promise<void> {
     const opened = new Promise<void>((resolvePromise, rejectPromise) => {
       const timer = setTimeout(
         () => rejectPromise(new Error("the tab never paired")),
@@ -307,8 +356,10 @@ describe("vtt-mcp ↔ agent bridge (MCP plan §8 Phase 0)", () => {
       });
       bridge = createAgentBridge({
         transport,
-        view: agentWorldView(gm),
+        view: as?.view ?? agentWorldView(gm),
         grant,
+        ...(as?.writer ? { writer: as.writer } : {}),
+        agentId: as?.agentId ?? null,
       });
     });
     await opened;
@@ -362,6 +413,16 @@ describe("vtt-mcp ↔ agent bridge (MCP plan §8 Phase 0)", () => {
       "chat.read",
       "sheet.read",
       "bestiary.search",
+      "document.create",
+      "document.update",
+      "document.delete",
+      "token.move",
+      "token.properties",
+      "scene.create",
+      "scene.update",
+      "scene.activate",
+      "chat.post",
+      "undo.last",
     ]);
     for (const tool of tools)
       expect(tool.inputSchema).toMatchObject({ type: "object" });
@@ -561,6 +622,161 @@ describe("vtt-mcp ↔ agent bridge (MCP plan §8 Phase 0)", () => {
       MessageDocument | undefined;
     expect(card?.author).toBe(agent._id);
     expect(card?.content).toBe("the agent speaks for itself");
+  }, 30_000);
+
+  test("a write tool lands as one envelope, by the agent — and undo.last takes it back", async () => {
+    // The Phase 2 shape: the bridge is bound to the agent's *own* session, so the read is its
+    // projection and the write is attributed to it. This is the plan's acceptance test.
+    const opened = openAgentSession({
+      host: hostRef,
+      meta,
+      settings: storeRef.getAll("settings"),
+      users: storeRef.getAll("users"),
+      name: "Scribe",
+      preset: "gm-no-delete",
+      client: "vitest",
+    });
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const scribe = opened.session;
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    bridge?.dispose();
+    bridge = null;
+    await new Promise((done) => setTimeout(done, 50));
+    const record = agentRecordOf(
+      agentRegistryFrom(storeRef.getAll("settings")),
+      scribe.id,
+    );
+    await connect(grantOfRecord(record), {
+      view: agentWorldView(scribe.client),
+      writer: scribe.writer,
+      agentId: scribe.id,
+    });
+
+    // ── one create, one envelope, one op, by the agent ──
+    const created = await started.client.request("tools/call", {
+      name: "document.create",
+      arguments: { coll: "actors", name: "Goblin" },
+    });
+    expect(created["error"]).toBeUndefined();
+    const createdText =
+      (
+        created["result"] as {
+          content: Array<{ text: string }>;
+          isError?: boolean;
+        }
+      ).content[0]?.text ?? "";
+    expect(createdText).toContain('created actors "Goblin"');
+    const envelope = logRef.at(storeRef.seq);
+    expect(envelope?.env.by).toBe(scribe.id);
+    expect(envelope?.env.ops).toHaveLength(1);
+
+    // ── undo.last: the agent takes back its own change ──
+    const undone = await started.client.request("tools/call", {
+      name: "undo.last",
+    });
+    const undoneText =
+      (
+        undone["result"] as {
+          content: Array<{ text: string }>;
+          isError?: boolean;
+        }
+      ).content[0]?.text ?? "";
+    expect(undoneText).toContain("undone: 1 op(s) from seq");
+    expect(storeRef.getAll("actors")).toHaveLength(0);
+
+    // ── and the mask refuses a delete for gm-no-delete, before any op is built ──
+    const refused = await started.client.request("tools/call", {
+      name: "document.delete",
+      arguments: { coll: "scenes", id: "s2", confirm: true },
+    });
+    const refusedResult = refused["result"] as {
+      content: Array<{ text: string }>;
+      isError?: boolean;
+    };
+    expect(refusedResult.isError).toBe(true);
+    expect(refusedResult.content[0]?.text).toBe(
+      "this agent may not delete documents — ask the GM to change its grant",
+    );
+
+    // ── undo is scoped: another agent may not take back this one's change ──
+    const other = openAgentSession({
+      host: hostRef,
+      meta,
+      settings: storeRef.getAll("settings"),
+      users: storeRef.getAll("users"),
+      name: "Vandal",
+      preset: "gm",
+      client: "vitest",
+    });
+    expect(other.ok).toBe(true);
+    if (!other.ok) return;
+    await flushMicrotasks();
+    await flushMicrotasks();
+    const otherContext = {
+      view: agentWorldView(scribe.client),
+      writer: other.session.writer,
+    };
+    const answered = await callTool(
+      { name: "undo.last", args: {} },
+      {
+        view: otherContext.view,
+        grant: grantOfRecord(other.session.record),
+        writer: otherContext.writer,
+      },
+    );
+    expect(answered.kind).toBe("result");
+    if (answered.kind !== "result") return;
+    expect(answered.result.isError).toBe(true);
+    // The top of the stack is the *undo* Scribe just did (system-authored), so this is "not yours"
+    // either way — which is the property that matters: an agent never undoes someone else's move.
+    expect(answered.result.content[0]?.text).toContain("not yours");
+  }, 30_000);
+
+  test("the two layers: the grant allows the verb, the host still refuses the write (§3.1)", async () => {
+    // This is the sentence the whole security model rests on: the capability mask is UX plus
+    // defence in depth, and the *host* is the boundary. A `player` agent holds `token.move`, so
+    // the bridge lets the call through — and the host refuses it anyway, because the token is the
+    // GM's and `can()` needs OWNER. A bug in the bridge cannot buy a write.
+    const opened = openAgentSession({
+      host: hostRef,
+      meta,
+      settings: storeRef.getAll("settings"),
+      users: storeRef.getAll("users"),
+      name: "Runner",
+      preset: "player",
+      client: "vitest",
+    });
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const runner = opened.session;
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const grant = grantOfRecord(
+      agentRecordOf(agentRegistryFrom(storeRef.getAll("settings")), runner.id),
+    );
+    expect(grant.capabilities).toContain("token.move"); // the mask says yes …
+    expect(grant.role).toBe("PLAYER");
+
+    const answered = await callTool(
+      { name: "token.move", args: { tokenId: "t-vex", col: 4, row: 3 } },
+      { view: agentWorldView(runner.client), grant, writer: runner.writer },
+    );
+    expect(answered.kind).toBe("result");
+    if (answered.kind !== "result") return;
+    // … and the host says no, in the host's words, not a summary of them.
+    expect(answered.result.isError).toBe(true);
+    expect(answered.result.content[0]?.text).toContain(
+      "the host refused this change (forbidden)",
+    );
+    // Nothing moved: the refusal is the world's state, not just the answer's.
+    const after = storeRef.get("scenes", "s1") as unknown as {
+      tokens: Array<{ _id: string; x: number }>;
+    };
+    expect(after.tokens.find((t) => t._id === "t-vex")?.x).toBe(350);
   }, 30_000);
 
   test("an unknown method is -32601, and a notification gets no answer at all", async () => {
