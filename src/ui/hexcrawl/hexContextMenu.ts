@@ -38,6 +38,7 @@ import type { TerrainCatalog } from "../../core/hexcrawl/terrain";
 import { partyPositionOps } from "../../core/hexcrawl/travel";
 import { hexcrawlProfileOf } from "../../core/hexcrawl/types";
 import { isCellOpen, partyCellKey } from "../../core/hexcrawl/visibility";
+import { hexMenu } from "../../core/hexcrawl/strings";
 
 export type HexMenuEntryId =
   | "open"
@@ -107,11 +108,11 @@ export function hexContextMenuModel(input: {
   if (!isGM) {
     // A player's menu: the text the GM published, and where the party stands. Nothing else is
     // theirs to do — and on ground they have not been shown, nothing at all.
-    if (!open) return { title: "Unexplored", subtitle: null, entries: [] };
+    if (!open) return { title: hexMenu.unexplored, subtitle: null, entries: [] };
     const entries: HexMenuEntry[] = [
       {
         id: "open",
-        label: "Open hex description",
+        label: hexMenu.openDescription,
         disabled: false,
         reason: null,
       },
@@ -119,7 +120,7 @@ export function hexContextMenuModel(input: {
     if (partyCellKey(scene) === key) {
       entries.push({
         id: "party",
-        label: "the party is here",
+        label: hexMenu.partyHere,
         disabled: true,
         reason: null,
         statik: true,
@@ -131,20 +132,20 @@ export function hexContextMenuModel(input: {
   const entries: HexMenuEntry[] = [
     {
       id: "open",
-      label: "Open hex description",
+      label: hexMenu.openDescription,
       disabled: false,
       reason: null,
     },
     open
       ? {
           id: "hide",
-          label: "Close hex (hide from players)",
+          label: hexMenu.closeHex,
           disabled: false,
           reason: null,
         }
       : {
           id: "reveal",
-          label: "Open hex (reveal to players)",
+          label: hexMenu.openHex,
           disabled: false,
           reason: null,
         },
@@ -161,7 +162,7 @@ export function hexContextMenuModel(input: {
       label: terrain.name,
       disabled: terrainLess,
       reason: terrainLess
-        ? "no zone authored here — a gridless cell needs its own shape"
+        ? hexMenu.noZone
         : null,
       terrainId: terrain.id,
       checked: current === terrain.id,
@@ -171,7 +172,7 @@ export function hexContextMenuModel(input: {
   entries.push(
     {
       id: "attach",
-      label: "Attach encounter table…",
+      label: hexMenu.attachTable,
       // Enabled: the tables window does the attaching (D-272). A GM who has authored no table
       // yet still wants the door — the window's *New table…* is the first step of that path.
       disabled: false,
@@ -182,7 +183,7 @@ export function hexContextMenuModel(input: {
     // decides what "roll this hex's table" means, and it is the window.
     {
       id: "roll",
-      label: "Roll from a table…",
+      label: hexMenu.rollFromTable,
       disabled: false,
       reason: null,
     },
@@ -190,7 +191,7 @@ export function hexContextMenuModel(input: {
     // ops belong to the shell (the clock envelope), so this entry only says "yes, explore".
     {
       id: "explore",
-      label: "Explore this hex",
+      label: hexMenu.explore,
       disabled: false,
       reason: null,
     },
@@ -199,25 +200,25 @@ export function hexContextMenuModel(input: {
     {
       id: "feature",
       label: cell && (cell.features ?? []).length > 0
-        ? "Features of this hex…"
-        : "Reveal feature…",
+        ? hexMenu.featuresOf
+        : hexMenu.revealFeature,
       disabled: false,
       reason: null,
     },
     {
       id: "move-party",
-      label: "Move party here",
+      label: hexMenu.moveParty,
       // A scene with no party token cannot be marched: the profile names the token, and the
       // shell refuses the click with a reason rather than moving nothing.
       disabled: partyTokenIdOf(scene) === null,
       reason:
         partyTokenIdOf(scene) === null
-          ? "this scene has no party token yet"
+          ? hexMenu.noPartyToken
           : null,
     },
     {
       id: "add-path",
-      label: "Add to path",
+      label: hexMenu.addToPath,
       disabled: false,
       reason: null,
     },

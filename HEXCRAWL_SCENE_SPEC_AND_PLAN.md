@@ -736,7 +736,7 @@ evaluator (manual / perception / time / dice), auto vs manual reveal, the projec
 terrain-priced amount, the clock advanced exactly that, and an exploration-timed feature revealed itself on
 the third day.
 
-### Phase 7 — Polish, docs, decisions (0.5 day)
+### Phase 7 — Polish, docs, decisions (0.5 day) — ✅ landed 2026-09-22 (D-276)
 Help panel entries, toolbar hints, keyboard (`H` for the hex menu?), the i18n strings kept in one table
 (G-38 is open; this feature must not add scattered literals), `STATUS_ASSESSMENT` + `GAP_ANALYSIS` §5.1
 note (this feature is *not* a parity row — it gets its own line under "not in the open set, by decision"
@@ -755,10 +755,21 @@ march touched keeps the seconds it was given (`flags.core.exploredSeconds`), whi
 feature's *time* rule reads: a shrine that waits for 40 h in a hex reveals itself on the third day with no
 GM click, and posts one plain card in the chat — `Found at 6,3: the old well` — because a feature the
 players are allowed to hold is not a secret. The three canvas-menu rows that were disabled after Phase 5
-are live: *Features of this hex…*, *Move party here* and *Add to path*. What is left is Phase 7 (polish,
+are live: *Features of this hex…*, *Move party here* and *Add to path*. What was left is Phase 7 (polish,
 help, the closing docs), and the acceptance line is the Phase 6 e2e spec: **a three-cell forest path, one
 border and one day, and the ledger summing to exactly what the clock advanced** — plus the third-day
 reveal.
+
+*Status after Phase 7 (2026-09-22):* **the feature is complete** — Phases 0–7, D-268…D-276. Phase 7
+paid the plan's own debts: the help window carries a **hexcrawl sheet** (right-click, `Y`, `Esc`,
+`Shift+H`, and the model in words — the clock walks the party and a hex keeps the hours), `Shift+H`
+opens the hex the party stands in from anywhere on the map (`h` alone is Roll20's hand tool, so the
+modifier buys the mnemonic), the travel panel says beside its buttons that they spend the **world
+clock**, and every sentence the feature speaks — a rule label, a note, a log line, a menu entry, a
+hint — lives in **one table** (`src/core/hexcrawl/strings.ts`) instead of being scattered across
+modules, so G-38's eventual extraction is one file's worth of work. `GAP_ANALYSIS_Roll20_Foundry.md`
+§5.1 records the standing decision that this was never a parity row, and `STATUS_ASSESSMENT_2026-09-21.md`
+§5 carries the dated note.
 
 *Status after Phase 5 (2026-09-22):* Phases 0–5 are landed (D-268…D-274). A table a GM writes now fires —
 automatically when the party enters or moves through a tagged hex, as a GM-only pending card whose roll the

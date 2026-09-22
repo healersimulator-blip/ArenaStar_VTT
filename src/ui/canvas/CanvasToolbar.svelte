@@ -7,6 +7,7 @@
    * `vtt-canvas-tool` / `vtt-canvas-action` events.
    */
   import { isTypingTarget } from "../../core/keys";
+  import { hexTravel } from "../../core/hexcrawl/strings";
   import type { ToolOptions } from "../../canvas/tools/controller";
   import type { DoorState } from "../../canvas/vision/wallSight";
 
@@ -36,7 +37,9 @@
     | "help"
     | "reveal-all"
     | "hide-all"
-    | "delete-last-placement";
+    | "delete-last-placement"
+    /** D-276: Shift+H — open the hex the party is standing in (plan §8 Phase 7's keyboard row). */
+    | "hex-party";
   export type RollMode = "roll" | "gmroll" | "blindroll" | "selfroll";
 
   let {
@@ -174,6 +177,14 @@
       layer = "map";
       return;
     }
+    // D-276: the plan asked for `H` for the hex menu, and `h` alone is Roll20's hand tool — so
+    // the modifier is what buys the mnemonic. Shift+H opens the hex the *party* stands in: a key
+    // has no pointer, and the party's cell is the one hex it can mean.
+    if (event.shiftKey && key === "h") {
+      event.preventDefault();
+      act("hex-party");
+      return;
+    }
     const layerHit = layers.find((entry) => entry.key.toLowerCase() === key && entry.id !== "map");
     if (layerHit && isGM) {
       event.preventDefault();
@@ -265,10 +276,7 @@
 
     <div class="group subpanel" role="group" aria-label="Tool options">
       {#if active === "path"}
-        <p class="hint" data-path-hint>
-          Click hexes to extend the route; click the last one again to take it back. Esc clears,
-          and the itinerary under the rail commits it.
-        </p>
+        <p class="hint" data-path-hint>{hexTravel.pathHint}</p>
       {:else if active === "draw"}
         <div class="swatches">
           {#each drawShapes as shape (shape.id)}

@@ -41,6 +41,7 @@ import type {
 import type { FlatDiff, Op } from "../ops";
 import { evaluateFormula, type RngFn } from "../../dice/engine";
 import { createCellOps } from "./scene";
+import { hexFeature } from "./strings";
 
 /** Where the accumulated "time spent here" lives on a cell (`flags.core`). */
 export const EXPLORED_FLAG = "exploredSeconds";
@@ -152,20 +153,20 @@ export function formatDuration(seconds: number): string {
 /** How a feature's rule reads in the hex window (a GM who cannot read it cannot rule on it). */
 export function featureRuleLabel(feature: CellFeature): string {
   const reveal = feature.reveal;
-  const auto = feature.autoReveal ? "" : " — the GM decides";
+  const auto = feature.autoReveal ? "" : hexFeature.decides;
   switch (reveal.kind) {
     case "manual":
-      return "the GM reveals it";
+      return hexFeature.manual;
     case "perception":
       return reveal.active === true
-        ? `Perception check vs ${reveal.dc}${auto}`
-        : `passive Perception ${reveal.dc}${auto}`;
+        ? `${hexFeature.perceptionCheck(reveal.dc)}${auto}`
+        : `${hexFeature.perceptionPassive(reveal.dc)}${auto}`;
     case "time":
-      return `${formatDuration(reveal.seconds)} spent here${auto}`;
+      return `${hexFeature.time(formatDuration(reveal.seconds))}${auto}`;
     case "dice":
-      return `${reveal.formula} ≥ ${reveal.target}${auto}`;
+      return `${hexFeature.dice(reveal.formula, reveal.target)}${auto}`;
     default:
-      return "the GM reveals it";
+      return hexFeature.manual;
   }
 }
 
@@ -193,7 +194,7 @@ export function evaluateFeature(
       const need = Math.max(0, Math.trunc(reveal.seconds));
       return {
         reveal: spent >= need,
-        note: `${feature.name}: ${formatDuration(spent)} here vs ${formatDuration(need)}`,
+        note: hexFeature.noteTime(feature.name, formatDuration(spent), formatDuration(need)),
       };
     }
     case "perception": {
@@ -208,14 +209,14 @@ export function evaluateFeature(
         return {
           reveal: roll.ok && total >= target,
           note: roll.ok
-            ? `${feature.name}: Perception ${total} vs ${target}`
-            : `${feature.name}: the Perception check could not be rolled`,
+            ? hexFeature.notePerceptionRoll(feature.name, total, target)
+            : hexFeature.notePerceptionBroken(feature.name),
         };
       }
       const passive = Math.max(0, Math.trunc(facts.passivePerception));
       return {
         reveal: passive >= target,
-        note: `${feature.name}: passive Perception ${passive} vs ${target}`,
+        note: hexFeature.notePerception(feature.name, passive, target),
       };
     }
     case "dice": {
@@ -223,13 +224,13 @@ export function evaluateFeature(
       if (!roll.ok) {
         return {
           reveal: false,
-          note: `${feature.name}: “${reveal.formula}” is not a formula this engine can roll`,
+          note: hexFeature.noteBadFormula(feature.name, reveal.formula),
         };
       }
       const total = roll.value.total;
       return {
         reveal: total >= Math.trunc(reveal.target),
-        note: `${feature.name}: ${reveal.formula} → ${total} vs ${reveal.target}`,
+        note: hexFeature.noteDice(feature.name, reveal.formula, total, reveal.target),
       };
     }
     default:
@@ -289,7 +290,7 @@ export function revealDueFeatures(input: {
       continue;
     }
     if (feature.autoReveal !== true) {
-      notes.push(`${feature.name}: found — reveal it when you are ready`);
+      notes.push(hexFeature.noteFound(feature.name));
       continue;
     }
     revealed.push(feature);
@@ -355,7 +356,7 @@ export function featureFoundMessage(input: {
     flags: {},
     system: {},
     author: input.authorId,
-    content: names.map((name) => `Found at ${input.cellKey}: ${name}`).join("\n"),
+    content: names.map((name) => hexFeature.found(input.cellKey, name)).join("\n"),
     whisper: [],
     roll: null,
     flavor: "hexcrawl",

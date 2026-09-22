@@ -110,6 +110,7 @@
     type EncounterTrigger,
   } from "../core/hexcrawl/encounter";
   import { hexcrawlProfileOf } from "../core/hexcrawl/types";
+  import { hexTravel } from "../core/hexcrawl/strings";
   import { encounterPayloadOf } from "../core/hexcrawl/encounterFlow";
   import {
     advanceWorldClockOps,
@@ -556,6 +557,9 @@ const WALL_PICK_RADIUS = 12;
         activeTab = "chat";
         openWindow("help", "Keyboard shortcuts", "help");
         break;
+      case "hex-party":
+        openPartyHexWindow();
+        break;
       case "reveal-all":
         setWholeSceneFog("reveal");
         break;
@@ -784,6 +788,28 @@ const WALL_PICK_RADIUS = 12;
       sceneId: scene._id,
       key,
     });
+  }
+
+  /**
+   * D-276: Shift+H — the hex the party is standing in, from anywhere on the map. A key has no
+   * pointer, so *which* hex it means has to be decided by something else, and the party's own
+   * cell is the only answer a GM would expect from "where are we?". Both refusals say what they
+   * are waiting for instead of doing nothing: a key that answers is worth more than a key that
+   * sulks.
+   */
+  function openPartyHexWindow(): void {
+    const scene = activeScene();
+    if (!scene) return;
+    if (!isHexcrawlScene(scene)) {
+      pushLog([hexTravel.partyKeyNoScene], "info");
+      return;
+    }
+    const key = partyCellKey(scene);
+    if (!key) {
+      pushLog([hexTravel.partyKeyNoToken], "info");
+      return;
+    }
+    openHexWindow(key);
   }
 
   /**
@@ -1470,7 +1496,7 @@ const WALL_PICK_RADIUS = 12;
     if (!current || !scene) return;
     const keys = travelPathOf(scene);
     if (keys.length < 2) {
-      pushLog(["A route needs at least a second hex — click one, then Commit."], "info");
+      pushLog([hexTravel.routeTooShort], "info");
       return;
     }
     const plan: TravelPlan = {
@@ -1484,15 +1510,18 @@ const WALL_PICK_RADIUS = 12;
     clearPathDraft();
     pushLog(
       [
-        `Route committed: ${keys.length} hexes, ${formatDuration(
-          routeSeconds({
-            scene,
-            path: keys,
-            speedPerDay: plan.speedPerDay,
-            pace: plan.pace,
-            catalog: hexTerrainCatalog(),
-          }),
-        )} on the road.`,
+        hexTravel.committed(
+          keys.length,
+          formatDuration(
+            routeSeconds({
+              scene,
+              path: keys,
+              speedPerDay: plan.speedPerDay,
+              pace: plan.pace,
+              catalog: hexTerrainCatalog(),
+            }),
+          ),
+        ),
       ],
       "info",
     );
@@ -1505,7 +1534,7 @@ const WALL_PICK_RADIUS = 12;
     if (!current || !scene) return;
     if (planOf(scene)) current.gm.client.submit(travelProgressOps(scene, null));
     clearPathDraft();
-    pushLog(["The march is called off."], "info");
+    pushLog([hexTravel.calledOff], "info");
   }
 
   /**
@@ -1525,7 +1554,7 @@ const WALL_PICK_RADIUS = 12;
     if (!current || !scene) return;
     const plan = planOf(scene);
     if (!plan) {
-      pushLog(["No route is committed — draw one in path mode first."], "info");
+      pushLog([hexTravel.noRoute], "info");
       return;
     }
     const catalog = hexTerrainCatalog();
@@ -1565,10 +1594,12 @@ const WALL_PICK_RADIUS = 12;
     pushLog(
       [
         advance.arrived
-          ? `The party arrives at ${where} — ${formatDuration(delta)} on the road, ${formatDuration(
-              advance.leftoverSeconds,
-            )} spent there.`
-          : `The party is at ${where} — ${formatDuration(delta)} on the road.`,
+          ? hexTravel.arrives(
+              where,
+              formatDuration(delta),
+              formatDuration(advance.leftoverSeconds),
+            )
+          : hexTravel.atCell(where, formatDuration(delta)),
       ],
       "info",
     );
@@ -4365,6 +4396,9 @@ const WALL_PICK_RADIUS = 12;
                   <option value="forced">forced march</option>
                 </select>
               </label>
+              {#if travelPanel.committed}
+                <p class="hint" data-travel-hint>{hexTravel.hint}</p>
+              {/if}
               <div class="travel-actions">
                 {#if travelPanel.draft}
                   <button type="button" data-travel-commit onclick={() => commitTravelRoute()}>Commit route</button>
@@ -5131,6 +5165,12 @@ const WALL_PICK_RADIUS = 12;
   }
   .travel-panel .static {
     opacity: 0.75;
+  }
+  /* D-276: the one line the advance buttons need beside them — the clock is what they spend. */
+  .travel-panel .hint {
+    margin: 2px 0 0;
+    color: #8b9bb1;
+    line-height: 1.35;
   }
   .travel-row {
     display: grid;

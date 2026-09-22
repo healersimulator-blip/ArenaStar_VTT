@@ -751,6 +751,17 @@ marketplace (**G-35**).
 G-35 marketplace — each contradicts the serverless single-file identity; revisit only by explicit
 scope decision. **G-13** (house rules) and 3PP content remain L-items until promoted.
 
+**Built here, not parity (2026-09-22) — hexcrawl scenes (D-268…D-276).** Neither Roll20 nor
+Foundry ships an overland hexcrawl as a first-class scene type, so this one was never a gap row
+and must not be scheduled as gap closure: there is nothing to reach parity *with*. It is a
+product decision with its own spec (`HEXCRAWL_SCENE_SPEC_AND_PLAN.md`, proposed §20) and its own
+milestone, and it is **complete** — a hex/grid map the GM paints terrain onto, encounter tables
+that fire on entering/moving/exploring/fighting, a party that walks a drawn route at the
+terrain's price while the **world clock** pays for it, per-hex ledgers of the hours spent there,
+and hidden features that give themselves up by the GM's hand, a Perception DC, time spent, or a
+dice roll. What it reuses (fog, the clock, compendium packs, scene copy, the op pipeline) is
+already counted in the rows above; what it adds is not a gap anyone was owed.
+
 ## 6. Sources
 
 Roll20

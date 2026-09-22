@@ -7958,3 +7958,72 @@ all four causes are the kind a unit test is blind to:
   alone: **19 passed, 2.8 m**), and `webrtc.spec.ts`'s PixiJS layer-order test fails on the *pristine*
   `0a48ced` tree here too (checked by stashing this entry's diff and rebuilding) — a WebGL limitation
   of the headless Chromium in this box, the same class the 2026-09-21 assessment records.
+
+## D-276 — 2026-09-22 — The feature finishes: a sheet in the help window, `Shift+H` for the party's hex, one table for its words, and the note that this was never a parity row (hexcrawl Phase 7)
+
+**Context.** Plan §8's Phase 7 is the plan paying its own debts: "Help panel entries, toolbar hints,
+keyboard (`H` for the hex menu?), the i18n strings kept in one table (G-38 is open; this feature must
+not add scattered literals), `STATUS_ASSESSMENT` + `GAP_ANALYSIS` §5.1 note … and the closing
+`DECISIONS.md` entries." §7.2 had already promised the same two surfaces from the other end —
+`ui/canvas/HelpPanel.svelte` and `CanvasToolbar.svelte` — as "the two hint lines the new mode needs".
+Phases 0–6 built the machine; this is the half-day that makes it findable.
+
+**Decision — the help window gets a hexcrawl sheet, shown to everyone.** It sits above *Bindings*,
+announced by one paragraph of **model** rather than a list of buttons: the buttons are labelled where
+they stand, and the thing a GM actually forgets is that the *clock* walks the party and that a hex keeps
+the hours spent in it. The rows below it are the four keys (`Right-click a hex`, `Shift+H`, `Y`,
+`Escape`), each marked `(GM)` where it is the GM's alone. It renders on a tactical map too: a GM who has
+not made a hexcrawl scene yet is exactly the person who needs to read that the key exists.
+
+**Decision — `Shift+H` opens the hex the party stands in.** The plan asked for `H`, and `h` alone is
+Roll20's hand tool (the pan alias the rail has had since D-256), so the modifier is what buys the
+mnemonic — the same trick `Shift+M` uses for the map layer, and it costs one branch placed *before* the
+single-letter aliases so `h` never sees it. A key has no pointer, so *which* hex it means has to be
+decided by something else, and the party's own cell is the only answer a GM expects from "where are
+we?"; on a map that is not a hexcrawl one — or one with no party token yet — the key says what it is
+waiting for instead of doing nothing. It works for a player too: the hex window is projection-safe, and
+what they get is the published description and nothing else.
+
+**Decision — one table for the feature's sentences, and G-38 stays open.** `src/core/hexcrawl/strings.ts`
+holds every string the feature **composes**: rule labels, verdict notes, log lines, menu entries and
+their disabled reasons, the two hint sentences, the `Found at 6,3: the old well` card. Two rules keep it
+worth having. It **imports nothing** — not even `formatDuration`, whose callers format their own numbers
+and hand the pieces over — so it can be handed to G-38's extraction whole, whatever shape that slice
+takes. And it holds **sentences, not names**: `Travel`, `Pace`, *Commit route* and the rest of a
+control's own labels stay in the markup beside the control they name, because they are one word long,
+they are already in one file, and moving them would make the template harder to read without making the
+table more useful. The i18n barrel stays empty and G-38 stays open — D-263's decision, not this
+feature's to relitigate by inventing a catalogue with no consumer.
+
+**Decision — the hint appears when it can be acted on.** The path tool's hint (itself moved into the
+table) covers drawing the route; the travel panel's line — *every button spends the world clock; the
+party camps where the road ends* — is rendered only once a route is committed, which is the moment the
+buttons it is about appear. A hint that is always on screen is a hint nobody reads.
+
+**Decision — the gap analysis says what this was not.** `GAP_ANALYSIS_Roll20_Foundry.md` §5.1 gains a
+line under "Not in the open set, by decision": hexcrawl scenes are **built here, not parity**, because
+neither Roll20 nor Foundry ships an overland hexcrawl as a first-class scene type and there is nothing
+to reach parity with. It must not be scheduled as gap closure. `STATUS_ASSESSMENT` §5 carries the dated
+note with this entry's gates, and the plan's §8 Phase 7 marker closes the last phase.
+
+**Gates.**
+
+- **The unit gate:** `pnpm test` — **261 files / 3 100 tests passed** (2 files, 12 tests skipped).
+  Phase 7 adds no unit tests and changes no behaviour: the strings move is a refactor, and the rule
+  labels and notes it now composes are asserted through `tests/core/hexcrawlFeatures.test.ts`, which
+  was already covering them.
+- **Types and lint:** `tsc --noEmit` **exit 0** · `pnpm typecheck` **50 components, 0 blocking, 1
+  advisory** (`ReplayPanel.svelte:29`) · `pnpm lint` **exit 0**.
+- **The build and the size budget:** `pnpm build` → `pnpm size` **3 142 538 B raw / 904 019 B gzip,
+  OK: within the 6 MB raw budget** (the Phase 6 tree: 3 139 370 / 902 715 — **+3 168 B raw** for the
+  help sheet, the strings table, the `Shift+H` branch and the panel hint).
+- **The browser gate, chromium only:** the phase's own spec `e2e/hexcrawl_help.spec.ts` is
+  **3 passed (14.2 s)** — the help sheet and its four keys, `Shift+H` opening the party's hex, the
+  travel hint appearing exactly when a route is committed, and the key staying quiet on a map that is
+  not a hexcrawl one. The five older hexcrawl specs re-run against this build are **8 passed**
+  (`hexcrawl_encounters` 3, `hexcrawl_travel` 2, `hexcrawl_fog` 1, `hexcrawl_scene` 1,
+  `hexcrawl_tables` 1) — **11 hexcrawl tests** in all. The same run carried the specs this change
+  touches (`onboarding`, `canvas_toolbar`, `canvas_rail`, `windows`) to **29 passed across the eight
+  spec files**, the single failure being the fog flake below; two failures in the wider full-suite
+  run are not this change either: `hexcrawl_fog`'s two-peer propagation step **passes standalone
+  (41.8 s)**, and `webrtc`'s PixiJS layer-order test fails on the pristine tree here too.
