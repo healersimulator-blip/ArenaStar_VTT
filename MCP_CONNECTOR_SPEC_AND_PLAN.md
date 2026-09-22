@@ -1,7 +1,8 @@
 # MCP-style LLM connector — specification additions and implementation plan
 
 **Status:** proposal 2026-09-21 · **Phase 0 landed 2026-09-22 (D-278)** · **Phase 1 landed 2026-09-22
-(D-279)** · **Phase 2 landed 2026-09-22 (D-280)**; Phases 3–6 unstarted.
+(D-279)** · **Phase 2 landed 2026-09-22 (D-280)** · **Phase 3 landed 2026-09-22 (D-281)**; Phases 4–6
+unstarted.
 **Reads with:** `PROTOCOL.md` (§4 ops, §5 projection, §6 transports,
 §13 message reference), `PLAN.md` (§12 packages/modules), `DECISIONS.md` (D-013 roles, D-045 the typed
 `__vttE2E` surfaces, D-262 view-as), `HEXCRAWL_SCENE_SPEC_AND_PLAN.md` (the hexcrawl tools depend on it),
@@ -471,7 +472,7 @@ whose grant *allows* `token.move` is still refused **by the host**, because the 
 `can()` wants OWNER). **The bundle moves for the first time: 3 213 166 B raw / 926 492 B gzip
 (+70 331 B)** — the connector is now in the app graph, and that is the number to watch.
 
-### Phase 3 — Player-scoped agents and the projection proof (1 day, S)
+### Phase 3 — Player-scoped agents and the projection proof (1 day, S) — ✅ landed 2026-09-22 (D-281)
 `actor.from_compendium` / `actor.from_statblock` (the D-264/D-267 importers), `token.move` restricted to
 owned tokens, `chat.whisper` policy, and the *proof* test: a `PLAYER` agent's replica is compared
 field-by-field with `projectWorld()` for that user, with hidden tokens, whispers and GM-only rolls
@@ -479,6 +480,34 @@ asserted absent — the same posture the player shell's own e2e already takes.
 *e2e (`agent_connector.spec.ts`, Chromium):* start the sidecar, boot the app, pair, call
 `bestiary.search` + `actor.from_compendium` + `token.move`, and assert the canvas shows the token; then
 connect a second agent as `PLAYER` and assert a `scene.delete` call is refused and nothing changes.
+
+**As landed — and the one thing the proof found.** `tests/integration/agentProjection.test.ts` (12)
+boots a real `HostSync`, opens a `player`-preset agent session, and compares the replica it holds
+against `projectWorld()` collection by collection and **document by document** (`JSON.parse(JSON.stringify(doc))`),
+so a projection that keeps a document but forgets a field fails the test rather than a player. It then
+asserts the three must-never-see items are absent from the documents: the hidden token is not a row at
+all, the whisper the agent was not in is not in the replica, and the `gmroll` card is there with
+`roll: null`. A `gm` agent on the same world sees all three, and `<secret>` journal text is stripped
+while the visible text survives — the projection's own rules, proved at the connector's boundary.
+
+*The hole the proof found:* `projectMessage` redacts a GM-only roll by nulling `roll`, but the total is
+in the content too, as an inline `[[16|1d20+5]]` chip — which the player's chat renders, and an agent
+reads as text. `agentWorldView` strips it (`[rolled 1d20+5]`) and `chat.read` says
+`[result withheld from this grant]`. Being **stricter** than the player shell is allowed; being wider
+never is.
+
+*Three decisions taken in D-281:* `token.move` is **ownership-scoped** (the bridge mirrors `can()`, one
+layer earlier, so the refusal can name what to ask for — and `mcpBridge.test.ts` proves the mirror is a
+convenience by handing the GM's token back *without* letting the replica catch up, where the host is
+the one that refuses); `actor.from_compendium` imports the **pack's own payload** rather than running it
+through `importCharacter`, because a pack entry is already this app's document shape and re-reading it
+as an export would author an actor that opens as a blank sheet — `actor.from_statblock` is where the
+D-264/D-267 reader belongs, and it hands the importer's report (`read`/`warnings`) back to the agent;
+and the Phase 3 **e2e is not run** — this environment has no Chromium, and the repo's e2e needs
+Playwright's — so the run that puts the Agents window on screen stays outstanding. What replaces it
+here is a real-host integration test: `bestiary.search → actor.from_compendium` lands an actor and its
+token in **one envelope stamped `by` the agent**, and a pasted `Goblin Warrior` stat block becomes a
+real actor (hp 6, Dex 15, owned by the session that imported it) with a token on the table.
 
 ### Phase 4 — Table flow, time, strategic (1 day, S)
 `combat.*`, `time.*`, `dice.apply`, `fog.*` (mask + state), `strategic.snapshot/order/report`.
@@ -500,7 +529,9 @@ see, how to revoke); a `MCP_CONNECTOR.md` reference for the tool table; and the 
 
 ### Sequencing note
 Phases 0–2 give a GM-scoped agent that can run a table. Phase 3 is what makes "the LLM plays a character"
-defensible, and it should not be skipped before letting any agent near a live table.
+defensible, and it should not be skipped before letting any agent near a live table — it has landed, and
+the one gate it leaves open is the **e2e**: no browser here, so no run has put the Agents window on
+screen. Any environment with Chromium should write `e2e/agent_connector.spec.ts` next.
 
 ---
 

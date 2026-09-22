@@ -69,6 +69,8 @@ describe("the gate: the grant matrix (§8 Phase 2)", () => {
       "document.create": { coll: "actors", name: "Goblin" },
       "document.update": { coll: "actors", id: "a1", diff: { "system.hp": 5 } },
       "document.delete": { coll: "scenes", id: "s2", confirm: true },
+      "actor.from_compendium": { entryId: "goblin" },
+      "actor.from_statblock": { text: "Goblin Warrior CR 1/3" },
       "token.move": { tokenId: "t-vex", col: 2, row: 2 },
       "token.properties": { tokenId: "t-vex", disposition: "hostile" },
       "scene.create": { name: "Camp" },
@@ -114,6 +116,8 @@ describe("the gate: the grant matrix (§8 Phase 2)", () => {
       "document.create": { coll: "actors", name: "Goblin" },
       "document.update": { coll: "scenes", id: "s1", diff: { name: "Camp" } },
       "document.delete": { coll: "scenes", id: "s2", confirm: true },
+      "actor.from_compendium": { entryId: "goblin" },
+      "actor.from_statblock": { text: "Goblin Warrior CR 1/3" },
       "token.move": { tokenId: "t-vex", col: 2, row: 2 },
       "token.properties": { tokenId: "t-vex", disposition: "hostile" },
       "scene.create": { name: "Camp" },
@@ -410,6 +414,199 @@ describe("tokens (§5.3)", () => {
   });
 });
 
+describe("actors from the library and from text (§5.4)", () => {
+  test("from_compendium creates the pack's own document, with a fresh id, in one envelope", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf(
+      "actor.from_compendium",
+      { entryId: "goblin" },
+      ctxWith(writer),
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toHaveLength(1);
+    const op = calls[0]?.[0];
+    expect(op?.kind).toBe("create");
+    if (op?.kind !== "create") return;
+    // The entry's payload, not a re-derivation of it: what the Compendia panel's Import button
+    // would have submitted, with an id of this world's own.
+    expect(op.coll).toBe("actors");
+    expect(op.data["name"]).toBe("Goblin");
+    expect(op.data["system"]).toMatchObject({ pf1e: { hpMax: 6 } });
+    expect(String(op.data["_id"])).not.toBe("goblin");
+    expect(body).toContain("imported Goblin from bestiary as actor");
+  });
+
+  test("placing a token is the same call: two ops, one envelope, and it names the cell", async () => {
+    const { writer, calls } = fakeWriter();
+    await textOf(
+      "actor.from_compendium",
+      { entryId: "goblin", col: 4, row: 3 },
+      ctxWith(writer),
+    );
+    // One call, one envelope: the actor and its token land together or not at all.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toHaveLength(2);
+    const token = calls[0]?.[1];
+    expect(token).toMatchObject({
+      kind: "create",
+      coll: "tokens",
+      parent: { coll: "scenes", id: "s1" },
+    });
+    // The actor id the token links to is the one this call created — not the entry's pack id.
+    const created = calls[0]?.[0];
+    if (created?.kind === "create" && token?.kind === "create") {
+      const linked = token.data as unknown as Record<string, Json>;
+      expect(linked["actorId"]).toBe(created.data["_id"]);
+    }
+  });
+
+  test("half a cell is a malformed call, not a refusal", async () => {
+    const bad = await call(
+      "actor.from_compendium",
+      { entryId: "goblin", col: 4 },
+      ctxWith(fakeWriter().writer),
+    );
+    expect(bad.kind).toBe("invalid");
+    if (bad.kind === "invalid")
+      expect(bad.error).toContain("both col and row");
+  });
+
+  test("an off-map cell comes back as the map's own sentence", async () => {
+    // The cell is checked where the map is: the tool names a cell, the view owns the geometry.
+    const tight = fakeView({
+      tokenCreate: () => ({
+        error: "cell 40,3 is off Goblinwood — it is 12×9 cells",
+      }),
+    });
+    const { writer, calls } = fakeWriter();
+    const body = await textOf(
+      "actor.from_compendium",
+      { entryId: "goblin", col: 40, row: 3 },
+      { view: tight, grant: grantFor("gm"), writer },
+    );
+    expect(body).toContain("it is 12×9 cells");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("an entry that is not an actor is refused, and the refusal says what to use instead", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf(
+      "actor.from_compendium",
+      { entryId: "fireball" },
+      ctxWith(writer),
+    );
+    expect(body).toContain("not an actor");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("stocking the bestiary is not permission to put things on the table", async () => {
+    // doc.create without token.move: the import is allowed, the placement is not.
+    const grant = narrow(grantFor("gm"), ["doc.create"]);
+    const { writer, calls } = fakeWriter();
+    const body = await textOf(
+      "actor.from_compendium",
+      { entryId: "goblin", col: 1, row: 1 },
+      { view, grant, writer },
+    );
+    expect(body).toContain("not place tokens");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("a replica with no packs says so, rather than finding nothing", async () => {
+    const bare = fakeView();
+    delete bare.compendiumEntry; // a replica with the packs runtime not wired up
+    const { writer, calls } = fakeWriter();
+    const answered = await call(
+      "actor.from_compendium",
+      { entryId: "goblin" },
+      { view: bare, grant: grantFor("gm"), writer },
+    );
+    expect(answered.kind).toBe("result");
+    if (answered.kind !== "result") return;
+    expect(answered.result.isError).toBe(true);
+    expect(answered.result.content[0]?.text).toContain("no compendium packs");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("from_statblock reads the stat block and hands the importer's report back", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf(
+      "actor.from_statblock",
+      { text: "Goblin Warrior CR 1/3" },
+      ctxWith(writer),
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[0]?.kind).toBe("create");
+    // The report is the point: what came across, and what the source stated that this app does
+    // not place. An agent that reads it can tell the table; one that does not, cannot.
+    expect(body).toContain("from a stat block");
+    expect(body).toContain("hit points: 6/6");
+    expect(body).toContain("no ability scores in the text");
+  });
+
+  test("from_statblock passes the importer's own refusal through, verbatim", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf(
+      "actor.from_statblock",
+      { text: "a bag of holding and a rope" },
+      ctxWith(writer),
+    );
+    expect(body).toContain("that text did not read as a character");
+    expect(body).toContain("a stat block starts with the creature's name and its CR");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("dryRun describes the import and changes nothing", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf(
+      "actor.from_compendium",
+      { entryId: "goblin", col: 2, row: 2, dryRun: true },
+      ctxWith(writer),
+    );
+    expect(body).toContain("dry run");
+    expect(body).toContain("create actors");
+    expect(body).toContain("create tokens in scenes/s1");
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe("token.move is ownership-scoped (§8 Phase 3)", () => {
+  test("a grant that is not the GM's moves its own token", async () => {
+    const mover = narrow(grantFor("player"), ["token.move"]);
+    const { writer, calls } = fakeWriter();
+    const body = await textOf(
+      "token.move",
+      { tokenId: "t-vex", col: 2, row: 2 },
+      { view, grant: mover, writer },
+    );
+    expect(calls).toHaveLength(1);
+    expect(body).not.toContain("not yours");
+  });
+
+  test("the party's other tokens are not the agent's to move, however well it can see them", async () => {
+    // Seeing a token is not permission to move it: the player shell has always drawn that line at
+    // ownership, and an agent playing one character does not get to place the others.
+    const mover = narrow(grantFor("player"), ["token.move"]);
+    const { writer, calls } = fakeWriter();
+    const body = await textOf(
+      "token.move",
+      { tokenId: "t-gob", col: 2, row: 2 },
+      { view, grant: mover, writer },
+    );
+    expect(body).toContain('token "t-gob" is not yours to move');
+    expect(body).toContain("token.list marks the tokens you own");
+    expect(calls).toHaveLength(0);
+
+    // The GM's grant moves anything: the difference is the grant, not the token.
+    const gmBody = await textOf(
+      "token.move",
+      { tokenId: "t-gob", col: 2, row: 2 },
+      ctxWith(fakeWriter().writer),
+    );
+    expect(gmBody).not.toContain("not yours");
+  });
+});
+
 describe("scenes (§5.2)", () => {
   test("scene.activate switches one on and the other off in a single envelope", async () => {
     const { writer, calls } = fakeWriter();
@@ -539,8 +736,8 @@ describe("chat and undo (§5.5, §5.1)", () => {
 });
 
 describe("the catalogue", () => {
-  test("every write tool names one capability, and all ten are registered", () => {
-    expect(WRITE_TOOLS).toHaveLength(10);
+  test("every write tool names one capability, and all twelve are registered", () => {
+    expect(WRITE_TOOLS).toHaveLength(12);
     for (const tool of WRITE_TOOLS) expect(tool.capability).not.toBeNull();
     for (const tool of WRITE_TOOLS) {
       expect(AGENT_TOOLS.map((t) => t.name)).toContain(tool.name);

@@ -12,11 +12,29 @@ import { callTool, toolManifest } from "../../src/core/agents/tools";
 import { fakeView, TOKENS } from "./agentsFixture";
 import { paginate } from "../../src/core/agents/paging";
 import type { Json } from "../../src/core/documents";
-import type { ToolContext } from "../../src/core/agents/types";
+import type {
+  AgentMessageRow,
+  ToolContext,
+} from "../../src/core/agents/types";
 
 const gm = grantFor("gm");
 const observer = grantFor("observer");
 const view = fakeView();
+
+/**
+ * A `gmroll` card as a player's replica holds it: the result is gone from `roll` and from the
+ * content chip, and `resultWithheld` is the view's way of saying there was one.
+ */
+const WITHHELD_ROLL: AgentMessageRow = {
+  id: "m2",
+  author: "u-vex",
+  authorName: "Vex",
+  content: "I check for tracks. [rolled 1d20+5]",
+  whisper: [],
+  hasRoll: false,
+  rollMode: "gmroll",
+  resultWithheld: true,
+};
 
 const call = (
   name: string,
@@ -239,17 +257,23 @@ describe("documents, chat and sheets (§5.3–5.4)", () => {
     );
     expect(public_.result.content[0]?.text).toContain("(whisper)");
 
+    // The same card as a grant that may not read the dice holds it: the projection nulls `roll`
+    // (projectMessage) and the view strips the total out of the content chip, so what reaches the
+    // agent says a roll happened, on what, and never what it came to.
     const limited = await call(
       "chat.read",
       {},
-      { view, grant: narrow(grantFor("observer"), ["chat.read"]) },
+      {
+        view: fakeView({ messages: (options) => paginate([WITHHELD_ROLL], options) }),
+        grant: narrow(grantFor("observer"), ["chat.read"]),
+      },
     );
     expect(limited.kind).toBe("result");
     if (limited.kind !== "result") return;
-    // The card is public; the dice are not. Saying "there was a roll" is the fact the table needs.
     expect(limited.result.content[0]?.text).toContain(
-      "[rolled — result withheld from this grant]",
+      "Vex: I check for tracks. [rolled 1d20+5] [result withheld from this grant]",
     );
+    expect(limited.result.content[0]?.text).not.toContain("16");
   });
 
   test("chat.read without chat.read is refused by the gate, like any other tool", async () => {

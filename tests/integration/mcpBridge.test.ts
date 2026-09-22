@@ -416,6 +416,8 @@ describe("vtt-mcp ↔ agent bridge (MCP plan §8 Phase 0)", () => {
       "document.create",
       "document.update",
       "document.delete",
+      "actor.from_compendium",
+      "actor.from_statblock",
       "token.move",
       "token.properties",
       "scene.create",
@@ -735,49 +737,103 @@ describe("vtt-mcp ↔ agent bridge (MCP plan §8 Phase 0)", () => {
     expect(answered.result.content[0]?.text).toContain("not yours");
   }, 30_000);
 
-  test("the two layers: the grant allows the verb, the host still refuses the write (§3.1)", async () => {
-    // This is the sentence the whole security model rests on: the capability mask is UX plus
-    // defence in depth, and the *host* is the boundary. A `player` agent holds `token.move`, so
-    // the bridge lets the call through — and the host refuses it anyway, because the token is the
-    // GM's and `can()` needs OWNER. A bug in the bridge cannot buy a write.
-    const opened = openAgentSession({
-      host: hostRef,
-      meta,
-      settings: storeRef.getAll("settings"),
-      users: storeRef.getAll("users"),
-      name: "Runner",
-      preset: "player",
-      client: "vitest",
-    });
-    expect(opened.ok).toBe(true);
-    if (!opened.ok) return;
-    const runner = opened.session;
-    await flushMicrotasks();
-    await flushMicrotasks();
+  test(
+    "the two layers: the bridge mirrors the host's rule, and the host is still the boundary (§3.1)",
+    async () => {
+      // This is the sentence the whole security model rests on: the capability mask is UX plus
+      // defence in depth, and the *host* is the boundary. Two halves, and Phase 3 added the first:
+      //
+      // 1. The bridge now refuses a `player` agent's move of a token it does not own, in its own
+      //    words — the same rule `can()` applies, checked one layer earlier so the agent is told
+      //    what to ask for instead of just "forbidden".
+      // 2. A mirror can be stale, and a stale mirror is a bug that could buy a write. So the proof
+      //    is the case the mirror gets wrong: the GM takes the token back, the agent's replica has
+      //    not caught up, the bridge's pre-check reads "owned" — and the host, which validates
+      //    against the world as it is, refuses anyway.
+      const opened = openAgentSession({
+        host: hostRef,
+        meta,
+        settings: storeRef.getAll("settings"),
+        users: storeRef.getAll("users"),
+        name: "Runner",
+        preset: "player",
+        client: "vitest",
+      });
+      expect(opened.ok).toBe(true);
+      if (!opened.ok) return;
+      const runner = opened.session;
+      await flushMicrotasks();
+      await flushMicrotasks();
 
-    const grant = grantOfRecord(
-      agentRecordOf(agentRegistryFrom(storeRef.getAll("settings")), runner.id),
-    );
-    expect(grant.capabilities).toContain("token.move"); // the mask says yes …
-    expect(grant.role).toBe("PLAYER");
+      const grant = grantOfRecord(
+        agentRecordOf(agentRegistryFrom(storeRef.getAll("settings")), runner.id),
+      );
+      expect(grant.capabilities).toContain("token.move"); // the mask says yes …
+      expect(grant.role).toBe("PLAYER");
 
-    const answered = await callTool(
-      { name: "token.move", args: { tokenId: "t-vex", col: 4, row: 3 } },
-      { view: agentWorldView(runner.client), grant, writer: runner.writer },
-    );
-    expect(answered.kind).toBe("result");
-    if (answered.kind !== "result") return;
-    // … and the host says no, in the host's words, not a summary of them.
-    expect(answered.result.isError).toBe(true);
-    expect(answered.result.content[0]?.text).toContain(
-      "the host refused this change (forbidden)",
-    );
-    // Nothing moved: the refusal is the world's state, not just the answer's.
-    const after = storeRef.get("scenes", "s1") as unknown as {
-      tokens: Array<{ _id: string; x: number }>;
-    };
-    expect(after.tokens.find((t) => t._id === "t-vex")?.x).toBe(350);
-  }, 30_000);
+      /** The GM's side of ownership: `level` is what the agent holds on this token, 3 or nothing. */
+      const ownership = (level: 0 | 3): Op => ({
+        kind: "update",
+        ref: { coll: "tokens", id: "t-vex", parent: { coll: "scenes", id: "s1" } },
+        diff: { ownership: { default: 0, [runner.user._id]: level } },
+      });
+
+      // 1. Not yours: the bridge's own gate, before anything reaches the host.
+      const before = await callTool(
+        { name: "token.move", args: { tokenId: "t-vex", col: 4, row: 3 } },
+        { view: agentWorldView(runner.client), grant, writer: runner.writer },
+      );
+      expect(before.kind).toBe("result");
+      if (before.kind === "result") {
+        expect(before.result.isError).toBe(true);
+        expect(before.result.content[0]?.text).toContain("is not yours to move");
+      }
+
+      // The GM hands it over, and lets the replica catch up …
+      gm.submit([ownership(3)]);
+      for (let i = 0; i < 4; i++) await flushMicrotasks();
+      expect(runner.client.store.seq).toBe(storeRef.seq);
+
+      // … then takes it back without letting the replica catch up. The bridge reads its own
+      // replica, so it still believes the token is the agent's.
+      gm.submit([ownership(0)]);
+      const ctx = {
+        view: agentWorldView(runner.client),
+        grant,
+        writer: runner.writer,
+      };
+      const answered = await callTool(
+        { name: "token.move", args: { tokenId: "t-vex", col: 4, row: 3 } },
+        ctx,
+      );
+      expect(answered.kind).toBe("result");
+      if (answered.kind !== "result") return;
+      // The host says no, in the host's words, not a summary of them: the world's state is the
+      // one that decides, and the bridge's mirror of it is a convenience, never an authority.
+      expect(answered.result.isError).toBe(true);
+      expect(answered.result.content[0]?.text).toContain(
+        "the host refused this change (forbidden)",
+      );
+      // Nothing moved: the refusal is the world's state, not just the answer's.
+      const after = storeRef.get("scenes", "s1") as unknown as {
+        tokens: Array<{ _id: string; x: number }>;
+      };
+      expect(after.tokens.find((t) => t._id === "t-vex")?.x).toBe(350);
+
+      // And once the replica has caught up, the bridge says no too — in its own words, before the
+      // host is even asked. Two layers, each with something to say.
+      for (let i = 0; i < 4; i++) await flushMicrotasks();
+      const settled = await callTool(
+        { name: "token.move", args: { tokenId: "t-vex", col: 4, row: 3 } },
+        { view: agentWorldView(runner.client), grant, writer: runner.writer },
+      );
+      expect(settled.kind).toBe("result");
+      if (settled.kind !== "result") return;
+      expect(settled.result.isError).toBe(true);
+      expect(settled.result.content[0]?.text).toContain("is not yours to move");
+    },
+    30_000,
+  );
 
   test("the audit ring records what the agent did, in the GM's words (§6.4)", async () => {
     const before = bridge?.audit().length ?? 0;

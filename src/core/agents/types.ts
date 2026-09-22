@@ -33,6 +33,33 @@ export interface AgentWorldView {
   /** Optional: only a replica with the compendium runtime can answer it. */
   bestiary?(query: string, limit: number): Promise<AgentBestiaryHit[]>;
   packages?(): AgentPackageRow[];
+  /**
+   * Optional: one compendium entry by id, in the shape its pack authors it. Only a replica with
+   * the compendium runtime can answer it.
+   */
+  compendiumEntry?(id: string): Promise<AgentCompendiumEntry | null>;
+  /**
+   * Optional: the D-264/D-267 import front door — pasted text (a stat block, or a Foundry/Roll20/
+   * Hero Lab export) becomes the ops that create the actor. The **importer's own sentence** comes
+   * back as the error, because "a stat block starts with the creature's name and its CR" is what
+   * tells an agent what to paste next time.
+   */
+  importCharacter?(
+    text: string,
+    options: { id: string },
+  ): AgentImportPlan | { error: string };
+  /**
+   * Optional: the one create op that puts a token on a scene at a cell. The token's own shape
+   * (D-061's tabletop default, the app's light/vision defaults) lives in the app layer, so the
+   * view is the only place that can build it; core gets a cell and gets an op back.
+   */
+  tokenCreate?(spec: {
+    sceneId: string;
+    name: string;
+    actorId?: string | null;
+    col: number;
+    row: number;
+  }): Op | { error: string };
 }
 
 export interface AgentWorldInfo {
@@ -93,6 +120,40 @@ export interface AgentTokenRow {
   disposition: "hostile" | "neutral" | "friendly";
   hidden: boolean;
   actorId: string | null;
+  /**
+   * This session owns the token — directly, or by the scene above it (§4's ownership cascade).
+   * `token.move` moves owned tokens for a grant that is not the GM's; the rest it names as not
+   * the agent's to move. A GM/ASSISTANT session owns everything, because its role says so.
+   */
+  owned: boolean;
+}
+
+/** One compendium entry, as the packs hold it — what `actor.from_compendium` creates. */
+export interface AgentCompendiumEntry {
+  id: string;
+  name: string;
+  /** The pack it came from, so the answer can say where the creature was found. */
+  pack: string;
+  /** The pack's target collection: an `actors` pack imports as an actor, a `feats` pack does not. */
+  coll: string;
+  /**
+   * The create payload, exactly as the Compendia panel's own Import button submits it — the
+   * document a GM's click would land, not a re-derivation of it.
+   */
+  data: Json;
+}
+
+/**
+ * What the D-264/D-267 importer made of a pasted character: the ops it becomes, plus the report the
+ * UI shows a GM (what was read, and what the source stated that this app does not place).
+ */
+export interface AgentImportPlan {
+  name: string;
+  /** `stat block`, `Foundry PF1e actor`, … — the importer's own name for the format it read. */
+  format: string;
+  ops: Op[];
+  read: string[];
+  warnings: string[];
 }
 
 /** One scene with its contents. `walls` are the segments themselves, not the summary's count. */
@@ -118,6 +179,12 @@ export interface AgentMessageRow {
   hasRoll: boolean;
   /** null = no roll; the mode decides whether the *result* is the agent's to read. */
   rollMode: string | null;
+  /**
+   * The card carries a roll whose result this replica does not hold (a `gmroll`/`blindroll`
+   * the agent did not roll and may not read). `projectMessage` redacts by nulling `roll`, and the
+   * view strips the total out of the content chip as well — see `agentBridge.ts`.
+   */
+  resultWithheld: boolean;
 }
 
 export interface AgentDocumentRow {

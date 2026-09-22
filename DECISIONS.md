@@ -8301,3 +8301,83 @@ the OpLog can never show.
 - **Not yet proven:** no browser has rendered the Agents window — the section passes `svelte check`
   and its logic is tested through the manager, but the e2e (`agent_connector.spec.ts`) is Phase 3's,
   and it is the same run that must prove a `PLAYER` agent's replica against `projectWorld()`.
+
+## D-281 — 2026-09-22 — The projection proved field-by-field, ownership as the line, and the two import front doors (connector Phase 3)
+
+**Context.** Phases 0–2 gave a GM-scoped agent that can run a table, and every phase's security claim
+rested on one belief: that the host projects the world per session, so an agent sees what its role may
+see. `projectWorld()` is real and tested, but "the agent's replica is the projection" had never been
+asserted — Phase 2's reads ran on an agent session nobody had compared against it. Phase 3 is that
+comparison, plus the two tools that put a creature on the table (`actor.from_compendium`,
+`actor.from_statblock`) and `token.move` restricted to owned tokens.
+
+**Decision — the proof is a field-by-field comparison, not a spot check.**
+`tests/integration/agentProjection.test.ts` (12) boots a real `HostSync`, seeds a world with a hidden
+token, a whisper aimed at a human and a `gmroll` card, opens a `player` agent session, and compares its
+replica against `projectWorld(store.world, seq, {id, role})` over every top-level collection: the same
+ids, then `JSON.parse(JSON.stringify(doc))` deep-equal per document. Ids alone would pass a projection
+that kept a document but forgot to strip a field inside it; that failure belongs in a test, not in a
+player's hands. A `gm`-preset agent on the same world sees the hidden token and the whisper, which is
+the assertion that makes the first one mean something.
+
+**Decision — the proof found a hole, and the connector closes it on its side.**
+`projectMessage` redacts a GM-only roll by nulling `roll` — but the total is in the content too, as an
+inline `[[16|1d20+5]]` chip, which the player's chat renders (so the number is not secret at the table)
+and an agent reads as text. `agentWorldView` strips the total and keeps the formula (`[rolled 1d20+5]`),
+and `chat.read` adds `[result withheld from this grant]`. The rule that decides it: **the connector may
+be stricter than the player shell, never wider.** The old marker asked the grant whether it could read
+GM-only data; the new one reads the replica's own state (`roll === null` with a mode that withholds),
+which is the only thing that is true of a projected document.
+
+**Decision — `token.move` is ownership-scoped, and the bridge's mirror is a convenience, not an
+authority.** A grant that is not the GM's moves the tokens it owns; `AgentTokenRow.owned` carries §4's
+own cascade (`getEffectiveOwnership`, scene included) and `token.list` marks it, because an agent can
+only act on what it has been told it owns. The bridge is now checking `can()`'s rule one layer earlier,
+so the refusal can say *what to ask for* instead of only "forbidden" — and
+`tests/integration/mcpBridge.test.ts` proves the mirror is not the boundary: the GM hands a token to a
+`player` agent, takes it back **without letting the replica catch up**, and the host is the one that
+refuses. Two layers, each with something to say; a bug in the first still cannot buy a write.
+
+**Decision — `actor.from_compendium` imports the pack's own payload; `actor.from_statblock` is the
+D-264/D-267 front door.** The plan named `importCharacter` for the compendium tool. Packs are already
+in this app's document shape (`system.pf1e`, authored directly in
+`systems/pf1e-core/packs/bestiary.json`), so handing an entry to the Foundry/Roll20 reader would find
+none of its fields and author an actor that opens as a blank sheet — the exact failure
+`characterImportCheck` exists to prevent, and worse than a refusal because the numbers look plausible.
+The tool submits the entry's payload with a fresh id, which is what `importEntryOp` builds for the
+Compendia panel's own Import button: an agent's import lands the document a GM's click lands. Pasted
+*text* is the other case, and there the importer is right, report and all — the answer carries its
+`read` and `warnings` lines, and the importer's own refusal sentence comes back verbatim, because "a
+stat block starts with the creature's name and its CR" is what tells an agent what to paste next time.
+Placing a token is a **second capability** (`token.move`) on top of `doc.create`: an agent allowed to
+stock the bestiary is not automatically allowed to put things on the table. An imported actor is owned
+by the session that imported it, the same way the app's own import hands a character to the GM.
+
+**Decision — the packs are wired up, because a tool that always refuses is not a tool.** Phase 1
+left `compendia` unpassed, so `bestiary.search` answered "no compendium index on this replica" in the
+app that had the packs all along. `AgentManagerOptions.compendia` now carries
+`HostPackages.compendia()` into every bridge the manager connects (`App.svelte`), and the tools'
+refusal stays for the case it was written for: a replica with no packages runtime.
+
+**Gates.**
+
+- **The unit gate:** `pnpm test` — **270 files / 3 232 tests passed** (2 files, 12 tests skipped). New
+  in `tests/core/agentsWriteTools.test.ts` (now 40): the two importers (the pack's payload with a fresh
+  id, actor + token in one envelope, the off-map cell coming back as the map's sentence, `doc.create`
+  without `token.move`, the no-packs refusal, the importer's report and its refusal verbatim, dryRun)
+  and the ownership gate (a player's own token moves; the party's does not; the GM's grant moves both).
+- **The integration gate:** `tests/integration/agentProjection.test.ts` (**12** — the field-by-field
+  proof, the three must-never-see items absent from the documents, the stripped `<secret>`, the tools
+  reading the projection ("2 tokens", not three), a write the projection forbids refused by the host,
+  the withheld total out of the tools' text, the ownership pair against a real host, and
+  `bestiary.search → actor.from_compendium` landing an actor and its token in **one envelope stamped
+  `by` the agent** plus a real stat block becoming a real actor) and `mcpBridge.test.ts` (14 — the
+  stale-replica two-layer proof above).
+- **Types and lint:** `pnpm typecheck` **51 components, 0 blocking, 1 advisory**
+  (`ReplayPanel.svelte:29`) · `pnpm lint` **exit 0**.
+- **The build and the size budget:** `pnpm build` → `pnpm size` **3 220 484 B raw / 928 453 B gzip —
+  +7 318 B** (the pf1e import front door is now reachable from the Agents window), inside the 6 MB
+  budget.
+- **Not yet proven:** the Phase 3 e2e (`agent_connector.spec.ts`) — this environment has no Chromium
+  and the repo's e2e needs Playwright's, so **no browser has rendered the Agents window**. The security
+  claim is proved without it; the UI's own run is the debt this phase leaves behind.

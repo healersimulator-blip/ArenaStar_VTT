@@ -419,7 +419,7 @@ const documentRead: ToolDefinition = {
 const tokenList: ToolDefinition = {
   name: "token.list",
   description:
-    "The tokens on a scene with their ids, world positions, grid cells and dispositions. Hidden tokens appear only for a grant with gmOnly.read.",
+    "The tokens on a scene with their ids, world positions, grid cells and dispositions. Hidden tokens appear only for a grant with gmOnly.read, and the ones you own are marked \"yours\" — token.move moves those, and only those, unless your grant is the GM's.",
   args: {
     properties: {
       sceneId: {
@@ -451,7 +451,7 @@ const tokenList: ToolDefinition = {
     });
     const lines = page.rows.map(
       (t) =>
-        `  ${t.name} [${t.id}] — ${t.disposition}${t.hidden ? ", hidden" : ""} · cell ${t.col},${t.row} · ${Math.round(t.x)},${Math.round(t.y)} px${t.actorId ? ` · actor ${t.actorId}` : ""}`,
+        `  ${t.name} [${t.id}] — ${t.disposition}${t.hidden ? ", hidden" : ""}${t.owned ? ", yours" : ""} · cell ${t.col},${t.row} · ${Math.round(t.x)},${Math.round(t.y)} px${t.actorId ? ` · actor ${t.actorId}` : ""}`,
     );
     return text(
       [
@@ -505,12 +505,11 @@ const chatRead: ToolDefinition = {
     const page = paged.page;
     const lines = page.rows.map((m) => {
       const tag = m.whisper.length > 0 ? " (whisper)" : "";
-      const roll =
-        m.hasRoll && m.rollMode !== null && !gmOnly(ctx)
-          ? " [rolled — result withheld from this grant]"
-          : m.hasRoll
-            ? " [rolled]"
-            : "";
+      const roll = m.resultWithheld
+        ? " [result withheld from this grant]"
+        : m.hasRoll
+          ? " [rolled]"
+          : "";
       return `  ${m.authorName}: ${m.content}${tag}${roll}`;
     });
     return text(

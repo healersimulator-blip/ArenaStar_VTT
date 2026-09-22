@@ -21,6 +21,7 @@
  * `system.*`, and it cannot write `ownership`, `_id`, or anyone's `flags`.
  */
 import type {
+  BaseDocument,
   CollectionName,
   Json,
   SceneDocument,
@@ -545,6 +546,14 @@ function tokenTarget(
       error: `no token "${id}" on ${detail.name} — token.list names the ones you may see`,
     };
   }
+  // And the ownership gate (Phase 3): a grant that is not the GM's moves its own tokens, not the
+  // table's. Seeing a token is not permission to move it — the party's rogue is not the agent's to
+  // place, and "I could see it" is the answer a player's client has always refused.
+  if (!canReadGmOnly(ctx.grant) && !row.owned) {
+    return {
+      error: `token "${id}" is not yours to move — token.list marks the tokens you own`,
+    };
+  }
   return { row, sceneId: detail.id, sceneName: detail.name };
 }
 
@@ -749,6 +758,275 @@ const tokenProperties: ToolDefinition = {
         token: (row ?? null) as unknown as Json,
       } as unknown as Json,
     );
+  },
+};
+
+// ─── actors from the library and from text (§5.4) ─────────────────────────────────────────────
+
+/**
+ * The companion token an import may place. Both importers place the same way, and an error here is
+ * about the *cell*, not the creature — the entry was fine, the map did not have that square.
+ *
+ * Nothing is placed unless `col`/`row` are named: an import is not a placement by default, because
+ * an agent that is stocking the bestiary for later does not want a token on the table.
+ */
+function placeTokenOp(
+  ctx: ToolContext,
+  args: Record<string, Json>,
+  what: string,
+  actorId: string,
+): { op: Op | null } | { error: string } | { invalid: string } {
+  const col = numIn(args["col"], -1_000_000, 1_000_000);
+  const row = numIn(args["row"], -1_000_000, 1_000_000);
+  if (col === undefined && row === undefined) return { op: null };
+  if (col === undefined || row === undefined) {
+    // A malformed call, not a refusal (D-279): half a cell is the model's mistake to fix.
+    return {
+      invalid: `placing ${what} needs both col and row — a cell is a pair`,
+    };
+  }
+  const build = ctx.view.tokenCreate;
+  if (!build) {
+    return {
+      error: `this replica cannot place a token — the app's token shape is wired up by the Agents window`,
+    };
+  }
+  const sceneId = str(args["sceneId"]) ?? ctx.view.scene(null)?.id;
+  if (!sceneId) {
+    return {
+      error: "there is no scene to place a token on — scene.create makes one",
+    };
+  }
+  const made = build({ sceneId, name: what, actorId, col, row });
+  return "error" in made ? { error: made.error } : { op: made };
+}
+
+/** The sentence a placed token adds to an import's answer, read back rather than echoed. */
+function placedLine(
+  view: AgentWorldView,
+  sceneId: string | undefined,
+  actorId: string,
+): string | null {
+  const detail = view.scene(sceneId ?? null);
+  const row = detail?.tokenRows.find((token) => token.actorId === actorId);
+  return row
+    ? `Token ${row.name} [${row.id}] stands at cell ${row.col},${row.row} on ${detail?.name ?? "the scene"}.`
+    : null;
+}
+
+/**
+ * §5.4 — the compendium's own import, not the character importer's. A pack entry is *already* this
+ * app's document shape (`systems/pf1e-core/packs/bestiary.json` authors `system.pf1e` directly), so
+ * handing it to `importCharacter` would read none of its fields and author an actor that opens as a
+ * blank sheet — the one failure the importer's own header calls worse than a refusal. What the
+ * Compendia panel's Import button submits is what an agent gets.
+ */
+const actorFromCompendium: ToolDefinition = {
+  name: "actor.from_compendium",
+  description:
+    "Import one compendium entry as an actor — the same document the Compendia panel's Import button creates — and, with col/row, put a token for it on a scene at that cell. One call, one envelope. Answer: the new actor's id, a read-back, and where the token stands. bestiary.search finds the ids.",
+  args: {
+    properties: {
+      entryId: {
+        type: "string",
+        description: "the compendium entry id (from bestiary.search)",
+      },
+      name: {
+        type: "string",
+        description: "a name for the actor; the entry's own name when omitted",
+      },
+      sceneId: {
+        type: "string",
+        description: "the scene to place a token on; the active one when omitted",
+      },
+      col: { type: "integer", description: "place a token at this column" },
+      row: { type: "integer", description: "place a token at this row" },
+      dryRun: {
+        type: "boolean",
+        description: "describe the ops without applying them",
+      },
+    },
+    required: ["entryId"],
+  },
+  capability: "doc.create",
+  async run(args, ctx): Promise<ToolOutcome> {
+    const begun = beginWrite(ctx);
+    if ("refused" in begun) return begun.refused;
+
+    const entryId = str(args["entryId"]);
+    if (!entryId)
+      return invalid(
+        "actor.from_compendium needs an entryId — bestiary.search gives them",
+      );
+    if (!ctx.view.compendiumEntry) {
+      return refusal(
+        "this replica holds no compendium packs — bestiary.search and actor.from_compendium need the packages runtime, which the Agents window wires up",
+      );
+    }
+    const entry = await ctx.view.compendiumEntry(entryId);
+    if (!entry) {
+      return refusal(
+        `no compendium entry "${entryId}" — bestiary.search names the ones installed`,
+      );
+    }
+    if (entry.coll !== "actors") {
+      return refusal(
+        `"${entry.name}" lives in a ${entry.coll} pack, so it is not an actor — document.create makes anything else, and actor.from_statblock makes an actor out of text`,
+      );
+    }
+    // Placing a token is a second capability (§5.4): an agent allowed to stock the bestiary is not
+    // automatically allowed to put things on the table.
+    const placing = numIn(args["col"], -1_000_000, 1_000_000) !== undefined;
+    if (placing && !ctx.grant.capabilities.includes("token.move")) {
+      return refusal(
+        "this agent may import actors but not place tokens — ask the GM to change its grant",
+      );
+    }
+
+    const actorId = newId();
+    const data: Record<string, Json> = {
+      ...(entry.data as Record<string, Json>),
+      _id: actorId,
+    };
+    if (typeof data["name"] !== "string")
+      data["name"] = str(args["name"]) ?? entry.name;
+    const name = String(data["name"]);
+    const ops: Op[] = [
+      {
+        kind: "create",
+        coll: entry.coll as CollectionName,
+        // The entry's own payload with a fresh id — exactly what `importEntryOp` builds for the
+        // panel's Import button. The cast is the importer's own, and the whitelist this file
+        // applies to `document.create` does not apply here on purpose: a pack entry *is* the
+        // document, and editing it on the way in would be the drift this tool exists to avoid.
+        data: data as unknown as BaseDocument,
+      },
+    ];
+    const placed = await placeTokenOp(ctx, args, name, actorId);
+    if ("invalid" in placed) return invalid(placed.invalid);
+    if ("error" in placed) return refusal(placed.error);
+    if (placed.op) ops.push(placed.op);
+
+    const what = `importing ${entry.name} from ${entry.pack}${placed.op ? ` and placing a token` : ""}`;
+    if (bool(args["dryRun"]) === true) return dryRunAnswer(ops, what);
+
+    const done = await submit(ops, begun.writer);
+    if (!done.ok) return done.answered;
+
+    const answered = readBack(
+      ctx.view,
+      "actors",
+      actorId,
+      `imported ${entry.name} from ${entry.pack} as actor "${name}" [${actorId}]${placed.op ? " and placed its token" : ""} (seq ${done.seq})`,
+      { seq: done.seq, entryId: entry.id, pack: entry.pack },
+    );
+    const line = placed.op ? placedLine(ctx.view, str(args["sceneId"]), actorId) : null;
+    if (line === null || "invalid" in answered) return answered;
+    return text(
+      `${answered.content[0]?.text ?? ""}
+${line}`,
+      answered.structuredContent,
+    );
+  },
+};
+
+/**
+ * §5.4 — the D-264/D-267 front door for *text*: a Pathfinder stat block pasted off a wiki, or a
+ * Foundry/Roll20/Hero Lab export. The importer validates what it read before anything is created
+ * (`characterImportCheck`), so a sheet that would open blank is refused instead — and the report's
+ * own `read`/`warnings` lines come back, because "the export states no hit-point maximum" is
+ * exactly the sort of thing an agent should tell the table rather than discover later.
+ */
+const actorFromStatblock: ToolDefinition = {
+  name: "actor.from_statblock",
+  description:
+    "Turn pasted text into an actor: a Pathfinder 1e monster stat block, or a Foundry/Roll20/Hero Lab character export. The importer reads it and validates what it read before creating anything, so a sheet that would open blank is refused instead. With col/row it also puts a token on a scene. One call, one envelope.",
+  args: {
+    properties: {
+      text: {
+        type: "string",
+        description:
+          "the stat block or export, pasted whole — start at the creature's name",
+      },
+      name: {
+        type: "string",
+        description: "a name for the actor; the importer's when omitted",
+      },
+      sceneId: {
+        type: "string",
+        description: "the scene to place a token on; the active one when omitted",
+      },
+      col: { type: "integer", description: "place a token at this column" },
+      row: { type: "integer", description: "place a token at this row" },
+      dryRun: {
+        type: "boolean",
+        description: "describe the ops without applying them",
+      },
+    },
+    required: ["text"],
+  },
+  capability: "doc.create",
+  async run(args, ctx): Promise<ToolOutcome> {
+    const begun = beginWrite(ctx);
+    if ("refused" in begun) return begun.refused;
+
+    const body = str(args["text"]);
+    if (!body || body.trim() === "") {
+      return invalid(
+        "actor.from_statblock needs the text — paste the stat block from its first line (the creature's name and its CR)",
+      );
+    }
+    const importer = ctx.view.importCharacter;
+    if (!importer) {
+      return refusal(
+        "this replica has no character importer — actor.from_statblock needs the packages runtime, which the Agents window wires up",
+      );
+    }
+    // The id is this call's, not the importer's to invent: it is what the token links to, and it is
+    // what the answer names.
+    const actorId = newId();
+    const plan = importer(body, { id: actorId });
+    if ("error" in plan) {
+      return refusal(`that text did not read as a character: ${plan.error}`);
+    }
+    const placing = numIn(args["col"], -1_000_000, 1_000_000) !== undefined;
+    if (placing && !ctx.grant.capabilities.includes("token.move")) {
+      return refusal(
+        "this agent may import actors but not place tokens — ask the GM to change its grant",
+      );
+    }
+
+    const name = str(args["name"]) ?? plan.name;
+    const ops: Op[] = [...plan.ops];
+    const placed = await placeTokenOp(ctx, args, name, actorId);
+    if ("invalid" in placed) return invalid(placed.invalid);
+    if ("error" in placed) return refusal(placed.error);
+    if (placed.op) ops.push(placed.op);
+
+    const what = `importing ${plan.name} (${plan.format})${placed.op ? " and placing a token" : ""}`;
+    if (bool(args["dryRun"]) === true) return dryRunAnswer(ops, what);
+
+    const done = await submit(ops, begun.writer);
+    if (!done.ok) return done.answered;
+
+    const lines = [
+      `imported ${plan.name} from a ${plan.format} as actor [${actorId}]${placed.op ? " and placed its token" : ""} (seq ${done.seq}).`,
+      ...(plan.read.length > 0
+        ? ["Read:", ...plan.read.map((line) => `  ${line}`)]
+        : []),
+      ...(plan.warnings.length > 0
+        ? ["The importer could not place:", ...plan.warnings.map((line) => `  ${line}`)]
+        : []),
+    ];
+    const placed_ = placed.op ? placedLine(ctx.view, str(args["sceneId"]), actorId) : null;
+    if (placed_) lines.push(placed_);
+    return text(lines.join("\n"), {
+      seq: done.seq,
+      format: plan.format,
+      actorId,
+      read: plan.read,
+      warnings: plan.warnings,
+    } as unknown as Json);
   },
 };
 
@@ -1057,6 +1335,8 @@ export const WRITE_TOOLS: readonly ToolDefinition[] = [
   documentCreate,
   documentUpdate,
   documentDelete,
+  actorFromCompendium,
+  actorFromStatblock,
   tokenMove,
   tokenProperties,
   sceneCreate,

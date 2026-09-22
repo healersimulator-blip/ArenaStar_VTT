@@ -43,6 +43,8 @@ describe("the tool manifest (MCP plan §5)", () => {
       "document.create",
       "document.update",
       "document.delete",
+      "actor.from_compendium",
+      "actor.from_statblock",
       "token.move",
       "token.properties",
       "scene.create",

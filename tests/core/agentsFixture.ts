@@ -9,6 +9,7 @@
  */
 import { paginate } from "../../src/core/agents/paging";
 import type {
+  AgentCompendiumEntry,
   AgentDocument,
   AgentDocumentRow,
   AgentMessageRow,
@@ -20,7 +21,7 @@ import type {
   AgentWorldView,
   PageOptions,
 } from "../../src/core/agents/types";
-import type { Json } from "../../src/core/documents";
+import type { BaseDocument, Json } from "../../src/core/documents";
 
 const SCENE_ONE: AgentSceneSummary = {
   id: "s1",
@@ -61,6 +62,8 @@ export const TOKENS: AgentTokenRow[] = [
     disposition: "friendly",
     hidden: false,
     actorId: "a-vex",
+    // Vex is the agent's own token: `token.move` moves it for any grant.
+    owned: true,
   },
   {
     id: "t-gob",
@@ -72,6 +75,7 @@ export const TOKENS: AgentTokenRow[] = [
     disposition: "hostile",
     hidden: false,
     actorId: null,
+    owned: false,
   },
   // A hidden token is the whole redaction question in one row: the replica has it, the grant may not.
   {
@@ -84,6 +88,7 @@ export const TOKENS: AgentTokenRow[] = [
     disposition: "hostile",
     hidden: true,
     actorId: null,
+    owned: false,
   },
 ];
 
@@ -96,6 +101,7 @@ export const MESSAGES: AgentMessageRow[] = [
     whisper: [],
     hasRoll: false,
     rollMode: null,
+    resultWithheld: false,
   },
   {
     id: "m2",
@@ -105,6 +111,7 @@ export const MESSAGES: AgentMessageRow[] = [
     whisper: [],
     hasRoll: true,
     rollMode: "gmroll",
+    resultWithheld: false, // the roll is in the replica: this grant may read it
   },
   {
     id: "m3",
@@ -114,6 +121,7 @@ export const MESSAGES: AgentMessageRow[] = [
     whisper: ["u-vex"],
     hasRoll: false,
     rollMode: null,
+    resultWithheld: false,
   },
 ];
 
@@ -258,6 +266,61 @@ export function fakeView(
     packages: () => [
       { id: "c1", label: "Bestiary", entries: 1284 } satisfies AgentPackageRow,
     ],
+    compendiumEntry: async (id: string) =>
+      id === "goblin"
+        ? ({
+            id,
+            name: "Goblin",
+            pack: "bestiary",
+            coll: "actors",
+            data: {
+              type: "actor",
+              name: "Goblin",
+              system: { pf1e: { size: "Small", bab: 1, hp: 6, hpMax: 6 } },
+              items: [],
+              effects: [],
+            } as unknown as Json,
+          } satisfies AgentCompendiumEntry)
+        : id === "fireball"
+          ? ({
+              id,
+              name: "Fireball",
+              pack: "spells",
+              coll: "items",
+              data: { type: "item", name: "Fireball" } as unknown as Json,
+            } satisfies AgentCompendiumEntry)
+          : null,
+    importCharacter: (text: string, options: { id: string }) =>
+      text.includes("CR")
+        ? {
+            name: "Goblin Warrior",
+            format: "stat block",
+            ops: [
+              {
+                kind: "create" as const,
+                coll: "actors" as const,
+                data: {
+                  _id: options.id,
+                  type: "actor",
+                  name: "Goblin Warrior",
+                } as unknown as BaseDocument,
+              },
+            ],
+            read: ["hit points: 6/6", "AC: 16"],
+            warnings: ["no ability scores in the text — left unauthored"],
+          }
+        : { error: "that text is not a stat block — a stat block starts with the creature's name and its CR" },
+    tokenCreate: (spec) => ({
+      kind: "create" as const,
+      coll: "tokens" as const,
+      parent: { coll: "scenes", id: spec.sceneId },
+      data: {
+        _id: "t-new",
+        type: "token",
+        name: spec.name,
+        actorId: spec.actorId ?? null,
+      } as unknown as BaseDocument,
+    }),
   };
   return { ...view, ...overrides };
 }

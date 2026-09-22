@@ -28,7 +28,7 @@ import {
   upsertAgentOps,
   type AgentRecord,
 } from "../core/agents/grants";
-import { connectAgentBridge } from "./agentBridge";
+import { connectAgentBridge, type AgentCompendiumSource } from "./agentBridge";
 import { openAgentSession, type AgentSession } from "./agentSession";
 import type { AgentBridge, AgentAuditEntry } from "../core/agents/bridge";
 import { grantOfRecord } from "../core/agents/grants";
@@ -45,6 +45,12 @@ export interface AgentManagerOptions {
   /** The GM's client — the grant edits travel through it, so they are undoable like any edit. */
   client: ClientSync;
   meta: StoreMeta;
+  /**
+   * The installed compendia, when this world has any. `bestiary.search` and
+   * `actor.from_compendium` answer that they cannot search without it — an honest refusal beats a
+   * tool that silently finds nothing, and a test that does not pass one is testing that refusal.
+   */
+  compendia?: AgentCompendiumSource | undefined;
 }
 
 export interface AgentManager {
@@ -188,6 +194,7 @@ export function createAgentManager(options: AgentManagerOptions): AgentManager {
               grant: grantOfRecord(next),
               writer: session.writer,
               agentId: id,
+              ...(options.compendia ? { compendia: options.compendia } : {}),
             }),
           );
         } else {
@@ -228,6 +235,7 @@ export function createAgentManager(options: AgentManagerOptions): AgentManager {
           grant: grantOfRecord(record),
           writer: session.writer,
           agentId: id,
+          ...(options.compendia ? { compendia: options.compendia } : {}),
         }),
       );
       return true;

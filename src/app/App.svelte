@@ -2778,6 +2778,10 @@ const WALL_PICK_RADIUS = 12;
       host: current.host,
       client: current.gm.client,
       meta: current.meta,
+      // The packs the agent may search and import from: without this, `bestiary.search` and
+      // `actor.from_compendium` say they cannot, rather than finding nothing.
+      compendia: async () =>
+        (await current.packages.compendia()).map((entry) => entry.pack),
     });
     // Canvas tool listeners are attached after `await createStage(...)`, i.e. after the
     // component-init context is gone — `onDestroy` may only be *called* synchronously
