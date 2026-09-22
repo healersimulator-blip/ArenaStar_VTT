@@ -592,10 +592,19 @@ moves the token every player shares. Phase 5 is **complete**, and it is proved e
 `HostSync` hexcrawl world: a player replica holding one cell of three, and a march that moves the
 clock and the party in one envelope by the agent.
 
-### Phase 6 — Hardening, budgets, docs (1 day, S)
+### Phase 6 — Hardening, budgets, docs (1 day, S) — 🚧 prompts landed 2026-09-22 (D-288)
 Rate classes and read caps tuned against a real 25k-entry world; the `dryRun`/`confirm` ergonomics; the
 prompts (`gm.narrate_scene`, `hexcrawl.travel_day`, …); Help → *Agents* page (what it is, what it can
 see, how to revoke); a `MCP_CONNECTOR.md` reference for the tool table; and the closing decisions.
+
+**As landed so far — the prompts (D-288).** All seven §5.7 templates in `src/core/agents/prompts.ts`,
+served over `prompts/list` and `prompts/get`. Each names the tools it reaches for — and a test asserts
+every one of those names is in the catalogue, which is how the first draft was caught naming
+`packages` (a resource, not a tool). Every recipe closes by telling the model that a refusal is an
+answer and must not be worked around. The handshake now advertises all three primitives: it had been
+answering `{ tools }` while serving resources and prompts, so a client that trusted it would never
+have asked for two thirds of the surface. **Still to come:** rate classes and read caps against a
+25k-entry world, the Help → *Agents* page, and `MCP_CONNECTOR.md`.
 
 ### Sequencing note
 Phases 0–2 give a GM-scoped agent that can run a table. Phase 3 is what makes "the LLM plays a character"

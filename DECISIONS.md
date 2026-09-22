@@ -8656,3 +8656,40 @@ rules. §8's opt-in stands: `strategic.order` is a capability the GM grants, one
   `pnpm lint` **exit 0**.
 - `pnpm build` → `pnpm size` **3 279 848 B raw / 946 487 B gzip — +9 733 B**, inside the 6 MB
   budget.
+
+## D-288 — MCP connector Phase 6, part 1: the prompts (2026-09-22)
+
+The seven §5.7 prompt templates, and the handshake that now admits to serving them.
+
+**Decision — a prompt names the tools it reaches for, and only tools that exist.** `prompts/list`
+and `prompts/get` are backed by `src/core/agents/prompts.ts`, and a test asserts every name every
+recipe mentions is in `AGENT_TOOLS`. A recipe is a promise about the catalogue, and one that names a
+tool the bridge does not serve is invisible until a client follows it and gets a method error — which
+is exactly how the test caught `packages` (a **resource**, `vtt://world/<id>/packages`, not a tool).
+
+**Decision — every recipe tells the model that a refusal is an answer.** All seven close with the
+same two lines: say so plainly, do not work around it, and quote what was missing. A model told to
+achieve an outcome will route around a locked door if the recipe implies the door is open.
+
+**Decision — advising is not commanding.** `strategic.advise_turn` reaches for `strategic.order`
+**only** when it was explicitly told to; `gm.improvise_npc` places a token only when asked. The
+recipes are written so the safe reading is the default one.
+
+**Decision — the handshake advertises what the bridge serves.** `initialize` answered with
+`{ tools }` while the same bridge answered `resources/*` and now `prompts/*`: a client that trusts
+the handshake would never ask for two thirds of the surface. Both the sidecar and the bridge's own
+fallback now advertise all three, with `subscribe: false` — resources are re-read on demand, and a
+promise to push notifications is not one this bridge keeps.
+
+**Gates.**
+
+- `pnpm test` — **3 314 tests passed** (12 skipped). New: `tests/core/agentsPrompts.test.ts` (8 —
+  the tool-name invariant, the seven names, the list's shape, the refusal rule in every recipe,
+  arguments rendered and omitted, the ruling-versus-guessing line, advise-versus-order, and
+  `prompts/get` on an unknown name) and 3 integration cases in `mcpBridge.test.ts` — the list over
+  the real sidecar, `prompts/get` with a non-string argument dropped rather than stringified, an
+  error (not an empty message) for an unknown name, and the handshake's capabilities.
+- `pnpm typecheck` **51 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`) ·
+  `pnpm lint` **exit 0**.
+- `pnpm build` → `pnpm size` **3 288 920 B raw / 949 630 B gzip — +9 072 B**, inside the 6 MB
+  budget.

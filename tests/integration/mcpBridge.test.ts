@@ -592,9 +592,60 @@ describe("vtt-mcp ↔ agent bridge (MCP plan §8 Phase 0)", () => {
     expect(hexmap[0]?.text).toContain("no hexcrawl scene active");
   }, 30_000);
 
-  test("prompts/list is honest: there are none yet (§5.7, Phase 6)", async () => {
+  test("the handshake advertises all three primitives the bridge serves", async () => {
+    // The sidecar answers `initialize` for a real dial; this is the bridge's own answer, and it has
+    // to name resources and prompts now that it serves them — a client that trusts the handshake
+    // would otherwise never ask for two thirds of the surface.
+    const reply = await started.client.request("initialize", {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "vitest", version: "0" },
+    });
+    const result = reply["result"] as { capabilities: Record<string, unknown> };
+    expect(Object.keys(result.capabilities).sort()).toEqual([
+      "prompts",
+      "resources",
+      "tools",
+    ]);
+  }, 30_000);
+
+  test("prompts/list offers the recipes, and prompts/get renders one (§5.7)", async () => {
     const prompts = await started.client.request("prompts/list");
-    expect(prompts["result"]).toEqual({ prompts: [] });
+    const list = (prompts["result"] as { prompts: Array<{ name: string; title: string }> })[
+      "prompts"
+    ];
+    expect(list.map((row) => row.name)).toContain("gm.run_encounter");
+    expect(list.map((row) => row.name)).toContain("hexcrawl.travel_day");
+    for (const row of list) expect(row.title.length).toBeGreaterThan(3);
+
+    const got = await started.client.request("prompts/get", {
+      name: "gm.run_encounter",
+      arguments: { sceneId: "s1" },
+    });
+    const result = got["result"] as {
+      description: string;
+      messages: Array<{ role: string; content: { type: string; text: string } }>;
+    };
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]?.role).toBe("user");
+    expect(result.messages[0]?.content.text).toContain('scene "s1"');
+    // A non-string argument is dropped rather than stringified into the sentence.
+    const messy = await started.client.request("prompts/get", {
+      name: "gm.run_encounter",
+      arguments: { sceneId: 7 },
+    });
+    const messyResult = messy["result"] as {
+      messages: Array<{ content: { text: string } }>;
+    };
+    expect(messyResult.messages[0]?.content.text).not.toContain("7");
+  }, 30_000);
+
+  test("prompts/get on a name that is not offered is an error, not an empty message", async () => {
+    const reply = await started.client.request("prompts/get", { name: "gm.do_everything" });
+    const error = reply["error"] as { code: number; message: string } | undefined;
+    expect(error?.code).toBe(-32602);
+    // The message names the count, because "no such prompt" leaves a model with nothing to try.
+    expect(error?.message).toContain("prompts/list names");
   }, 30_000);
 
   test("an agent writes as itself: one envelope, one op, by the agent (§3.1)", async () => {

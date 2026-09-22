@@ -196,7 +196,15 @@ function answerLocally(msg) {
     id: msg.id ?? null,
     result: {
       protocolVersion: PROTOCOL_VERSION,
-      capabilities: { tools: { listChanged: false } },
+      // All three primitives the bridge behind us serves (D-287): a client that trusts the
+      // handshake would never ask for resources or prompts if we advertised tools alone.
+      // `subscribe` stays false — resources are re-read on demand, and a promise to push
+      // notifications is not one this sidecar keeps.
+      capabilities: {
+        tools: { listChanged: false },
+        resources: { listChanged: false, subscribe: false },
+        prompts: { listChanged: false },
+      },
       serverInfo: SERVER_INFO,
     },
   };

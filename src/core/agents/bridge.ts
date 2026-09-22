@@ -23,6 +23,7 @@ import type { Json } from "../documents";
 import type { AgentGrant } from "./capabilities";
 import { RESOURCE_TEMPLATES, readResource, resourceList } from "./resources";
 import { callTool, toolManifest } from "./tools";
+import { promptGet, promptList } from "./prompts";
 import type { AgentWorldView, AgentWriter } from "./types";
 
 export interface BridgeTransport {
@@ -174,7 +175,16 @@ export function createAgentBridge(options: AgentBridgeOptions): AgentBridge {
             envelope(id, {
               result: {
                 protocolVersion,
-                capabilities: { tools: { listChanged: false } },
+                // All three primitives this bridge actually serves. Advertising only `tools`
+                // while answering `resources/*` and `prompts/*` would leave a client that trusts
+                // the handshake never asking for two thirds of the surface. `subscribe` is not
+                // advertised: resources are re-read on demand, and a promise to push updates is
+                // not one this bridge keeps.
+                capabilities: {
+                  tools: { listChanged: false },
+                  resources: { listChanged: false, subscribe: false },
+                  prompts: { listChanged: false },
+                },
                 serverInfo,
               },
             }),
@@ -288,12 +298,37 @@ export function createAgentBridge(options: AgentBridgeOptions): AgentBridge {
         );
         return;
       case "prompts/list":
-        // Phase 6 (§5.7): the prompt templates are named there; an empty list is the honest answer
-        // today — the primitive is declared, this world has nothing behind it yet.
+        // §5.7: the recipes. Each one names the tools it reaches for, so a client can offer
+        // "Run this encounter as the GM" as one action instead of hoping its model invents the
+        // sequence. They are pure templates — they read no world, so they can leak none.
         transport.send(
-          JSON.stringify(envelope(id, { result: { prompts: [] } })),
+          JSON.stringify(envelope(id, { result: { prompts: promptList() } })),
         );
         return;
+      case "prompts/get": {
+        const params = (req.params ?? {}) as Record<string, unknown>;
+        const name = typeof params["name"] === "string" ? params["name"] : "";
+        const raw = params["arguments"];
+        const filled: Record<string, string> = {};
+        if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
+          for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+            // MCP sends prompt arguments as strings; anything else is not a fill-in the template
+            // can render, and dropping it is better than stringifying an object into a sentence.
+            if (typeof value === "string") filled[key] = value;
+          }
+        }
+        const prompt = promptGet(name, filled);
+        if (!prompt) {
+          sendError(
+            id,
+            JSON_RPC_ERROR.invalidParams,
+            `no prompt "${name}" — prompts/list names the ${promptList().length} this world offers`,
+          );
+          return;
+        }
+        transport.send(JSON.stringify(envelope(id, { result: prompt })));
+        return;
+      }
       default:
         if (isNotification(req)) return;
         sendError(id, JSON_RPC_ERROR.methodNotFound, `no method "${method}"`);
