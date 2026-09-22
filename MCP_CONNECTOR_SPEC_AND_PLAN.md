@@ -1,6 +1,7 @@
 # MCP-style LLM connector — specification additions and implementation plan
 
-**Status:** proposal 2026-09-21 · **Phase 0 landed 2026-09-22 (D-278)**; Phases 1–6 unstarted.
+**Status:** proposal 2026-09-21 · **Phase 0 landed 2026-09-22 (D-278)** · **Phase 1 landed 2026-09-22
+(D-279)**; Phases 2–6 unstarted.
 **Reads with:** `PROTOCOL.md` (§4 ops, §5 projection, §6 transports,
 §13 message reference), `PLAN.md` (§12 packages/modules), `DECISIONS.md` (D-013 roles, D-045 the typed
 `__vttE2E` surfaces, D-262 view-as), `HEXCRAWL_SCENE_SPEC_AND_PLAN.md` (the hexcrawl tools depend on it),
@@ -377,12 +378,47 @@ socket, a JSON-RPC client over stdio). The bundle is **byte-identical** to the P
 (3 142 835 B raw): nothing in the app graph imports the bridge yet, and it starts costing when Phase 2's
 Agents window does.
 
-### Phase 1 — The read surface and the representations (1.5 days, M)
+### Phase 1 — The read surface and the representations (1.5 days, M) — ✅ landed 2026-09-22 (D-279)
 `scene.list/read/describe`, `map.render` (ASCII + JSON, with the legend and ids), `document.read/list`,
 `token.list`, `chat.read`, `sheet.read`, `bestiary.search` (over `rankIndex`), resources
 (`vtt://world/...`) + pagination + the read caps, and **redaction** for a non-GM agent.
 *Test:* renderer unit tests (a 12×9 fixture scene: tokens, a wall, fog) with byte-exact expected output;
 a player-scoped read of a hidden token returns nothing; pagination boundaries.
+
+**As landed.** `src/core/agents/types.ts` — the `AgentWorldView` **port** the tools read through, so the
+tool table never touches `ClientSync` and the whole read surface is testable without a browser ·
+`src/app/agentBridge.ts` — the app's one implementation of it · `src/core/agents/paging.ts` (§7.4 caps:
+50 default, 500 hard, opaque-but-readable `o:<offset>` cursors) · `src/core/agents/mapRender.ts` — the
+text map · `src/core/agents/{baseTools,readTools}.ts` — the ten new tools behind the two from Phase 0 ·
+`src/core/agents/resources.ts` — §5.7's `vtt://world/...` resources, dispatched **through the tools**.
+
+*Five decisions the plan left open, taken in D-279:*
+- **A resource is the tool's answer wearing a URI.** `resources/read` calls `callTool`, so the grant that
+  refuses `token.list` refuses `vtt://world/<id>/tokens` and there is one place to get a redaction wrong.
+- **A third way a call can end.** A refusal (`isError` + §4's plain words) is information; a **malformed
+  call** (`{ invalid }` → `-32602`) is a client bug; and a **thrown** tool becomes an error result, never
+  an unanswered id. A bad cursor is the second kind specifically: treating it as "start again" would let
+  an agent with a self-built cursor re-read page 1 forever and look like it was making progress.
+- **Walls paint over fog, never over a token.** Precedence is tokens > walls > fog > empty: fog says what
+  a *player* has seen, and a map that hides every door behind an unexplored cell is unnavigable.
+- **`@` is the party, `F` is an ally** — friendly *with* an `actorId` versus friendly without; two tokens
+  sharing a cell fall back to a letter from the name, and the legend carries the ids, because the glyph
+  is not the answer, the id is.
+- **Redaction is two gates, not one.** The capability gate (`world.read`, `chat.read`) and then
+  `gmOnly.read` on hidden tokens and GM-only roll results — and the answer says how many were withheld,
+  because "2 tokens" from a grant that can see 3 is a lie by omission.
+
+*Tests:* `tests/core/agentsMapRender.test.ts` (8, byte-exact over a 12×9 fixture with a wall, fog, hex
+placement and a shared cell) · `tests/core/agentsReadTools.test.ts` (21, over a shared fixture world in
+`tests/core/agentsFixture.ts`) · `tests/core/agentsTools.test.ts` (10, updated for the grown catalogue) ·
+`tests/integration/mcpBridge.test.ts` (10 — `scene.list` and `map.render` answered out of a **host's
+replica** over the real sidecar, plus `resources/list`, `resources/templates/list` and `resources/read`).
+The bundle stays **byte-identical** (3 142 835 B raw): still nothing in the app graph imports the bridge.
+
+*Two caveats, stated in `agentBridge.ts` itself:* the reads are the **GM's replica** — §5.3's
+`projectWorld()` routing is Phase 3 and no agent should meet a live table before it lands — and there is
+**no UI**: Phase 2's Agents window is the production entry point, so today the bridge is reachable only
+from a test or a console.
 
 ### Phase 2 — Writes, grants and the GM surface (1.5 days, M)
 `document.create/update/delete`, `token.*`, `scene.create/update/duplicate/activate`, `chat.post`,

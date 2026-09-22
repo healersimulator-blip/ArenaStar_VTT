@@ -330,7 +330,21 @@ describe("vtt-mcp ↔ agent bridge (MCP plan §8 Phase 0)", () => {
         tools: Array<{ name: string; inputSchema: unknown }>;
       }
     ).tools;
-    expect(tools.map((t) => t.name)).toEqual(["whoami", "world.info"]);
+    expect(tools.map((t) => t.name)).toEqual([
+      "whoami",
+      "world.info",
+      "world.snapshot",
+      "scene.list",
+      "scene.read",
+      "scene.describe",
+      "map.render",
+      "document.list",
+      "document.read",
+      "token.list",
+      "chat.read",
+      "sheet.read",
+      "bestiary.search",
+    ]);
     for (const tool of tools)
       expect(tool.inputSchema).toMatchObject({ type: "object" });
   }, 30_000);
@@ -362,6 +376,33 @@ describe("vtt-mcp ↔ agent bridge (MCP plan §8 Phase 0)", () => {
     expect(collections["scenes"]).toBe(2);
     expect(collections["users"]).toBe(1);
     expect(collections["depots"]).toBeUndefined(); // empty collections are noise, not information
+  }, 30_000);
+
+  test("the read surface answers from the host's replica, not from a fixture", async () => {
+    const scenes = await started.client.request("tools/call", {
+      name: "scene.list",
+    });
+    const sceneText =
+      (
+        scenes["result"] as {
+          content: Array<{ text: string }>;
+          isError?: boolean;
+        }
+      ).content[0]?.text ?? "";
+    // Both seeded scenes, with the active one marked: an agent that cannot tell which scene the
+    // table is on will describe the wrong room.
+    expect(sceneText).toContain("* Scene s1");
+    expect(sceneText).toContain("  Scene s2");
+
+    const map = await started.client.request("tools/call", {
+      name: "map.render",
+      arguments: {},
+    });
+    const mapText =
+      (map["result"] as { content: Array<{ text: string }> }).content[0]
+        ?.text ?? "";
+    // 1000 px at 100 px per cell, 5 ft per cell — the numbers came out of the host's scene doc.
+    expect(mapText).toContain("map 10×10 cells (square, 1 cell = 5 ft)");
   }, 30_000);
 
   test("a tool name that is not in the catalogue is a protocol error, not a refusal", async () => {
@@ -404,17 +445,49 @@ describe("vtt-mcp ↔ agent bridge (MCP plan §8 Phase 0)", () => {
     expect(body).toContain("Capabilities (1): chat.read.");
   }, 30_000);
 
-  test("resources and prompts answer honestly instead of hanging", async () => {
+  test("resources are the tool's answer wearing a URI (§5.7)", async () => {
+    // Back to the full grant: the previous test deliberately narrowed it.
+    bridge?.dispose();
+    bridge = null;
+    await new Promise((done) => setTimeout(done, 50));
+    await connect(grantFor("gm"));
+
     const list = await started.client.request("resources/list");
-    expect(list["result"]).toEqual({ resources: [] });
+    const uris = (
+      list["result"] as { resources: Array<{ uri: string }> }
+    ).resources.map((r) => r.uri);
+    expect(uris).toContain("vtt://world/w1/overview");
+    expect(uris).toContain("vtt://world/w1/tokens");
+    expect(uris).toContain("vtt://world/w1/scene/s1/map.txt");
+
+    const templates = await started.client.request("resources/templates/list");
+    expect(
+      (
+        templates["result"] as {
+          resourceTemplates: Array<{ uriTemplate: string }>;
+        }
+      ).resourceTemplates.map((t) => t.uriTemplate),
+    ).toContain("vtt://world/{worldId}/scene/{sceneId}/map.txt");
+
+    const read = await started.client.request("resources/read", {
+      uri: "vtt://world/w1/scene/s1/map.txt",
+    });
+    const contents = (read["result"] as { contents: Array<{ text: string }> })
+      .contents;
+    expect(contents[0]?.text).toContain("map 10×10 cells");
+
+    // A guessed URI is answered with the grammar, and Phase 5's work says so rather than 404-ing.
+    const guessed = await started.client.request("resources/read", {
+      uri: "vtt://world/w1/hexmap",
+    });
+    const error = guessed["error"] as { code: number; message: string };
+    expect(error.code).toBe(-32601);
+    expect(error.message).toContain("Phase 5");
+  }, 30_000);
+
+  test("prompts/list is honest: there are none yet (§5.7, Phase 6)", async () => {
     const prompts = await started.client.request("prompts/list");
     expect(prompts["result"]).toEqual({ prompts: [] });
-    const read = await started.client.request("resources/read", {
-      uri: "vtt://world/info",
-    });
-    const error = read["error"] as { code: number; message: string };
-    expect(error.code).toBe(-32601);
-    expect(error.message).toContain("not implemented yet");
   }, 30_000);
 
   test("an unknown method is -32601, and a notification gets no answer at all", async () => {

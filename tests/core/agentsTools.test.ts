@@ -13,25 +13,34 @@ import {
   toolManifest,
   type AgentWorldView,
 } from "../../src/core/agents/tools";
+import { fakeView } from "./agentsFixture";
 
-const view: AgentWorldView = {
-  worldInfo: () => ({
-    id: "w1",
-    name: "World One",
-    system: "pf1e-core",
-    version: "1.0.0",
-    seq: 42,
-    collections: { scenes: 2, actors: 41, messages: 7 },
-  }),
-  identity: () => ({ id: "u-agent", name: "Vex (agent)", role: "ASSISTANT" }),
-};
+// The full port, from the shared fixture: this file is about the *call* (gate, schema, failure
+// modes), but the tools it calls read a real-shaped view.
+const view: AgentWorldView = fakeView();
 
 const gm = grantFor("gm");
 
 describe("the tool manifest (MCP plan §5)", () => {
-  test("tools/list names Phase 0's two tools with a schema each", () => {
+  test("tools/list names every tool, in the order a client should read them", () => {
     const manifest = toolManifest();
-    expect(manifest.map((t) => t.name)).toEqual(["whoami", "world.info"]);
+    // whoami first: it is the answer to "what am I allowed to do", and nothing else makes sense
+    // before it.
+    expect(manifest.map((t) => t.name)).toEqual([
+      "whoami",
+      "world.info",
+      "world.snapshot",
+      "scene.list",
+      "scene.read",
+      "scene.describe",
+      "map.render",
+      "document.list",
+      "document.read",
+      "token.list",
+      "chat.read",
+      "sheet.read",
+      "bestiary.search",
+    ]);
     for (const tool of manifest) {
       expect(tool.description.length).toBeGreaterThan(20);
       expect(tool.inputSchema).toMatchObject({

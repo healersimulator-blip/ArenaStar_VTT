@@ -8157,3 +8157,68 @@ stealing the session from a browser the GM forgot about is worse than telling th
   number to watch then. The sidecar is Node-only and never bundled.
 - **Not yet proven:** the WebSocket client has run under Node 22's `WebSocket` and nowhere else — the
   browser transport and the Settings pairing flow are Phase 3's e2e (`agent_connector.spec.ts`).
+
+## D-279 — 2026-09-22 — What an LLM can see: the read surface, the text map and the `vtt://` resources (connector Phase 1)
+
+**Context.** Phase 0 (D-278) gave the connector a wire, a gate and two tools: enough to prove the shape
+works, not enough to be useful. Phase 1 of `MCP_CONNECTOR_SPEC_AND_PLAN.md` is the read surface —
+`scene.*`, `map.render`, `document.*`, `token.list`, `chat.read`, `sheet.read`, `bestiary.search` — plus
+the §5.7 resources, the §7.4 pagination caps and the redaction a non-GM agent must see. It is the half
+of the connector that cannot damage a world, which is the half worth shipping first: a model that can
+only read is already a useful assistant at a table, and it is the only safe way to find out whether the
+representations are any good before writes depend on them.
+
+**Decision — the tools read through a port, not through the app.** `AgentWorldView`
+(`src/core/agents/types.ts`) is the whole read vocabulary, implemented once in
+`src/app/agentBridge.ts` over `ClientSync`. The tool table therefore never touches the store, the read
+surface is testable without a browser, and the integration test can serve a view built on a *host*
+because the tools cannot tell the difference.
+
+**Decision — a resource is the tool's answer wearing a URI.** `resources/read` dispatches through
+`callTool`, so the grant that refuses `token.list` refuses `vtt://world/<id>/tokens` too, and there is
+one place to get a redaction wrong rather than two. The open-ended resources (a sheet per actor, a map
+per scene) go out as **templates**: 5,000 actor URIs is a resource list no client can read.
+
+**Decision — three ways a call can end, and a third was missing.** D-278 split refusals (`isError` +
+plain words) from malformed calls (`-32602`). Phase 1 needed a channel for the second kind *from inside
+a tool*, not just from the argument validator, so `ToolOutcome = ToolResult | { invalid }`. The first
+user is the **cursor**: `"page-two"` is `-32602`, never page 1 again — an agent looping pages with a
+cursor it built itself would re-read page 1 forever and the transcript would look like progress. The
+related bug, caught by the new tests rather than by reading: paging a page the view had already cut
+turned "50 of 1,200" into "all 50", which is the §7.4 cap failing silently. The tool now clamps a view
+that over-runs the cap and keeps the true total.
+
+**Decision — walls paint over fog, never over a token.** Precedence is tokens > walls > fog > empty.
+Fog is "what a player has seen", and a map that hides every door behind an unexplored cell is
+unnavigable; a token is a creature, and no fog state should delete one from the picture. `@` is the
+party (friendly *with* an `actorId`), `F` is an ally, two tokens sharing a cell fall back to a letter
+from the name, and the legend always carries the ids — the glyph is not the answer, the id is.
+
+**Decision — redaction is two gates, and the answer says how much it withheld.** The capability gate
+decides whether the tool runs at all; `gmOnly.read` then decides whether hidden tokens and GM-only roll
+results survive — the *card* that someone rolled is public, the dice are not. And every redacted answer
+counts what it removed ("2 tokens … (1 withheld by the grant)"): a read that quietly returns two of
+three tokens is a lie by omission, and a model cannot ask for what it does not know exists.
+
+**Gates.**
+
+- **The unit gate:** `pnpm test` — **266 files / 3 156 tests passed** (2 files, 12 tests skipped).
+  New: `tests/core/agentsMapRender.test.ts` (8 — byte-exact over a 12×9 fixture: the whole map string,
+  walls over fog, `@` vs `F`, a shared cell, a region rect, hex placement, the `showWalls`/`showTokens`
+  switches) and `tests/core/agentsReadTools.test.ts` (21 — the catalogue, scenes and maps, the hidden
+  token and the GM-only roll, cursor paging and the caps, documents, chat, sheets, bestiary, and the
+  resources). Both read a shared fixture world, `tests/core/agentsFixture.ts`.
+- **The integration gate:** `tests/integration/mcpBridge.test.ts` (10) — the real sidecar, the real
+  socket, `scene.list` and `map.render` answered out of a **host's replica** ("map 10×10 cells (square,
+  1 cell = 5 ft)" came out of a seeded scene document, not a fixture), `resources/list`,
+  `resources/templates/list` and `resources/read` over the wire, and Phase 5's `hexmap` answering
+  `-32601` "Phase 5" rather than a 404 that reads like a gap in the product.
+- **Types and lint:** `pnpm typecheck` **50 components, 0 blocking, 1 advisory**
+  (`ReplayPanel.svelte:29`) · `pnpm lint` **exit 0** · `prettier --check` clean on every new file.
+- **The build and the size budget:** `pnpm build` → `pnpm size` **3 142 835 B raw / 904 095 B gzip —
+  still byte-identical**. Nothing in the app graph imports the bridge; Phase 2's Agents window is where
+  the connector starts costing bytes, and that is the number to watch.
+- **Not yet proven:** the reads are the **GM's replica**, so a `PLAYER`-scoped agent gets GM-shaped
+  answers today — Phase 3's `projectWorld()` routing and its field-by-field proof are what make that
+  claim true, and no agent should meet a live table before it lands. There is still **no UI** (Phase 2),
+  so the bridge is reachable only from a test or a console.

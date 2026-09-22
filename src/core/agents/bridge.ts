@@ -21,6 +21,7 @@
  */
 import type { Json } from "../documents";
 import type { AgentGrant } from "./capabilities";
+import { RESOURCE_TEMPLATES, readResource, resourceList } from "./resources";
 import { callTool, toolManifest, type AgentWorldView } from "./tools";
 
 export interface BridgeTransport {
@@ -138,43 +139,69 @@ export function createAgentBridge(options: AgentBridgeOptions): AgentBridge {
           JSON.stringify(envelope(id, { result: { tools: toolManifest() } })),
         );
         return;
-      case "tools/call":
-      case "resources/read":
-      case "prompts/get": {
-        if (method === "tools/call") {
-          const called = await callTool(
-            { name: params["name"], args: params["arguments"] },
-            { view, grant },
-          );
-          if (called.kind === "invalid") {
-            sendError(id, JSON_RPC_ERROR.invalidParams, called.error);
-            return;
-          }
-          transport.send(
-            JSON.stringify(envelope(id, { result: called.result })),
+      case "tools/call": {
+        const called = await callTool(
+          { name: params["name"], args: params["arguments"] },
+          { view, grant },
+        );
+        if (called.kind === "invalid") {
+          sendError(id, JSON_RPC_ERROR.invalidParams, called.error);
+          return;
+        }
+        transport.send(JSON.stringify(envelope(id, { result: called.result })));
+        return;
+      }
+      case "resources/read": {
+        const uri = params["uri"];
+        if (typeof uri !== "string" || uri === "") {
+          sendError(
+            id,
+            JSON_RPC_ERROR.invalidParams,
+            "resources/read needs a uri",
           );
           return;
         }
-        // Phase 1/6 fill these in (§5.7). Answering "not yet" beats answering nothing: the client
-        // knows the primitive exists and that this world has nothing behind it.
-        sendError(
-          id,
-          JSON_RPC_ERROR.methodNotFound,
-          `${method} is not implemented yet — this connector exposes tools only (plan Phase 1 and 6)`,
+        // §5.7: a resource is the same answer as the tool behind it, wearing a URI — so the grant
+        // that refuses the tool refuses the resource, and there is one place to get it wrong.
+        const read = await readResource(view, grant, uri);
+        if (!read.ok) {
+          sendError(
+            id,
+            read.code === "not_implemented"
+              ? JSON_RPC_ERROR.methodNotFound
+              : JSON_RPC_ERROR.invalidParams,
+            read.message,
+          );
+          return;
+        }
+        transport.send(
+          JSON.stringify(
+            envelope(id, { result: { contents: [read.resource] } }),
+          ),
         );
         return;
       }
       case "resources/list":
         transport.send(
-          JSON.stringify(envelope(id, { result: { resources: [] } })),
+          JSON.stringify(
+            envelope(id, { result: { resources: resourceList(view) } }),
+          ),
         );
         return;
       case "resources/templates/list":
+        // The open-ended resources (a sheet per actor, a map per scene) are advertised as templates
+        // rather than enumerated: 5,000 actor URIs is a resource list no client can read.
         transport.send(
-          JSON.stringify(envelope(id, { result: { resourceTemplates: [] } })),
+          JSON.stringify(
+            envelope(id, {
+              result: { resourceTemplates: [...RESOURCE_TEMPLATES] },
+            }),
+          ),
         );
         return;
       case "prompts/list":
+        // Phase 6 (§5.7): the prompt templates are named there; an empty list is the honest answer
+        // today — the primitive is declared, this world has nothing behind it yet.
         transport.send(
           JSON.stringify(envelope(id, { result: { prompts: [] } })),
         );
