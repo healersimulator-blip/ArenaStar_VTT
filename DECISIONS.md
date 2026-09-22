@@ -8693,3 +8693,32 @@ promise to push notifications is not one this bridge keeps.
   `pnpm lint` **exit 0**.
 - `pnpm build` → `pnpm size` **3 288 920 B raw / 949 630 B gzip — +9 072 B**, inside the 6 MB
   budget.
+
+## D-289 — MCP connector Phase 6, part 2: `MCP_CONNECTOR.md`, generated (2026-09-22)
+
+The reference for the surface: what the connector is, how to connect, the security model in one
+paragraph, the tools, the resources, the prompts, the presets, and the room left.
+
+**Decision — the tool table is generated, not written.** A hand-written tool table is a table that
+drifts: add a tool, forget the doc, and the doc lies to every GM who reads it. So
+`src/core/agents/docs.ts` renders the section from `AGENT_TOOLS` — the same list `tools/list`
+serves — and `tests/core/agentsDocs.test.ts` asserts the file still contains it. Drift fails the
+suite, and `UPDATE_AGENT_DOCS=1 pnpm vitest run tests/core/agentsDocs.test.ts` rewrites the section.
+The same test names every resource template and every prompt, because those drift the same way.
+
+**Writing the reference found two things worth recording.** One recipe named `packages` as a *tool*
+when it is a *resource* — caught by the tool-name invariant, not by a reader. And `initialize`
+advertised `{ tools }` while the same bridge answered `resources/*` and `prompts/*`, so a client that
+trusted the handshake would never have asked for two thirds of the surface; both the sidecar and the
+bridge's own fallback now advertise all three, with `subscribe: false`, since a promise to push
+resource notifications is not one this bridge keeps.
+
+**Gates.**
+
+- `pnpm test` — **3 318 tests passed** (12 skipped). New: `tests/core/agentsDocs.test.ts` (4 — the
+  section in the file is the section the registry renders; every tool has a row; every resource
+  template and prompt is named; the counts in the prose are real).
+- `pnpm typecheck` **51 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`) ·
+  `pnpm lint` **exit 0**.
+- `pnpm build` → `pnpm size` **3 288 920 B raw / 949 630 B gzip**, unchanged — `docs.ts` is only
+  reached from a test, so the bundle never sees it.
