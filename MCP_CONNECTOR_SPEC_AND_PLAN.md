@@ -592,7 +592,7 @@ moves the token every player shares. Phase 5 is **complete**, and it is proved e
 `HostSync` hexcrawl world: a player replica holding one cell of three, and a march that moves the
 clock and the party in one envelope by the agent.
 
-### Phase 6 — Hardening, budgets, docs (1 day, S) — 🚧 prompts landed 2026-09-22 (D-288)
+### Phase 6 — Hardening, budgets, docs (1 day, S) — ✅ landed 2026-09-22 (D-288, D-289, D-290)
 Rate classes and read caps tuned against a real 25k-entry world; the `dryRun`/`confirm` ergonomics; the
 prompts (`gm.narrate_scene`, `hexcrawl.travel_day`, …); Help → *Agents* page (what it is, what it can
 see, how to revoke); a `MCP_CONNECTOR.md` reference for the tool table; and the closing decisions.

@@ -8722,3 +8722,33 @@ resource notifications is not one this bridge keeps.
   `pnpm lint` **exit 0**.
 - `pnpm build` → `pnpm size` **3 288 920 B raw / 949 630 B gzip**, unchanged — `docs.ts` is only
   reached from a test, so the bundle never sees it.
+
+## D-290 — MCP connector Phase 6, part 3: Help → *Agents* (2026-09-22)
+
+The last page the plan asks for, and the end of Phase 6's documentation work.
+
+**Decision — the page is data, and its numbers are read from the catalogue.**
+`src/core/agents/help.ts` renders the copy from `PRESETS` / `AGENT_CAPABILITIES`, so a page that says
+"the player preset holds 8 capabilities" cannot survive a change to the grant. This is the same
+reasoning as the generated tool table (D-289): a GM decides how much to hand over *from this page*,
+and a stale number is a decision made on a lie.
+
+**Decision — players see it too.** The people an agent can read about are owed what it can see, so
+"What it can see", "What it cannot do", "What it leaves behind" and "When it is told no" are shown to
+every role; only **Granting, Narrowing, Revoking, Watching it work** are the GM's. The page also says
+what the tick boxes cannot do — a capability outside the preset never applies, and only changing the
+preset grants more — because a tick that looks like it worked and did not is the worst kind of
+control.
+
+**Gates.**
+
+- `pnpm test` — **3 322 tests passed** (12 skipped). New: `tests/core/agentsHelp.test.ts` (4 — the
+  page's counts equal the catalogue's, `player` is strictly thinner than `gm` and is described as
+  such, the host is named the authority and the dice the table's, and the revoking rows exist).
+- `pnpm typecheck` **51 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`) ·
+  `pnpm lint` **exit 0**.
+- `pnpm build` → `pnpm size` **3 292 582 B raw / 951 167 B gzip — +3 662 B**, inside the 6 MB budget.
+
+**Phase 6 is complete.** What remains of the plan is its optional tail: rate classes tuned against a
+25k-entry world, and the `dryRun`/`confirm` ergonomics — both refinements of a surface that is
+already fully built, tested and documented.
