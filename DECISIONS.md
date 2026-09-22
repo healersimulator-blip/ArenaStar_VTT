@@ -8485,3 +8485,58 @@ sentence that names it is what tells the model which one it is reading.
   `pnpm lint` **exit 0**.
 - `pnpm build` → `pnpm size` **3 243 190 B raw / 935 107 B gzip — +12 059 B**, inside the 6 MB
   budget.
+
+## D-284 — MCP connector Phase 4, part 1: the clock and the turn tracker (2026-09-22)
+
+Nine tools: `time.get`, `time.of_day`, `time.advance`, `time.set`, and `combat.state` / `start` /
+`add` / `next` / `end`.
+
+**Decision — time passing is one call, and the sweep rides in the same envelope.** `time.advance`
+submits `advanceWorldClockOps` **and** `pf1eClockSweepOps` together, which is exactly what the
+Settings window's *minute / hour / day* buttons do — the integration test proves it by asserting the
+agent's envelope is **deep-equal** to the two builders' output, not merely "the clock moved". An
+agent's "three days pass" is therefore indistinguishable from the GM pressing the button: the same
+ops, the same order, the same undo entry, and one effect sweep instead of a clock that has slipped
+past a dozen durations nobody ended.
+
+**Decision — the ladder is the world's, not the wall's.** A `minutes: 1` is `ROUNDS_PER_MINUTE ×
+secondsPerRound` (60 s on a 6-second-round world), not 60 wall-clock seconds, because that is what
+makes a "1 minute" buff end when the button says it should (D-268). A conversion that silently
+disagreed with the duration ladder would be a tool that lies about how long a spell lasts.
+
+**Decision — moving time backward expires nothing.** A negative `time.advance` and a `time.set` to
+an earlier second both sweep nothing: a GM correcting the hour has not cast a spell in reverse. The
+answer says so, because "nothing expired" and "I forgot to sweep" look identical otherwise.
+
+**Decision — `time.get` is a control, `time.of_day` is a read.** The integral seconds are the
+number every subsystem spends, so reading them sits behind `time.control` (a player agent has no
+business in the control plane); the derived hour, phase and day are fiction-facing and sit behind
+`world.read`. They can never disagree, because the second is computed from the first and never
+stored beside it.
+
+**Decision — the tracker calls the app's own combat engine, and never rolls a die.** `combat.start`
+routes through PF1e's `startWithSurprise` when the combatants are PF1e actors (so surprise rounds
+and initiative ties are the rules' own, not a second engine's approximation: an unresolved tie is a
+refusal that names the rule), and `combat.next` through `pf1eNextTurn`, whose `clockDeltaSeconds`
+moves the world clock **only when the world advances it on a round wrap** and only by the round the
+transition reports. A dying creature that owes a stabilization check is **named, not rolled** — the
+answer says "roll 1d20 against DC 10" and the agent may then ask `dice.roll`, once it exists.
+
+**Decision — `combat.state` exists, though §5.5 does not list it.** `combat.next` without a way to
+read the order is a tool that advances a tracker it cannot see. It sits behind `world.read`, because
+the turn order is on the table for everyone at it, and the projection still decides what a player's
+replica holds (a hidden combatant is not on it).
+
+**Gates.**
+
+- `pnpm test` — **3 275 tests passed** (12 skipped). New: 3 integration cases in
+  `tests/integration/agentProjection.test.ts` over a real PF1e encounter (two actors, one carrying
+  an hour-long spell, initiative already rolled) — a full round in one envelope per call with the
+  clock advancing by **exactly `secondsPerRound`**; three days whose envelope is deep-equal to the
+  Settings buttons' own ops with the spell gone from the document; and `time.set` forward and back
+  with a `player` grant refused on `time.control` while `time.of_day` still answers. Plus 4 read
+  cases and 9 write cases over the fixture.
+- `pnpm typecheck` **51 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`) ·
+  `pnpm lint` **exit 0**.
+- `pnpm build` → `pnpm size` **3 259 556 B raw / 939 973 B gzip — +16 366 B**, inside the 6 MB
+  budget.

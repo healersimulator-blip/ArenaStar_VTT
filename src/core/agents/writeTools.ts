@@ -30,8 +30,15 @@ import type {
 import { OWNERSHIP_LEVELS, TOP_LEVEL_COLLECTIONS } from "../documents";
 import type { Op } from "../ops";
 import { bool, invalid, num, numIn, obj, refusal, str, text } from "./answer";
+import {
+  ROUNDS_PER_DAY,
+  ROUNDS_PER_HOUR,
+  ROUNDS_PER_MINUTE,
+} from "../clock";
 import { canReadGmOnly } from "./capabilities";
 import type {
+  AgentCombatTurn,
+  AgentTimeOps,
   AgentTokenRow,
   AgentWorldView,
   AgentWriter,
@@ -1667,6 +1674,324 @@ const undoLast: ToolDefinition = {
   },
 };
 
+// ── the clock and the tracker (§5.5) ─────────────────────────────────────────────────────────
+//
+// Time is one clock and the tracker is one state machine, so both of these families are thin: the
+// tools name what the table said ("three days pass", "next turn") and the world's own builders do
+// the rest. The one thing they add is the sweep — advancing the clock ends the clock-counted
+// effects exactly as the Settings window's buttons do, in the *same envelope*, because "a night
+// passes and your shield has expired" is one event to a reader and two ops to a store.
+
+/** The ladder a table counts time in, read off the world's own clock. */
+const TIME_UNITS = ["rounds", "minutes", "hours", "days"] as const;
+
+const timeAdvance: ToolDefinition = {
+  name: "time.advance",
+  description:
+    'Pass time: seconds, or `rounds`/`minutes`/`hours`/`days` on the world\'s own ladder (a round is secondsPerRound, an hour 600 rounds, a day 14 400). The clock and the effect sweep it triggers are one envelope, so "a night passes" ends what a night ends. A negative amount is a GM correction and expires nothing. Answer: the clock afterwards, and anything the new time ended.',
+  args: {
+    properties: {
+      seconds: {
+        type: "number",
+        description: "seconds to add (negative rewinds the clock and expires nothing)",
+      },
+      rounds: { type: "integer", description: "combat rounds to pass (6 s each by default)" },
+      minutes: { type: "integer", description: "minutes to pass" },
+      hours: { type: "integer", description: "hours to pass" },
+      days: { type: "integer", description: "days to pass" },
+      dryRun: { type: "boolean", description: "describe the ops without applying them" },
+    },
+  },
+  capability: "time.control",
+  async run(args, ctx): Promise<ToolOutcome> {
+    const begun = beginWrite(ctx);
+    if ("refused" in begun) return begun.refused;
+    const given = TIME_UNITS.filter((unit) => args[unit] !== undefined);
+    const seconds = num(args["seconds"]);
+    if (given.length > 1)
+      return invalid("time.advance takes one unit — seconds, rounds, minutes, hours or days");
+    if (given.length === 1 && seconds !== undefined)
+      return invalid("time.advance takes either `seconds` or one unit, not both");
+    if (given.length === 0 && seconds === undefined)
+      return invalid("time.advance needs `seconds`, or one of rounds/minutes/hours/days");
+    // D-268's ladder, not a wall-clock conversion: the Settings window's *minute* button advances
+    // what a "1 minute" duration means **in this world** (600 rounds at 6 s a round), so a buff
+    // with that duration ends when the button says it should — an hour button that advanced 100
+    // rounds would end a one-hour spell after ten minutes of game time.
+    const spr = ctx.view.clock().secondsPerRound;
+    const perUnit: Record<(typeof TIME_UNITS)[number], number> = {
+      rounds: spr,
+      minutes: ROUNDS_PER_MINUTE * spr,
+      hours: ROUNDS_PER_HOUR * spr,
+      days: ROUNDS_PER_DAY * spr,
+    };
+    let delta = seconds ?? 0;
+    if (given.length === 1) {
+      const unit = given[0] as (typeof TIME_UNITS)[number];
+      const count = num(args[unit]);
+      if (count === undefined) return invalid(`time.advance needs \`${unit}\` as a number`);
+      delta = Math.trunc(count) * perUnit[unit];
+    }
+    const made = ctx.view.timeOps({ delta: Math.trunc(delta) });
+    if ("error" in made) return refusal(made.error);
+    return await answerClock(made, begun.writer, bool(args["dryRun"]) === true, ctx);
+  },
+};
+
+const timeSet: ToolDefinition = {
+  name: "time.set",
+  description:
+    "Set the world clock to an absolute number of seconds — a GM correction, or a campaign that starts at a given hour. Moving forward sweeps clock-counted effects; moving backward expires nothing, because time un-passing has not cast a spell in reverse.",
+  args: {
+    properties: {
+      seconds: {
+        type: "integer",
+        description: "the clock, in seconds from the world's zero (never negative)",
+      },
+      dryRun: { type: "boolean", description: "describe the ops without applying them" },
+    },
+    required: ["seconds"],
+  },
+  capability: "time.control",
+  async run(args, ctx): Promise<ToolOutcome> {
+    const begun = beginWrite(ctx);
+    if ("refused" in begun) return begun.refused;
+    const seconds = num(args["seconds"]);
+    if (seconds === undefined) return invalid("time.set needs `seconds` as a number");
+    if (seconds < 0) return invalid("time.set needs a whole number of seconds, zero or more");
+    const made = ctx.view.timeOps({ seconds: Math.trunc(seconds) });
+    if ("error" in made) return refusal(made.error);
+    return await answerClock(made, begun.writer, bool(args["dryRun"]) === true, ctx);
+  },
+};
+
+/** One answer for both clock tools: the post-state, and what the new time ended. */
+async function answerClock(
+  made: AgentTimeOps,
+  writer: AgentWriter,
+  dry: boolean,
+  ctx: ToolContext,
+): Promise<ToolOutcome> {
+  if (made.ops.length === 0)
+    return text(
+      `the clock is already at ${made.seconds} s — nothing moved and nothing ended.`,
+      made as unknown as Json,
+    );
+  if (dry) return dryRunAnswer(made.ops, `moving the clock by ${formatDelta(made.delta)}`);
+  const done = await submit(made.ops, writer);
+  if (!done.ok) return done.answered;
+  const clock = ctx.view.clock();
+  const lines = [
+    `the clock moved ${formatDelta(made.delta)} — it is now ${clock.stamp} (${clock.seconds} s)${made.delta < 0 ? " — a backward jump, so nothing expired" : ""} (seq ${done.seq}).`,
+  ];
+  if (made.expired.length > 0)
+    lines.push(
+      `  ${made.expired.length} effect(s) ended: ${made.expired
+        .map((row) => `${row.effectId} on ${row.home}/${row.ownerId}`)
+        .join(", ")}.`,
+    );
+  else if (made.delta > 0) lines.push("  nothing expired.");
+  return text(lines.join("\n"), { seq: done.seq, clock, expired: made.expired } as unknown as Json);
+}
+
+function formatDelta(seconds: number): number | string {
+  const abs = Math.abs(seconds);
+  if (abs >= 86_400) return `${Math.round((seconds / 86_400) * 100) / 100} day(s)`;
+  if (abs >= 3600) return `${Math.round((seconds / 3600) * 100) / 100} hour(s)`;
+  if (abs >= 60) return `${Math.round((seconds / 60) * 100) / 100} minute(s)`;
+  return `${seconds} s`;
+}
+
+/** The tracker's answer: the order after the transition, and the two things it may owe the table. */
+async function answerCombat(
+  made: AgentCombatTurn,
+  sceneId: string | null,
+  writer: AgentWriter,
+  dry: boolean,
+  ctx: ToolContext,
+): Promise<ToolOutcome> {
+  if (made.ops.length === 0)
+    return text(`${made.name}: ${made.note ?? "nothing to do"} (no ops).`, made as unknown as Json);
+  if (dry) return dryRunAnswer(made.ops, `${made.note ?? "moving the tracker"} on ${made.name}`);
+  const done = await submit(made.ops, writer);
+  if (!done.ok) return done.answered;
+  const after = ctx.view.combatState(sceneId);
+  const lines = [
+    `${made.name}: ${made.note ?? "the tracker moved"} (seq ${done.seq}).`,
+    after === null
+      ? `  round ${made.round} — ${made.current?.name ?? "nobody"}'s turn.`
+      : `  round ${after.round}${after.phase === "surprise" ? " (surprise round)" : ""} — ${after.current?.name ?? "nobody"}'s turn, ${after.order.length} in the order.`,
+  ];
+  if (made.clockDeltaSeconds > 0)
+    lines.push(`  the round wrap advanced the world clock by ${made.clockDeltaSeconds} s.`);
+  for (const check of made.dyingChecks)
+    lines.push(
+      `  ${check.actorName} is dying at ${check.hp} hp and owes this round's stabilization check — dice.roll 1d20 (DC 10, minus the negative hp) resolves it.`,
+    );
+  return text(lines.join("\n"), { seq: done.seq, combat: after ?? made } as unknown as Json);
+}
+
+const combatStart: ToolDefinition = {
+  name: "combat.start",
+  description:
+    "Begin the encounter on a scene: initiative, the surprise round (PF1e), and who is caught flat-footed, all as the tracker itself decides them. With no encounter on the scene, one is opened from its tokens. Answer: the order, whose turn it is, and — when the world advances the clock on a round wrap — the seconds that moved.",
+  args: {
+    properties: {
+      sceneId: {
+        type: "string",
+        description: "the scene whose encounter to start; the active one when omitted",
+      },
+      name: {
+        type: "string",
+        description: "the name to give an encounter opened here (the scene's tokens are its combatants)",
+      },
+      initiative: {
+        type: "object",
+        description: "combatant id → the initiative rolled for them, for the ones not yet rolled",
+      },
+      unaware: {
+        type: "array",
+        items: { type: "string" },
+        description: "combatant ids the GM declares caught unaware (PF1e surprise round)",
+      },
+      dryRun: { type: "boolean", description: "describe the ops without applying them" },
+    },
+  },
+  capability: "combat.control",
+  async run(args, ctx): Promise<ToolOutcome> {
+    const begun = beginWrite(ctx);
+    if ("refused" in begun) return begun.refused;
+    const sceneId = str(args["sceneId"]) ?? null;
+    const made = ctx.view.combatStartOps(sceneId, {
+      ...(str(args["name"]) === undefined ? {} : { name: str(args["name"]) as string }),
+      ...(obj(args["initiative"]) === undefined
+        ? {}
+        : { initiative: initiativeMap(obj(args["initiative"])) }),
+      ...(Array.isArray(args["unaware"])
+        ? { unaware: args["unaware"].filter((id): id is string => typeof id === "string") }
+        : {}),
+    });
+    if ("error" in made) return refusal(made.error);
+    return await answerCombat(made, sceneId, begun.writer, bool(args["dryRun"]) === true, ctx);
+  },
+};
+
+/** `{ "c-1": 18 }` — an object arg is Json, and the tracker wants finite numbers. */
+function initiativeMap(raw: Record<string, Json> | undefined): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!raw) return out;
+  for (const [key, value] of Object.entries(raw)) {
+    const n = num(value);
+    if (n !== undefined) out[key] = Math.trunc(n);
+  }
+  return out;
+}
+
+const combatAdd: ToolDefinition = {
+  name: "combat.add",
+  description:
+    "Put combatants into the encounter — by token, by actor, or by name — with their initiative when it is already rolled. With no encounter on the scene, one is opened first. Answer: the order as it now stands.",
+  args: {
+    properties: {
+      sceneId: {
+        type: "string",
+        description: "the scene whose encounter to add to; the active one when omitted",
+      },
+      name: {
+        type: "string",
+        description: "the name to give an encounter opened here",
+      },
+      combatants: {
+        type: "array",
+        items: { type: "object" },
+        description:
+          'one per combatant: { tokenId } or { actorId } or { name }, plus an optional initiative — [{ "tokenId": "t-3", "initiative": 18 }]',
+      },
+      dryRun: { type: "boolean", description: "describe the ops without applying them" },
+    },
+    required: ["combatants"],
+  },
+  capability: "combat.control",
+  async run(args, ctx): Promise<ToolOutcome> {
+    const begun = beginWrite(ctx);
+    if ("refused" in begun) return begun.refused;
+    const sceneId = str(args["sceneId"]) ?? null;
+    const raw = args["combatants"];
+    if (!Array.isArray(raw)) return invalid("combat.add needs `combatants` as a list");
+    const combatants = raw.map((entry) => {
+      const row = obj(entry) ?? {};
+      return {
+        ...(str(row["tokenId"]) === undefined ? {} : { tokenId: str(row["tokenId"]) as string }),
+        ...(str(row["actorId"]) === undefined ? {} : { actorId: str(row["actorId"]) as string }),
+        ...(str(row["name"]) === undefined ? {} : { name: str(row["name"]) as string }),
+        ...(num(row["initiative"]) === undefined
+          ? {}
+          : { initiative: Math.trunc(num(row["initiative"]) as number) }),
+      };
+    });
+    if (combatants.length === 0) return invalid("combat.add needs at least one combatant");
+    const made = ctx.view.combatAddOps(sceneId, {
+      ...(str(args["name"]) === undefined ? {} : { name: str(args["name"]) as string }),
+      combatants,
+    });
+    if ("error" in made) return refusal(made.error);
+    return await answerCombat(made, sceneId, begun.writer, bool(args["dryRun"]) === true, ctx);
+  },
+};
+
+const combatNext: ToolDefinition = {
+  name: "combat.next",
+  description:
+    "Advance the turn — the tracker's own transition, so effect durations tick, actions refresh, held actions come due, and a round wrap moves the world clock by the round this world says a round costs. A dying creature that owes a stabilization check is named, not rolled: this tool never rolls a die.",
+  args: {
+    properties: {
+      sceneId: {
+        type: "string",
+        description: "the scene whose encounter to advance; the active one when omitted",
+      },
+      count: {
+        type: "integer",
+        description: "turns to advance (default 1, max 20) — a whole round is one per combatant",
+      },
+      dryRun: { type: "boolean", description: "describe the ops without applying them" },
+    },
+  },
+  capability: "combat.control",
+  async run(args, ctx): Promise<ToolOutcome> {
+    const begun = beginWrite(ctx);
+    if ("refused" in begun) return begun.refused;
+    const sceneId = str(args["sceneId"]) ?? null;
+    const count = Math.min(Math.max(Math.trunc(num(args["count"]) ?? 1), 1), 20);
+    const made = ctx.view.combatNextOps(sceneId, count);
+    if ("error" in made) return refusal(made.error);
+    return await answerCombat(made, sceneId, begun.writer, bool(args["dryRun"]) === true, ctx);
+  },
+};
+
+const combatEnd: ToolDefinition = {
+  name: "combat.end",
+  description:
+    "End the encounter: the round structure is cleared and nobody's turn it is. The combatants stay on the document, so a second fight in the same room is combat.start again.",
+  args: {
+    properties: {
+      sceneId: {
+        type: "string",
+        description: "the scene whose encounter to end; the active one when omitted",
+      },
+      dryRun: { type: "boolean", description: "describe the ops without applying them" },
+    },
+  },
+  capability: "combat.control",
+  async run(args, ctx): Promise<ToolOutcome> {
+    const begun = beginWrite(ctx);
+    if ("refused" in begun) return begun.refused;
+    const sceneId = str(args["sceneId"]) ?? null;
+    const made = ctx.view.combatEndOps(sceneId);
+    if ("error" in made) return refusal(made.error);
+    return await answerCombat(made, sceneId, begun.writer, bool(args["dryRun"]) === true, ctx);
+  },
+};
+
 export const WRITE_TOOLS: readonly ToolDefinition[] = [
   documentCreate,
   documentUpdate,
@@ -1677,6 +2002,12 @@ export const WRITE_TOOLS: readonly ToolDefinition[] = [
   travelAdvance,
   encounterRoll,
   encounterPlace,
+  timeAdvance,
+  timeSet,
+  combatStart,
+  combatAdd,
+  combatNext,
+  combatEnd,
   tokenMove,
   tokenProperties,
   sceneCreate,

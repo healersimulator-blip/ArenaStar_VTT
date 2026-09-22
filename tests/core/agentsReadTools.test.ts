@@ -69,9 +69,12 @@ describe("the catalogue after Phase 1 (§5)", () => {
         "hex.read",
         "hex.describe",
         "hexmap.render",
+        "time.get",
+        "time.of_day",
+        "combat.state",
       ]),
     );
-    expect(READ_TOOLS).toHaveLength(14);
+    expect(READ_TOOLS).toHaveLength(17);
   });
 
   test("every tool declares a capability, and the identity probe declares none", () => {
@@ -81,6 +84,59 @@ describe("the catalogue after Phase 1 (§5)", () => {
         additionalProperties: false,
       });
     }
+  });
+});
+
+describe("the clock and the tracker (§5.5)", () => {
+  test("time.get is the number every subsystem spends, and time.of_day is what it means", async () => {
+    const got = await call("time.get");
+    expect(got.kind).toBe("result");
+    if (got.kind !== "result") return;
+    const body = got.result.content[0]?.text ?? "";
+    expect(body).toContain("Clock: 1d 02:00:00 — 93600 s.");
+    expect(body).toContain("a round is 6 s here");
+    // The world advances the clock on a round wrap, and the answer says so — an agent planning a
+    // fight in game time needs to know whether the fight costs time.
+    expect(body).toContain("advances the clock");
+
+    const tod = await call("time.of_day");
+    expect(tod.kind).toBe("result");
+    if (tod.kind !== "result") return;
+    expect(tod.result.content[0]?.text).toContain("It is 02:00 on day 1 — night");
+  });
+
+  test("time.of_day is a read, and time.get is a control — a player agent gets one of them", async () => {
+    const grant = grantFor("player");
+    const tod = await call("time.of_day", {}, { view, grant });
+    expect(tod.kind).toBe("result");
+    if (tod.kind !== "result") return;
+    expect(tod.result.isError).toBeUndefined();
+
+    const got = await call("time.get", {}, { view, grant });
+    expect(got.kind).toBe("result");
+    if (got.kind !== "result") return;
+    expect(got.result.isError).toBe(true);
+    expect(got.result.content[0]?.text).toBe(refusalFor("time.control"));
+  });
+
+  test("combat.state names whose turn it is, and marks it in the order", async () => {
+    const answered = await call("combat.state");
+    expect(answered.kind).toBe("result");
+    if (answered.kind !== "result") return;
+    const body = answered.result.content[0]?.text ?? "";
+    expect(body).toContain("Goblinwood ambush: round 1 — Vex's turn.");
+    // The current combatant is marked in the order, because an agent that can only read the name
+    // of the turn has to count rows to find it in a list of twenty.
+    expect(body).toContain("18  Vex (← now)");
+    expect(body).toContain("12  Goblin");
+  });
+
+  test("a scene with no encounter says so, and names the tool that opens one", async () => {
+    const answered = await call("combat.state", { sceneId: "s2" });
+    expect(answered.kind).toBe("result");
+    if (answered.kind !== "result") return;
+    expect(answered.result.isError).toBe(true);
+    expect(answered.result.content[0]?.text).toContain("no encounter on scene \"s2\"");
   });
 });
 

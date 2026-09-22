@@ -9,6 +9,8 @@
  */
 import { paginate } from "../../src/core/agents/paging";
 import type {
+  AgentClock,
+  AgentCombatTurn,
   AgentCompendiumEntry,
   AgentHexCell,
   AgentHexMapPlan,
@@ -20,6 +22,7 @@ import type {
   AgentSceneDetail,
   AgentSceneSummary,
   AgentSheet,
+  AgentTimeOps,
   AgentTokenRow,
   AgentWorldView,
   PageOptions,
@@ -53,6 +56,94 @@ const SCENE_TWO: AgentSceneSummary = {
   active: false,
   tokens: 0,
   walls: 0,
+};
+
+/** The clock the fixture's world starts at: day 1, 02:00 by the clock's own readout. */
+export const CLOCK_SECONDS = 93_600;
+
+const CLOCK_OPS = [
+  {
+    kind: "update" as const,
+    ref: { coll: "settings" as const, id: "core" },
+    diff: { clockSeconds: CLOCK_SECONDS + 6 },
+  },
+];
+
+/** An encounter in progress: round 1, and Vex's turn. */
+export const COMBAT: AgentCombatTurn = {
+  id: "cb-1",
+  name: "Goblinwood ambush",
+  round: 1,
+  turn: 0,
+  started: true,
+  phase: null,
+  current: {
+    id: "c-vex",
+    name: "Vex",
+    initiative: 18,
+    defeated: false,
+    hidden: false,
+    tokenId: "t-vex",
+    actorId: "a-vex",
+    isCurrent: true,
+  },
+  order: [
+    {
+      id: "c-vex",
+      name: "Vex",
+      initiative: 18,
+      defeated: false,
+      hidden: false,
+      tokenId: "t-vex",
+      actorId: "a-vex",
+      isCurrent: true,
+    },
+    {
+      id: "c-goblin",
+      name: "Goblin",
+      initiative: 12,
+      defeated: false,
+      hidden: false,
+      tokenId: "t-goblin",
+      actorId: "a-goblin",
+      isCurrent: false,
+    },
+  ],
+  clockDeltaSeconds: 0,
+  ops: [],
+  note: null,
+  dyingChecks: [],
+};
+
+const COMBAT_UPDATE = [
+  {
+    kind: "update" as const,
+    ref: { coll: "combats" as const, id: "cb-1" },
+    diff: { round: 1, turn: 1 },
+  },
+];
+
+/** `combat.start` on the fixture: round 1 and the first combatant's turn. */
+const STARTED: AgentCombatTurn = { ...COMBAT, note: "round 1", ops: COMBAT_UPDATE };
+
+/** Two turns: the round wrapped, and the world clock moved a round's worth. */
+const ROUND_TWO: AgentCombatTurn = {
+  ...COMBAT,
+  round: 2,
+  note: "round 2",
+  current: { ...(COMBAT.order[1] as NonNullable<AgentCombatTurn["current"]>), isCurrent: true },
+  order: COMBAT.order.map((row) => ({ ...row, isCurrent: row.id === "c-goblin" })),
+};
+
+/** `combat.end`: the round structure is cleared and nobody's turn it is. */
+const ENDED: AgentCombatTurn = {
+  ...COMBAT,
+  round: 0,
+  turn: 0,
+  started: false,
+  current: null,
+  order: COMBAT.order.map((row) => ({ ...row, isCurrent: false })),
+  note: "combat ended",
 };
 
 export const TOKENS: AgentTokenRow[] = [
@@ -562,6 +653,85 @@ export function fakeView(
               } as unknown as BaseDocument,
             },
           ],
+    clock: (): AgentClock => ({
+      seconds: CLOCK_SECONDS,
+      stamp: "1d 02:00:00",
+      hour: 2,
+      minute: 0,
+      phase: "night",
+      day: 1,
+      label: "02:00",
+      secondsPerRound: 6,
+      advanceOnRound: true,
+    }),
+    timeOps: (spec): AgentTimeOps | { error: string } => {
+      const delta =
+        typeof spec.delta === "number" && Number.isFinite(spec.delta)
+          ? Math.trunc(spec.delta)
+          : null;
+      const absolute =
+        typeof spec.seconds === "number" && Number.isFinite(spec.seconds)
+          ? Math.trunc(spec.seconds)
+          : null;
+      if (delta === null && absolute === null) {
+        return { error: "say `seconds` to set the clock, or `days`/`hours`/`rounds` to move it" };
+      }
+      // Three days is the plan's Phase 4 test: the sweep is what it is really asking about.
+      const next = absolute === null ? CLOCK_SECONDS + (delta as number) : absolute;
+      const moved = next - CLOCK_SECONDS;
+      return {
+        seconds: next,
+        delta: moved,
+        ops: [
+          {
+            kind: "update" as const,
+            ref: { coll: "settings" as const, id: "core" },
+            diff: { clockSeconds: next },
+          },
+        ],
+        // A forward jump of three days ends the mage's hour-long shield; a backward one ends
+        // nothing. The fixture knows this because the world clock's rule says so.
+        expired: moved > 0 ? [{ home: "actors", ownerId: "a-vex", effectId: "fx-shield" }] : [],
+      };
+    },
+    combatState: (sceneId) => (sceneId === null || sceneId === "s1" ? COMBAT : null),
+    combatStartOps: (_sceneId, spec) => {
+      if (spec.initiative === undefined || Object.keys(spec.initiative).length === 0) {
+        return { error: "a PF1e encounter needs an initiative for every combatant" };
+      }
+      return { ...STARTED, ops: COMBAT_UPDATE };
+    },
+    combatAddOps: (_sceneId, spec) =>
+      spec.combatants.length === 0
+        ? { error: "combat.add needs at least one combatant" }
+        : {
+            ...COMBAT,
+            order: [
+              ...COMBAT.order,
+              ...spec.combatants.map((entry, index) => ({
+                id: `c-new-${index}`,
+                name: entry.name ?? "Goblin",
+                initiative: entry.initiative ?? null,
+                defeated: false,
+                hidden: false,
+                tokenId: entry.tokenId ?? null,
+                actorId: entry.actorId ?? null,
+                isCurrent: false,
+              })),
+            ],
+            note: `${spec.combatants.length} combatant(s) added`,
+            ops: COMBAT_UPDATE,
+          },
+    combatNextOps: (_sceneId, count) => {
+      const steps = Math.min(Math.max(Math.trunc(count) || 1, 1), 20);
+      return {
+        ...(steps > 1 ? ROUND_TWO : STARTED),
+        // One turn is not a round wrap; two are, and a round costs six seconds.
+        clockDeltaSeconds: steps > 1 ? 6 : 0,
+        ops: steps > 1 ? [...COMBAT_UPDATE, ...CLOCK_OPS] : COMBAT_UPDATE,
+      };
+    },
+    combatEndOps: () => ({ ...ENDED, ops: COMBAT_UPDATE }),
     tokenCreate: (spec) => ({
       kind: "create" as const,
       coll: "tokens" as const,

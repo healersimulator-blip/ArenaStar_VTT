@@ -75,6 +75,12 @@ describe("the gate: the grant matrix (§8 Phase 2)", () => {
       "travel.advance": { seconds: 3600 },
       "encounter.roll": { key: "1,0" },
       "encounter.place": { actors: [{ actorId: "a-vex", count: 1 }] },
+      "time.advance": { days: 3 },
+      "time.set": { seconds: 3600 },
+      "combat.start": { initiative: { "c-vex": 18 } },
+      "combat.add": { combatants: [{ tokenId: "t-vex", initiative: 18 }] },
+      "combat.next": { count: 1 },
+      "combat.end": {},
       "token.move": { tokenId: "t-vex", col: 2, row: 2 },
       "token.properties": { tokenId: "t-vex", disposition: "hostile" },
       "scene.create": { name: "Camp" },
@@ -126,6 +132,12 @@ describe("the gate: the grant matrix (§8 Phase 2)", () => {
       "travel.advance": { seconds: 3600 },
       "encounter.roll": { key: "1,0" },
       "encounter.place": { actors: [{ actorId: "a-vex", count: 1 }] },
+      "time.advance": { days: 3 },
+      "time.set": { seconds: 3600 },
+      "combat.start": { initiative: { "c-vex": 18 } },
+      "combat.add": { combatants: [{ tokenId: "t-vex", initiative: 18 }] },
+      "combat.next": { count: 1 },
+      "combat.end": {},
       "token.move": { tokenId: "t-vex", col: 2, row: 2 },
       "token.properties": { tokenId: "t-vex", disposition: "hostile" },
       "scene.create": { name: "Camp" },
@@ -860,9 +872,131 @@ describe("chat and undo (§5.5, §5.1)", () => {
   });
 });
 
+describe("the clock and the tracker (§5.5)", () => {
+  test("three days pass in one envelope, and the sweep rides with the clock", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf("time.advance", { days: 3 }, ctxWith(writer));
+    expect(body).toContain("the clock moved 3 day(s)");
+    expect(body).toContain("(seq 91)");
+    // The clock op and the effect it ends are one envelope: an agent's "a night passes" is
+    // indistinguishable from the GM clicking the Settings window's *day* button.
+    expect(calls).toHaveLength(1);
+    const ops = calls[0] ?? [];
+    expect(ops.length).toBeGreaterThan(0);
+    expect(ops[0]).toMatchObject({ kind: "update", ref: { coll: "settings" } });
+    expect(body).toContain("1 effect(s) ended: fx-shield on actors/a-vex");
+  });
+
+  test("the ladder is the world's, not the wall's — a minute is 10 rounds at 6 s", async () => {
+    const { writer, calls } = fakeWriter();
+    await textOf("time.advance", { minutes: 1 }, ctxWith(writer));
+    // One minute on the world's ladder is 60 seconds at 6 s a round — the Settings window's own
+    // *minute* button, so a "1 minute" buff ends when the button says it should.
+    expect(calls[0]?.[0]).toMatchObject({ diff: { clockSeconds: 93_600 + 60 } });
+    const { writer: w2, calls: c2 } = fakeWriter();
+    await textOf("time.advance", { hours: 1 }, ctxWith(w2));
+    expect(c2[0]?.[0]).toMatchObject({ diff: { clockSeconds: 93_600 + 3_600 } });
+    const { writer: w3 } = fakeWriter();
+    const both = await call("time.advance", { hours: 1, days: 1 }, ctxWith(w3));
+    expect(both.kind).toBe("invalid");
+    if (both.kind === "invalid") expect(both.error).toContain("time.advance takes one unit");
+  });
+
+  test("time.set is absolute, and a backward jump expires nothing", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf("time.set", { seconds: 3600 }, ctxWith(writer));
+    expect(body).toContain("it is now");
+    // 3600 s is earlier than the fixture's 93600 s, so this is the GM correcting the hour.
+    expect(body).toContain("a backward jump, so nothing expired");
+    expect(calls).toHaveLength(1);
+  });
+
+  test("time.set refuses a negative clock rather than clamping it silently", async () => {
+    const { writer } = fakeWriter();
+    const answered = await call("time.set", { seconds: -5 }, ctxWith(writer));
+    // A negative clock is an invalid call, not a clamp: silently moving the world to zero would
+    // be a different time than the one asked for, and the answer would not say which happened.
+    expect(answered.kind).toBe("invalid");
+    if (answered.kind === "invalid") expect(answered.error).toContain("zero or more");
+  });
+
+  test("a dry run of time passing changes nothing", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf("time.advance", { days: 3, dryRun: true }, ctxWith(writer));
+    expect(body).toContain("dry run");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("combat.start opens round 1 and reads the order back afterwards", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf(
+      "combat.start",
+      { initiative: { "c-vex": 18, "c-goblin": 12 } },
+      ctxWith(writer),
+    );
+    expect(body).toContain("round 1");
+    expect(body).toContain("(seq 91)");
+    expect(calls).toHaveLength(1);
+    const { writer: w2 } = fakeWriter();
+    // The tracker's own rule, reported rather than invented: a PF1e encounter with no initiative
+    // is not something this tool may guess its way through.
+    const refused = await textOf("combat.start", {}, ctxWith(w2));
+    expect(refused).toContain("needs an initiative for every combatant");
+  });
+
+  test("combat.next names the turn, and says when the wrap moved the clock", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf("combat.next", {}, ctxWith(writer));
+    expect(body).toContain("round 1");
+    expect(calls).toHaveLength(1);
+    // Two turns is a round wrap in the fixture, and a round is six seconds.
+    const { writer: w2, calls: c2 } = fakeWriter();
+    const wrapped = await textOf("combat.next", { count: 2 }, ctxWith(w2));
+    expect(wrapped).toContain("the round wrap advanced the world clock by 6 s");
+    expect(c2).toHaveLength(1);
+  });
+
+  test("combat.add puts combatants in the order and names them back", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf(
+      "combat.add",
+      { combatants: [{ tokenId: "t-goblin", initiative: 7 }] },
+      ctxWith(writer),
+    );
+    expect(body).toContain("1 combatant(s) added");
+    expect(calls).toHaveLength(1);
+    const { writer: w2 } = fakeWriter();
+    const empty = await call("combat.add", { combatants: [] }, ctxWith(w2));
+    expect(empty.kind).toBe("invalid");
+    if (empty.kind === "invalid") expect(empty.error).toContain("at least one combatant");
+  });
+
+  test("combat.end clears the round structure, and the tracker says whose turn it is not", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf("combat.end", {}, ctxWith(writer));
+    expect(body).toContain("combat ended");
+    expect(calls).toHaveLength(1);
+  });
+
+  test("the tracker needs combat.control, and a GM-narrowed grant still has the clock", async () => {
+    const grant = narrow(grantFor("gm"), ["time.control"]);
+    const { writer } = fakeWriter();
+    const refused = await call("combat.next", {}, ctxWith(writer, grant));
+    expect(refused.kind).toBe("result");
+    if (refused.kind !== "result") return;
+    expect(refused.result.isError).toBe(true);
+    expect(refused.result.content[0]?.text).toBe(refusalFor("combat.control"));
+
+    const allowed = await call("time.advance", { hours: 2 }, ctxWith(writer, grant));
+    expect(allowed.kind).toBe("result");
+    if (allowed.kind !== "result") return;
+    expect(allowed.result.isError).toBeUndefined();
+  });
+});
+
 describe("the catalogue", () => {
-  test("every write tool names one capability, and all sixteen are registered", () => {
-    expect(WRITE_TOOLS).toHaveLength(16);
+  test("every write tool names one capability, and all twenty-two are registered", () => {
+    expect(WRITE_TOOLS).toHaveLength(22);
     for (const tool of WRITE_TOOLS) expect(tool.capability).not.toBeNull();
     for (const tool of WRITE_TOOLS) {
       expect(AGENT_TOOLS.map((t) => t.name)).toContain(tool.name);

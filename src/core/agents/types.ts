@@ -69,6 +69,38 @@ export interface AgentWorldView {
       row?: number;
     },
   ): Op[] | { error: string };
+  /** The one clock, read against the ladder the rest of the world spends (§5.5). */
+  clock(): AgentClock;
+  /** Time passing: the clock ops **and** the effect sweep they trigger, as one bundle. */
+  timeOps(spec: { delta?: number; seconds?: number }): AgentTimeOps | { error: string };
+  /** The encounter on a scene, as the tracker shows it — null when there is none. */
+  combatState(sceneId: string | null): AgentCombatState | null;
+  /** Begin it: the transition, its clock delta, and the ops that carry both. */
+  combatStartOps(
+    sceneId: string | null,
+    spec: {
+      name?: string;
+      initiative?: Record<string, number>;
+      unaware?: string[];
+    },
+  ): AgentCombatTurn | { error: string };
+  /** Add combatants to the encounter, creating it from the scene's tokens when there is none. */
+  combatAddOps(
+    sceneId: string | null,
+    spec: {
+      name?: string;
+      combatants: Array<{
+        tokenId?: string | null;
+        actorId?: string | null;
+        name?: string | null;
+        initiative?: number | null;
+      }>;
+    },
+  ): AgentCombatTurn | { error: string };
+  /** Advance a turn (a round wrap moves the clock, when this world advances it). */
+  combatNextOps(sceneId: string | null, count: number): AgentCombatTurn | { error: string };
+  /** End it: the tracker stops and the round structure is cleared. */
+  combatEndOps(sceneId: string | null): AgentCombatTurn | { error: string };
   /**
    * Optional: one compendium entry by id, in the shape its pack authors it. Only a replica with
    * the compendium runtime can answer it.
@@ -199,6 +231,80 @@ export interface AgentHexCell {
 }
 
 /** The hexcrawl layer of one scene, before any single cell is read. */
+/**
+ * The world clock, in the two shapes a table uses it (§5.5): the integral seconds every subsystem
+ * spends, and the hour of day the fiction is set in. One clock, never two — a round is
+ * `secondsPerRound`, an hour 600 rounds, a day 14 400.
+ */
+export interface AgentClock {
+  seconds: number;
+  /** `1d 02:03:04` — the settings window's own readout. */
+  stamp: string;
+  /** 0–23. */
+  hour: number;
+  minute: number;
+  phase: "day" | "night";
+  /** Whole days elapsed — what a hex map's "day 4" column shows. */
+  day: number;
+  /** `14:20`. */
+  label: string;
+  secondsPerRound: number;
+  /** Whether a combat round wrap advances the clock in this world. */
+  advanceOnRound: boolean;
+}
+
+/** Time passing, bundled: the clock ops, and the effects the new time ended. */
+export interface AgentTimeOps {
+  /** The clock after the change. */
+  seconds: number;
+  /** What it moved by — negative for a GM correction, which expires nothing. */
+  delta: number;
+  ops: Op[];
+  /** Clock-counted effects the sweep stripped, named so an agent can say which buffs dropped. */
+  expired: Array<{ home: "actors" | "combats"; ownerId: string; effectId: string }>;
+}
+
+/** The encounter on a scene, as the tracker shows it. */
+export interface AgentCombatState {
+  id: string;
+  name: string;
+  round: number;
+  /** 0-based index into `order`; the tracker's own number. */
+  turn: number;
+  started: boolean;
+  /** `"surprise"` during a PF1e surprise round, else null. */
+  phase: string | null;
+  current: AgentCombatantRow | null;
+  /** Initiative order, current first-marked. */
+  order: AgentCombatantRow[];
+}
+
+export interface AgentCombatantRow {
+  id: string;
+  name: string;
+  initiative: number | null;
+  defeated: boolean;
+  hidden: boolean;
+  tokenId: string | null;
+  actorId: string | null;
+  isCurrent: boolean;
+}
+
+/** One combat transition: the state after it, the ops that carry it, and what the table hears. */
+export interface AgentCombatTurn extends AgentCombatState {
+  /** Seconds the world clock moved — a round wrap, when this world advances it. */
+  clockDeltaSeconds: number;
+  ops: Op[];
+  /** What happened, in the tracker's own words: "surprise round", "round 2", "combat ended". */
+  note: string | null;
+  /**
+   * Dying combatants whose turn just started: they owe a stabilization check the transition
+   * itself never rolls. Named so a GM agent can roll it (or say it out loud) rather than
+   * silently skipping a rule.
+   */
+  dyingChecks: Array<{ combatantId: string; actorId: string; actorName: string; hp: number }>;
+}
+
 export interface AgentHexSummary {
   sceneId: string;
   sceneName: string;

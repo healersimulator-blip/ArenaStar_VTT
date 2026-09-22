@@ -31,7 +31,18 @@ import type { ToolContext } from "../../src/core/agents/types";
 import type { AgentSession } from "../../src/app/agentSession";
 import { createCellOps, enableHexcrawlOps } from "../../src/core/hexcrawl/scene";
 import { readWorldClock } from "../../src/packages/pf1e/worldClock";
-import type { CellDocument } from "../../src/core/documents";
+import {
+  advanceWorldClockOps,
+  pf1eClockSweepOps,
+} from "../../src/packages/pf1e/worldClock";
+import { buildEffectDoc } from "../../src/packages/pf1e/effectOps";
+import type {
+  ActorDocument,
+  CellDocument,
+  CombatDocument,
+  EffectDocument,
+} from "../../src/core/documents";
+import { secondsPerRoundOf, worldSettingsFrom } from "../../src/core/worldSettings";
 import { agentRegistryFrom, agentRecordOf, grantOfRecord } from "../../src/core/agents/grants";
 import { agentWorldView } from "../../src/app/agentBridge";
 import { callTool } from "../../src/core/agents/tools";
@@ -293,6 +304,91 @@ async function bootHexcrawl(): Promise<Booted> {
   boot.gm.submit(ops);
   for (let i = 0; i < 6; i++) await flushMicrotasks();
   expect(boot.store.seq).toBe(2);
+  return boot;
+}
+
+/**
+ * A table in mid-fight: two PF1e actors, one of them carrying an hour-long spell, and an encounter
+ * bound to the scene with its initiative already rolled. Seeded with the app's own builders
+ * (`buildEffectDoc`) so the sweep the test asserts on is the sweep the Settings window runs.
+ */
+async function bootCombat(): Promise<Booted> {
+  const boot = await bootWorld();
+  const effects: EffectDocument[] = [];
+  const mageArmor = buildEffectDoc({
+    id: "fx-mage-armor",
+    name: "Mage Armor",
+    payload: {
+      mods: [{ key: "ac", type: "armor", value: 4 }],
+      // An hour, anchored at the world's zero: three days later it is long gone.
+      ttl: { unit: "hour", value: 1 },
+      source: { kind: "spell", level: 1 },
+    },
+    worldClockSeconds: 0,
+  });
+  if (mageArmor.ok) effects.push(mageArmor.value);
+  const actor = (id: string, name: string, withEffects: boolean): ActorDocument =>
+    ({
+      _id: id,
+      type: "actor",
+      name,
+      ownership: { default: 1 },
+      flags: {},
+      // `system.pf1e` is what makes it a PF1e actor (`isPF1eActor`), and that is what routes the
+      // encounter through PF1e's round structure instead of the generic tracker's.
+      system: { pf1e: { abilities: { str: 10, dex: 10, con: 10 } } },
+      items: [],
+      effects: withEffects ? effects : [],
+    }) as unknown as ActorDocument;
+  const combat: CombatDocument = {
+    _id: "cb-1",
+    type: "combat",
+    name: "Goblinwood ambush",
+    ownership: { default: 1 },
+    flags: { core: { sceneId: "s1" } },
+    system: {},
+    round: 0,
+    turn: 0,
+    combatants: [
+      {
+        _id: "c-vex",
+        type: "combatant",
+        name: "Vex",
+        ownership: { default: 1 },
+        flags: {},
+        system: {},
+        tokenId: "t-party",
+        actorId: "a-vex",
+        initiative: 18,
+        hidden: false,
+        defeated: false,
+      },
+      {
+        _id: "c-goblin",
+        type: "combatant",
+        name: "Goblin",
+        ownership: { default: 1 },
+        flags: {},
+        system: {},
+        tokenId: "t-goblin",
+        actorId: "a-goblin",
+        initiative: 12,
+        hidden: false,
+        defeated: false,
+      },
+    ],
+  } as unknown as CombatDocument;
+  boot.gm.submit([
+    { kind: "create", coll: "actors", data: actor("a-vex", "Vex", true) },
+    { kind: "create", coll: "actors", data: actor("a-goblin", "Goblin", false) },
+    { kind: "create", coll: "combats", data: combat },
+    {
+      kind: "update",
+      ref: { coll: "scenes", id: "s1" },
+      diff: { "flags.core": { activeCombatId: "cb-1" } },
+    },
+  ]);
+  for (let i = 0; i < 6; i++) await flushMicrotasks();
   return boot;
 }
 
@@ -680,5 +776,137 @@ describe("the hexcrawl, through a real host and a real projection (§5.6, F1)", 
     expect(answered.result.content[0]?.text).toBe(refusalFor("hexcrawl.travel"));
     // Nothing moved, and no time passed.
     expect(boot.store.seq).toBe(seqBefore);
+  });
+});
+
+describe("the clock and the turn tracker, through a real host (§5.5)", () => {
+  test("a full round is one envelope per call, and the clock advances by exactly one round", async () => {
+    const boot = await bootCombat();
+    const { session, grant } = await openAgent(boot, "gm", "Warden");
+    const ctx = hexCtxOf(session, grant);
+    const settings = boot.store.getAll("settings");
+    const spr = secondsPerRoundOf(worldSettingsFrom(settings));
+    const before = readWorldClock(settings);
+
+    const started = await callTool({ name: "combat.start", args: {} }, ctx);
+    expect(started.kind).toBe("result");
+    if (started.kind !== "result") return;
+    expect(started.result.isError, started.result.content[0]?.text).toBeUndefined();
+    expect(started.result.content[0]?.text).toContain("round 1");
+
+    // Two combatants: the second `next` wraps the round, and a round is `secondsPerRound` here.
+    const first = await callTool({ name: "combat.next", args: {} }, ctx);
+    expect(first.kind).toBe("result");
+    if (first.kind !== "result") return;
+    expect(first.result.content[0]?.text).not.toContain("advanced the world clock");
+
+    const seqBefore = boot.store.seq;
+    const wrapped = await callTool({ name: "combat.next", args: {} }, ctx);
+    expect(wrapped.kind).toBe("result");
+    if (wrapped.kind !== "result") return;
+    expect(wrapped.result.isError, wrapped.result.content[0]?.text).toBeUndefined();
+    expect(wrapped.result.content[0]?.text).toContain(`advanced the world clock by ${spr} s`);
+
+    // Exactly one round, not "about a round": the combat update and the clock move are the same
+    // envelope, and the clock is the world's own number read back from the host's store.
+    expect(readWorldClock(boot.store.getAll("settings"))).toBe(before + spr);
+    const envelope = boot.log.at(boot.store.seq);
+    expect(envelope?.env.by).toBe(session.user._id);
+    expect(boot.store.seq).toBe(seqBefore + 1);
+
+    const state = await callTool({ name: "combat.state", args: {} }, ctx);
+    expect(state.kind).toBe("result");
+    if (state.kind !== "result") return;
+    expect(state.result.content[0]?.text).toContain("round 2 — Vex's turn.");
+  });
+
+  test("three days pass in one envelope, and the sweep is the Settings window's own", async () => {
+    const boot = await bootCombat();
+    const { session, grant } = await openAgent(boot, "gm", "Guide");
+    const ctx = hexCtxOf(session, grant);
+    // A copy, not the store's own array: `getAll` hands back the live list, and an expectation
+    // computed from it after the write would describe the world the write produced.
+    const settingsBefore = [...boot.store.getAll("settings")];
+    const spr = secondsPerRoundOf(worldSettingsFrom(settingsBefore));
+    const before = readWorldClock(settingsBefore);
+    const delta = 3 * 86_400;
+    // The *pre*-state is the only honest input to the comparison: a sweep computed after the
+    // effect is already gone produces no ops at all, and would "prove" the agent did nothing.
+    const actorsBefore = [...boot.store.getAll("actors")];
+    const combatsBefore = [...boot.store.getAll("combats")];
+
+    const seqBefore = boot.store.seq;
+    const answered = await callTool({ name: "time.advance", args: { days: 3 } }, ctx);
+    expect(answered.kind).toBe("result");
+    if (answered.kind !== "result") return;
+    expect(answered.result.isError, answered.result.content[0]?.text).toBeUndefined();
+    expect(answered.result.content[0]?.text).toContain("fx-mage-armor");
+
+    expect(readWorldClock(boot.store.getAll("settings"))).toBe(before + delta);
+    // The spell is gone from the document, not merely reported gone.
+    const vex = boot.store.get("actors", "a-vex") as unknown as ActorDocument | undefined;
+    expect(vex?.effects ?? ["not-empty"]).toEqual([]);
+
+    // …and the envelope is byte-for-byte what the Settings window's *day* button submits: the
+    // clock op first, then the sweep of both effect homes at the new time.
+    const envelope = boot.log.at(boot.store.seq);
+    console.log("DBG seq", boot.store.seq, "seqBefore", seqBefore, "envSeq", envelope?.env.seq, "ops", JSON.stringify(envelope?.env.ops).slice(0, 300));
+    expect(envelope?.env.by).toBe(session.user._id);
+    expect(boot.store.seq).toBe(seqBefore + 1);
+    expect(envelope?.env.ops).toEqual([
+      ...advanceWorldClockOps(settingsBefore, delta),
+      ...(pf1eClockSweepOps(
+        actorsBefore as never,
+        combatsBefore as never,
+        before + delta,
+        spr,
+      ).ops as unknown as Op[]),
+    ]);
+  });
+
+  test("time.set is absolute, and a player agent may read the hour but not spend it", async () => {
+    const boot = await bootCombat();
+    const { session, grant } = await openAgent(boot, "gm", "Keeper");
+    const gmCtx = hexCtxOf(session, grant);
+
+    // Forward to a minute past midnight: the hour-long spell is still running, so this proves a
+    // short jump is not a sweep of everything it can find.
+    const set = await callTool({ name: "time.set", args: { seconds: 60 } }, gmCtx);
+    expect(set.kind).toBe("result");
+    if (set.kind !== "result") return;
+    expect(set.result.isError, set.result.content[0]?.text).toBeUndefined();
+    expect(readWorldClock(boot.store.getAll("settings"))).toBe(60);
+    const vex = boot.store.get("actors", "a-vex") as unknown as ActorDocument | undefined;
+    expect(vex?.effects ?? []).toHaveLength(1);
+
+    // …and back to zero. The clock went backwards, so nothing expires: time un-passing has not
+    // cast anything in reverse.
+    const back = await callTool({ name: "time.set", args: { seconds: 0 } }, gmCtx);
+    expect(back.kind).toBe("result");
+    if (back.kind !== "result") return;
+    expect(back.result.content[0]?.text).toContain("a backward jump, so nothing expired");
+    expect(readWorldClock(boot.store.getAll("settings"))).toBe(0);
+    expect(
+      (boot.store.get("actors", "a-vex") as unknown as ActorDocument | undefined)?.effects ?? [],
+    ).toHaveLength(1);
+
+    const player = await openAgent(boot, "player");
+    const playerCtx = hexCtxOf(player.session, player.grant);
+    const refused = await callTool(
+      { name: "time.advance", args: { hours: 6 } },
+      playerCtx,
+    );
+    expect(refused.kind).toBe("result");
+    if (refused.kind !== "result") return;
+    expect(refused.result.isError).toBe(true);
+    expect(refused.result.content[0]?.text).toBe(refusalFor("time.control"));
+    // Nothing moved: a refused write is not a partial write.
+    expect(readWorldClock(boot.store.getAll("settings"))).toBe(0);
+
+    const tod = await callTool({ name: "time.of_day", args: {} }, playerCtx);
+    expect(tod.kind).toBe("result");
+    if (tod.kind !== "result") return;
+    expect(tod.result.isError).toBeUndefined();
+    expect(tod.result.content[0]?.text).toContain("It is 00:00 on day 0 — night");
   });
 });

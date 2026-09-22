@@ -509,8 +509,24 @@ here is a real-host integration test: `bestiary.search → actor.from_compendium
 token in **one envelope stamped `by` the agent**, and a pasted `Goblin Warrior` stat block becomes a
 real actor (hp 6, Dex 15, owned by the session that imported it) with a token on the table.
 
-### Phase 4 — Table flow, time, strategic (1 day, S)
+### Phase 4 — Table flow, time, strategic (1 day, S) — 🚧 clock + tracker landed 2026-09-22 (D-284)
 `combat.*`, `time.*`, `dice.apply`, `fog.*` (mask + state), `strategic.snapshot/order/report`.
+
+**As landed so far — the clock and the tracker (D-284).** `time.get` / `time.of_day` /
+`time.advance` / `time.set`, and `combat.state` / `start` / `add` / `next` / `end`. Time passing is
+**one call with the sweep in the same envelope** — byte-for-byte the ops the Settings window's
+*day* button submits, proved by deep equality rather than by "the clock moved" — on the world's own
+ladder (a minute is 10 rounds, not 60 wall-clock seconds), and a backward jump expires nothing
+because time un-passing has not cast a spell in reverse. `time.get` is the control-plane number
+(`time.control`); `time.of_day` is the derived hour, phase and day (`world.read`). The tracker calls
+the app's own engine — PF1e's `startWithSurprise` and `pf1eNextTurn`, so a surprise round and an
+unresolved initiative tie are the rules' own verdicts — moves the world clock by the transition's
+`clockDeltaSeconds` **only** where the world advances it on a round wrap, and reports a dying
+creature's stabilization check instead of rolling it. `combat.state` is an addition to §5.5's table:
+`combat.next` without a way to read the order advances a tracker it cannot see. **Still to come:**
+`dice.roll` / `dice.apply` (host-executed, so these two are async: the client sends, the host rolls
+and commits the card, and the tool reads the number back off the replica), `fog.*`, and
+`strategic.*`.
 *Test:* the agent runs a full round (start combat, next turn, apply damage) and the clock advances by
 exactly `secondsPerRound`; a `time.advance` of 3 days sweeps the clock-counted effects exactly as the
 Settings buttons do.

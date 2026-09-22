@@ -862,6 +862,91 @@ const bestiarySearch: ToolDefinition = {
   },
 };
 
+// ── the clock and the tracker (§5.5) ──────────────────────────────────────────────────────────
+//
+// There is **one** clock, in seconds, and everything spends it: a round is `secondsPerRound`, an
+// hour 600 rounds, a day 14 400 (`HEXCRAWL_SCENE_SPEC_AND_PLAN.md` §3.7). So `time.get` is the
+// number the subsystems share and `time.of_day` is the sentence the table says — and they can never
+// disagree, because the second is derived from the first and not stored beside it.
+
+const timeGet: ToolDefinition = {
+  name: "time.get",
+  description:
+    "The world's one clock: the integral seconds every subsystem spends, the seconds a combat round costs here, and whether a round wrap moves the clock at all. Effects with a duration, the hexcrawl's day/night and the tracker's rounds are all counted against this number.",
+  args: { properties: {} },
+  capability: "time.control",
+  run(_args, ctx): ToolOutcome {
+    const clock = ctx.view.clock();
+    return text(
+      [
+        `Clock: ${clock.stamp} — ${clock.seconds} s.`,
+        `  a round is ${clock.secondsPerRound} s here, and a round wrap ${clock.advanceOnRound ? "advances the clock" : "does not move it"}.`,
+        `  time of day: ${clock.label} on day ${clock.day} (${clock.phase}) — time.of_day says it in words.`,
+      ].join("\n"),
+      clock as unknown as Json,
+    );
+  },
+};
+
+const timeOfDayTool: ToolDefinition = {
+  name: "time.of_day",
+  description:
+    "What the clock means in the world's own terms: the hour and minute, day or night, and the day number — derived from the one clock, never stored, so it cannot drift from it. What an agent wants before it says whether the sun is up.",
+  args: { properties: {} },
+  capability: "world.read",
+  run(_args, ctx): ToolOutcome {
+    const clock = ctx.view.clock();
+    return text(
+      `It is ${clock.label} on day ${clock.day} — ${clock.phase} (${clock.seconds} s on the world clock).`,
+      clock as unknown as Json,
+    );
+  },
+};
+
+const combatStateTool: ToolDefinition = {
+  name: "combat.state",
+  description:
+    "The turn tracker on a scene, as the table sees it: whose turn it is, the initiative order with the current combatant marked, the round, and whether the encounter has started (a PF1e surprise round is running before round 1). Nothing here rolls a die or moves a turn — combat.next does that.",
+  args: {
+    properties: {
+      sceneId: {
+        type: "string",
+        description: "the scene whose encounter to read; the active one when omitted",
+      },
+    },
+  },
+  capability: "world.read",
+  run(args, ctx): ToolOutcome {
+    const sceneId = str(args["sceneId"]) ?? null;
+    const combat = ctx.view.combatState(sceneId);
+    if (!combat) {
+      return refusal(
+        sceneId
+          ? `no encounter on scene "${sceneId}" — combat.start opens one, and scene.list names the scenes`
+          : "there is no encounter here — combat.start opens one",
+      );
+    }
+    const order = combat.order.map((row) => {
+      const init = row.initiative === null ? "—" : `${row.initiative}`;
+      const marks = [
+        row.isCurrent ? "← now" : "",
+        row.defeated ? "defeated" : "",
+        row.hidden ? "hidden" : "",
+      ].filter((mark) => mark !== "");
+      return `  ${init.toString().padStart(3)}  ${row.name}${marks.length > 0 ? ` (${marks.join(", ")})` : ""}`;
+    });
+    return text(
+      [
+        combat.started
+          ? `${combat.name}: round ${combat.round}${combat.phase === "surprise" ? " (surprise round)" : ""} — ${combat.current?.name ?? "nobody"}'s turn.`
+          : `${combat.name}: not started (round ${combat.round}) — ${combat.order.length} combatant(s) in the order.`,
+        ...(order.length > 0 ? order : ["  nobody is in the order yet — combat.add names them"]),
+      ].join("\n"),
+      combat as unknown as Json,
+    );
+  },
+};
+
 export const READ_TOOLS: readonly ToolDefinition[] = [
   sceneList,
   sceneRead,
@@ -877,4 +962,7 @@ export const READ_TOOLS: readonly ToolDefinition[] = [
   hexRead,
   hexDescribe,
   hexmapRender,
+  timeGet,
+  timeOfDayTool,
+  combatStateTool,
 ];

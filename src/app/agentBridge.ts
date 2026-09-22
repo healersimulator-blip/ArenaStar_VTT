@@ -19,6 +19,8 @@ import type { ClientSync } from "../client/sync";
 import type {
   ActorDocument,
   BaseDocument,
+  CombatDocument,
+  CombatantDocument,
   CollectionName,
   Json,
   MessageDocument,
@@ -28,8 +30,12 @@ import type {
 import { TOP_LEVEL_COLLECTIONS } from "../core/documents";
 import type {
   AgentBestiaryHit,
+  AgentClock,
+  AgentCombatTurn,
+  AgentCombatantRow,
   AgentCompendiumEntry,
   AgentEncounterCheck,
+  AgentTimeOps,
   AgentHexCell,
   AgentHexFeature,
   AgentDocument,
@@ -93,9 +99,33 @@ import type { AgentWriter } from "../core/agents/types";
 import { createAgentBridge, type AgentBridge } from "../core/agents/bridge";
 import {
   advanceWorldClockOps,
+  formatWorldClock,
   pf1eClockSweepOps,
   readWorldClock,
+  setWorldClockOps,
+  wrapAdvanceOps,
 } from "../packages/pf1e/worldClock";
+import {
+  currentCombatant,
+  endCombat,
+  nextTurn,
+  startCombat,
+} from "../core/combat";
+import {
+  pf1eNextTurn,
+  readRoundState,
+  startWithSurprise,
+} from "../packages/pf1e/combatState";
+import { isPf1eEncounter } from "../ui/combat/actionBudget";
+import {
+  activateEncounter,
+  encounterList,
+  newEncounter,
+  selectedEncounter,
+} from "../ui/combat/encounters";
+import { timeOfDay } from "../core/clock";
+import { daylightOf } from "../core/hexcrawl/encounter";
+import { advanceClockOnRoundOf } from "../core/worldSettings";
 import { pf1eSheetView, isPF1eActor } from "../ui/sheets/pf1eSheetModel";
 import { createAgentLink, type AgentLinkStatus } from "../net/agentLink";
 import type { CompendiumIndex } from "../core/compendiumIndex";
@@ -394,6 +424,109 @@ export function agentWorldView(
       if (count > 0) out[coll] = count;
     }
     return out;
+  };
+
+  // ── the turn tracker, as this view reads it ─────────────────────────────────────────────────
+  //
+  // These four helpers exist so the ports above can *call the app's* combat engine instead of
+  // growing a second one. `combatUpdateOps` is the panel's own `push()`: the round, the turn, the
+  // combatants and the flags are what a transition writes, and nothing else on the document is
+  // the tracker's to touch.
+  const legacySceneId = (): string => store.getAll("scenes")[0]?._id ?? "";
+  const combatsOf = (): readonly CombatDocument[] =>
+    store.getAll("combats") as unknown as CombatDocument[];
+  const encounterOf = (scene: SceneDocument): CombatDocument | null =>
+    selectedEncounter(combatsOf(), scene, legacySceneId());
+
+  const combatUpdateOps = (combat: CombatDocument): Op[] => [
+    {
+      kind: "update",
+      ref: { coll: "combats", id: combat._id },
+      diff: {
+        round: combat.round,
+        turn: combat.turn,
+        combatants: combat.combatants as unknown as Json[],
+        flags: combat.flags as unknown as Json,
+      },
+    },
+  ];
+
+  const applyValues = (
+    combat: CombatDocument,
+    values: Record<string, number> | undefined,
+  ): { combat: CombatDocument } =>
+    values === undefined || Object.keys(values).length === 0
+      ? { combat }
+      : {
+          combat: {
+            ...combat,
+            combatants: combat.combatants.map((member) =>
+              member._id in values
+                ? { ...member, initiative: Math.trunc(values[member._id] as number) }
+                : member,
+            ),
+          },
+        };
+
+  /** Create the encounter when the scene has none; otherwise hand back the one the tracker shows. */
+  const openEncounter = (
+    scene: SceneDocument,
+    name?: string,
+  ): { combat: CombatDocument; ops: Op[] } | { error: string } => {
+    const existing = encounterOf(scene);
+    if (existing) return { combat: existing, ops: [] };
+    const count = encounterList(combatsOf(), scene, legacySceneId()).length;
+    const doc = newEncounter(scene, newId(), name ?? `Encounter ${count + 1}`, () => newId());
+    const activation = activateEncounter(scene, doc, userOf(), legacySceneId());
+    if (activation.error) return { error: activation.error };
+    return {
+      combat: doc,
+      ops: [
+        { kind: "create", coll: "combats", data: doc as unknown as BaseDocument },
+        ...activation.ops,
+      ],
+    };
+  };
+
+  /** One combat, in the shape the tools report: the order, whose turn it is, and what happened. */
+  const stateOf = (
+    combat: CombatDocument,
+    note: string | null,
+    ops: Op[],
+    clockDeltaSeconds: number,
+    dyingChecks: AgentCombatTurn["dyingChecks"] = [],
+  ): AgentCombatTurn => {
+    const state = readRoundState(combat);
+    const inSurprise = state.phase === "surprise";
+    const currentId = inSurprise
+      ? (state.surpriseOrder[state.surpriseTurn] ?? null)
+      : (currentCombatant(combat)?._id ?? null);
+    const rows: AgentCombatantRow[] = combat.combatants.map((member) => ({
+      id: member._id,
+      name: member.name,
+      initiative: member.initiative,
+      defeated: member.defeated === true,
+      hidden: member.hidden === true,
+      tokenId: member.tokenId ?? null,
+      actorId: member.actorId ?? null,
+      isCurrent: member._id === currentId,
+    }));
+    const current = rows.find((row) => row.isCurrent) ?? null;
+    return {
+      id: combat._id,
+      name: combat.name,
+      round: combat.round,
+      turn: combat.turn,
+      // A surprise round is running before `round` reaches 1: the tracker's own rule, not ours.
+      started: combat.round >= 1 || inSurprise,
+      phase: inSurprise ? "surprise" : null,
+      current,
+      order: rows,
+      clockDeltaSeconds,
+      ops,
+      note,
+      dyingChecks,
+    };
   };
 
   const view: AgentWorldView = {
@@ -980,6 +1113,234 @@ export function agentWorldView(
           data: token,
         }),
       );
+    },
+    // ── the clock (§5.5) ─────────────────────────────────────────────────────────────────────
+    //
+    // One integral clock, in seconds, and every subsystem spends it: a round is `secondsPerRound`,
+    // an hour 600 rounds, a day 14 400. "Three days pass" is therefore one call, and the sweep that
+    // ends clock-counted effects rides in the same envelope — which is exactly what the Settings
+    // window's buttons do, and the reason an agent's "a night passes" is indistinguishable from
+    // the GM clicking *day*.
+    clock(): AgentClock {
+      const settingsDocs = store.getAll("settings");
+      const settings = coreWorldSettingsFrom(settingsDocs);
+      const seconds = readWorldClock(settingsDocs);
+      // Day and night come from the active scene's dawn/dusk window when it names one: a world can
+      // be lit by two scenes at once, and the one on screen is the one the party is standing in.
+      const tod = timeOfDay(seconds, daylightOf(pick(null)));
+      return {
+        seconds,
+        stamp: formatWorldClock(seconds),
+        hour: tod.hour,
+        minute: tod.minute,
+        phase: tod.phase,
+        day: tod.day,
+        label: tod.label,
+        secondsPerRound: secondsPerRoundOf(settings),
+        advanceOnRound: advanceClockOnRoundOf(settings),
+      };
+    },
+    timeOps(spec): AgentTimeOps | { error: string } {
+      const settingsDocs = store.getAll("settings");
+      const settings = coreWorldSettingsFrom(settingsDocs);
+      const spr = secondsPerRoundOf(settings);
+      const current = readWorldClock(settingsDocs);
+      const delta =
+        typeof spec.delta === "number" && Number.isFinite(spec.delta)
+          ? Math.trunc(spec.delta)
+          : null;
+      const absolute =
+        typeof spec.seconds === "number" && Number.isFinite(spec.seconds)
+          ? Math.trunc(spec.seconds)
+          : null;
+      if (delta === null && absolute === null) {
+        return { error: "say `seconds` to set the clock, or `days`/`hours`/`rounds` to move it" };
+      }
+      const next = Math.max(
+        0,
+        absolute !== null ? absolute : current + (delta as number),
+      );
+      const moved = next - current;
+      const ops: Op[] =
+        absolute !== null ? setWorldClockOps(settingsDocs, next) : advanceWorldClockOps(settingsDocs, moved);
+      // A backward jump expires nothing — a GM correcting the hour has not cast a spell backwards.
+      // Forward, the sweep ends exactly what the Settings buttons would end.
+      const sweep =
+        moved > 0
+          ? pf1eClockSweepOps(
+              store.getAll("actors") as never,
+              store.getAll("combats") as never,
+              next,
+              spr,
+            )
+          : { ops: [], expired: [] };
+      return {
+        seconds: next,
+        delta: moved,
+        ops: [...ops, ...(sweep.ops as unknown as Op[])],
+        expired: sweep.expired.map((row) => ({
+          home: row.home,
+          ownerId: row.ownerId,
+          effectId: row.effectId,
+        })),
+      };
+    },
+
+    // ── the turn tracker (§5.5) ───────────────────────────────────────────────────────────────
+    //
+    // The tracker is the app's own state machine (`core/combat.ts`, and PF1e's `combatState.ts`
+    // over it), and these ports call it rather than reimplementing it: a surprise round, an
+    // initiative tie and a dying creature's stabilization check are rules, and a connector that
+    // invented its own "next turn" would be a second combat engine with no tests.
+    combatState(sceneId) {
+      const scene = pick(sceneId);
+      if (!scene) return null;
+      const combat = encounterOf(scene);
+      return combat === null ? null : stateOf(combat, null, [], 0);
+    },
+    combatStartOps(sceneId, spec): AgentCombatTurn | { error: string } {
+      const scene = pick(sceneId);
+      if (!scene) return { error: "there is no scene here — scene.list names them" };
+      const opened = openEncounter(scene, spec.name);
+      if ("error" in opened) return { error: opened.error };
+      const combat = opened.combat;
+      if (combat.combatants.length === 0) {
+        return {
+          error: `${combat.name} has no combatants — combat.add names the tokens that are in it`,
+        };
+      }
+      const actors = store.getAll("actors") as unknown as ActorDocument[];
+      let next: CombatDocument;
+      let note: string | null;
+      if (isPf1eEncounter(combat, actors)) {
+        const rolls = combat.combatants.map((member) => ({
+          combatantId: member._id,
+          value: spec.initiative?.[member._id] ?? member.initiative ?? null,
+          dexMod: 0,
+        }));
+        if (rolls.some((roll) => roll.value === null)) {
+          return {
+            error:
+              "a PF1e encounter needs an initiative for every combatant — pass them to combat.start, or set them with combat.add",
+          };
+        }
+        const started = startWithSurprise(applyValues(combat, spec.initiative).combat, {
+          initiative: rolls.map((roll) => ({ ...roll, value: roll.value as number })),
+          ...(spec.unaware === undefined ? {} : { unaware: spec.unaware }),
+        });
+        if (started.state.ties.some((tie) => tie.resolvedBy === "reroll-needed")) {
+          return {
+            error:
+              "initiative ties are unresolved — give one of the tied combatants a different initiative",
+          };
+        }
+        next = started.combat;
+        note =
+          started.surprise?.surpriseRound === true
+            ? `surprise round — ${started.surprise.aware.length} aware, ${started.surprise.flatFooted.length} caught flat-footed`
+            : (started.surprise?.note ?? "round 1");
+      } else {
+        next = startCombat(applyValues(combat, spec.initiative).combat).combat;
+        note = "round 1";
+      }
+      return stateOf(next, note, [...opened.ops, ...combatUpdateOps(next)], 0);
+    },
+    combatAddOps(sceneId, spec): AgentCombatTurn | { error: string } {
+      const scene = pick(sceneId);
+      if (!scene) return { error: "there is no scene here — scene.list names them" };
+      if (spec.combatants.length === 0) {
+        return { error: "combat.add needs at least one combatant" };
+      }
+      const opened = openEncounter(scene, spec.name);
+      if ("error" in opened) return { error: opened.error };
+      const combat = opened.combat;
+      const tokens = (scene.tokens ?? []) as readonly TokenDocument[];
+      const additions: CombatantDocument[] = spec.combatants.map((entry) => {
+        const token = entry.tokenId ? tokens.find((row) => row._id === entry.tokenId) : undefined;
+        const actorId = entry.actorId ?? token?.actorId ?? null;
+        return {
+          _id: newId(),
+          type: "combatant",
+          name: entry.name ?? token?.name ?? actorId ?? "combatant",
+          ownership: { default: 1 },
+          flags: {},
+          system: {},
+          tokenId: entry.tokenId ?? null,
+          actorId,
+          initiative:
+            typeof entry.initiative === "number" && Number.isFinite(entry.initiative)
+              ? Math.trunc(entry.initiative)
+              : null,
+          hidden: false,
+          defeated: false,
+        } as unknown as CombatantDocument;
+      });
+      const merged: CombatDocument = {
+        ...combat,
+        combatants: [...combat.combatants, ...additions],
+      };
+      return stateOf(
+        merged,
+        `${additions.length} combatant(s) added — ${merged.combatants.length} in the order`,
+        [...opened.ops, ...combatUpdateOps(merged)],
+        0,
+      );
+    },
+    combatNextOps(sceneId, count): AgentCombatTurn | { error: string } {
+      const scene = pick(sceneId);
+      if (!scene) return { error: "there is no scene here — scene.list names them" };
+      const combat = encounterOf(scene);
+      if (!combat) {
+        return { error: "there is no encounter on this scene — combat.start opens one" };
+      }
+      const steps = Math.min(Math.max(Math.trunc(count) || 1, 1), 20);
+      const actors = store.getAll("actors") as unknown as ActorDocument[];
+      const settingsDocs = store.getAll("settings");
+      let acc = combat;
+      let clockDeltaSeconds = 0;
+      const dying: AgentCombatTurn["dyingChecks"] = [];
+      let phase: string | null = null;
+      for (let i = 0; i < steps; i++) {
+        if (isPf1eEncounter(acc, actors)) {
+          const result = pf1eNextTurn(acc, { actors });
+          acc = result.combat;
+          clockDeltaSeconds += result.clockDeltaSeconds;
+          for (const check of result.dyingChecks)
+            dying.push({
+              combatantId: check.combatantId,
+              actorId: check.actorId,
+              actorName: check.actorName,
+              hp: check.hp,
+            });
+          phase = result.state.phase;
+        } else {
+          acc = nextTurn(acc).combat;
+        }
+      }
+      const settings = coreWorldSettingsFrom(settingsDocs);
+      // The tracker's own rule, not ours: a round wrap moves the clock only in a world that says
+      // so, and it moves it by the round the transition reports (a surprise round: not at all).
+      const clockOps =
+        clockDeltaSeconds > 0 && advanceClockOnRoundOf(settings)
+          ? wrapAdvanceOps(settingsDocs, clockDeltaSeconds)
+          : [];
+      return stateOf(
+        acc,
+        phase === "surprise" ? "surprise round" : `round ${acc.round}`,
+        [...combatUpdateOps(acc), ...clockOps],
+        clockOps.length > 0 ? clockDeltaSeconds : 0,
+        dying,
+      );
+    },
+    combatEndOps(sceneId): AgentCombatTurn | { error: string } {
+      const scene = pick(sceneId);
+      if (!scene) return { error: "there is no scene here — scene.list names them" };
+      const combat = encounterOf(scene);
+      if (!combat) {
+        return { error: "there is no encounter on this scene — combat.start opens one" };
+      }
+      const ended = endCombat(combat).combat;
+      return stateOf(ended, "combat ended", combatUpdateOps(ended), 0);
     },
     tokenCreate(spec): Op | { error: string } {
       const scene = scenes().find((row) => row._id === spec.sceneId);
