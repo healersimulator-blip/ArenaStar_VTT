@@ -771,6 +771,20 @@ modules, so G-38's eventual extraction is one file's worth of work. `GAP_ANALYSI
 §5.1 records the standing decision that this was never a parity row, and `STATUS_ASSESSMENT_2026-09-21.md`
 §5 carries the dated note.
 
+*Status after the player-side tail (2026-09-22):* PR #29's one open follow-up is closed (**D-277**),
+and it earned its keep. `e2e/hexcrawl_player_fields.spec.ts` asserts D-271's projection from the
+player's side of the wire — a hex the party has been shown, two features on it, and the player's
+replica read back across the three states: neither revealed (no rows at all, `description` null, the
+picture never crossed), the GM's checkbox (the row arrives *with* its art), and a rule firing on its
+own (the hour reveals the well, the card reaches the table, and the ledger reads 3 600 on both sides).
+It found two defects. The player's hex window **could not draw a revealed feature's picture at all**:
+the hash crossed by design, but the player shell never handed `WindowHost` a `resolveAsset`, and the
+prop defaults to `null` — the GM shell passes one, so only the player's half was missing. And both
+two-peer hexcrawl specs **leaked their browser contexts**, which is what was starving the peer link
+and what the `hexcrawl_fog` flake really was: a page nobody is looking at is a page Chromium throttles.
+With both fixed the seven hexcrawl specs are green in one run — **12 passed (4.5 m)** — and the
+projection is asserted where it matters, on the document a player is actually handed.
+
 *Status after Phase 5 (2026-09-22):* Phases 0–5 are landed (D-268…D-274). A table a GM writes now fires —
 automatically when the party enters or moves through a tagged hex, as a GM-only pending card whose roll the
 GM answers, or by hand from the hex window — the cooldown ledger keeps it quiet, and the result **reaches the

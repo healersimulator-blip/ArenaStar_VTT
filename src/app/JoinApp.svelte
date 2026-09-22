@@ -44,6 +44,7 @@
   import OnboardingPanel from "../ui/onboarding/OnboardingPanel.svelte";
   import { ChatPanel } from "../ui/chat";
   import { QuickbarRow } from "../ui/quickbar";
+  import { SvelteMap } from "svelte/reactivity";
   import { WindowManager } from "../core/windows";
   import { WindowHost } from "../ui/windows";
   import { openPF1eSheetWindow } from "../ui/sheets/pf1eSheetWindow";
@@ -493,6 +494,36 @@
     return scene.tokens
       .filter((token) => visible === null || visible.has(token._id))
       .map((token) => ({ token, sceneId: scene._id }));
+  }
+
+  /**
+   * D-277: an asset hash → a URL a DOM `<img>` can load, for **this** replica. A revealed
+   * feature's picture reaches a player as a hash in the cell document (`core/projection.ts` keeps
+   * it, because a revealed feature is the players' to look at) — but a hash is not a picture, and
+   * until the player's client fetched the bytes behind it there was nothing for the `<img>` to
+   * draw: the player shell handed `HexWindow` no resolver at all, so the art was simply absent
+   * from the one window whose whole job is to show it. The first ask starts the fetch and answers
+   * `null`; the bytes land in a reactive map, so the asking component re-renders on its own.
+   *
+   * URLs pass straight through — a feature's picture may be a link the GM pasted.
+   */
+  const assetUrls = new SvelteMap<string, string>();
+
+  function resolveAsset(hash: string | null | undefined): string | null {
+    if (!hash) return null;
+    if (/^(https?:|data:|blob:)/.test(hash)) return hash;
+    const ready = assetUrls.get(hash);
+    if (ready) return ready;
+    const current = app;
+    if (!current) return null;
+    void current.fetcher
+      .request(hash, "ui")
+      .then((bytes) => {
+        const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)]));
+        assetUrls.set(hash, url);
+      })
+      .catch(() => undefined);
+    return null;
   }
 
   function squareGrid(
@@ -1067,6 +1098,7 @@
             onUndo={() => undefined}
             onRedo={() => undefined}
             bindings={DEFAULT_BINDINGS}
+            {resolveAsset}
             isGM={false}
           />
         {/if}

@@ -8027,3 +8027,65 @@ note with this entry's gates, and the plan's §8 Phase 7 marker closes the last 
   spec files**, the single failure being the fog flake below; two failures in the wider full-suite
   run are not this change either: `hexcrawl_fog`'s two-peer propagation step **passes standalone
   (41.8 s)**, and `webrtc`'s PixiJS layer-order test fails on the pristine tree here too.
+
+## D-277 — 2026-09-22 — What a player's replica holds: the projection asserted from the player's side, a player shell taught to resolve a feature's picture, and the two-peer leak that starved the peer link (hexcrawl Phase 6 tail)
+
+**Context.** PR #29 (D-275) closed with one follow-up open: the phase's two new fields — `featureRows`
+and `exploredSeconds` — had been asserted from the GM's side only. `hexcrawl_travel.spec.ts` and
+`hexcrawl_fog.spec.ts` are that half; what was missing was the other side of the same documents, which
+is the only place D-271's projection rule can be seen to hold. `core/hexcrawl/features.ts` says it of
+itself: the projection of an unrevealed feature is *the single security-relevant line of the whole
+feature*. A hidden thing must not be hidden in the UI — it must not be in the document a player is
+handed.
+
+**What the spec asserts.** `e2e/hexcrawl_player_fields.spec.ts` is a two-context spec with a real
+manual join (the same handshake `hexcrawl_fog.spec.ts` uses): a hex a player has been shown, two
+features on it — one manual and carrying a picture, one ruled by time — and then the player's replica
+across the three states. *Neither revealed:* the cell arrives with **no feature rows at all**,
+`description: null`, and the picture never crossed (the GM's row has an `img`, the player's document
+does not exist). *The GM's checkbox:* the row arrives **with** its `img` — a revealed feature's art is
+the players' to look at — and the player's own hex window draws it. *A rule firing on its own:* an
+hour spent exploring reveals the well, the `Found at 6,3: the old well` card reaches the player's chat,
+the row arrives, and `exploredSeconds` reads **3 600 on both sides**. The hours are the party's own —
+the players were standing there — and the secret was the rule waiting for them, not the time.
+
+**Decision — a defect: the player's hex window could not draw a revealed feature's picture at all.**
+The hash crossed the wire by design (D-271 keeps it, because a revealed feature is the players' to look
+at), but a hash is not a picture. `HexWindow` turns one into an `<img src>` through a `resolveAsset`
+prop that `WindowHost` forwards; `App.svelte`, the GM shell, passes one backed by `gm.fetcher`; and
+`JoinApp.svelte`, the player shell, **passed none** — the prop defaults to `null`, so the art was
+simply absent from the one window whose whole job is to show it. The player shell is given a resolver
+of its own, built on the client fetcher it already uses for the map image
+(`current.fetcher.request(hash, "ui")` → `URL.createObjectURL`), memoised in a `SvelteMap` like the
+GM's, with `https:`/`data:`/`blob:` passing straight through because a feature's picture may be a link
+the GM pasted. It is the player's **own** fetcher on purpose: the bytes travel from the GM's peer
+through the player's client, and handing the player shell the GM's resolver would mean reaching for a
+`gm` client it does not have. `HexWindow` is unchanged and grows no `isGM` branch — the two shells
+differ in what they pass, not in what the window does.
+
+**Decision — a defect in the harness: two-peer specs were starving the peer link.** Both
+`hexcrawl_fog.spec.ts` and the new spec created their contexts with `browser.newContext()` and never
+closed them, and Playwright does not close contexts a test made for itself. Every two-peer test thus
+left two live pages behind the next one, and Chromium throttles a page nobody is looking at — which is
+exactly the shape of the flake D-276 recorded: `hexcrawl_fog`'s propagation step failing in a long run
+and passing alone (41.8 s). The new spec showed the same thing with the diagnosis written on it — the
+GM's document reading `revealedFeatures: 1` while the player's replica stayed at 0 for **90 seconds**,
+with the cell still present and the peer still connected. `fog_player.spec.ts`, a two-peer spec that
+has always passed here, closes its contexts; that was the whole difference. Both specs now close
+theirs. The seven hexcrawl specs go green **in one run** for the first time: 12 passed (4.5 m),
+against 7.6 m and one failure before.
+
+**Gates.**
+
+- **The unit gate:** `pnpm test` — **261 files / 3 100 tests passed** (2 files, 12 tests skipped).
+  This change is a shell prop, a fetch and a spec: no core behaviour moves, and the projection it
+  asserts from the browser is already unit-tested in `tests/core/hexcrawlFeatures.test.ts`.
+- **Types and lint:** `pnpm typecheck` **50 components, 0 blocking, 1 advisory**
+  (`ReplayPanel.svelte:29`) · `pnpm lint` **exit 0**.
+- **The build and the size budget:** `pnpm build` → `pnpm size` **3 142 835 B raw / 904 095 B gzip,
+  OK: within the 6 MB raw budget** (the Phase 7 tree: 3 142 538 / 904 019 — **+297 B raw** for the
+  player shell's resolver).
+- **The browser gate, chromium only:** the new spec `e2e/hexcrawl_player_fields.spec.ts` is
+  **1 passed (34.6 s)**, and the six older hexcrawl specs re-run beside it in one command are
+  **11 passed** — **12 hexcrawl tests, 4.5 m, no failures**, which also retires the `hexcrawl_fog`
+  flake D-276 had to explain.

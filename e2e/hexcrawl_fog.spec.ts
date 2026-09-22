@@ -468,5 +468,11 @@ test.describe("hexcrawl canvas (§8 Phase 2, D-271)", () => {
         { timeout: 45_000 },
       )
       .toBe(true);
+
+    // A two-peer spec has to give its contexts back: a leaked context leaves a page open behind
+    // the next test, and Chromium throttles a page nobody is looking at — which starves the peer
+    // link, and is why this spec's propagation step used to fail in a long run and pass alone.
+    await hostCtx.close();
+    await playerCtx.close();
   });
 });
