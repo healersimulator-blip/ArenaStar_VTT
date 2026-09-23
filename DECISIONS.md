@@ -8752,3 +8752,62 @@ control.
 **Phase 6 is complete.** What remains of the plan is its optional tail: rate classes tuned against a
 25k-entry world, and the `dryRun`/`confirm` ergonomics — both refinements of a surface that is
 already fully built, tested and documented.
+
+## D-291 — the starter world ships a complete hexcrawl, and the e2e suite ran in a browser (2026-09-22)
+
+Two things: the PF1e starter world now opens on a region you can walk, and the e2e suite was
+executed rather than only collected — for the first time since the hexcrawl landed.
+
+**Decision — the starter ships a region, authored as content.** **The Hollow Reach**:
+`content/hexcrawl/hollow-reach.json`, 28 hexes at 6 miles, every one with a name, terrain, the GM's
+description and the line the party reads; 16 hidden features across all four reveal rules
+(Perception DC, hours spent, a dice check, the GM's say-so); four encounter tables attached to the
+hexes that should roll them; a party token at Gallows Ford; six hexes open and the rest dark, with
+`gm+party` sight at radius 1 so walking opens the map. `scripts/buildStarterWorlds.mjs` converts it
+into the documents the app stores — one scene with its cells embedded, four `encounterTables`, and a
+generated traveller's guide that lists every hex, every rumour and every feature with the rule that
+finds it.
+
+The prose is **content, not code**, for the same reason the tool table is generated (D-289): the
+region can be edited or replaced without touching the build, and the conversion is testable. Nothing
+ship is *found*: every feature starts hidden, because the starter ships rules, not answers.
+
+**Decision — a browser ran.** The plan has carried "no Chromium here, so the suite is collected and
+not executed" for several slices. The workaround is D-119/D-153's and the README's: the Playwright
+CDN (`cdn.playwright.dev`) is unreachable from this sandbox, so the browser comes from npm —
+`npm i @sparticuz/chromium@153.0.0` (Chromium 153.0.8010.0, matching Playwright's pinned 153
+build), `chromium.br` inflated to `/tmp/chromium`, and the shared libraries from the package's own
+`al2023.tar.br` (on this version `executablePath()` did not inflate it, so it was brotli-decoded and
+untarred by hand) with `LD_LIBRARY_PATH=/tmp/al2023/lib`, `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` and
+`PLAYWRIGHT_CHROMIUM_NO_SANDBOX=1`. WebGL works — ANGLE over SwiftShader.
+
+**What the run found.** The PixiJS layer-order smoke (`e2e/webrtc.spec.ts`) had been failing since
+D-271: `createStage` adds a `hexcrawl` layer between *lighting* and *tokens*, but `LAYER_ORDER` — the
+constant the smoke asserts the stage against — never got it. A contract nobody executed for months
+had drifted. Fixed in the constant and the spec, not in the stage. `fog_player.spec.ts` failed once
+under full parallel load and passes alone: recorded as load, not as a regression.
+
+**Gates.**
+
+- `pnpm test` — **3 327 tests passed** (12 skipped). New: five cases over the region's conversion
+  (28 cells with terrain in the catalog and prose on both sides; the profile is a real hexcrawl
+  scene and **every authored cell's computed centre lands inside that cell**, which is the one thing
+  the plain-JS writer cannot share with the TS geometry; four tables that draw and are the ones the
+  hexes name; 16 features that ship hidden with a rule each) and one that boots the built zip
+  through the real importer and finds the cells intact.
+- `e2e` (Chromium, the whole collected suite, run twice): **197 passed / 1 skipped** on the first
+  pass — the skipped one is `content_world.spec.ts`, which needs the converted 8 MB content package
+  this machine has not built. The new `e2e/hexcrawl_starter_world.spec.ts` opens the built starter
+  world from the start screen and walks it: the scene in the rail, 28 authored of 90 cells, the
+  party at 1,2, the Ash Mile's name / terrain / GM text / player text and its attached table, that
+  table rolled and written to the ledger, a route drawn with the hex menu and priced at
+  *Highway / road* × 2 = 2 h, committed, and two clock advances that walk the party to Waystone
+  Cross at an hour a border. Two specs failed and were diagnosed, not re-run into green:
+  `fog_player.spec.ts` and `fog_lighting.spec.ts` pass alone and fail only under full parallel load
+  on two cores (timing, not behaviour) — and the second pass, started after a bare `pnpm build`
+  wiped `dist/packages`, added four failures that are simply `pf1e-core-1.0.0.zip missing`; all
+  seven of those pass serially once `pnpm build:systems` has run, which `pnpm test:e2e` does.
+- `pnpm typecheck` **51 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`) ·
+  `pnpm lint` **exit 0**.
+- `pnpm build` → `pnpm size` **3 292 593 B raw / 951 170 B gzip**, inside the 6 MB budget. The
+  region costs the world zip 10.8 kB and the bundle nothing.

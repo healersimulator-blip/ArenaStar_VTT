@@ -20,6 +20,15 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { bootHostApp, DEFAULT_SCENE_ID, type HostApp } from "../../src/app/hostBoot";
 import { searchCompendia } from "../../src/core/compendium";
 import { buildCompendiumIndex, searchIndex } from "../../src/core/compendiumIndex";
+import {
+  cellAtPoint,
+  cellCenterOf,
+  cellsInMap,
+  cellsOf,
+} from "../../src/core/hexcrawl/cells";
+import { PF1E_TERRAIN_CATALOG } from "../../src/core/hexcrawl/terrain";
+import { validateEncounterTable } from "../../src/core/hexcrawl/tables";
+import { hexcrawlProfileOf, isHexcrawlScene } from "../../src/core/hexcrawl/types";
 import { importWorldZip, type WorldFileMeta } from "../../src/host/worldFile";
 import { classifyZip, describeWorldContents } from "../../src/host/zipKind";
 import { getWorld, listPackages, listWorlds, openVttDb } from "../../src/storage/idb";
@@ -80,13 +89,13 @@ describe("scripts/buildStarterWorlds.mjs", () => {
       worldId: "starter-pf1e-mass-battles",
       system: "pf1e-mass-battles",
       version: "1.0.0",
-      seq: 11,
+      seq: 17,
       rules: { active: "pf1e-mass-battles" },
       starter: true,
     });
     const starterDocuments = JSON.parse(strFromU8(entries["documents.json"] as Uint8Array)) as { seq: number; docs: unknown[] };
-    expect(starterDocuments.seq).toBe(11);
-    expect(starterDocuments.docs).toHaveLength(11);
+    expect(starterDocuments.seq).toBe(17);
+    expect(starterDocuments.docs).toHaveLength(17);
     expect(Object.keys(entries)).toEqual(expect.arrayContaining([
       "packages/pf1e-mass-battles/manifest.json",
       "packages/pf1e-mass-battles/rules.js",
@@ -248,8 +257,9 @@ describe("scripts/buildStarterWorlds.mjs", () => {
 
 /**
  * The tester starter bundles the mass-battles ruleset (active) + pf1e-core + the converted
- * PF1e content package, with 11 pre-placed documents (a tactical skirmish, a strategic
- * battle with two armies, and a tester guide). The content package here is a SMALL fixture
+ * PF1e content package, with 17 pre-placed documents (a tactical skirmish, a strategic
+ * battle with two armies, an overland hexcrawl, and a tester guide). The content package here
+ * is a SMALL fixture
  * shaped like the real `dist/content/pf1e` (the real one is 58 MB / 25 k entries — the
  * conversion itself is covered by tests/scripts/contentConverter.test.ts).
  */
@@ -310,7 +320,7 @@ describe("tester starter (buildStarterWorlds with contentDir)", () => {
     tester = built.find((b) => b.id === "pf1e-mass-battles-tester");
   }, 120_000);
 
-  test("builds the plain starter PLUS the tester with three packages and 11 documents", () => {
+  test("builds the plain starter PLUS the tester with three packages and 17 documents", () => {
     expect(tester).toBeDefined();
     if (!tester?.zip) throw new Error("tester starter not built");
     expect(tester.name).toBe("Pathfinder 1e Mass Battles — tester");
@@ -324,7 +334,7 @@ describe("tester starter (buildStarterWorlds with contentDir)", () => {
       format: 2,
       worldId: "starter-pf1e-mass-battles-tester",
       system: "pf1e-mass-battles",
-      seq: 11,
+      seq: 17,
       rules: { active: "pf1e-mass-battles" },
       starter: true,
     });
@@ -360,8 +370,8 @@ describe("tester starter (buildStarterWorlds with contentDir)", () => {
       seq: number;
       docs: DocRow[];
     };
-    expect(docs.seq).toBe(11);
-    expect(docs.docs).toHaveLength(11);
+    expect(docs.seq).toBe(17);
+    expect(docs.docs).toHaveLength(17);
     const byId = new Map(docs.docs.map((d) => [d.id, d]));
     const docOf = <T>(id: string): T => {
       const row = byId.get(id);
@@ -428,7 +438,7 @@ describe("tester starter (buildStarterWorlds with contentDir)", () => {
       expect(app.meta.name).toBe("Tester World");
       expect(app.rulesBoot).toMatchObject({ source: "package", packageId: "pf1e-mass-battles", error: null });
       const store = app.gm.client.store;
-      // pre-placed docs: no default seed (seq 11), the tactical scene is DEFAULT_SCENE_ID
+      // pre-placed docs: no default seed (seq 17), the tactical scene is DEFAULT_SCENE_ID
       expect(store.get("scenes", "scene-1")).toBeDefined();
       const scene2 = store.get("scenes", "scene-2") as { flags?: { core?: { scale?: string } } } | undefined;
       expect(scene2?.flags?.core?.scale).toBe("strategic");
@@ -463,4 +473,183 @@ describe("tester starter (buildStarterWorlds with contentDir)", () => {
     });
     expect(built.map((b) => b.id)).toEqual(["pf1e-mass-battles"]);
   });
+});
+
+// ─── the overland region: hexcrawl content → documents → a booted world ───────
+
+/**
+ * The starter ships a complete hexcrawl — **The Hollow Reach** — because a world you can only
+ * read about is a world that hides half the app. The region is authored as content
+ * (`content/hexcrawl/hollow-reach.json`) and converted by `hexcrawlDocuments()`; these tests hold
+ * both halves: the conversion, and the fact that the host, the importer and the projection all
+ * still carry the result.
+ */
+describe("starter overland region (content/hexcrawl/hollow-reach.json)", () => {
+  let regionDocs: Record<string, unknown>[] = [];
+  beforeAll(async () => {
+    const mod = await regionModule();
+    regionDocs = mod.hexcrawlDocuments();
+  });
+
+  interface RegionDoc extends Record<string, unknown> {
+    _id: string;
+    type: string;
+    name: string;
+  }
+  interface RegionScene extends RegionDoc {
+    grid: { type: string; size: number; distance: number; units: string; hexLayout: string };
+    tokens: Array<{ _id: string; x: number; y: number }>;
+    cells: Array<{
+      key: string;
+      terrain?: string;
+      description?: string;
+      playerText?: string;
+      tables?: string[];
+      features?: Array<{ id: string; reveal: { kind: string }; state: { revealed: boolean } }>;
+    }>;
+    flags: { core: { hexcrawl: Record<string, unknown> } };
+  }
+
+  /** The writer is plain JS, loaded the same way the other tests load it. */
+  const regionModule = async (): Promise<{
+    hexcrawlDocuments: (file?: string) => Record<string, unknown>[];
+    readHexcrawlContent: (file?: string) => { hexes: unknown[] };
+  }> =>
+    (await import(/* @vite-ignore */ join(repoRoot, "scripts/buildStarterWorlds.mjs"))) as never;
+
+  const region = (): {
+    scene: RegionScene;
+    tables: Array<RegionDoc & { mode: string; entries: unknown[] }>;
+    guide: RegionDoc & { pages: Array<{ text: string }> };
+  } => {
+    const docs = regionDocs as unknown as RegionDoc[];
+    const scene = docs.find((d) => d.type === "scene") as unknown as RegionScene;
+    const tables = docs.filter((d) => d.type === "encounterTable") as unknown as Array<
+      RegionDoc & { mode: string; entries: unknown[] }
+    >;
+    const guide = docs.find((d) => d.type === "journal") as unknown as RegionDoc & {
+      pages: Array<{ text: string }>;
+    };
+    return { scene, tables, guide };
+  };
+
+  test("the region converts to a hexcrawl scene, its tables, and a guide", () => {
+    const { scene, tables, guide } = region();
+    expect(scene.grid).toEqual({
+      type: "hex",
+      size: 100,
+      distance: 6,
+      units: "mi",
+      diagonals: "555",
+      hexLayout: "oddQ",
+    });
+    expect(scene.cells).toHaveLength(28);
+    expect(tables).toHaveLength(4);
+    expect(guide.pages[0]?.text).toContain("The Hollow Reach");
+    // Every hex is authored: a name the GM reads, a description, and the line the party reads.
+    for (const cell of scene.cells) {
+      expect(cell.key, "every cell carries its q,r key").toMatch(/^-?\d+,-?\d+$/);
+      expect(cell.description?.length ?? 0).toBeGreaterThan(80);
+      expect(cell.playerText?.length ?? 0).toBeGreaterThan(30);
+      expect(PF1E_TERRAIN_CATALOG.terrains.some((t) => t.id === cell.terrain), cell.key).toBe(true);
+    }
+    // The region covers the terrain catalog a GM would want to price travel against.
+    const terrains = new Set(scene.cells.map((c) => c.terrain));
+    for (const id of ["plains", "road", "hills", "forest", "marsh", "mountains", "water", "city"]) {
+      expect(terrains, `the region has no ${id}`).toContain(id);
+    }
+  });
+
+  test("the profile is a real hexcrawl scene, and the party stands in the hex it should", () => {
+    const { scene } = region();
+    expect(isHexcrawlScene(scene as never)).toBe(true);
+    const profile = hexcrawlProfileOf(scene as never);
+    expect(profile).toMatchObject({
+      version: 1,
+      sight: { mode: "gm+party", radiusCells: 1 },
+      partyTokenId: "tok-party",
+      encounterMode: "prompt",
+      encounterAnnounce: "names",
+      terrain: "pf1e-overland",
+      travel: null,
+    });
+    expect(profile?.revealed).toEqual(["1,1", "1,2", "1,3", "2,2", "2,3", "3,2"]);
+    // The one thing the writer cannot share with the TS geometry module: the pixel centre it
+    // computes for a hex must be the hex the app reads back at that pixel.
+    const party = scene.tokens[0];
+    expect(party?._id).toBe("tok-party");
+    expect(cellAtPoint(scene as never, party?.x ?? 0, party?.y ?? 0)).toBe("1,2");
+    // …and every authored cell's centre lands inside that cell, not in a neighbour.
+    for (const cell of scene.cells) {
+      const centre = cellCenterOf(scene as never, cell.key);
+      expect(cellAtPoint(scene as never, centre?.x ?? -1, centre?.y ?? -1), cell.key).toBe(cell.key);
+    }
+    // The map is bigger than the region: the dark edges are unexplored ground, not a cropped map.
+    expect(cellsInMap(scene as never).length).toBeGreaterThan(scene.cells.length);
+  });
+
+  test("four encounter tables draw, and every hex that names one names a real one", () => {
+    const { scene, tables } = region();
+    const ids = new Set(tables.map((t) => t._id));
+    for (const table of tables) {
+      const check = validateEncounterTable(table as never);
+      expect(check.errors, `${table._id}: ${check.errors.join("; ")}`).toEqual([]);
+      expect(table.entries.length).toBeGreaterThan(3);
+    }
+    const attached = new Set(scene.cells.flatMap((c) => c.tables ?? []));
+    expect(attached.size).toBeGreaterThan(0);
+    for (const id of attached) {
+      expect(ids.has(id), `a hex attaches ${id}, which no table provides`).toBe(true);
+    }
+  });
+
+  test("hidden features ship hidden, each with the rule that finds it", () => {
+    const { scene, guide } = region();
+    const features = scene.cells.flatMap((c) => c.features ?? []);
+    expect(features.length).toBeGreaterThanOrEqual(10);
+    for (const feature of features) {
+      // Nothing is found before a party finds it — the starter ships rules, not answers.
+      expect(feature.state).toEqual({ revealed: false });
+      expect(["manual", "perception", "time", "dice"]).toContain(feature.reveal.kind);
+    }
+    const kinds = new Set(features.map((f) => f.reveal.kind));
+    expect([...kinds].sort()).toEqual(["dice", "manual", "perception", "time"]);
+    // The guide names every feature and the rule that uncovers it, in the GM's words.
+    for (const feature of features.slice(0, 4)) {
+      expect(guide.pages[0]?.text).toContain(feature.id.replace(/^feat-/, "").replace(/-/g, " "));
+    }
+  });
+
+  test("the region survives the world file and boots with its cells intact", async () => {
+    const bytes = new Uint8Array(readFileSync(starterOf("pf1e-mass-battles").zip as string));
+    const db = await openVttDb();
+    const root = new MemDirHandle();
+    const imported = await importWorldZip({ db, file: bytes, root, mode: "copy", name: "Reach" });
+    const app = await bootHostApp({
+      db,
+      root,
+      codec: new FakeCodec(),
+      simRunner: new InlineSimRunner(),
+      worldId: imported.worldId,
+    });
+    try {
+      const store = app.gm.client.store;
+      const scene = store.get("scenes", "scene-3") as unknown as RegionScene | undefined;
+      expect(scene).toBeDefined();
+      // The importer and the host kept the cells — the whole point of shipping them.
+      expect(cellsOf(scene as never)).toHaveLength(28);
+      expect(isHexcrawlScene(scene as never)).toBe(true);
+      expect(hexcrawlProfileOf(scene as never)?.partyTokenId).toBe("tok-party");
+      expect(store.getAll("encounterTables")).toHaveLength(4);
+      const guide = store.get("journals", "journal-hollow-reach") as
+        | { pages?: Array<{ text: string }> }
+        | undefined;
+      expect(guide?.pages?.[0]?.text).toContain("Gallows Ford");
+      // The tactical scene the world opens on is untouched by the region.
+      expect(store.get("scenes", DEFAULT_SCENE_ID)).toBeDefined();
+      await app.persister.flush();
+    } finally {
+      await app.close();
+    }
+  }, 60_000);
 });

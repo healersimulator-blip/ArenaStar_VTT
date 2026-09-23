@@ -61,6 +61,11 @@ export const LAYER_ORDER = [
   "templates",
   "walls",
   "lighting",
+  // §20 hexcrawl overlay (D-271): tints and the cell grid, under the tokens and above the
+  // lighting. The constant is the *contract* the e2e smoke asserts the stage against, so a layer
+  // added in `createStage` and not here is a silent divergence — which is exactly how the
+  // hexcrawl layer drifted for the whole time no browser ran the suite (D-291).
+  "hexcrawl",
   "tokens",
   "models",
   "tilesAbove",
