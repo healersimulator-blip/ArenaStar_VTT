@@ -728,7 +728,7 @@ pre-batch store, refused the intent, and the scene, the log and the card disappe
 over the canvas still eats the next right-click (the spec closes the results window before the canvas
 gesture, and the still-open hex window is what proves the log's one-click row).
 
-### Phase 6 — Travel, terrain, hidden features (1.5 days, M)
+### Phase 6 — Travel, terrain, hidden features (1.5 days, M) — ✅ landed 2026-09-22 (D-275)
 Path mode, itinerary preview, the `travelAdvance` call site (the model landed in Phase 0b, this is the
   clock/UI wiring), terrain brush, feature model and
 evaluator (manual / perception / time / dice), auto vs manual reveal, the projection gate.
@@ -736,7 +736,7 @@ evaluator (manual / perception / time / dice), auto vs manual reveal, the projec
 terrain-priced amount, the clock advanced exactly that, and an exploration-timed feature revealed itself on
 the third day.
 
-### Phase 7 — Polish, docs, decisions (0.5 day)
+### Phase 7 — Polish, docs, decisions (0.5 day) — ✅ landed 2026-09-22 (D-276)
 Help panel entries, toolbar hints, keyboard (`H` for the hex menu?), the i18n strings kept in one table
 (G-38 is open; this feature must not add scattered literals), `STATUS_ASSESSMENT` + `GAP_ANALYSIS` §5.1
 note (this feature is *not* a parity row — it gets its own line under "not in the open set, by decision"
@@ -745,6 +745,45 @@ unless the product decision is otherwise), and the closing `DECISIONS.md` entrie
 ### Sequencing note
 Phases 0–2 are the *walking skeleton* (a hexcrawl scene you can look at); 3–5 make it a game; 6 makes it a
 campaign. If the product wants a demo sooner, ship 0–2 + a hand-authored encounter table (3) and stop.
+
+*Status after Phase 6 (2026-09-22):* Phases 0–6 are landed (D-268…D-275). The party now **walks**: path
+mode draws a route one hex at a time (`Esc` gives it up, *Commit route* writes it), the itinerary prices it
+per cell off the same `stepSecondsOf` the march will charge, and the six travel buttons spend the **world
+clock** — *To the next hex*, *Travel the route*, *To dawn*, *To dusk*, *+1 day* — walking the party as far
+as that time and the terrain allow and leaving the rest of it spent where the party stopped. Every cell the
+march touched keeps the seconds it was given (`flags.core.exploredSeconds`), which is the counter a hidden
+feature's *time* rule reads: a shrine that waits for 40 h in a hex reveals itself on the third day with no
+GM click, and posts one plain card in the chat — `Found at 6,3: the old well` — because a feature the
+players are allowed to hold is not a secret. The three canvas-menu rows that were disabled after Phase 5
+are live: *Features of this hex…*, *Move party here* and *Add to path*. What was left is Phase 7 (polish,
+help, the closing docs), and the acceptance line is the Phase 6 e2e spec: **a three-cell forest path, one
+border and one day, and the ledger summing to exactly what the clock advanced** — plus the third-day
+reveal.
+
+*Status after Phase 7 (2026-09-22):* **the feature is complete** — Phases 0–7, D-268…D-276. Phase 7
+paid the plan's own debts: the help window carries a **hexcrawl sheet** (right-click, `Y`, `Esc`,
+`Shift+H`, and the model in words — the clock walks the party and a hex keeps the hours), `Shift+H`
+opens the hex the party stands in from anywhere on the map (`h` alone is Roll20's hand tool, so the
+modifier buys the mnemonic), the travel panel says beside its buttons that they spend the **world
+clock**, and every sentence the feature speaks — a rule label, a note, a log line, a menu entry, a
+hint — lives in **one table** (`src/core/hexcrawl/strings.ts`) instead of being scattered across
+modules, so G-38's eventual extraction is one file's worth of work. `GAP_ANALYSIS_Roll20_Foundry.md`
+§5.1 records the standing decision that this was never a parity row, and `STATUS_ASSESSMENT_2026-09-21.md`
+§5 carries the dated note.
+
+*Status after the player-side tail (2026-09-22):* PR #29's one open follow-up is closed (**D-277**),
+and it earned its keep. `e2e/hexcrawl_player_fields.spec.ts` asserts D-271's projection from the
+player's side of the wire — a hex the party has been shown, two features on it, and the player's
+replica read back across the three states: neither revealed (no rows at all, `description` null, the
+picture never crossed), the GM's checkbox (the row arrives *with* its art), and a rule firing on its
+own (the hour reveals the well, the card reaches the table, and the ledger reads 3 600 on both sides).
+It found two defects. The player's hex window **could not draw a revealed feature's picture at all**:
+the hash crossed by design, but the player shell never handed `WindowHost` a `resolveAsset`, and the
+prop defaults to `null` — the GM shell passes one, so only the player's half was missing. And both
+two-peer hexcrawl specs **leaked their browser contexts**, which is what was starving the peer link
+and what the `hexcrawl_fog` flake really was: a page nobody is looking at is a page Chromium throttles.
+With both fixed the seven hexcrawl specs are green in one run — **12 passed (4.5 m)** — and the
+projection is asserted where it matters, on the document a player is actually handed.
 
 *Status after Phase 5 (2026-09-22):* Phases 0–5 are landed (D-268…D-274). A table a GM writes now fires —
 automatically when the party enters or moves through a tagged hex, as a GM-only pending card whose roll the

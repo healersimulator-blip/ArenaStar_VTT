@@ -57,6 +57,7 @@ test.describe("canvas (§9 M1 subset)", () => {
       "templates",
       "walls",
       "lighting",
+      "hexcrawl", // §20 overlay: under the tokens, above the lighting (D-271)
       "tokens",
       "models",
       "tilesAbove",

@@ -14,6 +14,7 @@
     "test": "vitest run",
     "bench:dense": "VTT_DENSE_BENCH=1 vitest run tests/packages/pf1eDenseArmyBenchmark.test.ts",
     "test:e2e": "pnpm build && pnpm build:systems && node tools/convert/index.mjs --allow-missing && pnpm build:worlds && playwright test",
+    "mcp": "node tools/mcp/server.mjs",
     "typecheck": "tsc --noEmit && node scripts/checkSvelte.mjs",
     "check:svelte": "node scripts/checkSvelte.mjs",
     "lint": "eslint .",

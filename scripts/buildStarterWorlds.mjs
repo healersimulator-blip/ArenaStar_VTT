@@ -22,7 +22,7 @@
  *
  * `--content-dir` (default dist/content/pf1e — the `pnpm content:convert` output) adds the
  * TESTER starter: the mass-battles ruleset + pf1e-core + the converted content, with a
- * pre-placed tactical + strategic scenario and a tester guide (11 documents). Missing
+ * pre-placed tactical + strategic + overland scenario and a tester guide. Missing
  * content dir ⇒ the tester is skipped with a note (fresh clones build the plain starter only).
  */
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -249,6 +249,7 @@ const COLL_OF_TYPE = {
   faction: "factions",
   army: "armies",
   journal: "journals",
+  encounterTable: "encounterTables",
 };
 
 function docRow(doc) {
@@ -351,7 +352,21 @@ packs** (pf1e-content — spells, feats, classes, items, rules, roll tables, …
 - The hero unit is linked to the Scene 1 token (leaderTokenId) — leadership auras apply.
 - The scene note links back to the tactical scene (linkedSceneId).
 
-## 3. Content packs — compendium searches to try
+## 3. Overland — Scene 3 (The Hollow Reach)
+- Open **Overland — The Hollow Reach** from the scene rail: 28 authored hexes, one hex = 6 miles,
+  every one with a description, a player-facing line, and — where there is something to find — a
+  hidden feature with a rule that uncovers it (Perception DC, hours spent, a dice check, or the
+  GM's own say-so).
+- **Right-click a hex** for its menu. **Shift+H** opens the hex you are standing in.
+- **Y** arms *Travel path*: click hexes, **Commit route**, and the panel prices the route off the
+  terrain — forest 2 h a hex, plains 1 h, a road crosses as open ground whatever it runs through.
+- Spend hours with the travel panel: the **world clock** advances, the party walks as far as that
+  buys, night falls when it falls, and an encounter check fires where the tables are attached.
+- Four encounter tables ship with it (road, forest, fen, downs) and are wired to the hexes that
+  should roll them. The **traveller's guide** journal lists every hex, every rumour, and every
+  hidden feature with the rule that finds it.
+
+## 4. Content packs — compendium searches to try
 - "fireball" → PF1e Spells (Core): level table, school, descriptors, save.
 - "power attack" → PF1e Feats (Core + Expanded): categories, raw Foundry data under system.foundry.
 - "abjurant salt" → PF1e Wondrous Items: armor block + item hp/hardness.
@@ -360,10 +375,234 @@ packs** (pf1e-content — spells, feats, classes, items, rules, roll tables, …
 - roll tables → PF1e Ultimate Equipment + Roll Tables (Core).
 - actors: Goblin (basic NPC), Allosaurus (companion), deities, artifacts.
 
-## 4. Export round-trip
-Export this world to a zip and re-import it: all 11 pre-placed documents, the three packages,
-the active ruleset, and the explored fog must come back identical.
+## 5. Export round-trip
+Export this world to a zip and re-import it: all 17 pre-placed documents — three scenes, the armies
+and their units, the encounter tables and their hexes, the journals — the three packages, the active
+ruleset, and the explored fog must come back identical.
 `;
+
+// ─── the Hollow Reach: a hexcrawl the starter world ships complete ────────────
+//
+// A starter world that let a tester *read* about the hexcrawl without ever standing on one is a
+// starter world that hides half of what the app can do. So the region ships as **content** —
+// `content/hexcrawl/hollow-reach.json`, in the shape an adventure author would write it (a hex
+// per entry: name, terrain, what is there, what the party is told, what is hidden and by what
+// rule) — and this block converts it into the documents the app actually stores: one scene with
+// its cells embedded, four encounter tables, and a traveller's guide.
+//
+// Keeping the prose out of code is the point: the region can be edited, extended or replaced
+// without touching the build, and `tests/scripts/buildStarterWorlds.test.ts` boots the result
+// through the real importer to prove the conversion still lands.
+const HEXCRAWL_CONTENT = join(repoRoot, "content", "hexcrawl", "hollow-reach.json");
+
+const SQRT3 = Math.sqrt(3);
+
+/**
+ * The centre of an odd-Q hex, mirroring `canvas/grid/hex.ts` (`offsetToAxial` +
+ * `axialToPixel`). The writer is plain JS and cannot import the TS geometry module, so the
+ * formula is restated here and *checked* instead: the starter-world test asks `cellAtPoint`
+ * which hex each authored cell's centre falls in, and a mismatch fails the build.
+ */
+function hexCenterPixels(size, q, r) {
+  const b = r - (q - (q & 1)) / 2;
+  return { x: 1.5 * size * q, y: SQRT3 * size * (b + q / 2) };
+}
+
+/** Read the region, throwing with the path when it is missing or malformed (never a silent skip). */
+export function readHexcrawlContent(file = HEXCRAWL_CONTENT) {
+  const raw = JSON.parse(readFileSync(file, "utf8"));
+  if (!Array.isArray(raw.hexes) || raw.hexes.length === 0) {
+    throw new Error(`${file}: no hexes`);
+  }
+  return raw;
+}
+
+/** One authored cell, as the document the canvas, the projection and the world file all read. */
+function hexcrawlCellDoc(content, hex, index) {
+  const features = (hex.features ?? []).map((feature) => ({
+    id: feature.id,
+    name: feature.name,
+    text: feature.text,
+    reveal: feature.reveal,
+    autoReveal: feature.autoReveal !== false,
+    // Nothing is found before a party finds it: the starter ships the *rules*, not the answers.
+    state: { revealed: false },
+  }));
+  return baseDoc(`cell-${hex.key.replace(",", "-")}-${index}`, "cell", hex.name, {
+    key: hex.key,
+    ...(hex.terrain ? { terrain: hex.terrain } : {}),
+    ...(hex.description ? { description: hex.description } : {}),
+    ...(hex.playerText ? { playerText: hex.playerText } : {}),
+    ...(hex.tables && hex.tables.length > 0 ? { tables: [...hex.tables] } : {}),
+    ...(features.length > 0 ? { features } : {}),
+  });
+}
+
+/** An encounter table, one row per drawable outcome, exactly as the editor stores it. */
+function hexcrawlTableDoc(table) {
+  const entries = table.entries.map((entry) => ({
+    weight: entry.weight ?? 1,
+    ...(entry.range ? { range: [entry.range[0], entry.range[1]] } : {}),
+    text: entry.text,
+    count: entry.count ?? 0,
+    refs: entry.refs ?? [],
+  }));
+  return baseDoc(table.id, "encounterTable", table.name, {
+    mode: table.mode === "dice" ? "dice" : "weighted",
+    formula: table.formula ?? "",
+    entries,
+    tags: table.tags ?? {
+      day: true,
+      night: true,
+      entering: true,
+      moving: true,
+      exploring: false,
+      fighting: false,
+    },
+    ...(typeof table.cooldownSeconds === "number" ? { cooldownSeconds: table.cooldownSeconds } : {}),
+  });
+}
+
+/** The region's guide: what it is, how to walk it, what the rumours are, and what is in each hex. */
+function hexcrawlGuideMarkdown(content) {
+  const terrainNames = {
+    plains: "plains",
+    road: "road",
+    hills: "hills",
+    forest: "forest",
+    marsh: "marsh",
+    mountains: "mountains",
+    water: "water",
+    city: "town",
+  };
+  const lines = [
+    `# ${content.name}`,
+    "",
+    content.subtitle ?? "",
+    "",
+    content.blurb ?? "",
+    "",
+    `**${content.hexes.length} hexes · one hex is ${content.scene.distance} ${content.scene.units}.** ` +
+      `**${content.party.name}** starts at ${content.hexes.find((h) => h.key === content.party.start)?.name ?? content.party.start}.`,
+    "",
+    "## How to walk it",
+    "",
+    `- Open the scene **Overland — ${content.name}** from the scene rail.`,
+    "- **Right-click a hex** for its menu: description, terrain, features, tables.",
+    "- **Shift+H** opens the hex the party is standing in.",
+    "- **Y** arms *Travel path*; click the hexes you want, then **Commit route**. The panel prices",
+    "  the route cell by cell off the terrain — forest is two hours a hex at a normal pace, plains",
+    "  one, and a road crosses as open ground whatever it runs through.",
+    "- The travel buttons then spend the **world clock**: the party walks as far as that buys and",
+    "  camps where the road ends. Night falls when the clock says it does.",
+    "- Every hex keeps the hours the party spent in it, which is what a hidden feature's *time*",
+    "  rule reads. A shrine that wants two days of travelling gives itself up on the third.",
+    "",
+    "## Rumours in Gallows Ford",
+    "",
+    ...(content.rumours ?? []).map((rumour, i) => `${i + 1}. ${rumour}`),
+    "",
+    "## The hexes",
+    "",
+    "| Hex | Where | Terrain | What is there |",
+    "|---|---|---|---|",
+    ...content.hexes.map((hex) => {
+      const first = (hex.description ?? "").split(/(?<=\.)\s/)[0] ?? "";
+      return `| ${hex.key} | **${hex.name}** | ${terrainNames[hex.terrain] ?? hex.terrain} | ${first.replace(/\|/g, "/")} |`;
+    }),
+    "",
+    "## What is hidden, and by what rule",
+    "",
+    ...(content.hexes.flatMap((hex) =>
+      (hex.features ?? []).map((feature) => {
+        const rule =
+          feature.reveal.kind === "perception"
+            ? `Perception DC ${feature.reveal.dc}${feature.reveal.active ? " (rolled)" : " (passive)"}`
+            : feature.reveal.kind === "time"
+              ? `${Math.round(feature.reveal.seconds / 3600)} h spent in the hex`
+              : feature.reveal.kind === "dice"
+                ? `${feature.reveal.formula} vs ${feature.reveal.target}`
+                : "the GM decides";
+        return `- **${feature.name}** (${hex.name}, ${hex.key}) — ${rule}${feature.autoReveal === false ? "; the GM ticks it, the rule only says when" : ""}.`;
+      }),
+    )),
+    "",
+  ];
+  return lines.join("\n");
+}
+
+/**
+ * The region as documents: the scene (cells embedded, party token on it, the profile as
+ * `flags.core.hexcrawl`), the encounter tables, and the guide.
+ *
+ * The scene is **not** active — the starter still opens on the tactical skirmish, and the guide
+ * says where the overland map is.
+ */
+export function hexcrawlDocuments(file = HEXCRAWL_CONTENT) {
+  const content = readHexcrawlContent(file);
+  const { width, height, cellSize, distance, units, layout } = content.scene;
+  const partyId = "tok-party";
+  const start = content.hexes.find((h) => h.key === content.party.start) ?? content.hexes[0];
+  const [sq, sr] = String(start.key).split(",").map(Number);
+  const centre = hexCenterPixels(cellSize, sq, sr);
+  const cells = content.hexes.map((hex, index) => hexcrawlCellDoc(content, hex, index));
+  const tables = (content.tables ?? []).map(hexcrawlTableDoc);
+  const party = tokenDoc(partyId, content.party.name, Math.round(centre.x), Math.round(centre.y), null, "friendly");
+  const pin = baseDoc("note-hex-start", "note", "The Company starts here", {
+    x: Math.round(centre.x),
+    y: Math.round(centre.y - 60),
+    text: `${content.party.name} begins at ${start.name}. Right-click any hex to work on it; \`Y\` draws a travel path.`,
+    icon: "\u{1F6A0}",
+    visible: true,
+  });
+  const scene = baseDoc("scene-3", "scene", `Overland — ${content.name}`, {
+    active: false,
+    img: null,
+    width,
+    height,
+    darkness: 0,
+    grid: {
+      type: "hex",
+      size: cellSize,
+      distance,
+      units,
+      diagonals: "555",
+      hexLayout: layout,
+    },
+    tokens: [party],
+    walls: [],
+    lights: [],
+    sounds: [],
+    tiles: [],
+    drawings: [],
+    templates: [],
+    notes: [pin],
+    cells,
+    flags: {
+      core: {
+        hexcrawl: {
+          version: 1,
+          revealed: [...(content.revealed ?? [])],
+          sight: {
+            mode: content.sight?.mode === "gm" ? "gm" : "gm+party",
+            radiusCells: content.sight?.radiusCells ?? 1,
+            radiusWorldUnits: 0,
+          },
+          partyTokenId: partyId,
+          encounterMode: "prompt",
+          encounterAnnounce: "names",
+          daylight: content.daylight ?? { dawnHour: 6, duskHour: 20 },
+          terrain: "pf1e-overland",
+          travel: null,
+        },
+      },
+    },
+  });
+  const guide = baseDoc("journal-hollow-reach", "journal", `${content.name} — a traveller's guide`, {
+    pages: [{ name: content.name, text: hexcrawlGuideMarkdown(content), src: null }],
+  });
+  return [scene, ...tables, guide];
+}
 
 /**
  * The pre-placed documents of the tester world, in deterministic order. `contentDir` is the
@@ -433,6 +672,9 @@ function testerDocuments(contentDir) {
     baseDoc("journal-welcome", "journal", "Tester Guide", {
       pages: [{ name: "PF1e tester world — what to test", text: TESTER_GUIDE, src: null }],
     }),
+    // The overland region: a hexcrawl scene with 28 authored hexes, four encounter tables and a
+    // traveller's guide, so a tester can walk before they author.
+    ...hexcrawlDocuments(),
   ];
 }
 

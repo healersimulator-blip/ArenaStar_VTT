@@ -142,8 +142,46 @@ describe("the time counter", () => {
     expect(core["exploredAtClock"]).toBe(5_400);
     expect(addExploredTimeOps(sceneDoc, "3,4", 0)).toEqual([]);
     expect(addExploredTimeOps(sceneDoc, "3,4", -60)).toEqual([]);
-    // A cell nobody authored has nothing to patch — the GM's own writes create it.
-    expect(addExploredTimeOps(sceneDoc, "9,9", 600)).toEqual([]);
+  });
+
+  test("a march authors the hex it slept in, rather than dropping the hours", () => {
+    // The ledger is a fact about where the party *stood*, not about what the GM painted: a hex
+    // nobody authored still owes the party its hours when the GM opens it later (the `time` rule
+    // reads this counter). The create carries the flag with it — one op, not two.
+    const [op] = addExploredTimeOps(scene([]), "9,9", 600, 1_200);
+    expect(op?.kind).toBe("create");
+    const data = (op as unknown as { data: CellDocument }).data;
+    expect(data.key).toBe("9,9");
+    expect(data.name).toBe("9,9"); // `create` needs a name; the key is the name a GM would give it
+    expect(exploredSecondsOf(data)).toBe(600);
+    const core = (data.flags ?? {})["core"] as Record<string, unknown>;
+    expect(core["exploredAtClock"]).toBe(1_200);
+    // …and an authored hex is still an *update*, carrying the flag forward.
+    const [patched] = addExploredTimeOps(
+      scene([cell({ flags: { core: { exploredSeconds: 3_600 } } })]),
+      "3,4",
+      600,
+    );
+    expect(patched?.kind).toBe("update");
+  });
+
+  test("an unauthored hex is walked over: the time is written, no rule is judged", () => {
+    const facts: FeatureFacts = { clockSeconds: 0, passivePerception: 10, perceptionModifier: 0, rng: () => 0 };
+    const result = revealDueFeatures({
+      scene: scene([]),
+      cellKey: "9,9",
+      facts,
+      spentSeconds: 7_200,
+    });
+    expect(result.revealed).toEqual([]);
+    expect(result.notes).toEqual([]);
+    expect(result.ops).toHaveLength(1);
+    expect(result.ops[0]?.kind).toBe("create");
+    expect(
+      exploredSecondsOf((result.ops[0] as unknown as { data: CellDocument }).data),
+    ).toBe(7_200);
+    // A zero-second pass over an unauthored hex writes nothing at all.
+    expect(revealDueFeatures({ scene: scene([]), cellKey: "9,9", facts, spentSeconds: 0 }).ops).toEqual([]);
   });
 
   test("the reader is total: absent, junk and negative all read as zero", () => {

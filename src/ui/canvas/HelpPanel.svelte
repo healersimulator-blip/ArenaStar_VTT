@@ -4,6 +4,7 @@
    * this is ours: the rail's own keys plus the gesture modifiers the tools honour. It reads
    * the live binding map, so a rebound action shows its new combo.
    */
+  import { agentHelp } from "../../core/agents/help";
   import { DEFAULT_BINDINGS } from "../../core/keys";
   import { NO_ONBOARDING_FACTS, onboardingSteps } from "../../core/onboarding";
   import { RULES_REFERENCE_LINKS } from "../../core/docs";
@@ -60,6 +61,23 @@
     { keys: "Click a map pin", action: "Tooltip · double-click opens the linked handout" },
     { keys: "Alt + wheel", action: "Zoom · Ctrl+A selects the layer's content" },
   ];
+
+  /**
+   * D-276 (plan §8 Phase 7) — the hexcrawl's own sheet. Shown whether or not the open scene is
+   * one: a GM who has not made a hexcrawl map yet still needs to know the key exists, and the
+   * rows say which of them are theirs. The prose is the model, not the buttons — the buttons
+   * are labelled where they stand, and what a GM actually forgets is that the *clock* walks the
+   * party and that a hex keeps the hours spent in it.
+   */
+  /** §10 Agents — read from the catalogue, so the counts on the page cannot drift. */
+  const agentsPage = agentHelp();
+
+  const hexcrawlKeys: Array<{ keys: string; action: string }> = [
+    { keys: "Right-click a hex", action: "The hex menu: description, terrain, features, tables (GM)" },
+    { keys: "Shift+H", action: "Open the hex the party is standing in" },
+    { keys: "Y", action: "Travel path — click hexes to draw the party's route (GM)" },
+    { keys: "Escape", action: "Give up the route being drawn (the tool stays armed)" },
+  ];
 </script>
 
 <div class="help" data-help-panel>
@@ -102,6 +120,57 @@
         <dd>{row.action}</dd>
       {/each}
     </dl>
+  </section>
+  <section data-help-hexcrawl>
+    <h4>Hexcrawl maps</h4>
+    <p class="prose">
+      A hexcrawl scene is one overland map the party walks across. Right-click a hex to work on it
+      and use <em>Travel path</em> to draw a route; <em>Commit route</em> prices it cell by cell off
+      the terrain, and the travel panel's buttons then spend the <strong>world clock</strong> — the
+      party walks as far as that buys and camps where the road ends. Every hex keeps the hours the
+      party spent in it, which is what a hidden feature's <em>time</em> rule reads: a shrine that
+      waits for two days of travelling gives itself up on the third and says so in the chat.
+    </p>
+    <dl>
+      {#each hexcrawlKeys as row (row.keys)}
+        <dt>{row.keys}</dt>
+        <dd>{row.action}</dd>
+      {/each}
+    </dl>
+  </section>
+  <!--
+    §10 Agents (D-290) — the page is data (`src/core/agents/help.ts`), and its numbers are read
+    from the capability catalogue, so a preset that changed is a count this page gets right
+    instead of a count a GM acts on wrongly. Players see it too: the people an agent reads about
+    are owed what it can see. Only the granting rows are the GM's.
+  -->
+  <section data-help-agents>
+    <h4>{agentsPage.title}</h4>
+    {#each agentsPage.prose as line (line)}
+      <p class="prose">{line}</p>
+    {/each}
+    <dl>
+      {#each agentsPage.rows as row (row.term)}
+        <dt>{row.term}</dt>
+        <dd>{row.detail}</dd>
+      {/each}
+    </dl>
+    <h4>The four kinds of agent</h4>
+    <dl>
+      {#each agentsPage.presets as preset (preset.id)}
+        <dt>{preset.id} · role {preset.role} · {preset.count} capabilities</dt>
+        <dd>{preset.note}</dd>
+      {/each}
+    </dl>
+    {#if isGM}
+      <h4>Granting and revoking</h4>
+      <dl>
+        {#each agentsPage.gmRows as row (row.term)}
+          <dt>{row.term}</dt>
+          <dd>{row.detail}</dd>
+        {/each}
+      </dl>
+    {/if}
   </section>
   <section>
     <h4>Bindings</h4>

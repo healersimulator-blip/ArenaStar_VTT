@@ -1,6 +1,9 @@
 # MCP-style LLM connector — specification additions and implementation plan
 
-**Status:** proposal, 2026-09-21 · **Reads with:** `PROTOCOL.md` (§4 ops, §5 projection, §6 transports,
+**Status:** proposal 2026-09-21 · **Phase 0 landed 2026-09-22 (D-278)** · **Phase 1 landed 2026-09-22
+(D-279)** · **Phase 2 landed 2026-09-22 (D-280)** · **Phase 3 landed 2026-09-22 (D-281)**; Phases 4–6
+unstarted.
+**Reads with:** `PROTOCOL.md` (§4 ops, §5 projection, §6 transports,
 §13 message reference), `PLAN.md` (§12 packages/modules), `DECISIONS.md` (D-013 roles, D-045 the typed
 `__vttE2E` surfaces, D-262 view-as), `HEXCRAWL_SCENE_SPEC_AND_PLAN.md` (the hexcrawl tools depend on it),
 `GAP_ANALYSIS_Roll20_Foundry.md` §5.1.
@@ -336,7 +339,7 @@ answered with the content hash. It must land with `PROTOCOL.md` updated in the s
 Effort scale as in `GAP_CLOSURE_ImplementationPlan.md` (S ≈ 1–2 days, M ≈ 3–5). Total **≈ 7–8 days**,
 each phase shippable, each ending with the standing gates + one `DECISIONS.md` entry.
 
-### Phase 0 — Skeleton and the bridge contract (1 day, S)
+### Phase 0 — Skeleton and the bridge contract (1 day, S) — ✅ landed 2026-09-22 (D-278)
 `tools/mcp/server.mjs` (JSON-RPC 2.0 framing, `initialize`, `tools/list`, `tools/call`,
 `notifications/*`), `BridgeTransport` interface + the loopback WS implementation, pairing token, and two
 read tools (`whoami`, `world.info`). The in-tab bridge with the capability gate stubbed to "deny
@@ -345,14 +348,80 @@ everything except the two".
 (`tests/host/sync.test.ts` is the precedent), a real MCP client over stdio, `tools/list` returns the two
 tools, `tools/call world.info` returns the world's name, a third tool name returns a JSON-RPC error.
 
-### Phase 1 — The read surface and the representations (1.5 days, M)
+**As landed.** `tools/mcp/server.mjs` — stdio JSON-RPC with `initialize`/`ping` answered **locally**
+(an MCP client handshakes the instant it spawns us, which is before any tab exists) and everything else
+proxied to the tab by request id; a 30 s timeout and a `-32603` that names the Settings button when no
+tab is paired, because a client waiting on an id nobody will answer is the worst failure this shape has;
+HTTP **401** on a bad token and **409** on a second tab (a world has one GM, and silently stealing the
+session from a browser the GM forgot about is worse than saying so); every log line on **stderr**,
+because one `console.log` on stdout is a corrupt protocol stream · `src/core/agents/bridge.ts` — the
+JSON-RPC 2.0 + MCP method core over `BridgeTransport`. §7.3 put this in the app; it is in `core` so the
+method table, the error codes and the refusal semantics are unit-testable without a browser and
+identical in the tab and in Node · `src/core/agents/tools.ts` — the catalogue, the argument validator
+(a JSON-Schema subset with no dependency, §9 risk 1) and `callTool`; this is §7.3's `toolArgs.ts` under
+a name that says what it holds, because the two are one table · `src/core/agents/capabilities.ts` — the
+vocabulary, the four presets and `allows()` · `src/net/agentLink.ts` — the outbound WebSocket
+transport, beside the app's other transports, on the platform `WebSocket` so the integration test
+drives the real thing · `src/app/agentBridge.ts` — the app's wiring and nothing else: the
+`AgentWorldView` over `ClientSync` and `connectAgentBridge()`.
+*Deferred, and §7.3's file table updated accordingly:* `grants.ts` — the replicated `agents` settings
+document, the scene scope and the Agents window belong to Phase 2. A grant document with no UI to grant
+it from is a document nobody can explain.
+*Two decisions the plan left open, taken in D-278:* a **refusal is a tool result** (`isError` plus §4's
+plain words) while a **malformed call is `-32602`** — "you may not delete" is information, "no tool
+named `scene.delete`" is a client bug, and conflating them teaches an agent the world is closed to it;
+and `whoami` names the **session** (whose replica the reads come from) and the **grant** (the ceiling)
+apart, because Phase 0 hosts the bridge in the GM's tab and an agent that reads "role GM" and stops
+there would draw exactly the wrong conclusion.
+*Tests:* `tests/core/agentsCapabilities.test.ts` (7) · `tests/core/agentsTools.test.ts` (10) ·
+`tests/integration/mcpBridge.test.ts` (8 — host in Node, the **real sidecar as a child process**, a real
+socket, a JSON-RPC client over stdio). The bundle is **byte-identical** to the Phase 0 baseline
+(3 142 835 B raw): nothing in the app graph imports the bridge yet, and it starts costing when Phase 2's
+Agents window does.
+
+### Phase 1 — The read surface and the representations (1.5 days, M) — ✅ landed 2026-09-22 (D-279)
 `scene.list/read/describe`, `map.render` (ASCII + JSON, with the legend and ids), `document.read/list`,
 `token.list`, `chat.read`, `sheet.read`, `bestiary.search` (over `rankIndex`), resources
 (`vtt://world/...`) + pagination + the read caps, and **redaction** for a non-GM agent.
 *Test:* renderer unit tests (a 12×9 fixture scene: tokens, a wall, fog) with byte-exact expected output;
 a player-scoped read of a hidden token returns nothing; pagination boundaries.
 
-### Phase 2 — Writes, grants and the GM surface (1.5 days, M)
+**As landed.** `src/core/agents/types.ts` — the `AgentWorldView` **port** the tools read through, so the
+tool table never touches `ClientSync` and the whole read surface is testable without a browser ·
+`src/app/agentBridge.ts` — the app's one implementation of it · `src/core/agents/paging.ts` (§7.4 caps:
+50 default, 500 hard, opaque-but-readable `o:<offset>` cursors) · `src/core/agents/mapRender.ts` — the
+text map · `src/core/agents/{baseTools,readTools}.ts` — the ten new tools behind the two from Phase 0 ·
+`src/core/agents/resources.ts` — §5.7's `vtt://world/...` resources, dispatched **through the tools**.
+
+*Five decisions the plan left open, taken in D-279:*
+- **A resource is the tool's answer wearing a URI.** `resources/read` calls `callTool`, so the grant that
+  refuses `token.list` refuses `vtt://world/<id>/tokens` and there is one place to get a redaction wrong.
+- **A third way a call can end.** A refusal (`isError` + §4's plain words) is information; a **malformed
+  call** (`{ invalid }` → `-32602`) is a client bug; and a **thrown** tool becomes an error result, never
+  an unanswered id. A bad cursor is the second kind specifically: treating it as "start again" would let
+  an agent with a self-built cursor re-read page 1 forever and look like it was making progress.
+- **Walls paint over fog, never over a token.** Precedence is tokens > walls > fog > empty: fog says what
+  a *player* has seen, and a map that hides every door behind an unexplored cell is unnavigable.
+- **`@` is the party, `F` is an ally** — friendly *with* an `actorId` versus friendly without; two tokens
+  sharing a cell fall back to a letter from the name, and the legend carries the ids, because the glyph
+  is not the answer, the id is.
+- **Redaction is two gates, not one.** The capability gate (`world.read`, `chat.read`) and then
+  `gmOnly.read` on hidden tokens and GM-only roll results — and the answer says how many were withheld,
+  because "2 tokens" from a grant that can see 3 is a lie by omission.
+
+*Tests:* `tests/core/agentsMapRender.test.ts` (8, byte-exact over a 12×9 fixture with a wall, fog, hex
+placement and a shared cell) · `tests/core/agentsReadTools.test.ts` (21, over a shared fixture world in
+`tests/core/agentsFixture.ts`) · `tests/core/agentsTools.test.ts` (10, updated for the grown catalogue) ·
+`tests/integration/mcpBridge.test.ts` (10 — `scene.list` and `map.render` answered out of a **host's
+replica** over the real sidecar, plus `resources/list`, `resources/templates/list` and `resources/read`).
+The bundle stays **byte-identical** (3 142 835 B raw): still nothing in the app graph imports the bridge.
+
+*Two caveats, stated in `agentBridge.ts` itself:* the reads are the **GM's replica** — §5.3's
+`projectWorld()` routing is Phase 3 and no agent should meet a live table before it lands — and there is
+**no UI**: Phase 2's Agents window is the production entry point, so today the bridge is reachable only
+from a test or a console.
+
+### Phase 2 — Writes, grants and the GM surface (1.5 days, M) — ✅ landed 2026-09-22 (D-280)
 `document.create/update/delete`, `token.*`, `scene.create/update/duplicate/activate`, `chat.post`,
 `dice.roll`, one-envelope-per-call, `dryRun`/`confirm`, the Agents window (pending, role picker,
 capability checkboxes, scene scope, audit ring, revoke), and the GM-only chat note option.
@@ -360,7 +429,50 @@ capability checkboxes, scene scope, audit ring, revoke), and the GM-only chat no
 an agent with `gm-no-delete` gets a refusal from *both* the bridge and the host; a `doc.create` call
 appears as exactly one `OpEnvelope` with `by = agent`, undoable by the GM in one click.
 
-### Phase 3 — Player-scoped agents and the projection proof (1 day, S)
+**As landed — and the decision everything else follows from: the agent is a *user with its own
+session*, not a mask on the GM's.** `OpEnvelope.by` is host-stamped from the session's user id
+(`host/sync.ts:842`), so there is no way to claim a different author, and a write made through the
+GM's `ClientSync` is the GM's write. `src/app/agentSession.ts` therefore mints a user document
+(`"Vex (agent)"`, role from the preset) **and** the grant in one system envelope, then opens a second
+`ClientSync` over the same in-memory loopback the GM's own session rides. Three things fall out of
+it rather than being implemented: attribution is free; the host sends this session a *projected*
+envelope (`host/sync.ts:1004`), so Phase 3's redaction is the projection's job in the one place it is
+already proved; and the host validates against the agent's role, so the mask stays UX plus defence in
+depth.
+
+- **`src/core/agents/grants.ts`** (§3.2) — the grant is a replicated `settings` document
+  (`_id = "agents"`): it survives a reload, every replica can read what is allowed, and a grant
+  changed by accident is one Ctrl+Z away. Revoked records are kept.
+- **`src/core/agents/writeTools.ts`** — ten tools. **One call, one envelope** (capped at 25 ops);
+  the answer is the **post-state read back**, never an echo; `dryRun` before `confirm`; and a refusal
+  is the **host's own sentence** (`the host refused this change (forbidden): delete scenes`), not a
+  summary of it. The whitelist is why they are typed: `name` and `system.*` are writable, `ownership`
+  /`_id`/`flags` never are. Redaction gates writes too — an agent that cannot read a hidden token
+  cannot move it, wherever it guessed the id from.
+- **`src/core/agents/types.ts`** — the §6.2 write port. `submit()` **waits for the host's verdict**:
+  `ClientSync.submit` only returns a txId, and answering "done" at submit time would be a lie about
+  the world.
+- **`src/app/agentManager.ts` + `src/ui/settings/AgentsSection.svelte`** — the GM surface: presets
+  with §7.4's warning on screen, capability boxes that can only narrow a preset, scene scope, the
+  GM-only chat note, and the §6.4 **audit ring** — which records *attempts*, not just successes,
+  because what an agent tried is the half the OpLog cannot show.
+
+*Three decisions the plan left open, taken in D-280:* a **pending or revoked agent holds no
+capabilities at all** (an agent that connects before the GM has looked at it must not be able to read
+the world); `undo.last` pops only when the top of the stack is the agent's **own** change, because
+inverses for an older envelope were computed against a world that has moved on; and **`users` is
+never creatable by an agent** — an agent that can mint an identity is the security model inverted.
+
+*Tests:* `tests/core/agentsGrants.test.ts` (12) · `tests/core/agentsWriteTools.test.ts` (28 — the
+grant matrix over four presets × ten tools, the whitelist, dryRun/confirm, the cap, cell→pixel, the
+host's refusal verbatim) · `tests/integration/agentManager.test.ts` (8) ·
+`tests/integration/mcpBridge.test.ts` (14 — a write tool lands as **one envelope, one op, `by =
+agent`**, `undo.last` takes it back, the mask refuses a `gm-no-delete` delete, and a `player` agent
+whose grant *allows* `token.move` is still refused **by the host**, because the token is the GM's and
+`can()` wants OWNER). **The bundle moves for the first time: 3 213 166 B raw / 926 492 B gzip
+(+70 331 B)** — the connector is now in the app graph, and that is the number to watch.
+
+### Phase 3 — Player-scoped agents and the projection proof (1 day, S) — ✅ landed 2026-09-22 (D-281)
 `actor.from_compendium` / `actor.from_statblock` (the D-264/D-267 importers), `token.move` restricted to
 owned tokens, `chat.whisper` policy, and the *proof* test: a `PLAYER` agent's replica is compared
 field-by-field with `projectWorld()` for that user, with hidden tokens, whispers and GM-only rolls
@@ -369,27 +481,160 @@ asserted absent — the same posture the player shell's own e2e already takes.
 `bestiary.search` + `actor.from_compendium` + `token.move`, and assert the canvas shows the token; then
 connect a second agent as `PLAYER` and assert a `scene.delete` call is refused and nothing changes.
 
-### Phase 4 — Table flow, time, strategic (1 day, S)
+**As landed — and the one thing the proof found.** `tests/integration/agentProjection.test.ts` (12)
+boots a real `HostSync`, opens a `player`-preset agent session, and compares the replica it holds
+against `projectWorld()` collection by collection and **document by document** (`JSON.parse(JSON.stringify(doc))`),
+so a projection that keeps a document but forgets a field fails the test rather than a player. It then
+asserts the three must-never-see items are absent from the documents: the hidden token is not a row at
+all, the whisper the agent was not in is not in the replica, and the `gmroll` card is there with
+`roll: null`. A `gm` agent on the same world sees all three, and `<secret>` journal text is stripped
+while the visible text survives — the projection's own rules, proved at the connector's boundary.
+
+*The hole the proof found:* `projectMessage` redacts a GM-only roll by nulling `roll`, but the total is
+in the content too, as an inline `[[16|1d20+5]]` chip — which the player's chat renders, and an agent
+reads as text. `agentWorldView` strips it (`[rolled 1d20+5]`) and `chat.read` says
+`[result withheld from this grant]`. Being **stricter** than the player shell is allowed; being wider
+never is.
+
+*Three decisions taken in D-281:* `token.move` is **ownership-scoped** (the bridge mirrors `can()`, one
+layer earlier, so the refusal can name what to ask for — and `mcpBridge.test.ts` proves the mirror is a
+convenience by handing the GM's token back *without* letting the replica catch up, where the host is
+the one that refuses); `actor.from_compendium` imports the **pack's own payload** rather than running it
+through `importCharacter`, because a pack entry is already this app's document shape and re-reading it
+as an export would author an actor that opens as a blank sheet — `actor.from_statblock` is where the
+D-264/D-267 reader belongs, and it hands the importer's report (`read`/`warnings`) back to the agent;
+and the Phase 3 **e2e is not run** — this environment has no Chromium, and the repo's e2e needs
+Playwright's — so the run that puts the Agents window on screen stays outstanding. What replaces it
+here is a real-host integration test: `bestiary.search → actor.from_compendium` lands an actor and its
+token in **one envelope stamped `by` the agent**, and a pasted `Goblin Warrior` stat block becomes a
+real actor (hp 6, Dex 15, owned by the session that imported it) with a token on the table.
+
+### Phase 4 — Table flow, time, strategic (1 day, S) — ✅ landed 2026-09-22 (D-284, D-285, D-286, D-287)
 `combat.*`, `time.*`, `dice.apply`, `fog.*` (mask + state), `strategic.snapshot/order/report`.
+
+**As landed so far — the clock and the tracker (D-284).** `time.get` / `time.of_day` /
+`time.advance` / `time.set`, and `combat.state` / `start` / `add` / `next` / `end`. Time passing is
+**one call with the sweep in the same envelope** — byte-for-byte the ops the Settings window's
+*day* button submits, proved by deep equality rather than by "the clock moved" — on the world's own
+ladder (a minute is 10 rounds, not 60 wall-clock seconds), and a backward jump expires nothing
+because time un-passing has not cast a spell in reverse. `time.get` is the control-plane number
+(`time.control`); `time.of_day` is the derived hour, phase and day (`world.read`). The tracker calls
+the app's own engine — PF1e's `startWithSurprise` and `pf1eNextTurn`, so a surprise round and an
+unresolved initiative tie are the rules' own verdicts — moves the world clock by the transition's
+`clockDeltaSeconds` **only** where the world advances it on a round wrap, and reports a dying
+creature's stabilization check instead of rolling it. `combat.state` is an addition to §5.5's table:
+`combat.next` without a way to read the order advances a tracker it cannot see. **Still to come:**
+**As landed so far — dice (D-285).** `dice.roll` and `dice.apply` are the only two tools that
+**wait**: the host owns the RNG, the seed and the card, so a roll sends its formula through the
+commit-reveal path and reads the total back off the card the host commits (four-second ceiling,
+then a refusal in words). `dice.apply` names a card and an actor and **never an amount** — the host
+re-reads the card's own total and does the arithmetic, exactly as the chat card's *Apply* button
+does. A player agent may roll; it may not apply. **Still to come:** `fog.reveal` / `fog.hide` /
+`fog.state` (the manual mask, and the cell reveal set on a hexcrawl scene), and
+**As landed so far — fog (D-286).** `fog.state` (a control: what the table can see is not a read),
+`fog.reveal` and `fog.hide`. Cells, a rectangle, a polygon or the whole scene — the geometry is the
+view's (`cellPolygonOf`), because a cell is a hexagon on a hex grid and a square on a square one. On
+a hexcrawl scene a cell edit writes **both** records in one envelope: the mask the canvas paints and
+the hex list the tools read, since painting one without the other is how a map ends up open on one
+screen and shut on another. That envelope found a real host bug (D-286): D-271's reveal hook
+inserted each crossing's cell creates after *every* scene update in an envelope, so two flag writes
+on one scene sent the same create twice and the receiving store refused the whole envelope — the
+player's replica silently kept the old scene. **As landed so far — the strategic layer (D-287).** `strategic.snapshot`, `strategic.report` and
+`strategic.order`. A unit's *models* are the §5A pool's truth, not the document's: `96/120 standing,
+at 400,300` when the replica holds the pool, and a sentence saying it does not when it does not. The
+turn report is **retained** (`ClientSync.lastTurnReport`), because a bus event is a moment and an
+agent asked "what happened?" after the fact had nothing to read. `strategic.order` checks the *shape*
+of an order and never its outcome — a move needs a path, an attack a target, and whether the charge
+is legal is the rules module's verdict at resolution — writes the same embedded record the Army
+window writes, in one envelope, and names the units this replica does not hold. §8's opt-in stands:
+a capability the GM grants, `MAX_OPS_PER_CALL` orders per call. **Phase 4 is complete.**
 *Test:* the agent runs a full round (start combat, next turn, apply damage) and the clock advances by
 exactly `secondsPerRound`; a `time.advance` of 3 days sweeps the clock-counted effects exactly as the
 Settings buttons do.
 
-### Phase 5 — Hexcrawl tools (1 day, S) — **depends on `HEXCRAWL_SCENE_SPEC_AND_PLAN.md`**
+### Phase 5 — Hexcrawl tools (1 day, S) — ✅ landed 2026-09-22 (D-282, D-283) — **depends on `HEXCRAWL_SCENE_SPEC_AND_PLAN.md`**
 `hexmap.render`, `hex.read/describe` (GM fields withheld from a player agent), `hexcrawl.cells`,
 `travel.plan/advance`, `encounter.roll/place`.
 *e2e:* the agent walks the party three hexes along a path, the clock advances by the terrain-priced
 amount, the encounter engine fires the expected table, and the rolled tokens land on the copied battle
 scene (the F1 acceptance, driven by the agent instead of the UI).
 
-### Phase 6 — Hardening, budgets, docs (1 day, S)
+**As landed so far — the read surface (D-282).** `hexcrawl.cells`, `hex.read`, `hex.describe` and
+`hexmap.render`, all `hexcrawl.read`, plus the `vtt://world/<worldId>/hexmap` resource. They read the
+replica and add nothing to it: **a closed cell is not on a player's replica at all** (D-271), so the
+tools never check a "revealed" flag — a cell the party has not been shown is simply not there, and
+`hex.read` refuses with "hexcrawl.cells names the ones you may see" rather than inventing an empty hex.
+`hexmap.render` draws a **window, not the world** — 48×24 cells, centred on the party or on the cell
+the agent names with `around`, and it says when it clamped, because a 20 000-hex map pasted into a
+context is a denial of service dressed as an answer. Both forms come back on every call: the ASCII a
+model quotes, and the JSON grid (a key per glyph) it points with. Terrain letters are derived from the
+catalog's own names, so a custom catalog reads the same way, and the legend counts only the glyphs
+actually drawn — a hex under cover is not a "P" the reader can find on the map. The renderer is pure
+(`src/core/agents/hexRender.ts`, byte-exact tested); the region is decided in the view, where the data
+is. `hex.read` prints the GM's text and the table's text as two lines (`Notes (GM):` / `Reads (table):`)
+rather than whichever the replica happens to carry, because they are different facts and only one of
+them is on a player's replica.
+
+**As landed so far — the walk and the fight (D-283).** `travel.plan`, `travel.advance`,
+`encounter.roll` and `encounter.place`. A march is **one envelope** — clock sweep, then progress,
+then the party's new position, then the feature reveals — so there is no moment at which the world
+says the party is in the next hex with the old time on the clock, and `undo` takes the whole march
+back rather than half of one. Reveals are judged at `startClock + delta` with the **party's own
+perception** (the party token's actor, else the best Perception among the party's sheets), so a
+scout in the party changes what a march finds and no tool call has to say who. `encounter.roll`
+rolls and reports — and writes the check's ledger, so the same check cannot be re-rolled inside its
+cooldown — while `encounter.place` is what puts tokens on the table; the split is deliberate, since
+a GM agent may want to describe the warband before three goblins appear. Placing needs
+`hexcrawl.travel` **and** `token.move`, and says which is missing. `hexcrawl.read` joins the `player`
+and `observer` presets (the party's map is part of the world a player sees, and the projection
+decides how much of it); `hexcrawl.travel` does not, because a march spends the table's clock and
+moves the token every player shares. Phase 5 is **complete**, and it is proved end-to-end on a real
+`HostSync` hexcrawl world: a player replica holding one cell of three, and a march that moves the
+clock and the party in one envelope by the agent.
+
+### Phase 6 — Hardening, budgets, docs (1 day, S) — ✅ landed 2026-09-22 (D-288, D-289, D-290)
 Rate classes and read caps tuned against a real 25k-entry world; the `dryRun`/`confirm` ergonomics; the
 prompts (`gm.narrate_scene`, `hexcrawl.travel_day`, …); Help → *Agents* page (what it is, what it can
 see, how to revoke); a `MCP_CONNECTOR.md` reference for the tool table; and the closing decisions.
 
+**As landed so far — the prompts (D-288).** All seven §5.7 templates in `src/core/agents/prompts.ts`,
+served over `prompts/list` and `prompts/get`. Each names the tools it reaches for — and a test asserts
+every one of those names is in the catalogue, which is how the first draft was caught naming
+`packages` (a resource, not a tool). Every recipe closes by telling the model that a refusal is an
+answer and must not be worked around. The handshake now advertises all three primitives: it had been
+answering `{ tools }` while serving resources and prompts, so a client that trusted it would never
+have asked for two thirds of the surface. **Still to come:** rate classes and read caps against a
+25k-entry world, the Help → *Agents* page, and `MCP_CONNECTOR.md`.
+
+### Phase 7 — Authoring the overworld (0.5 day, S) — ✅ landed 2026-09-23 (D-292)
+Phase 5 gave the connector the *reads* of the hexcrawl and the two verbs of walking it. It could not
+*make* one. Phase 7 closes that with one new capability and seven tools, all writing the documents the
+Hex window writes.
+
+- `hex.write` — one hex, whole: name, terrain, the GM's text, the party's text, its tables, its hidden
+  features and the rule that finds each one; `open` opens it to the party, `delete` drops it.
+- `hex.reveal` — open (or close) any number of hexes in one envelope.
+- `hexcrawl.configure` — the switch and the scale: what one hex means (1, 3, 6, 12 miles, or any
+  number of `units`), the sight ring, the day/night window, how encounters are announced.
+- `encounterTable.create` / `.update` / `.delete` — the tables, with rows that *point at* world actors
+  or compendium entries, so a drawn encounter places something on the map.
+- `asset.import` — the one way to mint a content hash, which is the only name a picture has here.
+
+New capability `hexcrawl.author` ("author the overworld"), in the `gm` preset and deliberately not in
+`player` or `observer`. New prompt `hexcrawl.author_region`, the recipe that walks the whole job. The
+world's asset pipeline is now threaded into the agent manager, so `asset.import` works in the app and
+not only in tests. **The user-facing half already existed** — `HexcrawlWizard`, `HexWindow` and
+`EncounterTablesWindow` cover every one of these acts by hand — so this phase added no new UI.
+
 ### Sequencing note
 Phases 0–2 give a GM-scoped agent that can run a table. Phase 3 is what makes "the LLM plays a character"
-defensible, and it should not be skipped before letting any agent near a live table.
+defensible, and it should not be skipped before letting any agent near a live table — it has landed.
+
+**The e2e gate is no longer open.** A browser runs here (D-291: the Playwright CDN is unreachable, so
+`@sparticuz/chromium` comes from npm with its own `al2023` libraries on `LD_LIBRARY_PATH`), and the
+whole suite was executed on Chromium. What remains is the **Agents window**: no spec has put it on
+screen, so `e2e/agent_connector.spec.ts` should be written next — the protocol, the grants, the
+projection and the tools are all proved at their own levels; the panel is not.
 
 ---
 

@@ -2,6 +2,7 @@
   import { onMount, untrack } from "svelte";
   import { detectCapabilities } from "./capabilities";
   import { DEFAULT_SCENE_ID, GM_USER_ID, makeToken, type HostApp } from "./hostBoot";
+  import { createAgentManager, type AgentManager } from "./agentManager";
   import { createStage, type Stage } from "../canvas/stage";
   import { tokenRect } from "../canvas/tokens";
   import type { RollHighlightRect } from "../canvas/layers/RollHighlightLayer";
@@ -110,6 +111,7 @@
     type EncounterTrigger,
   } from "../core/hexcrawl/encounter";
   import { hexcrawlProfileOf } from "../core/hexcrawl/types";
+  import { hexTravel } from "../core/hexcrawl/strings";
   import { encounterPayloadOf } from "../core/hexcrawl/encounterFlow";
   import {
     advanceWorldClockOps,
@@ -140,13 +142,13 @@
   import { cellAtPoint } from "../core/hexcrawl/cells";
   import { terrainCatalogOrDefault } from "../core/hexcrawl/terrain";
   import {
+    featureFoundMessage,
     formatDuration,
     revealDueFeatures,
     type FeatureFacts,
   } from "../core/hexcrawl/features";
   import {
     DEFAULT_SPEED_PER_DAY,
-    readTravelPlan,
     type TravelPace,
     type TravelPlan,
   } from "../core/hexcrawl/types";
@@ -195,6 +197,7 @@
   import { startHostShare, type HostShare } from "./hostShare";
   import type {
     ActorDocument,
+    CellFeature,
     CombatDocument,
     LightDocument,
     NoteDocument,
@@ -296,6 +299,12 @@
     { id: "compendia", label: "Compendia" },
   ];
   let canvasError = $state<string | null>(null);
+  /**
+   * §3.2 the agent desk. Null until a host app exists (and for a joined player, who has no host to
+   * mint agent users on — agents are a GM surface). The Settings window shows the section only
+   * when this is non-null, which is how a player's replica stays unable to grant anything.
+   */
+  let agents = $state<AgentManager | null>(null);
   let canvasTool = $state<CanvasTool>("select");
   let canvasToolbarCollapsed = $state(false);
   /** D-256: Roll20's layer picker — the GM's active layer (players stay on `tokens`). */
@@ -555,6 +564,9 @@ const WALL_PICK_RADIUS = 12;
         activeTab = "chat";
         openWindow("help", "Keyboard shortcuts", "help");
         break;
+      case "hex-party":
+        openPartyHexWindow();
+        break;
       case "reveal-all":
         setWholeSceneFog("reveal");
         break;
@@ -568,6 +580,14 @@ const WALL_PICK_RADIUS = 12;
         toolController?.recall();
         break;
       case "escape":
+        // D-275: in path mode the route being drawn *is* the pending gesture (plan §5.7's
+        // "Esc clears"), so the key gives it up and leaves the tool armed for the next click
+        // — falling through to `select` here would disarm the tool *before* the canvas key
+        // layer could see `canvasTool === "path"` and clear the draft it owns.
+        if (canvasTool === "path") {
+          clearPathDraft();
+          break;
+        }
         if (!toolController || toolController.current() === null) canvasTool = "select";
         else toolController.dismissGesture();
         break;
@@ -775,6 +795,28 @@ const WALL_PICK_RADIUS = 12;
       sceneId: scene._id,
       key,
     });
+  }
+
+  /**
+   * D-276: Shift+H — the hex the party is standing in, from anywhere on the map. A key has no
+   * pointer, so *which* hex it means has to be decided by something else, and the party's own
+   * cell is the only answer a GM would expect from "where are we?". Both refusals say what they
+   * are waiting for instead of doing nothing: a key that answers is worth more than a key that
+   * sulks.
+   */
+  function openPartyHexWindow(): void {
+    const scene = activeScene();
+    if (!scene) return;
+    if (!isHexcrawlScene(scene)) {
+      pushLog([hexTravel.partyKeyNoScene], "info");
+      return;
+    }
+    const key = partyCellKey(scene);
+    if (!key) {
+      pushLog([hexTravel.partyKeyNoToken], "info");
+      return;
+    }
+    openHexWindow(key);
   }
 
   /**
@@ -1325,14 +1367,14 @@ const WALL_PICK_RADIUS = 12;
    * scene switch cannot leave half a route pointing at a map that is no longer in front of anyone.
    */
   let pathDraft = $state<{ sceneId: string; keys: string[] }>({ sceneId: "", keys: [] });
-  /** Whether the route being shown is the committed one (the profile's) or the draft. */
-  const planOf = (scene: SceneDocument | null): TravelPlan | null => {
-    if (!scene) return null;
-    const raw = (scene.flags?.["core"] as Record<string, unknown> | undefined)?.["hexcrawl"];
-    return typeof raw === "object" && raw !== null && !Array.isArray(raw)
-      ? readTravelPlan(raw as Record<string, unknown>)
-      : null;
-  };
+  /**
+   * The route the party is walking (plan §5.7), read through the profile's own tolerant reader
+   * rather than off the raw flag: `travel` is a **field of** `flags.core.hexcrawl`, not the
+   * profile itself, so a reader handed the whole profile sees no `path` and answers "no route"
+   * for a march that is already in the document.
+   */
+  const planOf = (scene: SceneDocument | null): TravelPlan | null =>
+    hexcrawlProfileOf(scene)?.travel ?? null;
 
   /**
    * The path the travel panel shows and travels: the draft while one is being drawn (the party's
@@ -1461,7 +1503,7 @@ const WALL_PICK_RADIUS = 12;
     if (!current || !scene) return;
     const keys = travelPathOf(scene);
     if (keys.length < 2) {
-      pushLog(["A route needs at least a second hex — click one, then Commit."], "info");
+      pushLog([hexTravel.routeTooShort], "info");
       return;
     }
     const plan: TravelPlan = {
@@ -1475,15 +1517,18 @@ const WALL_PICK_RADIUS = 12;
     clearPathDraft();
     pushLog(
       [
-        `Route committed: ${keys.length} hexes, ${formatDuration(
-          routeSeconds({
-            scene,
-            path: keys,
-            speedPerDay: plan.speedPerDay,
-            pace: plan.pace,
-            catalog: hexTerrainCatalog(),
-          }),
-        )} on the road.`,
+        hexTravel.committed(
+          keys.length,
+          formatDuration(
+            routeSeconds({
+              scene,
+              path: keys,
+              speedPerDay: plan.speedPerDay,
+              pace: plan.pace,
+              catalog: hexTerrainCatalog(),
+            }),
+          ),
+        ),
       ],
       "info",
     );
@@ -1496,7 +1541,7 @@ const WALL_PICK_RADIUS = 12;
     if (!current || !scene) return;
     if (planOf(scene)) current.gm.client.submit(travelProgressOps(scene, null));
     clearPathDraft();
-    pushLog(["The march is called off."], "info");
+    pushLog([hexTravel.calledOff], "info");
   }
 
   /**
@@ -1516,7 +1561,7 @@ const WALL_PICK_RADIUS = 12;
     if (!current || !scene) return;
     const plan = planOf(scene);
     if (!plan) {
-      pushLog(["No route is committed — draw one in path mode first."], "info");
+      pushLog([hexTravel.noRoute], "info");
       return;
     }
     const catalog = hexTerrainCatalog();
@@ -1556,10 +1601,12 @@ const WALL_PICK_RADIUS = 12;
     pushLog(
       [
         advance.arrived
-          ? `The party arrives at ${where} — ${formatDuration(delta)} on the road, ${formatDuration(
-              advance.leftoverSeconds,
-            )} spent there.`
-          : `The party is at ${where} — ${formatDuration(delta)} on the road.`,
+          ? hexTravel.arrives(
+              where,
+              formatDuration(delta),
+              formatDuration(advance.leftoverSeconds),
+            )
+          : hexTravel.atCell(where, formatDuration(delta)),
       ],
       "info",
     );
@@ -1611,16 +1658,31 @@ const WALL_PICK_RADIUS = 12;
     spent: Record<string, number>,
     clockSeconds: number,
   ) {
+    const current = app;
     const ops = [];
     const notes: string[] = [];
+    const found: Array<{ cellKey: string; features: CellFeature[] }> = [];
     const facts = featureFacts(clockSeconds);
     for (const [key, seconds] of Object.entries(spent)) {
       const result = revealDueFeatures({ scene, cellKey: key, facts, spentSeconds: seconds });
       ops.push(...result.ops);
-      // Only the reveals are worth a line at the table; a march over a hex whose check failed is
-      // noise the GM did not ask for.
-      for (const feature of result.revealed) {
-        notes.push(`Found at ${key}: ${feature.name}`);
+      notes.push(...result.notes);
+      if (result.revealed.length > 0) found.push({ cellKey: key, features: result.revealed });
+    }
+    // A reveal is a line in the chat, not only a toast: the table hears it. One card per hex, in
+    // the same envelope as the feature flip and the time that earned it — the log, the counter
+    // and the document can never tell three different stories.
+    if (current) {
+      for (const card of found) {
+        ops.push({
+          kind: "create",
+          coll: "messages",
+          data: featureFoundMessage({
+            authorId: current.gm.client.user?.id ?? GM_USER_ID,
+            cellKey: card.cellKey,
+            features: card.features,
+          }),
+        });
       }
     }
     if (notes.length > 0) pushLog(notes, "info");
@@ -1698,11 +1760,19 @@ const WALL_PICK_RADIUS = 12;
       spentSeconds: EXPLORE_SECONDS,
     });
     if (due.ops.length > 0) current.gm.client.submit(due.ops);
+    // The same card the travel advance posts: one reveal, one line at the table (D-275).
     if (due.revealed.length > 0) {
-      pushLog(
-        due.revealed.map((feature) => `Found at ${key}: ${feature.name}`),
-        "info",
-      );
+      current.gm.client.submit([
+        {
+          kind: "create",
+          coll: "messages",
+          data: featureFoundMessage({
+            authorId: current.gm.client.user?.id ?? GM_USER_ID,
+            cellKey: key,
+            features: due.revealed,
+          }),
+        },
+      ]);
     }
     // The clock op is committed by now (submit is synchronous into the store), so the engine sees
     // the new reading and the ledger records it.
@@ -2702,6 +2772,22 @@ const WALL_PICK_RADIUS = 12;
   onMount(() => {
     const current = app;
     if (!current) return;
+    // §3.2 the agent desk, built here rather than in `$props` init: it needs the live HostSync to
+    // mint agent users on, and it is torn down with the app (onDestroy above).
+    agents = createAgentManager({
+      host: current.host,
+      client: current.gm.client,
+      meta: current.meta,
+      // The packs the agent may search and import from: without this, `bestiary.search` and
+      // `actor.from_compendium` say they cannot, rather than finding nothing.
+      compendia: async () =>
+        (await current.packages.compendia()).map((entry) => entry.pack),
+      // The world's asset pipeline, the same one the sidebar's **Import map** and the hexcrawl
+      // wizard use. Without it `asset.import` answers that it cannot — and an agent authoring an
+      // overland map cannot hang a picture on a hex.
+      importImage: async (bytes, name, mime) =>
+        current.pipeline.importImage(bytes, name, mime || "image/png"),
+    });
     // Canvas tool listeners are attached after `await createStage(...)`, i.e. after the
     // component-init context is gone — `onDestroy` may only be *called* synchronously
     // (Svelte 5 throws `lifecycle_outside_component` otherwise, which aborted the rest of
@@ -2746,6 +2832,8 @@ const WALL_PICK_RADIUS = 12;
     };
     globalThis.addEventListener("keydown", onKey);
     onDestroy(() => {
+      agents?.dispose();
+      agents = null;
       moduleHost?.dispose();
       if (rtSampleTimer !== null) globalThis.clearInterval(rtSampleTimer);
       offSimBus?.();
@@ -4333,6 +4421,9 @@ const WALL_PICK_RADIUS = 12;
                   <option value="forced">forced march</option>
                 </select>
               </label>
+              {#if travelPanel.committed}
+                <p class="hint" data-travel-hint>{hexTravel.hint}</p>
+              {/if}
               <div class="travel-actions">
                 {#if travelPanel.draft}
                   <button type="button" data-travel-commit onclick={() => commitTravelRoute()}>Commit route</button>
@@ -4540,6 +4631,7 @@ const WALL_PICK_RADIUS = 12;
           onRedo={redo}
           packages={app.packages}
           rulesBoot={app.rulesBoot}
+          {agents}
           bindings={DEFAULT_BINDINGS}
           isGM={true}
           onHexRollTable={rollHexTable}
@@ -5099,6 +5191,12 @@ const WALL_PICK_RADIUS = 12;
   }
   .travel-panel .static {
     opacity: 0.75;
+  }
+  /* D-276: the one line the advance buttons need beside them — the clock is what they spend. */
+  .travel-panel .hint {
+    margin: 2px 0 0;
+    color: #8b9bb1;
+    line-height: 1.35;
   }
   .travel-row {
     display: grid;

@@ -296,3 +296,46 @@ G-45 slice** (§3.6, D-266): the chromium e2e project, the content pipeline end 
 entries and both world zips), and real-content unit gates; and again on the **G-08 tree** (§3.7, D-267)
 for the statblock reader, its box in the Sheets panel, and the same gate set re-run. **Still unverified here:** the firefox/webkit
 matrix (CDN-only bundles) and CI (there is none) — each marked **[claimed]** in the documents that record it.
+
+---
+
+## 5. Addendum 2026-09-22 — the hexcrawl feature is complete (D-268…D-276)
+
+*Sections 0–4 above are the 2026-09-21 snapshot, taken at `19c821a`, and are left exactly as they were
+written. This section is what happened next, on the trees that followed it.*
+
+**What shipped.** The hexcrawl feature of `HEXCRAWL_SCENE_SPEC_AND_PLAN.md` — Phases 0 through 7,
+decisions D-268…D-276. A scene type for overland play: a map with a hex/square/gridless grid the GM
+paints terrain onto, encounter tables that fire on entering / moving / exploring / fighting (automatic,
+GM-prompted, or by hand), a party that walks a route the GM draws at the terrain's price while the
+**world clock** pays for it and the hexes keep the hours spent in them, and hidden features that give
+themselves up by the GM's hand, a Perception DC, time spent, or a dice roll — announcing themselves in
+the chat when they do. PR #29 merged it with Phase 6's acceptance spec red; the slices after it closed
+Phase 6 (four defects, all of them invisible to a unit test) and finished Phase 7 (help sheet, the
+`Shift+H` key, the panel hint, one strings table, and these three documents).
+
+**Where it sits in the counts in §2.** Nowhere, and that is the point: **this was never a gap row.**
+Neither Roll20 nor Foundry ships an overland hexcrawl as a first-class scene type, so there is nothing
+to reach parity with. `GAP_ANALYSIS_Roll20_Foundry.md` §5.1 now says so under "Built here, not parity —
+do not schedule as gap closure". What the feature *reuses* (fog, the world clock, compendium packs,
+scene copy, the op pipeline) is already counted in the rows above.
+
+**Gates executed on the closing tree.**
+
+| Gate | Result |
+|---|---|
+| `pnpm test` | **261 files / 3 100 tests passed** (2 files, 12 tests skipped) |
+| `pnpm typecheck` | tsc clean; svelte check **50 components, 0 blocking**, 1 advisory (`ReplayPanel.svelte:29`) |
+| `pnpm lint` | 0 problems |
+| `pnpm size` | **3 142 538 B raw / 904 019 B gzip** — inside the 6 MB raw budget |
+| `playwright test --project=chromium`, hexcrawl specs | **11 passed** across `hexcrawl_scene`, `hexcrawl_tables`, `hexcrawl_encounters`, `hexcrawl_fog`, `hexcrawl_travel`, `hexcrawl_help` |
+
+**Two browser failures that are not this feature's**, both recorded with the evidence that says so:
+`hexcrawl_fog`'s "closing a hex takes the document away again" step failed once in a nine-spec run and
+**passes standalone (41.8 s)** — the two-peer propagation class §3.6 already documents — and
+`webrtc.spec.ts`'s PixiJS layer-order test fails on the pristine `0a48ced` tree in this sandbox as well
+(checked by stashing the diff and rebuilding), i.e. a WebGL limitation of the headless Chromium here.
+
+**Still unverified here, unchanged from §3.4:** the firefox/webkit matrix and CI (there is none). The
+browser runs above use the npm-sourced Chromium through the config's
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` override, because this sandbox cannot reach the Playwright CDN.

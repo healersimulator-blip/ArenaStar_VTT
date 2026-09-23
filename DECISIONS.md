@@ -7873,3 +7873,1014 @@ bare text row legitimately places a token with no `actorId`.
   (39.2 s — the spec that exercises the hex window and the canvas menu this change touched) passes in the
   same run: **4 passed (2.3 m)**. `e2e/hexcrawl_tables.spec.ts` and `e2e/hexcrawl_scene.spec.ts` re-run
   after the hex-window change: **2 passed (53.2 s)**.
+
+## D-275 — 2026-09-22 — The party walks: a route the GM draws, priced by the terrain, paid for by the world clock, and the things waiting in the hex that give themselves up (hexcrawl Phase 6)
+
+**Context.** Phase 5 put an encounter's creatures on the map; Phase 6 turns the map into a *campaign*. Plan
+§8's Phase 6 is "path mode, itinerary preview, the `travelAdvance` call site, terrain brush, feature model
+and evaluator (manual / perception / time / dice), auto vs manual reveal, the projection gate", and its e2e
+line is *"commit a three-cell forest path, advance one day on the clock, and assert the party moved by the
+terrain-priced amount, the clock advanced exactly that, and an exploration-timed feature revealed itself on
+the third day"*. Two requirements hang off it: **7** (travel priced by terrain, advanced by the clock) and
+**8's automatic half** (a hidden feature that reveals itself by its own rule, with no GM click). The PR
+that carried the code (#29) was merged with this spec red, and this entry is what closing it cost.
+
+**Decision — a route is a draft until it is committed.** Path mode is one click per decision: a hex
+extends the route, the same hex again takes the last cell back, `Esc` gives the whole thing up, and
+*Commit route* is the single write that turns it into a `TravelPlan` under `flags.core.hexcrawl.travel`
+(`travelProgressOps`, which carries the profile's every other field through untouched). While a draft
+exists the party's own cell is prepended — a route that does not start where the party stands is not a
+route — and the itinerary prices each crossing with the **same `stepSecondsOf` the march will charge**, so
+the number the GM reads before committing is the number the clock moves by afterwards.
+
+**Decision — travel spends the world clock, never a private timer.** Every button is `advanceWorldClockOps`
+plus `travelAdvance`: *To the next hex*, *Travel the route*, *To dawn*, *To dusk*, *+1 day*, *+1 hour*. The
+party walks as far as that time and the terrain allow and then **spends the rest of it standing where it
+arrived** — it camps there, and those hours count. `travelAdvance.spentSeconds` is the per-cell ledger: a
+completed step charges the cell the party walked *out of*, a step that ended mid-crossing charges the cell
+it is still in, and the leftover charges the destination. Its invariant is the one the spec asserts: **the
+ledger sums to the clock's advance**, so "2 h spent here" and the world's own time can never drift apart.
+A finished march clears the plan — a walked-out route is not a route any more.
+
+**Decision — the ledger belongs to the hex, not to the GM's authoring.** `addExploredTimeOps` used to
+return `[]` for a cell nobody had authored ("there is nothing to patch"), which silently broke the `time`
+rule for exactly the hexes a party is most likely to camp in — including the one it started on. A march now
+authors the hex it slept in and writes the hours in the same op (D-270/D-271's two-envelope lesson, one
+more time), and `revealDueFeatures` writes the time even when it has no feature to judge. An unauthored hex
+is still invisible to a player: `projectCellForViewer` drops every cell the profile has not opened,
+whatever it carries.
+
+**Decision — a reveal is a line in the chat, not only a toast.** `featureFoundMessage` posts one plain,
+public card per hex — `Found at 6,3: the old well` — in the **same envelope** as the feature flip and the
+hours that earned it, so the log, the counter and the document cannot tell three different stories. It is
+plain text because a GM-authored name should read as written, and public because a revealed feature is a
+document the players are allowed to hold — whispering its name would keep a secret about a thing that is no
+longer one. A feature with `autoReveal` off never reaches here: that one is the GM's checkbox alone.
+
+**What the browser found that the unit tests could not.** The phase's two e2e tests were red at #29, and
+all four causes are the kind a unit test is blind to:
+
+1. **The reader looked in the wrong place.** `planOf()` handed the whole `flags.core.hexcrawl` profile to
+   `readTravelPlan`, which expects the `travel` field — so it saw no `path` and answered "no route" for a
+   march already in the document. Commit worked all along; the panel, the advance buttons and the ledger
+   never saw the plan. It now reads `hexcrawlProfileOf(scene)?.travel`, through the tolerant reader.
+2. **`Esc` disarmed the tool before it cleared the draft.** The rail's keydown handler is registered at
+   mount, so its `escape` action ran first and set `canvasTool = "select"`; by the time the canvas key
+   layer's `canvasTool === "path"` branch ran, the branch was unreachable and the draft survived. The
+   shell's `escape` case now handles path mode itself (clear the draft, leave the tool armed) before the
+   "nothing armed → back to Select" fallback.
+3. **Hours were dropped for unauthored hexes** — the ledger decision above.
+4. **The acceptance spec's own final sum was wrong.** Three crossings do not belong to one advance: the
+   first is paid for by *To the next hex* and the day buys the two that are left, so the ledger sums to a
+   day **and a border**. The four ledger lines above it were right and passing all along; the invariant is
+   "the ledger sums to the clock", and that is what the line now says.
+
+**Gates.**
+
+- **The unit gate:** `pnpm test` — **261 files: 261 passed / 2 skipped**, **3 112 tests: 3 100 passed /
+  12 skipped**, exit 0. The tree this entry started from (`0a48ced`, PR #29) was 261 / 3 098, so this
+  entry's own slice is **+2 tests** in `tests/core/hexcrawlFeatures.test.ts` — the march that authors
+  the hex it slept in, and the walk over an unauthored hex that still writes its hours.
+- **Types and lint:** `tsc --noEmit` **exit 0** · `pnpm typecheck` **50 components, 0 blocking, 1
+  advisory** (the same pre-existing `ReplayPanel.svelte:29`) · `pnpm lint` **exit 0**.
+- **The build and the size budget:** `pnpm build` → `pnpm size` **3 139 370 B raw / 902 902 B gzip,
+  OK: within the 6 MB raw budget** (the `0a48ced` tree: 3 138 770 / 902 715 — **+600 B raw** for the
+  chat card, the ledger's create path and the shell's `escape` branch).
+- **The browser gate, chromium only** (this sandbox has no firefox/webkit runtime): the phase's own
+  acceptance spec `e2e/hexcrawl_travel.spec.ts` is **2 passed** — the three-hex forest route at 56.7 s
+  and the third-day reveal at 1.4 m — and the four Phase 0–5 hexcrawl specs beside it
+  (`hexcrawl_scene`, `hexcrawl_tables`, `hexcrawl_encounters`, `hexcrawl_fog`) are **6 passed** in the
+  same run: **8 passed (6.6 m, `--workers=1`)**. The **full** chromium suite is **183 passed / 10
+  failed / 2 skipped (16.5 m, `--workers=2` on 2 cores)**, and all ten are environmental, not this
+  change: two ask for `pnpm build:systems` / `pnpm build:worlds` first (`pf1e_mass_battles`, `start`),
+  seven are the load-sensitive two-peer specs that pass when they are not racing each other
+  (`commitroll`, `fog_player`, `onboarding`, `packages`, `pf1e_acceptance` ×2, `pf1e_join` — re-run
+  alone: **19 passed, 2.8 m**), and `webrtc.spec.ts`'s PixiJS layer-order test fails on the *pristine*
+  `0a48ced` tree here too (checked by stashing this entry's diff and rebuilding) — a WebGL limitation
+  of the headless Chromium in this box, the same class the 2026-09-21 assessment records.
+
+## D-276 — 2026-09-22 — The feature finishes: a sheet in the help window, `Shift+H` for the party's hex, one table for its words, and the note that this was never a parity row (hexcrawl Phase 7)
+
+**Context.** Plan §8's Phase 7 is the plan paying its own debts: "Help panel entries, toolbar hints,
+keyboard (`H` for the hex menu?), the i18n strings kept in one table (G-38 is open; this feature must
+not add scattered literals), `STATUS_ASSESSMENT` + `GAP_ANALYSIS` §5.1 note … and the closing
+`DECISIONS.md` entries." §7.2 had already promised the same two surfaces from the other end —
+`ui/canvas/HelpPanel.svelte` and `CanvasToolbar.svelte` — as "the two hint lines the new mode needs".
+Phases 0–6 built the machine; this is the half-day that makes it findable.
+
+**Decision — the help window gets a hexcrawl sheet, shown to everyone.** It sits above *Bindings*,
+announced by one paragraph of **model** rather than a list of buttons: the buttons are labelled where
+they stand, and the thing a GM actually forgets is that the *clock* walks the party and that a hex keeps
+the hours spent in it. The rows below it are the four keys (`Right-click a hex`, `Shift+H`, `Y`,
+`Escape`), each marked `(GM)` where it is the GM's alone. It renders on a tactical map too: a GM who has
+not made a hexcrawl scene yet is exactly the person who needs to read that the key exists.
+
+**Decision — `Shift+H` opens the hex the party stands in.** The plan asked for `H`, and `h` alone is
+Roll20's hand tool (the pan alias the rail has had since D-256), so the modifier is what buys the
+mnemonic — the same trick `Shift+M` uses for the map layer, and it costs one branch placed *before* the
+single-letter aliases so `h` never sees it. A key has no pointer, so *which* hex it means has to be
+decided by something else, and the party's own cell is the only answer a GM expects from "where are
+we?"; on a map that is not a hexcrawl one — or one with no party token yet — the key says what it is
+waiting for instead of doing nothing. It works for a player too: the hex window is projection-safe, and
+what they get is the published description and nothing else.
+
+**Decision — one table for the feature's sentences, and G-38 stays open.** `src/core/hexcrawl/strings.ts`
+holds every string the feature **composes**: rule labels, verdict notes, log lines, menu entries and
+their disabled reasons, the two hint sentences, the `Found at 6,3: the old well` card. Two rules keep it
+worth having. It **imports nothing** — not even `formatDuration`, whose callers format their own numbers
+and hand the pieces over — so it can be handed to G-38's extraction whole, whatever shape that slice
+takes. And it holds **sentences, not names**: `Travel`, `Pace`, *Commit route* and the rest of a
+control's own labels stay in the markup beside the control they name, because they are one word long,
+they are already in one file, and moving them would make the template harder to read without making the
+table more useful. The i18n barrel stays empty and G-38 stays open — D-263's decision, not this
+feature's to relitigate by inventing a catalogue with no consumer.
+
+**Decision — the hint appears when it can be acted on.** The path tool's hint (itself moved into the
+table) covers drawing the route; the travel panel's line — *every button spends the world clock; the
+party camps where the road ends* — is rendered only once a route is committed, which is the moment the
+buttons it is about appear. A hint that is always on screen is a hint nobody reads.
+
+**Decision — the gap analysis says what this was not.** `GAP_ANALYSIS_Roll20_Foundry.md` §5.1 gains a
+line under "Not in the open set, by decision": hexcrawl scenes are **built here, not parity**, because
+neither Roll20 nor Foundry ships an overland hexcrawl as a first-class scene type and there is nothing
+to reach parity with. It must not be scheduled as gap closure. `STATUS_ASSESSMENT` §5 carries the dated
+note with this entry's gates, and the plan's §8 Phase 7 marker closes the last phase.
+
+**Gates.**
+
+- **The unit gate:** `pnpm test` — **261 files / 3 100 tests passed** (2 files, 12 tests skipped).
+  Phase 7 adds no unit tests and changes no behaviour: the strings move is a refactor, and the rule
+  labels and notes it now composes are asserted through `tests/core/hexcrawlFeatures.test.ts`, which
+  was already covering them.
+- **Types and lint:** `tsc --noEmit` **exit 0** · `pnpm typecheck` **50 components, 0 blocking, 1
+  advisory** (`ReplayPanel.svelte:29`) · `pnpm lint` **exit 0**.
+- **The build and the size budget:** `pnpm build` → `pnpm size` **3 142 538 B raw / 904 019 B gzip,
+  OK: within the 6 MB raw budget** (the Phase 6 tree: 3 139 370 / 902 715 — **+3 168 B raw** for the
+  help sheet, the strings table, the `Shift+H` branch and the panel hint).
+- **The browser gate, chromium only:** the phase's own spec `e2e/hexcrawl_help.spec.ts` is
+  **3 passed (14.2 s)** — the help sheet and its four keys, `Shift+H` opening the party's hex, the
+  travel hint appearing exactly when a route is committed, and the key staying quiet on a map that is
+  not a hexcrawl one. The five older hexcrawl specs re-run against this build are **8 passed**
+  (`hexcrawl_encounters` 3, `hexcrawl_travel` 2, `hexcrawl_fog` 1, `hexcrawl_scene` 1,
+  `hexcrawl_tables` 1) — **11 hexcrawl tests** in all. The same run carried the specs this change
+  touches (`onboarding`, `canvas_toolbar`, `canvas_rail`, `windows`) to **29 passed across the eight
+  spec files**, the single failure being the fog flake below; two failures in the wider full-suite
+  run are not this change either: `hexcrawl_fog`'s two-peer propagation step **passes standalone
+  (41.8 s)**, and `webrtc`'s PixiJS layer-order test fails on the pristine tree here too.
+
+## D-277 — 2026-09-22 — What a player's replica holds: the projection asserted from the player's side, a player shell taught to resolve a feature's picture, and the two-peer leak that starved the peer link (hexcrawl Phase 6 tail)
+
+**Context.** PR #29 (D-275) closed with one follow-up open: the phase's two new fields — `featureRows`
+and `exploredSeconds` — had been asserted from the GM's side only. `hexcrawl_travel.spec.ts` and
+`hexcrawl_fog.spec.ts` are that half; what was missing was the other side of the same documents, which
+is the only place D-271's projection rule can be seen to hold. `core/hexcrawl/features.ts` says it of
+itself: the projection of an unrevealed feature is *the single security-relevant line of the whole
+feature*. A hidden thing must not be hidden in the UI — it must not be in the document a player is
+handed.
+
+**What the spec asserts.** `e2e/hexcrawl_player_fields.spec.ts` is a two-context spec with a real
+manual join (the same handshake `hexcrawl_fog.spec.ts` uses): a hex a player has been shown, two
+features on it — one manual and carrying a picture, one ruled by time — and then the player's replica
+across the three states. *Neither revealed:* the cell arrives with **no feature rows at all**,
+`description: null`, and the picture never crossed (the GM's row has an `img`, the player's document
+does not exist). *The GM's checkbox:* the row arrives **with** its `img` — a revealed feature's art is
+the players' to look at — and the player's own hex window draws it. *A rule firing on its own:* an
+hour spent exploring reveals the well, the `Found at 6,3: the old well` card reaches the player's chat,
+the row arrives, and `exploredSeconds` reads **3 600 on both sides**. The hours are the party's own —
+the players were standing there — and the secret was the rule waiting for them, not the time.
+
+**Decision — a defect: the player's hex window could not draw a revealed feature's picture at all.**
+The hash crossed the wire by design (D-271 keeps it, because a revealed feature is the players' to look
+at), but a hash is not a picture. `HexWindow` turns one into an `<img src>` through a `resolveAsset`
+prop that `WindowHost` forwards; `App.svelte`, the GM shell, passes one backed by `gm.fetcher`; and
+`JoinApp.svelte`, the player shell, **passed none** — the prop defaults to `null`, so the art was
+simply absent from the one window whose whole job is to show it. The player shell is given a resolver
+of its own, built on the client fetcher it already uses for the map image
+(`current.fetcher.request(hash, "ui")` → `URL.createObjectURL`), memoised in a `SvelteMap` like the
+GM's, with `https:`/`data:`/`blob:` passing straight through because a feature's picture may be a link
+the GM pasted. It is the player's **own** fetcher on purpose: the bytes travel from the GM's peer
+through the player's client, and handing the player shell the GM's resolver would mean reaching for a
+`gm` client it does not have. `HexWindow` is unchanged and grows no `isGM` branch — the two shells
+differ in what they pass, not in what the window does.
+
+**Decision — a defect in the harness: two-peer specs were starving the peer link.** Both
+`hexcrawl_fog.spec.ts` and the new spec created their contexts with `browser.newContext()` and never
+closed them, and Playwright does not close contexts a test made for itself. Every two-peer test thus
+left two live pages behind the next one, and Chromium throttles a page nobody is looking at — which is
+exactly the shape of the flake D-276 recorded: `hexcrawl_fog`'s propagation step failing in a long run
+and passing alone (41.8 s). The new spec showed the same thing with the diagnosis written on it — the
+GM's document reading `revealedFeatures: 1` while the player's replica stayed at 0 for **90 seconds**,
+with the cell still present and the peer still connected. `fog_player.spec.ts`, a two-peer spec that
+has always passed here, closes its contexts; that was the whole difference. Both specs now close
+theirs. The seven hexcrawl specs go green **in one run** for the first time: 12 passed (4.5 m),
+against 7.6 m and one failure before.
+
+**Gates.**
+
+- **The unit gate:** `pnpm test` — **261 files / 3 100 tests passed** (2 files, 12 tests skipped).
+  This change is a shell prop, a fetch and a spec: no core behaviour moves, and the projection it
+  asserts from the browser is already unit-tested in `tests/core/hexcrawlFeatures.test.ts`.
+- **Types and lint:** `pnpm typecheck` **50 components, 0 blocking, 1 advisory**
+  (`ReplayPanel.svelte:29`) · `pnpm lint` **exit 0**.
+- **The build and the size budget:** `pnpm build` → `pnpm size` **3 142 835 B raw / 904 095 B gzip,
+  OK: within the 6 MB raw budget** (the Phase 7 tree: 3 142 538 / 904 019 — **+297 B raw** for the
+  player shell's resolver).
+- **The browser gate, chromium only:** the new spec `e2e/hexcrawl_player_fields.spec.ts` is
+  **1 passed (34.6 s)**, and the six older hexcrawl specs re-run beside it in one command are
+  **11 passed** — **12 hexcrawl tests, 4.5 m, no failures**, which also retires the `hexcrawl_fog`
+  flake D-276 had to explain.
+
+## D-278 — 2026-09-22 — An LLM sits at the table: the MCP-shaped connector's skeleton, the capability gate, and the one-tab-one-sidecar bridge (connector Phase 0)
+
+**Context.** `MCP_CONNECTOR_SPEC_AND_PLAN.md` was a proposal dated 2026-09-21 and nothing in the tree
+answered it. It is the last unstarted document in the repo, and it is a **differentiator**, not a parity
+row — neither Roll20 nor Foundry ships an MCP surface, so per `GAP_ANALYSIS` §5.1's ordering it waits
+until the product says otherwise. Phase 0 is the skeleton: the wire, the transport, the gate and two
+read tools, with no UI and no writes yet (`HEXCRAWL_SCENE_SPEC_AND_PLAN.md` is complete and shipped as
+D-268…D-277; this is a separate feature with its own plan and its own phases).
+
+**Decision — architecture A, and the browser dials out.** `vtt-mcp` (`tools/mcp/server.mjs`, `pnpm mcp`)
+is a sidecar an MCP-speaking client launches over **stdio**; the GM's tab opens a **WebSocket to it**
+on loopback, presenting a one-time pairing token. The app never listens on a port — which is the whole
+reason it is a separate process, and the reason it works from `file://` and behind a router. The sidecar
+binds `127.0.0.1` by default and prints a warning when it is told otherwise (the sandbox's e2e harness
+needs `0.0.0.0`; the product default does not change).
+
+**Decision — one registry, one gate.** The tool table, the argument validation and the capability check
+live in the app's `core` (`src/core/agents/`), not in the sidecar. The sidecar answers `initialize` and
+`ping` itself — an MCP client handshakes the moment it spawns us, which is before any tab exists — and
+proxies everything else to the bridge by request id. A sidecar that kept its own copy of the catalogue
+would be a second place to forget to enforce a grant.
+
+**Decision — a refusal is a tool result, a malformed call is a protocol error.** "You may not delete
+documents — ask the GM to change its grant" (§4's plain words, one per capability) comes back as a
+normal result with `isError: true`, because a model that is told *why* a door is closed stops pushing on
+it. An unknown tool name, a non-object argument or an unknown argument key is `-32602`: that is a
+client bug, not a policy, and conflating the two is how an agent learns that the world is closed to it.
+
+**Decision — `whoami` names the session and the grant apart.** Phase 0 hosts the bridge in the GM's tab,
+so the session says `GM` while the grant may say `observer`; an agent that read "role GM" and stopped
+there would draw exactly the wrong conclusion. The answer reports both, and says which is the ceiling.
+Related and equally deliberate: **reads are the GM's replica today**, which is correct for a GM-scoped
+agent and wrong for a player-scoped one — that is the gap Phase 3 closes with `projectWorld()` and its
+field-by-field proof, and nothing in the code pretends otherwise.
+
+**Decision — no UI, no global, in Phase 0.** `connectAgentBridge()` is a function, not a `window`
+object: the Agents section in Settings (Phase 2) is the production entry point, and until then the only
+caller is the integration test. A connector whose bound identity is the whole design does not get a
+surface a page console can reach (the D-045 pattern is the precedent for gating test surfaces).
+
+**Two things the plan's Phase 0 did not say, decided here.** (1) The sidecar answers a tool call with
+`-32603` and a sentence naming the Settings button when **no tab is connected**, and times a forwarded
+call out after 30 s — an MCP client waiting on an id it will never see answered is the worst failure
+mode this shape has. (2) It refuses a **second** tab with HTTP 409: a world has one GM, and silently
+stealing the session from a browser the GM forgot about is worse than telling them.
+
+**Gates.**
+
+- **The unit gate:** `pnpm test` — **264 files / 3 125 tests passed** (2 files, 12 tests skipped).
+  New: `tests/core/agentsCapabilities.test.ts` (7 — the presets, the gate, the refusal wording) and
+  `tests/core/agentsTools.test.ts` (10 — the manifest, the three ways a call ends, the argument
+  validator, a tool that throws).
+- **The integration gate:** `tests/integration/mcpBridge.test.ts` (8) — a host booted in Node on the
+  in-memory wire (`tests/host/sync.test.ts` is the precedent), the **real sidecar as a child process**,
+  the **real WebSocket transport**, and a JSON-RPC client over stdio: `initialize` answers before any
+  tab exists; a call with no tab says what is missing instead of hanging; `tools/list` returns the two
+  tools; `tools/call world.info` returns the world's name and the counts that came out of the seeded
+  store; an unknown tool is `-32602`; a tool the grant does not cover is a refusal in plain words while
+  `whoami` still answers; `resources`/`prompts` answer honestly; an unknown method is `-32601`.
+- **Types and lint:** `pnpm typecheck` **50 components, 0 blocking, 1 advisory**
+  (`ReplayPanel.svelte:29`) · `pnpm lint` **exit 0** · `prettier --check` clean on every new file.
+- **The build and the size budget:** `pnpm build` → `pnpm size` **3 142 835 B raw / 904 095 B gzip —
+  byte-identical to the D-277 tree**. Nothing in the app graph imports the bridge yet, so the connector
+  costs the bundle nothing; it starts costing when Phase 2's Agents window imports it, and that is the
+  number to watch then. The sidecar is Node-only and never bundled.
+- **Not yet proven:** the WebSocket client has run under Node 22's `WebSocket` and nowhere else — the
+  browser transport and the Settings pairing flow are Phase 3's e2e (`agent_connector.spec.ts`).
+
+## D-279 — 2026-09-22 — What an LLM can see: the read surface, the text map and the `vtt://` resources (connector Phase 1)
+
+**Context.** Phase 0 (D-278) gave the connector a wire, a gate and two tools: enough to prove the shape
+works, not enough to be useful. Phase 1 of `MCP_CONNECTOR_SPEC_AND_PLAN.md` is the read surface —
+`scene.*`, `map.render`, `document.*`, `token.list`, `chat.read`, `sheet.read`, `bestiary.search` — plus
+the §5.7 resources, the §7.4 pagination caps and the redaction a non-GM agent must see. It is the half
+of the connector that cannot damage a world, which is the half worth shipping first: a model that can
+only read is already a useful assistant at a table, and it is the only safe way to find out whether the
+representations are any good before writes depend on them.
+
+**Decision — the tools read through a port, not through the app.** `AgentWorldView`
+(`src/core/agents/types.ts`) is the whole read vocabulary, implemented once in
+`src/app/agentBridge.ts` over `ClientSync`. The tool table therefore never touches the store, the read
+surface is testable without a browser, and the integration test can serve a view built on a *host*
+because the tools cannot tell the difference.
+
+**Decision — a resource is the tool's answer wearing a URI.** `resources/read` dispatches through
+`callTool`, so the grant that refuses `token.list` refuses `vtt://world/<id>/tokens` too, and there is
+one place to get a redaction wrong rather than two. The open-ended resources (a sheet per actor, a map
+per scene) go out as **templates**: 5,000 actor URIs is a resource list no client can read.
+
+**Decision — three ways a call can end, and a third was missing.** D-278 split refusals (`isError` +
+plain words) from malformed calls (`-32602`). Phase 1 needed a channel for the second kind *from inside
+a tool*, not just from the argument validator, so `ToolOutcome = ToolResult | { invalid }`. The first
+user is the **cursor**: `"page-two"` is `-32602`, never page 1 again — an agent looping pages with a
+cursor it built itself would re-read page 1 forever and the transcript would look like progress. The
+related bug, caught by the new tests rather than by reading: paging a page the view had already cut
+turned "50 of 1,200" into "all 50", which is the §7.4 cap failing silently. The tool now clamps a view
+that over-runs the cap and keeps the true total.
+
+**Decision — walls paint over fog, never over a token.** Precedence is tokens > walls > fog > empty.
+Fog is "what a player has seen", and a map that hides every door behind an unexplored cell is
+unnavigable; a token is a creature, and no fog state should delete one from the picture. `@` is the
+party (friendly *with* an `actorId`), `F` is an ally, two tokens sharing a cell fall back to a letter
+from the name, and the legend always carries the ids — the glyph is not the answer, the id is.
+
+**Decision — redaction is two gates, and the answer says how much it withheld.** The capability gate
+decides whether the tool runs at all; `gmOnly.read` then decides whether hidden tokens and GM-only roll
+results survive — the *card* that someone rolled is public, the dice are not. And every redacted answer
+counts what it removed ("2 tokens … (1 withheld by the grant)"): a read that quietly returns two of
+three tokens is a lie by omission, and a model cannot ask for what it does not know exists.
+
+**Gates.**
+
+- **The unit gate:** `pnpm test` — **266 files / 3 156 tests passed** (2 files, 12 tests skipped).
+  New: `tests/core/agentsMapRender.test.ts` (8 — byte-exact over a 12×9 fixture: the whole map string,
+  walls over fog, `@` vs `F`, a shared cell, a region rect, hex placement, the `showWalls`/`showTokens`
+  switches) and `tests/core/agentsReadTools.test.ts` (21 — the catalogue, scenes and maps, the hidden
+  token and the GM-only roll, cursor paging and the caps, documents, chat, sheets, bestiary, and the
+  resources). Both read a shared fixture world, `tests/core/agentsFixture.ts`.
+- **The integration gate:** `tests/integration/mcpBridge.test.ts` (10) — the real sidecar, the real
+  socket, `scene.list` and `map.render` answered out of a **host's replica** ("map 10×10 cells (square,
+  1 cell = 5 ft)" came out of a seeded scene document, not a fixture), `resources/list`,
+  `resources/templates/list` and `resources/read` over the wire, and Phase 5's `hexmap` answering
+  `-32601` "Phase 5" rather than a 404 that reads like a gap in the product.
+- **Types and lint:** `pnpm typecheck` **50 components, 0 blocking, 1 advisory**
+  (`ReplayPanel.svelte:29`) · `pnpm lint` **exit 0** · `prettier --check` clean on every new file.
+- **The build and the size budget:** `pnpm build` → `pnpm size` **3 142 835 B raw / 904 095 B gzip —
+  still byte-identical**. Nothing in the app graph imports the bridge; Phase 2's Agents window is where
+  the connector starts costing bytes, and that is the number to watch.
+- **Not yet proven:** the reads are the **GM's replica**, so a `PLAYER`-scoped agent gets GM-shaped
+  answers today — Phase 3's `projectWorld()` routing and its field-by-field proof are what make that
+  claim true, and no agent should meet a live table before it lands. There is still **no UI** (Phase 2),
+  so the bridge is reachable only from a test or a console.
+
+## D-280 — 2026-09-22 — An agent is a user with its own session: the writes, the grants and the Agents window (connector Phase 2)
+
+**Context.** Phase 1 (D-279) gave an LLM the whole read surface, but it read the GM's replica and
+could not write anything. Phase 2 of `MCP_CONNECTOR_SPEC_AND_PLAN.md` is the writes, the grants and
+the GM surface — and it opens with one question that decides the rest: **who wrote this?**
+
+**Decision — the agent is a user with its own session, not a mask on the GM's.** The host stamps
+`OpEnvelope.by` from the *session's* user id (`host/sync.ts:842`), and clients cannot create `users`,
+so there is no way to claim a different author. A write made through the GM's `ClientSync` is the
+GM's write: the OpLog, the undo stack and the world file would all blame the GM for the agent. So
+`src/app/agentSession.ts` mints a user document (`"Vex (agent)"`, role from the preset) **and** the
+grant in one system envelope, then opens a second `ClientSync` in the GM's tab over the same
+in-memory loopback the GM's own session rides (`hostBoot.ts:552`). Three things fall out of it rather
+than being implemented:
+
+- **attribution** — `by` is the agent, so the OpLog and undo need nothing new;
+- **projection** — the host sends this session a *projected* envelope (`host/sync.ts:1004`), so
+  Phase 3's redaction proof is the projection's job, done once, in the place it is already proved;
+- **authority** — the host validates against the agent's **role**, so the capability mask stays the
+  UX of the boundary plus defence in depth, exactly as §3.1 says it should be.
+
+The cost is one more `ClientSync` per agent, which is what this app is made of.
+
+**Decision — the grant is a replicated document, and revoking is not deleting.** `settings/_id:
+"agents"` (§3.2): it survives a reload, every replica can read what is allowed, and a grant changed
+by accident is one Ctrl+Z away — asserted by a test that undoes a grant edit through the host. A
+revoked record is **kept**, because the world file remembering what was *allowed* is the audit a GM
+reads afterwards; "forget" is a separate, explicit act. A pending or revoked agent holds **no**
+capabilities at all — not the preset's defaults — because an agent that connects before the GM has
+looked at it must not be able to read the world.
+
+**Decision — one call, one envelope; the answer is the post-state; a refusal is the host's sentence.**
+Every write tool builds one `Op[]` and submits it once (capped at 25), so the GM's undo is one click.
+The answer is what the world **is now**, read back — and when a committed write is not visible to
+this agent's projection, the tool says exactly that instead of claiming success. And when the host
+refuses, the bridge passes the host's reason through verbatim (`the host refused this change
+(forbidden): delete scenes`): the reason is what a model routes around. The §6.2 port therefore
+**waits for the verdict** — `ClientSync.submit` returns a txId and moves on, and answering "done" at
+submit time would be a lie about the world.
+
+**Decision — typed means whitelisted, on the way in as well as out.** `name` and `system.*` are
+writable; `ownership`, `_id` and `flags` never are, and the refusal names the paths that are. The
+redaction gate applies to writes too: an agent that cannot read a hidden token cannot move it,
+wherever it guessed the id from. `users` has no create at all — an agent that can mint an identity is
+the security model inverted.
+
+**Decision — `undo.last` is scoped, and deliberately shallow.** `HostSync.undoOwn(user)` pops only
+when the top of the undo stack is that user's own envelope. Not a search for their last change: the
+inverses stored for an older envelope were computed against a world that has moved on since, and an
+agent undoing the GM's move is worse than an agent that cannot undo.
+
+**Decision — the audit records attempts, not just successes** (§6.4). One line per call, the last
+200, in memory: tool, one-line arguments, outcome, the first line of the answer. A *refused* call is
+a line too, because "the agent tried to delete a scene three times" is what a GM wants to know and
+the OpLog can never show.
+
+**Gates.**
+
+- **The unit gate:** `pnpm test` — **269 files / 3 208 tests passed** (2 files, 12 tests skipped).
+  New: `tests/core/agentsGrants.test.ts` (12) and `tests/core/agentsWriteTools.test.ts` (28 — the
+  grant matrix over four presets × ten tools, the whitelist, dryRun/confirm, the op cap, cell→pixel,
+  the host's refusal passed through).
+- **The integration gate:** `tests/integration/agentManager.test.ts` (8 — a user and a grant in one
+  envelope, one agent per name across a reload, preset changes re-intersecting the ticked boxes, a
+  grant edit undone by the host, revoke ≠ forget) and `tests/integration/mcpBridge.test.ts` (14 —
+  **a write tool lands as one envelope, one op, `by = agent`**, `undo.last` takes it back, the mask
+  refuses a `gm-no-delete` delete, and the plan's named two-layer proof: a `player` agent whose
+  grant *allows* `token.move` is still refused **by the host**, because the token is the GM's and
+  `can()` wants OWNER).
+- **Types and lint:** `pnpm typecheck` **51 components, 0 blocking, 1 advisory**
+  (`ReplayPanel.svelte:29`) · `pnpm lint` **exit 0**.
+- **The build and the size budget:** `pnpm build` → `pnpm size` **3 213 166 B raw / 926 492 B gzip —
+  +70 331 B**, inside the 6 MB budget. The connector is in the app graph for the first time (the
+  Agents window imports it), which is the cost Phase 0 said to watch; it has been byte-identical
+  until now.
+- **Not yet proven:** no browser has rendered the Agents window — the section passes `svelte check`
+  and its logic is tested through the manager, but the e2e (`agent_connector.spec.ts`) is Phase 3's,
+  and it is the same run that must prove a `PLAYER` agent's replica against `projectWorld()`.
+
+## D-281 — 2026-09-22 — The projection proved field-by-field, ownership as the line, and the two import front doors (connector Phase 3)
+
+**Context.** Phases 0–2 gave a GM-scoped agent that can run a table, and every phase's security claim
+rested on one belief: that the host projects the world per session, so an agent sees what its role may
+see. `projectWorld()` is real and tested, but "the agent's replica is the projection" had never been
+asserted — Phase 2's reads ran on an agent session nobody had compared against it. Phase 3 is that
+comparison, plus the two tools that put a creature on the table (`actor.from_compendium`,
+`actor.from_statblock`) and `token.move` restricted to owned tokens.
+
+**Decision — the proof is a field-by-field comparison, not a spot check.**
+`tests/integration/agentProjection.test.ts` (12) boots a real `HostSync`, seeds a world with a hidden
+token, a whisper aimed at a human and a `gmroll` card, opens a `player` agent session, and compares its
+replica against `projectWorld(store.world, seq, {id, role})` over every top-level collection: the same
+ids, then `JSON.parse(JSON.stringify(doc))` deep-equal per document. Ids alone would pass a projection
+that kept a document but forgot to strip a field inside it; that failure belongs in a test, not in a
+player's hands. A `gm`-preset agent on the same world sees the hidden token and the whisper, which is
+the assertion that makes the first one mean something.
+
+**Decision — the proof found a hole, and the connector closes it on its side.**
+`projectMessage` redacts a GM-only roll by nulling `roll` — but the total is in the content too, as an
+inline `[[16|1d20+5]]` chip, which the player's chat renders (so the number is not secret at the table)
+and an agent reads as text. `agentWorldView` strips the total and keeps the formula (`[rolled 1d20+5]`),
+and `chat.read` adds `[result withheld from this grant]`. The rule that decides it: **the connector may
+be stricter than the player shell, never wider.** The old marker asked the grant whether it could read
+GM-only data; the new one reads the replica's own state (`roll === null` with a mode that withholds),
+which is the only thing that is true of a projected document.
+
+**Decision — `token.move` is ownership-scoped, and the bridge's mirror is a convenience, not an
+authority.** A grant that is not the GM's moves the tokens it owns; `AgentTokenRow.owned` carries §4's
+own cascade (`getEffectiveOwnership`, scene included) and `token.list` marks it, because an agent can
+only act on what it has been told it owns. The bridge is now checking `can()`'s rule one layer earlier,
+so the refusal can say *what to ask for* instead of only "forbidden" — and
+`tests/integration/mcpBridge.test.ts` proves the mirror is not the boundary: the GM hands a token to a
+`player` agent, takes it back **without letting the replica catch up**, and the host is the one that
+refuses. Two layers, each with something to say; a bug in the first still cannot buy a write.
+
+**Decision — `actor.from_compendium` imports the pack's own payload; `actor.from_statblock` is the
+D-264/D-267 front door.** The plan named `importCharacter` for the compendium tool. Packs are already
+in this app's document shape (`system.pf1e`, authored directly in
+`systems/pf1e-core/packs/bestiary.json`), so handing an entry to the Foundry/Roll20 reader would find
+none of its fields and author an actor that opens as a blank sheet — the exact failure
+`characterImportCheck` exists to prevent, and worse than a refusal because the numbers look plausible.
+The tool submits the entry's payload with a fresh id, which is what `importEntryOp` builds for the
+Compendia panel's own Import button: an agent's import lands the document a GM's click lands. Pasted
+*text* is the other case, and there the importer is right, report and all — the answer carries its
+`read` and `warnings` lines, and the importer's own refusal sentence comes back verbatim, because "a
+stat block starts with the creature's name and its CR" is what tells an agent what to paste next time.
+Placing a token is a **second capability** (`token.move`) on top of `doc.create`: an agent allowed to
+stock the bestiary is not automatically allowed to put things on the table. An imported actor is owned
+by the session that imported it, the same way the app's own import hands a character to the GM.
+
+**Decision — the packs are wired up, because a tool that always refuses is not a tool.** Phase 1
+left `compendia` unpassed, so `bestiary.search` answered "no compendium index on this replica" in the
+app that had the packs all along. `AgentManagerOptions.compendia` now carries
+`HostPackages.compendia()` into every bridge the manager connects (`App.svelte`), and the tools'
+refusal stays for the case it was written for: a replica with no packages runtime.
+
+**Gates.**
+
+- **The unit gate:** `pnpm test` — **270 files / 3 232 tests passed** (2 files, 12 tests skipped). New
+  in `tests/core/agentsWriteTools.test.ts` (now 40): the two importers (the pack's payload with a fresh
+  id, actor + token in one envelope, the off-map cell coming back as the map's sentence, `doc.create`
+  without `token.move`, the no-packs refusal, the importer's report and its refusal verbatim, dryRun)
+  and the ownership gate (a player's own token moves; the party's does not; the GM's grant moves both).
+- **The integration gate:** `tests/integration/agentProjection.test.ts` (**12** — the field-by-field
+  proof, the three must-never-see items absent from the documents, the stripped `<secret>`, the tools
+  reading the projection ("2 tokens", not three), a write the projection forbids refused by the host,
+  the withheld total out of the tools' text, the ownership pair against a real host, and
+  `bestiary.search → actor.from_compendium` landing an actor and its token in **one envelope stamped
+  `by` the agent** plus a real stat block becoming a real actor) and `mcpBridge.test.ts` (14 — the
+  stale-replica two-layer proof above).
+- **Types and lint:** `pnpm typecheck` **51 components, 0 blocking, 1 advisory**
+  (`ReplayPanel.svelte:29`) · `pnpm lint` **exit 0**.
+- **The build and the size budget:** `pnpm build` → `pnpm size` **3 220 484 B raw / 928 453 B gzip —
+  +7 318 B** (the pf1e import front door is now reachable from the Agents window), inside the 6 MB
+  budget.
+- **Not yet proven:** the Phase 3 e2e (`agent_connector.spec.ts`) — this environment has no Chromium
+  and the repo's e2e needs Playwright's, so **no browser has rendered the Agents window**. The security
+  claim is proved without it; the UI's own run is the debt this phase leaves behind.
+
+## D-282 — 2026-09-22 — The overworld, read: the hexcrawl surface, a map that is a window, and the projection doing the hiding (connector Phase 5, part 1)
+
+**Context.** Phase 5's dependency (`HEXCRAWL_SCENE_SPEC_AND_PLAN.md`) is complete — Phases 0–7,
+D-268…D-277 — so the [F1] tools are the last gap between "an agent can run a tactical table" and
+"an agent can run an overland campaign". This entry lands the **read** half (`hexcrawl.cells`,
+`hex.read`, `hex.describe`, `hexmap.render`, and the `vtt://world/<id>/hexmap` resource); the
+travel and encounter half follows.
+
+**Decision — the tools read the replica, and the projection has already decided what is on it.** A
+closed cell is **not on a player's replica at all** (D-271): opening one is a create for that
+session. So no hexcrawl tool checks a "revealed" flag — a cell the party has not been shown is
+absent, and `hex.read` answers *"no cell \"9,9\" on this replica — hexcrawl.cells names the ones you
+may see"*. The tools' one addition to the projection's rule is saying which of the two things
+happened, because "no such cell" and "not yours to read" are different sentences to a model choosing
+what to ask next.
+
+**Decision — `hexmap.render` draws a window, not the world.** 48×24 cells, centred on the party, or
+on whatever cell the agent names with `around`; a bigger region is clamped and the map says so
+(`— a 48×24 window of 20000 cells; ask for one region at a time`). A 20 000-hex world rendered one
+character at a time is not an answer, it is a denial of service on a context. Both forms come back
+on **every** call rather than behind a `format` flag: the ASCII a model quotes, and the JSON grid —
+a key per glyph — it points with, because a model that wants to act should not need a second round
+trip to get the half it did not ask for.
+
+**Decision — the map's letters come from the world's own catalog, and the legend counts what is
+drawn.** Terrain letters are derived (the first free letter of the label, then of the name, then a
+digit), so a GM's custom catalog reads the way they named it; and the legend counts only the glyphs
+actually on the map — a hex under cover or under the party is not a "P" the reader can find, and a
+legend claiming three when one is drawn is a model pointing at terrain that is not there. The
+renderer (`src/core/agents/hexRender.ts`) is pure and byte-exact tested; the region is decided in
+the view, where the data is.
+
+**Decision — `hex.describe` prices a march in the units the table uses.** Cost is the catalog's
+multiplier; `speedPerDay` from the scene's travel plan turns it into hours a cell (24 cells a day at
+cost 1 is an hour a cell, the same ground at cost 2 is two). A cell also reports the seconds the
+party has spent in it, which is the clock a "found after 1 hour" feature measures — the number an
+agent needs before it can say whether the shrine has been found yet.
+
+**Gates.**
+
+- `pnpm test` — **3 246 tests passed** (12 skipped). New: `tests/core/agentsHexRender.test.ts` (7 —
+  byte-exact, including the collision rule for two terrains that share a first letter and the
+  two-digit ruler) and seven cases in `tests/core/agentsReadTools.test.ts` (the cell list and its
+  cover count, one cell with its march price, the refusal for a cell the replica does not hold, the
+  neighbourhood, the map's glyphs and legend, the capability gate, and a scene with no cells).
+- `pnpm typecheck` **51 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`) ·
+  `pnpm lint` **exit 0**.
+- `pnpm build` → `pnpm size` **3 231 131 B raw / 931 936 B gzip — +10 647 B**, inside the 6 MB budget.
+- **Not yet proven:** no integration test yet against a *real* hexcrawl scene — the fixture world
+  carries the cells, and the projection's half of the claim (a closed cell absent from a player's
+  replica) is proved for tokens, journals and chat in D-281 but not yet for cells. That is the first
+  thing the travel half should close, since it needs a real hexcrawl world to test against anyway.
+
+## D-283 — MCP connector Phase 5, part 2: the march and the encounter (2026-09-22)
+
+Four write tools (`travel.plan`, `travel.advance`, `encounter.roll`, `encounter.place`) and the
+proof, against a real host, that a closed cell is absent from a player's replica.
+
+**Decision — the walk is one envelope, with the clock first.** `travel.advance` builds a single
+envelope: `advanceWorldClockOps` + the PF1e sweep **first**, then the travel progress, the party's
+new position, and finally the feature reveals. Order matters, because a feature that is "found after
+1 hour" is judged at `startClock + delta`, and an agent that reads the world between the clock move
+and the party move would see a party in the wrong hex with the right time on it. One envelope also
+means **one undo entry**: `undo` takes back the whole march — time, party and reveals — rather than
+leaving a table half-walked.
+
+**Decision — reveals are judged with the party's own eyes, not a fixed number.**
+`passivePerception = 10 + <the party token's own actor, or the best Perception among the party's
+character sheets>`. A scout in the party changes what the march finds, and the tool does not have to
+be told which hex the scout is in — that is what the party token *is*.
+
+**Decision — `encounter.roll` rolls and reports; `encounter.place` places.** They are two tools on
+purpose. A roll that fires writes its ledger (`check.ops`), so the same check cannot be re-rolled
+until the cooldown expires, and it **puts nothing on the map** — a GM agent may want to describe the
+goblin warband before three goblins appear. Placing needs `hexcrawl.travel` *and* `token.move`, and
+refuses in words when it has the first and not the second ("this agent may run the hexcrawl but not
+place tokens"), because placing is token creation and a narrower grant must still be a narrower
+grant.
+
+**Decision — a player agent may read the hexcrawl but not walk the party.** `hexcrawl.read` joins
+the `player` and `observer` presets — the party's map is part of the table's world, and the
+projection already decides how much of it a player sees. `hexcrawl.travel` does not: a march spends
+the table's clock and moves the token every player shares, so walking is the GM's call unless the GM
+narrows a grant to say otherwise. Reading where the party is and what the ground costs is not.
+
+**Decision — the GM's text and the table's text are different facts, so both are shown.** `hex.read`
+prints `Notes (GM): …` and `Reads (table): …` rather than "whichever text this replica happens to
+carry". A GM's replica holds both and needs both; a player's holds only the table's, and the
+sentence that names it is what tells the model which one it is reading.
+
+**Gates.**
+
+- `pnpm test` — **3 258 tests passed** (12 skipped). New: 4 integration cases in
+  `tests/integration/agentProjection.test.ts` over a *real* hexcrawl world — a player replica holds
+  one cell of three and `hex.read` of a closed one refuses; the GM's replica of the same world holds
+  all three and the GM's own text; `travel.advance` moves the clock by exactly the seconds marched
+  and the party token with it, in one envelope `by` the agent; and the write is refused for a
+  `player` grant with nothing moved and no time passed. Plus 7 tool cases in
+  `tests/core/agentsWriteTools.test.ts`.
+- `pnpm typecheck` **51 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`) ·
+  `pnpm lint` **exit 0**.
+- `pnpm build` → `pnpm size` **3 243 190 B raw / 935 107 B gzip — +12 059 B**, inside the 6 MB
+  budget.
+
+## D-284 — MCP connector Phase 4, part 1: the clock and the turn tracker (2026-09-22)
+
+Nine tools: `time.get`, `time.of_day`, `time.advance`, `time.set`, and `combat.state` / `start` /
+`add` / `next` / `end`.
+
+**Decision — time passing is one call, and the sweep rides in the same envelope.** `time.advance`
+submits `advanceWorldClockOps` **and** `pf1eClockSweepOps` together, which is exactly what the
+Settings window's *minute / hour / day* buttons do — the integration test proves it by asserting the
+agent's envelope is **deep-equal** to the two builders' output, not merely "the clock moved". An
+agent's "three days pass" is therefore indistinguishable from the GM pressing the button: the same
+ops, the same order, the same undo entry, and one effect sweep instead of a clock that has slipped
+past a dozen durations nobody ended.
+
+**Decision — the ladder is the world's, not the wall's.** A `minutes: 1` is `ROUNDS_PER_MINUTE ×
+secondsPerRound` (60 s on a 6-second-round world), not 60 wall-clock seconds, because that is what
+makes a "1 minute" buff end when the button says it should (D-268). A conversion that silently
+disagreed with the duration ladder would be a tool that lies about how long a spell lasts.
+
+**Decision — moving time backward expires nothing.** A negative `time.advance` and a `time.set` to
+an earlier second both sweep nothing: a GM correcting the hour has not cast a spell in reverse. The
+answer says so, because "nothing expired" and "I forgot to sweep" look identical otherwise.
+
+**Decision — `time.get` is a control, `time.of_day` is a read.** The integral seconds are the
+number every subsystem spends, so reading them sits behind `time.control` (a player agent has no
+business in the control plane); the derived hour, phase and day are fiction-facing and sit behind
+`world.read`. They can never disagree, because the second is computed from the first and never
+stored beside it.
+
+**Decision — the tracker calls the app's own combat engine, and never rolls a die.** `combat.start`
+routes through PF1e's `startWithSurprise` when the combatants are PF1e actors (so surprise rounds
+and initiative ties are the rules' own, not a second engine's approximation: an unresolved tie is a
+refusal that names the rule), and `combat.next` through `pf1eNextTurn`, whose `clockDeltaSeconds`
+moves the world clock **only when the world advances it on a round wrap** and only by the round the
+transition reports. A dying creature that owes a stabilization check is **named, not rolled** — the
+answer says "roll 1d20 against DC 10" and the agent may then ask `dice.roll`, once it exists.
+
+**Decision — `combat.state` exists, though §5.5 does not list it.** `combat.next` without a way to
+read the order is a tool that advances a tracker it cannot see. It sits behind `world.read`, because
+the turn order is on the table for everyone at it, and the projection still decides what a player's
+replica holds (a hidden combatant is not on it).
+
+**Gates.**
+
+- `pnpm test` — **3 275 tests passed** (12 skipped). New: 3 integration cases in
+  `tests/integration/agentProjection.test.ts` over a real PF1e encounter (two actors, one carrying
+  an hour-long spell, initiative already rolled) — a full round in one envelope per call with the
+  clock advancing by **exactly `secondsPerRound`**; three days whose envelope is deep-equal to the
+  Settings buttons' own ops with the spell gone from the document; and `time.set` forward and back
+  with a `player` grant refused on `time.control` while `time.of_day` still answers. Plus 4 read
+  cases and 9 write cases over the fixture.
+- `pnpm typecheck` **51 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`) ·
+  `pnpm lint` **exit 0**.
+- `pnpm build` → `pnpm size` **3 259 556 B raw / 939 973 B gzip — +16 366 B**, inside the 6 MB
+  budget.
+
+## D-285 — MCP connector Phase 4, part 2: dice (2026-09-22)
+
+`dice.roll` and `dice.apply`.
+
+**Decision — dice are the host's, so these are the only two tools that wait.** Every other tool
+builds ops and submits them. A roll cannot: the host owns the RNG, the seed and the card, and it
+commits the total as a `messages` document carrying `flags.core.rollId`. So `dice.roll` sends the
+formula through the commit-reveal path (`rollVerified`) and then **waits for the host's card to land
+on the replica**, reading the number back off it — a four-second ceiling, after which the tool
+refuses in words ("the host did not answer the roll … try again, or chat.post the result you need").
+An agent that could roll its own dice could quietly roll again until it liked the answer, which is
+exactly the temptation the verified path exists to remove.
+
+**Decision — `dice.apply` names a card and an actor, and never an amount.** The host re-reads the
+card's own total, checks the permission, and does the arithmetic (temporary hit points absorb
+first; healing also removes nonlethal) — the same intent the chat card's *Apply* button sends, and
+the same reason a client cannot claim a damage figure. The answer reports what the host did: the
+amount, the hit points before and after, and the sentence "this agent named no number".
+
+**Decision — the wait re-reads the document.** The store hands out a new document when the host
+updates one, so a captured card waits forever for a flag that has already landed. (Found the hard
+way: the first apply test timed out at four seconds with the update sitting in the store.)
+
+**Decision — a player agent may roll, and may not apply.** Rolling is what a player does at the
+table; applying a number to a character sheet is the GM's side of the card, so `dice.roll` is on
+the `player` and `observer` presets and `dice.apply` is not.
+
+**Gates.**
+
+- `pnpm test` — **3 283 tests passed** (12 skipped). New: 2 integration cases in
+  `tests/integration/agentProjection.test.ts` against a real host — `dice.roll` produces a card
+  **authored by the agent** carrying the host's total (asserted only to be a legal `1d20+5`, since
+  the number is not the test's to choose), and `dice.apply` takes the actor's hit points from 30 to
+  exactly `30 − total` with the card recording the application, so it cannot be counted twice. Plus
+  6 fixture cases (the four modes, an unrollable formula, an unknown card, and the player gate).
+- `pnpm typecheck` **51 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`) ·
+  `pnpm lint` **exit 0**.
+- `pnpm build` → `pnpm size` **3 264 620 B raw / 941 607 B gzip — +5 064 B**, inside the 6 MB
+  budget.
+
+## D-286 — MCP connector Phase 4, part 3: fog (2026-09-22)
+
+`fog.state`, `fog.reveal`, `fog.hide` — and a host bug they walked straight into.
+
+**Decision — a cell edit writes both records, in one envelope.** On a hexcrawl scene, "show them the
+clearing" is two facts: the mask the players' canvas paints (`flags.core.fogMask`) and the hex list
+the tools read (the profile's `revealed`). `fog.reveal` of a set of cells writes **both** — painting
+one without the other is how a map ends up open on one screen and shut on another, and no amount of
+reading the state back would reveal the split, because each half looks right from where it stands.
+
+**Decision — the geometry is the view's, not the agent's.** The tools name cells (`["0,0", "1,0"]`),
+a rectangle, a polygon, or the whole scene; a cell is a hexagon on a hex grid and a square on a
+square one, and that is the app's `cellPolygonOf` to build. An agent that had to supply world
+coordinates would need to know the grid, which is precisely the knowledge typed tools exist to
+remove.
+
+**Bug found and fixed — the host duplicated a cell reveal.** `withCellReveals` inserted each
+crossing's cell ops after **every** scene update in the envelope rather than after the op that moved
+the boundary, so an envelope carrying two `flags` writes on one scene — which is exactly what a fog
+edit is — sent the same cell `create` twice. A duplicated create inside one envelope is refused by
+the receiving store, which takes the *whole* envelope with it: the player's replica silently kept
+the old scene. The crossing now carries the index of the op that produced it
+(`src/host/sync.ts`, D-271's hook). It was invisible until a tool wrote two flag ops at once, and it
+would have bitten any GM UI that did the same.
+
+**Decision — `fog.state` is a control (`fog.control`), and painting is `fog.reveal`.** Reading what
+the table can see is not the same power as changing it, and a player agent has neither.
+
+**Gates.**
+
+- `pnpm test` — **3 292 tests passed** (12 skipped). New: 2 integration cases — opening a cell on a
+  real hexcrawl world **sends the document to the player's replica** (`hexcrawl.cells` gains `1,0`,
+  and closing it takes the cell away again), in one envelope `by` the agent with more than one op;
+  and a `player` grant refused on `fog.reveal` with the fog unmoved. Plus 3 read cases and 5 write
+  cases over the fixture.
+- `pnpm typecheck` **51 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`) ·
+  `pnpm lint` **exit 0**.
+- `pnpm build` → `pnpm size` **3 270 115 B raw / 943 124 B gzip — +5 495 B**, inside the 6 MB
+  budget.
+
+## D-287 — MCP connector Phase 4, part 4: the strategic layer (2026-09-22)
+
+`strategic.snapshot`, `strategic.report`, `strategic.order` — Phase 4 is **complete**.
+
+**Decision — a unit's models are the pool's truth, not the document's.** An army's units name a
+`modelRange`; how many are still standing and where they are is the §5A pool's business. So the
+snapshot reads both and says which it got: `96/120 standing, at 400,300` when the replica holds the
+pool, `120 models (the pool is not on this replica)` when it does not. A document-only answer would
+report a full-strength unit that has been shot to pieces.
+
+**Decision — the turn report is retained, not streamed.** A bus event is a moment: an agent asked
+"what happened?" after the fact has nothing to read if the report was only ever emitted. `ClientSync`
+now keeps the last `turn.report` (`lastTurnReport`) beside emitting it — the turn's own record, not
+state the client invented — and `strategic.report` refuses honestly before the first turn resolves
+rather than answering with an empty one.
+
+**Decision — `strategic.order` checks the shape, never the outcome.** The tool validates what each
+kind needs (a move needs a path, an attack a target) and writes the same embedded record the Army
+window writes — `orders.pending`, `orders.issuedBy`, `orders.issuedTurn` — in **one envelope**, so a
+turn's orders are one act of command and one undo. Whether a charge is *legal* is the rules module's
+verdict at resolution; a connector that pre-adjudicated orders would be a second referee with no
+rules. §8's opt-in stands: `strategic.order` is a capability the GM grants, one call is at most
+`MAX_OPS_PER_CALL` orders, and a unit this replica does not hold is **named**, not dropped.
+
+**Gates.**
+
+- `pnpm test` — **3 304 tests passed** (12 skipped). New: 3 integration cases over a real host with
+  two armies and a turn open in the orders phase — the order of battle read back, two orders issued
+  in **one envelope `by` the agent** and stamped on the documents with the turn and the user, a
+  unit the replica does not hold named while the other order still lands, a `player` grant refused
+  with nothing submitted, and no report before a turn resolves. Plus 3 read and 6 write cases.
+- `pnpm typecheck` **51 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`) ·
+  `pnpm lint` **exit 0**.
+- `pnpm build` → `pnpm size` **3 279 848 B raw / 946 487 B gzip — +9 733 B**, inside the 6 MB
+  budget.
+
+## D-288 — MCP connector Phase 6, part 1: the prompts (2026-09-22)
+
+The seven §5.7 prompt templates, and the handshake that now admits to serving them.
+
+**Decision — a prompt names the tools it reaches for, and only tools that exist.** `prompts/list`
+and `prompts/get` are backed by `src/core/agents/prompts.ts`, and a test asserts every name every
+recipe mentions is in `AGENT_TOOLS`. A recipe is a promise about the catalogue, and one that names a
+tool the bridge does not serve is invisible until a client follows it and gets a method error — which
+is exactly how the test caught `packages` (a **resource**, `vtt://world/<id>/packages`, not a tool).
+
+**Decision — every recipe tells the model that a refusal is an answer.** All seven close with the
+same two lines: say so plainly, do not work around it, and quote what was missing. A model told to
+achieve an outcome will route around a locked door if the recipe implies the door is open.
+
+**Decision — advising is not commanding.** `strategic.advise_turn` reaches for `strategic.order`
+**only** when it was explicitly told to; `gm.improvise_npc` places a token only when asked. The
+recipes are written so the safe reading is the default one.
+
+**Decision — the handshake advertises what the bridge serves.** `initialize` answered with
+`{ tools }` while the same bridge answered `resources/*` and now `prompts/*`: a client that trusts
+the handshake would never ask for two thirds of the surface. Both the sidecar and the bridge's own
+fallback now advertise all three, with `subscribe: false` — resources are re-read on demand, and a
+promise to push notifications is not one this bridge keeps.
+
+**Gates.**
+
+- `pnpm test` — **3 314 tests passed** (12 skipped). New: `tests/core/agentsPrompts.test.ts` (8 —
+  the tool-name invariant, the seven names, the list's shape, the refusal rule in every recipe,
+  arguments rendered and omitted, the ruling-versus-guessing line, advise-versus-order, and
+  `prompts/get` on an unknown name) and 3 integration cases in `mcpBridge.test.ts` — the list over
+  the real sidecar, `prompts/get` with a non-string argument dropped rather than stringified, an
+  error (not an empty message) for an unknown name, and the handshake's capabilities.
+- `pnpm typecheck` **51 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`) ·
+  `pnpm lint` **exit 0**.
+- `pnpm build` → `pnpm size` **3 288 920 B raw / 949 630 B gzip — +9 072 B**, inside the 6 MB
+  budget.
+
+## D-289 — MCP connector Phase 6, part 2: `MCP_CONNECTOR.md`, generated (2026-09-22)
+
+The reference for the surface: what the connector is, how to connect, the security model in one
+paragraph, the tools, the resources, the prompts, the presets, and the room left.
+
+**Decision — the tool table is generated, not written.** A hand-written tool table is a table that
+drifts: add a tool, forget the doc, and the doc lies to every GM who reads it. So
+`src/core/agents/docs.ts` renders the section from `AGENT_TOOLS` — the same list `tools/list`
+serves — and `tests/core/agentsDocs.test.ts` asserts the file still contains it. Drift fails the
+suite, and `UPDATE_AGENT_DOCS=1 pnpm vitest run tests/core/agentsDocs.test.ts` rewrites the section.
+The same test names every resource template and every prompt, because those drift the same way.
+
+**Writing the reference found two things worth recording.** One recipe named `packages` as a *tool*
+when it is a *resource* — caught by the tool-name invariant, not by a reader. And `initialize`
+advertised `{ tools }` while the same bridge answered `resources/*` and `prompts/*`, so a client that
+trusted the handshake would never have asked for two thirds of the surface; both the sidecar and the
+bridge's own fallback now advertise all three, with `subscribe: false`, since a promise to push
+resource notifications is not one this bridge keeps.
+
+**Gates.**
+
+- `pnpm test` — **3 318 tests passed** (12 skipped). New: `tests/core/agentsDocs.test.ts` (4 — the
+  section in the file is the section the registry renders; every tool has a row; every resource
+  template and prompt is named; the counts in the prose are real).
+- `pnpm typecheck` **51 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`) ·
+  `pnpm lint` **exit 0**.
+- `pnpm build` → `pnpm size` **3 288 920 B raw / 949 630 B gzip**, unchanged — `docs.ts` is only
+  reached from a test, so the bundle never sees it.
+
+## D-290 — MCP connector Phase 6, part 3: Help → *Agents* (2026-09-22)
+
+The last page the plan asks for, and the end of Phase 6's documentation work.
+
+**Decision — the page is data, and its numbers are read from the catalogue.**
+`src/core/agents/help.ts` renders the copy from `PRESETS` / `AGENT_CAPABILITIES`, so a page that says
+"the player preset holds 8 capabilities" cannot survive a change to the grant. This is the same
+reasoning as the generated tool table (D-289): a GM decides how much to hand over *from this page*,
+and a stale number is a decision made on a lie.
+
+**Decision — players see it too.** The people an agent can read about are owed what it can see, so
+"What it can see", "What it cannot do", "What it leaves behind" and "When it is told no" are shown to
+every role; only **Granting, Narrowing, Revoking, Watching it work** are the GM's. The page also says
+what the tick boxes cannot do — a capability outside the preset never applies, and only changing the
+preset grants more — because a tick that looks like it worked and did not is the worst kind of
+control.
+
+**Gates.**
+
+- `pnpm test` — **3 322 tests passed** (12 skipped). New: `tests/core/agentsHelp.test.ts` (4 — the
+  page's counts equal the catalogue's, `player` is strictly thinner than `gm` and is described as
+  such, the host is named the authority and the dice the table's, and the revoking rows exist).
+- `pnpm typecheck` **51 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`) ·
+  `pnpm lint` **exit 0**.
+- `pnpm build` → `pnpm size` **3 292 582 B raw / 951 167 B gzip — +3 662 B**, inside the 6 MB budget.
+
+**Phase 6 is complete.** What remains of the plan is its optional tail: rate classes tuned against a
+25k-entry world, and the `dryRun`/`confirm` ergonomics — both refinements of a surface that is
+already fully built, tested and documented.
+
+## D-291 — the starter world ships a complete hexcrawl, and the e2e suite ran in a browser (2026-09-22)
+
+Two things: the PF1e starter world now opens on a region you can walk, and the e2e suite was
+executed rather than only collected — for the first time since the hexcrawl landed.
+
+**Decision — the starter ships a region, authored as content.** **The Hollow Reach**:
+`content/hexcrawl/hollow-reach.json`, 28 hexes at 6 miles, every one with a name, terrain, the GM's
+description and the line the party reads; 16 hidden features across all four reveal rules
+(Perception DC, hours spent, a dice check, the GM's say-so); four encounter tables attached to the
+hexes that should roll them; a party token at Gallows Ford; six hexes open and the rest dark, with
+`gm+party` sight at radius 1 so walking opens the map. `scripts/buildStarterWorlds.mjs` converts it
+into the documents the app stores — one scene with its cells embedded, four `encounterTables`, and a
+generated traveller's guide that lists every hex, every rumour and every feature with the rule that
+finds it.
+
+The prose is **content, not code**, for the same reason the tool table is generated (D-289): the
+region can be edited or replaced without touching the build, and the conversion is testable. Nothing
+ship is *found*: every feature starts hidden, because the starter ships rules, not answers.
+
+**Decision — a browser ran.** The plan has carried "no Chromium here, so the suite is collected and
+not executed" for several slices. The workaround is D-119/D-153's and the README's: the Playwright
+CDN (`cdn.playwright.dev`) is unreachable from this sandbox, so the browser comes from npm —
+`npm i @sparticuz/chromium@153.0.0` (Chromium 153.0.8010.0, matching Playwright's pinned 153
+build), `chromium.br` inflated to `/tmp/chromium`, and the shared libraries from the package's own
+`al2023.tar.br` (on this version `executablePath()` did not inflate it, so it was brotli-decoded and
+untarred by hand) with `LD_LIBRARY_PATH=/tmp/al2023/lib`, `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` and
+`PLAYWRIGHT_CHROMIUM_NO_SANDBOX=1`. WebGL works — ANGLE over SwiftShader.
+
+**What the run found.** The PixiJS layer-order smoke (`e2e/webrtc.spec.ts`) had been failing since
+D-271: `createStage` adds a `hexcrawl` layer between *lighting* and *tokens*, but `LAYER_ORDER` — the
+constant the smoke asserts the stage against — never got it. A contract nobody executed for months
+had drifted. Fixed in the constant and the spec, not in the stage. `fog_player.spec.ts` failed once
+under full parallel load and passes alone: recorded as load, not as a regression.
+
+**Gates.**
+
+- `pnpm test` — **3 327 tests passed** (12 skipped). New: five cases over the region's conversion
+  (28 cells with terrain in the catalog and prose on both sides; the profile is a real hexcrawl
+  scene and **every authored cell's computed centre lands inside that cell**, which is the one thing
+  the plain-JS writer cannot share with the TS geometry; four tables that draw and are the ones the
+  hexes name; 16 features that ship hidden with a rule each) and one that boots the built zip
+  through the real importer and finds the cells intact.
+- `e2e` (Chromium, the whole collected suite, run twice): **197 passed / 1 skipped** on the first
+  pass — the skipped one is `content_world.spec.ts`, which needs the converted 8 MB content package
+  this machine has not built. The new `e2e/hexcrawl_starter_world.spec.ts` opens the built starter
+  world from the start screen and walks it: the scene in the rail, 28 authored of 90 cells, the
+  party at 1,2, the Ash Mile's name / terrain / GM text / player text and its attached table, that
+  table rolled and written to the ledger, a route drawn with the hex menu and priced at
+  *Highway / road* × 2 = 2 h, committed, and two clock advances that walk the party to Waystone
+  Cross at an hour a border. Two specs failed and were diagnosed, not re-run into green:
+  `fog_player.spec.ts` and `fog_lighting.spec.ts` pass alone and fail only under full parallel load
+  on two cores (timing, not behaviour) — and the second pass, started after a bare `pnpm build`
+  wiped `dist/packages`, added four failures that are simply `pf1e-core-1.0.0.zip missing`; all
+  seven of those pass serially once `pnpm build:systems` has run, which `pnpm test:e2e` does.
+- `pnpm typecheck` **51 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`) ·
+  `pnpm lint` **exit 0**.
+- `pnpm build` → `pnpm size` **3 292 593 B raw / 951 170 B gzip**, inside the 6 MB budget. The
+  region costs the world zip 10.8 kB and the bundle nothing.
+
+## D-292 — an agent can now author a hexcrawl end to end (2026-09-23)
+
+The connector could read the overworld and walk it, but not make one. Every other thing a GM builds —
+actors, scenes, journals, tables, combat — an agent could write; the hexcrawl was the one surface it
+could only look at. This closes that, and in doing so answers the other half of the question: **yes,
+the user can already author hexes by hand** — `HexcrawlWizard.svelte` (grid type, layout, "1 cell = N
+units"), `HexWindow.svelte` (name, terrain, both texts, hidden features with their reveal rules and
+per-feature images) and `EncounterTablesWindow.svelte` (rows, weights, refs to bestiary entries and
+world actors, and the battle scene to copy). The gap was never the UI; it was that the agent had no
+way in. So this decision adds no UI at all.
+
+**Decision — one capability, seven tools.** `hexcrawl.author` joins `hexcrawl.read` and
+`hexcrawl.travel`, and is in the `gm` preset and deliberately **not** in `player` or `observer`: a
+player-grant agent that could open hexes could read the whole map. The tools:
+
+| Tool | What it writes |
+|---|---|
+| `hex.write` | one hex whole — name, terrain, both texts, its tables, its hidden features and each one's reveal rule; `open` opens it to the party, `delete` removes it |
+| `hex.reveal` | any number of hexes opened, or closed again, in one envelope |
+| `hexcrawl.configure` | the switch and the scale: `cellDistance` + `units` (6 + `"mi"` is a six-mile hex), sight ring, daylight, encounter mode, terrain catalog, party token |
+| `encounterTable.create` / `.update` / `.delete` | a table's rows, mode, tags, cooldown and battle scene |
+| `asset.import` | an image into the world's asset store, answered with its content hash |
+
+No new core ops: every one of these is built from the builders the Hex window already uses
+(`createCellOps`, `updateCellOps`, `deleteCellOps`, `revealCellsOps`, `enable`/`patch`/`disable
+HexcrawlOps`, `create`/`update`/`deleteEncounterTableOps`). **The agent's document is the GM's
+document** — same validation, same op log, same undo, same projection.
+
+**Three rules the tools keep.**
+
+1. **Nothing invents a reference.** A terrain id is checked against the world's catalog, a table id
+   against the tables, an actor id against the actors — and a refusal names what is missing *and*
+   what would do ("no actor 'a-nobody' in this world — actor.from_compendium or actor.from_statblock
+   makes the thing a table row can point at"). The first draft silently dropped a ref it could not
+   resolve; that fails the way silence always fails — the table looks authored, the encounter draws
+   the row, and it places nothing with no sentence anywhere saying why.
+2. **A hex is one call, not five.** Creating it, naming it, describing it, hiding something in it and
+   opening it are one envelope, because an agent has no listeners to keep in step.
+3. **`hex.write` is idempotent, and a no-op is genuinely no ops.** A field is written only when it
+   differs from what the cell holds, so a retry after a dropped connection writes nothing and the
+   GM's undo stack has no entry that changes nothing. "Nothing named at all" is still an error;
+   "everything named is already true" is a no-op with a sentence saying so.
+
+**Two things found on the way.** The reveal rule an agent supplies was being *cast* into
+`CellFeature["reveal"]` rather than checked, so `{ kind: "perception" }` with no `dc` was stored
+happily — a feature that looks authored and can never be found. It is now validated, per rule, with
+the missing field named. And `encounterTable.update` demanded a name and a full set of rows, so
+rewriting one row meant re-sending all of them; an update now keeps what it was not told to change.
+
+**Also:** the world's asset pipeline (`host.importImage`) was never threaded into the agent manager,
+so `asset.import` would have refused in the app while passing in tests. Wired through
+`AgentManagerOptions` → `connectAgentBridge`, using the same pipeline as the sidebar's *Import map*.
+And the tool reference's count was passing by accident — the doc happened to contain the string "50"
+in an unrelated argument description. The generated section now states the count itself.
+
+**Gates.**
+
+- `pnpm test` — **3 354 passed / 12 skipped** (277 files), up from 3 327. New: 19 cases in
+  `tests/integration/agentHexcrawlAuthoring.test.ts`, which boots a real host, opens a real agent
+  session, calls the tools through `callTool` (the path an MCP client takes) and then reads **the
+  host's own store** — not the tool's answer — to see what landed; plus seven in
+  `tests/core/agentsWriteTools.test.ts` over the shared fixture. The security case: a PLAYER-grant
+  agent is refused all seven tools, the refusal is `refusalFor("hexcrawl.author")` verbatim, and the
+  world's seq does not move.
+- `pnpm typecheck` **51 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`) ·
+  `pnpm lint` **exit 0**.
+- `pnpm build` → `pnpm size` **3 318 225 B raw / 958 205 B gzip**, inside the 6 MB budget.
+- `e2e` (Chromium, the whole collected suite, 22.9 m): **198 passed / 1 skipped / 1 failed**. The
+  failure is `fog_lighting.spec.ts` — the same load flake D-291 recorded (it expects the player's
+  visible set to settle, and under two-core parallel load it does not within 45 s); run alone it
+  passes in 41 s. The skip is `content_world.spec.ts`, which needs the converted content package this
+  machine has not built.
