@@ -8811,3 +8811,76 @@ under full parallel load and passes alone: recorded as load, not as a regression
   `pnpm lint` **exit 0**.
 - `pnpm build` → `pnpm size` **3 292 593 B raw / 951 170 B gzip**, inside the 6 MB budget. The
   region costs the world zip 10.8 kB and the bundle nothing.
+
+## D-292 — an agent can now author a hexcrawl end to end (2026-09-23)
+
+The connector could read the overworld and walk it, but not make one. Every other thing a GM builds —
+actors, scenes, journals, tables, combat — an agent could write; the hexcrawl was the one surface it
+could only look at. This closes that, and in doing so answers the other half of the question: **yes,
+the user can already author hexes by hand** — `HexcrawlWizard.svelte` (grid type, layout, "1 cell = N
+units"), `HexWindow.svelte` (name, terrain, both texts, hidden features with their reveal rules and
+per-feature images) and `EncounterTablesWindow.svelte` (rows, weights, refs to bestiary entries and
+world actors, and the battle scene to copy). The gap was never the UI; it was that the agent had no
+way in. So this decision adds no UI at all.
+
+**Decision — one capability, seven tools.** `hexcrawl.author` joins `hexcrawl.read` and
+`hexcrawl.travel`, and is in the `gm` preset and deliberately **not** in `player` or `observer`: a
+player-grant agent that could open hexes could read the whole map. The tools:
+
+| Tool | What it writes |
+|---|---|
+| `hex.write` | one hex whole — name, terrain, both texts, its tables, its hidden features and each one's reveal rule; `open` opens it to the party, `delete` removes it |
+| `hex.reveal` | any number of hexes opened, or closed again, in one envelope |
+| `hexcrawl.configure` | the switch and the scale: `cellDistance` + `units` (6 + `"mi"` is a six-mile hex), sight ring, daylight, encounter mode, terrain catalog, party token |
+| `encounterTable.create` / `.update` / `.delete` | a table's rows, mode, tags, cooldown and battle scene |
+| `asset.import` | an image into the world's asset store, answered with its content hash |
+
+No new core ops: every one of these is built from the builders the Hex window already uses
+(`createCellOps`, `updateCellOps`, `deleteCellOps`, `revealCellsOps`, `enable`/`patch`/`disable
+HexcrawlOps`, `create`/`update`/`deleteEncounterTableOps`). **The agent's document is the GM's
+document** — same validation, same op log, same undo, same projection.
+
+**Three rules the tools keep.**
+
+1. **Nothing invents a reference.** A terrain id is checked against the world's catalog, a table id
+   against the tables, an actor id against the actors — and a refusal names what is missing *and*
+   what would do ("no actor 'a-nobody' in this world — actor.from_compendium or actor.from_statblock
+   makes the thing a table row can point at"). The first draft silently dropped a ref it could not
+   resolve; that fails the way silence always fails — the table looks authored, the encounter draws
+   the row, and it places nothing with no sentence anywhere saying why.
+2. **A hex is one call, not five.** Creating it, naming it, describing it, hiding something in it and
+   opening it are one envelope, because an agent has no listeners to keep in step.
+3. **`hex.write` is idempotent, and a no-op is genuinely no ops.** A field is written only when it
+   differs from what the cell holds, so a retry after a dropped connection writes nothing and the
+   GM's undo stack has no entry that changes nothing. "Nothing named at all" is still an error;
+   "everything named is already true" is a no-op with a sentence saying so.
+
+**Two things found on the way.** The reveal rule an agent supplies was being *cast* into
+`CellFeature["reveal"]` rather than checked, so `{ kind: "perception" }` with no `dc` was stored
+happily — a feature that looks authored and can never be found. It is now validated, per rule, with
+the missing field named. And `encounterTable.update` demanded a name and a full set of rows, so
+rewriting one row meant re-sending all of them; an update now keeps what it was not told to change.
+
+**Also:** the world's asset pipeline (`host.importImage`) was never threaded into the agent manager,
+so `asset.import` would have refused in the app while passing in tests. Wired through
+`AgentManagerOptions` → `connectAgentBridge`, using the same pipeline as the sidebar's *Import map*.
+And the tool reference's count was passing by accident — the doc happened to contain the string "50"
+in an unrelated argument description. The generated section now states the count itself.
+
+**Gates.**
+
+- `pnpm test` — **3 354 passed / 12 skipped** (277 files), up from 3 327. New: 19 cases in
+  `tests/integration/agentHexcrawlAuthoring.test.ts`, which boots a real host, opens a real agent
+  session, calls the tools through `callTool` (the path an MCP client takes) and then reads **the
+  host's own store** — not the tool's answer — to see what landed; plus seven in
+  `tests/core/agentsWriteTools.test.ts` over the shared fixture. The security case: a PLAYER-grant
+  agent is refused all seven tools, the refusal is `refusalFor("hexcrawl.author")` verbatim, and the
+  world's seq does not move.
+- `pnpm typecheck` **51 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`) ·
+  `pnpm lint` **exit 0**.
+- `pnpm build` → `pnpm size` **3 318 225 B raw / 958 205 B gzip**, inside the 6 MB budget.
+- `e2e` (Chromium, the whole collected suite, 22.9 m): **198 passed / 1 skipped / 1 failed**. The
+  failure is `fog_lighting.spec.ts` — the same load flake D-291 recorded (it expects the player's
+  visible set to settle, and under two-core parallel load it does not within 45 s); run alone it
+  passes in 41 s. The skip is `content_world.spec.ts`, which needs the converted content package this
+  machine has not built.

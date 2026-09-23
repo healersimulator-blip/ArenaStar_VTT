@@ -42,6 +42,8 @@ export type AgentCapability =
   | "strategic.order"
   | "hexcrawl.read"
   | "hexcrawl.travel"
+  /** Authoring the overworld: cells, their hidden features, the tables, the profile. */
+  | "hexcrawl.author"
   | "assets.write"
   | "undo";
 
@@ -68,6 +70,7 @@ export const AGENT_CAPABILITIES: readonly AgentCapability[] = [
   "strategic.order",
   "hexcrawl.read",
   "hexcrawl.travel",
+  "hexcrawl.author",
   "assets.write",
   "undo",
 ];
@@ -142,6 +145,7 @@ const PHRASE: Record<AgentCapability, string> = {
   "strategic.order": "issue strategic orders",
   "hexcrawl.read": "read the hexcrawl",
   "hexcrawl.travel": "move the party",
+  "hexcrawl.author": "author the overworld",
   "assets.write": "upload images",
   undo: "undo",
 };

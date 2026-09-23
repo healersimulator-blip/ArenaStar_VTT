@@ -256,6 +256,7 @@ export const SHEET: AgentSheet = {
 export const HEX_CELLS: AgentHexCell[] = [
   {
     key: "0,0",
+    name: "Waystone",
     col: 0,
     row: 0,
     terrain: "plains",
@@ -270,6 +271,7 @@ export const HEX_CELLS: AgentHexCell[] = [
   },
   {
     key: "1,0",
+    name: "Goblinwood",
     col: 1,
     row: 0,
     terrain: "forest",
@@ -291,6 +293,7 @@ export const HEX_CELLS: AgentHexCell[] = [
   },
   {
     key: "2,0",
+    name: "Thorn Hills",
     col: 2,
     row: 0,
     terrain: "hills",
@@ -305,6 +308,7 @@ export const HEX_CELLS: AgentHexCell[] = [
   },
   {
     key: "0,1",
+    name: "Greenfields",
     col: 0,
     row: 1,
     terrain: "plains",
@@ -319,6 +323,7 @@ export const HEX_CELLS: AgentHexCell[] = [
   },
   {
     key: "1,1",
+    name: "The King's Road",
     col: 1,
     row: 1,
     terrain: "road",
@@ -432,6 +437,15 @@ export function fakeView(
             }))
           : coll === "actors"
             ? [{ id: "a-vex", name: "Vex", type: "actor", parent: null }]
+            : coll === "encounterTables"
+              ? [
+                  {
+                    id: "tbl-goblin",
+                    name: "Goblinwood",
+                    type: "encounterTable",
+                    parent: null,
+                  },
+                ]
             : coll === "messages"
               ? MESSAGES.map((m) => ({
                   id: m.id,
@@ -974,6 +988,71 @@ export function fakeView(
         issuedTurn: 4,
       };
     },
+    hexCellOps: (_sceneId, spec) => {
+      if (String(spec["key"] ?? "").trim() === "")
+        return { error: 'hex.write needs a cell key, "col,row"' };
+      // The catalog, checked the way the real bridge checks it: a stub that accepted any terrain
+      // would let a test assert a refusal no world would ever give.
+      const terrain = spec["terrain"];
+      if (typeof terrain === "string" && !HEX_TERRAINS.some((row) => row.id === terrain))
+        return { error: `terrain '${terrain}' is not in this world's catalog` };
+      return [
+        {
+          kind: "update" as const,
+          ref: { coll: "cells" as const, id: String(spec["key"]) },
+          diff: {},
+        },
+      ];
+    },
+    hexRevealOps: (_sceneId, spec) =>
+      (spec["keys"] ?? []).length === 0
+        ? { error: "hex.reveal needs at least one cell key" }
+        : [
+            {
+              kind: "update" as const,
+              ref: { coll: "scenes" as const, id: "s1" },
+              diff: {},
+            },
+          ],
+    hexSceneOps: (_sceneId, spec) =>
+      Object.keys(spec).length === 0
+        ? { error: "hexcrawl.configure has nothing to change" }
+        : [{ kind: "update" as const, ref: { coll: "scenes" as const, id: "s1" }, diff: {} }],
+    encounterTableOps: (spec) => {
+      if (spec["action"] === "delete") {
+        return String(spec["tableId"] ?? "").trim() === ""
+          ? { error: "encounterTable.delete needs the table's id" }
+          : [
+              {
+                kind: "delete" as const,
+                ref: { coll: "encounterTables" as const, id: String(spec["tableId"]) },
+              },
+            ];
+      }
+      if (String(spec["name"] ?? "").trim() === "") return { error: "an encounter table needs a name" };
+      // An update that sends no rows keeps the ones the table has; a create has none to keep.
+      const write = [
+        {
+          kind: "update" as const,
+          ref: { coll: "encounterTables" as const, id: String(spec["tableId"] ?? "tbl-new") },
+          diff: {},
+        },
+      ];
+      // The real bridge refuses a row that points at an actor this world does not hold; the stub
+      // refuses the one id the tests use for "made up".
+      for (const row of (spec["entries"] ?? []) as unknown as Array<Record<string, unknown>>) {
+        for (const ref of (row["refs"] ?? []) as unknown as Array<Record<string, unknown>>) {
+          if (ref["kind"] === "actor" && ref["actorId"] === "a-nobody") {
+            return { error: "no actor 'a-nobody' in this world" };
+          }
+        }
+      }
+      if (spec["action"] === "update") return write;
+      const entries = (spec["entries"] ?? []) as unknown[];
+      return entries.length === 0 ? { error: "an encounter table needs at least one entry" } : write;
+    },
+    importAsset: async (spec) =>
+      spec["base64"] === "" ? { error: "asset.import got an empty file" } : { hash: "asset-stub" },
     tokenCreate: (spec) => ({
       kind: "create" as const,
       coll: "tokens" as const,

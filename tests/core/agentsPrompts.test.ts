@@ -20,7 +20,7 @@ describe("the prompt catalogue (§5.7)", () => {
     }
   });
 
-  test("the seven recipes §5.7 names are all here, with titles and descriptions", () => {
+  test("the eight recipes §5.7 names are all here, with titles and descriptions", () => {
     expect(AGENT_PROMPTS.map((row) => row.name)).toEqual([
       "gm.narrate_scene",
       "gm.run_encounter",
@@ -29,6 +29,7 @@ describe("the prompt catalogue (§5.7)", () => {
       "referee.rule_question",
       "strategic.advise_turn",
       "hexcrawl.travel_day",
+      "hexcrawl.author_region",
     ]);
     for (const prompt of AGENT_PROMPTS) {
       expect(prompt.title.length).toBeGreaterThan(3);

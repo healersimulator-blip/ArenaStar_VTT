@@ -38,7 +38,10 @@ import {
 import { canReadGmOnly } from "./capabilities";
 import type {
   AgentCombatTurn,
+  AgentEncounterEntryDraft,
   AgentFogOps,
+  AgentHexFeatureDraft,
+  AgentSceneSummary,
   AgentTimeOps,
   AgentTokenRow,
   AgentWorldView,
@@ -2331,6 +2334,493 @@ const strategicOrder: ToolDefinition = {
   },
 };
 
+// ─── authoring the overworld (D-292) ─────────────────────────────────────────
+//
+// Phase 5 gave the connector the *reads* of the hexcrawl and the two verbs of walking it. What it
+// could not do was **make** one: author a hex, hide something in it, write a table, hang a picture.
+// A GM who wants an overland map had to sit at the keyboard for all of it — the one part of the
+// app an agent could read but never write.
+//
+// These tools close that, and they do it by writing **the same documents the UI writes**
+// (`core/hexcrawl/scene.ts`, `core/hexcrawl/tableOps.ts`), in one envelope per call. Two rules run
+// through them:
+//
+// - **Nothing invents a reference.** A table id, a terrain id, an asset hash and an actor id are all
+//   checked against what this replica holds before the ops are built, and a refusal names what is
+//   missing. An encounter row that points at an actor that does not exist places nothing and says
+//   nothing, which is the worst possible failure for a GM to debug.
+// - **A cell is one call, not five.** Creating it, naming it, describing it, hiding a feature in it
+//   and opening it to the party are one envelope: an agent has no listeners to keep in step.
+
+/** One hidden feature, as a tool argument. */
+const featureDraft = {
+  type: "object",
+  description:
+    'a hidden thing in this hex — { name, text, img?, reveal: { kind: "manual" } | { kind: "perception", dc } | { kind: "time", seconds } | { kind: "dice", formula, target }, autoReveal? }',
+} as const;
+
+/** What one hex means, in the words a table uses: "one hex = 6 mi". */
+function scaleNote(grid: AgentSceneSummary["grid"]): string {
+  if (grid.distance <= 0) return "no scale set";
+  const units = grid.units === "" ? "units" : grid.units;
+  return `one hex = ${grid.distance} ${units}`;
+}
+
+const hexWrite: ToolDefinition = {
+  name: "hex.write",
+  description:
+    'Author one hex of a hexcrawl scene: its name, terrain, what is really there, what the party reads once you open it, the encounter tables attached to it, and the hidden features inside it with the rule that finds each one. A hex that does not exist yet is created; one that does is rewritten. `open: true` opens it to the party, `open: false` closes it again, and `delete: true` removes it. One call, one envelope.',
+  args: {
+    properties: {
+      key: {
+        type: "string",
+        description: 'the cell key, "col,row" — on a gridless map, the zone id you choose',
+      },
+      sceneId: { type: "string", description: "the hexcrawl scene; the active one when omitted" },
+      name: { type: "string", description: "the hex's name, as the map's legend shows it" },
+      terrain: {
+        type: "string",
+        description:
+          'a terrain id from this world\'s catalog — plains, road, hills, forest, marsh, mountains, water, city, …',
+      },
+      description: { type: "string", description: "what is actually here (GM only)" },
+      playerText: { type: "string", description: "what the party reads once the hex is open" },
+      tables: {
+        type: "array",
+        items: { type: "string" },
+        description: "encounter table ids to attach — encounterTable.create makes one",
+      },
+      features: { type: "array", items: featureDraft, description: "hidden things in this hex" },
+      removeFeatures: {
+        type: "array",
+        items: { type: "string" },
+        description: "feature ids to drop from this hex",
+      },
+      poly: {
+        type: "array",
+        items: { type: "number" },
+        description: "zone geometry, flat [x1,y1,x2,y2,…] — gridless scenes only",
+      },
+      open: { type: "boolean", description: "true opens the hex to the party; false closes it" },
+      delete: { type: "boolean", description: "drop this cell and everything authored on it" },
+      dryRun: { type: "boolean", description: "describe the ops without applying them" },
+    },
+    required: ["key"],
+  },
+  capability: "hexcrawl.author",
+  async run(args, ctx): Promise<ToolOutcome> {
+    const begun = beginWrite(ctx);
+    if ("refused" in begun) return begun.refused;
+    const spec = {
+      key: str(args["key"]) ?? "",
+      ...(str(args["name"]) === undefined ? {} : { name: str(args["name"]) as string }),
+      ...(str(args["terrain"]) === undefined ? {} : { terrain: str(args["terrain"]) as string }),
+      ...(str(args["description"]) === undefined
+        ? {}
+        : { description: str(args["description"]) as string }),
+      ...(str(args["playerText"]) === undefined
+        ? {}
+        : { playerText: str(args["playerText"]) as string }),
+      ...(Array.isArray(args["tables"])
+        ? { tables: (args["tables"] as unknown[]).filter((v): v is string => typeof v === "string") }
+        : {}),
+      ...(Array.isArray(args["features"])
+        ? { features: args["features"] as unknown as AgentHexFeatureDraft[] }
+        : {}),
+      ...(Array.isArray(args["removeFeatures"])
+        ? {
+            removeFeatures: (args["removeFeatures"] as unknown[]).filter(
+              (v): v is string => typeof v === "string",
+            ),
+          }
+        : {}),
+      ...(Array.isArray(args["poly"])
+        ? { poly: (args["poly"] as unknown[]).filter((v): v is number => typeof v === "number") }
+        : {}),
+      ...(bool(args["open"]) === undefined ? {} : { open: bool(args["open"]) as boolean }),
+      ...(bool(args["delete"]) === undefined ? {} : { delete: bool(args["delete"]) as boolean }),
+    };
+    const made = ctx.view.hexCellOps(str(args["sceneId"]) ?? null, spec);
+    if ("error" in made) return refusal(made.error);
+    if (made.length === 0) {
+      return text(`hex ${spec.key} is already as you described it — nothing to write.`, {
+        changed: false,
+      } as unknown as Json);
+    }
+    const dropping = spec.delete === true;
+    if (bool(args["dryRun"]) === true)
+      return dryRunAnswer(
+        made,
+        `${dropping ? "deleting" : "writing"} hex ${spec.key} (${made.length} op(s))`,
+      );
+    const done = await submit(made, begun.writer);
+    if (!done.ok) return done.answered;
+    // A delete has nothing to read back, and saying "cannot read it back" about a hex the agent
+    // just asked to remove would describe a failure that did not happen.
+    if (dropping) {
+      return text(`hex ${spec.key} deleted (seq ${done.seq}) — and everything authored on it.`, {
+        seq: done.seq,
+        key: spec.key,
+        deleted: true,
+      } as unknown as Json);
+    }
+    const cell = ctx.view.hexCell(str(args["sceneId"]) ?? null, spec.key);
+    return text(
+      [
+        `hex ${spec.key} written (seq ${done.seq}).`,
+        cell === null
+          ? "  this agent cannot read it back."
+          : [
+              `  ${cell.name} — ${cell.terrainName ?? cell.terrain ?? "no terrain"}, ${cell.open ? "open to the party" : "closed to the party"}.`,
+              `  ${cell.features.length} hidden feature(s).`,
+            ].join("\n"),
+      ].join("\n"),
+      { seq: done.seq, cell } as unknown as Json,
+    );
+  },
+};
+
+const hexReveal: ToolDefinition = {
+  name: "hex.reveal",
+  description:
+    'Open hexes to the party, or (with `open: false`) close them again. A closed hex is one the party has no document for at all — its text, its picture and its features are not on their replica. One call, one envelope, however many hexes it names.',
+  args: {
+    properties: {
+      keys: {
+        type: "array",
+        items: { type: "string" },
+        description: 'the cell keys, "col,row" — hexcrawl.cells lists them',
+      },
+      sceneId: { type: "string", description: "the hexcrawl scene; the active one when omitted" },
+      open: { type: "boolean", description: "true (default) opens them; false closes them" },
+      dryRun: { type: "boolean", description: "describe the ops without applying them" },
+    },
+    required: ["keys"],
+  },
+  capability: "hexcrawl.author",
+  async run(args, ctx): Promise<ToolOutcome> {
+    const begun = beginWrite(ctx);
+    if ("refused" in begun) return begun.refused;
+    const keys = (args["keys"] as unknown[]).filter((v): v is string => typeof v === "string");
+    const made = ctx.view.hexRevealOps(str(args["sceneId"]) ?? null, {
+      keys,
+      ...(bool(args["open"]) === undefined ? {} : { open: bool(args["open"]) as boolean }),
+    });
+    if ("error" in made) return refusal(made.error);
+    if (made.length === 0) {
+      return text("those hexes are already in that state — nothing to write.", {
+        changed: false,
+      } as unknown as Json);
+    }
+    if (bool(args["dryRun"]) === true)
+      return dryRunAnswer(made, `${keys.length} hex(es) ${bool(args["open"]) === false ? "closed" : "opened"}`);
+    const done = await submit(made, begun.writer);
+    if (!done.ok) return done.answered;
+    return text(
+      `${keys.length} hex(es) ${bool(args["open"]) === false ? "closed to" : "opened to"} the party (seq ${done.seq}): ${keys.join(", ")}.`,
+      { seq: done.seq, keys } as unknown as Json,
+    );
+  },
+};
+
+const hexcrawlConfigure: ToolDefinition = {
+  name: "hexcrawl.configure",
+  description:
+    "Make a scene an overland map, or change how one behaves: the scale (what one hex means — 1, 3, 6 or 12 miles, or any number of `units`), the party's sight ring, the day/night window, how encounters are announced, the terrain catalog and the party token. `enable: false` takes the profile off the scene and leaves the map alone. Setting a scale on a scene that is not a hexcrawl yet switches it on — deciding a map is an overland map and choosing its scale are usually the same act.",
+  args: {
+    properties: {
+      sceneId: { type: "string", description: "the scene; the active one when omitted" },
+      enable: { type: "boolean", description: "true (default) switches the profile on; false off" },
+      cellDistance: {
+        type: "number",
+        description: "what one hex means: 6 with units \"mi\" is a six-mile hex",
+      },
+      units: { type: "string", description: 'the unit name — "mi", "km", "leagues"' },
+      hexLayout: { type: "string", description: '"oddQ" or "evenQ", for hex grids' },
+      sightMode: { type: "string", description: '"gm" (the GM opens hexes) or "gm+party"' },
+      radiusCells: { type: "integer", description: "how far the party sees, in cells (0–12)" },
+      dawnHour: { type: "number", description: "the hour the sun comes up (0–24)" },
+      duskHour: { type: "number", description: "the hour it goes down (0–24)" },
+      encounterMode: {
+        type: "string",
+        description: '"auto" rolls itself, "prompt" asks the GM, "manual" never rolls',
+      },
+      encounterAnnounce: {
+        type: "string",
+        description: '"names" tells the table what it met; "hidden" says only that something happened',
+      },
+      terrain: { type: "string", description: "the terrain catalog id (default pf1e-overland)" },
+      partyTokenId: { type: "string", description: "the token that walks; null to unname it" },
+      dryRun: { type: "boolean", description: "describe the ops without applying them" },
+    },
+  },
+  capability: "hexcrawl.author",
+  async run(args, ctx): Promise<ToolOutcome> {
+    const begun = beginWrite(ctx);
+    if ("refused" in begun) return begun.refused;
+    const spec = {
+      ...(bool(args["enable"]) === undefined ? {} : { enable: bool(args["enable"]) as boolean }),
+      ...(num(args["cellDistance"]) === undefined
+        ? {}
+        : { cellDistance: num(args["cellDistance"]) as number }),
+      ...(str(args["units"]) === undefined ? {} : { units: str(args["units"]) as string }),
+      ...(str(args["hexLayout"]) === undefined
+        ? {}
+        : { hexLayout: str(args["hexLayout"]) as string }),
+      ...(str(args["sightMode"]) === undefined && num(args["radiusCells"]) === undefined
+        ? {}
+        : {
+            sight: {
+              ...(str(args["sightMode"]) === undefined
+                ? {}
+                : { mode: str(args["sightMode"]) as string }),
+              ...(num(args["radiusCells"]) === undefined
+                ? {}
+                : { radiusCells: Math.trunc(num(args["radiusCells"]) as number) }),
+            },
+          }),
+      ...(num(args["dawnHour"]) === undefined && num(args["duskHour"]) === undefined
+        ? {}
+        : {
+            daylight: {
+              ...(num(args["dawnHour"]) === undefined
+                ? {}
+                : { dawnHour: num(args["dawnHour"]) as number }),
+              ...(num(args["duskHour"]) === undefined
+                ? {}
+                : { duskHour: num(args["duskHour"]) as number }),
+            },
+          }),
+      ...(str(args["encounterMode"]) === undefined
+        ? {}
+        : { encounterMode: str(args["encounterMode"]) as string }),
+      ...(str(args["encounterAnnounce"]) === undefined
+        ? {}
+        : { encounterAnnounce: str(args["encounterAnnounce"]) as string }),
+      ...(str(args["terrain"]) === undefined ? {} : { terrain: str(args["terrain"]) as string }),
+      ...(args["partyTokenId"] === null
+        ? { partyTokenId: null }
+        : str(args["partyTokenId"]) === undefined
+          ? {}
+          : { partyTokenId: str(args["partyTokenId"]) as string }),
+    };
+    const made = ctx.view.hexSceneOps(str(args["sceneId"]) ?? null, spec);
+    if ("error" in made) return refusal(made.error);
+    if (bool(args["dryRun"]) === true)
+      return dryRunAnswer(made, `configuring the hexcrawl profile (${made.length} op(s))`);
+    const done = await submit(made, begun.writer);
+    if (!done.ok) return done.answered;
+    // The read-back is the scene, not the hexcrawl summary: a map that has just been switched on
+    // has no cells yet, and `hexSummary` answers null for a scene with nothing authored on it —
+    // which is the one moment an agent most needs to be told what it just wrote.
+    const scene = ctx.view.scene(str(args["sceneId"]) ?? null);
+    const summary = ctx.view.hexSummary(str(args["sceneId"]) ?? null);
+    return text(
+      [
+        `hexcrawl profile written (seq ${done.seq}).`,
+        scene === null
+          ? "  this agent cannot read it back."
+          : [
+              `  ${scene.name}: ${scaleNote(scene.grid)} · grid ${scene.grid.type} ${scene.grid.size}px${scene.grid.hexLayout === "" ? "" : ` ${scene.grid.hexLayout}`}`,
+              summary === null
+                ? "  no cells authored yet — hex.write makes the first one"
+                : `  ${summary.cells} cells (${summary.open} open to the party) · catalog ${summary.catalog}`,
+            ].join("\n"),
+      ].join("\n"),
+      { seq: done.seq, ...(summary === null ? {} : { summary }) } as unknown as Json,
+    );
+  },
+};
+
+/** One row of a table, as a tool argument. */
+const entryDraft = {
+  type: "object",
+  description:
+    'one row — { text, count?, weight?, range?: [lo, hi], refs?: [{ kind: "actor", actorId } | { kind: "compendium", packId, entryId }] }',
+} as const;
+
+const encounterTableCreate: ToolDefinition = {
+  name: "encounterTable.create",
+  description:
+    'Write a random-encounter table: a name, a mode ("weighted" rolls 1d100, "dice" rolls your own formula), its rows, when it may fire (day/night, entering/moving/exploring/fighting), an optional cooldown, and — with `sceneId` — a battle scene to copy when the encounter resolves. A row can point at world actors or at compendium entries, which is how an NPC, a monster or an item ends up on the map rather than merely named. Answer: the new table and the id to attach to hexes.',
+  args: {
+    properties: {
+      name: { type: "string", description: "the table's name, as the GM reads it" },
+      mode: { type: "string", description: '"weighted" (default) or "dice"' },
+      formula: { type: "string", description: 'dice mode only: "1d6", "2d6+1", …' },
+      entries: { type: "array", items: entryDraft, description: "the rows, in order" },
+      sceneId: { type: "string", description: "a battle scene to copy when this fires" },
+      cooldownSeconds: { type: "integer", description: "how long before it may fire in the same hex" },
+      day: { type: "boolean", description: "may fire by day (default true)" },
+      night: { type: "boolean", description: "may fire by night (default true)" },
+      entering: { type: "boolean", description: "may fire on entering (default true)" },
+      moving: { type: "boolean", description: "may fire while moving (default true)" },
+      exploring: { type: "boolean", description: "may fire while exploring (default false)" },
+      fighting: { type: "boolean", description: "may fire in a fight (default false)" },
+      dryRun: { type: "boolean", description: "describe the ops without applying them" },
+    },
+    required: ["name", "entries"],
+  },
+  capability: "hexcrawl.author",
+  async run(args, ctx): Promise<ToolOutcome> {
+    return writeEncounterTable(args, ctx, "create");
+  },
+};
+
+const encounterTableUpdate: ToolDefinition = {
+  name: "encounterTable.update",
+  description:
+    "Rewrite an encounter table wholesale: its name, mode, formula, rows, tags, cooldown or battle scene. Only what changed is written, so a save that changes nothing is no ops at all. `tableId` is the id `encounterTable.create` answered with (hexcrawl.cells lists the ones attached to a hex).",
+  args: {
+    properties: {
+      tableId: { type: "string", description: "the table to rewrite" },
+      name: { type: "string", description: "the table's name" },
+      mode: { type: "string", description: '"weighted" or "dice"' },
+      formula: { type: "string", description: "dice mode only" },
+      entries: { type: "array", items: entryDraft, description: "the rows, in order" },
+      sceneId: { type: "string", description: "a battle scene to copy, or null to unlink it" },
+      cooldownSeconds: {
+        type: "integer",
+        description: "how long before it may fire in the same hex; null to clear",
+      },
+      dryRun: { type: "boolean", description: "describe the ops without applying them" },
+    },
+    required: ["tableId"],
+  },
+  capability: "hexcrawl.author",
+  async run(args, ctx): Promise<ToolOutcome> {
+    return writeEncounterTable(args, ctx, "update");
+  },
+};
+
+const encounterTableDelete: ToolDefinition = {
+  name: "encounterTable.delete",
+  description:
+    "Delete an encounter table. Hexes that pointed at it keep the dead id, so the honest order is to detach it from the hexes first (hex.write with `tables`) or rewrite them — the refusal names the table if you try to delete one that is still attached.",
+  args: {
+    properties: {
+      tableId: { type: "string", description: "the table to delete" },
+      dryRun: { type: "boolean", description: "describe the op without applying it" },
+    },
+    required: ["tableId"],
+  },
+  capability: "hexcrawl.author",
+  async run(args, ctx): Promise<ToolOutcome> {
+    const begun = beginWrite(ctx);
+    if ("refused" in begun) return begun.refused;
+    const made = ctx.view.encounterTableOps({
+      action: "delete",
+      tableId: str(args["tableId"]) ?? "",
+    });
+    if ("error" in made) return refusal(made.error);
+    if (bool(args["dryRun"]) === true)
+      return dryRunAnswer(made, `deleting encounter table ${String(args["tableId"])}`);
+    const done = await submit(made, begun.writer);
+    if (!done.ok) return done.answered;
+    return text(`encounter table ${String(args["tableId"])} deleted (seq ${done.seq}).`, {
+      seq: done.seq,
+      tableId: args["tableId"],
+    } as unknown as Json);
+  },
+};
+
+/** The create/update pair, which differ in one argument. */
+async function writeEncounterTable(
+  args: Record<string, Json>,
+  ctx: ToolContext,
+  action: "create" | "update",
+): Promise<ToolOutcome> {
+  const begun = beginWrite(ctx);
+  if ("refused" in begun) return begun.refused;
+  const made = ctx.view.encounterTableOps({
+    action,
+    ...(str(args["tableId"]) === undefined ? {} : { tableId: str(args["tableId"]) as string }),
+    ...(str(args["name"]) === undefined ? {} : { name: str(args["name"]) as string }),
+    ...(str(args["mode"]) === undefined ? {} : { mode: str(args["mode"]) as string }),
+    ...(str(args["formula"]) === undefined ? {} : { formula: str(args["formula"]) as string }),
+    ...(Array.isArray(args["entries"])
+      ? { entries: args["entries"] as unknown as AgentEncounterEntryDraft[] }
+      : {}),
+    ...(args["sceneId"] === null
+      ? { sceneId: null }
+      : str(args["sceneId"]) === undefined
+        ? {}
+        : { sceneId: str(args["sceneId"]) as string }),
+    ...(num(args["cooldownSeconds"]) === undefined
+      ? {}
+      : { cooldownSeconds: Math.trunc(num(args["cooldownSeconds"]) as number) }),
+    tags: {
+      ...(bool(args["day"]) === undefined ? {} : { day: bool(args["day"]) as boolean }),
+      ...(bool(args["night"]) === undefined ? {} : { night: bool(args["night"]) as boolean }),
+      ...(bool(args["entering"]) === undefined
+        ? {}
+        : { entering: bool(args["entering"]) as boolean }),
+      ...(bool(args["moving"]) === undefined ? {} : { moving: bool(args["moving"]) as boolean }),
+      ...(bool(args["exploring"]) === undefined
+        ? {}
+        : { exploring: bool(args["exploring"]) as boolean }),
+      ...(bool(args["fighting"]) === undefined ? {} : { fighting: bool(args["fighting"]) as boolean }),
+    },
+  });
+  if ("error" in made) return refusal(made.error);
+  if (made.length === 0) {
+    return text("that table is already as you described it — nothing to write.", {
+      changed: false,
+    } as unknown as Json);
+  }
+  if (bool(args["dryRun"]) === true)
+    return dryRunAnswer(made, `${action} an encounter table (${made.length} op(s))`);
+  const done = await submit(made, begun.writer);
+  if (!done.ok) return done.answered;
+  // The tables this world holds are the read-back: the new one is in it, with its id.
+  const rows = ctx.view.documents("encounterTables", { limit: 500 }).rows;
+  const fresh = [...rows].reverse().find((row) => row.type === "encounterTable");
+  return text(
+    [
+      `encounter table ${action === "create" ? "written" : "rewritten"} (seq ${done.seq}).`,
+      fresh ? `  ${fresh.name} [${fresh.id}] — hex.write attaches it with that id.` : "",
+    ]
+      .filter((line) => line !== "")
+      .join("\n"),
+    { seq: done.seq, ...(fresh ? { tableId: fresh.id, table: fresh } : {}) } as unknown as Json,
+  );
+}
+
+const assetImport: ToolDefinition = {
+  name: "asset.import",
+  description:
+    "Put an image into the world's asset store and answer its content hash — the hash a scene's map, a token's picture and a hidden feature's picture are named by. Send the file as base64 with its name and mime type. Nothing else in the tool table can produce a hash, and a tool that invented one would point a hex at a picture that is not there.",
+  args: {
+    properties: {
+      name: { type: "string", description: 'the file name, "overland.png"' },
+      mime: { type: "string", description: 'the mime type, "image/png"' },
+      base64: { type: "string", description: "the file, base64-encoded" },
+    },
+    required: ["name", "mime", "base64"],
+  },
+  capability: "assets.write",
+  async run(args, ctx): Promise<ToolOutcome> {
+    // No envelope: an asset is not a document, so there is no op to submit and nothing for the GM
+    // to undo. There is still a session to answer to — a picture an agent put in the world is the
+    // agent's act, and every other write refuses without one — so the gate is the same gate.
+    const begun = beginWrite(ctx);
+    if ("refused" in begun) return begun.refused;
+    const name = str(args["name"]) ?? "";
+    const mime = str(args["mime"]) ?? "";
+    const base64 = str(args["base64"]) ?? "";
+    // Well-formed call, unusable content: a refusal the model can act on, not a -32602 that only
+    // says the call was wrong.
+    if (name === "") return refusal('asset.import needs a file "name"');
+    if (base64 === "") return refusal('asset.import needs the file as "base64"');
+    const made = await ctx.view.importAsset({ name, mime, base64 });
+    if ("error" in made) return refusal(made.error);
+    return text(
+      ["image stored.", `  ${name} → ${made.hash}`, "  use that hash as `img`."].join("\n"),
+      { hash: made.hash, name, mime } as unknown as Json,
+    );
+  },
+};
+
 export const WRITE_TOOLS: readonly ToolDefinition[] = [
   documentCreate,
   documentUpdate,
@@ -2352,6 +2842,13 @@ export const WRITE_TOOLS: readonly ToolDefinition[] = [
   fogReveal,
   fogHide,
   strategicOrder,
+  hexWrite,
+  hexReveal,
+  hexcrawlConfigure,
+  encounterTableCreate,
+  encounterTableUpdate,
+  encounterTableDelete,
+  assetImport,
   tokenMove,
   tokenProperties,
   sceneCreate,

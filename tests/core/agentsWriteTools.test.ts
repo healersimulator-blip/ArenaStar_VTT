@@ -86,6 +86,13 @@ describe("the gate: the grant matrix (§8 Phase 2)", () => {
       "fog.reveal": { cells: ["0,0"] },
       "fog.hide": { cells: ["0,0"] },
       "strategic.order": { orders: [{ unitId: "unit-1", kind: "hold" }] },
+      "hex.write": { key: "1,0", name: "Goblinwood" },
+      "hex.reveal": { keys: ["1,0"] },
+      "hexcrawl.configure": { cellDistance: 6 },
+      "encounterTable.create": { name: "Goblinwood", entries: [{ text: "2d6 goblins" }] },
+      "encounterTable.update": { tableId: "tbl-goblin", name: "Goblinwood" },
+      "encounterTable.delete": { tableId: "tbl-goblin" },
+      "asset.import": { name: "map.png", mime: "image/png", base64: "aGVsbG8=" },
       "token.move": { tokenId: "t-vex", col: 2, row: 2 },
       "token.properties": { tokenId: "t-vex", disposition: "hostile" },
       "scene.create": { name: "Camp" },
@@ -148,6 +155,13 @@ describe("the gate: the grant matrix (§8 Phase 2)", () => {
       "fog.reveal": { cells: ["0,0"] },
       "fog.hide": { cells: ["0,0"] },
       "strategic.order": { orders: [{ unitId: "unit-1", kind: "hold" }] },
+      "hex.write": { key: "1,0", name: "Goblinwood" },
+      "hex.reveal": { keys: ["1,0"] },
+      "hexcrawl.configure": { cellDistance: 6 },
+      "encounterTable.create": { name: "Goblinwood", entries: [{ text: "2d6 goblins" }] },
+      "encounterTable.update": { tableId: "tbl-goblin", name: "Goblinwood" },
+      "encounterTable.delete": { tableId: "tbl-goblin" },
+      "asset.import": { name: "map.png", mime: "image/png", base64: "aGVsbG8=" },
       "token.move": { tokenId: "t-vex", col: 2, row: 2 },
       "token.properties": { tokenId: "t-vex", disposition: "hostile" },
       "scene.create": { name: "Camp" },
@@ -1247,9 +1261,117 @@ describe("the strategic layer (§5.6)", () => {
   });
 });
 
+describe("authoring the overworld (D-292)", () => {
+  test("hex.write builds one envelope and reads the hex back by name", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf(
+      "hex.write",
+      { key: "1,0", name: "Goblinwood", terrain: "forest", open: true },
+      ctxWith(writer),
+    );
+    // One call, one envelope: the GM's undo is one click and the log has one line to attribute.
+    expect(calls).toHaveLength(1);
+    expect(body).toContain("hex 1,0 written");
+    expect(body).toContain("Goblinwood");
+  });
+
+  test("hex.write with dryRun submits nothing", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf(
+      "hex.write",
+      { key: "4,4", name: "Barrow", dryRun: true },
+      ctxWith(writer),
+    );
+    expect(calls).toHaveLength(0);
+    expect(body).toContain("dry run");
+  });
+
+  test("a refusal from the view is passed through word for word", async () => {
+    const { writer } = fakeWriter();
+    const answered = await call("hex.write", { key: "1,0", terrain: "volcano" }, ctxWith(writer));
+    expect(answered.kind).toBe("result");
+    if (answered.kind !== "result") return;
+    expect(answered.result.isError).toBe(true);
+    expect(answered.result.content[0]?.text).toBe("terrain 'volcano' is not in this world's catalog");
+  });
+
+  test("hex.reveal opens the hexes it names in one envelope", async () => {
+    const { writer, calls } = fakeWriter();
+    const body = await textOf("hex.reveal", { keys: ["1,0", "2,0"] }, ctxWith(writer));
+    expect(calls).toHaveLength(1);
+    expect(body).toContain("2 hex(es) opened to the party");
+  });
+
+  test("hexcrawl.configure with nothing to change says so rather than writing a blank", async () => {
+    const { writer, calls } = fakeWriter();
+    const answered = await call("hexcrawl.configure", {}, ctxWith(writer));
+    expect(calls).toHaveLength(0);
+    expect(answered.kind).toBe("result");
+    if (answered.kind !== "result") return;
+    expect(answered.result.isError).toBe(true);
+    expect(answered.result.content[0]?.text).toBe("hexcrawl.configure has nothing to change");
+  });
+
+  test("encounterTable.create answers the id to attach, and delete is one op", async () => {
+    const { writer, calls } = fakeWriter();
+    const made = await textOf(
+      "encounterTable.create",
+      { name: "Road", entries: [{ text: "Crows", weight: 1 }] },
+      ctxWith(writer),
+    );
+    expect(calls).toHaveLength(1);
+    expect(made).toContain("hex.write attaches it with that id");
+
+    const gone = await textOf("encounterTable.delete", { tableId: "tbl-road" }, ctxWith(writer));
+    expect(gone).toContain("deleted");
+    expect(calls).toHaveLength(2);
+  });
+
+  test("asset.import answers the hash, and refuses an empty file", async () => {
+    const { writer } = fakeWriter();
+    const answered = await call(
+      "asset.import",
+      { name: "map.png", mime: "image/png", base64: "aGk=" },
+      ctxWith(writer),
+    );
+    expect(answered.kind).toBe("result");
+    if (answered.kind !== "result") return;
+    // No ops: a picture is not a document, so there is nothing for the GM to undo — but there is
+    // still a session to attribute it to, and without one the answer is the same as every write's.
+    expect(answered.result.content[0]?.text).toContain("asset-stub");
+
+    const empty = await call(
+      "asset.import",
+      { name: "map.png", mime: "image/png", base64: "" },
+      ctxWith(writer),
+    );
+    expect(empty.kind).toBe("result");
+    if (empty.kind !== "result") return;
+    expect(empty.result.isError).toBe(true);
+  });
+
+  test("a PLAYER grant is refused authoring the overworld", async () => {
+    const { writer, calls } = fakeWriter();
+    const grant = grantFor("player");
+    const attempts: Array<[string, Record<string, Json>]> = [
+      ["hex.write", { key: "1,0", name: "Goblinwood" }],
+      ["hexcrawl.configure", { cellDistance: 6 }],
+      ["encounterTable.create", { name: "Road", entries: [{ text: "Crows" }] }],
+    ];
+    for (const [name, args] of attempts) {
+      const answered = await call(name, args, ctxWith(writer, grant));
+      expect(answered.kind).toBe("result");
+      if (answered.kind !== "result") continue;
+      expect(answered.result.isError, `${name} should be refused`).toBe(true);
+      expect(answered.result.content[0]?.text).toBe(refusalFor("hexcrawl.author"));
+    }
+    expect(calls).toHaveLength(0);
+  });
+});
+
 describe("the catalogue", () => {
-  test("every write tool names one capability, and all twenty-seven are registered", () => {
-    expect(WRITE_TOOLS).toHaveLength(27);
+  test("every write tool names one capability, and all thirty-four are registered", () => {
+    expect(WRITE_TOOLS).toHaveLength(34);
     for (const tool of WRITE_TOOLS) expect(tool.capability).not.toBeNull();
     for (const tool of WRITE_TOOLS) {
       expect(AGENT_TOOLS.map((t) => t.name)).toContain(tool.name);

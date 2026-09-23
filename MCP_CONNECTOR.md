@@ -76,6 +76,8 @@ and forget this file, and the suite fails.
 
 <!-- BEGIN GENERATED TOOLS -->
 
+**57 tools**, each naming the one capability it needs. Scan the table, then read the tool you want.
+
 | Tool | Capability |
 |---|---|
 | `whoami` | `— (always answerable)` |
@@ -121,6 +123,13 @@ and forget this file, and the suite fails.
 | `fog.reveal` | `fog.reveal` |
 | `fog.hide` | `fog.reveal` |
 | `strategic.order` | `strategic.order` |
+| `hex.write` | `hexcrawl.author` |
+| `hex.reveal` | `hexcrawl.author` |
+| `hexcrawl.configure` | `hexcrawl.author` |
+| `encounterTable.create` | `hexcrawl.author` |
+| `encounterTable.update` | `hexcrawl.author` |
+| `encounterTable.delete` | `hexcrawl.author` |
+| `asset.import` | `assets.write` |
 | `token.move` | `token.move` |
 | `token.properties` | `token.properties` |
 | `scene.create` | `scene.manage` |
@@ -364,6 +373,96 @@ Put creatures on a hexcrawl scene: one actor id with a count (or several), place
     - `sceneId` (string) — the hexcrawl scene; the active one when omitted
     - `dryRun` (boolean) — describe the ops without applying them
 
+**`hex.write`** — capability `hexcrawl.author`
+
+Author one hex of a hexcrawl scene: its name, terrain, what is really there, what the party reads once you open it, the encounter tables attached to it, and the hidden features inside it with the rule that finds each one. A hex that does not exist yet is created; one that does is rewritten. `open: true` opens it to the party, `open: false` closes it again, and `delete: true` removes it. One call, one envelope.
+
+  Arguments:
+    - `key` (string, required) — the cell key, "col,row" — on a gridless map, the zone id you choose
+    - `sceneId` (string) — the hexcrawl scene; the active one when omitted
+    - `name` (string) — the hex's name, as the map's legend shows it
+    - `terrain` (string) — a terrain id from this world's catalog — plains, road, hills, forest, marsh, mountains, water, city, …
+    - `description` (string) — what is actually here (GM only)
+    - `playerText` (string) — what the party reads once the hex is open
+    - `tables` (string[]) — encounter table ids to attach — encounterTable.create makes one
+    - `features` (object[]) — hidden things in this hex
+    - `removeFeatures` (string[]) — feature ids to drop from this hex
+    - `poly` (number[]) — zone geometry, flat [x1,y1,x2,y2,…] — gridless scenes only
+    - `open` (boolean) — true opens the hex to the party; false closes it
+    - `delete` (boolean) — drop this cell and everything authored on it
+    - `dryRun` (boolean) — describe the ops without applying them
+
+**`hex.reveal`** — capability `hexcrawl.author`
+
+Open hexes to the party, or (with `open: false`) close them again. A closed hex is one the party has no document for at all — its text, its picture and its features are not on their replica. One call, one envelope, however many hexes it names.
+
+  Arguments:
+    - `keys` (string[], required) — the cell keys, "col,row" — hexcrawl.cells lists them
+    - `sceneId` (string) — the hexcrawl scene; the active one when omitted
+    - `open` (boolean) — true (default) opens them; false closes them
+    - `dryRun` (boolean) — describe the ops without applying them
+
+**`hexcrawl.configure`** — capability `hexcrawl.author`
+
+Make a scene an overland map, or change how one behaves: the scale (what one hex means — 1, 3, 6 or 12 miles, or any number of `units`), the party's sight ring, the day/night window, how encounters are announced, the terrain catalog and the party token. `enable: false` takes the profile off the scene and leaves the map alone. Setting a scale on a scene that is not a hexcrawl yet switches it on — deciding a map is an overland map and choosing its scale are usually the same act.
+
+  Arguments:
+    - `sceneId` (string) — the scene; the active one when omitted
+    - `enable` (boolean) — true (default) switches the profile on; false off
+    - `cellDistance` (number) — what one hex means: 6 with units "mi" is a six-mile hex
+    - `units` (string) — the unit name — "mi", "km", "leagues"
+    - `hexLayout` (string) — "oddQ" or "evenQ", for hex grids
+    - `sightMode` (string) — "gm" (the GM opens hexes) or "gm+party"
+    - `radiusCells` (integer) — how far the party sees, in cells (0–12)
+    - `dawnHour` (number) — the hour the sun comes up (0–24)
+    - `duskHour` (number) — the hour it goes down (0–24)
+    - `encounterMode` (string) — "auto" rolls itself, "prompt" asks the GM, "manual" never rolls
+    - `encounterAnnounce` (string) — "names" tells the table what it met; "hidden" says only that something happened
+    - `terrain` (string) — the terrain catalog id (default pf1e-overland)
+    - `partyTokenId` (string) — the token that walks; null to unname it
+    - `dryRun` (boolean) — describe the ops without applying them
+
+**`encounterTable.create`** — capability `hexcrawl.author`
+
+Write a random-encounter table: a name, a mode ("weighted" rolls 1d100, "dice" rolls your own formula), its rows, when it may fire (day/night, entering/moving/exploring/fighting), an optional cooldown, and — with `sceneId` — a battle scene to copy when the encounter resolves. A row can point at world actors or at compendium entries, which is how an NPC, a monster or an item ends up on the map rather than merely named. Answer: the new table and the id to attach to hexes.
+
+  Arguments:
+    - `name` (string, required) — the table's name, as the GM reads it
+    - `mode` (string) — "weighted" (default) or "dice"
+    - `formula` (string) — dice mode only: "1d6", "2d6+1", …
+    - `entries` (object[], required) — the rows, in order
+    - `sceneId` (string) — a battle scene to copy when this fires
+    - `cooldownSeconds` (integer) — how long before it may fire in the same hex
+    - `day` (boolean) — may fire by day (default true)
+    - `night` (boolean) — may fire by night (default true)
+    - `entering` (boolean) — may fire on entering (default true)
+    - `moving` (boolean) — may fire while moving (default true)
+    - `exploring` (boolean) — may fire while exploring (default false)
+    - `fighting` (boolean) — may fire in a fight (default false)
+    - `dryRun` (boolean) — describe the ops without applying them
+
+**`encounterTable.update`** — capability `hexcrawl.author`
+
+Rewrite an encounter table wholesale: its name, mode, formula, rows, tags, cooldown or battle scene. Only what changed is written, so a save that changes nothing is no ops at all. `tableId` is the id `encounterTable.create` answered with (hexcrawl.cells lists the ones attached to a hex).
+
+  Arguments:
+    - `tableId` (string, required) — the table to rewrite
+    - `name` (string) — the table's name
+    - `mode` (string) — "weighted" or "dice"
+    - `formula` (string) — dice mode only
+    - `entries` (object[]) — the rows, in order
+    - `sceneId` (string) — a battle scene to copy, or null to unlink it
+    - `cooldownSeconds` (integer) — how long before it may fire in the same hex; null to clear
+    - `dryRun` (boolean) — describe the ops without applying them
+
+**`encounterTable.delete`** — capability `hexcrawl.author`
+
+Delete an encounter table. Hexes that pointed at it keep the dead id, so the honest order is to detach it from the hexes first (hex.write with `tables`) or rewrite them — the refusal names the table if you try to delete one that is still attached.
+
+  Arguments:
+    - `tableId` (string, required) — the table to delete
+    - `dryRun` (boolean) — describe the op without applying it
+
 ### Chat
 
 Speaking, whispering and reading.
@@ -595,6 +694,19 @@ Change a token's properties — name, disposition (friendly/hostile/neutral), hi
     - `rotation` (number) — rotation in degrees
     - `dryRun` (boolean) — describe the op without applying it
 
+### Images
+
+Pictures, and the hash every other tool names one by.
+
+**`asset.import`** — capability `assets.write`
+
+Put an image into the world's asset store and answer its content hash — the hash a scene's map, a token's picture and a hidden feature's picture are named by. Send the file as base64 with its name and mime type. Nothing else in the tool table can produce a hash, and a tool that invented one would point a hex at a picture that is not there.
+
+  Arguments:
+    - `name` (string, required) — the file name, "overland.png"
+    - `mime` (string, required) — the mime type, "image/png"
+    - `base64` (string, required) — the file, base64-encoded
+
 <!-- END GENERATED TOOLS -->
 
 ## Resources
@@ -639,6 +751,7 @@ invisible until a client follows it.
 | `referee.rule_question` | Answer a rules question from what this world has loaded — and admit to guessing when it has not. |
 | `strategic.advise_turn` | Read the order of battle and say what the orders should be. |
 | `hexcrawl.travel_day` | Run a day on the road: the ground, the hours, what finds them. |
+| `hexcrawl.author_region` | Build an overland map: the picture, the scale, the hexes, what is hidden in them, and the tables that populate them. |
 
 Every recipe closes with the same rule: **a refusal is an answer.** Say so plainly, do not work
 around it, and quote what was missing.

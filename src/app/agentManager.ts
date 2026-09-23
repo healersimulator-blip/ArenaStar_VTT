@@ -51,6 +51,14 @@ export interface AgentManagerOptions {
    * tool that silently finds nothing, and a test that does not pass one is testing that refusal.
    */
   compendia?: AgentCompendiumSource | undefined;
+  /**
+   * The world's asset pipeline (`host.importImage`), when this replica has one. `asset.import`
+   * answers that it cannot without it: an agent that hangs a picture on a hex has to be able to
+   * say it cannot, rather than inventing a hash that resolves to nothing.
+   */
+  importImage?:
+    | ((bytes: Uint8Array, name: string, mime: string) => Promise<{ hash: string }>)
+    | undefined;
 }
 
 export interface AgentManager {
@@ -195,6 +203,7 @@ export function createAgentManager(options: AgentManagerOptions): AgentManager {
               writer: session.writer,
               agentId: id,
               ...(options.compendia ? { compendia: options.compendia } : {}),
+              ...(options.importImage ? { importImage: options.importImage } : {}),
             }),
           );
         } else {
@@ -236,6 +245,7 @@ export function createAgentManager(options: AgentManagerOptions): AgentManager {
           writer: session.writer,
           agentId: id,
           ...(options.compendia ? { compendia: options.compendia } : {}),
+          ...(options.importImage ? { importImage: options.importImage } : {}),
         }),
       );
       return true;

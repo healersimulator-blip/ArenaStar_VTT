@@ -59,6 +59,86 @@ export interface AgentWorldView {
     sceneId: string | null,
     spec: { cellKey?: string | null; trigger?: string },
   ): AgentEncounterCheck | { error: string };
+  /**
+   * Author a cell: create it, rewrite its texts, set its terrain, attach tables, add or remove
+   * hidden features, or open it to the party. One call is one cell, and the ops come back as one
+   * envelope — a hex the GM authors by hand is several writes because the UI has listeners to
+   * keep in step, and an agent has none.
+   */
+  hexCellOps(
+    sceneId: string | null,
+    spec: {
+      key: string;
+      /** Zone geometry, flat `[x1,y1,…]` — gridless scenes only. */
+      poly?: number[];
+      name?: string;
+      terrain?: string;
+      description?: string;
+      playerText?: string;
+      tables?: string[];
+      open?: boolean;
+      /** Hidden things in this hex; `remove` names the feature ids to drop. */
+      features?: AgentHexFeatureDraft[];
+      removeFeatures?: string[];
+      /** Drop the cell and everything authored on it. */
+      delete?: boolean;
+    },
+  ): Op[] | { error: string };
+  /** Open cells to the party, or close them again (`open: false`). */
+  hexRevealOps(
+    sceneId: string | null,
+    spec: { keys: string[]; open?: boolean },
+  ): Op[] | { error: string };
+  /**
+   * The scene's hexcrawl profile: switch it on or off, set the **scale** (what one cell means:
+   * 1, 3, 6 or 12 miles, or any number), the sight ring, the day/night window, the terrain
+   * catalog, the party token and how encounters are announced. Setting the scale on a scene that
+   * is not a hexcrawl scene yet switches it on — authoring a map and deciding it is an overland
+   * map are usually the same act.
+   */
+  hexSceneOps(
+    sceneId: string | null,
+    spec: {
+      enable?: boolean;
+      /** World units per cell — `6` with `units: "mi"` is a six-mile hex. */
+      cellDistance?: number;
+      units?: string;
+      /** Hex layout when the scene's grid is a hex grid. */
+      hexLayout?: string;
+      sight?: { mode?: string; radiusCells?: number };
+      daylight?: { dawnHour?: number; duskHour?: number };
+      encounterMode?: string;
+      encounterAnnounce?: string;
+      terrain?: string;
+      partyTokenId?: string | null;
+    },
+  ): Op[] | { error: string };
+  /** Write an encounter table: create it, rewrite it, or delete it. */
+  encounterTableOps(
+    spec: {
+      action: "create" | "update" | "delete";
+      tableId?: string;
+      name?: string;
+      mode?: string;
+      formula?: string;
+      entries?: AgentEncounterEntryDraft[];
+      tags?: Partial<Record<string, boolean>>;
+      /** A battle scene to copy when this encounter resolves. */
+      sceneId?: string | null;
+      cooldownSeconds?: number | null;
+    },
+  ): Op[] | { error: string };
+  /**
+   * The world's asset pipeline: bytes in, a content hash out. The hash is what a scene's `img`,
+   * a token's `img` and a hidden feature's `img` hold — an agent cannot name one without this,
+   * and no tool invents one.
+   */
+  importAsset(spec: {
+    name: string;
+    mime: string;
+    /** Base64, because JSON-RPC carries text. */
+    base64: string;
+  }): Promise<{ hash: string } | { error: string }>;
   /** Put N of each named actor on the map, spiralling out from a cell. */
   encounterPlaceOps(
     sceneId: string | null,
@@ -269,6 +349,8 @@ export interface AgentHexFeature {
 export interface AgentHexCell {
   /** `q,r`. The id every other hexcrawl tool takes. */
   key: string;
+  /** The label the GM gave it — "The Ash Mile", or the key for a hex nobody has named. */
+  name: string;
   col: number;
   row: number;
   /** Terrain catalog id; null when the cell names none (the catalog's default covers it). */
@@ -504,6 +586,34 @@ export interface AgentStrategicOrders {
   missing: string[];
   /** The turn number the orders are stamped with, when the theatre has one. */
   issuedTurn: number;
+}
+
+export interface AgentHexFeatureDraft {
+  id?: string;
+  name: string;
+  text: string;
+  /** An asset hash (from `asset.import`) or an external URL. */
+  img?: string;
+  reveal:
+    | { kind: "manual" }
+    | { kind: "perception"; dc: number; active?: boolean }
+    | { kind: "time"; seconds: number }
+    | { kind: "dice"; formula: string; target: number };
+  /** False = leave the reveal to the GM's checkbox, whatever the rule says. */
+  autoReveal?: boolean;
+}
+
+export interface AgentEncounterEntryDraft {
+  text: string;
+  count?: number;
+  /** Weighted tables only. */
+  weight?: number;
+  /** Dice tables only: the inclusive range this row answers. */
+  range?: [number, number];
+  /** What the row puts on the map — world actors, or compendium entries to import. */
+  refs?: Array<
+    { kind: "actor"; actorId: string } | { kind: "compendium"; packId: string; entryId: string }
+  >;
 }
 
 export interface AgentHexSummary {

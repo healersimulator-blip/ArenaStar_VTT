@@ -56,12 +56,19 @@ const FAMILIES: ReadonlyArray<{ title: string; prefix: string; blurb: string }> 
     blurb: "Armies, their orders, and the turn's report.",
   },
   { title: "Tokens", prefix: "token.", blurb: "Moving and changing what is on the canvas." },
+  {
+    title: "Images",
+    prefix: "asset.",
+    blurb: "Pictures, and the hash every other tool names one by.",
+  },
 ];
 
 const familyOf = (name: string): string => {
   if (name.startsWith("hexcrawl.") || name.startsWith("hex.") || name.startsWith("travel."))
     return "hex";
-  if (name.startsWith("encounter.")) return "hex";
+  // Encounter tables are part of the overworld family: a table with no hex to fire in is a
+  // document looking for a home, and a reader meets it right after the cells that call it.
+  if (name.startsWith("encounter.") || name.startsWith("encounterTable.")) return "hex";
   if (name.startsWith("hexmap.")) return "hex";
   const hit = FAMILIES.find((family) => name.startsWith(family.prefix));
   return hit?.prefix ?? "other";
@@ -107,8 +114,12 @@ export function renderToolDocs(): string {
       );
     }
   }
-  // The summary table first, so a reader can scan before they read.
+  // The count is rendered, not written: a prose number that drifts from the table beside it is
+  // worse than no number, and `tests/core/agentsDocs.test.ts` asserts the reference still states
+  // the truth.
   const table = [
+    `**${rows.length} tools**, each naming the one capability it needs. Scan the table, then read the tool you want.`,
+    "",
     "| Tool | Capability |",
     "|---|---|",
     ...rows.map((row) => `| \`${row.name}\` | \`${row.capability}\` |`),

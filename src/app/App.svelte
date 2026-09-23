@@ -2782,6 +2782,11 @@ const WALL_PICK_RADIUS = 12;
       // `actor.from_compendium` say they cannot, rather than finding nothing.
       compendia: async () =>
         (await current.packages.compendia()).map((entry) => entry.pack),
+      // The world's asset pipeline, the same one the sidebar's **Import map** and the hexcrawl
+      // wizard use. Without it `asset.import` answers that it cannot — and an agent authoring an
+      // overland map cannot hang a picture on a hex.
+      importImage: async (bytes, name, mime) =>
+        current.pipeline.importImage(bytes, name, mime || "image/png"),
     });
     // Canvas tool listeners are attached after `await createStage(...)`, i.e. after the
     // component-init context is gone — `onDestroy` may only be *called* synchronously

@@ -606,11 +606,35 @@ answering `{ tools }` while serving resources and prompts, so a client that trus
 have asked for two thirds of the surface. **Still to come:** rate classes and read caps against a
 25k-entry world, the Help → *Agents* page, and `MCP_CONNECTOR.md`.
 
+### Phase 7 — Authoring the overworld (0.5 day, S) — ✅ landed 2026-09-23 (D-292)
+Phase 5 gave the connector the *reads* of the hexcrawl and the two verbs of walking it. It could not
+*make* one. Phase 7 closes that with one new capability and seven tools, all writing the documents the
+Hex window writes.
+
+- `hex.write` — one hex, whole: name, terrain, the GM's text, the party's text, its tables, its hidden
+  features and the rule that finds each one; `open` opens it to the party, `delete` drops it.
+- `hex.reveal` — open (or close) any number of hexes in one envelope.
+- `hexcrawl.configure` — the switch and the scale: what one hex means (1, 3, 6, 12 miles, or any
+  number of `units`), the sight ring, the day/night window, how encounters are announced.
+- `encounterTable.create` / `.update` / `.delete` — the tables, with rows that *point at* world actors
+  or compendium entries, so a drawn encounter places something on the map.
+- `asset.import` — the one way to mint a content hash, which is the only name a picture has here.
+
+New capability `hexcrawl.author` ("author the overworld"), in the `gm` preset and deliberately not in
+`player` or `observer`. New prompt `hexcrawl.author_region`, the recipe that walks the whole job. The
+world's asset pipeline is now threaded into the agent manager, so `asset.import` works in the app and
+not only in tests. **The user-facing half already existed** — `HexcrawlWizard`, `HexWindow` and
+`EncounterTablesWindow` cover every one of these acts by hand — so this phase added no new UI.
+
 ### Sequencing note
 Phases 0–2 give a GM-scoped agent that can run a table. Phase 3 is what makes "the LLM plays a character"
-defensible, and it should not be skipped before letting any agent near a live table — it has landed, and
-the one gate it leaves open is the **e2e**: no browser here, so no run has put the Agents window on
-screen. Any environment with Chromium should write `e2e/agent_connector.spec.ts` next.
+defensible, and it should not be skipped before letting any agent near a live table — it has landed.
+
+**The e2e gate is no longer open.** A browser runs here (D-291: the Playwright CDN is unreachable, so
+`@sparticuz/chromium` comes from npm with its own `al2023` libraries on `LD_LIBRARY_PATH`), and the
+whole suite was executed on Chromium. What remains is the **Agents window**: no spec has put it on
+screen, so `e2e/agent_connector.spec.ts` should be written next — the protocol, the grants, the
+projection and the tools are all proved at their own levels; the panel is not.
 
 ---
 

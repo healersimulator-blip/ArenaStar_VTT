@@ -270,6 +270,60 @@ export const AGENT_PROMPTS: readonly AgentPrompt[] = [
       ].join("\n");
     },
   },
+  {
+    name: "hexcrawl.author_region",
+    title: "Author an overland map",
+    description:
+      "Build a hexcrawl from nothing: the map image, the scale, the hexes, what is hidden in them, the encounter tables and the creatures that walk out of them.",
+    args: [
+      sceneArg,
+      arg("scale", 'what one hex means — "6 mi", "3 leagues", "1 mi"', true),
+      arg("region", "the shape of the country: what is where, and what the party knows of it"),
+    ],
+    tools: [
+      "scene.create",
+      "scene.update",
+      "asset.import",
+      "hexcrawl.configure",
+      "hex.write",
+      "hex.reveal",
+      "encounterTable.create",
+      "actor.from_compendium",
+      "actor.from_statblock",
+      "bestiary.search",
+      "hexcrawl.cells",
+      "hexmap.render",
+      "chat.post",
+    ],
+    render(args) {
+      return [
+        "You are the GM authoring an overland map before the party walks onto it.",
+        "",
+        `1. ${"scene.create"} the map if there is no scene for it yet, then ${"asset.import"} its picture and`,
+        `   ${"scene.update"} the hash onto \`img\`. A picture in this world is named by a content hash, and`,
+        "   `asset.import` is the only thing that mints one — never write a hash you did not receive.",
+        `2. ${"hexcrawl.configure"} the scale${args["scale"] ? ` (${args["scale"]})` : ""} and the sight ring. This is also`,
+        "   the switch that makes the scene an overland map at all: a scale is what a hex *means*.",
+        `3. ${"hex.write"} the hexes, one call each. A hex is its name, its terrain, what is really there,`,
+        "   what the party reads once you open it, the tables bound to it, and the hidden features inside it",
+        "   with the rule that finds each one (a Perception DC, an hour in the hex, a dice roll, or your own hand).",
+        `4. ${"encounterTable.create"} the tables a hex points at. A row that names a creature should also point at`,
+        `   one: ${"bestiary.search"} or ${"actor.from_compendium"} (or ${"actor.from_statblock"} for something you`,
+        "   wrote yourself) and put the actor's id in the row's `refs`, so the encounter places it on the map",
+        "   instead of merely naming it.",
+        `5. ${"hex.reveal"} the hexes the party already knows${args["region"] ? ` — ${args["region"]}` : ""}. A closed hex`,
+        "   is one they hold no document for at all, not one with a flag on it.",
+        `6. ${"hexcrawl.cells"} and ${"hexmap.render"} what you made, and read it back. The map you drew and the map`,
+        "   the tools describe have to be the same map before the party walks it.",
+        "",
+        "Order matters in one place only: the creature has to exist before a table row can point at it, and the",
+        "table has to exist before a hex can name it. Everything else you may do in whatever order suits the",
+        "country you are making. Each call is one undo-able envelope, so a hex is written whole or not at all.",
+        "",
+        REFUSAL_RULE,
+      ].join("\n");
+    },
+  },
 ];
 
 /** `prompts/list` — the catalogue, in the shape MCP returns it. */

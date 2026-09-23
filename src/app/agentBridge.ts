@@ -37,6 +37,8 @@ import type {
   AgentDiceApply,
   AgentDiceRoll,
   AgentEncounterCheck,
+  AgentEncounterEntryDraft,
+  AgentHexFeatureDraft,
   AgentFogOps,
   AgentFogState,
   AgentStrategicOrders,
@@ -73,7 +75,21 @@ import {
   revealCellsOps,
   setTravelRouteOps,
   clearTravelOps,
+  createCellOps,
+  updateCellOps,
+  deleteCellOps,
+  enableHexcrawlOps,
+  disableHexcrawlOps,
+  patchHexcrawlOps,
 } from "../core/hexcrawl/scene";
+import { hexcrawlProfileOf, isHexcrawlScene } from "../core/hexcrawl/types";
+import { DEFAULT_DAYLIGHT } from "../core/clock";
+import {
+  createEncounterTableOps,
+  deleteEncounterTableOps,
+  newEncounterTableId,
+  updateEncounterTableOps,
+} from "../core/hexcrawl/tableOps";
 import {
   partyPositionOps,
   partyTokenOf,
@@ -88,7 +104,12 @@ import {
   type PlacementEntry,
 } from "../core/hexcrawl/placement";
 import { revealDueFeatures } from "../core/hexcrawl/features";
-import type { EncounterTableDocument } from "../core/documents";
+import type {
+  CellFeatureReveal,
+  EncounterEntry,
+  EncounterRef,
+  EncounterTableDocument,
+} from "../core/documents";
 import {
   terrainById,
   terrainCatalogOrDefault,
@@ -184,7 +205,16 @@ export interface AgentWorldViewOptions {
    * cannot search — an honest refusal beats a tool that silently finds nothing.
    */
   compendia?: AgentCompendiumSource;
+  /**
+   * The world's asset pipeline — `host.importImage`. Without it `asset.import` answers that it
+   * cannot: an agent that wants to hang a picture on a hex has to be able to *say* it cannot,
+   * rather than inventing a hash that resolves to nothing.
+   */
+  importImage?: (bytes: Uint8Array, name: string, mime: string) => Promise<{ hash: string }>;
 }
+
+/** An agent cannot upload a map the size of a map: 8 MB is three 4k textures. */
+const MAX_ASSET_BYTES = 8 * 1024 * 1024;
 
 /** The scene's grid, in the shape the tools and the map renderer share. */
 function gridOf(scene: SceneDocument): AgentSceneSummary["grid"] {
@@ -383,6 +413,9 @@ function hexCellRowOf(
   }));
   return {
     key: cell.key,
+    // A cell's name defaults to its key (see `createCellOps`), so an unnamed hex reads as its
+    // address rather than as blank — the same thing the map's tooltip shows the GM.
+    name: cell.name ?? cell.key,
     col: coords?.q ?? 0,
     row: coords?.r ?? 0,
     terrain: cell.terrain ?? null,
@@ -396,6 +429,73 @@ function hexCellRowOf(
     features,
     exploredSeconds: explored,
   };
+}
+
+/**
+ * A new cell's id. The key is the cell's identity on the map; the id is the document's, and it
+ * has to be distinct from every other embedded cell on the scene — including one the GM deleted
+ * and re-authored with the same key.
+ */
+function newCellId(key: string): string {
+  const slug = key.replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "");
+  const suffix = Math.floor(Math.random() * 0xffffff)
+    .toString(36)
+    .padStart(4, "0")
+    .slice(0, 4);
+  return `cell-${slug || "zone"}-${suffix}`;
+}
+
+/**
+ * One hidden feature, from the draft a tool was given. The rule is validated here rather than in
+ * the tool, because the same four shapes are what the hex window's own form writes and the words
+ * a refusal uses should be the app's, not the connector's.
+ */
+function buildFeature(draft: AgentHexFeatureDraft, cellKey: string): CellFeature | string {
+  const name = (draft.name ?? "").trim();
+  if (name === "") return `a hidden feature of "${cellKey}" needs a name`;
+  const text = (draft.text ?? "").trim();
+  const rule = draft.reveal;
+  if (!rule || typeof rule !== "object") {
+    return `feature "${name}" needs a reveal rule: manual, perception, time or dice`;
+  }
+  // The four shapes, checked rather than cast. A feature with a rule the evaluator cannot read is
+  // the worst thing an authoring tool can write: it sits in the hex looking authored, and the
+  // party walks over it forever because nothing ever asks the question it answers. So the refusal
+  // names the field that is missing, in the words the rule itself uses.
+  const reveal: CellFeatureReveal | string = ((): CellFeatureReveal | string => {
+    switch (rule.kind) {
+      case "manual":
+        return { kind: "manual" };
+      case "perception":
+        return typeof rule.dc === "number" && Number.isFinite(rule.dc)
+          ? { kind: "perception", dc: Math.trunc(rule.dc), ...(rule.active ? { active: true } : {}) }
+          : `feature "${name}" has a perception rule with no dc — how hard is it to spot?`;
+      case "time":
+        return typeof rule.seconds === "number" && Number.isFinite(rule.seconds)
+          ? { kind: "time", seconds: Math.trunc(rule.seconds) }
+          : `feature "${name}" has a time rule with no seconds — how long in the hex before it is found?`;
+      case "dice":
+        if (typeof rule.formula !== "string" || rule.formula.trim() === "")
+          return `feature "${name}" has a dice rule with no formula — "1d6", "2d6+1"`;
+        return typeof rule.target === "number" && Number.isFinite(rule.target)
+          ? { kind: "dice", formula: rule.formula.trim(), target: Math.trunc(rule.target) }
+          : `feature "${name}" has a dice rule with no target — what does the roll have to reach?`;
+      default:
+        return `feature "${name}" has a reveal rule this app does not read: manual, perception, time or dice`;
+    }
+  })();
+  if (typeof reveal === "string") return reveal;
+  const made: CellFeature = {
+    id: (draft.id ?? "").trim() || `feat-${newCellId(cellKey).slice(5)}`,
+    name,
+    text,
+    reveal,
+    autoReveal: draft.autoReveal !== false,
+    // Nothing is found before a party finds it.
+    state: { revealed: false },
+  };
+  if (draft.img !== undefined && draft.img !== "") made.img = draft.img;
+  return made;
 }
 
 /**
@@ -428,6 +528,7 @@ export function agentWorldView(
   options: AgentWorldViewOptions = {},
 ): AgentWorldView {
   const store = client.store;
+  const importImage = options.importImage ?? null;
   // Assigned once the object below exists: a view method that needs another view method (the
   // party's Perception, read through `sheet()`) calls it without reaching past what is being built.
   let thisView: AgentWorldView | null = null;
@@ -1124,6 +1225,296 @@ export function agentWorldView(
                 tokenId: party._id,
               },
       };
+    },
+    hexCellOps(sceneId, spec) {
+      const scene = pick(sceneId);
+      if (!scene) return { error: "there is no scene to author a hex on" };
+      const key = (spec.key ?? "").trim();
+      if (key === "") return { error: "hex.write needs a cell key — 'col,row'" };
+      if (!isHexcrawlScene(scene)) {
+        return {
+          error: `${scene.name} is not a hexcrawl scene — hexcrawl.configure switches the profile on`,
+        };
+      }
+      // A gridded scene's cells are addresses; only a gridless map paints them as zones, and a
+      // zone must have at least three points to be a shape at all.
+      const gridless = scene.grid?.type === "gridless";
+      if (gridless && !spec.poly) {
+        return { error: `${scene.name} is gridless — a cell there is a zone, and needs a 'poly' list` };
+      }
+      const existing = cellsOf(scene).find((cell) => cell.key === key) ?? null;
+      if (spec.delete === true) {
+        if (!existing) return { error: `no cell '${key}' on ${scene.name} to delete` };
+        return deleteCellOps(scene, key);
+      }
+      const catalog = hexCatalogOf(store);
+      if (spec.terrain !== undefined && !catalog.terrains.some((t) => t.id === spec.terrain)) {
+        return {
+          error: `terrain '${spec.terrain}' is not in this world's catalog — ${catalog.terrains
+            .map((t) => t.id)
+            .join(", ")}`,
+        };
+      }
+      if (spec.tables !== undefined) {
+        const known = store.getAll("encounterTables") as unknown as EncounterTableDocument[];
+        for (const id of spec.tables) {
+          if (!known.some((table) => table._id === id)) {
+            return {
+              error: `no encounter table '${id}' in this world — encounterTable.create makes one`,
+            };
+          }
+        }
+      }
+      const ops: Op[] = [];
+      const patch: Record<string, unknown> = {};
+      /** Equal enough to not be a change: values here are JSON-ish, not identity-bearing. */
+      const same = (a: unknown, b: unknown): boolean =>
+        a === b || JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+      /**
+       * Write a field only when it differs from what the cell already holds, so a second identical
+       * `hex.write` is **no ops at all**. That is what makes a retry after a dropped connection
+       * safe, and the GM's undo stack honest: an entry that changes nothing is a lie in the log.
+       */
+      const put = (field: string, value: unknown, current: unknown): void => {
+        if (same(value, current)) return;
+        patch[field] = value;
+      };
+      /** Whether the caller said anything at all — see the no-op branch below. */
+      let named = spec.open !== undefined || spec.delete !== undefined;
+      /** `named` and `put` in one step: every field the caller named is a field it meant. */
+      const write = (field: string, value: unknown, current: unknown): void => {
+        named = true;
+        put(field, value, current);
+      };
+      if (spec.name !== undefined) write("name", spec.name, existing?.name);
+      if (spec.terrain !== undefined) write("terrain", spec.terrain, existing?.terrain ?? null);
+      if (spec.description !== undefined)
+        write("description", spec.description, existing?.description ?? null);
+      if (spec.playerText !== undefined)
+        write("playerText", spec.playerText, existing?.playerText ?? null);
+      if (spec.poly !== undefined && gridless) write("poly", spec.poly, existing?.poly);
+      if (spec.tables !== undefined) write("tables", spec.tables, existing?.tables ?? []);
+      const features = [...(existing?.features ?? [])];
+      for (const draft of spec.features ?? []) {
+        const feature = buildFeature(draft, key);
+        if (typeof feature === "string") return { error: feature };
+        const at = features.findIndex((f) => f.id === feature.id);
+        if (at >= 0) features[at] = feature;
+        else features.push(feature);
+      }
+      const dropped = new Set(spec.removeFeatures ?? []);
+      if (dropped.size > 0) {
+        named = true;
+        put("features", features.filter((f) => !dropped.has(f.id)), existing?.features ?? []);
+      } else if ((spec.features ?? []).length > 0) {
+        named = true;
+        put("features", features, existing?.features ?? []);
+      }
+      if (Object.keys(patch).length === 0 && spec.open === undefined) {
+        // Nothing named at all is a malformed call, and says so. Everything named but already true
+        // is a no-op, and returns no ops so the tool can say exactly that instead of failing — the
+        // difference between "you forgot the arguments" and "this was already done".
+        if (!named) return { error: `hex.write has nothing to write on '${key}'` };
+        return [];
+      }
+      if (!existing) {
+        ops.push(...createCellOps(scene, newCellId(key), { key, ...patch } as never));
+      } else if (Object.keys(patch).length > 0) {
+        ops.push(...updateCellOps(scene, key, patch as never));
+      }
+      // Opening a hex is the profile's own list, not the cell's: a closed cell is a cell the
+      // party has no document for, and the projection strips it either way.
+      // `revealCellsOps` takes two lists — the cells to open and the cells to close — so one
+      // call can do both and a no-op is genuinely no ops.
+      if (spec.open !== undefined) {
+        ops.push(...revealCellsOps(scene, spec.open === true ? [key] : [], spec.open ? [] : [key]));
+      }
+      return ops;
+    },
+    hexRevealOps(sceneId, spec) {
+      const scene = pick(sceneId);
+      if (!scene) return { error: "there is no scene to open hexes on" };
+      if (!isHexcrawlScene(scene)) {
+        return { error: `${scene.name} is not a hexcrawl scene — hexcrawl.configure switches it on` };
+      }
+      const keys = spec.keys.filter((key) => typeof key === "string" && key !== "");
+      if (keys.length === 0) return { error: "hex.reveal needs at least one cell key" };
+      return revealCellsOps(scene, spec.open === false ? [] : keys, spec.open === false ? keys : []);
+    },
+    hexSceneOps(sceneId, spec) {
+      const scene = pick(sceneId);
+      if (!scene) return { error: "there is no scene to configure" };
+      const ops: Op[] = [];
+      const on = spec.enable !== false;
+      if (on && !isHexcrawlScene(scene)) {
+        // Switching a scene on and setting its scale are usually the same act, so one call does
+        // both: enable the profile, then write the grid it walks on.
+        ops.push(...enableHexcrawlOps(scene, { daylight: DEFAULT_DAYLIGHT }));
+      }
+      if (!on) {
+        if (!isHexcrawlScene(scene)) return { error: `${scene.name} is not a hexcrawl scene` };
+        return disableHexcrawlOps(scene);
+      }
+      if (spec.cellDistance !== undefined || spec.units !== undefined || spec.hexLayout !== undefined) {
+        const grid = { ...(scene.grid ?? {}) } as Record<string, unknown>;
+        if (spec.cellDistance !== undefined) grid["distance"] = spec.cellDistance;
+        if (spec.units !== undefined) grid["units"] = spec.units;
+        if (spec.hexLayout !== undefined) grid["hexLayout"] = spec.hexLayout;
+        ops.push({ kind: "update", ref: { coll: "scenes", id: scene._id }, diff: { grid } as never });
+      }
+      const oneOf = (value: string, allowed: readonly string[]): string | null =>
+        allowed.includes(value)
+          ? null
+          : `${value} is not one of ${allowed.join(", ")} — the app reads no other value`;
+      const patch: Record<string, unknown> = {};
+      if (spec.sight !== undefined) {
+        if (spec.sight.mode !== undefined) {
+          const bad = oneOf(spec.sight.mode, ["gm", "gm+party"] as const);
+          if (bad !== null) return { error: `hexcrawl.configure: sightMode ${bad}` };
+        }
+        const sight = { ...(hexcrawlProfileOf(scene)?.sight ?? {}) } as Record<string, unknown>;
+        if (spec.sight.mode === "gm" || spec.sight.mode === "gm+party") sight["mode"] = spec.sight.mode;
+        if (spec.sight.radiusCells !== undefined) sight["radiusCells"] = spec.sight.radiusCells;
+        patch["sight"] = sight;
+      }
+      if (spec.daylight !== undefined) {
+        const daylight = { ...(hexcrawlProfileOf(scene)?.daylight ?? DEFAULT_DAYLIGHT) };
+        if (spec.daylight.dawnHour !== undefined) daylight.dawnHour = spec.daylight.dawnHour;
+        if (spec.daylight.duskHour !== undefined) daylight.duskHour = spec.daylight.duskHour;
+        patch["daylight"] = daylight;
+      }
+      if (spec.encounterMode !== undefined) {
+        const bad = oneOf(spec.encounterMode, ["auto", "prompt", "manual"] as const);
+        if (bad !== null) return { error: `hexcrawl.configure: encounterMode ${bad}` };
+        patch["encounterMode"] = spec.encounterMode;
+      }
+      if (spec.encounterAnnounce !== undefined) {
+        const bad = oneOf(spec.encounterAnnounce, ["names", "hidden"] as const);
+        if (bad !== null) return { error: `hexcrawl.configure: encounterAnnounce ${bad}` };
+        patch["encounterAnnounce"] = spec.encounterAnnounce;
+      }
+      if (spec.terrain !== undefined) {
+        // Named, not checked: a scene may name a catalog this world's settings do not carry, and
+        // the app falls back to the default rather than refusing to draw. The enums above are a
+        // different matter — a mode the app does not read is a value that does nothing at all.
+        patch["terrain"] = spec.terrain;
+      }
+      if (spec.partyTokenId !== undefined) patch["partyTokenId"] = spec.partyTokenId;
+      if (Object.keys(patch).length > 0) ops.push(...patchHexcrawlOps(scene, patch as never));
+      if (ops.length === 0) return { error: "hexcrawl.configure has nothing to change" };
+      return ops;
+    },
+    encounterTableOps(spec) {
+      if (spec.action === "delete") {
+        const id = spec.tableId ?? "";
+        if (id === "") return { error: "encounterTable.delete needs the table's id" };
+        const tables = store.getAll("encounterTables") as unknown as EncounterTableDocument[];
+        if (!tables.some((table) => table._id === id)) {
+          return { error: `no encounter table '${id}' in this world` };
+        }
+        return deleteEncounterTableOps(id);
+      }
+      // An update that names no entries keeps the rows the table already has: rewriting a table's
+      // name should not demand that the agent re-send every row it does not mean to touch.
+      const existing =
+        spec.action === "update"
+          ? ((store.getAll("encounterTables") as unknown as EncounterTableDocument[]).find(
+              (row) => row._id === (spec.tableId ?? ""),
+            ) ?? null)
+          : null;
+      // The same courtesy for the name: `encounterTable.update` with only new rows is the common
+      // case, and "an encounter table needs a name" is a lie when the table already has one.
+      const name = (spec.name ?? existing?.name ?? "").trim();
+      if (name === "") return { error: "an encounter table needs a name" };
+      // An update names the table it means, so that is the first thing checked: "no encounter
+      // table 'x' in this world" is the sentence that helps, and "needs at least one entry" for a
+      // table the agent is trying to *edit* is a sentence that misleads.
+      if (spec.action === "update" && !existing) {
+        return { error: `no encounter table '${spec.tableId ?? ""}' in this world to update` };
+      }
+      const mode = spec.mode === "dice" ? "dice" : "weighted";
+      const rows: AgentEncounterEntryDraft[] =
+        spec.entries ??
+        (existing?.entries ?? []).map((entry) => ({
+          text: entry.text,
+          count: entry.count,
+          weight: entry.weight,
+          ...(entry.range ? { range: entry.range } : {}),
+          refs: entry.refs.map((ref: EncounterRef) =>
+            ref.kind === "actor"
+              ? { kind: "actor" as const, actorId: ref.actorId }
+              : { kind: "compendium" as const, packId: ref.packId, entryId: ref.entryId },
+          ),
+        }));
+      const entries: EncounterEntry[] = [];
+      for (const row of rows) {
+        const index = entries.length;
+        const range = row.range ?? (mode === "dice" ? [index + 1, index + 1] : undefined);
+        const refs: EncounterRef[] = [];
+        for (const ref of row.refs ?? []) {
+          // A ref is a promise the drawer will find something. Silently dropping one that cannot
+          // be kept was the first draft, and it fails the way silence always fails: the table
+          // looks authored, the encounter draws it, and it places nothing on the map with no
+          // sentence anywhere saying why. So the refusal names the actor instead, while the row
+          // can still be written.
+          if (ref.kind === "actor") {
+            const actor = store.get("actors", ref.actorId) ?? null;
+            if (!actor) {
+              return {
+                error: `no actor '${ref.actorId}' in this world — actor.from_compendium or actor.from_statblock makes the thing a table row can point at`,
+              };
+            }
+          }
+          refs.push(ref);
+        }
+        entries.push({
+          weight: Math.max(0, Math.trunc(row.weight ?? 1)),
+          ...(range ? { range } : {}),
+          text: row.text,
+          count: Math.max(0, Math.trunc(row.count ?? 0)),
+          refs,
+        });
+      }
+      if (entries.length === 0) return { error: "an encounter table needs at least one entry" };
+      const draft = {
+        name,
+        mode,
+        formula: mode === "dice" ? (spec.formula ?? `1d${entries.length}`) : "",
+        entries,
+        tags: {
+          day: spec.tags?.day !== false,
+          night: spec.tags?.night !== false,
+          entering: spec.tags?.entering !== false,
+          moving: spec.tags?.moving !== false,
+          exploring: spec.tags?.exploring === true,
+          fighting: spec.tags?.fighting === true,
+        },
+        ...(spec.sceneId ? { sceneId: spec.sceneId } : {}),
+        ...(typeof spec.cooldownSeconds === "number" ? { cooldownSeconds: spec.cooldownSeconds } : {}),
+      };
+      if (spec.action === "update") {
+        return updateEncounterTableOps(existing as EncounterTableDocument, draft as never);
+      }
+      return createEncounterTableOps(newEncounterTableId(name), draft as never);
+    },
+    async importAsset(spec) {
+      if (!importImage) return { error: "the world's asset pipeline is not on this replica" };
+      let bytes: Uint8Array;
+      try {
+        bytes = new Uint8Array(Buffer.from(spec.base64, "base64"));
+      } catch {
+        return { error: "asset.import needs the image as base64" };
+      }
+      if (bytes.byteLength === 0) return { error: "asset.import got an empty file" };
+      if (bytes.byteLength > MAX_ASSET_BYTES) {
+        return { error: `that image is ${bytes.byteLength} bytes — the limit is ${MAX_ASSET_BYTES}` };
+      }
+      try {
+        const made = await importImage(bytes, spec.name, spec.mime);
+        return { hash: made.hash };
+      } catch (e) {
+        return { error: `image import failed: ${e instanceof Error ? e.message : String(e)}` };
+      }
     },
     travelPlanOps(sceneId, spec) {
       const scene = pick(sceneId);
