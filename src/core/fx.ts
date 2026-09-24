@@ -17,6 +17,52 @@ export interface FxImportPermissions {
   includeInWorldFile: boolean;
 }
 export type FxLayerName = "belowTokens" | "aboveTokens";
+
+/**
+ * How a visual section composites onto what is already under it. A closed set, because
+ * an unknown blend would silently render as `normal` while the author believed they had
+ * a glow; every name is one the renderer genuinely supports.
+ */
+export type FxBlendMode = "normal" | "add" | "multiply" | "screen" | "overlay" | "darken" | "lighten";
+const BLEND_MODE_SET: readonly string[] = ["normal", "add", "multiply", "screen", "overlay", "darken", "lighten"];
+const isBlendMode = (value: unknown): value is FxBlendMode =>
+  typeof value === "string" && BLEND_MODE_SET.includes(value);
+
+export type FxFilterKind = "blur" | "grayscale" | "brightness" | "saturate";
+/**
+ * One filter per section, with the kind carrying its own range: a blur is measured in
+ * pixels and a colour adjustment is a scale, so a single 0–1 bound would make "blur 8"
+ * unwritable and "brightness 8" a white square. `strength` is optional — omitted means
+ * the kind's default, which is the value the wizard offers first.
+ */
+export interface FxVisualFilter {
+  kind: FxFilterKind;
+  strength?: number;
+}
+export const FX_FILTER_RANGES: Record<FxFilterKind, { min: number; max: number; default: number; unit: string }> = {
+  blur: { min: 1, max: 32, default: 8, unit: "px" },
+  grayscale: { min: 0, max: 1, default: 1, unit: "×" },
+  brightness: { min: 0, max: 2, default: 1.5, unit: "×" },
+  saturate: { min: 0, max: 2, default: 0.5, unit: "×" },
+};
+export interface FxVisualStyle {
+  blend: FxBlendMode;
+  filter?: { kind: FxFilterKind; strength: number };
+}
+/**
+ * Turn an author's choice into the numbers a renderer applies: an absent blend is
+ * `normal`, a filter without a strength takes its kind's default, and a strength
+ * outside its kind's range is clamped. The host validates all of this, but a client
+ * must not render a nonsense value just because a cue was hand-written.
+ */
+export function fxStylePlan(section: { blend?: FxBlendMode; filter?: FxVisualFilter }): FxVisualStyle {
+  const blend = section.blend ?? "normal";
+  const kind = section.filter?.kind;
+  if (kind === undefined || !(kind in FX_FILTER_RANGES)) return { blend };
+  const range = FX_FILTER_RANGES[kind];
+  const requested = section.filter?.strength ?? range.default;
+  return { blend, filter: { kind, strength: Math.min(range.max, Math.max(range.min, requested)) } };
+}
 export type FxEasing = "linear" | "easeIn" | "easeOut" | "easeInOut";
 const EASINGS: readonly FxEasing[] = ["linear", "easeIn", "easeOut", "easeInOut"];
 /** Validation reads untyped JSON: narrow rather than cast an arbitrary value. */
@@ -55,6 +101,10 @@ interface FxLocated extends FxBase {
   fadeInMs?: number;
   fadeOutMs?: number;
   layer?: FxLayerName;
+  /** Composite this visual with the layers beneath it (glow, shadow, screen). */
+  blend?: FxBlendMode;
+  /** One bounded filter: blur, grayscale, brightness or saturation. */
+  filter?: FxVisualFilter;
   /** Follow visible source/target token anchors on each recipient's canvas. Only host-resolved IDs travel. */
   follow?: boolean;
   /** Host-resolved destination: tween from `at`, or stretch an image along the segment. */
@@ -195,8 +245,8 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
     const repeatFields = section.kind === "wait" || section.kind === "camera"
       ? [] : ["repeatCount", "repeatDelayMs"];
     const fields = section.kind === "sound" ? ["assetId", "volume", "channel", "fadeInMs", "fadeOutMs"] :
-      section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow"] :
-      section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow"] :
+      section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter"] :
+      section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter"] :
       section.kind === "camera" ? ["mode", "to", "easing", "zoom", "intensity", "points"] : [];
     if (Object.keys(section).some((key) => !["id", "kind", "startMs", "durationMs", ...fields, ...repeatFields].includes(key)) ||
       (section.kind !== "wait" && section.durationMs === 0)) {
@@ -270,6 +320,19 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
       (section.fadeInMs !== undefined && !inRange(section.fadeInMs, 0, section.durationMs)) ||
       (section.fadeOutMs !== undefined && !inRange(section.fadeOutMs, 0, section.durationMs))) {
       return { ok: false, error: "FX image/text needs a valid anchor, layer, fade and transform" };
+    }
+    // Appearance is validated before the asset, so a mistyped blend is reported as
+    // itself rather than as a bad hash.
+    if (section.blend !== undefined && !isBlendMode(section.blend))
+      return { ok: false, error: "FX blend must be normal, add, multiply, screen, overlay, darken or lighten" };
+    if (section.filter !== undefined) {
+      const filter = section.filter;
+      if (!isObject(filter) || Object.keys(filter).some((key) => !["kind", "strength"].includes(key)) ||
+          typeof filter.kind !== "string" || !(filter.kind in FX_FILTER_RANGES))
+        return { ok: false, error: "FX filter must be blur, grayscale, brightness or saturate" };
+      const range = FX_FILTER_RANGES[filter.kind as FxFilterKind];
+      if (filter.strength !== undefined && !inRange(filter.strength, range.min, range.max))
+        return { ok: false, error: `FX ${filter.kind} strength must be ${range.min}–${range.max}` };
     }
     if (section.kind === "image" &&
         (typeof section.assetId !== "string" || !HASH.test(section.assetId) ||

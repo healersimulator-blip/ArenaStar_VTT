@@ -3,8 +3,9 @@
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import type { AssetManifest, MacroDocument, SceneDocument } from "../../core/documents";
-  import { resolveFxSequence, validateFxSequence, type FxAnchor, type FxCameraPathSection, type FxEasing,
-    type FxSection, type FxSequence, type FxImportPermissions } from "../../core/fx";
+  import { FX_FILTER_RANGES, resolveFxSequence, validateFxSequence, type FxAnchor, type FxBlendMode,
+    type FxCameraPathSection, type FxEasing, type FxFilterKind, type FxSection, type FxSequence,
+    type FxImportPermissions } from "../../core/fx";
   import { fxFitnessIssues } from "../../core/fxDelivery";
   import { SOUND_CHANNELS, SOUND_CHANNEL_LABELS, cueSilentForViewer, soundChannelOf } from "../../core/fxSound";
   import { domCanPlay, fxViewPrefs } from "../../core/fxPrefs";
@@ -253,6 +254,45 @@
     const zoom = value.trim() === "" ? undefined : Number(value);
     draft = { ...draft, sections: draft.sections.map((old, i) => i === index
       ? { ...before, ...(zoom === undefined ? {} : { zoom }) } as FxSection : old) };
+  }
+
+  /**
+   * Blend and filter are optional fields whose absence is meaningful (`normal`, no
+   * filter), so "Normal"/"None" delete the field rather than storing a no-op value the
+   * host would then have to treat as authored.
+   */
+  function changeBlend(index: number, value: string): void {
+    const before = draft.sections[index];
+    if (!before || (before.kind !== "image" && before.kind !== "text")) return;
+    // Cleared means *absent*: a key left holding `undefined` is not the same document
+    // once it crosses a payload boundary, where it becomes something the host refuses.
+    const { blend: _blend, ...remaining } = before;
+    void _blend;
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      ? (value === "normal" ? remaining : { ...remaining, blend: value as FxBlendMode }) as FxSection : old) };
+  }
+
+  function changeFilter(index: number, value: string): void {
+    const before = draft.sections[index];
+    if (!before || (before.kind !== "image" && before.kind !== "text")) return;
+    const { filter: _filter, ...remaining } = before;
+    void _filter;
+    const kind = value as FxFilterKind;
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      ? (value === "none" ? remaining
+        : { ...remaining, filter: { kind, strength: FX_FILTER_RANGES[kind].default } }) as FxSection : old) };
+  }
+
+  function changeFilterStrength(index: number, value: string): void {
+    const before = draft.sections[index];
+    if (!before || (before.kind !== "image" && before.kind !== "text") || !before.filter) return;
+    const { kind } = before.filter;
+    const range = FX_FILTER_RANGES[kind];
+    const strength = Number(value);
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      ? { ...before, filter: { kind, strength: Number.isFinite(strength)
+          ? Math.min(range.max, Math.max(range.min, strength)) : range.default } } as FxSection
+      : old) };
   }
 
   function changeReplayCount(index: number, value: string): void {
@@ -670,6 +710,31 @@
             {/if}
             {#if section.kind === "image"}
               <label>Tint <input type="color" bind:value={section.tint} /></label>
+            {/if}
+            <label>Blend <select data-fx-blend value={section.blend ?? "normal"}
+              onchange={(e) => changeBlend(i, e.currentTarget.value)}>
+              <option value="normal">Normal</option>
+              <option value="add">Add — glow</option>
+              <option value="multiply">Multiply — shadow</option>
+              <option value="screen">Screen</option>
+              <option value="overlay">Overlay</option>
+              <option value="darken">Darken</option>
+              <option value="lighten">Lighten</option>
+            </select></label>
+            <label>Filter <select data-fx-filter value={section.filter?.kind ?? "none"}
+              onchange={(e) => changeFilter(i, e.currentTarget.value)}>
+              <option value="none">None</option>
+              <option value="blur">Blur</option>
+              <option value="grayscale">Grayscale</option>
+              <option value="brightness">Brightness</option>
+              <option value="saturate">Saturation</option>
+            </select></label>
+            {#if section.filter}
+              {@const range = FX_FILTER_RANGES[section.filter.kind]}
+              <label>Filter amount ({range.unit}) <input type="number" data-fx-filter-strength
+                min={range.min} max={range.max} step="0.1" value={section.filter.strength ?? range.default}
+                oninput={(e) => changeFilterStrength(i, e.currentTarget.value)} /></label>
+              <small>One filter per section: {range.min}–{range.max}{range.unit}; the renderer applies it once, not per frame.</small>
             {/if}
             {#if section.at.kind !== "point" || section.to && section.to.kind !== "point"}
               <label><input type="checkbox" data-fx-follow bind:checked={section.follow} />Follow visible token anchors</label>

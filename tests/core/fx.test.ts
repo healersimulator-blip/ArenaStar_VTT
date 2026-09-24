@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
-import { resolveFxSequence, validateFxSequence, type FxSequence } from "../../src/core/fx";
+import { FX_FILTER_RANGES, fxStylePlan, resolveFxSequence, validateFxSequence,
+  type FxSequence } from "../../src/core/fx";
 import { fxFollowAnchors, fxPosition } from "../../src/canvas/layers/FxLayer";
 import type { SceneDocument, TokenDocument } from "../../src/core/documents";
 
@@ -15,6 +16,12 @@ const scene: SceneDocument = {
   width: 1000, height: 1000, grid: { type: "square", size: 100, distance: 5, units: "ft", diagonals: "555", hexLayout: "oddQ" },
   darkness: 0, img: null, tokens: [source], walls: [], lights: [], sounds: [], tiles: [], drawings: [], templates: [], notes: [],
 };
+
+/** A visual section, so blend/filter cases read as one line each. */
+const visual = (patch: Record<string, unknown> = {}): FxSequence => ({
+  version: 1, sections: [{ kind: "image", id: "glow", assetId: hash,
+    at: { kind: "point", x: 100, y: 100 }, startMs: 0, durationMs: 1000, ...patch } as never] });
+
 const sequence: FxSequence = { version: 1, sections: [
   { kind: "text", id: "title", text: "Charge", at: { kind: "source" }, startMs: 0, durationMs: 1000, fadeOutMs: 200 },
   { kind: "image", id: "impact", assetId: hash, at: { kind: "target" }, startMs: 500, durationMs: 1200, scale: 1.4 },
@@ -308,5 +315,76 @@ describe("camera paths (D-298, SQ-15)", () => {
     const resolved = resolveFxSequence(stationary, scene, source, source, () => undefined);
     expect(resolved.ok).toBe(false); // …resolved, it never goes anywhere
     if (!resolved.ok) expect(resolved.error).toContain("two different waypoints");
+  });
+});
+
+describe("FX appearance: blend modes and one bounded filter (§SQ-05)", () => {
+  test("every supported blend is accepted and an unknown one is refused by name", () => {
+    for (const blend of ["normal", "add", "multiply", "screen", "overlay", "darken", "lighten"]) {
+      expect(validateFxSequence(visual({ blend })).ok, blend).toBe(true);
+    }
+    const bad = validateFxSequence(visual({ blend: "glow" }));
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.error).toBe("FX blend must be normal, add, multiply, screen, overlay, darken or lighten");
+  });
+
+  test("a filter carries its kind and an optional strength; both are checked", () => {
+    expect(validateFxSequence(visual({ filter: { kind: "blur", strength: 12 } })).ok).toBe(true);
+    expect(validateFxSequence(visual({ filter: { kind: "grayscale" } })).ok).toBe(true); // strength is optional
+    const kind = validateFxSequence(visual({ filter: { kind: "sepia" } }));
+    expect(kind.ok).toBe(false);
+    if (!kind.ok) expect(kind.error).toBe("FX filter must be blur, grayscale, brightness or saturate");
+    // Each kind has its own range: 8 px of blur is legitimate, 8× of brightness is not.
+    expect(validateFxSequence(visual({ filter: { kind: "blur", strength: 32 } })).ok).toBe(true);
+    expect(validateFxSequence(visual({ filter: { kind: "blur", strength: 33 } })).ok).toBe(false);
+    expect(validateFxSequence(visual({ filter: { kind: "blur", strength: 0 } })).ok).toBe(false);
+    expect(validateFxSequence(visual({ filter: { kind: "brightness", strength: 2 } })).ok).toBe(true);
+    expect(validateFxSequence(visual({ filter: { kind: "brightness", strength: 8 } })).ok).toBe(false);
+    expect(validateFxSequence(visual({ filter: { kind: "saturate", strength: -0.5 } })).ok).toBe(false);
+    expect(validateFxSequence(visual({ filter: { kind: "grayscale", strength: "all" } })).ok).toBe(false);
+    // An unknown key inside the filter object is not a place to smuggle a setting.
+    expect(validateFxSequence(visual({ filter: { kind: "blur", radius: 4 } })).ok).toBe(false);
+  });
+
+  test("a filter kind's range is the one the wizard offers, so authoring cannot lie to the host", () => {
+    // The panel's min/max/default come from the same table the host validates against.
+    expect(FX_FILTER_RANGES.blur.max).toBe(32);
+    expect(FX_FILTER_RANGES.grayscale.default).toBe(1);
+    for (const [kind, range] of Object.entries(FX_FILTER_RANGES)) {
+      expect(validateFxSequence(visual({ filter: { kind, strength: range.default } })).ok, kind).toBe(true);
+      expect(validateFxSequence(visual({ filter: { kind, strength: range.min } })).ok, kind).toBe(true);
+      expect(validateFxSequence(visual({ filter: { kind, strength: range.max } })).ok, kind).toBe(true);
+    }
+  });
+
+  test("appearance belongs to a visual section: a sound, text and camera cannot carry it", () => {
+    // Text genuinely can — it is a visual — while sound and camera/wait cannot.
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "text", id: "t", text: "hi",
+      at: { kind: "source" }, startMs: 0, durationMs: 500, blend: "screen" } as never] }).ok).toBe(true);
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "sound", id: "s", assetId: sound,
+      startMs: 0, durationMs: 500, blend: "add" } as never] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "wait", id: "w",
+      startMs: 0, durationMs: 500, filter: { kind: "blur" } } as never] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "camera", id: "c", mode: "pan",
+      to: { kind: "point", x: 10, y: 10 }, startMs: 0, durationMs: 500, blend: "add" } as never] }).ok).toBe(false);
+  });
+
+  test("the style plan fills in a default, clamps, and never invents a filter", () => {
+    expect(fxStylePlan({})).toEqual({ blend: "normal" });
+    expect(fxStylePlan({ blend: "add" })).toEqual({ blend: "add" });
+    expect(fxStylePlan({ filter: { kind: "grayscale" } })).toEqual({ blend: "normal", filter: { kind: "grayscale", strength: 1 } });
+    expect(fxStylePlan({ filter: { kind: "blur" } }).filter).toEqual({ kind: "blur", strength: 8 });
+    // A cue that never passed the host must still render something sane.
+    expect(fxStylePlan({ filter: { kind: "blur", strength: 500 } }).filter).toEqual({ kind: "blur", strength: 32 });
+    expect(fxStylePlan({ filter: { kind: "brightness", strength: -3 } }).filter).toEqual({ kind: "brightness", strength: 0 });
+    expect(fxStylePlan({ filter: { kind: "nonsense" as never } })).toEqual({ blend: "normal" });
+  });
+
+  test("resolving a visual keeps its appearance: the host adds anchors, not style", () => {
+    const resolved = resolveFxSequence(visual({ blend: "screen", filter: { kind: "saturate", strength: 0.5 } }),
+      scene, source, source, () => "image/png");
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.sections[0]).toMatchObject({ blend: "screen", filter: { kind: "saturate", strength: 0.5 } });
   });
 });

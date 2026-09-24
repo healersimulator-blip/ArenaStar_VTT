@@ -856,3 +856,74 @@ test("a camera path tours its waypoints and parks on the last one", async ({ pag
   expect(sameCamera((await stageView(page))?.camera ?? null, parked)).toBe(true);
   await expect(page.locator("[data-notify]").filter({ hasText: "cut by reduced motion" })).toHaveCount(1);
 });
+
+// D-299 (SQ-05): a visual can composite with what is under it and carry one bounded
+// filter. The assertion is on the live sprite — a saved blend that renders as "normal"
+// is exactly the silent no-op the parity spec forbids.
+test("a blend and a filter survive the host, the save and the renderer", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  await wizard.locator('input[type="file"]').setInputFiles({ name: "flame.png", mimeType: "image/png", buffer: png });
+  await expect(wizard.getByRole("status")).toContainText("GM-only playback");
+  await wizard.locator("[data-fx-name]").fill("Warded flame");
+  await wizard.getByRole("button", { name: "Image / video", exact: true }).click();
+  const section = wizard.locator("[data-fx-section]");
+  await section.getByRole("combobox", { name: "Media" }).selectOption({ index: 1 });
+  await section.getByLabel("X", { exact: true }).fill("400");
+  await section.getByLabel("Y", { exact: true }).fill("300");
+  await section.getByLabel("Duration ms").fill("1500");
+
+  // The wizard must not send a filter the host would refuse: the amount field's own
+  // bounds are the host's range, and picking a kind fills in that kind's default.
+  await section.locator("[data-fx-filter]").selectOption("blur");
+  await expect(section.locator("[data-fx-filter-strength]")).toHaveValue("8");
+  await expect(section.locator("[data-fx-filter-strength]")).toHaveAttribute("max", "32");
+  await section.locator("[data-fx-blend]").selectOption("screen");
+  await section.locator("[data-fx-filter]").selectOption("grayscale");
+  await expect(section.locator("[data-fx-filter-strength]")).toHaveValue("1");
+  await section.locator("[data-fx-filter-strength]").fill("0.5");
+  await wizard.locator("[data-fx-save]").click();
+  await expect(wizard.locator("li")).toContainText(["Warded flame"]);
+
+  // Reopening the saved timeline proves the host kept the appearance, not just the
+  // anchors: an unvalidated field would have been dropped at the first snapshot.
+  await wizard.locator("li").filter({ hasText: "Warded flame" }).getByRole("button", { name: "Edit" }).click();
+  await expect(section.locator("[data-fx-blend]")).toHaveValue("screen");
+  await expect(section.locator("[data-fx-filter]")).toHaveValue("grayscale");
+  await expect(section.locator("[data-fx-filter-strength]")).toHaveValue("0.5");
+
+  const run = async () => {
+    await wizard.locator("[data-fx-run]").click();
+    await expect.poll(async () => page.evaluate(() => (globalThis as unknown as
+      { __stage?: { getFxLayer: () => { inspect: (runId?: string) => unknown[] } } })
+      .__stage?.getFxLayer().inspect().length ?? 0), { timeout: 5_000 }).toBeGreaterThan(0);
+    return page.evaluate(() => (globalThis as unknown as
+      { __stage?: { getFxLayer: () => { inspect: (runId?: string) => Array<{ kind: string; blend: string; filter: string | null }> } } })
+      .__stage?.getFxLayer().inspect() ?? []);
+  };
+  const live = await run();
+  expect(live[0]).toEqual({ kind: "image", blend: "screen", filter: "grayscale:0.5" });
+
+  // "Normal" really means no blend field and "None" no filter field: a saved no-op is
+  // not the same as an authored setting, and the host is told the difference.
+  await section.locator("[data-fx-blend]").selectOption("normal");
+  await expect(section.locator("[data-fx-blend]")).toHaveValue("normal");
+  await section.locator("[data-fx-filter]").selectOption("none");
+  await expect(section.locator("[data-fx-filter]")).toHaveValue("none");
+  await expect(section.locator("[data-fx-filter-strength]")).toHaveCount(0);
+  // Wait for the host, not the click: reopening the editor before the update commits
+  // would load the pre-update document and read as a failure that never happened.
+  const before = await hostCall<number>(page, "seq");
+  await wizard.locator("[data-fx-save]").click();
+  await expect.poll(() => hostCall<number>(page, "seq"), { timeout: 5_000 }).toBeGreaterThan(before);
+  await wizard.locator("li").filter({ hasText: "Warded flame" }).getByRole("button", { name: "Edit" }).click();
+  await expect(section.locator("[data-fx-blend]")).toHaveValue("normal");
+  await expect(section.locator("[data-fx-filter]")).toHaveValue("none");
+  // …and the renderer agrees with the reopened document, not with what was on screen.
+  await expect.poll(async () => (await run())[0] ?? null, { timeout: 5_000 })
+    .toEqual({ kind: "image", blend: "normal", filter: null });
+});

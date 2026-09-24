@@ -3,8 +3,8 @@
  * BOTH strata live UNDER fog; an author cannot bypass LOS by setting a layer.
  * Sprites/text are lifetime-managed per cue, not streamed per frame.
  */
-import { Container, Sprite, Text, type Texture } from "pixi.js";
-import { fxEase, type ResolvedFxSection } from "../../core/fx";
+import { BlurFilter, ColorMatrixFilter, Container, Sprite, Text, type Filter, type Texture } from "pixi.js";
+import { fxEase, fxStylePlan, type FxFilterKind, type ResolvedFxSection } from "../../core/fx";
 
 type Located = Extract<ResolvedFxSection, { kind: "image" | "text" }>;
 type Point = { x: number; y: number };
@@ -19,6 +19,21 @@ export function fxFollowAnchors(section: Located, tokenCenter: (id: string) => P
     : section.toX !== undefined && section.toY !== undefined ? { x: section.toX, y: section.toY } : undefined;
   if (!from || section.followToTokenId && !to) return undefined;
   return { from, ...(to ? { to } : {}) };
+}
+
+/**
+ * The renderer's half of `fxStylePlan`: one section, one pixi filter. A blur is a
+ * real blur; the colour adjustments are a colour matrix, so an author can desaturate
+ * a ghost or push a fire sprite brighter without shipping a second asset.
+ */
+export function fxPixiFilter(filter: { kind: FxFilterKind; strength: number } | undefined): Filter | undefined {
+  if (!filter) return undefined;
+  if (filter.kind === "blur") return new BlurFilter({ strength: filter.strength });
+  const matrix = new ColorMatrixFilter();
+  if (filter.kind === "grayscale") matrix.greyscale(filter.strength, false);
+  else if (filter.kind === "brightness") matrix.brightness(filter.strength, false);
+  else matrix.saturate(filter.strength, false);
+  return matrix;
 }
 
 /** Pure host-time tween: late join/slow decoding jumps to the correct frame. */
@@ -43,6 +58,8 @@ interface ActiveVisual {
   view: Sprite | Text;
   age: number;
   persistent: boolean;
+  /** What this visual was actually built with, for inspection (`inspect`). */
+  filterLabel: string | null;
   finish?: () => void;
 }
 
@@ -74,9 +91,17 @@ export class FxLayer {
         view.rotation += Math.atan2(section.toY - section.y, section.toX - section.x);
       }
     }
+    // Appearance is applied here, once: neither the blend nor the filter changes
+    // during a section, so a per-frame rebuild would only cost work.
+    const style = fxStylePlan(section);
+    view.blendMode = style.blend as typeof view.blendMode;
+    const filter = fxPixiFilter(style.filter);
+    if (filter) view.filters = [filter];
     view.position.set(section.x, section.y);
     (section.layer === "belowTokens" ? this.belowTokens : this.aboveTokens).addChild(view);
-    const active: ActiveVisual = { runId, section, view, age, persistent, ...(finish ? { finish } : {}) };
+    const active: ActiveVisual = { runId, section, view, age, persistent,
+      filterLabel: style.filter ? `${style.filter.kind}:${style.filter.strength}` : null,
+      ...(finish ? { finish } : {}) };
     this.visuals.add(active);
     this.setAlpha(active);
   }
@@ -117,6 +142,14 @@ export class FxLayer {
   }
 
   get count(): number { return this.visuals.size; }
+
+  /** Read-only: what a run (or everything) is drawing with. Tests and diagnostics only. */
+  inspect(runId?: string): Array<{ kind: string; blend: string; filter: string | null }> {
+    return [...this.visuals]
+      .filter((active) => runId === undefined || active.runId === runId)
+      .map((active) => ({ kind: active.section.kind, blend: String(active.view.blendMode),
+        filter: active.filterLabel }));
+  }
 
   private remove(active: ActiveVisual): void {
     this.visuals.delete(active);

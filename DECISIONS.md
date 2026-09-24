@@ -9436,3 +9436,77 @@ is replaced, never mutated in place.
   no GM-only or per-viewer-targeted camera delivery (every recipient of a cue gets the
   same tour), no masks, elevation or per-waypoint zoom, and no Firefox/WebKit run or the
   41-scenario acceptance matrix.
+
+## D-299 — appearance a section carries: blend modes and one bounded filter (2026-09-25)
+
+SQ-05 asks for "tint, supported filters/blend modes, ... mask/cutout" and D-294's own
+status notes listed "broader effect filters (blend modes, masks/cutouts)" as the gap.
+Tint has existed since the first wizard; this decision lands the other two visual
+appearance controls — **blend** and **one filter** — with the masks/cutouts left open
+and named as open.
+
+**A closed blend set, because a silent `normal` is a lie.** A visual section may now
+name `blend`: `normal`, `add`, `multiply`, `screen`, `overlay`, `darken` or `lighten`.
+Every one is a mode the renderer really implements (they are pixi's own names), and
+anything else is refused by name — the parity spec's rule is "do not offer a UI control
+that silently does nothing", and an unknown blend string would do exactly that.
+
+**One filter per section, each kind with its own range.** `filter: { kind, strength? }`
+where kind is `blur` (1–32 px), `grayscale` (0–1), `brightness` (0–2) or `saturate`
+(0–2). A single shared range would be wrong in both directions: it would make "blur 8"
+unwritable and would let "brightness 8" render a white square. `strength` is optional
+and the omission has a defined meaning per kind (the value the wizard offers first), so
+an author who picks "grayscale" gets fully grey rather than nothing. The renderer builds
+exactly one pixi `Filter` at spawn — a `BlurFilter` for blur, a `ColorMatrixFilter` for
+the three colour kinds — and never rebuilds it per frame; alpha keeps composing on top
+of it each frame, so a fade and a filter do not interfere.
+
+**A design decision about defaults: `normal` and "no filter" are absent fields, not
+stored no-ops.** The blend select's "Normal" and the filter select's "None" *remove* the
+key from the section. That matters beyond tidiness, and it is where this increment's bug
+came from: the wires are **msgpack**, which has no `undefined`, so a key left holding
+`undefined` arrives at the host as `null` — and `null` is not a blend name. The new e2e
+found it immediately: clearing the two fields and saving produced
+`invalid_schema: FX blend must be normal, add, multiply, screen, overlay, darken or
+lighten` and no commit at all (the `seq` never moved). The panel already had the right
+idiom for deleting a field — `changeDestination` destructures the key out and spreads
+the rest — and both new handlers now do the same; an immediate assertion in the spec
+pins "cleared means absent" so a future `field: undefined` cannot come back. This is a
+class of bug worth remembering: `exactOptionalPropertyTypes` catches it in typed code,
+but a cast at the section-boundary (`as FxSection`) is exactly where it slips through.
+
+**Non-claims.** No masks or cutouts, no filter *animation* (a filter is fixed for its
+section's whole life), no filter chains or per-recipient styling (every viewer of a cue
+renders the same appearance), no blend/filter on camera, sound or wait sections, no
+blur quality/performance control beyond pixi's default, and no Firefox/WebKit run or the
+41-scenario acceptance matrix.
+
+**Gates.**
+
+- `pnpm test` — **3 691 passed / 12 skipped** (297 files: 295 passed, 2 skipped). New:
+  `tests/canvas/fxStyle.test.ts` (5 — the blur builds a real `BlurFilter` whose strength
+  matches, the colour kinds build a `ColorMatrixFilter` whose grayscale weights are
+  balanced, a spawned visual carries its blend *and* its one filter with the live view
+  inspected rather than only the plan, an unstyled section is `normal` with no filter
+  array at all, inspection is per run and read-only, and alpha keeps composing with the
+  filter across a tick) plus six in `tests/core/fx.test.ts` (all seven blends accepted
+  and an unknown one refused by name; filter kind and strength including an unknown inner
+  key; appearance accepted on text but refused on sound, wait and camera; the style plan's
+  defaults and clamping plus an unknown kind; resolution keeping the style; and the
+  wizard's ranges agreeing with the validator's).
+  (`tests/canvas/fxStyle.test.ts` stubs a canvas that reports no WebGL, because pixi's
+  `BlurFilter` builds its GL programs eagerly and sniffs shader precision; that is the
+  same path pixi's own fallback takes.)
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing) · `pnpm lint` **exit 0** · `pnpm build` → `pnpm size` **3 811 476 B raw /
+  1 092 280 B gzip**, inside the 6 MB budget. No wire change: `blend`/`filter` ride the
+  existing `fx.start` cue and its resolved sections.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **16/16** — the new spec
+  imports a real PNG, authors an image cue, asserts the wizard's own filter bounds are
+  the host's (picking "blur" fills 8 and caps at 32, switching to grayscale fills 1),
+  saves and reopens (`screen` / `grayscale` / `0.5` all back), reads the **live sprite**
+  back through the layer as `{ blend: "screen", filter: "grayscale:0.5" }`, then clears
+  both, waits for the host's `seq` to move before reopening, and proves the re-read
+  sprite is `{ blend: "normal", filter: null }`. The `summons` suite ran alongside it
+  (**20/20** together) and the canvas batch (`canvas_rail` + `canvas_toolbar` + `vision`
+  + `walls`) is **19/19** against the rebuilt file.
