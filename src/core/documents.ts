@@ -34,6 +34,8 @@ export interface BaseDocument {
   ownership: Ownership;
   flags: FlagStore;
   system: Record<string, Json>;
+  /** Tagger-style placeable labels. Distinct from encounter-table activation `tags`. */
+  taggerTags?: string[];
 }
 
 /** Reference to a document, possibly embedded via a parent chain (§4, D-012). */
@@ -94,6 +96,11 @@ export interface WallDocument extends BaseDocument {
   light: 0 | 1 | 2;
 }
 
+/** A conditional-axis wall is a door; ordinary walls/windows must never be opened by a trigger. */
+export function isDoorWall(w: Pick<WallDocument, "sight" | "move" | "sound" | "light">): boolean {
+  return w.sight === 1 || w.move === 1 || w.sound === 1 || w.light === 1;
+}
+
 export interface LightDocument extends BaseDocument {
   type: "light";
   x: number;
@@ -117,11 +124,17 @@ export interface SoundDocument extends BaseDocument {
 
 export interface TileDocument extends BaseDocument {
   type: "tile";
+  /** GM-only tile until explicitly revealed; legacy tiles without this field remain visible. */
+  hidden?: boolean;
   x: number;
   y: number;
   width: number;
   height: number;
   img: string;
+  /** Degrees clockwise about tile center; legacy tiles default to zero. */
+  rotation?: number;
+  /** Optional trigger priority/z-sort; ties default to zero and then tile ID. */
+  sort?: number;
   above: boolean;
   occlusion: { mode: "roof" | "fade"; alpha: number };
 }
@@ -375,8 +388,44 @@ export interface CombatDocument extends BaseDocument {
 
 export interface MacroDocument extends BaseDocument {
   type: "macro";
-  kind: "chat" | "script";
+  kind: "chat" | "script" | "sequence" | "summon";
   command: string;
+  /** GM-published summoning preset. Player projection keeps only callable metadata. */
+  summon?: import("./summons").SummonDefinition | import("./summons").SummonPublic;
+  /** A versioned, multi-section audiovisual timeline; legacy macros omit it. */
+  sequence?: import("./fx").FxSequence;
+  /** GM-reviewed JS source/policy. Legacy scripts without approval cannot execute. */
+  script?: import("./scriptMacros").ScriptPolicy;
+  /** Host-owned durable invocation deduplication; projected away for players. */
+  scriptState?: import("./scriptMacros").ScriptHistory;
+}
+
+/** GM-owned authoring graph. Never projected to players, regardless of ownership. */
+export interface AutomationDocument extends BaseDocument {
+  type: "automation";
+  definition: import("./automation").AutomationDefinition;
+  /** Host-committed history/cooldown survives reload; not part of the authored definition. */
+  state?: import("./automation").AutomationState;
+}
+
+/** Reusable, GM-only multi-layer placeable template. No prefab bytes reach player replicas. */
+export interface PrefabDocument extends BaseDocument {
+  type: "prefab";
+  definition: import("./prefabs").PrefabDefinition;
+}
+
+/** Private, host-owned durable Sequencer instance. Players receive only entitled,
+ * resolved playback cues, never this record or its origin/source references. */
+export interface FxInstanceDocument extends BaseDocument {
+  type: "fxInstance";
+  sceneId: DocId;
+  macroId: DocId;
+  ownerId: UserId;
+  audience: "scene" | "gm" | "caller";
+  atHostTime: number;
+  sections: import("./fx").ResolvedFxSection[];
+  sourceTokenId?: DocId;
+  targetTokenId?: DocId;
 }
 
 export interface CardEntry {
@@ -404,6 +453,21 @@ export interface RollRecord {
 
 /** Roll visibility mode (§10/§11): who may see the result of a chat roll. */
 export type RollMode = "roll" | "gmroll" | "blindroll" | "selfroll";
+
+export interface ActionReceiptDocument extends BaseDocument {
+  type: "actionReceipt";
+  /** Host-authored, GM-private, persisted pre-images; never sent to players. */
+  status: "pending" | "ready" | "reverted";
+  createdAt: number;
+  /** A crashed worker cannot leave an action permanently pending. */
+  pendingUntil?: number;
+  outcome?: "completed" | "partial";
+  commits: number;
+  /** Apply in this order; earlier commits follow later commits in the array. */
+  inverses: import("./ops").Op[];
+  /** Post-images of every changed document, for fail-closed stale detection. */
+  after: Array<{ ref: DocRef; hash: string | null }>;
+}
 
 export interface MessageDocument extends BaseDocument {
   type: "message";
@@ -510,6 +574,11 @@ export interface AssetManifestEntry {
   mime: string;
   size: number;
   chunks: number;
+  /** New imports default to referenced; legacy entries without this field are handled conservatively. */
+  visibility?: "world" | "referenced" | "gm";
+  /** Explicit FX-import consent for redistribution in a world archive. Absence means legacy asset,
+   * NOT proof that any external premium-pack license permits sharing. */
+  exportRights?: "restricted" | "granted";
   /** Intrinsic pixel dimensions (present on image assets after import). */
   width?: number;
   height?: number;
@@ -536,6 +605,10 @@ export type CollectionName =
   | "encounterTables"
   | "playlists"
   | "macros"
+  | "automations"
+  | "actionReceipts"
+  | "prefabs"
+  | "fxInstances"
   | "cards"
   | "combats"
   | "messages"
@@ -560,6 +633,10 @@ export const TOP_LEVEL_COLLECTIONS: readonly CollectionName[] = [
   "encounterTables",
   "playlists",
   "macros",
+  "automations",
+  "actionReceipts",
+  "prefabs",
+  "fxInstances",
   "cards",
   "combats",
   "messages",
@@ -608,6 +685,11 @@ export interface WorldCollections {
   encounterTables: EncounterTableDocument[];
   playlists: PlaylistDocument[];
   macros: MacroDocument[];
+  automations: AutomationDocument[];
+  /** GM-only durable reversible world-action history (not capped with chat). */
+  actionReceipts: ActionReceiptDocument[];
+  prefabs: PrefabDocument[];
+  fxInstances: FxInstanceDocument[];
   cards: CardDocument[];
   combats: CombatDocument[];
   /** Capped / paginated (§4); trims oldest-first, deterministically (D-018). */

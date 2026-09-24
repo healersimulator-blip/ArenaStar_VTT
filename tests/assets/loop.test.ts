@@ -4,7 +4,8 @@
  */
 import "fake-indexeddb/auto";
 import { describe, expect, test } from "vitest";
-import { HostSync, type HostEvents } from "../../src/host/sync";
+import { HostSync, gmSessionUser, type HostEvents } from "../../src/host/sync";
+import type { SceneDocument } from "../../src/core/documents";
 import { AssetServer, wireManifestToStore } from "../../src/host/assets";
 import { ClientSync, type ClientEvents } from "../../src/client/sync";
 import { AssetCache, AssetFetcher, type AssetCacheBackend } from "../../src/client/assets";
@@ -71,7 +72,9 @@ async function setup(worldId: string): Promise<{
   const importAsset = async (size: number, name: string) => {
     const bytes = new Uint8Array(size);
     for (let i = 0; i < size; i++) bytes[i] = (i * 7) % 256;
-    const { hash } = await server.import(bytes, name, "application/octet-stream");
+    // These pre-existing loop fixtures are intentionally GM-published shared
+    // assets; privacy tests below use the default `referenced` policy.
+    const { hash } = await server.import(bytes, name, "application/octet-stream", "world");
     return hash;
   };
 
@@ -152,6 +155,41 @@ describe("assets over the wire (§7)", () => {
     }
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(misses).toHaveLength(20); // burst consumed; 5 dropped silently
+  });
+
+  test("a hidden document's asset is absent from manifest and a guessed hash fetches no bytes", async () => {
+    const h = await setup("w-loop-private");
+    const secret = await h.server.import(new Uint8Array([1, 2, 3, 4]), "secret-guardian.png", "image/png");
+    const s: SceneDocument = {
+      _id: "trap-scene", type: "scene", name: "Trap", ownership: { default: 2 }, flags: {}, system: {},
+      active: true, img: null, width: 500, height: 500, darkness: 0,
+      grid: { type: "square", size: 100, distance: 5, units: "ft", diagonals: "555", hexLayout: "oddQ" },
+      tokens: [{ _id: "secret-token", type: "token", name: "Secret", ownership: { default: 0 },
+        flags: {}, system: {}, hidden: true, x: 0, y: 0, rotation: 0, width: 100, height: 100,
+        img: secret.hash, disposition: "hostile", vision: false, light: { radius: 0, color: "#fff", alpha: 0 } }],
+      walls: [], lights: [], sounds: [], tiles: [], drawings: [], templates: [], notes: [],
+    };
+    expect(h.host.commitSystem([{ kind: "create", coll: "scenes", data: s }]).ok).toBe(true);
+    const peer = await h.addPeer("guessing-player", AssetCache.withBackend(new MemBackend()));
+    expect(peer.client.store.world.assetManifest[secret.hash]).toBeUndefined();
+    const chunks: Array<{ total: number; bytes: number }> = [];
+    peer.bus.on("asset", (m) => chunks.push({ total: m.total, bytes: m.bytes.length }));
+    peer.client.requestAsset(secret.hash);
+    await flushMicrotasks();
+    expect(chunks).toEqual([{ total: 0, bytes: 0 }]);
+    expect(h.hostStore.world.assetManifest[secret.hash]).toBeDefined();
+
+    const pair = createTransportPair();
+    h.host.addSession("gm-private", pair.a, gmSessionUser("gm-loop"));
+    const gmBus = createEventBus<ClientEvents>();
+    const gm = new ClientSync({ transport: pair.b, bus: gmBus, meta });
+    const gmChunks: number[] = [];
+    gmBus.on("asset", (m) => gmChunks.push(m.total));
+    await flushMicrotasks();
+    expect(gm.store.world.assetManifest[secret.hash]?.name).toBe("secret-guardian.png");
+    gm.requestAsset(secret.hash);
+    await flushMicrotasks();
+    expect(gmChunks).toEqual([4]);
   });
 
   test("unauthenticated sessions get no assets (§16)", async () => {

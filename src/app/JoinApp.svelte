@@ -4,6 +4,8 @@
   import { parseInvite } from "./hostShare";
   import { createStage, type Stage } from "../canvas/stage";
   import { screenToWorld, worldToScreen, zoomAt } from "../canvas/camera";
+  import SummonCrosshair from "../ui/macros/SummonCrosshair.svelte";
+  import type { RequestSummonPick, SummonPickOptions, SummonPickPoint } from "../ui/macros/summonPicker";
   import { displayDistance } from "../canvas/grid/measure";
   import { rulerLabel } from "../canvas/ephemera";
   import CanvasToolbar, {
@@ -24,9 +26,11 @@
   import {
     CanvasController,
     domPointerSource,
+    pickToken,
     type TokenView,
   } from "../canvas/interactions";
   import { can } from "../core/permissions";
+  import { tileContainsPoint } from "../core/automation";
   import { sceneFogSettings } from "../core/fogExploration";
   import { createHexOverlaySync, repaintHexOverlay, syncHexOverlay } from "./hexOverlay";
   import { cellAtPoint } from "../core/hexcrawl/cells";
@@ -42,6 +46,7 @@
     type OnboardingFacts,
   } from "../core/onboarding";
   import OnboardingPanel from "../ui/onboarding/OnboardingPanel.svelte";
+  import Icon from "../ui/icons/Icon.svelte";
   import { ChatPanel } from "../ui/chat";
   import { QuickbarRow } from "../ui/quickbar";
   import { SvelteMap } from "svelte/reactivity";
@@ -57,6 +62,7 @@
   import type { Op } from "../core/ops";
   import { copyText } from "../ui/clipboard";
   import { FogExploration } from "../client/fogExploration";
+  import { FxPlayer } from "../client/fxPlayer";
   import { fogMaskLog } from "../core/fogMask";
   import { drawingBounds } from "../canvas/layers/drawingGeometry";
   import { createVisionComputer } from "../workers/visionComputer";
@@ -75,6 +81,18 @@
   let seq = $state(0);
   let tokenCount = $state(0);
   let playerName = $state("");
+  let playerTab = $state<"chat" | "actors">("chat");
+  let guideOpen = $state(false);
+  let guideFocus = $state<HTMLDivElement | null>(null);
+  let guideTrigger = $state<HTMLButtonElement | null>(null);
+  function openGuide(): void {
+    guideOpen = true;
+    queueMicrotask(() => guideFocus?.focus());
+  }
+  function closeGuide(): void {
+    guideOpen = false;
+    queueMicrotask(() => guideTrigger?.focus());
+  }
   let connState = $state("new");
   let copyStatus = $state("");
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -214,6 +232,14 @@
         break;
     }
   }
+  /** Player-callable scripts are projected as input-only stubs; code stays with the host. */
+  function openMacros() {
+    const rect = canvasHost?.getBoundingClientRect();
+    if (rect) wm.setBounds({ width: rect.width, height: rect.height });
+    wm.open({ id: "macros", title: "Published macros", kind: "macros",
+      x: 55, y: 50, width: 550, height: 580 });
+  }
+
   /** Roll20's Turn Tracker for a player: the shared list, read-only where they lack rights. */
   function openTurnOrder() {
     const rect = canvasHost?.getBoundingClientRect();
@@ -245,6 +271,8 @@
   /** `$state.raw`: the stage is a Pixi object graph — assignment must re-run the
    *  effects that read it, but it must never be deep-proxied. */
   let stage = $state.raw<Stage | null>(null);
+  let fxPlayer: FxPlayer | null = null;
+  let fxClockTimer: ReturnType<typeof setInterval> | null = null;
   let controller: CanvasController | null = null;
   let toolController: ToolInteractionController | null = null;
   let measurePreview = $state<MeasurePreview | null>(null);
@@ -417,6 +445,21 @@
    * expression `App.svelte` uses: the `active` flag wins, `scene-1` is only the fallback for a
    * replica that has not been told yet.
    */
+  // A shared, cancellable canvas crosshair for GM/player summon windows. The
+  // UI owns the preview only; HostSync rechecks every point and permission.
+  let pendingSummonPick = $state.raw<{ options: SummonPickOptions;
+    resolve: (at: SummonPickPoint | null) => void } | null>(null);
+  function settleSummonPick(at: SummonPickPoint | null): void {
+    const pending = pendingSummonPick;
+    pendingSummonPick = null;
+    pending?.resolve(activeScene()?._id === pending.options.sceneId ? at : null);
+  }
+  const requestSummonPick: RequestSummonPick = (options) => {
+    if (options.sceneId !== activeScene()?._id || !stage) return Promise.resolve(null);
+    settleSummonPick(null); // starting a new gesture cancels the old one
+    return new Promise((resolve) => { pendingSummonPick = { options, resolve }; });
+  };
+
   function activeScene(): SceneDocument | null {
     const client = app?.client;
     if (!client) return null;
@@ -543,6 +586,7 @@
     // them whenever a snapshot or an op lands (the GM shell tracks its store the same way).
     storeVersion++;
     const scene = activeScene();
+    fxPlayer?.syncScene();
     worldName = client.world?.name ?? "—";
     seq = client.store.seq;
     tokenCount = scene?.tokens.length ?? 0;
@@ -622,6 +666,17 @@
         const height = Math.max(240, hostElement.clientHeight);
         const view = await createStage({ width, height, hostElement });
         stage = view;
+        const fetcher = current.fetcher;
+        if (fetcher) {
+          fxPlayer = new FxPlayer({
+            client, bus: current.bus, stage: view,
+            fetchAsset: (hash) => fetcher.request(hash, "ui"),
+            sceneId: () => activeScene()?._id ?? null,
+            onError: (message) => console.warn(message),
+          });
+        }
+        client.sendPing();
+        fxClockTimer = globalThis.setInterval(() => client.sendPing(), 30_000);
         // e2e readback (camera / stage introspection) — the player shell's own global, so a
         // page that hosts both shells never confuses the two stages.
         (globalThis as unknown as { __canvasStage?: unknown }).__canvasStage = view;
@@ -732,11 +787,32 @@
           if (canvasTool !== "text" || e.button !== 0) return;
           editTextAt(toWorld({ clientX: e.clientX, clientY: e.clientY } as PointerEvent));
         };
+        let tileDown: { x: number; y: number; tokenId?: string } | null = null;
+        const onTileDown = (e: PointerEvent) => {
+          // Capture selection before the canvas controller clears it on an empty-space click.
+          tileDown = { x: e.clientX, y: e.clientY,
+            ...(selection.length === 1 && selection[0] ? { tokenId: selection[0] } : {}) };
+        };
+        const onTileClick = (e: MouseEvent) => {
+          if (canvasTool !== "select" || e.button !== 0 || e.detail > 1 ||
+              e.altKey || e.ctrlKey || e.shiftKey || !tileDown ||
+              Math.hypot(e.clientX - tileDown.x, e.clientY - tileDown.y) > 4) return;
+          const scene = activeScene();
+          if (!scene) return;
+          const world = toWorld({ clientX: e.clientX, clientY: e.clientY } as PointerEvent);
+          if (pickToken(tokenViews(), world)) return; // a token click is not also a tile click
+          const tile = [...scene.tiles].reverse().find((item) => tileContainsPoint(item, world));
+          if (tile) client.requestAutomationClick(scene._id, tile._id, world, tileDown.tokenId);
+        };
+        canvas.addEventListener("pointerdown", onTileDown);
+        canvas.addEventListener("click", onTileClick);
         canvas.addEventListener("pointerdown", toolDown); canvas.addEventListener("pointermove", toolMove); canvas.addEventListener("pointerup", toolUp);
         canvas.addEventListener("contextmenu", onToolContext);
         canvas.addEventListener("dblclick", onTextEdit);
         globalThis.addEventListener("keydown", onToolKey);
         toolCleanup = () => {
+          canvas.removeEventListener("pointerdown", onTileDown);
+          canvas.removeEventListener("click", onTileClick);
           canvas.removeEventListener("pointerdown", toolDown);
           canvas.removeEventListener("pointermove", toolMove);
           canvas.removeEventListener("pointerup", toolUp);
@@ -824,9 +900,14 @@
     globalThis.addEventListener("pagehide", onPageHide);
     return () => {
       globalThis.removeEventListener("pagehide", onPageHide);
+      settleSummonPick(null);
       offWm();
       toolCleanup?.();
       toolCleanup = null;
+      if (fxClockTimer !== null) clearInterval(fxClockTimer);
+      fxClockTimer = null;
+      fxPlayer?.dispose();
+      fxPlayer = null;
       clearCopyTimer();
       if (pollTimer !== null) clearInterval(pollTimer);
       controller?.destroy();
@@ -839,18 +920,32 @@
   });
 </script>
 
-<main class="vtt-ui">
-  <header class="join-header">
-    <p class="eyebrow">ARENASTAR</p>
-    <h1>Join a game</h1>
-    <p class="sub">
-      Connect to a host with an invite link and a short manual code exchange.
-    </p>
+<main class="vtt-ui" class:player-live={phase === "live" || phase === "dead"}>
+  <header class="join-header" class:live-header={phase === "live" || phase === "dead"}>
+    {#if phase === "live" || phase === "dead"}
+      <div class="brand-badge" aria-hidden="true">✦</div>
+      <div class="player-identity">
+        <p class="eyebrow">ARENASTAR <span> / PLAYER TABLE</span></p>
+        <h1 title={worldName}>{worldName}</h1>
+      </div>
+      <div id="pstatus" aria-live="polite">
+        <strong class="sr-only">{worldName}</strong>
+        <span class="connection-badge" class:disconnected={phase === "dead"}><span class="connection-dot"></span>{phase === "dead" ? "Disconnected" : "Connected"}</span>
+        <span>{playerName}</span>
+        <span>seq {seq} · tokens {tokenCount}</span>
+      </div>
+      <div class="player-actions" aria-label="Player actions">
+        <button data-icon-button data-player-macros type="button" aria-label="Published macros" title="Published macros" onclick={openMacros}><Icon name="macro" /></button>
+        <button data-icon-button data-player-setup type="button" bind:this={guideTrigger} aria-expanded={guideOpen}
+          aria-label="Session & guide" title="Session & guide" onclick={openGuide}><Icon name="sliders" /></button>
+      </div>
+    {:else}
+      <p class="eyebrow">ARENASTAR</p>
+      <h1>Join a game</h1>
+      <p class="sub">Connect to a host with an invite link and a short manual code exchange.</p>
+    {/if}
   </header>
-  {#if joinError}
-    <p class="error" role="alert">{joinError}</p>
-  {/if}
-
+  {#if joinError}<p class="error" role="alert">{joinError}</p>{/if}
   {#if phase === "invite"}
     <section class="join-panel" aria-label="Join a game">
       <div class="panel-heading">
@@ -878,7 +973,7 @@
       </button>
     </section>
   {:else if phase === "exchange" || phase === "dead"}
-    <section class="join-panel exchange-panel" aria-label="Signaling exchange">
+    <section class="join-panel exchange-panel" class:reconnect={phase === "dead"} aria-label="Signaling exchange">
       {#if phase === "dead"}
         <p class="error" id="disconnect-notice" role="alert">
           Host disconnected — connection lost.
@@ -940,41 +1035,10 @@
     </section>
   {/if}
 
+
   {#if phase === "live" || phase === "dead"}
-    {#if canvasError}
-      <p class="error">canvas: {canvasError}</p>
-    {/if}
+    {#if canvasError}<p class="error" role="alert">canvas: {canvasError}</p>{/if}
     <section class="shell" aria-label="Player shell">
-      <aside class="sidebar">
-        <div id="pstatus">
-          <strong>{worldName}</strong>
-          <span>{playerName}</span>
-          <span>seq {seq}</span>
-          <span>tokens {tokenCount}</span>
-        </div>
-        {#if app?.client}
-          <OnboardingPanel
-            steps={onboarding}
-            storageKey="vtt-onboarding-player"
-            title="Getting started"
-          />
-          <QuickbarRow
-            client={app.client}
-            actor={quickbarActor}
-            targets={quickbarTargets}
-          />
-          <ChatPanel
-            client={app.client}
-            bus={app.bus}
-            targetTokenId={selection.length === 1 ? (selection[0] ?? null) : null}
-          />
-          <SheetPanel
-            client={app.client}
-            bus={app.bus}
-            onOpenActor={openActorSheet}
-          />
-        {/if}
-      </aside>
       <div class="canvas-area">
         <div class="board">
           <div class="toolrail">
@@ -1095,6 +1159,8 @@
             windows={wmWindows}
             client={app.client}
             bus={app.bus}
+            sceneId={activeScene()?._id ?? null}
+            onPickSummon={requestSummonPick}
             onUndo={() => undefined}
             onRedo={() => undefined}
             bindings={DEFAULT_BINDINGS}
@@ -1102,11 +1168,59 @@
             isGM={false}
           />
         {/if}
+        {#if pendingSummonPick}
+          {@const summonScene = activeScene()}
+          {#if summonScene && summonScene._id === pendingSummonPick.options.sceneId}
+            <SummonCrosshair scene={summonScene} options={pendingSummonPick.options}
+              camera={() => stage?.camera ?? { x: 0, y: 0, scale: 1 }}
+              pick={(at) => settleSummonPick(at)} cancel={() => settleSummonPick(null)} />
+          {/if}
+        {/if}
       </div>
+      <aside class="sidebar" data-player-dock aria-label="Player content">
+        <div class="dock-heading"><div><span class="dock-eyebrow">AT YOUR TABLE</span><h2>{playerTab === "chat" ? "Chat" : "Characters"}</h2></div></div>
+        <nav class="player-tabs" aria-label="Player content tabs">
+          <button data-player-tab="chat" type="button" class:active={playerTab === "chat"}
+            aria-label="Chat" title="Chat" onclick={() => (playerTab = "chat")}><Icon name="chat" size={19}/><span>Chat</span></button>
+          <button data-player-tab="actors" type="button" class:active={playerTab === "actors"}
+            aria-label="Characters" title="Characters" onclick={() => (playerTab = "actors")}><Icon name="actors" size={19}/><span>Characters</span></button>
+        </nav>
+        <div class="tabbody" data-player-active-tab={playerTab}>
+          {#if app?.client}
+            {#if playerTab === "chat"}
+              <ChatPanel client={app.client} bus={app.bus}
+                targetTokenId={selection.length === 1 ? (selection[0] ?? null) : null} />
+            {:else}
+              <SheetPanel client={app.client} bus={app.bus} onOpenActor={openActorSheet} />
+            {/if}
+          {/if}
+        </div>
+        {#if app?.client}<div class="dock-footer"><QuickbarRow client={app.client} actor={quickbarActor} targets={quickbarTargets} /></div>{/if}
+      </aside>
     </section>
+    {#if guideOpen}
+      <div class="player-guide" data-player-guide role="dialog" aria-modal="false" aria-labelledby="guide-title" tabindex="-1"
+        bind:this={guideFocus} onkeydown={(event) => { if (event.key === "Escape") { event.stopPropagation(); closeGuide(); } }}>
+        <header class="guide-heading"><div><span class="dock-eyebrow">TABLE GUIDE</span><h2 id="guide-title">Session & guide</h2></div>
+          <button data-icon-button class="guide-close" type="button" aria-label="Close guide" title="Close guide" onclick={closeGuide}><Icon name="x" /></button>
+        </header>
+        <div class="guide-content">
+          <p>Everything you need to join the adventure. You can return here anytime from the top bar.</p>
+          {#if app?.client}
+            <section class="guide-card"><h3>Getting started</h3>
+              <OnboardingPanel steps={onboarding} storageKey="vtt-onboarding-player" title="Getting started" />
+            </section>
+          {/if}
+          <section class="guide-card"><h3>Connection</h3>
+            <p>Playing as <strong>{playerName}</strong> in {worldName}.</p>
+            <p>Connection state: <strong>{connState}</strong></p>
+            <p class="hint">If your connection drops, the code exchange will appear here so you can reconnect.</p>
+          </section>
+        </div>
+      </div>
+    {/if}
   {/if}
 </main>
-
 <style>
   main {
     min-height: 100vh;
@@ -1116,7 +1230,8 @@
     gap: 20px;
     padding: clamp(24px, 4vw, 48px) clamp(16px, 4vw, 56px);
     background:
-      radial-gradient(circle at 85% 0%, #203d56 0%, transparent 42%), #0d1117;
+      radial-gradient(circle at 78% 3%, #19423e 0%, transparent 43%),
+      radial-gradient(circle at 18% 75%, #203142 0%, transparent 45%), #0c141d;
   }
   .join-header {
     width: min(100%, 760px);
@@ -1124,7 +1239,7 @@
   }
   .eyebrow {
     margin: 0 0 8px;
-    color: #66b7ff;
+    color: #8ce5cf;
     font-size: 0.8rem;
     font-weight: 800;
     letter-spacing: 0.18em;
@@ -1149,10 +1264,10 @@
     width: min(100%, 720px);
     margin: 0;
     padding: clamp(18px, 3vw, 28px);
-    border: 1px solid #41566d;
+    border: 1px solid #48646a;
     border-radius: 14px;
-    background: #151f2aee;
-    box-shadow: 0 16px 40px #0005;
+    background: #192b35f5;
+    box-shadow: 0 20px 58px #0007;
   }
   .panel-heading h2 {
     margin: 0;
@@ -1222,11 +1337,11 @@
     opacity: 0.55;
   }
   .join-panel > button:not(.secondary) {
-    background: #1f689b;
-    border-color: #69baf2;
+    background: #28675d;
+    border-color: #72cdb9;
   }
   .join-panel > button:not(.secondary):hover:not(:disabled) {
-    background: #2d82bb;
+    background: #377e71;
   }
   .code-field {
     display: flex;
@@ -1432,5 +1547,212 @@
     .canvas-area {
       min-height: 58vh;
     }
+  }
+
+  /* Once connected, the player's board uses the same full-viewport workspace
+     as the GM. The initial invite/code exchange remains a focused setup page. */
+  main.player-live {
+    width: 100%;
+    height: 100dvh;
+    min-height: 480px;
+    padding: 0;
+    gap: 0;
+    align-items: stretch;
+    overflow: hidden;
+    background: #0c141d;
+  }
+  .join-header.live-header {
+    flex: 0 0 70px;
+    width: 100%;
+    min-height: 70px;
+    display: flex;
+    align-items: center;
+    gap: 13px;
+    padding: 0 16px;
+    border-bottom: 1px solid #344352;
+    background: #17222e;
+    box-shadow: 0 2px 16px #0004;
+    text-align: left;
+    z-index: 23;
+  }
+  .live-header .brand-badge {
+    flex: 0 0 36px;
+    width: 36px;
+    height: 36px;
+    display: grid;
+    place-items: center;
+    border-radius: 11px;
+    background: linear-gradient(145deg, #8be8d0, #459d99);
+    color: #142933;
+    font-size: 1.55rem;
+    line-height: 1;
+  }
+  .player-identity { flex: 0 1 190px; min-width: 95px; overflow: hidden; }
+  .live-header .eyebrow { margin: 0 0 2px; color: #7ce3ca; font-size: .63rem; font-weight: 800; letter-spacing: .13em; white-space: nowrap; }
+  .live-header .eyebrow span { color: #96aaaf; font-weight: 650; }
+  .live-header h1 { overflow: hidden; color: #f5fafb; font-size: 1.12rem; font-weight: 750; line-height: 1.2; letter-spacing: -.018em; white-space: nowrap; text-overflow: ellipsis; }
+  #pstatus {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    overflow: hidden;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: #b6c7d0;
+    font-size: .76rem;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  #pstatus .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .connection-badge {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 9px;
+    border: 1px solid #335850;
+    border-radius: 20px;
+    background: #1a3537;
+    color: #b8e9d9;
+    font-size: .72rem;
+    font-weight: 650;
+  }
+  .connection-badge.disconnected { border-color: #835455; background: #3f292e; color: #ffc0b8; }
+  .connection-dot { width: 7px; height: 7px; border-radius: 50%; background: #66dbc0; box-shadow: 0 0 7px #6cebd28c; }
+  .disconnected .connection-dot { background: #f1a995; box-shadow: none; }
+  .player-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 5px; }
+  .player-actions button {
+    display: grid;
+    place-items: center;
+    width: 36px;
+    min-width: 36px;
+    height: 36px;
+    min-height: 36px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 9px;
+    background: transparent;
+    color: #bacbd3;
+  }
+  .player-actions button:hover, .player-actions button[aria-expanded="true"] { background: #2a3e49; border-color: #52998d; color: #eafff9; }
+  .player-live .error { width: 100%; padding: 8px 16px; background: #38262a; font-size: .85rem; }
+  .player-live .shell {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: row;
+    gap: 0;
+    width: 100%;
+    min-width: 0;
+    min-height: 0;
+    height: auto;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: #101a24;
+    box-shadow: none;
+  }
+  .player-live .canvas-area { order: 0; flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+  .player-live .board { flex: 1 1 auto; height: auto; min-height: 0; }
+  .player-live .toolrail { min-height: 0; }
+  .player-live .canvas-host { flex: 1 1 auto; min-width: 0; min-height: 0; height: auto; overflow: hidden; border: 0; border-radius: 0; background: #0d151e; }
+  .player-live .sidebar {
+    order: 1;
+    flex: 0 0 clamp(312px, 25vw, 376px);
+    width: clamp(312px, 25vw, 376px);
+    min-height: 0;
+    max-height: none;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    overflow: hidden;
+    padding: 0;
+    border-left: 1px solid #344657;
+    background: #16222e;
+  }
+  .dock-heading { flex: 0 0 60px; min-height: 60px; display: flex; align-items: center; padding: 8px 15px; }
+  .dock-eyebrow { color: #81d4c5; font-size: .64rem; font-weight: 800; letter-spacing: .13em; }
+  .dock-heading h2, .guide-heading h2 { margin: 1px 0 0; font-size: .98rem; font-weight: 700; color: #f0f8f9; }
+  .player-tabs { flex: 0 0 auto; display: flex; min-height: 46px; padding: 0 10px; border-bottom: 1px solid #3b4b59; }
+  .player-tabs button {
+    flex: 1 1 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    min-height: 44px;
+    padding: 7px 12px;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    background: transparent;
+    color: #a8b9c4;
+    font-size: .83rem;
+    font-weight: 600;
+  }
+  .player-tabs button:hover { background: #243440; color: #effcfa; }
+  .player-tabs button.active { border-bottom-color: #74d9c5; background: #1b3037; color: #b9f7e4; }
+  .tabbody { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 13px 14px; background: #15222d; }
+  .tabbody :global(.chat) { min-height: 100%; height: 100%; }
+  .tabbody :global(#chat-log) { flex: 1 1 auto; max-height: none; min-height: 120px; border-color: #344957; background: #101a24; }
+  .dock-footer { flex: 0 0 auto; max-height: 170px; overflow-y: auto; padding: 9px 12px; border-top: 1px solid #3a4b59; background: #192834; }
+  .player-guide {
+    position: fixed;
+    top: 70px;
+    right: 0;
+    bottom: 0;
+    z-index: 70;
+    width: min(440px, 100vw);
+    display: flex;
+    flex-direction: column;
+    border: 1px solid #4b6d73;
+    border-right: 0;
+    border-bottom: 0;
+    border-radius: 14px 0 0 0;
+    background: #172530;
+    box-shadow: -20px 0 60px #050a11a8;
+  }
+  .guide-heading { flex: 0 0 70px; display: flex; align-items: center; justify-content: space-between; padding: 12px 18px; border-bottom: 1px solid #405460; background: #1a2b36; border-radius: 14px 0 0 0; }
+  .guide-heading h2 { font-size: 1.25rem; }
+  .guide-close { display: grid; place-items: center; width: 36px; min-width: 36px; height: 36px; min-height: 36px; padding: 0; border: 1px solid #49616c; border-radius: 9px; background: #293d48; color: #d2e1e4; }
+  .guide-content { display: flex; flex-direction: column; gap: 16px; overflow-y: auto; padding: 18px; color: #b0c5cb; font-size: .87rem; }
+  .guide-content > p, .guide-card p { margin: 0 0 8px; }
+  .guide-card { padding: 15px; border: 1px solid #405564; border-radius: 11px; background: #1c2b37; }
+  .guide-card h3 { margin: 0 0 10px; font-size: .92rem; color: #eff7f7; }
+  .join-panel.exchange-panel.reconnect {
+    position: fixed;
+    top: 70px;
+    right: 0;
+    bottom: 0;
+    z-index: 81;
+    width: min(440px, 100vw);
+    overflow-y: auto;
+    border-radius: 14px 0 0 0;
+    border-right: 0;
+    border-bottom: 0;
+    background: #1a2a36;
+    box-shadow: -20px 0 60px #050a11a8;
+  }
+  @media (max-width: 930px) {
+    .player-live .sidebar { flex-basis: 306px; width: 306px; }
+  }
+  @media (max-width: 710px) {
+    .join-header.live-header { flex-basis: 60px; min-height: 60px; gap: 8px; padding-inline: 8px; }
+    .live-header .brand-badge { display: none; }
+    .player-identity { flex: 0 0 125px; min-width: 0; }
+    .player-identity .eyebrow span { display: none; }
+    #pstatus { flex: 1 1 auto; justify-content: flex-end; }
+    #pstatus > span:not(.connection-badge) { display: none; }
+    .player-live .shell { flex-direction: column; }
+    .player-live .canvas-area { flex: 1 1 auto; min-height: 0; }
+    .player-live .sidebar { order: 1; flex: 0 0 min(42dvh, 360px); width: 100%; max-height: none; border-left: 0; border-top: 1px solid #344657; }
+    .dock-heading { flex-basis: 44px; min-height: 44px; }
+    .dock-eyebrow { display: none; }
+    .tabbody :global(#chat-log) { min-height: 80px; }
+    .dock-footer { display: block; max-height: 80px; overflow-y: auto; padding: 4px 12px; }
+    .player-guide, .join-panel.exchange-panel.reconnect { top: 60px; }
   }
 </style>

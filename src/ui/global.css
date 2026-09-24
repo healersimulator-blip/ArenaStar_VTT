@@ -1,11 +1,5 @@
-/* Shared product-wide UI baseline.
- *
- * The VTT has a deliberately dense layout, but density must never come from
- * shrinking controls below a comfortable reading/touch size. Component
- * styles can still opt into compact, non-interactive metadata; interactive
- * controls use the baseline below unless they are an icon-only control with
- * its own accessible label.
- */
+/* Shared product-wide UI baseline. The board shell uses labeled icon controls
+ * in its chrome; forms and content panels retain comfortable reading sizes. */
 :root {
   color-scheme: dark;
   font-family:
@@ -21,15 +15,15 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  --vtt-bg: #0d1117;
-  --vtt-panel: #151b24;
-  --vtt-panel-raised: #1c2632;
-  --vtt-border: #344254;
-  --vtt-border-strong: #52657d;
-  --vtt-text: #f2f5f8;
-  --vtt-muted: #b1bdca;
-  --vtt-accent: #66b7ff;
-  --vtt-focus: #ffd166;
+  --vtt-bg: #0c141d;
+  --vtt-panel: #15222d;
+  --vtt-panel-raised: #1e2e3a;
+  --vtt-border: #394b58;
+  --vtt-border-strong: #59747c;
+  --vtt-text: #f1f8f7;
+  --vtt-muted: #b4c6cc;
+  --vtt-accent: #73d8c5;
+  --vtt-focus: #ffda8c;
   --vtt-control-height: 2.625rem;
 }
 
@@ -114,24 +108,14 @@ textarea {
   line-height: 1.45;
 }
 
-/* The sidebar is intentionally compact in width, but tabs and tool buttons
- * must remain easy to scan and click. */
-.vtt-ui .gmtools button,
+/* Content tabs and scenes scroll horizontally instead of wrapping into
+ * several rows that steal the canvas's height. */
 .vtt-ui .tabs button,
 .vtt-ui .scenenav button {
   width: auto !important;
 }
-
-.vtt-ui .gmtools button {
-  flex: 1 1 7rem;
-}
-
-.vtt-ui .tabs button {
-  flex: 1 1 auto;
-}
-
 .vtt-ui .scenenav button {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
 }
 
 .vtt-ui .hotbar .slot {
@@ -168,10 +152,6 @@ textarea {
 @media (max-width: 760px) {
   :root {
     --vtt-control-height: 2.75rem;
-  }
-
-  .vtt-ui :where(.gmtools button, .tabs button, .scenenav button) {
-    flex-basis: 100%;
   }
 }
 

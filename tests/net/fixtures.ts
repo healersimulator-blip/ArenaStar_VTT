@@ -1,4 +1,4 @@
-import type { WireMessage } from "../../src/core/messages";
+import { MsgKind, type WireMessage } from "../../src/core/messages";
 import type { Op } from "../../src/core/ops";
 import type { BaseDocument, WorldCollections } from "../../src/core/documents";
 import type { ProjectedWorld } from "../../src/core/projection";
@@ -38,6 +38,50 @@ export function sampleMessage(kind: WireMessage["kind"]): WireMessage {
       return { kind: "roll", rollId: "r-1", formula: "1d20+5", mode: "roll" };
     case "ephemeral":
       return { kind: "ephemeral", from: "u1", t: "cursor", data: { x: 1, y: 2 } };
+    case "automation.request":
+      return { kind: "automation.request", requestId: "req-2", automationId: "a-1", sceneId: "s1", method: "click" };
+    case "automation.click":
+      return { kind: "automation.click", requestId: "click-1", sceneId: "s1", tileId: "tile-1",
+        point: { x: 120, y: 130 }, tokenId: "t-1" };
+    case "automation.trace":
+      return { kind: "automation.trace", automationId: "a-1", method: "click", result: "committed", detail: "done", trace: ["0: select"], seq: 8 };
+    case "tagger.rules":
+      return { kind: "tagger.rules", requestId: "rules-1", refs: [{ coll: "tiles", id: "tile-1",
+        parent: { coll: "scenes", id: "s1" } }] };
+    case "tagger.rules.result":
+      return { kind: "tagger.rules.result", requestId: "rules-1", changed: 1, seq: 8 };
+    case "prefab.place":
+      return { kind: "prefab.place", requestId: "place-1", prefabId: "prefab-1", sceneId: "s1",
+        at: { x: 200, y: 300 }, rotation: 90 };
+    case "prefab.result":
+      return { kind: "prefab.result", requestId: "place-1", ok: true, detail: "placed", seq: 9,
+        instanceId: "instance-1", rootId: "tile-2" };
+    case "summon.place":
+      return { kind: "summon.place", requestId: "sp-1", presetId: "preset-1", sceneId: "s1", at: { x: 100, y: 200 }, summonerTokenId: "t1" };
+    case "summon.dismiss":
+      return { kind: "summon.dismiss", requestId: "sd-1", sceneId: "s1", tokenId: "t1" };
+    case "summon.result":
+      return { kind: "summon.result", requestId: "sp-1", ok: true, detail: "summoned", seq: 4, tokenId: "t1" };
+    case "macro.request":
+      return { kind: "macro.request", requestId: "mr-1", macroId: "m-1", args: { target: "t-1" } };
+    case "macro.result":
+      return { kind: "macro.result", requestId: "mr-1", macroId: "m-1", callerId: "u1", ok: true, detail: "done", trace: ["tag edit"] };
+    case "fx.request":
+      return { kind: "fx.request", requestId: "req-1", macroId: "fx-1", sceneId: "s1" };
+    case "fx.start":
+      return { kind: "fx.start", runId: "run-1", macroId: "fx-1", sceneId: "s1", atHostTime: 1000,
+        sections: [{ kind: "text", id: "title", text: "Flash", x: 40, y: 50, startMs: 0, durationMs: 500 }] };
+    case "fx.sync":
+      return { kind: "fx.sync", sceneId: "s1" };
+    case "fx.stop":
+      return { kind: "fx.stop", requestId: "stop-1", instanceId: "run-1" };
+    case "fx.stopMatching":
+      return { kind: "fx.stopMatching", requestId: "stop-many-1", sceneId: "s1",
+        filter: { name: "Ward*", sourceTokenId: "t-1" } };
+    case "fx.end":
+      return { kind: "fx.end", runId: "run-1", sceneId: "s1" };
+    case "asset.manifest":
+      return { kind: "asset.manifest", manifest: { ["a".repeat(64)]: { name: "texture.png", mime: "image/png", size: 2, chunks: 1 } } };
     case "asset.get":
       return { kind: "asset.get", assetId: "f".repeat(64), offset: 0, priority: "scene" };
     case "fog.put":
@@ -133,53 +177,27 @@ export function sampleMessage(kind: WireMessage["kind"]): WireMessage {
       return { kind: "roll.reroll", messageId: "m1" };
     case "roll.revert":
       return { kind: "roll.revert", messageId: "m1" };
+    case "action.revert":
+      return { kind: "action.revert", receiptId: "receipt-1" };
     case "roll.delegate":
       return { kind: "roll.delegate", messageId: "m1", playerId: "u1" };
+    case "roll.apply":
+      return { kind: "roll.apply", messageId: "m1", actorId: "actor", mode: "damage" };
+    case "fog.get":
+      return { kind: "fog.get", sceneId: "s1" };
+    case "fog.state":
+      return { kind: "fog.state", sceneId: "s1", png: new Uint8Array([1, 2]) };
     case "relay.frame":
       return { kind: "relay.frame", from: "p1", to: "host", bytes: new Uint8Array([7]) };
-    default:
-      throw new Error("sampleMessage: unhandled kind " + String(kind));
+    default: {
+      const unreachable: never = kind;
+      throw new Error("sampleMessage: unhandled kind " + String(unreachable));
+    }
   }
 }
 
-/** All 28 kinds, for exhaustive iteration. */
-export const ALL_KINDS: WireMessage["kind"][] = [
-  "hello",
-  "intent",
-  "roll",
-  "roll.reveal",
-  "roll.pending",
-  "roll.reroll",
-  "roll.revert",
-  "roll.delegate",
-  "roll.challenge",
-  "ephemeral",
-  "asset.get",
-  "fog.put",
-  "relay.offer",
-  "turn.ready",
-  "sim.control",
-  "report.detail",
-  "sim.snapshot.get",
-  "audio.cmd",
-  "welcome",
-  "snapshot",
-  "ops",
-  "rejected",
-  "asset.chunk",
-  "clock",
-  "kick",
-  "ban",
-  "sim.delta",
-  "sim.snapshot",
-  "turn.phase",
-  "turn.report",
-  "report.detail.page",
-  "heartbeat",
-  "ping",
-  "pong",
-  "relay.frame",
-];
+/** Every wire kind, unique and drawn from the actual 1-byte protocol map. */
+export const ALL_KINDS: WireMessage["kind"][] = Object.keys(MsgKind) as WireMessage["kind"][];
 
 /** Minimal empty world for store/projection fixtures. */
 export function emptyWorld(): WorldCollections {
@@ -194,6 +212,10 @@ export function emptyWorld(): WorldCollections {
     encounterTables: [],
     playlists: [],
     macros: [],
+    automations: [],
+    actionReceipts: [],
+    prefabs: [],
+    fxInstances: [],
     cards: [],
     combats: [],
     messages: [],

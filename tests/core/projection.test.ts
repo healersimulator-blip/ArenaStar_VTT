@@ -3,6 +3,9 @@ import { projectEnvelope, projectWorld, stripSecretText } from "../../src/core/p
 import { getEffectiveOwnership } from "../../src/core/permissions";
 import type {
   JournalDocument,
+  Json,
+  FxInstanceDocument,
+  MacroDocument,
   MessageDocument,
   SceneDocument,
   TokenDocument,
@@ -219,6 +222,56 @@ describe("projectWorld (§5)", () => {
     expect(sc?.lights).toHaveLength(1);
   });
 
+  test("player snapshots hide prefab attachment IDs and source scenes without changing GM state", () => {
+    const w = world();
+    const marker = { instanceId: "instance", rootId: "invisible-root", parentId: "hidden-parent",
+      sourceScene: "private-scene" };
+    const s = w.scenes[0];
+    if (!s?.tokens[0] || !s.walls[0] || !s.lights[0]) throw new Error("Missing fixture parts");
+    s.tokens[0].flags = { prefab: marker, public: { tint: "blue" } };
+    s.walls[0].flags = { prefab: marker };
+    s.lights[0].flags = { prefab: marker };
+    const visible = projectWorld(w, 5, player).collections.scenes?.[0];
+    if (!visible?.tokens[0] || !visible.walls[0] || !visible.lights[0]) {
+      throw new Error("Missing projected parts");
+    }
+    expect(visible.tokens[0].flags).toEqual({ public: { tint: "blue" } });
+    expect(visible.walls[0].flags).toEqual({});
+    expect(visible.lights[0].flags).toEqual({});
+    expect(visible.tokens.map((t) => t._id)).not.toContain("t-hidden");
+    expect(projectWorld(w, 5, gm).collections.scenes?.[0]?.tokens[0]?.flags.prefab)
+      .toEqual(marker);
+    expect(s.tokens[0].flags.prefab).toEqual(marker); // pure, including reconnect snapshots
+  });
+
+  test("live FX records and GM-audience macro assets never project, including direct ops", () => {
+    const w = world();
+    const secret = "a".repeat(64);
+    const macro: MacroDocument = { _id: "gm-fx", type: "macro", name: "GM secret", flags: {}, system: {},
+      ownership: { default: 3 }, kind: "sequence", command: "", sequence: {
+        version: 1, audience: "gm", persistent: true, sections: [{ kind: "image", id: "secret",
+          assetId: secret, at: { kind: "point", x: 100, y: 100 }, startMs: 0, durationMs: 1000 }],
+      } };
+    const instance: FxInstanceDocument = { _id: "secret-run", type: "fxInstance", name: "Hidden",
+      ownership: { default: 3 }, flags: {}, system: {}, macroId: macro._id, sceneId: "s1",
+      ownerId: gm.id, audience: "gm", atHostTime: 1000, sections: [{ kind: "image", id: "secret",
+        assetId: secret, x: 100, y: 100, mime: "image/png", startMs: 0, durationMs: 1000 }] };
+    w.macros.push(macro); w.fxInstances.push(instance);
+    const projected = projectWorld(w, 5, player);
+    expect(projected.collections.macros).toEqual([]);
+    expect(projected.collections.fxInstances).toEqual([]);
+    expect(projectWorld(w, 5, gm).collections.fxInstances).toEqual([instance]);
+    const env: OpEnvelope = { seq: 6, ts: 6, by: gm.id, txId: "secret-fx", ops: [
+      { kind: "create", coll: "fxInstances", data: instance },
+      { kind: "create", coll: "macros", data: macro },
+      { kind: "update", ref: { coll: "fxInstances", id: instance._id }, diff: { name: "Hidden again" } },
+      { kind: "delete", ref: { coll: "fxInstances", id: instance._id } },
+    ] };
+    const resolver: ProjectionResolver = { resolve: (ref) => ref.coll === "macros" ? macro : instance };
+    expect(projectEnvelope(env, player, resolver)).toBeNull();
+    expect(projectEnvelope(env, gm, resolver)).toBe(env);
+  });
+
   test("player: docs with effective ownership < LIMITED omitted", () => {
     const projected = projectWorld(world(), 5, player);
     expect(projected.collections.actors?.map((a) => a._id)).toEqual(["a-visible"]);
@@ -292,6 +345,57 @@ describe("projectEnvelope (§5)", () => {
   test("GM receives the envelope verbatim", () => {
     const e = env([{ kind: "update", ref: tokenRef("t-hidden"), diff: { x: 1 } }]);
     expect(projectEnvelope(e, gm, resolver)).toBe(e);
+  });
+
+  test("prefab creates, visibility-grant creates and updates omit host-only hierarchy flags", () => {
+    const marker = { instanceId: "instance", rootId: "hidden-root",
+      parentId: "private-parent", sourceScene: "gm-only-scene" };
+    const flagged = token("new-piece", { flags: { prefab: marker, public: { tint: "red" } } });
+    const wall = scene().walls[0];
+    if (!wall) throw new Error("Missing fixture wall");
+    const e = env([
+      { kind: "create", coll: "tokens", parent: sceneRef, data: flagged },
+      { kind: "create", coll: "walls", parent: sceneRef,
+        data: { ...wall, _id: "new-wall", flags: { prefab: marker } } },
+    ]);
+    const projected = projectEnvelope(e, player, resolver);
+    if (!projected) throw new Error("Expected player projection");
+    expect(projected.ops[0]).toMatchObject({ kind: "create", data: { flags: { public: { tint: "red" } } } });
+    expect(projected.ops[1]).toMatchObject({ kind: "create", data: { flags: {} } });
+    expect(projectEnvelope(e, gm, resolver)).toBe(e);
+    expect(flagged.flags.prefab).toEqual(marker);
+
+    const updates = env([
+      { kind: "update", ref: tokenRef("t-public"),
+        diff: { "flags.prefab.parentId": "secret", flags: { prefab: marker, public: { tint: "blue" } }, x: 12 } },
+      { kind: "update", ref: { coll: "walls", id: "w1", parent: sceneRef },
+        diff: { "flags.prefab": marker } },
+    ]);
+    expect(projectEnvelope(updates, player, resolver)?.ops).toEqual([
+      { kind: "update", ref: tokenRef("t-public"), diff: { flags: { public: { tint: "blue" } }, x: 12 } },
+    ]);
+    expect(projectEnvelope(updates, gm, resolver)).toBe(updates);
+  });
+
+  test("scene-level embedded-array updates cannot bypass child visibility or prefab redaction", () => {
+    const marker = { instanceId: "instance", parentId: "hidden-parent", sourceScene: "secret" };
+    const sc = scene({ tokens: [token("visible", { flags: { prefab: marker } }),
+      token("hidden", { hidden: true, flags: { prefab: marker } })] });
+    const wall = sc.walls[0];
+    if (!wall) throw new Error("Missing fixture wall");
+    wall.flags = { prefab: marker };
+    const e = env([{ kind: "update", ref: sceneRef, diff: {
+      name: "Still public", tokens: sc.tokens as unknown as Json,
+      "walls.0.flags.prefab": marker,
+    } }]);
+    const projection = projectEnvelope(e, player, { resolve: (ref) => ref.coll === "scenes" ? sc : undefined });
+    expect(projection?.ops[0]).toMatchObject({ kind: "update", diff: {
+      name: "Still public", tokens: [{ _id: "visible", flags: {} }],
+      walls: [{ _id: "w1", flags: {} }],
+    } });
+    expect(JSON.stringify(projection)).not.toContain("hidden-parent");
+    expect(JSON.stringify(projection)).not.toContain("secret");
+    expect(projectEnvelope(e, gm)).toBe(e);
   });
 
   test("updates to hidden tokens are dropped for non-owners", () => {
@@ -390,4 +494,26 @@ describe("helpers", () => {
   test("getEffectiveOwnership GM override", () => {
     expect(getEffectiveOwnership(gm, { ...token("t"), ownership: { default: 0 } })).toBe(3);
   });
+});
+
+test("action receipts never expose inverse HP or hidden entities to players, even with forged public ownership", () => {
+  const w = world();
+  const privateActor = w.actors.find((actor) => actor._id === "a-gm");
+  if (!privateActor) throw new Error("missing private actor");
+  const secret = { _id: "r-private", type: "actionReceipt" as const, name: "Private action",
+    ownership: { default: 3 as const }, flags: {}, system: {}, status: "ready" as const,
+    createdAt: 1, commits: 1, after: [{ ref: { coll: "actors" as const, id: "a-gm" },
+      hash: "f".repeat(64) }],
+    inverses: [{ kind: "create" as const, coll: "actors" as const,
+      data: privateActor }] };
+  w.actionReceipts.push(secret);
+  expect(projectWorld(w, 1, gm).collections.actionReceipts).toEqual([secret]);
+  expect(projectWorld(w, 1, player).collections.actionReceipts).toEqual([]);
+  const env: OpEnvelope = { seq: 1, ts: 1, by: "gm-key", txId: "r", ops: [
+    { kind: "create", coll: "actionReceipts", data: secret },
+    { kind: "update", ref: { coll: "actionReceipts", id: secret._id }, diff: { status: "reverted" } },
+    { kind: "delete", ref: { coll: "actionReceipts", id: secret._id } },
+  ] };
+  expect(projectEnvelope(env, player, { resolve: () => secret })).toBeNull();
+  expect(projectEnvelope(env, gm)).toEqual(env);
 });

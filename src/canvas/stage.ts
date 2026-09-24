@@ -43,6 +43,8 @@ import type { StrategicFogLayer } from "./layers/StrategicFogLayer";
 import { StrategicFogLayer as StrategicFogLayerImpl } from "./layers/StrategicFogLayer";
 import type { EffectsLayer } from "./layers/EffectsLayer";
 import { EffectsLayer as EffectsLayerImpl } from "./layers/EffectsLayer";
+import type { FxLayer } from "./layers/FxLayer";
+import { FxLayer as FxLayerImpl } from "./layers/FxLayer";
 import type { TilesLayer, TilesLayerOptions } from "./layers/TilesLayer";
 import { TilesLayer as TilesLayerImpl } from "./layers/TilesLayer";
 import type { AreaPreviewLayer } from "./layers/AreaPreviewLayer";
@@ -66,9 +68,11 @@ export const LAYER_ORDER = [
   // added in `createStage` and not here is a silent divergence — which is exactly how the
   // hexcrawl layer drifted for the whole time no browser ran the suite (D-291).
   "hexcrawl",
+  "fxBelowTokens",
   "tokens",
   "models",
   "tilesAbove",
+  "fxAboveTokens",
   "fog",
   "effects",
   "notes",
@@ -112,6 +116,8 @@ export interface Stage {
   peekHexOverlayLayer(): HexOverlayLayer | null;
   /** §9 pings + rulers (ephemeral overlays, ticker-driven). */
   getEffectsLayer(): EffectsLayer;
+  /** Macros/FX: bounded timeline visuals, always below fog. */
+  getFxLayer(): FxLayer;
   /** §9 tiles below/above with roof/fade occlusion. */
   getTilesLayer(options?: TilesLayerOptions): TilesLayer;
   setBackground(color: number): void;
@@ -370,6 +376,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   let strategicFogLayer: StrategicFogLayerImpl | null = null;
   let hexOverlayLayer: HexOverlayLayerImpl | null = null;
   let effectsLayer: EffectsLayerImpl | null = null;
+  let fxLayer: FxLayerImpl | null = null;
   let tilesLayer: TilesLayerImpl | null = null;
   let areaPreviewLayer: AreaPreviewLayerImpl | null = null;
   let threatOverlayLayer: ThreatOverlayLayerImpl | null = null;
@@ -395,6 +402,11 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   const hexOverlayHolder = new Container();
   hexOverlayHolder.label = "hexcrawl";
   root.addChild(hexOverlayHolder);
+
+  // FX world visuals NEVER ride the overlay above fog (unlike pings/rulers).
+  const fxBelowTokens = new Container();
+  fxBelowTokens.label = "fxBelowTokens";
+  root.addChild(fxBelowTokens);
 
   // ── Tokens ──────────────────────────────────────────────────────────────────
   const tokenLayer = new Container();
@@ -427,6 +439,9 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   const tilesAboveLayer = new Container();
   tilesAboveLayer.label = "tilesAbove";
   root.addChild(tilesAboveLayer);
+  const fxAboveTokens = new Container();
+  fxAboveTokens.label = "fxAboveTokens";
+  root.addChild(fxAboveTokens);
   const fogHolder = new Container();
   fogHolder.label = "fog";
   root.addChild(fogHolder);
@@ -560,6 +575,17 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       }
       return effectsLayer;
     },
+    getFxLayer(): FxLayer {
+      fxLayer ??= new FxLayerImpl(fxBelowTokens, fxAboveTokens, (id) => {
+        const view = tokenViews.get(id);
+        const rect = tokenRects.get(id);
+        if (!view?.visible || !rect) return undefined;
+        // Follow the *drawn* interpolated token, never the authoritative
+        // hidden pre-image or an off-scene/unprojected position.
+        return { x: view.x + rect.width / 2, y: view.y + rect.height / 2 };
+      });
+      return fxLayer;
+    },
     getTilesLayer(options?: TilesLayerOptions): TilesLayer {
       if (!tilesLayer) {
         tilesLayer = new TilesLayerImpl(
@@ -637,6 +663,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
         seen.add(token._id);
         const rect = tokenRect(token);
         let view = tokenViews.get(token._id);
+        const jump = !view;
         if (!view) {
           view = new Container();
           const body = new Graphics();
@@ -651,7 +678,6 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           tokenLayer.addChild(view);
           tokenViews.set(token._id, view);
         }
-        const jump = !tokenViews.has(token._id);
         tokenTargets.set(token._id, { x: rect.x, y: rect.y });
         tokenRects.set(token._id, {
           x: rect.x,
@@ -791,6 +817,8 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       threatOverlayLayer = null;
       effectsLayer?.destroy();
       effectsLayer = null;
+      fxLayer?.destroy();
+      fxLayer = null;
       tilesLayer?.destroy();
       tilesLayer = null;
       modelLayer?.destroy();
@@ -822,6 +850,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   // initial grid pass once a camera exists
   app.ticker.add((t) => {
     effectsLayer?.tick(t.deltaMS);
+    fxLayer?.tick(t.deltaMS);
     // §9 animated movement: exponential glide toward each token target
     for (const [id, view] of tokenViews) {
       const target = tokenTargets.get(id);

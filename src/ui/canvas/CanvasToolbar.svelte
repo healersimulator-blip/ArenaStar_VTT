@@ -8,6 +8,7 @@
    */
   import { isTypingTarget } from "../../core/keys";
   import { hexTravel } from "../../core/hexcrawl/strings";
+  import Icon from "../icons/Icon.svelte";
   import type { ToolOptions } from "../../canvas/tools/controller";
   import type { DoorState } from "../../canvas/vision/wallSight";
 
@@ -52,6 +53,7 @@
     fogStrokes = 0,
     bindings = {},
     onAction = () => {},
+    onChooseTool = () => {},
     onRoll = () => {},
     onEraseAll = () => {},
     pathTool = false,
@@ -66,6 +68,8 @@
     /** action → combo overrides from the settings/keybinding layer (§10). */
     bindings?: Readonly<Record<string, string>>;
     onAction?: (action: CanvasAction) => void;
+    /** The shell can dismiss setup before showing this tool's contextual options. */
+    onChooseTool?: (tool: CanvasTool) => void;
     onRoll?: (formula: string, mode: RollMode) => void;
     onEraseAll?: () => void;
     /**
@@ -80,6 +84,8 @@
   let diceCount = $state(1);
   let rollMode = $state<RollMode>("roll");
   let history = $state<Array<{ formula: string; mode: RollMode }>>([]);
+  let optionsOpen = $state(false);
+  const HAS_OPTIONS = new Set<CanvasTool>(["draw", "text", "measure", "dice", "fog", "wall", "light", "pin", "path"]);
   let toolDice = [4, 6, 8, 10, 12, 20] as const;
   let drawShapes = [
     { id: "freehand", label: "Freehand", icon: "✎", key: "F" },
@@ -141,7 +147,9 @@
   );
 
   function choose(toolId: CanvasTool) {
+    optionsOpen = HAS_OPTIONS.has(toolId) && (toolId !== active || !optionsOpen);
     active = toolId;
+    onChooseTool(toolId);
     globalThis.dispatchEvent(new CustomEvent("vtt-canvas-tool", { detail: toolId }));
   }
 
@@ -229,12 +237,13 @@
 
 <svelte:window onkeydown={onKey} />
 <div class:collapsed class="canvas-toolbar" role="toolbar" aria-label="Canvas tools" data-canvas-toolbar>
-  <button
+  <div class="rail-scroll">
+  <button data-icon-button
     class="collapse"
     type="button"
     aria-label={collapsed ? "Expand toolbar" : "Collapse toolbar"}
     title={collapsed ? "Expand toolbar" : "Collapse toolbar"}
-    onclick={() => (collapsed = !collapsed)}>{collapsed ? "›" : "‹"}</button
+    onclick={() => (collapsed = !collapsed)}><Icon name={collapsed ? "chevronRight" : "chevronLeft"} /></button
   >
   {#if !collapsed}
     {#if isGM}
@@ -242,15 +251,16 @@
         <span class="group-label">Layer</span>
         <div class="layers">
           {#each layers as entry (entry.id)}
-            <button
+            <button data-icon-button
               type="button"
               class:active={layer === entry.id}
               aria-pressed={layer === entry.id}
               title={`${entry.label} (${entry.key})`}
+              aria-label={entry.label}
               data-canvas-layer={entry.id}
               onclick={() => (layer = entry.id)}
             >
-              <span class="icon">{entry.label.slice(0, 1)}</span>
+              <span class="icon"><Icon name={entry.id} /></span>
               <span class="label">{entry.label.split(" ")[0]}</span>
             </button>
           {/each}
@@ -260,7 +270,7 @@
 
     <div class="group" role="group" aria-label="Tools">
       {#each visibleTools as tool (tool.id)}
-        <button
+        <button data-icon-button
           type="button"
           class:active={active === tool.id}
           aria-pressed={active === tool.id}
@@ -269,11 +279,56 @@
           data-canvas-tool={tool.id}
           onclick={() => choose(tool.id)}
         >
-          <span class="icon">{tool.icon}</span><span class="label">{tool.label}</span>
+          <span class="icon"><Icon name={tool.id} /></span><span class="label">{tool.label}</span>
         </button>
       {/each}
     </div>
 
+    <div class="group" role="group" aria-label="View">
+      <button data-icon-button type="button" title="Zoom in" aria-label="Zoom in" data-canvas-action="zoom-in" onclick={() => act("zoom-in")}>
+        <span class="icon"><Icon name="zoomIn" /></span><span class="label">Zoom in</span>
+      </button>
+      <button data-icon-button type="button" title="Zoom out" aria-label="Zoom out" data-canvas-action="zoom-out" onclick={() => act("zoom-out")}>
+        <span class="icon"><Icon name="zoomOut" /></span><span class="label">Zoom out</span>
+      </button>
+      <button data-icon-button type="button" title="Fit scene to view" aria-label="Fit scene" data-canvas-action="zoom-fit" onclick={() => act("zoom-fit")}>
+        <span class="icon"><Icon name="fit" /></span><span class="label">Fit</span>
+      </button>
+      <button data-icon-button type="button" title="Turn order (Y)" aria-label="Turn order" data-canvas-action="turn-order" onclick={() => act("turn-order")}>
+        <span class="icon"><Icon name="turn" /></span><span class="label">Turn order</span>
+      </button>
+      <button data-icon-button type="button" title="Add the selection to the turn order (U)" aria-label="Add to turn order" data-canvas-action="add-turn" onclick={() => act("add-turn")}>
+        <span class="icon"><Icon name="addTurn" /></span><span class="label">Add turn</span>
+      </button>
+      <button data-icon-button type="button" title="Settings" aria-label="Settings" data-canvas-action="settings" onclick={() => act("settings")}>
+        <span class="icon"><Icon name="settings" /></span><span class="label">Settings</span>
+      </button>
+      <button data-icon-button type="button" title="Keyboard shortcuts and help" aria-label="Help" data-canvas-action="help" onclick={() => act("help")}>
+        <span class="icon"><Icon name="help" /></span><span class="label">Help</span>
+      </button>
+    </div>
+
+    {#if isGM}
+      <div class="group" role="group" aria-label="Drawings">
+        <button data-icon-button
+          type="button"
+          class="danger"
+          aria-label="Erase all drawings"
+          title="Erase all drawings in this scene"
+          data-canvas-action="erase-all"
+          onclick={onEraseAll}><span class="icon"><Icon name="trash" /></span><span class="label">Erase drawings</span></button
+        >
+      </div>
+    {/if}
+  {/if}
+  </div>
+  {#if !collapsed && optionsOpen && HAS_OPTIONS.has(active)}
+    <div class="tool-popover" data-tool-options={active}>
+      <div class="popover-heading">
+        <div><span class="popover-kicker">CANVAS TOOL</span><strong>{tools.find((tool) => tool.id === active)?.label}</strong></div>
+        <button data-icon-button type="button" class="popover-close" aria-label="Close tool options" title="Close tool options"
+          onclick={() => (optionsOpen = false)}><Icon name="x" size={17} /></button>
+      </div>
     <div class="group subpanel" role="group" aria-label="Tool options">
       {#if active === "path"}
         <p class="hint" data-path-hint>{hexTravel.pathHint}</p>
@@ -584,210 +639,178 @@
       {/if}
     </div>
 
-    <div class="group" role="group" aria-label="View">
-      <button type="button" title="Zoom in" aria-label="Zoom in" data-canvas-action="zoom-in" onclick={() => act("zoom-in")}>
-        <span class="icon">＋</span><span class="label">Zoom in</span>
-      </button>
-      <button type="button" title="Zoom out" aria-label="Zoom out" data-canvas-action="zoom-out" onclick={() => act("zoom-out")}>
-        <span class="icon">－</span><span class="label">Zoom out</span>
-      </button>
-      <button type="button" title="Fit scene to view" aria-label="Fit scene" data-canvas-action="zoom-fit" onclick={() => act("zoom-fit")}>
-        <span class="icon">⤢</span><span class="label">Fit</span>
-      </button>
-      <button type="button" title="Turn order (Y)" aria-label="Turn order" data-canvas-action="turn-order" onclick={() => act("turn-order")}>
-        <span class="icon">☰</span><span class="label">Turn order</span>
-      </button>
-      <button type="button" title="Add the selection to the turn order (U)" aria-label="Add to turn order" data-canvas-action="add-turn" onclick={() => act("add-turn")}>
-        <span class="icon">＋☰</span><span class="label">Add turn</span>
-      </button>
-      <button type="button" title="Settings" aria-label="Settings" data-canvas-action="settings" onclick={() => act("settings")}>
-        <span class="icon">⚙</span><span class="label">Settings</span>
-      </button>
-      <button type="button" title="Keyboard shortcuts and help" aria-label="Help" data-canvas-action="help" onclick={() => act("help")}>
-        <span class="icon">?</span><span class="label">Help</span>
-      </button>
     </div>
-
-    {#if isGM}
-      <div class="group" role="group" aria-label="Drawings">
-        <button
-          type="button"
-          class="danger"
-          aria-label="Erase all drawings"
-          title="Erase all drawings in this scene"
-          data-canvas-action="erase-all"
-          onclick={onEraseAll}><span class="icon">⌫</span><span class="label">Erase drawings</span></button
-        >
-      </div>
-    {/if}
   {/if}
 </div>
 
 <style>
-  /* D-255: a rail column beside the canvas (never floating over the map or a window). */
+  /* A single, fixed-width icon rail. Tool options occupy the content-dock edge
+     rather than swallowing drawing gestures on the map; no canvas reflow. */
   .canvas-toolbar {
     position: relative;
-    /* A fixed rail width: the canvas must never reflow because a sub-toolbar appeared
-       (D-256 — the tool previews and the e2e pointer maths both assume a stable board). */
-    flex: 0 0 152px;
-    width: 152px;
+    flex: 0 0 56px;
+    width: 56px;
+    min-height: 0;
+    background: #111a23;
+    border-right: 1px solid #283443;
+    z-index: 20;
+  }
+  .canvas-toolbar.collapsed { flex-basis: 44px; width: 44px; }
+  .rail-scroll {
+    height: 100%;
+    width: 100%;
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    padding: 6px 5px;
-    border: 1px solid #343c50;
-    border-left: 0;
-    border-radius: 0 7px 7px 0;
-    background: #151a24ef;
-    overflow-y: auto;
-  }
-  .canvas-toolbar button {
-    display: flex;
     align-items: center;
-    gap: 7px;
-    min-width: 138px;
-    padding: 6px 8px;
-    border: 1px solid transparent;
-    border-radius: 4px;
-    color: #d9dfeb;
-    background: transparent;
-    cursor: pointer;
-    text-align: left;
+    gap: 9px;
+    padding: 9px 6px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-width: none;
+    overscroll-behavior: contain;
   }
-  .canvas-toolbar button:hover,
-  .canvas-toolbar button.active {
-    border-color: #6c8fd6;
-    background: #2a3858;
-    color: #fff;
+  .rail-scroll::-webkit-scrollbar { display: none; }
+  .rail-scroll .group { display: flex; flex-direction: column; gap: 3px; width: 100%; border-top: 1px solid #293846; padding-top: 9px; }
+  .rail-scroll .group-label, .rail-scroll .label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
-  /* D-256: icon-first compact rail — the label is the tooltip when collapsed. */
-  .canvas-toolbar.collapsed {
+  .layers { display: flex; flex-direction: column; gap: 3px; }
+  .rail-scroll button {
     flex: 0 0 42px;
     width: 42px;
-    padding: 4px;
-  }
-  .canvas-toolbar.collapsed button {
-    min-width: 30px;
-    justify-content: center;
-  }
-  .canvas-toolbar.collapsed .label,
-  .canvas-toolbar.collapsed .group-label,
-  .canvas-toolbar.collapsed .hint,
-  .canvas-toolbar.collapsed .subpanel,
-  .canvas-toolbar.collapsed .group:not(:has(button.active)) {
-    display: none;
-  }
-  .canvas-toolbar .collapse {
-    min-width: 30px;
-    justify-content: center;
-    padding: 4px;
-    font-size: 18px;
-  }
-  .group {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    padding-top: 4px;
-    border-top: 1px solid #242b3a;
-  }
-  .group:first-of-type {
-    border-top: 0;
-  }
-  .group-label {
-    font-size: 10px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: #7f8aa3;
-    padding-left: 4px;
-  }
-  .layers {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 3px;
-  }
-  .layers button,
-  .swatches button {
+    height: 42px;
     min-width: 0;
-    justify-content: center;
-    padding: 5px 6px;
-  }
-  .swatches {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 3px;
-  }
-  .swatches button {
-    flex: 1 1 auto;
-    border: 1px solid #333c50;
-  }
-  .style-row {
+    min-height: 42px;
+    padding: 0;
     display: flex;
     align-items: center;
-    gap: 4px;
-  }
-  .style-row input[type="color"] {
-    width: 30px;
-    height: 24px;
-    padding: 0;
-    border: 1px solid #3a455e;
-    border-radius: 3px;
-    background: #0c111b;
-  }
-  .style-row input[type="range"] {
-    flex: 1;
-    min-width: 0;
-  }
-  .style-row input[type="number"] {
-    width: 56px;
-    padding: 4px;
-    color: #fff;
-    background: #0c111b;
-    border: 1px solid #3a455e;
-    border-radius: 3px;
-  }
-  .icon {
-    width: 25px;
-    text-align: center;
-    font-weight: 700;
-  }
-  .label {
-    font-size: 12px;
-  }
-  .hint {
-    margin: 2px 4px 0;
-    font-size: 10px;
-    line-height: 1.35;
-    color: #8b94a8;
-    overflow-wrap: anywhere;
-  }
-  .dice-form {
-    display: flex;
-    gap: 3px;
-  }
-  .dice-form input {
-    width: 84px;
-    min-width: 0;
-    padding: 5px;
-    color: #fff;
-    background: #0c111b;
-    border: 1px solid #3a455e;
-    border-radius: 3px;
-  }
-  .dice-form button {
-    min-width: 0;
-    padding: 5px;
     justify-content: center;
+    border: 1px solid transparent;
+    border-radius: 11px;
+    background: transparent;
+    color: #aebec8;
+    cursor: pointer;
+    transition: color .16s, background .16s, border-color .16s;
   }
-  .history {
+  .rail-scroll button:hover { background: #233342; color: #f2fbfc; }
+  .rail-scroll button.active {
+    border-color: #4e938b;
+    color: #a7f0df;
+    background: #1d4342;
+    box-shadow: inset 3px 0 0 #70d8c6;
+  }
+  .rail-scroll button:focus-visible { position: relative; z-index: 2; }
+  .rail-scroll .collapse { flex-basis: 32px; height: 32px; min-height: 32px; opacity: .8; }
+  .canvas-toolbar.collapsed .rail-scroll { padding-inline: 1px; }
+  .canvas-toolbar.collapsed .collapse { width: 40px; }
+  .icon { display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; }
+  .danger { color: #e6a7a5 !important; }
+  .tool-popover {
+    position: fixed;
+    left: auto;
+    right: 12px;
+    top: 186px;
+    width: calc(clamp(312px, 25vw, 376px) - 24px);
+    max-height: min(590px, calc(100dvh - 210px));
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    overflow-y: auto;
+    border: 1px solid #41566a;
+    border-radius: 14px;
+    background: #1b2632;
+    color: #edf5f6;
+    box-shadow: 0 18px 52px #020810bd, 0 2px 10px #02081055;
   }
-  .history button {
-    min-width: 0;
-    font-size: 11px;
+  .popover-heading {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 12px 10px 16px;
+    border-bottom: 1px solid #354658;
+    background: #202d3a;
   }
-  .danger {
-    color: #ffb4b4 !important;
+  .popover-heading > div { display: flex; flex-direction: column; gap: 2px; }
+  .popover-heading strong { font-size: .94rem; font-weight: 700; }
+  .popover-kicker { font-size: .63rem; font-weight: 750; letter-spacing: .14em; color: #86bfb7; }
+  .popover-close {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    min-height: 32px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: transparent;
+    color: #b6c6cd;
+    cursor: pointer;
+  }
+  .popover-close:hover { background: #344757; color: #fff; }
+  .subpanel { display: flex; flex-direction: column; gap: 12px; padding: 14px 16px 18px; }
+  .subpanel .group-label { font-size: .7rem; text-transform: uppercase; letter-spacing: .09em; color: #a3b8bf; }
+  .swatches, .style-row { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+  .subpanel button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    width: auto;
+    min-width: 39px;
+    min-height: 38px;
+    padding: 6px 9px;
+    border: 1px solid #465a68;
+    border-radius: 8px;
+    background: #253543;
+    color: #ebf3f3;
+    cursor: pointer;
+    text-align: center;
+    font-size: .86rem;
+  }
+  .subpanel button:hover, .subpanel button.active { background: #315a57; border-color: #70d8c6; color: #f6fffc; }
+  .subpanel .icon { width: auto; height: auto; font-weight: 700; }
+  .subpanel .label { font-size: .83rem; }
+  .subpanel input { min-height: 38px; border: 1px solid #506473; border-radius: 7px; background: #111e29; color: #fff; padding: 5px 8px; }
+  .style-row input[type="color"] { width: 40px; height: 38px; min-height: 38px; padding: 2px; }
+  .style-row input[type="range"] { flex: 1 1 100px; min-width: 85px; }
+  .style-row input[type="number"] { width: 82px; }
+  .hint { margin: 0; color: #b5c4ca; font-size: .76rem; line-height: 1.45; }
+  .dice-form { display: flex; gap: 7px; }
+  .dice-form input { flex: 1; width: 0; }
+  .dice-form button { flex: 0 0 auto; }
+  .history { display: flex; flex-wrap: wrap; gap: 6px; border-top: 1px solid #354658; padding-top: 10px; }
+  .history .group-label { width: 100%; }
+  .canvas-toolbar:not(.collapsed)::after {
+    content: "⌄";
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 55px;
+    height: 19px;
+    background: linear-gradient(transparent, #111a23 65%);
+    color: #91bdb8;
+    text-align: center;
+    line-height: 20px;
+    pointer-events: none;
+  }
+  @media (max-width: 930px) {
+    .tool-popover { right: 8px; width: 290px; }
+  }
+  @media (max-width: 710px) {
+    .tool-popover {
+      top: auto;
+      right: 8px;
+      bottom: 8px;
+      width: calc(100vw - 16px);
+      max-height: min(36dvh, 320px);
+    }
   }
 </style>

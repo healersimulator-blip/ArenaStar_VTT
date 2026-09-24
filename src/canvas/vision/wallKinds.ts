@@ -13,7 +13,7 @@
  * locked as blocking). A *window* needs no new document field: sight and light pass, movement
  * and sound are blocked by ordinary codes.
  */
-import type { WallDocument } from "../../core/documents";
+import { isDoorWall, type WallDocument } from "../../core/documents";
 import type { DoorState } from "./wallSight";
 
 export type WallKind = "wall" | "door" | "window";
@@ -65,7 +65,7 @@ export function wallKindName(kind: WallKind): string {
  * anything else is a plain wall.
  */
 export function wallKindOf(w: Pick<WallDocument, "sight" | "move" | "sound" | "light" | "door">): WallKind {
-  if (w.sight === 1 || w.move === 1 || w.sound === 1 || w.light === 1) return "door";
+  if (isDoorWall(w)) return "door";
   if (w.sight === 2 && w.move === 0 && w.light === 2) return "window";
   return "wall";
 }

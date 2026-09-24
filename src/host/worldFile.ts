@@ -42,6 +42,8 @@
  * Trust is never imported. `WorldsRecord.trustedPackages` is THIS GM's consent
  * to run a module in-page (D-089); it is not exported, and an archive claiming it
  * is ignored. A restore keeps whatever this browser had already granted.
+ * Reviewed-script approvals are also local consent: copies AND restores of world
+ * archives keep source/policy for inspection but must be re-approved on this host.
  */
 import { strFromU8, strToU8, unzip, Zip, ZipDeflate } from "fflate";
 import type { IDBPDatabase } from "idb";
@@ -57,7 +59,7 @@ import {
 } from "../storage/strategicStore";
 import type { TurnReport } from "../core/sim";
 import { OpfsAssetStore, type DirHandleLike } from "../storage/opfs";
-import type { BaseDocument, CollectionName } from "../core/documents";
+import type { BaseDocument, CollectionName, MacroDocument } from "../core/documents";
 import type { AssetId, DocId, WorldId } from "../core/ids";
 import type { HostPersister } from "../storage/persistence";
 import { buildPackageFromFiles } from "../packages/packageLoader";
@@ -248,6 +250,15 @@ export async function collectWorldArchive(options: ExportWorldOptions): Promise<
 
   const assetEntries: WorldFileAsset[] = [];
   const blobs: Array<{ hash: AssetId; bytes: Uint8Array }> = [];
+  // Playback/importing licensed media does not grant permission to distribute
+  // its bytes in a downloadable world ZIP or folder. Refuse the entire export
+  // before emitting even one archive entry; the GM can reclassify only media
+  // for which they have separately established redistribution rights.
+  const restricted = assets.filter((asset) => asset.exportRights === "restricted");
+  if (restricted.length) throw new Error(
+    `world file: ${restricted.length} FX media file(s) have no world-export rights (${restricted.slice(0, 3)
+      .map((asset) => asset.name).join(", ")}); export cancelled — confirm redistribution rights separately`,
+  );
   for (const record of assets) {
     const bytes = record.bytes ?? (await opfs?.get(record.hash));
     if (!bytes) throw new Error(`world file: missing blob for asset ${record.hash}`);
@@ -258,6 +269,8 @@ export async function collectWorldArchive(options: ExportWorldOptions): Promise<
       size: record.size,
       chunks: record.chunks,
     };
+    if (record.visibility !== undefined) entry.visibility = record.visibility;
+    if (record.exportRights !== undefined) entry.exportRights = record.exportRights;
     if (record.width !== undefined) entry.width = record.width;
     if (record.height !== undefined) entry.height = record.height;
     if (record.thumb !== undefined) entry.thumb = record.thumb;
@@ -552,14 +565,32 @@ export async function importWorldZip(options: ImportWorldOptions): Promise<Impor
   }
   const assetStore = tx.objectStore(STORES.assets);
   for (const entry of assetEntries) {
+    // A claim inside somebody else's archive does not transfer their media
+    // license to the receiving GM. Even a formerly exportable FX file must be
+    // reapproved for both serving to players and repackaging in a new ZIP.
+    const rights = entry.exportRights === undefined ? {} : {
+      visibility: "gm" as const, exportRights: "restricted" as const,
+    };
     const record: AssetRecord = opfs
-      ? { ...entry, worldId }
-      : { ...entry, worldId, bytes: files.get(`assets/${entry.hash}`) as Uint8Array };
+      ? { ...entry, worldId, ...rights }
+      : { ...entry, worldId, bytes: files.get(`assets/${entry.hash}`) as Uint8Array, ...rights };
     void assetStore.put(record);
   }
   const docStore = tx.objectStore(STORES.documents);
-  for (const doc of documents.docs) {
-    void docStore.put({ worldId, coll: doc.coll, id: doc.id, doc: doc.doc });
+  for (const row of documents.docs) {
+    let doc = row.doc;
+    if (row.coll === "macros" && doc.type === "macro" && (doc as MacroDocument).kind === "script") {
+      const macro = doc as MacroDocument;
+      // An archive can be supplied by anyone, including a former GM. A hash matching
+      // the bundled source/policy proves integrity, NOT this host's review/consent.
+      // Invalidate the approval and hide the player entry until this GM republishes.
+      doc = { ...macro, ownership: { ...macro.ownership, default: 0 },
+        script: macro.script ? { ...macro.script, approvedHash: "0".repeat(64), playerCallable: false } : undefined,
+        flags: { ...macro.flags, core: { ...(typeof macro.flags.core === "object" && macro.flags.core &&
+          !Array.isArray(macro.flags.core) ? macro.flags.core : {}), playerCallable: false } },
+        scriptState: { recent: [] } } as MacroDocument;
+    }
+    void docStore.put({ worldId, coll: row.coll, id: row.id, doc });
   }
   if (carriesPackages) {
     const pkgStore = tx.objectStore(STORES.packages);

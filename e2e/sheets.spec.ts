@@ -36,6 +36,7 @@ async function connectSheetPlayer(host: Page, player: Page): Promise<string> {
   await expect
     .poll(() => player.locator("#pstatus").textContent(), { timeout: 20_000 })
     .toContain("World One");
+  await player.click('[data-player-tab="actors"]');
   return playerCall<string>(player, "userId");
 }
 

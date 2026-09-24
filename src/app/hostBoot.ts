@@ -13,7 +13,7 @@ import { DocumentStore, type StoreMeta } from "../core/store";
 import { OpLog } from "../core/oplog";
 import { UndoStack } from "../core/undo";
 import { createEventBus } from "../core/events";
-import type { SceneDocument, TokenDocument, UserDocument } from "../core/documents";
+import type { ActorDocument, SceneDocument, TokenDocument, UserDocument } from "../core/documents";
 import type { WorldId } from "../core/ids";
 import { HostSync, gmSessionUser, type HostEvents } from "../host/sync";
 import { AssetServer, wireManifestToStore } from "../host/assets";
@@ -147,7 +147,7 @@ export interface HostPackages {
   grantTrust(id: string): Promise<{ ok: true } | { ok: false; error: string }>;
   revokeTrust(id: string): Promise<{ ok: true } | { ok: false; error: string }>;
   /** §12 compendia: parsed read-only packs from every imported package. */
-  compendia(): Promise<Array<{ packageId: string; pack: CompendiumPack }>>;
+  compendia(): Promise<Array<{ packageId: string; packFile: string; pack: CompendiumPack }>>;
 }
 
 export interface HostApp {
@@ -434,7 +434,9 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
   // ── Assets (§7) ─────────────────────────────────────────────────────────────
   const root = options.root !== undefined ? options.root : await opfsRoot();
   const assets = await AssetServer.open({ worldId: meta.worldId, db, root });
-  wireManifestToStore(assets, store);
+  // The asset server exists before HostSync; the hook begins fan-out once sessions are available.
+  let manifestHost: HostSync | null = null;
+  wireManifestToStore(assets, store, () => manifestHost?.broadcastAssetManifests());
   const pipeline = new ImportPipeline(assets, options.codec ?? new AssetWorkerCodec());
 
   // ── HostSync + GM loopback (§2: GM UI never calls host internals) ──────────
@@ -449,6 +451,33 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
     verifyHelloSig: (hello, roomId) => verifyHello(hello, roomId),
     now,
     assets,
+    // Stable package/file/entry addressing: resolve only from this world's
+    // imported actor pack, on the host, at invocation time. Never import or
+    // mutate a compendium entry just to summon it.
+    resolveSummonSource: async (ref): Promise<ActorDocument | undefined> => {
+      const rec = await getPackage(db, meta.worldId, ref.packageId);
+      const descriptor = rec?.manifest.packs?.find((pack) =>
+        pack.file === ref.packFile && pack.type === "actors");
+      if (!rec || !descriptor) return undefined;
+      const body = rec.files[descriptor.file];
+      if (!body) return undefined;
+      let parsed: unknown;
+      try { parsed = JSON.parse(body); } catch { return undefined; }
+      const pack = parsePackCached(packCacheKey({ worldId: meta.worldId, packageId: rec.id,
+        version: rec.version, importedAt: rec.importedAt, file: descriptor.file }), parsed);
+      if (pack?.type !== "actors") return undefined;
+      const entry = pack.entries.find((row) => row.id === ref.entryId);
+      if (!entry || entry.data.type !== "actor") return undefined;
+      const data = entry.data;
+      return { ...data, _id: ref.entryId, type: "actor", name: data.name,
+        ownership: { default: 0 }, flags: typeof data.flags === "object" && data.flags !== null &&
+          !Array.isArray(data.flags) ? data.flags : {},
+        system: typeof data.system === "object" && data.system !== null &&
+          !Array.isArray(data.system) ? data.system : {},
+        items: Array.isArray(data.items) ? data.items : [],
+        effects: Array.isArray(data.effects) ? data.effects : [],
+        ...(entry.img && data.img === undefined ? { img: entry.img } : {}) } as ActorDocument;
+    },
     // D-250: explored fog per user + scene lives in the world's `fog` store, so a reload,
     // a player's reconnect and the world file all bring the same map back.
     fogStore: {
@@ -456,6 +485,7 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
       get: async (userId, sceneId) => (await getFog(db, meta.worldId, sceneId, userId))?.png ?? null,
     },
   });
+  manifestHost = host;
 
   // ── §5A turn/sim channel: sandboxed SimWorker + §12 package boot ──────────
   const activeRec: PackageRecord | undefined = worldRec?.activeRulesPackage
@@ -711,7 +741,7 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
       return writeTrusted(current.filter((x) => x !== id));
     },
     async compendia() {
-      const out: Array<{ packageId: string; pack: CompendiumPack }> = [];
+      const out: Array<{ packageId: string; packFile: string; pack: CompendiumPack }> = [];
       for (const rec of await listPackages(db, meta.worldId)) {
         for (const descriptor of rec.manifest.packs ?? []) {
           const text = rec.files[descriptor.file];
@@ -736,7 +766,7 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
             }),
             parsed,
           );
-          if (pack) out.push({ packageId: rec.id, pack });
+          if (pack) out.push({ packageId: rec.id, packFile: descriptor.file, pack });
         }
       }
       return out;
@@ -764,6 +794,7 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
       runner.terminate();
       gmClient.close();
       host.removeSession("gm");
+      host.dispose();
       assets.close();
       // Awaited, not `void`: this is the final documents flush. Returning
       // before it settles lets a subsequent world-row replacement (the §8

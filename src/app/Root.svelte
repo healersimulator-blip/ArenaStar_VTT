@@ -28,8 +28,12 @@
   let app = $state<HostApp | null>(null);
   let bootError = $state<string | null>(null);
   let wizardPackage = $state<Uint8Array | null>(null);
+  // A newly created campaign opens the setup surface once. Returning to an
+  // existing world goes directly to the board; Session & world stays available.
+  let initialSetup = $state(false);
 
-  async function host(worldId: string | null): Promise<void> {
+  async function host(worldId: string | null, fresh = false): Promise<void> {
+    initialSetup = fresh;
     mode = "hosting";
     bootError = null;
     try {
@@ -65,13 +69,13 @@
 </script>
 
 {#if mode === "picker"}
-  <StartScreen onHost={(id) => void host(id)} onJoin={() => (mode = "joining")} onNewWorld={openWizard} />
+  <StartScreen onHost={(id) => void host(id, id === null)} onJoin={() => (mode = "joining")} onNewWorld={openWizard} />
 {:else if mode === "wizard"}
   <main class="vtt-ui">
     <NewWorldWizard
       initialPackage={wizardPackage}
       onCancel={() => (mode = "picker")}
-      onCreated={(id) => void host(id)}
+      onCreated={(id) => void host(id, true)}
     />
   </main>
 {:else if mode === "joining"}
@@ -86,7 +90,7 @@
     <!-- App wires its canvas, bus listeners and status in onMount from the `app` prop, so it
          must not mount before the boot has produced one (mounting on null left a dead shell:
          no canvas, status "—" — found by the D-248 picker-import e2e). -->
-    <App {app} {bootError} onExit={() => void closeWorld()} />
+    <App {app} {bootError} {initialSetup} onExit={() => void closeWorld()} />
   {:else}
     <main class="vtt-ui">
       <p class="sub" role="status" data-booting>Starting world…</p>
@@ -104,7 +108,8 @@
     gap: 24px;
     padding: clamp(24px, 6vw, 72px) 20px;
     background:
-      radial-gradient(circle at 50% 0%, #243b55 0%, transparent 48%), #0d1117;
+      radial-gradient(circle at 28% 8%, #1b403d 0%, transparent 42%),
+      radial-gradient(circle at 78% 70%, #202f43 0%, transparent 48%), #0c141d;
     color: #f2f5f8;
   }
   .sub {

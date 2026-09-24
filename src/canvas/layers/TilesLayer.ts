@@ -104,11 +104,22 @@ export class TilesLayer {
     const occupiedUnder = occupied.some((o) => rectsOverlap(rect, o));
     const alpha = tileAlpha(tile, occupiedUnder);
     view.alpha = alpha;
+    const parent = this.containerFor(tile);
+    if (view.g.parent !== parent) parent.addChild(view.g);
+    const cx = tile.x + tile.width / 2;
+    const cy = tile.y + tile.height / 2;
+    const angle = ((tile.rotation ?? 0) * Math.PI) / 180;
     view.g.alpha = alpha; // placeholder path: whole-view fade (readback honest)
+    view.g.pivot.set(cx, cy);
+    view.g.position.set(cx, cy);
+    view.g.rotation = angle;
     if (view.sprite) {
-      view.sprite.position.set(tile.x, tile.y);
+      if (view.sprite.parent !== parent) parent.addChild(view.sprite);
+      view.sprite.anchor.set(0.5);
+      view.sprite.position.set(cx, cy);
       view.sprite.width = tile.width;
       view.sprite.height = tile.height;
+      view.sprite.rotation = angle;
       view.sprite.alpha = alpha;
       view.g.clear();
       // roof outline stays visible even with a texture (GM affordance)

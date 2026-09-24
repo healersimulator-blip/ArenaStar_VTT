@@ -4,8 +4,8 @@ import { MsgKind, type MsgName } from "../../src/core/messages";
 import { ALL_KINDS, sampleMessage } from "./fixtures";
 
 describe("frameMessage / deframeMessage (§6.1, §13)", () => {
-  test("round-trips every one of the 28 message kinds", () => {
-    expect(ALL_KINDS).toHaveLength(35);
+  test("round-trips all sampled wire message kinds", () => {
+    expect(new Set(ALL_KINDS).size).toBe(Object.keys(MsgKind).length);
     for (const kind of ALL_KINDS) {
       const msg = sampleMessage(kind);
       const framed = frameMessage(msg);
@@ -70,8 +70,28 @@ describe("channelFor (§6.1)", () => {
       "roll.pending": "ops",
       "roll.reroll": "ops",
       "roll.revert": "ops",
+      "action.revert": "ops",
       "roll.delegate": "ops",
-  "roll.apply": "ops",
+      "roll.apply": "ops",
+      "automation.request": "ops",
+      "automation.click": "ops",
+      "automation.trace": "ops",
+      "tagger.rules": "ops",
+      "tagger.rules.result": "ops",
+      "macro.request": "ops",
+      "macro.result": "ops",
+      "prefab.place": "ops",
+      "prefab.result": "ops",
+      "summon.place": "ops",
+      "summon.dismiss": "ops",
+      "summon.result": "ops",
+      "fx.request": "ops",
+      "fx.start": "ops",
+      "fx.sync": "ops",
+      "fx.stop": "ops",
+      "fx.stopMatching": "ops",
+      "fx.end": "ops",
+      "asset.manifest": "ops",
       "roll.challenge": "ops",
       ephemeral: "ephemeral",
       "asset.get": "assets",

@@ -61,32 +61,35 @@ test.describe("readable, keyboard-friendly UI surfaces", () => {
     await expect(page.locator("#answer-input")).toHaveValue("");
   });
 
-  test("GM toolbar controls keep their labels readable and open a window", async ({
+  test("GM workspace gives the board room and retains accessible, compact actions", async ({
     page,
   }) => {
     await page.goto(`${entry}?e2e=1`);
     await waitForSurface(page, "app");
     await expect(page.locator("#status")).toContainText("World One");
 
-    for (const selector of [
-      "#add-token",
-      "#share",
-      "#gm-perms",
-      "#gm-settings",
-      "#gm-undo",
-      "#gm-redo",
-    ]) {
+    const board = await page.locator(".canvas-host").boundingBox();
+    const rail = await page.locator("[data-canvas-toolbar]").boundingBox();
+    expect(board?.y).toBeLessThan(155);
+    expect(board?.width).toBeGreaterThan(700);
+    expect(rail?.width).toBeLessThanOrEqual(60);
+    expect(await page.evaluate(() => document.body.scrollHeight)).toBeLessThanOrEqual(960);
+
+    for (const selector of ["#add-token", "#gm-perms", "#gm-settings", "#gm-undo", "#gm-redo"]) {
       const control = page.locator(selector);
       await expect(control).toBeVisible();
-      const metrics = await controlMetrics(control);
-      expect(metrics.fontSize).toBeGreaterThanOrEqual(14);
-      expect(metrics.height).toBeGreaterThanOrEqual(40);
+      await expect(control).toHaveAttribute("aria-label", /.+/);
+      await expect(control).toHaveAttribute("title", /.+/);
+      const box = await control.boundingBox();
+      expect(box?.height).toBeGreaterThanOrEqual(32);
+      expect(box?.height).toBeLessThanOrEqual(42);
     }
+    const invite = page.locator("#share");
+    await expect(invite).toBeVisible();
+    expect((await controlMetrics(invite)).fontSize).toBeGreaterThanOrEqual(14);
 
     await page.click("#gm-settings");
     await expect(page.locator('[data-window="settings"]')).toBeVisible();
-    await expect(
-      page.locator('[data-window="settings"] [data-window-close]'),
-    ).toBeVisible();
+    await expect(page.locator('[data-window="settings"] [data-window-close]')).toBeVisible();
   });
 });

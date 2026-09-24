@@ -13,9 +13,15 @@
  */
 import {
   OWNERSHIP_LEVELS,
+  type AssetManifest,
+  type AutomationDocument,
+  type ActionReceiptDocument,
   type BaseDocument,
   type CollectionName,
   type MessageDocument,
+  type MacroDocument,
+  type PrefabDocument,
+  type FxInstanceDocument,
   type Role,
   type UserDocument,
 } from "../core/documents";
@@ -24,11 +30,28 @@ import type {
   DocRef,
   Json,
   SceneDocument,
+  TileDocument,
+  TokenDocument,
 } from "../core/documents";
 import type { Op, OpEnvelope } from "../core/ops";
 import type {
   AudioCmdMsg,
   EphemeralMsg,
+  AutomationRequestMsg,
+  AutomationClickMsg,
+  AutomationTraceMsg,
+  TaggerRulesMsg,
+  TaggerRulesResultMsg,
+  PrefabPlaceMsg,
+  SummonPlaceMsg,
+  SummonDismissMsg,
+  SummonResultMsg,
+  MacroRequestMsg,
+  MacroResultMsg,
+  FxRequestMsg,
+  FxStartMsg,
+  FxStopMsg,
+  FxStopMatchingMsg,
   HelloMsg,
   PingMsg,
   ReportDetailMsg,
@@ -68,16 +91,33 @@ import {
 } from "../packages/pf1e/rollLedger";
 import type { RollLedger, RollLedgerRoll } from "../packages/pf1e/rollLedger";
 import { deriveFromActorDocument } from "../packages/pf1e/actor";
+import { planAutomationHealth } from "../packages/pf1e/automationHealth";
 import {
   appliedWith,
   planRollApply,
   readRollApplications,
 } from "../packages/pf1e/rollApply";
-import type { AssetId, DocId, PeerId, TxId, UserId } from "../core/ids";
+import type { DocId, PeerId, TxId, UserId } from "../core/ids";
 import { DocumentStore } from "../core/store";
+import { actionOpRef, actionStaleReason, extendActionReceipt, missingActionMessageDeletes,
+  type ActionAudit } from "../core/actionRevert";
 import { OpLog } from "../core/oplog";
 import { UndoStack } from "../core/undo";
 import { can } from "../core/permissions";
+import { canFetchAsset, projectAssetManifest } from "../core/assetAccess";
+import { resolveFxSequence, validateFxSequence } from "../core/fx";
+import { planAutomation, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState,
+  type AutomationEvent, type AutomationMethod } from "../core/automation";
+import { attachedDeletionOps, attachedMovementOps, planPrefabPlacement, PREFAB_COLLECTIONS, validatePrefab } from "../core/prefabs";
+import { boundFxDeletionOps, fxInstanceMatches, validateFxInstance, validateFxInstanceFilter } from "../core/fxInstances";
+import { planSummon, summonDeletionOps, summonMarker, summonPlacementError, validateSummon,
+  type SummonSource } from "../core/summons";
+import { getByTag, isWorldTagRef, listTaggable, tagEditOps, tagRuleOps, tagsOf, TAGGABLE_COLLECTIONS, validSceneTagRefs,
+  validWorldTagRefs,
+  type TagEdit, type TagMatchMode, type TagPattern } from "../core/tags";
+import { boundedJson, scriptApprovalHash, scriptApprovalHashSync, validateScriptArgs, validateScriptMacro,
+  type ScriptGrant, type ScriptPolicy } from "../core/scriptMacros";
+import { runScriptWorker, type ScriptRunner } from "./scriptWorker";
 import {
   docVisibleTo,
   projectEnvelope,
@@ -143,10 +183,7 @@ export interface HostSyncOptions {
   /** Injectable verifier (tests); default verifies via WebCrypto (§6.4). */
   verifyHelloSig?: (hello: HelloMsg, roomId: string) => Promise<boolean>;
   /** Asset manifest source for snapshots (AssetServer wiring; default: store's). */
-  manifest?: () => Record<
-    AssetId,
-    { name: string; mime: string; size: number; chunks: number }
-  >;
+  manifest?: () => AssetManifest;
   /**
    * §7: when present, asset.get requests are served from this server via an
    * AssetTransfer (priority queue + per-peer bandwidth cap).
@@ -163,14 +200,28 @@ export interface HostSyncOptions {
    * store). Absent → fog.put is kept in memory only and fog.get answers from that.
    */
   fogStore?: FogStore;
+  /** Browser Worker by default; injected for deterministic host authorization tests. */
+  scriptRunner?: ScriptRunner;
   rng?: RngFn;
   now?: () => number;
+  /** Host-only pack lookup; absent means compendium summoning is unavailable. */
+  resolveSummonSource?: (source: Extract<SummonSource, { kind: "compendium" }>) => Promise<ActorDocument | undefined>;
 }
 
 /** Persistence for §9 explored fog, keyed per user + scene (the world is implied). */
 export interface FogStore {
   put(userId: UserId, sceneId: DocId, png: Uint8Array): Promise<void>;
   get(userId: UserId, sceneId: DocId): Promise<Uint8Array | null>;
+}
+
+interface PreparedFx {
+  cue: FxStartMsg;
+  recipients: Session[];
+  callerId: string;
+  audience: "scene" | "gm" | "caller";
+  checkedAtSeq: number;
+  sourceTokenId?: string;
+  targetTokenId?: string;
 }
 
 interface Session {
@@ -181,16 +232,32 @@ interface Session {
   intentBucket: TokenBucket;
   ephemeralBucket: TokenBucket;
   assetBucket: TokenBucket;
+  /** Last projected metadata sent to this peer (not asset bytes). */
+  manifestFingerprint: string | null;
 }
 
 function randomId(): string {
   return globalThis.crypto.randomUUID();
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
 function cryptoRng(): number {
   const buf = new Uint32Array(1);
   globalThis.crypto.getRandomValues(buf);
   return (buf[0] as number) / 2 ** 32;
+}
+
+/** Dry-run graphs must not advance the host's mechanical RNG or change later rolls. */
+function automationPreviewRng(seed: string): () => number {
+  let value = 2166136261;
+  for (const char of seed) value = Math.imul(value ^ char.charCodeAt(0), 16777619) >>> 0;
+  if (!value) value = 1;
+  return () => {
+    value ^= value << 13; value ^= value >>> 17; value ^= value << 5;
+    return (value >>> 0) / 2 ** 32;
+  };
 }
 
 /** N01: column-map equality (name → wire kind), order-independent. */
@@ -224,6 +291,10 @@ function resolveInlineRolls(content: string, rng: RngFn): string {
  * lose sight of it. `before` is the document with the inverse diff applied — the state the
  * projection would have judged one envelope ago.
  */
+function visibilityKey(ref: DocRef): string {
+  return `${ref.parent ? `${visibilityKey(ref.parent)}/` : ""}${ref.coll}/${encodeURIComponent(ref.id)}`;
+}
+
 interface VisibilityCrossing {
   key: string;
   ref: DocRef;
@@ -236,22 +307,40 @@ function visibilityCrossings(
   inverses: readonly Op[],
   resolve: (ref: DocRef) => BaseDocument | undefined,
 ): VisibilityCrossing[] {
-  const out: VisibilityCrossing[] = [];
+  type Diff = Extract<Op, { kind: "update" }>["diff"];
+  const grouped = new Map<string, { ref: DocRef; doc: BaseDocument; inverses: Diff[]; touches: boolean }>();
   for (let i = 0; i < envelope.ops.length; i += 1) {
-    const op: Op | undefined = envelope.ops[i];
-    const inverse: Op | undefined = inverses[i];
-    if (!op || !inverse) continue;
-    if (op.kind !== "update" || inverse.kind !== "update") continue;
+    const op = envelope.ops[i], inverse = inverses[i];
+    if (op?.kind !== "update" || inverse?.kind !== "update" ||
+        op.ref.coll === "actionReceipts") continue;
     const doc = resolve(op.ref);
     if (!doc) continue;
+    const key = visibilityKey(op.ref);
+    let entry = grouped.get(key);
+    if (!entry) {
+      entry = { ref: op.ref, doc, inverses: [], touches: false };
+      grouped.set(key, entry);
+    }
+    entry.inverses.push(inverse.diff);
     const fields = visibilityFields(doc);
-    if (!fields.some((f) => f in op.diff && f in inverse.diff)) continue;
-    out.push({
-      key: `${op.ref.coll}/${op.ref.id}`,
-      ref: op.ref,
-      doc,
-      before: { ...doc, ...inverse.diff } as BaseDocument,
-    });
+    const touches = (diff: Diff, field: string) => field in diff || `-=${field}` in diff;
+    if (fields.some((field) => touches(op.diff, field) && touches(inverse.diff, field)))
+      entry.touches = true;
+  }
+  const out: VisibilityCrossing[] = [];
+  for (const [key, entry] of grouped) {
+    if (!entry.touches) continue;
+    // Several actions in one graph can edit the SAME document. Invert them
+    // all in reverse order to compare the final state to the PRE-ENVELOPE
+    // state, never to an intermediate state between tag/visibility steps.
+    let before = entry.doc;
+    let valid = true;
+    for (const diff of [...entry.inverses].reverse()) {
+      const prior = applyDiff(before, diff);
+      if (!prior.ok) { valid = false; break; }
+      before = prior.value;
+    }
+    if (valid) out.push({ key, ref: entry.ref, doc: entry.doc, before });
   }
   return out;
 }
@@ -275,27 +364,36 @@ function projectWithCrossings(
 ): OpEnvelope | null {
   let modified = false;
   const ops: Op[] = [];
-  for (const rawOp of envelope.ops) {
+  const byKey = new Map(crossings.map((crossing) => [crossing.key, crossing]));
+  const last = new Map<string, number>();
+  envelope.ops.forEach((raw, i) => {
+    if (raw.kind === "update") {
+      const key = visibilityKey(raw.ref);
+      if (byKey.has(key)) last.set(key, i);
+    }
+  });
+  for (const [i, rawOp] of envelope.ops.entries()) {
     const op = rawOp as Extract<Op, { kind: "update" }>;
-    const crossing =
-      rawOp.kind === "update"
-        ? crossings.find((c) => c.key === `${rawOp.ref.coll}/${rawOp.ref.id}`)
-        : undefined;
+    const crossing = rawOp.kind === "update" ? byKey.get(visibilityKey(rawOp.ref)) : undefined;
     if (crossing) {
       const parent = crossing.ref.parent
         ? resolver.resolve(crossing.ref.parent)
         : undefined;
       const nowVisible = docVisibleTo(user, crossing.doc, parent);
       const wasVisible = docVisibleTo(user, crossing.before, parent);
+      if (nowVisible !== wasVisible && i !== last.get(crossing.key)) {
+        modified = true; // final create/delete already contains/suppresses every earlier edit
+        continue;
+      }
       if (nowVisible && !wasVisible) {
-        ops.push({
-          kind: "create",
-          coll: crossing.ref.coll,
-          ...(crossing.ref.parent !== undefined
-            ? { parent: crossing.ref.parent }
-            : {}),
-          data: structuredClone(crossing.doc),
-        });
+        // A visibility grant is a *new create* for this viewer, but a raw host
+        // document may contain script code, journal secrets or hidden scene
+        // embeds. Run it through the same projection as any ordinary create.
+        const synthetic: Op = { kind: "create", coll: crossing.ref.coll,
+          ...(crossing.ref.parent !== undefined ? { parent: crossing.ref.parent } : {}),
+          data: structuredClone(crossing.doc) };
+        const projected = projectEnvelope({ ...envelope, ops: [synthetic] }, user, resolver);
+        if (projected) ops.push(...projected.ops);
         modified = true;
         continue;
       }
@@ -440,6 +538,18 @@ function withCellReveals(
   return { ...envelope, ops };
 }
 
+/** One top-level invocation shares a deadline and action budget with all nested scripts. */
+interface ScriptInvocation {
+  session: Session;
+  caller: SessionUser;
+  requestId: string;
+  deadline: number;
+  budget: { calls: number };
+  trace: string[];
+  /** One durable Revert control for this script and its nested direct RPCs. */
+  audit: ActionAudit;
+}
+
 export class HostSync {
   private readonly store: DocumentStore;
   private readonly log: OpLog;
@@ -455,6 +565,11 @@ export class HostSync {
   private readonly transfer: AssetTransfer | null;
   private readonly rng: RngFn;
   private readonly now: () => number;
+  private readonly scriptRunner: ScriptRunner;
+  private readonly resolveSummonSource: HostSyncOptions["resolveSummonSource"];
+  private readonly summonRequests = new Map<string, number>();
+  private summonTimer: ReturnType<typeof setTimeout> | null = null;
+  private disposed = false;
   /** §8/§9 fog readbacks: `${sceneId}:${userId}` → latest PNG bytes (write-through cache). */
   readonly fogPngs = new Map<string, Uint8Array>();
   private readonly fogStore: FogStore | null;
@@ -557,7 +672,15 @@ export class HostSync {
       options.manifest ?? (() => this.store.world.assetManifest);
     this.transfer = options.assets
       ? new AssetTransfer(
-          options.assets.read,
+          async (hash, offset, length, peerId) => {
+            const user = peerId ? this.sessions.get(peerId)?.user : null;
+            // Re-check on EACH chunk, not only when queued: permissions and
+            // documents can change during a long premium-media transfer.
+            if (!user || !canFetchAsset(this.store.world, this.manifestSource(), user, hash)) {
+              return undefined; // indistinguishable from an unknown hash
+            }
+            return options.assets?.read(hash, offset, length);
+          },
           {
             send: (peerId, chunk) => {
               const session = this.sessions.get(peerId);
@@ -570,12 +693,16 @@ export class HostSync {
     this.fogStore = options.fogStore ?? null;
     this.rng = options.rng ?? cryptoRng;
     this.now = options.now ?? (() => Date.now());
+    this.scriptRunner = options.scriptRunner ?? runScriptWorker;
+    this.resolveSummonSource = options.resolveSummonSource;
+    this.scheduleSummonExpiry();
   }
 
   // ─── Sessions ───────────────────────────────────────────────────────────────
 
   /** Attach a peer transport.GM loopback sessions may pass their user directly. */
   addSession(peerId: PeerId, transport: Transport, user?: SessionUser): void {
+    this.sweepExpiredSummons(); // expiry also runs on reconnect after a sleeping tab resumes
     const session: Session = {
       peerId,
       transport,
@@ -584,6 +711,7 @@ export class HostSync {
       intentBucket: createIntentRateLimiter(this.now),
       ephemeralBucket: createEphemeralRateLimiter(this.now),
       assetBucket: createAssetRateLimiter(this.now),
+      manifestFingerprint: null,
     };
     this.sessions.set(peerId, session);
     transport.onMessage = (_channel, bytes) => this.onFrame(session, bytes);
@@ -594,6 +722,7 @@ export class HostSync {
     const session = this.sessions.get(peerId);
     if (!session) return;
     this.sessions.delete(peerId);
+    for (const viewers of this.fxViewers.values()) viewers.peers.delete(peerId);
     try {
       session.transport.close();
     } catch {
@@ -689,6 +818,9 @@ export class HostSync {
           msg as unknown as import("../core/messages").RollRevertMsg,
         );
         return;
+      case "action.revert":
+        this.handleActionRevert(session, msg);
+        return;
       case "roll.delegate":
         void this.handleRollDelegate(
           session,
@@ -698,12 +830,54 @@ export class HostSync {
       case "ephemeral":
         this.handleEphemeral(session, msg);
         return;
+      case "fx.request":
+        this.handleFxRequest(session, msg);
+        return;
+      case "fx.sync":
+        this.handleFxSync(session, msg.sceneId);
+        return;
+      case "fx.stop":
+        this.handleFxStop(session, msg);
+        return;
+      case "fx.stopMatching":
+        this.handleFxStopMatching(session, msg);
+        return;
+      case "automation.request":
+        this.handleAutomationRequest(session, msg);
+        return;
+      case "automation.click":
+        this.handleAutomationClick(session, msg);
+        return;
+      case "tagger.rules":
+        this.handleTaggerRules(session, msg);
+        return;
+      case "prefab.place":
+        this.handlePrefabPlace(session, msg);
+        return;
+      case "summon.place":
+        void this.handleSummonPlace(session, msg);
+        return;
+      case "summon.dismiss":
+        this.handleSummonDismiss(session, msg);
+        return;
+      case "macro.request":
+        void this.handleMacroRequest(session, msg);
+        return;
       // Host→client kinds and later-milestone kinds are never accepted here:
       case "welcome":
       case "snapshot":
       case "ops":
       case "rejected":
       case "asset.chunk":
+      case "fx.start":
+      case "fx.end":
+      case "asset.manifest":
+      case "automation.trace":
+      case "tagger.rules.result":
+      case "prefab.result":
+      case "summon.result":
+      case "macro.result":
+        return; // host-only cues/metadata are never accepted from a client
       case "ping":
         this.handlePing(session, msg as PingMsg);
         return;
@@ -893,12 +1067,16 @@ export class HostSync {
   }
 
   /**
-   * §5/D-031: with a valid lastSeq inside the retained log, send ops-since
-   * instead of a full snapshot. Returns the seq the client is current to.
+   * Reconnecting GM/assistant can consume raw ops-since. Other users must
+   * receive a freshly projected snapshot: replaying the historical log against
+   * today's resolver leaks once-hidden documents/visibility transitions (and
+   * an unprojected envelope was sent here before the FX privacy work).
+   * History-aware delta projection can restore the optimization later.
    */
   private catchUpSeq(session: Session, hello: HelloMsg | undefined): number {
     const lastSeq = hello?.lastSeq;
     if (
+      (session.user?.role === "GM" || session.user?.role === "ASSISTANT") &&
       typeof lastSeq === "number" &&
       Number.isInteger(lastSeq) &&
       lastSeq >= 0 &&
@@ -908,19 +1086,19 @@ export class HostSync {
       for (const env of this.log.since(lastSeq)) {
         this.send(session, { kind: "ops", envelope: env });
       }
+      // Metadata is not an Op. Even a GM receiving delta catch-up needs today's manifest.
+      this.sendProjectedManifest(session);
       return lastSeq;
     }
     // Full projected snapshot (§5: manifest only — assets stream lazily, §7).
+    const manifest = projectAssetManifest(this.store.world, this.manifestSource(), session.user as SessionUser);
     this.send(session, {
       kind: "snapshot",
       seq: this.store.seq,
-      world: projectWorld(
-        this.store.world,
-        this.store.seq,
-        session.user as SessionUser,
-      ),
-      manifest: this.manifestSource(),
+      world: projectWorld(this.store.world, this.store.seq, session.user as SessionUser),
+      manifest,
     });
+    session.manifestFingerprint = JSON.stringify(manifest);
     return this.store.seq;
   }
 
@@ -947,6 +1125,13 @@ export class HostSync {
     }
     if (!session.intentBucket.tryRemove()) {
       this.reject(session, txId, "rate_limited", "intent rate exceeded");
+      return;
+    }
+    // FX instances are host-owned runtime state, not GM-authored document ops.
+    if (Array.isArray(ops) && ops.some((op) => op && typeof op === "object" &&
+        (op.kind === "create" ? op.coll === "fxInstances" || op.parent?.coll === "fxInstances"
+          : op.ref?.coll === "fxInstances" || op.ref?.parent?.coll === "fxInstances"))) {
+      this.reject(session, txId, "forbidden", "FX instances are host-owned");
       return;
     }
     const normalized = this.normalizeOps(session.user.id, ops);
@@ -996,6 +1181,37 @@ export class HostSync {
     return { ok: true, ops: out };
   }
 
+  /** A saved graph never trusts a client-supplied step, anchor or media identifier. */
+  private automationDocumentError(doc: AutomationDocument): string | null {
+    if (doc.type !== "automation") return "automation document type required";
+    const checked = validateAutomation(doc.definition);
+    if (!checked.ok) return checked.error;
+    if (!validateAutomationState(doc.state)) return "invalid trigger history";
+    const scene = this.store.get("scenes", checked.definition.sceneId) as SceneDocument | undefined;
+    if (!scene || !scene.tiles.some((tile) => tile._id === checked.definition.tileId))
+      return "automation anchor tile/scene does not exist";
+    for (const step of checked.definition.steps) {
+      if (step.kind !== "sequence" && step.kind !== "script") continue;
+      const macro = this.store.get("macros", step.macroId) as MacroDocument | undefined;
+      if (step.kind === "sequence") {
+        if (!macro || macro.kind !== "sequence" || !validateFxSequence(macro.sequence).ok)
+          return `missing/invalid saved sequence macro: ${step.macroId}`;
+      } else {
+        const approval = macro?.kind === "script" ? validateScriptMacro(macro) : null;
+        if (!approval?.ok || approval.policy.sceneId !== scene._id)
+          return `missing/invalid scene-local reviewed script: ${step.macroId}`;
+      }
+    }
+    return null;
+  }
+
+  private scriptDocumentError(doc: MacroDocument): string | null {
+    const checked = validateScriptMacro(doc);
+    if (!checked.ok) return checked.error;
+    if (!this.store.get("scenes", checked.policy.sceneId)) return "script context scene does not exist";
+    return null;
+  }
+
   /** §5 validation: permissions per op (+ cascade parents), schema-lite diffs. */
   private validateOps(
     user: SessionUser,
@@ -1004,6 +1220,8 @@ export class HostSync {
     | { ok: true }
     | { ok: false; reason: "forbidden" | "invalid_schema"; error: string } {
     for (const op of ops) {
+      if ((op.kind === "create" ? op.coll : op.ref.coll) === "actionReceipts")
+        return { ok: false, reason: "forbidden", error: "Revert history is host-owned" };
       switch (op.kind) {
         case "create": {
           const parent =
@@ -1031,6 +1249,52 @@ export class HostSync {
               error: "users are assigned by the host only",
             };
           }
+          if (op.coll === "tiles" && user.role !== "GM" && user.role !== "ASSISTANT" &&
+              (op.data as TileDocument).sort !== undefined)
+            return { ok: false, reason: "forbidden", error: "only GMs set tile trigger priority" };
+          // Attachment metadata is host-owned on placement. A player must not
+          // forge a parent/instance relationship that moves hidden GM objects.
+          if (user.role !== "GM" && user.role !== "ASSISTANT" &&
+              (op.data.flags?.summon !== undefined || op.data.flags?.summonStatus !== undefined))
+            return { ok: false, reason: "forbidden", error: "summon markers are host-owned" };
+          if (PREFAB_COLLECTIONS.includes(op.coll as (typeof PREFAB_COLLECTIONS)[number]) &&
+              op.data.flags?.prefab !== undefined && user.role !== "GM" && user.role !== "ASSISTANT")
+            return { ok: false, reason: "forbidden", error: "only GMs attach prefab parts" };
+          if (op.coll === "automations") {
+            if (user.role !== "GM" && user.role !== "ASSISTANT")
+              return { ok: false, reason: "forbidden", error: "only GMs author active zones" };
+            const error = this.automationDocumentError(op.data as AutomationDocument);
+            if (error) return { ok: false, reason: "invalid_schema", error };
+          }
+          if (op.coll === "prefabs") {
+            if (user.role !== "GM" && user.role !== "ASSISTANT")
+              return { ok: false, reason: "forbidden", error: "only GMs author prefabs" };
+            const doc = op.data as PrefabDocument;
+            const checked = validatePrefab(doc.definition);
+            if (doc.type !== "prefab" || !checked.ok)
+              return { ok: false, reason: "invalid_schema", error: checked.ok ? "prefab type required" : checked.error };
+          }
+          if (op.coll === "macros" && (op.data as MacroDocument).kind === "sequence") {
+            if (user.role !== "GM" && user.role !== "ASSISTANT") {
+              return { ok: false, reason: "forbidden", error: "only GMs author FX macros" };
+            }
+            const check = validateFxSequence((op.data as MacroDocument).sequence);
+            if (!check.ok) return { ok: false, reason: "invalid_schema", error: check.error };
+          }
+          if (op.coll === "macros" && (op.data as MacroDocument).kind === "summon") {
+            if (user.role !== "GM" && user.role !== "ASSISTANT")
+              return { ok: false, reason: "forbidden", error: "only GMs publish summons" };
+            const check = validateSummon((op.data as MacroDocument).summon);
+            if (!check.ok) return { ok: false, reason: "invalid_schema", error: check.error };
+          }
+          if (op.coll === "macros" && (op.data as MacroDocument).kind === "script") {
+            if (user.role !== "GM" && user.role !== "ASSISTANT")
+              return { ok: false, reason: "forbidden", error: "only GMs publish scripts" };
+            if ((op.data as MacroDocument).scriptState !== undefined)
+              return { ok: false, reason: "forbidden", error: "execution history is host-owned" };
+            const error = this.scriptDocumentError(op.data as MacroDocument);
+            if (error) return { ok: false, reason: "invalid_schema", error };
+          }
           continue;
         }
         case "update": {
@@ -1055,9 +1319,70 @@ export class HostSync {
               error: `update ${op.ref.coll}/${op.ref.id}`,
             };
           }
+          if (user.role !== "GM" && user.role !== "ASSISTANT" &&
+              (op.ref.coll === "actors" || op.ref.coll === "tokens") &&
+              Object.keys(op.diff).some((field) =>
+                // The private link cannot be forged or edited, including by
+                // replacing all flags or setting a dot path on an ordinary token.
+                field.startsWith("flags.summon") || field.startsWith("-=flags.summon") ||
+                (field === "flags" && isRecord(op.diff.flags) &&
+                  (Object.hasOwn(op.diff.flags, "summon") || Object.hasOwn(op.diff.flags, "summonStatus"))) ||
+                (doc.flags?.summon !== undefined &&
+                  (field === "flags" || field === "ownership" || field.startsWith("ownership.") ||
+                    field === "actorId"))))
+            return { ok: false, reason: "forbidden", error: "summon links and ownership are host-owned" };
+          if (PREFAB_COLLECTIONS.includes(op.ref.coll as (typeof PREFAB_COLLECTIONS)[number]) &&
+              user.role !== "GM" && user.role !== "ASSISTANT" &&
+              ((doc.flags?.prefab as { locked?: boolean } | undefined)?.locked === true ||
+                Object.keys(op.diff).some((field) => field === "flags" || field.startsWith("flags.prefab") ||
+                  field.startsWith("-=flags.prefab"))))
+            return { ok: false, reason: "forbidden", error: "only GMs change prefab attachment metadata or locked parts" };
+          if (user.role !== "GM" && user.role !== "ASSISTANT" && Object.keys(op.diff).some((field) =>
+            op.ref.coll === "tiles" && (field === "sort" || field.startsWith("sort.") || field === "-=sort") ||
+            op.ref.coll === "scenes" && (field === "tiles" || field.startsWith("tiles.") || field === "-=tiles")))
+            return { ok: false, reason: "forbidden", error: "only GMs change tile trigger priority/scene tile lists" };
+          if (op.ref.coll === "automations" && user.role !== "GM" && user.role !== "ASSISTANT")
+            return { ok: false, reason: "forbidden", error: "only GMs edit active zones" };
+          if (op.ref.coll === "prefabs" && user.role !== "GM" && user.role !== "ASSISTANT")
+            return { ok: false, reason: "forbidden", error: "only GMs edit prefabs" };
+          if (op.ref.coll === "macros" && ["sequence", "script", "summon"].includes((doc as MacroDocument).kind) &&
+              user.role !== "GM" && user.role !== "ASSISTANT") {
+            return { ok: false, reason: "forbidden", error: "only GMs edit FX/script/summon macros" };
+          }
+          if (op.ref.coll === "macros" && Object.keys(op.diff).some((key) => key === "scriptState" || key.startsWith("scriptState.")))
+            return { ok: false, reason: "forbidden", error: "execution history is host-owned" };
           const dry = applyDiff(doc, op.diff);
           if (!dry.ok)
             return { ok: false, reason: "invalid_schema", error: dry.error };
+          if (op.ref.coll === "automations") {
+            const error = this.automationDocumentError(dry.value as AutomationDocument);
+            if (error) return { ok: false, reason: "invalid_schema", error };
+          }
+          if (op.ref.coll === "prefabs") {
+            const candidate = dry.value as PrefabDocument;
+            const checked = validatePrefab(candidate.definition);
+            if (candidate.type !== "prefab" || !checked.ok)
+              return { ok: false, reason: "invalid_schema", error: checked.ok ? "prefab type required" : checked.error };
+          }
+          if (op.ref.coll === "macros" && (dry.value as MacroDocument).kind === "sequence") {
+            if (user.role !== "GM" && user.role !== "ASSISTANT") {
+              return { ok: false, reason: "forbidden", error: "only GMs edit FX macros" };
+            }
+            const check = validateFxSequence((dry.value as MacroDocument).sequence);
+            if (!check.ok) return { ok: false, reason: "invalid_schema", error: check.error };
+          }
+          if (op.ref.coll === "macros" && (dry.value as MacroDocument).kind === "summon") {
+            if (user.role !== "GM" && user.role !== "ASSISTANT")
+              return { ok: false, reason: "forbidden", error: "only GMs publish summons" };
+            const check = validateSummon((dry.value as MacroDocument).summon);
+            if (!check.ok) return { ok: false, reason: "invalid_schema", error: check.error };
+          }
+          if (op.ref.coll === "macros" && (dry.value as MacroDocument).kind === "script") {
+            if (user.role !== "GM" && user.role !== "ASSISTANT")
+              return { ok: false, reason: "forbidden", error: "only GMs publish scripts" };
+            const error = this.scriptDocumentError(dry.value as MacroDocument);
+            if (error) return { ok: false, reason: "invalid_schema", error };
+          }
           continue;
         }
         case "delete": {
@@ -1068,6 +1393,17 @@ export class HostSync {
               reason: "invalid_schema",
               error: `delete: target not found`,
             };
+          if (op.ref.coll === "automations" && user.role !== "GM" && user.role !== "ASSISTANT")
+            return { ok: false, reason: "forbidden", error: "only GMs delete active zones" };
+          if (op.ref.coll === "prefabs" && user.role !== "GM" && user.role !== "ASSISTANT")
+            return { ok: false, reason: "forbidden", error: "only GMs delete prefabs" };
+          if (PREFAB_COLLECTIONS.includes(op.ref.coll as (typeof PREFAB_COLLECTIONS)[number]) &&
+              doc.flags?.prefab !== undefined && user.role !== "GM" && user.role !== "ASSISTANT")
+            return { ok: false, reason: "forbidden", error: "only GMs delete attached prefab parts" };
+          if (op.ref.coll === "macros" && ["sequence", "script", "summon"].includes((doc as MacroDocument).kind) &&
+              user.role !== "GM" && user.role !== "ASSISTANT") {
+            return { ok: false, reason: "forbidden", error: "only GMs delete FX/script/summon macros" };
+          }
           const parent =
             op.ref.parent !== undefined
               ? this.store.resolve(op.ref.parent)
@@ -1103,7 +1439,52 @@ export class HostSync {
     by: UserId,
     txId: TxId,
     recordUndo = true,
+    audit?: ActionAudit,
   ): { ok: true; seq: number } | { ok: false; error: string } {
+    // Expand parent transforms BEFORE auditing; the receipt MUST describe the
+    // actual committed envelope, not the unexpanded client/script proposal.
+    // Undo/redo and named Revert already contain every child pre-image.
+    if (!txId.startsWith("undo-") && !txId.startsWith("redo-") &&
+        !txId.startsWith("action-revert-")) {
+      const attached = attachedMovementOps(this.store.world, ops);
+      if (!attached.ok) return { ok: false, error: attached.error };
+      const deleting = attachedDeletionOps(this.store.world, attached.ops);
+      if (!deleting.ok) return { ok: false, error: deleting.error };
+      ops = boundFxDeletionOps(this.store.world, summonDeletionOps(this.store.world, deleting.ops));
+    }
+    if (audit) {
+      if (!ops.length) return { ok: false, error: "Cannot audit an empty world action" };
+      const previous = this.store.get("actionReceipts", audit.id) as ActionReceiptDocument | undefined;
+      const stale = previous && actionStaleReason(previous, this.store);
+      if (stale) return { ok: false, error: `Cannot extend stale action: ${stale}` };
+      const shadow = this.store.forkForPreflight();
+      const preview = shadow.applyEnvelope({ seq: shadow.seq + 1, ts: this.now(), by, txId, ops });
+      if (!preview.ok) return { ok: false, error: preview.error };
+      const candidate = extendActionReceipt(shadow, audit, ops, preview.value.inverses, previous, this.now());
+      if (!candidate.ok) return { ok: false, error: candidate.error };
+      ops = [...ops, previous
+        ? { kind: "update", ref: { coll: "actionReceipts", id: audit.id }, diff: {
+          status: candidate.receipt.status, commits: candidate.receipt.commits,
+          inverses: candidate.receipt.inverses as unknown as Json,
+          after: candidate.receipt.after as unknown as Json,
+        } }
+        : { kind: "create", coll: "actionReceipts", data: candidate.receipt }];
+    }
+    // Capture the START of each token path before applying any op. A multi-op transaction
+    // fires once from first pre-image to final committed position, never from an optimistic drag.
+    const moving = new Map<string, { sceneId: string; tokenId: string; before?: TokenDocument }>();
+    for (const op of ops) {
+      const ref = op.kind === "create" ? { coll: op.coll, id: op.data._id, parent: op.parent } : op.ref;
+      if (ref.coll !== "tokens" || ref.parent?.coll !== "scenes" ||
+          (op.kind === "update" && !Object.keys(op.diff).some((key) => ["x", "y", "rotation"].includes(key))) ||
+          op.kind === "delete") continue;
+      const key = `${ref.parent.id}\u0000${ref.id}`;
+      if (!moving.has(key)) {
+        const before = op.kind === "create" ? undefined : this.store.resolve(op.ref) as TokenDocument | undefined;
+        moving.set(key, { sceneId: ref.parent.id, tokenId: ref.id,
+          ...(before ? { before } : {}) });
+      }
+    }
     const envelope: OpEnvelope = {
       seq: this.store.seq + 1,
       ts: this.now(),
@@ -1115,8 +1496,15 @@ export class HostSync {
     if (!applied.ok) return { ok: false, error: applied.error };
     const appended = this.log.append(envelope, applied.value.inverses);
     if (!appended.ok) return { ok: false, error: appended.error };
+    // Keep legacy global Undo for the newest commit. Its inverse also restores
+    // the receipt version from that envelope; named Revert remains the durable,
+    // multi-commit path and refuses stale/intervening edits.
     if (recordUndo) this.undoStack.push(envelope, applied.value.inverses);
     this.broadcastEnvelope(envelope, applied.value.inverses);
+    this.scheduleSummonExpiry();
+    // Reverting a movement must not re-trigger a trap while reversing it.
+    if (moving.size > 0 && !txId.startsWith("action-revert-"))
+      this.fireMovementAutomations([...moving.values()], by);
     // F03: prune expired pending rolls (T+2 window) when a combat round/turn advanced
     try {
       let pruneTurn: number | null = null;
@@ -1174,6 +1562,21 @@ export class HostSync {
     return { ok: true, seq: envelope.seq };
   }
 
+  /** Re-project after media import/removal or document publication. The full replacement revokes stale metadata. */
+  broadcastAssetManifests(): void {
+    for (const session of this.sessions.values()) this.sendProjectedManifest(session);
+    this.reconcileFxInstances();
+  }
+
+  private sendProjectedManifest(session: Session): void {
+    if (!session.user) return;
+    const manifest = projectAssetManifest(this.store.world, this.manifestSource(), session.user);
+    const fingerprint = JSON.stringify(manifest);
+    if (session.manifestFingerprint === fingerprint) return;
+    session.manifestFingerprint = fingerprint;
+    this.send(session, { kind: "asset.manifest", manifest });
+  }
+
   private broadcastEnvelope(
     envelope: OpEnvelope,
     inverses: readonly Op[] = [],
@@ -1190,20 +1593,1563 @@ export class HostSync {
     const cellCrossings = cellRevealCrossings(envelope, inverses, (ref) =>
       this.store.resolve(ref),
     );
+    // A delete has already removed its document from the store. Projecting it
+    // without its inverse pre-image used to send private message/hidden tile IDs
+    // to players who never saw them; the stray delete could also invalidate an
+    // entire mixed public/private undo envelope on their replica. Inverses are
+    // keyed by ref rather than index because no-op updates need not have one.
+    const deleted = new Map<string, BaseDocument>();
+    for (const inverse of inverses) if (inverse.kind === "create")
+      deleted.set(visibilityKey({ coll: inverse.coll, id: inverse.data._id,
+        ...(inverse.parent ? { parent: inverse.parent } : {}) }), inverse.data);
     for (const session of this.sessions.values()) {
       if (!session.user) continue;
-      const resolver = { resolve: (ref: DocRef) => this.store.resolve(ref) };
+      const resolver = { resolve: (ref: DocRef) => this.store.resolve(ref) ?? deleted.get(visibilityKey(ref)) };
       const projected =
         crossings.length > 0
           ? projectWithCrossings(envelope, session.user, crossings, resolver)
           : projectEnvelope(envelope, session.user, resolver);
-      if (!projected) continue;
-      const withCells =
-        cellCrossings.length > 0
-          ? withCellReveals(projected, session.user, cellCrossings)
-          : projected;
-      this.send(session, { kind: "ops", envelope: withCells });
+      if (projected) {
+        const withCells =
+          cellCrossings.length > 0
+            ? withCellReveals(projected, session.user, cellCrossings)
+            : projected;
+        this.send(session, { kind: "ops", envelope: withCells });
+      }
+      // A visible document may add/remove an asset reference; even a projected-away op can
+      // change the legacy "unreferenced" policy. Never leave connected clients with stale metadata.
+      this.sendProjectedManifest(session);
     }
+    this.reconcileFxInstances();
+  }
+
+  // ─── GM Tagger rules: live scene-wide allocation, not client-computed ops ───
+
+  private readonly taggerRuleResults = new Map<string, TaggerRulesResultMsg>();
+
+  private handleTaggerRules(session: Session, msg: TaggerRulesMsg): void {
+    const caller = session.user;
+    if (!caller) return;
+    if (caller.role !== "GM" && caller.role !== "ASSISTANT") {
+      this.reject(session, String(msg.requestId), "forbidden", "Tagger rule allocation requires a GM");
+      return;
+    }
+    if (!session.intentBucket.tryRemove()) {
+      this.reject(session, String(msg.requestId), "rate_limited", "Tagger rule requests rate-limited");
+      return;
+    }
+    if (typeof msg.requestId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(msg.requestId) ||
+        !Array.isArray(msg.refs) || msg.refs.length < 1 || msg.refs.length > 32 ||
+        Object.keys(msg).some((key) => !["kind", "requestId", "refs"].includes(key)) ||
+        msg.refs.some((ref) => !isWorldTagRef(ref))) {
+      this.reject(session, String(msg.requestId), "invalid_schema", "Invalid Tagger rule references");
+      return;
+    }
+    const requestKey = `${caller.id}:${msg.requestId}`;
+    const previous = this.taggerRuleResults.get(requestKey);
+    if (previous) { this.send(session, previous); return; } // reconnect/retry never allocates twice
+    const seen = new Set<string>();
+    const docs: Array<{ ref: DocRef; sceneId: string; doc: BaseDocument }> = [];
+    for (const ref of msg.refs) {
+      const sceneId = ref.coll === "scenes" ? ref.id : ref.parent?.id;
+      const scene = sceneId ? this.store.get("scenes", sceneId) : undefined;
+      const doc = this.store.resolve(ref);
+      const identity = JSON.stringify([sceneId, ref.coll, ref.id]);
+      if (!scene || !doc || seen.has(identity) ||
+          !can(caller, "read", scene, "scenes") ||
+          !can(caller, "update", doc, ref.coll,
+            ref.coll === "scenes" ? {} : { parent: scene })) {
+        this.reject(session, msg.requestId, "invalid_schema", "Missing, duplicate or unauthorized Tagger target");
+        return;
+      }
+      seen.add(identity);
+      docs.push({ ref, sceneId: scene._id, doc });
+    }
+    let ops: Op[];
+    try { ops = tagRuleOps(this.store.world, docs); }
+    catch (cause) {
+      this.reject(session, msg.requestId, "invalid_schema",
+        cause instanceof Error ? cause.message : "Invalid Tagger rule templates");
+      return;
+    }
+    let seq = this.store.seq;
+    if (ops.length) {
+      const committed = this.commitOps(ops, caller.id, `tagger-rules-${msg.requestId}`, true,
+        this.newActionAudit(`Tagger: apply rules (${ops.length} targets)`));
+      if (!committed.ok) {
+        this.reject(session, msg.requestId, "invariant", committed.error);
+        return;
+      }
+      seq = committed.seq;
+    }
+    const result: TaggerRulesResultMsg = { kind: "tagger.rules.result", requestId: msg.requestId,
+      changed: ops.length, seq };
+    this.taggerRuleResults.set(requestKey, result);
+    if (this.taggerRuleResults.size > 256) {
+      const oldest = this.taggerRuleResults.keys().next().value;
+      if (oldest) this.taggerRuleResults.delete(oldest);
+    }
+    this.send(session, result);
+  }
+
+  // ─── Reviewed JS macros: publication → durable idempotency → scoped host RPC ───
+
+  private activeMacroRuns = 0;
+  /** Only workers in this host lifetime can extend a pending receipt. */
+  private readonly activeActionReceipts = new Set<string>();
+
+  private newActionAudit(label: string, pending = false): ActionAudit {
+    return { id: randomId(), label: label.slice(0, 160),
+      ...(pending ? { pendingUntil: Date.now() + 35_000 } : {}) };
+  }
+
+  private finishActionAudit(audit: ActionAudit, outcome: "completed" | "partial"): void {
+    this.activeActionReceipts.delete(audit.id);
+    const doc = this.store.get("actionReceipts", audit.id) as ActionReceiptDocument | undefined;
+    if (!doc || doc.status !== "pending") return;
+    this.commitOps([{ kind: "update", ref: { coll: "actionReceipts", id: audit.id },
+      diff: { status: "ready", outcome } }], this.systemUserId,
+    `action-finish-${audit.id}`, false);
+  }
+
+  private handleActionRevert(session: Session, msg: import("../core/messages").ActionRevertMsg): void {
+    const id = msg.receiptId;
+    if (!session.user || session.user.role !== "GM") {
+      this.reject(session, String(id), "forbidden", "Only a GM can Revert world actions");
+      return;
+    }
+    if (!session.intentBucket.tryRemove()) {
+      this.reject(session, String(id), "rate_limited", "Revert rate exceeded");
+      return;
+    }
+    if (typeof id !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(id) ||
+        Object.keys(msg).some((key) => key !== "kind" && key !== "receiptId")) {
+      this.reject(session, String(id), "invalid_schema", "Invalid action receipt ID");
+      return;
+    }
+    const receipt = this.store.get("actionReceipts", id) as ActionReceiptDocument | undefined;
+    if (!receipt || receipt.type !== "actionReceipt" || receipt.status === "reverted") {
+      this.reject(session, id, "invalid_schema", "Action is missing or already reverted");
+      return;
+    }
+    if (receipt.status === "pending" &&
+        (this.activeActionReceipts.has(id) || receipt.pendingUntil === undefined ||
+          !Number.isFinite(receipt.pendingUntil) || Date.now() < receipt.pendingUntil)) {
+      this.reject(session, id, "invalid_schema", "Action is still running; try again after it finishes");
+      return;
+    }
+    if (receipt.status !== "ready" && receipt.status !== "pending") {
+      this.reject(session, id, "invalid_schema", "Invalid action receipt");
+      return;
+    }
+    const stale = actionStaleReason(receipt, this.store);
+    if (stale) { this.reject(session, id, "invalid_schema", stale); return; }
+    // The bounded chat collection may have naturally evicted this action's
+    // message since it fired. Its inverse delete is already satisfied; never
+    // let that housekeeping make an otherwise-unchanged HP/trap unrevertable.
+    const missingChat = missingActionMessageDeletes(receipt, this.store);
+    const inverses = receipt.inverses.filter((op) => !(op.kind === "delete" &&
+      op.ref.coll === "messages" && missingChat.has(op.ref.id)));
+    // Exact inverses must not cascade over NEW prefab/summon/FX dependents.
+    // The original transaction already captured its own expanded child ops;
+    // compute the live deletion closure only to detect NEW dependents, then
+    // commit the recorded ops without double-expanding existing children.
+    const deleting = attachedDeletionOps(this.store.world, inverses);
+    if (!deleting.ok) { this.reject(session, id, "invariant", deleting.error); return; }
+    const closure = boundFxDeletionOps(this.store.world,
+      summonDeletionOps(this.store.world, deleting.ops));
+    const recorded = new Set(inverses.filter((op) => op.kind === "delete")
+      .map((op) => JSON.stringify(actionOpRef(op))));
+    if (closure.some((op) => op.kind === "delete" && !recorded.has(JSON.stringify(actionOpRef(op))))) {
+      this.reject(session, id, "invalid_schema", "Action has new dependent documents; Revert refused");
+      return;
+    }
+    for (const op of inverses) {
+      if (op.kind !== "update" || !op.ref.parent ||
+          !Object.keys(op.diff).some((key) => ["x", "y", "rotation", "width", "height", "c", "points", "box",
+            "direction", "dim", "bright", "distance", "radius"].includes(key))) continue;
+      const attached = attachedMovementOps(this.store.world, [op]);
+      if (!attached.ok || attached.ops.slice(1).some((extra) => extra.kind !== "update" ||
+          !inverses.some((saved) => saved.kind === "update" &&
+            JSON.stringify(saved.ref) === JSON.stringify(extra.ref)))) {
+        this.reject(session, id, "invalid_schema", "Action has new or changed attachments; Revert refused");
+        return;
+      }
+    }
+    const ops: Op[] = [...inverses, { kind: "update", ref: { coll: "actionReceipts", id },
+      diff: { status: "reverted" } }];
+    // Preflight so a malformed/imported receipt or chat-cap side effect cannot
+    // partially mutate the authoritative store. applyEnvelope is atomic too.
+    const shadow = this.store.forkForPreflight();
+    const preview = shadow.applyEnvelope({ seq: shadow.seq + 1, ts: this.now(),
+      by: this.systemUserId, txId: `action-revert-${id}`, ops });
+    if (!preview.ok) { this.reject(session, id, "invalid_schema", preview.error); return; }
+    const trimmed = preview.value.changes.flatMap((change) => change.ops)
+      .some((op) => op.kind === "delete" && op.ref.coll === "messages" &&
+        !ops.some((saved) => saved.kind === "delete" && saved.ref.coll === "messages" &&
+          saved.ref.id === op.ref.id));
+    if (trimmed) { this.reject(session, id, "invalid_schema", "Revert would evict later chat; refused"); return; }
+    const committed = this.commitOps(ops, this.systemUserId, `action-revert-${id}`, false);
+    if (!committed.ok) this.reject(session, id, "invariant", committed.error);
+  }
+
+  private reportMacro(ctx: ScriptInvocation, macroId: string, ok: boolean, detail: string, result?: Json): void {
+    const base: MacroResultMsg = { kind: "macro.result", requestId: ctx.requestId,
+      macroId, callerId: ctx.caller.id, ok, detail };
+    for (const session of this.sessions.values()) {
+      if (!session.user) continue;
+      if (session.user.role === "GM" || session.user.role === "ASSISTANT") {
+        this.send(session, { ...base, trace: ctx.trace.slice(0, 256),
+          ...(result !== undefined && boundedJson(result) ? { result } : {}) });
+      } else if (session === ctx.session) {
+        // No arbitrary script output, error details, tag results or action logs leave the GM tier.
+        this.send(session, { ...base, detail: ok ? "Script completed" : "Script failed" });
+      }
+    }
+  }
+
+  private async handleMacroRequest(session: Session, msg: MacroRequestMsg): Promise<void> {
+    const caller = session.user;
+    if (!caller) return;
+    if (!session.intentBucket.tryRemove()) {
+      this.reject(session, String(msg.requestId), "rate_limited", "macro requests rate-limited");
+      return;
+    }
+    if (typeof msg.requestId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.requestId) ||
+        typeof msg.macroId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.macroId) ||
+        !isRecord(msg.args) || !boundedJson(msg.args, 8192) ||
+        Object.keys(msg).some((key) => !["kind", "requestId", "macroId", "args"].includes(key))) {
+      this.reject(session, String(msg.requestId), "invalid_schema", "invalid macro request");
+      return;
+    }
+    if (this.activeMacroRuns >= 8) {
+      this.reject(session, msg.requestId, "rate_limited", "macro execution queue is full");
+      return;
+    }
+    const macro = this.store.get("macros", msg.macroId) as MacroDocument | undefined;
+    const audit = this.newActionAudit(`Script: ${macro?.name ?? msg.macroId}`, true);
+    const ctx: ScriptInvocation = { session, caller, requestId: msg.requestId,
+      deadline: Date.now() + 30_000, budget: { calls: 0 }, trace: [], audit };
+    this.activeMacroRuns++;
+    this.activeActionReceipts.add(audit.id);
+    let outcome: "completed" | "partial" = "completed";
+    try {
+      const result = await this.executeScript(msg.macroId, msg.args, ctx, "");
+      this.reportMacro(ctx, msg.macroId, true, "Script completed", result);
+    } catch (cause) {
+      outcome = "partial";
+      const reason = cause instanceof Error ? cause.message : "Unknown script error";
+      this.reportMacro(ctx, msg.macroId, false, reason.slice(0, 500));
+    } finally {
+      this.finishActionAudit(audit, outcome);
+      this.activeMacroRuns--;
+    }
+  }
+
+  private async executeScript(
+    macroId: string, rawArgs: unknown, ctx: ScriptInvocation, suffix: string,
+    stack: readonly string[] = [], isActive: () => boolean = () => true,
+  ): Promise<Json> {
+    const { caller, session } = ctx;
+    if (!isActive() || Date.now() >= ctx.deadline || stack.length >= 32 || stack.includes(macroId))
+      throw new Error("Script deadline, nesting depth or recursion limit reached");
+    const doc = this.store.get("macros", macroId) as MacroDocument | undefined;
+    const checked = doc?.kind === "script" ? validateScriptMacro(doc) : null;
+    if (!doc || !checked?.ok) throw new Error("Script is missing, unapproved or malformed");
+    const policy = checked.policy;
+    const gm = caller.role === "GM" || caller.role === "ASSISTANT";
+    const scene = this.store.get("scenes", policy.sceneId) as SceneDocument | undefined;
+    if (!scene || !can(caller, "read", scene, "scenes") || !can(caller, "read", doc, "macros") ||
+        (!gm && !policy.playerCallable)) throw new Error("Script not published for this caller");
+    const view = projectWorld(this.store.world, this.store.seq, caller).collections.scenes
+      ?.find((item) => item._id === scene._id);
+    const inputs = validateScriptArgs(rawArgs, policy, (id) => !!view?.tokens.some((t) => t._id === id));
+    if (!inputs.ok) throw new Error(inputs.error);
+    const { approvedHash, ...reviewed } = policy;
+    if (await scriptApprovalHash(doc.command, reviewed) !== approvedHash)
+      throw new Error("Script source or policy changed since GM approval");
+    // An await above yielded to other sessions: authorization and revision MUST still match.
+    const latest = this.store.get("macros", macroId) as MacroDocument | undefined;
+    if (!isActive() || !latest || latest.command !== doc.command || JSON.stringify(latest.script) !== JSON.stringify(policy) ||
+        this.sessions.get(session.peerId) !== session || !can(caller, "read", latest, "macros"))
+      throw new Error("Script changed, was unpublished or caller disconnected");
+    const key = `${caller.id}:${ctx.requestId}${suffix}`;
+    if (latest.scriptState?.recent.some((row) => row.key === key))
+      throw new Error("Macro invocation already accepted (at-most-once replay guard)");
+    // Record the invocation BEFORE the worker starts. This survives world save/reconnect
+    // and suppresses duplicate world actions even when the caller retries after a crash.
+    const recent = [...(latest.scriptState?.recent ?? []).slice(-255),
+      { key, at: this.now(), revision: approvedHash }];
+    const marked = this.commitOps([{ kind: "update", ref: { coll: "macros", id: macroId },
+      diff: { scriptState: { recent } as unknown as Json } }],
+    this.systemUserId, `macro-start-${randomId()}`, false);
+    if (!marked.ok) throw new Error(`Script start failed: ${marked.error}`);
+    ctx.trace.push(`start ${macroId} revision ${approvedHash.slice(0, 12)} caller ${caller.id} seq ${marked.seq}`);
+    const path = [...stack, macroId];
+    const remaining = ctx.deadline - Date.now();
+    if (remaining <= 0) throw new Error("Script deadline reached");
+    const result = await this.scriptRunner(doc.command, inputs.args,
+      { sceneId: policy.sceneId, callerId: caller.id, requestId: ctx.requestId },
+      (method, payload, live) => this.scriptAction(doc, policy, method, payload, ctx, path, () => isActive() && live()),
+      Math.min(remaining, 10_000));
+    if (!boundedJson(result)) throw new Error("Script result is not bounded JSON");
+    ctx.trace.push(`return ${macroId}`);
+    return result;
+  }
+
+  private async scriptAction(
+    macro: MacroDocument, policy: ScriptPolicy, method: string, payload: unknown, ctx: ScriptInvocation,
+    stack: readonly string[], isActive: () => boolean,
+  ): Promise<Json> {
+    if (!isActive() || ++ctx.budget.calls > 256 || Date.now() >= ctx.deadline)
+      throw new Error("Script action/deadline budget exceeded");
+    const seq = ctx.budget.calls;
+    const { caller, session } = ctx;
+    const current = this.store.get("macros", macro._id) as MacroDocument | undefined;
+    if (!current || current.command !== macro.command ||
+        JSON.stringify(current.script) !== JSON.stringify(policy) ||
+        !can(caller, "read", current, "macros") ||
+        ((caller.role !== "GM" && caller.role !== "ASSISTANT") && !policy.playerCallable) ||
+        this.sessions.get(session.peerId) !== session) throw new Error("Script was revoked or caller disconnected");
+    const scene = this.store.get("scenes", policy.sceneId) as SceneDocument | undefined;
+    if (!scene || !can(caller, "read", scene, "scenes")) throw new Error("Script scene no longer accessible");
+    if (!isRecord(payload) || !boundedJson(payload)) throw new Error("Invalid script action payload");
+    const grant: ScriptGrant | undefined = ({
+      "chat.say": "chat", "tags.find": "tags.read", "tags.get": "tags.read", "tags.edit": "tags.write",
+      "tags.rules": "tags.write",
+      "fx.play": "fx", "fx.stop": "fx", "fx.list": "fx", "fx.stopMatching": "fx",
+      "automation.fire": "automation", "macros.call": "macros",
+      "prefabs.place": "prefabs.place", "summons.place": "summons", "summons.dismiss": "summons",
+    } as Record<string, ScriptGrant>)[method];
+    if (!grant || !policy.grants.includes(grant)) throw new Error(`Action ${method} not granted`);
+    ctx.trace.push(`${seq}: ${macro._id} ${method}`);
+    if (method === "tags.get") {
+      if (Object.keys(payload).length !== 1 || !isWorldTagRef(payload.ref))
+        throw new Error("Invalid explicit-scene tag reference");
+      const ref = payload.ref;
+      const targetSceneId = ref.coll === "scenes" ? ref.id : ref.parent?.id;
+      const targetScene = targetSceneId ? this.store.get("scenes", targetSceneId) : undefined;
+      // The ref itself names the requested scene; neither GM-elevated code nor
+      // an explicit ID may declassify an unseen placeable or private scene.
+      if (!targetScene || !can(caller, "read", targetScene, "scenes"))
+        throw new Error("Tag target unavailable");
+      const hit = listTaggable(this.store.world, { sceneId: targetScene._id, viewer: caller,
+        includeRefs: [ref] })[0];
+      if (!hit) throw new Error("Tag target unavailable");
+      return [...hit.tags];
+    }
+    if (method === "tags.find") {
+      const options = payload.options ?? {};
+      if (!isRecord(options) || Object.keys(options).some((k) =>
+            !["mode", "pattern", "caseSensitive", "contains", "collections", "includeRefs", "excludeRefs",
+              "sceneId", "allScenes", "groupByScene"].includes(k)) ||
+          (options.collections !== undefined && (!Array.isArray(options.collections) || options.collections.length > 12 ||
+            options.collections.some((c: unknown) => c !== "scenes" && !TAGGABLE_COLLECTIONS.includes(c as typeof TAGGABLE_COLLECTIONS[number])))) ||
+          (options.mode !== undefined && !["all", "any", "exactSet"].includes(String(options.mode))) ||
+          (options.pattern !== undefined && !["literal", "wildcard", "regex"].includes(String(options.pattern))) ||
+          (options.caseSensitive !== undefined && typeof options.caseSensitive !== "boolean") ||
+          (options.contains !== undefined && typeof options.contains !== "boolean") ||
+          (options.allScenes !== undefined && typeof options.allScenes !== "boolean") ||
+          (options.groupByScene !== undefined && typeof options.groupByScene !== "boolean") ||
+          (options.sceneId !== undefined && (typeof options.sceneId !== "string" ||
+            !options.sceneId || options.sceneId.length > 128 ||
+            [...options.sceneId].some((char) => char.charCodeAt(0) < 32))) ||
+          (options.allScenes === true && options.sceneId !== undefined))
+        throw new Error("Invalid tag query options");
+      const targetSceneId = options.allScenes === true ? undefined
+        : options.sceneId === undefined || options.sceneId === "current" ? scene._id : options.sceneId as string;
+      const targetScene = targetSceneId ? this.store.get("scenes", targetSceneId) : undefined;
+      if (targetSceneId && (!targetScene || !can(caller, "read", targetScene, "scenes")))
+        throw new Error("Tag scene unavailable");
+      // In an all-scene query, refs must still explicitly identify their
+      // parent scene. Entitlement is enforced by projection at query time.
+      const validRefs = targetSceneId
+        ? validSceneTagRefs(options.includeRefs, targetSceneId) &&
+          validSceneTagRefs(options.excludeRefs, targetSceneId)
+        : validWorldTagRefs(options.includeRefs) && validWorldTagRefs(options.excludeRefs);
+      if (!validRefs) throw new Error("Invalid tag query references");
+      if (!(typeof payload.query === "string" || Array.isArray(payload.query) &&
+          payload.query.every((q: unknown) => typeof q === "string"))) throw new Error("Invalid tag query");
+      const hits = getByTag(this.store.world, payload.query as string | string[], {
+        ...(targetSceneId ? { sceneId: targetSceneId } : {}), viewer: caller,
+        ...(options.mode !== undefined ? { mode: options.mode as TagMatchMode } : {}),
+        ...(options.pattern !== undefined ? { pattern: options.pattern as TagPattern } : {}),
+        ...(options.caseSensitive !== undefined ? { caseSensitive: options.caseSensitive as boolean } : {}),
+        ...(options.contains !== undefined ? { contains: options.contains as boolean } : {}),
+        ...(options.collections !== undefined ? { collections: options.collections as typeof TAGGABLE_COLLECTIONS[number][] } : {}),
+        ...(options.includeRefs !== undefined ? { includeRefs: options.includeRefs as unknown as DocRef[] } : {}),
+        ...(options.excludeRefs !== undefined ? { excludeRefs: options.excludeRefs as unknown as DocRef[] } : {}),
+      });
+      if (hits.length > 100) throw new Error("Tag query matched over 100 documents; narrow the selector");
+      // No entire documents or hidden host-only fields cross the worker
+      // boundary. Grouping uses a null-prototype record for arbitrary scene IDs.
+      const rows = hits.map((hit) => ({ sceneId: hit.sceneId,
+        ref: { coll: hit.ref.coll, id: hit.ref.id,
+          ...(hit.ref.parent ? { parent: { coll: hit.ref.parent.coll, id: hit.ref.parent.id } } : {}) },
+        name: hit.doc.name, tags: [...hit.tags] }));
+      const result = options.groupByScene === true ? rows.reduce<Record<string, typeof rows>>((grouped, row) => {
+        (grouped[row.sceneId] ??= []).push(row);
+        return grouped;
+      }, Object.create(null) as Record<string, typeof rows>) : rows;
+      if (!boundedJson(result)) throw new Error("Tag query result exceeds 16 KiB; narrow the selector");
+      return result;
+    }
+    if (method === "tags.edit" || method === "tags.rules") {
+      if (!Array.isArray(payload.refs) || payload.refs.length < 1 || payload.refs.length > 32 ||
+          (method === "tags.rules" ? Object.keys(payload).some((key) => key !== "refs") :
+            !["add", "remove", "toggle", "replace"].includes(String(payload.edit)) ||
+            !Array.isArray(payload.tags) ||
+            Object.keys(payload).some((key) => !["refs", "edit", "tags"].includes(key))))
+        throw new Error("Invalid tag edit/rule call");
+      // Build one fresh projection for the ACTUAL caller, not the GM run-as
+      // principal. Even reviewed, elevated player code cannot write a secret
+      // tile/scene merely by supplying its ID. Each ref names its scene; unlike
+      // Tagger reads, writes always require concrete refs, never `allScenes`.
+      const visible = listTaggable(this.store.world, { viewer: caller });
+      const seen = new Set<string>();
+      const docs: Array<{ ref: DocRef; sceneId: string; doc: BaseDocument }> = [];
+      for (const input of payload.refs) {
+        if (!isWorldTagRef(input)) throw new Error("Invalid explicit-scene tag target");
+        const targetSceneId = input.coll === "scenes" ? input.id : input.parent?.id;
+        const targetScene = targetSceneId ? this.store.get("scenes", targetSceneId) : undefined;
+        if (!targetScene || !can(caller, "read", targetScene, "scenes"))
+          throw new Error("Tag scene unavailable");
+        const identity = JSON.stringify([targetScene._id, input.coll, input.id]);
+        if (seen.has(identity)) throw new Error("Duplicate tag target");
+        seen.add(identity);
+        const entry = visible.find((item) => item.sceneId === targetSceneId &&
+          item.ref.coll === input.coll && item.ref.id === input.id);
+        if (!entry) throw new Error("Invisible or missing tag target");
+        const live = this.store.resolve(entry.ref);
+        if (!live || (policy.runAs === "caller" &&
+            !can(caller, "update", live, input.coll,
+              input.coll === "scenes" ? {} : { parent: targetScene })))
+          throw new Error("Tag target not authorized");
+        docs.push({ ref: entry.ref, sceneId: targetScene._id, doc: live });
+      }
+      // A scene-unique ordinal depends on *all* tags, including hidden ones.
+      // A player could infer a secret 'trap-1' from receiving 'trap-2' even
+      // after every ref was projected. GM elevation must NOT launder this read.
+      if (method === "tags.rules" && caller.role !== "GM" && caller.role !== "ASSISTANT" &&
+          docs.some(({ doc }) => tagsOf(doc).some((tag) => tag.includes("{#}"))))
+        throw new Error("Scene-unique Tagger numbering requires a GM caller");
+      const ops = method === "tags.rules" ? tagRuleOps(this.store.world, docs)
+        : tagEditOps(docs, payload.edit as TagEdit, payload.tags as string[]);
+      if (!ops.length) return { changed: 0 };
+      const committed = this.commitOps(ops, policy.runAs === "gm" ? this.systemUserId : caller.id,
+        `macro-${ctx.requestId}-${seq}`, true, ctx.audit);
+      if (!committed.ok) throw new Error(`Tag commit failed: ${committed.error}`);
+      ctx.trace.push(`  committed ${ops.length} ${method === "tags.rules" ? "tag rules" : "tag edits"} at seq ${committed.seq}`);
+      return { changed: ops.length, seq: committed.seq };
+    }
+    if (method === "chat.say") {
+      if (typeof payload.content !== "string" || !payload.content.trim() || payload.content.length > 1000 ||
+          !["gm", "scene"].includes(String(payload.audience))) throw new Error("Invalid chat content/audience");
+      const gmOnly = payload.audience === "gm";
+      const message: MessageDocument = { _id: randomId(), type: "message", name: `Macro: ${macro.name}`,
+        ownership: { default: gmOnly ? 0 : 1 }, flags: {}, system: {},
+        // Chat projection lets an author see their own whisper. GM-only script output
+        // must be host-authored or the player caller would receive the private text.
+        author: gmOnly ? this.systemUserId : caller.id,
+        content: payload.content, whisper: gmOnly ? [this.systemUserId] : [],
+        roll: null, flavor: `Script macro: ${macro.name}` };
+      const committed = this.commitOps([{ kind: "create", coll: "messages", data: message }],
+        policy.runAs === "gm" ? this.systemUserId : caller.id, `macro-${ctx.requestId}-${seq}`, true, ctx.audit);
+      if (!committed.ok) throw new Error(`Chat commit failed: ${committed.error}`);
+      ctx.trace.push(`  chat seq ${committed.seq} audience ${payload.audience}`);
+      return { messageId: message._id };
+    }
+    if (method === "fx.play") {
+      if (typeof payload.macroId !== "string" ||
+          (payload.sourceTokenId !== undefined && typeof payload.sourceTokenId !== "string") ||
+          (payload.targetTokenId !== undefined && typeof payload.targetTokenId !== "string") ||
+          (payload.waitForEnd !== undefined && payload.waitForEnd !== true) ||
+          Object.keys(payload).some((key) => !["macroId", "sourceTokenId", "targetTokenId", "waitForEnd"].includes(key)))
+        throw new Error("Invalid FX call");
+      const projected = projectWorld(this.store.world, this.store.seq, caller).collections.scenes
+        ?.find((item) => item._id === scene._id);
+      for (const tokenId of [payload.sourceTokenId, payload.targetTokenId]) {
+        if (tokenId && !projected?.tokens.some((t) => t._id === tokenId))
+          throw new Error("Invisible FX target");
+      }
+      const gm: SessionUser = { id: this.systemUserId, role: "GM", name: "Script" };
+      const prepared = this.prepareFx(policy.runAs === "gm" ? gm : caller, {
+        macroId: payload.macroId, sceneId: scene._id,
+        ...(payload.sourceTokenId ? { sourceTokenId: payload.sourceTokenId } : {}),
+        ...(payload.targetTokenId ? { targetTokenId: payload.targetTokenId } : {}),
+      }, undefined, caller.id);
+      if (!prepared.ok) throw new Error(`FX preflight failed: ${prepared.error}`);
+      const durationMs = Math.max(...prepared.cue.sections.map((step) => step.startMs + step.durationMs));
+      // An awaited short sequence must be safe to finish before this reviewed
+      // Worker expires. Fail BEFORE emitting anything, including a persistent
+      // loop or a 60-second cue that the 10-second Worker cannot await.
+      if (payload.waitForEnd === true && (prepared.cue.persistent || durationMs + HostSync.FX_LEAD_MS > 7000))
+        throw new Error("Awaited FX must be nonpersistent and finish within 7 seconds");
+      if (!this.emitPreparedFx(prepared)) throw new Error("FX instance could not be committed");
+      return { runId: prepared.cue.runId, atHostTime: prepared.cue.atHostTime,
+        endsAtHostTime: prepared.cue.atHostTime + durationMs,
+        persistent: prepared.cue.persistent === true };
+    }
+    if (method === "fx.list" || method === "fx.stopMatching") {
+      if (Object.keys(payload).length !== 1 || !Object.hasOwn(payload, "filter"))
+        throw new Error("FX query needs one filter record");
+      const checked = validateFxInstanceFilter(payload.filter, method === "fx.stopMatching");
+      if (!checked.ok) throw new Error(checked.error);
+      // A GM-reviewed player script still acts as its *actual caller* for FX
+      // inspection/stopping. GM elevation for world ops is not a license to
+      // enumerate another user's private FX or hidden media. Neither authored
+      // graph IDs nor unprojected instance documents cross the worker boundary.
+      const manifest = this.manifestSource();
+      const privileged = caller.role === "GM" || caller.role === "ASSISTANT";
+      const matches = this.store.getAll("fxInstances")
+        .filter((doc) => doc.sceneId === scene._id &&
+          (privileged || doc.ownerId === caller.id) &&
+          fxInstanceMatches(doc, checked.filter) &&
+          (privileged ? validateFxInstance(doc, scene, manifest) : this.canViewFxInstance(session, doc, manifest)))
+        .sort((a, b) => a.atHostTime - b.atHostTime || a._id.localeCompare(b._id));
+      if (method === "fx.list") {
+        const rows = matches.map((doc) => ({ runId: doc._id, name: doc.name, macroId: doc.macroId,
+          sceneId: doc.sceneId, atHostTime: doc.atHostTime,
+          ...(doc.sourceTokenId ? { sourceTokenId: doc.sourceTokenId } : {}),
+          ...(doc.targetTokenId ? { targetTokenId: doc.targetTokenId } : {}),
+        }));
+        if (!boundedJson(rows)) throw new Error("FX query result exceeds 16 KiB; narrow the selector");
+        return rows;
+      }
+      if (matches.length > 16) throw new Error("FX stop matches over 16 instances; narrow the selector");
+      if (!matches.length) return { stopped: 0 };
+      const committed = this.commitOps(matches.map((doc) => ({ kind: "delete" as const,
+        ref: { coll: "fxInstances" as const, id: doc._id } })), this.systemUserId,
+      `macro-${ctx.requestId}-${seq}`);
+      if (!committed.ok) throw new Error(`FX filtered stop failed: ${committed.error}`);
+      ctx.trace.push(`  stopped ${matches.length} FX instance(s) atomically at seq ${committed.seq}`);
+      return { stopped: matches.length, seq: committed.seq };
+    }
+    if (method === "fx.stop") {
+      if (typeof payload.runId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(payload.runId) ||
+          Object.keys(payload).some((key) => key !== "runId")) throw new Error("Invalid FX stop call");
+      const instance = this.store.get("fxInstances", payload.runId);
+      if (!instance || instance.sceneId !== scene._id ||
+          (caller.role !== "GM" && caller.role !== "ASSISTANT" && instance.ownerId !== caller.id))
+        throw new Error("FX instance unavailable");
+      const committed = this.commitOps([{ kind: "delete", ref: { coll: "fxInstances", id: instance._id } }],
+        this.systemUserId, `macro-${ctx.requestId}-${seq}`);
+      if (!committed.ok) throw new Error(`FX stop failed: ${committed.error}`);
+      ctx.trace.push(`  stopped FX instance at seq ${committed.seq}`);
+      return { stopped: true, seq: committed.seq };
+    }
+    if (method === "summons.place") {
+      const gm = caller.role === "GM" || caller.role === "ASSISTANT";
+      const elevated = policy.runAs === "gm";
+      if (typeof payload.presetId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(payload.presetId) ||
+          !isRecord(payload.at) || typeof payload.at.x !== "number" || !Number.isFinite(payload.at.x) ||
+          typeof payload.at.y !== "number" || !Number.isFinite(payload.at.y) ||
+          Object.keys(payload.at).some((field) => !["x", "y"].includes(field)) ||
+          (payload.summonerTokenId !== undefined &&
+            (typeof payload.summonerTokenId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(payload.summonerTokenId))) ||
+          Object.keys(payload).some((field) => !["presetId", "at", "summonerTokenId"].includes(field)) ||
+          (!gm && policy.summonIds?.length && !policy.summonIds.includes(payload.presetId)) ||
+          (!gm && elevated && !policy.summonIds?.includes(payload.presetId)))
+        throw new Error("Summon preset not approved for this invocation");
+      const authorized = () => isActive() && (() => {
+        const live = this.store.get("macros", macro._id) as MacroDocument | undefined;
+        return live?.command === macro.command && JSON.stringify(live.script) === JSON.stringify(policy) &&
+          can(caller, "read", live, "macros") &&
+          (gm || policy.playerCallable);
+      })();
+      const placed = await this.commitSummonFromPreset({ session, caller, presetId: payload.presetId,
+        sceneId: scene._id, at: { x: payload.at.x, y: payload.at.y },
+        ...(typeof payload.summonerTokenId === "string" ? { summonerTokenId: payload.summonerTokenId } : {}),
+        txId: `macro-${ctx.requestId}-${seq}`, audit: ctx.audit,
+        asReviewedGM: elevated && (gm || policy.summonIds?.includes(payload.presetId) === true),
+        isActive: authorized });
+      if (!placed.ok) throw new Error(`Summon failed: ${placed.error}`);
+      ctx.trace.push(`  summoned token ${placed.tokenId} at seq ${placed.seq}`);
+      return { tokenId: placed.tokenId, seq: placed.seq };
+    }
+    if (method === "summons.dismiss") {
+      if (typeof payload.tokenId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(payload.tokenId) ||
+          Object.keys(payload).some((field) => field !== "tokenId"))
+        throw new Error("Invalid summon dismissal");
+      // Even reviewed GM elevation does not let a player dismiss another
+      // player's instance: the actor belongs to the actual script caller.
+      const dismissed = this.commitSummonDismiss(caller, scene._id, payload.tokenId,
+        `macro-${ctx.requestId}-${seq}`, ctx.audit);
+      if (!dismissed.ok) throw new Error(dismissed.error);
+      ctx.trace.push(`  dismissed summon at seq ${dismissed.seq}`);
+      return { dismissed: true, seq: dismissed.seq };
+    }
+    if (method === "prefabs.place") {
+      const elevated = policy.runAs === "gm";
+      const gm = caller.role === "GM" || caller.role === "ASSISTANT";
+      if ((!gm && (!elevated || !policy.prefabIds?.includes(String(payload.prefabId)))) ||
+          typeof payload.prefabId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(payload.prefabId) ||
+          Object.keys(payload).some((key) => !["prefabId", "at", "rotation", "scale"].includes(key)))
+        throw new Error("Prefab not approved for this invocation");
+      const asGm: SessionUser = { id: this.systemUserId, role: "GM", name: "Reviewed prefab script" };
+      const placed = this.commitPrefabPlacement(elevated ? asGm : caller, payload.prefabId,
+        scene._id, { at: payload.at, ...(payload.rotation !== undefined ? { rotation: payload.rotation } : {}),
+          ...(payload.scale !== undefined ? { scale: payload.scale } : {}) }, caller, ctx.audit);
+      if (!placed.ok) throw new Error(`Prefab placement failed: ${placed.error}`);
+      ctx.trace.push(`  placed prefab instance at seq ${placed.seq}`);
+      return { instanceId: placed.instanceId, rootId: placed.rootId, seq: placed.seq };
+    }
+    if (method === "automation.fire") {
+      if (typeof payload.automationId !== "string" || !["click", "manual", "enter", "exit", "stop", "create", "rotate"].includes(String(payload.method)) ||
+          (payload.tokenId !== undefined && typeof payload.tokenId !== "string"))
+        throw new Error("Invalid automation call");
+      const graph = this.store.get("automations", payload.automationId) as AutomationDocument | undefined;
+      const checked = graph ? validateAutomation(graph.definition) : null;
+      const definition = checked?.ok ? checked.definition : null;
+      const tile = scene.tiles.find((item) => item._id === definition?.tileId);
+      const token = payload.tokenId ? scene.tokens.find((item) => item._id === payload.tokenId) : undefined;
+      const gm = caller.role === "GM" || caller.role === "ASSISTANT";
+      if (!graph || !definition || !tile || definition.sceneId !== scene._id ||
+          !definition.methods.includes(payload.method as AutomationMethod) ||
+          (payload.tokenId && !token) ||
+          (!gm && (payload.method !== "click" || !definition.gates?.playerRunnable ||
+            !can(caller, "read", tile, "tiles", { parent: scene }) ||
+            !docVisibleTo(caller, tile, scene) ||
+            (token && !can(caller, "update", token, "tokens", { parent: scene })))))
+        throw new Error("Automation is not published for this caller");
+      const fired = this.fireAutomation(graph, { scene, tile, caller,
+        method: payload.method as AutomationMethod, at: this.now(), rng: this.rng,
+        ...(token ? { token } : {}) });
+      if (!fired.ok) throw new Error(fired.error);
+      return { fired: true };
+    }
+    if (method === "macros.call") {
+      if (typeof payload.macroId !== "string" || !isRecord(payload.args))
+        throw new Error("Invalid nested macro call");
+      const child = this.store.get("macros", payload.macroId) as MacroDocument | undefined;
+      if (child?.kind !== "script" ||
+          ((caller.role !== "GM" && caller.role !== "ASSISTANT") && child.script?.sceneId !== scene._id))
+        throw new Error("Nested script not published in this scene");
+      return this.executeScript(payload.macroId, payload.args, ctx, `:${seq}`, stack, isActive);
+    }
+    throw new Error("Unsupported script action");
+  }
+
+  // ─── GM-owned prefabs: saved templates → host-allocated atomic placement ───
+
+  private readonly seenPrefabRequests = new Map<string, number>();
+
+  private handlePrefabPlace(session: Session, msg: PrefabPlaceMsg): void {
+    const caller = session.user;
+    if (!caller) return;
+    if (caller.role !== "GM" && caller.role !== "ASSISTANT") {
+      this.reject(session, String(msg.requestId), "forbidden", "prefab placement unavailable");
+      return;
+    }
+    if (!session.intentBucket.tryRemove()) {
+      this.reject(session, String(msg.requestId), "rate_limited", "prefab placement rate-limited");
+      return;
+    }
+    if (typeof msg.requestId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(msg.requestId) ||
+        typeof msg.prefabId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(msg.prefabId) ||
+        typeof msg.sceneId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(msg.sceneId) ||
+        Object.keys(msg).some((key) => !["kind", "requestId", "prefabId", "sceneId", "at", "rotation", "scale"].includes(key))) {
+      this.reject(session, String(msg.requestId), "invalid_schema", "invalid prefab request");
+      return;
+    }
+    const key = `${caller.id}:${msg.requestId}`;
+    if (this.seenPrefabRequests.has(key)) return;
+    const placed = this.commitPrefabPlacement(caller, msg.prefabId, msg.sceneId,
+      { at: msg.at, ...(msg.rotation !== undefined ? { rotation: msg.rotation } : {}),
+        ...(msg.scale !== undefined ? { scale: msg.scale } : {}) });
+    if (placed.ok) {
+      this.seenPrefabRequests.set(key, this.now());
+      if (this.seenPrefabRequests.size > 256) {
+        const first = this.seenPrefabRequests.keys().next().value;
+        if (first) this.seenPrefabRequests.delete(first);
+      }
+    }
+    this.send(session, { kind: "prefab.result", requestId: msg.requestId, ok: placed.ok,
+      detail: placed.ok ? `${placed.parts} prefab objects placed atomically` : placed.error,
+      ...(placed.ok ? { seq: placed.seq, instanceId: placed.instanceId, rootId: placed.rootId } : {}) });
+  }
+
+  /** Common reviewed-script and GM request path: nothing is written until all
+   * IDs, geometry, linked graphs, imported media and publication are checked.
+   * Scripts never supply operation lists or child flags to this path. */
+  private commitPrefabPlacement(caller: SessionUser, prefabId: string, sceneId: string, placement: unknown,
+    requester: SessionUser = caller, audit?: ActionAudit):
+    | { ok: true; seq: number; instanceId: string; rootId: string; parts: number }
+    | { ok: false; error: string } {
+    const prefab = this.store.get("prefabs", prefabId) as PrefabDocument | undefined;
+    const scene = this.store.get("scenes", sceneId) as SceneDocument | undefined;
+    if (!prefab || !scene || !can(caller, "create", prefab, "prefabs") ||
+        !can(caller, "update", scene, "scenes"))
+      return { ok: false, error: "prefab or destination scene unavailable" };
+    const checked = validatePrefab(prefab.definition);
+    if (!checked.ok) return checked;
+    // Prefab placement allocates `{#}` against every scene tag. A reviewed GM
+    // script may elevate world writes, but it cannot leak hidden tag occupancy
+    // to its actual player caller through the generated tags on visible parts.
+    if (requester.role !== "GM" && requester.role !== "ASSISTANT" &&
+        checked.definition.parts.some((part) => tagsOf(part.doc).some((tag) => tag.includes("{#}"))))
+      return { ok: false, error: "Scene-unique prefab numbering requires a GM caller" };
+    const planned = planPrefabPlacement(this.store.world, checked.definition, sceneId, placement);
+    if (!planned.ok) return planned;
+    // Linked dependencies remain in the live host world. A missing/unreviewed
+    // script or missing FX asset fails the WHOLE prefab, not a partial trap.
+    for (const op of planned.plan.ops) {
+      if (op.kind !== "create" || op.coll !== "automations") continue;
+      const graph = op.data as AutomationDocument;
+      for (const step of graph.definition.steps) {
+        if (step.kind !== "sequence" && step.kind !== "script") continue;
+        const macro = this.store.get("macros", step.macroId) as MacroDocument | undefined;
+        const valid = step.kind === "sequence" ? macro?.kind === "sequence" && validateFxSequence(macro.sequence).ok
+          : macro?.kind === "script" && (() => {
+            const approved = validateScriptMacro(macro);
+            if (!approved.ok || approved.policy.sceneId !== sceneId) return false;
+            const { approvedHash, ...reviewed } = approved.policy;
+            return scriptApprovalHashSync(macro.command, reviewed) === approvedHash;
+          })();
+        if (!valid) return { ok: false, error: `missing or unreviewed ${step.kind} dependency ${step.macroId}` };
+        if (step.kind === "sequence" && macro?.sequence?.sections.some((section) =>
+          (section.kind === "image" || section.kind === "sound") &&
+          !this.manifestSource()[section.assetId]))
+          return { ok: false, error: `prefab FX dependency ${step.macroId} has missing media` };
+      }
+    }
+    const committed = this.commitOps(planned.plan.ops, this.systemUserId,
+      `prefab-${randomId()}`, true, audit ?? this.newActionAudit(`Prefab: ${prefab.name}`));
+    return committed.ok ? { ok: true, seq: committed.seq, instanceId: planned.plan.instanceId,
+      rootId: planned.plan.rootId, parts: planned.plan.ops.length } : { ok: false, error: committed.error };
+  }
+
+  // ─── GM-published summons: private source → fresh actor + linked scene token ───
+
+  private summonStatus(session: Session, requestId: string, ok: boolean, detail: string,
+    seq?: number, tokenId?: string): void {
+    const result: SummonResultMsg = { kind: "summon.result", requestId, ok, detail,
+      ...(seq !== undefined ? { seq } : {}), ...(tokenId ? { tokenId } : {}) };
+    if (this.sessions.get(session.peerId) === session) this.send(session, result);
+  }
+
+  private async handleSummonPlace(session: Session, msg: SummonPlaceMsg): Promise<void> {
+    const caller = session.user;
+    if (!caller) return;
+    const fail = (detail: string) => this.summonStatus(session, String(msg.requestId).slice(0, 128), false,
+      caller.role === "GM" || caller.role === "ASSISTANT" ? detail : "Summon unavailable or placement not allowed");
+    if (!session.intentBucket.tryRemove()) { fail("Summoning rate-limited"); return; }
+    const validId = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(v);
+    if (!validId(msg.requestId) || !validId(msg.presetId) || !validId(msg.sceneId) ||
+        (msg.summonerTokenId !== undefined && !validId(msg.summonerTokenId)) ||
+        !isRecord(msg.at) || typeof msg.at.x !== "number" || !Number.isFinite(msg.at.x) ||
+        typeof msg.at.y !== "number" || !Number.isFinite(msg.at.y) ||
+        Object.keys(msg.at).some((key) => !["x", "y"].includes(key)) ||
+        Object.keys(msg).some((key) => !["kind", "requestId", "presetId", "sceneId", "at", "summonerTokenId"].includes(key))) {
+      fail("Malformed summon request"); return;
+    }
+    const key = `${caller.id}:${msg.requestId}`;
+    if (this.summonRequests.has(key)) return; // in-flight and successful retries cannot duplicate
+    this.summonRequests.set(key, this.now());
+    let success = false;
+    try {
+      const placed = await this.commitSummonFromPreset({ session, caller, presetId: msg.presetId,
+        sceneId: msg.sceneId, at: msg.at,
+        ...(msg.summonerTokenId ? { summonerTokenId: msg.summonerTokenId } : {}),
+        txId: `summon-${msg.requestId}` });
+      if (!placed.ok) { fail(placed.error); return; }
+      success = true;
+      this.summonStatus(session, msg.requestId, true, "Summoned", placed.seq, placed.tokenId);
+    } catch {
+      fail("Unable to resolve summon source");
+    } finally {
+      if (!success) this.summonRequests.delete(key);
+      else if (this.summonRequests.size > 256) {
+        const oldest = this.summonRequests.keys().next().value;
+        if (oldest) this.summonRequests.delete(oldest);
+      }
+    }
+  }
+
+  /** One authority path for the UI and reviewed script RPCs. Both allocate a
+   * new actor+token in a single envelope; private sources require explicit
+   * GM authority OR a revision-pinned, allowlisted elevated script. */
+  private async commitSummonFromPreset(input: {
+    session: Session; caller: SessionUser; presetId: string; sceneId: string;
+    at: { x: number; y: number }; summonerTokenId?: string; txId: string;
+    asReviewedGM?: boolean; isActive?: () => boolean; audit?: ActionAudit;
+  }): Promise<{ ok: true; seq: number; tokenId: string } | { ok: false; error: string }> {
+    const fail = (error: string) => ({ ok: false as const, error });
+    const { session, caller, presetId, sceneId, at, summonerTokenId, txId } = input;
+    const alive = () => (input.isActive?.() ?? true) &&
+      this.sessions.get(session.peerId) === session && session.user === caller;
+    if (!alive()) return fail("Summon request no longer active");
+    this.sweepExpiredSummons();
+    const preset = this.store.get("macros", presetId) as MacroDocument | undefined;
+    const checked = preset?.kind === "summon" ? validateSummon(preset.summon) : null;
+    if (!preset || !checked?.ok || checked.definition.sceneId !== sceneId)
+      return fail("Summon preset unavailable");
+    const definition = checked.definition;
+    const gm = caller.role === "GM" || caller.role === "ASSISTANT";
+    const source = definition.source.kind === "world"
+      ? this.store.get("actors", definition.source.actorId) as ActorDocument | undefined
+      : await this.resolveSummonSource?.(definition.source);
+    // Async pack lookup: re-read grants, source identity and caster, and check
+    // worker/caller liveness AFTER yielding. Failure commits nothing.
+    if (!alive()) return fail("Summon request no longer active");
+    const latest = this.store.get("macros", presetId) as MacroDocument | undefined;
+    const scene = this.store.get("scenes", sceneId) as SceneDocument | undefined;
+    const current = latest?.kind === "summon" ? validateSummon(latest.summon) : null;
+    const privateApproved = gm || input.asReviewedGM === true;
+    if (!latest || !current?.ok || JSON.stringify(current.definition) !== JSON.stringify(definition) ||
+        !scene || !can(caller, "read", scene, "scenes") ||
+        (!privateApproved && (!can(caller, "read", latest, "macros") ||
+          !definition.playerCallable || !docVisibleTo(caller, latest))) ||
+        (definition.source.kind === "world" &&
+          source !== this.store.get("actors", definition.source.actorId)))
+      return fail("Summon is no longer published or scene is unavailable");
+    const summoner = summonerTokenId ? scene.tokens.find((t) => t._id === summonerTokenId) : undefined;
+    if (!gm && (!summoner || !can(caller, "update", summoner, "tokens", { parent: scene }) ||
+        !docVisibleTo(caller, summoner, scene))) return fail("An owned summoner token is required");
+    const active = this.store.world.scenes.reduce((count, sc) => count + sc.tokens.filter((token) =>
+      summonMarker(token)?.ownerId === caller.id).length, 0);
+    if (active >= 32) return fail("Summon instance limit reached");
+    if (!source) return fail("Summon source missing");
+    const planned = planSummon({ definition, presetId, scene, source,
+      caller, ...(summoner ? { summoner } : {}), at, now: this.now(),
+      instanceId: randomId(), actorId: randomId(), tokenId: randomId(), manifest: this.manifestSource() });
+    if (!planned.ok) return fail(planned.error);
+    if (!alive()) return fail("Summon request no longer active");
+    const commit = this.commitOps(planned.ops, caller.id, txId, true,
+      input.audit ?? this.newActionAudit(`Summon: ${preset.name}`));
+    return commit.ok ? { ok: true, seq: commit.seq, tokenId: planned.token._id } : fail(commit.error);
+  }
+
+  private handleSummonDismiss(session: Session, msg: SummonDismissMsg): void {
+    const user = session.user;
+    if (!user) return;
+    const fail = () => this.summonStatus(session, String(msg.requestId).slice(0, 128), false, "Summon unavailable");
+    if (!session.intentBucket.tryRemove() || typeof msg.requestId !== "string" ||
+        typeof msg.sceneId !== "string" || typeof msg.tokenId !== "string" ||
+        [msg.requestId, msg.sceneId, msg.tokenId].some((v) => !/^[A-Za-z0-9_-]{1,128}$/.test(v)) ||
+        Object.keys(msg).some((key) => !["kind", "requestId", "sceneId", "tokenId"].includes(key))) { fail(); return; }
+    const key = `${user.id}:${msg.requestId}`;
+    if (this.summonRequests.has(key)) return;
+    const commit = this.commitSummonDismiss(user, msg.sceneId, msg.tokenId,
+      `summon-dismiss-${msg.requestId}`);
+    if (!commit.ok) { fail(); return; }
+    this.summonRequests.set(key, this.now());
+    this.summonStatus(session, msg.requestId, true, "Dismissed", commit.seq, msg.tokenId);
+  }
+
+  private commitSummonDismiss(user: SessionUser, sceneId: string, tokenId: string, txId: string,
+    audit?: ActionAudit): { ok: true; seq: number } | { ok: false; error: string } {
+    const scene = this.store.get("scenes", sceneId) as SceneDocument | undefined;
+    const token = scene?.tokens.find((t) => t._id === tokenId);
+    const marker = token && summonMarker(token);
+    if (!marker || marker.tokenId !== tokenId || marker.sceneId !== sceneId ||
+        (user.role !== "GM" && user.role !== "ASSISTANT" && marker.ownerId !== user.id))
+      return { ok: false, error: "Summon unavailable" };
+    return this.commitOps([{ kind: "delete", ref: { coll: "tokens", id: tokenId,
+      parent: { coll: "scenes", id: sceneId } } }], user.id, txId, true,
+    audit ?? this.newActionAudit(`Dismiss summon: ${token.name}`));
+  }
+
+  /** Browser timers can sleep; joining or any new summon request also sweeps
+   * expired instances. Recomputing from stored markers survives reload. */
+  private sweepExpiredSummons(): void {
+    if (this.disposed) return;
+    const now = this.now();
+    const ops: Op[] = [];
+    for (const scene of this.store.world.scenes) for (const token of scene.tokens) {
+      const marker = summonMarker(token);
+      if (marker?.expiresAt !== undefined && marker.expiresAt <= now &&
+          marker.sceneId === scene._id && marker.tokenId === token._id)
+        ops.push({ kind: "delete", ref: { coll: "tokens", id: token._id,
+          parent: { coll: "scenes", id: scene._id } } });
+    }
+    if (ops.length) this.commitOps(ops, this.systemUserId, `summon-expiry-${randomId()}`, false);
+    else this.scheduleSummonExpiry();
+  }
+
+  private scheduleSummonExpiry(): void {
+    if (this.summonTimer) clearTimeout(this.summonTimer);
+    this.summonTimer = null;
+    if (this.disposed) return;
+    let next = Infinity;
+    for (const scene of this.store.world.scenes) for (const token of scene.tokens) {
+      const marker = summonMarker(token);
+      if (marker?.expiresAt !== undefined && marker.sceneId === scene._id && marker.tokenId === token._id)
+        next = Math.min(next, marker.expiresAt);
+    }
+    if (Number.isFinite(next)) {
+      this.summonTimer = setTimeout(() => this.sweepExpiredSummons(),
+        Math.max(0, Math.min(2_147_483_647, next - this.now())));
+      (this.summonTimer as unknown as { unref?: () => void }).unref?.();
+    }
+  }
+
+  /** Tear down the expiry scheduler when the host world closes. */
+  dispose(): void {
+    this.disposed = true;
+    if (this.summonTimer) clearTimeout(this.summonTimer);
+    this.summonTimer = null;
+  }
+
+  // ─── Active-zone graphs: host events → atomic world plan → projected cues ───
+
+  private readonly seenAutomationRequests = new Map<string, number>();
+
+  /** Public canvas gesture resolves a tile to private graphs on the host. */
+  private handleAutomationClick(session: Session, msg: AutomationClickMsg): void {
+    const caller = session.user;
+    if (!caller) return;
+    if (!session.intentBucket.tryRemove()) {
+      this.reject(session, String(msg.requestId), "rate_limited", "tile clicks rate-limited");
+      return;
+    }
+    if (typeof msg.requestId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.requestId) ||
+        typeof msg.sceneId !== "string" || typeof msg.tileId !== "string" ||
+        !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.sceneId) || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.tileId) ||
+        (msg.tokenId !== undefined && (typeof msg.tokenId !== "string" ||
+          !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.tokenId))) ||
+        !isRecord(msg.point) || Object.keys(msg.point).some((key) => !["x", "y"].includes(key)) ||
+        typeof msg.point.x !== "number" || !Number.isFinite(msg.point.x) ||
+        typeof msg.point.y !== "number" || !Number.isFinite(msg.point.y) ||
+        Object.keys(msg).some((key) => !["kind", "requestId", "sceneId", "tileId", "point", "tokenId"].includes(key))) {
+      this.reject(session, String(msg.requestId), "invalid_schema", "invalid tile click");
+      return;
+    }
+    const key = `${caller.id}:${msg.requestId}`;
+    if (this.seenAutomationRequests.has(key)) return;
+    const scene = this.store.get("scenes", msg.sceneId) as SceneDocument | undefined;
+    const tile = scene?.tiles.find((item) => item._id === msg.tileId);
+    const token = msg.tokenId ? scene?.tokens.find((item) => item._id === msg.tokenId) : undefined;
+    if (!scene?.active || !tile || !can(caller, "read", scene, "scenes") ||
+        !can(caller, "read", tile, "tiles", { parent: scene }) ||
+        !docVisibleTo(caller, tile, scene) || !tileContainsPoint(tile, msg.point) ||
+        msg.point.x < 0 || msg.point.y < 0 || msg.point.x > scene.width || msg.point.y > scene.height ||
+        (msg.tokenId && (!token || !docVisibleTo(caller, token, scene) ||
+          !can(caller, "update", token, "tokens", { parent: scene })))) {
+      this.reject(session, msg.requestId, "forbidden", "tile unavailable");
+      return;
+    }
+    const gm = caller.role === "GM" || caller.role === "ASSISTANT";
+    const graphs = this.store.getAll("automations").flatMap((doc) => {
+      const checked = validateAutomation(doc.definition);
+      return checked.ok && checked.definition.sceneId === scene._id &&
+        checked.definition.tileId === tile._id && checked.definition.methods.includes("click") &&
+        (gm || checked.definition.gates?.playerRunnable === true) ? [doc] : [];
+    }).sort((a, b) => a._id.localeCompare(b._id));
+    // Visible tiles are ordinary art too. Do not distinguish an unpublished graph
+    // from a plain tile by sending a success/failure containing private metadata.
+    if (!graphs.length) return;
+    this.seenAutomationRequests.set(key, this.now());
+    if (this.seenAutomationRequests.size > 256) {
+      const first = this.seenAutomationRequests.keys().next().value;
+      if (first) this.seenAutomationRequests.delete(first);
+    }
+    for (const graph of graphs) {
+      const liveScene = this.store.get("scenes", scene._id) as SceneDocument | undefined;
+      const liveTile = liveScene?.tiles.find((item) => item._id === tile._id);
+      if (!liveScene || !liveTile || !docVisibleTo(caller, liveTile, liveScene)) break;
+      const liveToken = token ? liveScene.tokens.find((item) => item._id === token._id) : undefined;
+      if (token && (!liveToken || !docVisibleTo(caller, liveToken, liveScene))) break;
+      this.fireAutomation(graph, { scene: liveScene, tile: liveTile, caller, method: "click",
+        at: this.now(), rng: this.rng, ...(liveToken ? { token: liveToken } : {}) });
+    }
+  }
+
+  private handleAutomationRequest(session: Session, msg: AutomationRequestMsg): void {
+    const caller = session.user;
+    if (!caller) return;
+    if (!session.intentBucket.tryRemove()) {
+      this.reject(session, String(msg.requestId), "rate_limited", "automation requests rate-limited");
+      return;
+    }
+    if (typeof msg.requestId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.requestId) ||
+        typeof msg.automationId !== "string" || typeof msg.sceneId !== "string" ||
+        !["enter", "exit", "stop", "create", "rotate", "click", "manual"].includes(msg.method) ||
+        (msg.tokenId !== undefined && typeof msg.tokenId !== "string") ||
+        (msg.dryRun !== undefined && typeof msg.dryRun !== "boolean") ||
+        Object.keys(msg).some((key) => !["kind", "requestId", "automationId", "sceneId", "method", "tokenId", "dryRun"].includes(key))) {
+      this.reject(session, String(msg.requestId), "invalid_schema", "invalid automation request");
+      return;
+    }
+    const isGm = caller.role === "GM" || caller.role === "ASSISTANT";
+    // This ID-bearing endpoint is an author/debug interface. Even a published
+    // click must come through automation.click: it proves the visible tile and
+    // rotated hit without ever giving the player an opaque private graph ID.
+    // Keeping the older player click path would bypass hit testing entirely.
+    if (!isGm) {
+      this.reject(session, msg.requestId, "forbidden", "not published for this caller");
+      return;
+    }
+    const requestKey = `${caller.id}:${msg.requestId}`;
+    if (this.seenAutomationRequests.has(requestKey)) return;
+    const doc = this.store.get("automations", msg.automationId) as AutomationDocument | undefined;
+    // Imported worlds can contain definitions that predate the current schema (or are malformed).
+    // Never dereference methods/gates from an unvalidated persisted document.
+    const checked = doc ? validateAutomation(doc.definition) : null;
+    const definition = checked?.ok ? checked.definition : null;
+    const scene = this.store.get("scenes", msg.sceneId) as SceneDocument | undefined;
+    const tile = scene?.tiles.find((t) => t._id === definition?.tileId);
+    const token = msg.tokenId ? scene?.tokens.find((t) => t._id === msg.tokenId) : undefined;
+    if (!doc || !scene || !tile || !definition || definition.sceneId !== scene._id ||
+        !definition.methods.includes(msg.method) || (msg.tokenId && !token)) {
+      this.reject(session, msg.requestId, "forbidden", "graph unavailable");
+      return;
+    }
+    this.seenAutomationRequests.set(requestKey, this.now());
+    if (this.seenAutomationRequests.size > 256) {
+      const first = this.seenAutomationRequests.keys().next().value;
+      if (first) this.seenAutomationRequests.delete(first);
+    }
+    const event: AutomationEvent = { method: msg.method, scene, tile, caller,
+      at: this.now(), rng: msg.dryRun === true
+        ? automationPreviewRng(`${doc._id}:${msg.method}:${msg.tokenId ?? ""}:${doc.state?.count ?? 0}`)
+        : this.rng, ...(token ? { token } : {}) };
+    const result = this.fireAutomation(doc, event, msg.dryRun === true);
+    if (!result.ok) this.reject(session, msg.requestId, isGm ? "invalid_schema" : "forbidden",
+      isGm ? result.error : "automation unavailable");
+  }
+
+  private fireMovementAutomations(
+    sources: Array<{ sceneId: string; tokenId: string; before?: TokenDocument }>, by: UserId,
+  ): void {
+    const caller = this.sessionUsers().find((user) => user.id === by) ??
+      { id: by, role: "GM" as const, name: "System" };
+    const candidates: Array<{ docId: string; sceneId: string; tokenId: string; tileId: string;
+      method: AutomationMethod; fraction: number; sort: number; direction?: AutomationEvent["direction"] }> = [];
+    for (const source of sources) {
+      const scene = this.store.get("scenes", source.sceneId) as SceneDocument | undefined;
+      const token = scene?.tokens.find((t) => t._id === source.tokenId);
+      if (!scene || !token) continue;
+      const dx = source.before ? token.x - source.before.x : 0;
+      const dy = source.before ? token.y - source.before.y : 0;
+      const direction: AutomationEvent["direction"] = {
+        ...(dx < -1e-6 ? { x: "left" as const } : dx > 1e-6 ? { x: "right" as const } : {}),
+        ...(dy < -1e-6 ? { y: "up" as const } : dy > 1e-6 ? { y: "down" as const } : {}),
+      };
+      for (const doc of this.store.getAll("automations")) {
+        const checked = validateAutomation(doc.definition);
+        if (!checked.ok || checked.definition.sceneId !== scene._id) continue;
+        const tile = scene.tiles.find((t) => t._id === checked.definition.tileId);
+        if (!tile) continue;
+        for (const hit of sweptTileEvents(tile, source.before, token)) {
+          if (checked.definition.methods.includes(hit.method)) candidates.push({
+            docId: doc._id, sceneId: scene._id, tokenId: token._id, tileId: tile._id,
+            method: hit.method, fraction: hit.fraction, direction,
+            sort: typeof tile.sort === "number" && Number.isFinite(tile.sort) ? tile.sort : 0,
+          });
+        }
+      }
+    }
+    // Path fraction determines first contact; for coincident tiles use method,
+    // descending tile Sort (not elevation), then stable IDs. No player sets priority.
+    const methodOrder: Record<AutomationMethod, number> = {
+      enter: 0, exit: 1, stop: 2, create: 3, rotate: 4, click: 5, manual: 6,
+    };
+    candidates.sort((a, b) => a.sceneId.localeCompare(b.sceneId) ||
+      a.fraction - b.fraction || a.tokenId.localeCompare(b.tokenId) ||
+      methodOrder[a.method] - methodOrder[b.method] || b.sort - a.sort ||
+      a.tileId.localeCompare(b.tileId) || a.docId.localeCompare(b.docId));
+    const stopped = new Map<string, string>(); // scene/token -> tile that stopped additional tiles
+    for (const hit of candidates) {
+      const scope = `${hit.sceneId}\u0000${hit.tokenId}`;
+      if (stopped.has(scope) && stopped.get(scope) !== hit.tileId) continue;
+      const doc = this.store.get("automations", hit.docId) as AutomationDocument | undefined;
+      const scene = this.store.get("scenes", hit.sceneId) as SceneDocument | undefined;
+      const tile = scene?.tiles.find((t) => t._id === doc?.definition?.tileId);
+      const token = scene?.tokens.find((t) => t._id === hit.tokenId);
+      if (!doc || !scene || !tile || !token) continue;
+      const result = this.fireAutomation(doc, { scene, tile, token, caller, method: hit.method,
+        ...(hit.direction ? { direction: hit.direction } : {}), at: this.now(), rng: this.rng });
+      if (result.ok && result.stopOthers) stopped.set(scope, hit.tileId);
+    }
+  }
+
+  private reportAutomation(
+    doc: AutomationDocument, method: AutomationMethod,
+    result: AutomationTraceMsg["result"], detail: string, trace: string[], seq?: number,
+  ): void {
+    const maxTrace = 4_096;
+    const shown = trace.length > maxTrace
+      ? [...trace.slice(0, maxTrace - 1), `… ${trace.length - maxTrace + 1} more trace entries omitted (delivery limit)`]
+      : trace;
+    const msg: AutomationTraceMsg = { kind: "automation.trace", automationId: doc._id,
+      method, result, detail, trace: shown, ...(seq !== undefined ? { seq } : {}) };
+    for (const session of this.sessions.values()) {
+      if (session.user?.role === "GM" || session.user?.role === "ASSISTANT") this.send(session, msg);
+    }
+  }
+
+  private fireAutomation(
+    doc: AutomationDocument, event: AutomationEvent, dryRun = false,
+  ): { ok: true; stopOthers: boolean } | { ok: false; error: string } {
+    const result = planAutomation(this.store.world, doc,
+      { ...event, hurtHeal: planAutomationHealth }, this.systemUserId);
+    if (!result.ok) {
+      this.reportAutomation(doc, event.method, "rejected", result.error, result.trace);
+      return { ok: false, error: result.error };
+    }
+    if ("skipped" in result) {
+      this.reportAutomation(doc, event.method, "skipped", result.skipped, result.trace);
+      return { ok: true, stopOthers: false };
+    }
+    const prepared: PreparedFx[] = [];
+    for (const cue of result.plan.cues) {
+      const gm: SessionUser = { id: this.systemUserId, name: "Automation", role: "GM" };
+      const ready = this.prepareFx(gm, {
+        macroId: cue.macroId, sceneId: event.scene._id,
+        ...(cue.sourceTokenId ? { sourceTokenId: cue.sourceTokenId } : {}),
+        ...(cue.targetTokenId ? { targetTokenId: cue.targetTokenId } : {}),
+      }, cue.audience);
+      if (!ready.ok) {
+        const error = `FX preflight failed: ${ready.error}`;
+        this.reportAutomation(doc, event.method, "rejected", error, result.plan.trace);
+        return { ok: false, error };
+      }
+      prepared.push(ready);
+    }
+    // Both reviewed scripts and GM-authored summon preset IDs are resolved by
+    // the host, in authored order. No player request names a graph or source
+    // actor. Preflight the complete list before consuming graph history.
+    const postActions = result.plan.postActions;
+    const actionSession = postActions.length ? [...this.sessions.values()].find((s) =>
+      s.user === event.caller) : undefined;
+    if (postActions.length && (this.activeMacroRuns >= 8 || !actionSession?.user)) {
+      const error = "No authorized session/capacity for post-commit zone actions";
+      this.reportAutomation(doc, event.method, "rejected", error, result.plan.trace);
+      return { ok: false, error };
+    }
+    const view = result.plan.scripts.length ?
+      projectWorld(this.store.world, this.store.seq, event.caller).collections.scenes
+        ?.find((item) => item._id === event.scene._id) : undefined;
+    const approvedSummons = new Map<object, string>();
+    for (const action of postActions) {
+      if (action.kind === "script") {
+        // A player-triggered zone cannot grant access to unpublished scripts.
+        const macro = this.store.get("macros", action.macroId) as MacroDocument | undefined;
+        const checked = macro?.kind === "script" ? validateScriptMacro(macro) : null;
+        const validated = checked?.ok ? validateScriptArgs(action.args, checked.policy,
+          (id) => !!view?.tokens.some((t) => t._id === id)) : null;
+        if (!macro || !checked?.ok || checked.policy.sceneId !== event.scene._id ||
+            !can(event.caller, "read", macro, "macros") ||
+            ((event.caller.role !== "GM" && event.caller.role !== "ASSISTANT") && !checked.policy.playerCallable) ||
+            !validated?.ok) {
+          const error = `Reviewed script ${action.macroId} unavailable or inputs not authorized`;
+          this.reportAutomation(doc, event.method, "rejected", error, result.plan.trace);
+          return { ok: false, error };
+        }
+        const { approvedHash, ...reviewed } = checked.policy;
+        if (scriptApprovalHashSync(macro.command, reviewed) !== approvedHash) {
+          const error = `Reviewed script ${action.macroId} changed since GM approval`;
+          this.reportAutomation(doc, event.method, "rejected", error, result.plan.trace);
+          return { ok: false, error };
+        }
+      } else {
+        // The saved graph is the GM's exact preset approval. This is NOT a
+        // generic player grant to enumerate private actors or summon by ID.
+        const preset = this.store.get("macros", action.presetId) as MacroDocument | undefined;
+        const checked = preset?.kind === "summon" ? validateSummon(preset.summon) : null;
+        const summoner = event.scene.tokens.find((t) => t._id === action.summonerTokenId);
+        const gm = event.caller.role === "GM" || event.caller.role === "ASSISTANT";
+        const placementError = checked?.ok ? summonPlacementError(event.scene, checked.definition,
+          action.at, summoner, !gm) : "invalid summon preset";
+        if (!checked?.ok || checked.definition.sceneId !== event.scene._id ||
+            (checked.definition.source.kind === "world" &&
+              !this.store.get("actors", checked.definition.source.actorId)) ||
+            (!gm && (!summoner || !can(event.caller, "update", summoner, "tokens", { parent: event.scene }) ||
+              !docVisibleTo(event.caller, summoner, event.scene))) || placementError) {
+          const error = `Summon [${action.stepId}] preset, caster or placement unavailable`;
+          this.reportAutomation(doc, event.method, "rejected", error, result.plan.trace);
+          return { ok: false, error };
+        }
+        approvedSummons.set(action, JSON.stringify(checked.definition));
+      }
+    }
+    const summonsQueued = postActions.filter((a) => a.kind === "summon").length;
+    if (dryRun) {
+      this.reportAutomation(doc, event.method, "skipped",
+        `dry-run: ${result.plan.ops.length} ops, ${prepared.length} cues, ${result.plan.scripts.length} reviewed scripts (not executed), ${summonsQueued} summons (not executed)`, result.plan.trace);
+      return { ok: true, stopOthers: false };
+    }
+    // A graph may intentionally activate/deactivate its own gate in this
+    // envelope. Post-commit reviewed actions must pin the *resulting* approved
+    // definition, not treat that authored change as an external edit.
+    const approvedRootDefinition = result.plan.ops.reduce((expected, op) =>
+      op.kind === "update" && op.ref.coll === "automations" && op.ref.id === doc._id &&
+      op.diff.definition !== undefined ? JSON.stringify(op.diff.definition) : expected,
+    JSON.stringify(doc.definition));
+    const audit = this.newActionAudit(`Active zone: ${doc.name} (${event.method})`, postActions.length > 0);
+    const committed = this.commitOps(result.plan.ops, this.systemUserId,
+      `zone-${randomId()}`, true, audit);
+    if (!committed.ok) {
+      this.reportAutomation(doc, event.method, "rejected", committed.error, result.plan.trace);
+      return { ok: false, error: committed.error };
+    }
+    if (postActions.length) this.activeActionReceipts.add(audit.id);
+    const fxFailed = prepared.filter((fx) => !this.emitPreparedFx(fx)).length;
+    this.reportAutomation(doc, event.method, fxFailed ? "post-commit-failed" : "committed",
+      fxFailed ? `${fxFailed} persistent FX could not be committed; graph state was not rolled back` :
+        `${result.plan.ops.length} ops, ${prepared.length} cues, ${postActions.length} post-commit actions queued`,
+      result.plan.trace, committed.seq);
+    const actionCaller = actionSession?.user;
+    if (actionCaller && actionSession && postActions.length) {
+      this.activeMacroRuns++;
+      // External source resolution and Worker RPCs cannot be folded into an
+      // atomic graph transaction. Execute in graph order with one bounded
+      // budget; failed actions send only GM diagnostics, not player secrets.
+      void (async () => {
+        const trace = [...result.plan.trace];
+        let outcome: "completed" | "partial" = "completed";
+        const deadline = Date.now() + 30_000;
+        const budget = { calls: 0 };
+        let currentKind: "script" | "summon" = "script";
+        const graphLive = () => Date.now() < deadline &&
+          this.store.get("actionReceipts", audit.id)?.status === "pending" &&
+          this.sessions.get(actionSession.peerId) === actionSession && actionSession.user === actionCaller &&
+          JSON.stringify((this.store.get("automations", doc._id) as AutomationDocument | undefined)?.definition) ===
+            approvedRootDefinition;
+        try {
+          for (const [i, action] of postActions.entries()) {
+            currentKind = action.kind;
+            if (!graphLive()) throw new Error("Zone changed or caller disconnected after graph commit");
+            if (action.kind === "script") {
+              const ctx: ScriptInvocation = { session: actionSession, caller: actionCaller,
+                requestId: `zone-${committed.seq}-${i}`, deadline, budget, trace: [], audit };
+              try {
+                await this.executeScript(action.macroId, action.args, ctx, "", [], graphLive);
+                trace.push(`reviewed script [${action.stepId}] completed`);
+              } finally { trace.push(...ctx.trace); }
+              continue;
+            }
+            let active = true;
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const expired = new Promise<{ ok: false; error: string }>((resolve) => {
+              timer = setTimeout(() => { active = false; resolve({ ok: false, error: "Summon source resolution timed out" }); },
+                Math.max(1, Math.min(10_000, deadline - Date.now())));
+            });
+            const approved = approvedSummons.get(action);
+            try {
+              const placed = await Promise.race([this.commitSummonFromPreset({
+                session: actionSession, caller: actionCaller, presetId: action.presetId,
+                sceneId: event.scene._id, at: action.at,
+                ...(action.summonerTokenId ? { summonerTokenId: action.summonerTokenId } : {}),
+                txId: `zone-summon-${committed.seq}-${i}`, asReviewedGM: true, audit,
+                isActive: () => active && graphLive() &&
+                  JSON.stringify((this.store.get("macros", action.presetId) as MacroDocument | undefined)?.summon) === approved,
+              }), expired]);
+              if (!placed.ok) throw new Error(placed.error);
+              trace.push(`summon [${action.stepId}] placed token ${placed.tokenId} at seq ${placed.seq}`);
+            } finally { active = false; if (timer) clearTimeout(timer); }
+          }
+          this.reportAutomation(doc, event.method, "committed",
+            summonsQueued ? `${postActions.length} post-commit actions completed` :
+              `${postActions.length} post-commit scripts completed`, trace, committed.seq);
+        } catch (cause) {
+          outcome = "partial";
+          trace.push(`POST-COMMIT ${currentKind.toUpperCase()} FAILED: ${cause instanceof Error ? cause.message : "unknown error"}`);
+          this.reportAutomation(doc, event.method, "post-commit-failed",
+            currentKind === "script" ? "Script failed after the graph committed; graph state was not rolled back" :
+              "Summon failed after the graph committed; graph state was not rolled back", trace, committed.seq);
+        } finally {
+          this.finishActionAudit(audit, outcome);
+          this.activeMacroRuns--;
+        }
+      })();
+    } else if (postActions.length) {
+      this.finishActionAudit(audit, "partial");
+    }
+    return { ok: true, stopOthers: result.plan.stopOthers };
+  }
+
+  // ─── Macros / FX Wizard: approved, recipient-projected timeline ─────────────
+
+  private readonly seenFxRequests = new Map<string, number>();
+  /** Per-session delivery ledger: revocation/end is sent only to past recipients. */
+  private readonly fxViewers = new Map<string, { sceneId: string; peers: Set<string> }>();
+  private static readonly FX_LEAD_MS = 300;
+
+  private handleFxRequest(session: Session, msg: FxRequestMsg): void {
+    const caller = session.user;
+    if (!caller) return;
+    if (!session.intentBucket.tryRemove()) {
+      this.reject(session, String(msg.requestId), "rate_limited", "FX requests rate-limited");
+      return;
+    }
+    if (typeof msg.requestId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.requestId)) {
+      this.reject(session, String(msg.requestId), "invalid_schema", "invalid FX request");
+      return;
+    }
+    const key = `${caller.id}:${msg.requestId}`;
+    if (this.seenFxRequests.has(key)) return;
+    const prepared = this.prepareFx(caller, msg);
+    if (!prepared.ok) {
+      this.reject(session, msg.requestId, prepared.reason, prepared.error);
+      return;
+    }
+    if (!this.emitPreparedFx(prepared)) {
+      this.reject(session, msg.requestId, "invariant", "FX instance could not be committed");
+      return;
+    }
+    // Register after a successful host commit/fan-out; retries cannot clone cues.
+    this.seenFxRequests.set(key, this.now());
+    if (this.seenFxRequests.size > 256) {
+      const first = this.seenFxRequests.keys().next().value;
+      if (first) this.seenFxRequests.delete(first);
+    }
+  }
+
+  /** Same host scheduler for editor/macros and triggered FX. Can NARROW a graph's audience,
+   * never expand the saved macro's audience or a recipient's asset entitlement. */
+  private prepareFx(
+    caller: SessionUser,
+    req: Pick<FxRequestMsg, "macroId" | "sceneId" | "sourceTokenId" | "targetTokenId">,
+    narrowAudience?: "gm" | "scene",
+    /** Reviewed GM-elevated scripts execute with GM rights but retain the invoking caller as owner/audience. */
+    ownerId = caller.id,
+  ): { ok: true } & PreparedFx |
+     { ok: false; reason: "forbidden" | "invalid_schema"; error: string } {
+    const invalid = (error: string) => ({ ok: false as const, reason: "invalid_schema" as const, error });
+    const forbidden = (error: string) => ({ ok: false as const, reason: "forbidden" as const, error });
+    if (typeof req.macroId !== "string" || !req.macroId ||
+        typeof req.sceneId !== "string" || !req.sceneId ||
+        (req.sourceTokenId !== undefined && typeof req.sourceTokenId !== "string") ||
+        (req.targetTokenId !== undefined && typeof req.targetTokenId !== "string")) return invalid("invalid FX reference");
+    const macro = this.store.get("macros", req.macroId) as MacroDocument | undefined;
+    const scene = this.store.get("scenes", req.sceneId) as SceneDocument | undefined;
+    if (!macro || macro.kind !== "sequence" || !scene || !macro.sequence)
+      return invalid("sequence macro or scene missing");
+    const isGm = caller.role === "GM" || caller.role === "ASSISTANT";
+    if (!can(caller, "read", macro, "macros") || !can(caller, "read", scene, "scenes") ||
+        (!isGm && (macro.flags?.core?.playerCallable !== true || macro.sequence.audience === "gm")))
+      return forbidden("FX macro is not published for this caller");
+    const callerScene = projectWorld(this.store.world, this.store.seq, caller).collections.scenes
+      ?.find((s) => s._id === scene._id);
+    const source = req.sourceTokenId ? scene.tokens.find((t) => t._id === req.sourceTokenId) : undefined;
+    const target = req.targetTokenId ? scene.tokens.find((t) => t._id === req.targetTokenId) : undefined;
+    if ((req.sourceTokenId && (!source || !callerScene?.tokens.some((t) => t._id === source._id))) ||
+        (req.targetTokenId && (!target || !callerScene?.tokens.some((t) => t._id === target._id))))
+      return forbidden("FX source/target is not visible to caller");
+    const manifest = this.manifestSource();
+    const resolved = resolveFxSequence(macro.sequence, scene, source, target, (id) => manifest[id]?.mime);
+    if (!resolved.ok) return invalid(resolved.error);
+    if (macro.sequence.persistent && (this.store.getAll("fxInstances").length >= 64 ||
+        this.store.getAll("fxInstances").filter((entry) => entry.sceneId === scene._id).length >= 24))
+      return invalid("persistent FX instance limit reached; stop an effect first");
+    const cue: FxStartMsg = {
+      kind: "fx.start", runId: randomId(), macroId: macro._id, sceneId: scene._id,
+      atHostTime: this.now() + HostSync.FX_LEAD_MS, sections: resolved.sections,
+      ...(macro.sequence.persistent ? { persistent: true } : {}),
+    };
+    const recipients: Session[] = [];
+    for (const viewer of this.sessions.values()) {
+      const user = viewer.user;
+      if (!user) continue;
+      if ((macro.sequence.audience === "gm" || narrowAudience === "gm") &&
+          user.role !== "GM" && user.role !== "ASSISTANT") continue;
+      if (macro.sequence.audience === "caller" && user.id !== ownerId) continue;
+      if (!can(user, "read", macro, "macros") || !can(user, "read", scene, "scenes")) continue;
+      const visibleScene = projectWorld(this.store.world, this.store.seq, user).collections.scenes
+        ?.find((s) => s._id === scene._id);
+      if (!visibleScene || (source && !visibleScene.tokens.some((t) => t._id === source._id)) ||
+          (target && !visibleScene.tokens.some((t) => t._id === target._id))) continue;
+      const available = projectAssetManifest(this.store.world, manifest, user);
+      if (resolved.sections.some((step) =>
+        (step.kind === "image" || step.kind === "sound") && !available[step.assetId])) continue;
+      recipients.push(viewer);
+    }
+    return { ok: true, cue, recipients, callerId: ownerId,
+      audience: narrowAudience === "gm" ? "gm" : macro.sequence.audience ?? "scene",
+      checkedAtSeq: this.store.seq,
+      ...(source ? { sourceTokenId: source._id } : {}),
+      ...(target ? { targetTokenId: target._id } : {}) };
+  }
+
+  private emitPreparedFx(prepared: PreparedFx): boolean {
+    if (prepared.cue.persistent) {
+      const macro = this.store.get("macros", prepared.cue.macroId) as MacroDocument | undefined;
+      const scene = this.store.get("scenes", prepared.cue.sceneId) as SceneDocument | undefined;
+      if (!macro || macro.kind !== "sequence" || !macro.sequence?.persistent || !scene ||
+          this.store.getAll("fxInstances").length >= 64) return false;
+      const doc: FxInstanceDocument = { _id: prepared.cue.runId, type: "fxInstance", name: macro.name,
+        ownership: { default: 0 }, flags: {}, system: {}, sceneId: scene._id, macroId: macro._id,
+        ownerId: prepared.callerId, audience: prepared.audience,
+        atHostTime: prepared.cue.atHostTime, sections: prepared.cue.sections,
+        ...(prepared.sourceTokenId ? { sourceTokenId: prepared.sourceTokenId } : {}),
+        ...(prepared.targetTokenId ? { targetTokenId: prepared.targetTokenId } : {}) };
+      if (!validateFxInstance(doc, scene, this.manifestSource())) return false;
+      // Broadcast projects the private document to GMs, then separately sends
+      // entitled viewers a resolved cue. Both happen after the durable commit.
+      return this.commitSystem([{ kind: "create", coll: "fxInstances", data: doc }], true).ok;
+    }
+    // A graph preflights FX before the mechanical envelope, then sends it after
+    // commit. That envelope can HIDE the FX's source/target or revoke its asset:
+    // never deliver an old entitlement/anchor just because it was valid earlier.
+    const changed = prepared.checkedAtSeq !== this.store.seq;
+    const scene = changed ? this.store.get("scenes", prepared.cue.sceneId) as SceneDocument | undefined : undefined;
+    const macro = changed ? this.store.get("macros", prepared.cue.macroId) as MacroDocument | undefined : undefined;
+    const manifest = changed ? this.manifestSource() : undefined;
+    for (const recipient of prepared.recipients) {
+      const user = recipient.user;
+      if (this.sessions.get(recipient.peerId) !== recipient || !user) continue;
+      if (changed) {
+        if (!scene || !macro || macro.kind !== "sequence" || !macro.sequence || !manifest ||
+            !can(user, "read", macro, "macros") || !can(user, "read", scene, "scenes") ||
+            (macro.sequence.audience === "gm" && user.role !== "GM" && user.role !== "ASSISTANT") ||
+            (macro.sequence.audience === "caller" && user.id !== prepared.callerId)) continue;
+        const view = projectWorld(this.store.world, this.store.seq, user).collections.scenes
+          ?.find((s) => s._id === scene._id);
+        if (!view || (prepared.sourceTokenId && !view.tokens.some((t) => t._id === prepared.sourceTokenId)) ||
+            (prepared.targetTokenId && !view.tokens.some((t) => t._id === prepared.targetTokenId))) continue;
+        const available = projectAssetManifest(this.store.world, manifest, user);
+        if (prepared.cue.sections.some((step) =>
+          (step.kind === "image" || step.kind === "sound") && !available[step.assetId])) continue;
+      }
+      this.send(recipient, prepared.cue);
+    }
+    return true;
+  }
+
+  /** Permission and asset rights are checked against COMMITTED state every time
+   * an instance is replayed or an existing viewer's entitlement may have moved. */
+  private canViewFxInstance(session: Session, doc: FxInstanceDocument, manifest: AssetManifest): boolean {
+    const user = session.user;
+    if (!user) return false;
+    const scene = this.store.get("scenes", doc.sceneId) as SceneDocument | undefined;
+    const macro = this.store.get("macros", doc.macroId) as MacroDocument | undefined;
+    if (!scene || !macro || macro.kind !== "sequence" || !macro.sequence ||
+        !validateFxInstance(doc, scene, manifest) ||
+        !can(user, "read", scene, "scenes") || !can(user, "read", macro, "macros")) return false;
+    const isGm = user.role === "GM" || user.role === "ASSISTANT";
+    if ((doc.audience === "gm" || macro.sequence.audience === "gm") && !isGm) return false;
+    if ((doc.audience === "caller" || macro.sequence.audience === "caller") && user.id !== doc.ownerId) return false;
+    // `playerCallable` gates who may *request* playback, not who may see a GM's
+    // scene-audience cue. Keep the same recipient policy as one-shot sequences.
+    const view = projectWorld(this.store.world, this.store.seq, user).collections.scenes
+      ?.find((s) => s._id === scene._id);
+    if (!view || (doc.sourceTokenId && !view.tokens.some((t) => t._id === doc.sourceTokenId)) ||
+        (doc.targetTokenId && !view.tokens.some((t) => t._id === doc.targetTokenId))) return false;
+    const available = projectAssetManifest(this.store.world, manifest, user);
+    return doc.sections.every((section) =>
+      (section.kind !== "image" && section.kind !== "sound") || available[section.assetId] !== undefined);
+  }
+
+  private fxCue(doc: FxInstanceDocument): FxStartMsg {
+    return { kind: "fx.start", runId: doc._id, macroId: doc.macroId,
+      sceneId: doc.sceneId, atHostTime: doc.atHostTime, persistent: true, sections: doc.sections };
+  }
+
+  /** Reconcile past recipients after *every* committed operation: hiding a
+   * source, deleting a macro, revoking a media reference or changing ownership
+   * cannot leave a private aura playing in someone else's client. */
+  private reconcileFxInstances(): void {
+    if (!this.fxViewers.size && !this.store.getAll("fxInstances").length) return;
+    const manifest = this.manifestSource();
+    const instances = new Map(this.store.getAll("fxInstances").map((doc) => [doc._id, doc]));
+    for (const [id, viewers] of this.fxViewers) {
+      if (instances.has(id)) continue;
+      for (const peerId of viewers.peers) {
+        const session = this.sessions.get(peerId);
+        if (session?.user) this.send(session, { kind: "fx.end", runId: id, sceneId: viewers.sceneId });
+      }
+      this.fxViewers.delete(id);
+    }
+    for (const doc of instances.values()) {
+      const state = this.fxViewers.get(doc._id) ?? { sceneId: doc.sceneId, peers: new Set<string>() };
+      for (const session of this.sessions.values()) {
+        const eligible = this.canViewFxInstance(session, doc, manifest);
+        const wasSent = state.peers.has(session.peerId);
+        if (eligible && !wasSent) {
+          this.send(session, this.fxCue(doc));
+          state.peers.add(session.peerId);
+        } else if (!eligible && wasSent) {
+          this.send(session, { kind: "fx.end", runId: doc._id, sceneId: doc.sceneId });
+          state.peers.delete(session.peerId);
+        }
+      }
+      if (state.peers.size) this.fxViewers.set(doc._id, state);
+      else this.fxViewers.delete(doc._id);
+    }
+  }
+
+  /** A client re-entering a scene (or restarting after a snapshot) explicitly
+   * asks for its own live playback state. No private records or other users'
+   * names/asset paths ride on the response. */
+  private handleFxSync(session: Session, sceneId: string): void {
+    if (!session.user || !session.intentBucket.tryRemove() || typeof sceneId !== "string" ||
+        !/^[A-Za-z0-9_-]{1,128}$/.test(sceneId)) return;
+    const manifest = this.manifestSource();
+    for (const doc of this.store.getAll("fxInstances")) {
+      if (doc.sceneId !== sceneId || !this.canViewFxInstance(session, doc, manifest)) continue;
+      this.send(session, this.fxCue(doc));
+      const state = this.fxViewers.get(doc._id) ?? { sceneId, peers: new Set<string>() };
+      state.peers.add(session.peerId);
+      this.fxViewers.set(doc._id, state);
+    }
+  }
+
+  /** The Live FX manager uses the same bounded matching semantics as reviewed
+   * scripts, but a player cannot submit arbitrary search patterns to enumerate
+   * or end other people's private instances. The current host scene and matches
+   * are recomputed at dispatch; the browser's preview list is never authority. */
+  private handleFxStopMatching(session: Session, msg: FxStopMatchingMsg): void {
+    const user = session.user;
+    if (!user) return;
+    if (!session.intentBucket.tryRemove()) {
+      this.reject(session, String(msg.requestId), "rate_limited", "FX requests rate-limited");
+      return;
+    }
+    if (user.role !== "GM" && user.role !== "ASSISTANT") {
+      this.reject(session, String(msg.requestId), "forbidden", "FX manager unavailable");
+      return;
+    }
+    const requestId = msg.requestId;
+    const checked = validateFxInstanceFilter(msg.filter, true);
+    if (typeof requestId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId) ||
+        typeof msg.sceneId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(msg.sceneId) ||
+        Object.keys(msg).length !== 4 || !checked.ok) {
+      this.reject(session, String(requestId), "invalid_schema", "invalid FX stop filter");
+      return;
+    }
+    const scene = this.store.get("scenes", msg.sceneId);
+    if (!scene) {
+      this.reject(session, requestId, "forbidden", "FX scene unavailable");
+      return;
+    }
+    const manifest = this.manifestSource();
+    const matches = this.store.getAll("fxInstances").filter((doc) =>
+      doc.sceneId === scene._id && fxInstanceMatches(doc, checked.filter) &&
+        validateFxInstance(doc, scene, manifest));
+    if (matches.length > 16) {
+      this.reject(session, requestId, "invalid_schema", "FX stop matches over 16 instances; narrow the selector");
+      return;
+    }
+    if (!matches.length) return;
+    const stopped = this.commitOps(matches.map((doc) => ({ kind: "delete" as const,
+      ref: { coll: "fxInstances" as const, id: doc._id } })),
+    this.systemUserId, `fx-stop-matching-${requestId}`);
+    if (!stopped.ok) this.reject(session, requestId, "invariant", "FX instances could not be stopped");
+  }
+
+  private handleFxStop(session: Session, msg: FxStopMsg): void {
+    const user = session.user;
+    if (!user) return;
+    if (!session.intentBucket.tryRemove()) {
+      this.reject(session, String(msg.requestId), "rate_limited", "FX requests rate-limited");
+      return;
+    }
+    if (typeof msg.requestId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(msg.requestId) ||
+        typeof msg.instanceId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(msg.instanceId) ||
+        Object.keys(msg).some((key) => !["kind", "requestId", "instanceId"].includes(key))) {
+      this.reject(session, String(msg.requestId), "invalid_schema", "invalid FX stop request");
+      return;
+    }
+    const doc = this.store.get("fxInstances", msg.instanceId);
+    if (!doc || (user.role !== "GM" && user.role !== "ASSISTANT" && doc.ownerId !== user.id)) {
+      this.reject(session, msg.requestId, "forbidden", "FX instance unavailable");
+      return;
+    }
+    const stopped = this.commitOps([{ kind: "delete", ref: { coll: "fxInstances", id: doc._id } }],
+      this.systemUserId, `fx-stop-${msg.requestId}`);
+    if (!stopped.ok) this.reject(session, msg.requestId, "invariant", "FX instance could not be stopped");
   }
 
   // ─── Assets (§7) ─────────────────────────────────────────────────────────────
@@ -1212,12 +3158,14 @@ export class HostSync {
     if (!session.user) return; // requires an approved session (§16)
     if (!session.assetBucket.tryRemove()) return; // §16: silently dropped
     if (!this.transfer) return; // no asset server wired (unit: assets)
-    this.transfer.request(
-      session.peerId,
-      msg.assetId,
-      msg.offset,
-      msg.priority,
-    );
+    if (!canFetchAsset(this.store.world, this.manifestSource(), session.user, msg.assetId)) {
+      // Same miss sentinel as an unknown asset: a guessed hash gives no
+      // existence oracle, and the fetcher's promise can terminate.
+      this.send(session, { kind: "asset.chunk", assetId: msg.assetId,
+        offset: 0, total: 0, bytes: new Uint8Array(0), done: true });
+      return;
+    }
+    this.transfer.request(session.peerId, msg.assetId, msg.offset, msg.priority);
   }
 
   // ─── §7 audio + clock ───────────────────────────────────────────────────────
@@ -2019,7 +3967,8 @@ export class HostSync {
       ),
     });
     // Undoable as one envelope: the HP write, the card's record and the note move together.
-    const committed = this.commitOps(ops, session.user.id, txId);
+    const committed = this.commitOps(ops, session.user.id, txId, true,
+      this.newActionAudit(`${msg.mode === "damage" ? "Damage" : "Healing"}: ${actor.name} (${total})`));
     if (!committed.ok) this.reject(session, txId, "invariant", committed.error);
   }
 

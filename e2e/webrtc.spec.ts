@@ -58,9 +58,11 @@ test.describe("canvas (§9 M1 subset)", () => {
       "walls",
       "lighting",
       "hexcrawl", // §20 overlay: under the tokens, above the lighting (D-271)
+      "fxBelowTokens", // FX world-space media stays below fog
       "tokens",
       "models",
       "tilesAbove",
+      "fxAboveTokens",
       "fog",
       "effects",
       "notes",

@@ -22,7 +22,7 @@ describe("PROTOCOL.md ↔ MsgKind consistency (§0, §13, D-010)", () => {
   });
 
   test("documented message sections exactly match the MsgKind names", () => {
-    const documented = [...doc.matchAll(/^### ([a-z.]+) \(0x/gm)].map((m) => m[1]);
+    const documented = [...doc.matchAll(/^### ([a-zA-Z.]+) \(0x/gm)].map((m) => m[1]);
     expect(new Set(documented).size).toBe(documented.length); // no duplicates
     expect(documented.sort()).toEqual([...Object.keys(MsgKind)].sort());
   });

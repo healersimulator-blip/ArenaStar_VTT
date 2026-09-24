@@ -16,7 +16,7 @@ import type { SimEvent, TurnReport } from "./sim";
 export type { RollMode };
 
 /**
- * The 1-byte message-type prefix (§6.1/§13). 37 kinds — this map is the
+ * The 1-byte message-type prefix (§6.1/§13). This map is the
  * single source of truth; PROTOCOL.md is kept in sync by a unit test.
  */
 export const MsgKind = {
@@ -42,6 +42,27 @@ export const MsgKind = {
   "roll.pending": 0x33,
   // §2.2 item 3 (G-20/D-261) — apply a roll card's total to an actor (the amount stays host-side)
   "roll.apply": 0x34,
+  // Macros / FX Wizard: authorized run request and recipient-projected timeline
+  "fx.request": 0x35,
+  "fx.start": 0x36,
+  "asset.manifest": 0x37,
+  "automation.request": 0x38,
+  "automation.trace": 0x39,
+  "macro.request": 0x3a,
+  "macro.result": 0x3b,
+  "automation.click": 0x3c,
+  "prefab.place": 0x3d,
+  "prefab.result": 0x3e,
+  "fx.sync": 0x3f,
+  "fx.stop": 0x44,
+  "fx.end": 0x45,
+  "summon.place": 0x46,
+  "summon.dismiss": 0x47,
+  "summon.result": 0x48,
+  "fx.stopMatching": 0x49,
+  "tagger.rules": 0x4a,
+  "tagger.rules.result": 0x4b,
+  "action.revert": 0x4c,
   // D-250 — explored fog restore: the client asks, the host answers from its fog store
   "fog.get": 0x0e,
   // host → client
@@ -80,8 +101,8 @@ export interface HelloMsg {
   displayName: string;
   ts: number;
   sig: string;
-  /** Reconnect (§5): the client's lastSeq — host replies ops-since-seq instead
-   * of a full snapshot when the log still covers it (D-031). */
+  /** Reconnect (§5): GM/assistant may receive ops-since-seq; players get fresh
+   * recipient-projected snapshots until history-aware delta projection exists. */
   lastSeq?: number;
 }
 
@@ -165,12 +186,164 @@ export interface RollApplyMsg {
   mode: "damage" | "healing";
 }
 
+/** GM-only named Revert of a durable, host-authored world-action receipt. */
+export interface ActionRevertMsg {
+  kind: "action.revert";
+  receiptId: DocId;
+}
+
 /** F01 — GM delegates a reroll window to a player (expires in 2 turns). */
 export interface RollDelegateMsg {
   kind: "roll.delegate";
   messageId: DocId;
   playerId: UserId;
 }
+
+/** GM/assistant-only graph invocation; never send steps, selectors or world operations. */
+export interface AutomationRequestMsg {
+  kind: "automation.request";
+  requestId: string;
+  automationId: DocId;
+  sceneId: DocId;
+  method: import("./automation").AutomationMethod;
+  tokenId?: DocId;
+  /** GM-only: trace the same plan/preflight without committing or emitting cues. */
+  dryRun?: boolean;
+}
+
+/** Click a *visible* tile; the client does not know private graph IDs or submit actions.
+ * Host checks the rotated hit, scene, publication, optional owned token and dedup. */
+export interface AutomationClickMsg {
+  kind: "automation.click";
+  requestId: string;
+  sceneId: DocId;
+  tileId: DocId;
+  point: { x: number; y: number };
+  tokenId?: DocId;
+}
+
+/** GM/assistant-only Tagger rule expansion. Send exact, scene-qualified refs,
+ * NEVER client-computed ordinals or final tags; the host allocates against live
+ * tags in every referenced scene in one authoritative undoable transaction. */
+export interface TaggerRulesMsg {
+  kind: "tagger.rules";
+  requestId: string;
+  refs: import("./documents").DocRef[];
+}
+
+export interface TaggerRulesResultMsg {
+  kind: "tagger.rules.result";
+  requestId: string;
+  changed: number;
+  seq: number;
+}
+
+/** GM-only request: host resolves the saved template; no authored ops cross the wire. */
+export interface PrefabPlaceMsg {
+  kind: "prefab.place";
+  requestId: string;
+  prefabId: DocId;
+  sceneId: DocId;
+  at: { x: number; y: number };
+  rotation?: number;
+  scale?: number;
+}
+
+/** GM/assistant-only placement result; players see projected spawned objects, never the template. */
+export interface PrefabResultMsg {
+  kind: "prefab.result";
+  requestId: string;
+  ok: boolean;
+  detail: string;
+  seq?: number;
+  instanceId?: string;
+  rootId?: DocId;
+}
+
+/** Request a GM-published summon by ID at a point; never supply an actor or world op. */
+export interface SummonPlaceMsg {
+  kind: "summon.place";
+  requestId: string;
+  presetId: DocId;
+  sceneId: DocId;
+  at: { x: number; y: number };
+  summonerTokenId?: DocId;
+}
+/** Request dismissal by visible instance token ID; source and actor IDs remain host-private. */
+export interface SummonDismissMsg { kind: "summon.dismiss"; requestId: string; sceneId: DocId; tokenId: DocId }
+/** Caller-only, source-free status. Other recipients only see projected ops. */
+export interface SummonResultMsg {
+  kind: "summon.result";
+  requestId: string;
+  ok: boolean;
+  detail: string;
+  seq?: number;
+  tokenId?: DocId;
+}
+
+/** Private diagnostic: only GM/assistant sessions receive graph history/step decisions. */
+export interface AutomationTraceMsg {
+  kind: "automation.trace";
+  automationId: DocId;
+  method: import("./automation").AutomationMethod;
+  result: "committed" | "skipped" | "rejected" | "post-commit-failed";
+  detail: string;
+  trace: string[];
+  seq?: number;
+}
+
+/** A caller supplies ONLY named inputs to a GM-reviewed, revision-pinned saved script. */
+export interface MacroRequestMsg {
+  kind: "macro.request";
+  requestId: string;
+  macroId: DocId;
+  args: Record<string, Json>;
+}
+
+/** Private diagnostic for GMs; players receive only a generic status, never logs/results. */
+export interface MacroResultMsg {
+  kind: "macro.result";
+  requestId: string;
+  macroId: DocId;
+  callerId: UserId;
+  ok: boolean;
+  detail: string;
+  result?: Json;
+  trace?: string[];
+}
+
+/** A client asks to run a SAVED macro by ID, never sends arbitrary FX/assets/ops. */
+export interface FxRequestMsg {
+  kind: "fx.request";
+  requestId: string;
+  macroId: DocId;
+  sceneId: DocId;
+  sourceTokenId?: DocId;
+  targetTokenId?: DocId;
+}
+
+/** Host-stamped, per-viewer projection. Coordinates and media MIME are authoritative. */
+export interface FxStartMsg {
+  kind: "fx.start";
+  runId: string;
+  macroId: DocId;
+  sceneId: DocId;
+  atHostTime: number;
+  sections: import("./fx").ResolvedFxSection[];
+  /** Instance survives scene switch/reconnect/reload; sections loop until fx.end. */
+  persistent?: boolean;
+}
+
+/** Request only a recipient-projected, live-instance replay for a visible scene. */
+export interface FxSyncMsg { kind: "fx.sync"; sceneId: DocId }
+/** Stop a host-owned instance. Owner or GM; unauthorized IDs have a generic error. */
+export interface FxStopMsg { kind: "fx.stop"; requestId: string; instanceId: DocId }
+/** GM-only bounded scene-local bulk stop. The host re-evaluates the filter; no
+ * client-supplied instance IDs or counts are trusted. All deletes share an undo. */
+export interface FxStopMatchingMsg { kind: "fx.stopMatching"; requestId: string;
+  sceneId: DocId; filter: import("./fxInstances").FxInstanceFilter }
+/** Recipient-only revocation/end. Contains no hidden macro/asset/source details. */
+export interface FxEndMsg { kind: "fx.end"; runId: string; sceneId: DocId }
 
 /** §5 ephemeral kinds: cursors, pings, drags, ruler, typing. */
 export type EphemeralKind = "cursor" | "ping" | "drag" | "ruler" | "typing";
@@ -310,6 +483,12 @@ export interface SnapshotMsg {
   kind: "snapshot";
   seq: number;
   world: import("./projection").ProjectedWorld;
+  manifest: AssetManifest;
+}
+
+/** Full per-recipient manifest replacement after a publication/entitlement change. No bytes. */
+export interface AssetManifestMsg {
+  kind: "asset.manifest";
   manifest: AssetManifest;
 }
 
@@ -456,8 +635,27 @@ export type WireMessage =
   | RollPendingMsg
   | RollRerollMsg
   | RollRevertMsg
+  | ActionRevertMsg
   | RollDelegateMsg
   | RollApplyMsg
+  | AutomationRequestMsg
+  | AutomationClickMsg
+  | AutomationTraceMsg
+  | TaggerRulesMsg
+  | TaggerRulesResultMsg
+  | PrefabPlaceMsg
+  | PrefabResultMsg
+  | SummonPlaceMsg
+  | SummonDismissMsg
+  | SummonResultMsg
+  | MacroRequestMsg
+  | MacroResultMsg
+  | FxRequestMsg
+  | FxStartMsg
+  | FxSyncMsg
+  | FxStopMsg
+  | FxStopMatchingMsg
+  | FxEndMsg
   | EphemeralMsg
   | AssetGetMsg
   | FogPutMsg
@@ -471,6 +669,7 @@ export type WireMessage =
   | AudioCmdMsg
   | WelcomeMsg
   | SnapshotMsg
+  | AssetManifestMsg
   | OpsMsg
   | RejectedMsg
   | AssetChunkMsg

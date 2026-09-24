@@ -3,8 +3,8 @@
  *
  * A table is set up in a definite order: a map, the party on it, players at the door, the cover
  * that hides what they must not see, and then the first roll. A newcomer's real problem is not
- * that they cannot *find* a control — the rail is labelled — but that they do not know which of
- * twenty controls to reach for first, and a hint that arrives after the mistake has taught them
+ * that they cannot *find* a control — the rail has tooltips and keyboard names — but that they
+ * do not know which of twenty controls to reach for first, and a hint that arrives too late teaches
  * nothing.
  *
  * So a step is **derived from the world's own state**, not tracked: there is nothing to store,
@@ -63,26 +63,26 @@ export interface OnboardingStep {
 
 /**
  * The GM's order of work. Each hint names a control that exists on the GM's own shell, so a step
- * can be acted on without a second window.
+ * can be acted on from the table or its Session & world panel.
  */
 export function gmOnboardingSteps(facts: OnboardingFacts): OnboardingStep[] {
   return [
     {
       id: "map",
       title: "Put a map on the table",
-      hint: "“Import map” in the sidebar — or Settings ▸ Scene to pick a background for the scene.",
+      hint: "Use Import map in the top bar, or Settings ▸ Scene to choose a background.",
       done: facts.map,
     },
     {
       id: "tokens",
       title: "Place the party",
-      hint: "“Add token” in the sidebar, or drag a character out of the Actors window.",
+      hint: "Use Add token in the top bar, or drag a character out of the Actors tab.",
       done: facts.tokens > 0,
     },
     {
       id: "invite",
       title: "Invite your players",
-      hint: "“Create invite link”, then paste each player's code back into the sidebar.",
+      hint: "Choose Invite in the top bar, then exchange codes in Session & world.",
       done: facts.invited,
     },
     {
@@ -101,7 +101,9 @@ export function gmOnboardingSteps(facts: OnboardingFacts): OnboardingStep[] {
 }
 
 /** The player's list: what they can see from their own replica, in the order they meet it. */
-export function playerOnboardingSteps(facts: OnboardingFacts): OnboardingStep[] {
+export function playerOnboardingSteps(
+  facts: OnboardingFacts,
+): OnboardingStep[] {
   return [
     {
       id: "token",
@@ -112,7 +114,7 @@ export function playerOnboardingSteps(facts: OnboardingFacts): OnboardingStep[] 
     {
       id: "sheet",
       title: "Open your character sheet",
-      hint: "The Sheet tab in the sidebar; ask your GM if your character is not listed.",
+      hint: "Open Characters in the content dock; ask your GM if yours is not listed.",
       done: facts.character,
     },
     {
@@ -129,7 +131,9 @@ export function onboardingSteps(
   facts: OnboardingFacts,
   role: string | null | undefined,
 ): OnboardingStep[] {
-  return role === "PLAYER" ? playerOnboardingSteps(facts) : gmOnboardingSteps(facts);
+  return role === "PLAYER"
+    ? playerOnboardingSteps(facts)
+    : gmOnboardingSteps(facts);
 }
 
 /** How many steps are still open — what a collapsed checklist summarizes. */
@@ -138,6 +142,8 @@ export function onboardingRemaining(steps: readonly OnboardingStep[]): number {
 }
 
 /** `false` when there is nothing left to do: a finished checklist folds itself away. */
-export function onboardingOpenByDefault(steps: readonly OnboardingStep[]): boolean {
+export function onboardingOpenByDefault(
+  steps: readonly OnboardingStep[],
+): boolean {
   return onboardingRemaining(steps) > 0;
 }

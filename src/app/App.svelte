@@ -22,6 +22,7 @@
   import {
     CanvasController,
     domPointerSource,
+    pickToken,
     type TokenView,
   } from "../canvas/interactions";
   import {
@@ -45,6 +46,7 @@
   import { WindowHost } from "../ui/windows";
   import { WindowManager } from "../ui/windows";
   import { macroSlots, runChatMacro } from "../ui/macros";
+  import type { FxImportPermissions } from "../core/fx";
   import { gmState } from "../ui/armies/gmState.svelte";
   import { buildStrategicFog, sceneIsStrategic } from "../core/strategicFog";
   import { FogExploration } from "../client/fogExploration";
@@ -55,6 +57,9 @@
   import { PoolInterpolator } from "../sim/interpolate";
   import { TrustedModuleHost } from "../packages/trustedModule";
   import { screenToWorld, worldToScreen, zoomAt } from "../canvas/camera";
+  import SummonCrosshair from "../ui/macros/SummonCrosshair.svelte";
+  import type { RequestSummonPick, SummonPickOptions, SummonPickPoint } from "../ui/macros/summonPicker";
+  import Icon from "../ui/icons/Icon.svelte";
   import CanvasToolbar, {
     type CanvasAction,
     type CanvasLayer,
@@ -82,6 +87,7 @@
   import { getFog, getSetting } from "../storage/idb";
   import { viewAsOptions, viewAsUser, withoutHiddenTokens } from "../core/viewAs";
   import { can } from "../core/permissions";
+  import { tileContainsPoint } from "../core/automation";
   import { sceneFogSettings } from "../core/fogExploration";
   import { createHexOverlaySync, repaintHexOverlay, syncHexOverlay } from "./hexOverlay";
   import {
@@ -191,6 +197,7 @@
   import { TablesPanel } from "../ui/tables";
   import { PlaylistsPanel } from "../ui/playlists";
   import { AudioPlayer } from "../client/audioPlayer";
+  import { FxPlayer } from "../client/fxPlayer";
   import { onDestroy } from "svelte";
   import { openPF1eSheetWindow } from "../ui/sheets/pf1eSheetWindow";
   import { SheetPanel } from "../ui/sheets";
@@ -244,10 +251,13 @@
   let {
     app = null,
     bootError = null,
+    initialSetup = false,
     onExit = null,
   }: {
     app?: HostApp | null;
     bootError?: string | null;
+    /** New-world entry only: give the GM a guided setup surface, not permanent clutter. */
+    initialSetup?: boolean;
     /**
      * D-249 "Close world": the host (Root) closes the HostApp and returns to the start
      * screen, where worlds are listed, opened, imported, exported and deleted. Null hides
@@ -283,6 +293,18 @@
   let seq = $state(0);
   let tokenCount = $state(0);
   let activeTab = $state("chat");
+  let sessionOpen = $state(untrack(() => initialSetup));
+  let sessionFocus = $state<HTMLElement | null>(null);
+  let sessionTrigger = $state<HTMLButtonElement | null>(null);
+  function openSession(): void {
+    sessionOpen = true;
+    // The surface is not modal: keep the board usable during a code exchange.
+    queueMicrotask(() => sessionFocus?.focus());
+  }
+  function closeSession(): void {
+    sessionOpen = false;
+    queueMicrotask(() => sessionTrigger?.focus());
+  }
   let player = $state<AudioPlayer | null>(null);
   const wm = new WindowManager({ width: 900, height: 700 });
   (globalThis as unknown as { __wm?: WindowManager }).__wm = wm;
@@ -329,6 +351,7 @@ const WALL_PICK_RADIUS = 12;
   /** `$state.raw`: the stage is a Pixi object graph — assignment must re-run the
    *  effects that read it, but it must never be deep-proxied. */
   let stage = $state.raw<Stage | null>(null);
+  let fxPlayer: FxPlayer | null = null;
   let controller: CanvasController | null = null;
   let toolController: ToolInteractionController | null = null;
   /** Bumped when the (async) tool controller exists — the activation effect below re-runs. */
@@ -1954,6 +1977,21 @@ const WALL_PICK_RADIUS = 12;
       openActorSheet(result.openEffectEditorActorId, "effects");
   }
 
+  // A shared, cancellable canvas crosshair for GM/player summon windows. The
+  // UI owns the preview only; HostSync rechecks every point and permission.
+  let pendingSummonPick = $state.raw<{ options: SummonPickOptions;
+    resolve: (at: SummonPickPoint | null) => void } | null>(null);
+  function settleSummonPick(at: SummonPickPoint | null): void {
+    const pending = pendingSummonPick;
+    pendingSummonPick = null;
+    pending?.resolve(activeScene()?._id === pending.options.sceneId ? at : null);
+  }
+  const requestSummonPick: RequestSummonPick = (options) => {
+    if (options.sceneId !== activeScene()?._id || !stage) return Promise.resolve(null);
+    settleSummonPick(null); // starting a new gesture cancels the old one
+    return new Promise((resolve) => { pendingSummonPick = { options, resolve }; });
+  };
+
   function activeScene(): SceneDocument | null {
     if (!app) return null;
     const scenes = app.gm.client.store.getAll(
@@ -1980,10 +2018,10 @@ const WALL_PICK_RADIUS = 12;
       kind,
       x: 40 + (wm.list().length % 5) * 24,
       y: 40 + (wm.list().length % 5) * 24,
-      width: kind === "hexcrawl-wizard" ? 520 : 380,
+      width: kind === "hexcrawl-wizard" ? 520 : kind === "macros" ? 560 : 380,
       // Settings carries the ruleset section on top of the scene options (D-249): taller;
       // the hexcrawl wizard has three steps and a readout to show at once (D-270).
-      height: kind === "settings" ? 560 : kind === "hexcrawl-wizard" ? 540 : 420,
+      height: kind === "settings" ? 560 : kind === "hexcrawl-wizard" || kind === "macros" ? 580 : 420,
       ...(data ? { data } : {}),
     });
   }
@@ -2042,7 +2080,16 @@ const WALL_PICK_RADIUS = 12;
 
   function runSlot(i: number): void {
     const macro = hotbarSlots[i];
-    if (macro && app) runChatMacro(app.gm.client, macro);
+    if (!macro || !app) return;
+    if (macro.kind === "chat") runChatMacro(app.gm.client, macro);
+    else if (macro.kind === "script") {
+      if (macro.script?.inputs.some((field) => field.required))
+        openWindow("macros", "Macros", "macros"); // collect declared inputs in the script tab
+      else app.gm.client.requestMacro(macro._id);
+    } else if (macro.kind === "sequence") {
+      const scene = activeScene();
+      if (scene) app.gm.client.requestSequence(macro._id, scene._id);
+    }
   }
 
   /**
@@ -2434,6 +2481,7 @@ const WALL_PICK_RADIUS = 12;
     const view = stage;
     if (!current || !view) return;
     const scene = activeScene();
+    fxPlayer?.syncScene();
     if (tokenSelection.sceneId !== (scene?._id ?? null)) clearTokenSelection();
     // A preview belongs to the scene it was resolved against; switching scenes
     // clears it rather than repainting stale cells.
@@ -2634,6 +2682,27 @@ const WALL_PICK_RADIUS = 12;
     };
   }
 
+  /** Import an owned media file for host-authorized FX. Stored as bytes, not embedded in a macro. */
+  async function importFxFile(file: File, permissions: FxImportPermissions): Promise<{ hash: string; mime: string; name: string }> {
+    const current = app;
+    if (!current) throw new Error("the world is not open");
+    if (!/^(image\/(png|jpeg|webp|gif|avif)|video\/(webm|mp4)|audio\/(mpeg|mp3|wav|ogg|webm|mp4|aac))$/.test(file.type))
+      throw new Error(`Unsupported FX media type: ${file.type || "unknown"}`);
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const { hash, entry } = await current.assets.import(bytes, file.name, file.type,
+      permissions.shareWithPlayers ? "referenced" : "gm",
+      permissions.includeInWorldFile ? "granted" : "restricted");
+    return { hash, mime: entry.mime, name: entry.name };
+  }
+
+  async function setFxAssetRights(hash: string, permissions: FxImportPermissions): Promise<void> {
+    const current = app;
+    if (!current || !/^[a-f0-9]{64}$/.test(hash) || !await current.assets.has(hash))
+      throw new Error("Media not found in this world");
+    await current.assets.describe(hash, { visibility: permissions.shareWithPlayers ? "referenced" : "gm",
+      exportRights: permissions.includeInWorldFile ? "granted" : "restricted" });
+  }
+
   /**
    * The sidebar's map import writes to the scene the GM is **looking at** (D-270). It used to
    * hardcode `DEFAULT_SCENE_ID`, which meant a hexcrawl map uploaded while standing on a new
@@ -2832,6 +2901,7 @@ const WALL_PICK_RADIUS = 12;
     };
     globalThis.addEventListener("keydown", onKey);
     onDestroy(() => {
+      settleSummonPick(null);
       agents?.dispose();
       agents = null;
       moduleHost?.dispose();
@@ -2840,6 +2910,8 @@ const WALL_PICK_RADIUS = 12;
       if (fogTimer !== null) globalThis.clearInterval(fogTimer);
       globalThis.clearInterval(clockTimer);
       audioPlayer.dispose();
+      fxPlayer?.dispose();
+      fxPlayer = null;
       offRejected();
       offWm();
       globalThis.removeEventListener("keydown", onKey);
@@ -2858,6 +2930,12 @@ const WALL_PICK_RADIUS = 12;
           hostElement,
         });
         stage = view;
+        fxPlayer = new FxPlayer({
+          client: current.gm.client, bus: current.gm.bus, stage: view,
+          fetchAsset: (hash) => current.gm.fetcher.request(hash, "ui"),
+          sceneId: () => viewAsPlayer === null ? (activeScene()?._id ?? null) : null,
+          onError: (message) => console.warn(message),
+        });
         const canvas = view.app.canvas as HTMLCanvasElement;
         const toWorld = (event: PointerEvent) => {
           const rect = canvas.getBoundingClientRect();
@@ -3010,6 +3088,24 @@ const WALL_PICK_RADIUS = 12;
         };
         canvas.addEventListener("pointerdown", onWallDown);
         canvas.addEventListener("click", onWallClick);
+        let tileDown: { x: number; y: number; tokenId?: string } | null = null;
+        const onTileDown = (e: PointerEvent) => {
+          tileDown = { x: e.clientX, y: e.clientY,
+            ...(tokenSelection.ids.length === 1 && tokenSelection.ids[0] ? { tokenId: tokenSelection.ids[0] } : {}) };
+        };
+        const onTileClick = (e: MouseEvent) => {
+          if (viewingAs || canvasTool !== "select" || !["map", "gm"].includes(canvasLayer) ||
+              e.button !== 0 || e.detail > 1 || e.altKey || e.ctrlKey || e.shiftKey || !tileDown ||
+              Math.hypot(e.clientX - tileDown.x, e.clientY - tileDown.y) > 4) return;
+          const scene = activeScene();
+          if (!scene) return;
+          const world = toWorld({ clientX: e.clientX, clientY: e.clientY } as PointerEvent);
+          if (pickToken(tokenViews(), world)) return;
+          const tile = [...scene.tiles].reverse().find((item) => tileContainsPoint(item, world));
+          if (tile) current.gm.client.requestAutomationClick(scene._id, tile._id, world, tileDown.tokenId);
+        };
+        canvas.addEventListener("pointerdown", onTileDown);
+        canvas.addEventListener("click", onTileClick);
         // The overlay's stroke widths are screen-constant, so a pan/zoom redraws it (the key
         // inside WallsLayer.sync keeps this cheap — nothing is rebuilt when the camera is still).
         let lastCameraKey = "";
@@ -3036,6 +3132,8 @@ const WALL_PICK_RADIUS = 12;
           canvas.removeEventListener("dblclick", onPinOpen);
           canvas.removeEventListener("pointerdown", onWallDown);
           canvas.removeEventListener("click", onWallClick);
+          canvas.removeEventListener("pointerdown", onTileDown);
+          canvas.removeEventListener("click", onTileClick);
           view.app.ticker.remove(onCameraTick);
           globalThis.removeEventListener("keydown", onToolKey);
         };
@@ -3943,6 +4041,7 @@ const WALL_PICK_RADIUS = 12;
   // choosing (or leaving) a player to view as (D-262): the loop re-enters the scene as that user.
   $effect(() => {
     const style = fogStyle();
+    fxPlayer?.syncScene();
     void fog?.sync(activeScene(), { style });
   });
 
@@ -3959,329 +4058,46 @@ const WALL_PICK_RADIUS = 12;
   });
 </script>
 
-<main class="vtt-ui">
+<main class="vtt-ui gm-app">
   <header class="app-header">
-    <div>
-      <p class="eyebrow">ARENASTAR</p>
-      <h1>VTT</h1>
+    <div class="brand-badge" aria-hidden="true">✦</div>
+    <div class="header-identity">
+      <p class="eyebrow">ARENASTAR <span> / GM TABLE</span></p>
+      <h1 title={worldName}>{worldName}</h1>
     </div>
-    <p class="sub">
-      Browser-only virtual tabletop · bootstrap v{__APP_VERSION__}
-    </p>
+    <div id="status" class="header-status" aria-live="polite">
+      <span class="status-connected" title="Local game master"><span class="status-indicator"></span> GM online</span>
+      <span class="status-world"><strong class="sr-only">{worldName}.</strong> seq {seq} · tokens {tokenCount}</span>
+      <span data-rules-status title="Strategic ruleset — applies to strategic-scale scenes; tactical scenes are heroes only">strategic rules: {app?.rulesBoot?.source === "package" ? `${app.rulesBoot.packageId} v${app.rulesBoot.version}` : `built-in v${app?.rulesBoot.version ?? "?"}`}</span>
+    </div>
+    <div class="header-actions" aria-label="Game master actions">
+      <label class="header-icon file-control" title="Import map" aria-label="Import map">
+        <Icon name="mapImport" /><span class="sr-only">Import map</span>
+        <input id="map-input" type="file" accept="image/*" onchange={importMap} hidden />
+      </label>
+      <button data-icon-button id="add-token" class="header-icon" aria-label="Add token" title="Add token" onclick={addToken}><Icon name="addToken" /></button>
+      <span class="header-separator" aria-hidden="true"></span>
+      <button data-icon-button id="gm-undo" class="header-icon" aria-label="Undo (Ctrl+Z)" title="Undo (Ctrl+Z)" onclick={undo}><Icon name="undo" /></button>
+      <button data-icon-button id="gm-redo" class="header-icon" aria-label="Redo (Ctrl+Y)" title="Redo (Ctrl+Y)" onclick={redo}><Icon name="redo" /></button>
+      <button data-icon-button id="gm-macros" class="header-icon" aria-label="Macros" title="Macros" onclick={() => openWindow("macros", "Macros", "macros")}><Icon name="macro" /></button>
+      <button data-icon-button id="gm-settings" class="header-icon" aria-label="World settings" title="World settings" onclick={() => openWindow("settings", "Settings", "settings")}><Icon name="settings" /></button>
+      <span class="header-separator" aria-hidden="true"></span>
+      <button data-icon-button id="export-world" class="header-icon optional-action" aria-label="Export world" title="Export world" onclick={exportWorld}><Icon name="export" /></button>
+      <button data-icon-button id="close-world" class="header-icon optional-action" aria-label="Close world" title="Close world" onclick={async () => { await fog?.flush(); onExit?.(); }}><Icon name="close" /></button>
+      <button data-icon-button id="session-open" class="header-icon session-trigger" bind:this={sessionTrigger} data-session-trigger
+        aria-label="Session & world" aria-expanded={sessionOpen} title="Session & world" onclick={openSession}><Icon name="sliders" /></button>
+      <button id="share" class="invite-trigger" title={share ? "Open session & invitation" : "Invite players"}
+        aria-label={share ? "Open session & invitation" : "Invite players"}
+        onclick={() => { openSession(); if (!share) void beginShare(); }}><Icon name="share" size={18} /><span>{share ? "Session" : "Invite"}</span></button>
+    </div>
   </header>
-  {#if bootError}
-    <p class="error" role="alert">Boot failed: {bootError}</p>
-  {/if}
-
-  <section class="capabilities" aria-labelledby="caps-h">
-    <h2 id="caps-h">Runtime capabilities ({ready}/{rows.length} available)</h2>
-    <ul>
-      {#each rows as [name, ok] (name)}
-        <li class:ok class:missing={!ok}>
-          <span class="dot" aria-hidden="true"></span>
-          <span class="name">{name}</span>
-          <span class="state">{ok ? "available" : "unavailable"}</span>
-        </li>
-      {/each}
-    </ul>
-  </section>
-
+  {#if bootError}<p class="error" role="alert">Boot failed: {bootError}</p>{/if}
+  {#if canvasError}<p class="error" role="alert">canvas: {canvasError}</p>{/if}
+  {#if app?.rulesBoot?.error}<p class="error rules-boot-error" role="alert">Strategic rules could not load: {app.rulesBoot.error}. Built-in rules are still available.</p>{/if}
   {#if app}
-    {#if canvasError}
-      <p class="error">canvas: {canvasError}</p>
-    {/if}
-    <section class="shell" aria-label="GM shell">
-      <aside class="sidebar">
-        <div id="status">
-          <strong>{worldName}</strong>
-          <span>seq {seq}</span>
-          <span>tokens {tokenCount}</span>
-          <!-- D-248: which strategic ruleset this world runs (strategic scenes only) -->
-          <span
-            data-rules-status
-            data-rules-source={app.rulesBoot.source}
-            title="Strategic ruleset — applies to strategic-scale scenes; tactical scenes are heroes only"
-            >strategic rules: {app.rulesBoot.source === "package"
-              ? `${app.rulesBoot.packageId} v${app.rulesBoot.version}`
-              : `built-in v${app.rulesBoot.version}`}</span
-          >
-        </div>
-        {#if app.rulesBoot.error}
-          <p class="error rules-boot-error" role="alert" data-rules-boot-error>
-            Strategic ruleset {app.rulesBoot.packageId ?? ""} could not load — running built-in
-            rules instead: {app.rulesBoot.error}
-          </p>
-        {/if}
-        <OnboardingPanel
-          steps={onboarding}
-          storageKey="vtt-onboarding-gm"
-          title="Getting started"
-        />
-        <label class="btn file-control" for="map-input">
-          Import map
-          <input
-            id="map-input"
-            type="file"
-            accept="image/*"
-            onchange={importMap}
-            hidden
-          />
-        </label>
-        <button id="add-token" type="button" onclick={addToken}
-          >Add token</button
-        >
-        <section class="invite-panel" aria-labelledby="invite-heading">
-          <div class="section-heading">
-            <h2 id="invite-heading">Invite players</h2>
-            <p>Share the link, then complete the one-time code exchange.</p>
-          </div>
-          {#if !share}
-            <button id="share" type="button" onclick={() => void beginShare()}>
-              Create invite link
-            </button>
-          {:else}
-            <div class="code-field">
-              <label for="invite-link">Invite link</label>
-              <textarea
-                id="invite-link"
-                class="signal-code"
-                rows="3"
-                readonly
-                value={share.inviteLink}
-                spellcheck="false"
-                aria-describedby="invite-help"></textarea>
-              <div class="field-actions">
-                <button
-                  id="copy-invite-link"
-                  class="secondary"
-                  type="button"
-                  onclick={() =>
-                    void copyCode(share?.inviteLink ?? "", "invite link")}
-                  >Copy invite link</button
-                >
-                <p id="invite-help" class="hint">
-                  Send this link to each player.
-                </p>
-              </div>
-            </div>
-            <div class="code-field">
-              <label for="peer-code">Player's code</label>
-              <textarea
-                id="peer-code"
-                class="signal-code"
-                rows="5"
-                bind:value={peerCode}
-                placeholder="Paste the player's code here"
-                spellcheck="false"
-                autocapitalize="off"
-                autocomplete="off"
-                aria-describedby="peer-help"></textarea>
-              <p id="peer-help" class="hint">
-                Paste a player's code, then apply it.
-              </p>
-            </div>
-            <button id="code-apply" type="button" onclick={applyPeerCode}
-              >Apply player code</button
-            >
-            <div class="code-field">
-              <label for="share-out"
-                >Your answer code <span class="required-note"
-                  >(send to player)</span
-                ></label
-              >
-              <textarea
-                id="share-out"
-                class="signal-code"
-                rows="5"
-                readonly
-                value={hostAnswer}
-                spellcheck="false"
-                aria-describedby="answer-help"></textarea>
-              <div class="field-actions">
-                <button
-                  id="copy-share-out"
-                  class="secondary"
-                  type="button"
-                  disabled={!hostAnswer}
-                  onclick={() => void copyCode(hostAnswer, "answer code")}
-                  >Copy answer code</button
-                >
-                <p id="answer-help" class="hint">
-                  Send this answer back to the player.
-                </p>
-              </div>
-            </div>
-            {#if copyStatus}<p class="copy-status" role="status">
-                {copyStatus}
-              </p>{/if}
-          {/if}
-          {#if shareError}
-            <p class="error" role="alert">{shareError}</p>
-          {/if}
-        </section>
-        <div class="gmtools" aria-label="GM tools">
-          <button
-            id="gm-perms"
-            type="button"
-            onclick={() =>
-              openWindow("permissions", "Permissions", "permissions")}
-          >
-            Perms
-          </button>
-          <button
-            id="gm-macros"
-            type="button"
-            onclick={() => openWindow("macros", "Macros", "macros")}
-            >Macros</button
-          >
-          <button
-            id="gm-settings"
-            type="button"
-            onclick={() => openWindow("settings", "Settings", "settings")}
-          >
-            Settings
-          </button>
-          <button
-            id="gm-extras"
-            type="button"
-            onclick={() => openWindow("gmextras", "GM Extras", "gmextras")}
-          >
-            Extras
-          </button>
-          <button
-            id="gm-armies"
-            type="button"
-            onclick={() => openWindow("armies", "Armies", "armies")}
-            title="Army management (M14)"
-          >
-            Armies
-          </button>
-          <button
-            id="gm-tables"
-            type="button"
-            onclick={() => openTablesWindow()}
-            title="Encounter tables (hexcrawl)"
-          >
-            Tables
-          </button>
-          <button
-            id="gm-undo"
-            type="button"
-            onclick={undo}
-            title="Undo (Ctrl+Z)"
-            aria-label="Undo (Ctrl+Z)">↩</button
-          >
-          <button
-            id="gm-redo"
-            type="button"
-            onclick={redo}
-            title="Redo (Ctrl+Y)"
-            aria-label="Redo (Ctrl+Y)">↪</button
-          >
-        </div>
-        <nav class="tabs" aria-label="Sidebar tabs">
-          {#each TABS as t (t.id)}
-            <button
-              type="button"
-              class:active={activeTab === t.id}
-              data-tab={t.id}
-              onclick={() => (activeTab = t.id)}
-            >
-              {t.label}
-            </button>
-          {/each}
-        </nav>
-        <div class="hotbar" aria-label="Hotbar">
-          {#each hotbarSlots as macro, i (i)}
-            <button
-              type="button"
-              class="slot"
-              data-slot={i + 1}
-              title={macro?.command ?? ""}
-              onclick={() => runSlot(i)}
-            >
-              {macro ? macro.name.slice(0, 6) : i + 1}
-            </button>
-          {/each}
-        </div>
-        {#if app}
-          <QuickbarRow
-            client={app.gm.client}
-            actor={quickbarActor}
-            targets={quickbarTargets}
-          />
-        {/if}
-        <div class="tabbody" data-active-tab={activeTab}>
-          {#if activeTab === "chat"}
-            <ChatPanel
-              client={app.gm.client}
-              bus={app.gm.bus}
-              targetTokenId={tokenSelection.ids.length === 1
-                ? (tokenSelection.ids[0] ?? null)
-                : null}
-              onEncounterRoll={rollEncounterTable}
-              onEncounterExplore={exploreCell}
-            />
-          {:else if activeTab === "combat"}
-            <CombatPanel
-              client={app.gm.client}
-              bus={app.gm.bus}
-              selection={tokenSelection}
-              onClearSelection={clearTokenSelection}
-            />
-          {:else if activeTab === "journals"}
-            <JournalsPanel
-              client={app.gm.client}
-              bus={app.gm.bus}
-              popout={(journalId, pageId) =>
-                openWindow(`journal:${pageId}`, "Journal", "journal", {
-                  journalId,
-                  pageId,
-                })}
-            />
-          {:else if activeTab === "tables"}
-            <TablesPanel client={app.gm.client} bus={app.gm.bus} />
-          {:else if activeTab === "playlists"}
-            <PlaylistsPanel client={app.gm.client} bus={app.gm.bus} {player} />
-          {:else if activeTab === "actors"}
-            <SheetPanel
-              client={app.gm.client}
-              bus={app.gm.bus}
-              onOpenActor={openActorSheet}
-            />
-          {:else if activeTab === "compendia"}
-            <CompendiaPanel client={app.gm.client} packages={app.packages} />
-          {/if}
-        </div>
-        <h3>World file (§8)</h3>
-        <p class="hint" data-world-name title={app.worldId}>{app.meta.name}</p>
-        <button id="export-world" type="button" onclick={exportWorld}>
-          Export world (.zip)
-        </button>
-        {#if typeof globalThis.showDirectoryPicker === "function"}
-          <button id="export-folder" type="button" onclick={exportToFolder}>
-            Save to folder…
-          </button>
-        {/if}
-        {#if onExit}
-          <!--
-            D-249: opening/importing another world happens on the start screen, not from
-            inside a running one — so the sidebar offers the way back instead of a second
-            importer. The world is saved continuously; closing loses nothing.
-          -->
-          <button
-            id="close-world"
-            type="button"
-            onclick={async () => {
-              await fog?.flush(); // D-250: the last reveal lands before the world closes
-              onExit?.();
-            }}
-          >
-            Close world…
-          </button>
-        {/if}
-      </aside>
+    <section class="shell" aria-label="Game table">
       <div class="canvas-col">
+        <div class="scene-bar">
         <nav class="scenenav" aria-label="Scenes" data-testid="scene-nav">
           {#each scenes as sc (sc._id)}
             <button
@@ -4332,6 +4148,7 @@ const WALL_PICK_RADIUS = 12;
             >
           {/each}
         </div>
+        </div>
         <div class="dice3d-host" bind:this={dice3dHost}></div>
         <div class="board">
           <div class="toolrail">
@@ -4346,6 +4163,7 @@ const WALL_PICK_RADIUS = 12;
               onEraseAll={eraseAllDrawings}
               onRoll={rollFromToolbar}
               onAction={runCanvasAction}
+              onChooseTool={() => { sessionOpen = false; }}
               pathTool={pathToolAvailable}
             />
           </div>
@@ -4367,7 +4185,12 @@ const WALL_PICK_RADIUS = 12;
             void onCompendiumDrop(ev);
             onEncounterDrop(ev);
           }}
-          onpointerdown={() => closeTokenMenu()}
+          onpointerdown={() => {
+            closeTokenMenu();
+            // Returning to the board dismisses setup without moving focus away
+            // from the canvas. The session remains one click away in the header.
+            sessionOpen = false;
+          }}
         >
           {#if travelPanel && (travelPanel.rows.length > 0 || travelPanel.committed)}
             {@const routeScene = activeScene()}
@@ -4627,6 +4450,11 @@ const WALL_PICK_RADIUS = 12;
           bus={app.gm.bus}
           sceneId={activeScene()?._id ?? null}
           importImage={importMapFile}
+          onFxImport={importFxFile}
+          onPickSummon={requestSummonPick}
+          listFxAssets={() => Promise.resolve(app?.assets.manifest() ?? {})}
+          {setFxAssetRights}
+          getFxAsset={(hash) => app?.assets.get(hash) ?? Promise.resolve(undefined)}
           onUndo={undo}
           onRedo={redo}
           packages={app.packages}
@@ -4640,6 +4468,14 @@ const WALL_PICK_RADIUS = 12;
           onEncounterBattleScene={(resultId) => void createBattleScene({ resultId })}
           {resolveAsset}
         />
+        {#if pendingSummonPick}
+          {@const summonScene = activeScene()}
+          {#if summonScene && summonScene._id === pendingSummonPick.options.sceneId}
+            <SummonCrosshair scene={summonScene} options={pendingSummonPick.options}
+              camera={() => stage?.camera ?? { x: 0, y: 0, scale: 1 }}
+              pick={(at) => settleSummonPick(at)} cancel={() => settleSummonPick(null)} />
+          {/if}
+        {/if}
         {#if pendingReaction}
           <!--
             D-187: the held move's queue. Nothing has moved yet — each row is the seam's
@@ -4688,10 +4524,221 @@ const WALL_PICK_RADIUS = 12;
           {/each}
         </div>
       </div>
+      <aside class="sidebar" data-gm-dock aria-label="Game content">
+        <div class="dock-heading">
+          <div><span class="dock-eyebrow">YOUR TABLE</span><h2>{TABS.find((tab) => tab.id === activeTab)?.label ?? "Game content"}</h2></div>
+          <div class="dock-actions" aria-label="GM libraries">
+            <button data-icon-button id="gm-perms" type="button" aria-label="Permissions" title="Permissions" onclick={() => openWindow("permissions", "Permissions", "permissions")}><Icon name="permissions" size={18} /></button>
+            <button data-icon-button id="gm-extras" type="button" aria-label="GM extras" title="GM extras" onclick={() => openWindow("gmextras", "GM Extras", "gmextras")}><Icon name="extras" size={18} /></button>
+            <button data-icon-button id="gm-armies" type="button" aria-label="Armies" title="Armies" onclick={() => openWindow("armies", "Armies", "armies")}><Icon name="armies" size={18} /></button>
+            <button data-icon-button id="gm-tables" type="button" aria-label="Tables" title="Tables" onclick={() => openTablesWindow()}><Icon name="tables" size={18} /></button>
+          </div>
+        </div>
+        <nav class="tabs" aria-label="Sidebar tabs">
+          {#each TABS as t (t.id)}
+            <button
+              type="button"
+              class:active={activeTab === t.id}
+              data-tab={t.id}
+              aria-label={t.label}
+              title={t.label}
+              onclick={() => (activeTab = t.id)}
+            >
+              <Icon name={t.id} size={19} /><span>{t.label}</span>
+            </button>
+          {/each}
+        </nav>
+        <div class="tabbody" data-active-tab={activeTab}>
+          {#if activeTab === "chat"}
+            <ChatPanel
+              client={app.gm.client}
+              bus={app.gm.bus}
+              targetTokenId={tokenSelection.ids.length === 1
+                ? (tokenSelection.ids[0] ?? null)
+                : null}
+              onEncounterRoll={rollEncounterTable}
+              onEncounterExplore={exploreCell}
+            />
+          {:else if activeTab === "combat"}
+            <CombatPanel
+              client={app.gm.client}
+              bus={app.gm.bus}
+              selection={tokenSelection}
+              onClearSelection={clearTokenSelection}
+            />
+          {:else if activeTab === "journals"}
+            <JournalsPanel
+              client={app.gm.client}
+              bus={app.gm.bus}
+              popout={(journalId, pageId) =>
+                openWindow(`journal:${pageId}`, "Journal", "journal", {
+                  journalId,
+                  pageId,
+                })}
+            />
+          {:else if activeTab === "tables"}
+            <TablesPanel client={app.gm.client} bus={app.gm.bus} />
+          {:else if activeTab === "playlists"}
+            <PlaylistsPanel client={app.gm.client} bus={app.gm.bus} {player} />
+          {:else if activeTab === "actors"}
+            <SheetPanel
+              client={app.gm.client}
+              bus={app.gm.bus}
+              onOpenActor={openActorSheet}
+            />
+          {:else if activeTab === "compendia"}
+            <CompendiaPanel client={app.gm.client} packages={app.packages} />
+          {/if}
+        </div>
+        <div class="dock-footer">
+        <div class="hotbar" aria-label="Hotbar">
+          {#each hotbarSlots as macro, i (i)}
+            <button
+              type="button"
+              class="slot"
+              data-slot={i + 1}
+              title={macro?.command ?? ""}
+              onclick={() => runSlot(i)}
+            >
+              {macro ? macro.name.slice(0, 6) : i + 1}
+            </button>
+          {/each}
+        </div>
+        {#if app}
+          <QuickbarRow
+            client={app.gm.client}
+            actor={quickbarActor}
+            targets={quickbarTargets}
+          />
+        {/if}
+        </div>
+      </aside>
     </section>
+    {#if sessionOpen}
+      <div class="session-panel" data-session-panel role="dialog" aria-modal="false" aria-labelledby="session-title"
+        tabindex="-1" bind:this={sessionFocus}
+        onkeydown={(event) => { if (event.key === "Escape") { event.stopPropagation(); closeSession(); } }}>
+        <header class="session-heading">
+          <div><span class="dock-eyebrow">TABLE SETUP</span><h2 id="session-title">Session & world</h2></div>
+          <button data-icon-button class="session-close" type="button" aria-label="Close session panel" title="Close session panel" onclick={closeSession}><Icon name="x" size={20} /></button>
+        </header>
+        <div class="session-content">
+          <p class="session-intro">Get the table ready, invite your players, or manage this world. You can return here anytime from the top bar.</p>
+          <section class="session-card">
+            <h3>Get started</h3>
+            <OnboardingPanel steps={onboarding} storageKey="vtt-onboarding-gm" title="Getting started" />
+          </section>
+        <section class="invite-panel" aria-labelledby="invite-heading">
+          <div class="section-heading">
+            <h2 id="invite-heading">Invite players</h2>
+            <p>Share the link, then complete the one-time code exchange.</p>
+          </div>
+          {#if !share}
+            <button id="create-invite" type="button" onclick={() => void beginShare()}>
+              Create invite link
+            </button>
+          {:else}
+            <div class="code-field">
+              <label for="invite-link">Invite link</label>
+              <textarea
+                id="invite-link"
+                class="signal-code"
+                rows="3"
+                readonly
+                value={share.inviteLink}
+                spellcheck="false"
+                aria-describedby="invite-help"></textarea>
+              <div class="field-actions">
+                <button
+                  id="copy-invite-link"
+                  class="secondary"
+                  type="button"
+                  onclick={() =>
+                    void copyCode(share?.inviteLink ?? "", "invite link")}
+                  >Copy invite link</button
+                >
+                <p id="invite-help" class="hint">
+                  Send this link to each player.
+                </p>
+              </div>
+            </div>
+            <div class="code-field">
+              <label for="peer-code">Player's code</label>
+              <textarea
+                id="peer-code"
+                class="signal-code"
+                rows="5"
+                bind:value={peerCode}
+                placeholder="Paste the player's code here"
+                spellcheck="false"
+                autocapitalize="off"
+                autocomplete="off"
+                aria-describedby="peer-help"></textarea>
+              <p id="peer-help" class="hint">
+                Paste a player's code, then apply it.
+              </p>
+            </div>
+            <button id="code-apply" type="button" onclick={applyPeerCode}
+              >Apply player code</button
+            >
+            <div class="code-field">
+              <label for="share-out"
+                >Your answer code <span class="required-note"
+                  >(send to player)</span
+                ></label
+              >
+              <textarea
+                id="share-out"
+                class="signal-code"
+                rows="5"
+                readonly
+                value={hostAnswer}
+                spellcheck="false"
+                aria-describedby="answer-help"></textarea>
+              <div class="field-actions">
+                <button
+                  id="copy-share-out"
+                  class="secondary"
+                  type="button"
+                  disabled={!hostAnswer}
+                  onclick={() => void copyCode(hostAnswer, "answer code")}
+                  >Copy answer code</button
+                >
+                <p id="answer-help" class="hint">
+                  Send this answer back to the player.
+                </p>
+              </div>
+            </div>
+            {#if copyStatus}<p class="copy-status" role="status">
+                {copyStatus}
+              </p>{/if}
+          {/if}
+          {#if shareError}
+            <p class="error" role="alert">{shareError}</p>
+          {/if}
+        </section>
+          <section class="session-card world-card">
+            <div class="section-heading"><h2>World files</h2><p data-world-name>{worldName}</p></div>
+            <p class="hint">Your table saves locally as you play. Export a copy to keep or move it.</p>
+            {#if typeof globalThis.showDirectoryPicker === "function"}<button id="export-folder" type="button" onclick={exportToFolder}>Save to folder…</button>{/if}
+            <p class="hint">Use the export and close shortcuts in the top bar when you need them.</p>
+          </section>
+          <details class="capabilities"><summary>System health & capabilities ({ready}/{rows.length} available)</summary>
+    <ul>
+      {#each rows as [name, ok] (name)}
+        <li class:ok class:missing={!ok}>
+          <span class="dot" aria-hidden="true"></span>
+          <span class="name">{name}</span>
+          <span class="state">{ok ? "available" : "unavailable"}</span>
+        </li>
+      {/each}
+    </ul>
+          </details>
+        </div>
+      </div>
+    {/if}
   {/if}
 </main>
-
 <style>
   .dice3d-host {
     position: absolute;
@@ -4763,251 +4810,412 @@ const WALL_PICK_RADIUS = 12;
   .notify[data-notify-level="error"] {
     border-left-color: #e05656;
   }
-  main {
-    width: min(100%, 1440px);
-    margin: 0 auto;
-    padding: 24px clamp(16px, 3vw, 42px) 36px;
-  }
-  .app-header {
-    display: flex;
-    align-items: end;
-    justify-content: space-between;
-    gap: 20px;
-    margin-bottom: 20px;
-  }
-  .eyebrow {
-    margin: 0 0 4px;
-    color: #66b7ff;
-    font-size: 0.75rem;
-    font-weight: 800;
-    letter-spacing: 0.18em;
-  }
-  h1 {
-    margin: 0;
-    color: #f4f7fb;
-    font-size: clamp(2rem, 4vw, 3rem);
-    line-height: 1.05;
-    letter-spacing: -0.03em;
-  }
-  .sub {
-    margin: 0;
-    color: #bdc9d6;
-    font-size: 0.95rem;
-  }
-  .error {
-    margin: 0 0 16px;
-    color: #ffb4b4;
-    font-size: 1rem;
-  }
-  .capabilities {
-    margin-bottom: 20px;
-    padding: 16px 18px;
-    border: 1px solid #293d52;
-    border-radius: 12px;
-    background: #111a25;
-  }
-  .capabilities h2 {
-    margin: 0 0 12px;
-    color: #dce8f4;
-    font-size: 1rem;
-  }
-  .capabilities ul {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 8px 18px;
-    list-style: none;
+  /* The table is the product's home, not a card under a landing-page header. */
+  main.gm-app {
+    --gm-dock-width: clamp(312px, 25vw, 376px);
+    width: 100%;
+    height: 100dvh;
+    min-height: 480px;
     margin: 0;
     padding: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: #0c141d;
   }
-  .capabilities li {
+  .app-header {
+    flex: 0 0 70px;
+    min-height: 70px;
     display: flex;
     align-items: center;
-    gap: 9px;
-    min-height: 28px;
-    color: #d5e0eb;
-    font-size: 0.9rem;
+    gap: 13px;
+    padding: 0 16px;
+    border-bottom: 1px solid #344352;
+    background: #17222e;
+    box-shadow: 0 2px 16px #0004;
+    z-index: 23;
   }
-  .capabilities li.missing {
-    opacity: 0.7;
+  .brand-badge {
+    flex: 0 0 36px;
+    width: 36px;
+    height: 36px;
+    display: grid;
+    place-items: center;
+    border-radius: 11px;
+    background: linear-gradient(145deg, #8be8d0, #459d99);
+    color: #142933;
+    font-size: 1.55rem;
+    line-height: 1;
+    box-shadow: 0 3px 16px #47d1aa22;
   }
-  .dot {
-    width: 10px;
-    height: 10px;
-    flex: 0 0 10px;
-    border-radius: 50%;
-    background: #69798a;
-    box-shadow: 0 0 0 3px #69798a22;
-  }
-  .capabilities li.ok .dot {
-    background: #4fd09a;
-    box-shadow: 0 0 0 3px #4fd09a22;
-  }
-  .capabilities .state {
-    margin-left: auto;
-    color: #aebdcb;
-  }
-  .shell {
-    display: flex;
-    gap: 14px;
-    min-height: 650px;
-    height: min(780px, calc(100vh - 230px));
-    border: 1px solid #304458;
-    border-radius: 14px;
-    overflow: visible; /* windows may hang past the canvas (§10) */
-    background: #101923;
-    box-shadow: 0 16px 40px #0005;
-  }
-  .gmtools {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .gmtools button {
-    padding: 8px 10px;
-  }
-  .hotbar {
-    display: flex;
-    gap: 5px;
-  }
-  .hotbar .slot {
-    flex: 1;
-    min-width: 0;
-    padding: 5px 3px;
-    overflow: hidden;
-    text-overflow: ellipsis;
+  .header-identity { flex: 0 1 190px; min-width: 95px; overflow: hidden; }
+  .eyebrow {
+    margin: 0 0 2px;
+    color: #7ce3ca;
+    font-size: .63rem;
+    font-weight: 800;
+    letter-spacing: .13em;
     white-space: nowrap;
   }
-  .canvas-col {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    position: relative;
-  }
-  .scenenav {
-    display: flex;
-    gap: 6px;
-    padding: 8px;
-    border-bottom: 1px solid #2f4052;
-    background: #141d28;
-    flex-wrap: wrap;
-  }
-  .scenenav button {
-    padding: 8px 12px;
-    border-radius: 7px;
-  }
-  .scenenav button.active {
-    background: #2c5a84;
-    border-color: #71b9ef;
-  }
-  /* D-270: the `+` button's chooser (blank scene vs hexcrawl scene). */
-  .scene-menu {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding: 6px;
-    border: 1px solid #49627d;
-    border-radius: 8px;
-    background: #182331;
-  }
-  .scene-menu button {
-    text-align: left;
-  }
-  .players {
-    display: flex;
-    gap: 10px;
-    min-height: 32px;
-    align-items: center;
-    padding: 5px 8px;
-    color: #cbd8e5;
-    border-bottom: 1px solid #2f4052;
-    background: #121a24;
-  }
-  .players small {
-    color: #aebdcb;
-  }
-  .tabs {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-  .tabs button {
-    padding: 8px 10px;
-    border-radius: 7px 7px 0 0;
-    border: 1px solid #3a5068;
-    background: #171f2a;
-    color: #c4d2e0;
-    cursor: pointer;
-  }
-  .tabs button.active {
-    background: #2c5a84;
-    color: #eff7ff;
-    border-color: #71b9ef;
-  }
-  .tabbody {
-    overflow: auto;
-    border: 1px solid #3a5068;
-    border-radius: 0 8px 8px 8px;
-    padding: 10px;
-    min-height: 140px;
-    max-height: min(46vh, 480px);
-    flex: 1 1 auto;
-    background: #121a24;
-  }
-  .sidebar {
-    width: 300px;
-    flex: 0 0 300px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    overflow-y: auto;
-    padding: 16px;
-    border-right: 1px solid #2f4052;
-    background: #141d28;
+  .eyebrow span { color: #96aaaF; font-weight: 650; }
+  h1 {
+    margin: 0;
+    overflow: hidden;
+    color: #f5fafb;
+    font-size: 1.12rem;
+    font-weight: 750;
+    line-height: 1.2;
+    letter-spacing: -.018em;
+    white-space: nowrap;
+    text-overflow: ellipsis;
   }
   #status {
+    flex: 1 1 auto;
     display: flex;
-    flex-direction: column;
-    gap: 5px;
-    padding: 12px;
-    border: 1px solid #40566d;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    color: #b6c7d0;
+    font-size: .76rem;
+    font-variant-numeric: tabular-nums;
+  }
+  #status strong { color: #e9f1f3; font-weight: 600; }
+  #status [data-rules-status] { overflow: hidden; text-overflow: ellipsis; color: #9daebb; font-size: .73rem; }
+  .status-connected {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 9px;
+    border: 1px solid #335850;
+    border-radius: 20px;
+    background: #1a3537;
+    color: #b8e9d9;
+    font-size: .72rem;
+    font-weight: 650;
+  }
+  .status-indicator { width: 7px; height: 7px; border-radius: 50%; background: #66dbc0; box-shadow: 0 0 7px #6cebd28c; }
+  .status-world { flex: 0 0 auto; }
+  .header-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 3px; }
+  .header-actions .header-icon,
+  .header-actions .invite-trigger {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    min-width: 36px;
+    height: 36px;
+    min-height: 36px;
+    padding: 0;
+    border: 1px solid transparent;
     border-radius: 9px;
-    background: #172331;
-    color: #cbd8e5;
-    font-size: 0.95rem;
-  }
-  #status strong {
-    color: #f2f5f8;
-    font-size: 1.1rem;
-  }
-  #status [data-rules-status] {
-    font-size: 0.8rem;
-    color: #b1bdca;
-  }
-  .rules-boot-error {
-    margin: 8px 0 0;
-    font-size: 0.85rem;
-  }
-  .btn,
-  button {
-    display: block;
-    width: 100%;
-    box-sizing: border-box;
-    padding: 10px 12px;
-    border-radius: 9px;
-    border: 1px solid #40566d;
-    background: #1c2a38;
-    color: #f2f5f8;
+    background: transparent;
+    color: #bacbd3;
     cursor: pointer;
     text-align: center;
   }
-  .btn:hover,
-  button:hover:not(:disabled) {
-    background: #29445d;
-    border-color: #6fb8ef;
-  }
-  .file-control {
+  .header-actions .header-icon:hover { background: #2a3c4b; color: #f7fffd; border-color: #466270; }
+  .header-actions .session-trigger { color: #a5e7d9; }
+  .header-actions .session-trigger[aria-expanded="true"] { border-color: #48877e; background: #244b49; }
+  .header-actions .invite-trigger {
+    gap: 8px;
+    width: auto;
+    min-width: 87px;
+    padding: 0 12px;
+    margin-left: 5px;
+    border-color: #529e90;
+    background: #255a56;
+    color: #eafff9;
+    font-size: .85rem;
     font-weight: 700;
+  }
+  .header-actions .invite-trigger:hover { background: #306f65; border-color: #7adac4; }
+  .header-separator { width: 1px; height: 23px; margin-inline: 5px; background: #41515e; }
+  .file-control { position: relative; }
+  .file-control input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .error { margin: 0; padding: 8px 16px; color: #ffb7ae; background: #372020; font-size: .85rem; }
+  .shell {
+    flex: 1 1 auto;
+    display: flex;
+    gap: 0;
+    width: 100%;
+    min-width: 0;
+    min-height: 0;
+    height: auto;
+    border: 0;
+    border-radius: 0;
+    background: #101a24;
+  }
+  .canvas-col { order: 0; flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; position: relative; }
+  .scene-bar {
+    flex: 0 0 46px;
+    min-height: 46px;
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid #354656;
+    background: #15222e;
+  }
+  .scenenav {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 100%;
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 5px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 5px 12px;
+    border: 0;
+    scrollbar-width: thin;
+    scrollbar-color: #4d6971 transparent;
+  }
+  .scenenav button {
+    flex: 0 0 auto;
+    width: auto;
+    min-height: 33px;
+    padding: 5px 11px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: transparent;
+    color: #afc0c9;
+    font-size: .82rem;
+    white-space: nowrap;
+  }
+  .scenenav button.active { border-color: #44877f; background: #21453f; color: #d4f9ec; }
+  .scene-menu {
+    position: absolute;
+    top: 42px;
+    left: 12px;
+    z-index: 35;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 7px;
+    border: 1px solid #536e7d;
+    border-radius: 10px;
+    background: #202f3d;
+    box-shadow: 0 14px 30px #0008;
+  }
+  .scene-menu button { text-align: left; }
+  .players {
+    flex: 0 0 auto;
+    max-width: min(40%, 360px);
+    height: 100%;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    overflow-x: auto;
+    white-space: nowrap;
+    padding: 5px 12px;
+    border-left: 1px solid #354656;
+    color: #d6e5e7;
+    font-size: .76rem;
+  }
+  .players small { color: #92aaaf; }
+  .sidebar {
+    order: 1;
+    flex: 0 0 var(--gm-dock-width);
+    width: var(--gm-dock-width);
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    overflow: hidden;
+    padding: 0;
+    border-left: 1px solid #344657;
+    background: #16222e;
+  }
+  .dock-heading {
+    flex: 0 0 60px;
+    min-height: 60px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding: 8px 10px 8px 15px;
+  }
+  .dock-eyebrow { color: #81d4c5; font-size: .64rem; font-weight: 800; letter-spacing: .13em; }
+  .dock-heading h2, .session-heading h2 { margin: 1px 0 0; font-size: .98rem; font-weight: 700; color: #f0f8f9; }
+  .dock-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 1px; }
+  .dock-actions button {
+    flex: 0 0 32px;
+    display: grid;
+    place-items: center;
+    width: 32px;
+    min-width: 32px;
+    height: 32px;
+    min-height: 32px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: transparent;
+    color: #aabdc6;
+    cursor: pointer;
+  }
+  .dock-actions button:hover { border-color: #527a7b; background: #293f49; color: #edfbf8; }
+  .tabs {
+    flex: 0 0 auto;
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 2px;
+    min-height: 46px;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    white-space: nowrap;
+    padding: 0 10px;
+    border-bottom: 1px solid #3b4b59;
+    scrollbar-width: thin;
+    scrollbar-color: #56737b transparent;
+  }
+  .tabs button {
+    flex: 1 0 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: auto;
+    min-width: 39px;
+    min-height: 44px;
+    padding: 7px;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    background: transparent;
+    color: #a8b9c4;
+    cursor: pointer;
+  }
+  .tabs button span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .tabs button:hover { color: #effcfa; background: #243440; }
+  .tabs button.active { border-bottom-color: #74d9c5; background: #1b3037; color: #b9f7e4; }
+  .tabbody {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: none;
+    overflow: auto;
+    padding: 13px 14px;
+    border: 0;
+    border-radius: 0;
+    background: #15222d;
+  }
+  .tabbody :global(.chat) { min-height: 100%; height: 100%; }
+  .tabbody :global(#chat-log) { flex: 1 1 auto; max-height: none; min-height: 120px; border-color: #344957; background: #101a24; }
+  .dock-footer {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 190px;
+    overflow-y: auto;
+    padding: 8px 10px;
+    border-top: 1px solid #3a4b59;
+    background: #192834;
+  }
+  .hotbar { display: flex; gap: 3px; }
+  .hotbar .slot { flex: 1 1 0; min-width: 0; overflow: hidden; padding: 4px 0; font-size: .72rem; text-overflow: ellipsis; white-space: nowrap; }
+  .board { flex: 1 1 auto; display: flex; min-width: 0; min-height: 0; }
+  .toolrail { flex: 0 0 auto; display: flex; min-height: 0; }
+  .canvas-host { flex: 1 1 auto; min-width: 0; min-height: 0; position: relative; background: #0d151e; }
+  .session-panel {
+    position: fixed;
+    top: 70px;
+    /* A nonmodal setup surface: keep chat and quick actions in the dock usable. */
+    right: var(--gm-dock-width);
+    bottom: 0;
+    z-index: 70;
+    width: min(440px, calc(100vw - var(--gm-dock-width) - 64px));
+    display: flex;
+    flex-direction: column;
+    border: 1px solid #4b6d73;
+    border-right: 0;
+    border-bottom: 0;
+    border-radius: 14px 0 0 0;
+    background: #172530;
+    box-shadow: -20px 0 60px #050a11a8, -2px 0 12px #050a1166;
+  }
+  .session-heading {
+    flex: 0 0 70px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 18px;
+    border-bottom: 1px solid #405460;
+    background: #1a2b36;
+    border-radius: 14px 0 0 0;
+  }
+  .session-heading h2 { font-size: 1.25rem; letter-spacing: -.02em; }
+  .session-close {
+    display: grid;
+    place-items: center;
+    width: 36px;
+    min-width: 36px;
+    height: 36px;
+    min-height: 36px;
+    padding: 0;
+    border: 1px solid #49616c;
+    border-radius: 9px;
+    background: #293d48;
+    color: #d2e1e4;
+    cursor: pointer;
+  }
+  .session-close:hover { background: #354f56; }
+  .session-content { display: flex; flex-direction: column; gap: 16px; overflow-y: auto; overscroll-behavior: contain; padding: 18px; }
+  .session-intro { margin: 0; color: #b0c5cb; font-size: .87rem; line-height: 1.5; }
+  .session-card, .capabilities { padding: 15px; border: 1px solid #405564; border-radius: 11px; background: #1c2b37; }
+  .session-card h3 { margin: 0 0 10px; color: #eff7f7; font-size: .92rem; }
+  .world-card { display: flex; flex-direction: column; gap: 9px; }
+  .world-card .hint { margin: 0; }
+  .capabilities { margin: 0; }
+  .capabilities summary { cursor: pointer; color: #d1e4e5; font-size: .86rem; font-weight: 650; }
+  .capabilities ul { display: grid; grid-template-columns: 1fr; gap: 8px; list-style: none; margin: 15px 0 0; padding: 0; }
+  .capabilities li { display: flex; align-items: center; gap: 8px; min-height: 24px; color: #c8d9de; font-size: .83rem; }
+  .capabilities li.missing { opacity: .65; }
+  .capabilities .dot { flex: 0 0 8px; width: 8px; height: 8px; border-radius: 50%; background: #7a8c98; }
+  .capabilities li.ok .dot { background: #73d8c5; }
+  .capabilities .state { margin-left: auto; color: #91a6af; }
+  .rules-boot-error { margin: 0; }
+  button { display: block; width: 100%; box-sizing: border-box; padding: 9px 12px; border-radius: 9px; border: 1px solid #465d6c; background: #243543; color: #f2f8f8; cursor: pointer; text-align: center; }
+  button:hover:not(:disabled) { background: #30505c; border-color: #78c9b8; }
+  @media (max-width: 1220px) {
+    #status [data-rules-status] { display: none; }
+    .app-header { gap: 9px; padding-inline: 12px; }
+    .header-identity { flex-basis: 150px; }
+  }
+  @media (max-width: 1100px) {
+    /* Narrow tables keep the full board in view while setup is open. */
+    .session-panel { right: 0; width: min(440px, 100vw); }
+  }
+  @media (max-width: 930px) {
+    main.gm-app { --gm-dock-width: 306px; }
+    .header-status .status-world { display: none; }
+    .header-actions { gap: 0; }
+    .header-separator { margin-inline: 2px; }
+  }
+  @media (max-width: 710px) {
+    .app-header { flex-basis: 60px; min-height: 60px; gap: 6px; padding-inline: 8px; }
+    .brand-badge { display: none; }
+    .header-identity { flex: 0 0 94px; min-width: 0; }
+    .header-identity .eyebrow span { display: none; }
+    .header-status { display: none !important; }
+    .header-actions { flex: 1 1 auto; min-width: 0; justify-content: flex-end; overflow-x: auto; scrollbar-width: none; }
+    .header-actions::-webkit-scrollbar { display: none; }
+    .header-actions .header-icon { width: 32px; min-width: 32px; }
+    .header-actions .invite-trigger { min-width: 40px; padding-inline: 9px; }
+    .header-actions .invite-trigger span { display: none; }
+    .shell { flex-direction: column; }
+    .canvas-col { flex: 1 1 auto; min-height: 0; }
+    .players { max-width: 30%; }
+    .sidebar { order: 1; flex: 0 0 min(42dvh, 360px); width: 100%; min-height: 0; border-left: 0; border-top: 1px solid #344657; }
+    .dock-heading { flex-basis: 44px; min-height: 44px; }
+    .dock-eyebrow { display: none; }
+    .session-panel { top: 60px; width: min(440px, 100vw); }
+    .tabbody { padding: 9px 12px; }
+    .tabbody :global(#chat-log) { min-height: 80px; }
+    .dock-footer { display: flex; max-height: 80px; overflow-y: auto; padding: 4px 10px; }
   }
   .invite-panel {
     display: flex;
@@ -5235,42 +5443,5 @@ const WALL_PICK_RADIUS = 12;
   .canvas-host :global(canvas) {
     display: block;
   }
-  @media (max-width: 980px) {
-    .shell {
-      min-height: 600px;
-    }
-    .sidebar {
-      width: 260px;
-      flex-basis: 260px;
-      padding: 12px;
-    }
-  }
-  @media (max-width: 760px) {
-    main {
-      padding: 20px 12px 28px;
-    }
-    .app-header {
-      align-items: flex-start;
-      flex-direction: column;
-      gap: 8px;
-    }
-    .shell {
-      height: auto;
-      min-height: 0;
-      flex-direction: column;
-    }
-    .sidebar {
-      width: 100%;
-      flex-basis: auto;
-      max-height: 580px;
-      border-right: 0;
-      border-bottom: 1px solid #2f4052;
-    }
-    .canvas-col {
-      min-height: 58vh;
-    }
-    .tabbody {
-      max-height: 420px;
-    }
-  }
+
 </style>
