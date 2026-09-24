@@ -550,3 +550,110 @@ test("a GM-cued pan animates each viewer's own camera, and only the player's own
     await hostCtx.close();
   }
 });
+
+// D-295 (SQ-13/A10): what the viewer's own device does with a cue — prefetch ahead,
+// tell them when a cue was late, and honour local mute / reduced-motion settings
+// without touching anyone else's effects.
+test("a viewer's own FX settings mute sound, cut camera motion, and say so once", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-settings").click();
+  const prefs = page.locator("[data-fx-prefs]");
+  await expect(prefs).toBeVisible();
+
+  // Mute FX sound on this device only.
+  await prefs.locator("[data-fx-pref-mute-sound]").check();
+  await expect(prefs.locator("[data-fx-pref-mute-sound]")).toBeChecked();
+  await page.locator('[data-window="settings"] [data-window-close]').click();
+
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  // A text section plus a real imported sound: the visual must still play while the
+  // sound is skipped, which is the "does not turn off other people's effects" half.
+  const wav = Buffer.from(
+    "UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=", "base64");
+  await wizard.locator('input[type="file"]').setInputFiles({ name: "hush.wav",
+    mimeType: "audio/wav", buffer: wav });
+  await expect(wizard.getByRole("status")).toContainText("GM-only playback");
+  await wizard.locator("[data-fx-name]").fill("Hushed ward");
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  await wizard.locator("[data-fx-section]").getByLabel("Text", { exact: true }).fill("Ward");
+  await wizard.getByRole("button", { name: "Sound", exact: true }).click();
+  await wizard.locator("[data-fx-section]").nth(1).getByRole("combobox", { name: "Media" })
+    .selectOption({ index: 1 });
+  await wizard.locator("[data-fx-save]").click();
+  await expect(wizard.locator("li")).toContainText(["Hushed ward"]);
+  await wizard.locator("[data-fx-run]").click();
+  const active = () => page.evaluate(() => (
+    globalThis as unknown as { __stage?: { getFxLayer: () => { count: number } } }
+  ).__stage?.getFxLayer().count ?? 0);
+  await expect.poll(active, { timeout: 5_000 }).toBeGreaterThan(0); // the text cue rendered
+  const notes = page.locator("[data-notify]");
+  await expect(notes.filter({ hasText: "muted on this device" })).toHaveCount(1);
+
+  // Reduce motion: a pan cuts to the destination instead of animating across it.
+  await page.locator("#gm-settings").click();
+  await prefs.locator("[data-fx-pref-reduced-motion]").check();
+  await page.locator('[data-window="settings"] [data-window-close]').click();
+  const destination = { x: 1_450, y: 550 };
+  await authorCamera(page, "Still look", { x: destination.x, y: destination.y, ms: 3_000 });
+  await expect(wizard.locator("li")).toContainText(["Still look"]);
+  await wizard.locator("[data-fx-run]").click();
+  // Within a couple of frames the view is already centred on the destination: no
+  // interpolation happened, so the screen never moved through the map.
+  await expect.poll(async () => near((await stageView(page))?.centre, destination, 4),
+    { timeout: 2_000 }).toBe(true);
+  const settled = (await stageView(page))?.camera ?? null;
+  await page.waitForTimeout(600); // the pan "duration" has not even elapsed yet
+  expect(sameCamera((await stageView(page))?.camera ?? null, settled)).toBe(true);
+  await expect(page.locator("[data-notify]").filter({ hasText: "cut by reduced motion" })).toHaveCount(1);
+});
+
+test("a GM-audience cue tells the requesting GM it reached fewer viewers than the scene", async ({ browser }) => {
+  test.setTimeout(120_000);
+  const hostCtx = await browser.newContext();
+  const playerCtx = await browser.newContext();
+  try {
+    const host = await hostCtx.newPage();
+    const player = await playerCtx.newPage();
+    await host.goto(entry + "?e2e=1");
+    await waitForSurface(host, "app");
+    await host.locator("#gm-macros").click();
+    await host.locator("[data-macro-fx-tab]").click();
+    const wizard = host.locator("[data-fx-wizard]");
+    await authorCamera(host, "GM only look", { x: 900, y: 400, ms: 300 });
+    // Narrow the saved timeline to the GM's own audience.
+    await wizard.locator("li").filter({ hasText: "GM only look" }).getByRole("button", { name: "Edit" }).click();
+    await wizard.locator("[data-fx-audience]").selectOption("gm");
+    await wizard.locator("[data-fx-save]").click();
+    await expect(wizard.locator("li")).toContainText(["GM only look"]);
+
+    await host.locator("#share").click();
+    const fragment = manualFragment(await host.locator("#invite-link").inputValue());
+    await player.goto(`${entry}?e2e=1&join=1#${fragment}`);
+    await expect.poll(() => player.locator("#offer-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await host.locator("#peer-code").fill(await player.locator("#offer-out").inputValue());
+    await host.locator("#code-apply").click();
+    await expect.poll(() => host.locator("#share-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await player.locator("#answer-input").fill(await host.locator("#share-out").inputValue());
+    await player.locator("#answer-apply").click();
+    await expect.poll(() => playerCall<boolean>(player, "connected"), { timeout: 30_000 }).toBe(true);
+    await waitForSurface(player, "playerCanvas");
+
+    await host.locator('[data-window="macros"] [data-window-close]').click();
+    await host.locator("#gm-macros").click();
+    await host.locator("[data-macro-fx-tab]").click();
+    await host.locator("[data-fx-wizard] li").filter({ hasText: "GM only look" })
+      .getByRole("button", { name: "Run" }).click();
+    const notice = host.locator("[data-notify]").filter({ hasText: "GM only look" });
+    await expect(notice).toHaveCount(1);
+    await expect(notice).toContainText("reached 1 viewer(s)");
+    await expect(notice).toContainText("outside its audience");
+    // The player heard nothing: a GM-only cue names no one and shows nothing there.
+    await expect(player.locator("[data-player-notify]")).toHaveCount(0);
+  } finally {
+    await playerCtx.close();
+    await hostCtx.close();
+  }
+});

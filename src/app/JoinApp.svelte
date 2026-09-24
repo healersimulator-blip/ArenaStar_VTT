@@ -63,6 +63,7 @@
   import { copyText } from "../ui/clipboard";
   import { FogExploration } from "../client/fogExploration";
   import { FxPlayer } from "../client/fxPlayer";
+  import FxViewPrefsPanel from "../ui/macros/FxViewPrefsPanel.svelte";
   import { fogMaskLog } from "../core/fogMask";
   import { drawingBounds } from "../canvas/layers/drawingGeometry";
   import { createVisionComputer } from "../workers/visionComputer";
@@ -83,6 +84,8 @@
   let playerName = $state("");
   let playerTab = $state<"chat" | "actors">("chat");
   let guideOpen = $state(false);
+  /** SQ-13: one-line FX delivery warnings for this viewer (max 4, newest last). */
+  let fxNotices = $state<string[]>([]);
   let guideFocus = $state<HTMLDivElement | null>(null);
   let guideTrigger = $state<HTMLButtonElement | null>(null);
   function openGuide(): void {
@@ -673,6 +676,10 @@
             fetchAsset: (hash) => fetcher.request(hash, "ui"),
             sceneId: () => activeScene()?._id ?? null,
             onError: (message) => console.warn(message),
+            // A player whose device could not show a cue on time is told so here;
+            // the timeline keeps playing for everyone else (A10).
+            onDelivery: (report) => { fxNotices = [...fxNotices.slice(-3), report.message]; },
+            macroName: (macroId) => client.store.get("macros", macroId)?.name ?? null,
           });
         }
         client.sendPing();
@@ -936,6 +943,11 @@
         <span class="connection-badge" class:disconnected={phase === "dead"}><span class="connection-dot"></span>{phase === "dead" ? "Disconnected" : "Connected"}</span>
         <span>{playerName}</span>
         <span>seq {seq} · tokens {tokenCount}</span>
+      </div>
+      <div class="notify-stack" aria-live="polite" data-player-notify-stack>
+        {#each fxNotices as message, i (message + ":" + String(i))}
+          <div class="notify" data-player-notify>{message}</div>
+        {/each}
       </div>
       <div class="player-actions" aria-label="Player actions">
         <button data-icon-button data-player-macros type="button" aria-label="Published macros" title="Published macros" onclick={openMacros}><Icon name="macro" /></button>
@@ -1214,6 +1226,9 @@
               <OnboardingPanel steps={onboarding} storageKey="vtt-onboarding-player" title="Getting started" />
             </section>
           {/if}
+          <section class="guide-card"><h3>Effects on this device</h3>
+            <FxViewPrefsPanel />
+          </section>
           <section class="guide-card"><h3>Connection</h3>
             <p>Playing as <strong>{playerName}</strong> in {worldName}.</p>
             <p>Connection state: <strong>{connState}</strong></p>
@@ -1408,6 +1423,21 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
+  }
+  .notify-stack {
+    display: grid;
+    gap: 4px;
+    max-width: 34ch;
+    margin: 0 10px;
+  }
+  .notify {
+    padding: 4px 8px;
+    border: 1px solid #7a5a2a;
+    border-radius: 4px;
+    background: #2a2113;
+    color: #ffdca6;
+    font-size: 0.75rem;
+    line-height: 1.25;
   }
   #pstatus {
     display: flex;

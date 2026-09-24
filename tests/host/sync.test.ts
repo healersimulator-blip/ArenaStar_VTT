@@ -22,6 +22,7 @@ import type { AutomationDefinition } from "../../src/core/automation";
 import { ClientSync, type ClientEvents } from "../../src/client/sync";
 import { createTransportPair, flushMicrotasks } from "../../src/net/memory";
 import { createEventBus, type EventBus } from "../../src/core/events";
+import { summarizeSkips } from "../../src/core/fxDelivery";
 import { DocumentStore, OpLog, UndoStack, type StoreMeta } from "../../src/core";
 import type { HelloMsg } from "../../src/core/messages";
 import type { Op, OpEnvelope } from "../../src/core/ops";
@@ -1389,6 +1390,64 @@ describe("Macros / FX host authority and audience", () => {
       .toMatchObject([{ mime: "image/png" }, { mime: "image/png" }]);
     expect(cues[0]?.sections.every((section) => !Object.hasOwn(section, "repeatCount"))).toBe(true);
     expect(h.hostStore.seq).toBe(before);
+  });
+
+  test("a cue that cannot reach everyone reports counts to the requesting GM, with no user or document names", async () => {
+    const h = await setup({ [imageHash]: { name: "vfx.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    h.gm.submit([{ kind: "create", coll: "macros", data: fxMacro("counsel") }]);
+    await flushMicrotasks();
+    const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+    void player;
+    await h.addPlayer(OTHER_ID, "Ivy");
+    const reports: ClientEvents["fxDelivery"][] = [];
+    h.gmBus.on("fxDelivery", (msg) => reports.push(msg));
+    const playerReports: ClientEvents["fxDelivery"][] = [];
+    // A scene-audience cue reaches everyone, so there is nothing to explain.
+    h.gm.requestSequence("counsel", "s1");
+    await flushMicrotasks();
+    expect(reports).toHaveLength(0);
+
+    // Narrow the same cue to the GM's own audience: the two players are outside it.
+    const macro = fxMacro("counsel");
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: "counsel" },
+      diff: { sequence: { ...macro.sequence, audience: "gm" } as unknown as Json } }]);
+    await flushMicrotasks();
+    h.gm.requestSequence("counsel", "s1");
+    await flushMicrotasks();
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.recipients).toBe(1); // the GM's own loopback session
+    expect(reports[0]?.skipped).toEqual({ audience: 2, rights: 0, anchor: 0, media: 0 });
+    expect(reports[0]?.macroId).toBe("counsel");
+    const summary = summarizeSkips(reports[0]?.skipped ?? { audience: 0, rights: 0, anchor: 0, media: 0 },
+      reports[0]?.recipients ?? 0, "Counsel");
+    expect(summary).toContain("Counsel: reached 1 viewer(s)");
+    expect(summary).toContain("2 outside its audience");
+    expect(JSON.stringify(reports[0])).not.toContain(PLAYER_ID); // counts, never identities
+    expect(playerReports).toHaveLength(0);
+  });
+
+  test("a player's own request never receives the host's audience aggregate", async () => {
+    const h = await setup();
+    const aura = fxMacro("open-aura");
+    aura.flags = { core: { playerCallable: true } };
+    aura.sequence = { version: 1, audience: "scene", sections: [{ kind: "text", id: "a", text: "Aura",
+      at: { kind: "point", x: 150, y: 150 }, startMs: 0, durationMs: 400 }] };
+    h.gm.submit([{ kind: "create", coll: "macros", data: aura }]);
+    await flushMicrotasks();
+    const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+    await h.addPlayer(OTHER_ID, "Ivy");
+    const seen: ClientEvents["fxDelivery"][] = [];
+    bus.on("fxDelivery", (msg) => seen.push(msg));
+    // The caller-scoped part of the audience is invisible to the other player, but a
+    // request from a player must not turn into a viewer census for that player.
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: "open-aura" }, diff: {
+      sequence: { version: 1, audience: "caller", sections: [{ kind: "text", id: "a", text: "Aura",
+        at: { kind: "point", x: 150, y: 150 }, startMs: 0, durationMs: 400 }] } as unknown as Json } }]);
+    await flushMicrotasks();
+    player.requestSequence("open-aura", "s1");
+    await flushMicrotasks();
+    expect(seen).toHaveLength(0);
   });
 
   test("hidden source and unpublished macros never broadcast to other players", async () => {

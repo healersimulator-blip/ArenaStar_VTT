@@ -47,6 +47,7 @@
   import { WindowManager } from "../ui/windows";
   import { macroSlots, runChatMacro } from "../ui/macros";
   import { resolveFxSequence, type FxImportPermissions } from "../core/fx";
+import { summarizeSkips } from "../core/fxDelivery";
   import { gmState } from "../ui/armies/gmState.svelte";
   import { buildStrategicFog, sceneIsStrategic } from "../core/strategicFog";
   import { FogExploration } from "../client/fogExploration";
@@ -790,6 +791,8 @@ const WALL_PICK_RADIUS = 12;
   const rtInterp = new PoolInterpolator();
   let rtSampleTimer: ReturnType<typeof setInterval> | null = null;
   let offSimBus: (() => void) | null = null;
+  /** SQ-13: the host's partial-audience report for a cue this tab requested. */
+  let offFxDelivery: (() => void) | null = null;
   let moduleHost: ModuleHost | null = null;
 
   /** The active encounter of the active scene (null before any is activated). */
@@ -2963,6 +2966,8 @@ const WALL_PICK_RADIUS = 12;
       audioPlayer.dispose();
       fxPlayer?.dispose();
       fxPlayer = null;
+      offFxDelivery?.();
+      offFxDelivery = null;
       offRejected();
       offWm();
       globalThis.removeEventListener("keydown", onKey);
@@ -2986,6 +2991,20 @@ const WALL_PICK_RADIUS = 12;
           fetchAsset: (hash) => current.gm.fetcher.request(hash, "ui"),
           sceneId: () => viewAsPlayer === null ? (activeScene()?._id ?? null) : null,
           onError: (message) => console.warn(message),
+          // SQ-13/A10: a GM whose own client could not keep up hears one line about
+          // it, in the same notice stack every other warning lands in.
+          onDelivery: (report) => {
+            notifyLog = [...notifyLog.slice(-49), { message: report.message, level: report.level }];
+          },
+          macroName: (macroId) => current.gm.client.store.get("macros", macroId)?.name ?? null,
+        });
+        // SQ-13: the host tells the requester when a cue reached fewer viewers than the
+        // scene has. The action already completed exactly once; this is the explanation.
+        offFxDelivery?.();
+        offFxDelivery = current.gm.bus.on("fxDelivery", (msg) => {
+          const name = current.gm.client.store.get("macros", msg.macroId)?.name ?? "FX timeline";
+          const line = summarizeSkips(msg.skipped, msg.recipients, name);
+          if (line) notifyLog = [...notifyLog.slice(-49), { message: line, level: "warn" }];
         });
         const canvas = view.app.canvas as HTMLCanvasElement;
         const toWorld = (event: PointerEvent) => {

@@ -8,9 +8,20 @@ import type { Stage } from "../canvas/stage";
 import type { FxStartMsg } from "../core/messages";
 import type { ResolvedFxSection } from "../core/fx";
 import { cameraAt, cameraPanEnd, type ResolvedCameraSection } from "../canvas/fxCamera";
+import {
+  fxMediaCues, fxPreloadPlan, lateMediaDecision, summarizeDelivery,
+  type FxDeliveryEntry, type FxDeliveryReport,
+} from "../core/fxDelivery";
+import { fxViewPrefs, subscribeFxViewPrefs, type FxViewPrefs } from "../core/fxPrefs";
 import type { Camera } from "../canvas/camera";
 import type { ClientEvents, ClientSync } from "./sync";
 import type { EventBus } from "../core/events";
+
+/**
+ * Below this, "late" is just the cost of a decode and not worth telling the table
+ * about. Above it, a viewer is looking at a cue that did not arrive on time.
+ */
+const LATE_TOLERANCE_MS = 120;
 
 export interface FxPlayerOptions {
   client: ClientSync;
@@ -19,6 +30,10 @@ export interface FxPlayerOptions {
   fetchAsset: (hash: string) => Promise<Uint8Array>;
   sceneId: () => string | null;
   onError?: (error: string) => void;
+  /** SQ-13: what this viewer's delivery looked like (late, skipped, cut, failed). */
+  onDelivery?: (report: FxDeliveryReport) => void;
+  /** Where a run's name comes from for the report line (the world's own macro). */
+  macroName?: (macroId: string) => string | null;
 }
 
 export class FxPlayer {
@@ -41,12 +56,22 @@ export class FxPlayer {
     startedAtHost: number; generation: number; epoch: number } | null = null;
   /** Runs whose camera track this viewer took back by dragging/zooming the map. */
   private readonly cameraTakenBack = new Set<string>();
+  /** SQ-13/A10: this device's own preferences; never sent anywhere. */
+  private prefs: FxViewPrefs = fxViewPrefs();
+  private readonly offPrefs: () => void;
+  /** Assets this run asked for ahead of time; `done` is the readiness signal at cue time. */
+  private readonly prefetched = new Map<string, { done: boolean; failed: boolean }>();
+  /** Per-run delivery entries plus how many media cues are still unresolved. */
+  private readonly delivery = new Map<string, { macroId: string; entries: FxDeliveryEntry[];
+    pending: number; reported: boolean }>();
 
   constructor(private readonly options: FxPlayerOptions) {
     this.scene = options.sceneId();
     this.off = options.bus.on("fx", (cue) => this.start(cue));
     this.offEnd = options.bus.on("fxEnd", (end) => this.stopRun(end.runId));
     this.offFrame = options.stage.onFrame(() => this.tickCamera());
+    // A viewer may flip these mid-session; the next cue already obeys the new value.
+    this.offPrefs = subscribeFxViewPrefs((prefs) => { this.prefs = prefs; });
     this.offWelcome = options.bus.on("welcome", () => {
       // A newly connected host may have ended instances while we were offline.
       this.clearLocal();
@@ -69,6 +94,8 @@ export class FxPlayer {
     this.previewRuns.clear();
     this.cameraTakenBack.clear();
     this.runEpoch.clear();
+    this.delivery.clear();
+    this.prefetched.clear();
   }
 
   /** Switch/reconnect: no old-scene image, sound or deferred timer survives. */
@@ -121,6 +148,9 @@ export class FxPlayer {
   }
 
   private stopRun(runId: string): void {
+    this.flushDelivery(runId); // a stopped run still reports what it never managed to show
+    this.delivery.delete(runId);
+    this.prefetched.clear(); // a stopped run's warm promises are its own
     if (this.view?.runId === runId) this.releaseCamera(true);
     this.runEpoch.set(runId, (this.runEpoch.get(runId) ?? 0) + 1);
     this.seenRuns.delete(runId);
@@ -149,31 +179,119 @@ export class FxPlayer {
     const generation = this.generation;
     const epoch = (this.runEpoch.get(cue.runId) ?? 0) + 1;
     this.runEpoch.set(cue.runId, epoch);
-    for (const section of cue.sections) {
-      if (section.kind === "wait") continue;
-      // A camera cue is a claim on THIS viewer's view. The host resolved and
-      // bounds-checked the destination; the client only animates its own camera.
-      if (section.kind === "camera") {
-        const delay = cue.atHostTime + section.startMs - this.hostNow();
-        if (delay < 0) continue; // a view claim never starts late; it is not a visual to catch up on
-        const cameraTimer = setTimeout(() => {
-          this.timers.delete(cameraTimer);
-          if (this.disposed || generation !== this.generation || this.options.sceneId() !== cue.sceneId ||
-              this.runEpoch.get(cue.runId) !== epoch || this.cameraTakenBack.has(cue.runId)) return;
-          this.beginCamera(cue, section, generation, epoch);
-        }, delay);
-        this.timers.set(cameraTimer, cue.runId);
-        continue;
-      }
-      const delay = cue.atHostTime + section.startMs - this.hostNow();
-      if (!cue.persistent && delay + section.durationMs <= 0) continue; // don't replay a stale one-shot
+    // SQ-13: fetch what this timeline will need *before* the table expects it. The
+    // cue arrives FX_LEAD_MS early, so a section later in the timeline has real lead
+    // time — that is the whole difference between a cue that fires on time and one
+    // that pops in late on the one viewer with a slow connection.
+    // A run is "settled" when everything that could produce a delivery entry has
+    // resolved: its media cues, plus its camera cues when this viewer asked for
+    // reduced motion (only then can a camera cue be degraded).
+    const cameras = this.prefs.reduceMotion
+      ? cue.sections.filter((section) => section.kind === "camera").length : 0;
+    this.delivery.set(cue.runId, { macroId: cue.macroId, entries: [],
+      pending: fxMediaCues(cue.sections).length + cameras, reported: false });
+    for (const plan of fxPreloadPlan(cue.sections, { leadMs: cue.atHostTime - this.hostNow(),
+      aheadMs: this.prefs.preloadAheadMs })) {
+      // A viewer who muted FX sounds doesn't want the bytes either: bandwidth is a
+      // courtesy, not a thing to spend on a cue that will be skipped.
+      if (plan.kind === "sound" && this.prefs.muteSound) continue;
+      const start = () => { void this.prefetch(plan.assetId); };
+      if (plan.waitMs <= 0) { start(); continue; }
       const timer = setTimeout(() => {
         this.timers.delete(timer);
         if (this.disposed || generation !== this.generation || this.options.sceneId() !== cue.sceneId ||
             this.runEpoch.get(cue.runId) !== epoch) return;
-        void this.play(cue, section, generation, epoch);
+        start();
+      }, plan.waitMs);
+      this.timers.set(timer, cue.runId);
+    }
+    cue.sections.forEach((section, index) => {
+      if (section.kind === "wait") return;
+      // A camera cue is a claim on THIS viewer's view. The host resolved and
+      // bounds-checked the destination; the client only animates its own camera.
+      if (section.kind === "camera") {
+        const delay = cue.atHostTime + section.startMs - this.hostNow();
+        if (delay < 0) { this.settleCue(cue.runId); return; } // a view claim never starts late
+        const cameraTimer = setTimeout(() => {
+          this.timers.delete(cameraTimer);
+          if (this.disposed || generation !== this.generation || this.options.sceneId() !== cue.sceneId ||
+              this.runEpoch.get(cue.runId) !== epoch || this.cameraTakenBack.has(cue.runId)) return;
+          // A viewer who asked for less motion still needs to end up looking at the
+          // right place: cut to it instead of panning, and skip a shake outright.
+          if (this.prefs.reduceMotion) {
+            this.noteDelivery(cue.runId, { index, kind: "camera",
+              state: section.mode === "shake" ? "skipped" : "cut", reason: "reduced-motion" });
+            if (section.mode === "pan") {
+              this.options.stage.setCamera(cameraPanEnd(section, this.options.stage.camera,
+                this.options.stage.viewport));
+            }
+            this.settleCue(cue.runId);
+            return;
+          }
+          this.settleCue(cue.runId);
+          this.beginCamera(cue, section, generation, epoch);
+        }, delay);
+        this.timers.set(cameraTimer, cue.runId);
+        return;
+      }
+      const delay = cue.atHostTime + section.startMs - this.hostNow();
+      if (!cue.persistent && delay + section.durationMs <= 0) {
+        this.settleCue(cue.runId); // a stale replay is not a delivery failure
+        return;
+      }
+      const timer = setTimeout(() => {
+        this.timers.delete(timer);
+        if (this.disposed || generation !== this.generation || this.options.sceneId() !== cue.sceneId ||
+            this.runEpoch.get(cue.runId) !== epoch) return;
+        void this.play(cue, section, generation, epoch, index);
       }, Math.max(0, delay));
       this.timers.set(timer, cue.runId);
+    });
+    this.flushDelivery(cue.runId);
+  }
+
+  /** Fetch an asset early and remember only whether it landed (the bytes are the fetcher's). */
+  private async prefetch(assetId: string): Promise<void> {
+    if (this.prefetched.has(assetId)) return;
+    const record = { done: false, failed: false };
+    this.prefetched.set(assetId, record);
+    try {
+      await this.options.fetchAsset(assetId);
+      record.done = true;
+    } catch {
+      record.failed = true; // the failure is reported when the section actually needs it
+    }
+  }
+
+  /** Record a delivery outcome; the report waits for the run's last media cue. */
+  private noteDelivery(runId: string, entry: FxDeliveryEntry): void {
+    const run = this.delivery.get(runId);
+    if (!run || run.reported) return;
+    run.entries.push(entry);
+  }
+
+  /** One cue is settled — when the last one is, the viewer hears how it went. */
+  private settleCue(runId: string): void {
+    const run = this.delivery.get(runId);
+    if (run && !run.reported) run.pending = Math.max(0, run.pending - 1);
+    this.flushDelivery(runId);
+  }
+
+  /**
+   * Emit the run's report **once**, when nothing is still outstanding. A timeline
+   * whose media all arrived early says nothing at all: the right amount of news for
+   * an effect that worked is none.
+   */
+  private flushDelivery(runId: string): void {
+    const run = this.delivery.get(runId);
+    if (!run || run.reported || run.pending > 0) return;
+    run.reported = true;
+    const summary = summarizeDelivery(run.entries,
+      this.options.macroName?.(run.macroId) ?? "FX timeline");
+    this.delivery.delete(runId);
+    if (summary && this.options.onDelivery) {
+      this.options.onDelivery({ runId, sceneId: this.scene ?? "", entries: run.entries,
+        level: summary.level, message: summary.message });
     }
   }
 
@@ -226,7 +344,7 @@ export class FxPlayer {
   }
 
   private async play(cue: FxStartMsg, section: Exclude<ResolvedFxSection, { kind: "wait" }>,
-    generation: number, epoch: number): Promise<void> {
+    generation: number, epoch: number, index = -1): Promise<void> {
     const elapsed = () => Math.max(0, this.hostNow() - cue.atHostTime - section.startMs);
     const active = () => !this.disposed && generation === this.generation &&
       this.runEpoch.get(cue.runId) === epoch && this.options.sceneId() === cue.sceneId;
@@ -236,10 +354,40 @@ export class FxPlayer {
         cue.persistent === true);
       return;
     }
+    if (section.kind === "sound" && this.prefs.muteSound) {
+      // Local choice, local effect: the rest of the timeline still plays, and no
+      // bytes are fetched for a sound this viewer asked not to hear.
+      this.noteDelivery(cue.runId, { index, kind: "sound", state: "skipped", reason: "muted",
+        assetId: section.assetId });
+      this.settleCue(cue.runId);
+      return;
+    }
+    // Readiness is a *pre-cue* fact: did the preload (or the cache) already land?
+    // Asking after a fetch would always answer "yes" and hide the slow client SQ-13
+    // is about.
+    const landed = this.prefetched.get(section.assetId)?.done === true;
+    const scheduledFor = cue.atHostTime + section.startMs;
     try {
       const bytes = await this.options.fetchAsset(section.assetId);
+      const lateMs = this.hostNow() - scheduledFor;
+      if (lateMs > LATE_TOLERANCE_MS) {
+        const decision = lateMediaDecision(this.prefs.lateMedia, lateMs);
+        if (!decision.start) {
+          this.noteDelivery(cue.runId, { index, kind: section.kind, state: "skipped",
+            reason: decision.reason, assetId: section.assetId, lateMs });
+          this.settleCue(cue.runId);
+          return;
+        }
+      }
       if (!active() || !cue.persistent && elapsed() >= section.durationMs) return;
       const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: section.mime }));
+      const arrivedMs = this.hostNow() - scheduledFor;
+      const late = arrivedMs > LATE_TOLERANCE_MS;
+      this.noteDelivery(cue.runId, { index, kind: section.kind, assetId: section.assetId,
+        state: late ? "late" : "ready",
+        ...(late ? { reason: "not-ready" as const, lateMs: arrivedMs }
+          : landed ? { reason: "preload" as const } : {}) });
+      this.settleCue(cue.runId);
       if (section.kind === "sound") {
         const audio = new Audio(url);
         audio.volume = section.volume ?? 1;
@@ -316,7 +464,12 @@ export class FxPlayer {
         throw err;
       }
     } catch (err) {
-      this.options.onError?.(`FX ${section.kind} failed: ${String(err)}`);
+      const detail = String(err);
+      const unsupported = /unsupported|format|decode|not supported/i.test(detail);
+      this.noteDelivery(cue.runId, { index, kind: section.kind, state: "failed", assetId: section.assetId,
+        reason: unsupported ? "unsupported-codec" : "error", detail });
+      this.settleCue(cue.runId); // one failure is not a reason to keep the run "pending"
+      this.options.onError?.(`FX ${section.kind} failed: ${detail}`);
     }
   }
 
@@ -327,6 +480,7 @@ export class FxPlayer {
     this.offEnd();
     this.offWelcome();
     this.offFrame();
+    this.offPrefs();
     this.clearLocal();
   }
 }

@@ -20,6 +20,7 @@ import type {
   EphemeralMsg,
   FxStartMsg,
   FxEndMsg,
+  FxDeliveryMsg,
   AutomationTraceMsg,
   TaggerRulesResultMsg,
   PrefabResultMsg,
@@ -84,6 +85,7 @@ export interface ClientEvents {
   fx: FxStartMsg;
   /** Only a recipient of a persistent cue receives its end/revocation. */
   fxEnd: FxEndMsg;
+  fxDelivery: FxDeliveryMsg;
   /** GM-only tile/zone execution diagnostics. */
   automationTrace: AutomationTraceMsg;
   /** Host-allocated Tagger rules on exact scene-qualified refs (GM only). */
@@ -525,6 +527,9 @@ export class ClientSync {
         return;
       case "fx.end":
         this.bus.emit("fxEnd", msg);
+        return;
+      case "fx.delivery":
+        this.bus.emit("fxDelivery", msg);
         return;
       case "automation.trace":
         this.bus.emit("automationTrace", msg);

@@ -9050,3 +9050,105 @@ behaviours, all pinned in `tests/client/fxViewClaim.test.ts`.
   a persistent timeline, no protocol change, no camera *paths* (waypoints), and no
   reduced-motion/preload handling yet (SQ-13). Firefox/WebKit and the 41-scenario
   acceptance matrix were not run.
+
+## D-295 — FX delivery: preload ahead, fall back visibly, and stay local about it (2026-09-24)
+
+An FX timeline fires on the host clock, so every viewer is supposed to see the same
+frame at the same moment. In practice one of them is on hotel wifi: their client asks
+for the fireball's video *when the section starts*, the bytes arrive 700 ms later, and
+the cue pops in late — or, if the section was already over, never. Nobody is told.
+SQ-13/A10 asks for three things this decision implements: fetch what a timeline will
+need **before** the table expects it, make the fallback a setting instead of an
+accident, and never let one viewer's accommodation change what anyone else sees.
+
+**Preload is a plan, not a download.** `fxPreloadPlan` (`core/fxDelivery.ts`) turns a
+cue's sections into "when to start fetching each asset": the cue arrives `FX_LEAD_MS`
+(300 ms) early, and a section due in 800 ms with a viewer's 2 s window starts its
+fetch *now*, while one due in 20 s waits until exactly 2 s before its own cue. The
+window is the viewer's choice (`preloadAheadMs`, 0–8000 ms; `0` means "lazily fetch at
+play time", the other half of SQ-13), which is also the courtesy the §7 priority
+ladder asks for: an asset belongs to the cue that needs it, not to a queue the scene
+load is waiting on. One entry per asset with the earliest need winning the deadline —
+a timeline that loops the same aura does not fetch it twice.
+
+**Readiness is measured before the fetch, not after.** `FxPlayer` prefetches through
+the same `AssetFetcher` the rest of the client uses (so a prefetched asset is a cache
+hit at cue time), and records whether the bytes were *already in hand when the section
+started*. Asking after awaiting would always answer "yes" and hide exactly the slow
+client this decision is about. Anything more than 120 ms late is "late"; the viewer's
+setting picks what happens then: `delay` (default, and today's behaviour) starts the
+cue as soon as its bytes land, jumping to the right phase, while `skip` drops that cue
+so every viewer is looking at the same frames. Either way the run produces **one**
+report line — "Fireball: 1 of 3 cue(s) degraded — image not loaded in time (up to
+480 ms late)" — and a timeline that arrived on time says nothing at all.
+
+**Local means local (SQ-16).** The new "Effects on this device" panel (GM Settings window
+and the player's *Session & guide*, one `FxViewPrefsPanel`, `localStorage` key
+`vtt-fx-view-prefs`) offers: **reduce camera motion** — a pan *cuts* to its
+host-resolved destination and a shake is skipped, because ending up looking at the
+right place without the motion is the point, and a cut is not a motion — **mute FX
+sounds** (the muted sound is not fetched either), the preload window, and the late
+policy. Nothing here is sent to the host, nothing is written into a document, and a
+muted sound in a timeline does not stop the text cue beside it: a viewer's
+accommodation is not a change to the effect. The OS `prefers-reduced-motion` switch
+only seeds the default for a profile that has never chosen, since a viewer who turns
+motion back on must not have it silently re-disabled.
+
+**The other audience gap: the host says who it could not reach.** `prepareFx` now
+counts *why* a session was dropped (audience, macros/scene read rights, an invisible
+source/target token, missing media entitlement) and answers the requester with a new
+`fx.delivery` message (`0x4d`, host → requesting session, ops) when any count is
+non-zero. It is deliberately counts-only — no user, document or asset id — so a cue
+cannot become a membership oracle, it goes only to a GM/assistant requester, and a
+player-initiated request never receives it. The GM sees "Ward: reached 1 viewer(s) —
+2 outside its audience" in the same notice stack as everything else, and the action
+itself still completed exactly once.
+
+**Authoring side.** The wizard already listed imported media and their rights; it now
+warns *before* the run when a draft references an asset the world's registry does not
+have, a codec this browser cannot decode (`canPlayType`, probed per MIME and cached),
+or GM-only media in a scene-audience timeline — the three registry gaps SQ-13 names.
+`domCanPlay()` returns `null` where there is no DOM rather than guessing, and a probe
+that throws is "no opinion", never a refusal.
+
+**Gates.**
+
+- `pnpm test` — **3 618 passed / 12 skipped** (293 files: 291 passed, 2 skipped; no
+  load flake this run). New: `tests/core/fxDelivery.test.ts` (20 — plan timing and
+  per-asset dedup, `aheadMs: 0` meaning lazy fetch, the skip/delay policy, one-line
+  summaries with the worst lateness, skip summaries, total preference parsing, codec
+  fitness and the authoring issues), `tests/client/fxDeliveryFlow.test.ts` (8 — a cue
+  really is fetched before its section starts and a clean run reports nothing; a slow
+  client gets its cue late by default and hears about it; `skip` drops it; preloading
+  off fetches at cue time; mute skips only the sound and never fetches its bytes;
+  reduced motion cuts once and never animates; a missing asset is reported and the
+  rest of the timeline still plays; a stopped run reports once), plus two host cases in
+  `tests/host/sync.test.ts` (a GM-audience cue reports `{audience: 2}` counts with no
+  user id in the message, and a player's own request never receives an aggregate).
+  Also updated for the new kind: `contracts`, `frame`, `protocol-doc`, `net/fixtures`.
+- `pnpm typecheck` **64 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`)
+  · `pnpm lint` **exit 0** · `pnpm build` → `pnpm size` **3 765 629 B raw /
+  1 079 455 B gzip**, inside the 6 MB budget. `PROTOCOL.md` documents `fx.delivery`
+  (0x4d) with its skip shape.
+- e2e (Chromium, production `file://` build): `e2e/fx_sequence.spec.ts` **13/13**,
+  including the two new specs — a viewer turns on mute and reduced motion in the
+  Settings window, runs a text+sound timeline (the text cue still renders, one notice
+  says "muted on this device") and then a 3-second camera pan, which is measured
+  already parked on its destination and *still* parked 600 ms later, with one "cut by
+  reduced motion" notice; and a two-context run where a GM-audience cue tells the
+  requesting GM "reached 1 viewer(s) — … outside its audience" while the joined player
+  sees nothing at all.
+- One earlier full-suite run failed three tests that this change had made stale or
+  flaky rather than broken: two protocol-count/doc tests updated for the new kind, and
+  the D-294 camera-claim test whose "the pan has finished by now" assumption lost
+  under load — it now drives frames until the view is actually parked (the same
+  timers-lag-under-load class as the D-291 flake, fixed in the test, not worked
+  around).
+- Explicit non-claims: no per-asset progress UI or byte-level resume beyond the
+  existing §7 chunk/resume path, no client decode-acknowledged sync (a `skip` viewer's
+  frame alignment is a policy, not a measured guarantee), no host-side codec probing
+  (a codec gap is the viewer's browser, so only the client can report it), no
+  reduced-motion handling for non-camera sections (images/text still animate), and no
+  measurement of how much the prefetch actually saves on a real network — the plan is
+  pinned by unit tests, not by a bandwidth benchmark. Firefox/WebKit and the
+  41-scenario acceptance matrix were not run.

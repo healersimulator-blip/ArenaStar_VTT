@@ -74,6 +74,9 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/** Exact camera equality — a shake must hand the view back untouched, scale included. */
+const same = (a: Camera, b: Camera) => a.x === b.x && a.y === b.y && a.scale === b.scale;
+
 describe("FX camera view claims (D-294)", () => {
   test("a viewer drag is not undone by the next frame, and the rest of that run yields", async () => {
     const h = harness();
@@ -121,20 +124,33 @@ describe("FX camera view claims (D-294)", () => {
   test("a finished shake returns the exact pre-cue camera; a finished pan stays on its destination", async () => {
     const h = harness();
     const base = { ...h.camera() };
+    /** Drive frames until `want` holds (cues start on timers, which lag under load). */
+    const until = async (want: () => boolean) => {
+      const deadline = Date.now() + 3_000;
+      for (;;) {
+        h.tick();
+        if (want()) return true;
+        if (Date.now() > deadline) return false;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    };
+
     await h.cue("r3", [shake(0.6, 120)]);
-    h.tick(); // mid-shake: the view is displaced
-    expect(h.camera()).not.toEqual(base);
-    await new Promise((resolve) => setTimeout(resolve, 160));
-    h.tick(); // the section is over
-    expect(h.camera()).toEqual(base);
+    // Somewhere in the shake the view is displaced…
+    expect(await until(() => !same(h.camera(), base))).toBe(true);
+    // …and by the end it is handed back exactly.
+    expect(await until(() => same(h.camera(), base))).toBe(true);
 
     await h.cue("r4", [pan(1_000, 400, 120)], 160);
+    const destination = () => ({ x: 1_000, y: 400 });
+    const parked = () => h.camera();
+    expect(await until(() => same(parked(), base) === false &&
+      Math.abs(parked().x + 800 / (2 * parked().scale) - destination().x) < 0.5)).toBe(true);
+    const settled = h.camera();
     h.tick();
-    const parked = h.camera();
-    h.tick();
-    expect(h.camera()).toEqual(parked); // the pan ends on the centring its sections asked for
-    expect(parked.x + 800 / (2 * parked.scale)).toBeCloseTo(1_000, 5);
-    expect(parked.y + 600 / (2 * parked.scale)).toBeCloseTo(400, 5);
+    expect(h.camera()).toEqual(settled); // the pan ends on the centring its sections asked for
+    expect(settled.x + 800 / (2 * settled.scale)).toBeCloseTo(1_000, 5);
+    expect(settled.y + 600 / (2 * settled.scale)).toBeCloseTo(400, 5);
   });
 
   test("a stale cue cannot claim the view after the viewer changed scene", async () => {

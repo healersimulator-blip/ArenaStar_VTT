@@ -80,6 +80,9 @@ export function sampleMessage(kind: WireMessage["kind"]): WireMessage {
         filter: { name: "Ward*", sourceTokenId: "t-1" } };
     case "fx.end":
       return { kind: "fx.end", runId: "run-1", sceneId: "s1" };
+    case "fx.delivery":
+      return { kind: "fx.delivery", requestId: "req-1", runId: "run-1", macroId: "macro-1",
+        recipients: 2, skipped: { audience: 1, rights: 0, anchor: 0, media: 1 } };
     case "asset.manifest":
       return { kind: "asset.manifest", manifest: { ["a".repeat(64)]: { name: "texture.png", mime: "image/png", size: 2, chunks: 1 } } };
     case "asset.get":

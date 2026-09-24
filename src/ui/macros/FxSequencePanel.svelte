@@ -3,7 +3,10 @@
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import type { AssetManifest, MacroDocument, SceneDocument } from "../../core/documents";
-  import { validateFxSequence, type FxEasing, type FxSection, type FxSequence, type FxImportPermissions } from "../../core/fx";
+  import { resolveFxSequence, validateFxSequence, type FxEasing, type FxSection, type FxSequence,
+    type FxImportPermissions } from "../../core/fx";
+  import { fxFitnessIssues } from "../../core/fxDelivery";
+  import { domCanPlay } from "../../core/fxPrefs";
   import type { Json } from "../../core/documents";
   import type { RequestAnchorPick } from "./anchorPicker";
   import type { PreviewFxSequence } from "./fxPreview";
@@ -51,6 +54,24 @@
   /** The local preview this panel started, if any (stopped on close/New/replace). */
   let previewRun = $state("");
   const scene = $derived(scenes.find((s) => s._id === sceneId) ?? null);
+  const canPlay = domCanPlay();
+  /**
+   * SQ-13, authoring half: what this save would ship that a viewer cannot get. The
+   * registry gaps are checked against the *same* resolution the host performs, so the
+   * warning is about the timeline that would really run — and the visibility check
+   * only speaks up when the audience is the whole scene, because "the players cannot
+   * receive this" is the one sentence a GM needs before wondering why nothing showed.
+   */
+  const fitnessIssues = $derived.by(() => {
+    if (!scene || draft.sections.length === 0) return [] as string[];
+    const entries = Object.fromEntries(media.map((asset) => [asset.hash,
+      { mime: asset.mime, ...(asset.visibility ? { visibility: asset.visibility } : {}) }]));
+    const resolved = resolveFxSequence(draft, scene, undefined, undefined,
+      (id) => entries[id]?.mime);
+    if (!resolved.ok) return [] as string[]; // the validator already shows the error
+    return fxFitnessIssues(resolved.sections, { entries, canPlay,
+      ...(draft.audience === "gm" ? { audience: "gm" as const } : { audience: "scene" as const }) });
+  });
   /** Picking and preview draw on the app's own canvas, so the wizard must point at the open scene. */
   const onOpenScene = $derived(!!activeSceneId && activeSceneId === sceneId);
 
@@ -375,7 +396,7 @@
     <label>Target <select bind:value={targetId}><option value="">None</option>
       {#each scene?.tokens ?? [] as t (t._id)}<option value={t._id}>{t.name}</option>{/each}
     </select></label>
-    <label>Audience <select bind:value={draft.audience}>
+    <label>Audience <select data-fx-audience bind:value={draft.audience}>
       <option value="scene">Entitled scene viewers</option><option value="gm">GM only</option><option value="caller">Caller only</option>
     </select></label>
     <label><input type="checkbox" bind:checked={playerCallable} /> Published for player invocation</label>
@@ -544,6 +565,9 @@
   </div>
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   {#if status}<p role="status">{status}</p>{/if}
+  {#if fitnessIssues.length > 0}
+    <p class="warn" role="status" data-fx-fitness>This timeline may not reach every viewer: {fitnessIssues.join("; ")}</p>
+  {/if}
   <h4>Saved timelines</h4>
   <ul>{#each macros as macro (macro._id)}
     <li data-fx-macro-id={macro._id}><strong>{macro.name}</strong> <small>{macro.sequence?.sections.length ?? 0} sections</small>
@@ -566,4 +590,5 @@
   legend { color: #e6d6a1; }
   li { margin: 4px 0; } li small { color: #aaa; }
   .error { color: #ff9e9e; }
+  .warn { color: #ffd79a; font-size: 0.7875rem; margin: 0; }
 </style>

@@ -136,7 +136,7 @@ import {
   createEphemeralRateLimiter,
   createIntentRateLimiter,
 } from "../core/ratelimit";
-import type { AssetGetMsg, FogGetMsg, FogPutMsg } from "../core/messages";
+import type { AssetGetMsg, FogGetMsg, FogPutMsg, FxDeliverySkips } from "../core/messages";
 import { MAX_FOG_PNG_BYTES } from "../core/fogExploration";
 import type { AssetServer } from "./assets";
 import { AssetTransfer } from "../net/transfer";
@@ -217,6 +217,8 @@ export interface FogStore {
 interface PreparedFx {
   cue: FxStartMsg;
   recipients: Session[];
+  /** Preflight drop counts (SQ-13), reported to a GM requester via `fx.delivery`. */
+  skipped: FxDeliverySkips;
   callerId: string;
   audience: "scene" | "gm" | "caller";
   checkedAtSeq: number;
@@ -2889,6 +2891,14 @@ export class HostSync {
       this.reject(session, msg.requestId, "invariant", "FX instance could not be committed");
       return;
     }
+    // SQ-13: tell the requester when the cue reached fewer viewers than the scene has.
+    // Sent only to the caller's own session, and only counts leave this method.
+    const skippedTotal = Object.values(prepared.skipped).reduce((a, b) => a + b, 0);
+    if (skippedTotal > 0 && (caller.role === "GM" || caller.role === "ASSISTANT")) {
+      this.send(session, { kind: "fx.delivery", requestId: String(msg.requestId),
+        runId: prepared.cue.runId, macroId: prepared.cue.macroId,
+        recipients: prepared.recipients.length, skipped: prepared.skipped });
+    }
     // Register after a successful host commit/fan-out; retries cannot clone cues.
     this.seenFxRequests.set(key, this.now());
     if (this.seenFxRequests.size > 256) {
@@ -2940,23 +2950,26 @@ export class HostSync {
       ...(macro.sequence.persistent ? { persistent: true } : {}),
     };
     const recipients: Session[] = [];
+    // SQ-13 (A10): preflight says who will NOT get this cue. Counts are per reason so
+    // the requester hears "two viewers are missing the media", not a silent drop.
+    const skipped: FxDeliverySkips = { audience: 0, rights: 0, anchor: 0, media: 0 };
     for (const viewer of this.sessions.values()) {
       const user = viewer.user;
       if (!user) continue;
       if ((macro.sequence.audience === "gm" || narrowAudience === "gm") &&
-          user.role !== "GM" && user.role !== "ASSISTANT") continue;
-      if (macro.sequence.audience === "caller" && user.id !== ownerId) continue;
-      if (!can(user, "read", macro, "macros") || !can(user, "read", scene, "scenes")) continue;
+          user.role !== "GM" && user.role !== "ASSISTANT") { skipped.audience++; continue; }
+      if (macro.sequence.audience === "caller" && user.id !== ownerId) { skipped.audience++; continue; }
+      if (!can(user, "read", macro, "macros") || !can(user, "read", scene, "scenes")) { skipped.rights++; continue; }
       const visibleScene = projectWorld(this.store.world, this.store.seq, user).collections.scenes
         ?.find((s) => s._id === scene._id);
       if (!visibleScene || (source && !visibleScene.tokens.some((t) => t._id === source._id)) ||
-          (target && !visibleScene.tokens.some((t) => t._id === target._id))) continue;
+          (target && !visibleScene.tokens.some((t) => t._id === target._id))) { skipped.anchor++; continue; }
       const available = projectAssetManifest(this.store.world, manifest, user);
       if (resolved.sections.some((step) =>
-        (step.kind === "image" || step.kind === "sound") && !available[step.assetId])) continue;
+        (step.kind === "image" || step.kind === "sound") && !available[step.assetId])) { skipped.media++; continue; }
       recipients.push(viewer);
     }
-    return { ok: true, cue, recipients, callerId: ownerId,
+    return { ok: true, cue, recipients, callerId: ownerId, skipped,
       audience: narrowAudience === "gm" ? "gm" : macro.sequence.audience ?? "scene",
       checkedAtSeq: this.store.seq,
       ...(source ? { sourceTokenId: source._id } : {}),

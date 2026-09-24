@@ -91,6 +91,7 @@ describe("channelFor (§6.1)", () => {
       "fx.stop": "ops",
       "fx.stopMatching": "ops",
       "fx.end": "ops",
+      "fx.delivery": "ops",
       "asset.manifest": "ops",
       "roll.challenge": "ops",
       ephemeral: "ephemeral",

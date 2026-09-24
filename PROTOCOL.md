@@ -418,6 +418,21 @@ A private stop/revocation signal with no author, macro, source, asset or scene-g
 interface FxEndMsg { kind: "fx.end"; runId: string; sceneId: DocId }
 ```
 
+### fx.delivery (0x4d · host → requesting session · ops)
+
+The host's preflight answer to the requester of a cue (SQ-13/A10): the requested action
+already completed exactly once, but the cue reached fewer sessions than the scene has.
+Counts only, per reason — an audience/entitlement mismatch must not become a membership
+oracle, so no user, document or asset identifier appears in the message. Sent only to the
+requesting session, and only when the requester is a GM/assistant and at least one session
+was skipped; a player-initiated request never receives it.
+
+```ts
+interface FxDeliverySkips { audience: number; rights: number; anchor: number; media: number }
+interface FxDeliveryMsg { kind: "fx.delivery"; requestId: string; runId: string; macroId: DocId;
+  recipients: number; skipped: FxDeliverySkips }
+```
+
 ### ephemeral (0x04 · both · ephemeral)
 
 Never persisted, rate-limited 20 Hz per peer (§5).

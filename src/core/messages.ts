@@ -63,6 +63,8 @@ export const MsgKind = {
   "tagger.rules": 0x4a,
   "tagger.rules.result": 0x4b,
   "action.revert": 0x4c,
+  // SQ-13 (D-295) — host-side preflight: how many viewers a cue will reach, and why not
+  "fx.delivery": 0x4d,
   // D-250 — explored fog restore: the client asks, the host answers from its fog store
   "fog.get": 0x0e,
   // host → client
@@ -344,6 +346,39 @@ export interface FxStopMatchingMsg { kind: "fx.stopMatching"; requestId: string;
   sceneId: DocId; filter: import("./fxInstances").FxInstanceFilter }
 /** Recipient-only revocation/end. Contains no hidden macro/asset/source details. */
 export interface FxEndMsg { kind: "fx.end"; runId: string; sceneId: DocId }
+
+/**
+ * Why a session was dropped *before* a cue was delivered. Counts only — the requester
+ * is told "two viewers cannot receive this", never which documents or users were
+ * involved, so a GM-authored cue cannot become a membership oracle.
+ */
+export interface FxDeliverySkips {
+  /** Role/audience mismatch (`audience: "gm"`, or a caller-scoped cue for someone else). */
+  audience: number;
+  /** The session cannot read the macro or the scene. */
+  rights: number;
+  /** A bound source/target token is not visible to that viewer. */
+  anchor: number;
+  /** The viewer has no media entitlement for an image/sound this cue uses. */
+  media: number;
+}
+
+/**
+ * SQ-13 (A10): the requested cue was emitted, but not everyone could receive it. Host
+ * actions already completed exactly once — this message exists so the GM learns the
+ * audience did not match instead of hearing about it from a confused player.
+ */
+export interface FxDeliveryMsg {
+  kind: "fx.delivery";
+  requestId: string;
+  runId: string;
+  /** The sequence the requester asked for; the requester can already read it. */
+  macroId: DocId;
+  /** Sessions the host delivered the cue to. */
+  recipients: number;
+  /** Sessions dropped at preflight. */
+  skipped: FxDeliverySkips;
+}
 
 /** §5 ephemeral kinds: cursors, pings, drags, ruler, typing. */
 export type EphemeralKind = "cursor" | "ping" | "drag" | "ruler" | "typing";
@@ -656,6 +691,7 @@ export type WireMessage =
   | FxStopMsg
   | FxStopMatchingMsg
   | FxEndMsg
+  | FxDeliveryMsg
   | EphemeralMsg
   | AssetGetMsg
   | FogPutMsg

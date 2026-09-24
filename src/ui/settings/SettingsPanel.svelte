@@ -1,4 +1,5 @@
 <script lang="ts">
+  import FxViewPrefsPanel from "../macros/FxViewPrefsPanel.svelte";
   /**
    * §10 settings window (GM) — active-scene grid editor (drives the canvas +
    * measurement), keybinding reference and undo/redo controls. Client-pref
@@ -1057,6 +1058,9 @@
       {/each}
     </tbody>
   </table>
+
+  <h4>Effects on this device</h4>
+  <FxViewPrefsPanel />
 
   <h4>Edit</h4>
   <div class="row">
