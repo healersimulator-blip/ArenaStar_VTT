@@ -26,6 +26,8 @@ export class FxPlayer {
   private readonly timers = new Map<ReturnType<typeof setTimeout>, string>();
   private readonly stopAudio = new Map<string, Set<() => void>>();
   private readonly seenRuns = new Set<string>();
+  /** GM-authored drafts rendered locally for their author; never committed or relayed. */
+  private readonly previewRuns = new Set<string>();
   /** A stopped/undone run may reuse its ID: old async decodes must not respawn. */
   private readonly runEpoch = new Map<string, number>();
   private scene: string | null;
@@ -52,6 +54,7 @@ export class FxPlayer {
     for (const stops of [...this.stopAudio.values()]) for (const stop of [...stops]) stop();
     this.options.stage.getFxLayer().clear();
     this.seenRuns.clear();
+    this.previewRuns.clear();
     this.runEpoch.clear();
   }
 
@@ -62,6 +65,27 @@ export class FxPlayer {
     this.clearLocal();
     this.scene = next;
     if (next) this.options.client.requestFxSync(next);
+  }
+
+  /**
+   * GM-local preview of an **unsaved draft**: the same renderer and the same
+   * host-clock offsets, but no host commit, no durable instance and no
+   * recipient — a preview cannot create world state, outlive its author's
+   * session, or grant a player a read. One preview at a time.
+   */
+  preview(cue: FxStartMsg): void {
+    if (this.disposed || cue.sceneId !== this.scene) return;
+    this.clearPreview();
+    this.previewRuns.add(cue.runId);
+    this.start(cue);
+  }
+
+  /** End every local preview (window close, Stop button, or scene switch above). */
+  clearPreview(): void {
+    for (const runId of [...this.previewRuns]) {
+      this.previewRuns.delete(runId);
+      this.stopRun(runId);
+    }
   }
 
   private stopRun(runId: string): void {

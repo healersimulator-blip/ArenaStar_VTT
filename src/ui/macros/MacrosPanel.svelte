@@ -13,6 +13,8 @@
   import { runChatMacro } from "./run";
   import TaggerPanel from "./TaggerPanel.svelte";
   import FxSequencePanel from "./FxSequencePanel.svelte";
+  import type { RequestAnchorPick } from "./anchorPicker";
+  import type { PreviewFxSequence } from "./fxPreview";
   import FxAssetBrowserPanel from "./FxAssetBrowserPanel.svelte";
   import FxManagerPanel from "./FxManagerPanel.svelte";
   import AutomationPanel from "./AutomationPanel.svelte";
@@ -34,6 +36,9 @@
     listCompendia = null,
     activeSceneId = null,
     onPickSummon = null,
+    onPickAnchor = null,
+    onPreviewFx = null,
+    onStopFxPreview = null,
   }: {
     client: ClientSync;
     bus: EventBus<ClientEvents>;
@@ -44,6 +49,10 @@
     listCompendia?: (() => Promise<Array<{ packageId: string; packFile: string; pack: CompendiumPack }>>) | null;
     activeSceneId?: string | null;
     onPickSummon?: RequestSummonPick | null;
+    /** GM-local canvas picking/rendering for the FX tab; null on a player shell. */
+    onPickAnchor?: RequestAnchorPick | null;
+    onPreviewFx?: PreviewFxSequence | null;
+    onStopFxPreview?: (() => void) | null;
   } = $props();
   let tab = $state<"chat" | "fx" | "assets" | "manager" | "zones" | "tags" | "prefabs" | "summons" | "scripts">("chat");
   let pickedAsset = $state<{ hash: string } | null>(null);
@@ -174,7 +183,8 @@
   </div>
   <div class="tab-page" hidden={tab !== "fx"}>
     <FxSequencePanel {client} {bus} onImport={onFxImport} listAssets={listFxAssets}
-      onAssetRights={setFxAssetRights} {pickedAsset} />
+      onAssetRights={setFxAssetRights} {pickedAsset} {activeSceneId} {onPickAnchor}
+      onPreview={onPreviewFx} onStopPreview={onStopFxPreview} />
   </div>
   <div class="tab-page" hidden={tab !== "assets"}>
     {#if gm}<FxAssetBrowserPanel {client} {bus} getAsset={getFxAsset} {useAsset} />{/if}

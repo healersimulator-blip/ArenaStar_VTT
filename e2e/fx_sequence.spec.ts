@@ -239,3 +239,101 @@ test("GM live FX manager stops a named wildcard batch atomically and undo restor
   await expect(manager.locator("[data-fx-instance]")).toHaveCount(3);
   await expect.poll(active).toBe(3);
 });
+
+// D-293: the wizard can place a point anchor by clicking the map, and it can
+// render an unsaved draft locally. Neither gesture is a host request: the first
+// answers authored data and the second commits nothing — so both are checked
+// against the draft and the host's sequence number, not against a saved macro.
+test("wizard picks point anchors on the map and a cancel leaves the draft unchanged", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const section = wizard.locator("[data-fx-section]");
+  const x = section.getByLabel("X", { exact: true });
+  const y = section.getByLabel("Y", { exact: true });
+  await expect(x).toHaveValue("1000"); // the wizard's own default (scene centre)
+  await expect(y).toHaveValue("750");
+
+  const camera = await hostCall<{ x: number; y: number; scale: number }>(page, "camera");
+
+  // Point picking: the square grid's 100 px cell means (274, 231) resolves to the
+  // centre (250, 250) — a token-style cell centre, not a corner intersection.
+  await section.locator('[data-fx-pick="at"]').click();
+  const overlay = page.locator("[data-fx-pick-overlay]");
+  await expect(overlay).toBeVisible();
+  // The picker maps the cursor against ITS OWN rect (it spans the app, not the
+  // canvas element), so the world→screen helper has to do the same thing.
+  const overlayBox = await overlay.boundingBox();
+  if (!overlayBox) throw new Error("Picker overlay missing");
+  const screenOf = (world: { x: number; y: number }) => ({
+    x: overlayBox.x + (world.x - camera.x) * camera.scale,
+    y: overlayBox.y + (world.y - camera.y) * camera.scale,
+  });
+  const at = screenOf({ x: 274, y: 231 });
+  await page.mouse.move(at.x, at.y);
+  await expect(page.locator("[data-fx-pick-readout]")).toContainText("250, 250");
+  await page.mouse.click(at.x, at.y);
+  await expect(overlay).toHaveCount(0);
+  await expect(x).toHaveValue("250");
+  await expect(y).toHaveValue("250");
+
+  // Cancelling a second gesture is not a half-edit: Esc returns the draft as it was.
+  await section.locator('[data-fx-pick="at"]').click();
+  await expect(overlay).toBeVisible();
+  await page.mouse.move(screenOf({ x: 900, y: 1200 }).x, screenOf({ x: 900, y: 1200 }).y);
+  await page.keyboard.press("Escape");
+  await expect(overlay).toHaveCount(0);
+  await expect(x).toHaveValue("250");
+  await expect(y).toHaveValue("250");
+
+  // The destination point uses the same picker and writes its own To X / To Y.
+  await section.getByLabel("Destination").selectOption("point");
+  await section.locator('[data-fx-pick="to"]').click();
+  await expect(overlay).toBeVisible();
+  const to = screenOf({ x: 174, y: 131 });
+  await page.mouse.move(to.x, to.y);
+  await page.mouse.click(to.x, to.y);
+  await expect(overlay).toHaveCount(0);
+  await expect(section.getByLabel("To X")).toHaveValue("150");
+  await expect(section.getByLabel("To Y")).toHaveValue("150");
+});
+
+test("preview renders the unsaved draft locally, commits nothing and stops on demand", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const section = wizard.locator("[data-fx-section]");
+  await section.getByLabel("Text", { exact: true }).fill("Preview only");
+  await section.getByLabel("Duration ms").fill("4000");
+  const active = () => page.evaluate(() => (
+    globalThis as unknown as { __stage?: { getFxLayer: () => { count: number } } }
+  ).__stage?.getFxLayer().count ?? 0);
+
+  const before = await hostCall<number>(page, "seq");
+  await wizard.locator("[data-fx-preview]").click();
+  await expect.poll(active, { timeout: 5_000 }).toBe(1);
+  // A preview is not a save and not a run: no macro, no instance and no new op.
+  await expect(wizard.locator("li")).toHaveCount(0);
+  expect(await hostCall<number>(page, "seq")).toBe(before);
+  expect(await hostCall<number>(page, "drainOps")).toBe(await hostCall<number>(page, "seq"));
+
+  // Stopping ends exactly the local cue the panel started.
+  await wizard.locator("[data-fx-preview-stop]").click();
+  await expect.poll(active, { timeout: 5_000 }).toBe(0);
+  expect(await hostCall<number>(page, "seq")).toBe(before);
+
+  // The saved path is unchanged: the same authored sections now go through the
+  // host, which commits and only then cues its recipients.
+  await wizard.locator("[data-fx-name]").fill("Previewed later");
+  await wizard.locator("[data-fx-save]").click();
+  await expect(wizard.locator("li")).toContainText(["Previewed later"]);
+  await wizard.locator("[data-fx-run]").click();
+  await expect.poll(active, { timeout: 5_000 }).toBe(1);
+  await expect.poll(() => hostCall<number>(page, "seq")).toBeGreaterThan(before);
+});

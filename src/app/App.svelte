@@ -46,7 +46,7 @@
   import { WindowHost } from "../ui/windows";
   import { WindowManager } from "../ui/windows";
   import { macroSlots, runChatMacro } from "../ui/macros";
-  import type { FxImportPermissions } from "../core/fx";
+  import { resolveFxSequence, type FxImportPermissions } from "../core/fx";
   import { gmState } from "../ui/armies/gmState.svelte";
   import { buildStrategicFog, sceneIsStrategic } from "../core/strategicFog";
   import { FogExploration } from "../client/fogExploration";
@@ -59,6 +59,9 @@
   import { screenToWorld, worldToScreen, zoomAt } from "../canvas/camera";
   import SummonCrosshair from "../ui/macros/SummonCrosshair.svelte";
   import type { RequestSummonPick, SummonPickOptions, SummonPickPoint } from "../ui/macros/summonPicker";
+  import AnchorPicker from "../ui/macros/AnchorPicker.svelte";
+  import type { AnchorPickOptions, AnchorPickPoint, RequestAnchorPick } from "../ui/macros/anchorPicker";
+  import type { PreviewFxSequence } from "../ui/macros/fxPreview";
   import Icon from "../ui/icons/Icon.svelte";
   import CanvasToolbar, {
     type CanvasAction,
@@ -1991,6 +1994,52 @@ const WALL_PICK_RADIUS = 12;
     settleSummonPick(null); // starting a new gesture cancels the old one
     return new Promise((resolve) => { pendingSummonPick = { options, resolve }; });
   };
+
+  /**
+   * D-293: the same gesture contract for FX anchors. It answers an **authored
+   * point**, not a mechanical placement — the host still validates the whole
+   * saved sequence, so this is UI convenience with no authority of its own.
+   */
+  let pendingAnchorPick = $state.raw<{ options: AnchorPickOptions;
+    resolve: (at: AnchorPickPoint | null) => void } | null>(null);
+  function settleAnchorPick(at: AnchorPickPoint | null): void {
+    const pending = pendingAnchorPick;
+    pendingAnchorPick = null;
+    pending?.resolve(at !== null && activeScene()?._id === pending.options.sceneId ? at : null);
+  }
+  const requestAnchorPick: RequestAnchorPick = (options) => {
+    if (options.sceneId !== activeScene()?._id || !stage) return Promise.resolve(null);
+    settleAnchorPick(null);
+    return new Promise((resolve) => { pendingAnchorPick = { options, resolve }; });
+  };
+
+  /**
+   * D-293: render an **unsaved** FX draft for its author. Deliberately not a host
+   * request: no world op, no durable `fxInstance`, no recipient — so a preview
+   * cannot create state, survive the author's session or grant a player a read.
+   * The sequence still goes through the same `resolveFxSequence` the host uses, so
+   * what previews is what a save would accept (persistent drafts preview one pass).
+   */
+  const previewFxSequence: PreviewFxSequence = async (sequence, sceneId,
+    sourceTokenId, targetTokenId) => {
+    const current = app;
+    const view = stage;
+    if (!current || !view || !fxPlayer) return { ok: false, error: "The canvas is not ready yet" };
+    const scene = activeScene();
+    if (!scene || scene._id !== sceneId) return { ok: false, error: "Open the timeline's scene before previewing" };
+    const source = sourceTokenId ? scene.tokens.find((token) => token._id === sourceTokenId) : undefined;
+    const target = targetTokenId ? scene.tokens.find((token) => token._id === targetTokenId) : undefined;
+    const resolved = resolveFxSequence({ ...sequence, persistent: false }, scene, source, target,
+      (id) => current.gm.client.store.world.assetManifest[id]?.mime);
+    if (!resolved.ok) return { ok: false, error: resolved.error };
+    const runId = `preview-${globalThis.crypto.randomUUID()}`;
+    fxPlayer.preview({ kind: "fx.start", runId, macroId: "preview", sceneId, sections: resolved.sections,
+      atHostTime: Date.now() + 120 });
+    return { ok: true, runId };
+  }
+  function stopFxPreview(): void {
+    fxPlayer?.clearPreview();
+  }
 
   function activeScene(): SceneDocument | null {
     if (!app) return null;
@@ -4452,6 +4501,9 @@ const WALL_PICK_RADIUS = 12;
           importImage={importMapFile}
           onFxImport={importFxFile}
           onPickSummon={requestSummonPick}
+          onPickAnchor={requestAnchorPick}
+          onPreviewFx={previewFxSequence}
+          onStopFxPreview={stopFxPreview}
           listFxAssets={() => Promise.resolve(app?.assets.manifest() ?? {})}
           {setFxAssetRights}
           getFxAsset={(hash) => app?.assets.get(hash) ?? Promise.resolve(undefined)}
@@ -4474,6 +4526,14 @@ const WALL_PICK_RADIUS = 12;
             <SummonCrosshair scene={summonScene} options={pendingSummonPick.options}
               camera={() => stage?.camera ?? { x: 0, y: 0, scale: 1 }}
               pick={(at) => settleSummonPick(at)} cancel={() => settleSummonPick(null)} />
+          {/if}
+        {/if}
+        {#if pendingAnchorPick}
+          {@const anchorScene = activeScene()}
+          {#if anchorScene && anchorScene._id === pendingAnchorPick.options.sceneId}
+            <AnchorPicker scene={anchorScene} options={pendingAnchorPick.options}
+              camera={() => stage?.camera ?? { x: 0, y: 0, scale: 1 }}
+              pick={(at) => settleAnchorPick(at)} cancel={() => settleAnchorPick(null)} />
           {/if}
         {/if}
         {#if pendingReaction}

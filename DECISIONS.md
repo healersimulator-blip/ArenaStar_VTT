@@ -8884,3 +8884,82 @@ in an unrelated argument description. The generated section now states the count
   visible set to settle, and under two-core parallel load it does not within 45 s); run alone it
   passes in 41 s. The skip is `content_world.spec.ts`, which needs the converted content package this
   machine has not built.
+
+## D-293 — the FX wizard draws on the map: point picking and a local draft preview (2026-09-24)
+
+The FX timeline wizard could author a burst, a beam or a sound and run it — but it
+could only be *placed* by typing numbers. A GM who wanted an effect on the door in
+front of the party had to read the coordinates off the canvas, guess the cell, type
+them, save, run, look, and do it again. That is not an authoring tool; it is a
+remote control for one. This decision gives the wizard the two gestures every
+Foundry-side FX tool has: click the map to say *where*, and look before you save.
+
+**Point picking (`Pick on map…`).** Next to the X/Y of a point anchor — and next to
+To X/To Y for a point destination — a button opens a full-canvas crosshair
+(`AnchorPicker.svelte`) with a live `x, y` readout, a snap toggle and Cancel/Esc.
+It is a sibling of the summon crosshair, deliberately not a generalisation of it:
+a summon answers a *mechanical* placement the host re-validates (range, footprint,
+line of sight), while an anchor answers **authored data** the host validates only
+when the timeline is runs as part of the sequence. Two rules are shared because
+they are the correct ones:
+
+- **Snapping uses the token rule.** `snapTokenCenter` (`canvas/grid`) puts a point
+  on a cell centre in a square grid and a hex centre in a hex grid — the summon
+  crosshair has always snapped to the square cell centre, and an FX meant to sit
+  "on the square" should land where a token on that square lands, not on the
+  intersection between four of them. Gridless scenes stay exact.
+- **The overlay refuses what the host refuses.** `anchorPickError` mirrors
+  `resolveFxSequence`'s own bounds check, so a point outside the scene shows a red
+  marker instead of saving a timeline that fails at run time. Cancel, Esc, closing
+  the wizard or starting a new gesture all resolve `null` — the draft is untouched,
+  which is the same promise the summon crosshair makes with `Cancel` (A04).
+
+**Preview on canvas.** `Preview on canvas` renders the **unsaved draft** on the
+GM's own canvas. It is deliberately *not* a host request: it calls the same
+`resolveFxSequence` a save would, then hands the resolved sections to the tab's own
+`FxPlayer.preview()`. So there is no `fx.request`, no world op, no durable
+`fxInstance`, no recipient, no oplog entry and nothing for Undo to do. A persistent
+draft previews a single pass, because "loop until stopped" without an instance is a
+cue with no owner; the status line says so instead of silently behaving differently
+from Run. `Stop preview` (and window close, `New`, or a scene switch) ends exactly
+the cue the panel started, via the player's own run-id bookkeeping.
+
+This is what the parity spec asks for in WZ-09 ("dry-run … without mutations", and
+"preview must not grant player reads") and it moves SQ-12 from "no on-canvas
+player" to "click-at-point placement with preset save/load/edit". It is **not** the
+full SQ-10 crosshair: no circle/cone/ray/rect shapes, no range or line-of-sight
+constraints, no drag source→target mode, no reusable named position yet. Those
+remain parity gaps, and `Pick on map…` does not pretend otherwise: it picks a
+point, nothing more.
+
+**Two guards worth naming.** Picking and preview both draw on *the app's* canvas, so
+both are disabled unless the wizard's chosen scene is the scene the canvas is
+showing (`activeSceneId`), with the reason in the tooltip — previewing another
+scene's coordinates over this map would be a quiet lie about what the draft looks
+like. And preview can only ever be local: the tab that renders it is the GM's host
+tab, `FxPlayer.preview` never touches `ClientSync`, and a player shell does not
+render the wizard at all.
+
+**Gates.**
+
+- `pnpm test` — **3 568 passed / 12 skipped** (289 files: 287 passed, 2 skipped).
+  New: nine cases in `tests/ui/anchorPicker.test.ts` (square snap is the *cell
+  centre* not the intersection, snap-off and gridless stay exact, malformed grid
+  size does not produce NaN, hex snapping stays inside the hex, bounds/NaN
+  refusals). One earlier run under full parallelism failed
+  `tests/packages/pf1eMassBattleScale.test.ts` (p95 273 ms against its 250 ms
+  ceiling) — the same load-sensitive gate D-291/D-292 recorded; it is green on
+  every re-run, including the recorded one.
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`)
+  · `pnpm lint` **exit 0** · `pnpm build` → `pnpm size` **3 744 751 B raw / 1 072 958 B
+  gzip**, inside the 6 MB budget.
+- e2e (Chromium, production `file://` build; the Playwright CDN is unreachable in
+  this sandbox, so `@sparticuz/chromium` is the executable, as the README
+  documents): `e2e/fx_sequence.spec.ts` **8/8**, including two new specs — picking
+  puts `(274, 231)` on the cell centre `(250, 250)` and writes it into the draft
+  while Esc changes nothing, and a preview of an unsaved 4-second section renders
+  one cue with `seq` unmoved while the same sections saved and Run do go through the
+  host. The five other wizard suites are **36/38** with two `active_zones` specs
+  timing out at 30 s under two-worker load (one waiting for a click to settle, one
+  still at "Starting world…"), and `active_zones.spec.ts` alone with one worker is
+  **16/16** in 2.9 m — the load flake D-291 named, not a regression.

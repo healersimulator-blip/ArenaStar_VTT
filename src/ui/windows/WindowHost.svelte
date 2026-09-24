@@ -30,6 +30,8 @@
   import type { AssetManifest } from "../../core/documents";
   import type { FxImportPermissions } from "../../core/fx";
   import type { RequestSummonPick } from "../macros/summonPicker";
+  import type { RequestAnchorPick } from "../macros/anchorPicker";
+  import type { PreviewFxSequence } from "../macros/fxPreview";
   import type { ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import type { AgentManager } from "../../app/agentManager";
@@ -53,6 +55,9 @@
     setFxAssetRights = null,
     getFxAsset = null,
     onPickSummon = null,
+    onPickAnchor = null,
+    onPreviewFx = null,
+    onStopFxPreview = null,
     onHexRollTable = null,
     onHexOpenScene = null,
     onEncounterPlaceAll = null,
@@ -83,6 +88,10 @@
     /** GM-local comparison reads the host's private asset store, never a player network route. */
     getFxAsset?: ((hash: string) => Promise<Uint8Array | undefined>) | null;
     onPickSummon?: RequestSummonPick | null;
+    /** D-293: FX-wizard anchor picking and the GM-local draft preview (never a host request). */
+    onPickAnchor?: RequestAnchorPick | null;
+    onPreviewFx?: PreviewFxSequence | null;
+    onStopFxPreview?: (() => void) | null;
     /**
      * D-273: a hex window's table row. The roll needs the engine's ledger, card and result
      * window — all three live in the shell — so the window asks up rather than drawing dice of
@@ -261,7 +270,7 @@
         {:else if win.kind === "macros"}
           <MacrosPanel {client} {bus} {onFxImport} {listFxAssets} {setFxAssetRights} {getFxAsset}
             listCompendia={isGM && packages ? () => packages.compendia() : null} activeSceneId={sceneId}
-            {onPickSummon} />
+            {onPickSummon} {onPickAnchor} {onPreviewFx} {onStopFxPreview} />
         {:else if win.kind === "settings"}
           <SettingsPanel
             {client}

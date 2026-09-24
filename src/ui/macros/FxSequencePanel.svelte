@@ -1,20 +1,30 @@
 <script lang="ts">
-  import { onMount, untrack } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import type { AssetManifest, MacroDocument, SceneDocument } from "../../core/documents";
   import { validateFxSequence, type FxSection, type FxSequence, type FxImportPermissions } from "../../core/fx";
   import type { Json } from "../../core/documents";
+  import type { RequestAnchorPick } from "./anchorPicker";
+  import type { PreviewFxSequence } from "./fxPreview";
 
   let {
     client, bus, onImport = null, listAssets = null, onAssetRights = null, pickedAsset = null,
+    activeSceneId = null, onPickAnchor = null, onPreview = null, onStopPreview = null,
   }: {
     client: ClientSync;
     bus: EventBus<ClientEvents>;
+    /** The scene the canvas is actually showing; picking and preview need it to match. */
+    activeSceneId?: string | null;
     onImport?: ((file: File, permissions: FxImportPermissions) => Promise<{ hash: string; mime: string; name: string }>) | null;
     listAssets?: (() => Promise<AssetManifest>) | null;
     onAssetRights?: ((hash: string, permissions: FxImportPermissions) => Promise<void>) | null;
     pickedAsset?: { hash: string } | null;
+    /** GM-local canvas picking for point anchors; null hides the controls. */
+    onPickAnchor?: RequestAnchorPick | null;
+    /** Renders the unsaved draft on this tab only — no host commit, no instance, no recipient. */
+    onPreview?: PreviewFxSequence | null;
+    onStopPreview?: (() => void) | null;
   } = $props();
 
   let macros = $state<MacroDocument[]>([]);
@@ -38,7 +48,11 @@
   let status = $state("");
   let error = $state("");
   let busy = $state(false);
+  /** The local preview this panel started, if any (stopped on close/New/replace). */
+  let previewRun = $state("");
   const scene = $derived(scenes.find((s) => s._id === sceneId) ?? null);
+  /** Picking and preview draw on the app's own canvas, so the wizard must point at the open scene. */
+  const onOpenScene = $derived(!!activeSceneId && activeSceneId === sceneId);
 
   function refresh(): void {
     macros = [...client.store.getAll("macros")].filter((m) => m.kind === "sequence");
@@ -84,6 +98,7 @@
     error = "";
   }
   function reset(): void {
+    stopPreview(); // a new draft must not leave the old one's cue on the canvas
     editing = "";
     name = "";
     playerCallable = false;
@@ -200,6 +215,56 @@
     client.requestSequence(macroId, sceneId, sourceId || undefined, targetId || undefined);
     status = "Requested saved timeline from host";
   }
+  /**
+   * Canvas picking for a point anchor. Cancel resolves `null`, so an abandoned
+   * gesture cannot half-edit the draft; square/hex snap to the cell or hex centre,
+   * gridless stays exact, and the overlay refuses a point the host would refuse.
+   */
+  async function pickPoint(index: number, which: "at" | "to"): Promise<void> {
+    const before = draft.sections[index];
+    if (!before || (before.kind !== "image" && before.kind !== "text") || !onPickAnchor || !scene) return;
+    error = ""; status = "";
+    const at = await onPickAnchor({ sceneId: scene._id,
+      label: which === "at" ? "the section's start point" : "the destination point",
+      bounds: { width: scene.width, height: scene.height } });
+    if (!at) { status = "Pick cancelled — the draft is unchanged"; return; }
+    const point = { x: Math.round(at.x), y: Math.round(at.y) };
+    draft = { ...draft, sections: draft.sections.map((old, i) => {
+      if (i !== index || (old.kind !== "image" && old.kind !== "text")) return old;
+      if (which === "to") return { ...old, to: { kind: "point" as const, ...point } } as FxSection;
+      // Replacing the start with a point can invalidate a token follow: keep it only
+      // while the destination is still a bound token, which is the host's own rule.
+      const keepsFollow = old.follow === true &&
+        old.to !== undefined && (old.to.kind === "source" || old.to.kind === "target");
+      return { ...old, at: { kind: "point" as const, ...point }, follow: keepsFollow } as FxSection;
+    }) };
+    status = `Anchor set to ${point.x}, ${point.y} — save the timeline to publish it`;
+  }
+  /**
+   * Preview the **unsaved draft** on this canvas: same validation as a save, but
+   * the host is never asked, so no world op, no durable instance and no player
+   * sees it. A persistent draft previews one pass; an unopened scene cannot be
+   * previewed at all rather than silently rendering the wrong map.
+   */
+  async function preview(): Promise<void> {
+    error = ""; status = "";
+    if (!onPreview) return;
+    const checked = validateFxSequence(draft);
+    if (!checked.ok) { error = checked.error; return; }
+    if (!scene || !onOpenScene) { error = "Open this timeline's scene to preview it on the canvas"; return; }
+    const result = await onPreview($state.snapshot(draft), sceneId, sourceId, targetId);
+    if (!result.ok) { error = result.error; return; }
+    previewRun = result.runId;
+    status = draft.persistent
+      ? "Previewing one local pass — save and Run to create the durable instance"
+      : "Previewing locally on this canvas; nothing is saved, committed or sent to players";
+  }
+  function stopPreview(): void {
+    if (!previewRun) return;
+    onStopPreview?.();
+    previewRun = "";
+    status = "Preview stopped";
+  }
   async function importFile(event: Event): Promise<void> {
     const input = event.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
@@ -228,11 +293,14 @@
     void refreshAssets();
     return () => { offSnapshot(); offOps(); offRejected(); };
   });
+  // Closing the wizard (or leaving the world) ends this tab's own preview; the
+  // windows are not part of the world, so nothing else would clear it.
+  onDestroy(() => { if (previewRun) onStopPreview?.(); });
 </script>
 
 <section class="fx-wizard" aria-label="FX sequence wizard" data-fx-wizard>
   <header><h3>FX timeline wizard</h3><button type="button" onclick={reset}>New</button></header>
-  <p class="hint">Author overlapping image/video/text/audio sections. One-shot sections can replay at a fixed interval; host-approved cues stay beneath fog. Persistent timelines loop until stopped in Live FX or their source disappears (they cannot also use section replays). This is a subset of the full Sequencer action library.</p>
+  <p class="hint">Author overlapping image/video/text/audio sections. One-shot sections can replay at a fixed interval; host-approved cues stay beneath fog. Persistent timelines loop until stopped in Live FX or their source disappears (they cannot also use section replays). <strong>Preview</strong> renders the unsaved draft on this tab's canvas only — no host commit, no durable instance, no player receives it; a persistent draft previews a single pass. This is a subset of the full Sequencer action library.</p>
   <div class="library">
     <label>Import licensed media <input type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/avif,video/webm,video/mp4,audio/ogg,audio/mpeg,audio/wav,audio/webm" disabled={busy || !onImport} onchange={(e) => void importFile(e)} /></label>
     <label><input type="checkbox" data-fx-share bind:checked={shareWithPlayers} /> I have permission to serve this file to players</label>
@@ -316,6 +384,11 @@
             {#if section.at.kind === "point"}
               <label>X <input type="number" min="0" bind:value={section.at.x} /></label>
               <label>Y <input type="number" min="0" bind:value={section.at.y} /></label>
+              {#if onPickAnchor}
+                <button type="button" data-fx-pick="at" disabled={!onOpenScene}
+                  title={onOpenScene ? "Click the map to set this point" : "Open this timeline's scene first"}
+                  onclick={() => void pickPoint(i, "at")}>Pick on map…</button>
+              {/if}
             {/if}
             <label>Destination <select value={section.to?.kind ?? "none"} onchange={(event) =>
                 changeDestination(i, event.currentTarget.value as "none" | "point" | "source" | "target")}>
@@ -325,6 +398,11 @@
             {#if section.to?.kind === "point"}
               <label>To X <input type="number" min="0" bind:value={section.to.x} /></label>
               <label>To Y <input type="number" min="0" bind:value={section.to.y} /></label>
+              {#if onPickAnchor}
+                <button type="button" data-fx-pick="to" disabled={!onOpenScene}
+                  title={onOpenScene ? "Click the map to set the destination" : "Open this timeline's scene first"}
+                  onclick={() => void pickPoint(i, "to")}>Pick on map…</button>
+              {/if}
             {/if}
             {#if section.to}
               <label>Easing <select bind:value={section.easing}>
@@ -365,6 +443,15 @@
     <button type="button" onclick={() => add("wait")}>Wait</button>
     <button type="button" data-fx-save onclick={save}>Save timeline</button>
     {#if editing}<button type="button" data-fx-run onclick={() => run(editing)}>Run saved</button>{/if}
+    {#if onPreview}
+      <button type="button" data-fx-preview disabled={draft.sections.length === 0 || !onOpenScene}
+        title={onOpenScene ? "Render this draft locally; nothing is committed"
+          : "Open this timeline's scene first"}
+        onclick={() => void preview()}>Preview on canvas</button>
+    {/if}
+    {#if previewRun}
+      <button type="button" data-fx-preview-stop onclick={stopPreview}>Stop preview</button>
+    {/if}
   </div>
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   {#if status}<p role="status">{status}</p>{/if}
