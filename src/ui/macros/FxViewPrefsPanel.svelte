@@ -8,12 +8,32 @@
   — and it says so in one line so nobody worries it turned off someone else's effect.
 -->
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { MAX_PRELOAD_AHEAD_MS, fxViewPrefs, setFxViewPrefs, type FxViewPrefs } from "../../core/fxPrefs";
+  import { SOUND_CHANNELS, SOUND_CHANNEL_LABELS, type FxSoundChannel } from "../../core/fxSound";
+  import { stopFxSounds, subscribeFxSounds, type LiveFxSound } from "../../client/fxSounds";
 
   let prefs = $state<FxViewPrefs>(fxViewPrefs());
+  /** What THIS browser is playing right now (D-297) — not the host's instances. */
+  let playing = $state<LiveFxSound[]>([]);
+  let localNote = $state("");
+  const offSounds = subscribeFxSounds((sounds) => { playing = sounds; });
+  onDestroy(() => { offSounds(); });
 
   function update(patch: Partial<FxViewPrefs>): void {
     prefs = setFxViewPrefs(patch);
+  }
+  function setChannel(channel: FxSoundChannel, value: number): void {
+    update({ soundMix: { ...prefs.soundMix,
+      channels: { ...prefs.soundMix.channels, [channel]: value } } });
+  }
+  function stop(sound: LiveFxSound): void {
+    stopFxSounds({ runId: sound.runId });
+    localNote = `Stopped ${sound.name ?? "this sound"} on this device — other people still hear the timeline.`;
+  }
+  function stopAll(): void {
+    const count = stopFxSounds();
+    localNote = count === 0 ? "Nothing was playing here." : `Stopped ${count} sound(s) on this device only.`;
   }
 </script>
 
@@ -45,8 +65,40 @@
       <option value="skip">Skip that cue</option>
     </select>
   </label>
+  <fieldset data-fx-mix>
+    <legend>Sound mix on this device</legend>
+    {#each SOUND_CHANNELS as channel (channel)}
+      <label>{SOUND_CHANNEL_LABELS[channel]}
+        <span class="inline">
+          <input type="range" min="0" max="1" step="0.05" data-fx-mix-channel={channel}
+            aria-label={`${SOUND_CHANNEL_LABELS[channel]} volume`} value={prefs.soundMix.channels[channel]}
+            oninput={(event) => setChannel(channel, Number(event.currentTarget.value))} />
+          <small data-fx-mix-value={channel}>{Math.round(prefs.soundMix.channels[channel] * 100)}%</small>
+        </span>
+      </label>
+    {/each}
+  </fieldset>
+  <div class="playing" data-fx-playing>
+    <div class="row"><strong>Playing on this device</strong>
+      {#if playing.length > 0}
+        <button type="button" data-fx-stop-sounds onclick={stopAll}>Stop all here</button>
+      {/if}
+    </div>
+    {#each playing as sound (sound.id)}
+      <div class="row" data-fx-playing-sound={sound.id}>
+        <span>{sound.name ?? "FX sound"} · {SOUND_CHANNEL_LABELS[sound.channel]}
+          {#if sound.persistent}<em>loop</em>{/if}
+          <small>{Math.round(sound.gain * 100)}%</small></span>
+        <button type="button" data-fx-stop-sound={sound.id} onclick={() => stop(sound)}>Stop here</button>
+      </div>
+    {:else}
+      <small data-fx-playing-empty>Nothing is playing on this device.</small>
+    {/each}
+    {#if localNote}<small role="status" data-fx-sound-note>{localNote}</small>{/if}
+  </div>
   <p class="hint">Saved in this browser only. These settings change what <em>you</em> see and hear;
-    other people's effects are unaffected, and nothing here is sent to the host.</p>
+    other people's effects are unaffected, and nothing here is sent to the host. Stopping a sound here
+    silences it on this device — a persistent cue is still running for everyone else until the GM stops it in Live FX.</p>
 </section>
 
 <style>
@@ -58,4 +110,12 @@
   .inline input { width: 6.5em; }
   .inline small { color: #aab6c6; }
   .hint { margin: 0; color: #b4bdc8; }
+  fieldset { display: grid; gap: 4px; border: 1px solid #53586a; border-radius: 4px; padding: 6px; }
+  fieldset label { flex-direction: row; align-items: center; justify-content: space-between; gap: 8px; }
+  input[type="range"] { width: 9em; }
+  .playing { display: grid; gap: 4px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .playing small { color: #aab6c6; }
+  .playing em { color: #9fd8b6; font-style: normal; }
+  .playing button { padding: 1px 6px; }
 </style>

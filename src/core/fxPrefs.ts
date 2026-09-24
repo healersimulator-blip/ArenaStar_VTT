@@ -13,6 +13,7 @@
  * must never produce `NaN`, an unbounded preload window or an unknown fallback mode.
  */
 import type { AssetManifestEntry } from "./documents";
+import { DEFAULT_SOUND_MIX, normalizeSoundMix, type SoundMix } from "./fxSound";
 
 export interface FxViewPrefs {
   /**
@@ -23,6 +24,12 @@ export interface FxViewPrefs {
   reduceMotion: boolean;
   /** Sound sections do not start on this device; visuals in the same timeline still do. */
   muteSound: boolean;
+  /**
+   * Per-channel gains for this device (D-297/SQ-09). `muteSound` mirrored into
+   * `soundMix.muted` would be two sources of truth, so the mix keeps its own master
+   * flag in sync in `setFxViewPrefs` and the player reads only `soundMix`.
+   */
+  soundMix: SoundMix;
   /** How far ahead of a section's start this client may prefetch its media (0–8000 ms). */
   preloadAheadMs: number;
   /**
@@ -41,6 +48,7 @@ export const MAX_PRELOAD_AHEAD_MS = 8_000;
 export const DEFAULT_FX_VIEW_PREFS: FxViewPrefs = {
   reduceMotion: false,
   muteSound: false,
+  soundMix: { ...DEFAULT_SOUND_MIX, channels: { ...DEFAULT_SOUND_MIX.channels } },
   preloadAheadMs: 2_000,
   lateMedia: "delay",
 };
@@ -60,9 +68,14 @@ function clampInt(value: unknown, min: number, max: number, fallback: number): n
 export function normalizeFxViewPrefs(raw: unknown): FxViewPrefs {
   if (!raw || typeof raw !== "object") return { ...DEFAULT_FX_VIEW_PREFS };
   const record = raw as Record<string, unknown>;
+  const muteSound = record["muteSound"] === true;
+  const mix = normalizeSoundMix(record["soundMix"]);
   return {
     reduceMotion: record["reduceMotion"] === true,
-    muteSound: record["muteSound"] === true,
+    muteSound,
+    // One master switch: an older profile that only has `muteSound`, or a panel that
+    // only flips it, still silences every channel.
+    soundMix: { ...mix, muted: mix.muted || muteSound },
     preloadAheadMs: clampInt(record["preloadAheadMs"], 0, MAX_PRELOAD_AHEAD_MS,
       DEFAULT_FX_VIEW_PREFS.preloadAheadMs),
     lateMedia: record["lateMedia"] === "skip" ? "skip" : "delay",

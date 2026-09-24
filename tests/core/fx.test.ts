@@ -18,7 +18,8 @@ const scene: SceneDocument = {
 const sequence: FxSequence = { version: 1, sections: [
   { kind: "text", id: "title", text: "Charge", at: { kind: "source" }, startMs: 0, durationMs: 1000, fadeOutMs: 200 },
   { kind: "image", id: "impact", assetId: hash, at: { kind: "target" }, startMs: 500, durationMs: 1200, scale: 1.4 },
-  { kind: "sound", id: "whoosh", assetId: sound, startMs: 500, durationMs: 800, volume: 0.7 },
+  { kind: "sound", id: "whoosh", assetId: sound, startMs: 500, durationMs: 800, volume: 0.7,
+    channel: "music", fadeInMs: 200, fadeOutMs: 300 },
 ] };
 
 describe("versioned audiovisual timeline", () => {
@@ -30,7 +31,10 @@ describe("versioned audiovisual timeline", () => {
     expect(result.sections[0]).toMatchObject({ kind: "text", x: 120, y: 150, startMs: 0 });
     expect(result.sections[1]).toMatchObject({ kind: "image", x: 120, y: 150, mime: "video/webm", startMs: 500 });
     expect("at" in (result.sections[0] ?? {})).toBe(false); // do not send author-only anchor extras
-    expect(result.sections[2]).toMatchObject({ kind: "sound", mime: "audio/ogg", volume: 0.7 });
+    // D-297: the channel and fades are part of the host-approved cue — they are a
+    // document fact, while the *gain* each viewer applies to them is not.
+    expect(result.sections[2]).toMatchObject({ kind: "sound", mime: "audio/ogg", volume: 0.7,
+      channel: "music", fadeInMs: 200, fadeOutMs: 300 });
   });
 
   test("bounded one-shot section replays expand into host-clock cues, distinct from motion cycles", () => {
@@ -219,5 +223,42 @@ describe("versioned audiovisual timeline", () => {
     const png: FxSequence = { version: 1, sections: [{ kind: "image", id: "a", assetId: hash,
       at: { kind: "point", x: 30, y: 40 }, startMs: 0, durationMs: 100 }] };
     expect(resolveFxSequence(png, scene, undefined, undefined, () => "image/svg+xml").ok).toBe(false);
+  });
+});
+
+describe("sound channels and fades (D-297)", () => {
+  const withSound = (patch: Record<string, unknown>): FxSequence => ({ version: 1, sections: [
+    { kind: "sound", id: "hum", assetId: sound, startMs: 0, durationMs: 1_000, ...patch } as never,
+  ] });
+
+  test("the four channels are accepted and an unknown one is refused, not silently ignored", () => {
+    for (const channel of ["sfx", "music", "ambience", "voice"])
+      expect(validateFxSequence(withSound({ channel })).ok).toBe(true);
+    const bad = validateFxSequence(withSound({ channel: "bass" }));
+    expect(bad.ok).toBe(false);
+    expect(bad.ok ? "" : bad.error).toContain("channel");
+    // An absent channel is the default effect, so old timelines keep working.
+    const plain = validateFxSequence(withSound({}));
+    expect(plain.ok).toBe(true);
+    if (plain.ok) expect(plain.sequence.sections[0]).not.toHaveProperty("channel");
+  });
+
+  test("fades must fit inside the section, and zero is a legal fade", () => {
+    expect(validateFxSequence(withSound({ fadeInMs: 400, fadeOutMs: 600 })).ok).toBe(true);
+    expect(validateFxSequence(withSound({ fadeInMs: 1_000, fadeOutMs: 1_000 })).ok).toBe(true);
+    expect(validateFxSequence(withSound({ fadeInMs: 0, fadeOutMs: 0 })).ok).toBe(true);
+    for (const patch of [{ fadeInMs: 1_001 }, { fadeOutMs: 2_000 }, { fadeInMs: -1 },
+      { fadeOutMs: Number.NaN }, { fadeInMs: "fast" }]) {
+      const checked = validateFxSequence(withSound(patch));
+      expect(checked.ok, JSON.stringify(patch)).toBe(false);
+      expect(checked.ok ? "" : checked.error).toContain("fade");
+    }
+  });
+
+  test("a channel or fade on a non-sound section is still an unknown field", () => {
+    const wrong = { version: 1, sections: [
+      { kind: "text", id: "t", text: "hi", at: { kind: "source" }, startMs: 0, durationMs: 500,
+        channel: "music" }] } as unknown as FxSequence;
+    expect(validateFxSequence(wrong).ok).toBe(false);
   });
 });

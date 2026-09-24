@@ -681,6 +681,7 @@
             // the timeline keeps playing for everyone else (A10).
             onDelivery: (report) => { fxNotices = [...fxNotices.slice(-3), report.message]; },
             macroName: (macroId) => client.store.get("macros", macroId)?.name ?? null,
+            assetName: (hash) => client.store.world.assetManifest[hash]?.name ?? null,
           });
         }
         client.sendPing();

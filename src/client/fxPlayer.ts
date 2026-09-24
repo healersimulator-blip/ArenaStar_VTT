@@ -13,6 +13,8 @@ import {
   type FxDeliveryEntry, type FxDeliveryReport,
 } from "../core/fxDelivery";
 import { fxViewPrefs, subscribeFxViewPrefs, type FxViewPrefs } from "../core/fxPrefs";
+import { soundChannelOf, soundFadeGain, soundGain } from "../core/fxSound";
+import { registerFxSound, setFxSoundGain } from "./fxSounds";
 import type { Camera } from "../canvas/camera";
 import type { ClientEvents, ClientSync } from "./sync";
 import type { EventBus } from "../core/events";
@@ -34,6 +36,8 @@ export interface FxPlayerOptions {
   onDelivery?: (report: FxDeliveryReport) => void;
   /** Where a run's name comes from for the report line (the world's own macro). */
   macroName?: (macroId: string) => string | null;
+  /** The world's own name for an imported asset, for the local "playing now" list. */
+  assetName?: (hash: string) => string | null;
 }
 
 export class FxPlayer {
@@ -168,6 +172,16 @@ export class FxPlayer {
     return Date.now() + (this.options.client.clockOffset()?.offsetMs ?? 0);
   }
 
+  /**
+   * Can this device hear that sound at all? The master switch and the per-channel
+   * fader both answer no, and either way the bytes are not fetched (D-297).
+   */
+  private audible(section: ResolvedFxSection | undefined): boolean {
+    if (!section || section.kind !== "sound") return true;
+    return soundGain({ ...(section.volume !== undefined ? { volume: section.volume } : {}),
+      channel: soundChannelOf(section), mix: this.prefs.soundMix }) > 0;
+  }
+
   private start(cue: FxStartMsg): void {
     this.syncScene();
     if (this.disposed || cue.sceneId !== this.scene || this.seenRuns.has(cue.runId)) return;
@@ -191,10 +205,11 @@ export class FxPlayer {
     this.delivery.set(cue.runId, { macroId: cue.macroId, entries: [],
       pending: fxMediaCues(cue.sections).length + cameras, reported: false });
     for (const plan of fxPreloadPlan(cue.sections, { leadMs: cue.atHostTime - this.hostNow(),
-      aheadMs: this.prefs.preloadAheadMs })) {
-      // A viewer who muted FX sounds doesn't want the bytes either: bandwidth is a
-      // courtesy, not a thing to spend on a cue that will be skipped.
-      if (plan.kind === "sound" && this.prefs.muteSound) continue;
+      aheadMs: this.prefs.preloadAheadMs,
+      // A viewer who muted FX sounds — or turned this channel down to zero — doesn't
+      // want the bytes either: bandwidth is a courtesy, not a thing to spend on a cue
+      // that will be skipped (D-295/D-297).
+      include: (media) => media.kind !== "sound" || this.audible(cue.sections[media.index]) })) {
       const start = () => { void this.prefetch(plan.assetId); };
       if (plan.waitMs <= 0) { start(); continue; }
       const timer = setTimeout(() => {
@@ -354,7 +369,7 @@ export class FxPlayer {
         cue.persistent === true);
       return;
     }
-    if (section.kind === "sound" && this.prefs.muteSound) {
+    if (section.kind === "sound" && !this.audible(section)) {
       // Local choice, local effect: the rest of the timeline still plays, and no
       // bytes are fetched for a sound this viewer asked not to hear.
       this.noteDelivery(cue.runId, { index, kind: "sound", state: "skipped", reason: "muted",
@@ -389,21 +404,44 @@ export class FxPlayer {
           : landed ? { reason: "preload" as const } : {}) });
       this.settleCue(cue.runId);
       if (section.kind === "sound") {
+        const channel = soundChannelOf(section);
         const audio = new Audio(url);
-        audio.volume = section.volume ?? 1;
         audio.loop = cue.persistent === true;
+        const startedAt = Date.now();
+        // The gain is recomputed on a timer rather than set once, because a fade is a
+        // curve and a viewer may move a channel fader while the cue is playing. Both
+        // facts are local: the timeline never learns that this device changed its mix.
+        const applyGain = () => {
+          const fade = soundFadeGain({ elapsedMs: elapsed(), durationMs: section.durationMs,
+            ...(section.fadeInMs !== undefined ? { fadeInMs: section.fadeInMs } : {}),
+            ...(section.fadeOutMs !== undefined ? { fadeOutMs: section.fadeOutMs } : {}),
+            loop: cue.persistent === true });
+          const gain = soundGain({ ...(section.volume !== undefined ? { volume: section.volume } : {}),
+            channel, mix: this.prefs.soundMix, fade });
+          audio.volume = gain;
+          setFxSoundGain(soundId, gain);
+          return gain;
+        };
+        // The epoch is part of the key: a run that restarts (or reuses its ID after a
+        // stop) is a different element, and its row must not be mistaken for this one's.
+        const soundId = `${cue.runId}:${index}:${epoch}`;
+        applyGain();
         const duration = Number.isFinite(audio.duration) && audio.duration > 0
           ? audio.duration : section.durationMs / 1000;
         audio.currentTime = cue.persistent ? (elapsed() / 1000) % duration : elapsed() / 1000;
         let timer: ReturnType<typeof setTimeout> | null = null;
+        let ramp: ReturnType<typeof setInterval> | null = null;
+        let unregister: (() => void) | null = null;
         let stopped = false;
         const stop = () => {
           if (stopped) return;
           stopped = true;
           if (timer !== null) clearTimeout(timer);
+          if (ramp !== null) clearInterval(ramp);
           audio.pause();
           audio.src = "";
           URL.revokeObjectURL(url);
+          unregister?.();
           const stops = this.stopAudio.get(cue.runId);
           stops?.delete(stop);
           if (stops?.size === 0) this.stopAudio.delete(cue.runId);
@@ -412,7 +450,15 @@ export class FxPlayer {
         stops.add(stop);
         this.stopAudio.set(cue.runId, stops);
         audio.onended = stop;
+        if ((section.fadeInMs ?? 0) > 0 || (section.fadeOutMs ?? 0) > 0) {
+          ramp = setInterval(() => { if (stopped || !active()) stop(); else applyGain(); }, 40);
+        }
         if (!cue.persistent) timer = setTimeout(stop, Math.max(0, section.durationMs - elapsed()));
+        // The device-local list: this element exists here and now, whoever else may
+        // also be hearing the timeline. Stopping from that list silences this device.
+        unregister = registerFxSound({ id: soundId, runId: cue.runId, index, channel,
+          name: this.options.assetName?.(section.assetId) ?? null,
+          gain: audio.volume, persistent: cue.persistent === true, startedAt, stop });
         void audio.play().catch((err: unknown) => {
           this.options.onError?.(`FX audio unavailable: ${String(err)}`);
           stop();

@@ -2998,6 +2998,8 @@ const WALL_PICK_RADIUS = 12;
             notifyLog = [...notifyLog.slice(-49), { message: report.message, level: report.level }];
           },
           macroName: (macroId) => current.gm.client.store.get("macros", macroId)?.name ?? null,
+          // D-297: the device-local sound list names a cue the way the world does.
+          assetName: (hash) => current.gm.client.store.world.assetManifest[hash]?.name ?? null,
         });
         // SQ-13: the host tells the requester when a cue reached fewer viewers than the
         // scene has. The action already completed exactly once; this is the explanation.

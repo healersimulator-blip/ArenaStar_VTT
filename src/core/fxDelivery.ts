@@ -51,11 +51,14 @@ export function fxMediaCues(sections: readonly ResolvedFxSection[]): FxMediaCue[
  */
 export function fxPreloadPlan(
   sections: readonly ResolvedFxSection[],
-  options: { leadMs: number; aheadMs: number },
+  options: { leadMs: number; aheadMs: number; include?: (media: FxMediaCue) => boolean },
 ): Array<{ assetId: string; mime: string; kind: FxMediaKind; waitMs: number }> {
   if (options.aheadMs <= 0) return [];
   const byAsset = new Map<string, { assetId: string; mime: string; kind: FxMediaKind; waitMs: number }>();
   for (const cue of fxMediaCues(sections)) {
+    // A viewer may rule a cue out before it is due — a muted sound must not spend
+    // bandwidth. The filter is a caller's policy; the plan stays a plan.
+    if (options.include && !options.include(cue)) continue;
     // `cue.startMs` may be ≤ 0 (a section that begins with the timeline): the bytes
     // are needed the moment the cue starts, so only the transport lead is left.
     const available = options.leadMs + cue.startMs;

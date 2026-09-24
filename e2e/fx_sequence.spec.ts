@@ -679,3 +679,81 @@ test("a GM-audience cue tells the requesting GM it reached fewer viewers than th
     await hostCtx.close();
   }
 });
+
+// D-297 (SQ-09/SQ-16): a sound belongs to a *channel*, each device mixes its own,
+// and this device can stop what it is playing without touching the table.
+test("a sound plays on its channel, fades in, and this device can stop and mix it", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  const wav = Buffer.from("UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=", "base64");
+  await wizard.locator('input[type="file"]').setInputFiles({ name: "ward-hum.wav",
+    mimeType: "audio/wav", buffer: wav });
+  await expect(wizard.getByRole("status")).toContainText("GM-only playback");
+  await wizard.locator("[data-fx-name]").fill("Ward hum");
+  await wizard.getByRole("button", { name: "Sound", exact: true }).click();
+  const section = wizard.locator("[data-fx-section]");
+  await section.getByRole("combobox", { name: "Media" }).selectOption({ index: 1 });
+  await section.getByLabel("Duration ms").fill("6000");
+  await section.locator("[data-fx-sound-channel]").selectOption("music");
+  await section.locator("[data-fx-sound-fade-in]").fill("500");
+  await section.locator("[data-fx-sound-fade-out]").fill("500");
+  await wizard.locator("[data-fx-save]").click();
+  await expect(wizard.locator("li")).toContainText(["Ward hum"]);
+
+  // The channel and the fades are document facts: editing the saved timeline again
+  // must show them back, or they were never host-approved.
+  await wizard.locator("li").filter({ hasText: "Ward hum" }).getByRole("button", { name: "Edit" }).click();
+  await expect(wizard.locator("[data-fx-sound-channel]")).toHaveValue("music");
+  await expect(wizard.locator("[data-fx-sound-fade-in]")).toHaveValue("500");
+  await expect(wizard.locator("[data-fx-sound-fade-out]")).toHaveValue("500");
+
+  const seqBefore = await hostCall<number>(page, "seq");
+  await wizard.locator("[data-fx-run]").click();
+  await page.locator('[data-window="macros"] [data-window-close]').click();
+
+  // This device's own list, in the Settings window: the world's name for the sound,
+  // its channel, and a gain that climbs as the fade-in does.
+  await page.locator("#gm-settings").click();
+  const prefs = page.locator("[data-fx-prefs]");
+  const row = prefs.locator("[data-fx-playing-sound]").first();
+  await expect(row).toContainText("ward-hum.wav");
+  await expect(row).toContainText("Music");
+  const percent = async () => {
+    const text = await row.innerText();
+    return Number(/(\d+)%/.exec(text)?.[1] ?? -1);
+  };
+  await expect.poll(percent, { timeout: 3_000 }).toBeGreaterThan(-1);
+  const early = await percent(); // the fade-in is still running
+  expect(early).toBeLessThan(100);
+  // The fade reaches full, and what the device ends up playing is the *author's*
+  // volume (the wizard's default 0.8) — the two are multiplied, not confused.
+  await expect.poll(percent, { timeout: 4_000 }).toBe(80);
+  // Moving this device's own fader reaches the element while it plays: half the
+  // channel, half the gain. Nobody else's mix changes.
+  await prefs.locator('[data-fx-mix-channel="music"]').fill("0.5");
+  await expect.poll(percent, { timeout: 3_000 }).toBe(40);
+  await prefs.locator('[data-fx-mix-channel="music"]').fill("1");
+  await expect.poll(percent, { timeout: 3_000 }).toBe(80);
+
+  // Stopping here is a *local* stop: the host run is untouched and the row goes away.
+  await row.getByRole("button", { name: "Stop here" }).click();
+  await expect(prefs.locator("[data-fx-playing-sound]")).toHaveCount(0);
+  await expect(prefs.locator("[data-fx-sound-note]")).toContainText("on this device");
+  expect(await hostCall<number>(page, "seq")).toBe(seqBefore);
+
+  // Turning this channel's fader to zero means the next cue is not played *or fetched*
+  // — and the one-line delivery notice still tells the viewer why.
+  await prefs.locator('[data-fx-mix-channel="music"]').fill("0");
+  await expect(prefs.locator('[data-fx-mix-value="music"]')).toHaveText("0%");
+  await page.locator('[data-window="settings"] [data-window-close]').click();
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  await wizard.locator("li").filter({ hasText: "Ward hum" }).getByRole("button", { name: "Run" }).click();
+  await expect(page.locator("[data-notify]").filter({ hasText: "muted on this device" })).toHaveCount(1);
+  await page.locator("#gm-settings").click();
+  await expect(prefs.locator("[data-fx-playing-sound]")).toHaveCount(0);
+  await prefs.locator('[data-fx-mix-channel="music"]').fill("1"); // leave the device as it was
+});

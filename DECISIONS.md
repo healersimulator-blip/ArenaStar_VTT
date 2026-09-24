@@ -9251,3 +9251,89 @@ the refusal.
   fault), no cross-window persistence of names (session state, not a document
   field), no shape semantics for the committed summon/FX (the point is what
   travels), and no Firefox/WebKit run or the 41-scenario acceptance matrix.
+
+## D-297 — sound channels, fades and a device-local sound list (2026-09-24)
+
+A sound section was `assetId + volume`. That is enough to make a noise and not
+enough to run a table's audio: a GM wants the ambience under the sting, a player on
+a phone wants the music off without losing the dice, and someone whose loop is stuck
+in their earphones wants to stop *their* copy without ending it for everyone. SQ-09
+lists channels, fades, per-user/local routing and a manager; SQ-16 caps it — per-client
+mix "without altering authoritative mechanics or turning off other users' effects".
+This decision lands the bounded half of that: channels with per-device faders, fades
+the host validates, and a list of what *this* browser is playing.
+
+**The channel is a document field; the fader is not.** A section may name one of four
+channels (`sfx`, `music`, `ambience`, `voice`) and the host validates it as a closed
+set — an unknown channel is refused rather than silently treated as an effect, which
+is the "no control that silently does nothing" rule (`validateFxSequence`). What each
+*viewer* does with that channel lives in `FxViewPrefs.soundMix`: four gains plus the
+master `muteSound` switch, kept as one source of truth (`normalizeFxViewPrefs`
+mirrors the old boolean into the mix, so an older profile — or a panel that only flips
+the checkbox — still silences everything). The mix is stored beside the other device
+preferences and is never sent anywhere; the timeline carries the channel, not the gain.
+
+**The fade is a curve, not a volume write.** `soundFadeGain` ramps in over `fadeInMs`
+and out over the last `fadeOutMs`, with the quieter of the two winning where they
+overlap (a 300 ms blip with 200 ms fades is a blip, not a fight), and returns 0 outside
+the section so a stale timer can never produce a blip of sound. A persistent loop fades
+in **once** and then holds: a loop that faded out would go silent at the end of every
+cycle instead of when the GM stops it. The player re-evaluates the gain on a 40 ms tick
+rather than setting `volume` once, because a fade is a function of time *and* because
+moving a fader mid-cue must reach the element — both are local facts the timeline never
+learns. The host validates the fades against the section duration, like an image's.
+
+**Silence is a skip, not a zero-volume element.** If the master switch or the channel
+fader makes a sound inaudible on this device, the cue is skipped with the existing
+`muted` delivery reason and its bytes are **not fetched** — the same courtesy D-295
+extended to the mute switch, now per channel. The wizard says so before a Run as well,
+in the status line: the author is a viewer too, and a timeline they cannot hear should
+say that rather than look broken.
+
+**"Playing on this device" is a different truth from the host's instances.** A new
+device-local registry (`client/fxSounds.ts`) holds what this browser is playing right
+now — a one-shot sting that exists nowhere else, or a persistent loop that others may
+still hear — and the device panel lists it with its channel and live gain, with a
+"Stop here" action. Stopping there silences this device and nothing else: the durable
+instance stays in the Live FX manager until the GM stops it, and the e2e asserts the
+host `seq` does not move. Rows are keyed by run, section *and run epoch*, and removal
+is identity-checked, because a stopped run may legitimately reuse its ID — a bug this
+increment's own tests caught (an old element's teardown deleting the new row).
+
+**Gates.**
+
+- `pnpm test` — **3 669 passed / 12 skipped** (296 files: 294 passed, 2 skipped). New:
+  `tests/core/fxSound.test.ts` (13 — channel set and fail-safe default, total mix
+  normalization, the fade curve including overlap and the loop rule, gain composition
+  with clamping, the "is this cue audible at all" helper, and the summary line),
+  `tests/client/fxSounds.test.ts` (6 — registration/teardown idempotence, identity on a
+  reused ID, subscriber emissions including clamped/ignored gain writes, the 64-row
+  bound, a throwing stop contained, stop by run/channel/all), three host-validation
+  cases in `tests/core/fx.test.ts` (the four channels accepted and an unknown one
+  refused, fades bounded by the section, channel/fade still unknown fields elsewhere)
+  and six player-flow cases in `tests/client/fxDeliveryFlow.test.ts` (authored volume ×
+  fader on the real element, a zeroed channel skipping without spending bytes while the
+  visual still plays, a fade-in ramping up measured on the element, a fader moved
+  mid-cue reaching both element and list, a persistent loop listed as a loop and
+  stopped locally, and a host stop clearing the list).
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing) · `pnpm lint` **exit 0** · `pnpm build` → `pnpm size` **3 782 261 B raw /
+  1 083 937 B gzip**, inside the 6 MB budget. No wire change: the channel and fades ride
+  the existing `fx.start` cue, and the mix never travels.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **14/14** — the new spec
+  imports a real WAV, authors a music-channel sound with 500 ms fades, saves it, and
+  reopens the saved timeline to prove the channel and fades came back through the host;
+  running it, the Settings window's device list shows the sound with its channel and a
+  gain climbing to **80 %** (the wizard's authored volume, with the fade now complete),
+  the device fader moved to 50 % takes it to **40 %** while the cue plays, "Stop here"
+  empties the list with a "this device" note and leaves host `seq` unmoved, and with the
+  music fader at 0 the next Run produces exactly one "muted on this device" notice and
+  no list row. The `summons` suite re-ran alongside it (**18/18** together) and the
+  interaction batch (`canvas_rail` + `canvas_toolbar` + `join`) is **18/18** on two
+  workers.
+- Explicit non-claims: no positional/attenuation audio, wall occlusion/muffle or
+  elevation-dependent sound, no clip window/start offset inside the media, no separate
+  sound *manager* for the host beyond the existing Live FX instance list and its
+  matching stop, no server-side volume or per-recipient targeting (a viewer's mix still
+  changes only what that viewer hears), no persistence of the local mix across devices,
+  and no Firefox/WebKit run or the 41-scenario acceptance matrix.

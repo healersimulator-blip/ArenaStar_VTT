@@ -6,7 +6,8 @@
   import { resolveFxSequence, validateFxSequence, type FxEasing, type FxSection, type FxSequence,
     type FxImportPermissions } from "../../core/fx";
   import { fxFitnessIssues } from "../../core/fxDelivery";
-  import { domCanPlay } from "../../core/fxPrefs";
+  import { SOUND_CHANNELS, SOUND_CHANNEL_LABELS, cueSilentForViewer, soundChannelOf } from "../../core/fxSound";
+  import { domCanPlay, fxViewPrefs } from "../../core/fxPrefs";
   import type { Json } from "../../core/documents";
   import { rememberPlacement, type NamedPlacement, type RequestCrosshairPick } from "./crosshairPicker";
   import type { PreviewFxSequence } from "./fxPreview";
@@ -150,7 +151,7 @@
     const at = { kind: "point" as const, x: Math.round((scene?.width ?? 500) / 2), y: Math.round((scene?.height ?? 500) / 2) };
     const section: FxSection = kind === "text" ? { id, kind, startMs, durationMs, at, text: "A dramatic moment" }
       : kind === "image" ? { id, kind, startMs, durationMs, at, assetId: media.find((m) => /^(image|video)\//.test(m.mime))?.hash ?? "" }
-      : kind === "sound" ? { id, kind, startMs, durationMs, assetId: media.find((m) => m.mime.startsWith("audio/"))?.hash ?? "", volume: 0.8 }
+      : kind === "sound" ? { id, kind, startMs, durationMs, assetId: media.find((m) => m.mime.startsWith("audio/"))?.hash ?? "", volume: 0.8, channel: "sfx" as const }
       : kind === "camera" ? cameraSection(id, startMs)
       : { id, kind, startMs, durationMs };
     draft = { ...draft, sections: [...draft.sections, section] };
@@ -176,7 +177,7 @@
     if (!before) return;
     const at = { kind: "point" as const, x: Math.round((scene?.width ?? 500) / 2), y: Math.round((scene?.height ?? 500) / 2) };
     const section: FxSection = kind === "image" ? { id: before.id, kind, at, assetId: "", startMs: before.startMs, durationMs: before.durationMs }
-      : kind === "sound" ? { id: before.id, kind, assetId: "", startMs: before.startMs, durationMs: before.durationMs, volume: 0.8 }
+      : kind === "sound" ? { id: before.id, kind, assetId: "", startMs: before.startMs, durationMs: before.durationMs, volume: 0.8, channel: soundChannelOf(before) }
       : kind === "text" ? { id: before.id, kind, at, text: "A dramatic moment", startMs: before.startMs, durationMs: before.durationMs }
       : kind === "camera" ? cameraSection(before.id, before.startMs, Math.max(100, before.durationMs))
       : { id: before.id, kind, startMs: before.startMs, durationMs: before.durationMs };
@@ -277,7 +278,13 @@
   function run(macroId: string): void {
     if (!sceneId) { error = "Choose a scene"; return; }
     client.requestSequence(macroId, sceneId, sourceId || undefined, targetId || undefined);
-    status = "Requested saved timeline from host";
+    // D-297: the author is the first viewer. If this device's own mix silences the
+    // whole timeline, say so here rather than letting them wonder why the table is
+    // reacting to something they cannot hear. The request itself is unchanged.
+    const sections = (macros.find((macro) => macro._id === macroId)?.sequence?.sections) ?? [];
+    status = cueSilentForViewer(sections, fxViewPrefs().soundMix)
+      ? "Requested saved timeline from host — this device's own mix silences every sound in it, so you will not hear this run"
+      : "Requested saved timeline from host";
   }
   /**
    * Canvas picking for a point anchor. Cancel resolves `null`, so an abandoned
@@ -454,7 +461,29 @@
           <label>Text <input maxlength="256" bind:value={section.text} /></label>
           <label>Color <input type="color" bind:value={section.color} /></label>
         {/if}
-        {#if section.kind === "sound"}<label>Volume <input type="number" min="0" max="1" step="0.05" bind:value={section.volume} /></label>{/if}
+        {#if section.kind === "sound"}
+          <div class="controls">
+            <label>Volume <input type="number" min="0" max="1" step="0.05" bind:value={section.volume} /></label>
+            <label>Channel <select data-fx-sound-channel value={soundChannelOf(section)}
+              onchange={(e) => draft = { ...draft, sections: draft.sections.map((old, j) =>
+                j === i && old.kind === "sound"
+                  ? { ...old, channel: e.currentTarget.value as typeof old.channel } as FxSection : old) } }>
+              {#each SOUND_CHANNELS as channel (channel)}
+                <option value={channel}>{SOUND_CHANNEL_LABELS[channel]}</option>
+              {/each}
+            </select></label>
+            <label>Fade in <input type="number" min="0" max={section.durationMs} step="50" data-fx-sound-fade-in
+              value={section.fadeInMs ?? ""} oninput={(e) => draft = { ...draft, sections: draft.sections.map((old, j) =>
+                j === i && old.kind === "sound" ? { ...old, fadeInMs: e.currentTarget.value === "" ? undefined
+                  : Number(e.currentTarget.value) } as FxSection : old) } } /></label>
+            <label>Fade out <input type="number" min="0" max={section.durationMs} step="50" data-fx-sound-fade-out
+              value={section.fadeOutMs ?? ""} oninput={(e) => draft = { ...draft, sections: draft.sections.map((old, j) =>
+                j === i && old.kind === "sound" ? { ...old, fadeOutMs: e.currentTarget.value === "" ? undefined
+                  : Number(e.currentTarget.value) } as FxSection : old) } } /></label>
+            <small>The channel is this device's fader, not a document field: each viewer mixes their own.
+              A persistent loop fades in once and holds until stopped.</small>
+          </div>
+        {/if}
         {#if section.kind === "camera"}
           <div class="controls">
             <label>Camera <select data-fx-camera-mode value={section.mode}

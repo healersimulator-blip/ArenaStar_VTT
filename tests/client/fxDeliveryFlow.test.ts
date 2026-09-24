@@ -16,10 +16,24 @@ vi.stubGlobal("Image", class {
   decode(): Promise<void> { return Promise.resolve(); }
 });
 vi.stubGlobal("URL", { createObjectURL: () => "blob:test", revokeObjectURL: () => undefined });
+/**
+ * D-297: sound sections now really start an element, so the audio decoder is a double
+ * too — `audios` is what those tests read the applied gain from.
+ */
+const audios: Array<{ src: string; volume: number; loop: boolean; currentTime: number; duration: number;
+  play: ReturnType<typeof vi.fn>; pause: ReturnType<typeof vi.fn> }> = [];
+vi.stubGlobal("Audio", class {
+  src: string; volume = 1; loop = false; currentTime = 0; duration = 2;
+  play = vi.fn(() => Promise.resolve());
+  pause = vi.fn();
+  constructor(src: string) { this.src = src; audios.push(this); }
+});
 
 import { FxPlayer } from "../../src/client/fxPlayer";
 import { createEventBus } from "../../src/core/events";
 import { setFxViewPrefs } from "../../src/core/fxPrefs";
+import { fxSounds, resetFxSounds, stopFxSounds } from "../../src/client/fxSounds";
+import { DEFAULT_SOUND_MIX } from "../../src/core/fxSound";
 import type { ClientEvents, ClientSync } from "../../src/client/sync";
 import type { Stage } from "../../src/canvas/stage";
 import type { Camera } from "../../src/canvas/camera";
@@ -101,11 +115,16 @@ const image = (startMs: number, assetId = "aa".repeat(32)): ResolvedFxSection =>
 const sound = (startMs: number, assetId = "bb".repeat(32)): ResolvedFxSection =>
   ({ id: `s-${startMs}`, kind: "sound", startMs, durationMs: 1_000, assetId, mime: "audio/mpeg" });
 
+const resetMix = () => setFxViewPrefs({ reduceMotion: false, muteSound: false, preloadAheadMs: 2_000,
+  lateMedia: "delay", soundMix: { ...DEFAULT_SOUND_MIX, channels: { ...DEFAULT_SOUND_MIX.channels } } });
 beforeEach(() => {
-  setFxViewPrefs({ reduceMotion: false, muteSound: false, preloadAheadMs: 2_000, lateMedia: "delay" });
+  audios.length = 0;
+  resetFxSounds();
+  resetMix();
 });
 afterEach(() => {
-  setFxViewPrefs({ reduceMotion: false, muteSound: false, preloadAheadMs: 2_000, lateMedia: "delay" });
+  resetMix();
+  resetFxSounds();
   vi.restoreAllMocks();
 });
 
@@ -222,5 +241,100 @@ describe("failures are contained (D-295, A10)", () => {
     expect(h.reports).toHaveLength(1);
     h.bus.emit("fxEnd", { kind: "fx.end", runId: "run-1", sceneId: SCENE });
     expect(h.reports).toHaveLength(1); // one report per run, never two
+  });
+});
+
+describe("sound channels, fades and the device-local list (D-297, SQ-09)", () => {
+  const music = (startMs: number, patch: Partial<Extract<ResolvedFxSection, { kind: "sound" }>> = {}) =>
+    ({ ...sound(startMs) as Extract<ResolvedFxSection, { kind: "sound" }>, ...patch });
+
+  test("the element plays the author's volume times this device's channel fader", async () => {
+    setFxViewPrefs({ soundMix: { muted: false, channels: { sfx: 1, music: 0.5, ambience: 1, voice: 1 } } });
+    const h = harness();
+    h.send([music(0, { volume: 0.5, channel: "music" })]);
+    await sleep(60);
+    await h.resolveAsset("bb".repeat(32));
+    await sleep(60);
+    expect(audios).toHaveLength(1);
+    expect(audios[0]?.volume).toBeCloseTo(0.25, 6); // 0.5 authored × 0.5 fader
+    expect(audios[0]?.play).toHaveBeenCalledTimes(1);
+    expect(h.reports).toEqual([]); // a sound this device can hear is not a degradation
+  });
+
+  test("a channel fader at zero skips the cue and never spends the bytes", async () => {
+    setFxViewPrefs({ soundMix: { muted: false, channels: { sfx: 1, music: 0, ambience: 1, voice: 1 } } });
+    const h = harness();
+    h.send([image(60), music(80, { channel: "music" })]);
+    await sleep(50);
+    await h.resolveAsset("aa".repeat(32));
+    await sleep(160);
+    expect(h.requests).toEqual(["aa".repeat(32)]); // the silenced channel was not fetched
+    expect(audios).toHaveLength(0);
+    expect(h.spawned.map((entry) => entry.kind)).toEqual(["image"]); // the visual still played
+    expect(h.reports[0]?.entries[1]).toMatchObject({ kind: "sound", state: "skipped", reason: "muted" });
+  });
+
+  test("a fade-in ramps the element's volume from silence up to full", async () => {
+    const h = harness();
+    // Long enough that the one-shot is still playing when the fades are checked:
+    // the registry row lives exactly as long as the element does.
+    h.send([music(0, { durationMs: 3_000, fadeInMs: 800 })]);
+    await sleep(60);
+    await h.resolveAsset("bb".repeat(32));
+    await sleep(200); // roughly a quarter of the way through the fade
+    const early = audios[0]?.volume ?? 1;
+    expect(early).toBeGreaterThan(0.02);
+    expect(early).toBeLessThan(0.95);
+    await sleep(900); // the fade has finished and the section has not
+    expect(audios[0]?.volume).toBeCloseTo(1, 6);
+    expect(fxSounds()[0]?.gain).toBeCloseTo(1, 6);
+    expect(h.reports).toEqual([]);
+  });
+
+  test("a fader moved mid-cue reaches the element and the live list", async () => {
+    setFxViewPrefs({ soundMix: { muted: false, channels: { sfx: 1, music: 1, ambience: 1, voice: 1 } } });
+    const h = harness();
+    // A loop with a short fade-in settles at volume × fader, so the fader move is the
+    // only thing changing the number when it is measured.
+    h.send([music(0, { channel: "music", fadeInMs: 100 })], { persistent: true });
+    await sleep(60);
+    await h.resolveAsset("bb".repeat(32));
+    await sleep(200);
+    expect(audios[0]?.volume).toBeCloseTo(1, 2);
+    setFxViewPrefs({ soundMix: { muted: false, channels: { sfx: 1, music: 0.25, ambience: 1, voice: 1 } } });
+    await sleep(160);
+    expect(audios[0]?.volume).toBeCloseTo(0.25, 2);
+    expect(fxSounds()[0]?.gain).toBeCloseTo(0.25, 2);
+    expect(fxSounds()[0]?.channel).toBe("music");
+    expect(fxSounds()[0]?.name).toBeNull(); // the harness supplies no asset-name lookup
+  });
+
+  test("a persistent loop is listed as a loop, and stopping from this device pauses it", async () => {
+    const h = harness();
+    h.send([music(0, { channel: "ambience" })], { persistent: true });
+    await sleep(60);
+    await h.resolveAsset("bb".repeat(32));
+    await sleep(60);
+    const [live] = fxSounds();
+    expect(live).toMatchObject({ channel: "ambience", persistent: true, runId: "run-1" });
+    expect(audios[0]?.loop).toBe(true);
+    expect(stopFxSounds({ channel: "ambience" })).toBe(1);
+    expect(audios[0]?.pause).toHaveBeenCalledTimes(1);
+    expect(fxSounds()).toEqual([]);
+    // The host-run timeline is untouched by a local stop: its cue is still playing
+    // for everyone else, and this player's run ends only when the host says so.
+    expect(h.reports).toEqual([]);
+  });
+
+  test("a host stop clears the device-local list too", async () => {
+    const h = harness();
+    h.send([music(0)], { persistent: true });
+    await sleep(60);
+    await h.resolveAsset("bb".repeat(32));
+    await sleep(60);
+    expect(fxSounds()).toHaveLength(1);
+    h.bus.emit("fxEnd", { kind: "fx.end", runId: "run-1", sceneId: SCENE });
+    expect(fxSounds()).toEqual([]);
+    expect(audios[0]?.pause).toHaveBeenCalledTimes(1);
   });
 });

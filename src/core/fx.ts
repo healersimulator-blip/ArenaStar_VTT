@@ -5,6 +5,7 @@
  * This is the first sequence format, not the full Sequencer action catalogue.
  */
 import type { SceneDocument, TokenDocument } from "./documents";
+import { isSoundChannel, type FxSoundChannel } from "./fxSound";
 
 export type FxAnchor = { kind: "point"; x: number; y: number } | { kind: "source" | "target" };
 
@@ -92,7 +93,13 @@ export type FxCameraSection = FxCameraPanSection | FxCameraShakeSection;
 export type FxSection =
   | (FxLocated & { kind: "image"; assetId: string; stretch?: boolean; tint?: string }) // image/* and alpha video
   | (FxLocated & { kind: "text"; text: string; color?: string })
-  | (FxBase & { kind: "sound"; assetId: string; volume?: number })
+  | (FxBase & { kind: "sound"; assetId: string; volume?: number;
+      /** Which fader this sound belongs to (viewer-local mix, D-297). */
+      channel?: FxSoundChannel;
+      /** Ramp 0→1 over this many ms at the start of the section. */
+      fadeInMs?: number;
+      /** Ramp 1→0 over the last `fadeOutMs` of the section (ignored by a persistent loop). */
+      fadeOutMs?: number })
   | FxCameraSection
   | (FxBase & { kind: "wait" });
 
@@ -171,7 +178,7 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
     // itself would be a stuck frame), so its repeat fields are unknown fields.
     const repeatFields = section.kind === "wait" || section.kind === "camera"
       ? [] : ["repeatCount", "repeatDelayMs"];
-    const fields = section.kind === "sound" ? ["assetId", "volume"] :
+    const fields = section.kind === "sound" ? ["assetId", "volume", "channel", "fadeInMs", "fadeOutMs"] :
       section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow"] :
       section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow"] :
       section.kind === "camera" ? ["mode", "to", "easing", "zoom", "intensity"] : [];
@@ -215,6 +222,15 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
         (section.volume !== undefined && !inRange(section.volume, 0, 1))) {
         return { ok: false, error: "FX sound needs an imported hash and volume 0–1" };
       }
+      // A channel is a closed set, not a free-text field: an unknown one would be
+      // silently treated as an effect everywhere and mix wrongly by accident.
+      if (section.channel !== undefined && !isSoundChannel(section.channel))
+        return { ok: false, error: "FX sound channel must be effects, music, ambience or voice" };
+      // Fades are bounded by the section itself, like an image's: a ramp longer than
+      // the cue is a fade that never finishes.
+      if ((section.fadeInMs !== undefined && !inRange(section.fadeInMs, 0, section.durationMs)) ||
+        (section.fadeOutMs !== undefined && !inRange(section.fadeOutMs, 0, section.durationMs)))
+        return { ok: false, error: "FX sound fades must fit inside the section duration" };
       continue;
     }
     if ((section.kind !== "image" && section.kind !== "text") || !validAnchor(section.at) ||
