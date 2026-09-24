@@ -89,6 +89,7 @@
     }
   }
   function pick(m: MacroDocument): void {
+    stopPreview(); // the cue on the canvas must belong to the draft being edited
     editing = m._id;
     name = m.name;
     playerCallable = m.flags.core?.playerCallable === true;
