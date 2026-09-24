@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { entry, hostCall, waitForSurface } from "./lib";
+import { entry, hostCall, manualFragment, playerCall, waitForSurface } from "./lib";
 
 test("a saved FX timeline is host-approved, renders below fog and removes its view after playback", async ({ page }) => {
   await page.goto(entry + "?e2e=1");
@@ -336,4 +336,217 @@ test("preview renders the unsaved draft locally, commits nothing and stops on de
   await wizard.locator("[data-fx-run]").click();
   await expect.poll(active, { timeout: 5_000 }).toBe(1);
   await expect.poll(() => hostCall<number>(page, "seq")).toBeGreaterThan(before);
+});
+
+// D-294: a camera cue is a claim on the viewer's OWN view — the host resolves and
+// bounds-checks the destination, and each client moves only its own camera. These
+// specs read the same `__stage` handle the game uses, so they measure the rendered
+// camera, not an editor draft or a socket echo.
+type Camera = { x: number; y: number; scale: number };
+const stageView = (page: import("@playwright/test").Page) => page.evaluate(() => {
+  const stage = (globalThis as unknown as { __stage?: { camera: Camera;
+    viewport: { width: number; height: number } } }).__stage;
+  if (!stage) return null;
+  const { camera, viewport } = stage;
+  return { camera, centre: { x: camera.x + viewport.width / (2 * camera.scale),
+    y: camera.y + viewport.height / (2 * camera.scale) } };
+});
+const near = (a: { x: number; y: number } | null | undefined, b: { x: number; y: number }, slack = 2) =>
+  !!a && Math.abs(a.x - b.x) < slack && Math.abs(a.y - b.y) < slack;
+const sameCamera = (a: Camera | null | undefined, b: Camera | null | undefined) =>
+  !!a && !!b && a.x === b.x && a.y === b.y && a.scale === b.scale;
+
+/** Author one camera section into a fresh draft and save it under `name`. */
+const authorCamera = async (
+  page: import("@playwright/test").Page,
+  name: string,
+  fields: { mode?: "pan" | "shake"; x?: number; y?: number; intensity?: number; ms: number },
+) => {
+  const wizard = page.locator("[data-fx-wizard]");
+  await wizard.getByRole("button", { name: "New", exact: true }).click();
+  await wizard.getByRole("button", { name: "Camera", exact: true }).click();
+  const section = wizard.locator("[data-fx-section]");
+  if (fields.mode === "shake") await section.locator("[data-fx-camera-mode]").selectOption("shake");
+  if (fields.x !== undefined) await section.locator("[data-fx-camera-x]").fill(String(fields.x));
+  if (fields.y !== undefined) await section.locator("[data-fx-camera-y]").fill(String(fields.y));
+  if (fields.intensity !== undefined) await section.locator("[data-fx-camera-intensity]").fill(String(fields.intensity));
+  await section.getByLabel("Duration ms").fill(String(fields.ms));
+  await wizard.locator("[data-fx-name]").fill(name);
+  await wizard.locator("[data-fx-save]").click();
+  await expect(wizard.locator("li")).toContainText([name]);
+};
+
+test("a camera pan parks on the host-resolved destination and a real drag takes the view back", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  const gated = { x: 1500, y: 600 };
+  const away = { x: 300, y: 1300 };
+
+  // 1. A quick pan ends centred on the destination the host resolved.
+  expect(await near((await stageView(page))?.centre, gated)).toBe(false); // the scene opens on a fitted view
+  await authorCamera(page, "Look at the gate", { x: gated.x, y: gated.y, ms: 600 });
+  const before = await hostCall<number>(page, "seq");
+  await wizard.locator("[data-fx-run]").click();
+  await expect.poll(async () => near((await stageView(page))?.centre, gated), { timeout: 5_000 }).toBe(true);
+  // A camera cue is a view effect: nothing was committed, and Undo has no entry.
+  expect(await hostCall<number>(page, "seq")).toBe(before);
+  expect(await hostCall<number>(page, "drainOps")).toBe(before);
+
+  // 2. A slow pan; the viewer drags the map mid-flight and the timeline yields.
+  await authorCamera(page, "Slow sweep", { x: away.x, y: away.y, ms: 2_000 });
+  await wizard.locator("[data-fx-run]").click();
+  await expect.poll(async () => {
+    const centre = (await stageView(page))?.centre;
+    return !!centre && Math.hypot(centre.x - gated.x, centre.y - gated.y) > 40;
+  }, { timeout: 5_000 }).toBe(true); // the sweep is really running before we interrupt it
+  await page.locator('[data-window="macros"] [data-window-close]').click(); // free the canvas
+  const box = await page.locator(".canvas-host canvas").boundingBox();
+  if (!box) throw new Error("Canvas missing");
+  const grab = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  const preGrab = (await stageView(page))?.camera ?? null;
+  await page.mouse.move(grab.x, grab.y);
+  await page.mouse.down({ button: "middle" });
+  await page.mouse.move(grab.x + 140, grab.y + 90, { steps: 8 });
+  await page.mouse.up({ button: "middle" });
+  const held = (await stageView(page))?.camera ?? null;
+  // The drag itself moved the view — and *against* the sweep, which is pulling the
+  // centre the other way, so this can only be the viewer's own gesture.
+  expect(held?.y ?? 0).toBeLessThan((preGrab?.y ?? 0) - 50);
+  // Well past the end of the sweep: a cue that ignored the gesture would be parked on
+  // the destination by now, and one that kept running would still be moving.
+  await page.waitForTimeout(2_400);
+  const settled = (await stageView(page))?.camera ?? null;
+  expect(await near((await stageView(page))?.centre, away)).toBe(false);
+  expect(sameCamera(settled, held)).toBe(true);
+});
+
+test("a camera shake returns the view exactly, and a wheel takes the view back with the zoom kept", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+
+  // A shake: sample every frame *inside* the page — a shake is a moving target for a
+  // poll, and "it moved and then came back exactly" is the whole contract.
+  const base = (await stageView(page))?.camera ?? null;
+  await authorCamera(page, "Impact tremor", { mode: "shake", intensity: 0.8, ms: 1_200 });
+  await wizard.locator("[data-fx-run]").click();
+  const peak = await page.evaluate(async () => {
+    const stage = (globalThis as unknown as { __stage?: { camera: { x: number; y: number } } }).__stage;
+    const start = stage ? { ...stage.camera } : null;
+    if (!stage || !start) return 0;
+    let worst = 0;
+    const until = performance.now() + 1_600;
+    while (performance.now() < until) {
+      worst = Math.max(worst, Math.hypot(stage.camera.x - start.x, stage.camera.y - start.y));
+      await new Promise((resolve) => setTimeout(resolve, 16));
+    }
+    return worst;
+  });
+  expect(peak).toBeGreaterThan(1); // the shake was visible
+  await expect.poll(async () => sameCamera((await stageView(page))?.camera, base), { timeout: 5_000 }).toBe(true);
+
+  // A wheel is a viewer gesture too: the pan yields, and the zoom the wheel applied
+  // survives instead of being overwritten by the next cue frame.
+  await page.locator('[data-window="macros"] [data-window-close]').click();
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const from = (await stageView(page))?.centre ?? null;
+  const destination = { x: 300, y: 1300 };
+  await authorCamera(page, "Roll away", { x: destination.x, y: destination.y, ms: 2_000 });
+  await wizard.locator("[data-fx-run]").click();
+  await expect.poll(async () => {
+    const centre = (await stageView(page))?.centre;
+    return !!centre && !!from && Math.hypot(centre.x - from.x, centre.y - from.y) > 40;
+  }, { timeout: 5_000 }).toBe(true);
+  await page.locator('[data-window="macros"] [data-window-close]').click();
+  const box = await page.locator(".canvas-host canvas").boundingBox();
+  if (!box) throw new Error("Canvas missing");
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.wheel(0, -240);
+  const zoomed = (await stageView(page))?.camera ?? null;
+  expect(zoomed?.scale ?? 0).toBeGreaterThan(base?.scale ?? 0);
+  await page.waitForTimeout(2_400); // the timeline is over by now
+  const settled = (await stageView(page))?.camera ?? null;
+  expect(sameCamera(settled, zoomed)).toBe(true);
+  expect(await near((await stageView(page))?.centre, destination)).toBe(false);
+});
+
+test("a GM-cued pan animates each viewer's own camera, and only the player's own drag takes theirs back", async ({ browser }) => {
+  test.setTimeout(120_000);
+  const hostCtx = await browser.newContext();
+  const playerCtx = await browser.newContext();
+  try {
+    const host = await hostCtx.newPage();
+    const player = await playerCtx.newPage();
+    await host.goto(entry + "?e2e=1");
+    await waitForSurface(host, "app");
+    await host.locator("#gm-macros").click();
+    await host.locator("[data-macro-fx-tab]").click();
+    const destination = { x: 1400, y: 500 };
+    await authorCamera(host, "Table sweep", { x: destination.x, y: destination.y, ms: 4_000 });
+
+    await host.locator("#share").click();
+    const fragment = manualFragment(await host.locator("#invite-link").inputValue());
+    await player.goto(`${entry}?e2e=1&join=1#${fragment}`);
+    await expect.poll(() => player.locator("#offer-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await host.locator("#peer-code").fill(await player.locator("#offer-out").inputValue());
+    await host.locator("#code-apply").click();
+    await expect.poll(() => host.locator("#share-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await player.locator("#answer-input").fill(await host.locator("#share-out").inputValue());
+    await player.locator("#answer-apply").click();
+    await expect.poll(() => playerCall<boolean>(player, "connected"), { timeout: 30_000 }).toBe(true);
+    await waitForSurface(player, "playerCanvas");
+
+    /** Each viewer's own stage: the canvas is the viewport, so the centre is camera + half of it. */
+    const view = async (page: import("@playwright/test").Page) => {
+      // The GM shell publishes `__stage`; the player shell publishes `__canvasStage`.
+      const camera = await page.evaluate(() => {
+        const g = globalThis as unknown as { __stage?: { camera: Camera };
+          __canvasStage?: { camera: Camera } };
+        return g.__stage?.camera ?? g.__canvasStage?.camera ?? null;
+      });
+      const box = await page.locator(".canvas-host canvas").boundingBox();
+      if (!camera || !box) return null;
+      return { camera, centre: { x: camera.x + box.width / (2 * camera.scale),
+        y: camera.y + box.height / (2 * camera.scale) } };
+    };
+    const before = { host: await view(host), player: await view(player) };
+    const moved = (now: Awaited<ReturnType<typeof view>>, base: Awaited<ReturnType<typeof view>>) =>
+      !!now && !!base && Math.hypot(now.centre.x - base.centre.x, now.centre.y - base.centre.y) > 40;
+
+    const seqBefore = await hostCall<number>(host, "seq");
+    await host.locator("[data-fx-run]").click();
+    // One cue, two viewers: each client animates its OWN camera (and no world op).
+    await expect.poll(async () => moved(await view(player), before.player), { timeout: 6_000 }).toBe(true);
+    await expect.poll(async () => moved(await view(host), before.host), { timeout: 6_000 }).toBe(true);
+    expect(await hostCall<number>(host, "seq")).toBe(seqBefore);
+
+    // The player takes their own view back: their camera jumps by the drag's own
+    // distance, and then the cue leaves their view alone while the GM's completes.
+    const box = await player.locator(".canvas-host canvas").boundingBox();
+    if (!box) throw new Error("player canvas not mounted");
+    const grab = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    const preDrag = await view(player);
+    await player.mouse.move(grab.x, grab.y);
+    await player.mouse.down({ button: "middle" });
+    await player.mouse.move(grab.x + 140, grab.y + 90, { steps: 8 });
+    await player.mouse.up({ button: "middle" });
+    const afterDrag = await view(player);
+    expect(Math.hypot((afterDrag?.camera.x ?? 0) - (preDrag?.camera.x ?? 0),
+      (afterDrag?.camera.y ?? 0) - (preDrag?.camera.y ?? 0))).toBeGreaterThan(200);
+    // The GM's own cue completes normally (same cue, different viewer)…
+    await expect.poll(async () => near((await view(host))?.centre, destination, 4), { timeout: 8_000 }).toBe(true);
+    // …while the player's view stayed where their gesture left it and never moved again.
+    const playerSettled = await view(player);
+    expect(await near(playerSettled?.centre, destination, 4)).toBe(false);
+    expect(sameCamera(playerSettled?.camera, afterDrag?.camera)).toBe(true);
+  } finally {
+    await playerCtx.close();
+    await hostCtx.close();
+  }
 });

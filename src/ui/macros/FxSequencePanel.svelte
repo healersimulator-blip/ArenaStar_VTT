@@ -3,7 +3,7 @@
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import type { AssetManifest, MacroDocument, SceneDocument } from "../../core/documents";
-  import { validateFxSequence, type FxSection, type FxSequence, type FxImportPermissions } from "../../core/fx";
+  import { validateFxSequence, type FxEasing, type FxSection, type FxSequence, type FxImportPermissions } from "../../core/fx";
   import type { Json } from "../../core/documents";
   import type { RequestAnchorPick } from "./anchorPicker";
   import type { PreviewFxSequence } from "./fxPreview";
@@ -107,6 +107,12 @@
     status = "";
     error = "";
   }
+  /** A camera cue's default: a short eased pan to the middle of the scene. */
+  function cameraSection(id: string, startMs: number, durationMs = 1500): FxSection {
+    return { id, kind: "camera", mode: "pan", startMs, durationMs,
+      to: { kind: "point", x: Math.round((scene?.width ?? 500) / 2), y: Math.round((scene?.height ?? 500) / 2) },
+      easing: "easeInOut" };
+  }
   function add(kind: FxSection["kind"]): void {
     const id = `fx-${globalThis.crypto.randomUUID().slice(0, 8)}`;
     const startMs = Math.min(30_000, Math.max(0, ...draft.sections.map((s) =>
@@ -117,6 +123,7 @@
     const section: FxSection = kind === "text" ? { id, kind, startMs, durationMs, at, text: "A dramatic moment" }
       : kind === "image" ? { id, kind, startMs, durationMs, at, assetId: media.find((m) => /^(image|video)\//.test(m.mime))?.hash ?? "" }
       : kind === "sound" ? { id, kind, startMs, durationMs, assetId: media.find((m) => m.mime.startsWith("audio/"))?.hash ?? "", volume: 0.8 }
+      : kind === "camera" ? cameraSection(id, startMs)
       : { id, kind, startMs, durationMs };
     draft = { ...draft, sections: [...draft.sections, section] };
   }
@@ -143,9 +150,37 @@
     const section: FxSection = kind === "image" ? { id: before.id, kind, at, assetId: "", startMs: before.startMs, durationMs: before.durationMs }
       : kind === "sound" ? { id: before.id, kind, assetId: "", startMs: before.startMs, durationMs: before.durationMs, volume: 0.8 }
       : kind === "text" ? { id: before.id, kind, at, text: "A dramatic moment", startMs: before.startMs, durationMs: before.durationMs }
+      : kind === "camera" ? cameraSection(before.id, before.startMs, Math.max(100, before.durationMs))
       : { id: before.id, kind, startMs: before.startMs, durationMs: before.durationMs };
     draft = { ...draft, sections: draft.sections.map((old, i) => i === index ? section : old) };
   }
+  /** Pan ⇄ shake is a real discriminator: the two shapes share no destination field. */
+  function changeCameraMode(index: number, mode: "pan" | "shake"): void {
+    const before = draft.sections[index];
+    if (!before || before.kind !== "camera") return;
+    const section: FxSection = mode === "shake"
+      ? { id: before.id, kind: "camera", mode: "shake", intensity: 0.4, startMs: before.startMs,
+          durationMs: Math.min(before.durationMs, 800) }
+      : cameraSection(before.id, before.startMs);
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index ? section : old) };
+  }
+  function changeCameraDestination(index: number, kind: "point" | "source" | "target"): void {
+    const before = draft.sections[index];
+    if (!before || before.kind !== "camera" || before.mode !== "pan") return;
+    const to = kind === "point"
+      ? { kind, x: Math.round((scene?.width ?? 500) / 2), y: Math.round((scene?.height ?? 500) / 2) }
+      : { kind };
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      ? { ...before, to } as FxSection : old) };
+  }
+  function changeCameraZoom(index: number, value: string): void {
+    const before = draft.sections[index];
+    if (!before || before.kind !== "camera" || before.mode !== "pan") return;
+    const zoom = value.trim() === "" ? undefined : Number(value);
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      ? { ...before, ...(zoom === undefined ? {} : { zoom }) } as FxSection : old) };
+  }
+
   function changeReplayCount(index: number, value: string): void {
     const section = draft.sections[index];
     if (!section || section.kind === "wait") return;
@@ -221,17 +256,23 @@
    * gesture cannot half-edit the draft; square/hex snap to the cell or hex centre,
    * gridless stays exact, and the overlay refuses a point the host would refuse.
    */
-  async function pickPoint(index: number, which: "at" | "to"): Promise<void> {
+  async function pickPoint(index: number, which: "at" | "to" | "camera"): Promise<void> {
     const before = draft.sections[index];
-    if (!before || (before.kind !== "image" && before.kind !== "text") || !onPickAnchor || !scene) return;
+    const cameraPan = before?.kind === "camera" && before.mode === "pan";
+    const located = before?.kind === "image" || before?.kind === "text";
+    if (!before || (which === "camera" ? !cameraPan : !located) || !onPickAnchor || !scene) return;
     error = ""; status = "";
     const at = await onPickAnchor({ sceneId: scene._id,
-      label: which === "at" ? "the section's start point" : "the destination point",
+      label: which === "at" ? "the section's start point"
+        : which === "camera" ? "where the camera should look" : "the destination point",
       bounds: { width: scene.width, height: scene.height } });
     if (!at) { status = "Pick cancelled — the draft is unchanged"; return; }
     const point = { x: Math.round(at.x), y: Math.round(at.y) };
     draft = { ...draft, sections: draft.sections.map((old, i) => {
-      if (i !== index || (old.kind !== "image" && old.kind !== "text")) return old;
+      if (i !== index) return old;
+      if (old.kind === "camera" && old.mode === "pan")
+        return { ...old, to: { kind: "point" as const, ...point } } as FxSection;
+      if (old.kind !== "image" && old.kind !== "text") return old;
       if (which === "to") return { ...old, to: { kind: "point" as const, ...point } } as FxSection;
       // Replacing the start with a point can invalidate a token follow: keep it only
       // while the destination is still a bound token, which is the host's own rule.
@@ -301,7 +342,7 @@
 
 <section class="fx-wizard" aria-label="FX sequence wizard" data-fx-wizard>
   <header><h3>FX timeline wizard</h3><button type="button" onclick={reset}>New</button></header>
-  <p class="hint">Author overlapping image/video/text/audio sections. One-shot sections can replay at a fixed interval; host-approved cues stay beneath fog. Persistent timelines loop until stopped in Live FX or their source disappears (they cannot also use section replays). <strong>Preview</strong> renders the unsaved draft on this tab's canvas only — no host commit, no durable instance, no player receives it; a persistent draft previews a single pass. This is a subset of the full Sequencer action library.</p>
+  <p class="hint">Author overlapping image/video/text/audio sections. One-shot sections can replay at a fixed interval; host-approved cues stay beneath fog. Persistent timelines loop until stopped in Live FX or their source disappears (they cannot also use section replays). A **Camera** section pans or shakes the *viewer's own* view — the host resolves where a pan may land, and a real drag or zoom always takes the map back. <strong>Preview</strong> renders the unsaved draft on this tab's canvas only — no host commit, no durable instance, no player receives it; a persistent draft previews a single pass. This is a subset of the full Sequencer action library.</p>
   <div class="library">
     <label>Import licensed media <input type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/avif,video/webm,video/mp4,audio/ogg,audio/mpeg,audio/wav,audio/webm" disabled={busy || !onImport} onchange={(e) => void importFile(e)} /></label>
     <label><input type="checkbox" data-fx-share bind:checked={shareWithPlayers} /> I have permission to serve this file to players</label>
@@ -347,13 +388,13 @@
         <legend>{i + 1}. {section.kind}</legend>
         <div class="controls">
           <label>Step <select value={section.kind} onchange={(e) => changeKind(i, (e.target as HTMLSelectElement).value as FxSection["kind"])}>
-            <option value="text">Text</option><option value="image">Image / video</option><option value="sound">Sound</option><option value="wait">Wait</option>
+            <option value="text">Text</option><option value="image">Image / video</option><option value="sound">Sound</option><option value="camera">Camera</option><option value="wait">Wait</option>
           </select></label>
           <label>Start ms <input type="number" min="0" max="60000" step="50" bind:value={section.startMs} /></label>
           <label>Duration ms <input type="number" min="0" max="30000" step="50" bind:value={section.durationMs} /></label>
           <button type="button" aria-label={`Remove section ${i + 1}`} onclick={() => remove(i)}>×</button>
         </div>
-        {#if section.kind !== "wait"}
+        {#if section.kind !== "wait" && section.kind !== "camera"}
           <div class="controls" data-fx-replay>
             <label>Section play count <input type="number" min="1" max="8" step="1" disabled={draft.persistent}
               value={section.repeatCount ?? 1} oninput={(e) => changeReplayCount(i, e.currentTarget.value)} /></label>
@@ -377,6 +418,52 @@
           <label>Color <input type="color" bind:value={section.color} /></label>
         {/if}
         {#if section.kind === "sound"}<label>Volume <input type="number" min="0" max="1" step="0.05" bind:value={section.volume} /></label>{/if}
+        {#if section.kind === "camera"}
+          <div class="controls">
+            <label>Camera <select data-fx-camera-mode value={section.mode}
+              onchange={(e) => changeCameraMode(i, (e.target as HTMLSelectElement).value as "pan" | "shake")}>
+              <option value="pan">Pan to a point</option><option value="shake">Shake in place</option>
+            </select></label>
+            {#if section.mode === "pan"}
+              <label>Destination <select data-fx-camera-destination value={section.to.kind}
+                onchange={(e) => changeCameraDestination(i, (e.target as HTMLSelectElement).value as "point" | "source" | "target")}>
+                <option value="point">Point</option><option value="source">Source token</option><option value="target">Target token</option>
+              </select></label>
+              {#if section.to.kind === "point"}
+                <label>Camera X <input type="number" min="0" data-fx-camera-x
+                  value={section.to.x} oninput={(e) => draft = { ...draft, sections: draft.sections.map((old, j) =>
+                    j === i && old.kind === "camera" && old.mode === "pan"
+                      ? { ...old, to: { kind: "point", x: Number(e.currentTarget.value), y: old.to.y } } as FxSection : old) } } /></label>
+                <label>Camera Y <input type="number" min="0" data-fx-camera-y
+                  value={section.to.y} oninput={(e) => draft = { ...draft, sections: draft.sections.map((old, j) =>
+                    j === i && old.kind === "camera" && old.mode === "pan"
+                      ? { ...old, to: { kind: "point", x: old.to.x, y: Number(e.currentTarget.value) } } as FxSection : old) } } /></label>
+                {#if onPickAnchor}
+                  <button type="button" data-fx-pick="camera" disabled={!onOpenScene}
+                    title={onOpenScene ? "Click the map to choose where the camera looks" : "Open this timeline's scene first"}
+                    onclick={() => void pickPoint(i, "camera")}>Pick on map…</button>
+                {/if}
+              {/if}
+              <label>Easing <select data-fx-camera-easing value={section.easing ?? "linear"}
+                onchange={(e) => draft = { ...draft, sections: draft.sections.map((old, j) =>
+                  j === i && old.kind === "camera" && old.mode === "pan"
+                    ? { ...old, easing: e.currentTarget.value as FxEasing } as FxSection : old) } }>
+                <option value="linear">Linear</option><option value="easeIn">Ease in</option>
+                <option value="easeOut">Ease out</option><option value="easeInOut">Ease in/out</option>
+              </select></label>
+              <label>Zoom at the end <input type="number" min="0.1" max="10" step="0.05" data-fx-camera-zoom
+                value={section.zoom ?? ""} oninput={(e) => changeCameraZoom(i, e.currentTarget.value)} /></label>
+              <small>Leaves the view on the destination when the section ends; the viewer's own drag cancels it.</small>
+            {:else}
+              <label>Shake intensity <input type="number" min="0.05" max="1" step="0.05" data-fx-camera-intensity
+                value={section.intensity} oninput={(e) => draft = { ...draft, sections: draft.sections.map((old, j) =>
+                  j === i && old.kind === "camera" && old.mode === "shake"
+                    ? { ...old, intensity: Number(e.currentTarget.value) } as FxSection : old) } } /></label>
+              <small>Bounded, decaying, and always returns the view exactly where it started.</small>
+            {/if}
+            <small>A camera section cannot loop or replay, and at most eight fit in one timeline.</small>
+          </div>
+        {/if}
         {#if section.kind === "image" || section.kind === "text"}
           <div class="controls">
             <label>Anchor <select value={section.at.kind} onchange={(e) => changeAnchor(i, (e.target as HTMLSelectElement).value as "point" | "source" | "target")}>
@@ -441,6 +528,7 @@
     <button type="button" onclick={() => add("text")}>Text</button>
     <button type="button" onclick={() => add("image")}>Image / video</button>
     <button type="button" onclick={() => add("sound")}>Sound</button>
+    <button type="button" onclick={() => add("camera")}>Camera</button>
     <button type="button" onclick={() => add("wait")}>Wait</button>
     <button type="button" data-fx-save onclick={save}>Save timeline</button>
     {#if editing}<button type="button" data-fx-run onclick={() => run(editing)}>Run saved</button>{/if}

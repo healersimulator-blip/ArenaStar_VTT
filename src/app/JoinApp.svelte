@@ -830,6 +830,9 @@
           },
           // D-271: the same gesture where no token was hit — a hex a player has been shown.
           onCanvasContextMenu: ({ screen, world }) => openHexMenu(screen, world),
+          // D-294: the same yield in the player shell — a player who drags the map
+          // during a GM-cued pan keeps their own view.
+          onCameraInput: () => fxPlayer?.cancelCamera(),
           stage: view,
           source: domPointerSource(view.app.canvas as HTMLCanvasElement),
           client: {

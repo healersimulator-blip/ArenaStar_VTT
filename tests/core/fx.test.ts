@@ -165,6 +165,52 @@ describe("versioned audiovisual timeline", () => {
     expect(validateFxSequence({ ...sequence, persistent: "untrusted" }).ok).toBe(false);
   });
 
+  test("camera cues resolve a host-side destination, and a shake carries no anchor", () => {
+    const camera: FxSequence = { version: 1, sections: [
+      { kind: "camera", id: "look", mode: "pan", to: { kind: "target" }, easing: "easeInOut",
+        zoom: 1.5, startMs: 0, durationMs: 1200 },
+      { kind: "camera", id: "impact", mode: "shake", intensity: 0.6, startMs: 400, durationMs: 600 },
+      { kind: "text", id: "title", text: "Steady", at: { kind: "point", x: 300, y: 300 },
+        startMs: 0, durationMs: 900 },
+    ] };
+    expect(validateFxSequence(camera).ok).toBe(true);
+    const result = resolveFxSequence(camera, scene, source, source, () => "image/png");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // The client is told where to look — never given an anchor to resolve itself.
+    expect(result.sections[0]).toMatchObject({ kind: "camera", mode: "pan", toX: 120, toY: 150, zoom: 1.5 });
+    expect("to" in (result.sections[0] ?? {})).toBe(false);
+    expect(result.sections[1]).toMatchObject({ kind: "camera", mode: "shake", intensity: 0.6 });
+    expect("toX" in (result.sections[1] ?? {})).toBe(false);
+    // A camera cue is view-only: it changes no document and needs no media.
+    expect(resolveFxSequence(camera, scene, source, source, () => undefined).ok).toBe(true);
+  });
+
+  test("a camera cue cannot loop, replay, crowd a timeline or leave the scene", () => {
+    const bad = (sections: unknown[], persistent = false) =>
+      validateFxSequence({ version: 1, persistent, sections });
+    const pan = { kind: "camera", id: "p", mode: "pan", to: { kind: "point", x: 10, y: 10 },
+      startMs: 0, durationMs: 500 };
+    expect(bad([{ kind: "text", id: "t", text: "Loop", at: { kind: "point", x: 1, y: 1 },
+      startMs: 0, durationMs: 500 }, pan], true).ok).toBe(false); // persistent = a view held forever
+    expect(bad([{ ...pan, repeatCount: 3 }]).ok).toBe(false); // a view claim never replays
+    expect(bad([{ ...pan, intensity: 0.5 }]).ok).toBe(false); // pan fields are not shake fields
+    expect(bad([{ kind: "camera", id: "s", mode: "shake", startMs: 0, durationMs: 500 }]).ok).toBe(false);
+    expect(bad([{ kind: "camera", id: "s", mode: "shake", intensity: 2, startMs: 0, durationMs: 500 }]).ok).toBe(false);
+    expect(bad([{ kind: "camera", id: "s", mode: "shake", intensity: 0.5,
+      to: { kind: "point", x: 1, y: 1 }, startMs: 0, durationMs: 500 }]).ok).toBe(false);
+    expect(bad([{ ...pan, durationMs: 50 }]).ok).toBe(false);
+    expect(bad([{ ...pan, zoom: 40 }]).ok).toBe(false);
+    expect(bad([{ ...pan, easing: "bounce" }]).ok).toBe(false);
+    expect(bad([{ kind: "camera", id: "x", mode: "orbit", startMs: 0, durationMs: 500 }]).ok).toBe(false);
+    expect(bad(Array.from({ length: 9 }, (_, i) => ({ ...pan, id: `p${i}`, startMs: i * 1000 }))).ok).toBe(false);
+    // …and the destination is bounded by the scene, exactly like every other anchor.
+    const off: FxSequence = { version: 1, sections: [{ kind: "camera", id: "p", mode: "pan",
+      to: { kind: "point", x: 5000, y: 10 }, startMs: 0, durationMs: 500 }] };
+    expect(validateFxSequence(off).ok).toBe(true); // in-range as data…
+    expect(resolveFxSequence(off, scene, source, undefined, () => undefined).ok).toBe(false); // …out of the scene in fact
+  });
+
   test("missing target, off-scene point and SVG are explicit errors", () => {
     expect(resolveFxSequence(sequence, scene, source, undefined, () => "image/png").ok).toBe(false);
     const off: FxSequence = { version: 1, sections: [{ kind: "text", id: "t", startMs: 0, durationMs: 100,

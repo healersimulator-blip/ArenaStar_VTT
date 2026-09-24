@@ -567,6 +567,7 @@ const WALL_PICK_RADIUS = 12;
           x: (host?.width ?? view.app.canvas.width) / 2,
           y: (host?.height ?? view.app.canvas.height) / 2,
         };
+        fxPlayer?.cancelCamera(); // an explicit zoom button is user input too
         view.setCamera(
           zoomAt(view.camera, centre.x, centre.y, action === "zoom-in" ? 1.25 : 1 / 1.25),
         );
@@ -574,6 +575,7 @@ const WALL_PICK_RADIUS = 12;
       }
       case "zoom-fit": {
         const scene = activeScene();
+        fxPlayer?.cancelCamera();
         if (view && scene) view.fit(scene.width, scene.height);
         break;
       }
@@ -3498,6 +3500,8 @@ const WALL_PICK_RADIUS = 12;
             view.getEffectsLayer().spawnPing(at);
             current.gm.client.sendEphemeral("ping", { ...at });
           },
+          // D-294: a real drag/zoom beats a scripted camera cue.
+          onCameraInput: () => fxPlayer?.cancelCamera(),
           onRulerChange: (points) => {
             const scene = activeScene();
             const grid = sceneGridSpec(scene?.grid);

@@ -60,6 +60,10 @@ export function validateFxInstance(
   for (const section of doc.sections) {
     if (!section || typeof section !== "object") return false;
     if (section.kind === "wait") { sections.push(section); continue; }
+    // A durable instance can never hold a camera cue (`validateFxSequence`
+    // forbids camera sections in a persistent timeline), so fail closed rather
+    // than treat an imported one as a visual.
+    if (section.kind === "camera") return false;
     if (section.kind === "sound") {
       const { mime, ...saved } = section;
       if (manifest[section.assetId]?.mime !== mime) return false;

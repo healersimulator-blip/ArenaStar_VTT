@@ -8963,3 +8963,85 @@ render the wizard at all.
   timing out at 30 s under two-worker load (one waiting for a click to settle, one
   still at "Starting world…"), and `active_zones.spec.ts` alone with one worker is
   **16/16** in 2.9 m — the load flake D-291 named, not a regression.
+
+## D-294 — the FX wizard moves the *viewer's own* view: camera pan and shake (2026-09-24)
+
+Every FX section so far drew something *into* the world: a burst, a beam, a sound.
+Parity item SQ-15 asks for the section that has no world position at all — a pan to
+a point, a shake in place — and the interesting part is not the easing, it is
+**ownership**. A camera cue writes `stage.camera` on every frame, which is the same
+field the viewer's own drag and wheel write. A cue that keeps writing after the
+viewer grabs the map is not an effect; it is a fight.
+
+**Camera is view state, so nothing about it crosses the network.** The host resolves
+a pan destination through the same `anchor()` path as every other anchor —
+`to`/`toToken` in, bounds-checked `toX`/`toY` out — and a shake carries no anchor at
+all. Message kinds are untouched (`fx.request`, `fx.start`, `fx.sync`, `fx.stop`,
+`fx.end`, `fx.stopMatching`), there is no op, no `fxInstance`, no recipient, no
+oplog entry and nothing for Undo to do: two recipients of one cue end up looking at
+the same world point, not at the same camera. That also means a camera section can
+never *loop* (a persistent timeline must not hold a view forever) and never
+replays; `validateFxSequence` refuses both, along with more than eight camera
+sections, under 100 ms, an intensity outside 0.05–1 and a zoom outside 0.1–10, and
+the authoring panel hides the replay controls instead of offering what the host
+would reject.
+
+**The maths that keeps a pan honest (`canvas/fxCamera.ts`).** A pan interpolates the
+viewport **centre**, not `camera.x`/`camera.y`: with a zoom attached, moving the
+camera origin linearly would make the destination drift as the scale changes, while
+centring is what an author means by "look at the gate". `cameraPanEnd` is exactly
+progress 1, so the frame after the last one cannot land somewhere new. A shake is a
+bounded screen-space budget (24 px) divided by the current scale — the same visual
+size at any zoom — decaying to zero by the last frame, and its end state is the
+base camera object itself.
+
+**Handover: the loser yields in the same frame.** `FxPlayer` holds at most one claim;
+it starts a cue on the stage's frame sink (`Stage.onFrame`) and never starts one
+late (a view claim is not a visual to catch up on). The rule that took an e2e
+failure to find is the exact one worth writing down: when a viewer's real gesture
+(drag with middle/right/shift+left, a wheel, or a zoom button) interrupts a cue, the
+handover must be **quiet** — `cancelCamera()` drops the claim, blacklists the rest
+of that run's camera track, and writes *no* camera, because restoring the pre-cue
+position would undo the very gesture that just took control. The frame tick obeys
+the same rule: a taken-back run releases without writing, while a claim invalidated
+for any *other* reason (scene switch, reconnect, dispose) restores the base. The
+other case is not a gesture: an explicit **stop** (`fxEnd`, clearLocal) hands the
+view back exactly where the cue found it, a finished pan stays on its destination,
+and a finished shake restores the base — three different endings, three deliberate
+behaviours, all pinned in `tests/client/fxViewClaim.test.ts`.
+
+**Gates.**
+
+- `pnpm test` — **3 588 passed / 12 skipped** (291 files: 289 passed, 2 skipped; no
+  load flake this run). New: `tests/canvas/fxCamera.test.ts` (14 cases — half-way
+  centre, monotonic centre through a zoom, an eased midpoint, shake bounded by
+  scale and decaying to the base, `null` on a non-finite elapsed time), two camera
+  cases added to `tests/core/fx.test.ts` (resolves to `toX`/`toY` and drops `to`,
+  shake stays anchor-free; persistent/loop/replay/9 sections/<100 ms/zoom 40/easing
+  `"bounce"`/mode `"orbit"` and a shake-with-destination are all refused), and
+  `tests/client/fxViewClaim.test.ts` (4 cases — a drag is not undone by the next
+  frame and the timeline's next camera section never starts, a stop restores the
+  base exactly and then stops writing, a finished shake/pan end as above, a stale
+  cue cannot claim the view after a scene switch).
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`)
+  · `pnpm lint` **exit 0** (four non-null assertions in the new camera test were
+  rewritten rather than suppressed) · `pnpm build` → `pnpm size` **3 753 973 B raw /
+  1 075 351 B gzip**, inside the 6 MB budget.
+- e2e (Chromium, production `file://` build): `e2e/fx_sequence.spec.ts` **11/11**,
+  including three new camera specs, the last with two real browser contexts (host +
+  joined player): one cue moves **both** clients' own cameras (both centres measured
+  moving, `seq` unchanged), the player's middle-drag moves *their* camera by more
+  than the drag's own distance, then the GM's sweep completes on the destination
+  while the player's view stays exactly where their gesture left it. A 600 ms pan to `(1500, 600)` parks the viewport
+  centre there with `seq` and `drainOps` unmoved (a camera cue commits nothing); a
+  2-second sweep to `(300, 1300)` is interrupted mid-flight by a real middle-button
+  drag, the drag is measured to have moved the view *against* the sweep, and 2.4 s
+  later the view is still exactly where the drag left it instead of at the
+  destination. A 1.2-second shake at intensity 0.8 is sampled frame-by-frame inside
+  the page (peak > 1 px) and returns the base camera exactly, scale included; in the
+  same spec a wheel takes a running sweep away and the zoom it applied survives.
+- Explicit non-claims: no per-user or GM-only camera modes (a camera cue goes to
+  every recipient), no camera section inside
+  a persistent timeline, no protocol change, no camera *paths* (waypoints), and no
+  reduced-motion/preload handling yet (SQ-13). Firefox/WebKit and the 41-scenario
+  acceptance matrix were not run.

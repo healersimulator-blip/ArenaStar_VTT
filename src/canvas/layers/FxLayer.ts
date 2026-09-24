@@ -4,7 +4,7 @@
  * Sprites/text are lifetime-managed per cue, not streamed per frame.
  */
 import { Container, Sprite, Text, type Texture } from "pixi.js";
-import type { ResolvedFxSection } from "../../core/fx";
+import { fxEase, type ResolvedFxSection } from "../../core/fx";
 
 type Located = Extract<ResolvedFxSection, { kind: "image" | "text" }>;
 type Point = { x: number; y: number };
@@ -31,10 +31,9 @@ export function fxPosition(section: Located, elapsedMs: number, anchors: Anchors
   const progress = Math.min(1, Math.max(0, elapsedMs / section.durationMs));
   const cycles = section.repeats ?? 1;
   const phase = progress === 1 ? 1 : (progress * cycles) % 1;
-  const eased = section.easing === "easeIn" ? phase * phase :
-    section.easing === "easeOut" ? 1 - (1 - phase) ** 2 :
-    section.easing === "easeInOut" ? phase < 0.5 ? 2 * phase * phase :
-      1 - (-2 * phase + 2) ** 2 / 2 : phase;
+  // One shared curve with the camera cues (`fxEase`), so a section's motion and a
+  // pan of the same timeline are eased by the same rule.
+  const eased = fxEase(section.easing, phase);
   return { x: anchors.from.x + (anchors.to.x - anchors.from.x) * eased,
     y: anchors.from.y + (anchors.to.y - anchors.from.y) * eased };
 }

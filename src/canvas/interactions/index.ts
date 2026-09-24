@@ -174,6 +174,13 @@ export interface ControllerOptions {
   /** §9: alt+click on the canvas emits a ping at the world point. */
   onPing?: (world: { x: number; y: number }) => void;
   /**
+   * The viewer just moved or zoomed the camera themselves. A timeline that is
+   * panning or shaking the view must yield to a real gesture — the app hands this
+   * to the FX player's `cancelCamera`, so a GM dragging the map during a scripted
+   * pan keeps control of it instead of fighting the next frame.
+   */
+  onCameraInput?: () => void;
+  /**
    * T01: right-CLICK (no drag) on a token opens its context menu with the screen point
    * (canvas-local coordinates for positioning the menu) and the world point. A right
    * DRAG still pans (D-057) and never opens a menu; right-click on empty space does
@@ -356,6 +363,8 @@ export class CanvasController {
         const dx = ev.x - this.startScreen.x;
         const dy = ev.y - this.startScreen.y;
         this.options.stage.setCamera(panByScreen(this.startCamera, dx, dy));
+        // Only a real movement counts: a click that never drags is not a takeover.
+        if (dx !== 0 || dy !== 0) this.options.onCameraInput?.();
         return;
       }
       case "drag": {
@@ -511,6 +520,7 @@ export class CanvasController {
     this.options.stage.setCamera(
       zoomAt(this.options.stage.camera, ev.x, ev.y, factor),
     );
+    this.options.onCameraInput?.();
   }
 
   /** Tokens with the dragged one offset by the live delta (local preview). */

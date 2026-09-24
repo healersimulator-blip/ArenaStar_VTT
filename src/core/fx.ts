@@ -16,6 +16,24 @@ export interface FxImportPermissions {
   includeInWorldFile: boolean;
 }
 export type FxLayerName = "belowTokens" | "aboveTokens";
+export type FxEasing = "linear" | "easeIn" | "easeOut" | "easeInOut";
+const EASINGS: readonly FxEasing[] = ["linear", "easeIn", "easeOut", "easeInOut"];
+/** Validation reads untyped JSON: narrow rather than cast an arbitrary value. */
+const isEasing = (value: unknown): value is FxEasing =>
+  typeof value === "string" && (EASINGS as readonly string[]).includes(value);
+
+/**
+ * The one easing curve both the canvas visuals and the camera use, so a section
+ * cannot move at one rate while its audition moves at another (WZ-09).
+ */
+export function fxEase(easing: FxEasing | undefined, progress: number): number {
+  const phase = Math.min(1, Math.max(0, progress));
+  if (easing === "easeIn") return phase * phase;
+  if (easing === "easeOut") return 1 - (1 - phase) ** 2;
+  if (easing === "easeInOut")
+    return phase < 0.5 ? 2 * phase * phase : 1 - (-2 * phase + 2) ** 2 / 2;
+  return phase;
+}
 
 interface FxBase {
   id: string;
@@ -40,14 +58,42 @@ interface FxLocated extends FxBase {
   follow?: boolean;
   /** Host-resolved destination: tween from `at`, or stretch an image along the segment. */
   to?: FxAnchor;
-  easing?: "linear" | "easeIn" | "easeOut" | "easeInOut";
+  easing?: FxEasing;
   /** Number of movement cycles inside this section's fixed duration. */
   repeats?: number;
 }
+/**
+ * A camera section claims the **viewer's own view** for its duration. It is not a
+ * document change: the host resolves and authorizes the destination exactly as it
+ * does for any other anchor, and each recipient's client moves only its own
+ * camera. Two rules follow from that, and both are enforced here rather than in a
+ * client: a camera cue can never loop (a persistent timeline must not hold a view
+ * forever), and it can never replay.
+ */
+interface FxCameraBase extends FxBase {
+  kind: "camera";
+}
+/** Centre the viewport on `to` over `durationMs`; `zoom` optionally ends at a new scale. */
+export interface FxCameraPanSection extends FxCameraBase {
+  mode: "pan";
+  to: FxAnchor;
+  easing?: FxEasing;
+  /** Absolute world zoom at the END of the pan (0.1–10); absent keeps the current scale. */
+  zoom?: number;
+}
+/** Bounded, decaying shake around wherever the camera already is. */
+export interface FxCameraShakeSection extends FxCameraBase {
+  mode: "shake";
+  /** Amplitude 0.05–1 of a bounded screen offset; decays to zero by the last frame. */
+  intensity: number;
+}
+export type FxCameraSection = FxCameraPanSection | FxCameraShakeSection;
+
 export type FxSection =
   | (FxLocated & { kind: "image"; assetId: string; stretch?: boolean; tint?: string }) // image/* and alpha video
   | (FxLocated & { kind: "text"; text: string; color?: string })
   | (FxBase & { kind: "sound"; assetId: string; volume?: number })
+  | FxCameraSection
   | (FxBase & { kind: "wait" });
 
 export interface FxSequence {
@@ -63,9 +109,15 @@ export type ResolvedFxSection =
   | (Omit<Extract<FxSection, { kind: "image" }>, "at" | "to" | "repeatCount" | "repeatDelayMs"> & { x: number; y: number; toX?: number; toY?: number; mime: string; followTokenId?: string; followToTokenId?: string })
   | (Omit<Extract<FxSection, { kind: "text" }>, "at" | "to" | "repeatCount" | "repeatDelayMs"> & { x: number; y: number; toX?: number; toY?: number; followTokenId?: string; followToTokenId?: string })
   | (Omit<Extract<FxSection, { kind: "sound" }>, "repeatCount" | "repeatDelayMs"> & { mime: string })
+  /** A pan carries its **host-resolved** destination; a shake carries no anchor at all. */
+  | (Omit<FxCameraPanSection, "to" | "repeatCount" | "repeatDelayMs"> & { toX: number; toY: number })
+  | Omit<FxCameraShakeSection, "repeatCount" | "repeatDelayMs">
   | Omit<Extract<FxSection, { kind: "wait" }>, "repeatCount" | "repeatDelayMs">;
 
 const MAX_SECTIONS = 48;
+/** A timeline that moved the view eight times would be a slideshow, not an effect. */
+const MAX_CAMERA_SECTIONS = 8;
+const MIN_CAMERA_MS = 100;
 const MAX_PLAYBACKS = 64;
 const MAX_TIMELINE_MS = 60_000;
 const MAX_SECTION_MS = 30_000;
@@ -107,6 +159,7 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
   }
   const ids = new Set<string>();
   let playbackCount = 0;
+  let cameraCount = 0;
   for (const section of value.sections as unknown[]) {
     if (!isObject(section) || typeof section.id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(section.id) || ids.has(section.id) ||
       !inRange(section.startMs, 0, MAX_TIMELINE_MS) || !inRange(section.durationMs, 0, MAX_SECTION_MS) ||
@@ -114,13 +167,36 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
       return { ok: false, error: "FX section IDs, start and duration must be unique and bounded" };
     }
     ids.add(section.id);
-    const repeatFields = section.kind === "wait" ? [] : ["repeatCount", "repeatDelayMs"];
+    // A camera cue is not media: it has no replays (a view claim that repeated
+    // itself would be a stuck frame), so its repeat fields are unknown fields.
+    const repeatFields = section.kind === "wait" || section.kind === "camera"
+      ? [] : ["repeatCount", "repeatDelayMs"];
     const fields = section.kind === "sound" ? ["assetId", "volume"] :
       section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow"] :
-      section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow"] : [];
+      section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow"] :
+      section.kind === "camera" ? ["mode", "to", "easing", "zoom", "intensity"] : [];
     if (Object.keys(section).some((key) => !["id", "kind", "startMs", "durationMs", ...fields, ...repeatFields].includes(key)) ||
       (section.kind !== "wait" && section.durationMs === 0)) {
       return { ok: false, error: "unknown FX section field or zero-duration media" };
+    }
+    if (section.kind === "camera") {
+      if (value.persistent)
+        return { ok: false, error: "a persistent timeline cannot move a viewer's camera" };
+      if ((cameraCount += 1) > MAX_CAMERA_SECTIONS)
+        return { ok: false, error: "at most 8 camera sections per timeline" };
+      if (section.durationMs < MIN_CAMERA_MS)
+        return { ok: false, error: "camera sections need at least 100 ms" };
+      if (section.mode === "pan") {
+        if (!validAnchor(section.to) || section.intensity !== undefined ||
+            (section.easing !== undefined && !isEasing(section.easing)) ||
+            (section.zoom !== undefined && !inRange(section.zoom, 0.1, 10)))
+          return { ok: false, error: "a camera pan needs a destination anchor, optional easing and zoom 0.1–10" };
+      } else if (section.mode === "shake") {
+        if (section.to !== undefined || section.zoom !== undefined || section.easing !== undefined ||
+            !inRange(section.intensity, 0.05, 1))
+          return { ok: false, error: "a camera shake needs an intensity 0.05–1 and no destination" };
+      } else return { ok: false, error: "camera sections are either a pan or a shake" };
+      continue;
     }
     if (section.kind === "wait") continue;
     const repeatCount = section.repeatCount === undefined ? 1 : section.repeatCount;
@@ -143,7 +219,7 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
     }
     if ((section.kind !== "image" && section.kind !== "text") || !validAnchor(section.at) ||
       (section.to !== undefined && !validAnchor(section.to)) ||
-      (section.easing !== undefined && !["linear", "easeIn", "easeOut", "easeInOut"].includes(String(section.easing))) ||
+      (section.easing !== undefined && !isEasing(section.easing)) ||
       (section.repeats !== undefined && (!Number.isInteger(section.repeats) || !inRange(section.repeats, 1, 20) || !section.to)) ||
       (section.layer !== undefined && section.layer !== "belowTokens" && section.layer !== "aboveTokens") ||
       (section.follow !== undefined && (typeof section.follow !== "boolean" ||
@@ -183,6 +259,12 @@ export function resolveFxSequence(
   const sections: ResolvedFxSection[] = [];
   for (const section of sequence.sections) {
     if (section.kind === "wait") { sections.push(section); continue; }
+    if (section.kind === "camera" && section.mode === "shake") {
+      const { repeatCount: _count, repeatDelayMs: _gap, ...projected } = section;
+      void _count; void _gap;
+      sections.push(projected);
+      continue;
+    }
     if (section.kind === "sound") {
       const mime = mimeOf(section.assetId);
       if (!mime || !AUDIO_MIME.has(mime)) return { ok: false, error: `missing/unsupported sound: ${section.assetId}` };
@@ -206,6 +288,16 @@ export function resolveFxSequence(
         return { ok: false, error: "FX anchor lies outside the scene" };
       return { ok: true, x, y };
     };
+    if (section.kind === "camera") {
+      // The host, never the client, decides where a pan may land — same anchor
+      // function, same scene bounds, same refusal as every other cue.
+      const destination = anchor(section.to);
+      if (!destination.ok) return destination;
+      const { to: _to, repeatCount: _count, repeatDelayMs: _gap, ...projected } = section;
+      void _to; void _count; void _gap;
+      sections.push({ ...projected, toX: destination.x, toY: destination.y });
+      continue;
+    }
     const start = anchor(section.at);
     if (!start.ok) return start;
     const destination = section.to ? anchor(section.to) : null;

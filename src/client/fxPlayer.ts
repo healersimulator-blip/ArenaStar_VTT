@@ -7,6 +7,8 @@ import { Texture } from "pixi.js";
 import type { Stage } from "../canvas/stage";
 import type { FxStartMsg } from "../core/messages";
 import type { ResolvedFxSection } from "../core/fx";
+import { cameraAt, cameraPanEnd, type ResolvedCameraSection } from "../canvas/fxCamera";
+import type { Camera } from "../canvas/camera";
 import type { ClientEvents, ClientSync } from "./sync";
 import type { EventBus } from "../core/events";
 
@@ -23,6 +25,7 @@ export class FxPlayer {
   private readonly off: () => void;
   private readonly offEnd: () => void;
   private readonly offWelcome: () => void;
+  private readonly offFrame: () => void;
   private readonly timers = new Map<ReturnType<typeof setTimeout>, string>();
   private readonly stopAudio = new Map<string, Set<() => void>>();
   private readonly seenRuns = new Set<string>();
@@ -33,11 +36,17 @@ export class FxPlayer {
   private scene: string | null;
   private generation = 0;
   private disposed = false;
+  /** The one camera cue currently claiming this viewer's view, if any. */
+  private view: { runId: string; sceneId: string; section: ResolvedCameraSection; base: Camera;
+    startedAtHost: number; generation: number; epoch: number } | null = null;
+  /** Runs whose camera track this viewer took back by dragging/zooming the map. */
+  private readonly cameraTakenBack = new Set<string>();
 
   constructor(private readonly options: FxPlayerOptions) {
     this.scene = options.sceneId();
     this.off = options.bus.on("fx", (cue) => this.start(cue));
     this.offEnd = options.bus.on("fxEnd", (end) => this.stopRun(end.runId));
+    this.offFrame = options.stage.onFrame(() => this.tickCamera());
     this.offWelcome = options.bus.on("welcome", () => {
       // A newly connected host may have ended instances while we were offline.
       this.clearLocal();
@@ -53,8 +62,12 @@ export class FxPlayer {
     this.timers.clear();
     for (const stops of [...this.stopAudio.values()]) for (const stop of [...stops]) stop();
     this.options.stage.getFxLayer().clear();
+    // A view claim dies with the scene/run it belonged to: leaving a camera
+    // parked where a stopped timeline put it would be state nothing owns.
+    this.releaseCamera(true);
     this.seenRuns.clear();
     this.previewRuns.clear();
+    this.cameraTakenBack.clear();
     this.runEpoch.clear();
   }
 
@@ -80,6 +93,25 @@ export class FxPlayer {
     this.start(cue);
   }
 
+  /**
+   * The viewer grabbed the map (drag or wheel) while a timeline held their view.
+   * The handover is deliberately **quiet**: the claim is dropped and the rest of
+   * that run's camera track is ignored, but no camera is written — the gesture
+   * that triggered this is already moving the view, and restoring the pre-pan
+   * position here would silently undo it. (An explicit *stop* is the other case:
+   * that restores where the viewer was — see `releaseCamera`.)
+   */
+  cancelCamera(): void {
+    const claimed = this.view;
+    if (!claimed) return;
+    this.view = null;
+    this.cameraTakenBack.add(claimed.runId);
+    if (this.cameraTakenBack.size > 256) {
+      const first = this.cameraTakenBack.values().next().value;
+      if (first) this.cameraTakenBack.delete(first);
+    }
+  }
+
   /** End every local preview (window close, Stop button, or scene switch above). */
   clearPreview(): void {
     for (const runId of [...this.previewRuns]) {
@@ -89,6 +121,7 @@ export class FxPlayer {
   }
 
   private stopRun(runId: string): void {
+    if (this.view?.runId === runId) this.releaseCamera(true);
     this.runEpoch.set(runId, (this.runEpoch.get(runId) ?? 0) + 1);
     this.seenRuns.delete(runId);
     for (const [timer, id] of this.timers) {
@@ -118,6 +151,20 @@ export class FxPlayer {
     this.runEpoch.set(cue.runId, epoch);
     for (const section of cue.sections) {
       if (section.kind === "wait") continue;
+      // A camera cue is a claim on THIS viewer's view. The host resolved and
+      // bounds-checked the destination; the client only animates its own camera.
+      if (section.kind === "camera") {
+        const delay = cue.atHostTime + section.startMs - this.hostNow();
+        if (delay < 0) continue; // a view claim never starts late; it is not a visual to catch up on
+        const cameraTimer = setTimeout(() => {
+          this.timers.delete(cameraTimer);
+          if (this.disposed || generation !== this.generation || this.options.sceneId() !== cue.sceneId ||
+              this.runEpoch.get(cue.runId) !== epoch || this.cameraTakenBack.has(cue.runId)) return;
+          this.beginCamera(cue, section, generation, epoch);
+        }, delay);
+        this.timers.set(cameraTimer, cue.runId);
+        continue;
+      }
       const delay = cue.atHostTime + section.startMs - this.hostNow();
       if (!cue.persistent && delay + section.durationMs <= 0) continue; // don't replay a stale one-shot
       const timer = setTimeout(() => {
@@ -130,11 +177,60 @@ export class FxPlayer {
     }
   }
 
+  /** Start a camera cue: capture the base view, then animate from it on every frame. */
+  private beginCamera(cue: FxStartMsg, section: ResolvedCameraSection, generation: number, epoch: number): void {
+    if (this.cameraTakenBack.has(cue.runId)) return;
+    this.releaseCamera(true); // one claim at a time; a new section starts from the live view
+    this.view = { runId: cue.runId, sceneId: cue.sceneId, section, base: this.options.stage.camera,
+      startedAtHost: cue.atHostTime + section.startMs, generation, epoch };
+    this.tickCamera();
+  }
+
+  private tickCamera(): void {
+    const claimed = this.view;
+    if (!claimed) return;
+    if (this.cameraTakenBack.has(claimed.runId)) {
+      // The viewer's own drag/wheel already owns the view: drop the claim **without**
+      // writing a camera. Restoring the pre-cue position here would undo exactly the
+      // gesture that took control, on the very next frame.
+      this.view = null;
+      return;
+    }
+    if (this.disposed || claimed.generation !== this.generation ||
+        this.runEpoch.get(claimed.runId) !== claimed.epoch ||
+        this.options.sceneId() !== claimed.sceneId) {
+      this.releaseCamera(true);
+      return;
+    }
+    const elapsed = this.hostNow() - claimed.startedAtHost;
+    const viewport = this.options.stage.viewport;
+    const want = cameraAt(claimed.section, claimed.base, viewport, elapsed);
+    if (want) {
+      this.options.stage.setCamera(want);
+      return;
+    }
+    // Finished. A shake hands the view back exactly as it found it; a pan leaves
+    // it on the destination, which is the whole point of a pan.
+    this.view = null;
+    this.options.stage.setCamera(claimed.section.mode === "shake"
+      ? claimed.base
+      : cameraPanEnd(claimed.section, claimed.base, viewport));
+  }
+
+  /** Release a camera claim; `restore` puts the view back where the section found it. */
+  private releaseCamera(restore: boolean): void {
+    const claimed = this.view;
+    if (!claimed) return;
+    this.view = null;
+    if (restore) this.options.stage.setCamera(claimed.base);
+  }
+
   private async play(cue: FxStartMsg, section: Exclude<ResolvedFxSection, { kind: "wait" }>,
     generation: number, epoch: number): Promise<void> {
     const elapsed = () => Math.max(0, this.hostNow() - cue.atHostTime - section.startMs);
     const active = () => !this.disposed && generation === this.generation &&
       this.runEpoch.get(cue.runId) === epoch && this.options.sceneId() === cue.sceneId;
+    if (section.kind === "camera") return; // animated per frame by tickCamera
     if (section.kind === "text") {
       if (active()) this.options.stage.getFxLayer().spawn(cue.runId, section, elapsed(), undefined, undefined,
         cue.persistent === true);
@@ -230,6 +326,7 @@ export class FxPlayer {
     this.off();
     this.offEnd();
     this.offWelcome();
+    this.offFrame();
     this.clearLocal();
   }
 }
