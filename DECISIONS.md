@@ -9040,6 +9040,11 @@ behaviours, all pinned in `tests/client/fxViewClaim.test.ts`.
   destination. A 1.2-second shake at intensity 0.8 is sampled frame-by-frame inside
   the page (peak > 1 px) and returns the base camera exactly, scale included; in the
   same spec a wheel takes a running sweep away and the zoom it applied survives.
+- Regression batch for the two shared-path changes (the new per-frame sink on the
+  stage ticker and the interaction callback on pan/wheel):
+  `canvas_rail.spec.ts` + `canvas_toolbar.spec.ts` + `join.spec.ts` **18/18** in 1.3 m
+  on two workers, including "view actions: zoom in/out moves the camera" and
+  "pan mode drags the map with the left button".
 - Explicit non-claims: no per-user or GM-only camera modes (a camera cue goes to
   every recipient), no camera section inside
   a persistent timeline, no protocol change, no camera *paths* (waypoints), and no
