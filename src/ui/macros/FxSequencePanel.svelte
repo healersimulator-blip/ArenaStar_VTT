@@ -8,7 +8,7 @@
   import { fxFitnessIssues } from "../../core/fxDelivery";
   import { domCanPlay } from "../../core/fxPrefs";
   import type { Json } from "../../core/documents";
-  import type { RequestAnchorPick } from "./anchorPicker";
+  import { rememberPlacement, type NamedPlacement, type RequestCrosshairPick } from "./crosshairPicker";
   import type { PreviewFxSequence } from "./fxPreview";
 
   let {
@@ -23,8 +23,8 @@
     listAssets?: (() => Promise<AssetManifest>) | null;
     onAssetRights?: ((hash: string, permissions: FxImportPermissions) => Promise<void>) | null;
     pickedAsset?: { hash: string } | null;
-    /** GM-local canvas picking for point anchors; null hides the controls. */
-    onPickAnchor?: RequestAnchorPick | null;
+    /** GM-local canvas picking through the shared crosshair; null hides the controls. */
+    onPickAnchor?: RequestCrosshairPick | null;
     /** Renders the unsaved draft on this tab only — no host commit, no instance, no recipient. */
     onPreview?: PreviewFxSequence | null;
     onStopPreview?: (() => void) | null;
@@ -34,6 +34,13 @@
   let scenes = $state<SceneDocument[]>([]);
   let media = $state<Array<{ hash: string; name: string; mime: string;
     visibility: AssetManifest[string]["visibility"]; exportRights: AssetManifest[string]["exportRights"] }>>([]);
+  /**
+   * SQ-10: placements this author committed through the crosshair, kept so a later
+   * section can reuse one by name instead of re-picking the same spot. Wizard-local
+   * by design — the sequence keeps plain host-validated points, so a name can never
+   * become a field a host has to trust.
+   */
+  let placements = $state<NamedPlacement[]>([]);
   let rightsHash = $state("");
   let rightsShare = $state(false);
   let rightsExport = $state(false);
@@ -283,12 +290,20 @@
     const located = before?.kind === "image" || before?.kind === "text";
     if (!before || (which === "camera" ? !cameraPan : !located) || !onPickAnchor || !scene) return;
     error = ""; status = "";
-    const at = await onPickAnchor({ sceneId: scene._id,
+    // Shapes and constraints come from the draft: a stretched image or a camera pan
+    // is a *direction*, so a ray/rect is the honest instrument, and a plain anchor
+    // stays a point. Nothing here is a host rule the sequence would not also check.
+    const stretch = before.kind === "image" && before.stretch === true;
+    const shapes = which === "to" || (which === "camera" && cameraPan) || stretch
+      ? ["point", "ray", "rect"] as const : ["point", "circle", "cone", "rect"] as const;
+    const placement = await onPickAnchor({ sceneId: scene._id,
       label: which === "at" ? "the section's start point"
         : which === "camera" ? "where the camera should look" : "the destination point",
-      bounds: { width: scene.width, height: scene.height } });
-    if (!at) { status = "Pick cancelled — the draft is unchanged"; return; }
-    const point = { x: Math.round(at.x), y: Math.round(at.y) };
+      shapes, named: placements,
+      hint: "The host validates the saved sequence — this only writes the draft." });
+    if (!placement) { status = "Pick cancelled — the draft is unchanged"; return; }
+    placements = rememberPlacement(placements, placement);
+    const point = { x: Math.round(placement.point.x), y: Math.round(placement.point.y) };
     draft = { ...draft, sections: draft.sections.map((old, i) => {
       if (i !== index) return old;
       if (old.kind === "camera" && old.mode === "pan")
@@ -301,7 +316,8 @@
         old.to !== undefined && (old.to.kind === "source" || old.to.kind === "target");
       return { ...old, at: { kind: "point" as const, ...point }, follow: keepsFollow } as FxSection;
     }) };
-    status = `Anchor set to ${point.x}, ${point.y} — save the timeline to publish it`;
+    const extent = placement.shape.kind === "point" ? "" : ` (${placement.shape.kind} area measured, not committed)`;
+    status = `Anchor "${placement.name}" set to ${point.x}, ${point.y}${extent} — save the timeline to publish it`;
   }
   /**
    * Preview the **unsaved draft** on this canvas: same validation as a save, but
@@ -568,6 +584,16 @@
   {#if fitnessIssues.length > 0}
     <p class="warn" role="status" data-fx-fitness>This timeline may not reach every viewer: {fitnessIssues.join("; ")}</p>
   {/if}
+  {#if placements.length > 0}
+    <!-- SQ-10: named placements reuse the author's own spot in later sections; the
+         overlay offers them, and this list is the record of what was named. -->
+    <div class="placements" data-fx-placements>
+      <small>{placements.length} named placement{placements.length === 1 ? "" : "s"} — offered for reuse on the next pick</small>
+      {#each placements as placement (placement.name)}
+        <span data-fx-placement={placement.name}>{placement.name} ({Math.round(placement.point.x)}, {Math.round(placement.point.y)})</span>
+      {/each}
+    </div>
+  {/if}
   <h4>Saved timelines</h4>
   <ul>{#each macros as macro (macro._id)}
     <li data-fx-macro-id={macro._id}><strong>{macro.name}</strong> <small>{macro.sequence?.sections.length ?? 0} sections</small>
@@ -585,6 +611,8 @@
   input:not([type="checkbox"]):not([type="file"]), select { min-width: 72px; max-width: 220px; }
   input[type="number"] { width: 70px; }
   .hint { margin: 0; color: #aab6c6; }
+  .placements { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; color: #cfe6d8; }
+  .placements span { border: 1px solid #4f7a61; border-radius: 3px; padding: 1px 5px; }
   .sections { display: grid; gap: 6px; max-height: 270px; overflow: auto; }
   fieldset { border: 1px solid #53586a; border-radius: 4px; padding: 6px; min-width: 0; display: grid; gap: 5px; }
   legend { color: #e6d6a1; }

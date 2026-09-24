@@ -4,7 +4,8 @@
   import { parseInvite } from "./hostShare";
   import { createStage, type Stage } from "../canvas/stage";
   import { screenToWorld, worldToScreen, zoomAt } from "../canvas/camera";
-  import SummonCrosshair from "../ui/macros/SummonCrosshair.svelte";
+  import CrosshairOverlay from "../ui/macros/CrosshairOverlay.svelte";
+  import { resolveCrosshairPick, summonCrosshairOptions } from "../ui/macros/crosshairPicker";
   import type { RequestSummonPick, SummonPickOptions, SummonPickPoint } from "../ui/macros/summonPicker";
   import { displayDistance } from "../canvas/grid/measure";
   import { rulerLabel } from "../canvas/ephemera";
@@ -1186,9 +1187,11 @@
         {#if pendingSummonPick}
           {@const summonScene = activeScene()}
           {#if summonScene && summonScene._id === pendingSummonPick.options.sceneId}
-            <SummonCrosshair scene={summonScene} options={pendingSummonPick.options}
+            {@const resolved = resolveCrosshairPick(summonScene,
+              summonCrosshairOptions(summonScene, pendingSummonPick.options))}
+            <CrosshairOverlay options={resolved.options} request={resolved.request}
               camera={() => stage?.camera ?? { x: 0, y: 0, scale: 1 }}
-              pick={(at) => settleSummonPick(at)} cancel={() => settleSummonPick(null)} />
+              pick={(placement) => settleSummonPick(placement.point)} cancel={() => settleSummonPick(null)} />
           {/if}
         {/if}
       </div>

@@ -9152,3 +9152,102 @@ that throws is "no opinion", never a refusal.
   measurement of how much the prefetch actually saves on a real network — the plan is
   pinned by unit tests, not by a bandwidth benchmark. Firefox/WebKit and the
   41-scenario acceptance matrix were not run.
+
+## D-296 — one shared crosshair: shapes, constraints, live refusal, named reuse (2026-09-24)
+
+Three flows wanted the same gesture — "put a point (or an area) on the map": the
+summon window (SU-03), the FX wizard's anchors (D-293), and the tile/summon paths
+coming behind them. Each had grown its own overlay and its own idea of what was
+legal, and only one of them could say *why* a spot was refused. SQ-10 asks for the
+instrument: point/circle/cone/ray/rect, snapping and rotation, min/max range,
+wall and line-of-sight constraints, live feedback, a cancel with no side effects,
+and an output that can be named and reused. This decision lands one crosshair used
+by both existing flows, with the rules in a pure module so the red preview and the
+host's refusal cannot drift apart.
+
+**The rule is one module, not a preview copy.** `core/crosshair.ts` holds the five
+shapes, snapping (cell/hex centres through the token rule, 15° for a direction),
+areas in world coordinates, and the fault list: `not-finite`, `outside-scene`,
+`too-close`, `out-of-range`, `behind-wall`, `no-path`. Fault *order* is the host's
+own order — a non-finite point outranks bounds, bounds outrank range, range
+outranks walls — so an author fixes the first thing a save would also refuse
+first. `summonPlacementError` now calls the same `sightBlockedBetween` its wall
+loop used to spell out by hand, and a unit test asserts the two agree on the same
+fixture and wall (blocked and legal) so a future edit cannot quietly diverge.
+Sight and movement stay separate axes: a window blocks a path but not a sight
+line, an open door blocks neither.
+
+**An area is measured, not committed.** A circle/cone/ray/rect is exactly what the
+author is shown and exactly what gets checked — the outline is sampled, so a
+circle whose rim is half-buried in a wall is refused instead of being discovered
+on save — but what a consumer stores is still the **point** (the FX anchor stays
+`{kind:"point",x,y}`, the summon still lands on a point). Nothing in this feature
+creates a zone, template or region document, and nothing here changes a host
+rule; the shapes exist so an author can measure a spell's footprint before
+committing to it.
+
+**Cancel is a gesture, not an edit.** Esc, the Cancel button, or standing the
+gesture down with a new request resolves `null` and touches no draft: the wizard
+keeps its X/Y, the summon window keeps its preset and coordinates, and no message
+is sent. The e2e asserts the host `seq` is unmoved after a cancel — as it is after
+a refused click, which is the other half of "invalid positions cannot commit".
+
+**Names are authoring, not data.** A committed placement can be named, and the
+overlay offers every name the window already holds for reuse, so a second section
+can be anchored on a spot the author already chose instead of re-aiming. The
+uniqueness suffix ("Portal (2)") keeps the list unambiguous, except when the author
+is deliberately standing on and re-using a name, which keeps it. The names live in
+the panel's session state: the saved sequence receives plain host-validated points,
+so a name can never become a field the host has to trust. The summon window's
+commit is immediate (place on click), so naming applies to the wizard flow, which
+is where a draft has several anchors to place.
+
+**Summon preview vs. host authority.** The summon crosshair is built from the
+preset the host will enforce — caster centre as the range origin, `maxDistance`,
+`requireLoS`, and the footprint inset that keeps a large creature inside the map.
+A GM placing without a caster keeps the host's own exemption (`gmManual`) instead
+of being shown a range nobody enforces; an unknown caster id is treated as no
+caster, so the preview stays silent rather than red. A player's rejection is still
+sanitized by the host ("Summon unavailable or placement not allowed") — the reason
+is host-side, which is why the *unit* test pins the wall reason and the *e2e* pins
+the refusal.
+
+**Gates.**
+
+- `pnpm test` — **3 640 passed / 12 skipped** (294 files: 292 passed, 2 skipped).
+  New: `tests/core/crosshair.test.ts` (22 — the unit→pixel metric, cell-centre and
+  15° snapping, each shape's outline including a malformed extent refusing to
+  draw, endpoint-touch and parallel-wall cases, the door/window axes, the
+  crosshair-vs-host agreement, the fault order, the footprint inset, unit-measured
+  range with an exact-limit point, an area refused at its outline, the reach axis,
+  and commit/naming/trim/dedupe), `tests/ui/crosshairPicker.test.ts` (9 — request
+  resolution against a live scene, the summon rules including the no-caster
+  exemption, shape switching that never yields a zero-extent area, and the named
+  placement bookkeeping), replacing the D-293 anchor-picker tests, whose snap and
+  bounds assertions now live in the core module's own file.
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing — two overlays became one, hence 63 rather than 64) · `pnpm lint`
+  **exit 0** · `pnpm build` → `pnpm size` **3 773 597 B raw / 1 081 418 B gzip**,
+  inside the 6 MB budget. No wire change: the crosshair is UI-only, so `PROTOCOL.md`,
+  the message byte map and the frame tables are untouched.
+- Chromium production `file://`, two suites. `e2e/summons.spec.ts` **4/4** — the new
+  A04 spec runs a real GM + player pair: the GM draws a wall with the rail tool
+  (coordinates read back from the committed wall, not from the drag), publishes a
+  preset with `requireLoS` and a 30-unit range, and the joined player's crosshair
+  then refuses the cell beside that wall for a **circle** (rim crosses it) and for a
+  **ray** aimed at it (far end crosses), with the commit button disabled and a click
+  that changes nothing (`seq` unmoved, no instance); the same circle on open floor
+  commits exactly once, cancelling a following gesture leaves one instance and the
+  same `seq`, and a point typed by hand behind the wall is refused **by the host**
+  with the player-facing reason. `e2e/fx_sequence.spec.ts` **13/13** — the rewritten
+  wizard spec names a placement, sees it listed, reuses it for the next anchor with
+  the same coordinates, draws a ray's area for a destination pick (a measurement)
+  and still writes only the point. The interaction batch (`canvas_rail` +
+  `canvas_toolbar` + `join`) is **18/18** on two workers.
+- Explicit non-claims: no tile/summon-caster-side "drag source→target" placement
+  gesture (the point is picked, the direction is rotated), no occupancy/terrain
+  walkability ("valid cell" means a cell centre inside the scene — this codebase
+  has no walkability data), no per-viewer visibility check (a hidden token is not a
+  fault), no cross-window persistence of names (session state, not a document
+  field), no shape semantics for the committed summon/FX (the point is what
+  travels), and no Firefox/WebKit run or the 41-scenario acceptance matrix.

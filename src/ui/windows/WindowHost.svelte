@@ -30,7 +30,7 @@
   import type { AssetManifest } from "../../core/documents";
   import type { FxImportPermissions } from "../../core/fx";
   import type { RequestSummonPick } from "../macros/summonPicker";
-  import type { RequestAnchorPick } from "../macros/anchorPicker";
+  import type { RequestCrosshairPick } from "../macros/crosshairPicker";
   import type { PreviewFxSequence } from "../macros/fxPreview";
   import type { ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
@@ -89,7 +89,7 @@
     getFxAsset?: ((hash: string) => Promise<Uint8Array | undefined>) | null;
     onPickSummon?: RequestSummonPick | null;
     /** D-293: FX-wizard anchor picking and the GM-local draft preview (never a host request). */
-    onPickAnchor?: RequestAnchorPick | null;
+    onPickAnchor?: RequestCrosshairPick | null;
     onPreviewFx?: PreviewFxSequence | null;
     onStopFxPreview?: (() => void) | null;
     /**

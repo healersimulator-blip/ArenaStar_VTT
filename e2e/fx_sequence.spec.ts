@@ -240,11 +240,12 @@ test("GM live FX manager stops a named wildcard batch atomically and undo restor
   await expect.poll(active).toBe(3);
 });
 
-// D-293: the wizard can place a point anchor by clicking the map, and it can
-// render an unsaved draft locally. Neither gesture is a host request: the first
-// answers authored data and the second commits nothing — so both are checked
-// against the draft and the host's sequence number, not against a saved macro.
-test("wizard picks point anchors on the map and a cancel leaves the draft unchanged", async ({ page }) => {
+// D-293/D-296: the wizard can place anchors by clicking the map — through the
+// shared SQ-10 crosshair — and it renders an unsaved draft locally. Neither
+// gesture is a host request: the first answers authored data (now with shapes,
+// a name and reuse) and the second commits nothing, so both are checked against
+// the draft and the host's sequence number, not against a saved macro.
+test("wizard places named anchors through the shared crosshair, reuses one, and a cancel changes nothing", async ({ page }) => {
   await page.goto(entry + "?e2e=1");
   await waitForSurface(page, "app");
   await page.locator("#gm-macros").click();
@@ -262,7 +263,7 @@ test("wizard picks point anchors on the map and a cancel leaves the draft unchan
   // Point picking: the square grid's 100 px cell means (274, 231) resolves to the
   // centre (250, 250) — a token-style cell centre, not a corner intersection.
   await section.locator('[data-fx-pick="at"]').click();
-  const overlay = page.locator("[data-fx-pick-overlay]");
+  const overlay = page.locator("[data-crosshair]");
   await expect(overlay).toBeVisible();
   // The picker maps the cursor against ITS OWN rect (it spans the app, not the
   // canvas element), so the world→screen helper has to do the same thing.
@@ -274,7 +275,7 @@ test("wizard picks point anchors on the map and a cancel leaves the draft unchan
   });
   const at = screenOf({ x: 274, y: 231 });
   await page.mouse.move(at.x, at.y);
-  await expect(page.locator("[data-fx-pick-readout]")).toContainText("250, 250");
+  await expect(page.locator("[data-crosshair-readout]")).toContainText("250, 250");
   await page.mouse.click(at.x, at.y);
   await expect(overlay).toHaveCount(0);
   await expect(x).toHaveValue("250");
@@ -289,12 +290,33 @@ test("wizard picks point anchors on the map and a cancel leaves the draft unchan
   await expect(x).toHaveValue("250");
   await expect(y).toHaveValue("250");
 
-  // The destination point uses the same picker and writes its own To X / To Y.
+  // A committed placement is named and kept: the panel lists it, and the next
+  // gesture offers it for reuse instead of making the author re-aim.
+  await expect(wizard.locator('[data-fx-placement="Placement 1"]')).toHaveCount(1);
+  await section.locator('[data-fx-pick="at"]').click();
+  await expect(overlay).toBeVisible();
+  await overlay.locator('[data-crosshair-reuse="Placement 1"]').click();
+  await expect(page.locator("[data-crosshair-readout]")).toContainText("250, 250");
+  await overlay.locator("[data-crosshair-name]").fill("Wizard's mark");
+  await page.mouse.move(screenOf({ x: 274, y: 231 }).x, screenOf({ x: 274, y: 231 }).y);
+  await overlay.locator("[data-crosshair-commit]").click();
+  await expect(overlay).toHaveCount(0);
+  await expect(x).toHaveValue("250");
+  await expect(y).toHaveValue("250");
+  await expect(wizard.locator('[data-fx-placement="Wizard\'s mark"]')).toHaveCount(1);
+
+  // The destination point uses the same crosshair, and a destination is a
+  // direction — so it offers the area shapes, draws the area, and writes its own
+  // To X / To Y from the *point* (an area is a measurement, never committed).
   await section.getByLabel("Destination").selectOption("point");
   await section.locator('[data-fx-pick="to"]').click();
   await expect(overlay).toBeVisible();
   const to = screenOf({ x: 174, y: 131 });
   await page.mouse.move(to.x, to.y);
+  await overlay.locator('[data-crosshair-shape="ray"]').click();
+  await overlay.locator("[data-crosshair-width]").fill("2");
+  await expect(page.locator("[data-crosshair-area]")).toHaveCount(1); // the area the author is shown
+  await expect(page.locator("[data-crosshair-fault]")).toHaveCount(0);
   await page.mouse.click(to.x, to.y);
   await expect(overlay).toHaveCount(0);
   await expect(section.getByLabel("To X")).toHaveValue("150");

@@ -13,7 +13,7 @@
   import { runChatMacro } from "./run";
   import TaggerPanel from "./TaggerPanel.svelte";
   import FxSequencePanel from "./FxSequencePanel.svelte";
-  import type { RequestAnchorPick } from "./anchorPicker";
+  import type { RequestCrosshairPick } from "./crosshairPicker";
   import type { PreviewFxSequence } from "./fxPreview";
   import FxAssetBrowserPanel from "./FxAssetBrowserPanel.svelte";
   import FxManagerPanel from "./FxManagerPanel.svelte";
@@ -50,7 +50,7 @@
     activeSceneId?: string | null;
     onPickSummon?: RequestSummonPick | null;
     /** GM-local canvas picking/rendering for the FX tab; null on a player shell. */
-    onPickAnchor?: RequestAnchorPick | null;
+    onPickAnchor?: RequestCrosshairPick | null;
     onPreviewFx?: PreviewFxSequence | null;
     onStopFxPreview?: (() => void) | null;
   } = $props();

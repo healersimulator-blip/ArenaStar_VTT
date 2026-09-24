@@ -58,10 +58,10 @@ import { summarizeSkips } from "../core/fxDelivery";
   import { PoolInterpolator } from "../sim/interpolate";
   import { TrustedModuleHost } from "../packages/trustedModule";
   import { screenToWorld, worldToScreen, zoomAt } from "../canvas/camera";
-  import SummonCrosshair from "../ui/macros/SummonCrosshair.svelte";
+  import CrosshairOverlay from "../ui/macros/CrosshairOverlay.svelte";
+  import { resolveCrosshairPick, summonCrosshairOptions, type CrosshairPickOptions } from "../ui/macros/crosshairPicker";
   import type { RequestSummonPick, SummonPickOptions, SummonPickPoint } from "../ui/macros/summonPicker";
-  import AnchorPicker from "../ui/macros/AnchorPicker.svelte";
-  import type { AnchorPickOptions, AnchorPickPoint, RequestAnchorPick } from "../ui/macros/anchorPicker";
+  import type { CrosshairPlacement, RequestCrosshairPick } from "../ui/macros/crosshairPicker";
   import type { PreviewFxSequence } from "../ui/macros/fxPreview";
   import Icon from "../ui/icons/Icon.svelte";
   import CanvasToolbar, {
@@ -2001,18 +2001,19 @@ const WALL_PICK_RADIUS = 12;
   };
 
   /**
-   * D-293: the same gesture contract for FX anchors. It answers an **authored
-   * point**, not a mechanical placement — the host still validates the whole
-   * saved sequence, so this is UI convenience with no authority of its own.
+   * D-293/D-296: the same gesture contract for FX anchors, now through the shared
+   * crosshair (shapes, constraints, named reuse). It answers **authored geometry**,
+   * not a mechanical placement — the host still validates the whole saved sequence,
+   * so this is UI convenience with no authority of its own.
    */
-  let pendingAnchorPick = $state.raw<{ options: AnchorPickOptions;
-    resolve: (at: AnchorPickPoint | null) => void } | null>(null);
-  function settleAnchorPick(at: AnchorPickPoint | null): void {
+  let pendingAnchorPick = $state.raw<{ options: CrosshairPickOptions;
+    resolve: (placement: CrosshairPlacement | null) => void } | null>(null);
+  function settleAnchorPick(placement: CrosshairPlacement | null): void {
     const pending = pendingAnchorPick;
     pendingAnchorPick = null;
-    pending?.resolve(at !== null && activeScene()?._id === pending.options.sceneId ? at : null);
+    pending?.resolve(placement !== null && activeScene()?._id === pending.options.sceneId ? placement : null);
   }
-  const requestAnchorPick: RequestAnchorPick = (options) => {
+  const requestAnchorPick: RequestCrosshairPick = (options) => {
     if (options.sceneId !== activeScene()?._id || !stage) return Promise.resolve(null);
     settleAnchorPick(null);
     return new Promise((resolve) => { pendingAnchorPick = { options, resolve }; });
@@ -4546,17 +4547,20 @@ const WALL_PICK_RADIUS = 12;
         {#if pendingSummonPick}
           {@const summonScene = activeScene()}
           {#if summonScene && summonScene._id === pendingSummonPick.options.sceneId}
-            <SummonCrosshair scene={summonScene} options={pendingSummonPick.options}
+            {@const resolved = resolveCrosshairPick(summonScene,
+              summonCrosshairOptions(summonScene, pendingSummonPick.options))}
+            <CrosshairOverlay options={resolved.options} request={resolved.request}
               camera={() => stage?.camera ?? { x: 0, y: 0, scale: 1 }}
-              pick={(at) => settleSummonPick(at)} cancel={() => settleSummonPick(null)} />
+              pick={(placement) => settleSummonPick(placement.point)} cancel={() => settleSummonPick(null)} />
           {/if}
         {/if}
         {#if pendingAnchorPick}
           {@const anchorScene = activeScene()}
           {#if anchorScene && anchorScene._id === pendingAnchorPick.options.sceneId}
-            <AnchorPicker scene={anchorScene} options={pendingAnchorPick.options}
+            {@const resolved = resolveCrosshairPick(anchorScene, pendingAnchorPick.options)}
+            <CrosshairOverlay options={resolved.options} request={resolved.request}
               camera={() => stage?.camera ?? { x: 0, y: 0, scale: 1 }}
-              pick={(at) => settleAnchorPick(at)} cancel={() => settleAnchorPick(null)} />
+              pick={(placement) => settleAnchorPick(placement)} cancel={() => settleAnchorPick(null)} />
           {/if}
         {/if}
         {#if pendingReaction}
