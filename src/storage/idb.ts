@@ -280,6 +280,10 @@ export interface AssetRecord {
   size: number;
   /** Transfer chunk count (AssetServer chunkSize basis). */
   chunks: number;
+  /** Recipient policy; absent on imported pre-wizard worlds. */
+  visibility?: AssetManifestEntry["visibility"];
+  /** FX import's explicit world-archive rights declaration (absent on legacy blobs). */
+  exportRights?: AssetManifestEntry["exportRights"];
   /** Present only when OPFS is unavailable (D-037). */
   bytes?: Uint8Array;
   /** §7 image descriptors (set via AssetServer.describe; absent on plain blobs). */

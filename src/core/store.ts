@@ -16,6 +16,7 @@
 import {
   TOP_LEVEL_COLLECTIONS,
   type ActorDocument,
+  type AssetManifest,
   type BaseDocument,
   type CollectionName,
   type CombatDocument,
@@ -179,6 +180,10 @@ function emptyCollections(): WorldCollections {
     encounterTables: [],
     playlists: [],
     macros: [],
+    automations: [],
+    actionReceipts: [],
+    prefabs: [],
+    fxInstances: [],
     cards: [],
     combats: [],
     messages: [],
@@ -217,6 +222,11 @@ export class DocumentStore {
   /** Read-only view over the world (projection iterates this). */
   get world(): Readonly<WorldCollections> {
     return this.collections;
+  }
+
+  /** Host asset service / recipient-projected metadata. Not an Op; no document mutation. */
+  replaceAssetManifest(manifest: AssetManifest): void {
+    this.collections.assetManifest = { ...manifest };
   }
 
   get<C extends CollectionName>(coll: C, id: DocId): WorldCollections[C][number] | undefined {
@@ -478,6 +488,17 @@ export class DocumentStore {
   }
 
   // ─── Hydration / serialization ──────────────────────────────────────────────
+
+  /** Isolated preflight for an audited envelope. Collection arrays are copied;
+   * individual documents are immutable under applyDiff/embedded writes. An
+   * unsuccessful preview cannot mutate or notify the authoritative store. */
+  forkForPreflight(): DocumentStore {
+    const copy = new DocumentStore({ meta: this.meta, messagesCap: this.messagesCap });
+    const collections = Object.fromEntries(TOP_LEVEL_COLLECTIONS.map((coll) =>
+      [coll, [...this.collections[coll]]])) as Partial<WorldCollections>;
+    copy.hydrate(collections, this.seq);
+    return copy;
+  }
 
   serialize(): { meta: StoreMeta; seq: number; collections: WorldCollections } {
     return {

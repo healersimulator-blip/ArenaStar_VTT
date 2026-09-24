@@ -26,14 +26,22 @@ async function bootHost(page: Page): Promise<void> {
   await waitForSurface(page, "gm");
 }
 
+// A real two-peer exchange plus a reload and both help windows can exceed the
+// default 30 s in the bundled Chromium even when each individual step succeeds.
+test.setTimeout(120_000);
+
 test.describe("first-run onboarding (§2.3, G-41)", () => {
   test("the GM's checklist ticks off the real steps, survives a reload, and the help window repeats it", async ({
     page: host,
     context,
   }) => {
     await bootHost(host);
+    // The host auto-entry is a returning/test world. Its setup panel is available
+    // from the top bar rather than consuming the board by default.
+    await expect(host.locator("[data-session-panel]")).toHaveCount(0);
+    await host.click("#session-open");
 
-    // ── a fresh world: the list is open, and nothing in it is done ──
+    // ── a fresh checklist: the list is open, and nothing in it is done ──
     const panel = host.locator("[data-onboarding]");
     await expect(panel).toBeVisible();
     await expect(panel).toHaveAttribute("data-onboarding-open", "true");
@@ -66,10 +74,16 @@ test.describe("first-run onboarding (§2.3, G-41)", () => {
     await expect.poll(async () => (await gmCall<{ enabled: boolean }>(host, "fogState")).enabled).toBe(true);
     await expect(host.locator('[data-onboarding-step="fog"]')).toHaveAttribute("data-onboarding-done", "true");
 
-    // ── step 5: the first roll — the table is playing ──
+    // ── step 5: leave setup to use the contextual dice options in the dock ──
+    await host.getByRole("button", { name: "Close session panel" }).click();
     await host.click('[data-canvas-tool="dice"]');
     await host.click('[data-canvas-die="20"]');
     await expect.poll(() => host.locator("#chat-log .line").count(), { timeout: 20_000 }).toBeGreaterThan(0);
+    await host.click("#session-open");
+    // Remounting a finished checklist folds it by default unless the GM asks
+    // to see the steps again; don't keep completed setup open in the dock.
+    if ((await panel.getAttribute("data-onboarding-open")) === "false")
+      await host.click("[data-onboarding-toggle]");
     await expect(host.locator('[data-onboarding-step="play"]')).toHaveAttribute("data-onboarding-done", "true");
     await expect(host.locator("[data-onboarding-complete]")).toBeVisible();
 
@@ -95,6 +109,7 @@ test.describe("first-run onboarding (§2.3, G-41)", () => {
     await waitForSurface(player, "player");
     await waitForSurface(player, "playerCanvas");
 
+    await player.click("[data-player-setup]");
     await expect(player.locator("[data-onboarding]")).toBeVisible();
     for (const step of ["token", "sheet", "chat"]) {
       await expect(player.locator(`[data-onboarding-step="${step}"]`)).toHaveCount(1);
@@ -149,6 +164,8 @@ test.describe("first-run onboarding (§2.3, G-41)", () => {
     await host.reload();
     await waitForSurface(host, "app");
     await waitForSurface(host, "gm");
+    await expect(host.locator("[data-session-panel]")).toHaveCount(0);
+    await host.click("#session-open");
     await expect(host.locator("[data-onboarding]")).toHaveCount(1);
     await expect(host.locator("[data-onboarding]")).toHaveAttribute("data-onboarding-open", "false");
     // the label is the hydration signal: a click before the pane is live would land on nothing

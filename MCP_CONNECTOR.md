@@ -221,7 +221,7 @@ The world's own records.
 
 **`document.list`** — capability `world.read`
 
-Id, name and type of the documents in one collection, capped and cursor-paged. collections: users, folders, scenes, actors, items, journals, rollTables, encounterTables, playlists, macros, cards, combats, messages, settings, compendia, factions, armies, turns, depots, routes, reinforcements
+Id, name and type of the documents in one collection, capped and cursor-paged. collections: users, folders, scenes, actors, items, journals, rollTables, encounterTables, playlists, macros, automations, actionReceipts, prefabs, fxInstances, cards, combats, messages, settings, compendia, factions, armies, turns, depots, routes, reinforcements
 
   Arguments:
     - `coll` (string, required) — Collection name

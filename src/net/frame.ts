@@ -39,8 +39,28 @@ function validateDecoded(obj: unknown, name: MsgName): Result<WireMessage> {
     case "roll.pending":
     case "roll.reroll":
     case "roll.revert":
+    case "action.revert":
     case "roll.delegate":
     case "roll.apply":
+    case "automation.request":
+    case "automation.click":
+    case "automation.trace":
+    case "tagger.rules":
+    case "tagger.rules.result":
+    case "prefab.place":
+    case "prefab.result":
+    case "summon.place":
+    case "summon.dismiss":
+    case "summon.result":
+    case "macro.request":
+    case "macro.result":
+    case "fx.request":
+    case "fx.start":
+    case "fx.sync":
+    case "fx.stop":
+    case "fx.stopMatching":
+    case "fx.end":
+    case "asset.manifest":
     case "ephemeral":
     case "asset.get":
     case "fog.put":
@@ -113,6 +133,7 @@ export function channelFor(kind: MsgName): ChannelName {
     case "roll.pending":
     case "roll.reroll":
     case "roll.revert":
+    case "action.revert":
     case "roll.delegate":
     case "fog.put":
     case "fog.get":
@@ -134,6 +155,25 @@ export function channelFor(kind: MsgName): ChannelName {
     case "ping":
     case "pong":
     case "roll.apply":
+    case "automation.request":
+    case "automation.click":
+    case "automation.trace":
+    case "tagger.rules":
+    case "tagger.rules.result":
+    case "prefab.place":
+    case "prefab.result":
+    case "summon.place":
+    case "summon.dismiss":
+    case "summon.result":
+    case "macro.request":
+    case "macro.result":
+    case "fx.request":
+    case "fx.start":
+    case "fx.sync":
+    case "fx.stop":
+    case "fx.stopMatching":
+    case "fx.end":
+    case "asset.manifest":
     case "relay.frame":
       return "ops";
   }

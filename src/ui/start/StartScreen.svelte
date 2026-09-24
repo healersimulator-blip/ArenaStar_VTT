@@ -57,11 +57,14 @@
   let fileInput = $state<HTMLInputElement | null>(null);
 
   let dbPromise: Promise<import("idb").IDBPDatabase> | null = null;
-  const db = (): Promise<import("idb").IDBPDatabase> => (dbPromise ??= openVttDb());
+  const db = (): Promise<import("idb").IDBPDatabase> =>
+    (dbPromise ??= openVttDb());
 
   const latest = $derived(worlds[0] ?? null);
   const existingForPending = $derived(
-    pending?.kind === "world" ? (worlds.find((w) => w.worldId === pending.info.worldId) ?? null) : null,
+    pending?.kind === "world"
+      ? (worlds.find((w) => w.worldId === pending.info.worldId) ?? null)
+      : null,
   );
 
   async function refresh(): Promise<void> {
@@ -79,7 +82,8 @@
       ? "built-in strategic rules"
       : `${w.system} v${w.version}`;
 
-  const when = (ts: number): string => (ts > 0 ? new Date(ts).toLocaleDateString() : "never");
+  const when = (ts: number): string =>
+    ts > 0 ? new Date(ts).toLocaleDateString() : "never";
 
   async function pickFile(): Promise<void> {
     const file = fileInput?.files?.[0];
@@ -100,7 +104,9 @@
       }
       pending = { kind: "world", info: kind, bytes };
       // A starter is a template: its copy is the campaign, so it drops the " — starter" tag.
-      copyName = kind.starter ? kind.name.replace(/\s+[—-]\s+starter$/i, "") : `${kind.name} (copy)`;
+      copyName = kind.starter
+        ? kind.name.replace(/\s+[—-]\s+starter$/i, "")
+        : `${kind.name} (copy)`;
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
     } finally {
@@ -118,7 +124,9 @@
         root: await opfsRoot(),
         file: pending.bytes,
         mode,
-        ...(mode === "copy" && copyName.trim() ? { name: copyName.trim() } : {}),
+        ...(mode === "copy" && copyName.trim()
+          ? { name: copyName.trim() }
+          : {}),
       });
       pending = null;
       onHost(imported.worldId);
@@ -133,7 +141,11 @@
     busy = true;
     error = null;
     try {
-      const blob = await exportWorldZip({ db: await db(), worldId: w.worldId, root: await opfsRoot() });
+      const blob = await exportWorldZip({
+        db: await db(),
+        worldId: w.worldId,
+        root: await opfsRoot(),
+      });
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
@@ -180,229 +192,346 @@
 </script>
 
 <main class="vtt-ui">
-  <div class="welcome">
-    <p class="eyebrow">ARENASTAR</p>
-    <h1>VTT</h1>
-    <p class="sub">A browser-only virtual tabletop for playing together.</p>
-  </div>
-
-  <section class="picker" aria-label="Choose a role">
-    <button id="role-host" type="button" disabled={busy} onclick={() => onHost(latest?.worldId ?? null)}>
-      {#if latest}
-        Continue “{latest.name}”
-      {:else}
-        Host a world
-      {/if}
-    </button>
-    <button id="role-join" type="button" onclick={onJoin}>Join a game</button>
-    <button id="new-world" type="button" disabled={busy} onclick={() => onNewWorld(null)}>
-      New world…
-      <small>pick a strategic ruleset and content packs</small>
-    </button>
-    <label class="btn" for="role-import">
-      Open file (.zip)
-      <small>a world file, a starter world, a ruleset or a content pack</small>
-      <input
-        id="role-import"
-        type="file"
-        accept=".zip,application/zip"
-        bind:this={fileInput}
-        onchange={() => void pickFile()}
-        hidden
-      />
-    </label>
-    {#if error}
-      <p class="error" role="alert" data-import-error>{error}</p>
-    {/if}
-    {#if notice}
-      <p class="notice" role="status" data-start-notice>{notice}</p>
-    {/if}
-  </section>
-
-  {#if pending}
-    <div class="dialog" role="dialog" aria-labelledby="open-h" data-open-dialog data-open-kind={pending.kind}>
-      {#if pending.kind === "world"}
-        <h2 id="open-h">{pending.info.starter ? "Starter world" : "World file"}: {pending.info.name}</h2>
-        <p class="detail" data-open-contents>
-          Brings along: {describeWorldContents(pending.info)} · format {pending.info.format}
+  <div class="launcher">
+    <div class="launch-top">
+      <div class="welcome">
+        <div class="welcome-mark" aria-hidden="true">✦</div>
+        <p class="eyebrow">ARENASTAR / YOUR TABLE</p>
+        <h1>VTT</h1>
+        <p class="sub">A place for every adventure.</p>
+        <p class="welcome-note">
+          Your worlds live on this device. Set the scene, invite your party, and
+          let the story unfold.
         </p>
-        {#if pending.info.starter}
-          <p class="detail">A starter is a template — it always opens as a fresh world of its own.</p>
-        {/if}
-        <label class="field">
-          <span>Name for the new world</span>
-          <input id="open-copy-name" type="text" bind:value={copyName} maxlength="80" />
+      </div>
+
+      <section class="picker" aria-label="Choose a role">
+        <button
+          id="role-host"
+          type="button"
+          disabled={busy}
+          onclick={() => onHost(latest?.worldId ?? null)}
+        >
+          {#if latest}
+            Continue “{latest.name}”
+          {:else}
+            Host a world
+          {/if}
+        </button>
+        <button id="role-join" type="button" onclick={onJoin}
+          >Join a game</button
+        >
+        <button
+          id="new-world"
+          type="button"
+          disabled={busy}
+          onclick={() => onNewWorld(null)}
+        >
+          New world…
+          <small>pick a strategic ruleset and content packs</small>
+        </button>
+        <label class="btn" for="role-import">
+          Open file (.zip)
+          <small
+            >a world file, a starter world, a ruleset or a content pack</small
+          >
+          <input
+            id="role-import"
+            type="file"
+            accept=".zip,application/zip"
+            bind:this={fileInput}
+            onchange={() => void pickFile()}
+            hidden
+          />
         </label>
-        <div class="actions">
-          <button type="button" data-open-cancel disabled={busy} onclick={() => (pending = null)}>Cancel</button>
-          {#if !pending.info.starter}
+        {#if error}
+          <p class="error" role="alert" data-import-error>{error}</p>
+        {/if}
+        {#if notice}
+          <p class="notice" role="status" data-start-notice>{notice}</p>
+        {/if}
+      </section>
+    </div>
+
+    {#if pending}
+      <div
+        class="dialog"
+        role="dialog"
+        aria-labelledby="open-h"
+        data-open-dialog
+        data-open-kind={pending.kind}
+      >
+        {#if pending.kind === "world"}
+          <h2 id="open-h">
+            {pending.info.starter ? "Starter world" : "World file"}: {pending
+              .info.name}
+          </h2>
+          <p class="detail" data-open-contents>
+            Brings along: {describeWorldContents(pending.info)} · format {pending
+              .info.format}
+          </p>
+          {#if pending.info.starter}
+            <p class="detail">
+              A starter is a template — it always opens as a fresh world of its
+              own.
+            </p>
+          {/if}
+          <label class="field">
+            <span>Name for the new world</span>
+            <input
+              id="open-copy-name"
+              type="text"
+              bind:value={copyName}
+              maxlength="80"
+            />
+          </label>
+          <div class="actions">
             <button
               type="button"
-              data-open-replace
+              data-open-cancel
               disabled={busy}
-              title={existingForPending
-                ? `Overwrites the local world “${existingForPending.name}” (${existingForPending.worldId}) with the archive`
-                : `Restores the archive under its own id (${pending.info.worldId})`}
-              onclick={() => void importPending("replace")}
+              onclick={() => (pending = null)}>Cancel</button
             >
-              {existingForPending ? `Restore over “${existingForPending.name}”` : "Restore (keep its id)"}
-            </button>
-          {/if}
-          <button type="button" class="primary" data-open-copy disabled={busy} onclick={() => void importPending("copy")}>
-            Open as new world
-          </button>
-        </div>
-      {:else}
-        <h2 id="open-h">{describePackage(pending.manifest)}</h2>
-        <p class="detail" data-open-contents>
-          This is a package, not a world. A {pending.manifest.type === "system"
-            ? "strategic ruleset"
-            : "content pack"} is chosen when a world is created (or added under Settings inside an open
-          world).
-        </p>
-        <div class="actions">
-          <button type="button" data-open-cancel onclick={() => (pending = null)}>Cancel</button>
-          <button
-            type="button"
-            class="primary"
-            data-open-wizard
-            onclick={() => {
-              const bytes = pending?.bytes ?? null;
-              pending = null;
-              onNewWorld(bytes);
-            }}
-          >
-            New world with it…
-          </button>
-        </div>
-      {/if}
-    </div>
-  {/if}
-
-  <section class="worlds" aria-labelledby="worlds-h" data-world-list>
-    <h2 id="worlds-h">Worlds on this device</h2>
-    {#if !loaded}
-      <p class="detail">Loading…</p>
-    {:else if worlds.length === 0}
-      <p class="detail" data-world-empty>
-        None yet. Host a world for a quick start, or New world… to pick a strategic ruleset.
-      </p>
-    {:else}
-      <div class="rows">
-        {#each worlds as w (w.worldId)}
-          <div class="world" data-world-row data-world-id={w.worldId}>
-            <div class="meta">
-              <span class="name" data-world-name>{w.name}</span>
-              <span class="detail">{rulesetLabel(w)} · opened {when(w.lastOpened)}</span>
-            </div>
-            <div class="row-actions">
-              <button type="button" data-world-open disabled={busy} onclick={() => onHost(w.worldId)}>Open</button>
-              <button type="button" data-world-export disabled={busy} onclick={() => void exportWorld(w)}>
-                Export
-              </button>
+            {#if !pending.info.starter}
               <button
                 type="button"
-                class:danger={confirmDeleteId === w.worldId}
-                data-world-delete
-                data-world-delete-armed={confirmDeleteId === w.worldId ? "true" : undefined}
+                data-open-replace
                 disabled={busy}
-                onclick={() => void deleteWorld(w)}
+                title={existingForPending
+                  ? `Overwrites the local world “${existingForPending.name}” (${existingForPending.worldId}) with the archive`
+                  : `Restores the archive under its own id (${pending.info.worldId})`}
+                onclick={() => void importPending("replace")}
               >
-                {confirmDeleteId === w.worldId ? "Delete? (click again)" : "Delete"}
+                {existingForPending
+                  ? `Restore over “${existingForPending.name}”`
+                  : "Restore (keep its id)"}
               </button>
-            </div>
+            {/if}
+            <button
+              type="button"
+              class="primary"
+              data-open-copy
+              disabled={busy}
+              onclick={() => void importPending("copy")}
+            >
+              Open as new world
+            </button>
           </div>
-        {/each}
+        {:else}
+          <h2 id="open-h">{describePackage(pending.manifest)}</h2>
+          <p class="detail" data-open-contents>
+            This is a package, not a world. A {pending.manifest.type ===
+            "system"
+              ? "strategic ruleset"
+              : "content pack"} is chosen when a world is created (or added under
+            Settings inside an open world).
+          </p>
+          <div class="actions">
+            <button
+              type="button"
+              data-open-cancel
+              onclick={() => (pending = null)}>Cancel</button
+            >
+            <button
+              type="button"
+              class="primary"
+              data-open-wizard
+              onclick={() => {
+                const bytes = pending?.bytes ?? null;
+                pending = null;
+                onNewWorld(bytes);
+              }}
+            >
+              New world with it…
+            </button>
+          </div>
+        {/if}
       </div>
     {/if}
-  </section>
 
-  <section class="capabilities" aria-labelledby="caps-h">
-    <h2 id="caps-h">
-      Runtime capabilities ({capsReady}/{capRows.length} available)
-    </h2>
-    <ul>
-      {#each capRows as [name, ok] (name)}
-        <li class:ok class:missing={!ok}>
-          <span class="dot" aria-hidden="true"></span>
-          <span class="name">{name}</span>
-          <span class="state">{ok ? "Available" : "Unavailable"}</span>
-        </li>
-      {/each}
-    </ul>
-  </section>
+    <section class="worlds" aria-labelledby="worlds-h" data-world-list>
+      <h2 id="worlds-h">Worlds on this device</h2>
+      {#if !loaded}
+        <p class="detail">Loading…</p>
+      {:else if worlds.length === 0}
+        <p class="detail" data-world-empty>
+          None yet. Host a world for a quick start, or New world… to pick a
+          strategic ruleset.
+        </p>
+      {:else}
+        <div class="rows">
+          {#each worlds as w (w.worldId)}
+            <div class="world" data-world-row data-world-id={w.worldId}>
+              <div class="meta">
+                <span class="name" data-world-name>{w.name}</span>
+                <span class="detail"
+                  >{rulesetLabel(w)} · opened {when(w.lastOpened)}</span
+                >
+              </div>
+              <div class="row-actions">
+                <button
+                  type="button"
+                  data-world-open
+                  disabled={busy}
+                  onclick={() => onHost(w.worldId)}>Open</button
+                >
+                <button
+                  type="button"
+                  data-world-export
+                  disabled={busy}
+                  onclick={() => void exportWorld(w)}
+                >
+                  Export
+                </button>
+                <button
+                  type="button"
+                  class:danger={confirmDeleteId === w.worldId}
+                  data-world-delete
+                  data-world-delete-armed={confirmDeleteId === w.worldId
+                    ? "true"
+                    : undefined}
+                  disabled={busy}
+                  onclick={() => void deleteWorld(w)}
+                >
+                  {confirmDeleteId === w.worldId
+                    ? "Delete? (click again)"
+                    : "Delete"}
+                </button>
+              </div>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </section>
+
+    <details class="capabilities">
+      <summary id="caps-h"
+        >Runtime capabilities ({capsReady}/{capRows.length} available)</summary
+      >
+      <ul>
+        {#each capRows as [name, ok] (name)}
+          <li class:ok class:missing={!ok}>
+            <span class="dot" aria-hidden="true"></span>
+            <span class="name">{name}</span>
+            <span class="state">{ok ? "Available" : "Unavailable"}</span>
+          </li>
+        {/each}
+      </ul>
+    </details>
+  </div>
 </main>
 
 <style>
   main {
-    min-height: 100vh;
+    min-height: 100dvh;
     display: flex;
-    flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 24px;
-    padding: clamp(24px, 6vw, 72px) 20px;
+    padding: 42px clamp(18px, 4vw, 64px);
     background:
-      radial-gradient(circle at 50% 0%, #243b55 0%, transparent 48%), #0d1117;
-    color: #f2f5f8;
+      radial-gradient(circle at 24% 4%, #193c3a 0%, transparent 37%),
+      radial-gradient(circle at 82% 65%, #202f43 0%, transparent 45%), #0c141d;
+    color: #f1f8f7;
+  }
+  .launcher {
+    width: min(100%, 1030px);
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+  .launch-top {
+    display: grid;
+    grid-template-columns: minmax(260px, 1fr) minmax(420px, 1.12fr);
+    align-items: center;
+    gap: clamp(26px, 4vw, 56px);
+    padding: clamp(26px, 3vw, 40px);
+    border: 1px solid #3e5b61;
+    border-radius: 20px;
+    background: linear-gradient(135deg, #1d3639e6, #192835fa 58%, #17232e);
+    box-shadow: 0 24px 80px #030b13a1;
   }
   .welcome {
-    max-width: 620px;
-    text-align: center;
+    max-width: 380px;
+  }
+  .welcome-mark {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    margin-bottom: 26px;
+    border-radius: 13px;
+    background: linear-gradient(145deg, #8be8d0, #459d99);
+    box-shadow: 0 6px 22px #70deba35;
+    color: #142933;
+    font-size: 1.8rem;
   }
   .eyebrow {
-    margin: 0 0 8px;
-    color: #66b7ff;
-    font-size: 0.8rem;
+    margin: 0 0 6px;
+    color: #9ce8d5;
+    font-size: 0.73rem;
     font-weight: 800;
-    letter-spacing: 0.18em;
+    letter-spacing: 0.17em;
   }
   h1 {
     margin: 0;
-    font-size: clamp(2.25rem, 6vw, 4rem);
-    line-height: 1.05;
-    letter-spacing: -0.035em;
+    font-size: clamp(3.4rem, 7vw, 5.1rem);
+    line-height: 1;
+    font-weight: 800;
+    letter-spacing: -0.05em;
   }
   .sub {
-    margin: 12px 0 0;
-    color: #c1ccd8;
-    font-size: 1.1rem;
+    margin: 13px 0 0;
+    color: #f3fbf9;
+    font-size: clamp(1.1rem, 2vw, 1.4rem);
+    font-weight: 630;
+    letter-spacing: -0.02em;
+  }
+  .welcome-note {
+    margin: 10px 0 0;
+    color: #b4c8cc;
+    font-size: 0.92rem;
+    line-height: 1.6;
   }
   .picker {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    width: min(100%, 360px);
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
   }
   .picker button,
   .picker .btn {
-    min-height: 50px !important;
-    padding: 12px 18px;
-    border: 1px solid #49627d;
-    border-radius: 10px;
-    background: #182331;
-    color: #f2f5f8;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    width: 100%;
+    min-height: 90px !important;
+    padding: 15px 16px;
+    border: 1px solid #4b6570;
+    border-radius: 12px;
+    background: #22313e;
+    color: #f1f8f7;
     cursor: pointer;
-    text-align: center;
+    text-align: left;
     font-size: 1rem;
     font-weight: 700;
+    line-height: 1.3;
     transition:
-      background 120ms ease,
-      border-color 120ms ease,
-      transform 120ms ease;
+      background 0.16s,
+      border-color 0.16s,
+      transform 0.16s;
   }
   .picker button:first-child {
-    background: #1f5f8f;
-    border-color: #68b9f2;
+    border-color: #6ecab7;
+    background: #28645c;
+    color: #fff;
   }
   .picker button:hover,
   .picker .btn:hover {
-    background: #29415a;
-    border-color: #79c5ff;
-    transform: translateY(-1px);
+    transform: translateY(-2px);
+    border-color: #88d7c7;
+    background: #2b4c52;
   }
   .picker button:first-child:hover {
-    background: #2878ae;
+    background: #37786d;
   }
   .picker button:disabled {
     opacity: 0.6;
@@ -415,62 +544,65 @@
   .picker small,
   .picker .btn small {
     display: block;
-    margin-top: 2px;
-    font-size: 0.75rem;
-    font-weight: 400;
-    opacity: 0.7;
+    margin-top: 5px;
+    color: #c1d5d9;
+    font-size: 0.77rem;
+    font-weight: 450;
+    line-height: 1.35;
   }
   .error {
-    max-width: 620px;
     margin: 0;
-    color: #ffb4b4;
-    font-size: 1rem;
-    text-align: center;
+    color: #ffb8b0;
+    font-size: 0.92rem;
   }
   .notice {
     margin: 0;
-    color: #9fe1c0;
-    font-size: 0.95rem;
-    text-align: center;
+    color: #93e2bc;
+    font-size: 0.92rem;
+  }
+  .picker > .error,
+  .picker > .notice {
+    grid-column: 1 / -1;
   }
   .dialog,
   .worlds,
   .capabilities {
-    width: min(100%, 620px);
-    padding: 18px 20px;
-    border: 1px solid #293a4d;
-    border-radius: 12px;
-    background: #111a25cc;
+    width: 100%;
+    padding: 20px 24px;
+    border: 1px solid #3a5260;
+    border-radius: 14px;
+    background: #172430ec;
   }
   .dialog {
-    border-color: #68b9f2;
+    border-color: #63bdaa;
+    box-shadow: 0 14px 42px #0007;
   }
   .dialog h2,
-  .worlds h2,
-  .capabilities h2 {
+  .worlds h2 {
     margin: 0 0 12px;
-    color: #dce8f4;
-    font-size: 1rem;
+    color: #f3f9f8;
+    font-size: 1.06rem;
   }
   .detail {
     margin: 0;
-    color: #aebdcb;
-    font-size: 0.85rem;
+    color: #b6c8ce;
+    font-size: 0.86rem;
+    line-height: 1.5;
   }
   .field {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 5px;
     margin: 12px 0;
-    font-size: 0.85rem;
-    color: #c1ccd8;
+    color: #d2e1e3;
+    font-size: 0.86rem;
   }
   .field input {
-    padding: 8px 10px;
-    border: 1px solid #49627d;
+    padding: 9px 12px;
+    border: 1px solid #54707a;
     border-radius: 8px;
-    background: #182331;
-    color: #f2f5f8;
+    background: #1e303d;
+    color: #fff;
     font-size: 1rem;
   }
   .actions {
@@ -478,44 +610,45 @@
     flex-wrap: wrap;
     justify-content: flex-end;
     gap: 8px;
-    margin-top: 12px;
+    margin-top: 14px;
   }
   .dialog button,
   .row-actions button {
-    min-height: 36px;
-    padding: 6px 12px;
-    border: 1px solid #49627d;
+    min-height: 38px;
+    padding: 7px 12px;
+    border: 1px solid #536c77;
     border-radius: 8px;
-    background: #182331;
-    color: #f2f5f8;
-    font-weight: 700;
+    background: #263845;
+    color: #f1f8f7;
+    font-weight: 650;
     cursor: pointer;
   }
-  .dialog button.primary {
-    background: #1f5f8f;
-    border-color: #68b9f2;
+  .dialog button:hover,
+  .row-actions button:hover {
+    background: #30515a;
+    border-color: #8cddc9;
+  }
+  .dialog button.primary,
+  .row-actions [data-world-open] {
+    border-color: #5fb29f;
+    background: #28645c;
   }
   .row-actions button.danger {
-    background: #6b2b2b;
-    border-color: #ee7777;
+    border-color: #d48e89;
+    background: #683839;
   }
   .dialog button:disabled,
   .row-actions button:disabled {
     opacity: 0.5;
     cursor: default;
   }
-  .capabilities ul {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
   .world {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
-    padding: 8px 0;
-    border-top: 1px solid #1f2b3a;
+    gap: 18px;
+    padding: 14px 0;
+    border-top: 1px solid #324955;
   }
   .world:first-child {
     border-top: 0;
@@ -523,63 +656,109 @@
   .meta {
     display: flex;
     flex-direction: column;
+    gap: 3px;
     min-width: 0;
   }
   .meta .name {
-    font-weight: 700;
     overflow: hidden;
+    color: #f1f8f7;
+    font-weight: 720;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .row-actions {
     display: flex;
-    gap: 6px;
     flex: 0 0 auto;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .capabilities {
+    padding-block: 13px;
+  }
+  .capabilities summary {
+    color: #a9c1c4;
+    cursor: pointer;
+    font-size: 0.82rem;
+    font-weight: 650;
+  }
+  .capabilities summary:hover {
+    color: #e8fbf4;
   }
   .capabilities ul {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 8px 16px;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 7px 16px;
+    list-style: none;
+    margin: 14px 0 0;
+    padding: 0;
   }
   .capabilities li {
     display: flex;
     align-items: center;
     gap: 9px;
-    min-height: 28px;
-    color: #d5e0eb;
-    font-size: 0.9rem;
+    min-height: 26px;
+    color: #d1e0e3;
+    font-size: 0.86rem;
   }
   .dot {
-    width: 10px;
-    height: 10px;
-    flex: 0 0 10px;
+    flex: 0 0 8px;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
-    background: #69798a;
-    box-shadow: 0 0 0 3px #69798a22;
+    background: #7b8d97;
   }
   .ok .dot {
-    background: #4fd09a;
-    box-shadow: 0 0 0 3px #4fd09a22;
+    background: #71dec2;
+    box-shadow: 0 0 0 3px #71dec21d;
   }
   .missing .dot {
-    background: #ee7777;
-    box-shadow: 0 0 0 3px #ee777722;
+    background: #e9908c;
   }
   .state {
     margin-left: auto;
-    color: #aebdcb;
+    color: #a7b8bf;
+  }
+  @media (max-width: 840px) {
+    .launch-top {
+      grid-template-columns: 1fr;
+      gap: 26px;
+    }
+    .welcome {
+      max-width: 600px;
+    }
+    .welcome-mark {
+      margin-bottom: 16px;
+    }
   }
   @media (max-width: 560px) {
     main {
-      justify-content: flex-start;
-      padding-top: 48px;
+      align-items: stretch;
+      padding: 22px 12px;
     }
-    .capabilities ul {
+    .launch-top {
+      padding: 22px 16px;
+    }
+    .picker {
       grid-template-columns: 1fr;
+    }
+    .picker button,
+    .picker .btn {
+      min-height: 58px !important;
     }
     .world {
       flex-direction: column;
       align-items: stretch;
+    }
+    .row-actions button {
+      flex: 1 1 auto;
+    }
+    .dialog,
+    .worlds,
+    .capabilities {
+      padding-inline: 16px;
+    }
+    .capabilities ul {
+      grid-template-columns: 1fr;
     }
   }
 </style>

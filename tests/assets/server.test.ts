@@ -40,7 +40,7 @@ describe("AssetServer (§7)", () => {
     );
 
     expect(hash).toBe(SHA256_ABC);
-    expect(entry).toEqual({ name: "abc.txt", mime: "text/plain", size: 3, chunks: 1 });
+    expect(entry).toEqual({ name: "abc.txt", mime: "text/plain", size: 3, chunks: 1, visibility: "referenced" });
 
     // OPFS path: root/vtt/<worldId>/assets/<hash>
     const assetsDir = root.dirs.get("vtt")?.dirs.get(worldId)?.dirs.get("assets");
@@ -73,6 +73,20 @@ describe("AssetServer (§7)", () => {
     const manifest = await server.manifest();
     expect(Object.keys(manifest)).toHaveLength(1);
     expect(manifest[first.hash]?.name).toBe("a.png");
+    server.close();
+  });
+
+  test("FX import stores player-stream and world-export rights independently; reimport cannot widen them", async () => {
+    const server = await AssetServer.open({ worldId: "w-assets-fx-rights", root: new MemDirHandle() });
+    const bytes = new Uint8Array([42, 19, 8]);
+    const { hash } = await server.import(bytes, "patron-effect.webm", "video/webm", "gm", "restricted");
+    expect((await server.manifest())[hash]).toMatchObject({ visibility: "gm", exportRights: "restricted" });
+    await expect(server.import(bytes, "same-effect.webm", "video/webm", "referenced", "granted"))
+      .rejects.toThrow(/rights were not changed/);
+    expect((await server.meta(hash))?.exportRights).toBe("restricted");
+    // An explicit, separate GM reclassification may change both policies.
+    await server.describe(hash, { visibility: "referenced", exportRights: "granted" });
+    expect((await server.meta(hash))).toMatchObject({ visibility: "referenced", exportRights: "granted" });
     server.close();
   });
 
@@ -129,6 +143,7 @@ describe("AssetServer (§7)", () => {
       mime: "image/png",
       size: 1,
       chunks: 1,
+      visibility: "referenced",
     });
     server.close();
   });

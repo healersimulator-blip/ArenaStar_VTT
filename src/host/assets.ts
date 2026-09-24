@@ -13,7 +13,6 @@
 import type { AssetId, WorldId } from "../core/ids";
 import type { AssetManifest, AssetManifestEntry } from "../core/documents";
 import type { DocumentStore } from "../core/store";
-import type { WorldCollections } from "../core/documents";
 import type { DirHandleLike } from "../storage/opfs";
 import { OpfsAssetStore } from "../storage/opfs";
 import {
@@ -86,11 +85,24 @@ export class AssetServer {
     return server;
   }
 
-  /** Import bytes under their content hash; idempotent per content. */
-  async import(bytes: Uint8Array, name: string, mime: string): Promise<ImportedAsset> {
+  /**
+   * Import bytes under their content hash; idempotent per content. New assets
+   * are private until referenced by a viewer-visible document. Explicit
+   * `world` sharing is a GM publishing decision, not inferred from a hash.
+   */
+  async import(
+    bytes: Uint8Array, name: string, mime: string,
+    visibility: NonNullable<AssetManifestEntry["visibility"]> = "referenced",
+    exportRights?: AssetManifestEntry["exportRights"],
+  ): Promise<ImportedAsset> {
     const hash = await sha256Hex(bytes);
     const existing = await getAsset(this.db, this.worldId, hash);
     if (existing) {
+      // A hash is a blob identity, not a license. Reimporting identical bytes
+      // cannot silently widen player sharing or grant world-archive rights.
+      if (exportRights !== undefined &&
+          (existing.exportRights !== exportRights || existing.visibility !== visibility))
+        throw new Error("Media already exists with different sharing/export permissions; existing rights were not changed");
       return { hash, entry: manifestEntry(existing) };
     }
     const size = bytes.length;
@@ -104,6 +116,8 @@ export class AssetServer {
         mime,
         size,
         chunks,
+        visibility,
+        ...(exportRights ? { exportRights } : {}),
       });
     } else {
       await putAsset(this.db, {
@@ -113,11 +127,14 @@ export class AssetServer {
         mime,
         size,
         chunks,
+        visibility,
+        ...(exportRights ? { exportRights } : {}),
         bytes: new Uint8Array(bytes),
       });
     }
     this.onManifest?.(await this.manifest());
-    return { hash, entry: { name, mime, size, chunks } };
+    return { hash, entry: { name, mime, size, chunks, visibility,
+      ...(exportRights ? { exportRights } : {}) } };
   }
 
   async get(hash: AssetId): Promise<Uint8Array | undefined> {
@@ -152,6 +169,8 @@ export class AssetServer {
     if (!record) throw new Error(`describe: unknown asset ${hash}`);
     const entry: AssetManifestEntry = { ...manifestEntry(record), ...patch };
     const updated: AssetRecord = { ...record, name: entry.name, mime: entry.mime };
+    if (entry.visibility !== undefined) updated.visibility = entry.visibility;
+    if (entry.exportRights !== undefined) updated.exportRights = entry.exportRights;
     if (entry.width !== undefined) updated.width = entry.width;
     if (entry.height !== undefined) updated.height = entry.height;
     if (entry.thumb !== undefined) updated.thumb = entry.thumb;
@@ -206,6 +225,8 @@ function manifestEntry(record: AssetRecord): AssetManifestEntry {
     size: record.size,
     chunks: record.chunks,
   };
+  if (record.visibility !== undefined) entry.visibility = record.visibility;
+  if (record.exportRights !== undefined) entry.exportRights = record.exportRights;
   if (record.width !== undefined) entry.width = record.width;
   if (record.height !== undefined) entry.height = record.height;
   if (record.thumb !== undefined) entry.thumb = record.thumb;
@@ -218,9 +239,12 @@ function manifestEntry(record: AssetRecord): AssetManifestEntry {
  * Wire the server's manifest into the host DocumentStore's world
  * (D-015: assetManifest is maintained by the AssetServer, never via Ops).
  */
-export function wireManifestToStore(server: AssetServer, store: DocumentStore): void {
+export function wireManifestToStore(
+  server: AssetServer, store: DocumentStore, onChange?: () => void,
+): void {
   const sink = (manifest: AssetManifest): void => {
-    (store.world as WorldCollections).assetManifest = manifest;
+    store.replaceAssetManifest(manifest);
+    onChange?.();
   };
   // re-route the server's hook through the store + rehydrate at startup
   server.installManifestSink(sink);

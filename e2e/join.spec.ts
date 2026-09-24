@@ -74,10 +74,22 @@ test.describe("join scenario (§2/§6/§14)", () => {
     await expect
       .poll(() => playerCall<number>(player, "seq"), { timeout: 20_000 })
       .toBeGreaterThanOrEqual(hostSeq + 1); // + the join user-create op
-    expect(await playerCall<string>(player, "role")).toBe("PLAYER");
+    await expect
+      .poll(() => playerCall<string | null>(player, "role"), { timeout: 20_000 })
+      .toBe("PLAYER");
     await expect.poll(() => playerCall<number>(player, "tokenCount")).toBe(1);
     expect(await playerCall<string>(player, "worldName")).toBe("World One");
     await expect(player.locator("#pstatus")).toContainText("World One", { timeout: 20_000 });
+    const playerBoard = await player.locator(".canvas-host").boundingBox();
+    const contentDock = await player.locator("[data-player-dock]").boundingBox();
+    expect(playerBoard?.y).toBeLessThan(100);
+    expect((contentDock?.x ?? 0)).toBeGreaterThan((playerBoard?.x ?? 0) + (playerBoard?.width ?? 0) - 1);
+    await player.click('[data-player-tab="actors"]');
+    await expect(player.locator("[data-player-active-tab]")).toHaveAttribute("data-player-active-tab", "actors");
+    await player.click("[data-player-setup]");
+    await expect(player.locator("[data-player-guide] [data-onboarding]")).toBeVisible();
+    await player.getByRole("button", { name: "Close guide" }).click();
+    await player.click('[data-player-tab="chat"]');
 
     // ── player drags the owned token; the GM sees the move (§14) ──
     const before = await hostCall<{ x: number; y: number } | null>(host, "tokenPos");

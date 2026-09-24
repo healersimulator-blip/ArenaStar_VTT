@@ -10,8 +10,8 @@ import type { CanFn } from "../../src/core/ownership";
 describe("§13 MsgKind map", () => {
   test("all byte values are unique", () => {
     const values = Object.values(MsgKind);
-    expect(values).toHaveLength(38);
-    expect(new Set(values).size).toBe(38);
+    expect(values).toHaveLength(58);
+    expect(new Set(values).size).toBe(values.length);
   });
 
   test("every kind name is exhaustively classified by direction (compile-time Record)", () => {
@@ -23,8 +23,28 @@ describe("§13 MsgKind map", () => {
       "roll.pending": "c2h",
       "roll.reroll": "c2h",
       "roll.revert": "c2h",
+      "action.revert": "c2h",
       "roll.delegate": "c2h",
       "roll.apply": "c2h",
+      "automation.request": "c2h",
+      "automation.click": "c2h",
+      "automation.trace": "h2c",
+      "tagger.rules": "c2h",
+      "tagger.rules.result": "h2c",
+      "prefab.place": "c2h",
+      "prefab.result": "h2c",
+      "summon.place": "c2h",
+      "summon.dismiss": "c2h",
+      "summon.result": "h2c",
+      "macro.request": "c2h",
+      "macro.result": "h2c",
+      "fx.request": "c2h",
+      "fx.start": "h2c",
+      "fx.sync": "c2h",
+      "fx.stop": "c2h",
+      "fx.stopMatching": "c2h",
+      "fx.end": "h2c",
+      "asset.manifest": "h2c",
       "roll.challenge": "h2c",
       ephemeral: "both",
       "asset.get": "c2h",
@@ -55,7 +75,7 @@ describe("§13 MsgKind map", () => {
       pong: "internal",
       "relay.frame": "internal",
     };
-    expect(Object.keys(direction)).toHaveLength(38);
+    expect(Object.keys(direction)).toHaveLength(58);
     expect(direction.hello).toBe("c2h");
   });
 });

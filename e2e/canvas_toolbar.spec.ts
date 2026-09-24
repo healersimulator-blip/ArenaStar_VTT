@@ -174,7 +174,7 @@ test.describe("canvas toolbar (§10, D-255)", () => {
       await page.mouse.up();
     }
     await expect.poll(() => hostCall<unknown[]>(page, "drawings")).toHaveLength(2);
-    await page.locator('[data-canvas-toolbar] button', { hasText: "Erase drawings" }).click();
+    await page.locator('[data-canvas-action="erase-all"]').click();
     await expect.poll(() => hostCall<unknown[]>(page, "drawings")).toHaveLength(0);
   });
 });

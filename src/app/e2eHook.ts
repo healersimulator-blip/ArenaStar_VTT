@@ -116,6 +116,10 @@ export interface ModelsSmokeResult {
 export interface AppSurface {
   worldId(): string;
   seq(): number;
+  /** Committed replica chat contents, for undo/projection UI regressions. */
+  chatLines(): string[];
+  /** Test-only durability barrier: await the queued IDB oplog append before navigating away. */
+  drainOps(): Promise<number>;
   tokenCount(): number;
   tokenPos(): { x: number; y: number } | null;
   sceneImg(): string | null;
@@ -1827,6 +1831,8 @@ function appSurface(app: HostApp): AppSurface {
   return {
     worldId: () => app.worldId,
     seq: () => client.store.seq,
+    chatLines: () => client.store.getAll("messages").map((message) => message.content),
+    drainOps: async () => { await app.persister.drain(); return app.store.seq; },
     tokenCount: () => scene()?.tokens.length ?? 0,
     tokenPos: () => {
       const token = firstToken();

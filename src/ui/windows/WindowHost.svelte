@@ -27,6 +27,9 @@
   import ArmyWindow from "../armies/ArmyWindow.svelte";
   import { armyWindowRules } from "../armies/armyModel";
   import type { ClientSync } from "../../client/sync";
+  import type { AssetManifest } from "../../core/documents";
+  import type { FxImportPermissions } from "../../core/fx";
+  import type { RequestSummonPick } from "../macros/summonPicker";
   import type { ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import type { AgentManager } from "../../app/agentManager";
@@ -45,6 +48,11 @@
     bindings = {},
     isGM = false,
     importImage = null,
+    onFxImport = null,
+    listFxAssets = null,
+    setFxAssetRights = null,
+    getFxAsset = null,
+    onPickSummon = null,
     onHexRollTable = null,
     onHexOpenScene = null,
     onEncounterPlaceAll = null,
@@ -69,6 +77,12 @@
     isGM?: boolean;
     /** D-270: the app's asset pipeline, for the hexcrawl wizard's map step. */
     importImage?: ((file: File) => Promise<{ hash: string; width?: number; height?: number }>) | null;
+    onFxImport?: ((file: File, permissions: FxImportPermissions) => Promise<{ hash: string; mime: string; name: string }>) | null;
+    listFxAssets?: (() => Promise<AssetManifest>) | null;
+    setFxAssetRights?: ((hash: string, permissions: FxImportPermissions) => Promise<void>) | null;
+    /** GM-local comparison reads the host's private asset store, never a player network route. */
+    getFxAsset?: ((hash: string) => Promise<Uint8Array | undefined>) | null;
+    onPickSummon?: RequestSummonPick | null;
     /**
      * D-273: a hex window's table row. The roll needs the engine's ledger, card and result
      * window — all three live in the shell — so the window asks up rather than drawing dice of
@@ -245,7 +259,9 @@
         {:else if win.kind === "permissions"}
           <PermissionsPanel {client} {bus} />
         {:else if win.kind === "macros"}
-          <MacrosPanel {client} {bus} />
+          <MacrosPanel {client} {bus} {onFxImport} {listFxAssets} {setFxAssetRights} {getFxAsset}
+            listCompendia={isGM && packages ? () => packages.compendia() : null} activeSceneId={sceneId}
+            {onPickSummon} />
         {:else if win.kind === "settings"}
           <SettingsPanel
             {client}

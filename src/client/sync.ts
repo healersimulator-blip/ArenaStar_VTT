@@ -1,8 +1,8 @@
 /**
  * §5 ClientSync — the client-side sync endpoint.
  *
- * - tracks lastSeq; reconnects send it (hello.lastSeq, D-031) and the host
- *   answers ops-since-seq or a full snapshot;
+ * - tracks lastSeq; reconnects send it (hello.lastSeq, D-031). GM/assistant
+ *   can receive ops-since; players receive a fresh projected snapshot;
  * - applies committed envelopes strictly in seq order, buffering gaps
  *   (late join: ops with seq > snapshot.seq apply after the snapshot, §14);
  * - optimistic UI (§5): latency-sensitive ops apply locally to an overlay
@@ -18,6 +18,13 @@ import type {
   ClockMsg,
   EphemeralKind,
   EphemeralMsg,
+  FxStartMsg,
+  FxEndMsg,
+  AutomationTraceMsg,
+  TaggerRulesResultMsg,
+  PrefabResultMsg,
+  SummonResultMsg,
+  MacroResultMsg,
   FogStateMsg,
   HelloMsg,
   PongMsg,
@@ -35,7 +42,7 @@ import type {
   WelcomeSimInfo,
   WireMessage,
 } from "../core/messages";
-import type { Json } from "../core/documents";
+import type { AssetManifest, DocRef, Json } from "../core/documents";
 import { randomSeedHex, sha256Hex } from "../dice/commitReveal";
 import type { AssetId, TxId, UserId } from "../core/ids";
 import type { Role } from "../core/documents";
@@ -46,6 +53,7 @@ import { createEphemeralRateLimiter, TokenBucket } from "../core/ratelimit";
 import type { ModelPool } from "../core/strategic";
 import type { SimDelta } from "../core/sim";
 import type { DocId } from "../core/ids";
+import type { FxInstanceFilter } from "../core/fxInstances";
 import type { SysSchema } from "../sim/pool";
 import type { RollHighlightRequest } from "./rollHighlight";
 import { applySimDelta, decodeSimDelta, decodeSimSnapshot, poolFromSnapshot } from "../sim/codec";
@@ -53,6 +61,7 @@ import { applySimDelta, decodeSimDelta, decodeSimSnapshot, poolFromSnapshot } fr
 export interface ClientEvents {
   welcome: { user: { id: UserId; role: Role; name: string }; world: WelcomeMsg["world"] };
   snapshot: { seq: number };
+  assetManifest: AssetManifest;
   ops: { envelope: OpEnvelope; reconciled: TxId | null };
   rejected: { txId: TxId; reason: RejectedMsg["reason"]; detail: string };
   ephemeral: EphemeralMsg;
@@ -71,6 +80,20 @@ export interface ClientEvents {
   clock: ClockMsg;
   /** §7 scheduled playback command (host clock; play at atHostTime − offset). */
   audio: AudioCmdMsg;
+  /** A host-approved timeline for this viewer only (not an ephemeral relay). */
+  fx: FxStartMsg;
+  /** Only a recipient of a persistent cue receives its end/revocation. */
+  fxEnd: FxEndMsg;
+  /** GM-only tile/zone execution diagnostics. */
+  automationTrace: AutomationTraceMsg;
+  /** Host-allocated Tagger rules on exact scene-qualified refs (GM only). */
+  taggerRulesResult: TaggerRulesResultMsg;
+  /** Host-validated atomic prefab placement (GM only). */
+  prefabResult: PrefabResultMsg;
+  /** Source-free host result for an authorized summon or dismissal. */
+  summonResult: SummonResultMsg;
+  /** A completed GM-reviewed macro; non-GM results omit logs and returned data. */
+  macroResult: MacroResultMsg;
   /** F01/F03: a chat roll-card link asks the canvas to center + outline. */
   rollHighlight: RollHighlightRequest;
   /** D-250: the host's answer to `requestFog` (also resolves the pending promise). */
@@ -188,8 +211,8 @@ export class ClientSync {
 
   /**
    * Reconnect the (stateful) client to a fresh transport, keeping the replica
-   * and pending intents. The new hello carries lastSeq so the host can answer
-   * with ops-since-seq instead of a full snapshot (§5, D-031).
+   * and pending intents. The hello carries lastSeq; host uses ops-since only
+   * for trusted roles, and a projected snapshot for players (§5, D-031).
    */
   reattach(transport: Transport): void {
     if (!this.hello) throw new Error("reattach: client was never connected");
@@ -346,9 +369,95 @@ export class ClientSync {
     this.send({ kind: "roll.revert", messageId });
   }
 
+  /** Ask the host to check and reverse one durable world-action receipt. */
+  actionRevert(receiptId: DocId): void {
+    this.send({ kind: "action.revert", receiptId });
+  }
+
   /** F01 — GM delegates reroll window to a player (expires in 2 turns). */
   rollDelegate(messageId: DocId, playerId: UserId): void {
     this.send({ kind: "roll.delegate", messageId, playerId });
+  }
+
+  /** GM/assistant-only graph invocation and dry-run; players must click the visible tile below. */
+  requestAutomation(automationId: DocId, sceneId: DocId, method: import("../core/automation").AutomationMethod, tokenId?: DocId, dryRun = false): string {
+    const requestId = globalThis.crypto.randomUUID();
+    this.send({ kind: "automation.request", requestId, automationId, sceneId, method,
+      ...(tokenId ? { tokenId } : {}), ...(dryRun ? { dryRun: true } : {}) });
+    return requestId;
+  }
+
+  /** Request host-allocated, atomic placement of a saved GM prefab. */
+  requestPrefabPlace(prefabId: DocId, sceneId: DocId, at: { x: number; y: number }, rotation = 0, scale = 1): string {
+    const requestId = globalThis.crypto.randomUUID();
+    this.send({ kind: "prefab.place", requestId, prefabId, sceneId, at, rotation, scale });
+    return requestId;
+  }
+
+  /** Request a published summon; source/actor fields never leave the host. */
+  requestSummonPlace(presetId: DocId, sceneId: DocId, at: { x: number; y: number }, summonerTokenId?: DocId): string {
+    const requestId = globalThis.crypto.randomUUID();
+    this.send({ kind: "summon.place", requestId, presetId, sceneId, at,
+      ...(summonerTokenId ? { summonerTokenId } : {}) });
+    return requestId;
+  }
+
+  /** Expand existing {#}/{id} templates on live host documents; GM/assistant only. */
+  requestTagRules(refs: DocRef[]): string {
+    const requestId = globalThis.crypto.randomUUID();
+    this.send({ kind: "tagger.rules", requestId, refs });
+    return requestId;
+  }
+
+  /** Caller may dismiss their instance; GM/assistant may dismiss any. */
+  requestSummonDismiss(sceneId: DocId, tokenId: DocId): string {
+    const requestId = globalThis.crypto.randomUUID();
+    this.send({ kind: "summon.dismiss", requestId, sceneId, tokenId });
+    return requestId;
+  }
+
+  /** Canvas click names a visible tile/point, never a GM-only graph ID or step. */
+  requestAutomationClick(sceneId: DocId, tileId: DocId, point: { x: number; y: number }, tokenId?: DocId): string {
+    const requestId = globalThis.crypto.randomUUID();
+    this.send({ kind: "automation.click", requestId, sceneId, tileId, point,
+      ...(tokenId ? { tokenId } : {}) });
+    return requestId;
+  }
+
+  /** Execute a published, revision-pinned script by ID; no code/grants/ops cross the wire. */
+  requestMacro(macroId: DocId, args: Record<string, Json> = {}): string {
+    const requestId = globalThis.crypto.randomUUID();
+    this.send({ kind: "macro.request", requestId, macroId, args });
+    return requestId;
+  }
+
+  /** Request a host-approved saved sequence. No client-authored cue or audience travels. */
+  requestSequence(macroId: DocId, sceneId: DocId, sourceTokenId?: DocId, targetTokenId?: DocId): string {
+    const requestId = globalThis.crypto.randomUUID();
+    this.send({ kind: "fx.request", requestId, macroId, sceneId,
+      ...(sourceTokenId ? { sourceTokenId } : {}),
+      ...(targetTokenId ? { targetTokenId } : {}),
+    });
+    return requestId;
+  }
+
+  /** Replay only live persistent instances entitled to this user and scene. */
+  requestFxSync(sceneId: DocId): void {
+    this.send({ kind: "fx.sync", sceneId });
+  }
+
+  /** End an owned persistent instance, or any instance as GM/assistant. */
+  requestFxStop(instanceId: DocId): string {
+    const requestId = globalThis.crypto.randomUUID();
+    this.send({ kind: "fx.stop", requestId, instanceId });
+    return requestId;
+  }
+
+  /** GM-only live scene filter, with one authoritative transaction/undo. */
+  requestFxStopMatching(sceneId: DocId, filter: FxInstanceFilter): string {
+    const requestId = globalThis.crypto.randomUUID();
+    this.send({ kind: "fx.stopMatching", requestId, sceneId, filter });
+    return requestId;
   }
 
   /** §7: lazy asset fetch with resume; answered by asset.chunk frames. */
@@ -394,6 +503,11 @@ export class ClientSync {
       case "snapshot":
         this.applySnapshot(msg);
         return;
+      case "asset.manifest":
+        this.store.replaceAssetManifest(msg.manifest);
+        this.echoImpl.replaceAssetManifest(msg.manifest);
+        this.bus.emit("assetManifest", msg.manifest);
+        return;
       case "ops":
         this.applyCommitted(msg);
         return;
@@ -405,6 +519,27 @@ export class ClientSync {
         return;
       case "ephemeral":
         this.bus.emit("ephemeral", msg);
+        return;
+      case "fx.start":
+        this.bus.emit("fx", msg);
+        return;
+      case "fx.end":
+        this.bus.emit("fxEnd", msg);
+        return;
+      case "automation.trace":
+        this.bus.emit("automationTrace", msg);
+        return;
+      case "tagger.rules.result":
+        this.bus.emit("taggerRulesResult", msg);
+        return;
+      case "prefab.result":
+        this.bus.emit("prefabResult", msg);
+        return;
+      case "summon.result":
+        this.bus.emit("summonResult", msg);
+        return;
+      case "macro.result":
+        this.bus.emit("macroResult", msg);
         return;
       case "kick":
         this.bus.emit("kick", { reason: msg.reason });
@@ -424,6 +559,14 @@ export class ClientSync {
       case "intent":
       case "roll":
       case "roll.reveal":
+      case "automation.request":
+      case "tagger.rules":
+      case "prefab.place":
+      case "macro.request":
+      case "fx.request":
+      case "fx.sync":
+      case "fx.stop":
+      case "fx.stopMatching":
       case "asset.get":
       case "fog.put":
       case "fog.get":
@@ -635,7 +778,10 @@ export class ClientSync {
   }
 
   private applySnapshot(msg: SnapshotMsg): void {
-    this.store.hydrate(msg.world.collections, msg.seq);
+    // The manifest is a separately projected snapshot field, not part of
+    // `world.collections`. Keep the replica's MIME/variants in sync with the
+    // same viewer entitlement decision that gates asset.get on the host.
+    this.store.hydrate({ ...msg.world.collections, assetManifest: msg.manifest }, msg.seq);
     // Late join (§14): buffered ops with seq > snapshot.seq apply now, in order.
     const buffered = this.buffer.filter((env) => env.seq > msg.seq).sort((a, b) => a.seq - b.seq);
     this.buffer = [];

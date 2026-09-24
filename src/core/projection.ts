@@ -27,9 +27,11 @@ import {
   type CellFeature,
   type DocRef,
   type JournalDocument,
+  type MacroDocument,
   type MessageDocument,
   type NoteDocument,
   type SceneDocument,
+  type TileDocument,
   type TokenDocument,
   type WorldCollections,
 } from "./documents";
@@ -38,6 +40,8 @@ import { getEffectiveOwnership } from "./permissions";
 import type { PermissionUser } from "./ownership";
 import type { Json } from "./documents";
 import { openCellKeys, projectCellForViewer } from "./hexcrawl/visibility";
+import { validateScriptMacro } from "./scriptMacros";
+import { summonMarker, validateSummon } from "./summons";
 
 export interface ProjectedWorld {
   seq: number;
@@ -129,6 +133,18 @@ export function docVisibleTo(
   parent?: BaseDocument,
 ): boolean {
   if (isGm(user)) return true;
+  if (doc.type === "automation" || doc.type === "prefab" || doc.type === "fxInstance") return false; // host-owned definitions and instances
+  // A GM-audience timeline's authored media names/hashes are also private;
+  // omitting just its cue while publishing its sequence would leak assets.
+  if (doc.type === "macro" && (doc as MacroDocument).kind === "summon" &&
+      !(validateSummon((doc as MacroDocument).summon).ok &&
+        (doc as MacroDocument).summon?.playerCallable === true)) return false;
+  if (doc.type === "macro" && (doc as MacroDocument).kind === "sequence" &&
+      (doc as MacroDocument).sequence?.audience === "gm") return false;
+  if ((doc.type === "token" && (doc as TokenDocument).hidden ||
+       doc.type === "tile" && (doc as TileDocument).hidden) && parent?.type === "scene") {
+    return getEffectiveOwnership(user, doc, parent) >= OWNERSHIP_LEVELS.OWNER;
+  }
   if (doc.type === "note") {
     const note = doc as NoteDocument;
     // An explicit pin state wins. `visible: false` is the GM's "not yet"; `visible: true` is
@@ -142,11 +158,14 @@ export function docVisibleTo(
 
 /**
  * Fields whose change can move a document across a session's read boundary: the ownership map
- * everywhere, plus the pin visibility flag on notes. `host/sync.ts` watches updates that touch
- * these to rewrite the envelope per session (grant → create, revoke → delete).
+ * everywhere, plus hidden flags on tokens/tiles and pin visibility on notes. `host/sync.ts`
+ * watches updates that touch these to rewrite the envelope per session (grant → create,
+ * revoke → delete).
  */
 export function visibilityFields(doc: BaseDocument): readonly string[] {
-  return doc.type === "note" ? ["ownership", "visible"] : ["ownership"];
+  return doc.type === "note" ? ["ownership", "visible"]
+    : doc.type === "token" || doc.type === "tile" ? ["ownership", "hidden"]
+      : doc.type === "macro" ? ["ownership", "kind", "sequence", "summon"] : ["ownership"];
 }
 
 /**
@@ -173,13 +192,133 @@ function projectSceneCells(scene: SceneDocument): CellDocument[] | null {
   return changed ? out : null;
 }
 
+/** Scene-visible placeables may belong to a secret nested hierarchy. Instance
+ * IDs, invisible parent IDs and the GM's source-scene ID are never needed by
+ * player rendering; only the authoritative host retains attachment metadata. */
+const PREFAB_PARTS = ["tokens", "tiles", "walls", "lights", "sounds", "drawings", "templates", "notes"] as const;
+function stripPrefabMarker<T extends BaseDocument>(doc: T): T {
+  if (doc.flags?.prefab === undefined && doc.flags?.summon === undefined &&
+      doc.flags?.summonStatus === undefined) return doc;
+  const { prefab: _hostOnly, summon: _summon, summonStatus: _status, ...flags } = doc.flags;
+  void _hostOnly; void _summon; void _status;
+  const marker = doc.type === "token" ? summonMarker(doc) : null;
+  return { ...doc, flags: marker ? { ...flags, summonStatus: {
+    ownerId: marker.ownerId, ...(marker.expiresAt !== undefined ? { expiresAt: marker.expiresAt } : {})
+  } } : flags };
+}
+
+function projectPrefabCreate(op: Extract<Op, { kind: "create" }>): Op {
+  if (op.coll !== "actors" && (!PREFAB_PARTS.some((part) => part === op.coll) || !op.parent)) return op;
+  if (op.data.flags?.prefab === undefined && op.data.flags?.summon === undefined &&
+      op.data.flags?.summonStatus === undefined) return op;
+  return { ...op, data: stripPrefabMarker(op.data) };
+}
+
+function projectPrefabDiff(op: Extract<Op, { kind: "update" }>): Op | null {
+  if (op.ref.coll !== "actors" && (!PREFAB_PARTS.some((part) => part === op.ref.coll) || !op.ref.parent)) return op;
+  const diff: Record<string, Json | null> = {};
+  let changed = false;
+  for (const [key, value] of Object.entries(op.diff)) {
+    const path = key.startsWith("-=") ? key.slice(2) : key;
+    if (["prefab", "summon", "summonStatus"].some((marker) => path === `flags.${marker}` || path.startsWith(`flags.${marker}.`))) {
+      changed = true;
+      continue;
+    }
+    if (path === "flags" && value && typeof value === "object" && !Array.isArray(value) &&
+        (Object.hasOwn(value, "prefab") || Object.hasOwn(value, "summon") ||
+          Object.hasOwn(value, "summonStatus"))) {
+      const { prefab: _hostOnly, summon: _summon, summonStatus: _status, ...flags } = value;
+      void _hostOnly; void _summon; void _status;
+      diff[key] = flags;
+      changed = true;
+      continue;
+    }
+    diff[key] = value;
+  }
+  if (Object.keys(diff).length === 0) return null;
+  return changed ? { ...op, diff } : op;
+}
+
+/** Scene updates can carry whole embedded arrays as well as individual child
+ * ops. Replace any touched array with its player-shaped committed version so a
+ * parent update cannot smuggle hidden children or prefab metadata past projection. */
+function projectSceneEmbedUpdate(
+  user: PermissionUser, op: Extract<Op, { kind: "update" }>, scene: SceneDocument,
+): Op {
+  const touched = PREFAB_PARTS.filter((part) => Object.keys(op.diff).some((key) => {
+    const path = key.startsWith("-=") ? key.slice(2) : key;
+    return path === part || path.startsWith(`${part}.`);
+  }));
+  if (touched.length === 0) return op;
+  const projected = projectScene(user, scene);
+  const diff: Record<string, Json | null> = {};
+  for (const [key, value] of Object.entries(op.diff)) {
+    const path = key.startsWith("-=") ? key.slice(2) : key;
+    if (!touched.some((part) => path === part || path.startsWith(`${part}.`))) diff[key] = value;
+  }
+  for (const part of touched) diff[part] = projected[part] as unknown as Json;
+  return { ...op, diff };
+}
+
 function projectScene(user: PermissionUser, scene: SceneDocument): SceneDocument {
-  const tokens = scene.tokens.filter((t) => tokenVisible(user, t, scene));
-  const notes = scene.notes.filter((n) => docVisibleTo(user, n, scene));
+  const tokens = scene.tokens.filter((t) => tokenVisible(user, t, scene)).map(stripPrefabMarker);
+  const tiles = scene.tiles.filter((t) => docVisibleTo(user, t, scene)).map(stripPrefabMarker);
+  const notes = scene.notes.filter((n) => docVisibleTo(user, n, scene)).map(stripPrefabMarker);
   const cells = projectSceneCells(scene);
-  if (tokens.length === scene.tokens.length && notes.length === scene.notes.length && !cells)
-    return scene;
-  return { ...scene, tokens, notes, ...(cells ? { cells } : {}) };
+  const markers = PREFAB_PARTS.some((coll) => scene[coll].some((doc) => doc.flags?.prefab !== undefined || doc.flags?.summon !== undefined ||
+    doc.flags?.summonStatus !== undefined));
+  if (tokens.length === scene.tokens.length && tiles.length === scene.tiles.length &&
+      notes.length === scene.notes.length && !cells && !markers) return scene;
+  return { ...scene, tokens, tiles, notes,
+    ...(markers ? { walls: scene.walls.map(stripPrefabMarker), lights: scene.lights.map(stripPrefabMarker),
+      sounds: scene.sounds.map(stripPrefabMarker), drawings: scene.drawings.map(stripPrefabMarker),
+      templates: scene.templates.map(stripPrefabMarker) } : {}),
+    ...(cells ? { cells } : {}) };
+}
+
+function projectMacro(macro: MacroDocument): MacroDocument {
+  if (macro.kind === "summon") {
+    const check = validateSummon(macro.summon);
+    // A published preset is a safe catalog entry, not a copy of its source
+    // reference or GM flags. Every update replaces this shape, too.
+    const safe: MacroDocument = { ...macro, command: "", system: {}, flags: {},
+      ...(check.ok && check.definition.playerCallable
+        ? { summon: { version: 1 as const, sceneId: check.definition.sceneId, playerCallable: true as const,
+          maxDistance: check.definition.maxDistance,
+          ...(check.definition.size !== undefined ? { size: check.definition.size } : {}),
+          ...(check.definition.requireLoS !== undefined ? { requireLoS: check.definition.requireLoS } : {}),
+          ...(check.definition.durationMs !== undefined ? { durationMs: check.definition.durationMs } : {}) } }
+        : {}) };
+    if (!check.ok || !check.definition.playerCallable) delete safe.summon;
+    delete safe.script; delete safe.scriptState; delete safe.sequence;
+    return safe;
+  }
+  if (macro.kind !== "script") {
+    if (macro.scriptState === undefined && macro.summon === undefined) return macro;
+    const safe = { ...macro };
+    delete safe.scriptState; delete safe.summon;
+    return safe;
+  }
+  // Public macros are a CALLABLE CATALOG, never a copy of source, grants,
+  // approval hash, execution history or arbitrary author metadata. Apply the
+  // identical shape to snapshots, creates and every subsequent update.
+  const core = macro.flags?.core;
+  const slot = core && typeof core === "object" && !Array.isArray(core) ? core.slot : undefined;
+  const validated = validateScriptMacro(macro);
+  const callable = validated.ok && validated.policy.playerCallable;
+  const safe: MacroDocument = { ...macro, command: "", system: {},
+    flags: { core: { playerCallable: callable,
+      ...(typeof slot === "number" && slot >= 1 && slot <= 5 ? { slot } : {}) } },
+    // Publish only validated input fields. A malformed import cannot smuggle
+    // private metadata inside a plausible input schema.
+    script: { version: 1, approvedHash: "", sceneId: "", runAs: "caller",
+      playerCallable: callable, grants: [],
+      inputs: validated.ok ? validated.policy.inputs.map(({ name, type, required }) =>
+        ({ name, type, ...(required !== undefined ? { required } : {}) })) : [] } };
+  delete safe.scriptState;
+  delete safe.sequence;
+  delete safe.summon;
+  return safe;
 }
 
 function projectJournal(journal: JournalDocument): JournalDocument {
@@ -207,10 +346,15 @@ export function projectWorld(
   };
   for (const coll of TOP_LEVEL_COLLECTIONS) {
     if (coll === "users") continue;
+    if (coll === "automations") { out.automations = []; continue; }
+    if (coll === "actionReceipts") { out.actionReceipts = []; continue; }
+    if (coll === "prefabs") { out.prefabs = []; continue; }
+    if (coll === "fxInstances") { out.fxInstances = []; continue; }
     const docs = world[coll] as readonly BaseDocument[];
     const kept: BaseDocument[] = [];
     for (const doc of docs) {
-      if (getEffectiveOwnership(user, doc) < OWNERSHIP_LEVELS.LIMITED) continue;
+      if (getEffectiveOwnership(user, doc) < OWNERSHIP_LEVELS.LIMITED ||
+          coll === "macros" && !docVisibleTo(user, doc)) continue;
       switch (coll) {
         case "scenes":
           kept.push(projectScene(user, doc as SceneDocument));
@@ -223,6 +367,12 @@ export function projectWorld(
           if (msg) kept.push(msg);
           break;
         }
+        case "macros":
+          kept.push(projectMacro(doc as MacroDocument));
+          break;
+        case "actors":
+          kept.push(stripPrefabMarker(doc));
+          break;
         default:
           kept.push(doc);
       }
@@ -260,7 +410,9 @@ function createVisible(
   op: Extract<Op, { kind: "create" }>,
   resolver?: ProjectionResolver,
 ): Op | null {
-  if (op.coll === "walls" || op.coll === "lights") return op; // §5/D-022
+  if (op.coll === "automations" || op.coll === "actionReceipts" || op.coll === "prefabs" || op.coll === "fxInstances") return null;
+  if (op.coll === "macros" && !docVisibleTo(user, op.data)) return null;
+  if (op.coll === "walls" || op.coll === "lights") return projectPrefabCreate(op); // §5/D-022
   // D-019 accepts creates without common fields; DocumentStore adds private ownership
   // on its clone, not on the original envelope. Projection must use the same default,
   // otherwise one sparse compendium actor can throw and stop a peer's whole broadcast
@@ -287,10 +439,10 @@ function createVisible(
     ) {
       return null;
     }
-    return op;
+    return projectPrefabCreate(op);
   }
-  if (op.coll === "notes" && !docVisibleTo(user, data, parent)) {
-    return null; // D-256: a hidden pin never reaches a player, even as a create op
+  if ((op.coll === "notes" || op.coll === "tiles") && !docVisibleTo(user, data, parent)) {
+    return null; // A concealed pin/tile never reaches a player, even as a create op.
   }
   if (op.coll === "cells") {
     // D-271: a closed cell never reaches a player, even as a create. The reveal set lives on
@@ -301,10 +453,15 @@ function createVisible(
     const projected = projectCellForViewer(data as CellDocument, openCellKeys(scene));
     return projected === null ? null : { ...op, data: projected as BaseDocument };
   }
-  if (getEffectiveOwnership(user, data, parent) >= OWNERSHIP_LEVELS.LIMITED) return op;
+  if (getEffectiveOwnership(user, data, parent) >= OWNERSHIP_LEVELS.LIMITED) {
+    if (op.coll === "macros") return { ...op, data: projectMacro(data as MacroDocument) };
+    if (op.coll === "scenes") return { ...op, data: projectScene(user, data as SceneDocument) };
+    if (op.coll === "journals") return { ...op, data: projectJournal(data as JournalDocument) };
+    return projectPrefabCreate(op);
+  }
   // Embedded create in a parent we cannot resolve (envelope-only mode): the
   // recipient sees the parent (host projects to connected users only), keep.
-  return op.parent !== undefined && parent === undefined ? op : null;
+  return op.parent !== undefined && parent === undefined ? projectPrefabCreate(op) : null;
 }
 
 function updateVisible(
@@ -312,9 +469,11 @@ function updateVisible(
   op: Extract<Op, { kind: "update" }>,
   resolver?: ProjectionResolver,
 ): Op | null {
-  if (op.ref.coll === "walls" || op.ref.coll === "lights") return op;
+  if (op.ref.coll === "automations" || op.ref.coll === "actionReceipts" || op.ref.coll === "prefabs" || op.ref.coll === "fxInstances") return null;
+  if (op.ref.coll === "walls" || op.ref.coll === "lights") return projectPrefabDiff(op);
   const doc = resolver?.resolve(op.ref);
-  if (!doc) return op; // envelope-only mode (D-023): host always passes a resolver
+  if (!doc) return projectPrefabDiff(op); // envelope-only mode (D-023): host always passes a resolver
+  if (op.ref.coll === "macros" && !docVisibleTo(user, doc)) return null;
   const parent = op.ref.parent !== undefined ? resolver?.resolve(op.ref.parent) : undefined;
   if (op.ref.coll === "messages") {
     const access = messageAccess(user, doc as MessageDocument);
@@ -331,7 +490,20 @@ function updateVisible(
     // Making a pin hidden again is a delete for the player (it leaves their replica).
     return { kind: "delete", ref: op.ref };
   }
+  if (op.ref.coll === "tiles" && !docVisibleTo(user, doc, parent)) return null;
   if (getEffectiveOwnership(user, doc, parent) < OWNERSHIP_LEVELS.LIMITED) return null;
+  if (op.ref.coll === "scenes") return projectSceneEmbedUpdate(user, op, doc as SceneDocument);
+  if (op.ref.coll === "macros" && (["script", "summon"].includes((doc as MacroDocument).kind) ||
+      Object.keys(op.diff).some((key) => ["kind", "script", "scriptState", "summon"].includes(key)))) {
+    const safe = projectMacro(doc as MacroDocument);
+    // A kind transition can leave a previous script's code in a client's replica;
+    // replace all macro-specific fields rather than forwarding a partial diff.
+    return { ...op, diff: { name: safe.name, kind: safe.kind, command: safe.command,
+      script: (safe.script as unknown as Json | undefined) ?? null, scriptState: null,
+      sequence: (safe.sequence as unknown as Json | undefined) ?? null,
+      summon: (safe.summon as unknown as Json | undefined) ?? null,
+      flags: safe.flags, system: safe.system, ownership: safe.ownership } };
+  }
   if (op.ref.coll === "pages" || op.ref.coll === "journals") {
     const diff = stripSecretsFromDiff(op.diff);
     if (diff !== op.diff) return { ...op, diff };
@@ -347,7 +519,21 @@ function updateVisible(
     if (!diff) return null;
     return diff === op.diff ? op : { ...op, diff };
   }
-  return op;
+  if ((op.ref.coll === "tokens" || op.ref.coll === "actors") &&
+      (doc.flags?.summon !== undefined || doc.flags?.summonStatus !== undefined ||
+        Object.keys(op.diff).some((key) => key.startsWith("flags.summon") || key.startsWith("-=flags.summon") ||
+          (key === "flags" && op.diff.flags && typeof op.diff.flags === "object" &&
+            (Object.hasOwn(op.diff.flags, "summon") || Object.hasOwn(op.diff.flags, "summonStatus")))))) {
+    const safe = stripPrefabMarker(doc);
+    const diff: Record<string, Json | null> = {};
+    for (const [key, value] of Object.entries(op.diff)) {
+      if (key === "flags" || key.startsWith("flags.") || key.startsWith("-=flags.")) continue;
+      diff[key] = value;
+    }
+    diff.flags = safe.flags as unknown as Json;
+    return { ...op, diff };
+  }
+  return projectPrefabDiff(op);
 }
 
 /**
@@ -392,16 +578,18 @@ function deleteVisible(
   op: Extract<Op, { kind: "delete" }>,
   resolver?: ProjectionResolver,
 ): Op | null {
+  if (op.ref.coll === "automations" || op.ref.coll === "actionReceipts" || op.ref.coll === "prefabs" || op.ref.coll === "fxInstances") return null;
   if (op.ref.coll === "walls" || op.ref.coll === "lights") return op;
   const doc = resolver?.resolve(op.ref);
   if (!doc) return op;
+  if (op.ref.coll === "macros" && !docVisibleTo(user, doc)) return null;
   const parent = op.ref.parent !== undefined ? resolver?.resolve(op.ref.parent) : undefined;
   if (op.ref.coll === "messages" && messageAccess(user, doc as MessageDocument) === "omit")
     return null;
   if (op.ref.coll === "tokens" && (doc as TokenDocument).hidden) {
     if (getEffectiveOwnership(user, doc, parent) < OWNERSHIP_LEVELS.OWNER) return null;
   }
-  if (op.ref.coll === "notes" && !docVisibleTo(user, doc, parent)) return null;
+  if ((op.ref.coll === "notes" || op.ref.coll === "tiles") && !docVisibleTo(user, doc, parent)) return null;
   if (getEffectiveOwnership(user, doc, parent) < OWNERSHIP_LEVELS.LIMITED) return null;
   return op;
 }

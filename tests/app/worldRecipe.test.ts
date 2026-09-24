@@ -5,7 +5,7 @@
  */
 import "fake-indexeddb/auto";
 import { strToU8, zipSync } from "fflate";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { bootHostApp, BUILTIN_SYSTEM_ID, DEFAULT_SCENE_ID, type HostApp } from "../../src/app/hostBoot";
 import {
   checkRecipe,
@@ -15,7 +15,9 @@ import {
   type RecipePackage,
 } from "../../src/app/worldRecipe";
 import { sceneIsStrategic } from "../../src/core/strategicFog";
-import type { SceneDocument } from "../../src/core/documents";
+import type { MacroDocument, SceneDocument } from "../../src/core/documents";
+import { flushMicrotasks } from "../../src/net/memory";
+import { summonMarker } from "../../src/core/summons";
 import { getWorld, listPackages, listWorlds, openVttDb } from "../../src/storage/idb";
 import { MemDirHandle } from "../../src/storage/opfs";
 import { InlineSimRunner } from "../../src/workers/simWorkerClient";
@@ -122,6 +124,47 @@ describe("createWorldFromRecipe", () => {
     expect((await app.packages.deactivate()).ok).toBe(true);
     await app.persister.flush();
     await app.close();
+  });
+
+  test("stable package/pack/entry summon clones without importing; saved instance survives world reload", async () => {
+    const db = await openVttDb();
+    const content = await load(contentZip);
+    const { worldId } = await createWorldFromRecipe(
+      { name: "Summon table", ruleset: { kind: "builtin" }, content: [content] },
+      { db, worldId: "w-summon-pack" as HostApp["worldId"] },
+    );
+    const app = await boot(worldId);
+    const refs = await app.packages.compendia();
+    expect(refs.map((r) => ({ pkg: r.packageId, file: r.packFile })))
+      .toEqual([{ pkg: "recipe-content", file: "packs/beasts.json" }]);
+    const preset: MacroDocument = { _id: "pack-summon", type: "macro", kind: "summon", name: "Call a wolf",
+      command: "", ownership: { default: 1 }, flags: {}, system: {}, summon: { version: 1,
+        sceneId: DEFAULT_SCENE_ID, source: { kind: "compendium", packageId: refs[0]?.packageId ?? "",
+          packFile: refs[0]?.packFile ?? "", entryId: "wolf" },
+        playerCallable: true, maxDistance: 30 } };
+    app.gm.client.submit([{ kind: "create", coll: "macros", data: preset }]);
+    await flushMicrotasks();
+    app.gm.client.requestSummonPlace(preset._id, DEFAULT_SCENE_ID, { x: 250, y: 250 });
+    await vi.waitFor(() => {
+      const first = (app.store.get("scenes", DEFAULT_SCENE_ID) as SceneDocument).tokens
+        .find((token) => summonMarker(token));
+      expect(first?.name).toBe("Wolf");
+    }, { interval: 20, timeout: 2000 });
+    const first = (app.store.get("scenes", DEFAULT_SCENE_ID) as SceneDocument).tokens
+      .find((token) => summonMarker(token));
+    expect(app.store.get("actors", "wolf")).toBeUndefined(); // source pack remains read-only
+    expect(app.store.get("actors", first?.actorId ?? "")?.name).toBe("Wolf");
+    await app.persister.drain();
+    await app.close();
+    const reopened = await boot(worldId);
+    const recovered = (reopened.store.get("scenes", DEFAULT_SCENE_ID) as SceneDocument).tokens
+      .find((token) => token._id === first?._id);
+    expect(summonMarker(recovered ?? { flags: {} })?.actorId).toBe(first?.actorId);
+    expect(reopened.store.get("actors", recovered?.actorId ?? "")?.name).toBe("Wolf");
+    reopened.gm.client.requestSummonDismiss(DEFAULT_SCENE_ID, recovered?._id ?? "");
+    await vi.waitFor(() => expect(reopened.store.get("actors", recovered?.actorId ?? ""))
+      .toBeUndefined(), { interval: 20, timeout: 2000 });
+    await reopened.close();
   });
 
   test("built-in recipe writes the built-in pair and no packages", async () => {

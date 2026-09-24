@@ -43,7 +43,9 @@
   const recipe = $derived<WorldRecipe>({
     name,
     ruleset:
-      rulesetChoice === "package" && ruleset ? { kind: "package", pkg: ruleset } : { kind: "builtin" },
+      rulesetChoice === "package" && ruleset
+        ? { kind: "package", pkg: ruleset }
+        : { kind: "builtin" },
     content,
   });
   const check = $derived(checkRecipe(recipe));
@@ -55,11 +57,17 @@
       ruleset = pkg;
       rulesetChoice = "package";
     } else {
-      content = [...content.filter((p) => p.manifest.id !== pkg.manifest.id), pkg];
+      content = [
+        ...content.filter((p) => p.manifest.id !== pkg.manifest.id),
+        pkg,
+      ];
     }
   }
 
-  async function loadFiles(files: FileList | null | undefined, slot: "ruleset" | "content"): Promise<void> {
+  async function loadFiles(
+    files: FileList | null | undefined,
+    slot: "ruleset" | "content",
+  ): Promise<void> {
     if (!files || files.length === 0) return;
     busy = true;
     error = "";
@@ -74,7 +82,10 @@
         const info = describeRecipePackage(loaded.pkg);
         if (slot === "ruleset" && loaded.pkg.manifest.type !== "system") {
           error = `${info.name} is a ${info.kind}, not a strategic ruleset — it was added under Content instead.`;
-        } else if (slot === "content" && loaded.pkg.manifest.type === "system") {
+        } else if (
+          slot === "content" &&
+          loaded.pkg.manifest.type === "system"
+        ) {
           error = `${info.name} is a strategic ruleset, not a content pack — it was set as the ruleset instead.`;
         }
         accept(loaded.pkg);
@@ -119,7 +130,17 @@
 </script>
 
 <section class="wizard" aria-labelledby="wizard-h" data-wizard>
-  <h2 id="wizard-h">New world</h2>
+  <div class="wizard-header">
+    <div class="wizard-mark" aria-hidden="true">✦</div>
+    <div>
+      <p class="wizard-eyebrow">CREATE YOUR TABLE</p>
+      <h2 id="wizard-h">New world</h2>
+    </div>
+  </div>
+  <p class="wizard-intro">
+    Give your adventure a name. You can adjust the scene and invite players once
+    your world opens.
+  </p>
 
   <label class="field">
     <span>Name</span>
@@ -129,9 +150,9 @@
   <fieldset>
     <legend>Strategic ruleset</legend>
     <p class="hint">
-      Drives <b>strategic</b> scenes (heroes + units) only. Scenes start tactical (heroes only);
-      switch any scene under Settings → Scale. The ruleset can be changed until the first
-      strategic turn is resolved.
+      Drives <b>strategic</b> scenes (heroes + units) only. Scenes start tactical
+      (heroes only); switch any scene under Settings → Scale. The ruleset can be changed
+      until the first strategic turn is resolved.
     </p>
     <label class="choice">
       <input
@@ -181,14 +202,18 @@
   <fieldset>
     <legend>Content packs</legend>
     <p class="hint">
-      Compendia (bestiary, spells, …) for this world. Optional; more can be added later under
-      Settings → Strategic ruleset &amp; content.
+      Compendia (bestiary, spells, …) for this world. Optional; more can be
+      added later under Settings → Strategic ruleset &amp; content.
     </p>
     {#each content as pkg (pkg.manifest.id)}
       {@const info = describeRecipePackage(pkg)}
       <div class="row" data-wizard-content-row data-pkg-id={info.id}>
         <span>{info.name} v{info.version} · {info.packCount} pack(s)</span>
-        <button type="button" data-wizard-content-remove onclick={() => removeContent(info.id)}>
+        <button
+          type="button"
+          data-wizard-content-remove
+          onclick={() => removeContent(info.id)}
+        >
           Remove
         </button>
       </div>
@@ -213,7 +238,9 @@
   {#if error}<p class="error" role="alert" data-wizard-error>{error}</p>{/if}
 
   <div class="actions">
-    <button id="wizard-cancel" type="button" onclick={onCancel} disabled={busy}>Cancel</button>
+    <button id="wizard-cancel" type="button" onclick={onCancel} disabled={busy}
+      >Cancel</button
+    >
     <button
       id="wizard-create"
       type="button"
@@ -230,30 +257,62 @@
   .wizard {
     display: flex;
     flex-direction: column;
-    gap: 14px;
-    width: min(100%, 560px);
-    padding: 20px 22px;
-    border: 1px solid #293a4d;
+    gap: 15px;
+    width: min(100%, 610px);
+    padding: clamp(20px, 3vw, 30px);
+    border: 1px solid #486466;
+    border-radius: 16px;
+    background: #192833f5;
+    box-shadow: 0 22px 64px #0008;
+    color: #f1f8f7;
+  }
+  .wizard-header {
+    display: flex;
+    align-items: center;
+    gap: 13px;
+  }
+  .wizard-mark {
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
     border-radius: 12px;
-    background: #111a25cc;
-    color: #f2f5f8;
+    background: linear-gradient(145deg, #8be8d0, #459d99);
+    color: #142933;
+    font-size: 1.65rem;
+  }
+  .wizard-eyebrow {
+    margin: 0 0 2px;
+    color: #8adfcb;
+    font-size: 0.67rem;
+    font-weight: 800;
+    letter-spacing: 0.14em;
   }
   h2 {
     margin: 0;
-    font-size: 1.4rem;
+    font-size: 1.45rem;
+    letter-spacing: -0.02em;
+  }
+  .wizard-intro {
+    margin: 0 0 2px;
+    color: #b5cbd0;
+    font-size: 0.88rem;
+    line-height: 1.5;
   }
   .field {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 5px;
+    color: #e1edeb;
     font-size: 0.9rem;
+    font-weight: 650;
   }
   .field input {
-    padding: 8px 10px;
-    border: 1px solid #49627d;
+    padding: 9px 12px;
+    border: 1px solid #57747d;
     border-radius: 8px;
-    background: #182331;
-    color: inherit;
+    background: #223440;
+    color: #fff;
     font-size: 1rem;
   }
   fieldset {
@@ -261,71 +320,92 @@
     flex-direction: column;
     gap: 8px;
     margin: 0;
-    padding: 10px 12px 12px;
-    border: 1px solid #293a4d;
-    border-radius: 10px;
+    padding: 12px 14px 14px;
+    border: 1px solid #3b5561;
+    border-radius: 11px;
+    background: #15242fc9;
   }
   legend {
     padding: 0 6px;
-    font-weight: 700;
+    color: #f1f8f7;
+    font-weight: 720;
   }
   .hint {
     margin: 0;
-    color: #aebdcb;
-    font-size: 0.85rem;
+    color: #b4c8cd;
+    font-size: 0.83rem;
+    line-height: 1.45;
   }
   .choice {
     display: flex;
     align-items: flex-start;
-    gap: 8px;
-    font-size: 0.95rem;
+    gap: 9px;
+    cursor: pointer;
+    font-size: 0.92rem;
+  }
+  .choice input {
+    margin-top: 4px;
   }
   .choice small {
     display: block;
-    color: #aebdcb;
+    color: #adc1c6;
   }
   .file {
     display: flex;
     flex-direction: column;
     gap: 4px;
-    font-size: 0.85rem;
-    color: #c1ccd8;
+    color: #c4d5d8;
+    font-size: 0.84rem;
+  }
+  .file input {
+    font-size: 0.84rem;
   }
   .row {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    font-size: 0.9rem;
+    font-size: 0.87rem;
   }
   .warn {
     margin: 0;
-    color: #ffd166;
+    color: #ffda8c;
     font-size: 0.85rem;
   }
   .error {
     margin: 0;
-    color: #ffb4b4;
+    color: #ffb4ae;
     font-size: 0.9rem;
   }
   .actions {
     display: flex;
     justify-content: flex-end;
-    gap: 10px;
+    flex-wrap: wrap;
+    gap: 9px;
+    margin-top: 2px;
+    padding-top: 13px;
+    border-top: 1px solid #394e58;
   }
   button {
-    min-height: 40px;
+    min-height: 42px;
     padding: 8px 16px;
-    border: 1px solid #49627d;
+    border: 1px solid #59727b;
     border-radius: 8px;
-    background: #182331;
+    background: #273b47;
     color: inherit;
     font-weight: 700;
     cursor: pointer;
   }
+  button:hover:not(:disabled) {
+    border-color: #8fdec9;
+    background: #33555b;
+  }
   button.primary {
-    background: #1f5f8f;
-    border-color: #68b9f2;
+    border-color: #6ccbb7;
+    background: #28675d;
+  }
+  button.primary:hover:not(:disabled) {
+    background: #367e70;
   }
   button:disabled {
     opacity: 0.5;

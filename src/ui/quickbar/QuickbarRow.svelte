@@ -54,14 +54,21 @@
   const derived = $derived(
     actor === null
       ? null
-      : deriveFromActorDocument(actor, settings.length > 0 ? worldSettingsFrom(settings) : {}),
+      : deriveFromActorDocument(
+          actor,
+          settings.length > 0 ? worldSettingsFrom(settings) : {},
+        ),
   );
   const entries = $derived(actor === null ? [] : readQuickbar(actor));
   const candidates = $derived(
-    actor === null || derived === null ? [] : quickbarCandidates(actor, derived),
+    actor === null || derived === null
+      ? []
+      : quickbarCandidates(actor, derived),
   );
   /** The picker's answer, and only that — a stale id (the actor left the replica) reads as none. */
-  const targetId = $derived(picked !== "" && targets.some((t) => t._id === picked) ? picked : "");
+  const targetId = $derived(
+    picked !== "" && targets.some((t) => t._id === picked) ? picked : "",
+  );
   const target = $derived(targets.find((t) => t._id === targetId) ?? null);
 
   function slotEntry(slot: number) {
@@ -75,7 +82,8 @@
     if (actor === null || derived === null) return "no character selected";
     const note = quickbarSlotNote(actor, entry, derived);
     if (note !== null) return note;
-    if (entry.kind !== "damage" && target === null) return "pick a target first";
+    if (entry.kind !== "damage" && target === null)
+      return "pick a target first";
     return null;
   }
 
@@ -106,14 +114,21 @@
     const candidate = candidates.find((c) => c.id === candidateId);
     if (candidate === undefined) return;
     const current = readQuickbar(actor);
-    client.submit([quickbarWriteOp(actor, bindQuickbarSlot(current, candidateToEntry(bindSlot, candidate)))]);
+    client.submit([
+      quickbarWriteOp(
+        actor,
+        bindQuickbarSlot(current, candidateToEntry(bindSlot, candidate)),
+      ),
+    ]);
     status = `slot ${String(bindSlot)} → ${candidate.label}`;
     error = "";
   }
 
   function clear(slot: number): void {
     if (actor === null) return;
-    client.submit([quickbarWriteOp(actor, clearQuickbarSlot(readQuickbar(actor), slot))]);
+    client.submit([
+      quickbarWriteOp(actor, clearQuickbarSlot(readQuickbar(actor), slot)),
+    ]);
     status = `slot ${String(slot)} cleared`;
     error = "";
   }
@@ -123,11 +138,15 @@
   <header>
     <span class="label">Quickbar</span>
     {#if actor === null}
-      <span class="hint" data-quickbar-actor="none">select a token to play its character</span>
+      <span class="hint" data-quickbar-actor="none"
+        >select a token to play its character</span
+      >
     {:else}
       <span class="hint" data-quickbar-actor={actor._id}>{actor.name}</span>
       <select data-quickbar-target bind:value={picked} aria-label="Target">
-        <option value="">{target === null ? "no target" : `target: ${target.name}`}</option>
+        <option value=""
+          >{target === null ? "no target" : `target: ${target.name}`}</option
+        >
         {#each targets as choice (choice._id)}
           <option value={choice._id}>{choice.name}</option>
         {/each}
@@ -135,38 +154,45 @@
     {/if}
   </header>
 
-  <div class="slots">
-    {#each QUICKBAR_SLOTS as slot (slot)}
-      {@const entry = slotEntry(slot)}
-      {@const hint = slotHint(slot)}
-      <button
-        type="button"
-        data-quickbar-slot={slot}
-        class:bound={entry !== null}
-        title={hint ?? entry?.label ?? "empty"}
-        disabled={busy || actor === null}
-        onclick={() => void run(slot)}
-      >
-        <span class="key">{slot}</span>
-        <span class="name">{entry?.label ?? "—"}</span>
-      </button>
-      <button
-        type="button"
-        class="clear"
-        data-quickbar-clear={slot}
-        title={`Clear slot ${slot}`}
-        disabled={actor === null || entry === null}
-        onclick={() => clear(slot)}>✕</button
-      >
-    {/each}
-  </div>
-
+  <!-- No actor, no disabled slot grid: keep the table quiet until a token is selected. -->
   {#if actor !== null}
+    <div class="slots">
+      {#each QUICKBAR_SLOTS as slot (slot)}
+        {@const entry = slotEntry(slot)}
+        {@const hint = slotHint(slot)}
+        <button
+          type="button"
+          data-quickbar-slot={slot}
+          class:bound={entry !== null}
+          title={hint ?? entry?.label ?? "empty"}
+          disabled={busy || actor === null}
+          onclick={() => void run(slot)}
+        >
+          <span class="key">{slot}</span>
+          <span class="name">{entry?.label ?? "—"}</span>
+        </button>
+        <button
+          type="button"
+          class="clear"
+          data-quickbar-clear={slot}
+          title={`Clear slot ${slot}`}
+          disabled={actor === null || entry === null}
+          onclick={() => clear(slot)}>✕</button
+        >
+      {/each}
+    </div>
+
     <div class="bind">
-      <select data-quickbar-bind bind:value={candidateId} aria-label="Action to bind">
+      <select
+        data-quickbar-bind
+        bind:value={candidateId}
+        aria-label="Action to bind"
+      >
         <option value="">Bind an action…</option>
         {#each candidates as candidate (candidate.id)}
-          <option value={candidate.id}>{candidate.label} — {candidate.detail}</option>
+          <option value={candidate.id}
+            >{candidate.label} — {candidate.detail}</option
+          >
         {/each}
       </select>
       <select data-quickbar-slot-select bind:value={bindSlot} aria-label="Slot">

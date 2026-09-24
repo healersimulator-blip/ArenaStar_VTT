@@ -7,6 +7,7 @@
   import { buildChatMessage, parseChatCommand } from "../../core/chat";
   import { renderMarkdown } from "../../core/markdown";
   import RollCard from "./RollCard.svelte";
+  import ActionRevertPanel from "./ActionRevertPanel.svelte";
   import EncounterCard from "./EncounterCard.svelte";
   import { encounterPayloadOf } from "../../core/hexcrawl/encounterFlow";
   import PendingRollCard from "./PendingRollCard.svelte";
@@ -277,9 +278,7 @@
     // unstable (actionability) under load.
     const offOps = bus.on("ops", ({ envelope }) => {
       const touches = envelope.ops.some((op) =>
-        op.kind === "create" || op.kind === "delete"
-          ? op.coll === "messages"
-          : op.ref.coll === "messages",
+        op.kind === "create" ? op.coll === "messages" : op.ref.coll === "messages",
       );
       if (touches) refresh();
     });
@@ -299,7 +298,15 @@
 
 <section class="chat" aria-label="Chat">
   <h3>Chat</h3>
+  <ActionRevertPanel {client} {bus} />
   <div id="chat-log" bind:this={logEl}>
+    {#if messages.length === 0}
+      <div class="chat-empty">
+        <span class="empty-mark" aria-hidden="true">✦</span>
+        <strong>The table is quiet</strong>
+        <span>Say hello or roll a die to start the story.</span>
+      </div>
+    {/if}
     {#each messages as message (message._id)}
       {@const pendingRoll = (message.system as unknown as { pendingRoll?: PendingRoll } | undefined)?.pendingRoll}
       {@const ledger = (message.system as unknown as { rollLedger?: RollLedger } | undefined)?.rollLedger}
@@ -453,6 +460,20 @@
     background: #101216;
     font-size: 0.9rem;
   }
+  .chat-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 5px;
+    margin: auto;
+    padding: 16px 8px;
+    color: #96aeb9;
+    text-align: center;
+    font-size: .81rem;
+    line-height: 1.4;
+  }
+  .chat-empty strong { color: #d4e4e5; font-size: .88rem; }
+  .empty-mark { color: #7fdcc7; font-size: 1.5rem; }
   .line {
     margin: 0;
     line-height: 1.45;

@@ -25,7 +25,8 @@ import {
   putCheckpoint,
   putReport,
 } from "../../src/storage/strategicStore";
-import type { TokenDocument } from "../../src/core/documents";
+import type { AutomationDocument, MacroDocument, TokenDocument } from "../../src/core/documents";
+import { scriptApprovalHash, validateScriptMacro, type ScriptPolicy } from "../../src/core/scriptMacros";
 
 const token = (id: string, x: number, y: number): TokenDocument => ({
   _id: id,
@@ -67,6 +68,75 @@ describe("world.zip export/import (§8)", () => {
 
   beforeEach(async () => {
     db = await openVttDb();
+  });
+
+  test("a user-provided FX pack cannot be exported until separate redistribution rights are granted", async () => {
+    const root = new MemDirHandle();
+    const app = await boot(root);
+    const bytes = new Uint8Array([21, 34, 55]);
+    const { hash } = await app.assets.import(bytes, "premium.webm", "video/webm", "gm", "restricted");
+    expect(app.store.world.assetManifest[hash]).toMatchObject({ visibility: "gm", exportRights: "restricted" });
+    await expect(exportWorldZip({ db, worldId: app.worldId, root, persister: app.persister }))
+      .rejects.toThrow(/world-export rights.*premium\.webm/);
+    expect((await app.assets.meta(hash))?.exportRights).toBe("restricted");
+    await app.assets.describe(hash, { exportRights: "granted" });
+    const archive = await exportWorldZip({ db, worldId: app.worldId, root, persister: app.persister });
+    const files = parseZip(new Uint8Array(await archive.arrayBuffer()));
+    const exported = JSON.parse(strFromU8(files.get("assets.json") as Uint8Array)) as Array<{
+      hash: string; visibility: string; exportRights: string;
+    }>;
+    expect(exported.find((asset) => asset.hash === hash)).toMatchObject({
+      hash, visibility: "gm", exportRights: "granted",
+    });
+    expect(files.get(`assets/${hash}`)).toEqual(bytes);
+    await app.close();
+    const copied = await importWorldZip({ db, file: archive, root, mode: "copy", worldId: "w-rights-copy" });
+    const restored = (await listAssets(db, copied.worldId)).find((asset) => asset.hash === hash);
+    expect(restored).toMatchObject({ visibility: "gm", exportRights: "restricted" });
+    await expect(exportWorldZip({ db, worldId: copied.worldId, root }))
+      .rejects.toThrow(/world-export rights/);
+    await deleteWorldData(db, copied.worldId);
+    // Every case in this file boots the most recent test world against an
+    // independent in-memory OPFS root. Do not strand this case's asset row in
+    // IDB for a later case whose root correctly has no such blob.
+    await deleteWorldData(db, app.worldId);
+  });
+
+  test("archive copies and restores keep script source but require this host to review and republish", async () => {
+    const root = new MemDirHandle();
+    const app = await boot(root);
+    const source = "await api.chat.say('from saved script', 'gm'); return 1;";
+    const settings: Omit<ScriptPolicy, "approvedHash"> = { version: 1, sceneId: DEFAULT_SCENE_ID,
+      runAs: "gm", playerCallable: true, grants: ["chat"], inputs: [] };
+    const macro: MacroDocument = { _id: "reviewed", type: "macro", name: "Reviewed",
+      ownership: { default: 1 }, flags: { core: { playerCallable: true } }, system: {},
+      kind: "script", command: source,
+      script: { ...settings, approvedHash: await scriptApprovalHash(source, settings) } };
+    app.gm.client.submit([{ kind: "create", coll: "macros", data: macro }]);
+    await settle();
+    expect(app.store.get("macros", "reviewed")).toBeDefined();
+    app.host.commitSystem([{ kind: "update", ref: { coll: "macros", id: "reviewed" },
+      diff: { scriptState: { recent: [{ key: "player:prior", at: 100,
+        revision: macro.script?.approvedHash ?? "" }] } } }]);
+    await app.persister.flush();
+    const archive = await exportWorldZip({ db, worldId: app.worldId, root, persister: app.persister });
+    await app.close();
+
+    for (const options of [{ mode: "copy" as const, worldId: "w-script-copy" },
+      { mode: "replace" as const }]) {
+      const result = await importWorldZip({ db, file: archive, root, ...options });
+      const rows = await getAllDocumentRecords(db, result.worldId);
+      const restored = rows.find((row) => row.coll === "macros" && row.id === "reviewed")?.doc as MacroDocument;
+      expect(restored.command).toBe(source); // GM can inspect and explicitly republish
+      expect(restored.script).toMatchObject({ ...settings, playerCallable: false,
+        approvedHash: "0".repeat(64) });
+      expect(restored.scriptState).toEqual({ recent: [] });
+      expect(restored.ownership.default).toBe(0);
+      expect((restored.flags.core as Record<string, unknown>).playerCallable).toBe(false);
+      expect(validateScriptMacro(restored).ok).toBe(true);
+      expect(await scriptApprovalHash(restored.command, { ...settings, playerCallable: false }))
+        .not.toBe(restored.script?.approvedHash); // never trusted merely for matching bundled bytes
+    }
   });
 
   test("round-trips losslessly and acts as restore (M1 acceptance)", async () => {
@@ -296,4 +366,60 @@ describe("world.zip export/import (§8)", () => {
     await restored.persister.flush();
     await restored.close();
   });
+});
+
+test("named action Revert persists through a compacted checkpoint, world-file copy and host reboot", async () => {
+  const db = await openVttDb();
+  const root = new MemDirHandle();
+  const app = await boot(root);
+  const sceneId = DEFAULT_SCENE_ID;
+  const tile = { _id: "history-tile", type: "tile", name: "History tile",
+    ownership: { default: 0 as const }, flags: {}, system: {},
+    x: 100, y: 100, width: 100, height: 100, img: "", above: false,
+    occlusion: { mode: "roof" as const, alpha: 0.5 } };
+  app.gm.client.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: sceneId },
+    data: tile }]);
+  await settle();
+  app.gm.client.submit([{ kind: "create", coll: "automations", data: {
+    _id: "history-graph", type: "automation", name: "Reversible history",
+    ownership: { default: 0 }, flags: {}, system: {},
+    definition: { version: 1, sceneId, tileId: tile._id, methods: ["manual"], steps: [
+      { id: "tile", kind: "select", selector: { kind: "tile" } },
+      { id: "mark", kind: "tags", edit: "add", tags: ["action-history"] },
+    ] },
+  } as AutomationDocument }]);
+  await settle();
+  const before = app.store.seq;
+  app.gm.client.requestAutomation("history-graph", sceneId, "manual");
+  await settle();
+  expect(app.store.seq).toBe(before + 1);
+  const receipt = app.store.getAll("actionReceipts")[0];
+  if (!receipt) throw new Error("action receipt missing");
+  expect(receipt).toMatchObject({ status: "ready", commits: 1 });
+  expect(app.store.resolve({ coll: "tiles", id: tile._id,
+    parent: { coll: "scenes", id: sceneId } })?.taggerTags).toEqual(["action-history"]);
+  await app.persister.checkpoint();
+  const archive = await exportWorldZip({ db, worldId: app.worldId, root, persister: app.persister });
+  const archiveDocuments = parseZip(new Uint8Array(await archive.arrayBuffer())).get("documents.json");
+  if (!archiveDocuments) throw new Error("archive documents missing");
+  const docs = JSON.parse(strFromU8(archiveDocuments)) as WorldFileDocuments;
+  expect(docs.docs.some((entry) => entry.coll === "actionReceipts" && entry.id === receipt?._id)).toBe(true);
+  const worldId = app.worldId;
+  await app.close();
+  const copied = await importWorldZip({ db, file: archive, root, mode: "copy",
+    worldId: `w-action-copy-${Date.now()}` });
+  for (const id of [worldId, copied.worldId]) {
+    const reopened = await boot(root, id);
+    expect(reopened.store.getAll("actionReceipts")[0]?.inverses).toEqual(receipt?.inverses);
+    reopened.gm.client.actionRevert(receipt._id);
+    await settle();
+    expect(reopened.store.getAll("actionReceipts")[0]?.status).toBe("reverted");
+    expect(reopened.store.resolve({ coll: "tiles", id: tile._id,
+      parent: { coll: "scenes", id: sceneId } })?.taggerTags).toBeUndefined();
+    expect(reopened.store.get("automations", "history-graph")?.state).toBeUndefined();
+    await reopened.close();
+  }
+  await deleteWorldData(db, copied.worldId);
+  await deleteWorldData(db, worldId);
+  db.close();
 });
