@@ -9510,3 +9510,76 @@ blur quality/performance control beyond pixi's default, and no Firefox/WebKit ru
   sprite is `{ blend: "normal", filter: null }`. The `summons` suite ran alongside it
   (**20/20** together) and the canvas batch (`canvas_rail` + `canvas_toolbar` + `vision`
   + `walls`) is **19/19** against the rebuilt file.
+
+## D-300 — a camera cue can be aimed: three-word audience, one payload per viewer (2026-09-25)
+
+D-298 closed SQ-15's paths and left one clause of its own sentence standing: "GM-only
+or per-viewer-targeted camera delivery (every recipient still gets it)". SQ-15 asks for a
+camera that "can be local or recipient-targeted", and a GM has an obvious use for it —
+look at the hidden chamber without dragging the table's view with you. This decision
+lands that, and nothing else.
+
+**The vocabulary is already in the codebase.** A sequence has carried `audience:
+"scene" | "gm" | "caller"` since the first wizard, and the host already uses those three
+words to decide who receives a run at all. A camera section now carries the *same*
+`audience`, with the same meanings one level down: `scene` (the default, every recipient
+of the run), `gm` (GM/assistant only), `caller` (the session that asked for the run).
+No second vocabulary, no new message kind, no new field on the wire — the section simply
+carries one more optional key inside the cue that already travels.
+
+**The exclusion is the payload.** The interesting consequence is not "the client ignores
+the section"; it is that an excluded viewer never receives it. The host now builds a
+cue *per recipient* through one pure helper (`fxSectionsForViewer`) in `core/fx`, which
+returns the original array untouched when nothing is filtered (so the common case
+allocates nothing) and a filtered copy otherwise. A viewer left with **no** sections
+receives no cue at all, rather than an empty run they would have to reason about. A
+unit test asserts the stronger property too: the excluded viewer's payload string does
+not contain the excluded destination. This is SQ-18's rule — a bystander cannot infer a
+GM-only cue from the socket — applied to the one section kind that is a *view* claim
+rather than media.
+
+**Why only camera sections.** A targeted visual or sound section would be a different
+feature with a different risk: the media-entitlement preflight counts a viewer out when
+*any* section's asset is unavailable to them, so per-viewer media visibility has to
+decide per viewer which assets matter — and a GM-only image whose bytes are shared with
+players is a leak question this decision does not want to answer by accident. The field
+is therefore **unknown** on image/text/sound/wait sections (refused by the validator),
+not silently ignored, and the wizard offers the control only on a camera section.
+
+**Non-claims.** No per-viewer targeting by *name* (no "send this pan to Ivy"), no groups
+or tokens as audiences, no per-section targeting for visual/text/sound sections, no
+delivery-notice breakdown of who saw a targeted section (the `fx.delivery` counts still
+describe the *run*: audience/rights/anchor/media), no targeted persistent instances (a
+persistent timeline still cannot move a camera at all), no targeted camera in a
+`fx.sync` reconnect replay (that path only replays persistent cues), and no Firefox/
+WebKit run or the 41-scenario acceptance matrix.
+
+**Gates.**
+
+- `pnpm test` — **3 696 passed / 12 skipped** (297 files: 295 passed, 2 skipped). New:
+  three cases in `tests/core/fx.test.ts` (the three audiences accepted on a camera and a
+  fourth refused *by name*, with the field rejected as unknown on image/sound sections;
+  one run yielding two payloads with the excluded destination absent from the player's
+  serialized cue; `scene` as the identity case returning the same array, `caller`
+  following the requester including "a GM who is not the caller", and a targeted
+  shake filtered by the same rule) and two host cases in `tests/host/sync.test.ts` (a
+  four-section timeline run first by the GM — GM sees all three cameras, each player
+  sees only the scene pan and not the GM-only destination — then by a player, where the
+  caller-targeted pan moves to that player while the GM keeps the GM-only one; the two
+  viewers' cues share a `runId` because targeting filters a payload, it does not fork a
+  run; and a timeline whose only section is a GM-only camera is delivered to the GM and
+  to no one else).
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing) · `pnpm lint` **exit 0** · `pnpm build` → `pnpm size` **3 812 848 B raw /
+  1 092 635 B gzip**, inside the 6 MB budget. `PROTOCOL.md`'s `fx.start` section now
+  states the per-recipient payload rule; the wire kind and its byte are unchanged.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **17/17** — the new spec runs
+  **two real browser contexts**: one timeline with a text cue and a `gm`-audience pan,
+  the wizard reopening it as "GMs only" (the audience is a document fact, not a draft
+  detail), then the GM running it — the GM's own view parks on the destination while the
+  joined player's camera is *exactly* where it was, which is the difference between
+  "ignored the cue" and "never received it". Flipping the same pan to everyone, saving
+  and running again moves the player's view to that same destination. The `summons`
+  suite ran alongside it (**21/21** together) and the canvas/interaction batch
+  (`canvas_rail` + `canvas_toolbar` + `vision` + `walls` + `join`) is **20/20** against
+  the rebuilt production file.

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { FX_FILTER_RANGES, fxStylePlan, resolveFxSequence, validateFxSequence,
+import { FX_FILTER_RANGES, fxSectionsForViewer, fxStylePlan, resolveFxSequence, validateFxSequence,
   type FxSequence } from "../../src/core/fx";
 import { fxFollowAnchors, fxPosition } from "../../src/canvas/layers/FxLayer";
 import type { SceneDocument, TokenDocument } from "../../src/core/documents";
@@ -386,5 +386,62 @@ describe("FX appearance: blend modes and one bounded filter (§SQ-05)", () => {
     expect(resolved.ok).toBe(true);
     if (!resolved.ok) return;
     expect(resolved.sections[0]).toMatchObject({ blend: "screen", filter: { kind: "saturate", strength: 0.5 } });
+  });
+});
+
+describe("camera targeting: one run, different views (§SQ-15/SQ-18, D-300)", () => {
+  const camera = (patch: Record<string, unknown> = {}) => ({
+    kind: "camera", id: "look", mode: "pan", to: { kind: "point", x: 300, y: 300 },
+    startMs: 0, durationMs: 1000, ...patch });
+  const cue = (patch: Record<string, unknown> = {}) => ({ version: 1,
+    sections: [{ kind: "text", id: "t", text: "Now", at: { kind: "point", x: 10, y: 10 },
+      startMs: 0, durationMs: 500 }, camera(patch)] });
+
+  test("the three audiences are accepted on a camera section, and only there", () => {
+    for (const audience of ["scene", "gm", "caller"]) {
+      expect(validateFxSequence(cue({ audience })).ok, audience).toBe(true);
+    }
+    const bad = validateFxSequence(cue({ audience: "party" }));
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.error).toBe("a camera section's audience must be scene, gm or caller");
+    // A visual or sound section has no targeted delivery, so the field is unknown there.
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "image", id: "i", assetId: hash,
+      at: { kind: "point", x: 1, y: 1 }, startMs: 0, durationMs: 500, audience: "gm" } as never] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "sound", id: "s", assetId: sound,
+      startMs: 0, durationMs: 500, audience: "gm" } as never] }).ok).toBe(false);
+  });
+
+  test("one run, one payload per viewer: an excluded viewer never receives the section", () => {
+    const resolved = resolveFxSequence(cue({ audience: "gm" }) as FxSequence, scene, source, source, () => undefined);
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    const gm = fxSectionsForViewer(resolved.sections, { id: "gm-1", isGm: true }, "gm-1");
+    const player = fxSectionsForViewer(resolved.sections, { id: "p-1", isGm: false }, "gm-1");
+    expect(gm).toHaveLength(2);
+    expect(player).toHaveLength(1);
+    expect(player[0]?.kind).toBe("text");
+    // The exclusion is the *payload*: nothing about the destination survives it.
+    expect(JSON.stringify(player)).not.toContain("300");
+  });
+
+  test("scene is the default, caller means the requester, and nothing else is touched", () => {
+    const resolved = resolveFxSequence(cue() as FxSequence, scene, source, source, () => undefined);
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    // Nothing to exclude: the host hands back the very same array (no allocation).
+    expect(fxSectionsForViewer(resolved.sections, { id: "p", isGm: false }, "p")).toBe(resolved.sections);
+    const requested = resolveFxSequence(cue({ audience: "caller" }) as FxSequence, scene, source, source, () => undefined);
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+    expect(fxSectionsForViewer(requested.sections, { id: "p", isGm: false }, "p")).toHaveLength(2);
+    // A GM who is not the caller is not "the caller", even though they are a GM.
+    expect(fxSectionsForViewer(requested.sections, { id: "gm-2", isGm: true }, "p")).toHaveLength(1);
+    // A targeted *shake* is filtered by the same rule as a pan.
+    const shake = resolveFxSequence({ version: 1, sections: [{ kind: "camera", id: "s", mode: "shake",
+      intensity: 0.5, audience: "gm", startMs: 0, durationMs: 500 }] } as FxSequence,
+      scene, source, source, () => undefined);
+    expect(shake.ok).toBe(true);
+    if (!shake.ok) return;
+    expect(fxSectionsForViewer(shake.sections, { id: "p", isGm: false }, "p")).toHaveLength(0);
   });
 });

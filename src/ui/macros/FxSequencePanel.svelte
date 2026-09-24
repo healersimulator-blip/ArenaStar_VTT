@@ -4,8 +4,8 @@
   import type { EventBus } from "../../core/events";
   import type { AssetManifest, MacroDocument, SceneDocument } from "../../core/documents";
   import { FX_FILTER_RANGES, resolveFxSequence, validateFxSequence, type FxAnchor, type FxBlendMode,
-    type FxCameraPathSection, type FxEasing, type FxFilterKind, type FxSection, type FxSequence,
-    type FxImportPermissions } from "../../core/fx";
+    type FxCameraPathSection, type FxEasing, type FxFilterKind, type FxSection, type FxSectionAudience,
+    type FxSequence, type FxImportPermissions } from "../../core/fx";
   import { fxFitnessIssues } from "../../core/fxDelivery";
   import { SOUND_CHANNELS, SOUND_CHANNEL_LABELS, cueSilentForViewer, soundChannelOf } from "../../core/fxSound";
   import { domCanPlay, fxViewPrefs } from "../../core/fxPrefs";
@@ -295,6 +295,21 @@
       : old) };
   }
 
+  /**
+   * Who a camera cue moves. `scene` is the default and is stored by *omitting* the
+   * field, like every other "no setting" in this panel — the host then treats the cue
+   * as everyone, and a reader cannot mistake a stored `scene` for an author's choice.
+   */
+  function changeCameraAudience(index: number, value: string): void {
+    const before = draft.sections[index];
+    if (!before || before.kind !== "camera") return;
+    const { audience: _audience, ...remaining } = before;
+    void _audience;
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      ? (value === "scene" ? remaining : { ...remaining, audience: value as FxSectionAudience }) as FxSection
+      : old) };
+  }
+
   function changeReplayCount(index: number, value: string): void {
     const section = draft.sections[index];
     if (!section || section.kind === "wait") return;
@@ -580,6 +595,12 @@
         {/if}
         {#if section.kind === "camera"}
           <div class="controls">
+            <label>Seen by <select data-fx-camera-audience value={section.audience ?? "scene"}
+              onchange={(e) => changeCameraAudience(i, e.currentTarget.value)}>
+              <option value="scene">Everyone watching this timeline</option>
+              <option value="gm">GMs only</option>
+              <option value="caller">Only whoever runs it</option>
+            </select></label>
             <label>Camera <select data-fx-camera-mode value={section.mode}
               onchange={(e) => changeCameraMode(i, (e.target as HTMLSelectElement).value as "pan" | "shake" | "path")}>
               <option value="pan">Pan to a point</option><option value="shake">Shake in place</option>
@@ -664,7 +685,9 @@
                     ? { ...old, intensity: Number(e.currentTarget.value) } as FxSection : old) } } /></label>
               <small>Bounded, decaying, and always returns the view exactly where it started.</small>
             {/if}
-            <small>A camera section cannot loop or replay, and at most eight fit in one timeline.</small>
+            <small>A camera section cannot loop or replay, and at most eight fit in one timeline.
+              A viewer outside "Seen by" receives the rest of the run without this section, so their
+              payload never says where someone else's view went.</small>
           </div>
         {/if}
         {#if section.kind === "image" || section.kind === "text"}

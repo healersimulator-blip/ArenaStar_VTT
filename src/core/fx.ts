@@ -28,6 +28,16 @@ const BLEND_MODE_SET: readonly string[] = ["normal", "add", "multiply", "screen"
 const isBlendMode = (value: unknown): value is FxBlendMode =>
   typeof value === "string" && BLEND_MODE_SET.includes(value);
 
+/**
+ * Who a run — or one camera section of it — is delivered to. The same three words at
+ * both levels, so an author does not have to learn a second vocabulary for "the GM's
+ * view only"; the sequence level has always had them.
+ */
+export type FxSectionAudience = "scene" | "gm" | "caller";
+const AUDIENCES: readonly string[] = ["scene", "gm", "caller"];
+export const isFxSectionAudience = (value: unknown): value is FxSectionAudience =>
+  typeof value === "string" && AUDIENCES.includes(value);
+
 export type FxFilterKind = "blur" | "grayscale" | "brightness" | "saturate";
 /**
  * One filter per section, with the kind carrying its own range: a blur is measured in
@@ -123,6 +133,12 @@ interface FxLocated extends FxBase {
  */
 interface FxCameraBase extends FxBase {
   kind: "camera";
+  /**
+   * Who this camera cue moves. Absent means `scene` — every recipient of the run —
+   * and a viewer who is not in the target set receives the run *without this section*,
+   * so the payload itself carries no trace of where the GM's view went.
+   */
+  audience?: FxSectionAudience;
 }
 /** Centre the viewport on `to` over `durationMs`; `zoom` optionally ends at a new scale. */
 export interface FxCameraPanSection extends FxCameraBase {
@@ -171,7 +187,7 @@ export interface FxSequence {
   version: 1;
   /** Overlap on the timeline = parallel; different startMs values = ordered. */
   sections: FxSection[];
-  audience?: "scene" | "gm" | "caller";
+  audience?: FxSectionAudience;
   /** Host-owned named instance: each visual/audio section loops until explicitly stopped. */
   persistent?: boolean;
 }
@@ -247,7 +263,7 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
     const fields = section.kind === "sound" ? ["assetId", "volume", "channel", "fadeInMs", "fadeOutMs"] :
       section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter"] :
       section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter"] :
-      section.kind === "camera" ? ["mode", "to", "easing", "zoom", "intensity", "points"] : [];
+      section.kind === "camera" ? ["mode", "to", "easing", "zoom", "intensity", "points", "audience"] : [];
     if (Object.keys(section).some((key) => !["id", "kind", "startMs", "durationMs", ...fields, ...repeatFields].includes(key)) ||
       (section.kind !== "wait" && section.durationMs === 0)) {
       return { ok: false, error: "unknown FX section field or zero-duration media" };
@@ -259,6 +275,10 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
         return { ok: false, error: "at most 8 camera sections per timeline" };
       if (section.durationMs < MIN_CAMERA_MS)
         return { ok: false, error: "camera sections need at least 100 ms" };
+      // Targeting is a camera cue's own business: a visual or sound section is still
+      // delivered to every recipient, and its `audience` is an unknown field.
+      if (section.audience !== undefined && !isFxSectionAudience(section.audience))
+        return { ok: false, error: "a camera section's audience must be scene, gm or caller" };
       if (section.mode === "pan") {
         if (!validAnchor(section.to) || section.intensity !== undefined ||
             (section.easing !== undefined && !isEasing(section.easing)) ||
@@ -347,6 +367,39 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
     )) return { ok: false, error: "FX text needs 1–256 characters and an optional hex color" };
   }
   return { ok: true, sequence: value as unknown as FxSequence };
+}
+
+export interface FxViewer {
+  id: string;
+  isGm: boolean;
+}
+
+/**
+ * Which sections of a run one viewer may receive. A camera section carries its own
+ * audience (SQ-15's "local or recipient-targeted"): `scene` is everyone who gets the
+ * run, `gm` is GM/assistant only, `caller` is the session that asked for the run.
+ * Everything else is `scene`-equivalent — targeting a visual or sound section would
+ * need per-viewer media entitlement, which this helper deliberately does not pretend
+ * to do.
+ *
+ * The filtered array *is the payload*: an excluded viewer never receives the section,
+ * so no socket sniffing reveals where someone else's camera went. Returns the original
+ * array (same identity) when nothing is excluded, so the host's common case allocates
+ * nothing.
+ */
+export function fxSectionsForViewer(
+  sections: readonly ResolvedFxSection[],
+  viewer: FxViewer,
+  callerId: string,
+): readonly ResolvedFxSection[] {
+  const allowed = (section: ResolvedFxSection): boolean => {
+    if (section.kind !== "camera") return true;
+    const audience = section.audience ?? "scene";
+    if (audience === "gm") return viewer.isGm;
+    if (audience === "caller") return viewer.id === callerId;
+    return true;
+  };
+  return sections.every(allowed) ? sections : sections.filter(allowed);
 }
 
 /** Resolve all anchors ON THE HOST using its committed scene state. */

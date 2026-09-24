@@ -382,7 +382,8 @@ const sameCamera = (a: Camera | null | undefined, b: Camera | null | undefined) 
 const authorCamera = async (
   page: import("@playwright/test").Page,
   name: string,
-  fields: { mode?: "pan" | "shake"; x?: number; y?: number; intensity?: number; ms: number },
+  fields: { mode?: "pan" | "shake"; x?: number; y?: number; intensity?: number; ms: number;
+    audience?: "scene" | "gm" | "caller" },
 ) => {
   const wizard = page.locator("[data-fx-wizard]");
   await wizard.getByRole("button", { name: "New", exact: true }).click();
@@ -392,6 +393,7 @@ const authorCamera = async (
   if (fields.x !== undefined) await section.locator("[data-fx-camera-x]").fill(String(fields.x));
   if (fields.y !== undefined) await section.locator("[data-fx-camera-y]").fill(String(fields.y));
   if (fields.intensity !== undefined) await section.locator("[data-fx-camera-intensity]").fill(String(fields.intensity));
+  if (fields.audience !== undefined) await section.locator("[data-fx-camera-audience]").selectOption(fields.audience);
   await section.getByLabel("Duration ms").fill(String(fields.ms));
   await wizard.locator("[data-fx-name]").fill(name);
   await wizard.locator("[data-fx-save]").click();
@@ -926,4 +928,95 @@ test("a blend and a filter survive the host, the save and the renderer", async (
   // …and the renderer agrees with the reopened document, not with what was on screen.
   await expect.poll(async () => (await run())[0] ?? null, { timeout: 5_000 })
     .toEqual({ kind: "image", blend: "normal", filter: null });
+});
+
+// D-300 (SQ-15/SQ-18): a camera section can be targeted. Two real browser contexts —
+// the same run, two payloads: the GM's view goes where the sequence said, and the
+// player's does not move at all, because that section never reached them.
+test("a targeted camera moves only its audience's view", async ({ browser }) => {
+  test.setTimeout(120_000);
+  const hostCtx = await browser.newContext();
+  const playerCtx = await browser.newContext();
+  try {
+    const host = await hostCtx.newPage();
+    const player = await playerCtx.newPage();
+    await host.goto(entry + "?e2e=1");
+    await waitForSurface(host, "app");
+    await host.locator("#gm-macros").click();
+    await host.locator("[data-macro-fx-tab]").click();
+    const wizard = host.locator("[data-fx-wizard]");
+    const secret = { x: 1500, y: 420 };
+    const base = (await stageView(host))?.camera ?? null;
+
+    // One timeline: a text cue for everyone (so the run really reaches both viewers)
+    // and a pan only the GM is allowed to see.
+    await wizard.getByRole("button", { name: "New", exact: true }).click();
+    await wizard.getByRole("button", { name: "Text", exact: true }).click();
+    await wizard.locator("[data-fx-section]").nth(0).getByLabel("X", { exact: true }).fill("200");
+    await wizard.locator("[data-fx-section]").nth(0).getByLabel("Y", { exact: true }).fill("200");
+    await wizard.getByRole("button", { name: "Camera", exact: true }).click();
+    const cameras = wizard.locator("[data-fx-section]");
+    await cameras.nth(1).locator("[data-fx-camera-audience]").selectOption("gm");
+    await cameras.nth(1).locator("[data-fx-camera-x]").fill(String(secret.x));
+    await cameras.nth(1).locator("[data-fx-camera-y]").fill(String(secret.y));
+    await cameras.nth(1).getByLabel("Duration ms").fill("2500");
+    await wizard.locator("[data-fx-name]").fill("One sightline");
+    await wizard.locator("[data-fx-save]").click();
+    await expect(wizard.locator("li")).toContainText(["One sightline"]);
+
+    // The audience is a document fact: reopening must show "GMs only" back, or it was
+    // never host-approved and the save was a no-op.
+    await wizard.locator("li").filter({ hasText: "One sightline" }).getByRole("button", { name: "Edit" }).click();
+    await expect(cameras.nth(1).locator("[data-fx-camera-audience]")).toHaveValue("gm");
+
+    await host.locator("#share").click();
+    const fragment = manualFragment(await host.locator("#invite-link").inputValue());
+    await player.goto(`${entry}?e2e=1&join=1#${fragment}`);
+    await expect.poll(() => player.locator("#offer-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await host.locator("#peer-code").fill(await player.locator("#offer-out").inputValue());
+    await host.locator("#code-apply").click();
+    await expect.poll(() => host.locator("#share-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await player.locator("#answer-input").fill(await host.locator("#share-out").inputValue());
+    await player.locator("#answer-apply").click();
+    await expect.poll(() => playerCall<boolean>(player, "connected"), { timeout: 30_000 }).toBe(true);
+    await waitForSurface(player, "playerCanvas");
+
+    /** The player shell publishes `__canvasStage`, not `__stage`. */
+    const view = async (page: import("@playwright/test").Page) => {
+      const camera = await page.evaluate(() => {
+        const g = globalThis as unknown as { __stage?: { camera: Camera };
+          __canvasStage?: { camera: Camera } };
+        return g.__stage?.camera ?? g.__canvasStage?.camera ?? null;
+      });
+      const box = await page.locator(".canvas-host canvas").boundingBox();
+      if (!camera || !box) return null;
+      return { camera, centre: { x: camera.x + box.width / (2 * camera.scale),
+        y: camera.y + box.height / (2 * camera.scale) } };
+    };
+    const playerBase = (await view(player))?.camera ?? null;
+
+    // The GM runs it: one run, two payloads. The GM's own view goes to the destination…
+    await wizard.locator("[data-fx-run]").click();
+    await expect.poll(async () => near((await stageView(host))?.centre, secret, 4), { timeout: 8_000 }).toBe(true);
+    expect(sameCamera(base, (await stageView(host))?.camera)).toBe(false);
+    // …and the joined player's camera is *exactly* where it was: not a moved-then-restored
+    // camera, but a client that was never told to move.
+    const playerSettled = await view(player);
+    expect(sameCamera(playerBase, playerSettled?.camera)).toBe(true);
+
+    // Flip that pan to everyone, save, run again: now the player's own view goes with
+    // it. Same document, one field changed — and the flip must survive the host.
+    await cameras.nth(1).locator("[data-fx-camera-audience]").selectOption("scene");
+    const before = await hostCall<number>(host, "seq");
+    await wizard.locator("[data-fx-save]").click();
+    await expect.poll(() => hostCall<number>(host, "seq"), { timeout: 5_000 }).toBeGreaterThan(before);
+    await wizard.locator("[data-fx-run]").click();
+    await expect.poll(async () => { const now = await view(player);
+      return !!now && !!playerBase && Math.hypot(now.camera.x - playerBase.x, now.camera.y - playerBase.y) > 40; },
+    { timeout: 8_000 }).toBe(true);
+    await expect.poll(async () => near((await view(player))?.centre, secret, 4), { timeout: 8_000 }).toBe(true);
+  } finally {
+    await playerCtx.close();
+    await hostCtx.close();
+  }
 });

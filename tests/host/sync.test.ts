@@ -1450,6 +1450,83 @@ describe("Macros / FX host authority and audience", () => {
     expect(seen).toHaveLength(0);
   });
 
+  test("a targeted camera section reaches only its audience, and the others never see it", async () => {
+    const h = await setup({ [imageHash]: { name: "vfx.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    // One timeline: a text cue everyone gets, a GM-only pan, a scene pan, and a pan only
+    // the requesting session gets. SQ-15's "local or recipient-targeted" camera.
+    const macro = fxMacro("sightlines");
+    if (!macro.sequence) throw new Error("Missing FX fixture sequence");
+    macro.sequence = { ...macro.sequence, sections: [
+      { kind: "text", id: "t", text: "Look", at: { kind: "point", x: 100, y: 100 }, startMs: 0, durationMs: 400 },
+      { kind: "camera", id: "gm-look", mode: "pan", to: { kind: "point", x: 900, y: 90 },
+        audience: "gm", startMs: 0, durationMs: 500 },
+      { kind: "camera", id: "all-look", mode: "pan", to: { kind: "point", x: 500, y: 500 },
+        startMs: 0, durationMs: 500 },
+      { kind: "camera", id: "mine", mode: "pan", to: { kind: "point", x: 700, y: 700 },
+        audience: "caller", startMs: 0, durationMs: 500 },
+    ] };
+    h.gm.submit([{ kind: "create", coll: "macros", data: macro }]);
+    await flushMicrotasks();
+    const first = await h.addPlayer(PLAYER_ID, "Rex");
+    const second = await h.addPlayer(OTHER_ID, "Ivy");
+    const gmCues: ClientEvents["fx"][] = [];
+    const firstCues: ClientEvents["fx"][] = [];
+    const secondCues: ClientEvents["fx"][] = [];
+    h.gmBus.on("fx", (cue) => gmCues.push(cue));
+    first.bus.on("fx", (cue) => firstCues.push(cue));
+    second.bus.on("fx", (cue) => secondCues.push(cue));
+
+    // The GM runs it: the GM sees all three cameras (they are the caller *and* a GM),
+    // each player sees only the scene pan…
+    h.gm.requestSequence("sightlines", "s1");
+    await flushMicrotasks();
+    const kinds = (cue: ClientEvents["fx"] | undefined) => cue?.sections.map((step) => step.id) ?? [];
+    expect(kinds(gmCues[0])).toEqual(["t", "gm-look", "all-look", "mine"]);
+    expect(kinds(firstCues[0])).toEqual(["t", "all-look"]);
+    expect(kinds(secondCues[0])).toEqual(["t", "all-look"]);
+    // …and the destination of the GM-only pan is not merely unrendered, it is absent:
+    // their payload carries no trace of where someone else's view went.
+    expect(JSON.stringify(firstCues[0])).not.toContain("900");
+
+    // A player runs it: now the caller-targeted pan follows *them*, and the GM-only pan
+    // still does not, while the other player still sees only the scene pan.
+    first.client.requestSequence("sightlines", "s1");
+    await flushMicrotasks();
+    // The GM still gets the GM-only panic and never gets "mine": the caller moved.
+    expect(kinds(gmCues[1])).toEqual(["t", "gm-look", "all-look"]);
+    expect(kinds(firstCues[1])).toEqual(["t", "all-look", "mine"]);
+    expect(kinds(secondCues[1])).toEqual(["t", "all-look"]);
+    // Same run, two payloads: targeting filters a cue per recipient, it does not fork
+    // the run — and the requester's own run is a new one, not a replay of the GM's.
+    expect(firstCues[1]?.runId).toBe(gmCues[1]?.runId);
+    expect(firstCues[1]?.runId).not.toBe(firstCues[0]?.runId);
+  });
+
+  test("a run whose every section is out of a viewer's audience is not delivered to them at all", async () => {
+    const h = await setup();
+    const macro = fxMacro("gm-vista");
+    if (!macro.sequence) throw new Error("Missing FX fixture sequence");
+    macro.sequence = { ...macro.sequence, sections: [
+      { kind: "camera", id: "gm-only", mode: "pan", to: { kind: "point", x: 300, y: 300 },
+        audience: "gm", startMs: 0, durationMs: 500 },
+    ] };
+    h.gm.submit([{ kind: "create", coll: "macros", data: macro }]);
+    await flushMicrotasks();
+    const player = await h.addPlayer(PLAYER_ID, "Rex");
+    const gmCues: ClientEvents["fx"][] = [];
+    const playerCues: ClientEvents["fx"][] = [];
+    h.gmBus.on("fx", (cue) => gmCues.push(cue));
+    player.bus.on("fx", (cue) => playerCues.push(cue));
+
+    h.gm.requestSequence("gm-vista", "s1");
+    await flushMicrotasks();
+    expect(gmCues).toHaveLength(1);
+    // An empty cue is not the same as no cue: the player is not sent a shell of a run
+    // they cannot see any part of.
+    expect(playerCues).toHaveLength(0);
+  });
+
   test("hidden source and unpublished macros never broadcast to other players", async () => {
     const h = await setup({ [imageHash]: { name: "vfx.png", mime: "image/png", size: 4,
       chunks: 1, visibility: "referenced" } });

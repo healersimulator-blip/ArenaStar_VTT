@@ -105,7 +105,7 @@ import { OpLog } from "../core/oplog";
 import { UndoStack } from "../core/undo";
 import { can } from "../core/permissions";
 import { canFetchAsset, projectAssetManifest } from "../core/assetAccess";
-import { resolveFxSequence, validateFxSequence } from "../core/fx";
+import { fxSectionsForViewer, resolveFxSequence, validateFxSequence } from "../core/fx";
 import { planAutomation, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState,
   type AutomationEvent, type AutomationMethod } from "../core/automation";
 import { attachedDeletionOps, attachedMovementOps, planPrefabPlacement, PREFAB_COLLECTIONS, validatePrefab } from "../core/prefabs";
@@ -3016,7 +3016,14 @@ export class HostSync {
         if (prepared.cue.sections.some((step) =>
           (step.kind === "image" || step.kind === "sound") && !available[step.assetId])) continue;
       }
-      this.send(recipient, prepared.cue);
+      // SQ-15/D-300: a camera section can be targeted, so the payload is built per
+      // recipient. A viewer excluded from every section of a run receives nothing at
+      // all rather than an empty cue they would have to reason about.
+      const forViewer = fxSectionsForViewer(prepared.cue.sections,
+        { id: user.id, isGm: user.role === "GM" || user.role === "ASSISTANT" }, prepared.callerId);
+      if (forViewer.length === 0) continue;
+      this.send(recipient, forViewer === prepared.cue.sections ? prepared.cue
+        : { ...prepared.cue, sections: [...forViewer] });
     }
     return true;
   }
