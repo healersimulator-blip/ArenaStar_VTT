@@ -10,6 +10,9 @@
  *  - a **pan** interpolates the viewport *centre* from where the viewer is to the
  *    resolved point, so a zoom change cannot make the destination drift; when the
  *    section ends the camera stays on the destination (that is what a pan is for),
+ *  - a **path** walks its host-resolved waypoints in order, starting from where the
+ *    viewer already is (so "here, then the gate, then the throne" is what the author
+ *    meant), and stays on the last one like a pan stays on its destination,
  *  - a **shake** never moves the camera anywhere permanently: the offset decays to
  *    zero and the caller restores the exact base camera on the last frame,
  *  - both are bounded: a shake's amplitude is a fixed screen-space budget divided
@@ -39,7 +42,17 @@ export interface ResolvedCameraShake {
   intensity: number;
   durationMs: number;
 }
-export type ResolvedCameraSection = ResolvedCameraPan | ResolvedCameraShake;
+export interface ResolvedCameraPath {
+  kind: "camera";
+  mode: "path";
+  startMs: number;
+  /** Host-resolved waypoints in order (2–8). */
+  points: Array<{ x: number; y: number }>;
+  easing?: FxEasing;
+  zoom?: number;
+  durationMs: number;
+}
+export type ResolvedCameraSection = ResolvedCameraPan | ResolvedCameraShake | ResolvedCameraPath;
 
 /** The world point a camera is centred on right now. */
 export function cameraCentre(camera: Camera, viewport: Viewport): { x: number; y: number } {
@@ -82,6 +95,50 @@ export function panCamera(
   );
 }
 
+/**
+ * A path walked from the viewer's current position through `points`, in order.
+ *
+ * The legs are evenly spread across the section's duration and each one is eased by
+ * the same shared curve (`fxEase`), so a tour and a single pan of the same timeline
+ * move alike. `zoom`, when given, is interpolated across the whole path rather than
+ * per leg — otherwise a two-waypoint tour and a single pan to the same place would
+ * end at different scales, which is exactly the kind of drift the pan rule exists to
+ * prevent.
+ */
+export function pathCamera(
+  base: Camera,
+  points: readonly { x: number; y: number }[],
+  viewport: Viewport,
+  progress: number,
+  zoom?: number,
+  easing?: FxEasing,
+): Camera {
+  // A non-finite progress is clamped to 0 rather than propagated: a NaN camera would
+  // blank the map for that viewer, and "no motion" is the safe reading of "no time".
+  const phase = Number.isFinite(progress) ? Math.min(1, Math.max(0, progress)) : 0;
+  const start = cameraCentre(base, viewport);
+  // The list is the current centre followed by every waypoint: N waypoints, N legs.
+  const route = [start, ...points];
+  const legs = route.length - 1;
+  if (legs < 1) return base;
+  const scale = zoom === undefined ? base.scale : base.scale + (zoom - base.scale) * phase;
+  if (phase >= 1) {
+    const last = route[route.length - 1] ?? start;
+    return cameraCentredOn(last, viewport, scale);
+  }
+  const scaled = phase * legs;
+  const index = Math.min(legs - 1, Math.floor(scaled));
+  const local = scaled - index;
+  const from = route[index] ?? start;
+  const to = route[index + 1] ?? from;
+  const eased = fxEase(easing, local); // easing is per leg: every stop is still a stop
+  return cameraCentredOn(
+    { x: from.x + (to.x - from.x) * eased, y: from.y + (to.y - from.y) * eased },
+    viewport,
+    scale,
+  );
+}
+
 /** Bounded, decaying offset around the base camera. `rand` is `Math.random` in the app. */
 export function shakeCamera(
   base: Camera,
@@ -113,10 +170,28 @@ export function cameraAt(
   if (!Number.isFinite(elapsedMs) || elapsedMs >= section.durationMs) return null;
   const progress = Math.min(1, Math.max(0, elapsedMs / section.durationMs));
   if (section.mode === "shake") return shakeCamera(base, progress, section.intensity, rand);
+  if (section.mode === "path")
+    return pathCamera(base, section.points, viewport, progress, section.zoom, section.easing);
   return panCamera(base, { x: section.toX, y: section.toY }, viewport, fxEase(section.easing, progress), section.zoom);
 }
 
 /** Where a finished pan leaves the view — the caller writes this on the last frame. */
 export function cameraPanEnd(section: ResolvedCameraPan, base: Camera, viewport: Viewport): Camera {
   return panCamera(base, { x: section.toX, y: section.toY }, viewport, 1, section.zoom);
+}
+
+/** Where a finished path leaves the view: its last waypoint, at the path's final zoom. */
+export function cameraPathEnd(section: ResolvedCameraPath, base: Camera, viewport: Viewport): Camera {
+  return pathCamera(base, section.points, viewport, 1, section.zoom, section.easing);
+}
+
+/**
+ * Where a camera section leaves the view once it is over — the one place the three
+ * modes differ: a pan parks on its destination, a path on its last waypoint, and a
+ * shake hands the view back exactly as it found it.
+ */
+export function cameraEnd(section: ResolvedCameraSection, base: Camera, viewport: Viewport): Camera {
+  if (section.mode === "shake") return base;
+  if (section.mode === "path") return cameraPathEnd(section, base, viewport);
+  return cameraPanEnd(section, base, viewport);
 }

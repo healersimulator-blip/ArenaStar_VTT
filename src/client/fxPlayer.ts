@@ -7,7 +7,7 @@ import { Texture } from "pixi.js";
 import type { Stage } from "../canvas/stage";
 import type { FxStartMsg } from "../core/messages";
 import type { ResolvedFxSection } from "../core/fx";
-import { cameraAt, cameraPanEnd, type ResolvedCameraSection } from "../canvas/fxCamera";
+import { cameraAt, cameraEnd, type ResolvedCameraSection } from "../canvas/fxCamera";
 import {
   fxMediaCues, fxPreloadPlan, lateMediaDecision, summarizeDelivery,
   type FxDeliveryEntry, type FxDeliveryReport,
@@ -236,8 +236,10 @@ export class FxPlayer {
           if (this.prefs.reduceMotion) {
             this.noteDelivery(cue.runId, { index, kind: "camera",
               state: section.mode === "shake" ? "skipped" : "cut", reason: "reduced-motion" });
-            if (section.mode === "pan") {
-              this.options.stage.setCamera(cameraPanEnd(section, this.options.stage.camera,
+            // A pan or a path still has to end up looking at the right place; only a
+            // shake is skipped outright.
+            if (section.mode !== "shake") {
+              this.options.stage.setCamera(cameraEnd(section, this.options.stage.camera,
                 this.options.stage.viewport));
             }
             this.settleCue(cue.runId);
@@ -342,12 +344,10 @@ export class FxPlayer {
       this.options.stage.setCamera(want);
       return;
     }
-    // Finished. A shake hands the view back exactly as it found it; a pan leaves
-    // it on the destination, which is the whole point of a pan.
+    // Finished. A shake hands the view back exactly as it found it; a pan leaves the
+    // view on its destination and a path on its last waypoint — the whole point of both.
     this.view = null;
-    this.options.stage.setCamera(claimed.section.mode === "shake"
-      ? claimed.base
-      : cameraPanEnd(claimed.section, claimed.base, viewport));
+    this.options.stage.setCamera(cameraEnd(claimed.section, claimed.base, viewport));
   }
 
   /** Release a camera claim; `restore` puts the view back where the section found it. */

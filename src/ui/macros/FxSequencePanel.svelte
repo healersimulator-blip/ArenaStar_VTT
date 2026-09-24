@@ -3,8 +3,8 @@
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import type { AssetManifest, MacroDocument, SceneDocument } from "../../core/documents";
-  import { resolveFxSequence, validateFxSequence, type FxEasing, type FxSection, type FxSequence,
-    type FxImportPermissions } from "../../core/fx";
+  import { resolveFxSequence, validateFxSequence, type FxAnchor, type FxCameraPathSection, type FxEasing,
+    type FxSection, type FxSequence, type FxImportPermissions } from "../../core/fx";
   import { fxFitnessIssues } from "../../core/fxDelivery";
   import { SOUND_CHANNELS, SOUND_CHANNEL_LABELS, cueSilentForViewer, soundChannelOf } from "../../core/fxSound";
   import { domCanPlay, fxViewPrefs } from "../../core/fxPrefs";
@@ -183,15 +183,60 @@
       : { id: before.id, kind, startMs: before.startMs, durationMs: before.durationMs };
     draft = { ...draft, sections: draft.sections.map((old, i) => i === index ? section : old) };
   }
-  /** Pan ⇄ shake is a real discriminator: the two shapes share no destination field. */
-  function changeCameraMode(index: number, mode: "pan" | "shake"): void {
+  /** Pan ⇄ shake ⇄ path is a real discriminator: the shapes share no destination field. */
+  function changeCameraMode(index: number, mode: "pan" | "shake" | "path"): void {
     const before = draft.sections[index];
     if (!before || before.kind !== "camera") return;
     const section: FxSection = mode === "shake"
       ? { id: before.id, kind: "camera", mode: "shake", intensity: 0.4, startMs: before.startMs,
           durationMs: Math.min(before.durationMs, 800) }
+      : mode === "path" ? pathSection(before.id, before.startMs, Math.max(1_000, before.durationMs))
       : cameraSection(before.id, before.startMs);
     draft = { ...draft, sections: draft.sections.map((old, i) => i === index ? section : old) };
+  }
+  /**
+   * Waypoint editing. A path is a *tour*: at least two points that differ, and the
+   * first leg runs from wherever each viewer already is (the host resolves the rest).
+   * The defaults are spread across the scene so a fresh path visibly goes somewhere.
+   */
+  function pathSection(id: string, startMs: number, durationMs = 2000): FxSection {
+    const width = scene?.width ?? 500;
+    const height = scene?.height ?? 500;
+    return { id, kind: "camera", mode: "path", startMs, durationMs, easing: "easeInOut",
+      points: [{ kind: "point", x: Math.round(width * 0.25), y: Math.round(height * 0.3) },
+        { kind: "point", x: Math.round(width * 0.75), y: Math.round(height * 0.7) }] };
+  }
+  function changeWaypoint(index: number, way: number, patch: Partial<FxCameraPathSection["points"][number]>): void {
+    const before = draft.sections[index];
+    if (!before || before.kind !== "camera" || before.mode !== "path") return;
+    const points = before.points.map((point, i) => i === way ? { ...point, ...patch } as FxAnchor : point);
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      ? { ...before, points } as FxSection : old) };
+  }
+  function changeWaypointKind(index: number, way: number, kind: "point" | "source" | "target"): void {
+    const before = draft.sections[index];
+    if (!before || before.kind !== "camera" || before.mode !== "path") return;
+    const at = { kind, x: Math.round((scene?.width ?? 500) / 2), y: Math.round((scene?.height ?? 500) / 2) };
+    changeWaypoint(index, way, kind === "point" ? { kind, x: at.x, y: at.y } : { kind } as never);
+  }
+  function addWaypoint(index: number): void {
+    const before = draft.sections[index];
+    if (!before || before.kind !== "camera" || before.mode !== "path" || before.points.length >= 8) return;
+    const last = before.points[before.points.length - 1];
+    // A new waypoint starts mirrored across the scene's centre, so a fresh tour visibly
+    // goes somewhere instead of stacking three anchors on one spot.
+    const x = last?.kind === "point" ? Math.round(scene?.width ?? 500) - last.x : Math.round((scene?.width ?? 500) / 2);
+    const y = last?.kind === "point" ? Math.round(scene?.height ?? 500) - last.y : Math.round((scene?.height ?? 500) / 2);
+    const points = [...before.points, { kind: "point" as const, x, y }];
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      ? { ...before, points } as FxSection : old) };
+  }
+  function removeWaypoint(index: number, way: number): void {
+    const before = draft.sections[index];
+    if (!before || before.kind !== "camera" || before.mode !== "path" || before.points.length <= 2) return;
+    const points = before.points.filter((_point, i) => i !== way);
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      ? { ...before, points } as FxSection : old) };
   }
   function changeCameraDestination(index: number, kind: "point" | "source" | "target"): void {
     const before = draft.sections[index];
@@ -204,7 +249,7 @@
   }
   function changeCameraZoom(index: number, value: string): void {
     const before = draft.sections[index];
-    if (!before || before.kind !== "camera" || before.mode !== "pan") return;
+    if (!before || before.kind !== "camera" || before.mode === "shake") return;
     const zoom = value.trim() === "" ? undefined : Number(value);
     draft = { ...draft, sections: draft.sections.map((old, i) => i === index
       ? { ...before, ...(zoom === undefined ? {} : { zoom }) } as FxSection : old) };
@@ -291,26 +336,35 @@
    * gesture cannot half-edit the draft; square/hex snap to the cell or hex centre,
    * gridless stays exact, and the overlay refuses a point the host would refuse.
    */
-  async function pickPoint(index: number, which: "at" | "to" | "camera"): Promise<void> {
+  async function pickPoint(index: number, which: "at" | "to" | "camera" | "waypoint", way = 0): Promise<void> {
     const before = draft.sections[index];
     const cameraPan = before?.kind === "camera" && before.mode === "pan";
+    const waypoint = before?.kind === "camera" && before.mode === "path"
+      ? before.points[way] : undefined;
     const located = before?.kind === "image" || before?.kind === "text";
-    if (!before || (which === "camera" ? !cameraPan : !located) || !onPickAnchor || !scene) return;
+    if (!before || (which === "waypoint" ? !waypoint : which === "camera" ? !cameraPan : !located) ||
+        !onPickAnchor || !scene) return;
     error = ""; status = "";
-    // Shapes and constraints come from the draft: a stretched image or a camera pan
-    // is a *direction*, so a ray/rect is the honest instrument, and a plain anchor
-    // stays a point. Nothing here is a host rule the sequence would not also check.
+    // Shapes and constraints come from the draft: a stretched image, a camera pan or a
+    // path leg is a *direction*, so a ray/rect is the honest instrument, and a plain
+    // anchor stays a point. Nothing here is a host rule the sequence would not check.
     const stretch = before.kind === "image" && before.stretch === true;
-    const shapes = which === "to" || (which === "camera" && cameraPan) || stretch
+    const shapes = which === "to" || which === "camera" || which === "waypoint" || stretch
       ? ["point", "ray", "rect"] as const : ["point", "circle", "cone", "rect"] as const;
     const placement = await onPickAnchor({ sceneId: scene._id,
       label: which === "at" ? "the section's start point"
-        : which === "camera" ? "where the camera should look" : "the destination point",
+        : which === "camera" ? "where the camera should look"
+        : which === "waypoint" ? `waypoint ${way + 1}` : "the destination point",
       shapes, named: placements,
       hint: "The host validates the saved sequence — this only writes the draft." });
     if (!placement) { status = "Pick cancelled — the draft is unchanged"; return; }
     placements = rememberPlacement(placements, placement);
     const point = { x: Math.round(placement.point.x), y: Math.round(placement.point.y) };
+    if (which === "waypoint") {
+      changeWaypoint(index, way, { kind: "point", x: point.x, y: point.y } as never);
+      status = `Waypoint ${way + 1} set to ${point.x}, ${point.y} — save the timeline to publish it`;
+      return;
+    }
     draft = { ...draft, sections: draft.sections.map((old, i) => {
       if (i !== index) return old;
       if (old.kind === "camera" && old.mode === "pan")
@@ -487,8 +541,9 @@
         {#if section.kind === "camera"}
           <div class="controls">
             <label>Camera <select data-fx-camera-mode value={section.mode}
-              onchange={(e) => changeCameraMode(i, (e.target as HTMLSelectElement).value as "pan" | "shake")}>
+              onchange={(e) => changeCameraMode(i, (e.target as HTMLSelectElement).value as "pan" | "shake" | "path")}>
               <option value="pan">Pan to a point</option><option value="shake">Shake in place</option>
+              <option value="path">Path through waypoints</option>
             </select></label>
             {#if section.mode === "pan"}
               <label>Destination <select data-fx-camera-destination value={section.to.kind}
@@ -520,6 +575,48 @@
               <label>Zoom at the end <input type="number" min="0.1" max="10" step="0.05" data-fx-camera-zoom
                 value={section.zoom ?? ""} oninput={(e) => changeCameraZoom(i, e.currentTarget.value)} /></label>
               <small>Leaves the view on the destination when the section ends; the viewer's own drag cancels it.</small>
+            {:else if section.mode === "path"}
+              <div class="waypoints" data-fx-waypoints>
+                <small>The tour starts wherever each viewer already is, then visits these in order
+                  and stays on the last one. Every waypoint is resolved and bounds-checked by the host.</small>
+                {#each section.points as point, way (way)}
+                  <div class="row" data-fx-waypoint={way}>
+                    <strong>{way + 1}.</strong>
+                    <select data-fx-waypoint-kind={way} value={point.kind}
+                      onchange={(e) => changeWaypointKind(i, way, (e.target as HTMLSelectElement).value as "point" | "source" | "target")}>
+                      <option value="point">Point</option><option value="source">Source token</option>
+                      <option value="target">Target token</option>
+                    </select>
+                    {#if point.kind === "point"}
+                      <label>X <input type="number" min="0" data-fx-waypoint-x={way} value={point.x}
+                        oninput={(e) => changeWaypoint(i, way, { kind: "point", x: Number(e.currentTarget.value),
+                          y: point.y } as never)} /></label>
+                      <label>Y <input type="number" min="0" data-fx-waypoint-y={way} value={point.y}
+                        oninput={(e) => changeWaypoint(i, way, { kind: "point", x: point.x,
+                          y: Number(e.currentTarget.value) } as never)} /></label>
+                      {#if onPickAnchor}
+                        <button type="button" data-fx-waypoint-pick={way} disabled={!onOpenScene}
+                          title={onOpenScene ? "Click the map to place this waypoint" : "Open this timeline's scene first"}
+                          onclick={() => void pickPoint(i, "waypoint", way)}>Pick on map…</button>
+                      {/if}
+                    {/if}
+                    <button type="button" data-fx-waypoint-remove={way} disabled={section.points.length <= 2}
+                      onclick={() => removeWaypoint(i, way)}>Remove</button>
+                  </div>
+                {/each}
+                <button type="button" data-fx-waypoint-add disabled={section.points.length >= 8}
+                  onclick={() => addWaypoint(i)}>Add waypoint</button>
+              </div>
+              <label>Easing <select data-fx-camera-easing value={section.easing ?? "linear"}
+                onchange={(e) => draft = { ...draft, sections: draft.sections.map((old, j) =>
+                  j === i && old.kind === "camera" && old.mode === "path"
+                    ? { ...old, easing: e.currentTarget.value as FxEasing } as FxSection : old) } }>
+                <option value="linear">Linear</option><option value="easeIn">Ease in</option>
+                <option value="easeOut">Ease out</option><option value="easeInOut">Ease in/out</option>
+              </select></label>
+              <label>Zoom at the end <input type="number" min="0.1" max="10" step="0.05" data-fx-camera-zoom
+                value={section.zoom ?? ""} oninput={(e) => changeCameraZoom(i, e.currentTarget.value)} /></label>
+              <small>One leg per waypoint, eased alike; a viewer's own drag or zoom still takes the map back.</small>
             {:else}
               <label>Shake intensity <input type="number" min="0.05" max="1" step="0.05" data-fx-camera-intensity
                 value={section.intensity} oninput={(e) => draft = { ...draft, sections: draft.sections.map((old, j) =>
@@ -640,6 +737,9 @@
   input:not([type="checkbox"]):not([type="file"]), select { min-width: 72px; max-width: 220px; }
   input[type="number"] { width: 70px; }
   .hint { margin: 0; color: #aab6c6; }
+  .waypoints { display: grid; gap: 4px; padding: 5px; border: 1px dashed #5d7091; border-radius: 4px; }
+  .waypoints .row { align-items: center; }
+  .waypoints strong { min-width: 1.4em; }
   .placements { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; color: #cfe6d8; }
   .placements span { border: 1px solid #4f7a61; border-radius: 3px; padding: 1px 5px; }
   .sections { display: grid; gap: 6px; max-height: 270px; overflow: auto; }

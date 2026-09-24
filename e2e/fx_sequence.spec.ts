@@ -719,7 +719,9 @@ test("a sound plays on its channel, fades in, and this device can stop and mix i
   await page.locator("#gm-settings").click();
   const prefs = page.locator("[data-fx-prefs]");
   const row = prefs.locator("[data-fx-playing-sound]").first();
-  await expect(row).toContainText("ward-hum.wav");
+  // The row appears only once this device has fetched and decoded the cue, so under a
+  // loaded machine (a batch run) give that first appearance more than the default wait.
+  await expect(row).toContainText("ward-hum.wav", { timeout: 15_000 });
   await expect(row).toContainText("Music");
   const percent = async () => {
     const text = await row.innerText();
@@ -756,4 +758,101 @@ test("a sound plays on its channel, fades in, and this device can stop and mix i
   await page.locator("#gm-settings").click();
   await expect(prefs.locator("[data-fx-playing-sound]")).toHaveCount(0);
   await prefs.locator('[data-fx-mix-channel="music"]').fill("1"); // leave the device as it was
+});
+
+// D-298 (SQ-15): a camera *path* tours the host-resolved waypoints in order and
+// parks on the last one. The middle waypoint is placed with the shared crosshair
+// from D-296, so authoring a tour is the same gesture as authoring a single anchor.
+test("a camera path tours its waypoints and parks on the last one", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+
+  const first = { x: 350, y: 250 };   // typed by hand
+  const middle = { x: 1_050, y: 650 }; // picked on the map (cell centre 1050, 650)
+  const last = { x: 550, y: 1_150 };  // added and typed
+  await wizard.getByRole("button", { name: "Camera", exact: true }).click();
+  const section = wizard.locator("[data-fx-section]");
+  await section.locator("[data-fx-camera-mode]").selectOption("path");
+  await section.getByLabel("Duration ms").fill("3000");
+  await section.locator('[data-fx-waypoint-x="0"]').fill(String(first.x));
+  await section.locator('[data-fx-waypoint-y="0"]').fill(String(first.y));
+
+  // Waypoint 2 through the crosshair: the same overlay (and the same snapping) the
+  // anchor work uses, so a tour leg is placed exactly like any other anchor.
+  await section.locator('[data-fx-waypoint-pick="1"]').click();
+  const overlay = page.locator("[data-crosshair]");
+  await expect(overlay).toBeVisible();
+  const overlayBox = await overlay.boundingBox();
+  if (!overlayBox) throw new Error("Crosshair overlay missing");
+  const camera = await hostCall<{ x: number; y: number; scale: number }>(page, "camera");
+  const at = { x: overlayBox.x + (1_074 - camera.x) * camera.scale,
+    y: overlayBox.y + (631 - camera.y) * camera.scale };
+  await page.mouse.move(at.x, at.y);
+  await expect(page.locator("[data-crosshair-readout]")).toContainText("1050, 650");
+  await page.mouse.click(at.x, at.y);
+  await expect(overlay).toHaveCount(0);
+  await expect(section.locator('[data-fx-waypoint-x="1"]')).toHaveValue("1050");
+
+  // A third waypoint, typed: a tour with a stop that is not on the straight line.
+  await section.locator("[data-fx-waypoint-add]").click();
+  await expect(section.locator('[data-fx-waypoint="2"]')).toHaveCount(1);
+  await section.locator('[data-fx-waypoint-x="2"]').fill(String(last.x));
+  await section.locator('[data-fx-waypoint-y="2"]').fill(String(last.y));
+  await wizard.locator("[data-fx-name]").fill("Gate tour");
+  await wizard.locator("[data-fx-save]").click();
+  await expect(wizard.locator("li")).toContainText(["Gate tour"]);
+
+  // Reopen the saved timeline: the mode and all three waypoints came back through the
+  // host, in order — an unsaved draft would have lost them at the first snapshot.
+  await wizard.locator("li").filter({ hasText: "Gate tour" }).getByRole("button", { name: "Edit" }).click();
+  await expect(section.locator("[data-fx-camera-mode]")).toHaveValue("path");
+  await expect(section.locator('[data-fx-waypoint="2"]')).toHaveCount(1);
+  await expect(section.locator('[data-fx-waypoint-x="0"]')).toHaveValue(String(first.x));
+  await expect(section.locator('[data-fx-waypoint-y="0"]')).toHaveValue(String(first.y));
+  await expect(section.locator('[data-fx-waypoint-x="1"]')).toHaveValue(String(middle.x));
+  await expect(section.locator('[data-fx-waypoint-y="1"]')).toHaveValue(String(middle.y));
+  await expect(section.locator('[data-fx-waypoint-x="2"]')).toHaveValue(String(last.x));
+  await expect(section.locator('[data-fx-waypoint-y="2"]')).toHaveValue(String(last.y));
+
+  // Sample the camera every frame while the tour runs: it must come within reach of
+  // the middle waypoint *and* finish on the last one.
+  await wizard.locator("[data-fx-run]").click();
+  const travelled = await page.evaluate(async () => {
+    const stage = (globalThis as unknown as { __stage?: { camera: { x: number; y: number; scale: number };
+      viewport: { width: number; height: number } } }).__stage;
+    if (!stage) return [] as Array<{ x: number; y: number }>;
+    const centre = () => ({ x: stage.camera.x + stage.viewport.width / (2 * stage.camera.scale),
+      y: stage.camera.y + stage.viewport.height / (2 * stage.camera.scale) });
+    const seen: Array<{ x: number; y: number }> = [];
+    const until = performance.now() + 3_200;
+    while (performance.now() < until) {
+      seen.push(centre());
+      await new Promise((resolve) => setTimeout(resolve, 16));
+    }
+    return seen;
+  });
+  const distanceTo = (point: { x: number; y: number }) =>
+    Math.min(...travelled.map((sample) => Math.hypot(sample.x - point.x, sample.y - point.y)));
+  expect(travelled.length).toBeGreaterThan(20);
+  expect(distanceTo(first)).toBeLessThan(30);   // the first waypoint was visited
+  expect(distanceTo(middle)).toBeLessThan(60);  // …so was the middle one
+  // The last waypoint is where it stayed, not merely passed through: the final frame
+  // is on it and the tour was still 200 px away halfway through.
+  await expect.poll(async () => near((await stageView(page))?.centre, last, 4), { timeout: 4_000 }).toBe(true);
+  const midway = travelled[Math.floor(travelled.length / 2)] ?? last;
+  expect(Math.hypot(midway.x - last.x, midway.y - last.y)).toBeGreaterThan(200);
+
+  // Reduced motion cuts the whole tour to its last waypoint — no interpolation at all.
+  await page.locator("#gm-settings").click();
+  await page.locator("[data-fx-prefs]").locator("[data-fx-pref-reduced-motion]").check();
+  await page.locator('[data-window="settings"] [data-window-close]').click();
+  await wizard.locator("li").filter({ hasText: "Gate tour" }).getByRole("button", { name: "Run" }).click();
+  await expect.poll(async () => near((await stageView(page))?.centre, last, 4), { timeout: 2_000 }).toBe(true);
+  const parked = (await stageView(page))?.camera ?? null;
+  await page.waitForTimeout(800); // well before the 3 s tour would have finished
+  expect(sameCamera((await stageView(page))?.camera ?? null, parked)).toBe(true);
+  await expect(page.locator("[data-notify]").filter({ hasText: "cut by reduced motion" })).toHaveCount(1);
 });

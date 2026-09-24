@@ -262,3 +262,51 @@ describe("sound channels and fades (D-297)", () => {
     expect(validateFxSequence(wrong).ok).toBe(false);
   });
 });
+
+describe("camera paths (D-298, SQ-15)", () => {
+  const path = (patch: Record<string, unknown> = {}): FxSequence => ({ version: 1, sections: [
+    { kind: "camera", id: "tour", mode: "path", startMs: 0, durationMs: 2_000,
+      points: [{ kind: "point", x: 200, y: 200 }, { kind: "source" }, { kind: "target" }],
+      ...patch } as never,
+  ] });
+
+  test("2–8 waypoint anchors are accepted; fewer, more or a non-anchor is refused", () => {
+    expect(validateFxSequence(path()).ok).toBe(true);
+    expect(validateFxSequence(path({ points: [{ kind: "point", x: 1, y: 1 }] })).ok).toBe(false);
+    expect(validateFxSequence(path({ points: Array.from({ length: 9 }, (_, i) => ({ kind: "point", x: i, y: i })) })).ok)
+      .toBe(false);
+    expect(validateFxSequence(path({ points: "gate" })).ok).toBe(false);
+    expect(validateFxSequence(path({ points: [{ kind: "point", x: 1, y: 1 }, { kind: "nope", x: 2, y: 2 }] })).ok)
+      .toBe(false);
+    for (const bad of [{ zoom: 0.05 }, { zoom: 11 }, { easing: "springy" }, { intensity: 0.5 }, { to: { kind: "source" } }]) {
+      const checked = validateFxSequence(path(bad));
+      expect(checked.ok, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  test("camera invariants still hold: one section, ≥100 ms, never in a persistent timeline", () => {
+    expect(validateFxSequence(path({ durationMs: 50 })).ok).toBe(false);
+    expect(validateFxSequence(path({ durationMs: 100 })).ok).toBe(true);
+    expect(validateFxSequence({ ...path(), persistent: true }).ok).toBe(false);
+    expect(validateFxSequence(path({ repeatCount: 2 })).ok).toBe(false); // a camera never replays
+  });
+
+  test("the host resolves every waypoint and refuses one outside the scene", () => {
+    const checked = resolveFxSequence(path(), scene, source, source, () => undefined);
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    const section = checked.sections[0] as Extract<typeof checked.sections[number], { mode: "path" }>;
+    expect(section.points).toEqual([{ x: 200, y: 200 }, { x: 120, y: 150 }, { x: 120, y: 150 }]);
+    expect("points" in section && section.points.every((point) => "kind" in point === false)).toBe(true);
+    const outside = path({ points: [{ kind: "point", x: 5_000, y: 10 }, { kind: "point", x: 20, y: 20 }] });
+    expect(resolveFxSequence(outside, scene, source, source, () => undefined).ok).toBe(false);
+  });
+
+  test("a path whose waypoints all resolve to the same place is refused as a no-op tour", () => {
+    const stationary = path({ points: [{ kind: "source" }, { kind: "source" }, { kind: "source" }] });
+    expect(validateFxSequence(stationary).ok).toBe(true); // authored, it looks like a tour…
+    const resolved = resolveFxSequence(stationary, scene, source, source, () => undefined);
+    expect(resolved.ok).toBe(false); // …resolved, it never goes anywhere
+    if (!resolved.ok) expect(resolved.error).toContain("two different waypoints");
+  });
+});

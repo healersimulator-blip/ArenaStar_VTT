@@ -9337,3 +9337,102 @@ increment's own tests caught (an old element's teardown deleting the new row).
   matching stop, no server-side volume or per-recipient targeting (a viewer's mix still
   changes only what that viewer hears), no persistence of the local mix across devices,
   and no Firefox/WebKit run or the 41-scenario acceptance matrix.
+
+## D-298 — camera paths: waypoints the host resolves, a tour each viewer walks from where they are (2026-09-25)
+
+D-294 gave a camera section two verbs — `pan` to one anchor, `shake` in place. SQ-15's
+other shape, the one a GM actually reaches for when the party walks a corridor or a
+spotlight slides across a plaza, is *several* anchors with motion between them. This
+decision adds `mode: "path"`: 2–8 waypoint anchors, resolved and bounds-checked by the
+host like any other anchor, and walked once by each viewer in order.
+
+**A path is a route, not a series of pans.** The naive reading of "waypoints" is "pan to
+A, then pan to B", and it is wrong for two reasons. First, a pan interpolates the
+*viewport centre* toward its destination, so a sequence of pans would visibly lurch at
+every join — each leg would start from wherever the previous one landed, and any two
+consecutive legs authored against the same easing curve would kink at the waypoint.
+Second, a route has a direction: what matters to a viewer is that the camera passes
+*through* the published anchors in order, on the way to the last one. So the tour is
+planned as **N legs from N waypoints** — leg 0 runs from the viewer's own current centre
+to waypoint 0, leg i runs from waypoint i−1 to waypoint i — with the *whole* path's
+progress divided evenly across the legs and the section's easing applied **per leg**, not
+across the tour. Two viewers a screen apart therefore meet on the first waypoint and are
+identical from there on, which is what "same tour for everyone" means when nobody is
+allowed to teleport anybody else's view.
+
+**Zoom interpolates across the whole path, not per leg.** Per-leg zoom would restart at
+the authored value every leg — a 2× zoom-in would pulse 2×, 2×, 2× instead of doing 1→2
+once. The zoom is one curve over the tour's total progress, so a path can be authored as
+a slow push-in over a four-corner walk and it reads as one move. The end state is
+explicit and total: `cameraEnd` now answers for all three modes (a shake restores the
+*base* view, a pan keeps its destination, a path parks on its **last** waypoint with the
+authored zoom), and both the finish path and the reduced-motion cut go through it — so a
+viewer with reduced motion enabled lands exactly where the tour ends, in one step,
+rather than getting a shake-free version of a move they cannot read.
+
+**The host owns every waypoint.** A path's points are ordinary `FxAnchor`s, so they get
+the same treatment as a single pan destination: resolved on the host, refused when they
+are not finite or fall outside the scene, and refused when the author wrote `to` or
+`intensity` on the same section (a path has neither). The one invariant a single-anchor
+pan does not need is that a tour must *go* somewhere: if every waypoint resolves to the
+same point — a plausible accident when three picks snap to one cell centre — the section
+is refused with "a camera path needs two different waypoints", because a camera cue that
+promises movement and delivers a stare is a bug report, not a feature. The resolved cue
+carries the ordered points to the viewers; no new field, no new message kind, no document
+change, no Undo entry — a camera path is a view-only claim exactly like a pan.
+
+**The wizard's waypoint editor reuses the crosshair, not a second picker.** "Path through
+waypoints" swaps the single destination row for a small editor: one row per waypoint with
+x/y inputs, a per-row **Pick on map…** that calls the same `pickPoint(i, "waypoint", way)`
+plumbing D-296 built (so the shared crosshair, its snapping and its host-side refusals
+apply unchanged), a per-row remove, and an **Add waypoint** that mirrors the last point
+across the scene's centre so a fresh tour visibly goes somewhere. The default two-point
+section is a diagonal walk (25 %/30 % → 75 %/70 %, `easeInOut`, 2000 ms) and the editor
+stops at 8 waypoints, matching the host's cap. Editing a saved document — where the bug
+below was found — round-trips the waypoints through the host and back.
+
+**One bug, found by the wizard path and worth naming.** `addWaypoint` first appended
+straight into the draft's `points` array; Svelte's `$state` draft is reassigned wholesale
+elsewhere, and the appended point never reached the editor row that was supposed to show
+it (the e2e's "a third waypoint" step failed with a zero-element locator, i.e. the button
+did nothing observable). It now maps the section into a fresh array, the same way the
+other waypoint helpers do — the lesson is the same one D-294 recorded: the wizard's draft
+is replaced, never mutated in place.
+
+**Gates.**
+
+- `pnpm test` — **3 680 passed / 12 skipped** (296 files: 294 passed, 2 skipped). New:
+  seven cases in `tests/canvas/fxCamera.test.ts` (progress 0 parks on the viewer's base
+  view, progress 1 lands on the last waypoint, a three-waypoint tour walks its legs in
+  order and never backtracks, per-leg easing is applied to each leg, zoom interpolates
+  across the whole path while a single waypoint degrades to a pan, empty/one-point/NaN
+  inputs fall back safely, and `cameraAt`'s window agrees with `cameraEnd` for a path) and
+  four in `tests/core/fx.test.ts` (an unknown mode and a path with one waypoint, a
+  repeated waypoint, a bad zoom or a forbidden `to`/`intensity` are refused; the accepted
+  section's invariants hold and do not repeat; the host resolves every waypoint and
+  refuses one outside the scene; all-equal waypoints are refused at resolution).
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing) · `pnpm lint` **exit 0** · `pnpm build` → `pnpm size` **3 788 353 B raw /
+  1 085 319 B gzip**, inside the 6 MB budget. No wire change: a path rides the existing
+  `fx.start` cue, whose resolved camera section now carries `points` instead of `to`.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **15/15** — the new spec
+  authors a three-waypoint tour, places the *middle* waypoint by clicking the shared
+  crosshair on the map (readout `1050, 650`), saves it, reopens the saved timeline and
+  sees `mode: path` with all three pairs back, then Samples the live camera every frame
+  during the Run: the centre comes within 30 px of the first waypoint and 60 px of the
+  middle one, the final frame is parked **on** the last waypoint (and was still >200 px
+  away at the halfway sample, so it arrived rather than started there), and with reduced
+  motion enabled the same Run cuts straight to that last waypoint and stays there with a
+  single "cut by reduced motion" notice. The `summons` suite re-ran alongside it
+  (**19/19** together) and the canvas batch (`canvas_rail` + `canvas_toolbar` + `vision`
+  + `walls`) is **19/19** against the rebuilt production file. One load flake was
+  observed and is recorded rather than hidden: in the first combined run the D-297 sound
+  spec's *first* assertion (the device list row appearing, which waits on a fetch and a
+  decode) timed out at 5 s; it passed standalone and in the re-run, and that one wait now
+  has a 15 s ceiling with a comment saying why.
+- Explicit non-claims: no per-leg durations (the tour's time is divided evenly), no
+  curved, orbit or spline legs (straight segments between waypoints), no looping or
+  replaying the camera (a path is walked once, and a camera section still cannot repeat),
+  no GM-only or per-viewer-targeted camera delivery (every recipient of a cue gets the
+  same tour), no masks, elevation or per-waypoint zoom, and no Firefox/WebKit run or the
+  41-scenario acceptance matrix.

@@ -88,7 +88,21 @@ export interface FxCameraShakeSection extends FxCameraBase {
   /** Amplitude 0.05–1 of a bounded screen offset; decays to zero by the last frame. */
   intensity: number;
 }
-export type FxCameraSection = FxCameraPanSection | FxCameraShakeSection;
+/**
+ * A path is a pan that keeps going: 2–8 host-resolved waypoints, walked in order
+ * from wherever the viewer currently is, each leg eased by the same curve. The view
+ * stays on the **last** waypoint, exactly like a single pan stays on its
+ * destination (a tour that snapped back would undo its own last move).
+ */
+export interface FxCameraPathSection extends FxCameraBase {
+  mode: "path";
+  /** Waypoints in order; every one is resolved and bounds-checked by the host. */
+  points: FxAnchor[];
+  easing?: FxEasing;
+  /** Absolute world zoom at the END of the whole path (0.1–10); absent keeps the scale. */
+  zoom?: number;
+}
+export type FxCameraSection = FxCameraPanSection | FxCameraShakeSection | FxCameraPathSection;
 
 export type FxSection =
   | (FxLocated & { kind: "image"; assetId: string; stretch?: boolean; tint?: string }) // image/* and alpha video
@@ -118,6 +132,8 @@ export type ResolvedFxSection =
   | (Omit<Extract<FxSection, { kind: "sound" }>, "repeatCount" | "repeatDelayMs"> & { mime: string })
   /** A pan carries its **host-resolved** destination; a shake carries no anchor at all. */
   | (Omit<FxCameraPanSection, "to" | "repeatCount" | "repeatDelayMs"> & { toX: number; toY: number })
+  /** A path carries its **host-resolved** waypoints, in order. */
+  | (Omit<FxCameraPathSection, "points" | "repeatCount" | "repeatDelayMs"> & { points: Array<{ x: number; y: number }> })
   | Omit<FxCameraShakeSection, "repeatCount" | "repeatDelayMs">
   | Omit<Extract<FxSection, { kind: "wait" }>, "repeatCount" | "repeatDelayMs">;
 
@@ -181,7 +197,7 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
     const fields = section.kind === "sound" ? ["assetId", "volume", "channel", "fadeInMs", "fadeOutMs"] :
       section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow"] :
       section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow"] :
-      section.kind === "camera" ? ["mode", "to", "easing", "zoom", "intensity"] : [];
+      section.kind === "camera" ? ["mode", "to", "easing", "zoom", "intensity", "points"] : [];
     if (Object.keys(section).some((key) => !["id", "kind", "startMs", "durationMs", ...fields, ...repeatFields].includes(key)) ||
       (section.kind !== "wait" && section.durationMs === 0)) {
       return { ok: false, error: "unknown FX section field or zero-duration media" };
@@ -202,7 +218,15 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
         if (section.to !== undefined || section.zoom !== undefined || section.easing !== undefined ||
             !inRange(section.intensity, 0.05, 1))
           return { ok: false, error: "a camera shake needs an intensity 0.05–1 and no destination" };
-      } else return { ok: false, error: "camera sections are either a pan or a shake" };
+      } else if (section.mode === "path") {
+        // A path is a bounded tour, not a slideshow: 2–8 waypoints, each one an anchor
+        // the host will resolve and bounds-check exactly like a pan's destination.
+        if (!Array.isArray(section.points) || section.points.length < 2 || section.points.length > 8 ||
+            !section.points.every(validAnchor) || section.to !== undefined || section.intensity !== undefined ||
+            (section.easing !== undefined && !isEasing(section.easing)) ||
+            (section.zoom !== undefined && !inRange(section.zoom, 0.1, 10)))
+          return { ok: false, error: "a camera path needs 2–8 waypoint anchors, optional easing and zoom 0.1–10" };
+      } else return { ok: false, error: "camera sections are a pan, a shake or a path" };
       continue;
     }
     if (section.kind === "wait") continue;
@@ -306,7 +330,22 @@ export function resolveFxSequence(
     };
     if (section.kind === "camera") {
       // The host, never the client, decides where a pan may land — same anchor
-      // function, same scene bounds, same refusal as every other cue.
+      // function, same scene bounds, same refusal as every other cue. A path repeats
+      // that for every waypoint, and refuses a "path" that never goes anywhere.
+      if (section.mode === "path") {
+        const points: Array<{ x: number; y: number }> = [];
+        for (const waypoint of section.points) {
+          const resolvedPoint = anchor(waypoint);
+          if (!resolvedPoint.ok) return resolvedPoint;
+          points.push({ x: resolvedPoint.x, y: resolvedPoint.y });
+        }
+        if (points.every((point) => point.x === points[0]?.x && point.y === points[0]?.y))
+          return { ok: false, error: "a camera path needs two different waypoints" };
+        const { points: _points, repeatCount: _count, repeatDelayMs: _gap, ...projected } = section;
+        void _points; void _count; void _gap;
+        sections.push({ ...projected, points });
+        continue;
+      }
       const destination = anchor(section.to);
       if (!destination.ok) return destination;
       const { to: _to, repeatCount: _count, repeatDelayMs: _gap, ...projected } = section;
