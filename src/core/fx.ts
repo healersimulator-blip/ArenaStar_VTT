@@ -6,6 +6,9 @@
  */
 import type { SceneDocument, TokenDocument } from "./documents";
 import { crosshairArea, type CrosshairPoint, type CrosshairShape } from "./crosshair";
+import { visibilityPolygon } from "../canvas/vision/polygon";
+import { distanceToSegment } from "../canvas/vision/wallKinds";
+import { sightSegments } from "../canvas/vision/wallSight";
 import { isSoundChannel, type FxSoundChannel } from "./fxSound";
 
 export type FxAnchor = { kind: "point"; x: number; y: number } | { kind: "source" | "target" };
@@ -52,6 +55,14 @@ export interface FxMask {
   /** Aperture in degrees for a cone (1–359); defaults to the crosshair's 53.13. */
   spread?: number;
   /**
+   * SQ-05/D-307: stop the region where a wall blocks sight. The host trims the resolved
+   * polygon against the scene's own sight segments — the same rule the fog uses, doors
+   * included — and bakes the result, because a client has no walls to trim against (and
+   * must not be handed them). It therefore cannot animate: the trim depends on geometry a
+   * recipient never sees.
+   */
+  walls?: boolean;
+  /**
    * SQ-05/D-305: animate the region itself. `lengthTo` is the reach it grows to — the
    * whole region scales about its anchor, so a rectangle's width grows with its depth
    * (a growing sliver would be a different shape, not a bigger one); `spinDeg` turns the
@@ -79,12 +90,97 @@ export interface ResolvedFxMask {
    */
   animate?: { scale?: number; spinDeg?: number };
 }
+/**
+ * SQ-05/D-307: the region a wall-bounded mask actually covers. `area` is the authored
+ * shape as offsets from its anchor and `segments` are the scene's sight blockers in that
+ * same offset space; both are star-shaped about the anchor, so the region is exactly the
+ * smaller of the two radial extents, sampled where either one bends: at every vertex angle
+ * of either polygon, and at every crossing of their edges (so a switch between the mask's
+ * boundary and a wall's inside one span is not chorded). The result is therefore the same
+ * polygon the eye would draw — cut at the wall, not near it.
+ *
+ * Pure and total: no segments, a degenerate shape, or a shadowed anchor all produce a
+ * shorter (possibly empty) polygon rather than NaN.
+ */
+export function fxSightTrim(
+  area: readonly CrosshairPoint[],
+  segments: readonly { x1: number; y1: number; x2: number; y2: number }[],
+  reach: number,
+): CrosshairPoint[] {
+  if (area.length < 3 || segments.length === 0 || !Number.isFinite(reach) || reach <= 0) return [...area];
+  const sight = visibilityPolygon(0, 0, segments, reach);
+  const visible: CrosshairPoint[] = [];
+  for (let i = 0; i + 1 < sight.length; i += 2) {
+    const x = sight[i]; const y = sight[i + 1];
+    if (x !== undefined && y !== undefined) visible.push({ x, y });
+  }
+  if (visible.length < 3) return [];
+  const angleOf = (point: CrosshairPoint): number => {
+    const angle = Math.atan2(point.y, point.x);
+    return angle < 0 ? angle + Math.PI * 2 : angle;
+  };
+  const angles = [...area, ...visible].map(angleOf);
+  // A crossing point of the two boundaries lies on both, so sampling there keeps the
+  // result exact where the region stops following one polygon and starts following the other.
+  for (let i = 0; i < area.length; i += 1) {
+    const a = area[i]; const b = area[(i + 1) % area.length];
+    if (!a || !b) continue;
+    for (let j = 0; j < visible.length; j += 1) {
+      const c = visible[j]; const d = visible[(j + 1) % visible.length];
+      if (!c || !d) continue;
+      const crossing = segmentCrossing(a, b, c, d);
+      if (crossing) angles.push(angleOf(crossing));
+    }
+  }
+  angles.sort((left, right) => left - right);
+  /** The farthest point of a star-shaped polygon along the ray at `angle`, or 0. */
+  const radial = (polygon: readonly CrosshairPoint[], angle: number): number => {
+    const dx = Math.cos(angle); const dy = Math.sin(angle);
+    let best = 0;
+    for (let i = 0; i < polygon.length; i += 1) {
+      const a = polygon[i]; const b = polygon[(i + 1) % polygon.length];
+      if (!a || !b) continue;
+      const ex = b.x - a.x; const ey = b.y - a.y;
+      const denom = dx * ey - dy * ex;
+      if (Math.abs(denom) < 1e-12) continue;
+      const along = (a.x * ey - a.y * ex) / denom; // distance along the ray
+      const edge = (a.x * dy - a.y * dx) / denom; // position along the edge
+      if (along > best && edge >= -1e-9 && edge <= 1 + 1e-9) best = along;
+    }
+    return best;
+  };
+  const out: CrosshairPoint[] = [];
+  let previous: number | null = null;
+  for (const angle of angles) {
+    // Near-duplicate angles would emit duplicate vertices; exact repeats are dropped and
+    // closer ones are harmless (they lie on the same boundary within a pixel).
+    if (previous !== null && angle - previous < 1e-9) continue;
+    previous = angle;
+    const distance = Math.min(radial(area, angle), radial(visible, angle));
+    if (distance <= 0) continue;
+    out.push({ x: Math.cos(angle) * distance, y: Math.sin(angle) * distance });
+  }
+  return out;
+}
+
+/** Where two segments cross, or `null` (endpoints count for a T-junction). */
+function segmentCrossing(a: CrosshairPoint, b: CrosshairPoint, c: CrosshairPoint, d: CrosshairPoint): CrosshairPoint | null {
+  const ex = b.x - a.x; const ey = b.y - a.y;
+  const fx = d.x - c.x; const fy = d.y - c.y;
+  const denom = ex * fy - ey * fx;
+  if (Math.abs(denom) < 1e-12) return null;
+  const t = ((c.x - a.x) * fy - (c.y - a.y) * fx) / denom;
+  const u = ((c.x - a.x) * ey - (c.y - a.y) * ex) / denom;
+  if (t < -1e-9 || t > 1 + 1e-9 || u < -1e-9 || u > 1 + 1e-9) return null;
+  return { x: a.x + ex * t, y: a.y + ey * t };
+}
+
 const MASK_FIELDS: Record<FxMask["kind"], readonly string[]> = {
   // A circle has no facing, so it takes no angle — and therefore no turn either.
-  circle: ["kind", "length", "lengthTo", "invert"],
-  cone: ["kind", "length", "lengthTo", "angle", "spread", "spinDeg", "invert"],
-  ray: ["kind", "length", "lengthTo", "width", "angle", "spinDeg", "invert"],
-  rect: ["kind", "length", "lengthTo", "width", "angle", "spinDeg", "invert"],
+  circle: ["kind", "length", "lengthTo", "walls", "invert"],
+  cone: ["kind", "length", "lengthTo", "angle", "spread", "spinDeg", "walls", "invert"],
+  ray: ["kind", "length", "lengthTo", "width", "angle", "spinDeg", "walls", "invert"],
+  rect: ["kind", "length", "lengthTo", "width", "angle", "spinDeg", "walls", "invert"],
 };
 /** Authored metric bounds, in scene units / degrees. */
 export const FX_MASK_LIMITS = { min: 0.5, max: 5_000, spreadMin: 1, spreadMax: 359 } as const;
@@ -481,6 +577,14 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
         return { ok: false, error: `an FX mask's growth must be ${FX_MASK_LIMITS.min}–${FX_MASK_LIMITS.max} scene units` };
       if (mask.spinDeg !== undefined && !inRange(mask.spinDeg, -FX_SPIN_LIMIT, FX_SPIN_LIMIT))
         return { ok: false, error: `an FX mask's turn must be within ±${FX_SPIN_LIMIT} degrees` };
+      if (mask.walls !== undefined && typeof mask.walls !== "boolean")
+        return { ok: false, error: "an FX mask's wall flag must be true or false" };
+      // The trim is resolved against the host's walls and travels as a baked polygon, so a
+      // turn or a growth would drag the shape straight through the wall it was cut by. A
+      // recipient has no walls to re-trim against and must not be given them (they can be
+      // secret), so this is a refusal rather than a per-frame recomputation.
+      if (mask.walls === true && (mask.lengthTo !== undefined || mask.spinDeg !== undefined))
+        return { ok: false, error: "an FX mask bounded by walls cannot animate: the trim is baked against the host's walls" };
     }
     // Appearance is validated before the asset, so a mistyped blend is reported as
     // itself rather than as a bad hash.
@@ -627,7 +731,7 @@ export function resolveFxSequence(
      * a length that survived validation but produces an empty outline is a control
      * that would do nothing.
      */
-    const maskArea = (mask: FxMask): ResolvedFxMask | { error: string } => {
+    const maskArea = (mask: FxMask, at: CrosshairPoint): ResolvedFxMask | { error: string } => {
       const shape: CrosshairShape = { kind: mask.kind, length: mask.length,
         ...(mask.width !== undefined ? { width: mask.width } : {}),
         ...(mask.spread !== undefined ? { spread: mask.spread } : {}) };
@@ -641,6 +745,33 @@ export function resolveFxSequence(
         return { error: "an FX mask needs a usable scene grid metric" };
       const area = crosshairArea({ x: 0, y: 0 }, shape, grid, mask.angle ?? 0);
       if (area.length === 0) return { error: "an FX mask must resolve to a region" };
+      // A wall-bounded region is trimmed HERE, against the scene's own sight segments (the
+      // same list the fog uses, so a door that is open for sight is open for the trim), and
+      // travels as the finished polygon: the client is never handed walls. The segments are
+      // shifted into the region's own space, because the polygon travels with its anchor.
+      let shaped = area;
+      if (mask.walls === true) {
+        const reach = Math.max(...area.map((point) => Math.hypot(point.x, point.y)));
+        const nearby = sightSegments(scene.walls ?? []).map((segment) => ({
+          x1: segment.x1 - at.x, y1: segment.y1 - at.y,
+          x2: segment.x2 - at.x, y2: segment.y2 - at.y,
+        })).filter((segment) => distanceToSegment({ x: 0, y: 0 },
+          { x: segment.x1, y: segment.y1 }, { x: segment.x2, y: segment.y2 }) <= reach + 1);
+        // An anchor standing on a wall is degenerate rather than merely tight: every ray
+        // starts blocked, and a "region" of zero width is a control that does nothing.
+        if (nearby.some((segment) => distanceToSegment({ x: 0, y: 0 },
+          { x: segment.x1, y: segment.y1 }, { x: segment.x2, y: segment.y2 }) <= 1))
+          return { error: "an FX mask bounded by walls cannot start on a wall" };
+        // Nothing in reach means nothing to cut: the authored region stands as it was.
+        shaped = nearby.length === 0 ? shaped : fxSightTrim(shaped, nearby, reach);
+        // A region with no area is no region: an anchor standing *on* a wall sees nothing
+        // in every direction, and a mask that hides or shows nothing is a control that
+        // does nothing (the same rule that refuses a point mask).
+        const survived = shaped.length >= 3
+          && Math.max(...shaped.map((point) => Math.hypot(point.x, point.y))) > 1e-6;
+        if (!survived)
+          return { error: "an FX mask bounded by walls resolves to no region at its anchor" };
+      }
       // The growth travels as a *ratio*, not as the authored length in scene units: the
       // polygon is already host-resolved against the scene's metric, and a ratio is
       // unit-free, so a client still never needs to know what "15 ft" is in pixels.
@@ -649,12 +780,12 @@ export function resolveFxSequence(
         ...(mask.spinDeg !== undefined ? { spinDeg: mask.spinDeg } : {}),
       };
       const animated = Object.keys(animate).length > 0;
-      return { area, invert: mask.invert === true, ...(animated ? { animate } : {}) };
+      return { area: shaped, invert: mask.invert === true, ...(animated ? { animate } : {}) };
     };
     /** The resolved-mask part of a section payload, or a refusal. */
-    const maskCoords = (): { ok: true; mask?: ResolvedFxMask } | { ok: false; error: string } => {
+    const maskCoords = (at: CrosshairPoint): { ok: true; mask?: ResolvedFxMask } | { ok: false; error: string } => {
       if (!section.mask) return { ok: true };
-      const resolved = maskArea(section.mask);
+      const resolved = maskArea(section.mask, at);
       if ("error" in resolved) return { ok: false, error: resolved.error };
       return { ok: true, mask: resolved };
     };
@@ -674,7 +805,7 @@ export function resolveFxSequence(
       ...(destination?.ok ? { toX: destination.x, toY: destination.y } : {}),
       ...(fromId ? { followTokenId: fromId } : {}),
       ...(toId ? { followToTokenId: toId } : {}) };
-    const mask = maskCoords();
+    const mask = maskCoords({ x: start.x, y: start.y });
     if (!mask.ok) return mask;
     if (section.kind === "text") {
       // The authored `mask` is dropped here and replaced by the resolved one: what

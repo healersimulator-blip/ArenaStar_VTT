@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { FX_FILTER_RANGES, fxFilterStrength, fxSectionsForViewer, fxStylePlan, resolveFxSequence,
   validateFxSequence, type FxSequence } from "../../src/core/fx";
 import { fxFollowAnchors, fxPosition } from "../../src/canvas/layers/FxLayer";
-import type { SceneDocument, TokenDocument } from "../../src/core/documents";
+import type { SceneDocument, TokenDocument, WallDocument } from "../../src/core/documents";
 
 const hash = "a".repeat(64);
 const sound = "b".repeat(64);
@@ -498,6 +498,93 @@ describe("effect masks and cutouts (§SQ-19/SQ-05, D-301)", () => {
     const circleTurn = validateFxSequence(masked({ kind: "circle", length: 10, spinDeg: 90 }));
     expect(circleTurn.ok).toBe(false);
     if (!circleTurn.ok) expect(circleTurn.error).toContain("an FX circle mask takes only");
+  });
+
+  test("a wall-bounded region is trimmed against the scene's own sight, and cannot animate", () => {
+    const wall = (c: [number, number, number, number], patch: Partial<WallDocument> = {}): WallDocument =>
+      ({ _id: `w-${c[0]}-${c[1]}`, type: "wall", name: "W", ownership: { default: 0 },
+        flags: {}, system: {}, c, door: 0, oneWay: false, move: 0, sight: 0, sound: 0, light: 0, ...patch });
+    // A vertical wall 200 px (10 units) east of the anchor at (200, 200), spanning far
+    // past the mask's 300 px reach on BOTH sides — a shorter wall would leave a real gap
+    // around its ends, which is correct visibility rather than a missed trim.
+    const walled: SceneDocument = { ...scene, walls: [wall([400, -200, 400, 1_000])] };
+    const at200 = masked({ kind: "circle", length: 15, walls: true });
+    const trimmed = resolveFxSequence(at200 as FxSequence, walled, source, source, () => "image/png");
+    expect(trimmed.ok).toBe(true);
+    if (!trimmed.ok) return;
+    const mask = (trimmed.sections[0] as Extract<typeof trimmed.sections[number], { mask?: unknown }>)
+      .mask as { area: Array<{ x: number; y: number }> };
+    // The authored reach is 15 units = 300 px; the wall is 200 px away and the anchor sits
+    // at (200, 200), so the region reaches 300 px west and stops at 200 px east.
+    const reachOf = (pick: (point: { x: number; y: number }) => number, most: boolean) =>
+      most ? Math.max(...mask.area.map(pick)) : Math.min(...mask.area.map(pick));
+    expect(reachOf((point) => point.x, true)).toBeCloseTo(200, 0);
+    expect(reachOf((point) => point.x, false)).toBeCloseTo(-300, 0);
+    expect(Math.max(...mask.area.map((point) => Math.hypot(point.x, point.y)))).toBeCloseTo(300, 0);
+    // It touches the wall rather than stopping short of it — the trim is the wall's own line.
+    expect(mask.area.some((point) => Math.abs(point.x - 200) < 0.5)).toBe(true);
+    // Offsets from the anchor, like any other resolved mask: the shape travels with it.
+    expect(mask.area.every((point) => Math.abs(point.x) <= 300.5)).toBe(true);
+
+    // Nothing in reach is nothing to trim: the authored circle stands exactly as it was.
+    const open = resolveFxSequence(masked({ kind: "circle", length: 15, walls: true }) as FxSequence,
+      scene, source, source, () => "image/png");
+    if (!open.ok) return;
+    const plain = (open.sections[0] as Extract<typeof open.sections[number], { mask?: unknown }>)
+      .mask as { area: Array<{ x: number; y: number }> };
+    expect(plain.area).toHaveLength(16);
+    expect(Math.max(...plain.area.map((point) => point.x))).toBeCloseTo(300, 3);
+
+    // The same sight rule the fog uses: a window (sight: 2 = passes) never trims, a closed
+    // door does, and opening that door stops trimming — doors obey state here too.
+    const places = (patch: Partial<WallDocument>) => resolveFxSequence(
+      masked({ kind: "circle", length: 15, walls: true }) as FxSequence,
+      { ...scene, walls: [wall([400, -200, 400, 1_000], patch)] }, source, source, () => "image/png");
+    const maxX = (result: ReturnType<typeof resolveFxSequence>) => {
+      if (!result.ok) return null;
+      const found = (result.sections[0] as Extract<typeof result.sections[number], { mask?: unknown }>)
+        .mask as { area: Array<{ x: number; y: number }> };
+      return Math.max(...found.area.map((point) => point.x));
+    };
+    // `door`: 0 closed | 1 open | 2 locked, and `sight`: 0 always blocks | 1 conditional | 2 passes.
+    expect(maxX(places({ sight: 2, door: 0 }))).toBeCloseTo(300, 0); // a window passes sight
+    expect(maxX(places({ sight: 1, door: 0 }))).toBeCloseTo(200, 0); // a closed door blocks
+    expect(maxX(places({ sight: 1, door: 1 }))).toBeCloseTo(300, 0); // an open door does not
+    expect(maxX(places({ sight: 1, door: 2 }))).toBeCloseTo(200, 0); // a locked door does
+    expect(maxX(places({ sight: 0, door: 1 }))).toBeCloseTo(200, 0); // an opaque wall, open door or not
+
+    // A growth or a turn is refused rather than silently ignored: the trim is baked, and a
+    // recipient has no walls to re-trim against.
+    const growing = validateFxSequence(masked({ kind: "circle", length: 15, walls: true, lengthTo: 30 }));
+    expect(growing.ok).toBe(false);
+    if (!growing.ok) expect(growing.error).toContain("cannot animate");
+    expect(validateFxSequence(masked({ kind: "circle", length: 15, walls: true })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "circle", length: 15, walls: "yes" })).ok).toBe(false);
+    // Walls on every side cap the region in every direction: an anchor in a 200×200 room
+    // sees the room, not its authored 300 px circle — the reach is the *smaller* of the two.
+    const room: SceneDocument = { ...scene, walls: [
+      wall([100, 100, 300, 100]), wall([300, 100, 300, 300]),
+      wall([300, 300, 100, 300]), wall([100, 300, 100, 100]),
+    ] };
+    const enclosed = resolveFxSequence(masked({ kind: "circle", length: 15, walls: true }) as FxSequence,
+      room, source, source, () => "image/png");
+    expect(enclosed.ok).toBe(true);
+    if (!enclosed.ok) return;
+    const inside = (enclosed.sections[0] as Extract<typeof enclosed.sections[number], { mask?: unknown }>)
+      .mask as { area: Array<{ x: number; y: number }> };
+    expect(inside.area.length).toBeGreaterThanOrEqual(3);
+    for (const point of inside.area) {
+      expect(Math.abs(point.x)).toBeLessThan(100.5);
+      expect(Math.abs(point.y)).toBeLessThan(100.5);
+    }
+
+    // An anchor standing *on* a wall sees nothing at all, and that is refused rather than
+    // drawn as an empty mask — "a control that would do nothing" again.
+    const onWall: SceneDocument = { ...scene, walls: [wall([0, 200, 400, 200])] };
+    const blind = resolveFxSequence(masked({ kind: "circle", length: 15, walls: true }) as FxSequence,
+      onWall, source, source, () => "image/png");
+    expect(blind.ok).toBe(false);
+    if (!blind.ok) expect(blind.error).toContain("cannot start on a wall");
   });
 
   test("a mask belongs to a visual: sound, wait and camera sections refuse it as unknown", () => {

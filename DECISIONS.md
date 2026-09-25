@@ -10063,3 +10063,82 @@ matrix.
   `summons` suite ran alongside it (**27/27** together, after the one recorded sound-spec
   batch flake passed standalone and on the batch re-run) and the canvas/interaction batch
   (`canvas_rail` + `canvas_toolbar` + `vision` + `walls` + `join`) is **20/20**.
+
+## D-307 — wall-bounded masks: the region stops where sight does (2026-09-25)
+
+D-301 gave a visual a host-resolved polygon; D-305 let it grow and turn. Neither could be
+*constrained by a wall* — SQ-05's explicit clause, and the reason a light effect spilled
+through the wall it was supposed to stop at. This decision closes it: `mask.walls` trims
+the resolved region against the scene's own sight segments, so a torch in a room lights the
+room rather than the corridor behind it.
+
+**The trim reuses the fog's own rule, not a second one.** `sightSegments(scene.walls)` is
+the exact list the vision worker is fed — so a window (sight permits) never trims, a
+*closed* door does, an *open* one stops trimming, a locked one trims again, and an opaque
+wall trims whatever its door state says. That equivalence is asserted directly in the unit
+test, because "the preview and the authority must be the same computation" is the whole
+point of sharing this code, and a mask that disagreed with the fog about a door would be
+worse than no mask at all.
+
+**Exact, not sampled.** The mask polygon and the visibility polygon are both star-shaped
+about the anchor, so the region is exactly the smaller of the two radial extents. The
+renderer-side silhouette is sampled where either polygon bends — at every vertex angle of
+either, *and* at every crossing of their edges, so a switch between the mask's boundary and
+a wall's inside one span is not chorded into a straight line. The result is the polygon the
+eye would draw: cut **at** the wall, not near it (the e2e asserts the wall contact within
+2 px while the open side keeps the authored reach to the pixel).
+
+**Baked, therefore unable to animate.** The trim is computed host-side and travels as the
+finished region, which is what keeps D-301's invariant intact: a recipient is never handed
+the scene's walls (they can be secret, and each viewer's vision differs anyway). The
+corollary is a refusal rather than a compromise — `walls: true` with `lengthTo`/`spinDeg`
+is rejected with the reason, because a rotating region would drag its cut edge straight
+through the wall while the client has nothing to re-trim against. The wizard does the
+author a favour: checking the box clears any growth/turn already entered and puts the
+animation fields away (SQ-05's "do not offer a UI control that silently does nothing").
+
+**Two degenerate anchors are refused explicitly.** A region with no area is no region, and
+two ways of producing one are named rather than drawn: an anchor standing *on* a wall
+(every ray starts blocked, and the sweep degenerates to a sliver along the wall's own line)
+and a trim that leaves fewer than three points. Both report "an FX mask bounded by walls
+cannot start on a wall" / "…resolves to no region at its anchor". A wall *near* the anchor
+is fine — an anchor 2 px from a wall is merely a tight region.
+
+**Offsets, cost, and what travels.** The trim happens in the region's own space (offsets
+from the anchor, walls shifted by −anchor), so the polygon keeps travelling with a followed
+visual and no absolute coordinate leaks into the payload. Only sight blockers within the
+mask's own reach are considered: a wall farther away cannot clip a point inside it, so the
+cost scales with the mask, not the scene. A mask with no wall in reach resolves to exactly
+the polygon D-301 produced — an empty filter, not a special case.
+
+**Non-claims.** Per-viewer trimming (the region uses the *scene's* walls, not each
+recipient's own vision or their fog), trimming against one-way walls' direction, sound or
+light "vision" axes, a mask that follows a moving wall (the trim is resolved at save), a
+region that re-trims as an animated door opens mid-cue, polygon-authored regions (still not
+authorable — this only *cuts* the four shapes), no PROTOCOL.md change (one optional mask
+property inside `fx.start`, and the polygon was already opaque), and no Firefox/WebKit run
+or the §10 41-scenario matrix.
+
+**Gates.**
+
+- `pnpm test` — **3 733 passed / 12 skipped** (297 files: 295 passed, 2 skipped). New: one
+  case in the mask block of `tests/core/fx.test.ts` covering the whole rule — a vertical
+  wall 200 px from the anchor cuts the 300 px circle flat at the wall (reaching it, not
+  stopping short), the open side keeps 300 px, the polygon stays in offsets from the
+  anchor, a mask with no wall in reach is the *unchanged* 16-gon, the sight-rule
+  equivalence holds for window/closed door/open door/locked door/opaque wall, a growth is
+  refused with its reason, `walls` must be a boolean, a room around the anchor caps the
+  region in every direction, and an anchor standing on a wall is refused by name.
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing — the new test fixture is typed `Partial<WallDocument>` rather than cast, so
+  the `0|1|2` axis unions catch a mistyped door in the test itself) · `pnpm lint` **exit 0**
+  · `pnpm build` → `pnpm size` **3 834 943 B raw / 1 099 493 B gzip**, inside the 6 MB budget.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **24/24** — the new spec places a
+  real wall through the canvas rail, anchors a 300 px mask 200 px west of it, enters a
+  growth **before** checking "Stop at walls" (asserting the wizard clears it and reports
+  why), saves, reopens (the bound and the cleared animation both survive the host), runs it,
+  and reads the **drawn** polygon: the east side stops within 2 px of the wall's own line
+  while the west side keeps −300 px and the north/south keep their reach, with more than 16
+  points (the wall's edge is in the polygon). The `summons` suite ran alongside it
+  (**28/28** together) and the canvas/interaction batch (`canvas_rail` + `canvas_toolbar` +
+  `vision` + `walls` + `join`) is **20/20**.

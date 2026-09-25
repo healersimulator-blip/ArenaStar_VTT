@@ -181,7 +181,8 @@ export function fxMaskDraw(graphics: Graphics, mask: { area: Point[]; invert?: b
  * points, which only a cone or a ray can say: a circle has no facing and a rectangle's
  * four corners are symmetric, so both report `null` instead of a made-up number.
  */
-export function fxMaskReadback(view: Graphics): { points: number; radius: number; bearingDeg: number | null } {
+export function fxMaskReadback(view: Graphics): { points: number; radius: number; bearingDeg: number | null;
+  bounds: { minX: number; maxX: number; minY: number; maxY: number } } {
   type RecordedPath = { instructions?: Array<{ action: string; data?: unknown[] }> };
   const flat = (path: unknown): number[] | null => {
     const poly = (path as RecordedPath | undefined)?.instructions?.find((it) => it.action === "poly");
@@ -207,8 +208,18 @@ export function fxMaskReadback(view: Graphics): { points: number; radius: number
   const centroid = far.reduce((sum, point) => ({ x: sum.x + point.x / far.length,
     y: sum.y + point.y / far.length }), { x: 0, y: 0 });
   const decided = radius > 1e-6 && Math.hypot(centroid.x, centroid.y) > radius * 1e-3;
-  return { points: points.length, radius: Math.round(radius * 1000) / 1000,
-    bearingDeg: decided ? Math.round(((Math.atan2(centroid.y, centroid.x) * 180) / Math.PI) * 10) / 10 : null };
+  const axis = points.map((point) => point.x);
+  const ordinate = points.map((point) => point.y);
+  const round = (value: number): number => Math.round(value * 1000) / 1000;
+  // The drawn polygon's own extent, offsets from the anchor: how a *trimmed* region is
+  // checked without shipping its vertices around (D-307 — the wall side flattens, the
+  // open side keeps the authored reach).
+  return { points: points.length, radius: round(radius),
+    bearingDeg: decided ? Math.round(((Math.atan2(centroid.y, centroid.x) * 180) / Math.PI) * 10) / 10 : null,
+    bounds: { minX: round(points.length ? Math.min(...axis) : 0),
+      maxX: round(points.length ? Math.max(...axis) : 0),
+      minY: round(points.length ? Math.min(...ordinate) : 0),
+      maxY: round(points.length ? Math.max(...ordinate) : 0) } };
 }
 
 /** Pure host-time tween: late join/slow decoding jumps to the correct frame. */
@@ -370,7 +381,8 @@ export class FxLayer {
   /** Read-only: what a run (or everything) is drawing with. Tests and diagnostics only. */
   inspect(runId?: string): Array<{ kind: string; blend: string; filter: string | null; scale: number;
     rotationDeg: number;
-    mask: { points: number; radius: number; bearingDeg: number | null; invert: boolean } | null }> {
+    mask: { points: number; radius: number; bearingDeg: number | null;
+      bounds: { minX: number; maxX: number; minY: number; maxY: number }; invert: boolean } | null }> {
     return [...this.visuals]
       .filter((active) => runId === undefined || active.runId === runId)
       .map((active) => ({ kind: active.section.kind, blend: String(active.view.blendMode),

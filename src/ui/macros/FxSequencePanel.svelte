@@ -384,6 +384,27 @@
           spinDeg: Math.min(FX_SPIN_LIMIT, Math.max(-FX_SPIN_LIMIT, spin)) }) } as FxSection) : old) };
   }
 
+  /**
+   * SQ-05/D-307: stop the region where a wall blocks sight. The host bakes the trim against
+   * its own walls, so a region bounded this way **cannot animate** — turning the bound on
+   * therefore clears any growth or turn the author had already entered, and the animation
+   * fields stay away while it is on (a control that silently does nothing is the thing
+   * SQ-05 forbids).
+   */
+  function changeMaskWalls(index: number, on: boolean): void {
+    const before = draft.sections[index];
+    if (!before || (before.kind !== "image" && before.kind !== "text") || !before.mask) return;
+    const { walls: _walls, lengthTo: _lengthTo, spinDeg: _spinDeg, ...rest } = before.mask;
+    void _walls; void _lengthTo; void _spinDeg;
+    const mask: FxMask = on ? { ...rest, walls: true } : rest;
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      ? { ...before, mask } as FxSection : old) };
+    status = on && (before.mask.lengthTo !== undefined || before.mask.spinDeg !== undefined)
+      ? "Wall-bounded: the region is trimmed against the scene's walls, which a recipient never receives — so its growth/turn was cleared."
+      : on ? "Wall-bounded: the region is trimmed against the scene's walls when the timeline is saved."
+        : "";
+  }
+
   function changeMask(index: number, value: string): void {
     const before = draft.sections[index];
     if (!before || (before.kind !== "image" && before.kind !== "text")) return;
@@ -945,18 +966,24 @@
                 <label>Mask angle (°) <input type="number" data-fx-mask-angle min="-360" max="360" step="15"
                   value={mask.angle ?? 0} oninput={(e) => changeMaskField(i, { angle: Number(e.currentTarget.value) })} /></label>
               {/if}
-              <label>Grow to ({units}) <input type="number" data-fx-mask-length-to
-                min={FX_MASK_LIMITS.min} max={FX_MASK_LIMITS.max} step="1" value={mask.lengthTo ?? ""}
-                placeholder="steady" oninput={(e) => changeMaskAnimation(i, "lengthTo", e.currentTarget.value)} /></label>
-              {#if mask.kind !== "circle"}
-                <label>Turn (°) <input type="number" data-fx-mask-spin min={-FX_SPIN_LIMIT}
-                  max={FX_SPIN_LIMIT} step="15" value={mask.spinDeg ?? ""} placeholder="still"
-                  oninput={(e) => changeMaskAnimation(i, "spinDeg", e.currentTarget.value)} /></label>
+              {#if mask.walls !== true}
+                <label>Grow to ({units}) <input type="number" data-fx-mask-length-to
+                  min={FX_MASK_LIMITS.min} max={FX_MASK_LIMITS.max} step="1" value={mask.lengthTo ?? ""}
+                  placeholder="steady" oninput={(e) => changeMaskAnimation(i, "lengthTo", e.currentTarget.value)} /></label>
+                {#if mask.kind !== "circle"}
+                  <label>Turn (°) <input type="number" data-fx-mask-spin min={-FX_SPIN_LIMIT}
+                    max={FX_SPIN_LIMIT} step="15" value={mask.spinDeg ?? ""} placeholder="still"
+                    oninput={(e) => changeMaskAnimation(i, "spinDeg", e.currentTarget.value)} /></label>
+                {/if}
               {/if}
+              <label><input type="checkbox" data-fx-mask-walls checked={mask.walls === true}
+                onchange={(e) => changeMaskWalls(i, e.currentTarget.checked)} />Stop at walls (sight)</label>
               <label><input type="checkbox" data-fx-mask-invert checked={mask.invert === true}
                 onchange={(e) => changeMaskField(i, { invert: e.currentTarget.checked })} />Cut out (hide what is inside the mask)</label>
               <small>The mask is measured against this scene's grid ({units}) around the anchor and travels with it; the host resolves it and refuses a shape it cannot draw.
-                {#if mask.lengthTo !== undefined || mask.spinDeg !== undefined}
+                {#if mask.walls === true}
+                  Trimmed where a wall blocks sight — the same rule the fog uses, doors included — and baked into the shape, so it cannot grow or turn.
+                {:else if mask.lengthTo !== undefined || mask.spinDeg !== undefined}
                   A region that grows or turns does so inside this section, on its own eased curve — {section.repeats !== undefined && section.repeats !== 1 ? `a grow restarts in each of its ${section.repeats} cycles, a turn keeps going.` : "eased across the section."}
                 {/if}</small>
             {/if}

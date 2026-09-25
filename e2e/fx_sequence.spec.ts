@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { entry, hostCall, manualFragment, playerCall, waitForSurface } from "./lib";
+import { entry, hostCall, manualFragment, playerCall, surfaceCallArg, waitForSurface } from "./lib";
 
 test("a saved FX timeline is host-approved, renders below fog and removes its view after playback", async ({ page }) => {
   await page.goto(entry + "?e2e=1");
@@ -1241,6 +1241,102 @@ test("a visual grows and spins through its section, eased, and lands on the auth
   expect((early?.scale ?? 1) - 1).toBeLessThan(0.4); // still near the start
   expect(rotations[rotations.length - 1] ?? 0).toBeGreaterThan(340); // turned the full circle
   expect(Math.max(...rotations)).toBeLessThan(365); // …and never past it
+});
+
+// D-307 (SQ-05): the last clause of the mask row — a region *constrained by walls*. The
+// host trims it against the scene's own sight segments (the rule the fog uses) and bakes
+// the polygon, so the claim is checked on the drawn shape: it stops at the wall it was cut
+// by and keeps its authored reach where nothing blocks it.
+test("a wall-bounded mask is trimmed to the wall the scene actually has", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await expect.poll(() => hostCall<unknown>(page, "camera"), { timeout: 10_000 }).not.toBeNull();
+
+  // A real wall, placed through the rail — the same sight blocker the fog uses.
+  const before = (await hostCall<Array<{ id: string }>>(page, "walls")).length;
+  await page.locator('[data-canvas-layer="gm"]').click();
+  await page.locator('[data-canvas-tool="wall"]').click();
+  await page.locator('[data-canvas-wall-kind="wall"]').click();
+  const screenOf = async (world: { x: number; y: number }) => {
+    const at = await surfaceCallArg<{ x: number; y: number } | null>(page, "app", "screenOf", world);
+    if (!at) throw new Error("screenOf returned null");
+    return at;
+  };
+  const a = await screenOf({ x: 900, y: 200 });
+  const b = await screenOf({ x: 900, y: 1_300 });
+  await page.mouse.move(a.x, a.y);
+  await page.mouse.down();
+  await page.mouse.move(b.x, b.y, { steps: 6 });
+  await page.mouse.up();
+  await expect.poll(async () => (await hostCall<unknown[]>(page, "walls")).length).toBe(before + 1);
+  const placed = await hostCall<Array<{ c: [number, number, number, number] }>>(page, "walls");
+  const wall = placed[placed.length - 1];
+  if (!wall) throw new Error("no wall was placed");
+  // Where the trim has to land, in the region's own offsets: the wall's own x minus the
+  // anchor's, whatever snapping did to the drag.
+  const anchor = { x: wall.c[0] - 200, y: (wall.c[1] + wall.c[3]) / 2 };
+  const wallOffset = wall.c[0] - anchor.x; // 200 px == 10 scene units on this grid
+
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  await wizard.locator('input[type="file"]').setInputFiles({ name: "lantern.png", mimeType: "image/png", buffer: png });
+  await expect(wizard.getByRole("status")).toContainText("GM-only playback");
+  await wizard.locator("[data-fx-name]").fill("Lantern");
+  await wizard.getByRole("button", { name: "Image / video", exact: true }).click();
+  const section = wizard.locator("[data-fx-section]");
+  await section.getByRole("combobox", { name: "Media" }).selectOption({ index: 1 });
+  await section.getByLabel("X", { exact: true }).fill(String(anchor.x));
+  await section.getByLabel("Y", { exact: true }).fill(String(anchor.y));
+  await section.getByLabel("Duration ms").fill("2000");
+  await section.locator("[data-fx-mask-kind]").selectOption("circle");
+  await section.locator("[data-fx-mask-length]").fill("15"); // 300 px of reach
+
+  // A growth entered first, then the wall bound: the host bakes the trim, so an animated
+  // wall-bounded region would drag itself through the wall — the wizard clears it and puts
+  // the fields away rather than offering a control the host would refuse.
+  await section.locator("[data-fx-mask-length-to]").fill("30");
+  await expect(section.locator("[data-fx-mask-length-to]")).toHaveValue("30");
+  await section.locator("[data-fx-mask-walls]").check();
+  await expect(section.locator("[data-fx-mask-length-to]")).toHaveCount(0);
+  await expect(wizard.locator("[data-fx-status]")).toContainText("growth/turn was cleared");
+  await expect(section.getByText("cannot grow or turn", { exact: false })).toBeVisible();
+
+  await wizard.locator("[data-fx-save]").click();
+  await expect(wizard.locator("li")).toContainText(["Lantern"]);
+  await wizard.locator("li").filter({ hasText: "Lantern" }).getByRole("button", { name: "Edit" }).click();
+  await expect(section.locator("[data-fx-mask-walls]")).toBeChecked();
+  await expect(section.locator("[data-fx-mask-length-to]")).toHaveCount(0);
+
+  await wizard.locator("[data-fx-run]").click();
+  // A one-shot starts at least 300 ms ahead of the click, so the drawn shape is read from
+  // inside the page until it lands rather than once at an arbitrary moment.
+  const drawn = await page.evaluate(async () => {
+    const layer = (globalThis as unknown as { __stage?: { getFxLayer: () => {
+      inspect: (runId?: string) => Array<{ mask: { points: number; radius: number;
+        bounds: { minX: number; maxX: number; minY: number; maxY: number } } | null }> } } })
+      .__stage?.getFxLayer();
+    const until = performance.now() + 6_000;
+    while (performance.now() < until) {
+      const mask = layer?.inspect()[0]?.mask;
+      if (mask) return mask;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return null;
+  });
+  expect(drawn).not.toBeNull();
+  // The east side stops on the wall — touching it, not short of it — while the west side
+  // keeps the authored 300 px, and the shape is no longer a circle (a 16-gon would have
+  // every vertex at the same distance).
+  expect(drawn?.bounds.maxX ?? 0).toBeGreaterThan(wallOffset - 2);
+  expect(drawn?.bounds.maxX ?? 0).toBeLessThan(wallOffset + 2);
+  expect(drawn?.bounds.minX ?? 0).toBeCloseTo(-300, 0);
+  expect(drawn?.bounds.minY ?? 0).toBeLessThan(-200); // north/south keep their reach
+  expect(drawn?.bounds.maxY ?? 0).toBeGreaterThan(200);
+  expect(drawn?.radius ?? 0).toBeCloseTo(300, 0);
+  expect(drawn?.points ?? 0).toBeGreaterThan(16); // the wall's own edge is in the polygon
 });
 
 // D-305 (SQ-05): the *region* animates too — a mask that grows, and one that turns. Both
