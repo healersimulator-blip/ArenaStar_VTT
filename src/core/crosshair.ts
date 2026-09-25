@@ -77,16 +77,31 @@ export type CrosshairFaultCode =
   | "too-close"
   | "out-of-range"
   | "behind-wall"
-  | "no-path";
+  | "no-path"
+  /** A drag's own claim: the line between its two ends crosses a sight-blocking wall. */
+  | "line-blocked";
 
 export interface CrosshairFault {
   code: CrosshairFaultCode;
   message: string;
+  /**
+   * Which end of a drag the fault belongs to. Absent for a single-point placement, so
+   * every existing consumer and its tests still see exactly one point's faults. A drag
+   * has two ends, and "outside the scene" on its own would not say which one to fix.
+   */
+  end?: "source" | "target";
 }
 
 export interface CrosshairPlacement {
   name: string;
+  /** The picked point — the *target* end of a drag, the only point of a click. */
   point: CrosshairPoint;
+  /**
+   * SQ-12: where a drag began. Absent for a click placement, which is why a consumer
+   * that only knows about `point` keeps working unchanged; the FX wizard reads it to set
+   * a section's start and destination in one gesture.
+   */
+  source?: CrosshairPoint;
   shape: CrosshairShape;
   /** Outline in world coordinates, closed implicitly; empty for a point. */
   area: CrosshairPoint[];
@@ -94,6 +109,8 @@ export interface CrosshairPlacement {
   angleDeg: number;
   /** Scene units from `origin`, or `null` when the request has no origin. */
   distance: number | null;
+  /** Scene units a drag measured from `source` to `point`; absent for a click. */
+  lineLength?: number;
 }
 
 export type CrosshairCommit =
@@ -301,6 +318,36 @@ export function crosshairFaults(
   return faults;
 }
 
+/**
+ * Faults for a **drag**: both ends are checked against the request's own rules, because
+ * both are placements a host will resolve independently, and the segment between them is
+ * checked as well — "the line crosses a wall" is the claim a drag makes that a click
+ * cannot. The shape is anchored at the *source* (a cone dragged from a token points away
+ * from it), so its outline is sampled there and only the target's point is sampled at the
+ * far end. Source faults come first: the author fixes where the effect starts before
+ * where it lands.
+ */
+export function crosshairLineFaults(
+  request: CrosshairRequest,
+  source: CrosshairPoint,
+  target: CrosshairPoint,
+  shape: CrosshairShape = { kind: "point" },
+  angleDeg = 0,
+): CrosshairFault[] {
+  const label = (end: "source" | "target", faults: CrosshairFault[]): CrosshairFault[] =>
+    faults.map((fault) => ({ ...fault, end, message: `${end === "source" ? "Start" : "End"}: ${fault.message}` }));
+  const faults = [
+    ...label("source", crosshairFaults(request, source, shape, angleDeg)),
+    ...label("target", crosshairFaults(request, target)),
+  ];
+  const finite = Number.isFinite(source.x) && Number.isFinite(source.y) &&
+    Number.isFinite(target.x) && Number.isFinite(target.y);
+  if (finite && request.requireLoS && sightBlockedBetween(request.walls, source, target))
+    faults.push({ code: "line-blocked", end: "target",
+      message: "End: a sight-blocking wall crosses the line" });
+  return faults;
+}
+
 /** The first fault message — what a one-line readout shows. */
 export function crosshairFaultMessage(faults: readonly CrosshairFault[]): string | null {
   return faults.length > 0 ? faults[0]?.message ?? null : null;
@@ -329,25 +376,47 @@ export function crosshairName(preferred: string | undefined, taken: readonly str
 export function crosshairCommit(input: {
   request: CrosshairRequest;
   point: CrosshairPoint;
+  /** A drag's start. Present only when the author dragged, which is what makes this a line. */
+  source?: CrosshairPoint;
   shape?: CrosshairShape;
   angleDeg?: number;
   name?: string;
   taken?: readonly string[];
 }): CrosshairCommit {
   const shape = input.shape ?? { kind: "point" as const };
-  const angleDeg = crosshairNormalizeAngle(input.angleDeg ?? 0);
-  const faults = crosshairFaults(input.request, input.point, shape, angleDeg);
+  const source = input.source;
+  // A drag's direction *is* its facing, so a caller that does not state an angle gets the
+  // one the gesture implied (snapped by the shared rule). An explicit angle wins, which is
+  // how the overlay lets an author nudge a shape off its own line.
+  const derived = source ? crosshairAngle(source, input.point, true, 0) : null;
+  const angleDeg = crosshairNormalizeAngle(input.angleDeg ?? derived ?? 0);
+  const faults = source
+    ? crosshairLineFaults(input.request, source, input.point, shape, angleDeg)
+    : crosshairFaults(input.request, input.point, shape, angleDeg);
   if (faults.length > 0) return { ok: false, faults };
+  const pxPerUnit = crosshairPxPerUnit(input.request.grid);
   const origin = input.request.origin;
   const distance = origin && Number.isFinite(origin.x) && Number.isFinite(origin.y)
-    ? Math.hypot(input.point.x - origin.x, input.point.y - origin.y) / crosshairPxPerUnit(input.request.grid)
+    ? Math.hypot(input.point.x - origin.x, input.point.y - origin.y) / pxPerUnit
     : null;
-  return { ok: true, placement: {
+  if (!source) return { ok: true, placement: {
     name: crosshairName(input.name, input.taken),
     point: input.point,
     shape: { ...shape, angle: angleDeg },
     area: crosshairArea(input.point, shape, input.request.grid, angleDeg),
     angleDeg,
     distance,
+  } };
+  return { ok: true, placement: {
+    name: crosshairName(input.name, input.taken),
+    point: input.point,
+    source,
+    // The area belongs to the *source*: that is where the effect starts, and the drag's
+    // direction is already folded into `angleDeg`, so a ray/cone/rect points at the target.
+    shape: { ...shape, angle: angleDeg },
+    area: crosshairArea(source, shape, input.request.grid, angleDeg),
+    angleDeg,
+    distance,
+    lineLength: Math.hypot(input.point.x - source.x, input.point.y - source.y) / pxPerUnit,
   } };
 }

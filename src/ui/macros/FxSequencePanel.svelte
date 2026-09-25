@@ -509,6 +509,33 @@
    * gesture cannot half-edit the draft; square/hex snap to the cell or hex centre,
    * gridless stays exact, and the overlay refuses a point the host would refuse.
    */
+  /**
+   * SQ-12's other placement mode: one gesture fills both ends of a section — the start
+   * where the effect begins and the destination it travels to — instead of two picks.
+   * The drag's direction is the section's bearing for free (a stretched image lies along
+   * it, a cone points down it), and its length becomes the visual's own tween distance.
+   * Only a located section can carry a destination at all, so only those offer it.
+   */
+  async function dragSection(index: number): Promise<void> {
+    const before = draft.sections[index];
+    if (!before || (before.kind !== "image" && before.kind !== "text") || !onPickAnchor || !scene) return;
+    error = ""; status = "";
+    const placement = await onPickAnchor({ sceneId: scene._id, gesture: "drag",
+      label: "from the start to the destination", shapes: ["point", "ray", "rect"], named: placements,
+      hint: "The host validates the saved sequence — this only writes the draft." });
+    if (!placement?.source) { status = "Drag cancelled — the draft is unchanged"; return; }
+    placements = rememberPlacement(placements, placement);
+    const from = { x: Math.round(placement.source.x), y: Math.round(placement.source.y) };
+    const to = { x: Math.round(placement.point.x), y: Math.round(placement.point.y) };
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      // Both ends are plain points now, so a token follow cannot survive: the host
+      // resolves `follow` only against bound anchors, and this placement binds nobody.
+      ? { ...old, at: { kind: "point" as const, ...from }, to: { kind: "point" as const, ...to },
+          follow: false } as FxSection : old) };
+    const length = placement.lineLength !== undefined ? ` over ${placement.lineLength.toFixed(1)} ${scene.grid.units ?? "units"}` : "";
+    status = `"${placement.name}": ${from.x}, ${from.y} → ${to.x}, ${to.y}${length} at ${placement.angleDeg}° — save the timeline to publish it`;
+  }
+
   async function pickPoint(index: number, which: "at" | "to" | "camera" | "waypoint", way = 0): Promise<void> {
     const before = draft.sections[index];
     const cameraPan = before?.kind === "camera" && before.mode === "pan";
@@ -820,6 +847,9 @@
                 <button type="button" data-fx-pick="at" disabled={!onOpenScene}
                   title={onOpenScene ? "Click the map to set this point" : "Open this timeline's scene first"}
                   onclick={() => void pickPoint(i, "at")}>Pick on map…</button>
+                <button type="button" data-fx-drag disabled={!onOpenScene}
+                  title={onOpenScene ? "Drag on the map from the start to the destination" : "Open this timeline's scene first"}
+                  onclick={() => void dragSection(i)}>Drag source → target…</button>
               {/if}
             {/if}
             <label>Destination <select value={section.to?.kind ?? "none"} onchange={(event) =>
@@ -977,7 +1007,7 @@
     {/if}
   </div>
   {#if error}<p class="error" role="alert">{error}</p>{/if}
-  {#if status}<p role="status">{status}</p>{/if}
+  {#if status}<p role="status" data-fx-status>{status}</p>{/if}
   {#if fitnessIssues.length > 0}
     <p class="warn" role="status" data-fx-fitness>This timeline may not reach every viewer: {fitnessIssues.join("; ")}</p>
   {/if}

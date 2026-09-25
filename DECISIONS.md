@@ -9978,3 +9978,88 @@ no Firefox/WebKit run or the §10 41-scenario matrix.
   a jump — while the reach stays within a pixel. The `summons` suite ran alongside it
   (**26/26** together) and the canvas/interaction batch (`canvas_rail` + `canvas_toolbar` +
   `vision` + `walls` + `join`) is **20/20**.
+
+## D-306 — the crosshair's second gesture: drag source → target (2026-09-25)
+
+SQ-12 asks for two placement modes — click-at-point **and** drag source→target — and only
+the first existed. That mattered most for the FX wizard: a tweening or stretched section
+has two anchors, and placing them meant two separate picks with a save in between if the
+author wanted to see the line. This decision adds the drag gesture to the shared crosshair
+(D-296), so one press-and-drag fills both ends — and the drag's own bearing becomes the
+section's facing for free, which is exactly what a ray, a cone or a stretched image needs.
+
+**A drag is a line, and a line has its own claims.** The click rule (`crosshairFaults`)
+checks one point. A drag checks **both ends** — a host resolves each anchor independently —
+and adds a claim a click cannot make: the segment *between* them (`line-blocked`). A wall
+that the far end hides behind from the caster and a wall that crosses the drag are
+different questions with different fixes, so both are reported when both apply (the source
+end first, because that is where the effect starts). Faults carry `end: "source" | "target"`
+and read as "Start: …" / "End: …"; without it, "Outside the scene" would not say which end
+to move. The shape is sampled at the **source** only, because that is where a dragged
+shape lives — a cone dragged from a token points away from it.
+
+**The direction is derived, not decreed.** `crosshairCommit` derives a drag's facing from
+its own geometry through the shared 15° rule when the caller does not state one, so a
+consumer cannot forget it; an explicit angle still wins, which is how the overlay lets an
+author nudge a shape off its own line with the rotate buttons. The placement carries
+`source` and `lineLength` (scene units the gesture measured) — both **optional**, which is
+what makes every existing click consumer, document and test unchanged.
+
+**Releasing ends the gesture; it does not place it.** The line, its length, its bearing and
+its faults stay on screen after the pointer lifts, and the author commits with the one
+button both gestures use ("Use this line") or Enter — so a name can be typed or
+reused, and the facing nudged, before anything is written. A drag that never leaves its
+starting cell places **nothing**: the mode's whole purpose is the line, so a stationary
+press is a hint ("Press at the start point, drag to the end", shown in the controls panel
+because before a press there is no pointer readout to put it in), not a one-point pick.
+
+**In the wizard it is one button.** `Drag source → target…` sits beside the start pick for
+image/text sections and writes `at` and `to` together, with `follow: false` — both anchors
+are plain points now, and the host resolves `follow` only against bound tokens. The status
+line reports the whole gesture: `"Dart line": 250, 250 → 1250, 950 over 61.0 ft at 30°`.
+The mode is per-request (`gesture: "drag"`), the summon window explicitly asks for `click`,
+and a scene-unit ratio is never invented: the line's length is measured against the scene's
+own grid metric.
+
+**The batch found two pre-existing flakes, and one of them was worth fixing.**
+
+- `canvas_rail`'s fog-mask spec failed one run in three: it reloaded *before* the queued IDB
+  oplog append finished, so it came back one stroke short. That is the recorded "reload in
+  the instant before the append" caveat, not a lost stroke — the spec now waits on the
+  existing `drainOps()` durability barrier before reloading (the same pattern four other
+  specs already use) and passes 4/4.
+- `fx_sequence`'s SQ-09 sound spec timed out once inside the full batch (its first
+  `[data-fx-playing-sound]` wait), passed standalone twice and passed a re-run of the whole
+  batch: the D-291/D-297 load flake again, unchanged and unrelated to this work. Neither
+  is a regression from D-306: this diff touches the crosshair overlay, the wizard's drag
+  button and a `data-fx-status` attribute on the status paragraph.
+
+**Non-claims.** No drag for the camera pan, path waypoints or summon placement (a camera
+destination is a *look-at*, not a line, and a summon is one point by definition), no
+multi-segment or multi-point drags, no per-end shapes or per-end walls beyond the one
+segment rule, no snapping an existing authored section back *into* the crosshair, no
+undo of a drag different from any other draft edit, no new wire field of any kind (a
+placement is draft state until a save), and no Firefox/WebKit run or the §10 41-scenario
+matrix.
+
+**Gates.**
+
+- `pnpm test` — **3 732 passed / 12 skipped** (297 files: 295 passed, 2 skipped). New: three
+  cases in `tests/core/crosshair.test.ts` (a line placement carries both ends, the drag's
+  own direction — derived and snapped, with an explicit angle still winning — and its
+  length in scene units, while a click placement has neither field; both ends are checked
+  and each fault names its end, in source-then-target order; the line's own wall is refused
+  as `line-blocked`, is reported beside the caster's separate `behind-wall` claim, is not
+  checked when LoS is not required, and a refused drag commits nothing).
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing — a new advisory from reading the gesture was avoided with `untrack`, the
+  same treatment the starting shape already gets) · `pnpm lint` **exit 0** · `pnpm build` →
+  `pnpm size` **3 831 673 B raw / 1 098 455 B gzip**, inside the 6 MB budget.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **23/23** — the new spec asserts
+  that nothing is placed before a press (no readout, disabled commit, the gesture hint), that
+  a press which has not moved is still not a line, that releasing leaves the line on screen
+  with "line 61.0 ft at 30°" measured from the drawn geometry, and that committing writes
+  `250, 250 → 1250, 950` into the draft and survives a save-and-reopen through the host. The
+  `summons` suite ran alongside it (**27/27** together, after the one recorded sound-spec
+  batch flake passed standalone and on the batch re-run) and the canvas/interaction batch
+  (`canvas_rail` + `canvas_toolbar` + `vision` + `walls` + `join`) is **20/20**.

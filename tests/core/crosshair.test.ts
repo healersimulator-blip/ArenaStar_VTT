@@ -9,8 +9,9 @@ import { describe, expect, test } from "vitest";
 import {
   CROSSHAIR_ANGLE_STEP, CROSSHAIR_DEFAULT_SPREAD, CROSSHAIR_NAME_MAX,
   crosshairAngle, crosshairArea, crosshairCommit, crosshairFaultMessage, crosshairFaults,
-  crosshairGridSpec, crosshairName, crosshairNormalizeAngle, crosshairPxPerUnit, crosshairSnapPoint,
-  pathBlockedBetween, segmentsBlocked, sightBlockedBetween, type CrosshairRequest,
+  crosshairGridSpec, crosshairLineFaults, crosshairName, crosshairNormalizeAngle,
+  crosshairPxPerUnit, crosshairSnapPoint, pathBlockedBetween, segmentsBlocked, sightBlockedBetween,
+  type CrosshairRequest,
 } from "../../src/core/crosshair";
 import { summonPlacementError } from "../../src/core/summons";
 import type { SceneDocument, SceneGrid, TokenDocument, WallDocument } from "../../src/core/documents";
@@ -233,5 +234,109 @@ describe("commit and naming", () => {
     expect(crosshairName("x".repeat(400), []).length).toBe(CROSSHAIR_NAME_MAX);
     const reused = crosshairCommit({ request, point: { x: 300, y: 100 }, name: "Portal", taken: ["Portal"] });
     expect(reused.ok && reused.placement.name).toBe("Portal (2)");
+  });
+});
+
+/**
+ * SQ-12/D-306 — the drag gesture. A click places one point; a drag places a line, and
+ * that means the *line's own* claims (both ends, and the segment between them) are the
+ * ones the preview must show. These tests pin the two properties that matter: a drag's
+ * placement carries both ends with the direction of the drag, and its faults say which
+ * end to fix — the same rule the wizard's own commit runs.
+ */
+describe("drag source → target (§SQ-12, D-306)", () => {
+  const clear: CrosshairRequest = { sceneId: "s1", bounds: { width: 1_000, height: 1_000 }, grid, walls: [] };
+  /** No origin: nothing to measure a range or a sight line from, only the line's own walls. */
+  const bare: CrosshairRequest = { ...clear, walls, requireLoS: true };
+  /** A caster standing at (300, 100) — east of the vertical wall, north of the horizontal. */
+  const open: CrosshairRequest = { ...bare, origin: { x: 300, y: 100 } };
+  const ranged: CrosshairRequest = { ...open, maxDistance: 10 }; // 10 ft = 200 px
+
+  test("a line placement carries both ends, the drag's direction and its length in scene units", () => {
+    // 600 px due east is 30 ft on this grid; the 15° snapping applies to the drag too.
+    const dragged = crosshairCommit({ request: clear, source: { x: 100, y: 100 }, point: { x: 700, y: 100 },
+      shape: { kind: "ray", length: 10, width: 2 } });
+    expect(dragged.ok).toBe(true);
+    if (!dragged.ok) return;
+    expect(dragged.placement.source).toEqual({ x: 100, y: 100 });
+    expect(dragged.placement.point).toEqual({ x: 700, y: 100 });
+    expect(dragged.placement.lineLength).toBeCloseTo(30, 6);
+    expect(dragged.placement.angleDeg).toBe(0);
+    // The area belongs to the *source* and points along the drag: this ray is 10 units
+    // (200 px) long, so it runs from the start at 100 px to 300 px — toward the target at
+    // 700 px rather than back from it. The drag's own length is what it measured, 30 ft.
+    const along = dragged.placement.area.map((corner) => corner.x);
+    expect(Math.max(...along)).toBeCloseTo(300, 6);
+    expect(Math.min(...along)).toBeCloseTo(100, 6);
+
+    // A click placement is unchanged — that is what "optional" has to mean here.
+    const clicked = crosshairCommit({ request: clear, point: { x: 300, y: 300 } });
+    expect(clicked.ok).toBe(true);
+    if (!clicked.ok) return;
+    expect("source" in clicked.placement).toBe(false);
+    expect("lineLength" in clicked.placement).toBe(false);
+    // A diagonal drag: 45° and its own length, not the axis-aligned one.
+    const diagonal = crosshairCommit({ request: clear, source: { x: 0, y: 0 }, point: { x: 300, y: 400 } });
+    if (!diagonal.ok) return;
+    expect(diagonal.placement.lineLength).toBeCloseTo(25, 6); // 500 px = 25 ft
+    // A drag states its own facing: atan2(400, 300) = 53.13°, snapped to the nearest of
+    // the shared 15° steps (60°, not 45° — the rule rounds rather than truncates).
+    expect(diagonal.placement.angleDeg).toBe(60);
+    // An explicit angle still wins, which is how the overlay lets an author nudge it.
+    const nudged = crosshairCommit({ request: clear, source: { x: 0, y: 0 }, point: { x: 300, y: 400 },
+      angleDeg: 90 });
+    if (!nudged.ok) return;
+    expect(nudged.placement.angleDeg).toBe(90);
+  });
+
+  test("both ends are checked, and the fault says which one to fix", () => {
+    const offScene = crosshairLineFaults(clear, { x: 100, y: 100 }, { x: 1_500, y: 100 });
+    expect(offScene.map((fault) => [fault.code, fault.end])).toEqual([["outside-scene", "target"]]);
+    expect(offScene[0]?.message).toContain("End:");
+    // Both ends wrong is two faults, source first — the author fixes where it starts.
+    const bothOff = crosshairLineFaults(clear, { x: -50, y: 100 }, { x: 1_500, y: 100 });
+    expect(bothOff.map((fault) => fault.end)).toEqual(["source", "target"]);
+    expect(bothOff.map((fault) => fault.code)).toEqual(["outside-scene", "outside-scene"]);
+    // A non-finite end is the plain code, still labelled with its end.
+    expect(crosshairLineFaults(clear, { x: 100, y: 100 }, { x: Number.NaN, y: 100 })[0])
+      .toMatchObject({ code: "not-finite", end: "target" });
+    // The request's own range rule applies to both ends, each labelled — a drag is two
+    // placements, and the host will resolve both.
+    const far = crosshairLineFaults(ranged, { x: 350, y: 100 }, { x: 700, y: 100 });
+    expect(far.map((fault) => [fault.code, fault.end])).toEqual([["out-of-range", "target"]]);
+    expect(far[0]?.message).toContain("End:");
+    const near = crosshairLineFaults({ ...ranged, minDistance: 10, maxDistance: 100 },
+      { x: 400, y: 100 }, { x: 900, y: 100 });
+    expect(near.map((fault) => [fault.code, fault.end])).toEqual([["too-close", "source"]]);
+    expect(near[0]?.message).toContain("Start:");
+  });
+
+  test("the line's own claim is checked: a wall across the drag is refused", () => {
+    // wallA is the vertical segment x = 250 from y = 0 to 400: a drag from (100, 100) to
+    // (400, 100) crosses it. With no origin there is nothing else to check, so the line's
+    // own wall is the whole fault list — and it is named for the end it lands on.
+    const crossed = crosshairLineFaults(bare, { x: 100, y: 100 }, { x: 400, y: 100 });
+    expect(crossed.map((fault) => fault.code)).toEqual(["line-blocked"]);
+    expect(crossed[0]).toMatchObject({ end: "target" });
+    expect(crossed[0]?.message).toContain("crosses the line");
+    // A drag that stops short of the wall is fine, and a *click* past it in clear air is
+    // just a click — the segment rule belongs to the gesture, not to the destination.
+    expect(crosshairLineFaults(bare, { x: 100, y: 100 }, { x: 200, y: 100 })).toEqual([]);
+    expect(crosshairFaults(bare, { x: 400, y: 100 })).toEqual([]);
+    // Without a line-of-sight requirement the drag is only a measurement.
+    expect(crosshairLineFaults({ ...bare, requireLoS: false }, { x: 100, y: 100 }, { x: 400, y: 100 }))
+      .toEqual([]);
+    // With an origin the *caster's* own sight line is a separate claim from the drag's, so
+    // both are reported: the target is behind the wall from the caster, and the line
+    // crosses it. They are different questions and a host would refuse either.
+    // (300, 400) → (400, 600) crosses wallB (y = 500) both from the caster and along its
+    // own length, so the two claims are reported side by side.
+    expect(crosshairLineFaults(open, { x: 300, y: 400 }, { x: 400, y: 600 })
+      .map((fault) => [fault.code, fault.end])).toEqual([["behind-wall", "target"], ["line-blocked", "target"]]);
+    // …and a refused drag produces no placement at all.
+    const refused = crosshairCommit({ request: bare, source: { x: 100, y: 100 }, point: { x: 400, y: 100 } });
+    expect(refused.ok).toBe(false);
+    if (refused.ok) return;
+    expect(refused.faults.map((fault) => fault.code)).toEqual(["line-blocked"]);
   });
 });

@@ -323,6 +323,85 @@ test("wizard places named anchors through the shared crosshair, reuses one, and 
   await expect(section.getByLabel("To Y")).toHaveValue("150");
 });
 
+// D-306 (SQ-12): the crosshair's second gesture. A click places one point; a drag places
+// a *line* — press at the start, release at the end — so one gesture fills a section's
+// start and destination, and the drag's own bearing becomes the section's facing.
+test("a drag places a section's start and destination in one gesture", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  await wizard.locator('input[type="file"]').setInputFiles({ name: "dart.png", mimeType: "image/png", buffer: png });
+  await expect(wizard.getByRole("status")).toContainText("GM-only playback");
+  await wizard.locator("[data-fx-name]").fill("Dart");
+  await wizard.getByRole("button", { name: "Image / video", exact: true }).click();
+  const section = wizard.locator("[data-fx-section]");
+  await section.getByRole("combobox", { name: "Media" }).selectOption({ index: 1 });
+  await section.getByLabel("Duration ms").fill("1200");
+
+  const camera = await hostCall<{ x: number; y: number; scale: number }>(page, "camera");
+  await section.locator("[data-fx-drag]").click();
+  const overlay = page.locator("[data-crosshair]");
+  await expect(overlay).toBeVisible();
+  const overlayBox = await overlay.boundingBox();
+  if (!overlayBox) throw new Error("Picker overlay missing");
+  const screenOf = (world: { x: number; y: number }) => ({
+    x: overlayBox.x + (world.x - camera.x) * camera.scale,
+    y: overlayBox.y + (world.y - camera.y) * camera.scale,
+  });
+
+  // Nothing is placed before the gesture: the readout says what to do, and there is no
+  // line to commit. This is the mode's whole point — a stationary press is a hint.
+  await expect(page.locator("[data-crosshair-readout]")).toHaveCount(0);
+  await expect(overlay.getByText("Press at the start point, drag to the end")).toBeVisible();
+  await expect(overlay.locator("[data-crosshair-commit]")).toBeDisabled();
+  const from = screenOf({ x: 250, y: 250 });   // both are cell centres of the 100 px grid
+  const to = screenOf({ x: 1250, y: 950 });
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  // A press that has not moved yet is still not a line: the same cell measures zero and
+  // the button stays disabled until the drag actually goes somewhere.
+  await page.mouse.move(from.x, from.y);
+  await expect(overlay.locator("[data-crosshair-commit]")).toBeDisabled();
+  await page.mouse.move(to.x, to.y);
+  await expect(page.locator("[data-crosshair-line]")).toHaveCount(1); // the line itself
+  await page.mouse.up();
+  // Releasing ends the gesture but does not place it, so the author can still nudge the
+  // facing or reuse a name; the commit button is the one path both gestures use.
+  await expect(overlay).toBeVisible();
+  // The drag measured itself: 1 220 px on a 100 px/5 ft grid is 61 ft, and the bearing
+  // (35°) is snapped by the crosshair's own 15° rule — the section's facing for free.
+  await expect(page.locator("[data-crosshair-readout]")).toContainText("1250, 950");
+  await expect(page.locator("[data-crosshair-readout]")).toContainText("line 61.0 ft");
+  await expect(page.locator("[data-crosshair-readout]")).toContainText("at 30°");
+  await expect(overlay.locator("[data-crosshair-commit]")).toBeEnabled();
+  await overlay.locator("[data-crosshair-name]").fill("Dart line");
+  await overlay.locator("[data-crosshair-commit]").click();
+  await expect(overlay).toHaveCount(0);
+
+  // Both ends landed in the draft — start *and* destination from one gesture.
+  await expect(section.getByLabel("X", { exact: true })).toHaveValue("250");
+  await expect(section.getByLabel("Y", { exact: true })).toHaveValue("250");
+  await expect(section.getByLabel("To X")).toHaveValue("1250");
+  await expect(section.getByLabel("To Y")).toHaveValue("950");
+  // Scoped to the status line itself: a fitness warning is also a `role="status"` here.
+  await expect(wizard.locator("[data-fx-status]")).toContainText("250, 250 → 1250, 950");
+  await expect(wizard.locator("[data-fx-status]")).toContainText("61.0 ft at 30°");
+  await expect(wizard.locator('[data-fx-placement="Dart line"]')).toHaveCount(1);
+
+  // Saving publishes what the gesture wrote — Run plays the macro the host holds, so the
+  // line has to survive the host's own validation to mean anything.
+  const before = await hostCall<number>(page, "seq");
+  await wizard.locator("[data-fx-save]").click();
+  await expect.poll(() => hostCall<number>(page, "seq"), { timeout: 5_000 }).toBeGreaterThan(before);
+  await wizard.locator("li").filter({ hasText: "Dart" }).getByRole("button", { name: "Edit" }).click();
+  await expect(section.getByLabel("X", { exact: true })).toHaveValue("250");
+  await expect(section.getByLabel("To X")).toHaveValue("1250");
+  await expect(section.getByLabel("To Y")).toHaveValue("950");
+});
+
 test("preview renders the unsaved draft locally, commits nothing and stops on demand", async ({ page }) => {
   await page.goto(entry + "?e2e=1");
   await waitForSurface(page, "app");

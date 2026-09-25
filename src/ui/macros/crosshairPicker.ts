@@ -22,8 +22,17 @@ export interface NamedPlacement {
   point: CrosshairPoint;
 }
 
+/**
+ * How the author places: a click (`point`) or a drag from a start to an end
+ * (`drag`, SQ-12's second mode). A drag placement carries both ends, so one gesture
+ * can fill an FX section's start *and* destination.
+ */
+export type CrosshairGesture = "click" | "drag";
+
 export interface CrosshairPickOptions {
   sceneId: string;
+  /** Click (default) or drag source → target. */
+  gesture?: CrosshairGesture;
   /** What the author is placing, e.g. "the destination point". */
   label?: string;
   /** Shapes the author may switch between; `point` is always offered. */
@@ -86,6 +95,8 @@ export function summonCrosshairOptions(scene: SceneDocument, options: SummonPick
         requireLoS: options.requireLoS === true,
       } : {}),
     },
+    // Summoning is a click placement: one point, checked on its own.
+    gesture: "click",
     hint: options.gmManual
       ? "GM placement: range and line of sight are not enforced here."
       : "The host repeats the footprint, range and line-of-sight checks before anything is created.",
