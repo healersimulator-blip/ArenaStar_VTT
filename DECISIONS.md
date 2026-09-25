@@ -9890,3 +9890,91 @@ no PROTOCOL.md change (the field rides inside `ResolvedFxSection`, exactly as
 - The e2e caught the one gap the units could not: the easing select was rendered only for
   `to`/`scaleTo`/`spinDeg`, so a filter-only animation had no curve control — widened to
   include `filterTo`, matching D-302's caution rather than repeating the mistake.
+
+## D-305 — animate the region itself: a mask grows and turns (2026-09-25)
+
+D-301 shipped effect masks as host-resolved polygons; D-302 and D-304 then animated the
+visual's transform and its filter. The region stayed still, so an author could grow a
+dome's art inside a fixed circle of clipping — the one part of SQ-05's
+"animate supported properties" row still missing. This decision animates the mask itself:
+`mask.lengthTo` grows it and `mask.spinDeg` turns it, eased by the section's own curve.
+
+**Two rules, reused rather than re-invented.** A turn is a bearing and a size is a value:
+D-302 already answered that question for the visual's own transform, so the region follows
+it exactly — `spinDeg` **accumulates** across `repeats` (a sweeping cone keeps sweeping,
+rather than snapping back at every cycle boundary) and `lengthTo` **restarts** each cycle
+(a pulsing dome). The shared cycle arithmetic is now one function (`fxTurned`) instead of
+two copies, so a future third inheritor cannot answer the question differently by accident.
+
+**The growth travels as a ratio, never as a second length.** The polygon is already
+host-resolved against the scene's own metric, and what the client receives for the growth
+is `lengthTo / length` — a unit-free scale. That keeps D-301's real invariant intact (a
+recipient never needs to know what "15 ft" is in pixels) and means one renderer path
+applies both animations: turn the vertices about the anchor, then scale them. Both are
+*exact* for all four shapes, because each is defined about its anchor — a circle's centre,
+a cone's apex, a rectangle's own centre — which is worth stating because it is why the
+region can be animated without ever re-deriving the shape: scaling a rectangle's four
+corners grows its width with its depth (a growing sliver would be a different shape, not a
+bigger one), and turning a centred rectangle leaves it the same rectangle, turned.
+
+**A circle takes no turn.** It has no facing, so `spinDeg` on a circle is refused as a
+field the shape does not accept — the same rule that already drops a rectangle's `width`
+from a circle — and the wizard simply does not offer the control. Following the same rule,
+switching the mask's kind **rebuilds the region and drops its animation**: `lengthTo` is
+legal for every kind, but a growth authored against a 15-unit circle means nothing once
+the shape is a 30-unit cone with a different authored reach.
+
+**A still region is still drawn once.** Only a mask with an animation is redrawn per frame,
+and it is redrawn *into the same graphics* (`fxMaskDraw` clears and re-draws), so D-301's
+one-time cost survives exactly as D-299's did for filters. The first frame and the
+thousandth come from the same recipe, and a late join takes the animated region from its
+own elapsed time.
+
+**`inspect` reports what the polygon says.** The mask row now carries `radius` (the drawn
+reach, read out of the graphics) and `bearingDeg` — and that last field is *null* for a
+circle and for a rectangle, because a circle has no facing and four symmetric corners do
+not say which way a rectangle points (`angle` and `angle + 180` produce the same polygon).
+A cone or a ray reports its axis. It is a readback that refuses to invent a number rather
+than one that always has an answer, which is the point: the e2e proves the sweep with it.
+
+**The e2e taught the flow, not the code.** The first version of the spec switched the
+mask's kind and then pressed **Run** — which plays the macro the *host* holds, so it
+faithfully rendered the previously saved circle (its growth reaching 4×, plainly visible in
+the samples) and the "sweep" assertion failed on a bearing of `null`. The fix is the
+product's own rule: author, save, then run. Recorded because a spec that edits and runs
+without saving is testing the previous document.
+
+**Non-claims.** No animating a mask's **width or spread** independently (the region scales
+as a whole), no easing separate from the section's own curve, no tweening `invert`, no
+mask animation on a sound/camera/wait section (still an unknown field), no wall-bounded or
+polygon-authored regions, no per-recipient regions, no keyframes or multi-stop tracks, no
+PROTOCOL.md change (the resolved mask gains one optional property inside `fx.start`), and
+no Firefox/WebKit run or the §10 41-scenario matrix.
+
+**Gates.**
+
+- `pnpm test` — **3 729 passed / 12 skipped** (297 files: 295 passed, 2 skipped). New: two
+  cases in the D-301 mask block of `tests/core/fx.test.ts` (a growth is bounded in the same
+  scene units as the region and a turn like the visual's own spin, with a circle's turn
+  refused by name; resolution turns an authored growth into the ratio 4 — while a cone's
+  turn travels as the degrees the author wrote — and a still region carries no recipe at
+  all) and four in `tests/canvas/fxStyle.test.ts` (`fxMaskTransform` follows the two rules,
+  including the per-cycle pulse and the accumulating turn, and answers the authored still
+  region to a NaN age or a zero-length section; a drawn region is the host's polygon scaled
+  and turned about its anchor, with the readback reporting a cone's axis, a circle's `null`
+  bearing and a cutout whose covering rectangle still covers the grown ring; a growing
+  region is redrawn per frame on the *same* graphics while a still one's polygon is
+  untouched from spawn to end; a late join starts mid-animation).
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing) · `pnpm lint` **exit 0** (after replacing two non-null assertions with
+  narrowing, the project's rule) · `pnpm build` → `pnpm size` **3 827 235 B raw /
+  1 096 985 B gzip**, inside the 6 MB budget.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **22/22** — the new spec authors
+  a circle of 2 units reaching 8 and samples the drawn polygon: the reach ratio lands on 4,
+  the middle frame sits strictly between the ends, and the last frame is past 3.5× (it
+  arrived rather than stopping short); then it switches the shape to a cone (asserting the
+  growth field reset and that a cone *has* a turn field), saves, runs, and watches the
+  drawn bearing sweep from <3° to >87° with most frames between 10° and 80° — a sweep, not
+  a jump — while the reach stays within a pixel. The `summons` suite ran alongside it
+  (**26/26** together) and the canvas/interaction batch (`canvas_rail` + `canvas_toolbar` +
+  `vision` + `walls` + `join`) is **20/20**.

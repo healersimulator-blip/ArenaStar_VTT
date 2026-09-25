@@ -484,6 +484,22 @@ describe("effect masks and cutouts (§SQ-19/SQ-05, D-301)", () => {
     expect(validateFxSequence(masked({ kind: "circle", length: "ten" })).ok).toBe(false);
   });
 
+  test("a region animates by its own two rules: a growth in scene units and a turn in degrees", () => {
+    expect(validateFxSequence(masked({ kind: "circle", length: 10, lengthTo: 40 })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "rect", length: 10, width: 4, lengthTo: 30, spinDeg: 90 })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "cone", length: 20, spinDeg: -3600 })).ok).toBe(true);
+    // A growth is measured in the same scene units as the region itself, so it has the
+    // same bounds — and a turn is bounded like the visual's own spin.
+    expect(validateFxSequence(masked({ kind: "circle", length: 10, lengthTo: 0.4 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "circle", length: 10, lengthTo: 5_001 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "cone", length: 20, spinDeg: 3_601 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "cone", length: 20, spinDeg: "sweep" })).ok).toBe(false);
+    // A circle has no facing, so it takes no turn — a field the shape cannot use.
+    const circleTurn = validateFxSequence(masked({ kind: "circle", length: 10, spinDeg: 90 }));
+    expect(circleTurn.ok).toBe(false);
+    if (!circleTurn.ok) expect(circleTurn.error).toContain("an FX circle mask takes only");
+  });
+
   test("a mask belongs to a visual: sound, wait and camera sections refuse it as unknown", () => {
     expect(validateFxSequence({ version: 1, sections: [{ kind: "sound", id: "s", assetId: sound,
       startMs: 0, durationMs: 500, mask: { kind: "circle", length: 5 } } as never] }).ok).toBe(false);
@@ -492,6 +508,37 @@ describe("effect masks and cutouts (§SQ-19/SQ-05, D-301)", () => {
     expect(validateFxSequence({ version: 1, sections: [{ kind: "camera", id: "c", mode: "pan",
       to: { kind: "point", x: 10, y: 10 }, startMs: 0, durationMs: 500,
       mask: { kind: "circle", length: 5 } } as never] }).ok).toBe(false);
+  });
+
+  test("resolution turns an authored growth into a unit-free ratio, not a second length", () => {
+    const resolved = resolveFxSequence(
+      masked({ kind: "circle", length: 15, lengthTo: 60 }) as FxSequence,
+      scene, source, source, () => "image/png");
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    const section = resolved.sections[0] as Extract<typeof resolved.sections[number], { mask?: unknown }>;
+    const mask = section.mask as { area: Array<{ x: number; y: number }>; invert: boolean; animate?: unknown };
+    // Four times the reach, as a ratio: a client still never learns what "15 ft" is. A
+    // circle takes no turn, so the recipe carries only the growth it was given.
+    expect(mask.animate).toEqual({ scale: 4 });
+    const radius = Math.max(...mask.area.map((point) => Math.hypot(point.x, point.y)));
+    expect(radius).toBeCloseTo(300, 3);
+    // A cone's turn travels as the degrees the author wrote — the polygon already holds
+    // the authored bearing, so the client only ever applies the delta.
+    const turning = resolveFxSequence(
+      masked({ kind: "cone", length: 20, angle: 90, spinDeg: 120 }) as FxSequence,
+      scene, source, source, () => "image/png");
+    expect(turning.ok).toBe(true);
+    if (!turning.ok) return;
+    const cone = turning.sections[0] as Extract<typeof turning.sections[number], { mask?: unknown }>;
+    expect((cone.mask as { animate?: unknown }).animate).toEqual({ spinDeg: 120 });
+    // A still region carries no animation at all — not an identity recipe.
+    const still = resolveFxSequence(masked({ kind: "circle", length: 15 }) as FxSequence,
+      scene, source, source, () => "image/png");
+    expect(still.ok).toBe(true);
+    if (!still.ok) return;
+    const plain = still.sections[0] as Extract<typeof still.sections[number], { mask?: unknown }>;
+    expect((plain.mask as { animate?: unknown }).animate).toBeUndefined();
   });
 
   test("the host resolves the shape into an offset polygon against the scene's own grid", () => {

@@ -51,6 +51,15 @@ export interface FxMask {
   angle?: number;
   /** Aperture in degrees for a cone (1–359); defaults to the crosshair's 53.13. */
   spread?: number;
+  /**
+   * SQ-05/D-305: animate the region itself. `lengthTo` is the reach it grows to — the
+   * whole region scales about its anchor, so a rectangle's width grows with its depth
+   * (a growing sliver would be a different shape, not a bigger one); `spinDeg` turns the
+   * region, accumulating across `repeats` like the visual's own spin. Both are eased by
+   * the section's curve, and the same two rules the visual's transform follows.
+   */
+  lengthTo?: number;
+  spinDeg?: number;
   /** Keep the *outside* of the shape — a cutout — instead of the inside. */
   invert?: boolean;
 }
@@ -62,12 +71,20 @@ export interface FxMask {
 export interface ResolvedFxMask {
   area: CrosshairPoint[];
   invert: boolean;
+  /**
+   * The region's own animation, in the two unit-free forms the rest of the vocabulary
+   * uses: `scale` is the ratio it grows by (never an authored scene-unit length, so a
+   * client never re-derives the scene's metric) and `spinDeg` is the turn. Absent when
+   * the author animated nothing, and a still region is still built exactly once.
+   */
+  animate?: { scale?: number; spinDeg?: number };
 }
 const MASK_FIELDS: Record<FxMask["kind"], readonly string[]> = {
-  circle: ["kind", "length", "invert"],
-  cone: ["kind", "length", "angle", "spread", "invert"],
-  ray: ["kind", "length", "width", "angle", "invert"],
-  rect: ["kind", "length", "width", "angle", "invert"],
+  // A circle has no facing, so it takes no angle — and therefore no turn either.
+  circle: ["kind", "length", "lengthTo", "invert"],
+  cone: ["kind", "length", "lengthTo", "angle", "spread", "spinDeg", "invert"],
+  ray: ["kind", "length", "lengthTo", "width", "angle", "spinDeg", "invert"],
+  rect: ["kind", "length", "lengthTo", "width", "angle", "spinDeg", "invert"],
 };
 /** Authored metric bounds, in scene units / degrees. */
 export const FX_MASK_LIMITS = { min: 0.5, max: 5_000, spreadMin: 1, spreadMax: 359 } as const;
@@ -460,6 +477,10 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
         return { ok: false, error: `a cone mask's spread must be ${FX_MASK_LIMITS.spreadMin}–${FX_MASK_LIMITS.spreadMax} degrees` };
       if (mask.invert !== undefined && typeof mask.invert !== "boolean")
         return { ok: false, error: "an FX mask's invert flag must be true or false" };
+      if (mask.lengthTo !== undefined && !inRange(mask.lengthTo, FX_MASK_LIMITS.min, FX_MASK_LIMITS.max))
+        return { ok: false, error: `an FX mask's growth must be ${FX_MASK_LIMITS.min}–${FX_MASK_LIMITS.max} scene units` };
+      if (mask.spinDeg !== undefined && !inRange(mask.spinDeg, -FX_SPIN_LIMIT, FX_SPIN_LIMIT))
+        return { ok: false, error: `an FX mask's turn must be within ±${FX_SPIN_LIMIT} degrees` };
     }
     // Appearance is validated before the asset, so a mistyped blend is reported as
     // itself rather than as a bad hash.
@@ -620,7 +641,15 @@ export function resolveFxSequence(
         return { error: "an FX mask needs a usable scene grid metric" };
       const area = crosshairArea({ x: 0, y: 0 }, shape, grid, mask.angle ?? 0);
       if (area.length === 0) return { error: "an FX mask must resolve to a region" };
-      return { area, invert: mask.invert === true };
+      // The growth travels as a *ratio*, not as the authored length in scene units: the
+      // polygon is already host-resolved against the scene's metric, and a ratio is
+      // unit-free, so a client still never needs to know what "15 ft" is in pixels.
+      const animate = {
+        ...(mask.lengthTo !== undefined ? { scale: mask.lengthTo / mask.length } : {}),
+        ...(mask.spinDeg !== undefined ? { spinDeg: mask.spinDeg } : {}),
+      };
+      const animated = Object.keys(animate).length > 0;
+      return { area, invert: mask.invert === true, ...(animated ? { animate } : {}) };
     };
     /** The resolved-mask part of a section payload, or a refusal. */
     const maskCoords = (): { ok: true; mask?: ResolvedFxMask } | { ok: false; error: string } => {

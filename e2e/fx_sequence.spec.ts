@@ -1069,13 +1069,16 @@ test("a mask confines a visual to its region, and a cutout hides what is inside 
       { __stage?: { getFxLayer: () => { inspect: (runId?: string) => unknown[] } } })
       .__stage?.getFxLayer().inspect().length ?? 0), { timeout: 5_000 }).toBeGreaterThan(0);
     return page.evaluate(() => (globalThis as unknown as { __stage?: { getFxLayer: () => {
-      inspect: (runId?: string) => Array<{ kind: string; mask: { points: number; invert: boolean } | null }> } } })
+      inspect: (runId?: string) => Array<{ kind: string; mask:
+        { points: number; radius: number; bearingDeg: number | null; invert: boolean } | null }> } } })
       .__stage?.getFxLayer().inspect()[0] ?? null);
   };
   const live = await run();
   // A 12-unit circle against a 100 px / 5 ft grid is a 240 px radius ring, sampled into
   // the shared crosshair's own 16-point resolution — the same polygon an author sees.
-  expect(live?.mask).toEqual({ points: 16, invert: false });
+  // The readback is the drawn polygon's own geometry now (D-305), so this asserts the
+  // fields it means rather than the whole row.
+  expect(live?.mask).toMatchObject({ points: 16, invert: false });
 
   // A cutout is the same geometry, inverted: the sprite survives *outside* the shape.
   await section.locator("[data-fx-mask-invert]").check();
@@ -1085,7 +1088,7 @@ test("a mask confines a visual to its region, and a cutout hides what is inside 
   await wizard.locator("li").filter({ hasText: "Warded circle" }).getByRole("button", { name: "Edit" }).click();
   await expect(section.locator("[data-fx-mask-invert]")).toBeChecked();
   await expect.poll(async () => (await run())?.mask, { timeout: 5_000 })
-    .toEqual({ points: 16, invert: true });
+    .toMatchObject({ points: 16, invert: true });
 
   // "None" removes the mask entirely rather than storing a shape that masks nothing.
   await section.locator("[data-fx-mask-kind]").selectOption("none");
@@ -1159,6 +1162,103 @@ test("a visual grows and spins through its section, eased, and lands on the auth
   expect((early?.scale ?? 1) - 1).toBeLessThan(0.4); // still near the start
   expect(rotations[rotations.length - 1] ?? 0).toBeGreaterThan(340); // turned the full circle
   expect(Math.max(...rotations)).toBeLessThan(365); // …and never past it
+});
+
+// D-305 (SQ-05): the *region* animates too — a mask that grows, and one that turns. Both
+// claims are read off the drawn polygon (`radius`, `bearingDeg`), sampled frame by frame,
+// because "the document said 4×" is not the same claim as "the clipping region got bigger".
+test("a mask grows through its section, and a turning one sweeps its own bearing", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  await wizard.locator('input[type="file"]').setInputFiles({ name: "dome.png", mimeType: "image/png", buffer: png });
+  await expect(wizard.getByRole("status")).toContainText("GM-only playback");
+  await wizard.locator("[data-fx-name]").fill("Dome");
+  await wizard.getByRole("button", { name: "Image / video", exact: true }).click();
+  const section = wizard.locator("[data-fx-section]");
+  await section.getByRole("combobox", { name: "Media" }).selectOption({ index: 1 });
+  await section.getByLabel("X", { exact: true }).fill("600");
+  await section.getByLabel("Y", { exact: true }).fill("500");
+  await section.getByLabel("Duration ms").fill("2000");
+  await section.locator("[data-fx-mask-kind]").selectOption("circle");
+  await section.locator("[data-fx-mask-length]").fill("2");
+
+  // An empty animation field is *no* animation (the D-299 lesson), the growth is measured
+  // in the same scene units as the region, and a circle takes no turn at all — it has no
+  // facing, so the field is not offered rather than being offered and ignored.
+  await expect(section.locator("[data-fx-mask-length-to]")).toHaveValue("");
+  await expect(section.locator("[data-fx-mask-spin]")).toHaveCount(0);
+  await section.locator("[data-fx-mask-length-to]").fill("8");
+  await section.locator("[data-fx-easing]").selectOption("easeInOut");
+  await wizard.locator("[data-fx-save]").click();
+  await expect(wizard.locator("li")).toContainText(["Dome"]);
+  await wizard.locator("li").filter({ hasText: "Dome" }).getByRole("button", { name: "Edit" }).click();
+  await expect(section.locator("[data-fx-mask-length-to]")).toHaveValue("8");
+
+  /** The drawn region of whatever cue is playing, straight off the clipping polygon. */
+  const sample = async (windowMs: number) => page.evaluate(async (until) => {
+    const layer = (globalThis as unknown as { __stage?: { getFxLayer: () => {
+      inspect: (runId?: string) => Array<{ mask:
+        { points: number; radius: number; bearingDeg: number | null; invert: boolean } | null }> } } })
+      .__stage?.getFxLayer();
+    const seen: Array<{ radius: number; bearingDeg: number | null }> = [];
+    const deadline = performance.now() + until;
+    while (performance.now() < deadline) {
+      const mask = layer?.inspect()[0]?.mask;
+      if (mask) seen.push({ radius: mask.radius, bearingDeg: mask.bearingDeg });
+      await new Promise((resolve) => setTimeout(resolve, 16));
+    }
+    return seen;
+  }, windowMs);
+
+  // Growth: 2 units of reach becoming 8, watched as the polygon's own radius. The scene's
+  // grid is 100 px per 5 units, so the drawn reach walks 40 px → 160 px.
+  await wizard.locator("[data-fx-run]").click();
+  const grown = (await sample(2_300)).map((frame) => frame.radius);
+  expect(grown.length).toBeGreaterThan(40);
+  const smallest = Math.min(...grown);
+  const largest = Math.max(...grown);
+  expect(largest / smallest).toBeCloseTo(4, 1);
+  const grownMiddle = grown[Math.floor(grown.length / 2)] ?? 0;
+  expect(grownMiddle).toBeGreaterThan(smallest * 1.8);
+  expect(grownMiddle).toBeLessThan(largest * 0.9);
+  // One last frame near the end: the eased region reaches its authored reach rather than
+  // stopping short of it.
+  expect(grown[grown.length - 1] ?? 0).toBeGreaterThan(smallest * 3.5);
+  await expect.poll(async () => (await sample(0)).length, { timeout: 5_000 }).toBe(0);
+
+  // Turning: switching the shape rebuilds the region, so the circle's growth is not
+  // silently inherited — and the cone offers the turn the circle could not.
+  await section.locator("[data-fx-mask-kind]").selectOption("cone");
+  await expect(section.locator("[data-fx-mask-length-to]")).toHaveValue("");
+  await section.locator("[data-fx-mask-length]").fill("5");
+  await section.locator("[data-fx-mask-spin]").fill("90");
+  await expect(section.locator("[data-fx-mask-length-to]")).toHaveValue("");
+  const before = await hostCall<number>(page, "seq");
+  await wizard.locator("[data-fx-save]").click();
+  await expect.poll(() => hostCall<number>(page, "seq"), { timeout: 5_000 }).toBeGreaterThan(before);
+  // Save, not draft: the Run button plays the macro the host holds (the circle, had this
+  // not been saved) — which is what a GM actually gets when they press it.
+  await wizard.locator("[data-fx-run]").click();
+  const sweep = await sample(2_300);
+  expect(sweep.length).toBeGreaterThan(40);
+  // The reach is unchanged — this cone's `lengthTo` equals its own length, so only the
+  // bearing moves. A cone's far arc is symmetric about its axis, so the drawn polygon
+  // genuinely says which way the region points (a circle reports null here instead).
+  const radii = sweep.map((frame) => frame.radius);
+  expect(Math.max(...radii) - Math.min(...radii)).toBeLessThan(1);
+  const bearings = sweep.map((frame) => frame.bearingDeg ?? Number.NaN);
+  expect(bearings[0] ?? Number.NaN).toBeLessThan(3);
+  expect(bearings[bearings.length - 1] ?? 0).toBeGreaterThan(87);
+  const middle = bearings[Math.floor(bearings.length / 2)] ?? Number.NaN;
+  expect(middle).toBeGreaterThan(30);
+  expect(middle).toBeLessThan(60);
+  // A sweep rather than a jump: most frames sit away from both endpoints.
+  expect(bearings.filter((bearing) => bearing > 10 && bearing < 80).length).toBeGreaterThan(10);
+  await expect.poll(async () => (await sample(0)).length, { timeout: 5_000 }).toBe(0);
 });
 
 // D-304 (SQ-05): the filter's own strength animates now — a blur that deepens across its

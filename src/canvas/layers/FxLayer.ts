@@ -6,7 +6,7 @@
 import { BlurFilter, ColorMatrixFilter, Container, Graphics, Sprite, Text, type Filter,
   type Texture } from "pixi.js";
 import { fxEase, fxFilterStrength, fxStylePlan, type FxEasing, type FxFilterKind,
-  type ResolvedFxSection } from "../../core/fx";
+  type ResolvedFxMask, type ResolvedFxSection } from "../../core/fx";
 
 type Located = Extract<ResolvedFxSection, { kind: "image" | "text" }>;
 type Point = { x: number; y: number };
@@ -93,9 +93,41 @@ export function fxTransform(
   // A spin ACCUMULATES: completed cycles are already turned, the current one is eased.
   // Easing each cycle from zero would snap the visual back to its base bearing at every
   // cycle boundary — a spinner that flinches once a second instead of turning.
-  const turned = progress === 1 ? cycles : Math.min(cycles - 1, Math.floor(progress * cycles)) + eased;
+  const turned = fxTurned(progress, cycles, eased);
   const spin = section.spinDeg === undefined ? 0 : (section.spinDeg * Math.PI / 180) * turned;
   return { scale, rotation: baseRotation + spin };
+}
+
+/**
+ * How many times a per-cycle animation has turned by `progress`: completed cycles are
+ * already behind it, the current one is eased. Easing each cycle from zero would snap a
+ * spinning visual back to its base bearing at every boundary (D-302), and a turn is a
+ * bearing — that answer is shared with the mask's own turn (D-305) so there is one rule.
+ */
+function fxTurned(progress: number, cycles: number, eased: number): number {
+  return progress === 1 ? cycles : Math.min(cycles - 1, Math.floor(progress * cycles)) + eased;
+}
+
+/**
+ * D-305: the region's own animation. A growing region restarts per cycle, exactly like
+ * the visual's `scaleTo` (a size is a value); a turning one accumulates like `spinDeg`
+ * (a bearing is a position). Either way it is pure and total — a late join, a NaN age or
+ * a zero-length section produce the authored still region rather than NaN.
+ */
+export function fxMaskTransform(
+  animate: { scale?: number; spinDeg?: number } | undefined,
+  section: { easing?: FxEasing; repeats?: number; durationMs: number },
+  elapsedMs: number,
+): { scale: number; rotation: number } {
+  if (!animate || !Number.isFinite(elapsedMs) || section.durationMs <= 0)
+    return { scale: 1, rotation: 0 };
+  const progress = Math.min(1, Math.max(0, elapsedMs / section.durationMs));
+  const cycles = section.repeats ?? 1;
+  const phase = progress === 1 ? 1 : (progress * cycles) % 1;
+  const eased = fxEase(section.easing, phase);
+  const scale = animate.scale === undefined ? 1 : 1 + (animate.scale - 1) * eased;
+  const turned = animate.spinDeg === undefined ? 0 : fxTurned(progress, cycles, eased);
+  return { scale, rotation: (turned * (animate.spinDeg ?? 0) * Math.PI) / 180 };
 }
 
 /**
@@ -107,18 +139,76 @@ export function fxTransform(
  *
  * `extent` is half the sprite's drawn size, so the inverse rectangle always covers it.
  */
-export function fxMaskGraphics(mask: { area: Point[]; invert?: boolean }, extent = 0): Graphics {
-  const graphics = new Graphics();
-  const points = mask.area.flatMap((point) => [point.x, point.y]);
+export function fxMaskGraphics(mask: { area: Point[]; invert?: boolean }, extent = 0,
+  transform: { scale: number; rotation: number } = { scale: 1, rotation: 0 }): Graphics {
+  return fxMaskDraw(new Graphics(), mask, extent, transform);
+}
+
+/**
+ * The same drawing, into a graphics that already exists — the path an *animated* region
+ * takes every frame. It clears first, so the shape is replaced rather than accumulated,
+ * and it is deliberately the only way a mask's geometry is ever produced: one recipe for
+ * the first frame and the thousandth.
+ */
+export function fxMaskDraw(graphics: Graphics, mask: { area: Point[]; invert?: boolean }, extent = 0,
+  transform: { scale: number; rotation: number } = { scale: 1, rotation: 0 }): Graphics {
+  graphics.clear();
+  // Both transforms are exact for every shape here, because each is defined *about* the
+  // anchor (a circle's centre, a cone's apex, a rectangle's own centre): turning the
+  // region's vertices about the origin spins it, and scaling them grows depth and width
+  // together. The polygon travels, so a client never re-derives the scene's metric.
+  const cos = Math.cos(transform.rotation);
+  const sin = Math.sin(transform.rotation);
+  const points = mask.area.flatMap((point) => [
+    (point.x * cos - point.y * sin) * transform.scale,
+    (point.x * sin + point.y * cos) * transform.scale,
+  ]);
   if (!mask.invert) {
     graphics.poly(points).fill({ color: 0xffffff, alpha: 1 });
     return graphics;
   }
   const reach = Math.max(1, extent) + Math.max(0, ...mask.area.map((point) =>
-    Math.max(Math.abs(point.x), Math.abs(point.y)))) + 32;
+    Math.hypot(point.x, point.y))) * transform.scale + 32;
   graphics.rect(-reach, -reach, reach * 2, reach * 2).fill({ color: 0xffffff, alpha: 1 });
   graphics.poly(points).cut();
   return graphics;
+}
+
+/**
+ * D-305: what a mask's polygon *is*, read out of the graphics it was drawn into rather
+ * than remembered beside it (D-302's rule for `inspect`). `radius` is the drawn reach —
+ * the largest distance from the anchor — and `bearingDeg` is the direction the region
+ * points, which only a cone or a ray can say: a circle has no facing and a rectangle's
+ * four corners are symmetric, so both report `null` instead of a made-up number.
+ */
+export function fxMaskReadback(view: Graphics): { points: number; radius: number; bearingDeg: number | null } {
+  type RecordedPath = { instructions?: Array<{ action: string; data?: unknown[] }> };
+  const flat = (path: unknown): number[] | null => {
+    const poly = (path as RecordedPath | undefined)?.instructions?.find((it) => it.action === "poly");
+    const data = poly?.data?.[0];
+    return Array.isArray(data) && data.every((value) => typeof value === "number") ? data as number[] : null;
+  };
+  let polygon: number[] | null = null;
+  for (const instruction of view.context.instructions) {
+    const data = (instruction as { data?: { path?: unknown; hole?: unknown } }).data;
+    // A plain mask fills its own polygon; a cutout carries it as the hole of the
+    // covering rectangle. Either way the region is the poly subpath.
+    polygon = flat(data?.path) ?? flat(data?.hole) ?? polygon;
+  }
+  const points: Point[] = [];
+  const values = polygon ?? [];
+  for (let i = 0; i + 1 < values.length; i += 2) {
+    const x = values[i]; const y = values[i + 1];
+    if (x === undefined || y === undefined) break;
+    points.push({ x, y });
+  }
+  const radius = points.reduce((most, point) => Math.max(most, Math.hypot(point.x, point.y)), 0);
+  const far = points.filter((point) => Math.hypot(point.x, point.y) >= radius - 1e-6);
+  const centroid = far.reduce((sum, point) => ({ x: sum.x + point.x / far.length,
+    y: sum.y + point.y / far.length }), { x: 0, y: 0 });
+  const decided = radius > 1e-6 && Math.hypot(centroid.x, centroid.y) > radius * 1e-3;
+  return { points: points.length, radius: Math.round(radius * 1000) / 1000,
+    bearingDeg: decided ? Math.round(((Math.atan2(centroid.y, centroid.x) * 180) / Math.PI) * 10) / 10 : null };
 }
 
 /** Pure host-time tween: late join/slow decoding jumps to the correct frame. */
@@ -149,8 +239,12 @@ interface ActiveVisual {
    * (D-304).
    */
   filter: { plan: { kind: FxFilterKind; strength: number; to?: number }; view: Filter } | null;
-  /** The clipping region, positioned with the anchor every frame. */
-  mask: Graphics | null;
+  /**
+   * The clipping region, positioned with the anchor every frame. What it was built from
+   * is kept beside it so an *animated* region can be re-derived per frame (D-305) while a
+   * still one is never redrawn at all (D-301).
+   */
+  mask: { view: Graphics; plan: ResolvedFxMask; extent: number } | null;
   finish?: () => void;
 }
 
@@ -197,13 +291,16 @@ export class FxLayer {
     const parent = section.layer === "belowTokens" ? this.belowTokens : this.aboveTokens;
     parent.addChild(view);
     // A mask is built once, like the filter, and only *moved* per frame: the polygon is
-    // relative to the anchor, so a followed effect's region travels with it.
-    const mask = section.mask
-      ? fxMaskGraphics(section.mask, Math.max(view.width, view.height) / 2) : null;
+    // relative to the anchor, so a followed effect's region travels with it. Only a
+    // region that animates is ever drawn again (D-305).
+    const extent = Math.max(view.width, view.height) / 2;
+    const maskView = section.mask
+      ? fxMaskGraphics(section.mask, extent, fxMaskTransform(section.mask.animate, section, age)) : null;
+    const mask = section.mask && maskView ? { view: maskView, plan: section.mask, extent } : null;
     if (mask) {
-      mask.position.set(section.x, section.y);
-      parent.addChild(mask);
-      view.mask = mask;
+      mask.view.position.set(section.x, section.y);
+      parent.addChild(mask.view);
+      view.mask = mask.view;
     }
     const active: ActiveVisual = { runId, section, view, mask, age, persistent,
       filter: style.filter && filter ? { plan: style.filter, view: filter } : null,
@@ -219,7 +316,13 @@ export class FxLayer {
     active.view.visible = true;
     const { x, y } = fxPosition(section, age, anchors);
     active.view.position.set(x, y);
-    active.mask?.position.set(x, y);
+    active.mask?.view.position.set(x, y);
+    // A turning or growing region is redrawn from its own elapsed time; the polygon is
+    // relative to the anchor, so this only ever changes the shape, never the placement.
+    if (active.mask?.plan.animate) {
+      fxMaskDraw(active.mask.view, active.mask.plan, active.mask.extent,
+        fxMaskTransform(active.mask.plan.animate, section, age));
+    }
     // Scale and rotation are animated here rather than at spawn: a section that grows
     // or spins has to be re-derived from its own elapsed time every frame.
     const transform = fxTransform(section, age);
@@ -266,7 +369,8 @@ export class FxLayer {
 
   /** Read-only: what a run (or everything) is drawing with. Tests and diagnostics only. */
   inspect(runId?: string): Array<{ kind: string; blend: string; filter: string | null; scale: number;
-    rotationDeg: number; mask: { points: number; invert: boolean } | null }> {
+    rotationDeg: number;
+    mask: { points: number; radius: number; bearingDeg: number | null; invert: boolean } | null }> {
     return [...this.visuals]
       .filter((active) => runId === undefined || active.runId === runId)
       .map((active) => ({ kind: active.section.kind, blend: String(active.view.blendMode),
@@ -277,14 +381,13 @@ export class FxLayer {
         // never applied.
         scale: active.view.scale.x,
         rotationDeg: (active.view.rotation * 180) / Math.PI,
-        mask: active.section.kind === "image" || active.section.kind === "text"
-          ? (active.section.mask ? { points: active.section.mask.area.length,
-              invert: active.section.mask.invert === true } : null)
+        mask: active.mask
+          ? { ...fxMaskReadback(active.mask.view), invert: active.mask.plan.invert === true }
           : null }));
   }
 
   private remove(active: ActiveVisual): void {
-    active.mask?.destroy();
+    active.mask?.view.destroy();
     this.visuals.delete(active);
     active.view.parent?.removeChild(active.view);
     active.view.destroy(); // media source lifetime is owned by FxPlayer's finish callback

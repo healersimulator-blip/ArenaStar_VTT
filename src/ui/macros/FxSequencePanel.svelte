@@ -408,6 +408,26 @@
       ? { ...before, mask } as FxSection : old) };
   }
 
+  /**
+   * The mask's own animation (D-305). An emptied box removes the key rather than storing a
+   * number, and the value is clamped to the same bounds the host checks — a region's
+   * geometry is measured in scene units, so its growth is too.
+   */
+  function changeMaskAnimation(index: number, field: "lengthTo" | "spinDeg", value: string): void {
+    const before = draft.sections[index];
+    if (!before || (before.kind !== "image" && before.kind !== "text") || !before.mask) return;
+    const { [field]: _dropped, ...rest } = before.mask;
+    void _dropped;
+    const trimmed = value.trim();
+    const parsed = trimmed === "" ? undefined : Number(trimmed);
+    const bounds: [number, number] = field === "lengthTo"
+      ? [FX_MASK_LIMITS.min, FX_MASK_LIMITS.max] : [-FX_SPIN_LIMIT, FX_SPIN_LIMIT];
+    const mask: FxMask = parsed === undefined || !Number.isFinite(parsed) ? rest
+      : { ...rest, [field]: Math.min(bounds[1], Math.max(bounds[0], parsed)) };
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      ? { ...before, mask } as FxSection : old) };
+  }
+
   function changeReplayCount(index: number, value: string): void {
     const section = draft.sections[index];
     if (!section || section.kind === "wait") return;
@@ -817,9 +837,11 @@
               {/if}
             {/if}
             {#if section.to || section.scaleTo !== undefined || section.spinDeg !== undefined ||
-              section.filterTo !== undefined}
+              section.filterTo !== undefined || section.mask?.lengthTo !== undefined ||
+              section.mask?.spinDeg !== undefined}
               <!-- The easing curve belongs to any animation, not only to a move: a growing,
-                   spinning or deepening visual eases with the same curve as a flying one. -->
+                   spinning or deepening visual — or a region of its own — eases with the
+                   same curve as a flying one. -->
               <label>Easing <select data-fx-easing bind:value={section.easing}>
                 <option value="linear">Linear</option><option value="easeIn">Ease in</option>
                 <option value="easeOut">Ease out</option><option value="easeInOut">Ease in/out</option>
@@ -893,9 +915,20 @@
                 <label>Mask angle (°) <input type="number" data-fx-mask-angle min="-360" max="360" step="15"
                   value={mask.angle ?? 0} oninput={(e) => changeMaskField(i, { angle: Number(e.currentTarget.value) })} /></label>
               {/if}
+              <label>Grow to ({units}) <input type="number" data-fx-mask-length-to
+                min={FX_MASK_LIMITS.min} max={FX_MASK_LIMITS.max} step="1" value={mask.lengthTo ?? ""}
+                placeholder="steady" oninput={(e) => changeMaskAnimation(i, "lengthTo", e.currentTarget.value)} /></label>
+              {#if mask.kind !== "circle"}
+                <label>Turn (°) <input type="number" data-fx-mask-spin min={-FX_SPIN_LIMIT}
+                  max={FX_SPIN_LIMIT} step="15" value={mask.spinDeg ?? ""} placeholder="still"
+                  oninput={(e) => changeMaskAnimation(i, "spinDeg", e.currentTarget.value)} /></label>
+              {/if}
               <label><input type="checkbox" data-fx-mask-invert checked={mask.invert === true}
                 onchange={(e) => changeMaskField(i, { invert: e.currentTarget.checked })} />Cut out (hide what is inside the mask)</label>
-              <small>The mask is measured against this scene's grid ({units}) around the anchor and travels with it; the host resolves it and refuses a shape it cannot draw.</small>
+              <small>The mask is measured against this scene's grid ({units}) around the anchor and travels with it; the host resolves it and refuses a shape it cannot draw.
+                {#if mask.lengthTo !== undefined || mask.spinDeg !== undefined}
+                  A region that grows or turns does so inside this section, on its own eased curve — {section.repeats !== undefined && section.repeats !== 1 ? `a grow restarts in each of its ${section.repeats} cycles, a turn keeps going.` : "eased across the section."}
+                {/if}</small>
             {/if}
             {#if section.at.kind !== "point" || section.to && section.to.kind !== "point"}
               <label><input type="checkbox" data-fx-follow bind:checked={section.follow} />Follow visible token anchors</label>

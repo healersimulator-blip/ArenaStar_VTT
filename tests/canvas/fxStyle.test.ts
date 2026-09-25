@@ -6,8 +6,8 @@
  */
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { BlurFilter, ColorMatrixFilter, Container, Graphics, Sprite, Texture } from "pixi.js";
-import { FxLayer, fxFilterReadback, fxMaskGraphics, fxPixiFilter, fxSetFilterStrength,
-  fxTransform } from "../../src/canvas/layers/FxLayer";
+import { FxLayer, fxFilterReadback, fxMaskGraphics, fxMaskReadback, fxMaskTransform, fxPixiFilter,
+  fxSetFilterStrength, fxTransform } from "../../src/canvas/layers/FxLayer";
 import type { ResolvedFxSection } from "../../src/core/fx";
 
 type ImageSection = Extract<ResolvedFxSection, { kind: "image" }>;
@@ -24,6 +24,24 @@ beforeAll(() => {
   vi.stubGlobal("document", { createElement: () => ({ width: 0, height: 0, getContext: () => null }) });
 });
 afterAll(() => { vi.unstubAllGlobals(); });
+
+/** The drawn polygon of a mask, read out of the graphics it was drawn into. */
+const drawnPoints = (graphics: Graphics): Array<{ x: number; y: number }> => {
+  type RecordedPath = { instructions?: Array<{ action: string; data?: unknown[] }> };
+  for (const instruction of graphics.context.instructions) {
+    const data = (instruction as { data?: { path?: RecordedPath; hole?: RecordedPath } }).data;
+    for (const path of [data?.path, data?.hole]) {
+      const poly = path?.instructions?.find((entry) => entry.action === "poly");
+      const flat = poly?.data?.[0];
+      if (Array.isArray(flat) && flat.every((value) => typeof value === "number")) {
+        const out: Array<{ x: number; y: number }> = [];
+        for (let i = 0; i + 1 < flat.length; i += 2) out.push({ x: flat[i] as number, y: flat[i + 1] as number });
+        return out;
+      }
+    }
+  }
+  return [];
+};
 
 /** The live view for a run, reached the same way the layer reaches it (tests only). */
 function viewOf(fx: FxLayer, runId: string): Sprite {
@@ -134,8 +152,10 @@ describe("effect masks on the canvas (§SQ-19, D-301)", () => {
   test("a spawned visual is clipped by its mask, and inspection reports the region", () => {
     const fx = layer();
     fx.spawn("run", image({ mask: circle(50) }), 0, Texture.EMPTY);
+    // The readback is the drawn polygon itself, so a still circle reports its reach and —
+    // honestly — that a circle has no facing to report (D-305).
     expect(fx.inspect("run")).toMatchObject([{ kind: "image", blend: "normal", filter: null,
-      mask: { points: 16, invert: false } }]);
+      mask: { points: 16, radius: 50, bearingDeg: null, invert: false } }]);
     const view = viewOf(fx, "run");
     expect(view.mask).toBeInstanceOf(Graphics);
     // The polygon is an offset polygon, so the mask itself sits on the anchor.
@@ -242,6 +262,108 @@ describe("animated transform on the canvas (§SQ-05, D-302)", () => {
     // 400° spin over a 1000 ms section is 200° at 500 ms.
     fx.spawn("run", image({ spinDeg: 400, durationMs: 1000 }), 500, Texture.EMPTY);
     expect(fx.inspect("run")[0]).toMatchObject({ rotationDeg: 200 });
+  });
+});
+
+/**
+ * D-305: a region animates by the two rules the visual's own transform already follows —
+ * a size restarts per cycle, a turn accumulates — and the drawing is read back, not the
+ * plan, so "the mask grew" is a claim about the polygon that is actually clipping.
+ */
+describe("animated regions on the canvas (§SQ-05, D-305)", () => {
+  const circle = (radius: number, animate?: { scale?: number; spinDeg?: number }) => ({
+    area: Array.from({ length: 16 }, (_, i) => {
+      const angle = (i / 16) * Math.PI * 2;
+      return { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius };
+    }),
+    invert: false,
+    ...(animate ? { animate } : {}),
+  });
+  /** A cone points along +x at angle 0; its far arc is symmetric about its own axis. */
+  const cone = (length: number, animate: { spinDeg: number }) => ({
+    area: [{ x: 0, y: 0 }, ...Array.from({ length: 9 }, (_, i) => {
+      const angle = (-26.565 + (i / 8) * 53.13) * (Math.PI / 180);
+      return { x: Math.cos(angle) * length, y: Math.sin(angle) * length };
+    })],
+    invert: false,
+    animate,
+  });
+
+  test("the region's transform is the visual's own two rules: a size restarts, a turn accumulates", () => {
+    const section = { durationMs: 1000 };
+    // A still region is the authored geometry, whatever the clock says.
+    expect(fxMaskTransform(undefined, section, 500)).toEqual({ scale: 1, rotation: 0 });
+    expect(fxMaskTransform({ scale: 3, spinDeg: 90 }, section, Number.NaN)).toEqual({ scale: 1, rotation: 0 });
+    expect(fxMaskTransform({ scale: 3 }, { durationMs: 0 }, 100)).toEqual({ scale: 1, rotation: 0 });
+    // Growth walks from the authored geometry (ratio 1) to the authored target ratio.
+    expect(fxMaskTransform({ scale: 3 }, section, 0).scale).toBeCloseTo(1, 6);
+    expect(fxMaskTransform({ scale: 3 }, section, 500).scale).toBeCloseTo(2, 6);
+    expect(fxMaskTransform({ scale: 3 }, { ...section, easing: "easeIn" }, 500).scale).toBeCloseTo(1.5, 6);
+    // A circle-like region has one rule only; a turn of zero degrees is still a turn.
+    expect(fxMaskTransform({ spinDeg: 180 }, section, 500).rotation).toBeCloseTo(Math.PI / 2, 6);
+    expect(fxMaskTransform({ spinner: 1 } as never, section, 500)).toEqual({ scale: 1, rotation: 0 });
+    // Two cycles: the growth runs twice (a pulse), the turn covers the full 360°.
+    const pulsed = { ...section, repeats: 2 };
+    expect(fxMaskTransform({ scale: 3, spinDeg: 180 }, pulsed, 250).scale).toBeCloseTo(2, 6);
+    expect(fxMaskTransform({ scale: 3, spinDeg: 180 }, pulsed, 499).scale).toBeCloseTo(3, 2);
+    expect(fxMaskTransform({ scale: 3, spinDeg: 180 }, pulsed, 500).scale).toBeCloseTo(1, 6);
+    expect(fxMaskTransform({ scale: 3, spinDeg: 180 }, pulsed, 500).rotation)
+      .toBeCloseTo((180 * Math.PI) / 180, 6);
+  });
+
+  test("a drawn region is the host's polygon scaled and turned about its anchor", () => {
+    const ring = circle(40);
+    const grown = fxMaskGraphics(ring, 0, { scale: 2, rotation: 0 });
+    for (const point of drawnPoints(grown)) expect(Math.hypot(point.x, point.y)).toBeCloseTo(80, 6);
+    // A turn moves every vertex, and a quarter turn sends the first vertex north.
+    const turned = fxMaskGraphics(ring, 0, { scale: 1, rotation: Math.PI / 2 });
+    const first = drawnPoints(turned)[0];
+    expect(first?.x ?? 1).toBeCloseTo(0, 6);
+    expect(first?.y ?? 0).toBeCloseTo(40, 6);
+    // The readback says what the polygon says: a cone's bearing is its axis, a circle's is
+    // nothing at all, and a cutout's reach still covers a region that grew.
+    expect(fxMaskReadback(fxMaskGraphics(ring)).bearingDeg).toBeNull();
+    const pointing = fxMaskReadback(fxMaskGraphics(cone(60, { spinDeg: 0 })));
+    expect(pointing.bearingDeg).toBeCloseTo(0, 0);
+    expect(fxMaskReadback(fxMaskGraphics(cone(60, { spinDeg: 0 }), 0, { scale: 1, rotation: Math.PI / 2 }))
+      .bearingDeg).toBeCloseTo(90, 0);
+    const cut = fxMaskGraphics({ ...ring, invert: true }, 20, { scale: 2, rotation: 0 });
+    const cover = cut.context.instructions[0] as { data?: { path?: { instructions?: Array<{ action: string; data?: unknown[] }> } } };
+    const rect = cover.data?.path?.instructions?.find((entry) => entry.action === "rect")?.data;
+    expect(Number(rect?.[2])).toBeGreaterThan(80 * 2); // half-width still covers the grown ring
+  });
+
+  test("a growing region is redrawn per frame on the same graphics; a still one never moves", () => {
+    const fx = layer();
+    fx.spawn("grow", image({ mask: circle(50, { scale: 4 }) }), 0, Texture.EMPTY);
+    fx.spawn("still", image({ mask: circle(50) }), 0, Texture.EMPTY);
+    const growView = viewOf(fx, "grow").mask as Graphics;
+    const stillView = viewOf(fx, "still").mask as Graphics;
+    const stillPoints = drawnPoints(stillView);
+    expect(fx.inspect("grow")[0]?.mask).toMatchObject({ radius: 50 });
+    // The anchored polygon: the mask itself sits on the anchor so the region travels with
+    // a followed visual, while `radius` is measured about that anchor.
+    expect(growView.position.x).toBe(100);
+
+    fx.tick(500);
+    expect(fx.inspect("grow")[0]?.mask).toMatchObject({ radius: 125 });
+    expect(fx.inspect("still")[0]?.mask).toMatchObject({ radius: 50 });
+    expect(viewOf(fx, "grow").mask).toBe(growView); // redrawn, never rebuilt
+    // One tick short of the end: a one-shot's final frame is also its removal.
+    fx.tick(499);
+    expect(fx.inspect("grow")[0]?.mask?.radius).toBeCloseTo(200, 0);
+    // Untouched from spawn to end: a still region is drawn once and only ever moved.
+    expect(drawnPoints(stillView)).toEqual(stillPoints);
+    expect(stillPoints).toHaveLength(16);
+    fx.tick(1);
+    expect(fx.inspect("grow")).toHaveLength(0);
+  });
+
+  test("a region that grows from a late spawn starts mid-animation, like the visual's own", () => {
+    const fx = layer();
+    fx.spawn("grow", image({ mask: circle(50, { scale: 5 }) }), 400, Texture.EMPTY);
+    // Ratio 1 + (5 - 1) * 0.4 = 2.6, so 50 px of authored reach is drawn as 130 px.
+    expect(fx.inspect("grow")[0]?.mask).toMatchObject({ radius: 130 });
   });
 });
 
