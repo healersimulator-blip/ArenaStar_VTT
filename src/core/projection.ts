@@ -141,6 +141,9 @@ export function docVisibleTo(
         (doc as MacroDocument).summon?.playerCallable === true)) return false;
   if (doc.type === "macro" && (doc as MacroDocument).kind === "sequence" &&
       (doc as MacroDocument).sequence?.audience === "gm") return false;
+  // D-310: a preset is an authoring aid — its own name and the media it references are
+  // a GM's library, not table state. A player never receives one (an assistant does).
+  if (doc.type === "macro" && (doc as MacroDocument).kind === "fxPreset") return false;
   if ((doc.type === "token" && (doc as TokenDocument).hidden ||
        doc.type === "tile" && (doc as TileDocument).hidden) && parent?.type === "scene") {
     return getEffectiveOwnership(user, doc, parent) >= OWNERSHIP_LEVELS.OWNER;

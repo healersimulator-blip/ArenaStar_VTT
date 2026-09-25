@@ -10365,3 +10365,86 @@ audio paths, occlusion is resolved at emit and does **not** follow a wall that o
 token that walks mid-cue (the level does, the wall answer does not), no sound targeting
 (only camera sections carry an audience), no `at` on wait sections, and no Firefox/WebKit run
 or the §10 41-scenario matrix.
+
+## D-310 — the look, kept: FX presets (2026-09-25)
+
+SQ-12's last clause — "preset save/load/edit/delete" — had no home in the wizard. A GM who
+built a good fireball could keep it only by also saving a **timeline**, and a timeline carries
+the parts that belong to a *run*: is it persistent, who is the audience, which tokens are
+bound. Wanting the same look for a different audience therefore meant re-authoring it section
+by section, which is exactly the friction the clause is about.
+
+**What a preset is.** A new `MacroDocument.kind: "fxPreset"` carrying
+`preset: {version: 1, sections}` — a top-level macro document, so ownership, the ordinary
+create/update/delete/undo path and the media-entitlement scan all apply without a second
+machinery. It is **the look, not the run**: no `persistent` and no timeline-level `audience`
+(`scene`/`gm`); a camera section's *own* `audience` travels with the section, because that is
+part of the look. Loading a preset replaces `draft.sections` under **fresh section ids** (the
+same preset can be loaded twice into one timeline without the host seeing duplicate ids) and
+leaves every lifecycle field of the draft exactly as it was. Nothing about a preset reaches the
+table until the resulting timeline is saved and run, so a preset can never become a second,
+weaker path to playing an effect.
+
+**Bounded, and validated by the same rules.** `validateFxPreset` does not have its own idea of
+what a section is: it hands each one to `validateFxSequence` and blames the failure on **the
+section that caused it** ("preset section 2 (fx-two): …"), because `invalid_schema` with no
+section number is not a sentence a GM can act on. The bundle's own shape stays small — version
+1 and **1–8 sections** — a fragment to compose, well inside the 64-section timeline cap. The
+document rule (`fxPresetDocumentError`) holds the name to 1–64 characters and **refuses a mixed
+document by name** in both directions: a `sequence`/`script`/`scriptState`/`summon` on a preset
+and a `preset` on a runnable macro are both `invalid_schema`. That is the D-302 lesson (one
+document, one payload) applied to the new kind — the FX path reads the sequence while a hand
+editor reads the preset, so neither mixture may exist.
+
+**Authority and projection.** Create, update and delete follow the summon rule unchanged: GM or
+assistant, everyone else `forbidden`, all of it ordinary undoable document ops. Presets are
+**never projected to players** (`docVisibleTo`) — not because of their ownership but because
+they are authoring state; there is no rule under which a player needs the GM's saved looks. The
+media a preset references therefore counts as **referenced** (withheld from players, visible to
+the GM) rather than as loose art: the D-306 entitlement rules do not change meaning, they gain
+a case.
+
+**In the wizard.** Under the saved timelines: a name box and "Save draft as preset", then one
+row per preset with **Load / Update from draft / Rename / Delete**, and a sentence that says in
+plain words what a load does and does not carry. Saving a preset is its own act and does not
+need a timeline first; deleting one leaves the timelines built from it untouched, because a
+preset is a source and not a parent.
+
+**Gates.**
+
+- `pnpm test` — **3 775 passed / 12 skipped** (299 files: 297 passed, 2 skipped; +8 cases). New:
+  5 in `tests/core/fxPresets.test.ts` (every section re-validated by the *sequence* validator —
+  including a positional sound without its reach, the D-309 rule; a failure naming the section
+  that caused it by index and id while a bundle-level fault is reported as the bundle's; the
+  version/1–8/inclusive-eight/unknown-field shape checks; fresh ids on load, with a
+  badly-behaved id source still unable to produce a duplicate and the loaded sections proving
+  they are copies; and the document rules — a 1–64-character name, a `sequence`,
+  `scriptState` or runnable kind smuggled onto a preset refused by name), 1 in
+  `tests/core/assetAccess.test.ts` (a preset's media counts as *referenced*, so it is not
+  "loose art" — and still reaches no player, because the preset does not), 1 in
+  `tests/core/projection.test.ts` (a world-readable preset is *still* authoring state: absent
+  from the player's snapshot and from every direct op, present for the GM and the assistant),
+  and 1 in `tests/host/sync.test.ts` (a GM create/rename reaching the store, the same macro
+  refused by the FX path as an unknown timeline, a forged preset-and-sequence document
+  rejected by name, an empty bundle rejected, a player's create/update/delete all `forbidden`,
+  and the GM's delete an ordinary undoable op).
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** · `pnpm lint` **exit 0** ·
+  `pnpm build` → `pnpm size` **3 855 399 B raw / 1 105 491 B gzip**, inside the 6 MB budget.
+- Chromium production `file://`: `fx_sequence` + `summons` with the new preset spec, the whole
+  pair run **twice** (`--repeat-each=2`) — **66/66** in 12.3 m — to show the fixture fix below is
+  not a knife-edge.
+- One real flake found and fixed while running this gate, worth naming: the e2e WAV fixture
+  used since D-297 is a **header with no samples**, which Chromium accepts and then ends almost
+  immediately — so any spec that played a sound and then opened a window to read the device
+  list was racing the element's own `ended`, and lost on a loaded machine (twice in a batch run,
+  passing standalone and on re-run, with the delivery line already saying "media in hand").
+  `wavSilence()` now writes a real PCM file (30 s of silence, 8000 Hz, ~240 KB) so the row
+  outlives the assertion; the animation specs' frame-count bars were also re-stated as
+  "sampled across the span" (`> 20`) with the *shape* of the growth asserted against the
+  authored reach instead of the sample count, and the two D-309 sound specs author 20 s
+  sections so every step of them happens inside one run.
+
+**Non-claims.** No item binding (A09's stretch clause — the preset is the core the row asks for
+and item binding is explicitly not claimed), no presets of *runs* (a preset holds no instance
+and no live state), no nested presets, no preset library across worlds, no sharing UI beyond the
+world file, and no preset branch in the Live FX manager.

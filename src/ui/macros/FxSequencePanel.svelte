@@ -11,6 +11,8 @@
   import { SOUND_CHANNELS, SOUND_CHANNEL_LABELS, SOUND_RADIUS_LIMITS, cueSilentForViewer,
     soundChannelOf } from "../../core/fxSound";
   import { domCanPlay, fxViewPrefs } from "../../core/fxPrefs";
+  import { FX_PRESET_LIMITS, fxPresetSections, validateFxPreset,
+    type FxPresetDefinition } from "../../core/fxPresets";
   import type { Json } from "../../core/documents";
   import { rememberPlacement, type NamedPlacement, type RequestCrosshairPick } from "./crosshairPicker";
   import type { PreviewFxSequence } from "./fxPreview";
@@ -35,6 +37,9 @@
   } = $props();
 
   let macros = $state<MacroDocument[]>([]);
+  /** D-310: the world's saved FX presets — the *look*, reusable across drafts. */
+  let presets = $state<MacroDocument[]>([]);
+  let presetName = $state("");
   let scenes = $state<SceneDocument[]>([]);
   let media = $state<Array<{ hash: string; name: string; mime: string;
     visibility: AssetManifest[string]["visibility"]; exportRights: AssetManifest[string]["exportRights"] }>>([]);
@@ -90,6 +95,7 @@
 
   function refresh(): void {
     macros = [...client.store.getAll("macros")].filter((m) => m.kind === "sequence");
+    presets = [...client.store.getAll("macros")].filter((m) => m.kind === "fxPreset");
     scenes = [...client.store.getAll("scenes")];
     if (!scenes.some((s) => s._id === sceneId)) sceneId = scenes.find((s) => s.active)?._id ?? scenes[0]?._id ?? "";
   }
@@ -494,6 +500,79 @@
   function remove(index: number): void {
     draft = { ...draft, sections: draft.sections.filter((_, i) => i !== index) };
   }
+  // ─── D-310 (SQ-12): save/load/edit/delete the look ──────────────────────────
+  //
+  // A preset is the draft's **sections**: the look, not the run. Persistence, audience
+  // and the bound source/target tokens are the timeline's own and are left alone by a
+  // load, so dropping a "fireball look" into a looping aura keeps it a loop. Loading
+  // edits the draft and nothing else — the host still validates the timeline on save,
+  // and nothing reaches the table until it is saved and run.
+  /** A snapshot, never a live reference: a preset must not alias editable draft state. */
+  function draftSections(): FxSection[] {
+    return $state.snapshot(draft).sections;
+  }
+  function submitPreset(preset: FxPresetDefinition, macro: MacroDocument | null, nextName: string): boolean {
+    if (macro) {
+      client.submit([{ kind: "update", ref: { coll: "macros", id: macro._id },
+        diff: { preset: preset as unknown as Json } }]);
+      status = `Updating preset "${macro.name}" from the draft`;
+      return true;
+    }
+    const doc: MacroDocument = { _id: globalThis.crypto.randomUUID(), type: "macro", name: nextName,
+      command: "", kind: "fxPreset", ownership: { default: 0 }, flags: {}, system: {}, preset };
+    client.submit([{ kind: "create", coll: "macros", data: doc }]);
+    status = `Preset "${nextName}" submitted with ${preset.sections.length} section(s) — load it into any draft`;
+    return true;
+  }
+  function savePreset(): void {
+    error = ""; status = "";
+    const nextName = presetName.trim();
+    if (!nextName) { error = "Name the preset before saving it"; return; }
+    if (nextName.length > FX_PRESET_LIMITS.name) {
+      error = `Preset names are at most ${FX_PRESET_LIMITS.name} characters`; return;
+    }
+    if (draft.sections.length === 0) { error = "A preset bundles sections — add one to the draft first"; return; }
+    const checked = validateFxPreset({ version: 1, sections: draftSections() });
+    if (!checked.ok) { error = checked.error; return; }
+    submitPreset(checked.preset, null, nextName);
+  }
+  function updatePreset(macro: MacroDocument): void {
+    error = ""; status = "";
+    if (draft.sections.length === 0) { error = "A preset bundles sections — add one to the draft first"; return; }
+    const checked = validateFxPreset({ version: 1, sections: draftSections() });
+    if (!checked.ok) { error = checked.error; return; }
+    submitPreset(checked.preset, macro, macro.name);
+  }
+  function loadPreset(macro: MacroDocument): void {
+    error = "";
+    const checked = validateFxPreset(macro.preset);
+    if (!checked.ok) { error = `Preset "${macro.name}" cannot be loaded: ${checked.error}`; return; }
+    stopPreview(); // the cue on the canvas belongs to the draft that is about to be replaced
+    // Fresh ids per section, because the same preset may be loaded twice into one
+    // timeline and a repeated id is a document the host refuses.
+    const sections = fxPresetSections(checked.preset, () => `fx-${globalThis.crypto.randomUUID().slice(0, 8)}`);
+    draft = { ...draft, sections };
+    presetName = macro.name;
+    status = `Loaded preset "${macro.name}" — ${sections.length} section(s) replaced the draft`
+      + (editing ? "; save the timeline to publish the change" : "; save the timeline to publish it");
+  }
+  function renamePreset(macro: MacroDocument, value: string): void {
+    const next = value.trim();
+    if (next === macro.name) return;
+    error = ""; status = "";
+    if (!next) { error = "A preset needs a name"; return; }
+    if (next.length > FX_PRESET_LIMITS.name) {
+      error = `Preset names are at most ${FX_PRESET_LIMITS.name} characters`; return;
+    }
+    client.submit([{ kind: "update", ref: { coll: "macros", id: macro._id }, diff: { name: next } }]);
+    status = `Renaming preset to "${next}"`;
+  }
+  function deletePreset(macro: MacroDocument): void {
+    error = ""; status = "";
+    client.submit([{ kind: "delete", ref: { coll: "macros", id: macro._id } }]);
+    status = `Deleting preset "${macro.name}"`;
+  }
+
   function save(): void {
     error = "";
     status = "";
@@ -1109,6 +1188,32 @@
       <button type="button" onclick={() => run(macro._id)}>Run</button>
     </li>
   {/each}</ul>
+  <h4>Presets</h4>
+  <div class="presets" data-fx-presets>
+    <div class="controls">
+      <label>Preset name <input data-fx-preset-name bind:value={presetName}
+        maxlength={FX_PRESET_LIMITS.name} placeholder="e.g. Fireball look" /></label>
+      <button type="button" data-fx-preset-save onclick={savePreset}>Save draft as preset</button>
+      <small>A preset is the draft's <strong>sections</strong> — not its persistence, audience or bound tokens.
+        Loading one replaces the draft; nothing reaches the table until the timeline is saved and run,
+        and a preset never copies a named placement.</small>
+    </div>
+    {#if presets.length === 0}
+      <small data-fx-presets-empty>No presets saved in this world yet.</small>
+    {:else}
+      <ul>{#each presets as preset (preset._id)}
+        <li data-fx-preset-id={preset._id}>
+          <input data-fx-preset-rename value={preset.name} aria-label="Preset name"
+            maxlength={FX_PRESET_LIMITS.name}
+            onchange={(event) => renamePreset(preset, event.currentTarget.value)} />
+          <small>{preset.preset?.sections.length ?? 0} sections</small>
+          <button type="button" data-fx-preset-load onclick={() => loadPreset(preset)}>Load</button>
+          <button type="button" data-fx-preset-update onclick={() => updatePreset(preset)}>Update from draft</button>
+          <button type="button" data-fx-preset-delete onclick={() => deletePreset(preset)}>Delete</button>
+        </li>
+      {/each}</ul>
+    {/if}
+  </div>
 </section>
 
 <style>

@@ -1508,6 +1508,64 @@ describe("Macros / FX host authority and audience", () => {
     }
   });
 
+  test("an FX preset is GM-authored, GM-visible and never runnable (D-310)", async () => {
+    const h = await setup({ [soundHash]: { name: "hum.wav", mime: "audio/wav", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    const look = (id: string, name: string, sections: unknown[]): MacroDocument =>
+      ({ _id: id, type: "macro", name, command: "", kind: "fxPreset", ownership: { default: 0 },
+        flags: {}, system: {}, preset: { version: 1, sections } as never });
+    const sections = [{ kind: "sound", id: "s", assetId: soundHash, startMs: 0, durationMs: 900, volume: 0.6 },
+      { kind: "text", id: "t", text: "boom", startMs: 0, durationMs: 900,
+        at: { kind: "point", x: 100, y: 100 }, color: "#ffffff", scale: 1 }];
+    h.gm.submit([{ kind: "create", coll: "macros", data: look("p-fire", "Fireball look", sections) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "p-fire")).toBeDefined();
+    // A preset is not a timeline: nothing about it is runnable, so an FX request naming
+    // it is refused exactly like any other unknown macro.
+    const denied: string[] = [];
+    h.gmBus.on("rejected", (event) => denied.push(event.detail));
+    h.gm.requestSequence("p-fire", "s1");
+    await flushMicrotasks();
+    expect(denied).toContain("sequence macro or scene missing");
+    // Rename (edit) survives, and so does replacing the bundle with another one.
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: "p-fire" }, diff: { name: "Big fireball" } }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "p-fire")?.name).toBe("Big fireball");
+    // A crafted document that is a preset *and* a timeline is refused by name: the FX
+    // path would run the sequence, and the file would keep the preset.
+    const forged: string[] = [];
+    h.gmBus.on("rejected", (event) => forged.push(event.detail));
+    const smuggler = { ...look("p-bad", "Smuggler", sections),
+      sequence: { version: 1, sections } } as unknown as MacroDocument;
+    h.gm.submit([{ kind: "create", coll: "macros", data: smuggler }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "p-bad")).toBeUndefined();
+    expect(forged.join(" | ")).toContain("not sequence");
+    // A preset with a section the sequence validator refuses never reaches the store.
+    h.gm.submit([{ kind: "create", coll: "macros", data: look("p-empty", "Nothing", []) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "p-empty")).toBeUndefined();
+    expect(forged.join(" | ")).toContain("1–8 sections");
+
+    // A player cannot author, edit or delete one, and never sees it in their replica.
+    const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+    expect(player.store.getAll("macros")).toEqual([]);
+    const playerRejected: string[] = [];
+    playerBus.on("rejected", (event) => playerRejected.push(`${event.reason}: ${event.detail}`));
+    player.submit([{ kind: "create", coll: "macros", data: look("p-mine", "Mine", sections) }]);
+    player.submit([{ kind: "update", ref: { coll: "macros", id: "p-fire" }, diff: { name: "Stolen" } }]);
+    player.submit([{ kind: "delete", ref: { coll: "macros", id: "p-fire" } }]);
+    await flushMicrotasks();
+    expect(playerRejected.filter((entry) => entry.startsWith("forbidden"))).toHaveLength(3);
+    expect(h.hostStore.get("macros", "p-mine")).toBeUndefined();
+    expect(h.hostStore.get("macros", "p-fire")?.name).toBe("Big fireball");
+    expect(player.store.getAll("macros")).toEqual([]);
+    // The GM's own delete is an ordinary undoable document op.
+    h.gm.submit([{ kind: "delete", ref: { coll: "macros", id: "p-fire" } }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "p-fire")).toBeUndefined();
+  });
+
   test("a wall between the source and a viewer dulls the sound for that viewer alone", async () => {
     const h = await setup({ [soundHash]: { name: "hum.wav", mime: "audio/wav", size: 4,
       chunks: 1, visibility: "referenced" } });

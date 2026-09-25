@@ -4,6 +4,29 @@ import { deflateSync as zlibDeflate } from "node:zlib";
 
 export const entry = "file://" + fileURLToPath(new URL("../dist/index.html", import.meta.url));
 
+/**
+ * A real PCM WAV of silence, long enough to outlive the assertion reading it.
+ *
+ * A "valid" WAV header with **no** samples (the four-line base64 fixture used earlier) is
+ * accepted by `decodeAudioData` and by a media element, but Chromium fires `ended` on it
+ * almost immediately — so a spec that plays a sound and then opens a window to read the
+ * device list is racing the element's own end, and on a loaded machine it loses. The bytes
+ * are silence either way, so nothing about what the table hears changes; the file simply
+ * outlives the assertion reading it. Twelve seconds of 8-bit silence is ~96 KB, which keeps
+ * the fetch well inside the player's own 120 ms "late" tolerance even on a busy host.
+ */
+export function wavSilence(seconds = 12, sampleRate = 8_000): Buffer {
+  const samples = Math.max(1, Math.round(seconds * sampleRate));
+  const out = Buffer.alloc(44 + samples);
+  out.write("RIFF", 0); out.writeUInt32LE(36 + samples, 4); out.write("WAVE", 8);
+  out.write("fmt ", 12); out.writeUInt32LE(16, 16); out.writeUInt16LE(1, 20); // PCM
+  out.writeUInt16LE(1, 22); out.writeUInt32LE(sampleRate, 24);
+  out.writeUInt32LE(sampleRate, 28); out.writeUInt16LE(1, 32); out.writeUInt16LE(8, 34);
+  out.write("data", 36); out.writeUInt32LE(samples, 40);
+  out.fill(128, 44); // 8-bit PCM silence is the midpoint, not zero
+  return out;
+}
+
 type AnySurface = Record<string, () => unknown>;
 /** `playerCanvas` (D-251) is the player shell's stage readback — fog's token gate. */
 export type SurfaceName = "app" | "player" | "gm" | "playerCanvas";

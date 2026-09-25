@@ -96,6 +96,29 @@ describe("asset entitlement / per-viewer manifest", () => {
     expect(canFetchAsset(world, manifest, player, "secret-media")).toBe(true);
   });
 
+  test("media a preset references is referenced — and a preset never reaches a player (D-310)", () => {
+    const world = emptyWorld();
+    world.scenes.push(scene());
+    world.macros.push({ _id: "p-fire", type: "macro", name: "Fireball look", command: "",
+      flags: {}, system: {}, ownership: { default: 0 }, kind: "fxPreset",
+      preset: { version: 1, sections: [
+        { id: "a", kind: "image", at: { kind: "point", x: 20, y: 20 }, assetId: "preset-media",
+          startMs: 0, durationMs: 500 },
+      ] } });
+    const manifest: AssetManifest = { "preset-media": entry("preset art", "referenced") };
+    // The preset is an authoring aid: the bytes are *referenced* by the world, so they are
+    // not "loose legacy art" — and because the preset itself is never projected to a
+    // player, that reference does not become theirs either. The GM sees both.
+    expect(projectAssetManifest(world, manifest, player)).toEqual({});
+    expect(canFetchAsset(world, manifest, player, "preset-media")).toBe(false);
+    expect(projectAssetManifest(world, manifest, gm)["preset-media"]?.name).toBe("preset art");
+    expect(canFetchAsset(world, manifest, gm, "preset-media")).toBe(true);
+    // Deleting the preset releases the reference: the same asset, now unreferenced but
+    // *new* (no visibility), stays GM-only exactly as before.
+    world.macros.length = 0;
+    expect(canFetchAsset(world, manifest, player, "preset-media")).toBe(false);
+  });
+
   test("no scene ownership also hides a referenced asset even with public token", () => {
     const world = emptyWorld();
     const s = scene();

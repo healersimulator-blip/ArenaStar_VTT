@@ -272,6 +272,30 @@ describe("projectWorld (§5)", () => {
     expect(projectEnvelope(env, gm, resolver)).toBe(env);
   });
 
+  test("an FX preset is an authoring aid: a player never receives it, an assistant does (D-310)", () => {
+    const w = world();
+    const preset: MacroDocument = { _id: "p-fire", type: "macro", name: "Fireball look", command: "",
+      flags: {}, system: {}, ownership: { default: 3 }, kind: "fxPreset",
+      preset: { version: 1, sections: [{ kind: "image", id: "a", assetId: "a".repeat(64),
+        at: { kind: "point", x: 100, y: 100 }, startMs: 0, durationMs: 900 }] } };
+    w.macros.push(preset);
+    // Ownership 3 is not the reason: even a world-readable preset is authoring state.
+    w.macros.push({ ...preset, _id: "p-open", ownership: { default: 2 } });
+    expect(projectWorld(w, 5, player).collections.macros ?? []).toEqual([]);
+    expect(projectWorld(w, 5, gm).collections.macros?.map((m) => m._id)).toEqual(["p-fire", "p-open"]);
+    const assistant = { id: "as", role: "ASSISTANT" as const };
+    expect(projectWorld(w, 5, assistant).collections.macros?.map((m) => m._id)).toEqual(["p-fire", "p-open"]);
+    // Direct ops agree with the snapshot: no create, no update, no delete reaches a player.
+    const env: OpEnvelope = { seq: 6, ts: 6, by: gm.id, txId: "preset", ops: [
+      { kind: "create", coll: "macros", data: preset },
+      { kind: "update", ref: { coll: "macros", id: preset._id }, diff: { name: "Rename" } },
+      { kind: "delete", ref: { coll: "macros", id: preset._id } },
+    ] };
+    const resolver: ProjectionResolver = { resolve: (ref) => ref.coll === "macros" ? preset : undefined };
+    expect(projectEnvelope(env, player, resolver)).toBeNull();
+    expect(projectEnvelope(env, gm, resolver)).toBe(env);
+  });
+
   test("player: docs with effective ownership < LIMITED omitted", () => {
     const projected = projectWorld(world(), 5, player);
     expect(projected.collections.actors?.map((a) => a._id)).toEqual(["a-visible"]);

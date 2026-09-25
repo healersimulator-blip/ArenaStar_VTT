@@ -111,6 +111,7 @@ import { planAutomation, sweptTileEvents, tileContainsPoint, validateAutomation,
   type AutomationEvent, type AutomationMethod } from "../core/automation";
 import { attachedDeletionOps, attachedMovementOps, planPrefabPlacement, PREFAB_COLLECTIONS, validatePrefab } from "../core/prefabs";
 import { boundFxDeletionOps, fxInstanceMatches, validateFxInstance, validateFxInstanceFilter } from "../core/fxInstances";
+import { fxPresetDocumentError, macroStrayPresetError } from "../core/fxPresets";
 import { planSummon, summonDeletionOps, summonMarker, summonPlacementError, validateSummon,
   type SummonSource } from "../core/summons";
 import { getByTag, isWorldTagRef, listTaggable, tagEditOps, tagRuleOps, tagsOf, TAGGABLE_COLLECTIONS, validSceneTagRefs,
@@ -1326,8 +1327,18 @@ export class HostSync {
             if (user.role !== "GM" && user.role !== "ASSISTANT") {
               return { ok: false, reason: "forbidden", error: "only GMs author FX macros" };
             }
+            const stray = macroStrayPresetError(op.data as MacroDocument);
+            if (stray) return { ok: false, reason: "invalid_schema", error: stray };
             const check = validateFxSequence((op.data as MacroDocument).sequence);
             if (!check.ok) return { ok: false, reason: "invalid_schema", error: check.error };
+          }
+          // D-310: a preset is an authoring aid for GMs/assistants — validated like the
+          // timeline fragment it is, and never runnable, so no FX/script path can reach it.
+          if (op.coll === "macros" && (op.data as MacroDocument).kind === "fxPreset") {
+            if (user.role !== "GM" && user.role !== "ASSISTANT")
+              return { ok: false, reason: "forbidden", error: "only GMs save FX presets" };
+            const error = fxPresetDocumentError(op.data as MacroDocument);
+            if (error) return { ok: false, reason: "invalid_schema", error };
           }
           if (op.coll === "macros" && (op.data as MacroDocument).kind === "summon") {
             if (user.role !== "GM" && user.role !== "ASSISTANT")
@@ -1393,7 +1404,7 @@ export class HostSync {
             return { ok: false, reason: "forbidden", error: "only GMs edit active zones" };
           if (op.ref.coll === "prefabs" && user.role !== "GM" && user.role !== "ASSISTANT")
             return { ok: false, reason: "forbidden", error: "only GMs edit prefabs" };
-          if (op.ref.coll === "macros" && ["sequence", "script", "summon"].includes((doc as MacroDocument).kind) &&
+          if (op.ref.coll === "macros" && ["sequence", "script", "summon", "fxPreset"].includes((doc as MacroDocument).kind) &&
               user.role !== "GM" && user.role !== "ASSISTANT") {
             return { ok: false, reason: "forbidden", error: "only GMs edit FX/script/summon macros" };
           }
@@ -1416,8 +1427,16 @@ export class HostSync {
             if (user.role !== "GM" && user.role !== "ASSISTANT") {
               return { ok: false, reason: "forbidden", error: "only GMs edit FX macros" };
             }
+            const stray = macroStrayPresetError(dry.value as MacroDocument);
+            if (stray) return { ok: false, reason: "invalid_schema", error: stray };
             const check = validateFxSequence((dry.value as MacroDocument).sequence);
             if (!check.ok) return { ok: false, reason: "invalid_schema", error: check.error };
+          }
+          if (op.ref.coll === "macros" && (dry.value as MacroDocument).kind === "fxPreset") {
+            if (user.role !== "GM" && user.role !== "ASSISTANT")
+              return { ok: false, reason: "forbidden", error: "only GMs save FX presets" };
+            const error = fxPresetDocumentError(dry.value as MacroDocument);
+            if (error) return { ok: false, reason: "invalid_schema", error };
           }
           if (op.ref.coll === "macros" && (dry.value as MacroDocument).kind === "summon") {
             if (user.role !== "GM" && user.role !== "ASSISTANT")
@@ -1448,7 +1467,7 @@ export class HostSync {
           if (PREFAB_COLLECTIONS.includes(op.ref.coll as (typeof PREFAB_COLLECTIONS)[number]) &&
               doc.flags?.prefab !== undefined && user.role !== "GM" && user.role !== "ASSISTANT")
             return { ok: false, reason: "forbidden", error: "only GMs delete attached prefab parts" };
-          if (op.ref.coll === "macros" && ["sequence", "script", "summon"].includes((doc as MacroDocument).kind) &&
+          if (op.ref.coll === "macros" && ["sequence", "script", "summon", "fxPreset"].includes((doc as MacroDocument).kind) &&
               user.role !== "GM" && user.role !== "ASSISTANT") {
             return { ok: false, reason: "forbidden", error: "only GMs delete FX/script/summon macros" };
           }
