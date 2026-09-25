@@ -908,7 +908,7 @@ test("a blend and a filter survive the host, the save and the renderer", async (
       .__stage?.getFxLayer().inspect() ?? []);
   };
   const live = await run();
-  expect(live[0]).toEqual({ kind: "image", blend: "screen", filter: "grayscale:0.5", mask: null });
+  expect(live[0]).toMatchObject({ kind: "image", blend: "screen", filter: "grayscale:0.5", mask: null });
 
   // "Normal" really means no blend field and "None" no filter field: a saved no-op is
   // not the same as an authored setting, and the host is told the difference.
@@ -927,7 +927,7 @@ test("a blend and a filter survive the host, the save and the renderer", async (
   await expect(section.locator("[data-fx-filter]")).toHaveValue("none");
   // …and the renderer agrees with the reopened document, not with what was on screen.
   await expect.poll(async () => (await run())[0] ?? null, { timeout: 5_000 })
-    .toEqual({ kind: "image", blend: "normal", filter: null, mask: null });
+    .toMatchObject({ kind: "image", blend: "normal", filter: null, mask: null });
 });
 
 // D-300 (SQ-15/SQ-18): a camera section can be targeted. Two real browser contexts —
@@ -1094,4 +1094,69 @@ test("a mask confines a visual to its region, and a cutout hides what is inside 
   await wizard.locator("[data-fx-save]").click();
   await expect.poll(() => hostCall<number>(page, "seq"), { timeout: 5_000 }).toBeGreaterThan(beforeClear);
   await expect.poll(async () => (await run())?.mask, { timeout: 5_000 }).toBeNull();
+});
+
+// D-302 (SQ-05): a visual animates its own transform now — growing to a target scale and
+// turning, eased with the same curve as its motion. Asserted on the drawn sprite, sampled
+// frame by frame: "it ended where the document said" is not the same claim as "it moved".
+test("a visual grows and spins through its section, eased, and lands on the authored values", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  await wizard.locator('input[type="file"]').setInputFiles({ name: "flame.png", mimeType: "image/png", buffer: png });
+  await expect(wizard.getByRole("status")).toContainText("GM-only playback");
+  await wizard.locator("[data-fx-name]").fill("Kindling");
+  await wizard.getByRole("button", { name: "Image / video", exact: true }).click();
+  const section = wizard.locator("[data-fx-section]");
+  await section.getByRole("combobox", { name: "Media" }).selectOption({ index: 1 });
+  await section.getByLabel("X", { exact: true }).fill("600");
+  await section.getByLabel("Y", { exact: true }).fill("500");
+  await section.getByLabel("Duration ms").fill("2400");
+
+  // An empty animation field is *no* animation: the host must not receive a number that
+  // merely equals the start (the D-299 lesson, checked here before it can bite).
+  await expect(section.locator("[data-fx-scale-to]")).toHaveValue("");
+  await expect(section.locator("[data-fx-spin]")).toHaveValue("");
+  await section.locator("[data-fx-scale-to]").fill("2.5");
+  await section.locator("[data-fx-spin]").fill("360");
+  await section.locator("[data-fx-easing]").selectOption("easeInOut");
+  await wizard.locator("[data-fx-save]").click();
+  await expect(wizard.locator("li")).toContainText(["Kindling"]);
+  await wizard.locator("li").filter({ hasText: "Kindling" }).getByRole("button", { name: "Edit" }).click();
+  await expect(section.locator("[data-fx-scale-to]")).toHaveValue("2.5");
+  await expect(section.locator("[data-fx-spin]")).toHaveValue("360");
+
+  // Sample the drawn transform every frame: it has to pass through the middle of the
+  // animation rather than only arrive at the end.
+  await wizard.locator("[data-fx-run]").click();
+  const frames = await page.evaluate(async () => {
+    const layer = (globalThis as unknown as { __stage?: { getFxLayer: () => {
+      inspect: (runId?: string) => Array<{ scale: number; rotationDeg: number }> } } })
+      .__stage?.getFxLayer();
+    const seen: Array<{ scale: number; rotationDeg: number }> = [];
+    const until = performance.now() + 2_600;
+    while (performance.now() < until) {
+      const [frame] = layer?.inspect() ?? [];
+      if (frame) seen.push({ scale: frame.scale, rotationDeg: frame.rotationDeg });
+      await new Promise((resolve) => setTimeout(resolve, 16));
+    }
+    return seen;
+  });
+  expect(frames.length).toBeGreaterThan(40);
+  const scales = frames.map((frame) => frame.scale);
+  const rotations = frames.map((frame) => frame.rotationDeg);
+  // Eased in/out: the mid-frame is near the middle of the range, and a few frames in it
+  // has barely moved — that is what "eased" means and a linear ramp would fail it.
+  expect(Math.min(...scales)).toBeCloseTo(1, 1);
+  expect(Math.max(...scales)).toBeCloseTo(2.5, 1);
+  const middle = frames[Math.floor(frames.length / 2)];
+  expect(middle?.scale ?? 0).toBeGreaterThan(1.5);
+  expect(middle?.scale ?? 0).toBeLessThan(2.5);
+  const early = frames[3];
+  expect((early?.scale ?? 1) - 1).toBeLessThan(0.4); // still near the start
+  expect(rotations[rotations.length - 1] ?? 0).toBeGreaterThan(340); // turned the full circle
+  expect(Math.max(...rotations)).toBeLessThan(365); // …and never past it
 });

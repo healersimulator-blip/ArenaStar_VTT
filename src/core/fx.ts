@@ -168,7 +168,21 @@ interface FxLocated extends FxBase {
   easing?: FxEasing;
   /** Number of movement cycles inside this section's fixed duration. */
   repeats?: number;
+  /**
+   * SQ-05: animate the visual's own scale. `scale` is where it starts, `scaleTo` where
+   * it ends; the same easing curve carries it, and with `repeats` it cycles.
+   */
+  scaleTo?: number;
+  /**
+   * Degrees turned over the section (negative spins the other way), applied **per
+   * cycle**: with `repeats: 3` a 120° spin turns 120° three times rather than crawling
+   * 40° each. Bounded, because a cue that spins forever is a loop, not a section.
+   */
+  spinDeg?: number;
 }
+/** The animation a located visual's transform is built from, both ends. */
+export const FX_SCALE_LIMITS = { min: 0.05, max: 10 } as const;
+export const FX_SPIN_LIMIT = 3_600;
 /**
  * A camera section claims the **viewer's own view** for its duration. It is not a
  * document change: the host resolves and authorizes the destination exactly as it
@@ -307,8 +321,8 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
     const repeatFields = section.kind === "wait" || section.kind === "camera"
       ? [] : ["repeatCount", "repeatDelayMs"];
     const fields = section.kind === "sound" ? ["assetId", "volume", "channel", "fadeInMs", "fadeOutMs"] :
-      section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "mask"] :
-      section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "mask"] :
+      section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "mask", "scaleTo", "spinDeg"] :
+      section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "mask", "scaleTo", "spinDeg"] :
       section.kind === "camera" ? ["mode", "to", "easing", "zoom", "intensity", "points", "audience"] : [];
     if (Object.keys(section).some((key) => !["id", "kind", "startMs", "durationMs", ...fields, ...repeatFields].includes(key)) ||
       (section.kind !== "wait" && section.durationMs === 0)) {
@@ -380,7 +394,9 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
       (section.layer !== undefined && section.layer !== "belowTokens" && section.layer !== "aboveTokens") ||
       (section.follow !== undefined && (typeof section.follow !== "boolean" ||
         section.follow && section.at.kind === "point" && (!section.to || section.to.kind === "point"))) ||
-      (section.scale !== undefined && !inRange(section.scale, 0.05, 10)) ||
+      (section.scale !== undefined && !inRange(section.scale, FX_SCALE_LIMITS.min, FX_SCALE_LIMITS.max)) ||
+      (section.scaleTo !== undefined && !inRange(section.scaleTo, FX_SCALE_LIMITS.min, FX_SCALE_LIMITS.max)) ||
+      (section.spinDeg !== undefined && !inRange(section.spinDeg, -FX_SPIN_LIMIT, FX_SPIN_LIMIT)) ||
       (section.opacity !== undefined && !inRange(section.opacity, 0, 1)) ||
       (section.rotation !== undefined && !inRange(section.rotation, -360, 360)) ||
       (section.fadeInMs !== undefined && !inRange(section.fadeInMs, 0, section.durationMs)) ||

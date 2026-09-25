@@ -5,7 +5,7 @@
  */
 import { BlurFilter, ColorMatrixFilter, Container, Graphics, Sprite, Text, type Filter,
   type Texture } from "pixi.js";
-import { fxEase, fxStylePlan, type FxFilterKind, type ResolvedFxSection } from "../../core/fx";
+import { fxEase, fxStylePlan, type FxEasing, type FxFilterKind, type ResolvedFxSection } from "../../core/fx";
 
 type Located = Extract<ResolvedFxSection, { kind: "image" | "text" }>;
 type Point = { x: number; y: number };
@@ -35,6 +35,37 @@ export function fxPixiFilter(filter: { kind: FxFilterKind; strength: number } | 
   else if (filter.kind === "brightness") matrix.brightness(filter.strength, false);
   else matrix.saturate(filter.strength, false);
   return matrix;
+}
+
+/**
+ * D-302: the transform a section's *animation* produces at `elapsedMs`. Scale walks
+ * from `scale` to `scaleTo`; rotation adds `spinDeg` **per cycle** to the section's
+ * own base rotation, eased with the same curve as position — so a spinning coin and a
+ * flying projectile of the same timeline read as one motion, not two conventions.
+ *
+ * Pure and total: a zero-length section, a missing field, or a non-finite age all
+ * produce the authored still frame rather than NaN.
+ */
+export function fxTransform(
+  section: { scale?: number; scaleTo?: number; spinDeg?: number; rotation?: number;
+    easing?: FxEasing; repeats?: number; durationMs: number },
+  elapsedMs: number,
+): { scale: number; rotation: number } {
+  const base = section.scale ?? 1;
+  const baseRotation = ((section.rotation ?? 0) * Math.PI) / 180;
+  if (!Number.isFinite(elapsedMs) || section.durationMs <= 0)
+    return { scale: base, rotation: baseRotation };
+  const progress = Math.min(1, Math.max(0, elapsedMs / section.durationMs));
+  const cycles = section.repeats ?? 1;
+  const phase = progress === 1 ? 1 : (progress * cycles) % 1;
+  const eased = fxEase(section.easing, phase);
+  const scale = section.scaleTo === undefined ? base : base + (section.scaleTo - base) * eased;
+  // A spin ACCUMULATES: completed cycles are already turned, the current one is eased.
+  // Easing each cycle from zero would snap the visual back to its base bearing at every
+  // cycle boundary — a spinner that flinches once a second instead of turning.
+  const turned = progress === 1 ? cycles : Math.min(cycles - 1, Math.floor(progress * cycles)) + eased;
+  const spin = section.spinDeg === undefined ? 0 : (section.spinDeg * Math.PI / 180) * turned;
+  return { scale, rotation: baseRotation + spin };
 }
 
 /**
@@ -107,8 +138,9 @@ export class FxLayer {
           fill: section.color ?? "#ffffff", align: "center", wordWrap: true, wordWrapWidth: 400 } })
       : new Sprite(texture);
     view.anchor.set(0.5);
-    view.scale.set(section.scale ?? 1);
-    view.rotation = ((section.rotation ?? 0) * Math.PI) / 180;
+    const start = fxTransform(section, age);
+    view.scale.set(start.scale);
+    view.rotation = start.rotation;
     if (section.kind === "image") {
       if (section.tint) view.tint = section.tint;
       if (section.stretch && section.toX !== undefined && section.toY !== undefined) {
@@ -150,10 +182,19 @@ export class FxLayer {
     const { x, y } = fxPosition(section, age, anchors);
     active.view.position.set(x, y);
     active.mask?.position.set(x, y);
+    // Scale and rotation are animated here rather than at spawn: a section that grows
+    // or spins has to be re-derived from its own elapsed time every frame.
+    const transform = fxTransform(section, age);
+    active.view.scale.set(transform.scale);
     if (section.kind === "image" && section.stretch && anchors.to) {
-      active.view.width = Math.hypot(anchors.to.x - anchors.from.x, anchors.to.y - anchors.from.y) * (section.scale ?? 1);
-      active.view.rotation = ((section.rotation ?? 0) * Math.PI) / 180 +
+      // A stretched image points at its destination; a spin adds to that bearing rather
+      // than replacing it, so a spinning bolt still flies along its own line.
+      active.view.width = Math.hypot(anchors.to.x - anchors.from.x, anchors.to.y - anchors.from.y)
+        * transform.scale;
+      active.view.rotation = transform.rotation +
         Math.atan2(anchors.to.y - anchors.from.y, anchors.to.x - anchors.from.x);
+    } else {
+      active.view.rotation = transform.rotation;
     }
     const fadeIn = section.fadeInMs ? Math.min(1, age / section.fadeInMs) : 1;
     const fadeOut = section.fadeOutMs ? Math.min(1, (section.durationMs - age) / section.fadeOutMs) : 1;
@@ -181,12 +222,16 @@ export class FxLayer {
   get count(): number { return this.visuals.size; }
 
   /** Read-only: what a run (or everything) is drawing with. Tests and diagnostics only. */
-  inspect(runId?: string): Array<{ kind: string; blend: string; filter: string | null;
-    mask: { points: number; invert: boolean } | null }> {
+  inspect(runId?: string): Array<{ kind: string; blend: string; filter: string | null; scale: number;
+    rotationDeg: number; mask: { points: number; invert: boolean } | null }> {
     return [...this.visuals]
       .filter((active) => runId === undefined || active.runId === runId)
       .map((active) => ({ kind: active.section.kind, blend: String(active.view.blendMode),
         filter: active.filterLabel,
+        // Read back from the drawn view, so a test cannot pass on a plan the renderer
+        // never applied.
+        scale: active.view.scale.x,
+        rotationDeg: (active.view.rotation * 180) / Math.PI,
         mask: active.section.kind === "image" || active.section.kind === "text"
           ? (active.section.mask ? { points: active.section.mask.area.length,
               invert: active.section.mask.invert === true } : null)

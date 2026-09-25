@@ -556,3 +556,31 @@ describe("effect masks and cutouts (§SQ-19/SQ-05, D-301)", () => {
     }
   });
 });
+
+describe("animated transform: growth and spin (§SQ-05, D-302)", () => {
+  const visual = (patch: Record<string, unknown> = {}) => ({ version: 1, sections: [
+    { kind: "image", id: "coin", assetId: hash, at: { kind: "point", x: 200, y: 200 },
+      startMs: 0, durationMs: 1000, ...patch } as never] });
+
+  test("scaleTo and spinDeg are bounded, and a bad one names the field's own range", () => {
+    expect(validateFxSequence(visual({ scaleTo: 2.5 })).ok).toBe(true);
+    expect(validateFxSequence(visual({ spinDeg: 720 })).ok).toBe(true);
+    expect(validateFxSequence(visual({ spinDeg: -3600 })).ok).toBe(true);
+    expect(validateFxSequence(visual({ scaleTo: 0.01 })).ok).toBe(false);
+    expect(validateFxSequence(visual({ scaleTo: 11 })).ok).toBe(false);
+    expect(validateFxSequence(visual({ spinDeg: 3601 })).ok).toBe(false);
+    expect(validateFxSequence(visual({ spinDeg: -3601 })).ok).toBe(false);
+    expect(validateFxSequence(visual({ spinDeg: "fast" })).ok).toBe(false);
+    // The animation is a transform, not a movement: it does not need a destination.
+    expect(validateFxSequence(visual({ to: undefined, scaleTo: 2 })).ok).toBe(true);
+  });
+
+  test("neither field is a place for another kind of section to smuggle a setting", () => {
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "sound", id: "s", assetId: sound,
+      startMs: 0, durationMs: 500, spinDeg: 90 } as never] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "wait", id: "w", startMs: 0,
+      durationMs: 500, scaleTo: 2 } as never] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "camera", id: "c", mode: "pan",
+      to: { kind: "point", x: 10, y: 10 }, startMs: 0, durationMs: 500, spinDeg: 90 } as never] }).ok).toBe(false);
+  });
+});

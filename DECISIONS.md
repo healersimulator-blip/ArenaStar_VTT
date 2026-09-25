@@ -9669,3 +9669,75 @@ Firefox/WebKit run or the 41-scenario acceptance matrix.
   The `summons` suite ran alongside it (**22/22** together) and the canvas/interaction
   batch (`canvas_rail` + `canvas_toolbar` + `vision` + `walls` + `join`) is **20/20**
   against the rebuilt production file.
+
+## D-302 — a visual animates its own transform: growth and spin, eased and per cycle (2026-09-25)
+
+SQ-05 asks to "animate opacity/fade, scale, rotation, position … with easing and loops".
+Position has been animated since the first wizard (`to` + `easing` + `repeats`), opacity
+has its fades, and the recent increments added appearance and masks — but a section's
+**scale and rotation** were still authored values, set once when the sprite was created.
+A growing fireball or a spinning coin had to be a sprite sheet. This decision lands the
+two fields that fix that, and nothing else.
+
+**Two fields, one curve.** `scaleTo` is where the visual's scale ends (it starts at
+`scale`), `spinDeg` is how far it turns. Both are eased with the section's own `easing` —
+the same shared `fxEase` the position tween, the camera pan and the camera path already
+use — so a spinning coin and a flying bolt of one timeline read as one motion rather than
+two conventions. Both are bounded (`scaleTo` 0.05–10, `spinDeg` ±3600) and both are
+optional: an empty field is *absent*, never a stored number that happens to equal the
+start, so the host can still tell an authored animation from a still frame.
+
+**A spin accumulates; it does not reset every cycle.** The first implementation eased each
+cycle from zero, which meant `repeats: 3` with a 120° spin snapped the visual *back* to
+its base bearing at every cycle boundary — a spinner that flinches once a second. The
+fix, found by the increment's own unit test, is to treat completed cycles as already
+turned and ease only the current one: `turned = completed + eased(phase)`, so 3 × 120°
+ends at 360° with no discontinuity. The distinction matters because it is the same shape
+of bug as D-298's per-leg easing question, answered the other way: the camera path *wants*
+to restart each leg (each leg is a fresh move), a spin does not (a rotating object has one
+bearing that keeps going).
+
+**The animation is applied per frame, from elapsed time.** `fxTransform` is a pure total
+function — a zero-length section, a non-finite age, or a missing field all produce the
+authored still frame rather than NaN — and `FxLayer` calls it in the same per-frame path
+that positions the sprite, then again at spawn (so a late join mid-spin starts at the
+correct phase instead of the authored still). A stretched image keeps aiming at its
+destination: its spin *adds* to the bearing, so a spinning bolt still flies along its own
+line. And the masked region does not follow the spin at all, which is what a mask in the
+parent's space means (D-301) — a visual turning inside its own clipped region.
+
+**One UI gap the e2e caught.** The easing select rendered only when a section had a
+destination (`{#if section.to}`), so a visual that grows without moving had no way to
+choose its curve — the animation would always be linear by accident. It now renders
+whenever the section has *any* animation (a destination, `scaleTo` or `spinDeg`), which
+is the honest condition.
+
+**Non-claims.** No animation of tint, alpha (beyond the existing fades), filter strength or
+mask shape — those are still fixed for a section's life — no keyframes or multi-stop
+tracks, no separate per-property easing, no animation of a mask's region, no bounce/spring
+curves beyond the four shared easings, no camera or sound animation, and no Firefox/WebKit
+run or the 41-scenario acceptance matrix.
+
+**Gates.**
+
+- `pnpm test` — **3 713 passed / 12 skipped** (297 files: 295 passed, 2 skipped). New:
+  two cases in `tests/core/fx.test.ts` (the two fields and their bounds, including the
+  "animation does not need a destination" case, and the refusal of both on sound, wait and
+  camera sections) and four in `tests/canvas/fxStyle.test.ts` (scale walking the eased
+  path and clamping at both ends with a degenerate section and a NaN age answering the
+  still frame; a spin per cycle **accumulating** across three cycles with the base
+  rotation riding along; the drawn sprite sampled at 0/500/999 ms and then removed, plus a
+  stretched bolt whose spin adds to its bearing; and a mid-section spawn starting at the
+  correct phase).
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing) · `pnpm lint` **exit 0** · `pnpm build` → `pnpm size` **3 821 347 B raw /
+  1 095 061 B gzip**, inside the 6 MB budget. No wire change: the two fields ride the
+  existing `fx.start` cue.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **19/19** — the new spec authors
+  an image that grows 1→2.5 and spins 360° with `easeInOut` over 2400 ms, reopens it to
+  prove both fields survived the host, then samples the **drawn** transform every frame:
+  the range covers 1…2.5, the middle frame is strictly between (so it travelled rather
+  than teleported), a few frames in it has barely moved (which a linear ramp would fail),
+  and the rotation ends above 340° without ever exceeding 365°. The `summons` suite ran
+  alongside it (**23/23** together) and the canvas/interaction batch (`canvas_rail` +
+  `canvas_toolbar` + `vision` + `walls` + `join`) is **20/20** against the rebuilt file.

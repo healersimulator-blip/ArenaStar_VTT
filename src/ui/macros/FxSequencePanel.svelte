@@ -3,7 +3,8 @@
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import type { AssetManifest, MacroDocument, SceneDocument } from "../../core/documents";
-  import { FX_FILTER_RANGES, FX_MASK_LIMITS, resolveFxSequence, validateFxSequence, type FxAnchor,
+  import { FX_FILTER_RANGES, FX_MASK_LIMITS, FX_SCALE_LIMITS, FX_SPIN_LIMIT, resolveFxSequence,
+    validateFxSequence, type FxAnchor,
     type FxBlendMode, type FxCameraPathSection, type FxEasing, type FxFilterKind, type FxMask,
     type FxSection, type FxSectionAudience, type FxSequence, type FxImportPermissions } from "../../core/fx";
   import { fxFitnessIssues } from "../../core/fxDelivery";
@@ -315,6 +316,34 @@
    * width would be a field the host refuses, so switching kinds drops what the new
    * kind has no use for. "None" removes the key entirely (the msgpack lesson).
    */
+  /**
+   * An empty field means "no animation" and removes the key, rather than storing a
+   * number that happens to equal the start (the host would then treat it as authored).
+   */
+  function changeScaleTo(index: number, value: string): void {
+    const before = draft.sections[index];
+    if (!before || (before.kind !== "image" && before.kind !== "text")) return;
+    const { scaleTo: _scaleTo, ...remaining } = before;
+    void _scaleTo;
+    const trimmed = value.trim();
+    const scaleTo = trimmed === "" ? undefined : Number(trimmed);
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      ? ({ ...remaining, ...(scaleTo === undefined || !Number.isFinite(scaleTo) ? {} : {
+          scaleTo: Math.min(FX_SCALE_LIMITS.max, Math.max(FX_SCALE_LIMITS.min, scaleTo)) }) } as FxSection) : old) };
+  }
+
+  function changeSpin(index: number, value: string): void {
+    const before = draft.sections[index];
+    if (!before || (before.kind !== "image" && before.kind !== "text")) return;
+    const { spinDeg: _spin, ...remaining } = before;
+    void _spin;
+    const trimmed = value.trim();
+    const spin = trimmed === "" ? undefined : Number(trimmed);
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      ? ({ ...remaining, ...(spin === undefined || !Number.isFinite(spin) ? {} : {
+          spinDeg: Math.min(FX_SPIN_LIMIT, Math.max(-FX_SPIN_LIMIT, spin)) }) } as FxSection) : old) };
+  }
+
   function changeMask(index: number, value: string): void {
     const before = draft.sections[index];
     if (!before || (before.kind !== "image" && before.kind !== "text")) return;
@@ -747,11 +776,15 @@
                   onclick={() => void pickPoint(i, "to")}>Pick on map…</button>
               {/if}
             {/if}
-            {#if section.to}
-              <label>Easing <select bind:value={section.easing}>
+            {#if section.to || section.scaleTo !== undefined || section.spinDeg !== undefined}
+              <!-- The easing curve belongs to any animation, not only to a move: a growing
+                   or spinning visual eases with the same curve as a flying one. -->
+              <label>Easing <select data-fx-easing bind:value={section.easing}>
                 <option value="linear">Linear</option><option value="easeIn">Ease in</option>
                 <option value="easeOut">Ease out</option><option value="easeInOut">Ease in/out</option>
               </select></label>
+            {/if}
+            {#if section.to}
               {#if section.kind === "image"}
                 <label><input type="checkbox" bind:checked={section.stretch}
                   onchange={() => { if (section.stretch) section.repeats = undefined; }} />Stretch toward destination</label>
@@ -826,7 +859,19 @@
             <label>Layer <select bind:value={section.layer}>
               <option value="aboveTokens">Above tokens, beneath fog</option><option value="belowTokens">Below tokens</option>
             </select></label>
-            <label>Scale <input type="number" min="0.05" max="10" step="0.1" bind:value={section.scale} /></label>
+            <label>Scale <input type="number" min={FX_SCALE_LIMITS.min} max={FX_SCALE_LIMITS.max}
+              step="0.1" bind:value={section.scale} /></label>
+            <label>Grow/shrink to <input type="number" data-fx-scale-to
+              min={FX_SCALE_LIMITS.min} max={FX_SCALE_LIMITS.max} step="0.1" value={section.scaleTo ?? ""}
+              placeholder="stay" oninput={(e) => changeScaleTo(i, e.currentTarget.value)} /></label>
+            <label>Spin (°) <input type="number" data-fx-spin min={-FX_SPIN_LIMIT} max={FX_SPIN_LIMIT}
+              step="15" value={section.spinDeg ?? ""} placeholder="none"
+              oninput={(e) => changeSpin(i, e.currentTarget.value)} /></label>
+            {#if section.scaleTo !== undefined || section.spinDeg !== undefined}
+              <small>{section.repeats === undefined || section.repeats === 1
+                ? "Both ends of the section, eased like its motion."
+                : `Applied per motion cycle — ${section.repeats} cycles, so the spin turns that many times.`}</small>
+            {/if}
             <label>Opacity <input type="number" min="0" max="1" step="0.1" bind:value={section.opacity} /></label>
             <label>Fade in <input type="number" min="0" step="50" bind:value={section.fadeInMs} /></label>
             <label>Fade out <input type="number" min="0" step="50" bind:value={section.fadeOutMs} /></label>
