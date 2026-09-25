@@ -2,7 +2,7 @@
   import { onDestroy, onMount, untrack } from "svelte";
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
-  import type { AssetManifest, MacroDocument, SceneDocument } from "../../core/documents";
+  import type { ActorDocument, AssetManifest, MacroDocument, SceneDocument } from "../../core/documents";
   import { FX_FILTER_RANGES, FX_MASK_LIMITS, FX_SCALE_LIMITS, FX_SPIN_LIMIT, resolveFxSequence,
     validateFxSequence, type FxAnchor,
     type FxBlendMode, type FxCameraPathSection, type FxEasing, type FxFilterKind, type FxMask,
@@ -13,6 +13,8 @@
   import { domCanPlay, fxViewPrefs } from "../../core/fxPrefs";
   import { FX_PRESET_LIMITS, fxPresetSections, validateFxPreset,
     type FxPresetDefinition } from "../../core/fxPresets";
+  import { FX_RECOGNITION_MODES, validateFxItemBinding,
+    type FxItemBinding, type FxRecognition } from "../../core/fxBinding";
   import type { Json } from "../../core/documents";
   import { rememberPlacement, type NamedPlacement, type RequestCrosshairPick } from "./crosshairPicker";
   import type { PreviewFxSequence } from "./fxPreview";
@@ -40,6 +42,17 @@
   /** D-310: the world's saved FX presets — the *look*, reusable across drafts. */
   let presets = $state<MacroDocument[]>([]);
   let presetName = $state("");
+  /**
+   * D-311: the item binding of the saved timeline being edited. It is authored state on the
+   * *timeline* (a binding a player discovers only through a cue they may already read), so the
+   * editor lives here, next to the timeline it belongs to.
+   */
+  let actors = $state<ActorDocument[]>([]);
+  let bindActorId = $state("");
+  let bindItemId = $state("");
+  let bindFailureId = $state("");
+  let bindRecognition = $state<FxRecognition>("auto");
+  let bindEnabled = $state(true);
   let scenes = $state<SceneDocument[]>([]);
   let media = $state<Array<{ hash: string; name: string; mime: string;
     visibility: AssetManifest[string]["visibility"]; exportRights: AssetManifest[string]["exportRights"] }>>([]);
@@ -97,6 +110,11 @@
     macros = [...client.store.getAll("macros")].filter((m) => m.kind === "sequence");
     presets = [...client.store.getAll("macros")].filter((m) => m.kind === "fxPreset");
     scenes = [...client.store.getAll("scenes")];
+    actors = [...client.store.getAll("actors")];
+    if (!actors.some((actor) => actor._id === bindActorId)) {
+      bindActorId = actors[0]?._id ?? "";
+      bindItemId = "";
+    }
     if (!scenes.some((s) => s._id === sceneId)) sceneId = scenes.find((s) => s.active)?._id ?? scenes[0]?._id ?? "";
   }
   function selectRights(hash: string): void {
@@ -133,6 +151,7 @@
     editing = m._id;
     name = m.name;
     playerCallable = m.flags.core?.playerCallable === true;
+    loadBinding(m);
     draft = { ...$state.snapshot(m.sequence ?? { version: 1, sections: [] }),
       persistent: m.sequence?.persistent === true };
     status = "Editing saved timeline";
@@ -143,6 +162,7 @@
     editing = "";
     name = "";
     playerCallable = false;
+    loadBinding(null);
     draft = { version: 1, audience: "scene", persistent: false, sections: [] };
     status = "";
     error = "";
@@ -573,6 +593,56 @@
     status = `Deleting preset "${macro.name}"`;
   }
 
+  // ─── D-311 (SQ-12's last clause): bind this timeline to an item ─────────────
+  //
+  // The binding is stored on the timeline rather than on the item, so the ordinary macro
+  // projection decides who can discover it — and an id never travels to a reader who could
+  // not already read the timeline. The *editor* is therefore the timeline's author, and the
+  // use path (the item's own cast) is a plain host-checked cue request.
+  const boundItems = $derived(actors.find((actor) => actor._id === bindActorId)?.items ?? []);
+  /** Every *other* saved timeline, for the failure branch. */
+  const otherTimelines = $derived(macros.filter((macro) => macro._id !== editing));
+  const bindItemName = $derived(boundItems.find((item) => item._id === bindItemId)?.name ?? "");
+
+  function loadBinding(macro: MacroDocument | null): void {
+    const binding = macro?.fxItem;
+    bindActorId = binding?.actorId ?? actors[0]?._id ?? "";
+    bindItemId = binding?.itemId ?? "";
+    bindFailureId = binding?.onFailureId ?? "";
+    bindRecognition = binding?.recognition ?? "auto";
+    bindEnabled = binding?.enabled !== false;
+  }
+  function selectBindActor(id: string): void {
+    bindActorId = id;
+    bindItemId = "";
+  }
+  /** The authored shape, or the reason it cannot be stored — the host repeats this check. */
+  function bindingDraft(): FxItemBinding {
+    return { actorId: bindActorId, itemId: bindItemId,
+      ...(bindFailureId ? { onFailureId: bindFailureId } : {}),
+      ...(bindRecognition !== "auto" ? { recognition: bindRecognition } : {}),
+      ...(bindEnabled ? {} : { enabled: false }) };
+  }
+  function saveBinding(): void {
+    error = ""; status = "";
+    if (!editing) { error = "Save the timeline before binding it to an item"; return; }
+    const checked = validateFxItemBinding(bindingDraft());
+    if (!checked.ok) { error = checked.error; return; }
+    client.submit([{ kind: "update", ref: { coll: "macros", id: editing },
+      diff: { fxItem: checked.binding as unknown as Json } }]);
+    status = `Binding submitted — "${name.trim() || "this timeline"}" will play when `
+      + `${bindItemName || "the item"} is used`
+      + (playerCallable ? "" : ". Tick \"players may run this\" or a player's use will be refused");
+  }
+  function removeBinding(): void {
+    error = ""; status = "";
+    if (!editing) return;
+    // Cleared means *deleted* (the D-295 msgpack trap: `undefined` arrives as `null`).
+    client.submit([{ kind: "update", ref: { coll: "macros", id: editing }, diff: { "-=fxItem": null } }]);
+    bindItemId = ""; bindFailureId = ""; bindRecognition = "auto"; bindEnabled = true;
+    status = "Binding removed — the item plays nothing";
+  }
+
   function save(): void {
     error = "";
     status = "";
@@ -593,6 +663,7 @@
         kind: "sequence", command: "", sequence: $state.snapshot(draft) };
       client.submit([{ kind: "create", coll: "macros", data: doc }]);
       editing = doc._id;
+      loadBinding(doc); // a new timeline starts with no binding, never the previous one's
       status = "Timeline submitted; use Run once it appears in the list";
     }
   }
@@ -1188,6 +1259,48 @@
       <button type="button" onclick={() => run(macro._id)}>Run</button>
     </li>
   {/each}</ul>
+  {#if editing}
+    <!-- D-311: the timeline's item binding. Authoring only — the item's own cast fires it. -->
+    <div class="binding" data-fx-binding={editing}>
+      <h4>Bind to an item</h4>
+      <div class="controls">
+        <label>Actor <select data-fx-binding-actor value={bindActorId}
+          onchange={(event) => selectBindActor(event.currentTarget.value)}>
+          <option value="">— actor —</option>
+          {#each actors as actor (actor._id)}
+            <option value={actor._id}>{actor.name}</option>
+          {/each}
+        </select></label>
+        <label>Item <select data-fx-binding-item bind:value={bindItemId} disabled={!bindActorId}>
+          <option value="">— item —</option>
+          {#each boundItems as item (item._id)}
+            <option value={item._id}>{item.name}</option>
+          {/each}
+        </select></label>
+        <label>On a failed use <select data-fx-binding-failure bind:value={bindFailureId}>
+          <option value="">play nothing</option>
+          {#each otherTimelines as macro (macro._id)}
+            <option value={macro._id}>{macro.name}</option>
+          {/each}
+        </select></label>
+        <label>Recognition <select data-fx-binding-recognition bind:value={bindRecognition}>
+          {#each FX_RECOGNITION_MODES as mode (mode)}
+            <option value={mode}>{mode}</option>
+          {/each}
+        </select></label>
+        <label><input type="checkbox" data-fx-binding-enabled bind:checked={bindEnabled} />Enabled</label>
+        <button type="button" data-fx-binding-save onclick={saveBinding}>Save binding</button>
+        {#if macros.find((macro) => macro._id === editing)?.fxItem}
+          <button type="button" data-fx-binding-remove onclick={removeBinding}>Remove binding</button>
+        {/if}
+      </div>
+      <small>The cue is requested by the item's own use — a cast, from the item window or the
+        quickbar — <strong>after</strong> that use has committed, so a failed use can play its
+        own cue and a refused one plays nothing. The binding never rolls, damages or spends
+        anything, and it grants nothing: a player still needs the timeline published for them
+        ("players may run this") or the host refuses the cue.</small>
+    </div>
+  {/if}
   <h4>Presets</h4>
   <div class="presets" data-fx-presets>
     <div class="controls">

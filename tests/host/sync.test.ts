@@ -30,17 +30,18 @@ import type {
   ActorDocument,
   AssetManifest,
   AutomationDocument,
-  PrefabDocument,
-  TileDocument,
+  ItemDocument,
   Json,
+  MacroDocument,
   MessageDocument,
   NoteDocument,
+  PrefabDocument,
   SceneDocument,
+  TileDocument,
   TokenDocument,
-  WallDocument,
   UserDocument,
+  WallDocument,
   WorldCollections,
-  MacroDocument,
 } from "../../src/core/documents";
 import { frameMessage, channelFor } from "../../src/net/frame";
 
@@ -1506,6 +1507,96 @@ describe("Macros / FX host authority and audience", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  test("a bound item cue is validated at authoring time and pruned with its item (D-311)", async () => {
+    /** The most recent player-side rejection says the timeline was not published for them. */
+    const playerRejectedTail = (entries: string[]): boolean =>
+      entries.some((entry) => entry.includes("not published for this caller"));
+    const h = await setup();
+    const sections = [{ kind: "text", id: "s", text: "sparks", startMs: 0, durationMs: 600,
+      at: { kind: "point", x: 120, y: 120 }, color: "#ffffff", scale: 1 }];
+    const look = (id: string, name: string, patch: Record<string, unknown> = {}): MacroDocument =>
+      ({ _id: id, type: "macro", name, command: "", kind: "sequence", ownership: { default: 1 },
+        flags: {}, system: {}, sequence: { version: 1, audience: "scene", persistent: false,
+          sections }, fxItem: { actorId: "a-hero", itemId: "wand" }, ...patch }) as unknown as MacroDocument;
+    const wand: ItemDocument = { _id: "wand", type: "item", name: "Wand of Sparks",
+      ownership: { default: 0 }, flags: {}, system: {}, effects: [] };
+    const hero: ActorDocument = { _id: "a-hero", type: "actor", name: "Hero",
+      ownership: { default: 2 }, flags: {}, system: {}, items: [wand], effects: [] };
+    h.gm.submit([{ kind: "create", coll: "actors", data: hero }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("actors", "a-hero")).toBeDefined();
+
+    const refused: string[] = [];
+    h.gmBus.on("rejected", (event) => refused.push(event.detail));
+    // A binding is authored on the timeline; the item has to exist.
+    h.gm.submit([{ kind: "create", coll: "macros",
+      data: look("fx-hit", "Sparks", { fxItem: { actorId: "a-hero", itemId: "gone" } }) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-hit")).toBeUndefined();
+    expect(refused.join(" | ")).toContain("an item that exists");
+
+    // A failure cue must be a *timeline*: a preset is refused by name, exactly as the D-310
+    // mixed-document rule refuses the same mistake from the other side.
+    h.gm.submit([{ kind: "create", coll: "macros", data: { _id: "look", type: "macro",
+      name: "Fireball look", command: "", kind: "fxPreset", ownership: { default: 1 },
+      flags: {}, system: {}, preset: { version: 1, sections } } as unknown as MacroDocument }]);
+    await flushMicrotasks();
+    h.gm.submit([{ kind: "create", coll: "macros",
+      data: look("fx-miss", "Fizzle", { fxItem: { actorId: "a-hero", itemId: "wand",
+        onFailureId: "look" } }) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-miss")).toBeUndefined();
+    expect(refused.join(" | ")).toContain("not a timeline");
+
+    // The good one lands, and a *second* timeline on the same item is refused: one item, one
+    // bound cue, so the use path is never a coin toss.
+    h.gm.submit([{ kind: "create", coll: "macros", data: look("fx-hit", "Sparks") }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-hit")).toBeDefined();
+    h.gm.submit([{ kind: "create", coll: "macros", data: look("fx-other", "Other") }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-other")).toBeUndefined();
+    expect(refused.join(" | ")).toContain("already bound to that item");
+
+    // A re-save of the bound timeline is ordinary — the one-binding rule must not trip over
+    // the binding's own document — and it is how an author adds the failure branch or disables
+    // the binding without touching the item.
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: "fx-hit" },
+      diff: { fxItem: { actorId: "a-hero", itemId: "wand", onFailureId: "fx-hit", enabled: false } } }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-hit")?.fxItem?.enabled).toBe(false);
+
+    // A player cannot author a timeline at all, so they cannot bind one either.
+    const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const playerRefused: string[] = [];
+    playerBus.on("rejected", (event) => playerRefused.push(`${event.reason}: ${event.detail}`));
+    player.submit([{ kind: "create", coll: "macros", data: look("fx-mine", "Mine") }]);
+    player.submit([{ kind: "update", ref: { coll: "macros", id: "fx-hit" },
+      diff: { fxItem: { actorId: "a-hero", itemId: "wand" } } }]);
+    await flushMicrotasks();
+    expect(playerRefused.filter((entry) => entry.startsWith("forbidden"))).toHaveLength(2);
+
+    // …and the binding grants nothing: a player asking for the bound timeline by hand is
+    // refused by the ordinary published-timeline rule, not admitted through the item.
+    player.requestSequence("fx-hit", "s1");
+    await flushMicrotasks();
+    expect(playerRejectedTail(playerRefused)).toBe(true);
+
+    // Deleting the item clears the binding in the same undoable envelope (D-311's pruning):
+    // a pointer to something gone can neither linger nor revive on a re-used id.
+    const before = h.hostStore.seq;
+    h.gm.submit([{ kind: "delete", ref: { coll: "items", id: "wand",
+      parent: { coll: "actors", id: "a-hero" } } }]);
+    await flushMicrotasks();
+    expect(h.hostStore.seq).toBeGreaterThan(before);
+    expect(h.hostStore.get("actors", "a-hero")?.items).toEqual([]);
+    expect(h.hostStore.get("macros", "fx-hit")?.fxItem).toBeUndefined();
+    h.host.undo();
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-hit")?.fxItem?.enabled).toBe(false);
+    expect(h.hostStore.get("actors", "a-hero")?.items.map((entry) => entry._id)).toEqual(["wand"]);
   });
 
   test("an FX preset is GM-authored, GM-visible and never runnable (D-310)", async () => {

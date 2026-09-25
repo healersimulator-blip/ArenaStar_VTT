@@ -112,6 +112,7 @@ import { planAutomation, sweptTileEvents, tileContainsPoint, validateAutomation,
 import { attachedDeletionOps, attachedMovementOps, planPrefabPlacement, PREFAB_COLLECTIONS, validatePrefab } from "../core/prefabs";
 import { boundFxDeletionOps, fxInstanceMatches, validateFxInstance, validateFxInstanceFilter } from "../core/fxInstances";
 import { fxPresetDocumentError, macroStrayPresetError } from "../core/fxPresets";
+import { fxBindingDeletionOps, fxItemBindingError } from "../core/fxBinding";
 import { planSummon, summonDeletionOps, summonMarker, summonPlacementError, validateSummon,
   type SummonSource } from "../core/summons";
 import { getByTag, isWorldTagRef, listTaggable, tagEditOps, tagRuleOps, tagsOf, TAGGABLE_COLLECTIONS, validSceneTagRefs,
@@ -1254,6 +1255,24 @@ export class HostSync {
     return null;
   }
 
+  /**
+   * D-311: a bound item cue is validated where it is authored. The lookup answers "does this
+   * item exist, is it a *timeline* being named, and can the author read both" — the host's own
+   * `can`, never a client's claim. Nothing about the caller's later rights is decided here:
+   * the run itself is an ordinary `fx.request` and goes through `prepareFx` as always.
+   */
+  private fxBindingError(macro: MacroDocument, user: SessionUser): string | null {
+    return fxItemBindingError(macro, {
+      actor: (id) => this.store.get("actors", id) as ActorDocument | undefined,
+      macro: (id) => this.store.get("macros", id) as MacroDocument | undefined,
+      readable: (coll, doc) => can(user, "read", doc as BaseDocument, coll),
+      boundTimelines: (actorId, itemId) => (this.store.getAll("macros") as readonly MacroDocument[])
+        .filter((candidate) => candidate.kind === "sequence" &&
+          candidate.fxItem?.actorId === actorId && candidate.fxItem?.itemId === itemId)
+        .map((candidate) => candidate._id),
+    });
+  }
+
   private scriptDocumentError(doc: MacroDocument): string | null {
     const checked = validateScriptMacro(doc);
     if (!checked.ok) return checked.error;
@@ -1331,6 +1350,8 @@ export class HostSync {
             if (stray) return { ok: false, reason: "invalid_schema", error: stray };
             const check = validateFxSequence((op.data as MacroDocument).sequence);
             if (!check.ok) return { ok: false, reason: "invalid_schema", error: check.error };
+            const bound = this.fxBindingError(op.data as MacroDocument, user);
+            if (bound) return { ok: false, reason: "invalid_schema", error: bound };
           }
           // D-310: a preset is an authoring aid for GMs/assistants — validated like the
           // timeline fragment it is, and never runnable, so no FX/script path can reach it.
@@ -1431,6 +1452,8 @@ export class HostSync {
             if (stray) return { ok: false, reason: "invalid_schema", error: stray };
             const check = validateFxSequence((dry.value as MacroDocument).sequence);
             if (!check.ok) return { ok: false, reason: "invalid_schema", error: check.error };
+            const bound = this.fxBindingError(dry.value as MacroDocument, user);
+            if (bound) return { ok: false, reason: "invalid_schema", error: bound };
           }
           if (op.ref.coll === "macros" && (dry.value as MacroDocument).kind === "fxPreset") {
             if (user.role !== "GM" && user.role !== "ASSISTANT")
@@ -1517,7 +1540,11 @@ export class HostSync {
       if (!attached.ok) return { ok: false, error: attached.error };
       const deleting = attachedDeletionOps(this.store.world, attached.ops);
       if (!deleting.ok) return { ok: false, error: deleting.error };
-      ops = boundFxDeletionOps(this.store.world, summonDeletionOps(this.store.world, deleting.ops));
+      // D-311: a timeline bound to a deleted item (or actor) loses its binding in the same
+      // undoable envelope, so a dangling pointer can neither revive on a re-used id nor
+      // linger as state a GM has to hunt down.
+      ops = fxBindingDeletionOps(this.store.world,
+        boundFxDeletionOps(this.store.world, summonDeletionOps(this.store.world, deleting.ops)));
     }
     if (audit) {
       if (!ops.length) return { ok: false, error: "Cannot audit an empty world action" };

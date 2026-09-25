@@ -392,6 +392,12 @@ export interface MacroDocument extends BaseDocument {
   command: string;
   /** GM-published summoning preset. Player projection keeps only callable metadata. */
   summon?: import("./summons").SummonDefinition | import("./summons").SummonPublic;
+  /**
+   * D-311: the item this timeline is bound to. It is stored **here**, on the timeline
+   * rather than on the item, so the ordinary macro projection decides who may discover the
+   * binding — the item side needs no rule of its own.
+   */
+  fxItem?: import("./fxBinding").FxItemBinding;
   /** D-310: a named bundle of authored FX sections — an authoring aid, never runnable. */
   preset?: import("./fxPresets").FxPresetDefinition;
   /** A versioned, multi-section audiovisual timeline; legacy macros omit it. */

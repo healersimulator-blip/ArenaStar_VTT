@@ -21,6 +21,7 @@
     setItemUsesOp,
   } from "./pf1eItemsTab";
   import { resolveCastFlow } from "./pf1eCastFlow";
+  import { boundCueFor, fireBoundItemCue, fxCastOutcome } from "./fxItemCue";
   import { observePF1eItem } from "./pf1eItemWindow";
 
   let {
@@ -49,6 +50,12 @@
   );
 
   const view = $derived(held === null ? null : pf1eItemView(held.actor, held.item._id));
+  /**
+   * D-311: the timeline bound to *this* item, as this reader may see it. The lookup is the
+   * same one the use path fires, so the line can never describe a cue the cast would not
+   * ask for — and a player simply sees nothing when the bound timeline is GM-only.
+   */
+  const boundCue = $derived(held === null ? null : boundCueFor(client, held.actor._id, held.item._id));
   const editable = $derived(
     held !== null && client.user !== null && can(client.user, "update", held.actor, "actors"),
   );
@@ -135,10 +142,19 @@
       });
       if (!outcome.ok) {
         error = outcome.error;
-      } else if (outcome.held) {
-        note = `the charge is spent — the spell is held for delivery (DC ${outcome.dc})`;
       } else {
-        note = `${source.spellName} cast from ${view.item.name} — DC ${outcome.dc}, ${Math.max(0, source.charges - 1)} charge(s) left`;
+        if (outcome.held) {
+          note = `the charge is spent — the spell is held for delivery (DC ${outcome.dc})`;
+        } else {
+          note = `${source.spellName} cast from ${view.item.name} — DC ${outcome.dc}, ${Math.max(0, source.charges - 1)} charge(s) left`;
+        }
+        // D-311: the cue is requested *after* the commit — the branch follows the result the
+        // host just wrote, and a use the flow refused above plays nothing at all.
+        const cue = fireBoundItemCue({ client, actor: held.actor, item: held.item,
+          outcome: fxCastOutcome(outcome), targetActor: target });
+        if (cue.fired) note += ` · ${cue.note}`;
+        else if (cue.reason === "disabled") note += " · the item's bound cue is disabled";
+        else if (cue.reason === "no-branch") note += " · the item has no cue for that outcome";
       }
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
@@ -233,6 +249,21 @@
         <p class="note">{line}</p>
       {/each}
     </details>
+
+    {#if boundCue}
+      <p class="note" data-pf1e-item-window-fx>
+        Bound cue: <strong>{boundCue.name}</strong>
+        {#if boundCue.fxItem?.onFailureId}
+          · a failed use plays the bound failure cue
+        {/if}
+        {#if boundCue.fxItem?.recognition === "success" || boundCue.fxItem?.recognition === "failure"}
+          · recognition forced to {boundCue.fxItem.recognition}
+        {/if}
+        {#if boundCue.fxItem?.enabled === false}
+          · <span class="warn">disabled</span>
+        {/if}
+      </p>
+    {/if}
 
     {#if view.consumable}
       <section class="cast" data-pf1e-item-window-cast>

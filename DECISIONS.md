@@ -10448,3 +10448,110 @@ preset is a source and not a parent.
 and item binding is explicitly not claimed), no presets of *runs* (a preset holds no instance
 and no live state), no nested presets, no preset library across worlds, no sharing UI beyond the
 world file, and no preset branch in the Live FX manager.
+
+## D-311 — the same timeline, bound to an item: a cue that follows a committed use (2026-09-25)
+
+A09's last clause — "…and the same authored sequence can be **saved/bound to an item**" — was
+the one part of SQ-12 that D-310 deliberately left unclaimed. The temptation is to put the
+binding on the **item** (`system.fxCue` or a flag), and that is the wrong half of the document
+graph: an item lives inside an actor, actors are the most-edited documents in the world
+(inventory churn, conversions, resizes), and a pointer stored there would be authored by
+whoever edits the sheet while the timeline it names belongs to the GM. The binding therefore
+lives on the **timeline**: `MacroDocument.fxItem = {actorId, itemId, onFailureId?,
+recognition?: "auto"|"success"|"failure", enabled?}`, a field beside `sequence`/`preset` on the
+document that already owns the cue. Two consequences fall out for free, and both are the point:
+
+- **Projection decides discovery.** A macro the reader cannot read is not in their replica, so
+  a player simply sees no binding — there is no second visibility rule to keep in step with the
+  macro one. What travels with a timeline the reader *may* read is the two ids it names; that is
+  deliberate: the point of publishing a timeline to a player is that their own use of the item
+  can play it, and a use path that could not read its own binding would need the very second
+  visibility rule this design avoids. The item window's line comes from the same lookup the use
+  path fires, so the sentence can never describe a cue the cast would not ask for.
+- **The run is an ordinary `fx.request`.** Firing a bound cue calls the same
+  `requestSequence` the wizard's Run button does, so `prepareFx` re-checks rights, audience,
+  token visibility and the 300 ms lead exactly as it always has. A binding **grants nothing**:
+  a player whose use would not otherwise be allowed to run that timeline is refused by the host,
+  not admitted through the item.
+
+**Which branch, and *when*.** The cue is requested **after** the caller's own flow has
+committed — charges spent, slot expended, hit points written — which is what makes A05's "uses
+the committed result" a fact rather than a hope, and is why the four outcomes split the way
+they do. `fxCastOutcome` reads the flow's own result: a lost spell, a held (missed) touch
+delivery, a missed touch attack, spell resistance or a **made save** is a *failure*; anything
+else that committed is a success; a still-pending multi-round cast is `unknown`, because
+nothing has landed to recognise and no branch can honestly be chosen. A refused use (no
+charges, no target, a denied flow) fires nothing at all, because there is no committed result
+to name. `fxBindingBranch` then answers *which* timeline: the macro the binding is stored on
+for success, `onFailureId` for a failure — and **`null`** when no failure cue is bound, which
+is the honest answer ("the item has no cue for that outcome") rather than replaying the hit cue
+on a miss. `enabled: false` short-circuits everything and is the author's manual disable; the
+`recognition` override forces either branch for effects the automatic read cannot know
+(an effect that lands later, a spell-like that "misses" narratively).
+
+**One item, one bound cue.** A second timeline naming the same actor+item is refused
+(`"another timeline is already bound to that item"`) instead of leaving the use path to pick
+arbitrarily — "which cue plays when I press this" must not be a coin toss. Re-saving the bound
+timeline is not a conflict; an update that re-states its own binding is admitted.
+
+**Where it is validated.** The host, where it is authored: `fxBindingError` runs on the `macros`
+create and update paths beside the sequence/summon/script checks and refuses a binding whose
+actor does not exist, whose item is not on that actor, whose cue is not a readable `sequence`
+macro (the cue is the document itself on create, so the check does not chase a store entry that
+does not exist yet), whose failure cue names no timeline, a preset or a script, or a timeline
+its author cannot read. A binding written on what *was* a timeline but is now refused — a
+hand-edited world file — reads as **no binding** (`fxBindingOf` returns `null` on a malformed
+shape) rather than as a cue the use path would try to fire.
+
+**Pruning is in the envelope.** Deleting the item or the whole actor emits the same transaction
+a timeline edit would — `{kind: "update", ref: {coll: "macros", id}, diff: {"-=fxItem": null}}`
+— through `fxBindingDeletionOps`, so one Undo restores both the item and the binding, and a
+re-used item id can never inherit a stale pointer. Cleared means **deleted**: the field is
+removed with the `-=` marker the rest of the wizard uses, never sent as `undefined` (msgpack
+would carry it as `null`, which the host refuses as `invalid_schema`).
+
+**Where the author meets it.** In the wizard, under the saved timeline being edited: actor,
+item, "on a failed use" (this timeline, nothing, or another timeline), recognition, an Enabled
+box, Save/Remove, and one sentence saying what the cue does and does not do. The *item* half is
+read-only: the item window shows "Bound cue: X · a failed use plays the bound failure cue ·
+recognition forced to failure · disabled" from the projected store, and appends the cue sentence
+to its cast note after the commit. The quickbar's item casts share that path.
+
+**Gates.**
+
+- `pnpm test` — **3 785 passed / 12 skipped** (301 files: 299 passed, 2 skipped; +10 cases): 5 in
+  `tests/core/fxBinding.test.ts` (the closed authored shape — unknown fields and a
+  half-binding refused by name, `recognition: "failure"` without a failure cue refused as
+  meaningless; a malformed binding reads as none, and the matcher is exact on both ids; the
+  branch table including `null` for an unrecognised failure with nothing bound, the disable,
+  and both forced-recognition directions; the host rule — real actor and item, the cue and the
+  failure cue as *readable timelines*, a preset or script refused by name, the one-binding rule
+  and the re-save exemption; and the pruning — item and actor deletes each clear the binding in
+  the same envelope, another actor's identically-named item is untouched, and an unrelated
+  delete adds nothing), 4 in `tests/ui/fxItemCue.test.ts` (recognition from the committed
+  facts including `pending` ⇒ unknown; a committed cast naming branch, scene and both tokens,
+  and a scene whose tokens are gone still running; every "nothing to play" answer —
+  unbound/disabled/no-branch/no-scene; and discovery — a binding absent from the replica reads
+  as unbound, the lookup filters by both ids and sorts by id), 1 in `tests/host/sync.test.ts`
+  (the authoring checks above through the real op path, a player's create and update both
+  `forbidden`, the player's own `requestSequence` for the bound timeline still refused as
+  unpublished, and the item delete clearing the binding **and Undo restoring it together**), and
+  1 e2e spec (`e2e/fx_item_binding.spec.ts`) that runs the whole loop in one browser: tokens, a
+  spell generated into a wand on the caster's own sheet, two timelines authored in the wizard,
+  the binding saved through the editor, then four casts — unbound (no cue, nothing requested), a
+  committed success (the bound cue drawn on `__stage` after the charge was spent), a disabled
+  binding (the note says so and nothing plays), a forced-failure recognition (the *failure*
+  timeline runs) — and the remove verb leaving the item unbound again.
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** · `pnpm lint` exit 0 ·
+  `pnpm build` → `pnpm size` **3 865 546 B raw / 1 108 397 B gzip**, inside the 6 MB budget.
+- Chromium production `file://`: `fx_item_binding` **1/1** standalone (31.4 s), and the
+  `fx_sequence` + `fx_item_binding` + `summons` batch with `--repeat-each=2` — **68/68** in
+  13.0 m. The touched call sites were re-run too (`pf1e_cast_flow`, `pf1e_inventory`,
+  `quickbar` **7/7**; the canvas/vision/walls/join regression batch **19/20**, its one failure
+  the known D-291 load flake (`join.spec.ts:32`, a 30 s ceiling under batch load — 14.0 s
+  standalone pass, the same failure D-310 recorded).
+
+**Non-claims.** No phase binding (which casting phase a cue follows), no per-target cue, no cue
+on an attack or condition event (only the item's own cast), no chained cues (a cue never fires
+another binding), no player-authored bindings (authoring is the timeline's own GM/assistant
+rule), no cue for a non-PF1e system's item, and no UI for a binding in the Live FX manager.

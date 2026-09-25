@@ -9,10 +9,12 @@
  */
 import type { ClientSync } from "../../client/sync";
 import type { ActorDocument } from "../../core/documents";
+import type { FxItemOutcomeFacts } from "../sheets/fxItemCue";
 import { worldSettingsFrom } from "../../core/worldSettings";
 import { consumableCastAuthored } from "../../packages/pf1e/consumables";
 import { pf1eAttackRollGroups } from "../../packages/pf1e/rollData";
 import { resolveCastFlow } from "../sheets/pf1eCastFlow";
+import { fireBoundItemCue, fxCastOutcome } from "../sheets/fxItemCue";
 import { pf1eItemView } from "../sheets/pf1eItemsTab";
 import { resolveAttackFlow } from "../sheets/pf1eResolveFlow";
 import { pf1eSheetView } from "../sheets/pf1eSheetModel";
@@ -30,6 +32,26 @@ export interface PF1eQuickbarRunInput {
 export type PF1eQuickbarRunResult =
   | { ok: true; note: string }
   | { ok: false; error: string };
+
+/**
+ * D-311: the note a bound cue adds to a committed item cast — empty when the item has no
+ * binding this reader can see, and a sentence when it does (including when the binding is
+ * disabled or has no cue for that outcome, because "nothing happened" needs saying then).
+ */
+function boundCueNote(
+  client: ClientSync,
+  actor: ActorDocument,
+  item: { _id: string; name: string },
+  outcome: FxItemOutcomeFacts,
+  target: ActorDocument,
+): string {
+  const cue = fireBoundItemCue({ client, actor, item, outcome: fxCastOutcome(outcome),
+    targetActor: target });
+  if (cue.fired) return ` · ${cue.note}`;
+  if (cue.reason === "disabled") return " · the item's bound cue is disabled";
+  if (cue.reason === "no-branch") return " · the item has no cue for that outcome";
+  return "";
+}
 
 export async function runQuickbarEntry(
   input: PF1eQuickbarRunInput,
@@ -118,7 +140,8 @@ export async function runQuickbarEntry(
     return { ok: false, error: `${source.spellName} was lost before it resolved` };
   }
   if (outcome.pending) {
-    // F03: the target's save is still to be rolled from the pending card.
+    // F03: the target's save is still to be rolled from the pending card. Nothing has landed
+    // yet, so a bound cue has no committed result to recognise and none is requested.
     return {
       ok: true,
       note: `${source.spellName} from ${item.item.name} → ${target.name} — awaiting the save`,
@@ -127,13 +150,15 @@ export async function runQuickbarEntry(
   if (outcome.held) {
     return {
       ok: true,
-      note: `${source.spellName} held for delivery — the charge is spent`,
+      note: `${source.spellName} held for delivery — the charge is spent` +
+        boundCueNote(client, actor, { _id: item.item.id, name: item.item.name }, outcome, target),
     };
   }
   return {
     ok: true,
     note: `${source.spellName} from ${item.item.name} → ${target.name} — DC ${String(
       outcome.dc,
-    )}, ${String(Math.max(0, source.charges - 1))} charge(s) left`,
+    )}, ${String(Math.max(0, source.charges - 1))} charge(s) left` +
+      boundCueNote(client, actor, { _id: item.item.id, name: item.item.name }, outcome, target),
   };
 }
