@@ -3,7 +3,8 @@
  * BOTH strata live UNDER fog; an author cannot bypass LOS by setting a layer.
  * Sprites/text are lifetime-managed per cue, not streamed per frame.
  */
-import { BlurFilter, ColorMatrixFilter, Container, Sprite, Text, type Filter, type Texture } from "pixi.js";
+import { BlurFilter, ColorMatrixFilter, Container, Graphics, Sprite, Text, type Filter,
+  type Texture } from "pixi.js";
 import { fxEase, fxStylePlan, type FxFilterKind, type ResolvedFxSection } from "../../core/fx";
 
 type Located = Extract<ResolvedFxSection, { kind: "image" | "text" }>;
@@ -36,6 +37,29 @@ export function fxPixiFilter(filter: { kind: FxFilterKind; strength: number } | 
   return matrix;
 }
 
+/**
+ * D-301: the graphics an effect is clipped by. A mask lives in the **parent's** space
+ * (a world-space region), so it does not rotate or scale with the art — a 15 ft circle
+ * on the ground stays a circle whichever way the sprite is turned. `invert` is the
+ * cutout: a rectangle big enough to cover the sprite with the shape removed, which the
+ * renderer builds with pixi's own hole operation.
+ *
+ * `extent` is half the sprite's drawn size, so the inverse rectangle always covers it.
+ */
+export function fxMaskGraphics(mask: { area: Point[]; invert?: boolean }, extent = 0): Graphics {
+  const graphics = new Graphics();
+  const points = mask.area.flatMap((point) => [point.x, point.y]);
+  if (!mask.invert) {
+    graphics.poly(points).fill({ color: 0xffffff, alpha: 1 });
+    return graphics;
+  }
+  const reach = Math.max(1, extent) + Math.max(0, ...mask.area.map((point) =>
+    Math.max(Math.abs(point.x), Math.abs(point.y)))) + 32;
+  graphics.rect(-reach, -reach, reach * 2, reach * 2).fill({ color: 0xffffff, alpha: 1 });
+  graphics.poly(points).cut();
+  return graphics;
+}
+
 /** Pure host-time tween: late join/slow decoding jumps to the correct frame. */
 export function fxPosition(section: Located, elapsedMs: number, anchors: Anchors = {
   from: { x: section.x, y: section.y },
@@ -60,6 +84,8 @@ interface ActiveVisual {
   persistent: boolean;
   /** What this visual was actually built with, for inspection (`inspect`). */
   filterLabel: string | null;
+  /** The clipping region, positioned with the anchor every frame. */
+  mask: Graphics | null;
   finish?: () => void;
 }
 
@@ -98,8 +124,18 @@ export class FxLayer {
     const filter = fxPixiFilter(style.filter);
     if (filter) view.filters = [filter];
     view.position.set(section.x, section.y);
-    (section.layer === "belowTokens" ? this.belowTokens : this.aboveTokens).addChild(view);
-    const active: ActiveVisual = { runId, section, view, age, persistent,
+    const parent = section.layer === "belowTokens" ? this.belowTokens : this.aboveTokens;
+    parent.addChild(view);
+    // A mask is built once, like the filter, and only *moved* per frame: the polygon is
+    // relative to the anchor, so a followed effect's region travels with it.
+    const mask = section.mask
+      ? fxMaskGraphics(section.mask, Math.max(view.width, view.height) / 2) : null;
+    if (mask) {
+      mask.position.set(section.x, section.y);
+      parent.addChild(mask);
+      view.mask = mask;
+    }
+    const active: ActiveVisual = { runId, section, view, mask, age, persistent,
       filterLabel: style.filter ? `${style.filter.kind}:${style.filter.strength}` : null,
       ...(finish ? { finish } : {}) };
     this.visuals.add(active);
@@ -113,6 +149,7 @@ export class FxLayer {
     active.view.visible = true;
     const { x, y } = fxPosition(section, age, anchors);
     active.view.position.set(x, y);
+    active.mask?.position.set(x, y);
     if (section.kind === "image" && section.stretch && anchors.to) {
       active.view.width = Math.hypot(anchors.to.x - anchors.from.x, anchors.to.y - anchors.from.y) * (section.scale ?? 1);
       active.view.rotation = ((section.rotation ?? 0) * Math.PI) / 180 +
@@ -144,14 +181,20 @@ export class FxLayer {
   get count(): number { return this.visuals.size; }
 
   /** Read-only: what a run (or everything) is drawing with. Tests and diagnostics only. */
-  inspect(runId?: string): Array<{ kind: string; blend: string; filter: string | null }> {
+  inspect(runId?: string): Array<{ kind: string; blend: string; filter: string | null;
+    mask: { points: number; invert: boolean } | null }> {
     return [...this.visuals]
       .filter((active) => runId === undefined || active.runId === runId)
       .map((active) => ({ kind: active.section.kind, blend: String(active.view.blendMode),
-        filter: active.filterLabel }));
+        filter: active.filterLabel,
+        mask: active.section.kind === "image" || active.section.kind === "text"
+          ? (active.section.mask ? { points: active.section.mask.area.length,
+              invert: active.section.mask.invert === true } : null)
+          : null }));
   }
 
   private remove(active: ActiveVisual): void {
+    active.mask?.destroy();
     this.visuals.delete(active);
     active.view.parent?.removeChild(active.view);
     active.view.destroy(); // media source lifetime is owned by FxPlayer's finish callback

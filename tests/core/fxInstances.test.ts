@@ -73,6 +73,34 @@ describe("private durable FX records", () => {
     expect(instance.sections[0]).toHaveProperty("x", 100); // pure; host records aren't rewritten
   });
 
+  test("a stored cue's resolved mask is checked as a polygon, not as authored scene units", () => {
+    const visual = instance.sections[0];
+    if (!visual || visual.kind !== "image") throw new Error("Missing image fixture");
+    const ring = Array.from({ length: 12 }, (_, i) => ({ x: Math.cos(i) * 40, y: Math.sin(i) * 40 }));
+    const masked = { ...visual, mask: { area: ring, invert: true } };
+    expect(validateFxInstance({ ...instance, sections: [masked] }, scene, manifest)).toBe(true);
+    // A polygon a renderer could not draw — too few points, a non-finite vertex, or a
+    // shape larger than the bound — is refused on a *stored* cue too, not only on save.
+    expect(validateFxInstance({ ...instance,
+      sections: [{ ...visual, mask: { area: ring.slice(0, 2), invert: false } }] }, scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...instance,
+      sections: [{ ...visual, mask: { area: [...ring, { x: Number.NaN, y: 0 }], invert: false } }] }, scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...instance,
+      sections: [{ ...visual, mask: { area: Array.from({ length: 257 }, (_, i) => ({ x: i, y: 0 })), invert: false } }] }, scene, manifest))
+      .toBe(false);
+    expect(validateFxInstance({ ...instance,
+      sections: [{ ...visual, mask: { area: ring, invert: "yes" as unknown as boolean } }] }, scene, manifest)).toBe(false);
+    // A stored cue that omits `invert` reads as "not inverted" rather than as a refusal:
+    // the flag is a boolean the renderer tests for `true`, not a required sentinel.
+    expect(validateFxInstance({ ...instance,
+      sections: [{ ...visual, mask: { area: ring, invert: undefined } as unknown as { area: { x: number; y: number }[]; invert: boolean } }] },
+    scene, manifest)).toBe(true);
+    // The authored form is not what a stored cue carries: trusting it would be a bypass.
+    expect(validateFxInstance({ ...instance,
+      sections: [{ ...visual, mask: { kind: "circle", length: 15 } } as unknown as typeof instance.sections[number]] },
+    scene, manifest)).toBe(false);
+  });
+
   test("source/target, scene or macro deletion cascades in one undoable transaction", () => {
     const world = emptyWorld();
     world.scenes.push(scene, { ...scene, _id: "scene-b", tokens: [] });

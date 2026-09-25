@@ -3,9 +3,9 @@
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import type { AssetManifest, MacroDocument, SceneDocument } from "../../core/documents";
-  import { FX_FILTER_RANGES, resolveFxSequence, validateFxSequence, type FxAnchor, type FxBlendMode,
-    type FxCameraPathSection, type FxEasing, type FxFilterKind, type FxSection, type FxSectionAudience,
-    type FxSequence, type FxImportPermissions } from "../../core/fx";
+  import { FX_FILTER_RANGES, FX_MASK_LIMITS, resolveFxSequence, validateFxSequence, type FxAnchor,
+    type FxBlendMode, type FxCameraPathSection, type FxEasing, type FxFilterKind, type FxMask,
+    type FxSection, type FxSectionAudience, type FxSequence, type FxImportPermissions } from "../../core/fx";
   import { fxFitnessIssues } from "../../core/fxDelivery";
   import { SOUND_CHANNELS, SOUND_CHANNEL_LABELS, cueSilentForViewer, soundChannelOf } from "../../core/fxSound";
   import { domCanPlay, fxViewPrefs } from "../../core/fxPrefs";
@@ -308,6 +308,35 @@
     draft = { ...draft, sections: draft.sections.map((old, i) => i === index
       ? (value === "scene" ? remaining : { ...remaining, audience: value as FxSectionAudience }) as FxSection
       : old) };
+  }
+
+  /**
+   * A mask is rebuilt from scratch when its shape changes: a circle that kept a ray's
+   * width would be a field the host refuses, so switching kinds drops what the new
+   * kind has no use for. "None" removes the key entirely (the msgpack lesson).
+   */
+  function changeMask(index: number, value: string): void {
+    const before = draft.sections[index];
+    if (!before || (before.kind !== "image" && before.kind !== "text")) return;
+    const { mask: _mask, ...remaining } = before;
+    void _mask;
+    const keepInvert = before.mask?.invert === true ? { invert: true } : {};
+    const shapeless = value === "none";
+    const kind = value as FxMask["kind"];
+    const mask: FxMask | null = shapeless ? null
+      : kind === "circle" ? { kind, length: 15, ...keepInvert }
+        : kind === "cone" ? { kind, length: 30, spread: 53.13, angle: 0, ...keepInvert }
+          : { kind, length: 30, width: 5, angle: 0, ...keepInvert };
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      ? (mask ? { ...remaining, mask } : remaining) as FxSection : old) };
+  }
+
+  function changeMaskField(index: number, patch: Partial<FxMask>): void {
+    const before = draft.sections[index];
+    if (!before || (before.kind !== "image" && before.kind !== "text") || !before.mask) return;
+    const mask = { ...before.mask, ...patch };
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      ? { ...before, mask } as FxSection : old) };
   }
 
   function changeReplayCount(index: number, value: string): void {
@@ -758,6 +787,38 @@
                 min={range.min} max={range.max} step="0.1" value={section.filter.strength ?? range.default}
                 oninput={(e) => changeFilterStrength(i, e.currentTarget.value)} /></label>
               <small>One filter per section: {range.min}–{range.max}{range.unit}; the renderer applies it once, not per frame.</small>
+            {/if}
+            <label>Mask <select data-fx-mask-kind value={section.mask?.kind ?? "none"}
+              onchange={(e) => changeMask(i, e.currentTarget.value)}>
+              <option value="none">None</option>
+              <option value="circle">Circle</option>
+              <option value="cone">Cone</option>
+              <option value="ray">Ray</option>
+              <option value="rect">Rectangle</option>
+            </select></label>
+            {#if section.mask}
+              {@const mask = section.mask}
+              {@const units = scene?.grid.units ?? "units"}
+              <label>Mask size ({units}) <input type="number" data-fx-mask-length
+                min={FX_MASK_LIMITS.min} max={FX_MASK_LIMITS.max} step="1" value={mask.length}
+                oninput={(e) => changeMaskField(i, { length: Number(e.currentTarget.value) })} /></label>
+              {#if mask.kind === "ray" || mask.kind === "rect"}
+                <label>Mask width ({units}) <input type="number" data-fx-mask-width
+                  min={FX_MASK_LIMITS.min} max={FX_MASK_LIMITS.max} step="1" value={mask.width ?? 5}
+                  oninput={(e) => changeMaskField(i, { width: Number(e.currentTarget.value) })} /></label>
+              {/if}
+              {#if mask.kind === "cone"}
+                <label>Mask spread (°) <input type="number" data-fx-mask-spread
+                  min={FX_MASK_LIMITS.spreadMin} max={FX_MASK_LIMITS.spreadMax} step="1" value={mask.spread ?? 53.13}
+                  oninput={(e) => changeMaskField(i, { spread: Number(e.currentTarget.value) })} /></label>
+              {/if}
+              {#if mask.kind !== "circle"}
+                <label>Mask angle (°) <input type="number" data-fx-mask-angle min="-360" max="360" step="15"
+                  value={mask.angle ?? 0} oninput={(e) => changeMaskField(i, { angle: Number(e.currentTarget.value) })} /></label>
+              {/if}
+              <label><input type="checkbox" data-fx-mask-invert checked={mask.invert === true}
+                onchange={(e) => changeMaskField(i, { invert: e.currentTarget.checked })} />Cut out (hide what is inside the mask)</label>
+              <small>The mask is measured against this scene's grid ({units}) around the anchor and travels with it; the host resolves it and refuses a shape it cannot draw.</small>
             {/if}
             {#if section.at.kind !== "point" || section.to && section.to.kind !== "point"}
               <label><input type="checkbox" data-fx-follow bind:checked={section.follow} />Follow visible token anchors</label>

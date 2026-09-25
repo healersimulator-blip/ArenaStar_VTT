@@ -5,6 +5,7 @@
  * This is the first sequence format, not the full Sequencer action catalogue.
  */
 import type { SceneDocument, TokenDocument } from "./documents";
+import { crosshairArea, type CrosshairPoint, type CrosshairShape } from "./crosshair";
 import { isSoundChannel, type FxSoundChannel } from "./fxSound";
 
 export type FxAnchor = { kind: "point"; x: number; y: number } | { kind: "source" | "target" };
@@ -27,6 +28,49 @@ export type FxBlendMode = "normal" | "add" | "multiply" | "screen" | "overlay" |
 const BLEND_MODE_SET: readonly string[] = ["normal", "add", "multiply", "screen", "overlay", "darken", "lighten"];
 const isBlendMode = (value: unknown): value is FxBlendMode =>
   typeof value === "string" && BLEND_MODE_SET.includes(value);
+
+/**
+ * SQ-19: a visual can be confined to a region (`mask`) or have a region cut out of it
+ * (`invert: true`). The region is one of the **shared crosshair's** shapes — the same
+ * geometry the author sees when placing an anchor, so "a 15 ft circle" means the same
+ * thing whether it is a placement or a mask — measured in scene units against the
+ * scene's own grid metric.
+ *
+ * A mask is authored around the visual's **own anchor** and travels with it: the host
+ * resolves the shape into a polygon of offsets, so a followed aura's mask moves with
+ * the token instead of staying behind where the host last saw it.
+ */
+export interface FxMask {
+  /** `point` is deliberately absent: a region with no area hides everything or nothing. */
+  kind: "circle" | "cone" | "ray" | "rect";
+  /** Scene units: a circle/cone's radius, a ray/rect's depth. */
+  length: number;
+  /** Scene units, ray/rect only. */
+  width?: number;
+  /** Degrees, 0 = east, growing clockwise on screen. Cone/ray/rect only. */
+  angle?: number;
+  /** Aperture in degrees for a cone (1–359); defaults to the crosshair's 53.13. */
+  spread?: number;
+  /** Keep the *outside* of the shape — a cutout — instead of the inside. */
+  invert?: boolean;
+}
+/**
+ * A mask as it travels: a closed polygon **relative to the visual's anchor** (world
+ * px offsets, not scene units) plus which side of it survives. Relative, because the
+ * anchor may be a followed token that moves every frame.
+ */
+export interface ResolvedFxMask {
+  area: CrosshairPoint[];
+  invert: boolean;
+}
+const MASK_FIELDS: Record<FxMask["kind"], readonly string[]> = {
+  circle: ["kind", "length", "invert"],
+  cone: ["kind", "length", "angle", "spread", "invert"],
+  ray: ["kind", "length", "width", "angle", "invert"],
+  rect: ["kind", "length", "width", "angle", "invert"],
+};
+/** Authored metric bounds, in scene units / degrees. */
+export const FX_MASK_LIMITS = { min: 0.5, max: 5_000, spreadMin: 1, spreadMax: 359 } as const;
 
 /**
  * Who a run — or one camera section of it — is delivered to. The same three words at
@@ -115,6 +159,8 @@ interface FxLocated extends FxBase {
   blend?: FxBlendMode;
   /** One bounded filter: blur, grayscale, brightness or saturation. */
   filter?: FxVisualFilter;
+  /** Confine this visual to a region, or cut that region out of it (SQ-19). */
+  mask?: FxMask;
   /** Follow visible source/target token anchors on each recipient's canvas. Only host-resolved IDs travel. */
   follow?: boolean;
   /** Host-resolved destination: tween from `at`, or stretch an image along the segment. */
@@ -193,8 +239,8 @@ export interface FxSequence {
 }
 
 export type ResolvedFxSection =
-  | (Omit<Extract<FxSection, { kind: "image" }>, "at" | "to" | "repeatCount" | "repeatDelayMs"> & { x: number; y: number; toX?: number; toY?: number; mime: string; followTokenId?: string; followToTokenId?: string })
-  | (Omit<Extract<FxSection, { kind: "text" }>, "at" | "to" | "repeatCount" | "repeatDelayMs"> & { x: number; y: number; toX?: number; toY?: number; followTokenId?: string; followToTokenId?: string })
+  | (Omit<Extract<FxSection, { kind: "image" }>, "at" | "to" | "mask" | "repeatCount" | "repeatDelayMs"> & { x: number; y: number; toX?: number; toY?: number; mime: string; followTokenId?: string; followToTokenId?: string; mask?: ResolvedFxMask })
+  | (Omit<Extract<FxSection, { kind: "text" }>, "at" | "to" | "mask" | "repeatCount" | "repeatDelayMs"> & { x: number; y: number; toX?: number; toY?: number; followTokenId?: string; followToTokenId?: string; mask?: ResolvedFxMask })
   | (Omit<Extract<FxSection, { kind: "sound" }>, "repeatCount" | "repeatDelayMs"> & { mime: string })
   /** A pan carries its **host-resolved** destination; a shake carries no anchor at all. */
   | (Omit<FxCameraPanSection, "to" | "repeatCount" | "repeatDelayMs"> & { toX: number; toY: number })
@@ -261,8 +307,8 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
     const repeatFields = section.kind === "wait" || section.kind === "camera"
       ? [] : ["repeatCount", "repeatDelayMs"];
     const fields = section.kind === "sound" ? ["assetId", "volume", "channel", "fadeInMs", "fadeOutMs"] :
-      section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter"] :
-      section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter"] :
+      section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "mask"] :
+      section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "mask"] :
       section.kind === "camera" ? ["mode", "to", "easing", "zoom", "intensity", "points", "audience"] : [];
     if (Object.keys(section).some((key) => !["id", "kind", "startMs", "durationMs", ...fields, ...repeatFields].includes(key)) ||
       (section.kind !== "wait" && section.durationMs === 0)) {
@@ -340,6 +386,30 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
       (section.fadeInMs !== undefined && !inRange(section.fadeInMs, 0, section.durationMs)) ||
       (section.fadeOutMs !== undefined && !inRange(section.fadeOutMs, 0, section.durationMs))) {
       return { ok: false, error: "FX image/text needs a valid anchor, layer, fade and transform" };
+    }
+    if (section.mask !== undefined) {
+      const mask = section.mask;
+      if (!isObject(mask) || typeof mask.kind !== "string")
+        return { ok: false, error: "an FX mask needs a shape kind" };
+      if (mask.kind === "point")
+        return { ok: false, error: "an FX mask cannot be a point: it has no area to mask with" };
+      if (!(mask.kind in MASK_FIELDS))
+        return { ok: false, error: "an FX mask must be a circle, cone, ray or rect" };
+      // Each shape accepts exactly its own fields: switching a rect to a circle must
+      // not leave a stale width that the renderer would then silently ignore.
+      if (Object.keys(mask).some((key) => !MASK_FIELDS[mask.kind as FxMask["kind"]].includes(key)))
+        return { ok: false, error: `an FX ${mask.kind} mask takes only ${MASK_FIELDS[mask.kind as FxMask["kind"]].join(", ")}` };
+      if (!inRange(mask.length, FX_MASK_LIMITS.min, FX_MASK_LIMITS.max))
+        return { ok: false, error: `an FX mask's length must be ${FX_MASK_LIMITS.min}–${FX_MASK_LIMITS.max} scene units` };
+      if ((mask.kind === "ray" || mask.kind === "rect") &&
+          !inRange(mask.width, FX_MASK_LIMITS.min, FX_MASK_LIMITS.max))
+        return { ok: false, error: `an FX mask's width must be ${FX_MASK_LIMITS.min}–${FX_MASK_LIMITS.max} scene units` };
+      if (mask.angle !== undefined && !inRange(mask.angle, -360, 360))
+        return { ok: false, error: "an FX mask's angle must be between -360 and 360 degrees" };
+      if (mask.spread !== undefined && !inRange(mask.spread, FX_MASK_LIMITS.spreadMin, FX_MASK_LIMITS.spreadMax))
+        return { ok: false, error: `a cone mask's spread must be ${FX_MASK_LIMITS.spreadMin}–${FX_MASK_LIMITS.spreadMax} degrees` };
+      if (mask.invert !== undefined && typeof mask.invert !== "boolean")
+        return { ok: false, error: "an FX mask's invert flag must be true or false" };
     }
     // Appearance is validated before the asset, so a mistyped blend is reported as
     // itself rather than as a bad hash.
@@ -469,6 +539,37 @@ export function resolveFxSequence(
       sections.push({ ...projected, toX: destination.x, toY: destination.y });
       continue;
     }
+    /**
+     * The mask polygon, in world px but **relative to the anchor** (the shape is
+     * measured from the origin and then translated by the renderer, so a followed
+     * visual's mask travels with it). Refuses a shape that resolves to no geometry:
+     * a length that survived validation but produces an empty outline is a control
+     * that would do nothing.
+     */
+    const maskArea = (mask: FxMask): ResolvedFxMask | { error: string } => {
+      const shape: CrosshairShape = { kind: mask.kind, length: mask.length,
+        ...(mask.width !== undefined ? { width: mask.width } : {}),
+        ...(mask.spread !== undefined ? { spread: mask.spread } : {}) };
+      // The scene's own metric decides what "15 ft" is in pixels. A gridless scene has
+      // no metric at all and is read 1:1 (the crosshair's own fallback), but a *broken*
+      // square/hex grid — distance 0, size NaN — is refused rather than quietly masked
+      // at 1 px per unit: the author asked for a distance and would get a dot.
+      const grid = scene.grid;
+      if (grid.type !== "gridless" &&
+          !(Number.isFinite(grid.size) && grid.size > 0 && Number.isFinite(grid.distance) && grid.distance > 0))
+        return { error: "an FX mask needs a usable scene grid metric" };
+      const area = crosshairArea({ x: 0, y: 0 }, shape, grid, mask.angle ?? 0);
+      if (area.length === 0) return { error: "an FX mask must resolve to a region" };
+      return { area, invert: mask.invert === true };
+    };
+    /** The resolved-mask part of a section payload, or a refusal. */
+    const maskCoords = (): { ok: true; mask?: ResolvedFxMask } | { ok: false; error: string } => {
+      if (!section.mask) return { ok: true };
+      const resolved = maskArea(section.mask);
+      if ("error" in resolved) return { ok: false, error: resolved.error };
+      return { ok: true, mask: resolved };
+    };
+
     const start = anchor(section.at);
     if (!start.ok) return start;
     const destination = section.to ? anchor(section.to) : null;
@@ -484,18 +585,22 @@ export function resolveFxSequence(
       ...(destination?.ok ? { toX: destination.x, toY: destination.y } : {}),
       ...(fromId ? { followTokenId: fromId } : {}),
       ...(toId ? { followToTokenId: toId } : {}) };
+    const mask = maskCoords();
+    if (!mask.ok) return mask;
     if (section.kind === "text") {
-      const { at: _anchor, to: _to, repeatCount: _count, repeatDelayMs: _gap, ...projected } = section;
-      void _anchor; void _to; void _count; void _gap;
-      sections.push({ ...projected, ...coords });
+      // The authored `mask` is dropped here and replaced by the resolved one: what
+      // travels is a polygon, never the author's scene-unit numbers.
+      const { at: _anchor, to: _to, mask: _mask, repeatCount: _count, repeatDelayMs: _gap, ...projected } = section;
+      void _anchor; void _to; void _mask; void _count; void _gap;
+      sections.push({ ...projected, ...coords, ...(mask.mask ? { mask: mask.mask } : {}) });
       continue;
     }
     const mime = mimeOf(section.assetId);
     if (!mime || !VISUAL_MIME.has(mime))
       return { ok: false, error: `missing/unsupported visual: ${section.assetId}` };
-    const { at: _anchor, to: _to, repeatCount: _count, repeatDelayMs: _gap, ...projected } = section;
-    void _anchor; void _to; void _count; void _gap;
-    sections.push({ ...projected, ...coords, mime });
+    const { at: _anchor, to: _to, mask: _mask, repeatCount: _count, repeatDelayMs: _gap, ...projected } = section;
+    void _anchor; void _to; void _mask; void _count; void _gap;
+    sections.push({ ...projected, ...coords, ...(mask.mask ? { mask: mask.mask } : {}), mime });
   }
   // All authored anchors and media are preflighted before any playback cue is
   // exposed. IDs with '@' cannot collide with an authored section ID (the

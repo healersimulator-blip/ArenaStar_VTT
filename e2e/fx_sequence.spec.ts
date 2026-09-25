@@ -908,7 +908,7 @@ test("a blend and a filter survive the host, the save and the renderer", async (
       .__stage?.getFxLayer().inspect() ?? []);
   };
   const live = await run();
-  expect(live[0]).toEqual({ kind: "image", blend: "screen", filter: "grayscale:0.5" });
+  expect(live[0]).toEqual({ kind: "image", blend: "screen", filter: "grayscale:0.5", mask: null });
 
   // "Normal" really means no blend field and "None" no filter field: a saved no-op is
   // not the same as an authored setting, and the host is told the difference.
@@ -927,7 +927,7 @@ test("a blend and a filter survive the host, the save and the renderer", async (
   await expect(section.locator("[data-fx-filter]")).toHaveValue("none");
   // …and the renderer agrees with the reopened document, not with what was on screen.
   await expect.poll(async () => (await run())[0] ?? null, { timeout: 5_000 })
-    .toEqual({ kind: "image", blend: "normal", filter: null });
+    .toEqual({ kind: "image", blend: "normal", filter: null, mask: null });
 });
 
 // D-300 (SQ-15/SQ-18): a camera section can be targeted. Two real browser contexts —
@@ -1019,4 +1019,79 @@ test("a targeted camera moves only its audience's view", async ({ browser }) => 
     await playerCtx.close();
     await hostCtx.close();
   }
+});
+
+// D-301 (SQ-19/SQ-05): an effect can be confined to a region or cut out of one. The
+// assertion is on the live sprite again — the polygon the host resolved has to be the
+// mask the renderer actually applied.
+test("a mask confines a visual to its region, and a cutout hides what is inside it", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  await wizard.locator('input[type="file"]').setInputFiles({ name: "aura.png", mimeType: "image/png", buffer: png });
+  await expect(wizard.getByRole("status")).toContainText("GM-only playback");
+  await wizard.locator("[data-fx-name]").fill("Warded circle");
+  await wizard.getByRole("button", { name: "Image / video", exact: true }).click();
+  const section = wizard.locator("[data-fx-section]");
+  await section.getByRole("combobox", { name: "Media" }).selectOption({ index: 1 });
+  await section.getByLabel("X", { exact: true }).fill("500");
+  await section.getByLabel("Y", { exact: true }).fill("400");
+  await section.getByLabel("Duration ms").fill("1500");
+
+  // The mask is a document fact with a host-checked metric: the size field's own bounds
+  // are the validator's, and its unit is the scene's own label.
+  await section.locator("[data-fx-mask-kind]").selectOption("circle");
+  await expect(section.locator("[data-fx-mask-length]")).toHaveValue("15");
+  await expect(section.locator("[data-fx-mask-length]")).toHaveAttribute("max", "5000");
+  await expect(section.locator("[data-fx-mask-width]")).toHaveCount(0);
+  await section.locator("[data-fx-mask-length]").fill("10");
+  // Switching kinds rebuilds the shape: a circle's stale fields are gone, and a ray
+  // grows the width/angle controls it actually uses.
+  await section.locator("[data-fx-mask-kind]").selectOption("ray");
+  await expect(section.locator("[data-fx-mask-width]")).toHaveValue("5");
+  await expect(section.locator("[data-fx-mask-angle]")).toHaveValue("0");
+  await section.locator("[data-fx-mask-kind]").selectOption("circle");
+  await expect(section.locator("[data-fx-mask-width]")).toHaveCount(0);
+  await section.locator("[data-fx-mask-length]").fill("12");
+  await wizard.locator("[data-fx-save]").click();
+  await expect(wizard.locator("li")).toContainText(["Warded circle"]);
+
+  await wizard.locator("li").filter({ hasText: "Warded circle" }).getByRole("button", { name: "Edit" }).click();
+  await expect(section.locator("[data-fx-mask-kind]")).toHaveValue("circle");
+  await expect(section.locator("[data-fx-mask-length]")).toHaveValue("12");
+
+  const run = async () => {
+    await wizard.locator("[data-fx-run]").click();
+    await expect.poll(async () => page.evaluate(() => (globalThis as unknown as
+      { __stage?: { getFxLayer: () => { inspect: (runId?: string) => unknown[] } } })
+      .__stage?.getFxLayer().inspect().length ?? 0), { timeout: 5_000 }).toBeGreaterThan(0);
+    return page.evaluate(() => (globalThis as unknown as { __stage?: { getFxLayer: () => {
+      inspect: (runId?: string) => Array<{ kind: string; mask: { points: number; invert: boolean } | null }> } } })
+      .__stage?.getFxLayer().inspect()[0] ?? null);
+  };
+  const live = await run();
+  // A 12-unit circle against a 100 px / 5 ft grid is a 240 px radius ring, sampled into
+  // the shared crosshair's own 16-point resolution — the same polygon an author sees.
+  expect(live?.mask).toEqual({ points: 16, invert: false });
+
+  // A cutout is the same geometry, inverted: the sprite survives *outside* the shape.
+  await section.locator("[data-fx-mask-invert]").check();
+  const before = await hostCall<number>(page, "seq");
+  await wizard.locator("[data-fx-save]").click();
+  await expect.poll(() => hostCall<number>(page, "seq"), { timeout: 5_000 }).toBeGreaterThan(before);
+  await wizard.locator("li").filter({ hasText: "Warded circle" }).getByRole("button", { name: "Edit" }).click();
+  await expect(section.locator("[data-fx-mask-invert]")).toBeChecked();
+  await expect.poll(async () => (await run())?.mask, { timeout: 5_000 })
+    .toEqual({ points: 16, invert: true });
+
+  // "None" removes the mask entirely rather than storing a shape that masks nothing.
+  await section.locator("[data-fx-mask-kind]").selectOption("none");
+  await expect(section.locator("[data-fx-mask-length]")).toHaveCount(0);
+  const beforeClear = await hostCall<number>(page, "seq");
+  await wizard.locator("[data-fx-save]").click();
+  await expect.poll(() => hostCall<number>(page, "seq"), { timeout: 5_000 }).toBeGreaterThan(beforeClear);
+  await expect.poll(async () => (await run())?.mask, { timeout: 5_000 }).toBeNull();
 });

@@ -5,8 +5,8 @@
  * live sprite, not merely that something was applied.
  */
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
-import { BlurFilter, ColorMatrixFilter, Container, Sprite, Texture } from "pixi.js";
-import { FxLayer, fxPixiFilter } from "../../src/canvas/layers/FxLayer";
+import { BlurFilter, ColorMatrixFilter, Container, Graphics, Sprite, Texture } from "pixi.js";
+import { FxLayer, fxMaskGraphics, fxPixiFilter } from "../../src/canvas/layers/FxLayer";
 import type { ResolvedFxSection } from "../../src/core/fx";
 
 type ImageSection = Extract<ResolvedFxSection, { kind: "image" }>;
@@ -54,7 +54,7 @@ describe("FX appearance on the canvas (§SQ-05, D-299)", () => {
   test("a spawned visual carries its blend and its one filter; inspection reports both", () => {
     const fx = layer();
     fx.spawn("run", image({ blend: "screen", filter: { kind: "blur", strength: 4 } }), 0, Texture.EMPTY);
-    expect(fx.inspect("run")).toEqual([{ kind: "image", blend: "screen", filter: "blur:4" }]);
+    expect(fx.inspect("run")).toEqual([{ kind: "image", blend: "screen", filter: "blur:4", mask: null }]);
     // The view itself — not just the plan — is what was styled.
     const view = viewOf(fx, "run");
     expect(view.blendMode).toBe("screen");
@@ -64,7 +64,7 @@ describe("FX appearance on the canvas (§SQ-05, D-299)", () => {
   test("an unstyled visual is normal blending with no filter at all", () => {
     const fx = layer();
     fx.spawn("run", image(), 0, Texture.EMPTY);
-    expect(fx.inspect("run")).toEqual([{ kind: "image", blend: "normal", filter: null }]);
+    expect(fx.inspect("run")).toEqual([{ kind: "image", blend: "normal", filter: null, mask: null }]);
     expect(viewOf(fx, "run").filters).toBeFalsy();
   });
 
@@ -72,11 +72,11 @@ describe("FX appearance on the canvas (§SQ-05, D-299)", () => {
     const fx = layer();
     fx.spawn("a", image({ blend: "add" }), 0, Texture.EMPTY);
     fx.spawn("b", image({ filter: { kind: "grayscale", strength: 0.5 } }), 0, Texture.EMPTY);
-    expect(fx.inspect("a")).toEqual([{ kind: "image", blend: "add", filter: null }]);
+    expect(fx.inspect("a")).toEqual([{ kind: "image", blend: "add", filter: null, mask: null }]);
     expect(fx.inspect().length).toBe(2);
     fx.clear("a");
     expect(fx.inspect("a")).toEqual([]);
-    expect(fx.inspect("b")).toEqual([{ kind: "image", blend: "normal", filter: "grayscale:0.5" }]);
+    expect(fx.inspect("b")).toEqual([{ kind: "image", blend: "normal", filter: "grayscale:0.5", mask: null }]);
   });
 
   test("the filter stays put while the fade moves: alpha is composed per frame, not per filter", () => {
@@ -88,5 +88,83 @@ describe("FX appearance on the canvas (§SQ-05, D-299)", () => {
     fx.tick(500);
     expect(view.alpha).toBeCloseTo(0.5, 5);
     expect(view.filters?.[0]).toBeInstanceOf(ColorMatrixFilter); // untouched by the tick
+  });
+});
+
+describe("effect masks on the canvas (§SQ-19, D-301)", () => {
+  const circle = (radius: number) => {
+    const area = Array.from({ length: 16 }, (_, i) => {
+      const angle = (i / 16) * Math.PI * 2;
+      return { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius };
+    });
+    return { area, invert: false };
+  };
+
+  test("a mask is a polygon; a cutout is that polygon removed from a rectangle that covers it", () => {
+    const ring = circle(40);
+    type RecordedPath = { instructions?: Array<{ action: string; data?: unknown[] }> };
+    /** The flattened points of the first `poly` subpath inside a recorded path. */
+    const polyPoints = (value: unknown): unknown => {
+      const path = value as RecordedPath | undefined;
+      return path?.instructions?.find((instruction) => instruction.action === "poly")?.data?.[0] ?? null;
+    };
+    /** A fill instruction's `data` holds the path (and, for a cutout, its hole). */
+    const dataOf = (instruction: unknown) =>
+      (instruction as { data?: { path?: RecordedPath; hole?: RecordedPath } } | undefined)?.data;
+
+    const ringPoints = ring.area.flatMap((point) => [point.x, point.y]);
+    const mask = fxMaskGraphics(ring);
+    const filled = dataOf(mask.context.instructions[0]);
+    expect(mask.context.instructions.map((instruction) => instruction.action)).toEqual(["fill"]);
+    // A plain mask fills the very ring the host resolved.
+    expect(polyPoints(filled?.path)).toEqual(ringPoints);
+    expect(filled?.hole).toBeFalsy();
+
+    const cutout = fxMaskGraphics({ ...ring, invert: true }, 60);
+    const cutFill = dataOf(cutout.context.instructions[0]);
+    // A cutout fills a rectangle covering the sprite and carries the ring as its *hole*:
+    // the sprite survives outside the shape, which is what "cut out" means.
+    expect(cutout.context.instructions.map((instruction) => instruction.action)).toEqual(["fill"]);
+    expect(cutFill?.path?.instructions?.some((instruction) => instruction.action === "rect")).toBe(true);
+    expect(polyPoints(cutFill?.path)).toBeNull(); // the ring is not also filled
+    expect(polyPoints(cutFill?.hole)).toEqual(ringPoints);
+  });
+
+  test("a spawned visual is clipped by its mask, and inspection reports the region", () => {
+    const fx = layer();
+    fx.spawn("run", image({ mask: circle(50) }), 0, Texture.EMPTY);
+    expect(fx.inspect("run")).toEqual([{ kind: "image", blend: "normal", filter: null,
+      mask: { points: 16, invert: false } }]);
+    const view = viewOf(fx, "run");
+    expect(view.mask).toBeInstanceOf(Graphics);
+    // The polygon is an offset polygon, so the mask itself sits on the anchor.
+    expect((view.mask as Graphics).position.x).toBe(100);
+    expect((view.mask as Graphics).position.y).toBe(100);
+  });
+
+  test("the region travels with a followed anchor: moving the token moves the mask, not the art", () => {
+    let centre = { x: 100, y: 100 };
+    const fx = new FxLayer(new Container(), new Container(), () => centre);
+    fx.spawn("run", image({ followTokenId: "t", mask: circle(30) }), 0, Texture.EMPTY);
+    const view = viewOf(fx, "run");
+    centre = { x: 420, y: 310 };
+    fx.tick(16);
+    expect(view.position.x).toBe(420);
+    expect((view.mask as Graphics).position.x).toBe(420);
+    expect((view.mask as Graphics).position.y).toBe(310);
+  });
+
+  test("an unmasked visual reports no mask, and stopping the cue destroys the mask with it", () => {
+    const fx = layer();
+    fx.spawn("plain", image(), 0, Texture.EMPTY);
+    fx.spawn("masked", image({ mask: circle(20) }), 0, Texture.EMPTY);
+    expect(fx.inspect("plain")[0]?.mask).toBeNull();
+    const view = viewOf(fx, "masked");
+    const mask = view.mask as Graphics;
+    const destroyed = vi.fn();
+    mask.on("destroyed", destroyed);
+    fx.clear("masked");
+    expect(destroyed).toHaveBeenCalled();
+    expect(fx.inspect()).toHaveLength(1);
   });
 });

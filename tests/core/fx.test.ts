@@ -445,3 +445,114 @@ describe("camera targeting: one run, different views (§SQ-15/SQ-18, D-300)", ()
     expect(fxSectionsForViewer(shake.sections, { id: "p", isGm: false }, "p")).toHaveLength(0);
   });
 });
+
+describe("effect masks and cutouts (§SQ-19/SQ-05, D-301)", () => {
+  const masked = (mask: unknown) => ({ version: 1, sections: [{ kind: "image", id: "aura", assetId: hash,
+    at: { kind: "point", x: 200, y: 200 }, startMs: 0, durationMs: 1000, mask } as never] });
+
+  test("four shapes are accepted; a point is refused because it has nothing to mask with", () => {
+    expect(validateFxSequence(masked({ kind: "circle", length: 15 })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "cone", length: 30, spread: 90 })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "ray", length: 60, width: 5, angle: 45 })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "rect", length: 20, width: 10 })).ok).toBe(true);
+    const point = validateFxSequence(masked({ kind: "point" }));
+    expect(point.ok).toBe(false);
+    if (!point.ok) expect(point.error).toContain("cannot be a point");
+    const unknown = validateFxSequence(masked({ kind: "star", length: 5 }));
+    expect(unknown.ok).toBe(false);
+    if (!unknown.ok) expect(unknown.error).toBe("an FX mask must be a circle, cone, ray or rect");
+  });
+
+  test("each shape takes only its own fields, so a stale width is a refusal and not a shrug", () => {
+    expect(validateFxSequence(masked({ kind: "circle", length: 10, width: 4 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "circle", length: 10, angle: 30 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "cone", length: 10, width: 4 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "ray", length: 10 })).ok).toBe(false); // no width
+    expect(validateFxSequence(masked({ kind: "rect", length: 10, width: 4, spread: 90 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "rect", length: 10, width: 4, opacity: 1 })).ok).toBe(false);
+  });
+
+  test("metrics are bounded in scene units, and invert is a boolean", () => {
+    expect(validateFxSequence(masked({ kind: "circle", length: 0.4 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "circle", length: 5_001 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "ray", length: 20, width: 0 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "cone", length: 20, spread: 400 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "cone", length: 20, spread: 0 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "ray", length: 20, width: 4, angle: -400 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "circle", length: 10, invert: "yes" })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "circle", length: 10, invert: true })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "circle", length: "ten" })).ok).toBe(false);
+  });
+
+  test("a mask belongs to a visual: sound, wait and camera sections refuse it as unknown", () => {
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "sound", id: "s", assetId: sound,
+      startMs: 0, durationMs: 500, mask: { kind: "circle", length: 5 } } as never] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "wait", id: "w", startMs: 0,
+      durationMs: 500, mask: { kind: "circle", length: 5 } } as never] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "camera", id: "c", mode: "pan",
+      to: { kind: "point", x: 10, y: 10 }, startMs: 0, durationMs: 500,
+      mask: { kind: "circle", length: 5 } } as never] }).ok).toBe(false);
+  });
+
+  test("the host resolves the shape into an offset polygon against the scene's own grid", () => {
+    // The fixture scene is 100 px per 5 ft, so a 15 ft circle is 300 px of radius.
+    const resolved = resolveFxSequence(masked({ kind: "circle", length: 15 }) as FxSequence,
+      scene, source, source, () => "image/png");
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    const section = resolved.sections[0] as Extract<typeof resolved.sections[number], { mask?: unknown }>;
+    const mask = section.mask as { area: Array<{ x: number; y: number }>; invert: boolean };
+    expect(mask.invert).toBe(false);
+    expect(mask.area.length).toBeGreaterThan(8);
+    const radius = Math.max(...mask.area.map((point) => Math.hypot(point.x, point.y)));
+    expect(radius).toBeCloseTo(300, 3);
+    // Relative to the anchor: the polygon is centred on the origin, not on (200, 200).
+    const centroid = mask.area.reduce((sum, point) => ({ x: sum.x + point.x, y: sum.y + point.y }),
+      { x: 0, y: 0 });
+    expect(Math.abs(centroid.x / mask.area.length)).toBeLessThan(1);
+    expect(Math.abs(centroid.y / mask.area.length)).toBeLessThan(1);
+    // The authored numbers are gone: what travels is the polygon.
+    expect(section.mask && "kind" in section.mask).toBe(false);
+    expect(JSON.stringify(resolved.sections)).not.toContain('"length"');
+  });
+
+  test("a cutout and an angle survive resolution; a shape with no metric is refused", () => {
+    const cut = resolveFxSequence(masked({ kind: "rect", length: 20, width: 10, angle: 90, invert: true }) as FxSequence,
+      scene, source, source, () => "image/png");
+    expect(cut.ok).toBe(true);
+    if (!cut.ok) return;
+    const mask = (cut.sections[0] as { mask?: { area: Array<{ x: number; y: number }>; invert: boolean } }).mask;
+    expect(mask?.invert).toBe(true);
+    // A 90° rect is taller than it is wide: its vertical extent is the length.
+    const height = Math.max(...(mask?.area ?? []).map((point) => Math.abs(point.y)));
+    const width = Math.max(...(mask?.area ?? []).map((point) => Math.abs(point.x)));
+    expect(height).toBeGreaterThan(width);
+    // A broken grid metric is refused: "15 ft" with no scale is not 15 px, it is a
+    // document the author cannot mean. A gridless scene is read 1:1 instead, which is
+    // the crosshair's own rule for a scene that has no metric by design.
+    const metricless = { ...scene, grid: { ...scene.grid, distance: 0 } };
+    const refused = resolveFxSequence(masked({ kind: "circle", length: 15 }) as FxSequence,
+      metricless, source, source, () => "image/png");
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.error).toContain("grid metric");
+    // A gridless scene *with* a metric converts exactly the same way (the picker reads
+    // the same fields), and a gridless scene without one is read 1:1 — its own rule for
+    // a scene that has no scale by design.
+    const gridless = { ...scene, grid: { ...scene.grid, type: "gridless" as const } };
+    const sameMetric = resolveFxSequence(masked({ kind: "circle", length: 15 }) as FxSequence,
+      gridless, source, source, () => "image/png");
+    expect(sameMetric.ok).toBe(true);
+    if (sameMetric.ok)
+      expect(Math.max(...((sameMetric.sections[0] as { mask?: { area: Array<{ x: number; y: number }> } })
+        .mask?.area ?? []).map((point) => Math.hypot(point.x, point.y)))).toBeCloseTo(300, 3);
+    const unmeasured = { ...scene,
+      grid: { ...scene.grid, type: "gridless" as const, size: 0, distance: 0 } };
+    const oneToOne = resolveFxSequence(masked({ kind: "circle", length: 15 }) as FxSequence,
+      unmeasured, source, source, () => "image/png");
+    expect(oneToOne.ok).toBe(true);
+    if (oneToOne.ok) {
+      const shape = (oneToOne.sections[0] as { mask?: { area: Array<{ x: number; y: number }> } }).mask;
+      expect(Math.max(...(shape?.area ?? []).map((point) => Math.hypot(point.x, point.y)))).toBeCloseTo(15, 3);
+    }
+  });
+});

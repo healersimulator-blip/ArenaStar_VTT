@@ -9583,3 +9583,89 @@ WebKit run or the 41-scenario acceptance matrix.
   suite ran alongside it (**21/21** together) and the canvas/interaction batch
   (`canvas_rail` + `canvas_toolbar` + `vision` + `walls` + `join`) is **20/20** against
   the rebuilt production file.
+
+## D-301 — masks and cutouts: the crosshair's own geometry, resolved by the host (2026-09-25)
+
+D-299 landed blend and one filter and left the third word of SQ-05's sentence — "mask/
+cutout" — and SQ-19's "effects can mask tokens/templates/regions" open. This decision
+lands the bounded half of both: a visual section can be confined to a region, or have
+that region cut out of it.
+
+**The geometry is not new.** A mask is one of the **shared crosshair's** shapes —
+circle, cone, ray or rect — measured in scene units against the scene's own grid
+metric. That is deliberate: "a 15 ft circle" must mean the same thing whether an author
+is placing a summon or masking an aura, and the codebase already had exactly one
+implementation of that sentence (`crosshairArea`, D-296). The mask reuses it, so the
+polygon an author sees drawn under the cursor is the polygon that clips the sprite.
+
+**The host resolves it, in offsets.** `resolveFxSequence` turns the authored shape into
+a polygon of **world-pixel offsets from the visual's anchor**; the authored scene-unit
+numbers do not travel. Two consequences worth stating: a followed effect's mask travels
+with it (the renderer moves the polygon to whatever anchor the frame is using, so a mask
+on a token's aura does not stay behind where the host last saw the token), and a stored
+`FxInstanceDocument` keeps the polygon, so a replay is the same shape rather than a
+re-derivation that could drift with a later grid change. `validateFxInstance` checks
+that stored polygon in its resolved form — 3–256 finite offsets plus a boolean — because
+reconstructing authored anchors is exactly the bypass the previous validation existed to
+prevent.
+
+**A point cannot be a mask, and a broken grid metric is a refusal.** The crosshair's
+fifth shape is `point`, which has no area: it would hide everything or nothing, so it is
+refused with a message that says so rather than silently doing one of the two. And where
+the crosshair's own `crosshairPxPerUnit` deliberately falls back to 1:1 (it is a preview
+tool and must not produce NaN on screen), a **host-resolved mask** refuses a broken
+square/hex metric instead: an author who typed "15 ft" is owed 15 ft, not 15 px. A
+gridless scene — which has no metric by design — is read 1:1, which is the same reading
+the picker gives it.
+
+**Per-shape field sets, so switching kinds cannot leave a lie behind.** A circle takes
+`kind/length/invert`; a cone adds `spread` and `angle`; a ray and a rect take
+`length/width/angle/invert`. A stale `width` on a circle is a refusal, not a shrug — the
+panel rebuilds the shape when the kind changes, and "None" removes the field entirely
+(the D-299 msgpack lesson, applied pre-emptively this time).
+
+**Rendering.** The mask is built once at spawn (like the filter) and only *moved* per
+frame. It lives in the parent container's space, so it does **not** rotate or scale with
+the art: a circle on the ground stays a circle whichever way the sprite is turned. A
+cutout is the inverse — a rectangle large enough to cover the sprite with the shape as
+its hole (pixi's own `cut()`), so the sprite survives *outside* the shape. Tests assert
+that shape directly: the polygon's points in a plain mask, and rect-plus-hole in a
+cutout, plus the mask travelling with a followed anchor and being destroyed with the cue.
+
+**Non-claims.** No wall-bounded or polygon-authored masks, no masks that follow a
+rotating/animating region, no masks on sound/camera/wait sections, no mask *animation*
+(the region is fixed for the section's life), no per-recipient masks, no wet-erase
+softness/feather or gradient masks, no elevation-aware or occlusion-based masks, and no
+Firefox/WebKit run or the 41-scenario acceptance matrix.
+
+**Gates.**
+
+- `pnpm test` — **3 707 passed / 12 skipped** (297 files: 295 passed, 2 skipped). New:
+  five cases in `tests/core/fx.test.ts` for masks (the four shapes accepted with `point`
+  and an unknown kind refused by name; each kind's own fields enforced — a circle with a
+  width, a ray without one, a rect with a spread; metric bounds in scene units, spread
+  bounds and the invert boolean; the field refused as unknown on sound, wait and camera
+  sections; and resolution: a 15 ft circle on the fixture's 100 px/5 ft grid becoming a
+  300 px ring of offsets centred on the origin, with the authored `length` absent from
+  the travelling payload, a rotated cutout's extents, a broken metric refused and a
+  gridless scene read 1:1), one in `tests/core/fxInstances.test.ts` (a stored cue's
+  resolved polygon — accepted, and refused for two points, a non-finite vertex, 257
+  points, a non-boolean invert, or the authored `{kind, length}` form), and four in
+  `tests/canvas/fxStyle.test.ts` (a plain mask fills the ring the host resolved; a cutout
+  fills a covering rect and carries the ring as its hole; a spawned sprite is clipped by
+  a mask sitting on its anchor, reported by inspection as `{points, invert}`; a followed
+  anchor moves the mask with the art; an unmasked sprite reports none and a stop destroys
+  the mask with the cue).
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing) · `pnpm lint` **exit 0** · `pnpm build` → `pnpm size` **3 819 019 B raw /
+  1 094 400 B gzip**, inside the 6 MB budget. No wire change: `mask` rides the existing
+  `fx.start` cue as one more resolved field.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **18/18** — the new spec
+  authors a circle mask (checking that the panel's own bounds are the validator's, that
+  switching to a ray grows width/angle controls and switching back removes them), saves,
+  reopens, and reads the live sprite's mask back as `{points: 16, invert: false}` (the
+  crosshair's own circle resolution); ticking "Cut out" and saving turns the same
+  geometry into `{invert: true}`; "None" removes it, and the re-read row is `mask: null`.
+  The `summons` suite ran alongside it (**22/22** together) and the canvas/interaction
+  batch (`canvas_rail` + `canvas_toolbar` + `vision` + `walls` + `join`) is **20/20**
+  against the rebuilt production file.
