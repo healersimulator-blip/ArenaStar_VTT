@@ -10142,3 +10142,106 @@ or the §10 41-scenario matrix.
   points (the wall's edge is in the polygon). The `summons` suite ran alongside it
   (**28/28** together) and the canvas/interaction batch (`canvas_rail` + `canvas_toolbar` +
   `vision` + `walls` + `join`) is **20/20**.
+
+## D-308 — the table answers: media acknowledgment (2026-09-25)
+
+SQ-13 has said "who is *entitled* to this cue" since D-295 (`fx.delivery`). That is a
+different question from "will the table actually see it": the bytes still have to arrive,
+and each browser still has to decode them. Until now only the viewer's own screen knew the
+answer — a GM could not tell a broken timeline from one that worked, and a cue that fetched
+fine but failed to decode on every player looked exactly like a success. This decision
+closes the row: **the viewers report what they did with the media**, and the host turns
+those answers into one line for the requester.
+
+**One new kind, one optional field.** `fx.media` (0x4e, client → host) carries one viewer's
+answer about one asset: `ready` (in hand, with how long the fetch took), `late` (in hand
+but past the section's start, with how late), `failed` (with `reason: fetch | decode`) or
+`unsupported` (this browser cannot decode the format — said before a byte is fetched or
+while decoding). `fx.delivery` (0x4d) gains an optional `media` report so the requester
+reads both halves in the same place. No new host → client kind was needed, and nothing
+about a cue's *authority* changed: this is reporting, not mechanics.
+
+**No identifiers, and no error strings either.** The report counts per asset and names it
+by **the requester's own section index** — no asset hash (that rule already guarded
+`fx.delivery`, and the honest way to keep it is to let the author count the section they
+wrote), and no user id. The ack carries a *closed set* of reasons rather than a `detail`
+string, because a fetch error is a place for a URL or an asset hash to reach a GM's report.
+The host also ignores anything it did not expect — a session that was not a recipient of
+that run (expectations are fixed when the cue is fanned out, so a player who joins later
+has no standing to answer), an asset the run does not use, a `runId` that is not a run,
+a state that is not one of the four, or an absurd `ms` — and it *ignores* rather than
+rejects: a session probing run ids learns nothing, not even whether the run exists.
+
+**The latest answer is the true one.** A prefetch that failed at cue start and succeeded
+when the section actually needed the bytes has the media, so a later ack replaces an
+earlier one rather than accumulating the worst of both. The client only speaks when its
+answer changes, so the wire carries transitions and not heartbeats.
+
+**Three things close the window, and at most two lines per run.** The first line goes out
+when (a) a viewer reports `failed`/`unsupported` — the emergency, because the GM may still
+stop a cue that is playing wrong — (b) every recipient has answered about every asset, or
+(c) the wait expires: the run's own last media section plus two seconds, never under four
+seconds and never over a minute, swept by one `unref`'d timer next to the summon sweep.
+Then exactly **one correction** may follow, and only when the *whole* answer changed —
+including a viewer that was silent when the first line went out and has since said "ready",
+because a report still saying "have not reported yet" after everybody has reported is worse
+than a late one. After that, further acks update the record silently: two lines per run is
+the bound, and it is deliberate.
+
+**A "ready" that means the bytes, and a skip that is nobody's business.** `ready` is the
+fetch's own fact — it is what the preload half of SQ-13 is about — so a decode failure
+arrives *later* and replaces it, and the client's own report (D-295) still carries the
+detail string for the viewer. A viewer that locally muted a sound, or turned a channel to
+zero, reports **nothing**: a device preference stays on the device, so the GM sees "no
+word" rather than learning what a player muted. A refused format is not even downloaded —
+`canPlayType` answering `""` is a hard no, so the section reports its own
+`unsupported-codec` and spends no bandwidth (a shell without a DOM claims no opinion and
+fetches as usual). A `lateMedia: "skip"` cue still reports `late`: the bytes *were* there,
+and it is the timeline's own timing that was wrong.
+
+**Where the answers are counted, and what stays out.** Receipts are bounded (32 runs, oldest
+evicted) and dropped once the correction window closes; the per-run wait is one timer, not
+one per viewer. Only a GM/assistant requester is told — the counts describe other sessions,
+the same reason a player-initiated request never gets the preflight line. A **persistent**
+instance gets no receipt at all: it loops and is re-sent on reconnect, so no single moment's
+answer would mean anything. A local draft preview never acks (it never left this client),
+and a *script*-driven cue (`fx.play` from a reviewed Worker) is not reported either — its
+trace is where a script's outcome belongs.
+
+**Gates.**
+
+- `pnpm test` — **3 747 passed / 12 skipped** (297 files: 295 passed, 2 skipped). New: 4
+  cases in `tests/core/fxDelivery.test.ts` (per-asset counting, the worst asset named by
+  section number, the all-clear with the slowest fetch, a run where nobody answers at all —
+  which caught a real bug: a recipient absent from the ack map was not counted as *silent*
+  for every asset — and a marked correction), 6 in `tests/client/fxDeliveryFlow.test.ts`
+  (a prefetch's cost reported before the section starts, a lazy fetch reported at play time,
+  a format this browser refuses reported *and not downloaded*, bytes that cannot play
+  replacing an earlier `ready`, a muted sound reporting nothing, and a draft preview saying
+  nothing), and 5 in `tests/host/sync.test.ts` (the immediate failure line, one correction
+  and then silence however the answer flips, the forging matrix, no line for a
+  player-initiated request, and — under fake timers — the window closing on its own with
+  "no word" for everybody). The frame/fixtures/contracts/protocol-doc tests pin the new
+  kind: 60 total message kinds, direction `c2h`, `PROTOCOL.md` documented.
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** · `pnpm lint` **exit 0** ·
+  `pnpm build` → `pnpm size` **3 841 737 B raw / 1 101 695 B gzip**, inside the 6 MB budget.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **26/26**, including two new
+  two-context specs over a real socket — one where a GM and a joined player both hold a
+  shared 1×1 PNG and the requester reads "media in hand … 1 asset(s) × 2 viewer(s)" while
+  the viewer hears nothing (no news is the right amount); and one where the *player's*
+  browser has `canPlayType` taken away by an init script, so the early line says "2 of 2
+  viewer(s) … 1 cannot decode this format; 1 have not reported yet" and is then **corrected**
+  to "1 of 2 viewer(s) … (corrected)" as the other viewer's honest answer lands. The
+  `summons` suite alongside is **28/28** (30/30 together) and the canvas/interaction batch
+  (`canvas_rail` + `canvas_toolbar` + `vision` + `walls` + `join`) is **20/20**.
+- A `vi.useFakeTimers()` leak was caught while writing the host tests (my first version
+  awaited a real-timer helper inside the fake scope, so the test hung and the fake clock
+  escaped into every later FX test): the request now happens under the fake clock and only
+  `advanceTimersByTimeAsync` awaits, which is what the "window closes" case actually needs.
+
+**Non-claims.** A viewer that reports nothing is never distinguished from one that muted,
+skipped or disconnected — the report's honest word is "have not reported yet". Per-recipient
+media expectations (the run's asset list is the same for every viewer while only camera
+sections are targetable), receipts for persistent instances or reviewed-script cues, a
+retry/repair flow, per-asset asset *names* in the message (deliberately only the section
+index), server-side metrics or logs, and no Firefox/WebKit run or the §10 41-scenario matrix.

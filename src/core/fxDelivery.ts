@@ -10,7 +10,7 @@
  * All of it is pure: the player owns sockets, timers and decoders, not policy.
  */
 import type { ResolvedFxSection } from "./fx";
-import type { FxDeliverySkips } from "./messages";
+import type { FxDeliverySkips, FxMediaAckState } from "./messages";
 import type { AssetManifestEntry } from "./documents";
 import { fxAssetFitness, type CanPlay, type FxAssetFitness } from "./fxPrefs";
 
@@ -205,4 +205,143 @@ export function summarizeSkips(
   const reach = recipients === 0 ? "reached no one" : `reached ${recipients} viewer(s)`;
   const skippedText = total > 0 ? `${total} skipped (${reasons.join(", ")})` : reasons.join(", ");
   return `${name}: ${reach} — ${skippedText}`;
+}
+
+// ─── D-308: the table's own answer about the media (SQ-13's second half) ──────
+//
+// D-295 answered "who was *entitled* to this cue" before it went out. That is not the
+// same question as "will the table actually see it": bytes still have to arrive, and a
+// browser still has to decode them. This half is the viewers' side of the report, and
+// it is deliberately three counts per asset rather than a list of names — the GM learns
+// that *something* did not reach the table and what to fix, without a socket payload
+// becoming a membership query (the same rule `summarizeSkips` follows).
+
+/**
+ * The state a viewer currently reports for one asset. Deliberately **the latest** ack, not
+ * the worst one: a viewer that failed to fetch at cue start and succeeded when the section
+ * actually needed the bytes has the media, and a report that kept saying "failed" would be
+ * lying about the table's present. The reverse — a decode failure after a happy prefetch —
+ * arrives later, so it wins too. A report that was already sent is corrected instead
+ * (`FxMediaReport.corrected`), and only when the set of viewers *lacking* media changes.
+ */
+export type FxMediaAckStates = ReadonlyMap<string, FxMediaAckState>;
+
+/** One asset of a run, as the requester's own timeline numbers it. */
+export interface FxMediaReportEntry {
+  /** Index into the cue's own section list — the numbering the author sees. */
+  index: number;
+  kind: "image" | "sound";
+  mime: string;
+  ready: number;
+  late: number;
+  failed: number;
+  unsupported: number;
+  /** Recipients that have said nothing about this asset yet. */
+  silent: number;
+}
+
+export interface FxMediaReport {
+  /** One entry per distinct asset the run uses, in timeline order. */
+  assets: FxMediaReportEntry[];
+  /** Sessions the cue was fanned out to. */
+  viewers: number;
+  /** How many of them have spoken about at least one asset — the progress half. */
+  spoke: number;
+  /** Every viewer answered for every asset: the report is final, not a snapshot. */
+  complete: boolean;
+  /** The slowest successful fetch among the `ready` acks that had to fetch (ms). */
+  slowestReadyMs?: number;
+  /** A **second** (and last) line for this run: an early answer changed after the fact. */
+  corrected?: boolean;
+}
+
+/** What the host knows about one run's media: acks per session, folded to states. */
+export interface FxMediaAckRecord {
+  /** sessionId → (assetId → the worst state that session has reported). */
+  bySession: ReadonlyMap<string, ReadonlyMap<string, FxMediaAckState>>;
+  /** sessionId → the fetch time (ms) it reported for an asset it had to fetch. */
+  fetchMs?: ReadonlyMap<string, ReadonlyMap<string, number>>;
+}
+
+/**
+ * Fold the acks into the report the requester reads. `recipients` is the number of
+ * sessions the cue reached; a recipient that has said nothing about an asset is
+ * `silent` for it, which is the honest word for "still fetching, or gone".
+ */
+export function fxMediaReport(
+  assets: ReadonlyArray<{ assetId: string; index: number; kind: "image" | "sound"; mime: string }>,
+  recipients: number,
+  acks: FxMediaAckRecord,
+  options: { corrected?: boolean } = {},
+): FxMediaReport {
+  const entries: FxMediaReportEntry[] = [];
+  let spoke = 0;
+  let slowestReadyMs = 0;
+  let answered = 0;
+  for (const asset of assets) {
+    const entry: FxMediaReportEntry = { index: asset.index, kind: asset.kind, mime: asset.mime,
+      ready: 0, late: 0, failed: 0, unsupported: 0, silent: 0 };
+    let counted = 0;
+    for (const [sessionId, states] of acks.bySession) {
+      const state = states.get(asset.assetId);
+      if (state === undefined) continue;
+      counted++;
+      answered++;
+      entry[state] += 1;
+      if (state === "ready")
+        slowestReadyMs = Math.max(slowestReadyMs, acks.fetchMs?.get(sessionId)?.get(asset.assetId) ?? 0);
+    }
+    // A viewer that has said nothing *at all* is not in the ack map: it is silent about
+    // every asset, which is the honest word for "still fetching, or gone".
+    entry.silent = Math.max(0, recipients - counted);
+    entries.push(entry);
+  }
+  for (const states of acks.bySession.values()) if (states.size > 0) spoke++;
+  return { assets: entries, viewers: recipients, spoke,
+    complete: answered === recipients * assets.length,
+    ...(slowestReadyMs > 0 ? { slowestReadyMs: Math.round(slowestReadyMs) } : {}),
+    ...(options.corrected ? { corrected: true } : {}) };
+}
+
+/** A viewer lacks this asset for a reason it *reported* — the urgent half of a report. */
+export function mediaLacking(entry: FxMediaReportEntry): number {
+  return entry.failed + entry.unsupported + entry.late;
+}
+
+/**
+ * The one line the requester gets. `null` is never returned: unlike a viewer's own
+ * unsolicited report, this one was asked for, so an all-clear is news too ("media in
+ * hand for everybody" is the answer to the GM's question, not noise).
+ */
+export function summarizeMedia(
+  report: FxMediaReport,
+  name = "FX timeline",
+): { level: "info" | "warn"; message: string } {
+  const tail = report.corrected ? " (corrected)" : "";
+  const affected = (entry: FxMediaReportEntry): number => mediaLacking(entry) + entry.silent;
+  const worst = [...report.assets].sort((a, b) =>
+    affected(b) - affected(a) || mediaLacking(b) - mediaLacking(a) || a.index - b.index)[0];
+  const lacking = worst ? mediaLacking(worst) : 0;
+  if (!worst || (lacking === 0 && worst.silent === 0)) {
+    const shape = `${report.assets.length} asset(s) × ${report.viewers} viewer(s)`;
+    const slow = report.slowestReadyMs !== undefined ? `; slowest fetch ${report.slowestReadyMs} ms` : "";
+    return { level: "info",
+      message: `${name}: media in hand — every viewer holds all ${shape}${slow}${tail}` };
+  }
+  const parts: string[] = [];
+  if (worst.unsupported > 0) parts.push(`${worst.unsupported} cannot decode this format`);
+  if (worst.failed > 0) parts.push(`${worst.failed} failed to load`);
+  if (worst.late > 0) parts.push(`started late for ${worst.late}`);
+  if (worst.silent > 0)
+    parts.push(lacking > 0 ? `${worst.silent} have not reported yet` : `no word from ${worst.silent}`);
+  const more = report.assets.filter((entry) => affected(entry) > 0).length - 1;
+  const also = more > 0 ? `; ${more} more asset(s) affected` : "";
+  // The asset is named by the requester's own section number: the host sends no asset
+  // identifier, so the author counts the section in the timeline they wrote.
+  const headline = lacking > 0
+    ? `media not in hand for ${lacking + worst.silent} of ${report.viewers} viewer(s)`
+    : `no answer yet for ${worst.silent} of ${report.viewers} viewer(s)`;
+  return { level: "warn",
+    message: `${name}: ${headline} — section ${worst.index + 1} (${worst.kind}, ${worst.mime}): ` +
+      `${parts.join("; ")}${also}${tail}` };
 }

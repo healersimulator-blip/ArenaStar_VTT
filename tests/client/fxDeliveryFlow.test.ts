@@ -70,8 +70,12 @@ function harness() {
   const fails = new Set<string>();
   const reports: FxDeliveryReport[] = [];
   const errors: string[] = [];
+  /** D-308: what this viewer told the host about the run's media. */
+  const mediaAcks: Array<{ runId: string; assetId: string; state: string; reason?: string; ms?: number }> = [];
   const player = new FxPlayer({
-    client: { clockOffset: () => ({ offsetMs: 0 }), requestFxSync: vi.fn() } as unknown as ClientSync,
+    client: { clockOffset: () => ({ offsetMs: 0 }), requestFxSync: vi.fn(),
+      reportFxMedia: (ack: { runId: string; assetId: string; state: string; reason?: string; ms?: number }) =>
+        mediaAcks.push(ack) } as unknown as ClientSync,
     bus, stage,
     fetchAsset: (hash: string) => {
       // The real fetcher dedups in-flight requests per hash; the double here must too,
@@ -92,7 +96,7 @@ function harness() {
     macroName: () => "Test timeline",
   });
   return {
-    bus, player, reports, errors, requests, cameraWrites, spawned,
+    bus, player, reports, errors, requests, cameraWrites, spawned, mediaAcks,
     fail: (hash: string) => fails.add(hash),
     /** Let a fetch finish, then let the microtask queue drain. */
     resolveAsset: async (hash: string) => {
@@ -336,5 +340,90 @@ describe("sound channels, fades and the device-local list (D-297, SQ-09)", () =>
     h.bus.emit("fxEnd", { kind: "fx.end", runId: "run-1", sceneId: SCENE });
     expect(fxSounds()).toEqual([]);
     expect(audios[0]?.pause).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the table answers with what it actually did (D-308, SQ-13)", () => {
+  test("a prefetch that arrived is reported, with what it cost", async () => {
+    const h = harness();
+    h.send([image(600)]);
+    await sleep(60);
+    await h.resolveAsset("aa".repeat(32));
+    await sleep(40);
+    // The answer is about the *bytes*, and it arrives before the section even starts:
+    // that is the preload half of SQ-13 made visible to the requester.
+    expect(h.mediaAcks).toHaveLength(1);
+    expect(h.mediaAcks[0]).toMatchObject({ runId: "run-1", assetId: "aa".repeat(32), state: "ready" });
+    expect(h.mediaAcks[0]?.ms).toBeGreaterThanOrEqual(0);
+    expect(h.spawned).toHaveLength(0);
+  });
+
+  test("a lazy fetch (preloading off) is reported when the section needed it", async () => {
+    setFxViewPrefs({ preloadAheadMs: 0 });
+    const h = harness();
+    h.send([image(0)]);
+    await sleep(40);
+    expect(h.requests).toEqual(["aa".repeat(32)]);
+    expect(h.mediaAcks).toEqual([]); // nothing is known until the bytes are
+    await h.resolveAsset("aa".repeat(32));
+    await sleep(60);
+    expect(h.mediaAcks).toHaveLength(1);
+    expect(h.mediaAcks[0]).toMatchObject({ state: "ready" });
+  });
+
+  test("a format this browser refuses is reported before a byte is fetched", async () => {
+    // The probe is what the browser itself answers; a shell without one claims no opinion.
+    const original = globalThis.document;
+    vi.stubGlobal("document", { createElement: () => ({ canPlayType: () => "" }) });
+    try {
+      const h = harness();
+      h.send([sound(0)]);
+      await sleep(60);
+      expect(h.mediaAcks).toEqual([{ runId: "run-1", assetId: "bb".repeat(32), state: "unsupported" }]);
+      // No point spending a download on a codec this browser already refused.
+      expect(h.requests).toEqual([]);
+    } finally {
+      vi.stubGlobal("document", original);
+    }
+  });
+
+  test("bytes that arrive but cannot play are a failure, not silence", async () => {
+    const original = globalThis.Image;
+    vi.stubGlobal("Image", class {
+      src = "";
+      decode(): Promise<void> { return Promise.reject(new Error("image decode unsupported")); }
+    });
+    try {
+      const h = harness();
+      h.send([image(0)]);
+      await sleep(40);
+      await h.resolveAsset("aa".repeat(32));
+      await sleep(80);
+      // The bytes were in hand (the prefetch said so); the decoder refused them, and the
+      // format is what it refused — the second, later answer is the true one.
+      expect(h.mediaAcks.map((ack) => ack.state)).toEqual(["ready", "unsupported"]);
+      expect(h.mediaAcks[1]).toMatchObject({ runId: "run-1", assetId: "aa".repeat(32) });
+    } finally {
+      vi.stubGlobal("Image", original);
+    }
+  });
+
+  test("a sound this device muted is a local choice, and says nothing to the host", async () => {
+    setFxViewPrefs({ muteSound: true });
+    const h = harness();
+    h.send([sound(0)]);
+    await sleep(80);
+    expect(h.mediaAcks).toEqual([]); // a device preference is not the table's business
+    expect(h.requests).toEqual([]);
+  });
+
+  test("a GM's own draft preview is not reported: it never left this client", async () => {
+    const h = harness();
+    h.player.preview({ kind: "fx.start", runId: "draft-1", macroId: "macro-1", sceneId: SCENE,
+      atHostTime: Date.now(), sections: [image(0)] });
+    await sleep(40);
+    await h.resolveAsset("aa".repeat(32));
+    await sleep(60);
+    expect(h.mediaAcks).toEqual([]);
   });
 });

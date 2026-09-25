@@ -5,14 +5,14 @@
  */
 import { Texture } from "pixi.js";
 import type { Stage } from "../canvas/stage";
-import type { FxStartMsg } from "../core/messages";
+import type { FxMediaAckState, FxStartMsg } from "../core/messages";
 import type { ResolvedFxSection } from "../core/fx";
 import { cameraAt, cameraEnd, type ResolvedCameraSection } from "../canvas/fxCamera";
 import {
   fxMediaCues, fxPreloadPlan, lateMediaDecision, summarizeDelivery,
   type FxDeliveryEntry, type FxDeliveryReport,
 } from "../core/fxDelivery";
-import { fxViewPrefs, subscribeFxViewPrefs, type FxViewPrefs } from "../core/fxPrefs";
+import { domCanPlay, fxAssetFitness, fxViewPrefs, subscribeFxViewPrefs, type FxViewPrefs } from "../core/fxPrefs";
 import { soundChannelOf, soundFadeGain, soundGain } from "../core/fxSound";
 import { registerFxSound, setFxSoundGain } from "./fxSounds";
 import type { Camera } from "../canvas/camera";
@@ -52,6 +52,15 @@ export class FxPlayer {
   private readonly previewRuns = new Set<string>();
   /** A stopped/undone run may reuse its ID: old async decodes must not respawn. */
   private readonly runEpoch = new Map<string, number>();
+  /**
+   * D-308: what this viewer has already told the host about each run's media, so a run
+   * never repeats itself. The *latest* state is the truth (a fetch that failed at cue
+   * start and succeeded when the section actually needed the bytes has the media), so a
+   * change is sent and a repeat is not.
+   */
+  private readonly mediaAcks = new Map<string, Map<string, FxMediaAckState>>();
+  /** This browser's own decoder opinion, cached; `null` in a shell without a DOM. */
+  private readonly canPlay = domCanPlay();
   private scene: string | null;
   private generation = 0;
   private disposed = false;
@@ -100,6 +109,7 @@ export class FxPlayer {
     this.runEpoch.clear();
     this.delivery.clear();
     this.prefetched.clear();
+    this.mediaAcks.clear();
   }
 
   /** Switch/reconnect: no old-scene image, sound or deferred timer survives. */
@@ -154,6 +164,7 @@ export class FxPlayer {
   private stopRun(runId: string): void {
     this.flushDelivery(runId); // a stopped run still reports what it never managed to show
     this.delivery.delete(runId);
+    this.mediaAcks.delete(runId);
     this.prefetched.clear(); // a stopped run's warm promises are its own
     if (this.view?.runId === runId) this.releaseCamera(true);
     this.runEpoch.set(runId, (this.runEpoch.get(runId) ?? 0) + 1);
@@ -200,6 +211,23 @@ export class FxPlayer {
     // A run is "settled" when everything that could produce a delivery entry has
     // resolved: its media cues, plus its camera cues when this viewer asked for
     // reduced motion (only then can a camera cue be degraded).
+    // D-308 (SQ-13): the answers this viewer can give *now* — a format this browser
+    // refuses (known before a byte is fetched, so the fetch is not made at all), media
+    // already in hand, and a fetch that failed for an earlier run. The rest of the
+    // report arrives as the bytes do.
+    const undecodable = new Set<string>();
+    for (const item of fxMediaCues(cue.sections)) {
+      if (this.mediaAcks.get(cue.runId)?.has(item.assetId)) continue;
+      const held = this.prefetched.get(item.assetId);
+      if (this.undecodable(item.mime)) {
+        undecodable.add(item.assetId);
+        this.ackMedia(cue.runId, item.assetId, "unsupported");
+      } else if (held?.done === true) {
+        this.ackMedia(cue.runId, item.assetId, "ready"); // already in hand: no fetch to time
+      } else if (held?.failed === true) {
+        this.ackMedia(cue.runId, item.assetId, "failed", { reason: "fetch" });
+      }
+    }
     const cameras = this.prefs.reduceMotion
       ? cue.sections.filter((section) => section.kind === "camera").length : 0;
     this.delivery.set(cue.runId, { macroId: cue.macroId, entries: [],
@@ -209,8 +237,9 @@ export class FxPlayer {
       // A viewer who muted FX sounds — or turned this channel down to zero — doesn't
       // want the bytes either: bandwidth is a courtesy, not a thing to spend on a cue
       // that will be skipped (D-295/D-297).
-      include: (media) => media.kind !== "sound" || this.audible(cue.sections[media.index]) })) {
-      const start = () => { void this.prefetch(plan.assetId); };
+      include: (media) => !undecodable.has(media.assetId) &&
+        (media.kind !== "sound" || this.audible(cue.sections[media.index])) })) {
+      const start = () => { void this.prefetch(plan.assetId, cue.runId); };
       if (plan.waitMs <= 0) { start(); continue; }
       const timer = setTimeout(() => {
         this.timers.delete(timer);
@@ -268,16 +297,47 @@ export class FxPlayer {
   }
 
   /** Fetch an asset early and remember only whether it landed (the bytes are the fetcher's). */
-  private async prefetch(assetId: string): Promise<void> {
+  /**
+   * Does *this* browser refuse this format outright? `canPlayType` answers "" only for a
+   * format it cannot play at all, which is worth acting on before spending a download on
+   * it — a shell with no DOM claims no opinion and fetches as usual.
+   */
+  private undecodable(mime: string): boolean {
+    return fxAssetFitness({ mime }, mime, this.canPlay) === "unsupported-codec";
+  }
+
+  private async prefetch(assetId: string, runId: string): Promise<void> {
     if (this.prefetched.has(assetId)) return;
     const record = { done: false, failed: false };
     this.prefetched.set(assetId, record);
+    const startedAt = Date.now();
     try {
       await this.options.fetchAsset(assetId);
       record.done = true;
+      // SQ-13's "progress" half: the requester learns not only *that* everyone has the
+      // bytes but how long the slowest fetch took.
+      this.ackMedia(runId, assetId, "ready", { ms: Math.max(0, Date.now() - startedAt) });
     } catch {
-      record.failed = true; // the failure is reported when the section actually needs it
+      record.failed = true; // the section still reports its own failure when it plays
+      this.ackMedia(runId, assetId, "failed", { reason: "fetch" });
     }
+  }
+
+  /**
+   * D-308 (SQ-13): tell the host what this viewer did with one asset of a run the host
+   * sent. A local draft preview is not the table's business — it never left this client —
+   * so a preview run says nothing. The *latest* state is what the host keeps (a fetch that
+   * failed at cue start and succeeded when the section needed the bytes has the media), so
+   * an unchanged answer is not repeated.
+   */
+  private ackMedia(runId: string, assetId: string, state: FxMediaAckState,
+    extra: { reason?: "fetch" | "decode"; ms?: number } = {}): void {
+    if (this.disposed || this.previewRuns.has(runId)) return;
+    const sent = this.mediaAcks.get(runId) ?? new Map<string, FxMediaAckState>();
+    if (sent.get(assetId) === state) return;
+    sent.set(assetId, state);
+    this.mediaAcks.set(runId, sent);
+    this.options.client.reportFxMedia({ runId, assetId, state, ...extra });
   }
 
   /** Record a delivery outcome; the report waits for the run's last media cue. */
@@ -377,11 +437,20 @@ export class FxPlayer {
       this.settleCue(cue.runId);
       return;
     }
+    if (this.undecodable(section.mime)) {
+      // No point downloading a format this browser already refused: the viewer is told
+      // why, the host was told at cue start, and the rest of the timeline plays on.
+      this.noteDelivery(cue.runId, { index, kind: section.kind, state: "failed",
+        assetId: section.assetId, reason: "unsupported-codec" });
+      this.settleCue(cue.runId);
+      return;
+    }
     // Readiness is a *pre-cue* fact: did the preload (or the cache) already land?
     // Asking after a fetch would always answer "yes" and hide the slow client SQ-13
     // is about.
     const landed = this.prefetched.get(section.assetId)?.done === true;
     const scheduledFor = cue.atHostTime + section.startMs;
+    const fetchStarted = this.hostNow();
     try {
       const bytes = await this.options.fetchAsset(section.assetId);
       const lateMs = this.hostNow() - scheduledFor;
@@ -390,6 +459,10 @@ export class FxPlayer {
         if (!decision.start) {
           this.noteDelivery(cue.runId, { index, kind: section.kind, state: "skipped",
             reason: decision.reason, assetId: section.assetId, lateMs });
+          // D-308: the bytes are here, they just missed the cue — the requester needs
+          // exactly that sentence, not silence, because it is the timeline's own timing
+          // that was wrong rather than this viewer's connection.
+          this.ackMedia(cue.runId, section.assetId, "late", { ms: Math.round(lateMs) });
           this.settleCue(cue.runId);
           return;
         }
@@ -402,6 +475,13 @@ export class FxPlayer {
         state: late ? "late" : "ready",
         ...(late ? { reason: "not-ready" as const, lateMs: arrivedMs }
           : landed ? { reason: "preload" as const } : {}) });
+      // D-308: this viewer's word — late by how much, or (when nothing was preloaded and
+      // nothing has been said yet) simply that the bytes were in hand when they were
+      // needed, with the fetch it took to get them.
+      if (late) this.ackMedia(cue.runId, section.assetId, "late", { ms: Math.round(arrivedMs) });
+      else if (this.mediaAcks.get(cue.runId)?.get(section.assetId) === undefined)
+        this.ackMedia(cue.runId, section.assetId, "ready",
+          { ms: Math.max(0, Math.round(this.hostNow() - fetchStarted)) });
       this.settleCue(cue.runId);
       if (section.kind === "sound") {
         const channel = soundChannelOf(section);
@@ -514,6 +594,10 @@ export class FxPlayer {
       const unsupported = /unsupported|format|decode|not supported/i.test(detail);
       this.noteDelivery(cue.runId, { index, kind: section.kind, state: "failed", assetId: section.assetId,
         reason: unsupported ? "unsupported-codec" : "error", detail });
+      // D-308: the bytes arrived and this browser could not use them — the one case the
+      // GM can still act on, so it is reported as its own state rather than as silence.
+      this.ackMedia(cue.runId, section.assetId, unsupported ? "unsupported" : "failed",
+        unsupported ? {} : { reason: "decode" });
       this.settleCue(cue.runId); // one failure is not a reason to keep the run "pending"
       this.options.onError?.(`FX ${section.kind} failed: ${detail}`);
     }

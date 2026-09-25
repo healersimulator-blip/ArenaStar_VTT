@@ -61,6 +61,7 @@ function validateDecoded(obj: unknown, name: MsgName): Result<WireMessage> {
     case "fx.stopMatching":
     case "fx.end":
     case "fx.delivery":
+    case "fx.media":
     case "asset.manifest":
     case "ephemeral":
     case "asset.get":
@@ -175,6 +176,7 @@ export function channelFor(kind: MsgName): ChannelName {
     case "fx.stopMatching":
     case "fx.end":
     case "fx.delivery":
+    case "fx.media":
     case "asset.manifest":
     case "relay.frame":
       return "ops";

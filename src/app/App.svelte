@@ -47,7 +47,7 @@
   import { WindowManager } from "../ui/windows";
   import { macroSlots, runChatMacro } from "../ui/macros";
   import { resolveFxSequence, type FxImportPermissions } from "../core/fx";
-import { summarizeSkips } from "../core/fxDelivery";
+import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   import { gmState } from "../ui/armies/gmState.svelte";
   import { buildStrategicFog, sceneIsStrategic } from "../core/strategicFog";
   import { FogExploration } from "../client/fogExploration";
@@ -3006,6 +3006,14 @@ const WALL_PICK_RADIUS = 12;
         offFxDelivery?.();
         offFxDelivery = current.gm.bus.on("fxDelivery", (msg) => {
           const name = current.gm.client.store.get("macros", msg.macroId)?.name ?? "FX timeline";
+          // D-308: a second line for the same run — what the viewers themselves did with
+          // the media, once the lead time has run out ("in hand for everybody" is an
+          // answer too, so this one is reported at its own level).
+          if (msg.media) {
+            const media = summarizeMedia(msg.media, name);
+            notifyLog = [...notifyLog.slice(-49), { message: media.message, level: media.level }];
+            return;
+          }
           const line = summarizeSkips(msg.skipped, msg.recipients, name,
             { targeted: msg.targeted ?? 0, empty: msg.empty ?? 0 });
           if (line) notifyLog = [...notifyLog.slice(-49), { message: line, level: "warn" }];

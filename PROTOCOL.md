@@ -418,6 +418,39 @@ A private stop/revocation signal with no author, macro, source, asset or scene-g
 interface FxEndMsg { kind: "fx.end"; runId: string; sceneId: DocId }
 ```
 
+### fx.media (0x4e · client → host · ops)
+
+What **one viewer did with one asset** of a cue it was sent (SQ-13/D-308): the second half
+of the delivery story, after `fx.delivery` has said who was *entitled* to the cue. The
+bytes still have to arrive and this browser still has to decode them, and until now only
+the viewer's own screen knew the answer — a GM could not tell a broken timeline from one
+that worked. Sent only by a session the host actually fanned that cue out to, and only
+about an asset that cue used; anything else is ignored without a reply (there is nothing
+to leak and no one to tell: a session that guessed a `runId` learns nothing).
+
+The client sends at most one ack per (run, asset), as soon as it knows something: an
+"already in hand" or "this browser refuses the format" ack at cue start, then the result of
+its prefetch, and then a *revision* if the section itself fails to play — a late or failed
+ack always outranks an earlier `ready`, because "the bytes arrived and the decoder refused
+them" is a failure, not a success. A recipient that never speaks is reported as having
+said nothing: `detail` is deliberately absent from the wire, since a fetch error string is
+a place for a URL or an asset hash to reach a GM's report.
+
+```ts
+type FxMediaAckState = "ready" | "late" | "failed" | "unsupported"
+interface FxMediaAckMsg { kind: "fx.media"; runId: string; assetId: string;
+  state: FxMediaAckState;
+  /* `failed` only: `fetch` = the bytes never arrived, `decode` = they did and were refused. */
+  reason?: "fetch" | "decode";
+  /* `ready` = ms spent fetching (absent when already in hand); `late` = ms past the start. */
+  ms?: number }
+```
+
+Bounds: `runId` matches the same `^[a-zA-Z0-9_-]{1,128}$` as a request, `assetId` is 1–128
+characters, `state` is one of the four names, `ms` is a finite 0–3 600 000, and the host
+keeps at most 32 runs' worth of expectations, so a hostile client can neither flood the
+requester with reports nor make the host remember unbounded state.
+
 ### fx.delivery (0x4d · host → requesting session · ops)
 
 The host's preflight answer to the requester of a cue (SQ-13/A10): the requested action
@@ -442,6 +475,27 @@ interface FxDeliveryMsg { kind: "fx.delivery"; requestId: string; runId: string;
 `recipients` counts sessions that received *something*; a viewer whose copy would have no
 sections at all is counted in `empty` and receives no cue, so a run the author aimed
 entirely at the GM is not reported as having reached the whole table.
+
+### (continued) the media follow-up (D-308)
+
+A cue with image/sound sections gets a **second** `fx.delivery` for the same `runId`, once
+the lead time has run out, carrying what the viewers reported through `fx.media`:
+
+```ts
+interface FxMediaReportEntry { index: number; kind: "image" | "sound"; mime: string;
+  ready: number; late: number; failed: number; unsupported: number; silent: number }
+interface FxMediaReport { assets: FxMediaReportEntry[]; viewers: number; spoke: number;
+  complete: boolean; slowestReadyMs?: number; corrected?: boolean }
+```
+
+It is sent to the emitting requester's own session when the answer is complete, when a
+viewer reports a failure (so the GM can still stop the cue), or when the run's own media
+window closes — whichever comes first — and an early answer is corrected **once** if a
+later ack changes whether some viewer lacks the media, after which further acks update the
+record silently. The asset is named by the requester's own section `index`: the message
+carries no asset or user identifier, keeping the "not a membership oracle" rule above. An
+all-clear line is still sent — this report was asked for, so "every viewer holds the
+media" is the answer, not noise.
 
 ### ephemeral (0x04 · both · ephemeral)
 

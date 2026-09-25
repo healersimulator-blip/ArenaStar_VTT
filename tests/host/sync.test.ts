@@ -13,7 +13,7 @@ import { acRevision, previewAcConversion } from "../../src/ui/sheets/pf1eAcConve
 import { pf1eAttackEdit, pf1eAttackEditorView } from "../../src/ui/sheets/pf1eAttackEditor";
 import { observePF1eSheetActor } from "../../src/ui/sheets/pf1eSheetWindow";
 import { pf1eSheetEdit, pf1eSheetView } from "../../src/ui/sheets/pf1eSheetModel";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { HostSync, gmSessionUser, type HostEvents } from "../../src/host/sync";
 import type { ScriptRunner } from "../../src/host/scriptWorker";
 import { scriptApprovalHash, type ScriptPolicy } from "../../src/core/scriptMacros";
@@ -24,7 +24,7 @@ import { createTransportPair, flushMicrotasks } from "../../src/net/memory";
 import { createEventBus, type EventBus } from "../../src/core/events";
 import { summarizeSkips } from "../../src/core/fxDelivery";
 import { DocumentStore, OpLog, UndoStack, type StoreMeta } from "../../src/core";
-import type { HelloMsg } from "../../src/core/messages";
+import type { FxStartMsg, HelloMsg } from "../../src/core/messages";
 import type { Op, OpEnvelope } from "../../src/core/ops";
 import type {
   ActorDocument,
@@ -1361,6 +1361,150 @@ describe("Macros / FX host authority and audience", () => {
     first.pair.b.send("ops", frameMessage({ ...observed, runId: "forged" }));
     await flushMicrotasks();
     expect(b).toHaveLength(2); // no forged rebroadcast
+  });
+
+  /** Run the fixture's `pulse` as the GM and hand back the cue its own session received:
+   * the run id the acks have to name. */
+  async function runPulse(h: Harness): Promise<FxStartMsg> {
+    const cues: FxStartMsg[] = [];
+    const off = h.gmBus.on("fx", (msg) => cues.push(msg));
+    try {
+      h.gm.requestSequence("pulse", "s1");
+      await flushMicrotasks();
+    } finally {
+      off();
+    }
+    const cue = cues.at(-1);
+    if (!cue) throw new Error("no cue reached the GM session");
+    return cue;
+  }
+
+  test("the table's answers become one line for the requester, and a failure is urgent", async () => {
+    const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    h.gm.submit([{ kind: "create", coll: "macros", data: fxMacro("pulse") }]);
+    await flushMicrotasks();
+    const player = await h.addPlayer(PLAYER_ID, "Rex");
+    const reports: ClientEvents["fxDelivery"][] = [];
+    h.gmBus.on("fxDelivery", (msg) => reports.push(msg));
+    const seen = await runPulse(h);
+
+    // One viewer answers for the run's only asset; the GM's own session never says
+    // anything. The answer is not complete without another voice, so nothing is sent yet…
+    const ack = (pair: ReturnType<typeof createTransportPair>, msg: Record<string, unknown>) =>
+      pair.b.send("ops", frameMessage({ kind: "fx.media", ...msg } as never));
+    ack(player.pair, { runId: seen.runId, assetId: imageHash, state: "ready", ms: 120 });
+    await flushMicrotasks();
+    expect(reports.filter((msg) => msg.media !== undefined)).toHaveLength(0);
+    // …and when the viewer says it could not decode the media, the requester hears at
+    // once: the cue is still playing, and the GM can still stop it.
+    ack(player.pair, { runId: seen.runId, assetId: imageHash, state: "unsupported" });
+    await flushMicrotasks();
+    const first = reports.filter((msg) => msg.media !== undefined);
+    expect(first).toHaveLength(1);
+    expect(first[0]?.media?.viewers).toBe(2); // the GM's own session got the cue too
+    expect(first[0]?.media?.assets[0]).toMatchObject({ index: 1, kind: "image", mime: "image/png",
+      unsupported: 1, silent: 1 });
+    expect(first[0]?.media?.complete).toBe(false);
+    // A repeat changes nothing; a recovery is the *second and last* line for this run.
+    ack(player.pair, { runId: seen.runId, assetId: imageHash, state: "unsupported" });
+    await flushMicrotasks();
+    expect(reports.filter((msg) => msg.media !== undefined)).toHaveLength(1);
+    ack(player.pair, { runId: seen.runId, assetId: imageHash, state: "ready" });
+    await flushMicrotasks();
+    const lines = reports.filter((msg) => msg.media !== undefined);
+    expect(lines).toHaveLength(2);
+    expect(lines[1]?.media?.corrected).toBe(true);
+    expect(lines[1]?.media?.assets[0]).toMatchObject({ ready: 1, unsupported: 0 });
+    // A third answer cannot produce a third line, however often it flips.
+    ack(player.pair, { runId: seen.runId, assetId: imageHash, state: "failed", reason: "fetch" });
+    await flushMicrotasks();
+    expect(reports.filter((msg) => msg.media !== undefined)).toHaveLength(2);
+  });
+
+  test("a forged media answer teaches the sender nothing and changes nothing", async () => {
+    const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    h.gm.submit([{ kind: "create", coll: "macros", data: fxMacro("pulse") }]);
+    await flushMicrotasks();
+    const reports: ClientEvents["fxDelivery"][] = [];
+    h.gmBus.on("fxDelivery", (msg) => reports.push(msg));
+    // The run goes out to the GM's own session and to nobody else, and only *then* does a
+    // player join: expectations are fixed when the cue is fanned out, so a session that
+    // never received it has no standing to answer for it.
+    const seen = await runPulse(h);
+    const player = await h.addPlayer(PLAYER_ID, "Rex");
+    const mediaLines = () => reports.filter((msg) => msg.media !== undefined).length;
+    const forge = (msg: Record<string, unknown>) =>
+      player.pair.b.send("ops", frameMessage({ kind: "fx.media", ...msg } as never));
+    forge({ runId: seen.runId, assetId: imageHash, state: "unsupported" }); // not a recipient
+    forge({ runId: seen.runId, assetId: "f".repeat(64), state: "unsupported" }); // not its media
+    forge({ runId: "no-such-run", assetId: imageHash, state: "unsupported" }); // no such run
+    forge({ runId: seen.runId, assetId: imageHash, state: "maybe" }); // not one of the four
+    forge({ runId: "bad run id", assetId: imageHash, state: "failed",
+      ms: Number.POSITIVE_INFINITY }); // shape the host never agreed to
+    await flushMicrotasks();
+    expect(mediaLines()).toBe(0);
+
+    // The session that really holds the cue answers from its own transport: one line, and
+    // it counts only the sessions that were actually sent the run.
+    h.gmPair.b.send("ops", frameMessage({ kind: "fx.media", runId: seen.runId,
+      assetId: imageHash, state: "failed", reason: "decode" } as never));
+    await flushMicrotasks();
+    expect(mediaLines()).toBe(1);
+    const line = reports.find((msg) => msg.media !== undefined);
+    expect(line?.media?.viewers).toBe(1);
+    expect(line?.media?.assets[0]).toMatchObject({ failed: 1, silent: 0 });
+    // Nothing about a viewer, an asset or a document leaves the host in that message.
+    expect(JSON.stringify(line?.media)).not.toContain(imageHash);
+    expect(JSON.stringify(line?.media)).not.toContain(PLAYER_ID);
+    expect(line?.skipped).toEqual({ audience: 0, rights: 0, anchor: 0, media: 0 });
+  });
+
+  test("a player-initiated request gets no media report about other sessions", async () => {
+    const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    h.gm.submit([{ kind: "create", coll: "macros", data: fxMacro("pulse") }]);
+    await flushMicrotasks();
+    const player = await h.addPlayer(PLAYER_ID, "Rex");
+    const reports: ClientEvents["fxDelivery"][] = [];
+    player.bus.on("fxDelivery", (msg) => reports.push(msg));
+    player.client.requestSequence("pulse", "s1");
+    await flushMicrotasks();
+    const seen = await runPulse(h);
+    player.pair.b.send("ops", frameMessage({ kind: "fx.media", runId: seen.runId,
+      assetId: imageHash, state: "unsupported" } as never));
+    await flushMicrotasks();
+    expect(reports).toEqual([]);
+  });
+
+  test("a viewer that never answers is reported as such when the window closes", async () => {
+    let clock = 1_000_000;
+    const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } }, undefined, undefined, () => clock);
+    h.gm.submit([{ kind: "create", coll: "macros", data: fxMacro("pulse") }]);
+    await flushMicrotasks();
+    await h.addPlayer(PLAYER_ID, "Rex");
+    const reports: ClientEvents["fxDelivery"][] = [];
+    h.gmBus.on("fxDelivery", (msg) => reports.push(msg));
+    // Freeze *before* the request: the host arms its window timer as the cue goes out, and
+    // the transport's own flush is a `setTimeout` too, so fake timers advance both.
+    vi.useFakeTimers();
+    try {
+      h.gm.requestSequence("pulse", "s1");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reports.filter((msg) => msg.media !== undefined)).toHaveLength(0);
+      // The window is the run's own media span plus a lead, never less than four seconds.
+      clock += 4_500;
+      await vi.advanceTimersByTimeAsync(4_500);
+      const lines = reports.filter((msg) => msg.media !== undefined);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]?.media?.complete).toBe(false);
+      expect(lines[0]?.media?.spoke).toBe(0);
+      expect(lines[0]?.media?.assets[0]).toMatchObject({ silent: 2 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("published repeated FX resolves clock-aligned per-section plays for entitled viewers without world ops", async () => {

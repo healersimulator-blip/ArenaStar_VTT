@@ -136,7 +136,8 @@ import {
   createEphemeralRateLimiter,
   createIntentRateLimiter,
 } from "../core/ratelimit";
-import type { AssetGetMsg, FogGetMsg, FogPutMsg, FxDeliverySkips } from "../core/messages";
+import type { AssetGetMsg, FogGetMsg, FogPutMsg, FxDeliverySkips, FxMediaAckMsg, FxMediaAckState } from "../core/messages";
+import { fxMediaReport } from "../core/fxDelivery";
 import { MAX_FOG_PNG_BYTES } from "../core/fogExploration";
 import type { AssetServer } from "./assets";
 import { AssetTransfer } from "../net/transfer";
@@ -228,6 +229,38 @@ interface PreparedFx {
   checkedAtSeq: number;
   sourceTokenId?: string;
   targetTokenId?: string;
+}
+
+/**
+ * D-308 (SQ-13): what the host expects and hears back about one cue's media.
+ *
+ * The preflight report says who was *entitled*; this is the answer to "did they
+ * actually get it". Kept per run, bounded (oldest evicted), and named by the
+ * requester's own section index in the report — no asset or session identifier leaves
+ * the host, so a viewer's answer cannot become a membership oracle either.
+ */
+interface FxMediaReceipt {
+  runId: string;
+  requestId: string;
+  macroId: DocId;
+  sceneId: DocId;
+  /** The session that asked to run this and will read the report (GM/assistant only). */
+  requesterPeerId: PeerId;
+  /** Distinct assets the run uses, with the index of the first section that needs one. */
+  assets: Array<{ assetId: string; index: number; kind: "image" | "sound"; mime: string }>;
+  /** Sessions the cue actually went to (a viewer that never got it has nothing to say). */
+  recipients: Set<PeerId>;
+  /** peerId → (assetId → the state it most recently reported). */
+  acks: Map<PeerId, Map<string, FxMediaAckState>>;
+  /** peerId → (assetId → the fetch time it reported), folded into `slowestReadyMs`. */
+  fetchMs: Map<PeerId, Map<string, number>>;
+  /** Host clock ms: when the wait for answers ends (extended for one correction). */
+  deadline: number;
+  reported: boolean;
+  corrected: boolean;
+  /** Every (viewer, asset) state as of the first line — including silence, so a viewer
+   * that reports *late* corrects the "have not reported yet" the GM was told. */
+  warnKey: string;
 }
 
 interface Session {
@@ -575,6 +608,9 @@ export class HostSync {
   private readonly resolveSummonSource: HostSyncOptions["resolveSummonSource"];
   private readonly summonRequests = new Map<string, number>();
   private summonTimer: ReturnType<typeof setTimeout> | null = null;
+  /** D-308: the media-acknowledgment window (one timer for the earliest deadline). */
+  private fxMediaTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly fxMediaReceipts = new Map<string, FxMediaReceipt>();
   private disposed = false;
   /** §8/§9 fog readbacks: `${sceneId}:${userId}` → latest PNG bytes (write-through cache). */
   readonly fogPngs = new Map<string, Uint8Array>();
@@ -838,6 +874,9 @@ export class HostSync {
         return;
       case "fx.request":
         this.handleFxRequest(session, msg);
+        break;
+      case "fx.media":
+        this.handleFxMedia(session, msg);
         return;
       case "fx.sync":
         this.handleFxSync(session, msg.sceneId);
@@ -2495,6 +2534,8 @@ export class HostSync {
     this.disposed = true;
     if (this.summonTimer) clearTimeout(this.summonTimer);
     this.summonTimer = null;
+    if (this.fxMediaTimer) clearTimeout(this.fxMediaTimer);
+    this.fxMediaTimer = null;
   }
 
   // ─── Active-zone graphs: host events → atomic world plan → projected cues ───
@@ -2872,6 +2913,14 @@ export class HostSync {
   /** Per-session delivery ledger: revocation/end is sent only to past recipients. */
   private readonly fxViewers = new Map<string, { sceneId: string; peers: Set<string> }>();
   private static readonly FX_LEAD_MS = 300;
+  /** How many runs' worth of media expectations the host remembers (oldest evicted). */
+  private static readonly FX_MEDIA_RUNS = 32;
+  /** The shortest wait for viewer answers: a cue with everything due at once still gets this. */
+  private static readonly FX_MEDIA_MIN_WINDOW_MS = 4_000;
+  /** The longest: beyond a minute a "report" describes a cue nobody is watching any more. */
+  private static readonly FX_MEDIA_MAX_WINDOW_MS = 60_000;
+  /** After the first line, how long a changed answer may still produce *one* correction. */
+  private static readonly FX_MEDIA_CORRECTION_MS = 20_000;
 
   private handleFxRequest(session: Session, msg: FxRequestMsg): void {
     const caller = session.user;
@@ -2891,10 +2940,18 @@ export class HostSync {
       this.reject(session, msg.requestId, prepared.reason, prepared.error);
       return;
     }
-    if (!this.emitPreparedFx(prepared)) {
+    const sentTo: Session[] = [];
+    if (!this.emitPreparedFx(prepared, sentTo)) {
       this.reject(session, msg.requestId, "invariant", "FX instance could not be committed");
       return;
     }
+    // D-308/SQ-13: the preflight line above says who was *entitled*. This opens the
+    // second half — the viewers' own answer about the bytes — for a GM/assistant
+    // requester whose cue actually used media. A player-initiated request gets no
+    // report, for the same reason it gets no preflight line: the counts describe
+    // other sessions.
+    if (caller.role === "GM" || caller.role === "ASSISTANT")
+      this.openFxMediaReceipt(session, msg.requestId, prepared, sentTo);
     // SQ-13/D-303: tell the requester when the cue reached fewer viewers than the scene
     // has — or when it reached them with a section withheld. Sent only to the caller's own
     // session, and only counts leave this method.
@@ -2913,6 +2970,139 @@ export class HostSync {
       const first = this.seenFxRequests.keys().next().value;
       if (first) this.seenFxRequests.delete(first);
     }
+  }
+
+  // ─── D-308 (SQ-13): the media acknowledgment, host side ─────────────────────
+  //
+  // A cue with image/sound sections makes every entitled viewer a promise the host
+  // cannot keep on their behalf: "the bytes will be there". The viewers answer through
+  // `fx.media`, and this is where those answers become one line for the requester.
+
+  /** Open the expectation for a run, or do nothing when there is nothing to wait for. */
+  private openFxMediaReceipt(session: Session, requestId: string, prepared: PreparedFx,
+    sentTo: readonly Session[]): void {
+    const seen = new Map<string, { assetId: string; index: number; kind: "image" | "sound"; mime: string }>();
+    prepared.cue.sections.forEach((section, index) => {
+      if (section.kind !== "image" && section.kind !== "sound") return;
+      if (seen.has(section.assetId)) return; // one answer per asset, not one per section
+      seen.set(section.assetId, { assetId: section.assetId, index, kind: section.kind, mime: section.mime });
+    });
+    // No media, no viewers, or a persistent instance (which loops and is re-sent on
+    // reconnect, so no single moment's answer would mean anything): no report.
+    if (seen.size === 0 || sentTo.length === 0 || prepared.cue.persistent) return;
+    const lastEnd = Math.max(...[...seen.values()].map((asset) => {
+      const section = prepared.cue.sections[asset.index];
+      return (section?.startMs ?? 0) + (section?.durationMs ?? 0);
+    }));
+    const window = Math.min(HostSync.FX_MEDIA_MAX_WINDOW_MS,
+      Math.max(HostSync.FX_MEDIA_MIN_WINDOW_MS, lastEnd + 2_000));
+    const receipt: FxMediaReceipt = { runId: prepared.cue.runId, requestId, macroId: prepared.cue.macroId,
+      sceneId: prepared.cue.sceneId, requesterPeerId: session.peerId, assets: [...seen.values()],
+      recipients: new Set(sentTo.map((recipient) => recipient.peerId)), acks: new Map(), fetchMs: new Map(),
+      deadline: this.now() + window, reported: false, corrected: false, warnKey: "unreported" };
+    this.fxMediaReceipts.set(receipt.runId, receipt);
+    while (this.fxMediaReceipts.size > HostSync.FX_MEDIA_RUNS) {
+      const oldest = this.fxMediaReceipts.keys().next().value;
+      if (oldest === undefined) break;
+      this.fxMediaReceipts.delete(oldest);
+    }
+    this.scheduleFxMediaSweep();
+  }
+
+  /** One viewer's answer about one asset. Anything unexpected is ignored, not answered:
+   * a session that guessed a run id must not even learn whether the run exists. */
+  private handleFxMedia(session: Session, msg: FxMediaAckMsg): void {
+    if (!session.user) return;
+    if (typeof msg.runId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.runId)) return;
+    const receipt = this.fxMediaReceipts.get(msg.runId);
+    if (!receipt || !receipt.recipients.has(session.peerId)) return;
+    if (typeof msg.assetId !== "string" || msg.assetId.length === 0 || msg.assetId.length > 128) return;
+    const asset = receipt.assets.find((entry) => entry.assetId === msg.assetId);
+    if (!asset) return;
+    if (msg.state !== "ready" && msg.state !== "late" && msg.state !== "failed" && msg.state !== "unsupported") return;
+    const ms = typeof msg.ms === "number" && Number.isFinite(msg.ms)
+      ? Math.max(0, Math.min(3_600_000, Math.round(msg.ms))) : undefined;
+    const states = receipt.acks.get(session.peerId) ?? new Map<string, FxMediaAckState>();
+    if (states.get(msg.assetId) === msg.state && ms === undefined) return; // nothing new to say
+    states.set(msg.assetId, msg.state);
+    receipt.acks.set(session.peerId, states);
+    if (msg.state === "ready" && ms !== undefined) {
+      const times = receipt.fetchMs.get(session.peerId) ?? new Map<string, number>();
+      times.set(msg.assetId, ms);
+      receipt.fetchMs.set(session.peerId, times);
+    }
+    // A viewer that cannot use the media is the emergency: the GM may still stop the
+    // cue, so that line goes out at once rather than waiting for the window. Anything
+    // that arrives *after* the first line takes the same door and lets `reportFxMedia`
+    // decide whether it is a correction worth sending or merely a change of record.
+    const urgent = msg.state === "failed" || msg.state === "unsupported";
+    const answered = [...receipt.acks.values()].reduce((total, byAsset) => total + byAsset.size, 0);
+    const settled = answered === receipt.recipients.size * receipt.assets.length;
+    if (urgent || settled || receipt.reported) this.reportFxMedia(receipt);
+  }
+
+  /** One line to the requester — the first answer, and at most one correction after it. */
+  private reportFxMedia(receipt: FxMediaReceipt): void {
+    // The whole answer, not just its complaints: a viewer that was silent when the first
+    // line went out and has since said "ready" makes that line's "have not reported yet"
+    // false, and a report that stayed wrong would be worse than a late one.
+    const pairs: string[] = [];
+    for (const peerId of receipt.recipients) {
+      const byAsset = receipt.acks.get(peerId);
+      for (const asset of receipt.assets)
+        pairs.push(`${peerId}:${asset.assetId}:${byAsset?.get(asset.assetId) ?? "silent"}`);
+    }
+    const lacking = pairs.sort().join(",");
+    if (!receipt.reported) {
+      receipt.reported = true;
+      receipt.warnKey = lacking;
+      // The answer can still change after the first line (a decode failure when the
+      // section actually plays, or a fetch that recovered). Keep the receipt a while
+      // longer so that change is a *correction* rather than silence.
+      receipt.deadline = Math.max(receipt.deadline, this.now() + HostSync.FX_MEDIA_CORRECTION_MS);
+      this.scheduleFxMediaSweep();
+    } else if (receipt.corrected || lacking === receipt.warnKey) {
+      return; // one correction per run, and only when the answer actually changed
+    } else {
+      receipt.corrected = true;
+      receipt.warnKey = lacking;
+    }
+    const session = this.sessions.get(receipt.requesterPeerId);
+    if (!session?.user) return; // the requester left; the record still stands
+    const report = fxMediaReport(receipt.assets, receipt.recipients.size,
+      { bySession: receipt.acks, fetchMs: receipt.fetchMs },
+      { ...(receipt.corrected ? { corrected: true } : {}) });
+    this.send(session, { kind: "fx.delivery", requestId: receipt.requestId, runId: receipt.runId,
+      macroId: receipt.macroId, recipients: receipt.recipients.size,
+      // The preflight line already carried the drops; a media follow-up repeats the
+      // recipient count so the two lines can be read together, and says nothing else.
+      skipped: { audience: 0, rights: 0, anchor: 0, media: 0 }, media: report });
+  }
+
+  /** Report every window that closed without a complete answer, then drop what is done. */
+  private sweepFxMedia(): void {
+    if (this.disposed) return;
+    const now = this.now();
+    for (const [runId, receipt] of [...this.fxMediaReceipts]) {
+      if (now < receipt.deadline) continue;
+      if (!receipt.reported) this.reportFxMedia(receipt);
+      else this.fxMediaReceipts.delete(runId);
+    }
+    this.scheduleFxMediaSweep();
+  }
+
+  /** One timer for the earliest window; browser timers can sleep, and a late sweep still
+   * reports correctly because every deadline is an absolute host time. */
+  private scheduleFxMediaSweep(): void {
+    if (this.fxMediaTimer) clearTimeout(this.fxMediaTimer);
+    this.fxMediaTimer = null;
+    if (this.disposed) return;
+    let next = Infinity;
+    for (const receipt of this.fxMediaReceipts.values()) next = Math.min(next, receipt.deadline);
+    if (!Number.isFinite(next)) return;
+    this.fxMediaTimer = setTimeout(() => this.sweepFxMedia(),
+      Math.max(0, Math.min(2_147_483_647, next - this.now())));
+    (this.fxMediaTimer as unknown as { unref?: () => void }).unref?.();
   }
 
   /** Same host scheduler for editor/macros and triggered FX. Can NARROW a graph's audience,
@@ -2993,7 +3183,7 @@ export class HostSync {
       ...(target ? { targetTokenId: target._id } : {}) };
   }
 
-  private emitPreparedFx(prepared: PreparedFx): boolean {
+  private emitPreparedFx(prepared: PreparedFx, sentTo?: Session[]): boolean {
     if (prepared.cue.persistent) {
       const macro = this.store.get("macros", prepared.cue.macroId) as MacroDocument | undefined;
       const scene = this.store.get("scenes", prepared.cue.sceneId) as SceneDocument | undefined;
@@ -3039,6 +3229,7 @@ export class HostSync {
       const forViewer = fxSectionsForViewer(prepared.cue.sections,
         { id: user.id, isGm: user.role === "GM" || user.role === "ASSISTANT" }, prepared.callerId);
       if (forViewer.length === 0) continue;
+      sentTo?.push(recipient);
       this.send(recipient, forViewer === prepared.cue.sections ? prepared.cue
         : { ...prepared.cue, sections: [...forViewer] });
     }

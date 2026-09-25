@@ -1243,6 +1243,130 @@ test("a visual grows and spins through its section, eased, and lands on the auth
   expect(Math.max(...rotations)).toBeLessThan(365); // …and never past it
 });
 
+// D-308 (SQ-13): the other half of the delivery story. The preflight line says who was
+// *entitled*; these two specs are about what the viewers themselves did with the bytes —
+// one table where everybody holds the media, and one where a viewer's browser cannot
+// decode the format at all. Both answers come back over the real socket from real clients.
+test("both viewers answer, and the GM hears that the media is in hand", async ({ browser }) => {
+  test.setTimeout(120_000);
+  const hostCtx = await browser.newContext();
+  const playerCtx = await browser.newContext();
+  try {
+    const host = await hostCtx.newPage();
+    const player = await playerCtx.newPage();
+    await host.goto(entry + "?e2e=1");
+    await waitForSurface(host, "app");
+    await host.locator("#gm-macros").click();
+    await host.locator("[data-macro-fx-tab]").click();
+    const wizard = host.locator("[data-fx-wizard]");
+    const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+    await wizard.locator("[data-fx-share]").check(); // players may fetch it, or preflight drops them
+    await wizard.locator('input[type="file"]').setInputFiles({ name: "lantern.png",
+      mimeType: "image/png", buffer: png });
+    await expect(wizard.getByRole("status")).toContainText("eligible scene viewers may fetch it");
+    await wizard.locator("[data-fx-name]").fill("Lantern");
+    await wizard.getByRole("button", { name: "Image / video", exact: true }).click();
+    const section = wizard.locator("[data-fx-section]");
+    await section.getByRole("combobox", { name: "Media" }).selectOption({ index: 1 });
+    await section.getByLabel("X", { exact: true }).fill("300");
+    await section.getByLabel("Y", { exact: true }).fill("300");
+    await section.getByLabel("Duration ms").fill("2500");
+    await wizard.locator("[data-fx-save]").click();
+    await expect(wizard.locator("li")).toContainText(["Lantern"]);
+
+    // A real second browser: its own client fetches and decodes the same media.
+    await host.locator("#share").click();
+    const fragment = manualFragment(await host.locator("#invite-link").inputValue());
+    await player.goto(`${entry}?e2e=1&join=1#${fragment}`);
+    await expect.poll(() => player.locator("#offer-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await host.locator("#peer-code").fill(await player.locator("#offer-out").inputValue());
+    await host.locator("#code-apply").click();
+    await expect.poll(() => host.locator("#share-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await player.locator("#answer-input").fill(await host.locator("#share-out").inputValue());
+    await player.locator("#answer-apply").click();
+    await expect.poll(() => playerCall<boolean>(player, "connected"), { timeout: 30_000 }).toBe(true);
+    await waitForSurface(player, "playerCanvas");
+
+    await wizard.locator("[data-fx-run]").click();
+    // One line, and it counts two viewers: the GM's own session answered too, and neither
+    // of them had anything to complain about.
+    const notes = host.locator("[data-notify]");
+    await expect.poll(async () => notes.filter({ hasText: "media in hand" }).count(),
+      { timeout: 15_000 }).toBe(1);
+    await expect(notes.filter({ hasText: "media in hand" }).first())
+      .toHaveText(/every viewer holds all 1 asset\(s\) × 2 viewer\(s\)/);
+    expect(await hostCall<number>(host, "seq")).toBeGreaterThan(0); // the run was a real commit
+    // The viewer had no complaint either: a timeline that kept up says nothing locally.
+    await expect(player.locator("[data-notify]").filter({ hasText: "degraded" })).toHaveCount(0);
+  } finally {
+    await hostCtx.close();
+    await playerCtx.close();
+  }
+});
+
+// The failure branch. Chromium can play a WAV, so the *viewer's* browser is told not to:
+// an init script takes `canPlayType` away before the app loads, which is exactly the
+// "unsupported codec" registry case SQ-13 names. The client then reports the format as
+// unsupported and never spends a download on it.
+test("a viewer that cannot decode the media says so, by section", async ({ browser }) => {
+  test.setTimeout(120_000);
+  const hostCtx = await browser.newContext();
+  const playerCtx = await browser.newContext();
+  try {
+    await playerCtx.addInitScript(() => {
+      Object.defineProperty(window.HTMLMediaElement.prototype, "canPlayType",
+        { value: () => "", configurable: true });
+    });
+    const host = await hostCtx.newPage();
+    const player = await playerCtx.newPage();
+    await host.goto(entry + "?e2e=1");
+    await waitForSurface(host, "app");
+    await host.locator("#gm-macros").click();
+    await host.locator("[data-macro-fx-tab]").click();
+    const wizard = host.locator("[data-fx-wizard]");
+    const wav = Buffer.from("UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=", "base64");
+    await wizard.locator("[data-fx-share]").check();
+    await wizard.locator('input[type="file"]').setInputFiles({ name: "hymn.wav",
+      mimeType: "audio/wav", buffer: wav });
+    await expect(wizard.getByRole("status")).toContainText("eligible scene viewers may fetch it");
+    await wizard.locator("[data-fx-name]").fill("Hymn");
+    await wizard.getByRole("button", { name: "Sound", exact: true }).click();
+    await wizard.locator("[data-fx-section]").getByRole("combobox", { name: "Media" })
+      .selectOption({ index: 1 });
+    await wizard.locator("[data-fx-save]").click();
+    await expect(wizard.locator("li")).toContainText(["Hymn"]);
+
+    await host.locator("#share").click();
+    const fragment = manualFragment(await host.locator("#invite-link").inputValue());
+    await player.goto(`${entry}?e2e=1&join=1#${fragment}`);
+    await expect.poll(() => player.locator("#offer-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await host.locator("#peer-code").fill(await player.locator("#offer-out").inputValue());
+    await host.locator("#code-apply").click();
+    await expect.poll(() => host.locator("#share-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await player.locator("#answer-input").fill(await host.locator("#share-out").inputValue());
+    await player.locator("#answer-apply").click();
+    await expect.poll(() => playerCall<boolean>(player, "connected"), { timeout: 30_000 }).toBe(true);
+    await waitForSurface(player, "playerCanvas");
+
+    await wizard.locator("[data-fx-run]").click();
+    const line = host.locator("[data-notify]").filter({ hasText: "cannot decode this format" });
+    // The urgency rule: a viewer that cannot use the media is reported at once, so the GM
+    // hears it while the cue is still running — which means the line is allowed to be
+    // early, and it says so ("1 have not reported yet" is the other viewer, still fetching).
+    await expect.poll(async () => line.count(), { timeout: 15_000 }).toBeGreaterThan(0);
+    // The asset is named by the author's own section number, not by an identifier, and the
+    // count is of viewers — the message the host sends carries neither a hash nor a name.
+    await expect(line.first()).toHaveText(/media not in hand for 2 of 2 viewer\(s\) — section 1 \(sound, audio\/wav\): 1 cannot decode this format; 1 have not reported yet$/);
+    // Then the other viewer's honest "I have it" arrives, and the early line is corrected:
+    // exactly one more message, and now it is right about who is actually missing what.
+    await expect.poll(async () => line.count(), { timeout: 15_000 }).toBe(2);
+    await expect(line.last()).toHaveText(/media not in hand for 1 of 2 viewer\(s\) — section 1 \(sound, audio\/wav\): 1 cannot decode this format \(corrected\)$/);
+  } finally {
+    await hostCtx.close();
+    await playerCtx.close();
+  }
+});
+
 // D-307 (SQ-05): the last clause of the mask row — a region *constrained by walls*. The
 // host trims it against the scene's own sight segments (the rule the fog uses) and bakes
 // the polygon, so the claim is checked on the drawn shape: it stops at the wall it was cut

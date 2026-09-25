@@ -9,9 +9,11 @@ import {
   normalizeFxViewPrefs, prefersReducedMotion, readFxViewPrefs, setFxViewPrefs, subscribeFxViewPrefs,
 } from "../../src/core/fxPrefs";
 import {
-  fxFitnessIssues, fxMediaCues, fxPreloadPlan, lateMediaDecision, summarizeDelivery, summarizeSkips,
+  fxFitnessIssues, fxMediaCues, fxMediaReport, fxPreloadPlan, lateMediaDecision, summarizeDelivery,
+  summarizeMedia, summarizeSkips,
   type FxDeliveryEntry,
 } from "../../src/core/fxDelivery";
+import type { FxMediaAckState } from "../../src/core/messages";
 import type { ResolvedFxSection } from "../../src/core/fx";
 
 const image = (assetId: string, startMs: number, durationMs = 2_000, x = 100, y = 100): ResolvedFxSection =>
@@ -226,5 +228,67 @@ describe("summarizeSkips (the requester's half of SQ-13)", () => {
       .toBe("Ward: reached 2 viewer(s) — 1 skipped (1 outside its audience, 1 saw it without its targeted sections, 2 left with none of it)");
     // An explicit zero is the same as an omitted field: "nothing to explain" stays quiet.
     expect(summarizeSkips(none, 4, "Ward", { targeted: 0 })).toBeNull();
+  });
+});
+
+describe("the table's own answer about the media (D-308, SQ-13)", () => {
+  const assets = [
+    { assetId: "img", index: 1, kind: "image" as const, mime: "image/png" },
+    { assetId: "snd", index: 3, kind: "sound" as const, mime: "audio/mpeg" },
+  ];
+  const acks = (rows: Record<string, Record<string, FxMediaAckState>>) =>
+    ({ bySession: new Map(Object.entries(rows).map(([id, states]) => [id, new Map(Object.entries(states))])) });
+
+  test("counts per asset, names the worst one by the author's own section number", () => {
+    const report = fxMediaReport(assets, 3, acks({
+      a: { img: "ready", snd: "ready" },
+      b: { img: "unsupported" },
+      c: { img: "ready", snd: "late" },
+    }));
+    expect(report.assets[0]).toMatchObject({ index: 1, ready: 2, unsupported: 1, silent: 0 });
+    expect(report.assets[1]).toMatchObject({ index: 3, ready: 1, late: 1, silent: 1 });
+    expect(report.viewers).toBe(3);
+    expect(report.spoke).toBe(3);
+    expect(report.complete).toBe(false); // c never reported `snd`, b never did either
+    const line = summarizeMedia(report, "Lantern");
+    expect(line.level).toBe("warn");
+    // The worst asset is the one two viewers lack; the asset is named by section, not id.
+    expect(line.message).toContain("section 4 (sound, audio/mpeg)");
+    expect(line.message).not.toContain("snd");
+    expect(line.message).toContain("media not in hand for 2 of 3 viewer(s)");
+    expect(line.message).toContain("started late for 1");
+    expect(line.message).toContain("have not reported yet");
+  });
+
+  test("an all-clear is still an answer, and a slow fetch is part of it", () => {
+    const report = fxMediaReport(assets, 2, {
+      ...acks({ a: { img: "ready", snd: "ready" }, b: { img: "ready", snd: "ready" } }),
+      fetchMs: new Map([["a", new Map([["img", 1_240]])]]),
+    });
+    expect(report.complete).toBe(true);
+    expect(report.spoke).toBe(2);
+    const line = summarizeMedia(report, "Lantern");
+    expect(line.level).toBe("info");
+    expect(line.message).toBe("Lantern: media in hand — every viewer holds all 2 asset(s) × 2 viewer(s); slowest fetch 1240 ms");
+  });
+
+  test("an ok timeline with nobody reporting says so rather than nothing", () => {
+    const report = fxMediaReport(assets, 2, acks({}));
+    expect(report.complete).toBe(false);
+    expect(report.spoke).toBe(0);
+    const line = summarizeMedia(report, "Lantern");
+    expect(line.level).toBe("warn");
+    expect(line.message).toContain("no answer yet for 2 of 2 viewer(s)");
+    expect(line.message).toContain("no word from 2");
+  });
+
+  test("a correction is marked, and the counts are the newest ones", () => {
+    // The first line said one viewer could not decode it; a recovery arrives before the
+    // window closes, so the second (and last) line for this run says so.
+    const report = fxMediaReport(assets, 1, acks({ a: { img: "ready", snd: "ready" } }),
+      { corrected: true });
+    const line = summarizeMedia(report, "Lantern");
+    expect(line.level).toBe("info");
+    expect(line.message.endsWith("(corrected)")).toBe(true);
   });
 });
