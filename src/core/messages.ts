@@ -378,6 +378,17 @@ export interface FxDeliveryMsg {
   recipients: number;
   /** Sessions dropped at preflight. */
   skipped: FxDeliverySkips;
+  /**
+   * D-303: of the sessions above, how many received the run **without** at least one
+   * section the author targeted elsewhere (a `gm`/`caller` camera, D-300). Not a
+   * preflight *skip* — they were entitled to the run — so it is counted separately.
+   */
+  targeted?: number;
+  /**
+   * Viewers entitled to the run that received **nothing at all**, because every section
+   * of it was targeted away from them. Silence needs explaining more than a reduction.
+   */
+  empty?: number;
 }
 
 /** §5 ephemeral kinds: cursors, pings, drags, ruler, typing. */

@@ -208,4 +208,23 @@ describe("summarizeSkips (the requester's half of SQ-13)", () => {
     expect(summarizeSkips({ audience: 1, rights: 0, anchor: 0, media: 0 }, 0, "Ward"))
       .toBe("Ward: reached no one — 1 skipped (1 outside its audience)");
   });
+
+  // D-303: a targeted section is not a preflight skip — everyone was entitled — so the
+  // line has to report it separately, and a run that withheld a section from someone
+  // must produce a line at all (before this, nothing was said and the author never
+  // learned whether their targeting did anything).
+  test("targeted sections and outright silence are their own sentences", () => {
+    expect(summarizeSkips(none, 3, "Ward", { targeted: 0, empty: 0 })).toBeNull();
+    expect(summarizeSkips(none, 3, "Ward", { targeted: 2, empty: 0 }))
+      .toBe("Ward: reached 3 viewer(s) — 2 saw it without its targeted sections");
+    expect(summarizeSkips(none, 0, "Ward", { targeted: 0, empty: 1 }))
+      .toBe("Ward: reached no one — 1 left with none of it");
+    // Both at once, and mixed with a genuine preflight skip: the skip total stays its
+    // own number so "6 skipped" never counts a viewer who was entitled.
+    expect(summarizeSkips({ audience: 1, rights: 0, anchor: 0, media: 0 }, 2, "Ward",
+      { targeted: 1, empty: 2 }))
+      .toBe("Ward: reached 2 viewer(s) — 1 skipped (1 outside its audience, 1 saw it without its targeted sections, 2 left with none of it)");
+    // An explicit zero is the same as an omitted field: "nothing to explain" stays quiet.
+    expect(summarizeSkips(none, 4, "Ward", { targeted: 0 })).toBeNull();
+  });
 });

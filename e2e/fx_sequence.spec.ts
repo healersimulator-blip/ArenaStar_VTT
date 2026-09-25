@@ -1160,3 +1160,84 @@ test("a visual grows and spins through its section, eased, and lands on the auth
   expect(rotations[rotations.length - 1] ?? 0).toBeGreaterThan(340); // turned the full circle
   expect(Math.max(...rotations)).toBeLessThan(365); // …and never past it
 });
+
+// D-303 (SQ-13/SQ-18): a targeted section is not a preflight skip, and the GM has to be
+// told either way — "my targeting worked" is worth knowing, and a player who sees nothing
+// at all will ask why. Two real contexts, because the counts are about *them*.
+test("the GM is told how many viewers received a run without its targeted section", async ({ browser }) => {
+  test.setTimeout(120_000);
+  const hostCtx = await browser.newContext();
+  const playerCtx = await browser.newContext();
+  try {
+    const host = await hostCtx.newPage();
+    const player = await playerCtx.newPage();
+    await host.goto(entry + "?e2e=1");
+    await waitForSurface(host, "app");
+    await host.locator("#gm-macros").click();
+    await host.locator("[data-macro-fx-tab]").click();
+    const wizard = host.locator("[data-fx-wizard]");
+
+    // One timeline: a text cue for everyone plus a GM-only pan. Every viewer is entitled
+    // to the run, so nothing is "skipped" — the notice has to come from the targeting.
+    await wizard.getByRole("button", { name: "New", exact: true }).click();
+    await wizard.getByRole("button", { name: "Text", exact: true }).click();
+    await wizard.locator("[data-fx-section]").nth(0).getByLabel("X", { exact: true }).fill("200");
+    await wizard.locator("[data-fx-section]").nth(0).getByLabel("Y", { exact: true }).fill("200");
+    await wizard.getByRole("button", { name: "Camera", exact: true }).click();
+    const cameras = wizard.locator("[data-fx-section]");
+    await cameras.nth(1).locator("[data-fx-camera-audience]").selectOption("gm");
+    await cameras.nth(1).locator("[data-fx-camera-x]").fill("900");
+    await cameras.nth(1).locator("[data-fx-camera-y]").fill("400");
+    await cameras.nth(1).getByLabel("Duration ms").fill("400");
+    await wizard.locator("[data-fx-name]").fill("Shared sightline");
+    await wizard.locator("[data-fx-save]").click();
+    await expect(wizard.locator("li")).toContainText(["Shared sightline"]);
+
+    // A second timeline that is GM-only *throughout*: the player receives nothing at all.
+    await wizard.getByRole("button", { name: "New", exact: true }).click();
+    await wizard.getByRole("button", { name: "Camera", exact: true }).click();
+    await wizard.locator("[data-fx-section]").nth(0).locator("[data-fx-camera-audience]").selectOption("gm");
+    await wizard.locator("[data-fx-section]").nth(0).locator("[data-fx-camera-x]").fill("700");
+    await wizard.locator("[data-fx-section]").nth(0).locator("[data-fx-camera-y]").fill("700");
+    await wizard.locator("[data-fx-section]").nth(0).getByLabel("Duration ms").fill("400");
+    await wizard.locator("[data-fx-name]").fill("GM vista");
+    await wizard.locator("[data-fx-save]").click();
+    await expect(wizard.locator("li")).toContainText(["GM vista"]);
+
+    await host.locator("#share").click();
+    const fragment = manualFragment(await host.locator("#invite-link").inputValue());
+    await player.goto(`${entry}?e2e=1&join=1#${fragment}`);
+    await expect.poll(() => player.locator("#offer-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await host.locator("#peer-code").fill(await player.locator("#offer-out").inputValue());
+    await host.locator("#code-apply").click();
+    await expect.poll(() => host.locator("#share-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await player.locator("#answer-input").fill(await host.locator("#share-out").inputValue());
+    await player.locator("#answer-apply").click();
+    await expect.poll(() => playerCall<boolean>(player, "connected"), { timeout: 30_000 }).toBe(true);
+    await waitForSurface(player, "playerCanvas");
+
+    // Run the mixed timeline: the GM hears that the run reached both viewers and that the
+    // player's copy came without the GM-only pan.
+    await host.locator("[data-fx-wizard] li").filter({ hasText: "Shared sightline" })
+      .getByRole("button", { name: "Run" }).click();
+    const notice = host.locator("[data-notify]").filter({ hasText: "Shared sightline" });
+    await expect(notice).toHaveCount(1);
+    await expect(notice).toContainText("reached 2 viewer(s)");
+    await expect(notice).toContainText("1 saw it without its targeted sections");
+    expect(await hostCall<number>(host, "seq")).toBeGreaterThan(0);
+
+    // Run the all-targeted timeline: now the notice is about silence — the player got
+    // nothing of it, and the GM is told that rather than "reached 1 viewer(s)".
+    await host.locator("[data-fx-wizard] li").filter({ hasText: "GM vista" })
+      .getByRole("button", { name: "Run" }).click();
+    const silence = host.locator("[data-notify]").filter({ hasText: "GM vista" });
+    await expect(silence).toHaveCount(1);
+    await expect(silence).toContainText("reached 1 viewer(s)");
+    await expect(silence).toContainText("1 left with none of it");
+    // Nothing about it reached the player's own notice log.
+    await expect(player.locator("[data-player-notify]")).toHaveCount(0);
+  } finally {
+    await playerCtx.close();
+    await hostCtx.close();
+  }
+});

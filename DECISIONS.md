@@ -9741,3 +9741,67 @@ run or the 41-scenario acceptance matrix.
   and the rotation ends above 340° without ever exceeding 365°. The `summons` suite ran
   alongside it (**23/23** together) and the canvas/interaction batch (`canvas_rail` +
   `canvas_toolbar` + `vision` + `walls` + `join`) is **20/20** against the rebuilt file.
+
+## D-303 — the delivery notice learns about targeting: a withheld section is not a skip (2026-09-25)
+
+D-295 introduced `fx.delivery`, the line a GM gets when a cue did not reach everyone, and
+D-300 added per-section targeting — a camera cue aimed at the GM alone. Between them sat
+an obvious hole: a run whose *plain* sections reached everyone and whose targeted section
+reached one viewer produced **no notice at all**, because the notice only spoke when a
+preflight reason had dropped somebody. The GM who set up the targeting therefore never
+learned whether it worked, and a player who saw nothing at all asked the table instead of
+the tool. This decision closes that: the notice now reports targeting, separately from
+skips.
+
+**Two new counters, and they are not skips.** `targeted` is how many recipients received
+the run *without* at least one section (they were entitled — the author aimed that section
+elsewhere), and `empty` is how many entitled viewers received **nothing at all** because
+every section was targeted away. Keeping them out of `FxDeliverySkips` is deliberate: a
+skip means "this session could not have this" (audience, rights, anchor, media), while
+these viewers *could* — the author's own audiences excluded them. The summary sentence
+keeps the distinction visible: `Ward: reached 2 viewer(s) — 1 skipped (1 outside its
+audience, 1 saw it without its targeted sections, 2 left with none of it)`.
+
+**Silence needs explaining more than a reduction.** `recipients` still counts sessions
+that received *something*, so a viewer the targeting emptied is counted in `empty` and not
+in `recipients` — a run aimed entirely at the GM reports "reached 1 viewer(s) … 1 left
+with none of it" rather than pretending the whole table got it. The host decides this at
+preflight (targeting follows the author's audiences, not committed visibility, so it cannot
+drift between preflight and fan-out) and the fan-out still refuses to send an empty cue.
+
+**The conditions, spelled out.** The message is sent when there is *something to explain* —
+a skip, a reduced payload, or an emptier audience — and the internal field is only
+included when it is non-zero, so a run with no targeting at all produces exactly the
+sentence it produced before. The request path, the counts-only rule (no user, document or
+asset identifier ever appears) and the GM/assistant-only restriction are unchanged.
+
+**Non-claims.** No per-viewer or per-section naming (still counts, for SQ-18's reason — a
+notice must not become a membership oracle), no notice for a player-initiated request, no
+notice when a targeted section was withheld from *nobody* (an idle GM-only camera says
+nothing), no delivery report inside the wizard before a Run, no historical log or per-run
+query, no notice about *which* section was withheld, and no Firefox/WebKit run or the
+41-scenario acceptance matrix.
+
+**Gates.**
+
+- `pnpm test` — **3 715 passed / 12 skipped** (297 files: 295 passed, 2 skipped). New: two
+  cases in `tests/core/fxDelivery.test.ts` (an omitted/zero targeting field still yields
+  `null`, targeted-only and empty-only runs each produce their own sentence, and a mixed
+  run keeps the skip total separate from viewers who were entitled) and one host case in
+  `tests/host/sync.test.ts` (a two-section timeline with a GM-only camera run for a table
+  of two players: `recipients` 3, `skipped` all zero, `targeted` 2, no `empty` — then an
+  all-targeted timeline reporting `recipients` 1 and `empty` 2, with no identity in the
+  payload).
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing) · `pnpm lint` **exit 0** · `pnpm build` → `pnpm size` **3 821 840 B raw /
+  1 095 291 B gzip**, inside the 6 MB budget. `PROTOCOL.md`'s `fx.delivery` entry documents
+  the two optional counters and why `recipients` excludes an emptied viewer; the message
+  kind and its byte are unchanged.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **20/20** — the new spec runs
+  **two real browser contexts**: a GM authors a text cue plus a GM-only pan, joins a player,
+  runs it, and reads the notice as "reached 2 viewer(s) … 1 saw it without its targeted
+  sections"; then runs a timeline that is GM-only throughout and reads "reached 1 viewer(s)
+  … 1 left with none of it", with the player's own notice log empty either way. The
+  `summons` suite ran alongside it (**24/24** together) and the canvas/interaction batch
+  (`canvas_rail` + `canvas_toolbar` + `vision` + `walls` + `join`) is **20/20** against the
+  rebuilt file.

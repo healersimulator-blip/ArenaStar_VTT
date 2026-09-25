@@ -1427,6 +1427,57 @@ describe("Macros / FX host authority and audience", () => {
     expect(playerReports).toHaveLength(0);
   });
 
+  // D-303: targeted sections are not skips, and the GM has to hear about them — both
+  // because "my targeting worked" is worth knowing and because a player who sees nothing
+  // at all will ask why.
+  test("the GM hears how many viewers got the run without a targeted section, and who got none", async () => {
+    const h = await setup();
+    const mixed = fxMacro("sightline");
+    if (!mixed.sequence) throw new Error("Missing FX fixture sequence");
+    mixed.sequence = { ...mixed.sequence, sections: [
+      { kind: "text", id: "everyone", text: "Look", at: { kind: "point", x: 100, y: 100 },
+        startMs: 0, durationMs: 400 },
+      { kind: "camera", id: "gm-only", mode: "pan", to: { kind: "point", x: 400, y: 400 },
+        audience: "gm", startMs: 0, durationMs: 500 },
+    ] };
+    const onlyTargeted = fxMacro("vista");
+    if (!onlyTargeted.sequence) throw new Error("Missing FX fixture sequence");
+    onlyTargeted.sequence = { ...onlyTargeted.sequence, sections: [
+      { kind: "camera", id: "gm-only", mode: "pan", to: { kind: "point", x: 400, y: 400 },
+        audience: "gm", startMs: 0, durationMs: 500 },
+    ] };
+    h.gm.submit([{ kind: "create", coll: "macros", data: mixed },
+      { kind: "create", coll: "macros", data: onlyTargeted }]);
+    await flushMicrotasks();
+    await h.addPlayer(PLAYER_ID, "Rex");
+    await h.addPlayer(OTHER_ID, "Ivy");
+    const reports: ClientEvents["fxDelivery"][] = [];
+    h.gmBus.on("fxDelivery", (msg) => reports.push(msg));
+
+    h.gm.requestSequence("sightline", "s1");
+    await flushMicrotasks();
+    // Both players are entitled and both receive the run — with one section withheld.
+    // Nobody was *skipped*, so the notice comes from the targeting counts alone.
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.recipients).toBe(3); // two players and the GM's own session
+    expect(reports[0]?.skipped).toEqual({ audience: 0, rights: 0, anchor: 0, media: 0 });
+    expect(reports[0]?.targeted).toBe(2);
+    expect(reports[0]?.empty).toBeUndefined();
+    expect(summarizeSkips(reports[0]?.skipped ?? { audience: 0, rights: 0, anchor: 0, media: 0 },
+      reports[0]?.recipients ?? 0, "Sightline", { targeted: reports[0]?.targeted ?? 0 }))
+      .toBe("Sightline: reached 3 viewer(s) — 2 saw it without its targeted sections");
+    expect(JSON.stringify(reports[0])).not.toContain(PLAYER_ID); // counts, never identities
+
+    // A timeline that is *entirely* GM-targeted: the players receive nothing, and the
+    // notice says so rather than reporting a run that reached everyone.
+    h.gm.requestSequence("vista", "s1");
+    await flushMicrotasks();
+    expect(reports).toHaveLength(2);
+    expect(reports[1]?.recipients).toBe(1); // the GM alone
+    expect(reports[1]?.targeted).toBeUndefined();
+    expect(reports[1]?.empty).toBe(2);
+  });
+
   test("a player's own request never receives the host's audience aggregate", async () => {
     const h = await setup();
     const aura = fxMacro("open-aura");

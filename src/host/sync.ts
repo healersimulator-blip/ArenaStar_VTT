@@ -219,6 +219,10 @@ interface PreparedFx {
   recipients: Session[];
   /** Preflight drop counts (SQ-13), reported to a GM requester via `fx.delivery`. */
   skipped: FxDeliverySkips;
+  /** D-303: how many recipients got a reduced payload (D-300 targeting), and how many
+   * were left with nothing at all — counted separately from `skipped`, because these
+   * viewers were entitled to the run. */
+  targeting: { targeted: number; empty: number };
   callerId: string;
   audience: "scene" | "gm" | "caller";
   checkedAtSeq: number;
@@ -2891,13 +2895,17 @@ export class HostSync {
       this.reject(session, msg.requestId, "invariant", "FX instance could not be committed");
       return;
     }
-    // SQ-13: tell the requester when the cue reached fewer viewers than the scene has.
-    // Sent only to the caller's own session, and only counts leave this method.
+    // SQ-13/D-303: tell the requester when the cue reached fewer viewers than the scene
+    // has — or when it reached them with a section withheld. Sent only to the caller's own
+    // session, and only counts leave this method.
     const skippedTotal = Object.values(prepared.skipped).reduce((a, b) => a + b, 0);
-    if (skippedTotal > 0 && (caller.role === "GM" || caller.role === "ASSISTANT")) {
+    const { targeted, empty } = prepared.targeting;
+    if ((skippedTotal > 0 || targeted > 0 || empty > 0) &&
+        (caller.role === "GM" || caller.role === "ASSISTANT")) {
       this.send(session, { kind: "fx.delivery", requestId: String(msg.requestId),
         runId: prepared.cue.runId, macroId: prepared.cue.macroId,
-        recipients: prepared.recipients.length, skipped: prepared.skipped });
+        recipients: prepared.recipients.length, skipped: prepared.skipped,
+        ...(targeted > 0 ? { targeted } : {}), ...(empty > 0 ? { empty } : {}) });
     }
     // Register after a successful host commit/fan-out; retries cannot clone cues.
     this.seenFxRequests.set(key, this.now());
@@ -2953,6 +2961,9 @@ export class HostSync {
     // SQ-13 (A10): preflight says who will NOT get this cue. Counts are per reason so
     // the requester hears "two viewers are missing the media", not a silent drop.
     const skipped: FxDeliverySkips = { audience: 0, rights: 0, anchor: 0, media: 0 };
+    // D-303: preflight also says who got a *reduced* payload (a targeted camera section,
+    // D-300) and who was left with nothing, which is a different fact from a skip.
+    const targeting = { targeted: 0, empty: 0 };
     for (const viewer of this.sessions.values()) {
       const user = viewer.user;
       if (!user) continue;
@@ -2967,9 +2978,15 @@ export class HostSync {
       const available = projectAssetManifest(this.store.world, manifest, user);
       if (resolved.sections.some((step) =>
         (step.kind === "image" || step.kind === "sound") && !available[step.assetId])) { skipped.media++; continue; }
+      // Would this viewer receive the whole run? Targeting is decided by the author's
+      // audiences, not by a document change, so it is settled here rather than later.
+      const entitled = fxSectionsForViewer(resolved.sections,
+        { id: user.id, isGm: user.role === "GM" || user.role === "ASSISTANT" }, ownerId);
+      if (entitled.length === 0) { targeting.empty++; continue; }
+      if (entitled.length < resolved.sections.length) targeting.targeted++;
       recipients.push(viewer);
     }
-    return { ok: true, cue, recipients, callerId: ownerId, skipped,
+    return { ok: true, cue, recipients, callerId: ownerId, skipped, targeting,
       audience: narrowAudience === "gm" ? "gm" : macro.sequence.audience ?? "scene",
       checkedAtSeq: this.store.seq,
       ...(source ? { sourceTokenId: source._id } : {}),

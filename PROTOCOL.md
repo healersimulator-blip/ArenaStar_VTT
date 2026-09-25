@@ -421,17 +421,27 @@ interface FxEndMsg { kind: "fx.end"; runId: string; sceneId: DocId }
 ### fx.delivery (0x4d · host → requesting session · ops)
 
 The host's preflight answer to the requester of a cue (SQ-13/A10): the requested action
-already completed exactly once, but the cue reached fewer sessions than the scene has.
-Counts only, per reason — an audience/entitlement mismatch must not become a membership
-oracle, so no user, document or asset identifier appears in the message. Sent only to the
-requesting session, and only when the requester is a GM/assistant and at least one session
-was skipped; a player-initiated request never receives it.
+already completed exactly once, but the cue reached fewer sessions than the scene has — or
+reached them with a *section withheld* because the author targeted it at someone else
+(D-300/D-303). Counts only, per reason — an audience/entitlement mismatch must not become a
+membership oracle, so no user, document or asset identifier appears in the message. Sent
+only to the requesting session, when the requester is a GM/assistant and there is something
+to explain (a skip, a reduced payload, or a viewer left with nothing); a player-initiated
+request never receives it.
 
 ```ts
 interface FxDeliverySkips { audience: number; rights: number; anchor: number; media: number }
 interface FxDeliveryMsg { kind: "fx.delivery"; requestId: string; runId: string; macroId: DocId;
-  recipients: number; skipped: FxDeliverySkips }
+  recipients: number; skipped: FxDeliverySkips;
+  /* Of `recipients`, those whose cue omitted a section targeted elsewhere. */
+  targeted?: number;
+  /* Entitled viewers who received nothing at all: every section was targeted away. */
+  empty?: number }
 ```
+
+`recipients` counts sessions that received *something*; a viewer whose copy would have no
+sections at all is counted in `empty` and receives no cue, so a run the author aimed
+entirely at the GM is not reported as having reached the whole table.
 
 ### ephemeral (0x04 · both · ephemeral)
 

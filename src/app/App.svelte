@@ -3006,7 +3006,8 @@ const WALL_PICK_RADIUS = 12;
         offFxDelivery?.();
         offFxDelivery = current.gm.bus.on("fxDelivery", (msg) => {
           const name = current.gm.client.store.get("macros", msg.macroId)?.name ?? "FX timeline";
-          const line = summarizeSkips(msg.skipped, msg.recipients, name);
+          const line = summarizeSkips(msg.skipped, msg.recipients, name,
+            { targeted: msg.targeted ?? 0, empty: msg.empty ?? 0 });
           if (line) notifyLog = [...notifyLog.slice(-49), { message: line, level: "warn" }];
         });
         const canvas = view.app.canvas as HTMLCanvasElement;

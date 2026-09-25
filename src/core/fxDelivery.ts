@@ -186,14 +186,23 @@ export function summarizeSkips(
   skipped: FxDeliverySkips,
   recipients: number,
   name = "FX timeline",
+  targeting: { targeted?: number; empty?: number } = {},
 ): string | null {
   const total = skipped.audience + skipped.rights + skipped.anchor + skipped.media;
-  if (total === 0) return null;
+  const targeted = targeting.targeted ?? 0;
+  const empty = targeting.empty ?? 0;
+  // D-303: a run that reached everyone but *reduced* some payloads (or silenced them
+  // entirely) still needs explaining — otherwise the author never learns whether the
+  // targeting they set did anything, and a player hearing nothing looks like a bug.
+  if (total === 0 && targeted === 0 && empty === 0) return null;
   const reasons: string[] = [];
   if (skipped.audience > 0) reasons.push(`${skipped.audience} outside its audience`);
   if (skipped.rights > 0) reasons.push(`${skipped.rights} without read rights`);
   if (skipped.anchor > 0) reasons.push(`${skipped.anchor} missing the source/target token`);
   if (skipped.media > 0) reasons.push(`${skipped.media} without media rights`);
+  if (targeted > 0) reasons.push(`${targeted} saw it without its targeted sections`);
+  if (empty > 0) reasons.push(`${empty} left with none of it`);
   const reach = recipients === 0 ? "reached no one" : `reached ${recipients} viewer(s)`;
-  return `${name}: ${reach} — ${total} skipped (${reasons.join(", ")})`;
+  const skippedText = total > 0 ? `${total} skipped (${reasons.join(", ")})` : reasons.join(", ");
+  return `${name}: ${reach} — ${skippedText}`;
 }
