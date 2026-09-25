@@ -2,12 +2,15 @@ import { describe, expect, test } from "vitest";
 import {
   pointInPolygon,
   polygonBounds,
+  segmentCrossingPoint,
+  segmentsCross,
   visibilityPolygon,
   type Segment,
 } from "../../src/canvas/vision/polygon";
 import {
   axisBlocks,
   sightBlocked,
+  soundSegments,
   sightSegments,
   wallStroke,
   WALL_COLORS,
@@ -124,6 +127,44 @@ describe("wall restriction semantics (§9 / D-009)", () => {
     const segs = sightSegments(walls);
     expect(segs.map((s) => s.y1)).toEqual([0, 30]);
     expect(walls.filter(sightBlocked).map((w) => w._id)).toEqual(["a", "d"]);
+  });
+
+  test("soundSegments asks the sound axis, not the sight axis (D-309)", () => {
+    // The same fixture as sight, read down the other axis: a window passes sound and a
+    // closed door does not, so what a viewer *hears* through is not what they see through.
+    const walls = [
+      wall({ _id: "a", c: [0, 0, 10, 0], sight: 2, sound: 0 }), // opaque to sound only
+      wall({ _id: "b", c: [0, 10, 10, 10], sight: 0, sound: 2 }), // see-through, sound-porous
+      wall({ _id: "c", c: [0, 20, 10, 20], sight: 0, sound: 1, door: 1 }), // open door
+      wall({ _id: "d", c: [0, 30, 10, 30], sight: 0, sound: 1, door: 0 }), // closed door
+      wall({ _id: "e", c: [0, 40, 10, 40], sight: 0, sound: 2 }), // and the light-only case
+    ];
+    // A window is the D-009 case that makes this whole distinction load-bearing: sight
+    // passes, sound is conditional, and a closed window is where a listener cannot see
+    // what they hear.
+    const window = wall({ _id: "w", c: [0, 50, 10, 50], sight: 2, light: 2, move: 0, sound: 1, door: 0 });
+    // Three of the five walls stop sound (a: opaque, d: closed door, the window: closed and
+    // conditional on the sound axis), while sight — asked the same question — keeps a
+    // different three: the two answers are genuinely different, which is the point.
+    expect(soundSegments([...walls, window]).map((s) => s.y1)).toEqual([0, 30, 50]);
+    expect(sightSegments(walls).map((s) => s.y1)).toEqual([10, 20, 30, 40]);
+    expect(soundSegments([])).toEqual([]);
+  });
+
+  test("a segment crossing is a pure geometric question (D-309)", () => {
+    const a = { x: 0, y: 0 };
+    const b = { x: 10, y: 0 };
+    expect(segmentsCross(a, b, { x: 5, y: -5 }, { x: 5, y: 5 })).toBe(true);
+    expect(segmentCrossingPoint(a, b, { x: 5, y: -5 }, { x: 5, y: 5 })).toEqual({ x: 5, y: 0 });
+    expect(segmentsCross(a, b, { x: 5, y: 5 }, { x: 5, y: 15 })).toBe(false); // clear of the line
+    expect(segmentCrossingPoint(a, b, { x: 5, y: 5 }, { x: 5, y: 15 })).toBeNull();
+    // Touching counts: a listener standing exactly on a wall is behind it, which is the
+    // same convention the D-307 mask trim uses. A wall that stops short does not.
+    expect(segmentsCross(a, b, { x: 5, y: 0 }, { x: 5, y: 5 })).toBe(true);
+    expect(segmentsCross(a, b, { x: 20, y: -5 }, { x: 20, y: 5 })).toBe(false);
+    // Parallel (and collinear) is never a crossing, however close the lines run.
+    expect(segmentsCross(a, b, { x: 0, y: 1 }, { x: 10, y: 1 })).toBe(false);
+    expect(segmentsCross(a, b, { x: 0, y: 0 }, { x: 10, y: 0 })).toBe(false);
   });
 
   test("wallStroke picks the dominant restriction color", () => {

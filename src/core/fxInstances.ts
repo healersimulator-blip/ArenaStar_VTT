@@ -8,6 +8,7 @@ import type { AssetManifest, FxInstanceDocument, SceneDocument, WorldCollections
 import type { Op } from "./ops";
 import { validateFxSequence, type FxSection } from "./fx";
 import { tagMatcher } from "./tags";
+import { crosshairPxPerUnit } from "./crosshair";
 
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -65,9 +66,19 @@ export function validateFxInstance(
     // than treat an imported one as a visual.
     if (section.kind === "camera") return false;
     if (section.kind === "sound") {
-      const { mime, ...saved } = section;
+      const { mime, x, y, radiusPx, ...authored } = section;
       if (manifest[section.assetId]?.mime !== mime) return false;
-      sections.push(saved);
+      // A stored positional sound keeps its geometry in the host's own pixels — the very
+      // form a recipient receives. Rebuild the authored anchor so one validator (the
+      // sequence schema) owns the bounds and the radius range, rather than a second set
+      // of numbers that could disagree. The pixel→unit division is the exact inverse of
+      // resolution, rounded so float noise cannot push a legal reach past its own limit.
+      const placed = x === undefined || y === undefined || radiusPx === undefined
+        ? x === undefined && y === undefined && radiusPx === undefined ? null : undefined
+        : { at: { kind: "point" as const, x, y },
+            radius: Math.round((radiusPx / crosshairPxPerUnit(scene.grid)) * 1e6) / 1e6 };
+      if (placed === undefined) return false;
+      sections.push({ ...authored, ...(placed ?? {}) });
       continue;
     }
     const { x, y, toX, toY, followTokenId, followToTokenId } = section;

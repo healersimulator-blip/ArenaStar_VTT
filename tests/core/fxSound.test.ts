@@ -5,7 +5,8 @@
 import { describe, expect, test } from "vitest";
 import {
   DEFAULT_SOUND_MIX, SOUND_CHANNELS, SOUND_CHANNEL_LABELS, SOUND_DEFAULT_CHANNEL, cueSilentForViewer,
-  isSoundChannel, normalizeSoundMix, soundChannelOf, soundFadeGain, soundGain, soundSummary,
+  isSoundChannel, normalizeSoundMix, positionalGain, positionalPan, soundChannelOf, soundFadeGain,
+  soundGain, soundNeedsGraph, soundSpatial, soundSummary,
   type SoundMix,
 } from "../../src/core/fxSound";
 
@@ -128,5 +129,58 @@ describe("soundSummary", () => {
     expect(soundSummary({ name: "Ward hum.wav", channel: "ambience" })).toBe("Ward hum.wav · Ambience");
     expect(soundSummary({ name: "  ", channel: "sfx" })).toBe("Effects");
     expect(soundSummary({ name: null, channel: "voice" })).toBe("Voice");
+  });
+});
+
+describe("where a sound is, and who is listening (D-309, SQ-09)", () => {
+  test("distance is a straight line from the source to the rim", () => {
+    expect(positionalGain(0, 600)).toBe(1);
+    expect(positionalGain(300, 600)).toBeCloseTo(0.5, 12);
+    expect(positionalGain(600, 600)).toBe(0);
+    expect(positionalGain(9_999, 600)).toBe(0);
+    // Nothing to measure from means global, not silence: an unpositioned cue plays.
+    expect(positionalGain(Number.NaN, 600)).toBe(1);
+    expect(positionalGain(300, 0)).toBe(1);
+    expect(positionalGain(300, Number.POSITIVE_INFINITY)).toBe(1);
+  });
+
+  test("panning follows the source's own side of the listener, bounded", () => {
+    expect(positionalPan(0, 600)).toBe(0);
+    expect(positionalPan(300, 600)).toBe(0.5);
+    expect(positionalPan(-300, 600)).toBe(-0.5);
+    expect(positionalPan(5_000, 600)).toBe(1);
+    expect(positionalPan(-5_000, 600)).toBe(-1);
+    expect(positionalPan(Number.NaN, 600)).toBe(0);
+  });
+
+  test("the whole rule: gain, pan and muffle for one listener", () => {
+    const section = { x: 900, y: 500, radiusPx: 600, pan: true, muffle: true, occluded: true };
+    const heard = soundSpatial(section, { x: 300, y: 500 });
+    expect(heard.gain).toBe(0); // the rim: 600 px away is out of earshot
+    expect(heard.pan).toBe(1); // …and hard right, where it is also silent
+    expect(heard.muffled).toBe(true);
+    const near = soundSpatial(section, { x: 600, y: 500 });
+    expect(near.gain).toBeCloseTo(0.5, 12);
+    expect(near.pan).toBeCloseTo(0.5, 12);
+
+    // A listener the client cannot name (nothing of its own, no camera) hears it as
+    // authored: guessing where somebody is would be worse than not attenuating at all.
+    expect(soundSpatial(section, null)).toEqual({ gain: 1, pan: 0, muffled: false });
+    // An unpositioned section is global even with switches on it (validation forbids
+    // that combination, and the policy must not invent a position anyway).
+    expect(soundSpatial({ pan: true, muffle: true, occluded: true }, { x: 0, y: 0 }))
+      .toEqual({ gain: 1, pan: 0, muffled: false });
+    // Occlusion is the host's answer: a muffle the host never confirmed is not applied.
+    expect(soundSpatial({ ...section, occluded: false }, { x: 600, y: 500 }).muffled).toBe(false);
+    // Panning is the author's choice, not a side effect of having a position.
+    expect(soundSpatial({ ...section, pan: false }, { x: 600, y: 500 }).pan).toBe(0);
+  });
+
+  test("only pan and a confirmed muffle need a Web Audio graph", () => {
+    expect(soundNeedsGraph({})).toBe(false);
+    expect(soundNeedsGraph({ pan: true })).toBe(true);
+    expect(soundNeedsGraph({ muffle: true })).toBe(false); // requested, but no wall between them
+    expect(soundNeedsGraph({ muffle: true, occluded: true })).toBe(true);
+    expect(soundNeedsGraph({ pan: false, muffle: true, occluded: false })).toBe(false);
   });
 });

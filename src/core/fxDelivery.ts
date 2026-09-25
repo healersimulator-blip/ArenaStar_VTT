@@ -70,7 +70,7 @@ export function fxPreloadPlan(
   return [...byAsset.values()].sort((a, b) => a.waitMs - b.waitMs || a.assetId.localeCompare(b.assetId));
 }
 
-export type FxDeliveryState = "ready" | "late" | "skipped" | "cut" | "failed";
+export type FxDeliveryState = "ready" | "late" | "skipped" | "cut" | "reduced" | "failed";
 export type FxDeliveryReason =
   | "preload"          // bytes were fetched ahead of the cue
   | "not-ready"        // a slow client: the fetch had not landed when the section started
@@ -78,6 +78,7 @@ export type FxDeliveryReason =
   | "unsupported-codec" // the browser refused the MIME before/while decoding
   | "muted"            // local "mute FX sound" preference
   | "reduced-motion"   // local "reduce motion" preference cut a camera cue short
+  | "spatial-unavailable" // D-309: this device cannot pan or muffle, so it played at distance gain only
   | "error";           // decode/playback threw
 
 export interface FxDeliveryEntry {
@@ -119,7 +120,8 @@ const KIND_LABEL: Record<string, string> = {
 const REASON_LABEL: Record<FxDeliveryReason, string> = {
   "preload": "preloaded", "not-ready": "not loaded in time", "missing": "missing media",
   "unsupported-codec": "unsupported format", "muted": "muted on this device",
-  "reduced-motion": "cut by reduced motion", "error": "failed to play",
+  "reduced-motion": "cut by reduced motion",
+  "spatial-unavailable": "played without spatial audio", "error": "failed to play",
 };
 
 /**

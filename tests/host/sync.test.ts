@@ -1315,6 +1315,7 @@ test("roll.apply refuses a card that never carried a total, and an actor that is
 
 describe("Macros / FX host authority and audience", () => {
   const imageHash = "a".repeat(64);
+  const soundHash = "5".repeat(64);
   const fxMacro = (id: string, at: "point" | "source" = "point"): MacroDocument => ({
     _id: id, type: "macro", name: id, ownership: { default: 1 },
     flags: { core: { playerCallable: true } }, system: {}, kind: "sequence", command: "",
@@ -1505,6 +1506,121 @@ describe("Macros / FX host authority and audience", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  test("a wall between the source and a viewer dulls the sound for that viewer alone", async () => {
+    const h = await setup({ [soundHash]: { name: "hum.wav", mime: "audio/wav", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    // The two players' own tokens, far apart: `t-pl` west of the sound, `t-ivy` east of it.
+    h.gm.submit([{ kind: "update", ref: { coll: "tokens", id: "t-pl", parent: { coll: "scenes", id: "s1" } },
+      diff: { x: 150, y: 500 } }]);
+    await flushMicrotasks();
+    const positioned = fxMacro("hum", "point");
+    if (!positioned.sequence) throw new Error("FX fixture missing sequence");
+    // A sound at the scene's centre with a 30-unit (600 px) reach, dulled by walls.
+    positioned.sequence.sections = [{ kind: "sound", id: "s", assetId: soundHash, startMs: 0,
+      durationMs: 4_000, volume: 1, at: { kind: "point", x: 500, y: 500 }, radius: 30,
+      muffle: true }];
+    positioned.sequence.persistent = false;
+    h.gm.submit([{ kind: "create", coll: "macros", data: positioned }]);
+    await flushMicrotasks();
+    const player = await h.addPlayer(PLAYER_ID, "Rex");
+    // A door between the sound and Ivy only (x = 900 spans her side), placed closed.
+    const door: WallDocument = { _id: "door-1", type: "wall", name: "Door", ownership: { default: 0 },
+      flags: {}, system: {}, c: [900, 100, 900, 900], move: 1, sight: 1, sound: 1, light: 1,
+      door: 0, oneWay: false };
+    h.gm.submit([{ kind: "create", coll: "walls", parent: { coll: "scenes", id: "s1" }, data: door }]);
+    await flushMicrotasks();
+
+    const cues: Record<string, ClientEvents["fx"][]> = { gm: [], rex: [], ivy: [] };
+    h.gmBus.on("fx", (msg) => cues.gm?.push(msg));
+    player.bus.on("fx", (msg) => cues.rex?.push(msg));
+    const ivy = await h.addPlayer(OTHER_ID, "Ivy");
+    ivy.bus.on("fx", (msg) => cues.ivy?.push(msg));
+    // Ivy's own token has to exist before the cue is fanned out for her to be occluded.
+    h.gm.submit([{ kind: "update", ref: { coll: "tokens", id: "t-ivy", parent: { coll: "scenes", id: "s1" } },
+      diff: { x: 950, y: 500 } }]);
+    await flushMicrotasks();
+
+    const before = cues.rex?.length ?? 0;
+    h.gm.requestSequence("hum", "s1");
+    await flushMicrotasks();
+    const rexCue = cues.rex?.[before];
+    const ivyCue = cues.ivy?.at(-1);
+    const gmCue = cues.gm?.at(-1);
+    const soundOf = (cue: ClientEvents["fx"] | undefined) =>
+      cue?.sections.find((section) => section.kind === "sound") as
+        { x?: number; y?: number; radiusPx?: number; muffle?: boolean; occluded?: boolean } | undefined;
+    // Both viewers get the same *authored* cue — the geometry, the radius in the host's
+    // own pixels, the request to muffle — and only one of them is told a wall is in the way.
+    expect(soundOf(rexCue)).toMatchObject({ x: 500, y: 500, radiusPx: 600, muffle: true });
+    expect(soundOf(rexCue)?.occluded).toBeUndefined();
+    expect(soundOf(ivyCue)).toMatchObject({ x: 500, y: 500, radiusPx: 600, occluded: true });
+    // The GM's own session holds no token of its own on this scene, so the host cannot
+    // honestly name a listening point: no answer, not a guessed one.
+    expect(soundOf(gmCue)?.occluded).toBeUndefined();
+    // Nothing in the payload says *where* the listening point was, only whether it was blocked.
+    expect(JSON.stringify(soundOf(ivyCue))).not.toContain("950");
+
+    // Opening the door lets the sound through, exactly as it lets sight through.
+    h.gm.submit([{ kind: "update", ref: { coll: "walls", id: "door-1", parent: { coll: "scenes", id: "s1" } },
+      diff: { door: 1 } }]);
+    await flushMicrotasks();
+    h.gm.requestSequence("hum", "s1");
+    await flushMicrotasks();
+    expect((cues.ivy?.at(-1)?.sections[0] as { occluded?: boolean }).occluded).toBeUndefined();
+    // A window permits sound by its own axes (it passes sight and light): no muffle, even
+    // though a listener who could not see through it would still be hidden from view.
+    h.gm.submit([{ kind: "update", ref: { coll: "walls", id: "door-1", parent: { coll: "scenes", id: "s1" } },
+      diff: { door: 0, sight: 2, light: 2, sound: 2 } }]);
+    await flushMicrotasks();
+    h.gm.requestSequence("hum", "s1");
+    await flushMicrotasks();
+    expect((cues.ivy?.at(-1)?.sections[0] as { occluded?: boolean }).occluded).toBeUndefined();
+    // An opaque wall blocks regardless of the door state, and reaches the same viewer.
+    h.gm.submit([{ kind: "update", ref: { coll: "walls", id: "door-1", parent: { coll: "scenes", id: "s1" } },
+      diff: { sight: 0, light: 0, sound: 0, move: 0, door: 1 } }]);
+    await flushMicrotasks();
+    h.gm.requestSequence("hum", "s1");
+    await flushMicrotasks();
+    expect((cues.ivy?.at(-1)?.sections[0] as { occluded?: boolean }).occluded).toBe(true);
+  });
+
+  test("a stored loop is muffled per recipient too, recomputed on reconnect", async () => {
+    const h = await setup({ [soundHash]: { name: "hum.wav", mime: "audio/wav", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    h.gm.submit([{ kind: "update", ref: { coll: "tokens", id: "t-pl", parent: { coll: "scenes", id: "s1" } },
+      diff: { x: 150, y: 500 } }]);
+    await flushMicrotasks();
+    const loop = fxMacro("aura", "point");
+    if (!loop.sequence) throw new Error("FX fixture missing sequence");
+    loop.sequence.persistent = true;
+    loop.sequence.sections = [{ kind: "sound", id: "s", assetId: soundHash, startMs: 0,
+      durationMs: 4_000, at: { kind: "point", x: 500, y: 500 }, radius: 30, muffle: true }];
+    h.gm.submit([{ kind: "create", coll: "macros", data: loop }]);
+    await flushMicrotasks();
+    const player = await h.addPlayer(PLAYER_ID, "Rex");
+    const wall: WallDocument = { _id: "wall-1", type: "wall", name: "Wall", ownership: { default: 0 },
+      flags: {}, system: {}, c: [800, 100, 800, 900], move: 0, sight: 0, sound: 0, light: 0,
+      door: 0, oneWay: false };
+    h.gm.submit([{ kind: "create", coll: "walls", parent: { coll: "scenes", id: "s1" }, data: wall }]);
+    await flushMicrotasks();
+    const cues: ClientEvents["fx"][] = [];
+    player.bus.on("fx", (msg) => cues.push(msg));
+    h.gm.requestSequence("aura", "s1");
+    await flushMicrotasks();
+    expect((cues.at(-1)?.sections[0] as { occluded?: boolean }).occluded).toBeUndefined();
+    // The durable record itself carries no per-recipient answer: it is resolved for each
+    // viewer at emit, so the same instance can be dulled for one and clear for another.
+    const stored = h.hostStore.getAll("fxInstances")[0];
+    expect(JSON.stringify(stored)).not.toContain("occluded");
+    // A reconnect asks for the live state, and the answer is recomputed for *that* viewer.
+    h.gm.submit([{ kind: "update", ref: { coll: "tokens", id: "t-pl", parent: { coll: "scenes", id: "s1" } },
+      diff: { x: 900, y: 500 } }]);
+    await flushMicrotasks();
+player.client.requestFxSync("s1");
+    await flushMicrotasks();
+    expect((cues.at(-1)?.sections[0] as { occluded?: boolean }).occluded).toBe(true);
   });
 
   test("published repeated FX resolves clock-aligned per-section plays for entitled viewers without world ops", async () => {

@@ -13,8 +13,10 @@ import {
   type FxDeliveryEntry, type FxDeliveryReport,
 } from "../core/fxDelivery";
 import { domCanPlay, fxAssetFitness, fxViewPrefs, subscribeFxViewPrefs, type FxViewPrefs } from "../core/fxPrefs";
-import { soundChannelOf, soundFadeGain, soundGain } from "../core/fxSound";
-import { registerFxSound, setFxSoundGain } from "./fxSounds";
+import { soundChannelOf, soundFadeGain, soundGain, soundNeedsGraph, soundSpatial,
+  type SoundSpatial } from "../core/fxSound";
+import { registerFxSound, setFxSoundGain, setFxSoundSpatial } from "./fxSounds";
+import { attachSpatialAudio, type SpatialAudioNodes } from "./fxAudioGraph";
 import type { Camera } from "../canvas/camera";
 import type { ClientEvents, ClientSync } from "./sync";
 import type { EventBus } from "../core/events";
@@ -306,6 +308,32 @@ export class FxPlayer {
     return fxAssetFitness({ mime }, mime, this.canPlay) === "unsupported-codec";
   }
 
+  /**
+   * D-309: where this viewer hears from. Their own token is the honest answer — the
+   * character they are playing stands somewhere on the map — and a viewer with nothing of
+   * their own uses **the centre of their own view**: they are looking at the scene from
+   * there, which is the only position a client can honestly name about itself.
+   */
+  private listener(): { x: number; y: number } | null {
+    const sceneId = this.options.sceneId();
+    const userId = this.options.client.user?.id;
+    // A shell with no store (a preview, a test double, a client that has not loaded the
+    // world yet) simply has no token to name — the view centre below still answers.
+    const world = (this.options.client as { store?: { world: { scenes?: readonly unknown[] } } }).store;
+    if (sceneId && world) {
+      const scene = (world.world.scenes as Array<{ _id: string; tokens: Array<{ x: number; y: number;
+        ownership?: Record<string, number> }> }> | undefined)?.find((entry) => entry._id === sceneId);
+      const token = userId
+        ? scene?.tokens.find((entry) => (entry.ownership?.[userId] ?? 0) >= 3) : undefined;
+      if (token) return { x: token.x, y: token.y };
+    }
+    const camera = this.options.stage.camera;
+    const viewport = this.options.stage.viewport;
+    if (!camera || !viewport || !Number.isFinite(camera.scale) || camera.scale <= 0) return null;
+    return { x: camera.x + viewport.width / (2 * camera.scale),
+      y: camera.y + viewport.height / (2 * camera.scale) };
+  }
+
   private async prefetch(assetId: string, runId: string): Promise<void> {
     if (this.prefetched.has(assetId)) return;
     const record = { done: false, failed: false };
@@ -482,24 +510,49 @@ export class FxPlayer {
       else if (this.mediaAcks.get(cue.runId)?.get(section.assetId) === undefined)
         this.ackMedia(cue.runId, section.assetId, "ready",
           { ms: Math.max(0, Math.round(this.hostNow() - fetchStarted)) });
-      this.settleCue(cue.runId);
       if (section.kind === "sound") {
         const channel = soundChannelOf(section);
         const audio = new Audio(url);
         audio.loop = cue.persistent === true;
         const startedAt = Date.now();
+        // D-309: pan and muffle are the two things an element cannot do; a device that
+        // cannot do them plays everything else and *says* so (once, in this viewer's own
+        // report) rather than pretending the author's placement took effect.
+        const wants = soundNeedsGraph(section);
+        const spatialNodes: SpatialAudioNodes | null = wants ? attachSpatialAudio(audio) : null;
+        if (wants && !spatialNodes) {
+          this.noteDelivery(cue.runId, { index, kind: "sound", state: "reduced",
+            reason: "spatial-unavailable", assetId: section.assetId });
+        }
+        // A run settles only once this viewer knows everything it will report — which
+        // includes whether its device could honour the author's placement at all. A note
+        // written after the report has gone out would never be sent.
+        this.settleCue(cue.runId);
         // The gain is recomputed on a timer rather than set once, because a fade is a
         // curve and a viewer may move a channel fader while the cue is playing. Both
         // facts are local: the timeline never learns that this device changed its mix.
-        const applyGain = () => {
+        // Distance is measured afresh on every tick, so a viewer who walks their token or
+        // pans their camera hears the sound approach (and a wall that opens between them
+        // stops muffling it — the host resolved that at emit, so it is fixed for this cue).
+        const applyGain = (): number => {
           const fade = soundFadeGain({ elapsedMs: elapsed(), durationMs: section.durationMs,
             ...(section.fadeInMs !== undefined ? { fadeInMs: section.fadeInMs } : {}),
             ...(section.fadeOutMs !== undefined ? { fadeOutMs: section.fadeOutMs } : {}),
             loop: cue.persistent === true });
+          const spatial: SoundSpatial = soundSpatial(section, this.listener());
           const gain = soundGain({ ...(section.volume !== undefined ? { volume: section.volume } : {}),
-            channel, mix: this.prefs.soundMix, fade });
+            channel, mix: this.prefs.soundMix, fade }) * spatial.gain;
           audio.volume = gain;
           setFxSoundGain(soundId, gain);
+          // The device list says what this device is *actually* playing: a shell that could
+          // not build the graph plays centred and open, so claiming the author's pan or a
+          // wall's muffle there would be showing a control that did nothing (its own report
+          // is where the reduction is stated honestly).
+          const heard = spatialNodes ? { pan: spatial.pan, muffled: spatial.muffled }
+            : { pan: 0, muffled: false };
+          spatialNodes?.setPan(heard.pan);
+          spatialNodes?.setMuffled(heard.muffled);
+          setFxSoundSpatial(soundId, heard);
           return gain;
         };
         // The epoch is part of the key: a run that restarts (or reuses its ID after a
@@ -521,6 +574,7 @@ export class FxPlayer {
           audio.pause();
           audio.src = "";
           URL.revokeObjectURL(url);
+          spatialNodes?.dispose();
           unregister?.();
           const stops = this.stopAudio.get(cue.runId);
           stops?.delete(stop);
@@ -530,8 +584,13 @@ export class FxPlayer {
         stops.add(stop);
         this.stopAudio.set(cue.runId, stops);
         audio.onended = stop;
-        if ((section.fadeInMs ?? 0) > 0 || (section.fadeOutMs ?? 0) > 0) {
-          ramp = setInterval(() => { if (stopped || !active()) stop(); else applyGain(); }, 40);
+        // A fade needs a fast ramp; a *positioned* sound needs a tick for as long as it
+        // plays, because the listener can walk (or pan the view) while it sounds. A plain
+        // global sound with no fade is set once and left alone — nothing about it changes.
+        const fading = (section.fadeInMs ?? 0) > 0 || (section.fadeOutMs ?? 0) > 0;
+        if (fading || section.radiusPx !== undefined) {
+          const everyMs = fading ? 40 : 100;
+          ramp = setInterval(() => { if (stopped || !active()) stop(); else applyGain(); }, everyMs);
         }
         if (!cue.persistent) timer = setTimeout(stop, Math.max(0, section.durationMs - elapsed()));
         // The device-local list: this element exists here and now, whoever else may
@@ -545,6 +604,7 @@ export class FxPlayer {
         });
         return;
       }
+      this.settleCue(cue.runId);
       let texture: Texture;
       let video: HTMLVideoElement | null = null;
       try {

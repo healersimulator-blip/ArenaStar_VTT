@@ -262,6 +262,63 @@ describe("sound channels and fades (D-297)", () => {
     }
   });
 
+  test("a positioned sound travels as a resolved point and a radius in pixels", () => {
+    // The scene grid is 100 px per 5 units: a 30-unit reach is 600 px.
+    const placed = validateFxSequence(withSound({ at: { kind: "point", x: 300, y: 400 }, radius: 30 }));
+    expect(placed.ok).toBe(true);
+    const resolved = resolveFxSequence(placed.ok ? placed.sequence : withSound({}), scene, source, source,
+      (id) => (id === sound ? "audio/ogg" : undefined));
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    const section = resolved.sections[0] as { x?: number; y?: number; radiusPx?: number; at?: unknown;
+      radius?: unknown; mime?: string };
+    expect(section).toMatchObject({ x: 300, y: 400, radiusPx: 600 });
+    // The authored anchor and its scene-unit radius are gone: a recipient measures
+    // against its own view, so it gets the metric the host validated, not a second one.
+    expect(section.at).toBeUndefined();
+    expect(section.radius).toBeUndefined();
+    expect(section.mime).toBe("audio/ogg");
+
+    // A token anchor resolves to that token's *current* centre — the same rule every
+    // other anchor follows, and never a two-way follow (a sound does not chase a token).
+    const bound = validateFxSequence(withSound({ at: { kind: "source" }, radius: 10, pan: true, muffle: true }));
+    expect(bound.ok).toBe(true);
+    const boundResolved = resolveFxSequence(bound.ok ? bound.sequence : withSound({}), scene, source, source,
+      () => "audio/ogg");
+    if (!boundResolved.ok) return;
+    expect(boundResolved.sections[0]).toMatchObject({ x: source.x, y: source.y, radiusPx: 200,
+      pan: true, muffle: true });
+  });
+
+  test("position is what makes a sound positional: the three fields that measure from one are refused without it", () => {
+    for (const patch of [{ radius: 30 }, { pan: true }, { muffle: true }]) {
+      const checked = validateFxSequence(withSound(patch));
+      expect(checked.ok, JSON.stringify(patch)).toBe(false);
+      expect(checked.ok ? "" : checked.error).toContain("position");
+    }
+    // A position needs a reach: "where it is" without "how far it carries" is half a cue.
+    const noRadius = validateFxSequence(withSound({ at: { kind: "point", x: 10, y: 10 } }));
+    expect(noRadius.ok).toBe(false);
+    expect(noRadius.ok ? "" : noRadius.error).toContain("radius");
+    for (const radius of [0, -5, 1_001, Number.NaN]) {
+      expect(validateFxSequence(withSound({ at: { kind: "point", x: 10, y: 10 }, radius })).ok,
+        String(radius)).toBe(false);
+    }
+    expect(validateFxSequence(withSound({ at: { kind: "point", x: 10, y: 10 }, radius: 1 })).ok).toBe(true);
+    expect(validateFxSequence(withSound({ at: { kind: "point", x: 10, y: 10 }, radius: 1_000,
+      pan: false, muffle: false })).ok).toBe(true);
+    // The two switches are switches, not free text.
+    expect(validateFxSequence(withSound({ at: { kind: "point", x: 10, y: 10 }, radius: 5, pan: "yes" })).ok).toBe(false);
+    expect(validateFxSequence(withSound({ at: { kind: "point", x: 10, y: 10 }, radius: 5, muffle: 1 })).ok).toBe(false);
+    // An anchor outside the scene is refused at resolution, like every other anchor.
+    const outside = validateFxSequence(withSound({ at: { kind: "point", x: 5_000, y: 10 }, radius: 5 }));
+    expect(outside.ok).toBe(true);
+    const resolved = resolveFxSequence(outside.ok ? outside.sequence : withSound({}), scene, source, source,
+      () => "audio/ogg");
+    expect(resolved.ok).toBe(false);
+    if (!resolved.ok) expect(resolved.error).toContain("outside the scene");
+  });
+
   test("a channel or fade on a non-sound section is still an unknown field", () => {
     const wrong = { version: 1, sections: [
       { kind: "text", id: "t", text: "hi", at: { kind: "source" }, startMs: 0, durationMs: 500,

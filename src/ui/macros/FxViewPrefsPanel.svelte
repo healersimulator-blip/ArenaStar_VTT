@@ -88,6 +88,10 @@
       <div class="row" data-fx-playing-sound={sound.id}>
         <span>{sound.name ?? "FX sound"} · {SOUND_CHANNEL_LABELS[sound.channel]}
           {#if sound.persistent}<em>loop</em>{/if}
+          {#if sound.muffled}<em data-fx-sound-muffled>through a wall</em>{/if}
+          {#if sound.pan !== undefined && Math.abs(sound.pan) > 0.05}
+            <em data-fx-sound-pan>{sound.pan < 0 ? "left" : "right"}</em>
+          {/if}
           <small>{Math.round(sound.gain * 100)}%</small></span>
         <button type="button" data-fx-stop-sound={sound.id} onclick={() => stop(sound)}>Stop here</button>
       </div>

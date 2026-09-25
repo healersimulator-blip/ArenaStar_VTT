@@ -24,8 +24,12 @@ export interface LiveFxSound {
   /** What the asset is called in the world's registry, when it is known. */
   name: string | null;
   channel: FxSoundChannel;
-  /** The gain this device is applying right now (volume × channel mix × fade). */
+  /** The gain this device is applying right now (volume × channel mix × fade × distance). */
   gain: number;
+  /** D-309: where the cue sits between the speakers (−1 … +1); 0 = centred or not panned. */
+  pan?: number;
+  /** D-309: a wall stands between the source and this device's own listener. */
+  muffled?: boolean;
   /** A persistent loop keeps playing until stopped; a one-shot ends on its own. */
   persistent: boolean;
   startedAt: number;
@@ -45,8 +49,10 @@ function snapshot(): LiveFxSound[] {
   const out: LiveFxSound[] = [];
   const sorted = [...registrations.values()]
     .sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id));
-  for (const { id, runId, index, name, channel, gain, persistent, startedAt } of sorted) {
-    out.push({ id, runId, index, name, channel, gain, persistent, startedAt });
+  for (const { id, runId, index, name, channel, gain, pan, muffled, persistent, startedAt } of sorted) {
+    out.push({ id, runId, index, name, channel, gain,
+      ...(pan !== undefined ? { pan } : {}), ...(muffled !== undefined ? { muffled } : {}),
+      persistent, startedAt });
   }
   return out;
 }
@@ -81,6 +87,20 @@ export function registerFxSound(entry: Registration): () => void {
 }
 
 /** Update the gain a live element is applying (a mix change mid-playback). */
+/**
+ * D-309: the spatial half of a row, updated as the listener moves. Kept separate from
+ * the gain so a device that only has a panner (no muffle) still shows one honest line.
+ */
+export function setFxSoundSpatial(id: string, spatial: { pan: number; muffled: boolean }): void {
+  const entry = registrations.get(id);
+  if (!entry) return;
+  const pan = Number.isFinite(spatial.pan) ? Math.min(1, Math.max(-1, spatial.pan)) : 0;
+  if (entry.pan === pan && entry.muffled === spatial.muffled) return;
+  entry.pan = pan;
+  entry.muffled = spatial.muffled;
+  emit();
+}
+
 export function setFxSoundGain(id: string, gain: number): void {
   const entry = registrations.get(id);
   if (!entry || !Number.isFinite(gain)) return;

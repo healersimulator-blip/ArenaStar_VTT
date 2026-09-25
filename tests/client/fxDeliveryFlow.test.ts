@@ -33,7 +33,8 @@ import { FxPlayer } from "../../src/client/fxPlayer";
 import { createEventBus } from "../../src/core/events";
 import { setFxViewPrefs } from "../../src/core/fxPrefs";
 import { fxSounds, resetFxSounds, stopFxSounds } from "../../src/client/fxSounds";
-import { DEFAULT_SOUND_MIX } from "../../src/core/fxSound";
+import { DEFAULT_SOUND_MIX, MUFFLE_CUTOFF_HZ } from "../../src/core/fxSound";
+import { resetFxAudioGraph } from "../../src/client/fxAudioGraph";
 import type { ClientEvents, ClientSync } from "../../src/client/sync";
 import type { Stage } from "../../src/canvas/stage";
 import type { Camera } from "../../src/canvas/camera";
@@ -44,7 +45,7 @@ import type { FxDeliveryReport } from "../../src/core/fxDelivery";
 const SCENE = "sc-1";
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function harness() {
+function harness(listener: { userId?: string; scenes?: unknown[] } = {}) {
   const bus = createEventBus<ClientEvents>();
   const camera: Camera = { x: 0, y: 0, scale: 1 };
   const cameraWrites: Camera[] = [];
@@ -75,7 +76,11 @@ function harness() {
   const player = new FxPlayer({
     client: { clockOffset: () => ({ offsetMs: 0 }), requestFxSync: vi.fn(),
       reportFxMedia: (ack: { runId: string; assetId: string; state: string; reason?: string; ms?: number }) =>
-        mediaAcks.push(ack) } as unknown as ClientSync,
+        mediaAcks.push(ack),
+      // D-309: a viewer's own token is their listening point; the harness lets a test
+      // hand the player a world so that rule is exercised, not assumed.
+      ...(listener.userId ? { user: { id: listener.userId } } : {}),
+      ...(listener.scenes ? { store: { world: { scenes: listener.scenes } } } : {}) } as unknown as ClientSync,
     bus, stage,
     fetchAsset: (hash: string) => {
       // The real fetcher dedups in-flight requests per hash; the double here must too,
@@ -96,7 +101,9 @@ function harness() {
     macroName: () => "Test timeline",
   });
   return {
-    bus, player, reports, errors, requests, cameraWrites, spawned, mediaAcks,
+    bus, player, reports, errors, requests, cameraWrites, spawned, mediaAcks, camera,
+    /** D-309: move the listening point by moving the view (the camera centre is the fallback). */
+    panTo: (x: number, y: number) => { camera.x = x - 400; camera.y = y - 300; },
     fail: (hash: string) => fails.add(hash),
     /** Let a fetch finish, then let the microtask queue drain. */
     resolveAsset: async (hash: string) => {
@@ -106,7 +113,10 @@ function harness() {
       await sleep(20);
     },
     pendingCount: () => pending.size,
-    send: (sections: ResolvedFxSection[], opts: { persistent?: boolean } = {}) => {
+    // The live-sound registry keys rows by `runId:index:epoch`, and a cue's ramp keeps
+    // ticking after its own test ends: a test that reads that registry gives its run its
+    // own ID rather than being written to by a previous test's timer.
+    send: (sections: ResolvedFxSection[], opts: { persistent?: boolean; runId?: string } = {}) => {
       bus.emit("fx", { kind: "fx.start", runId: "run-1", macroId: "macro-1", sceneId: SCENE,
         atHostTime: Date.now() + 40, sections, ...opts } satisfies FxStartMsg);
     },
@@ -425,5 +435,109 @@ describe("the table answers with what it actually did (D-308, SQ-13)", () => {
     await h.resolveAsset("aa".repeat(32));
     await sleep(60);
     expect(h.mediaAcks).toEqual([]);
+  });
+});
+
+/**
+ * D-309 (SQ-09) — *where* a sound is played from, and who is listening. The host resolves
+ * the position and tells this client only whether a wall stood in the way; distance and
+ * panning are measured here, per tick, against whatever the viewer can honestly point at.
+ */
+describe("positional audio: distance, panning, and the device that cannot pan (D-309, SQ-09)", () => {
+  const placed = (patch: Partial<Extract<ResolvedFxSection, { kind: "sound" }>> = {}): ResolvedFxSection =>
+    ({ ...sound(0), x: 700, y: 300, radiusPx: 600, ...patch }) as ResolvedFxSection;
+
+  test("the level falls with distance, measured from this viewer's own token", async () => {
+    const scenes = [{ _id: SCENE, width: 1_000, height: 1_000, tokens: [
+      { _id: "t-me", name: "Me", x: 700, y: 300, ownership: { u1: 3 } }] }];
+    const h = harness({ userId: "u1", scenes });
+    h.send([placed()], { runId: "run-d309" });
+    await sleep(60);
+    await h.resolveAsset("bb".repeat(32));
+    await sleep(60);
+    // Standing on the source: the full authored volume, no attenuation at all.
+    expect(audios[0]?.volume).toBeCloseTo(1, 6);
+    // A quarter of the way out is a quarter quieter — and this is a *live* number: the
+    // player re-measures, so a token that walks mid-cue is heard walking.
+    const token = (scenes[0]?.tokens[0]) as { x: number; y: number };
+    token.x = 550;
+    await sleep(140);
+    expect(audios[0]?.volume).toBeCloseTo(0.75, 2);
+    expect(fxSounds()[0]?.gain).toBeCloseTo(0.75, 2);
+    // Beyond the rim: silent, and still playing (the element is this viewer's own fader).
+    token.x = 100;
+    await sleep(140);
+    expect(audios[0]?.volume).toBe(0);
+  });
+
+  test("a viewer with no token of their own listens from the centre of their view", async () => {
+    const h = harness();
+    h.send([placed()], { runId: "run-d309" });
+    await sleep(60);
+    await h.resolveAsset("bb".repeat(32));
+    await sleep(60);
+    // The view's centre is (400, 300): 300 px from the source inside a 600 px reach.
+    expect(audios[0]?.volume).toBeCloseTo(0.5, 2);
+    // Panning the view is therefore also moving the listener, and the tick notices.
+    h.panTo(700, 300);
+    await sleep(140);
+    expect(audios[0]?.volume).toBeCloseTo(1, 2);
+  });
+
+  test("a device with no Web Audio still plays the sound, quieter with distance, and says so once", async () => {
+    // Node has no AudioContext at all, which is exactly the hardened-shell case: the
+    // author asked for panning and this device cannot pan — it must not go silent.
+    vi.stubGlobal("AudioContext", undefined);
+    resetFxAudioGraph();
+    const h = harness();
+    h.send([placed({ pan: true })], { runId: "run-d309" });
+    await sleep(60);
+    await h.resolveAsset("bb".repeat(32));
+    await sleep(60);
+    expect(audios[0]?.play).toHaveBeenCalled();
+    expect(audios[0]?.volume).toBeCloseTo(0.5, 2); // distance survives the reduction
+    expect(h.reports).toHaveLength(1);
+    expect(h.reports[0]?.entries).toContainEqual(expect.objectContaining({ index: 0, kind: "sound",
+      state: "reduced", reason: "spatial-unavailable" }));
+    expect(h.reports[0]?.message).toContain("without spatial audio");
+    // A plain sound needs no graph, so it is never "reduced" on such a device.
+    h.send([placed({ assetId: "cc".repeat(32) })], { runId: "run-d309b" });
+    await sleep(60);
+    expect(h.reports).toHaveLength(1);
+  });
+
+  test("with Web Audio present, pan and the muted-through-walls low-pass reach the graph", async () => {
+    const seen: { pan?: number; frequency?: number } = {};
+    class FakeAudioContext {
+      state = "running";
+      destination = {};
+      createMediaElementSource() { return { connect: () => undefined, disconnect: () => undefined }; }
+      createBiquadFilter() {
+        const frequency = { value: 0 };
+        Object.defineProperty(seen, "frequency", { get: () => frequency.value, configurable: true });
+        return { type: "", Q: { value: 0 }, frequency,
+          connect: () => undefined, disconnect: () => undefined };
+      }
+      createStereoPanner() {
+        const pan = { value: 0 };
+        Object.defineProperty(seen, "pan", { get: () => pan.value });
+        return { pan, connect: () => undefined, disconnect: () => undefined };
+      }
+      close() { return Promise.resolve(); }
+    }
+    vi.stubGlobal("AudioContext", FakeAudioContext);
+    resetFxAudioGraph();
+    const h = harness();
+    h.send([placed({ pan: true, muffle: true, occluded: true })], { runId: "run-d309" });
+    await sleep(60);
+    await h.resolveAsset("bb".repeat(32));
+    await sleep(60);
+    // 300 px to the right of the listener inside a 600 px reach: half right, half as loud,
+    // and dulled because the host said a wall stood in the way for *this* viewer.
+    expect(seen.pan).toBeCloseTo(0.5, 6);
+    expect(seen.frequency).toBe(MUFFLE_CUTOFF_HZ); // a wall between them: 700 Hz, not 20 kHz
+    expect(h.reports).toEqual([]); // the graph exists: nothing was reduced
+    vi.stubGlobal("AudioContext", undefined);
+    resetFxAudioGraph();
   });
 });

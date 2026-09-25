@@ -5,8 +5,9 @@
  * This is the first sequence format, not the full Sequencer action catalogue.
  */
 import type { SceneDocument, TokenDocument } from "./documents";
-import { crosshairArea, type CrosshairPoint, type CrosshairShape } from "./crosshair";
-import { visibilityPolygon } from "../canvas/vision/polygon";
+import { crosshairArea, crosshairPxPerUnit, type CrosshairPoint, type CrosshairShape } from "./crosshair";
+import { SOUND_RADIUS_LIMITS } from "./fxSound";
+import { segmentCrossingPoint, visibilityPolygon } from "../canvas/vision/polygon";
 import { distanceToSegment } from "../canvas/vision/wallKinds";
 import { sightSegments } from "../canvas/vision/wallSight";
 import { isSoundChannel, type FxSoundChannel } from "./fxSound";
@@ -128,7 +129,7 @@ export function fxSightTrim(
     for (let j = 0; j < visible.length; j += 1) {
       const c = visible[j]; const d = visible[(j + 1) % visible.length];
       if (!c || !d) continue;
-      const crossing = segmentCrossing(a, b, c, d);
+      const crossing = segmentCrossingPoint(a, b, c, d);
       if (crossing) angles.push(angleOf(crossing));
     }
   }
@@ -164,17 +165,6 @@ export function fxSightTrim(
 }
 
 /** Where two segments cross, or `null` (endpoints count for a T-junction). */
-function segmentCrossing(a: CrosshairPoint, b: CrosshairPoint, c: CrosshairPoint, d: CrosshairPoint): CrosshairPoint | null {
-  const ex = b.x - a.x; const ey = b.y - a.y;
-  const fx = d.x - c.x; const fy = d.y - c.y;
-  const denom = ex * fy - ey * fx;
-  if (Math.abs(denom) < 1e-12) return null;
-  const t = ((c.x - a.x) * fy - (c.y - a.y) * fx) / denom;
-  const u = ((c.x - a.x) * ey - (c.y - a.y) * ex) / denom;
-  if (t < -1e-9 || t > 1 + 1e-9 || u < -1e-9 || u > 1 + 1e-9) return null;
-  return { x: a.x + ex * t, y: a.y + ey * t };
-}
-
 const MASK_FIELDS: Record<FxMask["kind"], readonly string[]> = {
   // A circle has no facing, so it takes no angle — and therefore no turn either.
   circle: ["kind", "length", "lengthTo", "walls", "invert"],
@@ -386,7 +376,20 @@ export type FxSection =
       /** Ramp 0→1 over this many ms at the start of the section. */
       fadeInMs?: number;
       /** Ramp 1→0 over the last `fadeOutMs` of the section (ignored by a persistent loop). */
-      fadeOutMs?: number })
+      fadeOutMs?: number;
+      /**
+       * Where the sound is. Absent means **everywhere** — the authored volume for every
+       * recipient, exactly as before D-309 — so adding a position is what makes a cue
+       * positional rather than what makes it quiet. The host resolves the anchor at
+       * emit (a `source`/`target` token's *current* centre, never a two-way follow).
+       */
+      at?: FxAnchor;
+      /** Scene units at which a positional sound is no longer audible (1–1000). */
+      radius?: number;
+      /** Stereo-place it from the listener's own view; needs `at`. */
+      pan?: boolean;
+      /** A sound-blocking wall between the source and a listener dulls it there; needs `at`. */
+      muffle?: boolean })
   | FxCameraSection
   | (FxBase & { kind: "wait" });
 
@@ -402,7 +405,11 @@ export interface FxSequence {
 export type ResolvedFxSection =
   | (Omit<Extract<FxSection, { kind: "image" }>, "at" | "to" | "mask" | "repeatCount" | "repeatDelayMs"> & { x: number; y: number; toX?: number; toY?: number; mime: string; followTokenId?: string; followToTokenId?: string; mask?: ResolvedFxMask })
   | (Omit<Extract<FxSection, { kind: "text" }>, "at" | "to" | "mask" | "repeatCount" | "repeatDelayMs"> & { x: number; y: number; toX?: number; toY?: number; followTokenId?: string; followToTokenId?: string; mask?: ResolvedFxMask })
-  | (Omit<Extract<FxSection, { kind: "sound" }>, "repeatCount" | "repeatDelayMs"> & { mime: string })
+  | (Omit<Extract<FxSection, { kind: "sound" }>, "repeatCount" | "repeatDelayMs" | "at" | "radius"> &
+      { mime: string; x?: number; y?: number; radiusPx?: number;
+        /** Host-computed per recipient (D-309): a sound-blocking wall stands between
+         * that viewer's own listener and this source. */
+        occluded?: boolean })
   /** A pan carries its **host-resolved** destination; a shake carries no anchor at all. */
   | (Omit<FxCameraPanSection, "to" | "repeatCount" | "repeatDelayMs"> & { toX: number; toY: number })
   /** A path carries its **host-resolved** waypoints, in order. */
@@ -467,7 +474,8 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
     // itself would be a stuck frame), so its repeat fields are unknown fields.
     const repeatFields = section.kind === "wait" || section.kind === "camera"
       ? [] : ["repeatCount", "repeatDelayMs"];
-    const fields = section.kind === "sound" ? ["assetId", "volume", "channel", "fadeInMs", "fadeOutMs"] :
+    const fields = section.kind === "sound"
+      ? ["assetId", "volume", "channel", "fadeInMs", "fadeOutMs", "at", "radius", "pan", "muffle"] :
       section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "mask", "scaleTo", "spinDeg"] :
       section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "mask", "scaleTo", "spinDeg"] :
       section.kind === "camera" ? ["mode", "to", "easing", "zoom", "intensity", "points", "audience"] : [];
@@ -532,6 +540,22 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
       if ((section.fadeInMs !== undefined && !inRange(section.fadeInMs, 0, section.durationMs)) ||
         (section.fadeOutMs !== undefined && !inRange(section.fadeOutMs, 0, section.durationMs)))
         return { ok: false, error: "FX sound fades must fit inside the section duration" };
+      // A position is what makes a sound positional; the three fields that only mean
+      // something *from* a position are refused without one rather than quietly ignored
+      // (SQ-05's "do not offer a UI control that silently does nothing").
+      if (section.at === undefined) {
+        if (section.radius !== undefined || section.pan !== undefined || section.muffle !== undefined)
+          return { ok: false, error: "a positional FX sound needs a position: radius, pan and muffle measure from one" };
+      } else {
+        if (!validAnchor(section.at))
+          return { ok: false, error: "a positional FX sound needs a valid position" };
+        if (!inRange(section.radius, SOUND_RADIUS_LIMITS.min, SOUND_RADIUS_LIMITS.max))
+          return { ok: false, error: `a positional FX sound needs a radius of ${SOUND_RADIUS_LIMITS.min}–${SOUND_RADIUS_LIMITS.max} scene units` };
+        if (section.pan !== undefined && typeof section.pan !== "boolean")
+          return { ok: false, error: "a positional FX sound's pan is a yes/no choice" };
+        if (section.muffle !== undefined && typeof section.muffle !== "boolean")
+          return { ok: false, error: "a positional FX sound's muffle is a yes/no choice" };
+      }
       continue;
     }
     if ((section.kind !== "image" && section.kind !== "text") || !validAnchor(section.at) ||
@@ -676,14 +700,6 @@ export function resolveFxSequence(
       sections.push(projected);
       continue;
     }
-    if (section.kind === "sound") {
-      const mime = mimeOf(section.assetId);
-      if (!mime || !AUDIO_MIME.has(mime)) return { ok: false, error: `missing/unsupported sound: ${section.assetId}` };
-      const { repeatCount: _count, repeatDelayMs: _gap, ...projected } = section;
-      void _count; void _gap;
-      sections.push({ ...projected, mime });
-      continue;
-    }
     const anchor = (at: FxAnchor): { ok: true; x: number; y: number } | { ok: false; error: string } => {
       let x: number, y: number;
       if (at.kind === "point") ({ x, y } = at);
@@ -699,6 +715,25 @@ export function resolveFxSequence(
         return { ok: false, error: "FX anchor lies outside the scene" };
       return { ok: true, x, y };
     };
+    if (section.kind === "sound") {
+      const mime = mimeOf(section.assetId);
+      if (!mime || !AUDIO_MIME.has(mime)) return { ok: false, error: `missing/unsupported sound: ${section.assetId}` };
+      const { repeatCount: _count, repeatDelayMs: _gap, at: _at, radius, ...projected } = section;
+      void _count; void _gap; void _at;
+      // The radius travels in **pixels**, like every other distance a client measures
+      // against its own view: the host owns the scene's grid metric, and a client that
+      // had to re-derive "60 ft" could disagree with the host that validated it.
+      const radiusPx = radius === undefined ? undefined
+        : radius * crosshairPxPerUnit(scene.grid);
+      const placed = _at === undefined ? null : anchor(_at);
+      if (placed && !placed.ok) return placed;
+      if (radiusPx !== undefined && (!Number.isFinite(radiusPx) || radiusPx <= 0))
+        return { ok: false, error: "a positional FX sound needs a usable scene grid metric" };
+      sections.push({ ...projected, mime,
+        ...(placed?.ok ? { x: placed.x, y: placed.y } : {}),
+        ...(radiusPx !== undefined ? { radiusPx } : {}) });
+      continue;
+    }
     if (section.kind === "camera") {
       // The host, never the client, decides where a pan may land — same anchor
       // function, same scene bounds, same refusal as every other cue. A path repeats

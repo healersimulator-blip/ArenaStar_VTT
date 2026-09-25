@@ -10245,3 +10245,123 @@ media expectations (the run's asset list is the same for every viewer while only
 sections are targetable), receipts for persistent instances or reviewed-script cues, a
 retry/repair flow, per-asset asset *names* in the message (deliberately only the section
 index), server-side metrics or logs, and no Firefox/WebKit run or the §10 41-scenario matrix.
+
+## D-309 — where a sound comes from: distance, panning and walls (2026-09-25)
+
+SQ-09's row has had channels, fades and a device-local mix since D-297, and a sound was
+still *everywhere*: every viewer heard the same cue at the same gain, whichever corner of the
+map they stood in. A fountain, a footstep or a chant from a shrine is the case the row is
+named for, and it needs two facts the host does not have alone. **Where the listener is** is
+the client's own answer (its token, or the centre of its own view) — the host never sees a
+camera. **What stands between** is the host's and only the host's: a client is never handed
+walls (D-301/D-307), and a client that guessed would be guessing at a scene it cannot see.
+So the row is split the way the mask trim already is: the host resolves the source and
+answers occlusion **per recipient**, baked into that recipient's cue; the client measures the
+distance and applies the two things an `<audio>` element cannot do.
+
+**Authored.** A sound gains four optional fields: `at` (any anchor the sequence already
+supports), `radius` (scene units, `SOUND_RADIUS_LIMITS` **1–1000**, required with `at`),
+`pan` and `muffle`. None of the three mean anything without a position, so each is **refused
+by name** rather than silently ignored — the SQ-05 rule that a control must not do nothing
+applies to a hand-edited file too. A sound with no `at` is exactly what it was before: the
+author's volume, for everyone, everywhere. The wizard's "Place on map…" pick is **point-only**
+(a sound is at a place and has no area, so offering a shape would offer one the host refuses),
+sets `at` plus the panel's default radius of 30 units, and "Hear everywhere" **deletes** all
+four fields rather than writing `undefined` (the D-295 trap: `undefined` becomes `null` over
+msgpack and the host answers `invalid_schema`).
+
+**Resolved.** `at` follows the same `anchor()` rule as every other section — a point, or the
+*current* centre of a source/target token, frozen at emit (a sound does not chase a token,
+and a persistent instance re-resolves on `fx.sync` like everything else). `radius` becomes
+`radiusPx` on the scene's own grid metric (`crosshairPxPerUnit`), so a recipient never
+re-derives "60 ft" against a metric the host did not validate.
+
+**Heard.** Distance is a straight line: `gain = clamp(1 − d/r)`, full at the source, silent at
+the rim. Linear rather than inverse-square because it is the *predictable* one — an author
+placing a 60 ft reach can look at the map and see where it stops, and it is bounded at the
+source. Pan is `clamp(dx/r, ±1)` in screen space (the camera has no rotation, so world x grows
+right for every viewer) and is applied only when the author asked for it. Muffle is the
+author's `muffle` **and** the host's `occluded` for *that* recipient. Occlusion is a
+segment-crossing test between the recipient's own token (ownership level 3 — a token
+*assigned* to them, not one the table's default merely lets them move) and the source, against
+`soundSegments`: the **sound** axis plus door state, which is the mechanism the documents
+already carry and which `moveSegments` and `sightSegments` read for their own axes. So a plain
+wall muffles, a closed or locked door muffles, and an open door does not.
+
+**An inconsistency surfaced on the way and is *not* silently resolved here.** `wallKinds.ts`
+says in two places (its module header and `wallAxesFor`'s own docblock, echoing D-257) that a
+window blocks movement **and sound** — `sound: 0` — while the code returns `sound: 2` and both
+`tests/canvas/wallKinds.test.ts` and the `walls` e2e pin that permit. The sound axis has no
+other consumer yet (this decision is its first), so nothing else would have caught it. D-309
+obeys the implemented, tested axis — a window passes sound, so it does not muffle — because
+changing a wall's meaning inside an audio decision would move a contract three suites assert,
+and because the axis is what a world file actually stores. The prose/code disagreement is
+recorded in the status doc and the PR for a deliberate call. A viewer with no token of their own gets **no** occlusion
+answer: the host cannot honestly name their camera, and a guess would mute the wrong people.
+Nothing measurable at the client end (no listener, no position) means a **global** cue at gain
+1, which is also the pre-D-309 behaviour.
+
+**Played.** The client's listener is its own token when it has one, else the centre of its own
+view; it is recomputed on a 100 ms tick for as long as a positioned cue sounds, so a walking
+listener hears the sound approach (a fade keeps its 40 ms ramp; a plain global sound is still
+set once). Pan and muffle need Web Audio, so they go through a small adapter
+(`fxAudioGraph`): one lazily-created `AudioContext` per page, `source → lowpass (700 Hz
+muffled / 20 kHz open, Q 0.7) → stereoPanner`, with the element's own `volume` still carrying
+the level so the mix panel and the fades keep composing. A device without a context (or without
+a panner) must not pretend: the sound plays, the level keeps following the distance, the device
+list says what it is *actually* playing (centred and open, not the author's pan), and the
+viewer's own report carries `state: reduced`, `reason: spatial-unavailable`. The graph is
+optional; the honesty is not.
+
+**Gates.**
+
+- `pnpm test` — **3 767 passed / 12 skipped** (298 files: 296 passed, 2 skipped). New: 2 cases
+  in `tests/core/fx.test.ts` (a position resolving to px with its radius, a token anchor
+  frozen at that token's current centre, and the refusal matrix — `radius`/`pan`/`muffle`
+  without `at`, an out-of-range or missing radius, a non-boolean switch, an anchor outside the
+  scene), 4 in `tests/core/fxSound.test.ts` (the linear falloff, bound panning, the whole
+  rule for one listener including "nothing to measure from means global", and which cues need
+  a graph at all), 4 in `tests/client/fxDeliveryFlow.test.ts` (the level falling with distance
+  measured from the viewer's own token *and* re-measured as it walks, a listener with no token
+  using the view centre, a device with no Web Audio still playing and reporting
+  `reduced`/`spatial-unavailable` once, and a stubbed context receiving exactly the pan and
+  the 700 Hz low-pass), 6 in `tests/client/fxAudioGraph.test.ts` (no context, no panner,
+  a throwing constructor, an already-attached element, bounded pan with an idempotent
+  dispose, and one shared context per page that a detach never closes), 2 in
+  `tests/canvas/vision.test.ts` (`soundSegments` reading the sound axis and door state where
+  `sightSegments` reads another — the window case that makes the distinction load-bearing —
+  and the point-form crossing including "touching counts"), and 2 in
+  `tests/host/sync.test.ts` (per-recipient occlusion with a door opened, a window passed and
+  an opaque wall blocking, the payload carrying no listening-point coordinates, and a stored
+  loop with the per-recipient answer absent from the durable record and recomputed on
+  `fx.sync`).
+- Two regressions the tests caught, both fixed here: `validateFxInstance` was refusing a
+  *positional* sound's stored (already-resolved) pixels, because the sequence schema only
+  knows the authored `at`/`radius` — so a persistent positioned sound could not be committed
+  at all; the stored form now reconstructs the authored anchor (the px→unit division rounded,
+  so float noise cannot push a legal 1 000-unit reach over its own limit). And the run's
+  report settled *before* the sound branch decided whether the device could honour the
+  placement, so a `reduced` note could never be sent — the settle now happens after that
+  decision.
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** · `pnpm lint` **exit 0** ·
+  `pnpm build` → `pnpm size` **3 849 522 B raw / 1 104 078 B gzip**, inside the 6 MB budget.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **28/28**, including two new specs
+  — one that places a real wall through the rail and drags the GM's own token across it,
+  reading "through a wall" and 25 % (450 px inside a 600 px reach), then a higher level after
+  the walk (83 % on the recorded run — the assertion recomputes it from the token's own
+  position rather than pinning a pixel) while the wall answer stays baked for that run, then a
+  fresh run from the new place with no wall in the way at the same level; and one where an init script takes `AudioContext` away,
+  so the cue still plays, the row shows the distance level and *no* pan badge, and the
+  viewer's own report says "played without spatial audio". The shared geometry the occlusion
+  test rides on was regression-checked as the usual batches: `fx_sequence` + `summons`
+  **32/32** (2.2 m) and `canvas_rail` + `canvas_toolbar` + `vision` + `walls` + `join`
+  **20/20** (26 s).
+
+**Non-claims.** The window's sound axis is left exactly as it was implemented (see above) —
+this decision does not change what a wall kind writes. No filter chain beyond the one low-pass, no HRTF/3D panner or Doppler, no
+reverb/occlusion of *rooms*, no ray-counted "how many walls" attenuation (a wall either dulls
+the cue or does not), muffle is a fixed 700 Hz (the author cannot tune the cutoff), no per-leg
+audio paths, occlusion is resolved at emit and does **not** follow a wall that opens or a
+token that walks mid-cue (the level does, the wall answer does not), no sound targeting
+(only camera sections carry an audience), no `at` on wait sections, and no Firefox/WebKit run
+or the §10 41-scenario matrix.

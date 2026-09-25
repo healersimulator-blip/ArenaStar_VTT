@@ -8,7 +8,8 @@
     type FxBlendMode, type FxCameraPathSection, type FxEasing, type FxFilterKind, type FxMask,
     type FxSection, type FxSectionAudience, type FxSequence, type FxImportPermissions } from "../../core/fx";
   import { fxFitnessIssues } from "../../core/fxDelivery";
-  import { SOUND_CHANNELS, SOUND_CHANNEL_LABELS, cueSilentForViewer, soundChannelOf } from "../../core/fxSound";
+  import { SOUND_CHANNELS, SOUND_CHANNEL_LABELS, SOUND_RADIUS_LIMITS, cueSilentForViewer,
+    soundChannelOf } from "../../core/fxSound";
   import { domCanPlay, fxViewPrefs } from "../../core/fxPrefs";
   import type { Json } from "../../core/documents";
   import { rememberPlacement, type NamedPlacement, type RequestCrosshairPick } from "./crosshairPicker";
@@ -55,6 +56,8 @@
   let playerCallable = $state(false);
   // Neither serving bytes to a connected player nor bundling bytes into a
   // world archive follows from possessing a local copy of a premium pack.
+  /** The reach a position gets when the author first picks one (the host bounds it 1–1000). */
+  const FX_SOUND_DEFAULT_RADIUS = 30;
   let shareWithPlayers = $state(false);
   let includeInWorldFile = $state(false);
   let draft = $state<FxSequence>({ version: 1, audience: "scene", persistent: false, sections: [] });
@@ -557,23 +560,28 @@
     status = `"${placement.name}": ${from.x}, ${from.y} → ${to.x}, ${to.y}${length} at ${placement.angleDeg}° — save the timeline to publish it`;
   }
 
-  async function pickPoint(index: number, which: "at" | "to" | "camera" | "waypoint", way = 0): Promise<void> {
+  async function pickPoint(index: number, which: "at" | "to" | "camera" | "waypoint" | "sound", way = 0): Promise<void> {
     const before = draft.sections[index];
     const cameraPan = before?.kind === "camera" && before.mode === "pan";
     const waypoint = before?.kind === "camera" && before.mode === "path"
       ? before.points[way] : undefined;
     const located = before?.kind === "image" || before?.kind === "text";
-    if (!before || (which === "waypoint" ? !waypoint : which === "camera" ? !cameraPan : !located) ||
-        !onPickAnchor || !scene) return;
+    const sound = before?.kind === "sound";
+    if (!before || (which === "waypoint" ? !waypoint : which === "camera" ? !cameraPan
+        : which === "sound" ? !sound : !located) || !onPickAnchor || !scene) return;
     error = ""; status = "";
     // Shapes and constraints come from the draft: a stretched image, a camera pan or a
     // path leg is a *direction*, so a ray/rect is the honest instrument, and a plain
     // anchor stays a point. Nothing here is a host rule the sequence would not check.
     const stretch = before.kind === "image" && before.stretch === true;
-    const shapes = which === "to" || which === "camera" || which === "waypoint" || stretch
-      ? ["point", "ray", "rect"] as const : ["point", "circle", "cone", "rect"] as const;
+    // A sound is *at* a place and has no area, so it is the one pick that is a plain
+    // point: offering a cone would be offering a shape the host would refuse.
+    const shapes = which === "sound" ? ["point"] as const
+      : which === "to" || which === "camera" || which === "waypoint" || stretch
+        ? ["point", "ray", "rect"] as const : ["point", "circle", "cone", "rect"] as const;
     const placement = await onPickAnchor({ sceneId: scene._id,
-      label: which === "at" ? "the section's start point"
+      label: which === "sound" ? "where the sound comes from"
+        : which === "at" ? "the section's start point"
         : which === "camera" ? "where the camera should look"
         : which === "waypoint" ? `waypoint ${way + 1}` : "the destination point",
       shapes, named: placements,
@@ -588,6 +596,12 @@
     }
     draft = { ...draft, sections: draft.sections.map((old, i) => {
       if (i !== index) return old;
+      // A sound's position comes with its radius, filled to the panel's own default the
+      // first time: the host refuses a position with no reach, and an author who picked a
+      // spot has already said "this one is positional".
+      if (old.kind === "sound")
+        return { ...old, at: { kind: "point" as const, ...point },
+          radius: old.radius ?? FX_SOUND_DEFAULT_RADIUS } as FxSection;
       if (old.kind === "camera" && old.mode === "pan")
         return { ...old, to: { kind: "point" as const, ...point } } as FxSection;
       if (old.kind !== "image" && old.kind !== "text") return old;
@@ -737,6 +751,7 @@
           <label>Color <input type="color" bind:value={section.color} /></label>
         {/if}
         {#if section.kind === "sound"}
+          {@const units = scene?.grid.units ?? "units"}
           <div class="controls">
             <label>Volume <input type="number" min="0" max="1" step="0.05" bind:value={section.volume} /></label>
             <label>Channel <select data-fx-sound-channel value={soundChannelOf(section)}
@@ -758,6 +773,45 @@
             <small>The channel is this device's fader, not a document field: each viewer mixes their own.
               A persistent loop fades in once and holds until stopped.</small>
           </div>
+          <div class="controls">
+            {#if section.at}
+              <span>At {section.at.kind === "point" ? `${section.at.x}, ${section.at.y}` : section.at.kind} ·
+                {section.radius ?? FX_SOUND_DEFAULT_RADIUS} {units}</span>
+              <button type="button" data-fx-sound-pick disabled={!onOpenScene}
+                onclick={() => void pickPoint(i, "sound")}>Pick on map…</button>
+              <button type="button" data-fx-sound-clear
+                onclick={() => draft = { ...draft, sections: draft.sections.map((old, j) =>
+                  j === i && old.kind === "sound" ? (() => {
+                    const { at: _at, radius: _r, pan: _p, muffle: _m, ...rest } = old;
+                    void _at; void _r; void _p; void _m;
+                    return rest as FxSection;
+                  })() : old) }}>Hear everywhere</button>
+            {:else}
+              <button type="button" data-fx-sound-pick disabled={!onOpenScene}
+                onclick={() => void pickPoint(i, "sound")}>Place on map…</button>
+              <small>A sound with no position plays for everyone at the authored volume.</small>
+            {/if}
+          </div>
+          {#if section.at}
+            <div class="controls">
+              <label>Hear up to ({units}) <input type="number" data-fx-sound-radius
+                min={SOUND_RADIUS_LIMITS.min} max={SOUND_RADIUS_LIMITS.max} step="1"
+                value={section.radius ?? FX_SOUND_DEFAULT_RADIUS}
+                oninput={(e) => draft = { ...draft, sections: draft.sections.map((old, j) =>
+                  j === i && old.kind === "sound" ? { ...old, radius: e.currentTarget.value === ""
+                    ? undefined : Number(e.currentTarget.value) } as FxSection : old) } } /></label>
+              <label><input type="checkbox" data-fx-sound-pan checked={section.pan === true}
+                onchange={(e) => draft = { ...draft, sections: draft.sections.map((old, j) =>
+                  j === i && old.kind === "sound" ? { ...old, pan: e.currentTarget.checked } as FxSection : old) } } />Pan left/right</label>
+              <label><input type="checkbox" data-fx-sound-muffle checked={section.muffle === true}
+                onchange={(e) => draft = { ...draft, sections: draft.sections.map((old, j) =>
+                  j === i && old.kind === "sound" ? { ...old, muffle: e.currentTarget.checked } as FxSection : old) } } />Dulled through walls</label>
+            </div>
+            <small>Volume falls from the source to that rim, measured for each listener from
+              their own token — or, for a viewer with nothing of their own on the map, from the centre of their view.
+              Panning and wall-dulling need a stereo-capable device; one that has neither still plays the sound,
+              quieter with distance, and says so in its own report.</small>
+          {/if}
         {/if}
         {#if section.kind === "camera"}
           <div class="controls">

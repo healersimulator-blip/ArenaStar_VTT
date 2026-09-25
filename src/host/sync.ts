@@ -106,6 +106,7 @@ import { UndoStack } from "../core/undo";
 import { can } from "../core/permissions";
 import { canFetchAsset, projectAssetManifest } from "../core/assetAccess";
 import { fxSectionsForViewer, resolveFxSequence, validateFxSequence } from "../core/fx";
+import type { ResolvedFxSection } from "../core/fx";
 import { planAutomation, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState,
   type AutomationEvent, type AutomationMethod } from "../core/automation";
 import { attachedDeletionOps, attachedMovementOps, planPrefabPlacement, PREFAB_COLLECTIONS, validatePrefab } from "../core/prefabs";
@@ -138,6 +139,8 @@ import {
 } from "../core/ratelimit";
 import type { AssetGetMsg, FogGetMsg, FogPutMsg, FxDeliverySkips, FxMediaAckMsg, FxMediaAckState } from "../core/messages";
 import { fxMediaReport } from "../core/fxDelivery";
+import { soundSegments } from "../canvas/vision/wallSight";
+import { segmentsCross } from "../canvas/vision/polygon";
 import { MAX_FOG_PNG_BYTES } from "../core/fogExploration";
 import type { AssetServer } from "./assets";
 import { AssetTransfer } from "../net/transfer";
@@ -2972,6 +2975,52 @@ export class HostSync {
     }
   }
 
+  // ─── D-309 (SQ-09): where the listener is, and what stands in the way ──────
+  //
+  // A positional sound's distance is a client's own arithmetic — it knows where it is
+  // listening from — but the *walls* are the host's, and a client is never handed them
+  // (D-301/D-307). So the host answers the occlusion question per recipient and bakes the
+  // answer into that recipient's cue, exactly as it bakes a trimmed mask.
+
+  /**
+   * Where a viewer hears from: the first token on this scene they own at level 3 (their
+   * own character, in the world's own ownership vocabulary). A viewer with nothing of
+   * their own on the map has no listening *point* the host can honestly name — their
+   * camera is client-side state the host never sees — so it says nothing and the sound
+   * plays at its distance gain only.
+   */
+  private fxListener(scene: SceneDocument, userId: string): { x: number; y: number } | null {
+    for (const token of scene.tokens) {
+      if ((token.ownership?.[userId] ?? 0) >= 3) return { x: token.x, y: token.y };
+    }
+    return null;
+  }
+
+  /** Mark the sound sections a wall stands between this listener and. Returns the input
+   * array unchanged when there is nothing to say, so the shared cue object stays shared. */
+  private fxOccludedFor(scene: SceneDocument, sections: readonly ResolvedFxSection[],
+    userId: string): readonly ResolvedFxSection[] {
+    const positioned = sections.some((section) => section.kind === "sound" && section.muffle === true &&
+      typeof section.x === "number" && typeof section.y === "number");
+    if (!positioned) return sections;
+    const listener = this.fxListener(scene, userId);
+    if (!listener) return sections;
+    const walls = soundSegments(scene.walls ?? []);
+    if (walls.length === 0) return sections;
+    let changed = false;
+    const out = sections.map((section) => {
+      if (section.kind !== "sound" || section.muffle !== true ||
+          typeof section.x !== "number" || typeof section.y !== "number") return section;
+      const source = { x: section.x, y: section.y };
+      const blocked = walls.some((wall) => segmentsCross(listener, source,
+        { x: wall.x1, y: wall.y1 }, { x: wall.x2, y: wall.y2 }));
+      if (!blocked) return section;
+      changed = true;
+      return { ...section, occluded: true };
+    });
+    return changed ? out : sections;
+  }
+
   // ─── D-308 (SQ-13): the media acknowledgment, host side ─────────────────────
   //
   // A cue with image/sound sections makes every entitled viewer a promise the host
@@ -3205,6 +3254,9 @@ export class HostSync {
     // never deliver an old entitlement/anchor just because it was valid earlier.
     const changed = prepared.checkedAtSeq !== this.store.seq;
     const scene = changed ? this.store.get("scenes", prepared.cue.sceneId) as SceneDocument | undefined : undefined;
+    // D-309: occlusion is *per recipient*, so the scene is needed even when nothing
+    // changed since the preflight — a cue's walls are the host's to know, not the client's.
+    const hostScene = scene ?? this.store.get("scenes", prepared.cue.sceneId) as SceneDocument | undefined;
     const macro = changed ? this.store.get("macros", prepared.cue.macroId) as MacroDocument | undefined : undefined;
     const manifest = changed ? this.manifestSource() : undefined;
     for (const recipient of prepared.recipients) {
@@ -3230,8 +3282,9 @@ export class HostSync {
         { id: user.id, isGm: user.role === "GM" || user.role === "ASSISTANT" }, prepared.callerId);
       if (forViewer.length === 0) continue;
       sentTo?.push(recipient);
-      this.send(recipient, forViewer === prepared.cue.sections ? prepared.cue
-        : { ...prepared.cue, sections: [...forViewer] });
+      const forSound = hostScene ? this.fxOccludedFor(hostScene, forViewer, user.id) : forViewer;
+      const shared = forViewer === prepared.cue.sections && forSound === forViewer;
+      this.send(recipient, shared ? prepared.cue : { ...prepared.cue, sections: [...forSound] });
     }
     return true;
   }
@@ -3260,9 +3313,15 @@ export class HostSync {
       (section.kind !== "image" && section.kind !== "sound") || available[section.assetId] !== undefined);
   }
 
-  private fxCue(doc: FxInstanceDocument): FxStartMsg {
+  private fxCue(doc: FxInstanceDocument, userId?: string): FxStartMsg {
+    // D-309: a *loop* is where per-recipient occlusion matters most — one hum heard
+    // through a door on this side of the map and muffled on the other — so a stored
+    // instance's cue is built per recipient too, and recomputed on reconnect.
+    const scene = userId ? this.store.get("scenes", doc.sceneId) as SceneDocument | undefined : undefined;
+    const sections = scene && userId ? this.fxOccludedFor(scene, doc.sections, userId) : doc.sections;
     return { kind: "fx.start", runId: doc._id, macroId: doc.macroId,
-      sceneId: doc.sceneId, atHostTime: doc.atHostTime, persistent: true, sections: doc.sections };
+      sceneId: doc.sceneId, atHostTime: doc.atHostTime, persistent: true,
+      sections: [...sections] };
   }
 
   /** Reconcile past recipients after *every* committed operation: hiding a
@@ -3286,7 +3345,7 @@ export class HostSync {
         const eligible = this.canViewFxInstance(session, doc, manifest);
         const wasSent = state.peers.has(session.peerId);
         if (eligible && !wasSent) {
-          this.send(session, this.fxCue(doc));
+          this.send(session, this.fxCue(doc, session.user?.id));
           state.peers.add(session.peerId);
         } else if (!eligible && wasSent) {
           this.send(session, { kind: "fx.end", runId: doc._id, sceneId: doc.sceneId });
@@ -3307,7 +3366,7 @@ export class HostSync {
     const manifest = this.manifestSource();
     for (const doc of this.store.getAll("fxInstances")) {
       if (doc.sceneId !== sceneId || !this.canViewFxInstance(session, doc, manifest)) continue;
-      this.send(session, this.fxCue(doc));
+      this.send(session, this.fxCue(doc, session.user.id));
       const state = this.fxViewers.get(doc._id) ?? { sceneId, peers: new Set<string>() };
       state.peers.add(session.peerId);
       this.fxViewers.set(doc._id, state);

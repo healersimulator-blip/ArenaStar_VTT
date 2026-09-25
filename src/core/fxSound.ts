@@ -139,3 +139,94 @@ export function cueSilentForViewer(sections: readonly { kind: string; channel?: 
     mix,
   }) === 0);
 }
+
+// ─── D-309: where a sound is, and who is listening (SQ-09) ───────────────────
+//
+// A cue used to be everywhere: every viewer heard the same thing at the same gain,
+// which is exactly wrong for a fountain, a footstep or a chant coming from a shrine.
+// Two facts decide what one viewer hears — how far away the source is *for them*, and
+// whether a wall is in the way — and neither is the host's to answer alone: the host
+// owns the walls (a client is never handed them, D-301/D-307) while only the client
+// knows where it is listening from. So the host resolves the source and answers the
+// occlusion question per recipient, and the client does the arithmetic below.
+
+/** A positional sound's radius, in scene units: audible at the source, silent at the rim. */
+export const SOUND_RADIUS_LIMITS = { min: 1, max: 1_000 } as const;
+
+/**
+ * The low-pass a muffled sound sits behind (Hz). The number is the *dull* end of a
+ * closed door, not a wall of wool: speech stays intelligible through it, which is what
+ * a table wants from "you hear it through the wall".
+ */
+export const MUFFLE_CUTOFF_HZ = 700;
+/** Above this the filter is a pass-through: a bypass without rewiring the graph. */
+export const MUFFLE_OPEN_HZ = 20_000;
+
+/**
+ * Distance attenuation: full volume at the source, silence at the rim, straight line
+ * between. A linear falloff is the *predictable* one — an author placing a 60 ft radius
+ * can look at the map and know where it stops, which inverse-square alone would not
+ * tell them (and it would be unbounded at the source).
+ *
+ * Nothing usable to measure from (no position, no radius, a non-finite distance) means
+ * **global**: the sound plays at its authored volume, exactly as it did before D-309.
+ */
+export function positionalGain(distancePx: number, radiusPx: number): number {
+  if (!Number.isFinite(distancePx) || !Number.isFinite(radiusPx) || radiusPx <= 0) return 1;
+  return Math.min(1, Math.max(0, 1 - distancePx / radiusPx));
+}
+
+/**
+ * Stereo position: −1 hard left … +1 hard right, from the source's own x offset in
+ * **screen space** (the camera has no rotation, so world x grows right for every
+ * viewer). At the rim of the radius the source is fully to one side — where it is also
+ * inaudible, so the exaggeration is never heard.
+ */
+export function positionalPan(dxPx: number, radiusPx: number): number {
+  if (!Number.isFinite(dxPx) || !Number.isFinite(radiusPx) || radiusPx <= 0) return 0;
+  return Math.min(1, Math.max(-1, dxPx / radiusPx));
+}
+
+/** What one listener hears of one section: the three facts the player applies. */
+export interface SoundSpatial {
+  /** Multiplied into the author's volume, this device's mix and the fade. */
+  gain: number;
+  /** −1 … +1, applied only when the author asked for `pan`. */
+  pan: number;
+  /** A wall stands between the source and this listener (`muffle` + the host's `occluded`). */
+  muffled: boolean;
+}
+
+const GLOBAL: SoundSpatial = { gain: 1, pan: 0, muffled: false };
+
+/**
+ * The whole rule, in one pure place: a positioned section heard from a listener.
+ * `listener` is the viewer's own token when they have one on this scene, and otherwise
+ * where their view is centred — see `FxPlayer.listener`.
+ */
+export function soundSpatial(
+  section: { x?: number; y?: number; radiusPx?: number; pan?: boolean; muffle?: boolean; occluded?: boolean },
+  listener: { x: number; y: number } | null,
+): SoundSpatial {
+  if (!Number.isFinite(section.x) || !Number.isFinite(section.y) ||
+      typeof section.radiusPx !== "number" || !(section.radiusPx > 0) || !listener) return GLOBAL;
+  const dx = (section.x as number) - listener.x;
+  const dy = (section.y as number) - listener.y;
+  return {
+    gain: positionalGain(Math.hypot(dx, dy), section.radiusPx),
+    pan: section.pan === true ? positionalPan(dx, section.radiusPx) : 0,
+    muffled: section.muffle === true && section.occluded === true,
+  };
+}
+
+/**
+ * Does this cue ask for anything an `<audio>` element cannot do by itself? If so the
+ * player wires it through a Web Audio graph — and a device without one reports the
+ * reduction rather than pretending (SQ-16's "do not offer a control that silently
+ * does nothing" cuts both ways: it also must not *silently degrade*).
+ */
+export function soundNeedsGraph(
+  section: { pan?: boolean; muffle?: boolean; occluded?: boolean },
+): boolean {
+  return section.pan === true || (section.muffle === true && section.occluded === true);
+}

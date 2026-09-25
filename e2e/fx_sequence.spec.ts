@@ -1712,3 +1712,221 @@ test("the GM is told how many viewers received a run without its targeted sectio
     await hostCtx.close();
   }
 });
+
+// D-309 (SQ-09): a sound now has a *place*, and the two consequences are checked here
+// against a real wall on a real canvas. The host resolves the source and answers the
+// occlusion question for the listener it can name (the GM's own token); the level itself
+// is this device's own arithmetic, re-measured while the cue is still playing.
+test("a sound behind a wall is dulled for the listener behind it, at the distance they are", async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await expect.poll(() => hostCall<unknown>(page, "camera"), { timeout: 10_000 }).not.toBeNull();
+
+  // A token this session owns: that is the listening point the host can honestly name for
+  // the GM's own device, so the wall's answer has somebody to be *for*.
+  await page.locator("#add-token").click();
+  await expect.poll(() => hostCall<number>(page, "tokenCount")).toBe(1);
+  const token = await hostCall<{ x: number; y: number } | null>(page, "tokenPos");
+  if (!token) throw new Error("no token to listen from");
+
+  // A real wall, placed through the rail: x = 1200, from y 200 to 1300.
+  const wallsBefore = (await hostCall<Array<{ id: string }>>(page, "walls")).length;
+  await page.locator('[data-canvas-layer="gm"]').click();
+  await page.locator('[data-canvas-tool="wall"]').click();
+  await page.locator('[data-canvas-wall-kind="wall"]').click();
+  const screenOf = async (world: { x: number; y: number }) => {
+    const at = await surfaceCallArg<{ x: number; y: number } | null>(page, "app", "screenOf", world);
+    if (!at) throw new Error("screenOf returned null");
+    return at;
+  };
+  const wallA = await screenOf({ x: 1_200, y: 200 });
+  const wallB = await screenOf({ x: 1_200, y: 1_300 });
+  await page.mouse.move(wallA.x, wallA.y);
+  await page.mouse.down();
+  await page.mouse.move(wallB.x, wallB.y, { steps: 6 });
+  await page.mouse.up();
+  await expect.poll(async () => (await hostCall<unknown[]>(page, "walls")).length).toBe(wallsBefore + 1);
+
+  // Import a sound the table may fetch, and author it as a positional, wall-dulled cue.
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  const wav = Buffer.from("UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=", "base64");
+  await wizard.locator("[data-fx-share]").check();
+  await wizard.locator('input[type="file"]').setInputFiles({ name: "shiver.wav", mimeType: "audio/wav", buffer: wav });
+  await expect(wizard.getByRole("status")).toContainText("eligible scene viewers may fetch it");
+  await wizard.locator("[data-fx-name]").fill("Shiver");
+  await wizard.getByRole("button", { name: "Sound", exact: true }).click();
+  const section = wizard.locator("[data-fx-section]");
+  await section.getByRole("combobox", { name: "Media" }).selectOption({ index: 1 });
+  await section.getByLabel("Duration ms").fill("8000");
+  await section.getByLabel("Volume", { exact: true }).fill("1");
+  // No position yet: the panel offers to place it, and says plainly that an unplaced
+  // sound plays for everyone.
+  await expect(section.locator("[data-fx-sound-radius]")).toHaveCount(0);
+  await expect(section).toContainText("A sound with no position plays for everyone");
+  await section.locator("[data-fx-sound-pick]").click();
+  const overlay = page.locator("[data-crosshair]");
+  await expect(overlay).toBeVisible();
+  const camera = await hostCall<{ x: number; y: number; scale: number }>(page, "camera");
+  const overlayBox = await overlay.boundingBox();
+  if (!overlayBox) throw new Error("Picker overlay missing");
+  // (1440, 740) is inside the cell centred on (1450, 750) — the grid snaps the pick.
+  const target = { x: overlayBox.x + (1_440 - camera.x) * camera.scale,
+    y: overlayBox.y + (740 - camera.y) * camera.scale };
+  await page.mouse.move(target.x, target.y);
+  await page.mouse.click(target.x, target.y);
+  await expect(overlay).toHaveCount(0);
+  await expect(section.locator("[data-fx-sound-radius]")).toHaveValue("30"); // default reach, in scene units
+  await expect(section).toContainText("At 1450, 750 · 30");
+  await section.locator("[data-fx-sound-muffle]").check();
+  // Clearing the placement strips the whole group — the four fields are *deleted*, so the
+  // sound goes back to being global, exactly as a hand-edited file without them would be.
+  await section.locator("[data-fx-sound-clear]").click();
+  await expect(section.locator("[data-fx-sound-radius]")).toHaveCount(0);
+  await expect(section.locator("[data-fx-sound-muffle]")).toHaveCount(0);
+  await expect(section).toContainText("A sound with no position plays for everyone");
+  // …and placing it again brings the group back at the default reach.
+  await section.locator("[data-fx-sound-pick]").click();
+  await expect(overlay).toBeVisible();
+  const again = { x: overlayBox.x + (1_440 - camera.x) * camera.scale,
+    y: overlayBox.y + (740 - camera.y) * camera.scale };
+  await page.mouse.move(again.x, again.y);
+  await page.mouse.click(again.x, again.y);
+  await section.locator("[data-fx-sound-muffle]").check();
+  await expect(section.locator("[data-fx-sound-radius]")).toHaveValue("30");
+  await wizard.locator("[data-fx-save]").click();
+  await expect(wizard.locator("li")).toContainText(["Shiver"]);
+  await wizard.locator("[data-fx-run]").click();
+  await page.locator('[data-window="macros"] [data-window-close]').click();
+
+  // This device's own row: the wall is named, and the level is the distance arithmetic.
+  // 450 px from a 600 px reach is a quarter quieter, and one wall stands between them.
+  await page.locator("#gm-settings").click();
+  const prefs = page.locator("[data-fx-prefs]");
+  const row = prefs.locator("[data-fx-playing-sound]").first();
+  await expect(row).toContainText("shiver.wav", { timeout: 15_000 });
+  await expect(row.locator("[data-fx-sound-muffled]")).toHaveText("through a wall");
+  const percent = async () => {
+    const text = await row.innerText();
+    return Number(/(\d+)%/.exec(text)?.[1] ?? -1);
+  };
+  /** The level the device should be applying: the token's own distance from a 600 px
+   * reach (30 scene units on this 20 px/unit grid), straight line, silent at the rim. */
+  const expectedPercent = async () => {
+    const at = await hostCall<{ x: number; y: number } | null>(page, "tokenPos");
+    if (!at) throw new Error("listener vanished");
+    const distance = Math.hypot(1_450 - at.x, 750 - at.y);
+    return Math.round(Math.max(0, 1 - distance / 600) * 100);
+  };
+  await expect.poll(percent, { timeout: 5_000 }).toBe(await expectedPercent());
+  await page.locator('[data-window="settings"] [data-window-close]').click();
+
+  // Walk the listener east, through the wall the cue was already resolved against: the
+  // level follows the token while the cue plays (the room got closer), and the wall
+  // answer stays baked for this run — the same rule a trimmed mask follows.
+  // Back to the objects layer and the Select tool: the wall gesture left both armed for
+  // the GM layer, and a token cannot be grabbed from there.
+  await page.locator('[data-canvas-layer="tokens"]').click();
+  await page.locator('[data-canvas-tool="select"]').click();
+  const tokenAt = await screenOf(token);
+  const east = await screenOf({ x: 1_600, y: 750 });
+  await page.mouse.move(tokenAt.x, tokenAt.y);
+  await page.mouse.down();
+  await page.mouse.move(east.x, east.y, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(async () => (await hostCall<{ x: number } | null>(page, "tokenPos"))?.x ?? 0,
+    { timeout: 10_000 }).toBeGreaterThan(1_500);
+  await page.locator("#gm-settings").click();
+  await expect(row.locator("[data-fx-sound-muffled]")).toHaveText("through a wall");
+  const closer = await expectedPercent();
+  await expect.poll(percent, { timeout: 5_000 }).toBe(closer);
+  await page.locator('[data-window="settings"] [data-window-close]').click();
+
+  // A new run from where the listener stands now: no wall between the two, so the same
+  // authored cue is clean — the host answered for *this* listener at *this* moment.
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  await wizard.locator("li").filter({ hasText: "Shiver" }).getByRole("button", { name: "Run" }).click();
+  await page.locator('[data-window="macros"] [data-window-close]').click();
+  await page.locator("#gm-settings").click();
+  // The earlier cue may still be playing (it was authored for eight seconds), so the
+  // row under test is the newest one — the run that started from where the listener
+  // now stands.
+  const clean = prefs.locator("[data-fx-playing-sound]").last();
+  await expect(clean).toContainText("shiver.wav", { timeout: 15_000 });
+  await expect(clean.locator("[data-fx-sound-muffled]")).toHaveCount(0);
+  // The same place, the same reach, the same listener — only the wall's answer changed.
+  await expect.poll(async () => {
+    const text = await clean.innerText();
+    return Number(/(\d+)%/.exec(text)?.[1] ?? -1);
+  }, { timeout: 5_000 }).toBe(closer);
+});
+
+// The honest reduction: Chromium has Web Audio, so a shell that does not is modelled by
+// taking `AudioContext` away before the app loads. The sound must still play — quieter
+// with distance — and the device must say what it could not do, in its own report.
+test("a device with no Web Audio plays it anyway and says what it could not do", async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.addInitScript(() => {
+    Object.defineProperty(window, "AudioContext", { value: undefined, configurable: true });
+    Object.defineProperty(window, "webkitAudioContext", { value: undefined, configurable: true });
+  });
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await expect.poll(() => hostCall<unknown>(page, "camera"), { timeout: 10_000 }).not.toBeNull();
+  await page.locator("#add-token").click();
+  await expect.poll(() => hostCall<number>(page, "tokenCount")).toBe(1);
+
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  const wav = Buffer.from("UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=", "base64");
+  await wizard.locator("[data-fx-share]").check();
+  await wizard.locator('input[type="file"]').setInputFiles({ name: "chime.wav", mimeType: "audio/wav", buffer: wav });
+  await expect(wizard.getByRole("status")).toContainText("eligible scene viewers may fetch it");
+  await wizard.locator("[data-fx-name]").fill("Chime");
+  await wizard.getByRole("button", { name: "Sound", exact: true }).click();
+  const section = wizard.locator("[data-fx-section]");
+  await section.getByRole("combobox", { name: "Media" }).selectOption({ index: 1 });
+  await section.getByLabel("Duration ms").fill("8000");
+  await section.getByLabel("Volume", { exact: true }).fill("1");
+  await section.locator("[data-fx-sound-pick]").click();
+  const overlay = page.locator("[data-crosshair]");
+  await expect(overlay).toBeVisible();
+  const camera = await hostCall<{ x: number; y: number; scale: number }>(page, "camera");
+  const overlayBox = await overlay.boundingBox();
+  if (!overlayBox) throw new Error("Picker overlay missing");
+  await page.mouse.move(overlayBox.x + (1_440 - camera.x) * camera.scale,
+    overlayBox.y + (740 - camera.y) * camera.scale);
+  await page.mouse.click(overlayBox.x + (1_440 - camera.x) * camera.scale,
+    overlayBox.y + (740 - camera.y) * camera.scale);
+  await expect(section.locator("[data-fx-sound-radius]")).toHaveValue("30");
+  await section.locator("[data-fx-sound-pan]").check();
+  await wizard.locator("[data-fx-save]").click();
+  await expect(wizard.locator("li")).toContainText(["Chime"]);
+  await wizard.locator("[data-fx-run]").click();
+  await page.locator('[data-window="macros"] [data-window-close]').click();
+
+  // The viewer's own report: the cue played, and this device could not place it in the
+  // stereo field. One line, in words a table can act on.
+  const line = page.locator("[data-notify]").filter({ hasText: "without spatial audio" });
+  await expect.poll(async () => line.count(), { timeout: 15_000 }).toBeGreaterThan(0);
+  await expect(line.first()).toHaveText(/Chime: .*played without spatial audio$/);
+
+  // And the sound is genuinely playing, quieter with the distance — not silently dropped,
+  // and not claiming a pan this device cannot do.
+  await page.locator("#gm-settings").click();
+  const row = page.locator("[data-fx-prefs]").locator("[data-fx-playing-sound]").first();
+  await expect(row).toContainText("chime.wav", { timeout: 15_000 });
+  await expect(row.locator("[data-fx-sound-pan]")).toHaveCount(0);
+  // The same distance arithmetic as the spec above, on the same grid: the reduction
+  // costs the pan, not the level.
+  await expect.poll(async () => {
+    const at = await hostCall<{ x: number; y: number } | null>(page, "tokenPos");
+    const distance = at ? Math.hypot(1_450 - at.x, 750 - at.y) : 0;
+    const expected = Math.round(Math.max(0, 1 - distance / 600) * 100);
+    return [Number(/(\d+)%/.exec(await row.innerText())?.[1] ?? -1), expected];
+  }, { timeout: 5_000 }).toEqual([25, 25]);
+});
