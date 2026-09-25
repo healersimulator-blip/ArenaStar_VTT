@@ -6,7 +6,8 @@
  */
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { BlurFilter, ColorMatrixFilter, Container, Graphics, Sprite, Texture } from "pixi.js";
-import { FxLayer, fxMaskGraphics, fxPixiFilter, fxTransform } from "../../src/canvas/layers/FxLayer";
+import { FxLayer, fxFilterReadback, fxMaskGraphics, fxPixiFilter, fxSetFilterStrength,
+  fxTransform } from "../../src/canvas/layers/FxLayer";
 import type { ResolvedFxSection } from "../../src/core/fx";
 
 type ImageSection = Extract<ResolvedFxSection, { kind: "image" }>;
@@ -241,5 +242,77 @@ describe("animated transform on the canvas (§SQ-05, D-302)", () => {
     // 400° spin over a 1000 ms section is 200° at 500 ms.
     fx.spawn("run", image({ spinDeg: 400, durationMs: 1000 }), 500, Texture.EMPTY);
     expect(fx.inspect("run")[0]).toMatchObject({ rotationDeg: 200 });
+  });
+});
+
+/**
+ * D-304: an animated filter keeps the ONE filter instance the section was built with and
+ * only changes its strength, so "it deepened" is a claim about the drawn filter rather
+ * than about a plan. `fxFilterReadback` is the reading; these tests round-trip it first,
+ * so a pixi change fails here instead of silently misreporting in `inspect`.
+ */
+describe("animated filter strength on the canvas (§SQ-05, D-304)", () => {
+  const strengthOf = (fx: FxLayer, runId: string): number => {
+    const label = fx.inspect(runId)[0]?.filter ?? "";
+    return Number(label.slice(label.indexOf(":") + 1));
+  };
+
+  test("a strength read back out of a live filter is the strength it was given, twice over", () => {
+    const kinds = [
+      { kind: "blur", from: 6 }, { kind: "grayscale", from: 0.5 },
+      { kind: "brightness", from: 0.5 }, { kind: "saturate", from: 0.5 },
+    ] as const;
+    for (const { kind, from } of kinds) {
+      const filter = fxPixiFilter({ kind, strength: from });
+      if (!filter) throw new Error(`no ${kind} filter`);
+      expect(fxFilterReadback(kind, filter)).toBeCloseTo(from, 5);
+      fxSetFilterStrength(kind, filter, 1);
+      expect(fxFilterReadback(kind, filter)).toBeCloseTo(1, 5);
+      // Setting is absolute, never compounding: pixi's colour setters multiply onto the
+      // current matrix unless it is reset first, which would look right on frame one and
+      // drift every frame after — exactly the bug this pair guards.
+      fxSetFilterStrength(kind, filter, 1);
+      expect(fxFilterReadback(kind, filter)).toBeCloseTo(1, 5);
+    }
+  });
+
+  test("a deepening blur is one filter instance, nudged per frame and read back each time", () => {
+    const fx = layer();
+    fx.spawn("run", image({ filter: { kind: "blur", strength: 2 }, filterTo: 10 }), 0, Texture.EMPTY);
+    const built = viewOf(fx, "run").filters?.[0];
+    expect(strengthOf(fx, "run")).toBeCloseTo(2, 5); // the authored start, from frame one
+
+    fx.tick(250);
+    expect(strengthOf(fx, "run")).toBeCloseTo(4, 5);
+    // The drawn filter itself, not just the label the layer prints.
+    expect((viewOf(fx, "run").filters?.[0] as BlurFilter).strength).toBeCloseTo(4, 5);
+    expect(viewOf(fx, "run").filters?.[0]).toBe(built); // rebuilt never, nudged only
+    fx.tick(250);
+    expect(strengthOf(fx, "run")).toBeCloseTo(6, 5);
+    // One tick short of the end: a one-shot's final frame is also its removal.
+    fx.tick(499);
+    expect(strengthOf(fx, "run")).toBeCloseTo(9.988, 2);
+    fx.tick(1);
+    expect(fx.inspect("run")).toHaveLength(0);
+  });
+
+  test("a colour-matrix animation stays absolute: no compounding, and a still filter never moves", () => {
+    const fx = layer();
+    fx.spawn("fade", image({ filter: { kind: "grayscale", strength: 0 }, filterTo: 1 }), 0, Texture.EMPTY);
+    fx.spawn("still", image({ filter: { kind: "brightness", strength: 1.5 } }), 0, Texture.EMPTY);
+    const still = viewOf(fx, "still").filters?.[0];
+    for (const expected of [0.25, 0.5, 0.75]) {
+      fx.tick(250);
+      expect(strengthOf(fx, "fade")).toBeCloseTo(expected, 5);
+      // A constant filter is spawned once and then never touched: the D-299 property.
+      expect(viewOf(fx, "still").filters?.[0]).toBe(still);
+      expect(strengthOf(fx, "still")).toBeCloseTo(1.5, 5);
+    }
+  });
+
+  test("a filter animation starts mid-way for a late join, like the transform does", () => {
+    const fx = layer();
+    fx.spawn("run", image({ filter: { kind: "blur", strength: 2 }, filterTo: 10 }), 500, Texture.EMPTY);
+    expect(strengthOf(fx, "run")).toBeCloseTo(6, 5);
   });
 });

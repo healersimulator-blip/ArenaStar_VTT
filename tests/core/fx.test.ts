@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
-import { FX_FILTER_RANGES, fxSectionsForViewer, fxStylePlan, resolveFxSequence, validateFxSequence,
-  type FxSequence } from "../../src/core/fx";
+import { FX_FILTER_RANGES, fxFilterStrength, fxSectionsForViewer, fxStylePlan, resolveFxSequence,
+  validateFxSequence, type FxSequence } from "../../src/core/fx";
 import { fxFollowAnchors, fxPosition } from "../../src/canvas/layers/FxLayer";
 import type { SceneDocument, TokenDocument } from "../../src/core/documents";
 
@@ -582,5 +582,76 @@ describe("animated transform: growth and spin (§SQ-05, D-302)", () => {
       durationMs: 500, scaleTo: 2 } as never] }).ok).toBe(false);
     expect(validateFxSequence({ version: 1, sections: [{ kind: "camera", id: "c", mode: "pan",
       to: { kind: "point", x: 10, y: 10 }, startMs: 0, durationMs: 500, spinDeg: 90 } as never] }).ok).toBe(false);
+  });
+});
+
+// D-304 (SQ-05): the filter's own strength animates now — `filter.strength` is where it
+// starts, `filterTo` where it ends, on the same curve the transform uses.
+describe("animated filter strength (§SQ-05, D-304)", () => {
+  const hash = "a".repeat(64);
+  const visual = (patch: Record<string, unknown> = {}) => ({ version: 1,
+    sections: [{ kind: "image", id: "ghost", assetId: hash, at: { kind: "point", x: 200, y: 200 },
+      startMs: 0, durationMs: 1000, filter: { kind: "blur", strength: 2 }, ...patch } as never] });
+
+  test("a filter animation needs a kind, and both of its ends live in that kind's range", () => {
+    expect(validateFxSequence(visual({ filterTo: 16 })).ok).toBe(true);
+    expect(validateFxSequence(visual({ filterTo: 1 })).ok).toBe(true); // the low end is still a blur
+    // A blur that faded to 0 would be a blur that stopped existing, which is what
+    // dropping the filter says — so 0 is out of range for this kind, not a special case.
+    expect(validateFxSequence(visual({ filterTo: 0 })).ok).toBe(false);
+    expect(validateFxSequence(visual({ filterTo: 33 })).ok).toBe(false);
+    expect(validateFxSequence(visual({ filterTo: "heavy" })).ok).toBe(false);
+    // The range belongs to the KIND: 1.5 is a blur and an impossible grayscale.
+    expect(validateFxSequence(visual({ filter: { kind: "grayscale" }, filterTo: 1 })).ok).toBe(true);
+    expect(validateFxSequence(visual({ filter: { kind: "grayscale" }, filterTo: 1.5 })).ok).toBe(false);
+    // Named as itself rather than as an unknown field.
+    const orphan = validateFxSequence({ version: 1, sections: [{ kind: "image", id: "g", assetId: hash,
+      at: { kind: "point", x: 1, y: 1 }, startMs: 0, durationMs: 500, filterTo: 4 } as never] });
+    expect(orphan.ok).toBe(false);
+    expect(orphan.ok ? "" : orphan.error).toContain("filter kind to animate");
+  });
+
+  test("the plan carries an animation's end only when the author asked for one", () => {
+    expect(fxStylePlan({ filter: { kind: "blur", strength: 2 } })).toEqual({ blend: "normal",
+      filter: { kind: "blur", strength: 2 } });
+    expect(fxStylePlan({ filter: { kind: "blur", strength: 2 }, filterTo: 16 }).filter)
+      .toEqual({ kind: "blur", strength: 2, to: 16 });
+    // Clamped like the start: a hand-written cue must not render past its kind's range.
+    expect(fxStylePlan({ filter: { kind: "blur", strength: 2 }, filterTo: 900 }).filter)
+      .toEqual({ kind: "blur", strength: 2, to: 32 });
+    // Without a kind there is nothing to animate and nothing to clamp against.
+    expect(fxStylePlan({ filterTo: 16 })).toEqual({ blend: "normal" });
+  });
+
+  test("the strength walks from one end to the other, eased, and pulses per cycle", () => {
+    const plan = { kind: "blur" as const, strength: 2, to: 10 };
+    const section = { durationMs: 1000 };
+    expect(fxFilterStrength(plan, section, 0)).toBeCloseTo(2, 5);
+    expect(fxFilterStrength(plan, section, 500)).toBeCloseTo(6, 5);
+    expect(fxFilterStrength(plan, section, 1000)).toBeCloseTo(10, 5);
+    // The section's own curve carries it, exactly like position, scale and spin.
+    expect(fxFilterStrength(plan, { ...section, easing: "easeIn" }, 500)).toBeCloseTo(4, 5);
+    expect(fxFilterStrength(plan, { ...section, easing: "easeOut" }, 500)).toBeCloseTo(8, 5);
+    // Two cycles over one window is a pulse: each cycle runs the whole animation, so the
+    // peak lands at the END of a cycle and the strength snaps back at the boundary.
+    const pulsed = { ...section, repeats: 2 };
+    expect(fxFilterStrength(plan, pulsed, 250)).toBeCloseTo(6, 5);
+    expect(fxFilterStrength(plan, pulsed, 499)).toBeCloseTo(10, 1);
+    expect(fxFilterStrength(plan, pulsed, 500)).toBeCloseTo(2, 5);
+    expect(fxFilterStrength(plan, pulsed, 1000)).toBeCloseTo(10, 5);
+    // A still filter is the start value, whatever the clock says.
+    expect(fxFilterStrength({ kind: "grayscale", strength: 0.5 }, section, 999)).toBeCloseTo(0.5, 5);
+    expect(fxFilterStrength(plan, section, Number.NaN)).toBeCloseTo(2, 5);
+    expect(fxFilterStrength(plan, { durationMs: 0 }, 100)).toBeCloseTo(2, 5);
+  });
+
+  test("resolving a visual keeps its animated filter: the host adds anchors, not style", () => {
+    const resolved = resolveFxSequence(
+      visual({ filter: { kind: "saturate", strength: 0.2 }, filterTo: 1.8 }) as FxSequence,
+      scene, source, source, () => "image/png");
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.sections[0]).toMatchObject({ filter: { kind: "saturate", strength: 0.2 },
+      filterTo: 1.8 });
   });
 });

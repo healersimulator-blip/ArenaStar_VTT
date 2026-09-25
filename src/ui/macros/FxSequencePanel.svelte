@@ -273,11 +273,17 @@
       ? (value === "normal" ? remaining : { ...remaining, blend: value as FxBlendMode }) as FxSection : old) };
   }
 
+  /**
+   * Switching the kind resets the strength to that kind's default *and* drops any
+   * animation: 16 is a heavy blur and an impossible grayscale, so carrying the number
+   * over would either be refused by the host or silently mean something else (the D-301
+   * rule for a mask's shape fields, applied to a filter's own).
+   */
   function changeFilter(index: number, value: string): void {
     const before = draft.sections[index];
     if (!before || (before.kind !== "image" && before.kind !== "text")) return;
-    const { filter: _filter, ...remaining } = before;
-    void _filter;
+    const { filter: _filter, filterTo: _filterTo, ...remaining } = before;
+    void _filter; void _filterTo;
     const kind = value as FxFilterKind;
     draft = { ...draft, sections: draft.sections.map((old, i) => i === index
       ? (value === "none" ? remaining
@@ -294,6 +300,40 @@
       ? { ...before, filter: { kind, strength: Number.isFinite(strength)
           ? Math.min(range.max, Math.max(range.min, strength)) : range.default } } as FxSection
       : old) };
+  }
+
+  /**
+   * One sentence under the filter controls, because "applied once" stops being true the
+   * moment the second box is filled — and a hint that lies is worse than no hint.
+   */
+  function filterHint(section: Extract<FxSection, { kind: "image" | "text" }>): string {
+    const filter = section.filter;
+    if (!filter) return "";
+    const range = FX_FILTER_RANGES[filter.kind];
+    const start = filter.strength ?? range.default;
+    if (section.filterTo === undefined || section.filterTo === start)
+      return `One filter per section: ${range.min}–${range.max}${range.unit}, applied once. Fill "move to" to carry it to another strength across the section.`;
+    const cycles = section.repeats ?? 1;
+    return `Moves from ${start}${range.unit} to ${section.filterTo}${range.unit}, ${cycles === 1
+      ? "eased across the section." : `restarted in each of its ${cycles} cycles — a pulse.`}`;
+  }
+
+  /**
+   * Where the filter ends, if the author wants it to move at all. Same rule as every
+   * other animation field here: empty means no key, clamped to the kind's own range so
+   * the host never receives a value it would refuse.
+   */
+  function changeFilterTo(index: number, value: string): void {
+    const before = draft.sections[index];
+    if (!before || (before.kind !== "image" && before.kind !== "text") || !before.filter) return;
+    const range = FX_FILTER_RANGES[before.filter.kind];
+    const { filterTo: _filterTo, ...remaining } = before;
+    void _filterTo;
+    const trimmed = value.trim();
+    const filterTo = trimmed === "" ? undefined : Number(trimmed);
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      ? ({ ...remaining, ...(filterTo === undefined || !Number.isFinite(filterTo) ? {} : {
+          filterTo: Math.min(range.max, Math.max(range.min, filterTo)) }) } as FxSection) : old) };
   }
 
   /**
@@ -776,9 +816,10 @@
                   onclick={() => void pickPoint(i, "to")}>Pick on map…</button>
               {/if}
             {/if}
-            {#if section.to || section.scaleTo !== undefined || section.spinDeg !== undefined}
-              <!-- The easing curve belongs to any animation, not only to a move: a growing
-                   or spinning visual eases with the same curve as a flying one. -->
+            {#if section.to || section.scaleTo !== undefined || section.spinDeg !== undefined ||
+              section.filterTo !== undefined}
+              <!-- The easing curve belongs to any animation, not only to a move: a growing,
+                   spinning or deepening visual eases with the same curve as a flying one. -->
               <label>Easing <select data-fx-easing bind:value={section.easing}>
                 <option value="linear">Linear</option><option value="easeIn">Ease in</option>
                 <option value="easeOut">Ease out</option><option value="easeInOut">Ease in/out</option>
@@ -819,7 +860,10 @@
               <label>Filter amount ({range.unit}) <input type="number" data-fx-filter-strength
                 min={range.min} max={range.max} step="0.1" value={section.filter.strength ?? range.default}
                 oninput={(e) => changeFilterStrength(i, e.currentTarget.value)} /></label>
-              <small>One filter per section: {range.min}–{range.max}{range.unit}; the renderer applies it once, not per frame.</small>
+              <label>Move to ({range.unit}) <input type="number" data-fx-filter-to
+                min={range.min} max={range.max} step="0.1" value={section.filterTo ?? ""}
+                placeholder="steady" oninput={(e) => changeFilterTo(i, e.currentTarget.value)} /></label>
+              <small>{filterHint(section)}</small>
             {/if}
             <label>Mask <select data-fx-mask-kind value={section.mask?.kind ?? "none"}
               onchange={(e) => changeMask(i, e.currentTarget.value)}>

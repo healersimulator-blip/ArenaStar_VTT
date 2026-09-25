@@ -101,7 +101,8 @@ export const FX_FILTER_RANGES: Record<FxFilterKind, { min: number; max: number; 
 };
 export interface FxVisualStyle {
   blend: FxBlendMode;
-  filter?: { kind: FxFilterKind; strength: number };
+  /** `to` is present only when the author animated the strength (D-304). */
+  filter?: { kind: FxFilterKind; strength: number; to?: number };
 }
 /**
  * Turn an author's choice into the numbers a renderer applies: an absent blend is
@@ -109,13 +110,39 @@ export interface FxVisualStyle {
  * outside its kind's range is clamped. The host validates all of this, but a client
  * must not render a nonsense value just because a cue was hand-written.
  */
-export function fxStylePlan(section: { blend?: FxBlendMode; filter?: FxVisualFilter }): FxVisualStyle {
+export function fxStylePlan(section: { blend?: FxBlendMode; filter?: FxVisualFilter; filterTo?: number }): FxVisualStyle {
   const blend = section.blend ?? "normal";
   const kind = section.filter?.kind;
   if (kind === undefined || !(kind in FX_FILTER_RANGES)) return { blend };
   const range = FX_FILTER_RANGES[kind];
-  const requested = section.filter?.strength ?? range.default;
-  return { blend, filter: { kind, strength: Math.min(range.max, Math.max(range.min, requested)) } };
+  const clamp = (value: number): number => Math.min(range.max, Math.max(range.min, value));
+  const strength = clamp(section.filter?.strength ?? range.default);
+  // An animation's end is clamped like its start, and stays *absent* when the author did
+  // not ask for one: a stored end equal to the start would be a claim, not a no-op.
+  if (section.filterTo === undefined) return { blend, filter: { kind, strength } };
+  return { blend, filter: { kind, strength, to: clamp(section.filterTo) } };
+}
+/**
+ * D-304: the filter's strength at a point inside its section — `strength` walking to
+ * `to`, eased with the section's own curve and, exactly like scale, restarted per motion
+ * cycle (so `repeats` turns a ramp into a pulse: a heartbeat of blur, not one long fade).
+ * Pure and total: no animation, a non-finite age or a zero-length section gives the
+ * authored start rather than NaN, and either end is clamped to its kind's own range.
+ */
+export function fxFilterStrength(
+  filter: { kind: FxFilterKind; strength: number; to?: number },
+  section: { easing?: FxEasing; repeats?: number; durationMs: number },
+  elapsedMs: number,
+): number {
+  const range = FX_FILTER_RANGES[filter.kind];
+  const clamp = (value: number): number => Math.min(range.max, Math.max(range.min, value));
+  const start = clamp(filter.strength);
+  if (filter.to === undefined || !Number.isFinite(elapsedMs) || section.durationMs <= 0) return start;
+  const progress = Math.min(1, Math.max(0, elapsedMs / section.durationMs));
+  const cycles = section.repeats ?? 1;
+  const phase = progress === 1 ? 1 : (progress * cycles) % 1;
+  const eased = fxEase(section.easing, phase);
+  return clamp(start + (filter.to - start) * eased);
 }
 export type FxEasing = "linear" | "easeIn" | "easeOut" | "easeInOut";
 const EASINGS: readonly FxEasing[] = ["linear", "easeIn", "easeOut", "easeInOut"];
@@ -159,6 +186,13 @@ interface FxLocated extends FxBase {
   blend?: FxBlendMode;
   /** One bounded filter: blur, grayscale, brightness or saturation. */
   filter?: FxVisualFilter;
+  /**
+   * SQ-05/D-304: animate the filter's own strength. `filter.strength` (or the kind's
+   * default) is where it starts, this is where it ends; the section's own `easing`
+   * carries it and with `repeats` it pulses instead of ramping once. Needs a kind to
+   * animate: there is nothing to reach without one.
+   */
+  filterTo?: number;
   /** Confine this visual to a region, or cut that region out of it (SQ-19). */
   mask?: FxMask;
   /** Follow visible source/target token anchors on each recipient's canvas. Only host-resolved IDs travel. */
@@ -321,8 +355,8 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
     const repeatFields = section.kind === "wait" || section.kind === "camera"
       ? [] : ["repeatCount", "repeatDelayMs"];
     const fields = section.kind === "sound" ? ["assetId", "volume", "channel", "fadeInMs", "fadeOutMs"] :
-      section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "mask", "scaleTo", "spinDeg"] :
-      section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "mask", "scaleTo", "spinDeg"] :
+      section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "mask", "scaleTo", "spinDeg"] :
+      section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "mask", "scaleTo", "spinDeg"] :
       section.kind === "camera" ? ["mode", "to", "easing", "zoom", "intensity", "points", "audience"] : [];
     if (Object.keys(section).some((key) => !["id", "kind", "startMs", "durationMs", ...fields, ...repeatFields].includes(key)) ||
       (section.kind !== "wait" && section.durationMs === 0)) {
@@ -439,7 +473,17 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
       const range = FX_FILTER_RANGES[filter.kind as FxFilterKind];
       if (filter.strength !== undefined && !inRange(filter.strength, range.min, range.max))
         return { ok: false, error: `FX ${filter.kind} strength must be ${range.min}–${range.max}` };
+      // An animation's two ends live in the same range: a blur that faded to 0 would be
+      // a blur that stopped existing, which is what dropping the filter says.
+      if (section.filterTo !== undefined) {
+        if (!inRange(section.filterTo, range.min, range.max))
+          return { ok: false, error: `FX ${filter.kind} must animate between ${range.min} and ${range.max}` };
+      }
     }
+    // Reported as itself rather than as an unknown field: "you animated nothing" is the
+    // useful sentence, and `filterTo` on its own is a mistake worth naming.
+    if (section.filterTo !== undefined && section.filter === undefined)
+      return { ok: false, error: "FX filterTo needs a filter kind to animate" };
     if (section.kind === "image" &&
         (typeof section.assetId !== "string" || !HASH.test(section.assetId) ||
           (section.stretch !== undefined && (typeof section.stretch !== "boolean" || section.stretch && !section.to)) ||

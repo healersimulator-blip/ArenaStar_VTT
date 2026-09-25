@@ -9805,3 +9805,88 @@ query, no notice about *which* section was withheld, and no Firefox/WebKit run o
   `summons` suite ran alongside it (**24/24** together) and the canvas/interaction batch
   (`canvas_rail` + `canvas_toolbar` + `vision` + `walls` + `join`) is **20/20** against the
   rebuilt file.
+
+## D-304 — animate a filter's strength, without ever rebuilding the filter (2026-09-25)
+
+D-299 gave a visual section one bounded filter (blur, grayscale, brightness, saturate) and
+made a point of applying it **once** — the filter is built at spawn and never touched
+again. D-302 then animated the visual's own transform, and the asymmetry became obvious: a
+ghost could grow and spin, but its transparency had to pick one value for the whole
+section. This decision animates the filter's *strength* — `filter.strength` is where it
+starts, a new section-level `filterTo` is where it ends — while keeping D-299's property
+exactly: a filter that does not animate still costs nothing per frame.
+
+**A section-level field, like `scaleTo`.** `filterTo` sits beside `filter`, not inside it:
+`scale`/`scaleTo` and `rotation`/`spinDeg` already pair a start with an end at the section
+level, and a field named `to` inside a filter object would be a second convention for the
+same idea. It **requires** a kind — there is nothing to reach without one — and that is
+reported as itself (`filterTo needs a filter kind to animate`) rather than as an unknown
+field, because naming the author's actual mistake is the point of a validation error.
+
+**Pulses per cycle, like scale — not accumulating, like spin.** With `repeats: 2` the
+strength runs the whole animation in each cycle and returns to the start at the boundary.
+That is the useful shape for a filter (a heartbeat of blur, a pulse of grey), and it is the
+rule `scaleTo` already follows. D-302's spin accumulates instead, because a bearing is a
+position rather than a value: one answer for "keep moving" and a different one for "swing
+back and forth" is a choice, and it is now made twice in the same way.
+
+**Both ends live in the kind's own range, and that range is not negotiable.** A grayscale
+animation ends between 0 and 1; a blur between 1 and 32. So a blur cannot animate to 0:
+"stop blurring" is what dropping the filter says, and a 0-strength blur would be a
+different feature wearing the same word. Following the same logic, the *wizard* drops the
+animation when the author switches the kind: 16 is a heavy blur and an impossible
+grayscale, and carrying the number over would either be refused by the host or silently
+mean something else (D-301's rule for a mask's shape fields, applied to a filter's).
+
+**One instance, nudged — and reset before each nudge.** The renderer builds the filter once
+at spawn and, when `to` is set, writes a new strength into that same instance every frame.
+This is not merely an optimisation: pixi's colour-matrix setters *compose* onto the current
+matrix, so a naive `brightness(next)` per frame would stack onto the last one and a 0.5×
+desaturation would drift to grey within a second. `fxSetFilterStrength` therefore resets
+the matrix and then applies the absolute value, and a unit test sets the same value twice
+and reads it back to prove nothing compounds. A constant filter is left exactly as spawn
+applied it, so D-299's "not per frame" claim is still true for everything that is not
+animating.
+
+**Applied from elapsed time, and read back from the drawing.** A late join takes the
+animated strength from the same elapsed time the transform uses, so a viewer who arrives
+mid-animation sees the right frame rather than the authored start. `inspect` reports the
+strength by reading it *out of* the live filter — a blur exposes `strength`, a colour
+matrix stores the author's number in one coefficient (directly for
+`brightness`/`greyscale`, as `amount * 2/3 + 1` for `saturate`), which `fxFilterReadback`
+inverts exactly. A unit test round-trips all four kinds, so a pixi change fails there
+instead of quietly misreporting in a diagnostic.
+
+**Non-claims.** No filter chains or a second filter per section, no animating a filter on a
+sound/camera/wait section (still refused as an unknown field), no per-filter easing
+separate from the section's own curve, no animation whose end is outside its kind's range,
+no `filterTo` without a kind, no tweened *kind* (blur never becomes grayscale mid-section),
+no PROTOCOL.md change (the field rides inside `ResolvedFxSection`, exactly as
+`scaleTo`/`spinDeg` did), and no Firefox/WebKit run or the §10 41-scenario matrix.
+
+**Gates.**
+
+- `pnpm test` — **3 723 passed / 12 skipped** (297 files: 295 passed, 2 skipped). New:
+  four cases in the animated-filter block of `tests/core/fx.test.ts` (the range is the
+  kind's own and an orphan `filterTo` is named as itself; the plan carries `to` only when
+  asked for and clamps it; the strength walks, eases, pulses per cycle and answers the
+  authored start to a NaN age or a zero-length section; resolution preserves the animation)
+  and four in `tests/canvas/fxStyle.test.ts` (all four kinds round-trip through
+  `fxFilterReadback`, twice-set to prove nothing compounds; a deepening blur is the same
+  filter instance nudged per frame with the drawn value read back; a colour animation stays
+  absolute while a still filter never moves; a late join starts mid-animation).
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing) · `pnpm lint` **exit 0** · `pnpm build` → `pnpm size` **3 823 970 B raw /
+  1 095 976 B gzip**, inside the 6 MB budget. No new message kind, byte, or wire field:
+  `ResolvedFxSection` gains one optional property.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **21/21** — the new spec authors
+  a blur moving 2 px → 16 px over 2.4 s, checks the wizard's own claim changes with it
+  ("applied once" becomes "Moves from 2px to 16px"), samples the drawn strength every
+  frame (40+ frames, range 2…16, the middle strictly between 6 and 14, barely moved a few
+  frames in, above 15 at the end), and then **clears the box, saves, and re-opens** the
+  macro to prove an emptied animation field is absent rather than a stored number. The
+  `summons` suite ran alongside it (**25/25** together) and the canvas/interaction batch
+  (`canvas_rail` + `canvas_toolbar` + `vision` + `walls` + `join`) is **20/20**.
+- The e2e caught the one gap the units could not: the easing select was rendered only for
+  `to`/`scaleTo`/`spinDeg`, so a filter-only animation had no curve control — widened to
+  include `filterTo`, matching D-302's caution rather than repeating the mistake.

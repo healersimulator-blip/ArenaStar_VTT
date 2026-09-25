@@ -1161,6 +1161,78 @@ test("a visual grows and spins through its section, eased, and lands on the auth
   expect(Math.max(...rotations)).toBeLessThan(365); // …and never past it
 });
 
+// D-304 (SQ-05): the filter's own strength animates now — a blur that deepens across its
+// section, eased with the same curve as its motion, sampled on the sprite frame by frame:
+// "the document said 16" is not the same claim as "the drawing got blurrier".
+test("a visual's filter deepens through its section and lands on the authored strength", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  await wizard.locator('input[type="file"]').setInputFiles({ name: "mist.png", mimeType: "image/png", buffer: png });
+  await expect(wizard.getByRole("status")).toContainText("GM-only playback");
+  await wizard.locator("[data-fx-name]").fill("Mist");
+  await wizard.getByRole("button", { name: "Image / video", exact: true }).click();
+  const section = wizard.locator("[data-fx-section]");
+  await section.getByRole("combobox", { name: "Media" }).selectOption({ index: 1 });
+  await section.getByLabel("X", { exact: true }).fill("600");
+  await section.getByLabel("Y", { exact: true }).fill("500");
+  await section.getByLabel("Duration ms").fill("2400");
+  await section.locator("[data-fx-filter]").selectOption("blur");
+
+  // An empty animation field is *no* animation: the host must not receive a number that
+  // merely equals the start (the D-299 lesson), and the field has to say so before the run.
+  await expect(section.locator("[data-fx-filter-to]")).toHaveValue("");
+  await expect(section.getByText("applied once", { exact: false })).toBeVisible();
+  await section.locator("[data-fx-filter-strength]").fill("2");
+  await section.locator("[data-fx-filter-to]").fill("16");
+  await section.locator("[data-fx-easing]").selectOption("easeInOut");
+  // The hint stops claiming the filter is applied once the moment it is asked to move.
+  await expect(section.getByText("Moves from 2px to 16px", { exact: false })).toBeVisible();
+  await wizard.locator("[data-fx-save]").click();
+  await expect(wizard.locator("li")).toContainText(["Mist"]);
+  await wizard.locator("li").filter({ hasText: "Mist" }).getByRole("button", { name: "Edit" }).click();
+  await expect(section.locator("[data-fx-filter-strength]")).toHaveValue("2");
+  await expect(section.locator("[data-fx-filter-to]")).toHaveValue("16");
+
+  await wizard.locator("[data-fx-run]").click();
+  const strengths = await page.evaluate(async () => {
+    const layer = (globalThis as unknown as { __stage?: { getFxLayer: () => {
+      inspect: (runId?: string) => Array<{ filter: string | null }> } } })
+      .__stage?.getFxLayer();
+    const seen: number[] = [];
+    const until = performance.now() + 2_600;
+    while (performance.now() < until) {
+      const [frame] = layer?.inspect() ?? [];
+      const label = frame?.filter ?? "";
+      const value = Number(label.slice(label.indexOf(":") + 1));
+      if (label.startsWith("blur:") && Number.isFinite(value)) seen.push(value);
+      await new Promise((resolve) => setTimeout(resolve, 16));
+    }
+    return seen;
+  });
+  expect(strengths.length).toBeGreaterThan(40);
+  // Eased in/out from 2 to 16: it starts at the authored amount, ends at the target, and
+  // a few frames in it has barely moved — a straight ramp would fail that last claim.
+  expect(Math.min(...strengths)).toBeCloseTo(2, 0);
+  expect(Math.max(...strengths)).toBeCloseTo(16, 0);
+  const middle = strengths[Math.floor(strengths.length / 2)] ?? 0;
+  expect(middle).toBeGreaterThan(6);
+  expect(middle).toBeLessThan(14);
+  expect((strengths[3] ?? 2) - 2).toBeLessThan(2);
+  expect(strengths[strengths.length - 1] ?? 0).toBeGreaterThan(15);
+
+  // Clearing the box means the animation is *absent*, not stored as a number the host
+  // would receive as null — the macro has to save and come back with an empty field.
+  await section.locator("[data-fx-filter-to]").fill("");
+  await wizard.locator("[data-fx-save]").click();
+  await wizard.locator("li").filter({ hasText: "Mist" }).getByRole("button", { name: "Edit" }).click();
+  await expect(section.locator("[data-fx-filter-to]")).toHaveValue("");
+  await expect(section.getByText("applied once", { exact: false })).toBeVisible();
+});
+
 // D-303 (SQ-13/SQ-18): a targeted section is not a preflight skip, and the GM has to be
 // told either way — "my targeting worked" is worth knowing, and a player who sees nothing
 // at all will ask why. Two real contexts, because the counts are about *them*.

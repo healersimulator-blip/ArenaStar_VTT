@@ -5,7 +5,8 @@
  */
 import { BlurFilter, ColorMatrixFilter, Container, Graphics, Sprite, Text, type Filter,
   type Texture } from "pixi.js";
-import { fxEase, fxStylePlan, type FxEasing, type FxFilterKind, type ResolvedFxSection } from "../../core/fx";
+import { fxEase, fxFilterStrength, fxStylePlan, type FxEasing, type FxFilterKind,
+  type ResolvedFxSection } from "../../core/fx";
 
 type Located = Extract<ResolvedFxSection, { kind: "image" | "text" }>;
 type Point = { x: number; y: number };
@@ -35,6 +36,35 @@ export function fxPixiFilter(filter: { kind: FxFilterKind; strength: number } | 
   else if (filter.kind === "brightness") matrix.brightness(filter.strength, false);
   else matrix.saturate(filter.strength, false);
   return matrix;
+}
+
+/**
+ * D-304: push a new strength into a filter that is already attached to a view. A blur
+ * takes it directly; a colour matrix's setters *compose* onto the current matrix, so it
+ * must be reset first — otherwise every frame would stack onto the last and a 0.5×
+ * desaturation would be grey within a second.
+ */
+export function fxSetFilterStrength(kind: FxFilterKind, filter: Filter, strength: number): void {
+  if (kind === "blur") { (filter as BlurFilter).strength = strength; return; }
+  const matrix = filter as ColorMatrixFilter;
+  matrix.reset();
+  if (kind === "grayscale") matrix.greyscale(strength, false);
+  else if (kind === "brightness") matrix.brightness(strength, false);
+  else matrix.saturate(strength, false);
+}
+
+/**
+ * What a filter is *currently* applying, read back out of pixi rather than remembered
+ * beside it — D-302's rule for `inspect`, which must not report a plan the renderer
+ * never applied. A blur exposes its strength; a colour matrix is a list of coefficients
+ * pixi writes the author's number into (directly for `brightness`/`greyscale`, and as
+ * `amount * 2/3 + 1` for `saturate`), so this inverts the one cell it lands in. A unit
+ * test round-trips all four, so a pixi change fails there instead of lying here.
+ */
+export function fxFilterReadback(kind: FxFilterKind, filter: Filter): number {
+  if (kind === "blur") return (filter as BlurFilter).strength;
+  const first = Number((filter as ColorMatrixFilter).matrix[0]);
+  return kind === "saturate" ? (first - 1) * 1.5 : first;
 }
 
 /**
@@ -113,8 +143,12 @@ interface ActiveVisual {
   view: Sprite | Text;
   age: number;
   persistent: boolean;
-  /** What this visual was actually built with, for inspection (`inspect`). */
-  filterLabel: string | null;
+  /**
+   * The attached filter, if any: one instance for the section's whole life (D-299) and
+   * the plan it was built from, whose strength is re-derived per frame when `to` is set
+   * (D-304).
+   */
+  filter: { plan: { kind: FxFilterKind; strength: number; to?: number }; view: Filter } | null;
   /** The clipping region, positioned with the anchor every frame. */
   mask: Graphics | null;
   finish?: () => void;
@@ -149,12 +183,16 @@ export class FxLayer {
         view.rotation += Math.atan2(section.toY - section.y, section.toX - section.x);
       }
     }
-    // Appearance is applied here, once: neither the blend nor the filter changes
-    // during a section, so a per-frame rebuild would only cost work.
+    // Appearance is applied here, once: the blend never changes during a section, and a
+    // filter is built once and then only *nudged* when it animates (D-304).
     const style = fxStylePlan(section);
     view.blendMode = style.blend as typeof view.blendMode;
     const filter = fxPixiFilter(style.filter);
     if (filter) view.filters = [filter];
+    // A late join starts mid-animation, so an animated filter takes its start value from
+    // the same elapsed time the transform does rather than from the authored beginning.
+    if (filter && style.filter?.to !== undefined)
+      fxSetFilterStrength(style.filter.kind, filter, fxFilterStrength(style.filter, section, age));
     view.position.set(section.x, section.y);
     const parent = section.layer === "belowTokens" ? this.belowTokens : this.aboveTokens;
     parent.addChild(view);
@@ -168,13 +206,13 @@ export class FxLayer {
       view.mask = mask;
     }
     const active: ActiveVisual = { runId, section, view, mask, age, persistent,
-      filterLabel: style.filter ? `${style.filter.kind}:${style.filter.strength}` : null,
+      filter: style.filter && filter ? { plan: style.filter, view: filter } : null,
       ...(finish ? { finish } : {}) };
     this.visuals.add(active);
-    this.setAlpha(active);
+    this.applyFrame(active);
   }
 
-  private setAlpha(active: ActiveVisual): void {
+  private applyFrame(active: ActiveVisual): void {
     const { section, age } = active;
     const anchors = fxFollowAnchors(section, this.tokenCenter);
     if (!anchors) { active.view.visible = false; return; }
@@ -196,6 +234,11 @@ export class FxLayer {
     } else {
       active.view.rotation = transform.rotation;
     }
+    // A constant filter is left exactly as spawn applied it: only an animated one costs
+    // anything per frame (D-304), which is the property D-299 bought and this keeps.
+    if (active.filter?.plan.to !== undefined)
+      fxSetFilterStrength(active.filter.plan.kind, active.filter.view,
+        fxFilterStrength(active.filter.plan, section, age));
     const fadeIn = section.fadeInMs ? Math.min(1, age / section.fadeInMs) : 1;
     const fadeOut = section.fadeOutMs ? Math.min(1, (section.durationMs - age) / section.fadeOutMs) : 1;
     active.view.alpha = (section.opacity ?? 1) * Math.max(0, Math.min(fadeIn, fadeOut));
@@ -208,7 +251,7 @@ export class FxLayer {
         this.remove(active);
       } else {
         if (active.persistent) active.age %= active.section.durationMs;
-        this.setAlpha(active);
+        this.applyFrame(active);
       }
     }
   }
@@ -227,7 +270,9 @@ export class FxLayer {
     return [...this.visuals]
       .filter((active) => runId === undefined || active.runId === runId)
       .map((active) => ({ kind: active.section.kind, blend: String(active.view.blendMode),
-        filter: active.filterLabel,
+        filter: active.filter
+          ? `${active.filter.plan.kind}:${Math.round(fxFilterReadback(active.filter.plan.kind, active.filter.view) * 1000) / 1000}`
+          : null,
         // Read back from the drawn view, so a test cannot pass on a plan the renderer
         // never applied.
         scale: active.view.scale.x,
