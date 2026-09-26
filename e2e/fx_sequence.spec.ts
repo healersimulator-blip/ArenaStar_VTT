@@ -1528,8 +1528,8 @@ test("a wall-bounded mask is trimmed to the wall the scene actually has", async 
   await expect(section.locator("[data-fx-mask-length-to]")).toHaveValue("30");
   await section.locator("[data-fx-mask-walls]").check();
   await expect(section.locator("[data-fx-mask-length-to]")).toHaveCount(0);
-  await expect(wizard.locator("[data-fx-status]")).toContainText("growth/turn was cleared");
-  await expect(section.getByText("cannot grow or turn", { exact: false })).toBeVisible();
+  await expect(wizard.locator("[data-fx-status]")).toContainText("growth/turn/widening was cleared");
+  await expect(section.getByText("cannot grow, turn or widen", { exact: false })).toBeVisible();
 
   await wizard.locator("[data-fx-save]").click();
   await expect(wizard.locator("li")).toContainText(["Lantern"]);
@@ -1665,6 +1665,121 @@ test("a mask grows through its section, and a turning one sweeps its own bearing
   expect(middle).toBeLessThan(60);
   // A sweep rather than a jump: most frames sit away from both endpoints.
   expect(bearings.filter((bearing) => bearing > 10 && bearing < 80).length).toBeGreaterThan(10);
+  await expect.poll(async () => (await sample(0)).length, { timeout: 5_000 }).toBe(0);
+});
+
+// D-314 (SQ-05): the region's **cross axis** animates on its own. The claim is about the
+// clipping polygon: a widening beam gets wider without gaining reach, and an opening cone
+// swings its edge away from the axis while its radius holds — two different drawings, which
+// is why the wizard asks for a width in units and an aperture in degrees.
+test("a mask widens without changing its reach, and a cone opens at the same range", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  await wizard.locator('input[type="file"]').setInputFiles({ name: "beam.png", mimeType: "image/png", buffer: png });
+  await expect(wizard.getByRole("status")).toContainText("GM-only playback");
+  await wizard.locator("[data-fx-name]").fill("Beam");
+  await wizard.getByRole("button", { name: "Image / video", exact: true }).click();
+  const section = wizard.locator("[data-fx-section]");
+  await section.getByRole("combobox", { name: "Media" }).selectOption({ index: 1 });
+  await section.getByLabel("X", { exact: true }).fill("600");
+  await section.getByLabel("Y", { exact: true }).fill("500");
+  await section.getByLabel("Duration ms").fill("2000");
+
+  // The control belongs to the shape that has the axis: a circle has no cross axis at all,
+  // a cone's cross axis is an aperture, and a width is a width.
+  await section.locator("[data-fx-mask-kind]").selectOption("circle");
+  await expect(section.locator("[data-fx-mask-width-to]")).toHaveCount(0);
+  await expect(section.locator("[data-fx-mask-spread-to]")).toHaveCount(0);
+  await section.locator("[data-fx-mask-kind]").selectOption("rect");
+  await expect(section.locator("[data-fx-mask-spread-to]")).toHaveCount(0);
+  await section.locator("[data-fx-mask-kind]").selectOption("cone");
+  await expect(section.locator("[data-fx-mask-width-to]")).toHaveCount(0);
+  await expect(section.locator("[data-fx-mask-spread-to]")).toHaveValue("");
+
+  // A cone: 5 units of reach (100 px on this scene's 100 px / 5 unit grid), 53.13° of
+  // aperture opened to 120° — the arc swings from ±26.57° to ±60° at a fixed radius.
+  await section.locator("[data-fx-mask-length]").fill("5");
+  await section.locator("[data-fx-mask-spread-to]").fill("120");
+  await wizard.locator("[data-fx-save]").click();
+  await expect(wizard.locator("li")).toContainText(["Beam"]);
+  await wizard.locator("li").filter({ hasText: "Beam" }).getByRole("button", { name: "Edit" }).click();
+  await expect(section.locator("[data-fx-mask-spread-to]")).toHaveValue("120");
+
+  /** The drawn region frame by frame, straight off the clipping polygon. */
+  const sample = async (windowMs: number) => page.evaluate(async (until) => {
+    const layer = (globalThis as unknown as { __stage?: { getFxLayer: () => {
+      inspect: (runId?: string) => Array<{ mask: { points: number; radius: number; bounds:
+        { minX: number; maxX: number; minY: number; maxY: number } } | null }> } } })
+      .__stage?.getFxLayer();
+    const seen: Array<{ radius: number; minX: number; maxX: number; maxY: number }> = [];
+    const deadline = performance.now() + until;
+    // Frame-driven rather than timer-driven: a busy main thread stretches `setTimeout(16)`
+    // into a couple of samples a second, and "how many frames the sampler caught" must not
+    // decide whether an animation claim can be made.
+    while (performance.now() < deadline) {
+      const mask = layer?.inspect()[0]?.mask;
+      if (mask) seen.push({ radius: mask.radius, minX: mask.bounds.minX, maxX: mask.bounds.maxX,
+        maxY: mask.bounds.maxY });
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+    return seen;
+  }, windowMs);
+
+  await wizard.locator("[data-fx-run]").click();
+  const opened = await sample(2_300);
+  expect(opened.length).toBeGreaterThan(MIN_ANIMATION_SAMPLES);
+  // The radius never moves — an aperture is an angle, so the cone reaches exactly as far
+  // throughout — while the arc's own extent across the axis grows from sin(26.57°) to
+  // sin(60°) of that reach.
+  const radii = opened.map((frame) => frame.radius);
+  expect(Math.max(...radii) - Math.min(...radii)).toBeLessThan(1);
+  expect(radii[0] ?? 0).toBeCloseTo(100, 0);
+  // 26.57° → 60° half-angles are 44.7 px → 86.6 px of arc at a 100 px reach. The first
+  // frame the sampler can catch is already a little way in (the run has a lead, and the
+  // section's own easing is in play), so the ends are asserted as *bounds* the drawing
+  // genuinely crosses — and the widening itself as the ratio between them, which is the
+  // claim that cannot be satisfied by a still cone.
+  const arcs = opened.map((frame) => frame.maxY);
+  expect(arcs[0] ?? 0).toBeLessThan(56);
+  expect(Math.max(...arcs)).toBeGreaterThan(84);
+  expect(Math.max(...arcs)).toBeLessThanOrEqual(86.6 + 0.5);
+  expect(Math.min(...arcs)).toBeGreaterThan(43.5);
+  expect(arcs.every((arc, index) => index === 0 || arc >= (arcs[index - 1] ?? 0) - 0.5)).toBe(true);
+  expect((arcs[arcs.length - 1] ?? 0) / (arcs[0] ?? 1)).toBeGreaterThan(1.5);
+  await expect.poll(async () => (await sample(0)).length, { timeout: 5_000 }).toBe(0);
+
+  // A rect: 8 units deep (160 px) and 2 wide (40 px), widened to 8 units (160 px). The
+  // depth is the field that names it and never moves; the width does all the work.
+  await section.locator("[data-fx-mask-kind]").selectOption("rect");
+  await section.locator("[data-fx-mask-length]").fill("8");
+  await section.locator("[data-fx-mask-width]").fill("2");
+  await section.locator("[data-fx-mask-width-to]").fill("8");
+  const before = await hostCall<number>(page, "seq");
+  await wizard.locator("[data-fx-save]").click();
+  await expect.poll(() => hostCall<number>(page, "seq"), { timeout: 5_000 }).toBeGreaterThan(before);
+  // Saved, not drafted: Run plays what the host holds.
+  await wizard.locator("[data-fx-run]").click();
+  const widened = await sample(2_300);
+  expect(widened.length).toBeGreaterThan(MIN_ANIMATION_SAMPLES);
+  // A rect straddles its anchor: ±80 px of depth, which the width animation must not touch.
+  expect(Math.min(...widened.map((frame) => frame.minX))).toBeCloseTo(-80, 0);
+  expect(Math.max(...widened.map((frame) => frame.maxX))).toBeCloseTo(80, 0);
+  const widths = widened.map((frame) => frame.maxY);
+  expect(widths[0] ?? 0).toBeLessThan(30);
+  expect(Math.max(...widths)).toBeLessThanOrEqual(80.5);
+  expect(Math.min(...widths)).toBeGreaterThan(19.5);
+  expect(widths.every((width, index) => index === 0 || width >= (widths[index - 1] ?? 0) - 0.5)).toBe(true);
+  expect((widths[widths.length - 1] ?? 0) / (widths[0] ?? 1)).toBeGreaterThan(2.5);
+  // Growing wider is not growing longer: the drawn corner never reaches past the diagonal
+  // the authored depth and width add up to, and it does get there — the width lands on its
+  // own number rather than on some fraction of the depth's growth.
+  const reaches = widened.map((frame) => Math.hypot(frame.maxX, frame.maxY));
+  expect(Math.max(...reaches)).toBeLessThanOrEqual(Math.hypot(80, 80) + 0.5);
+  expect(Math.max(...reaches)).toBeGreaterThan(Math.hypot(80, 78));
   await expect.poll(async () => (await sample(0)).length, { timeout: 5_000 }).toBe(0);
 });
 

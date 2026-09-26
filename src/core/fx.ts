@@ -5,7 +5,8 @@
  * This is the first sequence format, not the full Sequencer action catalogue.
  */
 import type { SceneDocument, TokenDocument } from "./documents";
-import { crosshairArea, crosshairPxPerUnit, type CrosshairPoint, type CrosshairShape } from "./crosshair";
+import { CROSSHAIR_DEFAULT_SPREAD, crosshairArea, crosshairPxPerUnit,
+  type CrosshairPoint, type CrosshairShape } from "./crosshair";
 import { SOUND_RADIUS_LIMITS } from "./fxSound";
 import { segmentCrossingPoint, visibilityPolygon } from "../canvas/vision/polygon";
 import { distanceToSegment } from "../canvas/vision/wallKinds";
@@ -64,14 +65,27 @@ export interface FxMask {
    */
   walls?: boolean;
   /**
-   * SQ-05/D-305: animate the region itself. `lengthTo` is the reach it grows to — the
-   * whole region scales about its anchor, so a rectangle's width grows with its depth
-   * (a growing sliver would be a different shape, not a bigger one); `spinDeg` turns the
-   * region, accumulating across `repeats` like the visual's own spin. Both are eased by
-   * the section's curve, and the same two rules the visual's transform follows.
+   * SQ-05/D-305: animate the region itself. `lengthTo` is the reach it grows to — on its
+   * own the whole region scales about its anchor, so a rectangle's width grows with its
+   * depth (a growing sliver would be a different shape, not a bigger one), and beside a
+   * `widthTo`/`spreadTo` it becomes the *along* axis alone, because then every axis has
+   * been pinned to its own number; `spinDeg` turns the region, accumulating across
+   * `repeats` like the visual's own spin. All of them are eased by the section's curve,
+   * and the same two rules the visual's transform follows — a size (reach or width or
+   * aperture) restarts in each cycle, only a bearing keeps going.
    */
   lengthTo?: number;
   spinDeg?: number;
+  /**
+   * D-314: the **cross axis** animates too, on the same curve and cycle — and it means its
+   * own number. `widthTo` is the width a ray/rect widens to (scene units), perpendicular to
+   * its own axis, so a beam thickens without gaining a single unit of reach; `spreadTo` is
+   * the aperture a cone opens to (degrees), its points keeping their radius. A circle has no
+   * cross axis and a ray has no aperture, so each field belongs to its own shapes and the
+   * others refuse it by name.
+   */
+  widthTo?: number;
+  spreadTo?: number;
   /** Keep the *outside* of the shape — a cutout — instead of the inside. */
   invert?: boolean;
 }
@@ -89,7 +103,20 @@ export interface ResolvedFxMask {
    * client never re-derives the scene's metric) and `spinDeg` is the turn. Absent when
    * the author animated nothing, and a still region is still built exactly once.
    */
-  animate?: { scale?: number; spinDeg?: number };
+  animate?: {
+    scale?: number; spinDeg?: number;
+    /**
+     * D-314: the cross axis's own end, in the shape's own frame. `ratio` is the anonymous
+     * scale the width (or the aperture) walks to — a ratio, never the authored scene-unit
+     * number, so a client still learns no metric; `axisDeg` is the screen bearing that
+     * frame points along, carried because a polygon alone does not say which way a
+     * rectangle is facing; and `fan` marks a cone, whose cross axis is an **angle**, so it
+     * opens by swinging its points about the apex instead of stretching them sideways.
+     * Present only when the author pinned the cross axis — every stored timeline and every
+     * still region travels exactly as it did before.
+     */
+    cross?: { ratio: number; axisDeg: number; fan?: boolean };
+  };
 }
 /**
  * SQ-05/D-307: the region a wall-bounded mask actually covers. `area` is the authored
@@ -168,9 +195,9 @@ export function fxSightTrim(
 const MASK_FIELDS: Record<FxMask["kind"], readonly string[]> = {
   // A circle has no facing, so it takes no angle — and therefore no turn either.
   circle: ["kind", "length", "lengthTo", "walls", "invert"],
-  cone: ["kind", "length", "lengthTo", "angle", "spread", "spinDeg", "walls", "invert"],
-  ray: ["kind", "length", "lengthTo", "width", "angle", "spinDeg", "walls", "invert"],
-  rect: ["kind", "length", "lengthTo", "width", "angle", "spinDeg", "walls", "invert"],
+  cone: ["kind", "length", "lengthTo", "angle", "spread", "spreadTo", "spinDeg", "walls", "invert"],
+  ray: ["kind", "length", "lengthTo", "width", "widthTo", "angle", "spinDeg", "walls", "invert"],
+  rect: ["kind", "length", "lengthTo", "width", "widthTo", "angle", "spinDeg", "walls", "invert"],
 };
 /** Authored metric bounds, in scene units / degrees. */
 export const FX_MASK_LIMITS = { min: 0.5, max: 5_000, spreadMin: 1, spreadMax: 359 } as const;
@@ -679,6 +706,10 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
         return { ok: false, error: "an FX mask's invert flag must be true or false" };
       if (mask.lengthTo !== undefined && !inRange(mask.lengthTo, FX_MASK_LIMITS.min, FX_MASK_LIMITS.max))
         return { ok: false, error: `an FX mask's growth must be ${FX_MASK_LIMITS.min}–${FX_MASK_LIMITS.max} scene units` };
+      if (mask.widthTo !== undefined && !inRange(mask.widthTo, FX_MASK_LIMITS.min, FX_MASK_LIMITS.max))
+        return { ok: false, error: `an FX mask's width can widen to ${FX_MASK_LIMITS.min}–${FX_MASK_LIMITS.max} scene units` };
+      if (mask.spreadTo !== undefined && !inRange(mask.spreadTo, FX_MASK_LIMITS.spreadMin, FX_MASK_LIMITS.spreadMax))
+        return { ok: false, error: `a cone mask's spread can open to ${FX_MASK_LIMITS.spreadMin}–${FX_MASK_LIMITS.spreadMax} degrees` };
       if (mask.spinDeg !== undefined && !inRange(mask.spinDeg, -FX_SPIN_LIMIT, FX_SPIN_LIMIT))
         return { ok: false, error: `an FX mask's turn must be within ±${FX_SPIN_LIMIT} degrees` };
       if (mask.walls !== undefined && typeof mask.walls !== "boolean")
@@ -687,7 +718,8 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
       // turn or a growth would drag the shape straight through the wall it was cut by. A
       // recipient has no walls to re-trim against and must not be given them (they can be
       // secret), so this is a refusal rather than a per-frame recomputation.
-      if (mask.walls === true && (mask.lengthTo !== undefined || mask.spinDeg !== undefined))
+      if (mask.walls === true && (mask.lengthTo !== undefined || mask.spinDeg !== undefined ||
+          mask.widthTo !== undefined || mask.spreadTo !== undefined))
         return { ok: false, error: "an FX mask bounded by walls cannot animate: the trim is baked against the host's walls" };
     }
     // Appearance is validated before the asset, so a mistyped blend is reported as
@@ -914,6 +946,16 @@ export function resolveFxSequence(
       const animate = {
         ...(mask.lengthTo !== undefined ? { scale: mask.lengthTo / mask.length } : {}),
         ...(mask.spinDeg !== undefined ? { spinDeg: mask.spinDeg } : {}),
+        // D-314: the cross axis travels as a ratio plus the frame it lives in. Nothing here
+        // tells the client what the mask *is* in scene units, and only one bit of shape
+        // leaks — a cone's cross axis is an angle — because the drawing differs: a fan
+        // opens, a width stretches.
+        ...(mask.spreadTo !== undefined
+          ? { cross: { ratio: mask.spreadTo / (mask.spread ?? CROSSHAIR_DEFAULT_SPREAD),
+            axisDeg: mask.angle ?? 0, fan: true } }
+          : mask.widthTo !== undefined && mask.width !== undefined
+            ? { cross: { ratio: mask.widthTo / mask.width, axisDeg: mask.angle ?? 0 } }
+            : {}),
       };
       const animated = Object.keys(animate).length > 0;
       return { area: shaped, invert: mask.invert === true, ...(animated ? { animate } : {}) };

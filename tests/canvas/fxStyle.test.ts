@@ -440,6 +440,127 @@ describe("animated filter strength on the canvas (§SQ-05, D-304)", () => {
 });
 
 /**
+ * D-314: the region's **cross axis** — a ray/rect's width, a cone's aperture — animates on
+ * its own. The drawing is read back rather than the plan, because the claim is about the
+ * polygon that is clipping: a widened beam must be exactly wider, with the same reach.
+ */
+describe("animated region cross axis on the canvas (§SQ-05, D-314)", () => {
+  /** A ray along +x: (0, ±half width) and (depth, ±half width), exactly as resolved. */
+  const ray = (depth: number, width: number, animate?: Record<string, unknown>) => ({
+    area: [{ x: 0, y: -width / 2 }, { x: depth, y: -width / 2 },
+      { x: depth, y: width / 2 }, { x: 0, y: width / 2 }],
+    invert: false,
+    ...(animate ? { animate } : {}),
+  });
+  /** A cone along +x spanning 53.13°: its apex then its arc, 9 points. */
+  const cone = (reach: number, animate?: Record<string, unknown>) => ({
+    area: [{ x: 0, y: 0 }, ...Array.from({ length: 9 }, (_, i) => {
+      const angle = (-26.565 + (i / 8) * 53.13) * (Math.PI / 180);
+      return { x: Math.cos(angle) * reach, y: Math.sin(angle) * reach };
+    })],
+    invert: false,
+    ...(animate ? { animate } : {}),
+  });
+  /** Where one region vertex lands, read out of the drawn polygon (a 2-point sub-mask). */
+  const vertexAt = (point: { x: number; y: number },
+    transform: { scale: number; rotation: number; cross?: { ratio: number; axisRad: number; fan?: boolean } }) =>
+    drawnBounds({ area: [{ x: 0, y: 0 }, point], invert: false }, transform);
+  const drawnBounds = (mask: { area: Array<{ x: number; y: number }>; invert: boolean },
+    transform: { scale: number; rotation: number; cross?: { ratio: number; axisRad: number; fan?: boolean } }) =>
+    fxMaskReadback(fxMaskGraphics(mask, 0, transform)).bounds;
+
+  test("the cross ratio walks from the authored shape and restarts each cycle, like a size", () => {
+    const section = { durationMs: 1000 };
+    const animate = { cross: { ratio: 4, axisDeg: 0 } };
+    expect(fxMaskTransform(animate, section, 0).cross?.ratio).toBeCloseTo(1, 6);
+    expect(fxMaskTransform(animate, section, 500).cross?.ratio).toBeCloseTo(2.5, 6);
+    expect(fxMaskTransform(animate, section, 1000).cross?.ratio).toBeCloseTo(4, 6);
+    expect(fxMaskTransform(animate, { ...section, repeats: 2 }, 500).cross?.ratio).toBeCloseTo(1, 6);
+    // The frame travels as the bearing it was authored with, in radians, and a fan says so.
+    expect(fxMaskTransform({ cross: { ratio: 2, axisDeg: 90 } }, section, 0).cross?.axisRad)
+      .toBeCloseTo(Math.PI / 2, 6);
+    expect(fxMaskTransform({ cross: { ratio: 2, axisDeg: 0, fan: true } }, section, 0).cross?.fan).toBe(true);
+    expect(fxMaskTransform({ cross: { ratio: 2, axisDeg: 0 } }, section, 0).cross?.fan).toBeUndefined();
+    // A still region has no cross axis at all, and neither has a stalled clock.
+    expect(fxMaskTransform({}, section, 500).cross).toBeUndefined();
+    expect(fxMaskTransform({ cross: { ratio: 4, axisDeg: 0 } }, section, Number.NaN).cross).toBeUndefined();
+    // …and the early return stays exactly the shape it was, so a still mask is untouched.
+    expect(fxMaskTransform(undefined, section, 500)).toEqual({ scale: 1, rotation: 0 });
+  });
+
+  test("a widened ray is exactly wider: the reach is untouched and only the cross axis moves", () => {
+    // 100 px deep, 40 px wide, widened to 4× at the same bearing.
+    const widened = drawnBounds(ray(100, 40), { scale: 1, rotation: 0,
+      cross: { ratio: 4, axisRad: 0 } });
+    expect(widened).toMatchObject({ minX: 0, maxX: 100 });
+    expect(widened.minY).toBeCloseTo(-80, 3);
+    expect(widened.maxY).toBeCloseTo(80, 3);
+    // Reach is what the *length* axis says: a width alone never lengthens the beam.
+    expect(fxMaskReadback(fxMaskGraphics(ray(100, 40), 0, { scale: 1, rotation: 0,
+      cross: { ratio: 4, axisRad: 0 } })).radius).toBeCloseTo(Math.hypot(100, 80), 3);
+  });
+
+  test("a growth beside a pinned width lands each axis on its own number", () => {
+    // "Grow to 300, widen to 320": the depth triples, the width is multiplied by 8 — each
+    // comes from the field that named it, and neither is the other multiplied by surprise.
+    const both = drawnBounds(ray(100, 40), { scale: 3, rotation: 0, cross: { ratio: 8, axisRad: 0 } });
+    expect(both).toMatchObject({ minX: 0 });
+    expect(both.maxX).toBeCloseTo(300, 3);
+    expect(both.minY).toBeCloseTo(-160, 3);
+    expect(both.maxY).toBeCloseTo(160, 3);
+    // Without a cross axis the very same growth is D-305's uniform scale: both axes together.
+    const uniform = drawnBounds(ray(100, 40), { scale: 3, rotation: 0 });
+    expect(uniform.maxX).toBeCloseTo(300, 3);
+    expect(uniform.maxY).toBeCloseTo(60, 3);
+  });
+
+  test("a cone opens rather than stretching: its arc keeps the radius and swings outward", () => {
+    const reach = 200;
+    const opened = cone(reach, { cross: { ratio: 2, axisRad: 0, fan: true } });
+    const readOpened = fxMaskReadback(fxMaskGraphics(opened, 0, { scale: 1, rotation: 0,
+      cross: { ratio: 2, axisRad: 0, fan: true } }));
+    // Every point is still `reach` from the apex: it is the aperture that changed, not the
+    // range — a sideways stretch would have fattened the arc into an ellipse instead.
+    expect(readOpened.points).toBe(10);
+    const radiusOf = (polygon: { area: Array<{ x: number; y: number }> }, transform: {
+      scale: number; rotation: number; cross?: { ratio: number; axisRad: number; fan?: boolean } }) => {
+      const graphics = fxMaskGraphics(polygon, 0, transform);
+      return fxMaskReadback(graphics).radius;
+    };
+    expect(radiusOf(opened, { scale: 1, rotation: 0, cross: { ratio: 2, axisRad: 0, fan: true } }))
+      .toBeCloseTo(reach, 3);
+    // …and the aperture really widened. One vertex at a time, read out of the drawn
+    // polygon: the arc's last point sits at +26.565°, and doubling the aperture must put it
+    // at +53.13° *on the same circle* — where a sideways stretch would have left it on its
+    // own angle and simply pushed it outward across the axis.
+    const half = (26.565 * Math.PI) / 180;
+    const outer = { x: Math.cos(half) * reach, y: Math.sin(half) * reach };
+    const swung = vertexAt(outer, { scale: 1, rotation: 0, cross: { ratio: 2, axisRad: 0, fan: true } });
+    expect(swung.maxX).toBeCloseTo(Math.cos(half * 2) * reach, 1);
+    expect(swung.maxY).toBeCloseTo(Math.sin(half * 2) * reach, 1);
+    expect(Math.hypot(swung.maxX, swung.maxY)).toBeCloseTo(reach, 0);
+    const fattened = vertexAt(outer, { scale: 1, rotation: 0, cross: { ratio: 2, axisRad: 0 } });
+    expect(fattened.maxX).toBeCloseTo(outer.x, 2);
+    expect(fattened.maxY).toBeCloseTo(outer.y * 2, 2);
+    // The two are genuinely different shapes, which is the whole reason `fan` exists: one
+    // opens a cone, the other thickens it into an ellipse.
+    expect(Math.abs(fattened.maxX - swung.maxX)).toBeGreaterThan(10);
+  });
+
+  test("a turn and a width compose: the stretch happens in the shape's own frame", () => {
+    // A ray turned 90° (pointing down-screen) and widened: the width lands on the x axis,
+    // which is only true if the stretch was applied before the turn rather than after it.
+    const turned = { scale: 1, rotation: Math.PI / 2, cross: { ratio: 3, axisRad: 0 } };
+    const bounds = drawnBounds(ray(100, 40), turned);
+    expect(bounds.minY).toBeCloseTo(0, 3);
+    expect(bounds.maxY).toBeCloseTo(100, 3);
+    expect(bounds.minX).toBeCloseTo(-60, 3);
+    expect(bounds.maxX).toBeCloseTo(60, 3);
+  });
+
+});
+
+/**
  * D-313: a **chain** of filters. What matters on the canvas is that the author's order is the
  * order pixi applies, that each entry is its own instance (a blur deepening must not rebuild the
  * brightness beside it), and that an entry's animation moves only that entry.

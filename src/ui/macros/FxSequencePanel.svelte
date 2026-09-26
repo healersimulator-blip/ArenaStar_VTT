@@ -471,13 +471,16 @@
   function changeMaskWalls(index: number, on: boolean): void {
     const before = draft.sections[index];
     if (!before || (before.kind !== "image" && before.kind !== "text") || !before.mask) return;
-    const { walls: _walls, lengthTo: _lengthTo, spinDeg: _spinDeg, ...rest } = before.mask;
-    void _walls; void _lengthTo; void _spinDeg;
+    const { walls: _walls, lengthTo: _lengthTo, spinDeg: _spinDeg,
+      widthTo: _widthTo, spreadTo: _spreadTo, ...rest } = before.mask;
+    void _walls; void _lengthTo; void _spinDeg; void _widthTo; void _spreadTo;
     const mask: FxMask = on ? { ...rest, walls: true } : rest;
     draft = { ...draft, sections: draft.sections.map((old, i) => i === index
       ? { ...before, mask } as FxSection : old) };
-    status = on && (before.mask.lengthTo !== undefined || before.mask.spinDeg !== undefined)
-      ? "Wall-bounded: the region is trimmed against the scene's walls, which a recipient never receives — so its growth/turn was cleared."
+    const animated = before.mask.lengthTo !== undefined || before.mask.spinDeg !== undefined ||
+      before.mask.widthTo !== undefined || before.mask.spreadTo !== undefined;
+    status = on && animated
+      ? "Wall-bounded: the region is trimmed against the scene's walls, which a recipient never receives — so its growth/turn/widening was cleared."
       : on ? "Wall-bounded: the region is trimmed against the scene's walls when the timeline is saved."
         : "";
   }
@@ -511,19 +514,49 @@
    * number, and the value is clamped to the same bounds the host checks — a region's
    * geometry is measured in scene units, so its growth is too.
    */
-  function changeMaskAnimation(index: number, field: "lengthTo" | "spinDeg", value: string): void {
+  function changeMaskAnimation(index: number, field: "lengthTo" | "spinDeg" | "widthTo" | "spreadTo",
+    value: string): void {
     const before = draft.sections[index];
     if (!before || (before.kind !== "image" && before.kind !== "text") || !before.mask) return;
     const { [field]: _dropped, ...rest } = before.mask;
     void _dropped;
     const trimmed = value.trim();
     const parsed = trimmed === "" ? undefined : Number(trimmed);
-    const bounds: [number, number] = field === "lengthTo"
-      ? [FX_MASK_LIMITS.min, FX_MASK_LIMITS.max] : [-FX_SPIN_LIMIT, FX_SPIN_LIMIT];
+    // Each field is clamped to the same bounds the host checks for it: the scene-unit axes
+    // share a range, an aperture has its own, and only the turn is signed.
+    const bounds: [number, number] = field === "spinDeg" ? [-FX_SPIN_LIMIT, FX_SPIN_LIMIT]
+      : field === "spreadTo" ? [FX_MASK_LIMITS.spreadMin, FX_MASK_LIMITS.spreadMax]
+        : [FX_MASK_LIMITS.min, FX_MASK_LIMITS.max];
     const mask: FxMask = parsed === undefined || !Number.isFinite(parsed) ? rest
       : { ...rest, [field]: Math.min(bounds[1], Math.max(bounds[0], parsed)) };
     draft = { ...draft, sections: draft.sections.map((old, i) => i === index
       ? { ...before, mask } as FxSection : old) };
+  }
+
+  /** Does this region do anything inside its section? The hint appears only when it does. */
+  function maskAnimates(mask: FxMask): boolean {
+    return mask.lengthTo !== undefined || mask.spinDeg !== undefined ||
+      mask.widthTo !== undefined || mask.spreadTo !== undefined;
+  }
+
+  /**
+   * One sentence describing what the region does. Two rules are not guessable from the
+   * fields — a size restarts in each cycle while a bearing keeps going — and a widening
+   * width and an opening aperture are the same kind of control until someone says which
+   * axis each one moves and what it leaves alone.
+   */
+  function maskAnimationHint(mask: FxMask, repeats: number | undefined): string {
+    const axes = [mask.lengthTo !== undefined ? "growth" : "", mask.widthTo !== undefined ? "width" : "",
+      mask.spreadTo !== undefined ? "aperture" : "", mask.spinDeg !== undefined ? "turn" : ""]
+      .filter((axis) => axis !== "");
+    const cycles = repeats === undefined || repeats === 1 ? "eased across the section"
+      : `a size restarts in each of its ${repeats} cycles, a turn keeps going`;
+    const cross = mask.widthTo !== undefined
+      ? " The width widens perpendicular to the mask's own axis, so the reach it covers is untouched."
+      : mask.spreadTo !== undefined
+        ? " The spread opens the cone by swinging its edge away from the axis at the same reach."
+        : "";
+    return `The region animates its ${axes.join(" and ")} — ${cycles}.${cross}`;
   }
 
   function changeReplayCount(index: number, value: string): void {
@@ -1155,8 +1188,9 @@
               {/if}
             {/if}
             {#if section.to || section.scaleTo !== undefined || section.spinDeg !== undefined ||
-              section.filterTo !== undefined || section.mask?.lengthTo !== undefined ||
-              section.mask?.spinDeg !== undefined}
+              section.filterTo !== undefined || section.filters?.some((step) => step.to !== undefined) ||
+              section.mask?.lengthTo !== undefined || section.mask?.spinDeg !== undefined ||
+              section.mask?.widthTo !== undefined || section.mask?.spreadTo !== undefined}
               <!-- The easing curve belongs to any animation, not only to a move: a growing,
                    spinning or deepening visual — or a region of its own — eases with the
                    same curve as a flying one. -->
@@ -1255,6 +1289,17 @@
                 <label>Grow to ({units}) <input type="number" data-fx-mask-length-to
                   min={FX_MASK_LIMITS.min} max={FX_MASK_LIMITS.max} step="1" value={mask.lengthTo ?? ""}
                   placeholder="steady" oninput={(e) => changeMaskAnimation(i, "lengthTo", e.currentTarget.value)} /></label>
+                {#if mask.kind === "ray" || mask.kind === "rect"}
+                  <label>Widen to ({units}) <input type="number" data-fx-mask-width-to
+                    min={FX_MASK_LIMITS.min} max={FX_MASK_LIMITS.max} step="1" value={mask.widthTo ?? ""}
+                    placeholder="steady" oninput={(e) => changeMaskAnimation(i, "widthTo", e.currentTarget.value)} /></label>
+                {:else if mask.kind === "cone"}
+                  <!-- A cone's cross axis is an aperture, not a width: the fan keeps its
+                       radius and swings open, which is why this is degrees. -->
+                  <label>Open to (°) <input type="number" data-fx-mask-spread-to
+                    min={FX_MASK_LIMITS.spreadMin} max={FX_MASK_LIMITS.spreadMax} step="1" value={mask.spreadTo ?? ""}
+                    placeholder="steady" oninput={(e) => changeMaskAnimation(i, "spreadTo", e.currentTarget.value)} /></label>
+                {/if}
                 {#if mask.kind !== "circle"}
                   <label>Turn (°) <input type="number" data-fx-mask-spin min={-FX_SPIN_LIMIT}
                     max={FX_SPIN_LIMIT} step="15" value={mask.spinDeg ?? ""} placeholder="still"
@@ -1267,9 +1312,9 @@
                 onchange={(e) => changeMaskField(i, { invert: e.currentTarget.checked })} />Cut out (hide what is inside the mask)</label>
               <small>The mask is measured against this scene's grid ({units}) around the anchor and travels with it; the host resolves it and refuses a shape it cannot draw.
                 {#if mask.walls === true}
-                  Trimmed where a wall blocks sight — the same rule the fog uses, doors included — and baked into the shape, so it cannot grow or turn.
-                {:else if mask.lengthTo !== undefined || mask.spinDeg !== undefined}
-                  A region that grows or turns does so inside this section, on its own eased curve — {section.repeats !== undefined && section.repeats !== 1 ? `a grow restarts in each of its ${section.repeats} cycles, a turn keeps going.` : "eased across the section."}
+                  Trimmed where a wall blocks sight — the same rule the fog uses, doors included — and baked into the shape, so it cannot grow, turn or widen.
+                {:else if maskAnimates(mask)}
+                  {maskAnimationHint(mask, section.repeats)}
                 {/if}</small>
             {/if}
             {#if section.at.kind !== "point" || section.to && section.to.kind !== "point"}

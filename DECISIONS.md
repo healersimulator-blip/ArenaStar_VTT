@@ -10737,3 +10737,89 @@ advisory · `pnpm lint` exit 0 · `pnpm build` → `pnpm size` **3 871 184 B raw
   was **24/24** standalone and in the uncontended re-run (**3 800 passed / 12 skipped**). Recorded
   as load sensitivity, like the join/walls batch ceilings in D-312; nothing here touches the audio
   graph.
+
+## D-314 — a region's cross axis: a width that widens, an aperture that opens (2026-09-26)
+
+D-301 gave a mask four shapes and D-305 let the region **grow** and **turn**. What it could not do
+was change shape: a growth is a uniform scale, deliberately (D-305's rule — "a growing sliver would
+be a different shape, not a bigger one"), so a beam that thickens while keeping its reach and a cone
+whose aperture opens at the same range were simply not expressible. That is SQ-05's width/spread
+clause, and this entry closes it without disturbing the rule it grew out of.
+
+**Two new fields, each belonging to the shapes that have the axis.** `widthTo` is the width a
+**ray/rect** widens to — scene units, the same bounds as the width itself — and `spreadTo` is the
+aperture a **cone** opens to — degrees, the crosshair's own 1–359. A circle has no cross axis at
+all and a ray has no aperture, so each field is refused *by name* on the wrong shape through the
+per-kind field list D-301 built (`"an FX ray mask takes only …"`), which is the same refusal that
+stops a stale width surviving a switch to a circle. A wall-bounded region refuses both with the
+sentence that already refuses growth and turn: the trim is baked against walls a recipient never
+receives, so nothing about such a region may move.
+
+**The cross axis is a size, so it walks like one.** It eases on the section's own curve and cycle
+and **restarts** in each cycle rather than accumulating — an aperture is a value, not a bearing, and
+three 60° cycles of a 20°-opening cone end at 40°, not at 200° (the same split D-305 drew between
+`lengthTo` and `spinDeg`, and D-304 between a filter's strength and a spin).
+
+**What travels is a ratio and the frame it lives in.** The resolved mask carries
+`animate.cross = { ratio, axisDeg, fan? }`: the ratio of the number the author wrote (never the
+scene-unit number, so a recipient still learns no metric), the screen bearing of the shape's own
+axis, and one bit that says a cone's cross axis is an **angle**. That bit is not decoration — it
+decides the drawing. A ray/rect is **stretched** across its axis, which is exactly a width: the
+depth is untouched and the two long edges move apart. A cone is **opened**: its points keep their
+distance from the apex and swing away from the axis, because a sideways stretch would fatten the arc
+into an ellipse — a different shape that would still be called "spread". The drawn vertex at
++26.565° ends at +53.13° **on the same circle**, and the tests assert exactly that vertex.
+
+**Growth keeps its own meaning, and a pinned axis wins its own number.** `lengthTo` alone is still
+D-305's uniform growth: a bigger version of the same shape, the width following the depth. Beside a
+`widthTo`/`spreadTo` it becomes the **along** axis alone, because then every axis the author named
+has a number of its own — "grow to 60, widen to 40" lands the depth on 60 and the width on 40, and
+neither is the other multiplied by a surprise. A cone keeps its uniform radius growth beside an
+opening aperture (an angle is not a distance). A still region draws through exactly the path it
+always did: no cross axis means no per-vertex work at all, so every stored timeline and every mask
+without the new fields renders byte-for-byte as before.
+
+**In the wizard.** Ray/rect gain **Widen to** (scene units) and cone gains **Open to** (degrees),
+each offered only for its own shape — a circle shows neither, which is the "do not offer a UI
+control that silently does nothing" rule from SQ-05. The mask's hint now names the axes that are
+moving and says what a widening leaves alone ("the reach it covers is untouched"); the wall switch
+clears a widening exactly as it clears a growth, and the sentence it leaves behind says
+`growth/turn/widening`. Switching the shape still rebuilds the region and drops the animation.
+An emptied box removes the key rather than storing a number, as everywhere else.
+
+**Non-claims.** Not claimed: polygon-authored masks (the wall bound only *cuts* the four shapes),
+easing a mask on a curve other than its section's, tweened `invert`, a keyframe or multi-stop track
+of either new axis, masks on sound/camera/wait sections, and a cross axis on a circle. `widthTo`
+widens a ray/rect's width **as authored** — there is no separate "grow the width while the depth
+holds at something else" beyond the two fields, and the four vertex cases that would need a
+keyframe are out of scope.
+
+**Gates.** `pnpm test` **3 808 passed / 12 skipped** (302 files: 300 passed, 2 skipped), +8 cases: 2
+in `tests/core/fx.test.ts` (the per-shape field lists, bounds and the wall refusal; the resolved
+ratio/frame/`fan` for a rect and a cone, the absent-spread default, and `scale` surviving beside a
+pinned cross axis), 5 in `tests/canvas/fxStyle.test.ts` (the ratio walking from the authored shape
+and restarting per cycle with the frame in radians; a widened ray exactly wider with its reach
+untouched; a growth beside a pinned width landing each number where it was written, versus the
+uniform growth without one; a cone's vertex swinging to +53.13° at the same radius while the stretch
+path fattens it to an ellipse; and a turn composing with a width, which only holds if the stretch is
+applied in the shape's own frame), and 1 host case in `tests/host/sync.test.ts` (a beam that
+thickens reaching the cue as `{ scale: 3, cross: { ratio: 4, axisDeg: 30 } }`, with 5 forged cross
+axes — a circle's width, a ray's aperture, a cone's width, an out-of-range aperture and a
+wall-bounded widening — never reaching the store). e2e: `e2e/fx_sequence.spec.ts` gained a phase
+that switches the mask through circle → rect → cone to check which control each shape offers,
+authors a 5-unit cone opened to 120° and reads the drawn polygon frame by frame (the radius constant
+at 100 px while the arc swings from ~26.6° to 60° half-angle), then a 8×2-unit rect widened to 8 and
+checks the depth stays ±80 px while the width grows from 40 px to 160 px — with the sampler now
+**frame-driven** (`requestAnimationFrame`) rather than `setTimeout`-driven, because a busy main
+thread was stretching the timer into ~9 samples a second and letting "how many frames the sampler
+caught" decide whether an animation claim could be made. Two existing e2e assertions had to learn
+the new wording (`growth/turn/widening was cleared`, "cannot grow, turn or widen"), which is stated
+rather than quietly retargeted. Runs: `fx_sequence` alone on chromium **31/31** (5.7 m), and with
+`fx_item_binding` + `summons` at `--repeat-each=2` **72/72** (15.5 m). `pnpm typecheck` 63
+components / 0 blocking / 1 advisory · `pnpm lint` exit 0 · `pnpm build` → `pnpm size`
+**3 873 829 B raw / 1 110 876 B gzip** (+2 645 raw over D-313), inside the 6 MB budget. One honest
+note: the first full-suite e2e run of this change was made with the unit suite running beside it and
+failed three mask tests — two on the sampler's own frame count (19–20 samples against the repo's
+`MIN_ANIMATION_SAMPLES = 20`) and one on the status sentence this entry reworded. The sentence was a
+real break and was fixed; the sample count was contention, and the sampler is now frame-driven so
+the number of frames a busy browser managed cannot decide whether the animation claim is made.

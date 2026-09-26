@@ -662,6 +662,73 @@ describe("effect masks and cutouts (§SQ-19/SQ-05, D-301)", () => {
       mask: { kind: "circle", length: 5 } } as never] }).ok).toBe(false);
   });
 
+  test("D-314: the cross axis belongs to the shapes that have one, and is bounded by its own numbers", () => {
+    // A width animates a ray/rect; an aperture animates a cone. Each is offered where it
+    // means something and refused by name where it does not — the field list is the rule.
+    expect(validateFxSequence(masked({ kind: "rect", length: 20, width: 10, widthTo: 40 })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "ray", length: 40, width: 4, widthTo: 12, angle: 30 })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "cone", length: 30, spread: 90, spreadTo: 240 })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "cone", length: 30, spreadTo: 180 })).ok).toBe(true);
+    const circle = validateFxSequence(masked({ kind: "circle", length: 10, widthTo: 20 }));
+    expect(circle.ok).toBe(false);
+    if (!circle.ok) expect(circle.error).toContain("an FX circle mask takes only");
+    // A ray has no aperture and a cone no width: the cross axis is not a blank cheque.
+    expect(validateFxSequence(masked({ kind: "ray", length: 40, width: 4, spreadTo: 180 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "cone", length: 30, spread: 90, widthTo: 20 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "rect", length: 20, width: 10, spreadTo: 60 })).ok).toBe(false);
+
+    // Bounds are the axis's own: a width is measured like a width, an aperture like a spread.
+    expect(validateFxSequence(masked({ kind: "rect", length: 20, width: 10, widthTo: 0.4 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "rect", length: 20, width: 10, widthTo: 5_001 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "cone", length: 30, spread: 90, spreadTo: 0 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "cone", length: 30, spread: 90, spreadTo: 400 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "cone", length: 30, spread: 90, spreadTo: "wide" })).ok).toBe(false);
+
+    // A wall-bounded region is baked, so *nothing* about it can animate — the new axes
+    // are refused by the same sentence that refuses growth and turn.
+    const walled = masked({ kind: "rect", length: 20, width: 10, widthTo: 40, walls: true });
+    const refused = validateFxSequence(walled);
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.error).toContain("cannot animate");
+  });
+
+  test("D-314: the cross axis travels as a ratio in the shape's own frame, and the growth keeps its own meaning", () => {
+    // A rect's width animation: the ratio of the number the author wrote, plus the bearing
+    // that frame points along. No scene unit and no shape kind beyond one bit (see below).
+    const widened = resolveFxSequence(
+      masked({ kind: "rect", length: 20, width: 10, widthTo: 40, angle: 30 }) as FxSequence,
+      scene, source, source, () => "image/png");
+    expect(widened.ok).toBe(true);
+    if (!widened.ok) return;
+    const rect = (widened.sections[0] as Extract<typeof widened.sections[number], { mask?: unknown }>)
+      .mask as { animate?: unknown };
+    expect(rect.animate).toEqual({ cross: { ratio: 4, axisDeg: 30 } });
+
+    // A cone's cross axis is an angle: the same ratio shape, plus the one bit that says the
+    // polygon must *open* rather than stretch. An absent spread is the crosshair's default,
+    // which is what the polygon was built from — so the ratio is measured against it.
+    const opened = resolveFxSequence(
+      masked({ kind: "cone", length: 30, spreadTo: 180 }) as FxSequence,
+      scene, source, source, () => "image/png");
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const cone = (opened.sections[0] as Extract<typeof opened.sections[number], { mask?: unknown }>)
+      .mask as { animate?: unknown };
+    expect(cone.animate).toEqual({ cross: { ratio: 180 / 53.13, axisDeg: 0, fan: true } });
+
+    // A growth alone is still the D-305 uniform scale, and a pinned cross axis is carried
+    // beside it rather than replacing it: "grow to 60, widen to 40" is two statements, and
+    // both survive resolution (each axis lands on its own number, further down the pipe).
+    const both = resolveFxSequence(
+      masked({ kind: "rect", length: 20, width: 10, lengthTo: 60, widthTo: 40 }) as FxSequence,
+      scene, source, source, () => "image/png");
+    expect(both.ok).toBe(true);
+    if (!both.ok) return;
+    const pair = (both.sections[0] as Extract<typeof both.sections[number], { mask?: unknown }>)
+      .mask as { animate?: unknown };
+    expect(pair.animate).toEqual({ scale: 3, cross: { ratio: 4, axisDeg: 0 } });
+  });
+
   test("resolution turns an authored growth into a unit-free ratio, not a second length", () => {
     const resolved = resolveFxSequence(
       masked({ kind: "circle", length: 15, lengthTo: 60 }) as FxSequence,

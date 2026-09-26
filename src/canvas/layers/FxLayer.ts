@@ -115,10 +115,11 @@ function fxTurned(progress: number, cycles: number, eased: number): number {
  * a zero-length section produce the authored still region rather than NaN.
  */
 export function fxMaskTransform(
-  animate: { scale?: number; spinDeg?: number } | undefined,
+  animate: { scale?: number; spinDeg?: number;
+    cross?: { ratio: number; axisDeg: number; fan?: boolean } } | undefined,
   section: { easing?: FxEasing; repeats?: number; durationMs: number },
   elapsedMs: number,
-): { scale: number; rotation: number } {
+): { scale: number; rotation: number; cross?: { ratio: number; axisRad: number; fan?: boolean } } {
   if (!animate || !Number.isFinite(elapsedMs) || section.durationMs <= 0)
     return { scale: 1, rotation: 0 };
   const progress = Math.min(1, Math.max(0, elapsedMs / section.durationMs));
@@ -127,7 +128,45 @@ export function fxMaskTransform(
   const eased = fxEase(section.easing, phase);
   const scale = animate.scale === undefined ? 1 : 1 + (animate.scale - 1) * eased;
   const turned = animate.spinDeg === undefined ? 0 : fxTurned(progress, cycles, eased);
-  return { scale, rotation: (turned * (animate.spinDeg ?? 0) * Math.PI) / 180 };
+  // D-314: the cross axis is a *size* (a width, an aperture), so it walks like the growth
+  // does — from the authored shape to its own end and back each cycle — and never like the
+  // turn, which accumulates. It is applied per vertex further down, in the shape's frame.
+  const cross = animate.cross === undefined ? undefined : {
+    ratio: 1 + (animate.cross.ratio - 1) * eased,
+    axisRad: (animate.cross.axisDeg * Math.PI) / 180,
+    ...(animate.cross.fan === true ? { fan: true } : {}),
+  };
+  return { scale, rotation: (turned * (animate.spinDeg ?? 0) * Math.PI) / 180,
+    ...(cross === undefined ? {} : { cross }) };
+}
+
+/**
+ * D-314: one region vertex as its own cross-axis animation draws it, in the region's own
+ * frame (`axisRad` is the bearing that frame points along, and `along` is the section's
+ * growth when the along axis keeps it — see `fxMaskDraw`).
+ *
+ * A ray/rect **stretches**: the component across the axis is multiplied by the ratio, so
+ * "widen to 4" is exactly 4 and the reach is untouched. A cone (`fan`) **opens**: its cross
+ * axis is an angle, so each point keeps its distance from the apex and swings away from the
+ * axis by the ratio — a sideways stretch would fatten the arc into an ellipse instead of
+ * widening the cone, which is not what "spread" means. The apex itself is the anchor and
+ * never moves.
+ */
+export function fxMaskCrossPoint(point: Point, cross: { ratio: number; axisRad: number; fan?: boolean },
+  along = 1): Point {
+  const cos = Math.cos(cross.axisRad);
+  const sin = Math.sin(cross.axisRad);
+  if (cross.fan === true) {
+    const radius = Math.hypot(point.x, point.y);
+    if (radius <= 1e-9) return { x: point.x, y: point.y };
+    const raw = Math.atan2(point.y, point.x) - cross.axisRad;
+    const offset = ((raw + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+    const swung = cross.axisRad + offset * cross.ratio;
+    return { x: Math.cos(swung) * radius, y: Math.sin(swung) * radius };
+  }
+  const forward = point.x * cos + point.y * sin;
+  const across = (-point.x * sin + point.y * cos) * cross.ratio;
+  return { x: forward * along * cos - across * sin, y: forward * along * sin + across * cos };
 }
 
 /**
@@ -140,7 +179,8 @@ export function fxMaskTransform(
  * `extent` is half the sprite's drawn size, so the inverse rectangle always covers it.
  */
 export function fxMaskGraphics(mask: { area: Point[]; invert?: boolean }, extent = 0,
-  transform: { scale: number; rotation: number } = { scale: 1, rotation: 0 }): Graphics {
+  transform: { scale: number; rotation: number;
+    cross?: { ratio: number; axisRad: number; fan?: boolean } } = { scale: 1, rotation: 0 }): Graphics {
   return fxMaskDraw(new Graphics(), mask, extent, transform);
 }
 
@@ -151,24 +191,34 @@ export function fxMaskGraphics(mask: { area: Point[]; invert?: boolean }, extent
  * the first frame and the thousandth.
  */
 export function fxMaskDraw(graphics: Graphics, mask: { area: Point[]; invert?: boolean }, extent = 0,
-  transform: { scale: number; rotation: number } = { scale: 1, rotation: 0 }): Graphics {
+  transform: { scale: number; rotation: number;
+    cross?: { ratio: number; axisRad: number; fan?: boolean } } = { scale: 1, rotation: 0 }): Graphics {
   graphics.clear();
   // Both transforms are exact for every shape here, because each is defined *about* the
   // anchor (a circle's centre, a cone's apex, a rectangle's own centre): turning the
   // region's vertices about the origin spins it, and scaling them grows depth and width
   // together. The polygon travels, so a client never re-derives the scene's metric.
+  const cross = transform.cross;
+  // D-314: a pinned cross axis is applied first, in the shape's own frame, because it is
+  // defined about the anchor and turns with the region. With one pinned, the growth belongs
+  // to the along axis alone — "grow to 30, widen to 4" is two numbers about two axes — and
+  // for a cone the growth stays uniform (its radius is not its aperture). Without one, the
+  // growth is the uniform scale D-305 described: a bigger version of the same shape.
+  const uniform = cross === undefined || cross.fan === true ? transform.scale : 1;
+  const shaped = cross === undefined ? mask.area
+    : mask.area.map((point) => fxMaskCrossPoint(point, cross, transform.scale));
   const cos = Math.cos(transform.rotation);
   const sin = Math.sin(transform.rotation);
-  const points = mask.area.flatMap((point) => [
-    (point.x * cos - point.y * sin) * transform.scale,
-    (point.x * sin + point.y * cos) * transform.scale,
+  const points = shaped.flatMap((point) => [
+    (point.x * cos - point.y * sin) * uniform,
+    (point.x * sin + point.y * cos) * uniform,
   ]);
   if (!mask.invert) {
     graphics.poly(points).fill({ color: 0xffffff, alpha: 1 });
     return graphics;
   }
-  const reach = Math.max(1, extent) + Math.max(0, ...mask.area.map((point) =>
-    Math.hypot(point.x, point.y))) * transform.scale + 32;
+  const reach = Math.max(1, extent) + Math.max(0, ...shaped.map((point) =>
+    Math.hypot(point.x, point.y))) * uniform + 32;
   graphics.rect(-reach, -reach, reach * 2, reach * 2).fill({ color: 0xffffff, alpha: 1 });
   graphics.poly(points).cut();
   return graphics;

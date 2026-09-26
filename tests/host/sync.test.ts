@@ -1328,6 +1328,51 @@ describe("Macros / FX host authority and audience", () => {
     ] },
   });
 
+  test("a mask's cross axis survives the host as a ratio, and a shape without one is refused (D-314)", async () => {
+    const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    const withMask = (id: string, mask: unknown): MacroDocument => ({
+      _id: id, type: "macro", name: id, ownership: { default: 1 },
+      flags: { core: { playerCallable: true } }, system: {}, kind: "sequence", command: "",
+      sequence: { version: 1, audience: "scene", sections: [{ kind: "image", id: "a",
+        assetId: imageHash, startMs: 0, durationMs: 1000, at: { kind: "point", x: 100, y: 100 },
+        mask } as never] },
+    }) as unknown as MacroDocument;
+    const refused: string[] = [];
+    h.gmBus.on("rejected", (event) => refused.push(event.detail));
+
+    // A beam that thickens: the host resolves the *ratio* and the frame it lives in, so the
+    // recipient learns the shape and never the scene's metric.
+    h.gm.submit([{ kind: "create", coll: "macros", data: withMask("beam", { kind: "rect",
+      length: 20, width: 10, lengthTo: 60, widthTo: 40, angle: 30 }) }]);
+    await flushMicrotasks();
+    const cues: ClientEvents["fx"][] = [];
+    h.gmBus.on("fx", (m) => cues.push(m));
+    h.gm.requestSequence("beam", "s1");
+    await flushMicrotasks();
+    const started = cues.find((m) => m.kind === "fx.start");
+    expect(started).toBeDefined();
+    if (started?.kind === "fx.start") {
+      const mask = (started.sections[0] as { mask?: { animate?: unknown } }).mask;
+      expect(mask?.animate).toEqual({ scale: 3, cross: { ratio: 4, axisDeg: 30 } });
+    }
+
+    // Forged cross axes never reach the store: a shape that has no such axis, a value past
+    // its own bound, and the two axes the wall trim bakes away.
+    for (const [name, mask] of [
+      ["circle-width", { kind: "circle", length: 10, widthTo: 20 }],
+      ["ray-spread", { kind: "ray", length: 20, width: 4, spreadTo: 180 }],
+      ["cone-width", { kind: "cone", length: 20, spreadTo: 90, widthTo: 10 }],
+      ["past-range", { kind: "cone", length: 20, spreadTo: 400 }],
+      ["walled", { kind: "rect", length: 20, width: 10, widthTo: 40, walls: true }],
+    ] as const) {
+      h.gm.submit([{ kind: "create", coll: "macros", data: withMask(`bad-${name}`, mask) }]);
+      await flushMicrotasks();
+      expect(h.hostStore.get("macros", `bad-${name}`), name).toBeUndefined();
+    }
+    expect(refused.length).toBeGreaterThanOrEqual(5);
+  });
+
   test("a filter chain is host-accepted, resolved intact, and refused when forged (D-313)", async () => {
     const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
       chunks: 1, visibility: "referenced" } });
