@@ -187,14 +187,63 @@ export const isFxSectionAudience = (value: unknown): value is FxSectionAudience 
 
 export type FxFilterKind = "blur" | "grayscale" | "brightness" | "saturate";
 /**
- * One filter per section, with the kind carrying its own range: a blur is measured in
- * pixels and a colour adjustment is a scale, so a single 0–1 bound would make "blur 8"
- * unwritable and "brightness 8" a white square. `strength` is optional — omitted means
- * the kind's default, which is the value the wizard offers first.
+ * One filter, with the kind carrying its own range: a blur is measured in pixels and a
+ * colour adjustment is a scale, so a single 0–1 bound would make "blur 8" unwritable and
+ * "brightness 8" a white square. `strength` is optional — omitted means the kind's
+ * default, which is the value the wizard offers first.
  */
 export interface FxVisualFilter {
   kind: FxFilterKind;
   strength?: number;
+}
+
+/**
+ * D-313: one entry of a **chain**. A real look is usually more than one filter — a
+ * desaturated, dimmed ghost; a blurred silhouette — and a single field could only express
+ * those by picking one. A step is the same shape as the shorthand filter plus its own
+ * animation end (`to`), because a chain's entries animate independently: the blur can
+ * deepen while the brightness holds.
+ *
+ * **Two spellings, one document.** One filter stays what it always was (`filter` +
+ * `filterTo`), so every stored timeline keeps its meaning; a chain is `filters`, and it is
+ * **2–4 entries** — a one-entry chain would be a second spelling of the shorthand, which is
+ * exactly the kind of ambiguity the preset rule refuses. An author may not write both.
+ */
+export interface FxFilterStep {
+  kind: FxFilterKind;
+  strength?: number;
+  /** This step's own animation end (D-304's rule, per entry). */
+  to?: number;
+}
+/** The most filters one section may stack: enough for a look, bounded for the frame budget. */
+export const FX_FILTER_CHAIN_MAX = 4;
+
+/** The chain an author wrote, whichever spelling they used (the wizard's read). */
+export function fxAuthoredFilters(section: {
+  filter?: FxVisualFilter; filterTo?: number; filters?: readonly FxFilterStep[];
+}): FxFilterStep[] {
+  if (section.filters !== undefined)
+    return section.filters.map((step) => ({ ...step }));
+  if (section.filter === undefined) return [];
+  return [{ ...section.filter, ...(section.filterTo === undefined ? {} : { to: section.filterTo }) }];
+}
+
+/**
+ * The canonical **write** shape for a chain: nothing for an empty chain, the shorthand for
+ * one filter, the chain for two or more. The wizard saves through this, so a look that was
+ * built up to three filters and then trimmed back to one is stored as the same document a
+ * hand-authored single filter would be — not as a one-entry chain.
+ */
+export function fxFilterFields(steps: readonly FxFilterStep[]): {
+  filter?: FxVisualFilter; filterTo?: number; filters?: FxFilterStep[];
+} {
+  if (steps.length === 0) return {};
+  if (steps.length === 1) {
+    const [step] = steps as [FxFilterStep];
+    return { filter: { kind: step.kind, ...(step.strength === undefined ? {} : { strength: step.strength }) },
+      ...(step.to === undefined ? {} : { filterTo: step.to }) };
+  }
+  return { filters: steps.map((step) => ({ ...step })) };
 }
 export const FX_FILTER_RANGES: Record<FxFilterKind, { min: number; max: number; default: number; unit: string }> = {
   blur: { min: 1, max: 32, default: 8, unit: "px" },
@@ -202,10 +251,16 @@ export const FX_FILTER_RANGES: Record<FxFilterKind, { min: number; max: number; 
   brightness: { min: 0, max: 2, default: 1.5, unit: "×" },
   saturate: { min: 0, max: 2, default: 0.5, unit: "×" },
 };
+export interface FxFilterPlan {
+  kind: FxFilterKind;
+  strength: number;
+  /** `to` is present only when the author animated *this* entry's strength (D-304/D-313). */
+  to?: number;
+}
 export interface FxVisualStyle {
   blend: FxBlendMode;
-  /** `to` is present only when the author animated the strength (D-304). */
-  filter?: { kind: FxFilterKind; strength: number; to?: number };
+  /** The chain in authored order, each entry resolved and clamped. Empty = no filters. */
+  filters: FxFilterPlan[];
 }
 /**
  * Turn an author's choice into the numbers a renderer applies: an absent blend is
@@ -213,17 +268,35 @@ export interface FxVisualStyle {
  * outside its kind's range is clamped. The host validates all of this, but a client
  * must not render a nonsense value just because a cue was hand-written.
  */
-export function fxStylePlan(section: { blend?: FxBlendMode; filter?: FxVisualFilter; filterTo?: number }): FxVisualStyle {
+export function fxStylePlan(section: {
+  blend?: FxBlendMode; filter?: FxVisualFilter; filterTo?: number; filters?: readonly FxFilterStep[];
+}): FxVisualStyle {
   const blend = section.blend ?? "normal";
-  const kind = section.filter?.kind;
-  if (kind === undefined || !(kind in FX_FILTER_RANGES)) return { blend };
-  const range = FX_FILTER_RANGES[kind];
-  const clamp = (value: number): number => Math.min(range.max, Math.max(range.min, value));
-  const strength = clamp(section.filter?.strength ?? range.default);
-  // An animation's end is clamped like its start, and stays *absent* when the author did
-  // not ask for one: a stored end equal to the start would be a claim, not a no-op.
-  if (section.filterTo === undefined) return { blend, filter: { kind, strength } };
-  return { blend, filter: { kind, strength, to: clamp(section.filterTo) } };
+  const filters: FxFilterPlan[] = [];
+  for (const step of fxAuthoredFilters(section)) {
+    const kind = step.kind;
+    if (!(kind in FX_FILTER_RANGES)) continue; // a forged kind renders as no filter, never as a guess
+    const range = FX_FILTER_RANGES[kind];
+    const clamp = (value: number): number => Math.min(range.max, Math.max(range.min, value));
+    const strength = clamp(step.strength ?? range.default);
+    // An animation's end is clamped like its start, and stays *absent* when the author did
+    // not ask for one: a stored end equal to the start would be a claim, not a no-op.
+    filters.push(step.to === undefined ? { kind, strength } : { kind, strength, to: clamp(step.to) });
+  }
+  return { blend, filters };
+}
+
+/**
+ * D-313: every entry's strength at a point inside its section — the chain's per-frame answer.
+ * Each entry walks its own `to` on the section's shared curve and cycle, so one filter can
+ * pulse while the next holds exactly as authored.
+ */
+export function fxFilterStrengths(
+  filters: readonly FxFilterPlan[],
+  section: { easing?: FxEasing; repeats?: number; durationMs: number },
+  elapsedMs: number,
+): number[] {
+  return filters.map((filter) => fxFilterStrength(filter, section, elapsedMs));
 }
 /**
  * D-304: the filter's strength at a point inside its section — `strength` walking to
@@ -287,8 +360,15 @@ interface FxLocated extends FxBase {
   layer?: FxLayerName;
   /** Composite this visual with the layers beneath it (glow, shadow, screen). */
   blend?: FxBlendMode;
-  /** One bounded filter: blur, grayscale, brightness or saturation. */
+  /** One bounded filter: blur, grayscale, brightness or saturation (the D-313 shorthand). */
   filter?: FxVisualFilter;
+  /**
+   * SQ-05/D-313: a bounded **chain** of filters, applied in the author's order — a
+   * desaturated dimmed ghost is two entries, not a compromise between two fields. One
+   * filter keeps the D-304 shorthand (`filter` + `filterTo`); two or more use `filters`,
+   * and a section may not carry both spellings. Each entry animates its own strength.
+   */
+  filters?: FxFilterStep[];
   /**
    * SQ-05/D-304: animate the filter's own strength. `filter.strength` (or the kind's
    * default) is where it starts, this is where it ends; the section's own `easing`
@@ -476,8 +556,8 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
       ? [] : ["repeatCount", "repeatDelayMs"];
     const fields = section.kind === "sound"
       ? ["assetId", "volume", "channel", "fadeInMs", "fadeOutMs", "at", "radius", "pan", "muffle"] :
-      section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "mask", "scaleTo", "spinDeg"] :
-      section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "mask", "scaleTo", "spinDeg"] :
+      section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "filters", "mask", "scaleTo", "spinDeg"] :
+      section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "filters", "mask", "scaleTo", "spinDeg"] :
       section.kind === "camera" ? ["mode", "to", "easing", "zoom", "intensity", "points", "audience"] : [];
     if (Object.keys(section).some((key) => !["id", "kind", "startMs", "durationMs", ...fields, ...repeatFields].includes(key)) ||
       (section.kind !== "wait" && section.durationMs === 0)) {
@@ -633,6 +713,27 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
     // useful sentence, and `filterTo` on its own is a mistake worth naming.
     if (section.filterTo !== undefined && section.filter === undefined)
       return { ok: false, error: "FX filterTo needs a filter kind to animate" };
+    // D-313 — the chain. Two spellings of the same look would be an ambiguity the host has
+    // to resolve, so a section carries one filter *or* a chain, never both.
+    if (section.filters !== undefined) {
+      if (section.filter !== undefined)
+        return { ok: false, error: "an FX section carries either one filter or a chain, not both" };
+      const chain = section.filters;
+      if (!Array.isArray(chain) || chain.length < 2 || chain.length > FX_FILTER_CHAIN_MAX)
+        return { ok: false, error: `an FX filter chain is 2–${FX_FILTER_CHAIN_MAX} filters: stack the look, or use the single filter field for one` };
+      for (const [index, step] of chain.entries()) {
+        if (!isObject(step) || Object.keys(step).some((key) => !["kind", "strength", "to"].includes(key)) ||
+            typeof step.kind !== "string" || !(step.kind in FX_FILTER_RANGES))
+          return { ok: false, error: `FX filter ${index + 1} must be blur, grayscale, brightness or saturate` };
+        const range = FX_FILTER_RANGES[step.kind as FxFilterKind];
+        if (step.strength !== undefined && !inRange(step.strength, range.min, range.max))
+          return { ok: false, error: `FX filter ${index + 1} (${step.kind}) strength must be ${range.min}–${range.max}` };
+        // Each entry's animation is bounded by its own kind's range, exactly as the single
+        // filter's is — a chain does not relax the rule it is built from.
+        if (step.to !== undefined && !inRange(step.to, range.min, range.max))
+          return { ok: false, error: `FX filter ${index + 1} (${step.kind}) must animate between ${range.min} and ${range.max}` };
+      }
+    }
     if (section.kind === "image" &&
         (typeof section.assetId !== "string" || !HASH.test(section.assetId) ||
           (section.stretch !== undefined && (typeof section.stretch !== "boolean" || section.stretch && !section.to)) ||

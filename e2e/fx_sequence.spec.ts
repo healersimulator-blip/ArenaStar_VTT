@@ -966,8 +966,13 @@ test("a blend and a filter survive the host, the save and the renderer", async (
   await section.getByLabel("Y", { exact: true }).fill("300");
   await section.getByLabel("Duration ms").fill("1500");
 
-  // The wizard must not send a filter the host would refuse: the amount field's own
-  // bounds are the host's range, and picking a kind fills in that kind's default.
+  // D-313: a look starts empty — "Add filter" is the way in, and one entry is still the
+  // D-304 shorthand underneath. The wizard must not send a filter the host would refuse:
+  // the amount field's own bounds are the host's range, and picking a kind fills in that
+  // kind's default.
+  await expect(section.locator("[data-fx-filter]")).toHaveCount(0);
+  await section.locator("[data-fx-filter-add]").click();
+  await expect(section.locator("[data-fx-filter-row]")).toHaveCount(1);
   await section.locator("[data-fx-filter]").selectOption("blur");
   await expect(section.locator("[data-fx-filter-strength]")).toHaveValue("8");
   await expect(section.locator("[data-fx-filter-strength]")).toHaveAttribute("max", "32");
@@ -991,18 +996,20 @@ test("a blend and a filter survive the host, the save and the renderer", async (
       { __stage?: { getFxLayer: () => { inspect: (runId?: string) => unknown[] } } })
       .__stage?.getFxLayer().inspect().length ?? 0), { timeout: 5_000 }).toBeGreaterThan(0);
     return page.evaluate(() => (globalThis as unknown as
-      { __stage?: { getFxLayer: () => { inspect: (runId?: string) => Array<{ kind: string; blend: string; filter: string | null }> } } })
+      { __stage?: { getFxLayer: () => { inspect: (runId?: string) => Array<{ kind: string; blend: string; filters: string[] }> } } })
       .__stage?.getFxLayer().inspect() ?? []);
   };
   const live = await run();
-  expect(live[0]).toMatchObject({ kind: "image", blend: "screen", filter: "grayscale:0.5", mask: null });
+  expect(live[0]).toMatchObject({ kind: "image", blend: "screen", filters: ["grayscale:0.5"], mask: null });
 
   // "Normal" really means no blend field and "None" no filter field: a saved no-op is
   // not the same as an authored setting, and the host is told the difference.
   await section.locator("[data-fx-blend]").selectOption("normal");
   await expect(section.locator("[data-fx-blend]")).toHaveValue("normal");
   await section.locator("[data-fx-filter]").selectOption("none");
-  await expect(section.locator("[data-fx-filter]")).toHaveValue("none");
+  // "None" removes the entry (D-313): with no filters the row is gone, rather than a select
+  // left sitting there reading "none" as if it were a kind.
+  await expect(section.locator("[data-fx-filter-row]")).toHaveCount(0);
   await expect(section.locator("[data-fx-filter-strength]")).toHaveCount(0);
   // Wait for the host, not the click: reopening the editor before the update commits
   // would load the pre-update document and read as a failure that never happened.
@@ -1011,10 +1018,98 @@ test("a blend and a filter survive the host, the save and the renderer", async (
   await expect.poll(() => hostCall<number>(page, "seq"), { timeout: 5_000 }).toBeGreaterThan(before);
   await wizard.locator("li").filter({ hasText: "Warded flame" }).getByRole("button", { name: "Edit" }).click();
   await expect(section.locator("[data-fx-blend]")).toHaveValue("normal");
-  await expect(section.locator("[data-fx-filter]")).toHaveValue("none");
+  await expect(section.locator("[data-fx-filter-row]")).toHaveCount(0);
   // …and the renderer agrees with the reopened document, not with what was on screen.
   await expect.poll(async () => (await run())[0] ?? null, { timeout: 5_000 })
-    .toMatchObject({ kind: "image", blend: "normal", filter: null, mask: null });
+    .toMatchObject({ kind: "image", blend: "normal", filters: [], mask: null });
+});
+
+// D-313 (SQ-05): a **chain** of filters. The wizard builds it a row at a time, the host
+// accepts it, and the live sprite's own filter array is what proves the order was kept and
+// that each entry animates on its own. The last phase is the one a hand editor would get
+// wrong: trimming a chain back to one entry must store the *single-filter shorthand* — a
+// one-entry chain is a second spelling the host refuses.
+test("a filter chain stacks in order, animates one entry, and trims back to the shorthand", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  await wizard.locator('input[type="file"]').setInputFiles({ name: "ghost.png", mimeType: "image/png", buffer: png });
+  await expect(wizard.getByRole("status")).toContainText("GM-only playback");
+  await wizard.locator("[data-fx-name]").fill("Ghost stack");
+  await wizard.getByRole("button", { name: "Image / video", exact: true }).click();
+  const section = wizard.locator("[data-fx-section]");
+  await section.getByRole("combobox", { name: "Media" }).selectOption({ index: 1 });
+  await section.getByLabel("X", { exact: true }).fill("300");
+  await section.getByLabel("Y", { exact: true }).fill("300");
+  await section.getByLabel("Duration ms").fill("2400");
+
+  // The first entry, then a second: "Add filter" starts each new entry on a kind the look
+  // does not already use, so a second click buys something.
+  await expect(section.locator("[data-fx-filter-row]")).toHaveCount(0);
+  await section.locator("[data-fx-filter-add]").click();
+  await expect(section.locator("[data-fx-filter-row]")).toHaveCount(1);
+  const row0 = section.locator('[data-fx-filter-row="0"]');
+  await row0.locator("[data-fx-filter]").selectOption("grayscale");
+  await expect(row0.locator("[data-fx-filter-strength]")).toHaveValue("1");
+  await row0.locator("[data-fx-filter-strength]").fill("0.4");
+  await section.locator("[data-fx-filter-add]").click();
+  await expect(section.locator("[data-fx-filter-row]")).toHaveCount(2);
+  const row1 = section.locator('[data-fx-filter-row="1"]');
+  await expect(row1.locator("[data-fx-filter]")).toHaveValue("blur");
+  await row1.locator("[data-fx-filter-strength]").fill("4");
+  await row1.locator("[data-fx-filter-to]").fill("16");
+  // The hint tells the author what will render, in render order.
+  await expect(section.locator("[data-fx-filters] small")).toContainText("grayscale 0.4× → blur 4px → 16px");
+  // A chain is bounded at four: the button goes away rather than being refused on save.
+  await section.locator("[data-fx-filter-add]").click();
+  await section.locator("[data-fx-filter-add]").click();
+  await expect(section.locator("[data-fx-filter-row]")).toHaveCount(4);
+  await expect(section.locator("[data-fx-filter-add]")).toBeDisabled();
+  await section.locator('[data-fx-filter-remove="3"]').click();
+  await section.locator('[data-fx-filter-remove="2"]').click();
+  await expect(section.locator("[data-fx-filter-row]")).toHaveCount(2);
+
+  await wizard.locator("[data-fx-save]").click();
+  await expect(wizard.locator("li")).toContainText(["Ghost stack"]);
+  await wizard.locator("li").filter({ hasText: "Ghost stack" }).getByRole("button", { name: "Edit" }).click();
+  await expect(section.locator("[data-fx-filter-row]")).toHaveCount(2);
+  await expect(row0.locator("[data-fx-filter]")).toHaveValue("grayscale");
+  await expect(row0.locator("[data-fx-filter-strength]")).toHaveValue("0.4");
+  await expect(row1.locator("[data-fx-filter-to]")).toHaveValue("16");
+
+  const run = async (): Promise<Array<{ kind: string; blend: string; filters: string[] }>> => {
+    await wizard.locator("[data-fx-run]").click();
+    await expect.poll(async () => page.evaluate(() => (globalThis as unknown as
+      { __stage?: { getFxLayer: () => { inspect: (runId?: string) => unknown[] } } })
+      .__stage?.getFxLayer().inspect().length ?? 0), { timeout: 5_000 }).toBeGreaterThan(0);
+    return page.evaluate(() => (globalThis as unknown as
+      { __stage?: { getFxLayer: () => { inspect: (runId?: string) => Array<{ kind: string; blend: string; filters: string[] }> } } })
+      .__stage?.getFxLayer().inspect() ?? []);
+  };
+  const live = await run();
+  // Two entries, in the authored order, and the blur is *moving*: its label is read back out
+  // of the live filter, so a fan-out that dropped the chain would fail here rather than pass
+  // on a plan. The grayscale holds exactly where the author put it.
+  expect(live[0]?.filters).toHaveLength(2);
+  expect(live[0]?.filters[0]).toBe("grayscale:0.4");
+  expect(live[0]?.filters[1]).toMatch(/^blur:/);
+  expect(Number(live[0]?.filters[1]?.slice(5))).toBeGreaterThanOrEqual(4);
+  expect(Number(live[0]?.filters[1]?.slice(5))).toBeLessThanOrEqual(16);
+
+  // ── trimming to one entry stores the shorthand, not a one-entry chain ──────────────────
+  await section.locator('[data-fx-filter-remove="1"]').click();
+  await expect(section.locator("[data-fx-filter-row]")).toHaveCount(1);
+  const before = await hostCall<number>(page, "seq");
+  await wizard.locator("[data-fx-save]").click();
+  await expect.poll(() => hostCall<number>(page, "seq"), { timeout: 5_000 }).toBeGreaterThan(before);
+  await wizard.locator("li").filter({ hasText: "Ghost stack" }).getByRole("button", { name: "Edit" }).click();
+  await expect(section.locator("[data-fx-filter-row]")).toHaveCount(1);
+  await expect(row0.locator("[data-fx-filter]")).toHaveValue("grayscale");
+  await expect.poll(async () => (await run())[0]?.filters ?? [], { timeout: 5_000 })
+    .toEqual(["grayscale:0.4"]);
 });
 
 // D-300 (SQ-15/SQ-18): a camera section can be targeted. Two real browser contexts —
@@ -1592,6 +1687,7 @@ test("a visual's filter deepens through its section and lands on the authored st
   await section.getByLabel("X", { exact: true }).fill("600");
   await section.getByLabel("Y", { exact: true }).fill("500");
   await section.getByLabel("Duration ms").fill("2400");
+  await section.locator("[data-fx-filter-add]").click();
   await section.locator("[data-fx-filter]").selectOption("blur");
 
   // An empty animation field is *no* animation: the host must not receive a number that
@@ -1601,8 +1697,9 @@ test("a visual's filter deepens through its section and lands on the authored st
   await section.locator("[data-fx-filter-strength]").fill("2");
   await section.locator("[data-fx-filter-to]").fill("16");
   await section.locator("[data-fx-easing]").selectOption("easeInOut");
-  // The hint stops claiming the filter is applied once the moment it is asked to move.
-  await expect(section.getByText("Moves from 2px to 16px", { exact: false })).toBeVisible();
+  // The hint stops claiming the filter is applied once the moment it is asked to move,
+  // and (D-313) it describes the entry's own walk in the order it renders.
+  await expect(section.getByText("blur 2px → 16px", { exact: false })).toBeVisible();
   await wizard.locator("[data-fx-save]").click();
   await expect(wizard.locator("li")).toContainText(["Mist"]);
   await wizard.locator("li").filter({ hasText: "Mist" }).getByRole("button", { name: "Edit" }).click();
@@ -1612,13 +1709,13 @@ test("a visual's filter deepens through its section and lands on the authored st
   await wizard.locator("[data-fx-run]").click();
   const strengths = await page.evaluate(async () => {
     const layer = (globalThis as unknown as { __stage?: { getFxLayer: () => {
-      inspect: (runId?: string) => Array<{ filter: string | null }> } } })
+      inspect: (runId?: string) => Array<{ filters: string[] }> } } })
       .__stage?.getFxLayer();
     const seen: number[] = [];
     const until = performance.now() + 2_600;
     while (performance.now() < until) {
       const [frame] = layer?.inspect() ?? [];
-      const label = frame?.filter ?? "";
+      const label = frame?.filters[0] ?? "";
       const value = Number(label.slice(label.indexOf(":") + 1));
       if (label.startsWith("blur:") && Number.isFinite(value)) seen.push(value);
       await new Promise((resolve) => setTimeout(resolve, 16));

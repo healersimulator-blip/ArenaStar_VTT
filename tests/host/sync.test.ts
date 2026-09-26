@@ -1328,6 +1328,68 @@ describe("Macros / FX host authority and audience", () => {
     ] },
   });
 
+  test("a filter chain is host-accepted, resolved intact, and refused when forged (D-313)", async () => {
+    const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    const chain = (id: string, filters: unknown): MacroDocument => ({
+      _id: id, type: "macro", name: id, ownership: { default: 1 },
+      flags: { core: { playerCallable: true } }, system: {}, kind: "sequence", command: "",
+      sequence: { version: 1, audience: "scene", sections: [{ kind: "image", id: "a",
+        assetId: imageHash, startMs: 0, durationMs: 800, at: { kind: "point", x: 120, y: 120 },
+        filters } as never] },
+    }) as unknown as MacroDocument;
+    const refused: string[] = [];
+    h.gmBus.on("rejected", (event) => refused.push(event.detail));
+
+    // A real look: desaturated, blurred, dimmed — three entries in the author's order, each
+    // with its own strength and the middle one animating.
+    h.gm.submit([{ kind: "create", coll: "macros", data: chain("ghost", [
+      { kind: "saturate", strength: 0.2 }, { kind: "blur", strength: 3, to: 9 },
+      { kind: "brightness", strength: 1.1 }]) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "ghost")).toBeDefined();
+
+    // …and the run resolves the chain into the cue intact: the entries, their order and the
+    // animation's end all survive to the recipient (the plan is the client's, the document is
+    // the host's, and neither may quietly drop an entry).
+    const cues: ClientEvents["fx"][] = [];
+    h.gmBus.on("fx", (m) => cues.push(m));
+    h.gm.requestSequence("ghost", "s1");
+    await flushMicrotasks();
+    const started = cues.find((m) => m.kind === "fx.start");
+    expect(started).toBeDefined();
+    if (started?.kind === "fx.start")
+      expect((started.sections[0] as { filters?: unknown }).filters).toEqual([
+        { kind: "saturate", strength: 0.2 }, { kind: "blur", strength: 3, to: 9 },
+        { kind: "brightness", strength: 1.1 }]);
+
+    // A forged chain never reaches the store: one entry is not a chain, five is over budget,
+    // both spellings at once is an ambiguity, and a blur's end is not a grayscale's bound.
+    for (const [name, filters] of [
+      ["one", [{ kind: "blur" }]],
+      ["five", [{ kind: "blur" }, { kind: "blur" }, { kind: "blur" }, { kind: "blur" }, { kind: "blur" }]],
+      ["empty", []],
+      ["odd", [{ kind: "blur" }, { kind: "sepia" }]],
+      ["range", [{ kind: "grayscale", to: 9 }, { kind: "blur" }]],
+      ["stray", [{ kind: "blur" }, { kind: "blur", opacity: 0.5 }]],
+    ] as const) {
+      h.gm.submit([{ kind: "create", coll: "macros", data: chain(`bad-${name}`, filters) }]);
+      await flushMicrotasks();
+      expect(h.hostStore.get("macros", `bad-${name}`), name).toBeUndefined();
+    }
+    expect(refused.filter((entry) => entry.includes("filter")).length).toBeGreaterThanOrEqual(5);
+    // An update is checked by the same rule, not only a create.
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: "ghost" },
+      diff: { "sequence.sections": [{ kind: "image", id: "a", assetId: imageHash, startMs: 0,
+        durationMs: 800, at: { kind: "point", x: 120, y: 120 },
+        filter: { kind: "blur", strength: 4 }, filters: [{ kind: "blur" }, { kind: "blur" }] }] } }]);
+    await flushMicrotasks();
+    const stored = h.hostStore.get("macros", "ghost") as MacroDocument | undefined;
+    expect((stored?.sequence?.sections[0] as { filters?: unknown } | undefined)?.filters)
+      .toEqual([{ kind: "saturate", strength: 0.2 }, { kind: "blur", strength: 3, to: 9 },
+        { kind: "brightness", strength: 1.1 }]);
+  });
+
   test("multi-step timeline reaches entitled peers exactly once; forge is ignored", async () => {
     const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
       chunks: 1, visibility: "referenced" } });

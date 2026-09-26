@@ -6,7 +6,7 @@
 import { BlurFilter, ColorMatrixFilter, Container, Graphics, Sprite, Text, type Filter,
   type Texture } from "pixi.js";
 import { fxEase, fxFilterStrength, fxStylePlan, type FxEasing, type FxFilterKind,
-  type ResolvedFxMask, type ResolvedFxSection } from "../../core/fx";
+  type FxFilterPlan, type ResolvedFxMask, type ResolvedFxSection } from "../../core/fx";
 
 type Located = Extract<ResolvedFxSection, { kind: "image" | "text" }>;
 type Point = { x: number; y: number };
@@ -245,11 +245,12 @@ interface ActiveVisual {
   age: number;
   persistent: boolean;
   /**
-   * The attached filter, if any: one instance for the section's whole life (D-299) and
-   * the plan it was built from, whose strength is re-derived per frame when `to` is set
-   * (D-304).
+   * The attached filters, in authored order (D-313): one pixi instance per chain entry, for
+   * the section's whole life (D-299), each with the plan it was built from so an entry that
+   * animates is re-derived per frame (D-304) while its neighbours stay exactly as spawn set
+   * them.
    */
-  filter: { plan: { kind: FxFilterKind; strength: number; to?: number }; view: Filter } | null;
+  filters: Array<{ plan: FxFilterPlan; view: Filter }>;
   /**
    * The clipping region, positioned with the anchor every frame. What it was built from
    * is kept beside it so an *animated* region can be re-derived per frame (D-305) while a
@@ -292,12 +293,20 @@ export class FxLayer {
     // filter is built once and then only *nudged* when it animates (D-304).
     const style = fxStylePlan(section);
     view.blendMode = style.blend as typeof view.blendMode;
-    const filter = fxPixiFilter(style.filter);
-    if (filter) view.filters = [filter];
-    // A late join starts mid-animation, so an animated filter takes its start value from
+    // One instance per entry, in the author's order: pixi applies `filters` in array order,
+    // so the chain an author wrote is the chain that renders.
+    const filters = style.filters.flatMap((plan) => {
+      const built = fxPixiFilter(plan);
+      return built === undefined ? [] : [{ plan, view: built }];
+    });
+    if (filters.length > 0) view.filters = filters.map((entry) => entry.view);
+    // A late join starts mid-animation, so every animated entry takes its start value from
     // the same elapsed time the transform does rather than from the authored beginning.
-    if (filter && style.filter?.to !== undefined)
-      fxSetFilterStrength(style.filter.kind, filter, fxFilterStrength(style.filter, section, age));
+    for (const entry of filters) {
+      if (entry.plan.to !== undefined)
+        fxSetFilterStrength(entry.plan.kind, entry.view,
+          fxFilterStrength(entry.plan, section, age));
+    }
     view.position.set(section.x, section.y);
     const parent = section.layer === "belowTokens" ? this.belowTokens : this.aboveTokens;
     parent.addChild(view);
@@ -313,8 +322,7 @@ export class FxLayer {
       parent.addChild(mask.view);
       view.mask = mask.view;
     }
-    const active: ActiveVisual = { runId, section, view, mask, age, persistent,
-      filter: style.filter && filter ? { plan: style.filter, view: filter } : null,
+    const active: ActiveVisual = { runId, section, view, mask, age, persistent, filters,
       ...(finish ? { finish } : {}) };
     this.visuals.add(active);
     this.applyFrame(active);
@@ -349,10 +357,14 @@ export class FxLayer {
       active.view.rotation = transform.rotation;
     }
     // A constant filter is left exactly as spawn applied it: only an animated one costs
-    // anything per frame (D-304), which is the property D-299 bought and this keeps.
-    if (active.filter?.plan.to !== undefined)
-      fxSetFilterStrength(active.filter.plan.kind, active.filter.view,
-        fxFilterStrength(active.filter.plan, section, age));
+    // anything per frame (D-304), which is the property D-299 bought and this keeps. In a
+    // chain that is per entry (D-313): a deepening blur never re-touches the brightness
+    // beside it.
+    for (const entry of active.filters) {
+      if (entry.plan.to !== undefined)
+        fxSetFilterStrength(entry.plan.kind, entry.view,
+          fxFilterStrength(entry.plan, section, age));
+    }
     const fadeIn = section.fadeInMs ? Math.min(1, age / section.fadeInMs) : 1;
     const fadeOut = section.fadeOutMs ? Math.min(1, (section.durationMs - age) / section.fadeOutMs) : 1;
     active.view.alpha = (section.opacity ?? 1) * Math.max(0, Math.min(fadeIn, fadeOut));
@@ -379,16 +391,17 @@ export class FxLayer {
   get count(): number { return this.visuals.size; }
 
   /** Read-only: what a run (or everything) is drawing with. Tests and diagnostics only. */
-  inspect(runId?: string): Array<{ kind: string; blend: string; filter: string | null; scale: number;
+  inspect(runId?: string): Array<{ kind: string; blend: string; filters: string[]; scale: number;
     rotationDeg: number;
     mask: { points: number; radius: number; bearingDeg: number | null;
       bounds: { minX: number; maxX: number; minY: number; maxY: number }; invert: boolean } | null }> {
     return [...this.visuals]
       .filter((active) => runId === undefined || active.runId === runId)
       .map((active) => ({ kind: active.section.kind, blend: String(active.view.blendMode),
-        filter: active.filter
-          ? `${active.filter.plan.kind}:${Math.round(fxFilterReadback(active.filter.plan.kind, active.filter.view) * 1000) / 1000}`
-          : null,
+        // Read back out of each live instance, in chain order: a test cannot pass on a plan
+        // the renderer never applied, and the array is the chain the author wrote.
+        filters: active.filters.map((entry) =>
+          `${entry.plan.kind}:${Math.round(fxFilterReadback(entry.plan.kind, entry.view) * 1000) / 1000}`),
         // Read back from the drawn view, so a test cannot pass on a plan the renderer
         // never applied.
         scale: active.view.scale.x,

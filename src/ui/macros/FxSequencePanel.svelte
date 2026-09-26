@@ -3,9 +3,11 @@
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import type { ActorDocument, AssetManifest, MacroDocument, SceneDocument } from "../../core/documents";
-  import { FX_FILTER_RANGES, FX_MASK_LIMITS, FX_SCALE_LIMITS, FX_SPIN_LIMIT, resolveFxSequence,
+  import { FX_FILTER_CHAIN_MAX, FX_FILTER_RANGES, FX_MASK_LIMITS, FX_SCALE_LIMITS, FX_SPIN_LIMIT,
+    fxAuthoredFilters, fxFilterFields, resolveFxSequence,
     validateFxSequence, type FxAnchor,
-    type FxBlendMode, type FxCameraPathSection, type FxEasing, type FxFilterKind, type FxMask,
+    type FxBlendMode, type FxCameraPathSection, type FxEasing, type FxFilterKind, type FxFilterStep,
+    type FxMask,
     type FxSection, type FxSectionAudience, type FxSequence, type FxImportPermissions } from "../../core/fx";
   import { fxFitnessIssues } from "../../core/fxDelivery";
   import { SOUND_CHANNELS, SOUND_CHANNEL_LABELS, SOUND_RADIUS_LIMITS, cueSilentForViewer,
@@ -305,49 +307,84 @@
       ? (value === "normal" ? remaining : { ...remaining, blend: value as FxBlendMode }) as FxSection : old) };
   }
 
+  // ─── D-313: the filter *chain* ──────────────────────────────────────────────────────
+  //
+  // The wizard is the chain's authoring surface: it reads either spelling through
+  // `fxAuthoredFilters` and always writes the canonical one back through `fxFilterFields`
+  // (nothing / the single-filter shorthand / the chain), so a look trimmed from three
+  // filters down to one is stored as the same document a hand-authored single filter is.
+  function writeFilters(index: number, steps: readonly FxFilterStep[]): void {
+    const before = draft.sections[index];
+    if (!before || (before.kind !== "image" && before.kind !== "text")) return;
+    const { filter: _filter, filterTo: _filterTo, filters: _filters, ...remaining } = before;
+    void _filter; void _filterTo; void _filters;
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      ? ({ ...remaining, ...fxFilterFields(steps) } as FxSection) : old) };
+  }
+  function addFilter(index: number): void {
+    const before = draft.sections[index];
+    if (!before || (before.kind !== "image" && before.kind !== "text")) return;
+    const steps = fxAuthoredFilters(before);
+    if (steps.length >= FX_FILTER_CHAIN_MAX) return;
+    // A new entry starts on a kind the look does not already lean on, so a second click
+    // buys something rather than doubling the same blur.
+    const kind = (["blur", "grayscale", "brightness", "saturate"] as FxFilterKind[])
+      .find((candidate) => !steps.some((step) => step.kind === candidate)) ?? "blur";
+    writeFilters(index, [...steps, { kind, strength: FX_FILTER_RANGES[kind].default }]);
+  }
+  function removeFilter(index: number, at: number): void {
+    const before = draft.sections[index];
+    if (!before || (before.kind !== "image" && before.kind !== "text")) return;
+    writeFilters(index, fxAuthoredFilters(before).filter((_step, i) => i !== at));
+  }
   /**
-   * Switching the kind resets the strength to that kind's default *and* drops any
-   * animation: 16 is a heavy blur and an impossible grayscale, so carrying the number
+   * Switching a chain entry's kind resets its strength to that kind's default *and* drops
+   * its animation: 16 is a heavy blur and an impossible grayscale, so carrying the number
    * over would either be refused by the host or silently mean something else (the D-301
    * rule for a mask's shape fields, applied to a filter's own).
    */
-  function changeFilter(index: number, value: string): void {
+  function changeFilter(index: number, at: number, value: string): void {
     const before = draft.sections[index];
     if (!before || (before.kind !== "image" && before.kind !== "text")) return;
-    const { filter: _filter, filterTo: _filterTo, ...remaining } = before;
-    void _filter; void _filterTo;
+    const steps = fxAuthoredFilters(before);
+    if (value === "none") { removeFilter(index, at); return; }
     const kind = value as FxFilterKind;
-    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
-      ? (value === "none" ? remaining
-        : { ...remaining, filter: { kind, strength: FX_FILTER_RANGES[kind].default } }) as FxSection : old) };
+    writeFilters(index, steps.map((step, i) => i === at
+      ? { kind, strength: FX_FILTER_RANGES[kind].default } : step));
   }
-
-  function changeFilterStrength(index: number, value: string): void {
+  function changeFilterStrength(index: number, at: number, value: string): void {
     const before = draft.sections[index];
-    if (!before || (before.kind !== "image" && before.kind !== "text") || !before.filter) return;
-    const { kind } = before.filter;
-    const range = FX_FILTER_RANGES[kind];
+    if (!before || (before.kind !== "image" && before.kind !== "text")) return;
+    const steps = fxAuthoredFilters(before);
+    const step = steps[at];
+    if (!step) return;
+    const range = FX_FILTER_RANGES[step.kind];
     const strength = Number(value);
-    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
-      ? { ...before, filter: { kind, strength: Number.isFinite(strength)
-          ? Math.min(range.max, Math.max(range.min, strength)) : range.default } } as FxSection
-      : old) };
+    writeFilters(index, steps.map((old, i) => i === at ? { ...old,
+      strength: Number.isFinite(strength) ? Math.min(range.max, Math.max(range.min, strength)) : range.default }
+      : old));
   }
 
   /**
    * One sentence under the filter controls, because "applied once" stops being true the
-   * moment the second box is filled — and a hint that lies is worse than no hint.
+   * moment a second entry or a "move to" box appears — and a hint that lies is worse than
+   * no hint. The chain is described in the order it renders.
    */
   function filterHint(section: Extract<FxSection, { kind: "image" | "text" }>): string {
-    const filter = section.filter;
-    if (!filter) return "";
-    const range = FX_FILTER_RANGES[filter.kind];
-    const start = filter.strength ?? range.default;
-    if (section.filterTo === undefined || section.filterTo === start)
-      return `One filter per section: ${range.min}–${range.max}${range.unit}, applied once. Fill "move to" to carry it to another strength across the section.`;
+    const steps = fxAuthoredFilters(section);
+    if (steps.length === 0) return "";
     const cycles = section.repeats ?? 1;
-    return `Moves from ${start}${range.unit} to ${section.filterTo}${range.unit}, ${cycles === 1
-      ? "eased across the section." : `restarted in each of its ${cycles} cycles — a pulse.`}`;
+    const described = steps.map((step) => {
+      const range = FX_FILTER_RANGES[step.kind];
+      const start = step.strength ?? range.default;
+      if (step.to === undefined || step.to === start) return `${step.kind} ${start}${range.unit}`;
+      return `${step.kind} ${start}${range.unit} → ${step.to}${range.unit}` +
+        (cycles === 1 ? "" : ` (pulsing ×${cycles})`);
+    });
+    const ordered = described.join(" → ");
+    return steps.length === 1
+      ? `Applied once: ${ordered}. Fill "move to" to carry it to another strength across the section; "Add filter" stacks another.`
+      : `Stacked in this order: ${ordered}. Each entry animates its own strength; the host bounds a chain at ${FX_FILTER_CHAIN_MAX}.`;
   }
 
   /**
@@ -355,17 +392,25 @@
    * other animation field here: empty means no key, clamped to the kind's own range so
    * the host never receives a value it would refuse.
    */
-  function changeFilterTo(index: number, value: string): void {
+  function changeFilterTo(index: number, at: number, value: string): void {
     const before = draft.sections[index];
-    if (!before || (before.kind !== "image" && before.kind !== "text") || !before.filter) return;
-    const range = FX_FILTER_RANGES[before.filter.kind];
-    const { filterTo: _filterTo, ...remaining } = before;
-    void _filterTo;
+    if (!before || (before.kind !== "image" && before.kind !== "text")) return;
+    const steps = fxAuthoredFilters(before);
+    const step = steps[at];
+    if (!step) return;
+    const range = FX_FILTER_RANGES[step.kind];
     const trimmed = value.trim();
-    const filterTo = trimmed === "" ? undefined : Number(trimmed);
-    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
-      ? ({ ...remaining, ...(filterTo === undefined || !Number.isFinite(filterTo) ? {} : {
-          filterTo: Math.min(range.max, Math.max(range.min, filterTo)) }) } as FxSection) : old) };
+    const entered = Number(trimmed);
+    const to = trimmed === "" || !Number.isFinite(entered) ? undefined
+      : Math.min(range.max, Math.max(range.min, entered));
+    writeFilters(index, steps.map((old, i) => {
+      if (i !== at) return old;
+      // An emptied box *removes* the animation; it never stores a `to` equal to the start,
+      // which would be a claim the host would then have to treat as authored.
+      if (to === undefined)
+        return { kind: old.kind, ...(old.strength === undefined ? {} : { strength: old.strength }) };
+      return { ...old, to };
+    }));
   }
 
   /**
@@ -1142,24 +1187,42 @@
               <option value="darken">Darken</option>
               <option value="lighten">Lighten</option>
             </select></label>
-            <label>Filter <select data-fx-filter value={section.filter?.kind ?? "none"}
-              onchange={(e) => changeFilter(i, e.currentTarget.value)}>
-              <option value="none">None</option>
-              <option value="blur">Blur</option>
-              <option value="grayscale">Grayscale</option>
-              <option value="brightness">Brightness</option>
-              <option value="saturate">Saturation</option>
-            </select></label>
-            {#if section.filter}
-              {@const range = FX_FILTER_RANGES[section.filter.kind]}
-              <label>Filter amount ({range.unit}) <input type="number" data-fx-filter-strength
-                min={range.min} max={range.max} step="0.1" value={section.filter.strength ?? range.default}
-                oninput={(e) => changeFilterStrength(i, e.currentTarget.value)} /></label>
-              <label>Move to ({range.unit}) <input type="number" data-fx-filter-to
-                min={range.min} max={range.max} step="0.1" value={section.filterTo ?? ""}
-                placeholder="steady" oninput={(e) => changeFilterTo(i, e.currentTarget.value)} /></label>
-              <small>{filterHint(section)}</small>
-            {/if}
+            <!-- D-313: the filter chain. One row per entry, in render order, because the
+                 order is part of the look: a blur over a desaturation is not the reverse. -->
+            <div class="filters" data-fx-filters>
+              <span class="filters-label">Filters</span>
+              {#each fxAuthoredFilters(section) as step, at (at)}
+                {@const range = FX_FILTER_RANGES[step.kind]}
+                <div class="filter-row" data-fx-filter-row={at}>
+                  <select data-fx-filter value={step.kind}
+                    onchange={(e) => changeFilter(i, at, e.currentTarget.value)}>
+                    <!-- "None" removes *this* entry: the row goes away rather than sitting
+                         there reading "none" as if it were a kind. -->
+                    <option value="none">None</option>
+                    <option value="blur">Blur</option>
+                    <option value="grayscale">Grayscale</option>
+                    <option value="brightness">Brightness</option>
+                    <option value="saturate">Saturation</option>
+                  </select>
+                  <label>Amount ({range.unit}) <input type="number" data-fx-filter-strength
+                    min={range.min} max={range.max} step="0.1" value={step.strength ?? range.default}
+                    oninput={(e) => changeFilterStrength(i, at, e.currentTarget.value)} /></label>
+                  <label>Move to ({range.unit}) <input type="number" data-fx-filter-to
+                    min={range.min} max={range.max} step="0.1" value={step.to ?? ""}
+                    placeholder="steady" oninput={(e) => changeFilterTo(i, at, e.currentTarget.value)} /></label>
+                  <button type="button" data-fx-filter-remove={at}
+                    onclick={() => removeFilter(i, at)}>Remove</button>
+                </div>
+              {/each}
+              <!-- An empty chain is not offered as a row reading "none": with no filters the
+                   row is gone and the button is the way back, up to the host's own maximum. -->
+              <button type="button" data-fx-filter-add onclick={() => addFilter(i)}
+                disabled={fxAuthoredFilters(section).length >= FX_FILTER_CHAIN_MAX}
+                >Add filter</button>
+              {#if fxAuthoredFilters(section).length > 0}
+                <small>{filterHint(section)}</small>
+              {/if}
+            </div>
             <label>Mask <select data-fx-mask-kind value={section.mask?.kind ?? "none"}
               onchange={(e) => changeMask(i, e.currentTarget.value)}>
               <option value="none">None</option>
@@ -1377,4 +1440,10 @@
   li { margin: 4px 0; } li small { color: #aaa; }
   .error { color: #ff9e9e; }
   .warn { color: #ffd79a; font-size: 0.7875rem; margin: 0; }
+  /* D-313: a chain is a numbered stack, not a row of unrelated inputs — the border is
+     what makes "these render in this order" readable at a glance. */
+  .filters { display: grid; gap: 4px; padding: 5px; border: 1px dashed #5d7091; border-radius: 4px; }
+  .filters-label { color: #aab6c6; }
+  .filter-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .filter-row button { justify-self: start; }
 </style>

@@ -73,7 +73,7 @@ describe("FX appearance on the canvas (§SQ-05, D-299)", () => {
   test("a spawned visual carries its blend and its one filter; inspection reports both", () => {
     const fx = layer();
     fx.spawn("run", image({ blend: "screen", filter: { kind: "blur", strength: 4 } }), 0, Texture.EMPTY);
-    expect(fx.inspect("run")).toMatchObject([{ kind: "image", blend: "screen", filter: "blur:4", mask: null }]);
+    expect(fx.inspect("run")).toMatchObject([{ kind: "image", blend: "screen", filters: ["blur:4"], mask: null }]);
     // The view itself — not just the plan — is what was styled.
     const view = viewOf(fx, "run");
     expect(view.blendMode).toBe("screen");
@@ -83,7 +83,7 @@ describe("FX appearance on the canvas (§SQ-05, D-299)", () => {
   test("an unstyled visual is normal blending with no filter at all", () => {
     const fx = layer();
     fx.spawn("run", image(), 0, Texture.EMPTY);
-    expect(fx.inspect("run")).toMatchObject([{ kind: "image", blend: "normal", filter: null, mask: null }]);
+    expect(fx.inspect("run")).toMatchObject([{ kind: "image", blend: "normal", filters: [], mask: null }]);
     expect(viewOf(fx, "run").filters).toBeFalsy();
   });
 
@@ -91,11 +91,11 @@ describe("FX appearance on the canvas (§SQ-05, D-299)", () => {
     const fx = layer();
     fx.spawn("a", image({ blend: "add" }), 0, Texture.EMPTY);
     fx.spawn("b", image({ filter: { kind: "grayscale", strength: 0.5 } }), 0, Texture.EMPTY);
-    expect(fx.inspect("a")).toMatchObject([{ kind: "image", blend: "add", filter: null, mask: null }]);
+    expect(fx.inspect("a")).toMatchObject([{ kind: "image", blend: "add", filters: [], mask: null }]);
     expect(fx.inspect().length).toBe(2);
     fx.clear("a");
     expect(fx.inspect("a")).toEqual([]);
-    expect(fx.inspect("b")).toMatchObject([{ kind: "image", blend: "normal", filter: "grayscale:0.5", mask: null }]);
+    expect(fx.inspect("b")).toMatchObject([{ kind: "image", blend: "normal", filters: ["grayscale:0.5"], mask: null }]);
   });
 
   test("the filter stays put while the fade moves: alpha is composed per frame, not per filter", () => {
@@ -154,7 +154,7 @@ describe("effect masks on the canvas (§SQ-19, D-301)", () => {
     fx.spawn("run", image({ mask: circle(50) }), 0, Texture.EMPTY);
     // The readback is the drawn polygon itself, so a still circle reports its reach and —
     // honestly — that a circle has no facing to report (D-305).
-    expect(fx.inspect("run")).toMatchObject([{ kind: "image", blend: "normal", filter: null,
+    expect(fx.inspect("run")).toMatchObject([{ kind: "image", blend: "normal", filters: [],
       mask: { points: 16, radius: 50, bearingDeg: null, invert: false } }]);
     const view = viewOf(fx, "run");
     expect(view.mask).toBeInstanceOf(Graphics);
@@ -375,7 +375,7 @@ describe("animated regions on the canvas (§SQ-05, D-305)", () => {
  */
 describe("animated filter strength on the canvas (§SQ-05, D-304)", () => {
   const strengthOf = (fx: FxLayer, runId: string): number => {
-    const label = fx.inspect(runId)[0]?.filter ?? "";
+    const label = fx.inspect(runId)[0]?.filters[0] ?? "";
     return Number(label.slice(label.indexOf(":") + 1));
   };
 
@@ -436,5 +436,80 @@ describe("animated filter strength on the canvas (§SQ-05, D-304)", () => {
     const fx = layer();
     fx.spawn("run", image({ filter: { kind: "blur", strength: 2 }, filterTo: 10 }), 500, Texture.EMPTY);
     expect(strengthOf(fx, "run")).toBeCloseTo(6, 5);
+  });
+});
+
+/**
+ * D-313: a **chain** of filters. What matters on the canvas is that the author's order is the
+ * order pixi applies, that each entry is its own instance (a blur deepening must not rebuild the
+ * brightness beside it), and that an entry's animation moves only that entry.
+ */
+describe("filter chains on the canvas (§SQ-05, D-313)", () => {
+  const strengthsOf = (fx: FxLayer, runId: string): number[] => (fx.inspect(runId)[0]?.filters ?? [])
+    .map((label) => Number(label.slice(label.indexOf(":") + 1)));
+
+  test("the chain renders in the order it was written, one instance per entry", () => {
+    const fx = layer();
+    fx.spawn("run", image({ filters: [{ kind: "grayscale", strength: 0.5 },
+      { kind: "blur", strength: 6 }, { kind: "brightness", strength: 1.2 }] }), 0, Texture.EMPTY);
+    expect(fx.inspect("run")).toMatchObject([{ filters: ["grayscale:0.5", "blur:6", "brightness:1.2"] }]);
+    // The drawn array, not just the label: three filters, in that order, of the right kinds.
+    const drawn = viewOf(fx, "run").filters ?? [];
+    expect(drawn).toHaveLength(3);
+    expect(drawn[0]).toBeInstanceOf(ColorMatrixFilter);
+    expect(drawn[1]).toBeInstanceOf(BlurFilter);
+    expect(drawn[2]).toBeInstanceOf(ColorMatrixFilter);
+
+    // A still chain is spawned once and never touched again — the D-299 property, now per entry.
+    const built = [...drawn];
+    fx.tick(300);
+    expect(viewOf(fx, "run").filters).toEqual(built);
+    expect(strengthsOf(fx, "run")).toEqual([0.5, 6, 1.2]);
+  });
+
+  test("each entry animates its own strength and never its neighbour's", () => {
+    const fx = layer();
+    fx.spawn("run", image({ filters: [
+      { kind: "grayscale", strength: 0.5 },
+      { kind: "blur", strength: 2, to: 10 },
+      { kind: "saturate", strength: 1.5 },
+    ] }), 0, Texture.EMPTY);
+    const blur = viewOf(fx, "run").filters?.[1];
+    expect(strengthsOf(fx, "run")).toEqual([0.5, 2, 1.5]);
+    fx.tick(250);
+    expect(strengthsOf(fx, "run")[1]).toBeCloseTo(4, 5);
+    // The animated entry is the same instance nudged; the two constants are untouched.
+    expect(viewOf(fx, "run").filters?.[1]).toBe(blur);
+    expect(strengthsOf(fx, "run")[0]).toBe(0.5);
+    expect(strengthsOf(fx, "run")[2]).toBe(1.5);
+    fx.tick(250);
+    expect(strengthsOf(fx, "run")[1]).toBeCloseTo(6, 5);
+  });
+
+  test("two entries may animate at once, each on its own end and range", () => {
+    const fx = layer();
+    fx.spawn("run", image({ filters: [
+      { kind: "blur", strength: 2, to: 16 },
+      { kind: "brightness", strength: 0.5, to: 2 },
+    ] }), 0, Texture.EMPTY);
+    fx.tick(500);
+    const [blur, brightness] = strengthsOf(fx, "run");
+    expect(blur).toBeCloseTo(9, 5);
+    expect(brightness).toBeCloseTo(1.25, 5);
+    // …and a late join takes each entry's start from the same elapsed time the rest does.
+    const late = layer();
+    late.spawn("run", image({ filters: [{ kind: "blur", strength: 2, to: 16 },
+      { kind: "brightness", strength: 0.5, to: 2 }] }), 500, Texture.EMPTY);
+    expect(strengthsOf(late, "run")[0]).toBeCloseTo(9, 5);
+    expect(strengthsOf(late, "run")[1]).toBeCloseTo(1.25, 5);
+  });
+
+  test("the single-filter shorthand renders exactly as the same one-entry chain would", () => {
+    // The two spellings are one look: the renderer must not care which the author used. (A
+    // one-entry *chain* is refused by the host, so this compares against the plan directly.)
+    const shorthand = layer();
+    shorthand.spawn("run", image({ filter: { kind: "blur", strength: 4 }, filterTo: 12 }), 250, Texture.EMPTY);
+    expect(strengthsOf(shorthand, "run")).toHaveLength(1);
+    expect(strengthsOf(shorthand, "run")[0]).toBeCloseTo(6, 5); // mid-animation, from `filterTo`
   });
 });

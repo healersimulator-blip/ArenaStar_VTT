@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
-import { FX_FILTER_RANGES, fxFilterStrength, fxSectionsForViewer, fxStylePlan, resolveFxSequence,
+import { FX_FILTER_RANGES, fxAuthoredFilters, fxFilterFields, fxFilterStrengths,
+  fxFilterStrength, fxSectionsForViewer, fxStylePlan, resolveFxSequence,
   validateFxSequence, type FxSequence } from "../../src/core/fx";
 import { fxFollowAnchors, fxPosition } from "../../src/canvas/layers/FxLayer";
 import type { SceneDocument, TokenDocument, WallDocument } from "../../src/core/documents";
@@ -427,14 +428,21 @@ describe("FX appearance: blend modes and one bounded filter (§SQ-05)", () => {
   });
 
   test("the style plan fills in a default, clamps, and never invents a filter", () => {
-    expect(fxStylePlan({})).toEqual({ blend: "normal" });
-    expect(fxStylePlan({ blend: "add" })).toEqual({ blend: "add" });
-    expect(fxStylePlan({ filter: { kind: "grayscale" } })).toEqual({ blend: "normal", filter: { kind: "grayscale", strength: 1 } });
-    expect(fxStylePlan({ filter: { kind: "blur" } }).filter).toEqual({ kind: "blur", strength: 8 });
+    expect(fxStylePlan({})).toEqual({ blend: "normal", filters: [] });
+    expect(fxStylePlan({ blend: "add" })).toEqual({ blend: "add", filters: [] });
+    expect(fxStylePlan({ filter: { kind: "grayscale" } })).toEqual({ blend: "normal",
+      filters: [{ kind: "grayscale", strength: 1 }] });
+    expect(fxStylePlan({ filter: { kind: "blur" } }).filters[0]).toEqual({ kind: "blur", strength: 8 });
     // A cue that never passed the host must still render something sane.
-    expect(fxStylePlan({ filter: { kind: "blur", strength: 500 } }).filter).toEqual({ kind: "blur", strength: 32 });
-    expect(fxStylePlan({ filter: { kind: "brightness", strength: -3 } }).filter).toEqual({ kind: "brightness", strength: 0 });
-    expect(fxStylePlan({ filter: { kind: "nonsense" as never } })).toEqual({ blend: "normal" });
+    expect(fxStylePlan({ filter: { kind: "blur", strength: 500 } }).filters[0])
+      .toEqual({ kind: "blur", strength: 32 });
+    expect(fxStylePlan({ filter: { kind: "brightness", strength: -3 } }).filters[0])
+      .toEqual({ kind: "brightness", strength: 0 });
+    // A forged kind renders as no filter at all rather than as a guess.
+    expect(fxStylePlan({ filter: { kind: "nonsense" as never } })).toEqual({ blend: "normal", filters: [] });
+    expect(fxStylePlan({ filters: [{ kind: "blur", strength: 4 },
+      { kind: "nonsense" as never }, { kind: "saturate" }] }).filters)
+      .toEqual([{ kind: "blur", strength: 4 }, { kind: "saturate", strength: 0.5 }]);
   });
 
   test("resolving a visual keeps its appearance: the host adds anchors, not style", () => {
@@ -802,16 +810,128 @@ describe("animated filter strength (§SQ-05, D-304)", () => {
     expect(orphan.ok ? "" : orphan.error).toContain("filter kind to animate");
   });
 
+  test("D-313: a chain is bounded, each entry checked by its own kind's range, and the two spellings never mix", () => {
+    // This fixture's helper seeds the shorthand `filter`, so a chain case has to drop it —
+    // which is itself the point of the next block.
+    const ok = validateFxSequence(visual({ blend: "normal", filter: undefined,
+      filters: [{ kind: "grayscale", strength: 1 }, { kind: "blur", strength: 4 }] }) as never);
+    expect(ok.ok, ok.ok ? "" : ok.error).toBe(true);
+
+    // 2–4 entries: a one-entry chain is a second spelling of the shorthand, and five would
+    // be a stack the frame budget never agreed to.
+    for (const chain of [[{ kind: "blur" }], [{ kind: "blur" }, { kind: "blur" }, { kind: "blur" },
+      { kind: "blur" }, { kind: "blur" }], "blur", []]) {
+      const bad = validateFxSequence(visual({ filter: undefined, filters: chain }) as never);
+      expect(bad.ok, JSON.stringify(chain)).toBe(false);
+      if (!bad.ok) expect(bad.error).toContain("2–4");
+    }
+    // Both spellings at once is an ambiguity, refused by name.
+    const mixed = validateFxSequence(visual({
+      filter: { kind: "blur", strength: 4 },
+      filters: [{ kind: "grayscale" }, { kind: "saturate" }] }) as never);
+    expect(mixed.ok).toBe(false);
+    if (!mixed.ok) expect(mixed.error).toContain("either one filter or a chain");
+
+    // Each entry is validated on its own terms and blamed by position: a blur may hold 32
+    // and a grayscale may not, and the sentence says which entry offended.
+    const badKind = validateFxSequence(visual({ filter: undefined,
+      filters: [{ kind: "blur" }, { kind: "sepia" }] }) as never);
+    expect(badKind.ok).toBe(false);
+    if (!badKind.ok) expect(badKind.error).toContain("FX filter 2");
+    const badStrength = validateFxSequence(visual({ filter: undefined,
+      filters: [{ kind: "grayscale" }, { kind: "grayscale", strength: 9 }] }) as never);
+    expect(badStrength.ok).toBe(false);
+    if (!badStrength.ok) expect(badStrength.error).toContain("FX filter 2 (grayscale) strength must be 0–1");
+    const badTo = validateFxSequence(visual({ filter: undefined,
+      filters: [{ kind: "brightness", to: 80 }, { kind: "blur" }] }) as never);
+    expect(badTo.ok).toBe(false);
+    if (!badTo.ok) expect(badTo.error).toContain("FX filter 1 (brightness) must animate between 0 and 2");
+    const strayKey = validateFxSequence(visual({ filter: undefined,
+      filters: [{ kind: "blur" }, { kind: "blur", opacity: 0.5 }] }) as never);
+    expect(strayKey.ok).toBe(false);
+    if (!strayKey.ok) expect(strayKey.error).toContain("FX filter 2");
+
+    // …and a chain is refused where a single filter is: not on a sound, a wait or a camera
+    // section. The field list is the same one, so the refusal is the unknown-field one.
+    const onSound = validateFxSequence({ version: 1, sections: [{ kind: "sound", id: "s",
+      assetId: "a".repeat(64), at: { kind: "point", x: 1, y: 1 }, radius: 30,
+      startMs: 0, durationMs: 500, filters: [{ kind: "blur" }, { kind: "blur" }] }] } as never);
+    expect(onSound.ok).toBe(false);
+  });
+
+  test("D-313: the two spellings are two views of one look, and the write shape is canonical", () => {
+    expect(fxAuthoredFilters({})).toEqual([]);
+    expect(fxAuthoredFilters({ filter: { kind: "blur", strength: 4 } }))
+      .toEqual([{ kind: "blur", strength: 4 }]);
+    // The shorthand's animation end becomes the *entry's* end — one look, one reading.
+    expect(fxAuthoredFilters({ filter: { kind: "blur", strength: 4 }, filterTo: 12 }))
+      .toEqual([{ kind: "blur", strength: 4, to: 12 }]);
+    expect(fxAuthoredFilters({ filters: [{ kind: "blur", to: 12 }, { kind: "grayscale" }] }))
+      .toEqual([{ kind: "blur", to: 12 }, { kind: "grayscale" }]);
+    // …and the read is a copy: a caller that edits it cannot reach the document.
+    const authored = { filters: [{ kind: "blur" as const }] };
+    const copy = fxAuthoredFilters(authored)[0];
+    if (copy) copy.strength = 99;
+    expect(authored.filters[0]).toEqual({ kind: "blur" });
+
+    // Writing back: nothing for an empty chain, the shorthand for one, the chain for two+.
+    expect(fxFilterFields([])).toEqual({});
+    expect(fxFilterFields([{ kind: "blur" }])).toEqual({ filter: { kind: "blur" } });
+    expect(fxFilterFields([{ kind: "blur", strength: 4 }]))
+      .toEqual({ filter: { kind: "blur", strength: 4 } });
+    expect(fxFilterFields([{ kind: "blur", strength: 4, to: 12 }]))
+      .toEqual({ filter: { kind: "blur", strength: 4 }, filterTo: 12 });
+    expect(fxFilterFields([{ kind: "blur" }, { kind: "saturate", strength: 0.5 }]))
+      .toEqual({ filters: [{ kind: "blur" }, { kind: "saturate", strength: 0.5 }] });
+    // Round trip: a look read out of either spelling writes back as the same document a hand
+    // author would have written — that is what keeps "trim a chain to one" from leaving a
+    // one-entry chain behind (the host refuses that shape by name).
+    const trim = fxAuthoredFilters({ filters: [{ kind: "grayscale" }, { kind: "blur", strength: 6 }] })
+      .slice(1);
+    expect(fxFilterFields(trim)).toEqual({ filter: { kind: "blur", strength: 6 } });
+  });
+
+  test("D-313: a chain resolves in order, each entry by its own kind's rules", () => {
+    const plan = fxStylePlan({ filters: [{ kind: "grayscale", strength: 0.4 },
+      { kind: "blur", strength: 2, to: 16 }, { kind: "brightness" }] });
+    expect(plan).toEqual({ blend: "normal", filters: [
+      { kind: "grayscale", strength: 0.4 },
+      { kind: "blur", strength: 2, to: 16 },
+      { kind: "brightness", strength: 1.5 },
+    ] });
+    // A chain whose ends are out of range clamps per entry, never against a shared bound.
+    expect(fxStylePlan({ filters: [{ kind: "blur", strength: 900, to: 900 },
+      { kind: "grayscale", strength: 900, to: -4 }] }).filters)
+      .toEqual([{ kind: "blur", strength: 32, to: 32 }, { kind: "grayscale", strength: 1, to: 0 }]);
+
+    // The per-frame answer: entries walk their own ends on the shared curve, and an entry
+    // without an end holds exactly as authored while its neighbour moves.
+    const section = { durationMs: 1000 };
+    expect(fxFilterStrengths(plan.filters, section, 0)).toEqual([0.4, 2, 1.5]);
+    const half = fxFilterStrengths(plan.filters, section, 500);
+    expect(half[0]).toBe(0.4);
+    expect(half[1]).toBeCloseTo(9, 5);
+    expect(half[2]).toBe(1.5);
+    expect(fxFilterStrengths(plan.filters, section, 1000)[1]).toBe(16);
+    // A pulse says the same thing per entry: 3 cycles is 3 ramps, not one long one.
+    expect(fxFilterStrengths([{ kind: "blur", strength: 2, to: 16 }],
+      { durationMs: 900, repeats: 3 }, 150)[0]).toBeCloseTo(9, 5);
+    // Pure and total: a non-finite age or a zero-length section gives the authored start.
+    expect(fxFilterStrengths(plan.filters, section, Number.NaN)).toEqual([0.4, 2, 1.5]);
+    expect(fxFilterStrengths(plan.filters, { durationMs: 0 }, 10)).toEqual([0.4, 2, 1.5]);
+    expect(fxFilterStrengths([], section, 500)).toEqual([]);
+  });
+
   test("the plan carries an animation's end only when the author asked for one", () => {
     expect(fxStylePlan({ filter: { kind: "blur", strength: 2 } })).toEqual({ blend: "normal",
-      filter: { kind: "blur", strength: 2 } });
-    expect(fxStylePlan({ filter: { kind: "blur", strength: 2 }, filterTo: 16 }).filter)
+      filters: [{ kind: "blur", strength: 2 }] });
+    expect(fxStylePlan({ filter: { kind: "blur", strength: 2 }, filterTo: 16 }).filters[0])
       .toEqual({ kind: "blur", strength: 2, to: 16 });
     // Clamped like the start: a hand-written cue must not render past its kind's range.
-    expect(fxStylePlan({ filter: { kind: "blur", strength: 2 }, filterTo: 900 }).filter)
+    expect(fxStylePlan({ filter: { kind: "blur", strength: 2 }, filterTo: 900 }).filters[0])
       .toEqual({ kind: "blur", strength: 2, to: 32 });
     // Without a kind there is nothing to animate and nothing to clamp against.
-    expect(fxStylePlan({ filterTo: 16 })).toEqual({ blend: "normal" });
+    expect(fxStylePlan({ filterTo: 16 })).toEqual({ blend: "normal", filters: [] });
   });
 
   test("the strength walks from one end to the other, eased, and pulses per cycle", () => {

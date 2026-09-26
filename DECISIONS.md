@@ -10641,3 +10641,99 @@ because D-312 edits the sheet's own resolve path, which those specs drive hard.
   standalone pass) — which is the D-291 load sensitivity these five specs have shown before,
   not a change here: D-312 touches no canvas, vision or wall code. Recorded rather than
   smoothed over; the batch is never claimed green.
+
+## D-313 — the look is a stack: filter chains, two spellings, one canonical write (2026-09-26)
+
+SQ-05 says a section's look is filters — plural — and D-304 shipped exactly one: a bounded filter
+with an optional strength animation. One filter is a look an author runs out of immediately. A real
+ghost is desaturated, *then* blurred, *then* dimmed, and the order is part of the look: a blur over
+a desaturation is not the reverse. This entry adds the stack without taking anything back.
+
+**Two spellings, one document.** Every stored timeline already says `filter` + `filterTo`, and a
+stored document must keep meaning what it meant, so the shorthand stays and keeps its meaning
+exactly. A chain is `filters?: FxFilterStep[]` — `{kind, strength?, to?}`, the shorthand's own
+shape plus a per-entry animation end — and it is **2–4 entries** (`FX_FILTER_CHAIN_MAX = 4`). The
+bound is deliberate in both directions: one entry would be a second spelling of the shorthand, the
+ambiguity D-310 refused for presets, and five is a stack the frame budget never agreed to. Carrying
+*both* spellings is refused by name — `"an FX section carries either one filter or a chain, not
+both"` — because the host would otherwise have to pick, and a renderer that silently preferred one
+would make a hand-edited document mean something its author never wrote.
+
+**Per-entry validation, blamed by position.** An entry is validated on its own terms: only
+`kind`/`strength`/`to` are fields, the kind is the closed four, and `strength`/`to` are bounded by
+*that entry's own kind* — a blur may animate 1–32 where a grayscale may not exceed 1. Every refusal
+names the entry: `"FX filter 2 (grayscale) strength must be 0–1"`, `"FX filter 1 (brightness) must
+animate between 0 and 2"`. The chain lives in the same field list as the shorthand, so a sound, a
+wait or a camera section is refused for carrying it at all rather than quietly dropping it.
+
+**One read, one write.** `fxAuthoredFilters(section)` is the reader every consumer uses — it returns
+the chain, or the shorthand as a one-entry chain (its `filterTo` becoming that entry's `to`), so
+"what does this look like" has exactly one answer whichever spelling is on the document, and the
+returned steps are **copies**: a caller cannot edit a document by accident through a read.
+`fxFilterFields(steps)` is the canonical writer — nothing for empty, the shorthand for one, the
+chain for two or more — which is what keeps the wizard honest in the case a hand editor gets wrong:
+trimming a three-filter look back to one stores the **shorthand**, not a one-entry chain the host
+would refuse.
+
+**The plan and the frame.** `FxVisualStyle` is now `{blend, filters: FxFilterPlan[]}` — the singular
+field is gone, because "which filter" was never a question a chain can answer. `fxStylePlan`
+resolves each entry (kind default, per-entry clamp, a forged kind skipped rather than guessed) and
+`fxFilterStrengths(filters, section, elapsedMs)` is the per-frame answer: **every entry walks its own
+`to` on the section's shared curve and cycle**, so one filter pulses while the next holds exactly as
+authored, and an entry without a `to` is a constant. `fxFilterStrength` is unchanged in meaning, now
+applied per entry; it stays pure and total (a non-finite age or a zero-length section gives the
+authored start, never `NaN`).
+
+**The renderer.** One pixi instance per entry, **in the authored order** — pixi applies a filter
+array in order, so the chain an author wrote is the chain that renders. A still chain is built once
+and never touched again (D-299/D-304's property, now per entry): only entries with a `to` are nudged
+per frame, so a deepening blur never re-touches the brightness beside it. `inspect` reads each
+strength back out of the live filter — a colour matrix stores the author's number in one coefficient
+— and now reports `filters: string[]` (e.g. `["grayscale:0.5", "blur:6"]`), which is the claim about
+what is drawn rather than about what was planned.
+
+**In the wizard.** The section's filter block is a chain, one row per entry: kind / amount / move-to
+/ Remove, in render order, with **Add filter** (disabled at four) and a hint describing the stack.
+That hint is honest because it is generated from the entries in order, and the kind select's
+**None** removes *that* entry — the row disappears instead of sitting there reading "none" as if it
+were a kind. Picking a kind for an existing row resets that entry's strength to the kind's default
+*and drops its animation*: 16 is a heavy blur and an impossible grayscale, so carrying the number
+over would be refused or silently mean something else (the D-301 rule for a mask's shape fields,
+applied to a filter's own). A new entry starts on a kind the look does not already use, so a second
+click buys something. Saves go through `fxFilterFields`, so the stored document is always canonical.
+
+**Non-claims.** A chain is 2–4 filters on an **image/text** section: masks on sound/camera/wait
+sections, polygon-authored masks, animating a mask's own width/spread, mask easing, tweened
+`invert`, keyframes or multi-stop tracks, per-filter easing (every entry shares the section's curve
+and cycle), a filter chain on a sound, and any UI for hand-ordering beyond add/remove remain
+unclaimed (the rows are the order; moving an entry means removing and re-adding it). This adds **no
+wire change**: `filters` travels where `filter` already travelled, and `MsgKind` stays 60.
+
+**Gates.** `pnpm test` **3 800 passed / 12 skipped** (302 files: 300 passed, 2 skipped), +8 cases: 3
+in `tests/core/fx.test.ts` (the 2–4 bound and both-spellings refusal with per-entry messages and
+position-blame, the read/write round-trip that stores the shorthand when a chain is trimmed to one
+and copies on read, the ordered plan with per-entry clamps plus the per-frame walk including
+`repeats` pulsing each entry), 4 in `tests/canvas/fxStyle.test.ts` (authored order with one instance
+per entry and no rebuilds, an animated entry nudging only itself, two entries animating on their own
+ends and a late join taking each entry's start from the same elapsed time, and the shorthand
+rendering as the same one-entry look), and 1 host case in `tests/host/sync.test.ts` (a real chain
+accepted and resolved onto the cue intact, an update re-checked by the same rule, and 6 forged
+shapes — one entry, five, empty, an unknown kind, an out-of-range end, a stray field — never
+reaching the store, each refused with the entry-naming sentence). e2e: `e2e/fx_sequence.spec.ts`
+gained a chain test — two rows authored through the wizard with the hint read back, the fourth entry
+disabling **Add filter**, the saved chain reopened from the host, the live sprite's own `filters`
+array matching the authored order with the blur mid-animation and the grayscale holding at 0.4, and
+then the same look trimmed to one entry rendering as `["grayscale:0.4"]` — and the existing
+blend/filter test now asserts `filters: ["grayscale:0.5"]` and that "None" removes the row rather
+than leaving a "none" select behind — the D-304 e2e had to learn the new entry point (an empty look
+has no select at all, so "Add filter" is pressed first), which is the markup change stated rather
+than hidden. Runs: `fx_sequence` alone on chromium **30/30** (4.0 m), and with `fx_item_binding` +
+`summons` at `--repeat-each=2` **70/70** (10.8 m). `pnpm typecheck` 63 components / 0 blocking / 1
+advisory · `pnpm lint` exit 0 · `pnpm build` → `pnpm size` **3 871 184 B raw / 1 110 127 B gzip**
+(+2 535 raw over D-312), inside the 6 MB budget.
+- One honest note: the first *full* vitest run (made while a lint pass was running beside it) had a
+  single failure — `tests/client/fxDeliveryFlow.test.ts`, "a fader moved mid-cue reaches the
+  element and the live list", asserting a gain one 160 ms sleep after the move — and the same file
+  was **24/24** standalone and in the uncontended re-run (**3 800 passed / 12 skipped**). Recorded
+  as load sensitivity, like the join/walls batch ceilings in D-312; nothing here touches the audio
+  graph.
