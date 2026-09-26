@@ -4067,6 +4067,190 @@ describe("Active-zone host evaluation and graph secrecy", () => {
     expect((h.hostStore.get("automations", "zone-graph") as AutomationDocument).state).toBeUndefined();
     expect(h.hostStore.getAll("messages")).toHaveLength(0);
   });
+
+  test("a committed Move lands the token and fires the destination tile's graph through the normal dispatch", async () => {
+    const h = await setup();
+    const trap2: TileDocument = { ...zoneTile(), _id: "trap2", name: "Destination",
+      x: 400, y: 100, sort: 0 };
+    const trap2Graph: AutomationDocument = { ...zoneDoc(), _id: "trap2-graph", name: "Destination",
+      definition: { ...zoneDoc().definition, tileId: "trap2", methods: ["enter"], gates: {},
+        steps: [{ id: "notice", kind: "chat", audience: "gm", content: "trap2 fired" }] } };
+    const moveGraph: AutomationDocument = { ...zoneDoc(), name: "Mover",
+      definition: { ...zoneDoc().definition, methods: ["manual"], gates: {},
+        steps: [
+          { id: "move", kind: "move", x: 450, y: 150, targets: "triggering" },
+          { id: "notice", kind: "chat", audience: "gm", content: "moved" },
+        ] } };
+    h.gm.submit([
+      { kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: zoneTile() },
+      { kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: trap2 },
+    ]);
+    await flushMicrotasks();
+    // Anchors are validated against the applied store: the graphs land after their tiles.
+    h.gm.submit([
+      { kind: "create", coll: "automations", data: moveGraph },
+      { kind: "create", coll: "automations", data: trap2Graph },
+    ]);
+    await flushMicrotasks();
+    h.gm.requestAutomation("zone-graph", "s1", "manual", "t-pl");
+    await flushMicrotasks();
+    const token = (h.hostStore.get("scenes", "s1") as SceneDocument).tokens.find((t) => t._id === "t-pl");
+    expect(token && { x: token.x, y: token.y }).toEqual({ x: 450, y: 150 });
+    expect((h.hostStore.get("automations", "trap2-graph") as AutomationDocument).state?.count).toBe(1);
+    expect(h.hostStore.getAll("messages").some((m) => m.content === "trap2 fired")).toBe(true);
+  });
+
+  test("Stop Additional Tiles Triggering suppresses the sibling tile for the movement that fired the graph", async () => {
+    const h = await setup();
+    const a: TileDocument = { ...zoneTile(), sort: 10 };
+    const b: TileDocument = { ...zoneTile(), _id: "trap2", name: "Sibling", x: 400, y: 100, sort: 0 };
+    const aGraph: AutomationDocument = { ...zoneDoc(), name: "Mover",
+      definition: { ...zoneDoc().definition, methods: ["enter"], gates: {},
+        steps: [
+          { id: "move", kind: "move", x: 700, y: 700, targets: "triggering" },
+          { id: "stop", kind: "stopOthers" },
+          { id: "notice", kind: "chat", audience: "gm", content: "A fired" },
+        ] } };
+    const bGraph: AutomationDocument = { ...zoneDoc(), _id: "trap2-graph", name: "Sibling",
+      definition: { ...zoneDoc().definition, tileId: "trap2", methods: ["enter"], gates: {},
+        steps: [{ id: "notice", kind: "chat", audience: "gm", content: "B fired" }] } };
+    h.gm.submit([
+      { kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: a },
+      { kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: b },
+    ]);
+    await flushMicrotasks();
+    h.gm.submit([
+      { kind: "create", coll: "automations", data: aGraph },
+      { kind: "create", coll: "automations", data: bGraph },
+    ]);
+    await flushMicrotasks();
+    // t-pl walks from (0,0) through A into B in one committed move.
+    h.gm.submit([{ kind: "update", ref: { coll: "tokens", id: "t-pl",
+      parent: { coll: "scenes", id: "s1" } }, diff: { x: 450, y: 150 } }]);
+    await flushMicrotasks();
+    const token = (h.hostStore.get("scenes", "s1") as SceneDocument).tokens.find((t) => t._id === "t-pl");
+    expect(token && { x: token.x, y: token.y }).toEqual({ x: 700, y: 700 }); // A's move won
+    expect((h.hostStore.get("automations", "zone-graph") as AutomationDocument).state?.count).toBe(1);
+    expect((h.hostStore.get("automations", "trap2-graph") as AutomationDocument).state).toBeUndefined();
+    expect(h.hostStore.getAll("messages").some((m) => m.content === "B fired")).toBe(false);
+  });
+
+  test("ping-pong Move graphs are bounded by the host movement-chain depth cap", async () => {
+    const h = await setup();
+    const a: TileDocument = { ...zoneTile(), sort: 10 };
+    const b: TileDocument = { ...zoneTile(), _id: "trap2", name: "Echo", x: 400, y: 100, sort: 5 };
+    const ping: AutomationDocument = { ...zoneDoc(), name: "Ping",
+      definition: { ...zoneDoc().definition, methods: ["enter"], gates: {},
+        steps: [
+          { id: "move", kind: "move", x: 450, y: 150, targets: "triggering" },
+          { id: "notice", kind: "chat", audience: "gm", content: "ping {{count}}" },
+        ] } };
+    const pong: AutomationDocument = { ...zoneDoc(), _id: "trap2-graph", name: "Pong",
+      definition: { ...zoneDoc().definition, tileId: "trap2", methods: ["enter"], gates: {},
+        steps: [
+          { id: "move", kind: "move", x: 150, y: 150, targets: "triggering" },
+          { id: "notice", kind: "chat", audience: "gm", content: "pong {{count}}" },
+        ] } };
+    h.gm.submit([
+      { kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: a },
+      { kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: b },
+    ]);
+    await flushMicrotasks();
+    h.gm.submit([
+      { kind: "create", coll: "automations", data: ping },
+      { kind: "create", coll: "automations", data: pong },
+    ]);
+    await flushMicrotasks();
+    h.gm.submit([{ kind: "update", ref: { coll: "tokens", id: "t-pl",
+      parent: { coll: "scenes", id: "s1" } }, diff: { x: 150, y: 150 } }]);
+    await flushMicrotasks();
+    // Dispatches run at depths 1..8: ping fires at 1/3/5/7, pong at 2/4/6/8.
+    expect((h.hostStore.get("automations", "zone-graph") as AutomationDocument).state?.count).toBe(4);
+    expect((h.hostStore.get("automations", "trap2-graph") as AutomationDocument).state?.count).toBe(4);
+    const token = (h.hostStore.get("scenes", "s1") as SceneDocument).tokens.find((t) => t._id === "t-pl");
+    expect(token && { x: token.x, y: token.y }).toEqual({ x: 150, y: 150 });
+    // The host is still healthy: an unrelated manual fire commits normally.
+    const calm: AutomationDocument = { ...zoneDoc(), _id: "calm-graph", name: "Calm",
+      definition: { ...zoneDoc().definition, methods: ["manual"], gates: {},
+        steps: [{ id: "notice", kind: "chat", audience: "gm", content: "still alive" }] } };
+    h.gm.submit([{ kind: "create", coll: "automations", data: calm }]);
+    await flushMicrotasks();
+    const before = h.hostStore.seq;
+    h.gm.requestAutomation("calm-graph", "s1", "manual");
+    await flushMicrotasks();
+    expect(h.hostStore.seq).toBeGreaterThan(before);
+    expect(h.hostStore.getAll("messages").some((m) => m.content === "still alive")).toBe(true);
+  });
+
+  test("Delete Entities removes the placeable in the graph envelope and legacy Undo restores it", async () => {
+    const h = await setup();
+    const sweep: AutomationDocument = { ...zoneDoc(), name: "Sweeper",
+      definition: { ...zoneDoc().definition, methods: ["manual"], gates: {},
+        steps: [
+          { id: "select", kind: "select", selector: { kind: "tag", query: "victim", collections: ["tokens"] } },
+          { id: "delete", kind: "delete" },
+          { id: "notice", kind: "chat", audience: "gm", content: "swept" },
+        ] } };
+    h.gm.submit([
+      { kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: zoneTile() },
+      { kind: "update", ref: { coll: "tokens", id: "t-ivy", parent: { coll: "scenes", id: "s1" } },
+        diff: { taggerTags: ["victim"] } },
+    ]);
+    await flushMicrotasks();
+    h.gm.submit([{ kind: "create", coll: "automations", data: sweep }]);
+    await flushMicrotasks();
+    h.gm.requestAutomation("zone-graph", "s1", "manual");
+    await flushMicrotasks();
+    expect((h.hostStore.get("scenes", "s1") as SceneDocument).tokens.find((t) => t._id === "t-ivy")).toBeUndefined();
+    expect(h.hostStore.getAll("messages").some((m) => m.content === "swept")).toBe(true);
+    const undo = h.host.undo();
+    await flushMicrotasks();
+    expect(undo.ok).toBe(true);
+    const restored = (h.hostStore.get("scenes", "s1") as SceneDocument).tokens.find((t) => t._id === "t-ivy");
+    expect(restored).toBeDefined();
+    expect(restored?.taggerTags).toEqual(["victim"]);
+  });
+
+  test("Roll Table rolls on the host RNG, posts a scene or GM-only message and stores the variable", async () => {
+    const h = await setup();
+    const table = { _id: "fate", type: "rollTable" as const, name: "Fate", ownership: { default: 1 as const },
+      flags: {}, system: {}, formula: "1d20",
+      results: [
+        { range: [1, 10] as [number, number], text: "fortune", documentRef: null },
+        { range: [11, 20] as [number, number], text: "calamity", documentRef: null },
+      ] };
+    const graph: AutomationDocument = { ...zoneDoc(), name: "Fortune",
+      definition: { ...zoneDoc().definition, methods: ["manual"], gates: {},
+        steps: [
+          { id: "roll", kind: "rollTable", tableId: "fate", audience: "gm", variable: "fate" },
+          { id: "notice", kind: "chat", audience: "gm", content: "fate: {{fate}}" },
+        ] } };
+    h.gm.submit([
+      { kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: zoneTile() },
+      { kind: "create", coll: "rollTables", data: table },
+    ]);
+    await flushMicrotasks();
+    h.gm.submit([{ kind: "create", coll: "automations", data: graph }]);
+    await flushMicrotasks();
+    const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const playerMessages: MessageDocument[] = [];
+    bus.on("ops", (msg) => {
+      for (const op of msg.envelope.ops) if (op.kind === "create" && op.coll === "messages")
+        playerMessages.push(op.data as MessageDocument);
+    });
+    h.gm.requestAutomation("zone-graph", "s1", "manual");
+    await flushMicrotasks();
+    const messages = h.hostStore.getAll("messages") as MessageDocument[];
+    // setup()'s deterministic rng: 0.25 → 1d20 = 6 → "fortune"
+    expect(messages.find((m) => m.name === "Roll table: Fate"))
+      .toMatchObject({ content: "fortune", whisper: [GM_ID], roll: { formula: "1d20", total: 6 } });
+    expect(messages.some((m) => m.content === "fate: fortune")).toBe(true);
+    const before = h.hostStore.seq;
+    h.gm.requestAutomation("zone-graph", "s1", "manual");
+    await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(before + 1); // one envelope: table message + interpolated chat
+    expect(player.store.getAll("messages")).toHaveLength(0); // GM-only audience never reaches the player
+  });
 });
 
 describe("GM prefabs: atomic Tagger allocation, graph rebind, projection and undo", () => {

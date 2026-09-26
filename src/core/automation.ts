@@ -7,10 +7,11 @@
  * This is a bounded action registry foundation, not the full §5.4 inventory.
  */
 import type {
-  ActorDocument, AutomationDocument, BaseDocument, DocRef, Json, MessageDocument, SceneDocument,
-  NoteDocument, TileDocument, TokenDocument, WallDocument, WorldCollections,
+  ActorDocument, AutomationDocument, BaseDocument, DocRef, Json, MessageDocument,
+  SceneDocument, NoteDocument, TileDocument, TokenDocument, WallDocument, WorldCollections,
 } from "./documents";
 import { isDoorWall } from "./documents";
+import { drawFromTable, validateTable } from "./rollTable";
 import { applyDiff } from "./diff";
 import { DAY_SECONDS, MINUTE_SECONDS } from "./clock";
 import { WORLD_SETTINGS_ID, worldSettingsDoc, worldSettingsFrom } from "./worldSettings";
@@ -125,6 +126,22 @@ export type AutomationStep =
   /** MATT Hurt / Heal: fixed, GM-authored whole HP points; positive heals,
    * negative hurts. Current selection may come from Inside/Tagger filters. */
   | { id: string; kind: "hurtHeal"; amount: number; targets: "triggering" | "current" }
+  /** MATT Move: host-authorized reposition of the targeted tokens to an
+   * authored point on THIS scene. The committed move goes through the host's
+   * normal movement-trigger dispatch, so a destination crossing a tile can
+   * legitimately fire that tile; Stop Additional Tiles Triggering suppresses
+   * it. A token deleted earlier in the same plan is never rewritten. */
+  | { id: string; kind: "move"; x: number; y: number; targets: "triggering" | "current" }
+  /** MATT Rotation: set an absolute token rotation; degrees normalize to 0–360. */
+  | { id: string; kind: "rotate"; angle: number; targets: "triggering" | "current" }
+  /** MATT Delete Entities: remove the current collection's scene placeables
+   * (token, tile, wall, drawing, map pin). Deleting a token never touches its
+   * linked actor; the collection is empty afterwards. */
+  | { id: string; kind: "delete" }
+  /** MATT Roll Table: the host rolls a saved roll table with its RNG and posts
+   * the result to the scene or GM-only audience. An optional named variable
+   * receives the result text for later filters and chat interpolation. */
+  | { id: string; kind: "rollTable"; tableId: string; audience: "scene" | "gm"; variable?: string }
   /** MATT Random Number: host RNG sets a typed integer for later value filters/text. */
   | { id: string; kind: "random"; name: string; min: number; max: number }
   | { id: string; kind: "tags"; edit: TagEdit; tags: string[] }
@@ -537,6 +554,31 @@ export function validateAutomation(value: unknown): { ok: true; definition: Auto
         if (!keys(step, [...common, "mode"]) || !["open", "close", "lock", "unlock", "toggle"].includes(String(step.mode)))
           return bad("invalid door action");
         break;
+      case "move":
+        if (!keys(step, [...common, "x", "y", "targets"]) ||
+            !finite(step.x, 0, 1e9) || !finite(step.y, 0, 1e9) ||
+            !["triggering", "current"].includes(String(step.targets)))
+          return bad("Move needs finite scene points and triggering/current targets");
+        break;
+      case "rotate":
+        if (!keys(step, [...common, "angle", "targets"]) ||
+            !finite(step.angle, -1e6, 1e6) ||
+            !["triggering", "current"].includes(String(step.targets)))
+          return bad("Rotation needs a bounded angle in degrees and triggering/current targets");
+        break;
+      case "delete":
+        if (!keys(step, common)) return bad("invalid delete action");
+        break;
+      case "rollTable": {
+        if (!keys(step, [...common, "tableId", "audience", "variable"]) ||
+            typeof step.tableId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(step.tableId) ||
+            !["scene", "gm"].includes(String(step.audience)))
+          return bad("Roll Table needs a saved table ID and a scene/gm audience");
+        if (step.variable !== undefined &&
+            (typeof step.variable !== "string" || !IDENT.test(step.variable) || RESERVED_VARIABLES.has(step.variable)))
+          return bad("Roll Table needs a valid, non-reserved variable name");
+        break;
+      }
       case "chat":
         if (!keys(step, [...common, "content", "audience"]) || typeof step.content !== "string" ||
             step.content.length < 1 || step.content.length > 1000 || !["scene", "gm"].includes(String(step.audience))) return bad("invalid chat action");
@@ -707,6 +749,21 @@ function tileTargets(
   // A repeated current ref must not invert a toggle twice.
   const tiles = [...new Map(candidates.map((tile) => [tile._id, tile])).values()];
   return tiles.length > 32 ? { ok: false, error: "tile target fanout exceeds 32 tiles" } : { ok: true, tiles };
+}
+
+/** Resolve Move/Rotation target tokens from the staged scene. A token deleted
+ * earlier in the same plan is already gone and is never rewritten. */
+function motionTargets(
+  event: AutomationEvent, targets: "triggering" | "current",
+  current: ReadonlyArray<Target>,
+): TokenDocument[] {
+  const alive = new Set(event.scene.tokens.map((item) => item._id));
+  return targets === "triggering"
+    ? (event.token && alive.has(event.token._id) ? [event.token] : [])
+    : current
+      .filter((row) => row.ref.coll === "tokens" && row.doc.type === "token")
+      .map((row) => row.doc as TokenDocument)
+      .filter((item) => alive.has(item._id));
 }
 
 function escapeText(value: unknown): string {
@@ -1638,6 +1695,80 @@ function planGraph(
             wall.door = door;
             pendingDoors.set(id, { ref, door });
           }
+          break;
+        }
+        case "move": {
+          const docs = motionTargets(event, step.targets, current);
+          if (!docs.length) return fail("Move needs at least one live target token");
+          if (ops.length + docs.length > 1024) return fail("automation exceeds 1024 world operations");
+          if (!finite(step.x, 0, event.scene.width) || !finite(step.y, 0, event.scene.height))
+            return fail(`Move point ${step.x},${step.y} is outside the ${event.scene.width}x${event.scene.height} scene`);
+          const parent: DocRef = { coll: "scenes", id: event.scene._id };
+          for (const doc of docs) {
+            if (doc.x === step.x && doc.y === step.y) continue; // an unchanged position commits nothing
+            doc.x = step.x; doc.y = step.y;
+            ops.push({ kind: "update", ref: { coll: "tokens", id: doc._id, parent }, diff: { x: step.x, y: step.y } });
+          }
+          trace.push(`move ${docs.length} token(s) to ${step.x},${step.y}`);
+          break;
+        }
+        case "rotate": {
+          const angle = ((step.angle % 360) + 360) % 360;
+          const docs = motionTargets(event, step.targets, current);
+          if (!docs.length) return fail("Rotation needs at least one live target token");
+          if (ops.length + docs.length > 1024) return fail("automation exceeds 1024 world operations");
+          const parent: DocRef = { coll: "scenes", id: event.scene._id };
+          for (const doc of docs) {
+            if (doc.rotation === angle) continue;
+            doc.rotation = angle;
+            ops.push({ kind: "update", ref: { coll: "tokens", id: doc._id, parent }, diff: { rotation: angle } });
+          }
+          trace.push(`rotate ${docs.length} token(s) to ${angle} degrees`);
+          break;
+        }
+        case "delete": {
+          if (!current.length) return fail("Delete Entities needs a non-empty current collection");
+          if (current.some(({ ref }) => !["tokens", "tiles", "walls", "drawings", "notes"].includes(ref.coll)))
+            return fail("Delete Entities only removes tokens, tiles, walls, drawings or map pins");
+          if (ops.length + current.length > 1024) return fail("automation exceeds 1024 world operations");
+          const sceneList = (coll: string): Array<{ _id: string }> | null =>
+            coll === "tokens" ? event.scene.tokens : coll === "tiles" ? event.scene.tiles :
+            coll === "walls" ? event.scene.walls : coll === "drawings" ? event.scene.drawings :
+            coll === "notes" ? event.scene.notes : null;
+          const names: string[] = [];
+          for (const { ref, doc } of current) {
+            const list = sceneList(ref.coll);
+            const index = list ? list.findIndex((item) => item._id === ref.id) : -1;
+            if (index < 0) return fail(`delete target ${ref.coll}/${ref.id} is already gone from the scene`);
+            list?.splice(index, 1);
+            ops.push({ kind: "delete", ref });
+            names.push(String(doc.name ?? ref.id));
+          }
+          trace.push(`delete ${current.length} placeable(s): ${names.slice(0, 8).join(", ")}${
+            names.length > 8 ? `, … ${names.length - 8} more` : ""}`);
+          current = []; // the collection is empty after its entities are deleted
+          break;
+        }
+        case "rollTable": {
+          const table = world.rollTables.find((item) => item._id === step.tableId);
+          if (!table) return fail(`roll table ${step.tableId} is missing from the world`);
+          const invalid = validateTable(table);
+          if (invalid) return fail(`roll table ${table.name}: ${invalid}`);
+          const draw = drawFromTable(table, event.rng);
+          if (step.variable !== undefined && draw.result && draw.result.text.length > 256)
+            return fail(`roll table ${table.name}: result text exceeds the 256-character variable bound`);
+          if (step.variable !== undefined) values[step.variable] = draw.result?.text ?? "";
+          if (ops.length >= 1024) return fail("automation exceeds 1024 world operations");
+          const content = draw.result ? escapeText(draw.result.text) : "(no matching result)";
+          ops.push({ kind: "create", coll: "messages", data: {
+            _id: globalThis.crypto.randomUUID(), type: "message", name: `Roll table: ${table.name}`,
+            ownership: { default: step.audience === "gm" ? 0 : 1 },
+            flags: {}, system: {}, author: hostUserId, content,
+            whisper: step.audience === "gm" ? [hostUserId] : [],
+            roll: draw.result ? draw.roll : null,
+            flavor: `${table.formula} -> ${draw.roll.total}`,
+          } as MessageDocument });
+          trace.push(`rolled ${table.name}: ${table.formula} -> ${draw.roll.total}${draw.result ? "" : " (no matching result)"}`);
           break;
         }
         case "chat": {
