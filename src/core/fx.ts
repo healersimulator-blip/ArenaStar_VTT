@@ -46,10 +46,20 @@ const isBlendMode = (value: unknown): value is FxBlendMode =>
  * the token instead of staying behind where the host last saw it.
  */
 export interface FxMask {
-  /** `point` is deliberately absent: a region with no area hides everything or nothing. */
-  kind: "circle" | "cone" | "ray" | "rect";
-  /** Scene units: a circle/cone's radius, a ray/rect's depth. */
-  length: number;
+  /**
+   * `point` is deliberately absent: a region with no area hides everything or nothing.
+   * `polygon` (D-315) is the authored shape: `points` are scene units **relative to the
+   * anchor**, so a hand-drawn room, ridge or cone of cold is a region like any other — and
+   * with `walls` it is cut against the scene's own sight exactly as the four shapes are.
+   */
+  kind: "circle" | "cone" | "ray" | "rect" | "polygon";
+  /**
+   * Scene units: a circle/cone's radius, a ray/rect's depth. **Required on the four shapes
+   * and absent on a polygon**, which is measured by its own points instead — the host
+   * enforces that (a shape without a usable length is refused), because a hand-written
+   * document never passed a type checker.
+   */
+  length?: number;
   /** Scene units, ray/rect only. */
   width?: number;
   /** Degrees, 0 = east, growing clockwise on screen. Cone/ray/rect only. */
@@ -76,6 +86,21 @@ export interface FxMask {
    */
   lengthTo?: number;
   spinDeg?: number;
+  /**
+   * D-315: the authored region, in scene units **from the anchor**, in order around it.
+   * 3–64 points: three is the least that has an area, and 64 keeps the trim's angular sweep
+   * and the wire bounded. The region must not cross itself, and a wall-bounded one must be
+   * star-shaped about the anchor (see `walls`) — both refused by name rather than resolved
+   * into something the author did not draw.
+   */
+  points?: Array<{ x: number; y: number }>;
+  /**
+   * D-315: a polygon's own growth. It has no "length" to grow to, so it grows by a **ratio**
+   * — the same 0.05–10 the visual's own `scaleTo` uses, and the same number the region
+   * already travels with. (Only a polygon has it: the four crosshair shapes keep `lengthTo`,
+   * which is measured in the scene.)
+   */
+  scaleTo?: number;
   /**
    * D-314: the **cross axis** animates too, on the same curve and cycle — and it means its
    * own number. `widthTo` is the width a ray/rect widens to (scene units), perpendicular to
@@ -198,7 +223,82 @@ const MASK_FIELDS: Record<FxMask["kind"], readonly string[]> = {
   cone: ["kind", "length", "lengthTo", "angle", "spread", "spreadTo", "spinDeg", "walls", "invert"],
   ray: ["kind", "length", "lengthTo", "width", "widthTo", "angle", "spinDeg", "walls", "invert"],
   rect: ["kind", "length", "lengthTo", "width", "widthTo", "angle", "spinDeg", "walls", "invert"],
+  // A polygon is its own geometry: no length, no width, no angle, and no cross axis. It
+  // grows by a ratio, turns about the anchor, and takes the same wall bound and cutout.
+  polygon: ["kind", "points", "scaleTo", "spinDeg", "walls", "invert"],
 };
+/** The least and most points an authored region may have. */
+export const FX_POLYGON_POINTS = { min: 3, max: 64 } as const;
+
+/**
+ * D-315: is this authored region **star-shaped about the anchor**? The wall trim answers
+ * "how far can you see this way" with one distance per angle, so a region whose boundary a
+ * ray can cross twice has no single answer — the trim would silently take a slice of it. The
+ * test is the definition: walking the vertices, the direction from the anchor must always
+ * turn the same way (mod a full turn), which is exactly "each ray meets the boundary once".
+ */
+export function fxPolygonStarShaped(points: readonly { x: number; y: number }[]): boolean {
+  if (points.length < 3) return false;
+  let total = 0;
+  // The walk is a *loop*: the step from the last point back to the first is an edge like any
+  // other, and leaving it out would reject every shape whose seam happens to be closed there.
+  for (let index = 0; index < points.length; index += 1) {
+    const from = points[index];
+    const to = points[(index + 1) % points.length];
+    if (!from || !to) return false;
+    let delta = Math.atan2(to.y, to.x) - Math.atan2(from.y, from.x);
+    // Unwrap to the nearest equivalent turn, so a crossing of the ±π seam is not a reversal.
+    while (delta <= -Math.PI) delta += Math.PI * 2;
+    while (delta > Math.PI) delta -= Math.PI * 2;
+    if (Math.abs(delta) < 1e-9) return false; // two points on one ray: no single extent
+    if (delta * total < 0) return false;      // the walk turned back on itself
+    total += delta;
+  }
+  // Exactly one turn: every ray from the anchor leaves through the boundary once.
+  return Math.abs(Math.abs(total) - Math.PI * 2) < 1e-6;
+}
+
+/** Twice the signed area of an authored region — zero for anything without a region. */
+export function fxPolygonArea(points: readonly { x: number; y: number }[]): number {
+  let sum = 0;
+  for (let index = 0; index < points.length; index += 1) {
+    const from = points[index];
+    const to = points[(index + 1) % points.length];
+    if (!from || !to) continue;
+    sum += from.x * to.y - to.x * from.y;
+  }
+  return sum;
+}
+
+/**
+ * D-315: does the authored region cross itself? A bow-tie is not a region an author drew on
+ * purpose, and the fill a renderer gives it (even-odd) would show fields the author never
+ * asked for — refused instead, by name, with the two offending edges named by position.
+ * Touching at a shared vertex is fine: that is how a polygon is closed.
+ */
+export function fxPolygonSelfCrossing(points: readonly { x: number; y: number }[]): boolean {
+  const crosses = (a: { x: number; y: number }, b: { x: number; y: number },
+    c: { x: number; y: number }, d: { x: number; y: number }): boolean => {
+    const orient = (p: { x: number; y: number }, q: { x: number; y: number }, r: { x: number; y: number }) =>
+      (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+    const d1 = orient(a, b, c); const d2 = orient(a, b, d);
+    const d3 = orient(c, d, a); const d4 = orient(c, d, b);
+    return ((d1 > 1e-9 && d2 < -1e-9) || (d1 < -1e-9 && d2 > 1e-9)) &&
+      ((d3 > 1e-9 && d4 < -1e-9) || (d3 < -1e-9 && d4 > 1e-9));
+  };
+  for (let i = 0; i < points.length; i += 1) {
+    const a = points[i]; const b = points[(i + 1) % points.length];
+    if (!a || !b) continue;
+    for (let j = i + 1; j < points.length; j += 1) {
+      // Adjacent edges share a vertex by construction; the last and first share one too.
+      if (j === i || j === (i + 1) % points.length || (i === 0 && j === points.length - 1)) continue;
+      const c = points[j]; const d = points[(j + 1) % points.length];
+      if (!c || !d) continue;
+      if (crosses(a, b, c, d)) return true;
+    }
+  }
+  return false;
+}
 /** Authored metric bounds, in scene units / degrees. */
 export const FX_MASK_LIMITS = { min: 0.5, max: 5_000, spreadMin: 1, spreadMax: 359 } as const;
 
@@ -688,12 +788,34 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
       if (mask.kind === "point")
         return { ok: false, error: "an FX mask cannot be a point: it has no area to mask with" };
       if (!(mask.kind in MASK_FIELDS))
-        return { ok: false, error: "an FX mask must be a circle, cone, ray or rect" };
+        return { ok: false, error: "an FX mask must be a circle, cone, ray, rect or polygon" };
       // Each shape accepts exactly its own fields: switching a rect to a circle must
       // not leave a stale width that the renderer would then silently ignore.
       if (Object.keys(mask).some((key) => !MASK_FIELDS[mask.kind as FxMask["kind"]].includes(key)))
         return { ok: false, error: `an FX ${mask.kind} mask takes only ${MASK_FIELDS[mask.kind as FxMask["kind"]].join(", ")}` };
-      if (!inRange(mask.length, FX_MASK_LIMITS.min, FX_MASK_LIMITS.max))
+      // D-315: the authored region, before anything measures it. Points are scene units from
+      // the anchor, in order; the shape must have an area and must not cross itself. (Both
+      // refusals name the fault rather than smoothing it into *some* region.)
+      if (mask.kind === "polygon") {
+        const points = mask.points;
+        if (!Array.isArray(points) || points.length < FX_POLYGON_POINTS.min || points.length > FX_POLYGON_POINTS.max)
+          return { ok: false, error: `an FX polygon mask takes ${FX_POLYGON_POINTS.min}–${FX_POLYGON_POINTS.max} points` };
+        for (const [index, point] of points.entries()) {
+          if (!isObject(point) || Object.keys(point).some((key) => key !== "x" && key !== "y") ||
+              !inRange(point.x, -FX_MASK_LIMITS.max, FX_MASK_LIMITS.max) ||
+              !inRange(point.y, -FX_MASK_LIMITS.max, FX_MASK_LIMITS.max))
+            return { ok: false, error: `FX polygon point ${index + 1} needs an x and a y within ±${FX_MASK_LIMITS.max} scene units of the anchor` };
+        }
+        // Crossed first: a bow-tie's signed area is zero as a *consequence*, and "crosses
+        // itself" is the fault the author can act on.
+        if (fxPolygonSelfCrossing(points))
+          return { ok: false, error: "an FX polygon mask must not cross itself: draw the region in order around it" };
+        if (Math.abs(fxPolygonArea(points)) < 1e-6)
+          return { ok: false, error: "an FX polygon mask needs an area: its points must not lie in a line" };
+        if (mask.walls === true && !fxPolygonStarShaped(points))
+          return { ok: false, error: "a wall-bounded FX polygon mask must be star-shaped about its anchor: its points must run in order around it" };
+      }
+      if (mask.kind !== "polygon" && !inRange(mask.length, FX_MASK_LIMITS.min, FX_MASK_LIMITS.max))
         return { ok: false, error: `an FX mask's length must be ${FX_MASK_LIMITS.min}–${FX_MASK_LIMITS.max} scene units` };
       if ((mask.kind === "ray" || mask.kind === "rect") &&
           !inRange(mask.width, FX_MASK_LIMITS.min, FX_MASK_LIMITS.max))
@@ -710,6 +832,8 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
         return { ok: false, error: `an FX mask's width can widen to ${FX_MASK_LIMITS.min}–${FX_MASK_LIMITS.max} scene units` };
       if (mask.spreadTo !== undefined && !inRange(mask.spreadTo, FX_MASK_LIMITS.spreadMin, FX_MASK_LIMITS.spreadMax))
         return { ok: false, error: `a cone mask's spread can open to ${FX_MASK_LIMITS.spreadMin}–${FX_MASK_LIMITS.spreadMax} degrees` };
+      if (mask.scaleTo !== undefined && !inRange(mask.scaleTo, FX_SCALE_LIMITS.min, FX_SCALE_LIMITS.max))
+        return { ok: false, error: `an FX polygon mask's growth must be ${FX_SCALE_LIMITS.min}–${FX_SCALE_LIMITS.max}× its own size` };
       if (mask.spinDeg !== undefined && !inRange(mask.spinDeg, -FX_SPIN_LIMIT, FX_SPIN_LIMIT))
         return { ok: false, error: `an FX mask's turn must be within ±${FX_SPIN_LIMIT} degrees` };
       if (mask.walls !== undefined && typeof mask.walls !== "boolean")
@@ -719,7 +843,7 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
       // recipient has no walls to re-trim against and must not be given them (they can be
       // secret), so this is a refusal rather than a per-frame recomputation.
       if (mask.walls === true && (mask.lengthTo !== undefined || mask.spinDeg !== undefined ||
-          mask.widthTo !== undefined || mask.spreadTo !== undefined))
+          mask.widthTo !== undefined || mask.spreadTo !== undefined || mask.scaleTo !== undefined))
         return { ok: false, error: "an FX mask bounded by walls cannot animate: the trim is baked against the host's walls" };
     }
     // Appearance is validated before the asset, so a mistyped blend is reported as
@@ -900,9 +1024,12 @@ export function resolveFxSequence(
      * that would do nothing.
      */
     const maskArea = (mask: FxMask, at: CrosshairPoint): ResolvedFxMask | { error: string } => {
-      const shape: CrosshairShape = { kind: mask.kind, length: mask.length,
-        ...(mask.width !== undefined ? { width: mask.width } : {}),
-        ...(mask.spread !== undefined ? { spread: mask.spread } : {}) };
+      // The four crosshair shapes only: a polygon is its own geometry and never reaches the
+      // crosshair's area builder, so narrowing here keeps the kinds honestly separate.
+      const shape: CrosshairShape | null = mask.kind === "polygon" || mask.length === undefined ? null
+        : { kind: mask.kind, length: mask.length,
+          ...(mask.width !== undefined ? { width: mask.width } : {}),
+          ...(mask.spread !== undefined ? { spread: mask.spread } : {}) };
       // The scene's own metric decides what "15 ft" is in pixels. A gridless scene has
       // no metric at all and is read 1:1 (the crosshair's own fallback), but a *broken*
       // square/hex grid — distance 0, size NaN — is refused rather than quietly masked
@@ -911,8 +1038,14 @@ export function resolveFxSequence(
       if (grid.type !== "gridless" &&
           !(Number.isFinite(grid.size) && grid.size > 0 && Number.isFinite(grid.distance) && grid.distance > 0))
         return { error: "an FX mask needs a usable scene grid metric" };
-      const area = crosshairArea({ x: 0, y: 0 }, shape, grid, mask.angle ?? 0);
-      if (area.length === 0) return { error: "an FX mask must resolve to a region" };
+      // D-315: an authored region is measured like any other — the scene's metric turns its
+      // authored scene units into the same offsets the four shapes resolve to, so everything
+      // downstream (the wall trim, the cutout, the renderer) is unchanged.
+      const area = mask.kind === "polygon"
+        ? (mask.points ?? []).map((point) => ({ x: point.x * crosshairPxPerUnit(grid),
+          y: point.y * crosshairPxPerUnit(grid) }))
+        : shape ? crosshairArea({ x: 0, y: 0 }, shape, grid, mask.angle ?? 0) : [];
+      if (area.length < 3) return { error: "an FX mask must resolve to a region" };
       // A wall-bounded region is trimmed HERE, against the scene's own sight segments (the
       // same list the fog uses, so a door that is open for sight is open for the trim), and
       // travels as the finished polygon: the client is never handed walls. The segments are
@@ -944,7 +1077,10 @@ export function resolveFxSequence(
       // polygon is already host-resolved against the scene's metric, and a ratio is
       // unit-free, so a client still never needs to know what "15 ft" is in pixels.
       const animate = {
-        ...(mask.lengthTo !== undefined ? { scale: mask.lengthTo / mask.length } : {}),
+        // A polygon has no authored length to divide by: its growth is already a ratio.
+        ...(mask.kind === "polygon" && mask.scaleTo !== undefined ? { scale: mask.scaleTo } : {}),
+        ...(mask.kind === "polygon" || mask.length === undefined || mask.length <= 0 ? {}
+          : mask.lengthTo !== undefined ? { scale: mask.lengthTo / mask.length } : {}),
         ...(mask.spinDeg !== undefined ? { spinDeg: mask.spinDeg } : {}),
         // D-314: the cross axis travels as a ratio plus the frame it lives in. Nothing here
         // tells the client what the mask *is* in scene units, and only one bit of shape

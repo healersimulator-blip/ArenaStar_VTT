@@ -525,7 +525,7 @@ describe("effect masks and cutouts (§SQ-19/SQ-05, D-301)", () => {
     if (!point.ok) expect(point.error).toContain("cannot be a point");
     const unknown = validateFxSequence(masked({ kind: "star", length: 5 }));
     expect(unknown.ok).toBe(false);
-    if (!unknown.ok) expect(unknown.error).toBe("an FX mask must be a circle, cone, ray or rect");
+    if (!unknown.ok) expect(unknown.error).toBe("an FX mask must be a circle, cone, ray, rect or polygon");
   });
 
   test("each shape takes only its own fields, so a stale width is a refusal and not a shrug", () => {
@@ -660,6 +660,98 @@ describe("effect masks and cutouts (§SQ-19/SQ-05, D-301)", () => {
     expect(validateFxSequence({ version: 1, sections: [{ kind: "camera", id: "c", mode: "pan",
       to: { kind: "point", x: 10, y: 10 }, startMs: 0, durationMs: 500,
       mask: { kind: "circle", length: 5 } } as never] }).ok).toBe(false);
+  });
+
+  test("D-315: a drawn region is validated as the shape it is: an area, no self-crossing, and a star for the wall bound", () => {
+    const square = [{ x: -8, y: -8 }, { x: 8, y: -8 }, { x: 8, y: 8 }, { x: -8, y: 8 }];
+    expect(validateFxSequence(masked({ kind: "polygon", points: square })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "polygon", points: square, invert: true })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "polygon", points: square, scaleTo: 3 })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "polygon", points: square, spinDeg: 90 })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "polygon", points: square, walls: true })).ok).toBe(true);
+
+    // 3–64 points: two is a line, and 65 is past the bound the trim's sweep is sized for.
+    const tri = [{ x: -8, y: -8 }, { x: 8, y: -8 }, { x: 0, y: 8 }];
+    expect(validateFxSequence(masked({ kind: "polygon", points: tri })).ok).toBe(true);
+    for (const points of [square.slice(0, 2), Array.from({ length: 65 }, (_v, i) => ({
+      x: Math.cos((i / 65) * Math.PI * 2) * 10, y: Math.sin((i / 65) * Math.PI * 2) * 10 })),
+    []]) {
+      const bad = validateFxSequence(masked({ kind: "polygon", points }));
+      expect(bad.ok).toBe(false);
+      if (!bad.ok) expect(bad.error).toContain("3–64 points");
+    }
+    // A point is a scene-unit offset from the anchor, and nothing else.
+    const named = validateFxSequence(masked({ kind: "polygon",
+      points: [{ x: 1, y: 1 }, { x: 4, y: 1, z: 2 }, { x: 1, y: 4 }] }));
+    expect(named.ok).toBe(false);
+    if (!named.ok) expect(named.error).toContain("FX polygon point 2");
+    const offGrid = validateFxSequence(masked({ kind: "polygon",
+      points: [{ x: 1, y: 1 }, { x: 5_001, y: 1 }, { x: 1, y: 4 }] }));
+    expect(offGrid.ok).toBe(false);
+    if (!offGrid.ok) expect(offGrid.error).toContain("within ±5000 scene units");
+
+    // A line has no area, and a bow-tie crosses itself: both are refused by the fault they
+    // are rather than resolved into *some* region the author never drew.
+    const line = validateFxSequence(masked({ kind: "polygon",
+      points: [{ x: -8, y: 0 }, { x: 0, y: 0 }, { x: 8, y: 0 }] }));
+    expect(line.ok).toBe(false);
+    if (!line.ok) expect(line.error).toContain("must not lie in a line");
+    const bowTie = validateFxSequence(masked({ kind: "polygon",
+      points: [{ x: -8, y: -8 }, { x: 8, y: 8 }, { x: 8, y: -8 }, { x: -8, y: 8 }] }));
+    expect(bowTie.ok).toBe(false);
+    if (!bowTie.ok) expect(bowTie.error).toContain("must not cross itself");
+
+    // A concave region is still a region: the sprite is clipped to it either way.
+    const notched = [{ x: -10, y: -10 }, { x: 10, y: -10 }, { x: 10, y: 10 }, { x: 0, y: 2 },
+      { x: -10, y: 10 }];
+    expect(validateFxSequence(masked({ kind: "polygon", points: notched })).ok).toBe(true);
+    // The wall trim answers with one distance per angle, so a region a ray can cross twice
+    // has no answer — refused by name, and *only* when the author asked for the wall bound.
+    // This is a U opening eastward: a ray along +x meets its inner arms twice.
+    const u = [{ x: -10, y: -10 }, { x: 10, y: -10 }, { x: 10, y: 10 }, { x: 6, y: 10 },
+      { x: 6, y: -6 }, { x: -6, y: -6 }, { x: -6, y: 10 }, { x: -10, y: 10 }];
+    expect(validateFxSequence(masked({ kind: "polygon", points: u })).ok).toBe(true);
+    const walled = validateFxSequence(masked({ kind: "polygon", points: u, walls: true }));
+    expect(walled.ok).toBe(false);
+    if (!walled.ok) expect(walled.error).toContain("star-shaped about its anchor");
+
+    // …and a wall-bounded region cannot animate, the polygon's own ratio included.
+    const growing = validateFxSequence(masked({ kind: "polygon", points: square, walls: true, scaleTo: 2 }));
+    expect(growing.ok).toBe(false);
+    if (!growing.ok) expect(growing.error).toContain("cannot animate");
+    // A polygon takes no length, width, aperture or cross axis: its geometry is its own.
+    expect(validateFxSequence(masked({ kind: "polygon", points: square, length: 10 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "polygon", points: square, widthTo: 10 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "polygon", points: square, lengthTo: 20 })).ok).toBe(false);
+    // …and the four shapes refuse the polygon's own fields.
+    expect(validateFxSequence(masked({ kind: "circle", length: 10, points: square })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "circle", length: 10, scaleTo: 2 })).ok).toBe(false);
+    // A polygon's growth is a ratio, bounded like the sprite's own scale.
+    expect(validateFxSequence(masked({ kind: "polygon", points: square, scaleTo: 0.01 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "polygon", points: square, scaleTo: 40 })).ok).toBe(false);
+  });
+
+  test("D-315: a drawn region resolves through the scene's metric like any other shape", () => {
+    // The fixture scene is 100 px per 5 units, so 8 units is 160 px: the square's corners
+    // land at ±160 px, in the region's own offsets.
+    const resolved = resolveFxSequence(
+      masked({ kind: "polygon", points: [{ x: -8, y: -8 }, { x: 8, y: -8 }, { x: 8, y: 8 },
+        { x: -8, y: 8 }], scaleTo: 2, spinDeg: 90 }) as FxSequence,
+      scene, source, source, () => "image/png");
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    const mask = (resolved.sections[0] as Extract<typeof resolved.sections[number], { mask?: unknown }>)
+      .mask as { area: Array<{ x: number; y: number }>; invert: boolean; animate?: unknown };
+    expect(mask.area).toEqual([{ x: -160, y: -160 }, { x: 160, y: -160 },
+      { x: 160, y: 160 }, { x: -160, y: 160 }]);
+    // Its growth is already a ratio, so it travels as the number the author wrote — and the
+    // turn travels as the visual's own does.
+    expect(mask.animate).toEqual({ scale: 2, spinDeg: 90 });
+    // A still region carries no animation at all.
+    const still = resolveFxSequence(masked({ kind: "polygon", points: [{ x: -8, y: -8 },
+      { x: 8, y: -8 }, { x: 0, y: 8 }] }) as FxSequence, scene, source, source, () => "image/png");
+    if (!still.ok) return;
+    expect((((still.sections[0] as { mask?: { animate?: unknown } }).mask)?.animate)).toBeUndefined();
   });
 
   test("D-314: the cross axis belongs to the shapes that have one, and is bounded by its own numbers", () => {

@@ -3,7 +3,8 @@
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import type { ActorDocument, AssetManifest, MacroDocument, SceneDocument } from "../../core/documents";
-  import { FX_FILTER_CHAIN_MAX, FX_FILTER_RANGES, FX_MASK_LIMITS, FX_SCALE_LIMITS, FX_SPIN_LIMIT,
+  import { FX_FILTER_CHAIN_MAX, FX_FILTER_RANGES, FX_MASK_LIMITS, FX_POLYGON_POINTS, FX_SCALE_LIMITS,
+    FX_SPIN_LIMIT,
     fxAuthoredFilters, fxFilterFields, resolveFxSequence,
     validateFxSequence, type FxAnchor,
     type FxBlendMode, type FxCameraPathSection, type FxEasing, type FxFilterKind, type FxFilterStep,
@@ -471,14 +472,15 @@
   function changeMaskWalls(index: number, on: boolean): void {
     const before = draft.sections[index];
     if (!before || (before.kind !== "image" && before.kind !== "text") || !before.mask) return;
-    const { walls: _walls, lengthTo: _lengthTo, spinDeg: _spinDeg,
-      widthTo: _widthTo, spreadTo: _spreadTo, ...rest } = before.mask;
-    void _walls; void _lengthTo; void _spinDeg; void _widthTo; void _spreadTo;
+    const { walls: _walls, lengthTo: _lengthTo, spinDeg: _spinDeg, widthTo: _widthTo,
+      spreadTo: _spreadTo, scaleTo: _scaleTo, ...rest } = before.mask;
+    void _walls; void _lengthTo; void _spinDeg; void _widthTo; void _spreadTo; void _scaleTo;
     const mask: FxMask = on ? { ...rest, walls: true } : rest;
     draft = { ...draft, sections: draft.sections.map((old, i) => i === index
       ? { ...before, mask } as FxSection : old) };
     const animated = before.mask.lengthTo !== undefined || before.mask.spinDeg !== undefined ||
-      before.mask.widthTo !== undefined || before.mask.spreadTo !== undefined;
+      before.mask.widthTo !== undefined || before.mask.spreadTo !== undefined ||
+      before.mask.scaleTo !== undefined;
     status = on && animated
       ? "Wall-bounded: the region is trimmed against the scene's walls, which a recipient never receives — so its growth/turn/widening was cleared."
       : on ? "Wall-bounded: the region is trimmed against the scene's walls when the timeline is saved."
@@ -493,12 +495,56 @@
     const keepInvert = before.mask?.invert === true ? { invert: true } : {};
     const shapeless = value === "none";
     const kind = value as FxMask["kind"];
+    // D-315: a polygon starts as something with an area — a square about the anchor, in the
+    // scene's own units — because an empty point list is a control the author cannot save.
+    const side = 8;
     const mask: FxMask | null = shapeless ? null
       : kind === "circle" ? { kind, length: 15, ...keepInvert }
         : kind === "cone" ? { kind, length: 30, spread: 53.13, angle: 0, ...keepInvert }
-          : { kind, length: 30, width: 5, angle: 0, ...keepInvert };
+          : kind === "polygon" ? { kind, points: [{ x: -side, y: -side }, { x: side, y: -side },
+            { x: side, y: side }, { x: -side, y: side }], ...keepInvert }
+            : { kind, length: 30, width: 5, angle: 0, ...keepInvert };
     draft = { ...draft, sections: draft.sections.map((old, i) => i === index
       ? (mask ? { ...remaining, mask } : remaining) as FxSection : old) };
+  }
+
+  /**
+   * D-315: the authored region. Rows are the polygon's points, in order — the order *is* the
+   * shape, so adding appends (after the last edge, where an author expects the next point to
+   * go), and removing keeps the rest in place rather than renumbering them under the cursor.
+   * Only 3–64 points are offered: three is the least that has an area, and the host refuses
+   * both ends. The wizard stops *offering* the operation rather than offering one that fails.
+   */
+  function changeMaskPoint(index: number, at: number, axis: "x" | "y", value: string): void {
+    const before = draft.sections[index];
+    const points = before?.mask?.points;
+    if (!before || !points || !points[at]) return;
+    const entered = Number(value.trim());
+    const clamped = Number.isFinite(entered)
+      ? Math.min(FX_MASK_LIMITS.max, Math.max(-FX_MASK_LIMITS.max, entered)) : 0;
+    const next = points.map((point, i) => i === at ? { ...point, [axis]: clamped } : point);
+    changeMaskField(index, { points: next });
+  }
+
+  function addMaskPoint(index: number, after: number): void {
+    const before = draft.sections[index];
+    const points = before?.mask?.points;
+    if (!before || !points || points.length >= FX_POLYGON_POINTS.max) return;
+    // The new point continues from the edge it was added to, so the region keeps an area.
+    const from = points[after] ?? { x: 0, y: 0 };
+    const to = points[(after + 1) % points.length] ?? { x: 0, y: 0 };
+    const next = [...points];
+    next.splice(after + 1, 0, { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 });
+    changeMaskField(index, { points: next });
+  }
+
+  function removeMaskPoint(index: number, at: number): void {
+    const before = draft.sections[index];
+    const points = before?.mask?.points;
+    // A point that would leave two points is not removed: the region would have no area, and
+    // the host refuses it — so the last removal is not offered rather than offered and lost.
+    if (!before || !points || points.length <= FX_POLYGON_POINTS.min) return;
+    changeMaskField(index, { points: points.filter((_point, i) => i !== at) });
   }
 
   function changeMaskField(index: number, patch: Partial<FxMask>): void {
@@ -514,8 +560,8 @@
    * number, and the value is clamped to the same bounds the host checks — a region's
    * geometry is measured in scene units, so its growth is too.
    */
-  function changeMaskAnimation(index: number, field: "lengthTo" | "spinDeg" | "widthTo" | "spreadTo",
-    value: string): void {
+  function changeMaskAnimation(index: number,
+    field: "lengthTo" | "spinDeg" | "widthTo" | "spreadTo" | "scaleTo", value: string): void {
     const before = draft.sections[index];
     if (!before || (before.kind !== "image" && before.kind !== "text") || !before.mask) return;
     const { [field]: _dropped, ...rest } = before.mask;
@@ -526,7 +572,8 @@
     // share a range, an aperture has its own, and only the turn is signed.
     const bounds: [number, number] = field === "spinDeg" ? [-FX_SPIN_LIMIT, FX_SPIN_LIMIT]
       : field === "spreadTo" ? [FX_MASK_LIMITS.spreadMin, FX_MASK_LIMITS.spreadMax]
-        : [FX_MASK_LIMITS.min, FX_MASK_LIMITS.max];
+        : field === "scaleTo" ? [FX_SCALE_LIMITS.min, FX_SCALE_LIMITS.max]
+          : [FX_MASK_LIMITS.min, FX_MASK_LIMITS.max];
     const mask: FxMask = parsed === undefined || !Number.isFinite(parsed) ? rest
       : { ...rest, [field]: Math.min(bounds[1], Math.max(bounds[0], parsed)) };
     draft = { ...draft, sections: draft.sections.map((old, i) => i === index
@@ -536,7 +583,7 @@
   /** Does this region do anything inside its section? The hint appears only when it does. */
   function maskAnimates(mask: FxMask): boolean {
     return mask.lengthTo !== undefined || mask.spinDeg !== undefined ||
-      mask.widthTo !== undefined || mask.spreadTo !== undefined;
+      mask.widthTo !== undefined || mask.spreadTo !== undefined || mask.scaleTo !== undefined;
   }
 
   /**
@@ -546,7 +593,8 @@
    * axis each one moves and what it leaves alone.
    */
   function maskAnimationHint(mask: FxMask, repeats: number | undefined): string {
-    const axes = [mask.lengthTo !== undefined ? "growth" : "", mask.widthTo !== undefined ? "width" : "",
+    const axes = [mask.lengthTo !== undefined || mask.scaleTo !== undefined ? "growth" : "",
+      mask.widthTo !== undefined ? "width" : "",
       mask.spreadTo !== undefined ? "aperture" : "", mask.spinDeg !== undefined ? "turn" : ""]
       .filter((axis) => axis !== "");
     const cycles = repeats === undefined || repeats === 1 ? "eased across the section"
@@ -1264,13 +1312,42 @@
               <option value="cone">Cone</option>
               <option value="ray">Ray</option>
               <option value="rect">Rectangle</option>
+              <option value="polygon">Drawn region</option>
             </select></label>
             {#if section.mask}
               {@const mask = section.mask}
               {@const units = scene?.grid.units ?? "units"}
-              <label>Mask size ({units}) <input type="number" data-fx-mask-length
-                min={FX_MASK_LIMITS.min} max={FX_MASK_LIMITS.max} step="1" value={mask.length}
-                oninput={(e) => changeMaskField(i, { length: Number(e.currentTarget.value) })} /></label>
+              {#if mask.kind === "polygon"}
+                <!-- D-315: the region itself. Rows are its points in order — the order *is*
+                     the shape, and it has to run around the anchor for a wall bound to be
+                     possible at all, so each row says which point it is. -->
+                <div class="points" data-fx-mask-points>
+                  <span class="points-label">Region points ({units} from the anchor, in order)</span>
+                  {#each mask.points ?? [] as point, at (at)}
+                    <div class="point-row" data-fx-mask-point-row={at}>
+                      <strong>{at + 1}</strong>
+                      <label>X <input type="number" data-fx-mask-point-x min={-FX_MASK_LIMITS.max}
+                        max={FX_MASK_LIMITS.max} step="1" value={point.x}
+                        oninput={(e) => changeMaskPoint(i, at, "x", e.currentTarget.value)} /></label>
+                      <label>Y <input type="number" data-fx-mask-point-y min={-FX_MASK_LIMITS.max}
+                        max={FX_MASK_LIMITS.max} step="1" value={point.y}
+                        oninput={(e) => changeMaskPoint(i, at, "y", e.currentTarget.value)} /></label>
+                      <button type="button" data-fx-mask-point-add={at}
+                        onclick={() => addMaskPoint(i, at)}
+                        disabled={(mask.points ?? []).length >= FX_POLYGON_POINTS.max}
+                        >Insert after</button>
+                      <button type="button" data-fx-mask-point-remove={at}
+                        onclick={() => removeMaskPoint(i, at)}
+                        disabled={(mask.points ?? []).length <= FX_POLYGON_POINTS.min}
+                        >Remove</button>
+                    </div>
+                  {/each}
+                </div>
+              {:else}
+                <label>Mask size ({units}) <input type="number" data-fx-mask-length
+                  min={FX_MASK_LIMITS.min} max={FX_MASK_LIMITS.max} step="1" value={mask.length ?? 15}
+                  oninput={(e) => changeMaskField(i, { length: Number(e.currentTarget.value) })} /></label>
+              {/if}
               {#if mask.kind === "ray" || mask.kind === "rect"}
                 <label>Mask width ({units}) <input type="number" data-fx-mask-width
                   min={FX_MASK_LIMITS.min} max={FX_MASK_LIMITS.max} step="1" value={mask.width ?? 5}
@@ -1286,9 +1363,18 @@
                   value={mask.angle ?? 0} oninput={(e) => changeMaskField(i, { angle: Number(e.currentTarget.value) })} /></label>
               {/if}
               {#if mask.walls !== true}
-                <label>Grow to ({units}) <input type="number" data-fx-mask-length-to
-                  min={FX_MASK_LIMITS.min} max={FX_MASK_LIMITS.max} step="1" value={mask.lengthTo ?? ""}
-                  placeholder="steady" oninput={(e) => changeMaskAnimation(i, "lengthTo", e.currentTarget.value)} /></label>
+                {#if mask.kind === "polygon"}
+                  <!-- A polygon has no length to grow to, so it grows by a ratio — the same
+                       number the region travels with, and the same bounds as the sprite's own
+                       scale, because it is the same kind of statement. -->
+                  <label>Grow to (×) <input type="number" data-fx-mask-scale-to
+                    min={FX_SCALE_LIMITS.min} max={FX_SCALE_LIMITS.max} step="0.1" value={mask.scaleTo ?? ""}
+                    placeholder="steady" oninput={(e) => changeMaskAnimation(i, "scaleTo", e.currentTarget.value)} /></label>
+                {:else}
+                  <label>Grow to ({units}) <input type="number" data-fx-mask-length-to
+                    min={FX_MASK_LIMITS.min} max={FX_MASK_LIMITS.max} step="1" value={mask.lengthTo ?? ""}
+                    placeholder="steady" oninput={(e) => changeMaskAnimation(i, "lengthTo", e.currentTarget.value)} /></label>
+                {/if}
                 {#if mask.kind === "ray" || mask.kind === "rect"}
                   <label>Widen to ({units}) <input type="number" data-fx-mask-width-to
                     min={FX_MASK_LIMITS.min} max={FX_MASK_LIMITS.max} step="1" value={mask.widthTo ?? ""}
@@ -1491,4 +1577,9 @@
   .filters-label { color: #aab6c6; }
   .filter-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   .filter-row button { justify-self: start; }
+  /* D-315: a drawn region is a numbered list of points, and the numbering is the shape. */
+  .points { display: grid; gap: 4px; padding: 5px; border: 1px dashed #5d7091; border-radius: 4px; }
+  .points-label { color: #aab6c6; }
+  .point-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .point-row strong { min-width: 1.6em; color: #e6d6a1; }
 </style>

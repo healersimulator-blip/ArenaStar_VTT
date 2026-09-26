@@ -10823,3 +10823,94 @@ failed three mask tests — two on the sampler's own frame count (19–20 sample
 `MIN_ANIMATION_SAMPLES = 20`) and one on the status sentence this entry reworded. The sentence was a
 real break and was fixed; the sample count was contention, and the sampler is now frame-driven so
 the number of frames a busy browser managed cannot decide whether the animation claim is made.
+
+## D-315 — the drawn region: a mask the author draws, point by point (2026-09-26)
+
+D-301 gave a mask the crosshair's four shapes and D-307 let a wall cut them. What no field could
+express was a region that is not one of those shapes: a room's own outline, a ridge, a cone of cold
+drawn to the map. The wall bound only *cuts* the four shapes — it cannot invent one. This entry adds
+the authored shape: `mask.kind: "polygon"`, 3–64 `points` in scene units **from the anchor**, in
+order around it.
+
+**Validated as the shape it is, not as a list.** Points are `{x, y}` and nothing else, each within
+±5000 scene units (so a typo like `-9000` is a refusal and not an off-map region); there must be at
+least three (two is a line) and at most 64 (the bound the trim's angular sweep and the wire are
+sized for). A region that **crosses itself** is refused by name — a bow-tie's fill depends on the
+renderer's winding rule, and fields the author never drew would be shown by it — and so is a set of
+points with **no area at all** ("must not lie in a line"). Self-crossing is reported *first*: a
+bow-tie's zero area is a consequence of the crossing, and "crosses itself" is the fault the author
+can act on.
+
+**The wall bound needs a star, and says so.** `fxSightTrim` answers "how far can you see this way"
+with one distance per angle, so a region a ray from the anchor can cross twice has no single answer
+— the trim would silently take a slice of it. `fxPolygonStarShaped` tests the definition (walking
+the vertices, each step must turn the same way and the walk must total exactly one turn) and a
+wall-bounded polygon that fails it is refused: *"a wall-bounded FX polygon mask must be star-shaped
+about its anchor: its points must run in order around it"*. A concave region is perfectly fine
+**without** the wall bound — the sprite is clipped to it either way — which is exactly the shape of
+that refusal. A wall-bounded region still cannot animate, the polygon's own growth included: the
+trim is baked against walls a recipient never receives.
+
+**It resolves through the scene's metric like any other shape.** Points are multiplied by
+`crosshairPxPerUnit` exactly as the crosshair's own areas are, so everything downstream is
+unchanged: the same wall trim, the same cutout (the polygon becomes the hole of the covering
+rectangle), the same renderer, the same readback. `inspect` reports the drawn polygon's own points
+and bounds — a triangle drawn at (0,0), (5,0), (0,5) is three points in the first quadrant of the
+anchor, which is a claim the drawing itself makes.
+
+**Its own growth is a ratio.** A polygon has no `length` to grow to, so `scaleTo` (0.05–10, the
+visual's own scale bounds) says "twice itself" and travels **as the number the author wrote** — it
+is already a ratio, which is the form D-305's `lengthTo` is converted into. `spinDeg` turns it about
+the **anchor** rather than its centroid, like every other region. `length`/`width`/`spread`, the
+D-314 cross axes and the four shapes' `lengthTo` are all refused on a polygon through the per-kind
+field list, and `points`/`scaleTo` are refused on the four shapes: two halves of one vocabulary,
+each taking only what it means.
+
+**The type stops claiming a shape has a length.** `FxMask.length` is optional — required on the four
+shapes, absent on a polygon — because the one type was quietly saying "every region has a length"
+when the four shapes' kind list already said otherwise. The four shapes are simply required to keep
+it *in their own fields*: `lengthTo` is a multiple of the region's own length only when there is one
+to divide by, the crosshair's area builder is reached only by shapes that have one, and the host
+refuses a shape whose length is missing or not positive (the same refusal a bad number already got).
+A document is hand-writable JSON, so the invariant that matters is the runtime one.
+
+**In the wizard.** "Drawn region" joins the mask shapes, seeding a square about the anchor (an empty
+point list is not a shape anyone can save), and the region is a numbered list of rows — the
+numbering *is* the shape, so each row is labelled and **Insert after** puts a new point on the edge
+it was added to (its midpoint, so the region keeps an area). Remove is disabled at three points and
+Insert at 64: the wizard stops *offering* an operation the host would refuse rather than offering
+one that fails on save. "Grow to (×)" replaces "Grow to (units)" for this shape, because a polygon's
+growth is a multiple of itself.
+
+**Non-claims.** Not claimed: drawing a region **on the canvas** (a crosshair drag still produces the
+four shapes, and a polygon is authored as numbers in the wizard — the map-side editor is the
+crosshair's own next unit); a wall-bound polygon that is not star-shaped about its anchor (refused
+rather than approximated); self-intersecting regions; per-point animation; holes inside a region (a
+cutout is the whole region, not a ring); and a polygon mask on a sound/camera/wait section, which
+remains refused like every other mask.
+
+**Gates.** `pnpm test` **3 814 passed / 12 skipped** (302 files: 300 passed, 2 skipped), +6 cases: 2
+in `tests/core/fx.test.ts` (the 3–64 bound, per-point fields and ranges, the self-crossing refusal
+before the area one, a line with no area, the star rule for the wall bound and its absence without
+one, the polygon's fields refused on the four shapes and theirs on it; plus resolution — 8 units →
+160 px through the scene metric, `scaleTo` travelling as the author's ratio, a still region carrying
+no animation), 3 in `tests/canvas/fxStyle.test.ts` (the drawn polygon is its own vertices and
+bounds and says nothing about facing; a cutout of it hides what is inside, read off the polygon's
+own hole; its ratio and its turn about the anchor, read out of the polygon — the flag's far edge
+60 px down-screen after a quarter turn), and 1 host case in
+`tests/host/sync.test.ts` (a drawn region reaching the cue as offsets with `animate.scale`, and 8
+forged regions — too few, too many, a line, a bow-tie, a stray field, an out-of-scene point, a
+wall-bounded U and a polygon carrying `length` — never reaching the store, while the same U unwalled
+is accepted). e2e: `e2e/fx_sequence.spec.ts` gained a phase that authors a triangle point by point,
+checks the 3-point floor disables removal, inserts and removes a point on an edge, saves, reopens it
+from the host, and then reads the live mask frame by frame (three points, everything in the first
+quadrant, the far corner walking 100 px → 200 px at a 2× ratio, the reach exactly 200√2 px at the
+end). Every animation sampler in that spec is now **frame-driven** (`requestAnimationFrame`): the
+batch run of this change caught the older D-305 mask test failing on `middle < 60` with 60.5, which
+is a claim about *sampling* rather than about the easing — a busy main thread stretches
+`setTimeout(16)` into uneven samples, and the middle *sample* stops being the middle of the motion.
+The conversion is stated here rather than presented as a green first run. Runs: `fx_sequence` alone on chromium **32/32** (6.4 m), and with `fx_item_binding` +
+`summons` at `--repeat-each=2` **74/74** (16.2 m). Both runs come from the build this commit's source
+produces; the sampler conversion above was prompted by that batch standing at 73/74. `pnpm typecheck` 63 components / 0 blocking / 1
+advisory · `pnpm lint` exit 0 · `pnpm build` → `pnpm size` **3 878 940 B raw / 1 112 038 B gzip**
+(+5 111 raw over D-314), inside the 6 MB budget.

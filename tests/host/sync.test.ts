@@ -1328,6 +1328,70 @@ describe("Macros / FX host authority and audience", () => {
     ] },
   });
 
+  test("a drawn region is host-validated as a shape and resolves through the scene's metric (D-315)", async () => {
+    const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    const withMask = (id: string, mask: unknown): MacroDocument => ({
+      _id: id, type: "macro", name: id, ownership: { default: 1 },
+      flags: { core: { playerCallable: true } }, system: {}, kind: "sequence", command: "",
+      sequence: { version: 1, audience: "scene", sections: [{ kind: "image", id: "a",
+        assetId: imageHash, startMs: 0, durationMs: 1000, at: { kind: "point", x: 100, y: 100 },
+        mask } as never] },
+    }) as unknown as MacroDocument;
+    const refused: string[] = [];
+    h.gmBus.on("rejected", (event) => refused.push(event.detail));
+    const square = [{ x: -8, y: -8 }, { x: 8, y: -8 }, { x: 8, y: 8 }, { x: -8, y: 8 }];
+
+    // A drawn region reaches the cue as offsets in the scene's own metric: 8 units is
+    // 100 px/5 units × 8 = 160 px, and the growth travels as the ratio the author wrote.
+    h.gm.submit([{ kind: "create", coll: "macros", data: withMask("room", { kind: "polygon",
+      points: square, scaleTo: 2, invert: true }) }]);
+    await flushMicrotasks();
+    const cues: ClientEvents["fx"][] = [];
+    h.gmBus.on("fx", (m) => cues.push(m));
+    h.gm.requestSequence("room", "s1");
+    await flushMicrotasks();
+    const started = cues.find((m) => m.kind === "fx.start");
+    expect(started).toBeDefined();
+    if (started?.kind === "fx.start") {
+      const mask = (started.sections[0] as { mask?: { area?: unknown; invert?: boolean;
+        animate?: unknown } }).mask;
+      expect(mask?.area).toEqual([{ x: -160, y: -160 }, { x: 160, y: -160 },
+        { x: 160, y: 160 }, { x: -160, y: 160 }]);
+      expect(mask?.invert).toBe(true);
+      expect(mask?.animate).toEqual({ scale: 2 });
+    }
+
+    // Forged regions never reach the store: too few points, too many, a line with no area, a
+    // bow-tie that crosses itself, a point with a field that is not x/y, an out-of-scene
+    // offset, and a wall bound on a region a ray can cross twice.
+    const u = [{ x: -10, y: -10 }, { x: 10, y: -10 }, { x: 10, y: 10 }, { x: 6, y: 10 },
+      { x: 6, y: -6 }, { x: -6, y: -6 }, { x: -6, y: 10 }, { x: -10, y: 10 }];
+    for (const [name, mask] of [
+      ["two-points", { kind: "polygon", points: [square[0], square[1]] }],
+      ["many", { kind: "polygon", points: Array.from({ length: 65 }, (_v, i) => ({
+        x: Math.cos((i / 65) * Math.PI * 2) * 10, y: Math.sin((i / 65) * Math.PI * 2) * 10 })) }],
+      ["line", { kind: "polygon", points: [{ x: -8, y: 0 }, { x: 0, y: 0 }, { x: 8, y: 0 }] }],
+      ["bow-tie", { kind: "polygon", points: [{ x: -8, y: -8 }, { x: 8, y: 8 },
+        { x: 8, y: -8 }, { x: -8, y: 8 }] }],
+      ["stray-field", { kind: "polygon", points: [{ x: 0, y: 0 }, { x: 8, y: 0, z: 1 },
+        { x: 0, y: 8 }] }],
+      ["far-off", { kind: "polygon", points: [{ x: 0, y: 0 }, { x: 9_000, y: 0 },
+        { x: 0, y: 8 }] }],
+      ["walled-u", { kind: "polygon", points: u, walls: true }],
+      ["polygon-length", { kind: "polygon", points: square, length: 10 }],
+    ] as const) {
+      h.gm.submit([{ kind: "create", coll: "macros", data: withMask(`bad-${name}`, mask) }]);
+      await flushMicrotasks();
+      expect(h.hostStore.get("macros", `bad-${name}`), name).toBeUndefined();
+    }
+    expect(refused.length).toBeGreaterThanOrEqual(8);
+    // …and the concave region it refused to wall-bound is perfectly acceptable unwalled.
+    h.gm.submit([{ kind: "create", coll: "macros", data: withMask("u-open", { kind: "polygon", points: u }) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "u-open")).toBeDefined();
+  });
+
   test("a mask's cross axis survives the host as a ratio, and a shape without one is refused (D-314)", async () => {
     const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
       chunks: 1, visibility: "referenced" } });

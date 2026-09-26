@@ -555,7 +555,7 @@ test("a camera shake returns the view exactly, and a wheel takes the view back w
     const until = performance.now() + 1_600;
     while (performance.now() < until) {
       worst = Math.max(worst, Math.hypot(stage.camera.x - start.x, stage.camera.y - start.y));
-      await new Promise((resolve) => setTimeout(resolve, 16));
+      await new Promise((resolve) => requestAnimationFrame(resolve));
     }
     return worst;
   });
@@ -919,7 +919,7 @@ test("a camera path tours its waypoints and parks on the last one", async ({ pag
     const until = performance.now() + 3_200;
     while (performance.now() < until) {
       seen.push(centre());
-      await new Promise((resolve) => setTimeout(resolve, 16));
+      await new Promise((resolve) => requestAnimationFrame(resolve));
     }
     return seen;
   });
@@ -1326,7 +1326,7 @@ test("a visual grows and spins through its section, eased, and lands on the auth
     while (performance.now() < until) {
       const [frame] = layer?.inspect() ?? [];
       if (frame) seen.push({ scale: frame.scale, rotationDeg: frame.rotationDeg });
-      await new Promise((resolve) => setTimeout(resolve, 16));
+      await new Promise((resolve) => requestAnimationFrame(resolve));
     }
     return seen;
   });
@@ -1600,7 +1600,12 @@ test("a mask grows through its section, and a turning one sweeps its own bearing
   await wizard.locator("li").filter({ hasText: "Dome" }).getByRole("button", { name: "Edit" }).click();
   await expect(section.locator("[data-fx-mask-length-to]")).toHaveValue("8");
 
-  /** The drawn region of whatever cue is playing, straight off the clipping polygon. */
+  /**
+   * The drawn region of whatever cue is playing, straight off the clipping polygon. Sampled
+   * **per animation frame**, not on a timer: a busy main thread stretches `setTimeout(16)`
+   * into a couple of samples a second, and every claim below is about the animation, not
+   * about how many times the sampler got to look.
+   */
   const sample = async (windowMs: number) => page.evaluate(async (until) => {
     const layer = (globalThis as unknown as { __stage?: { getFxLayer: () => {
       inspect: (runId?: string) => Array<{ mask:
@@ -1611,7 +1616,7 @@ test("a mask grows through its section, and a turning one sweeps its own bearing
     while (performance.now() < deadline) {
       const mask = layer?.inspect()[0]?.mask;
       if (mask) seen.push({ radius: mask.radius, bearingDeg: mask.bearingDeg });
-      await new Promise((resolve) => setTimeout(resolve, 16));
+      await new Promise((resolve) => requestAnimationFrame(resolve));
     }
     return seen;
   }, windowMs);
@@ -1665,6 +1670,105 @@ test("a mask grows through its section, and a turning one sweeps its own bearing
   expect(middle).toBeLessThan(60);
   // A sweep rather than a jump: most frames sit away from both endpoints.
   expect(bearings.filter((bearing) => bearing > 10 && bearing < 80).length).toBeGreaterThan(10);
+  await expect.poll(async () => (await sample(0)).length, { timeout: 5_000 }).toBe(0);
+});
+
+// D-315 (SQ-05/SQ-19): a **drawn region**. The wizard is the only place a polygon can be
+// authored — rows of points in scene units from the anchor — and the claim is about what
+// clips: the sprite's mask is the polygon the author typed, and it grows by its ratio.
+test("a drawn region clips to the points the author entered, and grows by its ratio", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  await wizard.locator('input[type="file"]').setInputFiles({ name: "clearing.png", mimeType: "image/png", buffer: png });
+  await expect(wizard.getByRole("status")).toContainText("GM-only playback");
+  await wizard.locator("[data-fx-name]").fill("Clearing");
+  await wizard.getByRole("button", { name: "Image / video", exact: true }).click();
+  const section = wizard.locator("[data-fx-section]");
+  await section.getByRole("combobox", { name: "Media" }).selectOption({ index: 1 });
+  await section.getByLabel("X", { exact: true }).fill("600");
+  await section.getByLabel("Y", { exact: true }).fill("500");
+  await section.getByLabel("Duration ms").fill("1600");
+
+  // Choosing "Drawn region" seeds a region with an area — four points, not an empty list
+  // the author cannot save — and offers only the fields a polygon has.
+  await section.locator("[data-fx-mask-kind]").selectOption("polygon");
+  await expect(section.locator("[data-fx-mask-point-row]")).toHaveCount(4);
+  await expect(section.locator("[data-fx-mask-length]")).toHaveCount(0);
+  await expect(section.locator("[data-fx-mask-width]")).toHaveCount(0);
+  await expect(section.locator("[data-fx-mask-length-to]")).toHaveCount(0);
+  await expect(section.locator("[data-fx-mask-scale-to]")).toHaveCount(1);
+
+  // A right triangle, 5 units on each leg from the anchor (100 px per 5 units on this
+  // scene's grid), with the last point placed at the origin so the shape is anchored there.
+  const pointRow = (at: number) => section.locator(`[data-fx-mask-point-row="${at}"]`);
+  for (const [at, x, y] of [[0, "0", "0"], [1, "5", "0"], [2, "0", "5"], [3, "0", "0"]] as const) {
+    await pointRow(at).locator("[data-fx-mask-point-x]").fill(x);
+    await pointRow(at).locator("[data-fx-mask-point-y]").fill(y);
+  }
+  // Three points is the floor: the remove buttons go disabled rather than offering an
+  // operation the host would refuse.
+  await section.locator('[data-fx-mask-point-remove="3"]').click();
+  await expect(section.locator("[data-fx-mask-point-row]")).toHaveCount(3);
+  await expect(section.locator('[data-fx-mask-point-remove="0"]')).toBeDisabled();
+  // Insert puts the new point on the edge it was added to, where an author expects it.
+  await section.locator('[data-fx-mask-point-add="0"]').click();
+  await expect(section.locator("[data-fx-mask-point-row]")).toHaveCount(4);
+  // …the midpoint of the edge it was inserted into: (0,0) → (5,0) puts it at (2.5, 0),
+  // which is the next point on that leg rather than an arbitrary spot.
+  await expect(pointRow(1).locator("[data-fx-mask-point-x]")).toHaveValue("2.5");
+  await expect(pointRow(1).locator("[data-fx-mask-point-y]")).toHaveValue("0");
+  await section.locator('[data-fx-mask-point-remove="1"]').click();
+  await expect(section.locator("[data-fx-mask-point-row]")).toHaveCount(3);
+  // Grow by a ratio: this region is a polygon, so "grow to" is a multiple of itself.
+  await section.locator("[data-fx-mask-scale-to]").fill("2");
+
+  await wizard.locator("[data-fx-save]").click();
+  await expect(wizard.locator("li")).toContainText(["Clearing"]);
+  await wizard.locator("li").filter({ hasText: "Clearing" }).getByRole("button", { name: "Edit" }).click();
+  await expect(section.locator("[data-fx-mask-point-row]")).toHaveCount(3);
+  await expect(pointRow(1).locator("[data-fx-mask-point-x]")).toHaveValue("5");
+  await expect(section.locator("[data-fx-mask-scale-to]")).toHaveValue("2");
+
+  const sample = async (windowMs: number) => page.evaluate(async (until) => {
+    const layer = (globalThis as unknown as { __stage?: { getFxLayer: () => {
+      inspect: (runId?: string) => Array<{ mask: { points: number; radius: number; bounds:
+        { minX: number; maxX: number; minY: number; maxY: number } } | null }> } } })
+      .__stage?.getFxLayer();
+    const seen: Array<{ points: number; radius: number; maxX: number; maxY: number }> = [];
+    const deadline = performance.now() + until;
+    while (performance.now() < deadline) {
+      const mask = layer?.inspect()[0]?.mask;
+      if (mask) seen.push({ points: mask.points, radius: mask.radius, maxX: mask.bounds.maxX,
+        maxY: mask.bounds.maxY });
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+    return seen;
+  }, windowMs);
+
+  await wizard.locator("[data-fx-run]").click();
+  const grown = await sample(2_000);
+  expect(grown.length).toBeGreaterThan(MIN_ANIMATION_SAMPLES);
+  // What is drawn is the triangle: three points, and everything it covers is in the first
+  // quadrant of the anchor (the shape never crosses it, which is what the points say).
+  expect(new Set(grown.map((frame) => frame.points))).toEqual(new Set([3]));
+  expect(Math.min(...grown.map((frame) => frame.maxX))).toBeGreaterThanOrEqual(-0.5);
+  expect(Math.min(...grown.map((frame) => frame.maxY))).toBeGreaterThanOrEqual(-0.5);
+  // Growth: 5 units (100 px) becoming 10 units (200 px), watched as the polygon's own
+  // extent — the far corner walks from 100 px to 200 px along each axis.
+  const corners = grown.map((frame) => Math.max(frame.maxX, frame.maxY));
+  const smallest = Math.min(...corners);
+  const largest = Math.max(...corners);
+  expect(smallest).toBeLessThan(120);
+  expect(largest).toBeGreaterThan(190);
+  expect(largest / smallest).toBeGreaterThan(1.7);
+  expect(corners.every((corner, index) => index === 0 || corner >= (corners[index - 1] ?? 0) - 0.5)).toBe(true);
+  // The reach is the far corner's own distance: at 2× the ratio it is 200√2 px, no more.
+  expect(Math.max(...grown.map((frame) => frame.radius)))
+    .toBeLessThanOrEqual(Math.hypot(200, 200) + 0.5);
   await expect.poll(async () => (await sample(0)).length, { timeout: 5_000 }).toBe(0);
 });
 
@@ -1833,7 +1937,7 @@ test("a visual's filter deepens through its section and lands on the authored st
       const label = frame?.filters[0] ?? "";
       const value = Number(label.slice(label.indexOf(":") + 1));
       if (label.startsWith("blur:") && Number.isFinite(value)) seen.push(value);
-      await new Promise((resolve) => setTimeout(resolve, 16));
+      await new Promise((resolve) => requestAnimationFrame(resolve));
     }
     return seen;
   });

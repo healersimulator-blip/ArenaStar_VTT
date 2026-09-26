@@ -440,6 +440,54 @@ describe("animated filter strength on the canvas (§SQ-05, D-304)", () => {
 });
 
 /**
+ * D-315: a **drawn region** clips the sprite to its own polygon, and behaves like any other
+ * mask afterwards — it grows by its ratio, turns about the anchor, and its cutout is the
+ * same cutout. The reading is the drawn polygon, not the plan.
+ */
+describe("drawn polygon regions on the canvas (§SQ-05/SQ-19, D-315)", () => {
+  const square = (side: number) => ({ area: [{ x: -side, y: -side }, { x: side, y: -side },
+    { x: side, y: side }, { x: -side, y: side }], invert: false });
+
+  test("the drawn polygon is the region: its own vertices, in its own order", () => {
+    const drawn = fxMaskReadback(fxMaskGraphics(square(40), 0, { scale: 1, rotation: 0 }));
+    expect(drawn.points).toBe(4);
+    expect(drawn.bounds).toEqual({ minX: -40, maxX: 40, minY: -40, maxY: 40 });
+    // A rectangle of four points genuinely says nothing about which way it faces.
+    expect(drawn.bearingDeg).toBeNull();
+  });
+
+  test("a cutout of a drawn region hides what is inside it, exactly as the shapes do", () => {
+    const cutout = fxMaskGraphics({ ...square(40), invert: true }, 60, { scale: 1, rotation: 0 });
+    const read = fxMaskReadback(cutout);
+    // The region travels as the hole of the covering rectangle; the polygon survives as the
+    // same four offsets, and the reading covers the sprite rather than only the hole.
+    expect(read.points).toBe(4);
+    expect(read.radius).toBeCloseTo(Math.hypot(40, 40), 3);
+  });
+
+  test("a drawn region grows by its ratio and turns about the anchor, then holds", () => {
+    const section = { durationMs: 1000 };
+    const growing = fxMaskTransform({ scale: 3 }, section, 500);
+    expect(growing.scale).toBeCloseTo(2, 6);
+    const grown = fxMaskReadback(fxMaskGraphics(square(40), 0, growing));
+    expect(grown.bounds).toEqual({ minX: -80, maxX: 80, minY: -80, maxY: 80 });
+    // …and it is the *anchor* it turns about, not its own centroid: an asymmetric region
+    // must swing around the effect, which is where the author placed it.
+    const flag = { area: [{ x: 0, y: 0 }, { x: 60, y: 0 }, { x: 60, y: 20 }, { x: 0, y: 20 }],
+      invert: false };
+    // A quarter turn: the flag's 60 put its far edge 60 px below the anchor (the screen's own
+    // y-down convention, the same one every other rotation in this file uses), and its 20 of
+    // thickness now lies to the *left* of it — swung around the anchor, not around itself.
+    const turned = fxMaskReadback(fxMaskGraphics(flag, 0, { scale: 1, rotation: Math.PI / 2 }));
+    expect(turned.bounds.minX).toBeCloseTo(-20, 3);
+    expect(turned.bounds.maxX).toBeCloseTo(0, 3);
+    expect(turned.bounds.maxY).toBeCloseTo(60, 3);
+    // Its centroid has swung with it, which is the polygon genuinely saying it turned.
+    expect(turned.bearingDeg).toBeCloseTo(108.4, 1);
+  });
+});
+
+/**
  * D-314: the region's **cross axis** — a ray/rect's width, a cone's aperture — animates on
  * its own. The drawing is read back rather than the plan, because the claim is about the
  * polygon that is clipping: a widened beam must be exactly wider, with the same reach.
