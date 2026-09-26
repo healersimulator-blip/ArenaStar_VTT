@@ -1623,9 +1623,19 @@ export class HostSync {
     if (recordUndo) this.undoStack.push(envelope, applied.value.inverses);
     this.broadcastEnvelope(envelope, applied.value.inverses);
     this.scheduleSummonExpiry();
-    // Reverting a movement must not re-trigger a trap while reversing it.
-    if (moving.size > 0 && !txId.startsWith("action-revert-"))
-      this.fireMovementAutomations([...moving.values()], by);
+    // Reverting a movement must not re-trigger a trap while reversing it. A graph's
+    // own committed Move/Rotation re-enters here through its commit; the depth cap
+    // keeps a ping-pong graph pair from growing the host's call stack unboundedly.
+    if (moving.size > 0 && !txId.startsWith("action-revert-")) {
+      if (this.movementAutomationDepth < HostSync.MOVEMENT_AUTOMATION_DEPTH) {
+        this.movementAutomationDepth++;
+        try {
+          this.fireMovementAutomations([...moving.values()], by);
+        } finally {
+          this.movementAutomationDepth--;
+        }
+      }
+    }
     // F03: prune expired pending rolls (T+2 window) when a combat round/turn advanced
     try {
       let pruneTurn: number | null = null;
@@ -2617,6 +2627,11 @@ export class HostSync {
   // ─── Active-zone graphs: host events → atomic world plan → projected cues ───
 
   private readonly seenAutomationRequests = new Map<string, number>();
+  /** Reentry depth of movement-trigger dispatch. A graph's committed Move/Rotation
+   * can land a token in another tile whose graph moves it on, so the chain is
+   * bounded at the host, not by each plan's own invocation budget. */
+  private movementAutomationDepth = 0;
+  private static readonly MOVEMENT_AUTOMATION_DEPTH = 8;
 
   /** Public canvas gesture resolves a tile to private graphs on the host. */
   private handleAutomationClick(session: Session, msg: AutomationClickMsg): void {

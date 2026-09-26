@@ -1796,3 +1796,245 @@ describe("MATT Hurt / Heal planning", () => {
       caller: actor, at: 1000, rng: () => 0.5 }, "gm")).toMatchObject({ ok: false });
   });
 });
+
+describe("MATT Move / Rotation / Delete Entities / Roll Table actions", () => {
+  const fire = (def: AutomationDefinition, at = 1000,
+    rng: () => number = () => 0.25) => planAutomation(world, automation(def),
+    { scene, tile, token: runner, method: "enter", caller: actor, at, rng }, "gm");
+
+  test("publish validation rejects malformed Move, Rotation, Delete and Roll Table steps", () => {
+    const def = (steps: AutomationDefinition["steps"]): AutomationDefinition =>
+      ({ ...base, gates: {}, steps });
+    for (const bad of [
+      { id: "m", kind: "move", x: Number.NaN, y: 10, targets: "current" },
+      { id: "m", kind: "move", x: 10, y: -1, targets: "current" },
+      { id: "m", kind: "move", x: 10, y: 10, targets: "all" },
+      { id: "m", kind: "move", x: 10, targets: "current" },
+      { id: "r", kind: "rotate", angle: Number.NaN, targets: "current" },
+      { id: "r", kind: "rotate", angle: 1e7, targets: "current" },
+      { id: "r", kind: "rotate", angle: 90, targets: "player" },
+      { id: "d", kind: "delete", extra: true },
+      { id: "t", kind: "rollTable", tableId: "has space", audience: "scene" },
+      { id: "t", kind: "rollTable", tableId: "t1", audience: "player" },
+      { id: "t", kind: "rollTable", tableId: "t1", audience: "scene", variable: "count" },
+      { id: "t", kind: "rollTable", tableId: "t1", audience: "scene", variable: "bad name" },
+    ]) expect(validateAutomation(def([bad as never])).ok).toBe(false);
+    for (const good of [
+      { id: "m", kind: "move", x: 0, y: 0, targets: "triggering" },
+      { id: "r", kind: "rotate", angle: -359, targets: "current" },
+      { id: "d", kind: "delete" },
+      { id: "t", kind: "rollTable", tableId: "t1", audience: "gm" },
+    ]) expect(validateAutomation(def([good as never])).ok).toBe(true);
+  });
+
+  test("Move repositions the current collection with one host update op per token, in-scene only", () => {
+    const def: AutomationDefinition = { ...base, gates: {}, methods: ["click"], steps: [
+      { id: "select", kind: "select", selector: { kind: "inside" } },
+      { id: "move", kind: "move", x: 400, y: 400, targets: "current" },
+    ] };
+    const fired = planAutomation(world, automation(def), { scene, tile, method: "click",
+      caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    expect(fired.ok).toBe(true);
+    if (!fired.ok || !("plan" in fired)) return;
+    expect(fired.plan.ops.filter((op) => op.kind === "update" && op.ref.coll === "tokens"))
+      .toEqual([
+        { kind: "update", ref: { coll: "tokens", id: "runner", parent: { coll: "scenes", id: "s1" } }, diff: { x: 400, y: 400 } },
+        { kind: "update", ref: { coll: "tokens", id: "gate", parent: { coll: "scenes", id: "s1" } }, diff: { x: 400, y: 400 } },
+      ]);
+    expect(scene.tokens[0]?.x).toBe(150); // the staged clone moved, the committed world did not
+    const outside = fire({ ...def, methods: ["enter"], steps: [
+      { id: "move", kind: "move", x: 501, y: 400, targets: "triggering" } ] });
+    expect(outside).toMatchObject({ ok: false, error: expect.stringMatching(/outside the 500x500 scene/) });
+    const same = fire({ ...def, methods: ["enter"], steps: [
+      { id: "move", kind: "move", x: 150, y: 150, targets: "triggering" } ] });
+    if (same.ok && "plan" in same) {
+      expect(same.plan.ops.some((op) => op.kind === "update" && op.ref.coll === "tokens")).toBe(false);
+    } else {
+      throw new Error("an unchanged position must plan, not fail");
+    }
+  });
+
+  test("Move with no live target token fails closed, including after its own delete", () => {
+    const noTokens = fire({ ...base, steps: [
+      { id: "move", kind: "move", x: 100, y: 100, targets: "current" },
+    ] });
+    // current starts as the triggering token, so this still has a target:
+    expect(noTokens.ok).toBe(true);
+    const deletedFirst = fire({ ...base, steps: [
+      { id: "select", kind: "select", selector: { kind: "triggering" } },
+      { id: "delete", kind: "delete" },
+      { id: "move", kind: "move", x: 100, y: 100, targets: "triggering" },
+    ] });
+    expect(deletedFirst).toMatchObject({ ok: false, error: expect.stringMatching(/live target token/) });
+    const clicked = planAutomation(world, automation({ ...base, gates: {}, methods: ["click"], steps: [
+      { id: "move", kind: "move", x: 100, y: 100, targets: "current" },
+    ] }), { scene, tile, method: "click", caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    expect(clicked).toMatchObject({ ok: false, error: expect.stringMatching(/live target token/) });
+  });
+
+  test("Rotation normalizes to 0-360 and commits one rotation op per token", () => {
+    const def: AutomationDefinition = { ...base, gates: {}, steps: [
+      { id: "select", kind: "select", selector: { kind: "inside" } },
+      { id: "spin", kind: "rotate", angle: 450, targets: "current" },
+    ] };
+    const fired = planAutomation(world, automation(def), { scene, tile, method: "click",
+      caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    if (!fired.ok || !("plan" in fired)) throw new Error("rotation must plan");
+    expect(fired.plan.ops.filter((op) => op.kind === "update" && op.ref.coll === "tokens"))
+      .toMatchObject([
+        { ref: { id: "runner" }, diff: { rotation: 90 } },
+        { ref: { id: "gate" }, diff: { rotation: 90 } },
+      ]);
+    const negative = fire({ ...base, steps: [
+      { id: "spin", kind: "rotate", angle: -90, targets: "triggering" } ] });
+    if (negative.ok && "plan" in negative) {
+      expect(negative.plan.ops.filter((op) => op.kind === "update" && op.ref.coll === "tokens"))
+        .toMatchObject([{ ref: { id: "runner" }, diff: { rotation: 270 } }]);
+    } else {
+      throw new Error("negative angle must normalize to 270");
+    }
+    const wallsOnly = fire({ ...base, steps: [
+      { id: "select", kind: "select", selector: { kind: "tile" } },
+      { id: "spin", kind: "rotate", angle: 45, targets: "current" },
+    ] });
+    expect(wallsOnly).toMatchObject({ ok: false, error: expect.stringMatching(/live target token/) });
+  });
+
+  test("Delete Entities removes the staged placeables, commits delete ops and empties the collection", () => {
+    const def: AutomationDefinition = { ...base, gates: {}, methods: ["click"], steps: [
+      { id: "select", kind: "select", selector: { kind: "inside" } },
+      { id: "delete", kind: "delete" },
+      { id: "notice", kind: "chat", audience: "gm", content: "swept" },
+    ] };
+    const fired = planAutomation(world, automation(def), { scene, tile, method: "click",
+      caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    if (!fired.ok || !("plan" in fired)) throw new Error("delete must plan");
+    expect(fired.plan.ops.filter((op) => op.kind === "delete")).toEqual([
+      { kind: "delete", ref: { coll: "tokens", id: "runner", parent: { coll: "scenes", id: "s1" } } },
+      { kind: "delete", ref: { coll: "tokens", id: "gate", parent: { coll: "scenes", id: "s1" } } },
+    ]);
+    expect(fired.plan.trace.some((line) => line.startsWith("delete 2 placeable(s): runner, gate"))).toBe(true);
+    expect(scene.tokens).toHaveLength(2); // committed world untouched until the host commits
+    const emptyAgain = planAutomation(world, automation({ ...def, steps: [
+      { id: "select", kind: "select", selector: { kind: "inside" } },
+      { id: "delete", kind: "delete" },
+      { id: "delete2", kind: "delete" },
+    ] }), { scene, tile, method: "click", caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    expect(emptyAgain).toMatchObject({ ok: false, error: expect.stringMatching(/non-empty/) });
+  });
+
+  test("Delete Entities removes walls, drawings and notes, and refuses collections it cannot remove", () => {
+    const withWall: SceneDocument = { ...scene, walls: [{ _id: "w1", type: "wall", name: "w1",
+      ownership: { default: 0 }, flags: {}, system: {}, taggerTags: ["wall-x"],
+      c: [0, 0, 200, 0], door: 0, oneWay: false, move: 0, sight: 0, sound: 0, light: 0 }],
+      drawings: [{ _id: "d1", type: "drawing", name: "d1", ownership: { default: 0 }, flags: {}, system: {},
+        taggerTags: ["draw-x"], kind: "line", points: [0, 0, 10, 0], box: null,
+        stroke: "#000", fill: "#000", strokeWidth: 1, text: null }],
+      notes: [{ _id: "n1", type: "note", name: "n1", ownership: { default: 0 }, flags: {}, system: {},
+        taggerTags: ["note-x"], x: 0, y: 0, text: "pin", icon: "", visible: true }],
+      lights: [{ _id: "l1", type: "light", name: "l1", ownership: { default: 0 }, flags: {}, system: {},
+        taggerTags: ["light-x"], x: 0, y: 0, color: "#fff", alpha: 0.5, bright: 10, dim: 20 }] };
+    const fireIn = (query: string, collections: Array<"walls" | "drawings" | "notes" | "lights">) => {
+      const w = emptyWorld(); w.scenes.push(withWall);
+      const def: AutomationDefinition = { ...base, gates: {}, steps: [
+        { id: "select", kind: "select", selector: { kind: "tag", query, collections } },
+        { id: "delete", kind: "delete" },
+      ] };
+      return planAutomation(w, automation(def), { scene: withWall, tile, method: "click",
+        caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    };
+    for (const [query, coll, id] of [["wall-x", "walls", "w1"], ["draw-x", "drawings", "d1"],
+      ["note-x", "notes", "n1"]] as Array<[string, "walls" | "drawings" | "notes", string]>) {
+      const fired = fireIn(query, [coll]);
+      if (!fired.ok || !("plan" in fired)) throw new Error(`${query} delete must plan`);
+      expect(fired.plan.ops.filter((op) => op.kind === "delete"))
+        .toEqual([{ kind: "delete", ref: { coll, id, parent: { coll: "scenes", id: "s1" } } }]);
+    }
+    const refused = fireIn("light-x", ["lights"]);
+    expect(refused).toMatchObject({ ok: false,
+      error: expect.stringMatching(/only removes tokens, tiles, walls, drawings or map pins/) });
+  });
+
+  test("Roll Table posts a host roll to the audience, stores the optional variable and branches on it", () => {
+    const table = { _id: "t1", type: "rollTable" as const, name: "events", ownership: { default: 1 as const },
+      flags: {}, system: {}, formula: "1d20",
+      results: [
+        { range: [1, 10] as [number, number], text: "safe", documentRef: null },
+        { range: [11, 20] as [number, number], text: "danger", documentRef: null },
+      ] };
+    const tableWorld = () => { const w = emptyWorld(); w.scenes.push(scene); w.rollTables.push(table); return w; };
+    const def: AutomationDefinition = { ...base, gates: {}, steps: [
+      { id: "roll", kind: "rollTable", tableId: "t1", audience: "scene", variable: "loot" },
+      { id: "if", kind: "filter", test: { kind: "variable", name: "loot", equals: "danger" }, otherwise: "else" },
+      { id: "hit", kind: "chat", audience: "gm", content: "branch: {{loot}}" },
+      { id: "done", kind: "stop" },
+      { id: "else", kind: "landing", name: "else" },
+      { id: "miss", kind: "chat", audience: "gm", content: "else: {{loot}}" },
+    ] };
+    const fired = planAutomation(tableWorld(), automation(def), { scene, tile, token: runner,
+      method: "enter", caller: actor, at: 1000, rng: () => 0.6 }, "gm"); // 1d20 -> 13 -> danger
+    if (!fired.ok || !("plan" in fired)) throw new Error("roll table must plan");
+    const messages = fired.plan.ops.filter((op) => op.kind === "create" && op.coll === "messages")
+      .map((op) => (op as Extract<typeof op, { kind: "create" }>).data as MessageDocument);
+    expect(messages.find((msg) => msg.name === "Roll table: events"))
+      .toMatchObject({ content: "danger", whisper: [], roll: { formula: "1d20", total: 13 } });
+    expect(messages.filter((msg) => msg.content === "branch: danger")).toHaveLength(1);
+    expect(messages.some((msg) => msg.content === "else: danger")).toBe(false);
+    const safe = planAutomation(tableWorld(), automation(def), { scene, tile, token: runner,
+      method: "enter", caller: actor, at: 1000, rng: () => 0.2 }, "gm"); // 1d20 -> 5 -> safe
+    if (!safe.ok || !("plan" in safe)) throw new Error("safe roll must plan through the else landing");
+    const safeMessages = safe.plan.ops.filter((op) => op.kind === "create" && op.coll === "messages")
+      .map((op) => (op as Extract<typeof op, { kind: "create" }>).data as MessageDocument);
+    expect(safeMessages.find((msg) => msg.name === "Roll table: events"))
+      .toMatchObject({ content: "safe", roll: { formula: "1d20", total: 5 } });
+    expect(safeMessages.filter((msg) => msg.content === "else: safe")).toHaveLength(1);
+    const missing = planAutomation(tableWorld(), automation({ ...def, steps: [
+      { id: "roll", kind: "rollTable", tableId: "nope", audience: "scene" } ] }),
+      { scene, tile, token: runner, method: "enter", caller: actor, at: 1000, rng: () => 0.2 }, "gm");
+    expect(missing).toMatchObject({ ok: false, error: expect.stringMatching(/missing from the world/) });
+    const broken = emptyWorld();
+    broken.scenes.push(scene);
+    broken.rollTables.push({ _id: "t2", type: "rollTable", name: "broken", ownership: { default: 1 },
+      flags: {}, system: {}, formula: "1d20",
+      results: [
+        { range: [1, 10] as [number, number], text: "a", documentRef: null },
+        { range: [10, 20] as [number, number], text: "b", documentRef: null },
+      ] });
+    const invalid = planAutomation(broken, automation({ ...def, steps: [
+      { id: "roll", kind: "rollTable", tableId: "t2", audience: "scene" } ] }),
+      { scene, tile, token: runner, method: "enter", caller: actor, at: 1000, rng: () => 0.2 }, "gm");
+    expect(invalid).toMatchObject({ ok: false, error: expect.stringMatching(/overlaps/) });
+  });
+
+  test("Roll Table misses post the roll with no result, and an oversized result refuses the variable", () => {
+    const w = emptyWorld();
+    w.scenes.push(scene);
+    w.rollTables.push({ _id: "sparse", type: "rollTable", name: "sparse", ownership: { default: 1 },
+      flags: {}, system: {}, formula: "1d20",
+      results: [{ range: [10, 20] as [number, number], text: "late", documentRef: null }] });
+    const def: AutomationDefinition = { ...base, gates: {}, steps: [
+      { id: "roll", kind: "rollTable", tableId: "sparse", audience: "gm", variable: "loot" },
+      { id: "chat", kind: "chat", audience: "gm", content: "loot: {{loot}}" },
+    ] };
+    const missed = planAutomation(w, automation(def), { scene, tile, token: runner, method: "enter",
+      caller: actor, at: 1000, rng: () => 0.05 }, "gm"); // 1d20 -> 2, never in [10,20]
+    if (!missed.ok || !("plan" in missed)) throw new Error("a miss must still plan");
+    const tableMsg = missed.plan.ops.find((op) => op.kind === "create" && op.coll === "messages"
+      && (op.data as MessageDocument).name === "Roll table: sparse");
+    expect(tableMsg && (tableMsg as Extract<typeof missed.plan.ops[number], { kind: "create" }>).data)
+      .toMatchObject({ content: "(no matching result)", roll: null, whisper: ["gm"] });
+    const chatMsg = missed.plan.ops.find((op) => op.kind === "create" && op.coll === "messages"
+      && (op.data as MessageDocument).name !== "Roll table: sparse");
+    expect(chatMsg && (chatMsg as Extract<typeof missed.plan.ops[number], { kind: "create" }>).data)
+      .toMatchObject({ content: "loot: " });
+    const big = emptyWorld();
+    big.scenes.push(scene);
+    big.rollTables.push({ _id: "big", type: "rollTable", name: "big", ownership: { default: 1 },
+      flags: {}, system: {}, formula: "1d20",
+      results: [{ range: [1, 20] as [number, number], text: "x".repeat(257), documentRef: null }] });
+    const oversized = planAutomation(big, automation({ ...def, steps: [
+      { id: "roll", kind: "rollTable", tableId: "big", audience: "scene", variable: "loot" } ] }),
+      { scene, tile, token: runner, method: "enter", caller: actor, at: 1000, rng: () => 0.5 }, "gm");
+    expect(oversized).toMatchObject({ ok: false, error: expect.stringMatching(/256-character variable bound/) });
+  });
+});

@@ -2,7 +2,8 @@
   import { onMount } from "svelte";
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
-  import type { AutomationDocument, DocRef, Json, MacroDocument, SceneDocument, TileDocument } from "../../core/documents";
+  import type { AutomationDocument, DocRef, Json, MacroDocument, RollTableDocument, SceneDocument,
+    TileDocument } from "../../core/documents";
   import { listTaggable } from "../../core/tags";
   import {
     validateAutomation, type AutomationDefinition, type AutomationGates, type AutomationMethod,
@@ -11,13 +12,17 @@
 
   let { client, bus }: { client: ClientSync; bus: EventBus<ClientEvents> } = $props();
   const METHODS: AutomationMethod[] = ["enter", "exit", "stop", "create", "rotate", "click", "manual"];
-  const KINDS: AutomationStep["kind"][] = ["select", "filter", "checkVariable", "checkValue", "shuffle", "position", "distance", "attributes", "checkData", "condition", "inventory", "tokenTriggerCount", "routeMethod", "routeUser", "forEach", "endEach", "resetHistory", "batchFlush", "collection", "triggerTile", "setActive", "stopOthers", "set", "gameTime", "hurtHeal", "random", "tags", "visibility", "door", "chat", "sequence", "script", "summon", "landing", "jump", "stop"];
+  const KINDS: AutomationStep["kind"][] = ["select", "filter", "checkVariable", "checkValue", "shuffle", "position", "distance", "attributes", "checkData", "condition", "inventory", "tokenTriggerCount", "routeMethod", "routeUser", "forEach", "endEach", "resetHistory", "batchFlush", "collection", "triggerTile", "setActive", "stopOthers", "set", "gameTime", "hurtHeal", "random", "tags", "visibility", "door", "move", "rotate", "delete", "chat", "sequence", "script", "summon", "rollTable", "landing", "jump", "stop"];
   const ADD_KINDS = KINDS.filter((kind) => kind !== "endEach");
+  const KIND_LABEL: Record<string, string> = { batchFlush: "Run All Batch Actions", gameTime: "Game Time",
+    hurtHeal: "Hurt / Heal", move: "Move", rotate: "Rotation", delete: "Delete Entities", rollTable: "Roll Table" };
+  const kindLabel = (kind: string): string => KIND_LABEL[kind] ?? kind;
   const canEdit = $derived(client.user?.role === "GM" || client.user?.role === "ASSISTANT");
   let scenes = $state<SceneDocument[]>([]);
   let macros = $state<MacroDocument[]>([]);
   let scripts = $state<MacroDocument[]>([]);
   let summons = $state<MacroDocument[]>([]);
+  let rollTables = $state<RollTableDocument[]>([]);
   let saved = $state<AutomationDocument[]>([]);
   let editing = $state("");
   let name = $state("");
@@ -49,6 +54,7 @@
     macros = [...client.store.getAll("macros")].filter((m) => m.kind === "sequence");
     scripts = [...client.store.getAll("macros")].filter((m) => m.kind === "script");
     summons = [...client.store.getAll("macros")].filter((m) => m.kind === "summon");
+    rollTables = [...client.store.getAll("rollTables")];
     if (!scenes.some((s) => s._id === sceneId)) sceneId = scenes.find((s) => s.active)?._id ?? scenes[0]?._id ?? "";
     if (!scene?.tiles.some((tile) => tile._id === tileId)) tileId = scene?.tiles[0]?._id ?? "";
   }
@@ -112,6 +118,10 @@
       case "tags": return { id, kind, edit: "add", tags: ["activated"] };
       case "visibility": return { id, kind, mode: "show" };
       case "door": return { id, kind, mode: "open" };
+      case "move": return { id, kind, x: 0, y: 0, targets: "current" };
+      case "rotate": return { id, kind, angle: 90, targets: "current" };
+      case "delete": return { id, kind };
+      case "rollTable": return { id, kind, tableId: rollTables[0]?._id ?? "", audience: "scene" };
       case "chat": return { id, kind, audience: "gm", content: "{{method}} by {{user}}" };
       case "sequence": return { id, kind, macroId: macros[0]?._id ?? "", audience: "gm" };
       case "script": return { id, kind, macroId: scripts.find((m) => m.script?.sceneId === sceneId)?._id ?? "" };
@@ -524,11 +534,11 @@
     <div class="steps">
       {#each definition.steps as step, i (step.id)}
         <fieldset data-zone-step={step.id}>
-          <legend>{i + 1}. {step.kind === "batchFlush" ? "Run All Batch Actions" : step.kind === "gameTime" ? "Game Time" : step.kind === "hurtHeal" ? "Hurt / Heal" : step.kind}</legend>
+          <legend>{i + 1}. {kindLabel(step.kind)}</legend>
           <div class="row">
             <select aria-label={`Action ${i + 1}`} value={step.kind} disabled={step.kind === "forEach" || step.kind === "endEach"}
               onchange={(e) => replaceStep(i, (e.target as HTMLSelectElement).value as AutomationStep["kind"])}>
-              {#each ADD_KINDS as kind (kind)}<option value={kind}>{kind === "batchFlush" ? "Run All Batch Actions" : kind === "gameTime" ? "Game Time" : kind === "hurtHeal" ? "Hurt / Heal" : kind}</option>{/each}
+              {#each ADD_KINDS as kind (kind)}<option value={kind}>{kindLabel(kind)}</option>{/each}
               {#if step.kind === "endEach"}<option value="endEach">endEach</option>{/if}
             </select>
             <button type="button" aria-label={`Move step ${i + 1} up`} disabled={i === 0 || [step.kind, definition.steps[i - 1]?.kind].some((kind) => kind === "forEach" || kind === "endEach")} onclick={() => shift(i, -1)}>↑</button>
@@ -789,7 +799,7 @@
           {:else if step.kind === "forEach"}
             <small>Each of up to 1024 selected entities runs the enclosed actions with one current target. Use {"{{currentId}}"} and {"{{index}}"}; current selection is restored afterwards. Remove either marker to remove the entire loop.</small>
             <label>Add inside loop <select aria-label={`Add inside loop ${step.id}`} value="" onchange={(e) => { insertInsideLoop(i, e.currentTarget.value as AutomationStep["kind"]); e.currentTarget.value = ""; }}>
-              <option value="">Choose action…</option>{#each ADD_KINDS.filter((kind) => kind !== "landing") as kind (kind)}<option value={kind}>{kind === "batchFlush" ? "Run All Batch Actions" : kind === "gameTime" ? "Game Time" : kind === "hurtHeal" ? "Hurt / Heal" : kind}</option>{/each}
+              <option value="">Choose action…</option>{#each ADD_KINDS.filter((kind) => kind !== "landing") as kind (kind)}<option value={kind}>{kindLabel(kind)}</option>{/each}
             </select></label>
           {:else if step.kind === "endEach"}
             <small>End of loop {step.startId}. Nested loops and outward jumps are allowed; landings cannot be inside a loop.</small>
@@ -1023,6 +1033,30 @@
             <label>Token/tile/pin visibility <select bind:value={step.mode}><option value="show">Show</option><option value="hide">Hide</option><option value="toggle">Toggle</option></select></label>
           {:else if step.kind === "door"}
             <label>Tagged door state <select bind:value={step.mode}><option value="open">Open</option><option value="close">Close</option><option value="lock">Lock</option><option value="unlock">Unlock</option><option value="toggle">Toggle</option></select></label>
+          {:else if step.kind === "move"}
+            <label>Point X <input aria-label="Move X" type="number" step="1" bind:value={step.x} /></label>
+            <label>Point Y <input aria-label="Move Y" type="number" step="1" bind:value={step.y} /></label>
+            <label>Token targets <select aria-label="Move targets" bind:value={step.targets}>
+              <option value="current">Current token collection (Inside / Tagger selection)</option>
+              <option value="triggering">Triggering token</option>
+            </select></label>
+            <small>Host-authorized reposition inside this scene (pixel coordinates within the scene rectangle). The committed move goes through the normal movement-trigger dispatch, so a destination that crosses a tile can fire that tile; add Stop Additional Tiles Triggering to suppress it. One update op per moved token; unchanged positions commit nothing.</small>
+          {:else if step.kind === "rotate"}
+            <label>Rotation (degrees) <input aria-label="Rotation angle" type="number" step="1" bind:value={step.angle} /></label>
+            <label>Token targets <select aria-label="Rotation targets" bind:value={step.targets}>
+              <option value="current">Current token collection (Inside / Tagger selection)</option>
+              <option value="triggering">Triggering token</option>
+            </select></label>
+            <small>Absolute rotation, normalized to 0–360. A committed rotation of a token inside a tile can fire that tile's rotate method.</small>
+          {:else if step.kind === "delete"}
+            <small>Deletes the current collection's tokens, tiles, walls, drawings or map pins — one delete op each, atomic with the rest of the graph (undo restores them). Deleting a token never touches its linked actor; the collection is empty afterwards. Lights, sounds, templates and other documents are refused.</small>
+          {:else if step.kind === "rollTable"}
+            <label>Roll table <select bind:value={step.tableId}><option value="">Choose table…</option>{#each rollTables as table (table._id)}<option value={table._id}>{table.name} ({table.formula})</option>{/each}</select></label>
+            <label>Audience <select bind:value={step.audience}><option value="scene">Scene</option><option value="gm">GM only</option></select></label>
+            <label>Store result text in variable (optional)
+              <input value={step.variable ?? ""} aria-label="Roll Table result variable" placeholder="loot"
+                onchange={(e) => { if (step.kind === "rollTable") { const value = (e.target as HTMLInputElement).value.trim(); step.variable = value ? value : undefined; } }} /></label>
+            <small>The host rolls the table's formula with its own RNG and posts the result as a roll message. The optional variable receives the result text (at most 256 characters; a miss stores the empty string) for later filters and chat interpolation.</small>
           {:else if step.kind === "chat"}
             <label>Text <input bind:value={step.content} placeholder={'{{user}}, {{count}}, {{method}}'} /></label>
             <label>Audience <select bind:value={step.audience}><option value="gm">GM only</option><option value="scene">Scene</option></select></label>
@@ -1086,7 +1120,7 @@
       {/each}
     </div>
     <div class="row">Add:
-      {#each ADD_KINDS as kind (kind)}<button type="button" data-zone-add={kind} onclick={() => addStep(kind)}>{kind === "batchFlush" ? "Run All Batch Actions" : kind === "gameTime" ? "Game Time" : kind === "hurtHeal" ? "Hurt / Heal" : kind}</button>{/each}
+      {#each ADD_KINDS as kind (kind)}<button type="button" data-zone-add={kind} onclick={() => addStep(kind)}>{kindLabel(kind)}</button>{/each}
     </div>
     <p class="hint">Counts include this fire; a missing trigger token uses the caller's history key. Loops snapshot the selection, use bounded host execution and restore it after the closing step. Graph mutations commit atomically; reviewed scripts and saved-preset summons run separately in authored order after commit.</p>
     <div class="row">
