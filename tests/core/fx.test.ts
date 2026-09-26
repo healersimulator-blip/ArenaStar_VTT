@@ -1,8 +1,9 @@
 import { describe, expect, test } from "vitest";
 import { FX_AUDIENCE_PLAYERS_MAX, FX_FILTER_RANGES, fxAudienceAllows, fxAudiencePlayers,
   fxAuthoredFilters, fxFilterFields, fxFilterStrengths,
-  fxFilterStrength, fxSectionsForViewer, fxStylePlan, resolveFxSequence,
-  validateFxSequence, type FxSequence } from "../../src/core/fx";
+  fxFilterStrength, fxMaskError, fxMaskFromCrosshair, fxSectionsForViewer, fxStylePlan,
+  resolveFxSequence, validateFxSequence, type FxSequence } from "../../src/core/fx";
+import { CROSSHAIR_DEFAULT_SPREAD } from "../../src/core/crosshair";
 import { fxFollowAnchors, fxPosition } from "../../src/canvas/layers/FxLayer";
 import type { SceneDocument, TokenDocument, WallDocument } from "../../src/core/documents";
 
@@ -980,6 +981,48 @@ describe("effect masks and cutouts (§SQ-19/SQ-05, D-301)", () => {
       const shape = (oneToOne.sections[0] as { mask?: { area: Array<{ x: number; y: number }> } }).mask;
       expect(Math.max(...(shape?.area ?? []).map((point) => Math.hypot(point.x, point.y)))).toBeCloseTo(15, 3);
     }
+  });
+
+  test("a drawn region becomes the mask it means, in the host's own words (D-317)", () => {
+    // A point has no area: the validator's own refusal, said before a draft is written.
+    expect(fxMaskFromCrosshair({ kind: "point" })).toBeNull();
+    // A circle has no facing: the drawn angle is not written, because the host's own field
+    // list for a circle has no `angle` to ignore.
+    expect(fxMaskFromCrosshair({ kind: "circle", length: 15, angle: 90 }))
+      .toEqual({ kind: "circle", length: 15 });
+    expect(fxMaskFromCrosshair({ kind: "cone", length: 30, spread: 90, angle: 45 }))
+      .toEqual({ kind: "cone", length: 30, spread: 90, angle: 45 });
+    expect(fxMaskFromCrosshair({ kind: "ray", length: 60, width: 5 }))
+      .toEqual({ kind: "ray", length: 60, width: 5, angle: 0 });
+    expect(fxMaskFromCrosshair({ kind: "rect", length: 20, width: 10, angle: -15 }))
+      .toEqual({ kind: "rect", length: 20, width: 10, angle: -15 });
+    // A cone drawn without an aperture keeps the crosshair's usual wedge — the same default
+    // the mask itself uses, so a drawn region and a typed one are the same shape.
+    expect(fxMaskFromCrosshair({ kind: "cone", length: 30 }))
+      .toMatchObject({ kind: "cone", spread: CROSSHAIR_DEFAULT_SPREAD });
+
+    // Everything a gesture can produce is a mask the host accepts: one rule, one
+    // implementation, so the wizard cannot accept what the save will refuse.
+    for (const shape of [{ kind: "circle", length: 15 }, { kind: "cone", length: 30, spread: 90 },
+      { kind: "ray", length: 60, width: 5 }, { kind: "rect", length: 20, width: 10 }] as const) {
+      const mask = fxMaskFromCrosshair(shape);
+      expect(mask, shape.kind).not.toBeNull();
+      expect(fxMaskError(mask), shape.kind).toBeNull();
+      expect(validateFxSequence({ version: 1, sections: [{ kind: "image", id: "drawn",
+        assetId: hash, at: { kind: "point", x: 10, y: 10 }, startMs: 0, durationMs: 500,
+        mask }] }).ok, shape.kind).toBe(true);
+    }
+
+    // A shape with no extent comes back as a mask *and* as the sentence that says why it
+    // cannot be saved, rather than as a second opinion invented in a window.
+    expect(fxMaskError(fxMaskFromCrosshair({ kind: "circle" })))
+      .toBe("an FX mask's length must be 0.5–5000 scene units");
+    // The extracted check keeps the vocabulary's own refusals and accepts the flags.
+    expect(fxMaskError({ kind: "point" }))
+      .toBe("an FX mask cannot be a point: it has no area to mask with");
+    expect(fxMaskError({ kind: "blob", length: 5 }))
+      .toBe("an FX mask must be a circle, cone, ray, rect or polygon");
+    expect(fxMaskError({ kind: "circle", length: 5, invert: true, walls: true })).toBeNull();
   });
 });
 

@@ -6,7 +6,8 @@
     UserDocument } from "../../core/documents";
   import { FX_AUDIENCE_PLAYERS_MAX, FX_FILTER_CHAIN_MAX, FX_FILTER_RANGES, FX_MASK_LIMITS,
     FX_POLYGON_POINTS, FX_SCALE_LIMITS, FX_SPIN_LIMIT,
-    fxAudiencePlayers, fxAuthoredFilters, fxFilterFields, resolveFxSequence,
+    fxAudiencePlayers, fxAuthoredFilters, fxFilterFields, fxMaskError, fxMaskFromCrosshair,
+    resolveFxSequence,
     validateFxSequence, type FxAnchor,
     type FxAudience, type FxBlendMode, type FxCameraPathSection, type FxEasing, type FxFilterKind,
     type FxFilterStep,
@@ -23,6 +24,7 @@
     type FxItemBinding, type FxItemEvent, type FxRecognition } from "../../core/fxBinding";
   import type { Json } from "../../core/documents";
   import { rememberPlacement, type NamedPlacement, type RequestCrosshairPick } from "./crosshairPicker";
+  import type { CrosshairShape } from "../../core/crosshair";
   import type { PreviewFxSequence } from "./fxPreview";
 
   let {
@@ -554,6 +556,61 @@
       ? "Wall-bounded: the region is trimmed against the scene's walls, which a recipient never receives — so its growth/turn/widening was cleared."
       : on ? "Wall-bounded: the region is trimmed against the scene's walls when the timeline is saved."
         : "";
+  }
+
+  /**
+   * D-317 (SQ-10): **draw the region on the map**. The crosshair's own shape vocabulary is
+   * the mask's (circle/cone/ray/rect with a reach in scene units), so the gesture is not a
+   * translation — the overlay opens on the shape the author already has, and what comes
+   * back is written as the mask. The click is also the section's anchor, because a mask is
+   * measured *from* the anchor: a region drawn at a place has to say where that place is.
+   *
+   * Both the drawn shape and the assembled mask are checked by the **host's own** rule
+   * (`fxMaskError`) before anything is written, so a region that would be refused at save
+   * time is refused here, in the host's words, with the draft untouched.
+   */
+  async function drawMaskRegion(index: number): Promise<void> {
+    const before = draft.sections[index];
+    const located = before?.kind === "image" || before?.kind === "text";
+    if (!before || !located || !onPickAnchor || !scene) return;
+    error = ""; status = "";
+    // The gesture writes the anchor too, so a followed section loses its token anchor — said
+    // before the click rather than discovered after it.
+    const stopsFollowing = before.follow === true && (!before.to || before.to.kind === "point");
+    const placement = await onPickAnchor({ sceneId: scene._id, gesture: "click",
+      label: "the region this cue is confined to",
+      shapes: ["circle", "cone", "ray", "rect"], shape: seedMaskShape(before.mask),
+      hint: stopsFollowing
+        ? "This section follows a token: drawing moves its anchor to the point you click and stops the token follow."
+        : "The region is measured from the anchor, so the cue's anchor moves to the point you click; the host re-checks the region when the timeline is saved." });
+    if (!placement) { status = "Draw cancelled — the draft is unchanged"; return; }
+    const drawn = fxMaskFromCrosshair(placement.shape);
+    if (!drawn) { error = "a drawn region needs a shape: a point has no area to mask with"; return; }
+    // The author's own switches survive the gesture; a polygon's fields do not, because the
+    // drawn shape is a different geometry and the host would refuse the leftovers.
+    const mask: FxMask = { ...drawn,
+      ...(before.mask?.walls === true ? { walls: true } : {}),
+      ...(before.mask?.invert === true ? { invert: true } : {}) };
+    const problem = fxMaskError(mask);
+    if (problem) { error = problem; return; }
+    const point = { x: Math.round(placement.point.x), y: Math.round(placement.point.y) };
+    placements = rememberPlacement(placements, placement);
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      ? { ...old, at: { kind: "point", x: point.x, y: point.y }, mask,
+          // A point anchor cannot follow a token (the host refuses the pair), so the same
+          // rule the anchor controls use applies to the drawn anchor.
+          follow: !before.to || before.to.kind === "point" ? false : before.follow } as FxSection : old) };
+    status = `Region drawn at ${point.x}, ${point.y} — save the timeline to publish it`;
+  }
+
+  /** The overlay opens on what the author already has, so drawing is also adjusting. */
+  function seedMaskShape(mask: FxMask | undefined): CrosshairShape {
+    if (!mask || mask.kind === "polygon") return { kind: "circle", length: 15 };
+    return { kind: mask.kind,
+      ...(mask.length !== undefined ? { length: mask.length } : {}),
+      ...(mask.width !== undefined ? { width: mask.width } : {}),
+      ...(mask.spread !== undefined ? { spread: mask.spread } : {}),
+      ...(mask.angle !== undefined ? { angle: mask.angle } : {}) };
   }
 
   function changeMask(index: number, value: string): void {
@@ -1418,6 +1475,10 @@
               <option value="rect">Rectangle</option>
               <option value="polygon">Drawn region</option>
             </select></label>
+            {#if onPickAnchor}
+              <button type="button" data-fx-mask-draw disabled={!onOpenScene}
+                onclick={() => void drawMaskRegion(i)}>Draw on map</button>
+            {/if}
             {#if section.mask}
               {@const mask = section.mask}
               {@const units = scene?.grid.units ?? "units"}

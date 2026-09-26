@@ -227,6 +227,102 @@ const MASK_FIELDS: Record<FxMask["kind"], readonly string[]> = {
   // grows by a ratio, turns about the anchor, and takes the same wall bound and cutout.
   polygon: ["kind", "points", "scaleTo", "spinDeg", "walls", "invert"],
 };
+/**
+ * Why this is not an FX mask, or null when it is one. Extracted from the sequence
+ * validator so the *wizard* can check a mask it is about to write (D-317: a region drawn
+ * on the map is the host's own rules, or the author learns about it at the save), and so
+ * the refusals live in one place instead of two that drift.
+ */
+export function fxMaskError(mask: unknown): string | null {
+  if (!isObject(mask) || typeof mask.kind !== "string")
+    return "an FX mask needs a shape kind";
+  if (mask.kind === "point")
+    return "an FX mask cannot be a point: it has no area to mask with";
+  if (!(mask.kind in MASK_FIELDS))
+    return "an FX mask must be a circle, cone, ray, rect or polygon";
+  // Each shape accepts exactly its own fields: switching a rect to a circle must
+  // not leave a stale width that the renderer would then silently ignore.
+  if (Object.keys(mask).some((key) => !MASK_FIELDS[mask.kind as FxMask["kind"]].includes(key)))
+    return `an FX ${mask.kind} mask takes only ${MASK_FIELDS[mask.kind as FxMask["kind"]].join(", ")}`;
+  // D-315: the authored region, before anything measures it. Points are scene units from
+  // the anchor, in order; the shape must have an area and must not cross itself. (Both
+  // refusals name the fault rather than smoothing it into *some* region.)
+  if (mask.kind === "polygon") {
+    const points = mask.points;
+    if (!Array.isArray(points) || points.length < FX_POLYGON_POINTS.min || points.length > FX_POLYGON_POINTS.max)
+      return `an FX polygon mask takes ${FX_POLYGON_POINTS.min}–${FX_POLYGON_POINTS.max} points`;
+    for (const [index, point] of points.entries()) {
+      if (!isObject(point) || Object.keys(point).some((key) => key !== "x" && key !== "y") ||
+          !inRange(point.x, -FX_MASK_LIMITS.max, FX_MASK_LIMITS.max) ||
+          !inRange(point.y, -FX_MASK_LIMITS.max, FX_MASK_LIMITS.max))
+        return `FX polygon point ${index + 1} needs an x and a y within ±${FX_MASK_LIMITS.max} scene units of the anchor`;
+    }
+    // Crossed first: a bow-tie's signed area is zero as a *consequence*, and "crosses
+    // itself" is the fault the author can act on.
+    if (fxPolygonSelfCrossing(points))
+      return "an FX polygon mask must not cross itself: draw the region in order around it";
+    if (Math.abs(fxPolygonArea(points)) < 1e-6)
+      return "an FX polygon mask needs an area: its points must not lie in a line";
+    if (mask.walls === true && !fxPolygonStarShaped(points))
+      return "a wall-bounded FX polygon mask must be star-shaped about its anchor: its points must run in order around it";
+  }
+  if (mask.kind !== "polygon" && !inRange(mask.length, FX_MASK_LIMITS.min, FX_MASK_LIMITS.max))
+    return `an FX mask's length must be ${FX_MASK_LIMITS.min}–${FX_MASK_LIMITS.max} scene units`;
+  if ((mask.kind === "ray" || mask.kind === "rect") &&
+      !inRange(mask.width, FX_MASK_LIMITS.min, FX_MASK_LIMITS.max))
+    return `an FX mask's width must be ${FX_MASK_LIMITS.min}–${FX_MASK_LIMITS.max} scene units`;
+  if (mask.angle !== undefined && !inRange(mask.angle, -360, 360))
+    return "an FX mask's angle must be between -360 and 360 degrees";
+  if (mask.spread !== undefined && !inRange(mask.spread, FX_MASK_LIMITS.spreadMin, FX_MASK_LIMITS.spreadMax))
+    return `a cone mask's spread must be ${FX_MASK_LIMITS.spreadMin}–${FX_MASK_LIMITS.spreadMax} degrees`;
+  if (mask.invert !== undefined && typeof mask.invert !== "boolean")
+    return "an FX mask's invert flag must be true or false";
+  if (mask.lengthTo !== undefined && !inRange(mask.lengthTo, FX_MASK_LIMITS.min, FX_MASK_LIMITS.max))
+    return `an FX mask's growth must be ${FX_MASK_LIMITS.min}–${FX_MASK_LIMITS.max} scene units`;
+  if (mask.widthTo !== undefined && !inRange(mask.widthTo, FX_MASK_LIMITS.min, FX_MASK_LIMITS.max))
+    return `an FX mask's width can widen to ${FX_MASK_LIMITS.min}–${FX_MASK_LIMITS.max} scene units`;
+  if (mask.spreadTo !== undefined && !inRange(mask.spreadTo, FX_MASK_LIMITS.spreadMin, FX_MASK_LIMITS.spreadMax))
+    return `a cone mask's spread can open to ${FX_MASK_LIMITS.spreadMin}–${FX_MASK_LIMITS.spreadMax} degrees`;
+  if (mask.scaleTo !== undefined && !inRange(mask.scaleTo, FX_SCALE_LIMITS.min, FX_SCALE_LIMITS.max))
+    return `an FX polygon mask's growth must be ${FX_SCALE_LIMITS.min}–${FX_SCALE_LIMITS.max}× its own size`;
+  if (mask.spinDeg !== undefined && !inRange(mask.spinDeg, -FX_SPIN_LIMIT, FX_SPIN_LIMIT))
+    return `an FX mask's turn must be within ±${FX_SPIN_LIMIT} degrees`;
+  if (mask.walls !== undefined && typeof mask.walls !== "boolean")
+    return "an FX mask's wall flag must be true or false";
+  // The trim is resolved against the host's walls and travels as a baked polygon, so a
+  // turn or a growth would drag the shape straight through the wall it was cut by. A
+  // recipient has no walls to re-trim against and must not be given them (they can be
+  // secret), so this is a refusal rather than a per-frame recomputation.
+  if (mask.walls === true && (mask.lengthTo !== undefined || mask.spinDeg !== undefined ||
+      mask.widthTo !== undefined || mask.spreadTo !== undefined || mask.scaleTo !== undefined))
+    return "an FX mask bounded by walls cannot animate: the trim is baked against the host's walls";
+  return null;
+}
+
+/**
+ * D-317 (SQ-10, "output a named ... area for FX"): the region an author **drew**, as the
+ * mask it means. The crosshair's own shape vocabulary *is* this one — a circle/cone/ray/
+ * rect with an extent in scene units and a facing in degrees — so drawing a region is not
+ * a translation, and the mapping is stated once here rather than in whichever window
+ * happens to offer the gesture.
+ *
+ * Returns null for a `point`: it has no area, the same refusal the validator gives, said
+ * before a draft is written rather than after a save. A drawn shape with no extent still
+ * comes back as a mask, because the validator's own sentence ("an FX mask's length must
+ * be 0.5–5000 scene units") is what the author needs to read.
+ */
+export function fxMaskFromCrosshair(shape: CrosshairShape): FxMask | null {
+  const angle = typeof shape.angle === "number" && Number.isFinite(shape.angle) ? shape.angle : 0;
+  if (shape.kind === "point") return null;
+  // A circle has no facing, so it takes no angle: the host's own field list is the rule,
+  // and writing one would be a field the renderer ignores.
+  if (shape.kind === "circle") return { kind: "circle", length: shape.length ?? 0 };
+  if (shape.kind === "cone")
+    return { kind: "cone", length: shape.length ?? 0,
+      spread: shape.spread ?? CROSSHAIR_DEFAULT_SPREAD, angle };
+  return { kind: shape.kind, length: shape.length ?? 0, width: shape.width ?? 0, angle };
+}
+
 /** The least and most points an authored region may have. */
 export const FX_POLYGON_POINTS = { min: 3, max: 64 } as const;
 
@@ -842,69 +938,8 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
       return { ok: false, error: "FX image/text needs a valid anchor, layer, fade and transform" };
     }
     if (section.mask !== undefined) {
-      const mask = section.mask;
-      if (!isObject(mask) || typeof mask.kind !== "string")
-        return { ok: false, error: "an FX mask needs a shape kind" };
-      if (mask.kind === "point")
-        return { ok: false, error: "an FX mask cannot be a point: it has no area to mask with" };
-      if (!(mask.kind in MASK_FIELDS))
-        return { ok: false, error: "an FX mask must be a circle, cone, ray, rect or polygon" };
-      // Each shape accepts exactly its own fields: switching a rect to a circle must
-      // not leave a stale width that the renderer would then silently ignore.
-      if (Object.keys(mask).some((key) => !MASK_FIELDS[mask.kind as FxMask["kind"]].includes(key)))
-        return { ok: false, error: `an FX ${mask.kind} mask takes only ${MASK_FIELDS[mask.kind as FxMask["kind"]].join(", ")}` };
-      // D-315: the authored region, before anything measures it. Points are scene units from
-      // the anchor, in order; the shape must have an area and must not cross itself. (Both
-      // refusals name the fault rather than smoothing it into *some* region.)
-      if (mask.kind === "polygon") {
-        const points = mask.points;
-        if (!Array.isArray(points) || points.length < FX_POLYGON_POINTS.min || points.length > FX_POLYGON_POINTS.max)
-          return { ok: false, error: `an FX polygon mask takes ${FX_POLYGON_POINTS.min}–${FX_POLYGON_POINTS.max} points` };
-        for (const [index, point] of points.entries()) {
-          if (!isObject(point) || Object.keys(point).some((key) => key !== "x" && key !== "y") ||
-              !inRange(point.x, -FX_MASK_LIMITS.max, FX_MASK_LIMITS.max) ||
-              !inRange(point.y, -FX_MASK_LIMITS.max, FX_MASK_LIMITS.max))
-            return { ok: false, error: `FX polygon point ${index + 1} needs an x and a y within ±${FX_MASK_LIMITS.max} scene units of the anchor` };
-        }
-        // Crossed first: a bow-tie's signed area is zero as a *consequence*, and "crosses
-        // itself" is the fault the author can act on.
-        if (fxPolygonSelfCrossing(points))
-          return { ok: false, error: "an FX polygon mask must not cross itself: draw the region in order around it" };
-        if (Math.abs(fxPolygonArea(points)) < 1e-6)
-          return { ok: false, error: "an FX polygon mask needs an area: its points must not lie in a line" };
-        if (mask.walls === true && !fxPolygonStarShaped(points))
-          return { ok: false, error: "a wall-bounded FX polygon mask must be star-shaped about its anchor: its points must run in order around it" };
-      }
-      if (mask.kind !== "polygon" && !inRange(mask.length, FX_MASK_LIMITS.min, FX_MASK_LIMITS.max))
-        return { ok: false, error: `an FX mask's length must be ${FX_MASK_LIMITS.min}–${FX_MASK_LIMITS.max} scene units` };
-      if ((mask.kind === "ray" || mask.kind === "rect") &&
-          !inRange(mask.width, FX_MASK_LIMITS.min, FX_MASK_LIMITS.max))
-        return { ok: false, error: `an FX mask's width must be ${FX_MASK_LIMITS.min}–${FX_MASK_LIMITS.max} scene units` };
-      if (mask.angle !== undefined && !inRange(mask.angle, -360, 360))
-        return { ok: false, error: "an FX mask's angle must be between -360 and 360 degrees" };
-      if (mask.spread !== undefined && !inRange(mask.spread, FX_MASK_LIMITS.spreadMin, FX_MASK_LIMITS.spreadMax))
-        return { ok: false, error: `a cone mask's spread must be ${FX_MASK_LIMITS.spreadMin}–${FX_MASK_LIMITS.spreadMax} degrees` };
-      if (mask.invert !== undefined && typeof mask.invert !== "boolean")
-        return { ok: false, error: "an FX mask's invert flag must be true or false" };
-      if (mask.lengthTo !== undefined && !inRange(mask.lengthTo, FX_MASK_LIMITS.min, FX_MASK_LIMITS.max))
-        return { ok: false, error: `an FX mask's growth must be ${FX_MASK_LIMITS.min}–${FX_MASK_LIMITS.max} scene units` };
-      if (mask.widthTo !== undefined && !inRange(mask.widthTo, FX_MASK_LIMITS.min, FX_MASK_LIMITS.max))
-        return { ok: false, error: `an FX mask's width can widen to ${FX_MASK_LIMITS.min}–${FX_MASK_LIMITS.max} scene units` };
-      if (mask.spreadTo !== undefined && !inRange(mask.spreadTo, FX_MASK_LIMITS.spreadMin, FX_MASK_LIMITS.spreadMax))
-        return { ok: false, error: `a cone mask's spread can open to ${FX_MASK_LIMITS.spreadMin}–${FX_MASK_LIMITS.spreadMax} degrees` };
-      if (mask.scaleTo !== undefined && !inRange(mask.scaleTo, FX_SCALE_LIMITS.min, FX_SCALE_LIMITS.max))
-        return { ok: false, error: `an FX polygon mask's growth must be ${FX_SCALE_LIMITS.min}–${FX_SCALE_LIMITS.max}× its own size` };
-      if (mask.spinDeg !== undefined && !inRange(mask.spinDeg, -FX_SPIN_LIMIT, FX_SPIN_LIMIT))
-        return { ok: false, error: `an FX mask's turn must be within ±${FX_SPIN_LIMIT} degrees` };
-      if (mask.walls !== undefined && typeof mask.walls !== "boolean")
-        return { ok: false, error: "an FX mask's wall flag must be true or false" };
-      // The trim is resolved against the host's walls and travels as a baked polygon, so a
-      // turn or a growth would drag the shape straight through the wall it was cut by. A
-      // recipient has no walls to re-trim against and must not be given them (they can be
-      // secret), so this is a refusal rather than a per-frame recomputation.
-      if (mask.walls === true && (mask.lengthTo !== undefined || mask.spinDeg !== undefined ||
-          mask.widthTo !== undefined || mask.spreadTo !== undefined || mask.scaleTo !== undefined))
-        return { ok: false, error: "an FX mask bounded by walls cannot animate: the trim is baked against the host's walls" };
+      const maskError = fxMaskError(section.mask);
+      if (maskError) return { ok: false, error: maskError };
     }
     // Appearance is validated before the asset, so a mistyped blend is reported as
     // itself rather than as a bad hash.

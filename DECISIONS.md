@@ -11005,3 +11005,82 @@ timeline's sections (persistent runs cannot carry camera sections at all); a "lo
 word distinct from `caller`; the wizard offering a *search* over users (the checklist is the whole
 roster, which is what a table's roster is); and an audience list surviving a user's deletion with
 any special meaning — it simply names nobody.
+
+## D-317 — the region can be drawn where it belongs (SQ-10, 2026-09-26)
+
+SQ-10's crosshair is where an area is *chosen*: the overlay draws the shape, the author sees it,
+the host re-checks it when the thing it belongs to is committed. A mask is an area too — D-305
+gave the crosshair's four shapes a document spelling and D-315 a hand-typed point list — and the
+one thing the wizard could not do was **draw the region on the map**, which is exactly what the
+same picker already does beside it for anchors, waypoints and summon footprints. Six numbers are
+a description of a region; a cone pointing at a door is a decision. This entry wires the two
+together, and the wiring is only allowed to be a *bridge*: the same overlay component, the
+crosshair's own shape vocabulary, and the host's own `fxMaskError` deciding whether the assembled
+mask is a mask rather than a second opinion that could drift from it.
+
+**The drawn region is the crosshair's shape, never a polygon.** `fxMaskFromCrosshair` is the
+whole translation: `circle`/`cone`/`ray`/`rect` keep their reach, width, aperture and angle in
+scene units — the units a mask is measured in, so there is no conversion for the two to disagree
+about — and `point` is refused, because it has no area to mask with. The mapping follows the
+**host's** field list rather than the shape's expressiveness: a circle takes no `angle` even
+though the crosshair can turn one, because `MASK_FIELDS.circle` has no `angle` and
+`fxMaskError` says so by name. A cone with no aperture gets `CROSSHAIR_DEFAULT_SPREAD` instead of
+zero, and an extentless ray reaches the validator carrying the zero the gesture left and leaves
+with the validator's own sentence (*"an FX mask's length must be 0.5–5000 scene units"*) — the
+refusal the author would have met at save time, which is the reason `fxMaskError` was **extracted
+from `validateFxSequence`** instead of copied: the validator now delegates to it, so the two call
+sites cannot say different things about one shape.
+
+**The gesture writes two things, because a mask is measured from its anchor.** A mask is offsets
+from the section's anchor, so a region drawn around a door is meaningless unless the cue's anchor
+*is* that door: the picked point becomes `at` — rounded to whole scene units like every other
+typed anchor — and the drawn shape becomes `mask`, in one immutable draft replacement (there is no
+state in which the mask moved and the anchor did not). That has a consequence the author is told
+**before** the click rather than after it: a section anchored to a token with *Follow visible
+token anchors* ticked cannot both follow that token and take its anchor from a click, so drawing
+drops the follow — the same `follow: false` rule the anchor controls themselves apply, and
+without it the host's own anchor/follow refusal would fire at save on a draft the gesture had
+just written. The pick's hint states that in the sentence for the case where it happens. The
+author's `walls` and `invert` switches survive the gesture because they describe the same region;
+a polygon's `points`/`scaleTo` do not, because the drawn shape is a different geometry and the
+leftovers are exactly what the host refuses.
+
+**The wizard offers the gesture where a mask is edited, and nowhere else.** *Draw on map* sits
+beside the mask-kind select on an image/text section, disabled until the timeline's scene is
+open like every other pick; the overlay opens **seeded with the shape the author already has**
+(`seedMaskShape` maps an existing mask back onto the crosshair, and a polygon seeds a circle
+because a point list is not one of the four), so drawing is also adjusting; a cancelled pick
+leaves the draft untouched and says so in the status line rather than as an error. The write is a
+draft write like any other — nothing reaches the table, no host is asked, no op is sent until the
+timeline is saved, where the host repeats the check.
+
+**Nothing new on the wire, and no new authority.** A mask has always travelled inside a macro's
+`sequence`; D-317 adds no message kind, no field and no host path. It adds one host-visible rule
+at the edge of the wizard (`fxMaskError` as a named export) and one gesture in front of it.
+
+**Gates.** `pnpm test` **3 820 passed / 12 skipped** (302 files: 300 passed, 2 skipped), +1 case in
+`tests/core/fx.test.ts`: the bridge in the host's own words — a point is `null`, a circle takes
+no `angle`, an aperture-less cone gets the shared default spread, an extentless ray is refused
+with the validator's own sentence rather than a zero-length mask, and every shape the bridge
+writes passes `fxMaskError` while a hand-built refusal still names its own fault. e2e:
+`e2e/fx_sequence.spec.ts` gained "a mask region can be drawn on the map, and the host resolves the
+shape that was drawn" — a real browser opens the wizard, draws a cone through the shared crosshair
+at a mapped world point (30 units of reach, 90° of aperture), and asserts the panel's own fields
+now hold the drawn shape *and* that the anchor moved to the click; the timeline saves and reopens
+with the drawn shape intact; switching the anchor to a token and ticking *Follow visible token
+anchors* and then drawing again shows the overlay seeded with the mask the author already has
+(cone, 30, 90), leaves the anchor a point, **drops the follow** and produces a draft the wizard's
+own save gate accepts; and the live sprite's mask is read back out of the renderer as a cone —
+14 points (the crosshair's 13-point arc plus the anchor), radius **600 px** for 30 units on this
+scene's 100 px / 5 unit grid, with a bearing. Runs: that spec **34/34** (2.4 m) on chromium, and
+with `fx_item_binding` + `summons` at `--repeat-each=2` **78/78** (5.8 m). `pnpm typecheck`
+63 components / 0 blocking / 1 advisory · `pnpm lint` exit 0 · `pnpm build` → `pnpm size`
+**3 884 486 B raw / 1 113 592 B gzip** (+1 586 raw over D-316), inside the 6 MB budget.
+
+**Non-claims.** Not claimed: a freehand or multi-click **polygon** gesture (the four shapes are
+what a click can draw; a point list stays typed, D-315); resize handles or drag-to-reshape on a
+drawn region (re-drawing, or the numbers, is how it is adjusted); a mask on sound/camera/wait
+sections (D-300's boundary); per-point animation inside a polygon; a mask-aware *preview* of what
+the region will contain beyond the crosshair's own preview; and any claim about which tokens a
+region happens to cover — a mask confines a visual to a shape, and who is *in* it is not a
+concept this feature has.

@@ -1369,6 +1369,101 @@ test("a mask confines a visual to its region, and a cutout hides what is inside 
   await expect.poll(async () => (await run())?.mask, { timeout: 5_000 }).toBeNull();
 });
 
+// D-317 (SQ-10/SQ-19): the region can be **drawn on the map**. The crosshair's own shapes
+// are the mask's shapes, so the gesture writes what the author sees — and the same host
+// rule that checks a saved timeline checks the assembled mask before the draft moves.
+test("a mask region can be drawn on the map, and the host resolves the shape that was drawn", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  await wizard.locator('input[type="file"]').setInputFiles({ name: "aura.png", mimeType: "image/png", buffer: png });
+  await expect(wizard.getByRole("status")).toContainText("GM-only playback");
+  await wizard.locator("[data-fx-name]").fill("Drawn cone");
+  await wizard.getByRole("button", { name: "Image / video", exact: true }).click();
+  const section = wizard.locator("[data-fx-section]");
+  await section.getByRole("combobox", { name: "Media" }).selectOption({ index: 1 });
+  await section.getByLabel("Duration ms").fill("1500");
+
+  // Draw it: a cone, with the author's own reach and aperture, at a chosen spot.
+  const beforeDraw = { x: await section.getByLabel("X", { exact: true }).inputValue(),
+    y: await section.getByLabel("Y", { exact: true }).inputValue() };
+  const camera = await hostCall<{ x: number; y: number; scale: number }>(page, "camera");
+  await section.locator("[data-fx-mask-draw]").click();
+  const overlay = page.locator("[data-crosshair]");
+  await expect(overlay).toBeVisible();
+  await overlay.locator('[data-crosshair-shape="cone"]').click();
+  await overlay.locator("[data-crosshair-length]").fill("30");
+  await overlay.locator("[data-crosshair-spread]").fill("90");
+  const overlayBox = await overlay.boundingBox();
+  if (!overlayBox) throw new Error("Picker overlay missing");
+  const at = { x: overlayBox.x + (600 - camera.x) * camera.scale,
+    y: overlayBox.y + (500 - camera.y) * camera.scale };
+  await page.mouse.move(at.x, at.y);
+  await page.mouse.click(at.x, at.y);
+  await expect(overlay).toHaveCount(0);
+
+  // The gesture wrote the *mask* in the scene's own units, and moved the anchor with it —
+  // a mask is measured from the anchor, so a region drawn at a place says where that is.
+  await expect(section.locator("[data-fx-mask-kind]")).toHaveValue("cone");
+  await expect(section.locator("[data-fx-mask-length]")).toHaveValue("30");
+  await expect(section.locator("[data-fx-mask-spread]")).toHaveValue("90");
+  const drawn = { x: await section.getByLabel("X", { exact: true }).inputValue(),
+    y: await section.getByLabel("Y", { exact: true }).inputValue() };
+  expect(drawn).not.toEqual(beforeDraw);
+
+  // It is a document fact like any other mask: save, reopen, and the drawn shape is back.
+  await wizard.locator("[data-fx-save]").click();
+  await expect(wizard.locator("li")).toContainText(["Drawn cone"]);
+  await wizard.locator("li").filter({ hasText: "Drawn cone" }).getByRole("button", { name: "Edit" }).click();
+  await expect(section.locator("[data-fx-mask-kind]")).toHaveValue("cone");
+  await expect(section.locator("[data-fx-mask-length]")).toHaveValue("30");
+  await expect(section.locator("[data-fx-mask-spread]")).toHaveValue("90");
+
+  // A *followed* section is the case where the gesture has to give something up: its anchor
+  // was a token, and a point anchor cannot follow one — so the draw drops the follow rather
+  // than writing a pair the host refuses (the wizard's own save gate proves the draft it
+  // holds is acceptable).
+  await section.getByLabel("Anchor").selectOption("source");
+  await section.locator("[data-fx-follow]").check();
+  await section.locator("[data-fx-mask-draw]").click();
+  await expect(overlay).toBeVisible();
+  // The overlay opens on the shape the author already has — drawing is also adjusting.
+  await expect(overlay.locator('[data-crosshair-shape="cone"]')).toHaveAttribute("aria-pressed", "true");
+  await expect(overlay.locator("[data-crosshair-length]")).toHaveValue("30");
+  await expect(overlay.locator("[data-crosshair-spread]")).toHaveValue("90");
+  await page.mouse.move(at.x + 100, at.y);
+  await page.mouse.click(at.x + 100, at.y);
+  await expect(overlay).toHaveCount(0);
+  await expect(section.getByLabel("Anchor")).toHaveValue("point");
+  await expect(section.locator("[data-fx-follow]")).toHaveCount(0);
+  // The second click was 100 px to the right of the first and level with it, so the drawn
+  // anchor moved right and kept its row — the gesture, not the default, is what wrote it.
+  const moved = { x: await section.getByLabel("X", { exact: true }).inputValue(),
+    y: await section.getByLabel("Y", { exact: true }).inputValue() };
+  expect(Number(moved.x)).toBeGreaterThan(Number(drawn.x));
+  expect(moved.y).toBe(drawn.y);
+  await expect(section.locator("[data-fx-mask-kind]")).toHaveValue("cone");
+  await wizard.locator("[data-fx-save]").click();
+  await expect(wizard.locator("[data-fx-status]")).toContainText("Timeline update submitted");
+
+  // …and the live sprite's mask is that cone, through the scene's own metric: a 30-unit
+  // reach on a 100 px / 5 unit grid is 600 px, sampled at the crosshair's 13-point arc.
+  await wizard.locator("[data-fx-run]").click();
+  await expect.poll(async () => page.evaluate(() => (globalThis as unknown as
+    { __stage?: { getFxLayer: () => { inspect: (runId?: string) => unknown[] } } })
+    .__stage?.getFxLayer().inspect().length ?? 0), { timeout: 5_000 }).toBeGreaterThan(0);
+  const live = await page.evaluate(() => (globalThis as unknown as { __stage?: { getFxLayer: () => {
+    inspect: (runId?: string) => Array<{ kind: string; mask:
+      { points: number; radius: number; bearingDeg: number | null; invert: boolean } | null }> } } })
+    .__stage?.getFxLayer().inspect()[0] ?? null);
+  expect(live?.mask).toMatchObject({ points: 14, invert: false });
+  expect(live?.mask?.radius ?? 0).toBeCloseTo(600, 0);
+  expect(typeof live?.mask?.bearingDeg).toBe("number");
+});
+
 // D-302 (SQ-05): a visual animates its own transform now — growing to a target scale and
 // turning, eased with the same curve as its motion. Asserted on the drawn sprite, sampled
 // frame by frame: "it ended where the document said" is not the same claim as "it moved".
