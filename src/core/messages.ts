@@ -63,6 +63,10 @@ export const MsgKind = {
   "tagger.rules": 0x4a,
   "tagger.rules.result": 0x4b,
   "action.revert": 0x4c,
+  // SQ-13 (D-295) — host-side preflight: how many viewers a cue will reach, and why not
+  "fx.delivery": 0x4d,
+  // SQ-13 (D-308) — the table answers: what each viewer actually did with the media
+  "fx.media": 0x4e,
   // D-250 — explored fog restore: the client asks, the host answers from its fog store
   "fog.get": 0x0e,
   // host → client
@@ -344,6 +348,82 @@ export interface FxStopMatchingMsg { kind: "fx.stopMatching"; requestId: string;
   sceneId: DocId; filter: import("./fxInstances").FxInstanceFilter }
 /** Recipient-only revocation/end. Contains no hidden macro/asset/source details. */
 export interface FxEndMsg { kind: "fx.end"; runId: string; sceneId: DocId }
+
+/**
+ * Why a session was dropped *before* a cue was delivered. Counts only — the requester
+ * is told "two viewers cannot receive this", never which documents or users were
+ * involved, so a GM-authored cue cannot become a membership oracle.
+ */
+export interface FxDeliverySkips {
+  /** Role/audience mismatch (`audience: "gm"`, or a caller-scoped cue for someone else). */
+  audience: number;
+  /** The session cannot read the macro or the scene. */
+  rights: number;
+  /** A bound source/target token is not visible to that viewer. */
+  anchor: number;
+  /** The viewer has no media entitlement for an image/sound this cue uses. */
+  media: number;
+}
+
+/**
+ * SQ-13 (D-308): what one viewer did with one asset of a cue it received. The client
+ * speaks only about bytes it was actually sent (the host matches the asset against the
+ * cue it fanned out to *that* session), and it names no user — the sender is the
+ * session. A `detail` string would be a place for a URL or an asset hash to leak into
+ * the GM's report, so the reason is a closed set instead: `fetch` (the bytes never
+ * arrived) and `decode` (something went wrong once they had). `unsupported` is the
+ * format itself: the browser said so before anything was fetched, or said so while
+ * decoding.
+ */
+export type FxMediaAckState = "ready" | "late" | "failed" | "unsupported";
+
+export interface FxMediaAckMsg {
+  kind: "fx.media";
+  runId: string;
+  assetId: string;
+  state: FxMediaAckState;
+  /** `failed` only: where it broke. Omitted for the other states. */
+  reason?: "fetch" | "decode";
+  /** `ready` = how long the fetch took (omitted when it was already in hand);
+   *  `late` = how far past its section's start the bytes/decoder became usable. */
+  ms?: number;
+}
+
+/**
+ * SQ-13 (A10): the requested cue was emitted, but not everyone could receive it. Host
+ * actions already completed exactly once — this message exists so the GM learns the
+ * audience did not match instead of hearing about it from a confused player.
+ */
+export interface FxDeliveryMsg {
+  kind: "fx.delivery";
+  requestId: string;
+  runId: string;
+  /** The sequence the requester asked for; the requester can already read it. */
+  macroId: DocId;
+  /** Sessions the host delivered the cue to. */
+  recipients: number;
+  /** Sessions dropped at preflight. */
+  skipped: FxDeliverySkips;
+  /**
+   * D-303: of the sessions above, how many received the run **without** at least one
+   * section the author targeted elsewhere (a `gm`/`caller` camera, D-300). Not a
+   * preflight *skip* — they were entitled to the run — so it is counted separately.
+   */
+  targeted?: number;
+  /**
+   * Viewers entitled to the run that received **nothing at all**, because every section
+   * of it was targeted away from them. Silence needs explaining more than a reduction.
+   */
+  empty?: number;
+  /**
+   * D-308: the second half of SQ-13 — what the viewers did with the media, once the
+   * lead time has run out. Sent as a follow-up line for the same run (the same message
+   * kind, because the requester reads both in the same place), carrying counts per
+   * asset and no user or asset identifier: the asset is named by the requester's own
+   * section index. See `fxMediaReport`.
+   */
+  media?: import("./fxDelivery").FxMediaReport;
+}
 
 /** §5 ephemeral kinds: cursors, pings, drags, ruler, typing. */
 export type EphemeralKind = "cursor" | "ping" | "drag" | "ruler" | "typing";
@@ -656,6 +736,8 @@ export type WireMessage =
   | FxStopMsg
   | FxStopMatchingMsg
   | FxEndMsg
+  | FxDeliveryMsg
+  | FxMediaAckMsg
   | EphemeralMsg
   | AssetGetMsg
   | FogPutMsg

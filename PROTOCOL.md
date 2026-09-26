@@ -371,7 +371,7 @@ interface FxRequestMsg {
 
 ### fx.start (0x36 · host → client · ops)
 
-Recipient-projected visual/audio timeline with authoritative coordinates and asset MIME. One-shots start at least 300 ms ahead; each client uses the host-clock offset. After a graph commits a visibility-changing envelope, the host rechecks source/target visibility and asset entitlement before sending a cue. Cues do not mutate mechanics and never travel over `ephemeral`. Only explicitly persistent cues are durable: the host commits a private `FxInstanceDocument` (`fxInstances` top-level collection) and sends `fx.start` after commit. The viewer receives **only** this resolved cue, not its private instance document. Persistent image/text/audio lanes loop; recipients who re-enter a scene request `fx.sync` to recover the original host-clock phase. An explicitly `follow`ing visual carries only host-verified source/target token IDs, never author-supplied references. The canvas samples **projected, fog-visible** token centers; lost visibility hides playback locally and revokes the persistent cue on the host. Media sharing and permission to embed its bytes in a world ZIP are independent GM declarations; restricted FX media cancels export rather than silently redistributing a premium pack.
+Recipient-projected visual/audio timeline with authoritative coordinates and asset MIME. One-shots start at least 300 ms ahead; each client uses the host-clock offset. After a graph commits a visibility-changing envelope, the host rechecks source/target visibility and asset entitlement before sending a cue. Cues do not mutate mechanics and never travel over `ephemeral`. Only explicitly persistent cues are durable: the host commits a private `FxInstanceDocument` (`fxInstances` top-level collection) and sends `fx.start` after commit. The viewer receives **only** this resolved cue, not its private instance document. Persistent image/text/audio lanes loop; recipients who re-enter a scene request `fx.sync` to recover the original host-clock phase. An explicitly `follow`ing visual carries only host-verified source/target token IDs, never author-supplied references. The canvas samples **projected, fog-visible** token centers; lost visibility hides playback locally and revokes the persistent cue on the host. Media sharing and permission to embed its bytes in a world ZIP are independent GM declarations; restricted FX media cancels export rather than silently redistributing a premium pack. A **camera section** of a one-shot cue carries its own three-word audience (`scene` — everyone receiving the run — `gm`, or `caller` — the session that requested the run); the host builds the payload **per recipient**, so a viewer outside that audience receives the run *without* the section and learns nothing about where someone else's view went. A recipient left with no sections at all receives no cue. A **positioned sound** (D-309) likewise carries host-resolved geometry — `x`/`y` and a `radiusPx` on the scene's own grid: the client measures distance (silent at the rim, full at the source, linear between) and may pan across the stereo field, and a sound with no position stays a global cue at its authored volume. Occlusion is answered **per recipient** as well: `occluded: true` is added to that recipient's copy of a `muffle` sound when the scene's own *sound* axis (with door state) puts a wall between them and the source, tested from that recipient's own token at ownership level 3 — a recipient with nothing of their own on the scene is sent no answer at all. The client is never handed the walls, only the host's answer for it, and a device without Web Audio plays the cue at its distance level and reports the reduction instead.
 
 ```ts
 interface FxStartMsg {
@@ -417,6 +417,91 @@ A private stop/revocation signal with no author, macro, source, asset or scene-g
 ```ts
 interface FxEndMsg { kind: "fx.end"; runId: string; sceneId: DocId }
 ```
+
+### fx.media (0x4e · client → host · ops)
+
+What **one viewer did with one asset** of a cue it was sent (SQ-13/D-308): the second half
+of the delivery story, after `fx.delivery` has said who was *entitled* to the cue. The
+bytes still have to arrive and this browser still has to decode them, and until now only
+the viewer's own screen knew the answer — a GM could not tell a broken timeline from one
+that worked. Sent only by a session the host actually fanned that cue out to, and only
+about an asset that cue used; anything else is ignored without a reply (there is nothing
+to leak and no one to tell: a session that guessed a `runId` learns nothing).
+
+The client sends at most one ack per (run, asset), as soon as it knows something: an
+"already in hand" or "this browser refuses the format" ack at cue start, then the result of
+its prefetch, and then a *revision* if the section itself fails to play — a late or failed
+ack always outranks an earlier `ready`, because "the bytes arrived and the decoder refused
+them" is a failure, not a success. A recipient that never speaks is reported as having
+said nothing: `detail` is deliberately absent from the wire, since a fetch error string is
+a place for a URL or an asset hash to reach a GM's report.
+
+```ts
+type FxMediaAckState = "ready" | "late" | "failed" | "unsupported"
+interface FxMediaAckMsg { kind: "fx.media"; runId: string; assetId: string;
+  state: FxMediaAckState;
+  /* `failed` only: `fetch` = the bytes never arrived, `decode` = they did and were refused. */
+  reason?: "fetch" | "decode";
+  /* `ready` = ms spent fetching (absent when already in hand); `late` = ms past the start. */
+  ms?: number }
+```
+
+Bounds: `runId` matches the same `^[a-zA-Z0-9_-]{1,128}$` as a request, `assetId` is 1–128
+characters, `state` is one of the four names, `ms` is a finite 0–3 600 000, and the host
+keeps at most 32 runs' worth of expectations, so a hostile client can neither flood the
+requester with reports nor make the host remember unbounded state.
+
+### fx.delivery (0x4d · host → requesting session · ops)
+
+The host's preflight answer to the requester of a cue (SQ-13/A10): the requested action
+already completed exactly once, but the cue reached fewer sessions than the scene has — or
+reached them with a *section withheld* because the author targeted it at someone else
+(D-300/D-303). Counts only, per reason — an audience/entitlement mismatch must not become a
+membership oracle, so no user, document or asset identifier appears in the message. Sent
+only to the requesting session, when the requester is a GM/assistant and there is something
+to explain (a skip, a reduced payload, or a viewer left with nothing); a player-initiated
+request never receives it.
+
+```ts
+interface FxDeliverySkips { audience: number; rights: number; anchor: number; media: number }
+interface FxDeliveryMsg { kind: "fx.delivery"; requestId: string; runId: string; macroId: DocId;
+  recipients: number; skipped: FxDeliverySkips;
+  /* Of `recipients`, those whose cue omitted a section targeted elsewhere. */
+  targeted?: number;
+  /* Entitled viewers who received nothing at all: every section was targeted away. */
+  empty?: number }
+```
+
+`recipients` counts sessions that received *something*; a viewer whose copy would have no
+sections at all is counted in `empty` and receives no cue, so a run the author aimed
+entirely at the GM is not reported as having reached the whole table.
+
+### (continued) the media follow-up (D-308)
+
+A cue with image/sound sections gets a **second** `fx.delivery` for the same `runId`, once
+the lead time has run out, carrying what the viewers reported through `fx.media`:
+
+```ts
+interface FxMediaReportEntry { index: number; kind: "image" | "sound"; mime: string;
+  ready: number; late: number; failed: number; unsupported: number; silent: number }
+interface FxMediaReport { assets: FxMediaReportEntry[]; viewers: number; spoke: number;
+  complete: boolean; slowestReadyMs?: number; corrected?: boolean }
+```
+
+The same report carries the states a *device* answered with when it was asked for something it
+could not do (D-309): `reduced` — the cue played, but not as authored — with
+`reason: spatial-unavailable` when this shell has no Web Audio to pan or dull a positioned
+sound with. It is the viewer's own word about its own device, so it travels in this report like
+any other per-viewer answer, and a shell that can do it never sends one.
+
+It is sent to the emitting requester's own session when the answer is complete, when a
+viewer reports a failure (so the GM can still stop the cue), or when the run's own media
+window closes — whichever comes first — and an early answer is corrected **once** if a
+later ack changes whether some viewer lacks the media, after which further acks update the
+record silently. The asset is named by the requester's own section `index`: the message
+carries no asset or user identifier, keeping the "not a membership oracle" rule above. An
+all-clear line is still sent — this report was asked for, so "every viewer holds the
+media" is the answer, not noise.
 
 ### ephemeral (0x04 · both · ephemeral)
 

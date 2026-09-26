@@ -6,6 +6,7 @@
  */
 import type { ActorDocument, AssetManifest, FlagStore, Json, SceneDocument, TokenDocument,
   WorldCollections } from "./documents";
+import { sightBlockedBetween } from "./crosshair";
 import type { Op } from "./ops";
 import type { PermissionUser } from "./ownership";
 
@@ -104,19 +105,10 @@ export function summonPlacementError(scene: SceneDocument, definition: Pick<Summ
     return "summoning needs an owned token in this scene";
   const distance = Math.hypot(at.x - summoner.x, at.y - summoner.y) * scene.grid.distance / scene.grid.size;
   if (distance > definition.maxDistance) return "summon placement exceeds the approved range";
-  if (definition.requireLoS) for (const wall of scene.walls) {
-    if (wall.sight === 2 || (wall.sight === 1 && wall.door === 1)) continue;
-    const [x1, y1, x2, y2] = wall.c;
-    const dx = at.x - summoner.x, dy = at.y - summoner.y;
-    const wx = x2 - x1, wy = y2 - y1;
-    const denominator = dx * wy - dy * wx;
-    if (Math.abs(denominator) < 1e-8) continue; // parallel or collinear
-    const rx = x1 - summoner.x, ry = y1 - summoner.y;
-    const along = (rx * wy - ry * wx) / denominator;
-    const onWall = (rx * dy - ry * dx) / denominator;
-    if (along > 1e-7 && along < 1 - 1e-7 && onWall >= 0 && onWall <= 1)
-      return "summon placement is behind a sight-blocking wall";
-  }
+  // SQ-10: the same shared segment rule the crosshair preview draws with, so a
+  // placement that looked legal on the map is exactly the one the host accepts.
+  if (definition.requireLoS && sightBlockedBetween(scene.walls, summoner, at))
+    return "summon placement is behind a sight-blocking wall";
   return null;
 }
 

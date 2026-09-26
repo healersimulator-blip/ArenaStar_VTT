@@ -139,6 +139,12 @@ export interface Stage {
   fit(width: number, height: number): void;
   setCamera(camera: Camera): void;
   /**
+   * A per-frame subscription on the stage's own ticker (FX camera cues animate
+   * here rather than in a second rAF loop, so a viewer's cursor drag and a
+   * timeline's pan are ordered by the same frames). Returns its unsubscribe.
+   */
+  onFrame(cb: (deltaMs: number) => void): () => void;
+  /**
    * Sync tactical tokens; `badges` (E06, D-147) optionally carries the condition/effect chips
    * per token id — structural {code, tint} chips so core canvas never imports a package.
    * `hpBars` (§2.2/G-10a) carries the derived hit points to draw under each token, structural
@@ -462,6 +468,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   root.addChild(controlsLayer);
 
   const state: { camera: Camera } = { camera: { x: 0, y: 0, scale: 1 } };
+  const frameSinks = new Set<(deltaMs: number) => void>();
   const viewport: Viewport = { width: options.width, height: options.height };
 
   const applyCamera = (): void => {
@@ -653,6 +660,10 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       state.camera = { ...camera };
       applyCamera();
     },
+    onFrame(cb: (deltaMs: number) => void): () => void {
+      frameSinks.add(cb);
+      return () => frameSinks.delete(cb);
+    },
     syncTokens(
       tokens: readonly TokenDocument[],
       badges?: ReadonlyMap<string, readonly { code: string; tint: number }[]>,
@@ -840,6 +851,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       fogLayer?.destroy();
       fogLayer = null;
       tokenViews.clear();
+      frameSinks.clear();
       app.canvas.removeEventListener("pointermove", onStagePointerMove);
       app.destroy({ removeView: true }, { children: true });
       if (bgTextureUrl !== null) URL.revokeObjectURL(bgTextureUrl);
@@ -851,6 +863,8 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   app.ticker.add((t) => {
     effectsLayer?.tick(t.deltaMS);
     fxLayer?.tick(t.deltaMS);
+    // Copy: a sink is allowed to unsubscribe while it runs (a finished camera cue).
+    for (const sink of [...frameSinks]) sink(t.deltaMS);
     // §9 animated movement: exponential glide toward each token target
     for (const [id, view] of tokenViews) {
       const target = tokenTargets.get(id);

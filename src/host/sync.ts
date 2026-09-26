@@ -105,11 +105,15 @@ import { OpLog } from "../core/oplog";
 import { UndoStack } from "../core/undo";
 import { can } from "../core/permissions";
 import { canFetchAsset, projectAssetManifest } from "../core/assetAccess";
-import { resolveFxSequence, validateFxSequence } from "../core/fx";
+import { fxAudienceAllows, fxSectionsForViewer, resolveFxSequence, validateFxSequence,
+  type FxAudience } from "../core/fx";
+import type { ResolvedFxSection } from "../core/fx";
 import { planAutomation, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState,
   type AutomationEvent, type AutomationMethod } from "../core/automation";
 import { attachedDeletionOps, attachedMovementOps, planPrefabPlacement, PREFAB_COLLECTIONS, validatePrefab } from "../core/prefabs";
 import { boundFxDeletionOps, fxInstanceMatches, validateFxInstance, validateFxInstanceFilter } from "../core/fxInstances";
+import { fxPresetDocumentError, macroStrayPresetError } from "../core/fxPresets";
+import { fxBindingDeletionOps, fxBindingEvents, fxItemBindingError } from "../core/fxBinding";
 import { planSummon, summonDeletionOps, summonMarker, summonPlacementError, validateSummon,
   type SummonSource } from "../core/summons";
 import { getByTag, isWorldTagRef, listTaggable, tagEditOps, tagRuleOps, tagsOf, TAGGABLE_COLLECTIONS, validSceneTagRefs,
@@ -136,7 +140,10 @@ import {
   createEphemeralRateLimiter,
   createIntentRateLimiter,
 } from "../core/ratelimit";
-import type { AssetGetMsg, FogGetMsg, FogPutMsg } from "../core/messages";
+import type { AssetGetMsg, FogGetMsg, FogPutMsg, FxDeliverySkips, FxMediaAckMsg, FxMediaAckState } from "../core/messages";
+import { fxMediaReport } from "../core/fxDelivery";
+import { soundSegments } from "../canvas/vision/wallSight";
+import { segmentsCross } from "../canvas/vision/polygon";
 import { MAX_FOG_PNG_BYTES } from "../core/fogExploration";
 import type { AssetServer } from "./assets";
 import { AssetTransfer } from "../net/transfer";
@@ -217,11 +224,50 @@ export interface FogStore {
 interface PreparedFx {
   cue: FxStartMsg;
   recipients: Session[];
+  /** Preflight drop counts (SQ-13), reported to a GM requester via `fx.delivery`. */
+  skipped: FxDeliverySkips;
+  /** D-303: how many recipients got a reduced payload (D-300 targeting), and how many
+   * were left with nothing at all — counted separately from `skipped`, because these
+   * viewers were entitled to the run. */
+  targeting: { targeted: number; empty: number };
   callerId: string;
-  audience: "scene" | "gm" | "caller";
+  /** The run's effective audience: the narrowing if one was asked for, else the macro's. */
+  audience: FxAudience;
   checkedAtSeq: number;
   sourceTokenId?: string;
   targetTokenId?: string;
+}
+
+/**
+ * D-308 (SQ-13): what the host expects and hears back about one cue's media.
+ *
+ * The preflight report says who was *entitled*; this is the answer to "did they
+ * actually get it". Kept per run, bounded (oldest evicted), and named by the
+ * requester's own section index in the report — no asset or session identifier leaves
+ * the host, so a viewer's answer cannot become a membership oracle either.
+ */
+interface FxMediaReceipt {
+  runId: string;
+  requestId: string;
+  macroId: DocId;
+  sceneId: DocId;
+  /** The session that asked to run this and will read the report (GM/assistant only). */
+  requesterPeerId: PeerId;
+  /** Distinct assets the run uses, with the index of the first section that needs one. */
+  assets: Array<{ assetId: string; index: number; kind: "image" | "sound"; mime: string }>;
+  /** Sessions the cue actually went to (a viewer that never got it has nothing to say). */
+  recipients: Set<PeerId>;
+  /** peerId → (assetId → the state it most recently reported). */
+  acks: Map<PeerId, Map<string, FxMediaAckState>>;
+  /** peerId → (assetId → the fetch time it reported), folded into `slowestReadyMs`. */
+  fetchMs: Map<PeerId, Map<string, number>>;
+  /** Host clock ms: when the wait for answers ends (extended for one correction). */
+  deadline: number;
+  reported: boolean;
+  corrected: boolean;
+  /** Every (viewer, asset) state as of the first line — including silence, so a viewer
+   * that reports *late* corrects the "have not reported yet" the GM was told. */
+  warnKey: string;
 }
 
 interface Session {
@@ -234,6 +280,28 @@ interface Session {
   assetBucket: TokenBucket;
   /** Last projected metadata sent to this peer (not asset bytes). */
   manifestFingerprint: string | null;
+}
+
+/**
+ * D-316: a delivered cue carries no audience. The host has already decided who gets
+ * what; repeating the audience in the payload would let a recipient read a
+ * chosen-players list — including users they cannot otherwise see — straight out of
+ * their own socket traffic, and SQ-18 keeps membership out of payloads. Returns the
+ * input array unchanged when there is nothing to remove, so an untargeted cue is still
+ * the very same object for every recipient.
+ */
+function hostWithoutAudience(
+  sections: readonly ResolvedFxSection[],
+): readonly ResolvedFxSection[] {
+  // Only a camera section carries one, so the kind check is the type's own rule, not a guess.
+  const strip = (section: ResolvedFxSection): ResolvedFxSection => {
+    if (section.kind !== "camera") return section;
+    const { audience: _audience, ...rest } = section;
+    void _audience;
+    return rest as ResolvedFxSection;
+  };
+  return sections.some((section) => section.kind === "camera" && section.audience !== undefined)
+    ? sections.map(strip) : sections;
 }
 
 function randomId(): string {
@@ -569,6 +637,9 @@ export class HostSync {
   private readonly resolveSummonSource: HostSyncOptions["resolveSummonSource"];
   private readonly summonRequests = new Map<string, number>();
   private summonTimer: ReturnType<typeof setTimeout> | null = null;
+  /** D-308: the media-acknowledgment window (one timer for the earliest deadline). */
+  private fxMediaTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly fxMediaReceipts = new Map<string, FxMediaReceipt>();
   private disposed = false;
   /** §8/§9 fog readbacks: `${sceneId}:${userId}` → latest PNG bytes (write-through cache). */
   readonly fogPngs = new Map<string, Uint8Array>();
@@ -832,6 +903,9 @@ export class HostSync {
         return;
       case "fx.request":
         this.handleFxRequest(session, msg);
+        break;
+      case "fx.media":
+        this.handleFxMedia(session, msg);
         return;
       case "fx.sync":
         this.handleFxSync(session, msg.sceneId);
@@ -1205,6 +1279,27 @@ export class HostSync {
     return null;
   }
 
+  /**
+   * D-311: a bound item cue is validated where it is authored. The lookup answers "does this
+   * item exist, is it a *timeline* being named, and can the author read both" — the host's own
+   * `can`, never a client's claim. Nothing about the caller's later rights is decided here:
+   * the run itself is an ordinary `fx.request` and goes through `prepareFx` as always.
+   */
+  private fxBindingError(macro: MacroDocument, user: SessionUser): string | null {
+    return fxItemBindingError(macro, {
+      actor: (id) => this.store.get("actors", id) as ActorDocument | undefined,
+      macro: (id) => this.store.get("macros", id) as MacroDocument | undefined,
+      readable: (coll, doc) => can(user, "read", doc as BaseDocument, coll),
+      // D-312: the conflict is per *moment*, so the lookup answers with each bound timeline's
+      // events — D-311's rule, narrowed from "this item" to "this item's use"/"…'s attack".
+      boundTimelines: (actorId, itemId) => (this.store.getAll("macros") as readonly MacroDocument[])
+        .filter((candidate) => candidate.kind === "sequence" &&
+          candidate.fxItem?.actorId === actorId && candidate.fxItem?.itemId === itemId)
+        .map((candidate) => ({ id: candidate._id,
+          events: candidate.fxItem ? fxBindingEvents(candidate.fxItem) : [] })),
+    });
+  }
+
   private scriptDocumentError(doc: MacroDocument): string | null {
     const checked = validateScriptMacro(doc);
     if (!checked.ok) return checked.error;
@@ -1278,8 +1373,20 @@ export class HostSync {
             if (user.role !== "GM" && user.role !== "ASSISTANT") {
               return { ok: false, reason: "forbidden", error: "only GMs author FX macros" };
             }
+            const stray = macroStrayPresetError(op.data as MacroDocument);
+            if (stray) return { ok: false, reason: "invalid_schema", error: stray };
             const check = validateFxSequence((op.data as MacroDocument).sequence);
             if (!check.ok) return { ok: false, reason: "invalid_schema", error: check.error };
+            const bound = this.fxBindingError(op.data as MacroDocument, user);
+            if (bound) return { ok: false, reason: "invalid_schema", error: bound };
+          }
+          // D-310: a preset is an authoring aid for GMs/assistants — validated like the
+          // timeline fragment it is, and never runnable, so no FX/script path can reach it.
+          if (op.coll === "macros" && (op.data as MacroDocument).kind === "fxPreset") {
+            if (user.role !== "GM" && user.role !== "ASSISTANT")
+              return { ok: false, reason: "forbidden", error: "only GMs save FX presets" };
+            const error = fxPresetDocumentError(op.data as MacroDocument);
+            if (error) return { ok: false, reason: "invalid_schema", error };
           }
           if (op.coll === "macros" && (op.data as MacroDocument).kind === "summon") {
             if (user.role !== "GM" && user.role !== "ASSISTANT")
@@ -1345,7 +1452,7 @@ export class HostSync {
             return { ok: false, reason: "forbidden", error: "only GMs edit active zones" };
           if (op.ref.coll === "prefabs" && user.role !== "GM" && user.role !== "ASSISTANT")
             return { ok: false, reason: "forbidden", error: "only GMs edit prefabs" };
-          if (op.ref.coll === "macros" && ["sequence", "script", "summon"].includes((doc as MacroDocument).kind) &&
+          if (op.ref.coll === "macros" && ["sequence", "script", "summon", "fxPreset"].includes((doc as MacroDocument).kind) &&
               user.role !== "GM" && user.role !== "ASSISTANT") {
             return { ok: false, reason: "forbidden", error: "only GMs edit FX/script/summon macros" };
           }
@@ -1368,8 +1475,18 @@ export class HostSync {
             if (user.role !== "GM" && user.role !== "ASSISTANT") {
               return { ok: false, reason: "forbidden", error: "only GMs edit FX macros" };
             }
+            const stray = macroStrayPresetError(dry.value as MacroDocument);
+            if (stray) return { ok: false, reason: "invalid_schema", error: stray };
             const check = validateFxSequence((dry.value as MacroDocument).sequence);
             if (!check.ok) return { ok: false, reason: "invalid_schema", error: check.error };
+            const bound = this.fxBindingError(dry.value as MacroDocument, user);
+            if (bound) return { ok: false, reason: "invalid_schema", error: bound };
+          }
+          if (op.ref.coll === "macros" && (dry.value as MacroDocument).kind === "fxPreset") {
+            if (user.role !== "GM" && user.role !== "ASSISTANT")
+              return { ok: false, reason: "forbidden", error: "only GMs save FX presets" };
+            const error = fxPresetDocumentError(dry.value as MacroDocument);
+            if (error) return { ok: false, reason: "invalid_schema", error };
           }
           if (op.ref.coll === "macros" && (dry.value as MacroDocument).kind === "summon") {
             if (user.role !== "GM" && user.role !== "ASSISTANT")
@@ -1400,7 +1517,7 @@ export class HostSync {
           if (PREFAB_COLLECTIONS.includes(op.ref.coll as (typeof PREFAB_COLLECTIONS)[number]) &&
               doc.flags?.prefab !== undefined && user.role !== "GM" && user.role !== "ASSISTANT")
             return { ok: false, reason: "forbidden", error: "only GMs delete attached prefab parts" };
-          if (op.ref.coll === "macros" && ["sequence", "script", "summon"].includes((doc as MacroDocument).kind) &&
+          if (op.ref.coll === "macros" && ["sequence", "script", "summon", "fxPreset"].includes((doc as MacroDocument).kind) &&
               user.role !== "GM" && user.role !== "ASSISTANT") {
             return { ok: false, reason: "forbidden", error: "only GMs delete FX/script/summon macros" };
           }
@@ -1450,7 +1567,11 @@ export class HostSync {
       if (!attached.ok) return { ok: false, error: attached.error };
       const deleting = attachedDeletionOps(this.store.world, attached.ops);
       if (!deleting.ok) return { ok: false, error: deleting.error };
-      ops = boundFxDeletionOps(this.store.world, summonDeletionOps(this.store.world, deleting.ops));
+      // D-311: a timeline bound to a deleted item (or actor) loses its binding in the same
+      // undoable envelope, so a dangling pointer can neither revive on a re-used id nor
+      // linger as state a GM has to hunt down.
+      ops = fxBindingDeletionOps(this.store.world,
+        boundFxDeletionOps(this.store.world, summonDeletionOps(this.store.world, deleting.ops)));
     }
     if (audit) {
       if (!ops.length) return { ok: false, error: "Cannot audit an empty world action" };
@@ -2489,6 +2610,8 @@ export class HostSync {
     this.disposed = true;
     if (this.summonTimer) clearTimeout(this.summonTimer);
     this.summonTimer = null;
+    if (this.fxMediaTimer) clearTimeout(this.fxMediaTimer);
+    this.fxMediaTimer = null;
   }
 
   // ─── Active-zone graphs: host events → atomic world plan → projected cues ───
@@ -2866,6 +2989,14 @@ export class HostSync {
   /** Per-session delivery ledger: revocation/end is sent only to past recipients. */
   private readonly fxViewers = new Map<string, { sceneId: string; peers: Set<string> }>();
   private static readonly FX_LEAD_MS = 300;
+  /** How many runs' worth of media expectations the host remembers (oldest evicted). */
+  private static readonly FX_MEDIA_RUNS = 32;
+  /** The shortest wait for viewer answers: a cue with everything due at once still gets this. */
+  private static readonly FX_MEDIA_MIN_WINDOW_MS = 4_000;
+  /** The longest: beyond a minute a "report" describes a cue nobody is watching any more. */
+  private static readonly FX_MEDIA_MAX_WINDOW_MS = 60_000;
+  /** After the first line, how long a changed answer may still produce *one* correction. */
+  private static readonly FX_MEDIA_CORRECTION_MS = 20_000;
 
   private handleFxRequest(session: Session, msg: FxRequestMsg): void {
     const caller = session.user;
@@ -2885,9 +3016,29 @@ export class HostSync {
       this.reject(session, msg.requestId, prepared.reason, prepared.error);
       return;
     }
-    if (!this.emitPreparedFx(prepared)) {
+    const sentTo: Session[] = [];
+    if (!this.emitPreparedFx(prepared, sentTo)) {
       this.reject(session, msg.requestId, "invariant", "FX instance could not be committed");
       return;
+    }
+    // D-308/SQ-13: the preflight line above says who was *entitled*. This opens the
+    // second half — the viewers' own answer about the bytes — for a GM/assistant
+    // requester whose cue actually used media. A player-initiated request gets no
+    // report, for the same reason it gets no preflight line: the counts describe
+    // other sessions.
+    if (caller.role === "GM" || caller.role === "ASSISTANT")
+      this.openFxMediaReceipt(session, msg.requestId, prepared, sentTo);
+    // SQ-13/D-303: tell the requester when the cue reached fewer viewers than the scene
+    // has — or when it reached them with a section withheld. Sent only to the caller's own
+    // session, and only counts leave this method.
+    const skippedTotal = Object.values(prepared.skipped).reduce((a, b) => a + b, 0);
+    const { targeted, empty } = prepared.targeting;
+    if ((skippedTotal > 0 || targeted > 0 || empty > 0) &&
+        (caller.role === "GM" || caller.role === "ASSISTANT")) {
+      this.send(session, { kind: "fx.delivery", requestId: String(msg.requestId),
+        runId: prepared.cue.runId, macroId: prepared.cue.macroId,
+        recipients: prepared.recipients.length, skipped: prepared.skipped,
+        ...(targeted > 0 ? { targeted } : {}), ...(empty > 0 ? { empty } : {}) });
     }
     // Register after a successful host commit/fan-out; retries cannot clone cues.
     this.seenFxRequests.set(key, this.now());
@@ -2895,6 +3046,185 @@ export class HostSync {
       const first = this.seenFxRequests.keys().next().value;
       if (first) this.seenFxRequests.delete(first);
     }
+  }
+
+  // ─── D-309 (SQ-09): where the listener is, and what stands in the way ──────
+  //
+  // A positional sound's distance is a client's own arithmetic — it knows where it is
+  // listening from — but the *walls* are the host's, and a client is never handed them
+  // (D-301/D-307). So the host answers the occlusion question per recipient and bakes the
+  // answer into that recipient's cue, exactly as it bakes a trimmed mask.
+
+  /**
+   * Where a viewer hears from: the first token on this scene they own at level 3 (their
+   * own character, in the world's own ownership vocabulary). A viewer with nothing of
+   * their own on the map has no listening *point* the host can honestly name — their
+   * camera is client-side state the host never sees — so it says nothing and the sound
+   * plays at its distance gain only.
+   */
+  private fxListener(scene: SceneDocument, userId: string): { x: number; y: number } | null {
+    for (const token of scene.tokens) {
+      if ((token.ownership?.[userId] ?? 0) >= 3) return { x: token.x, y: token.y };
+    }
+    return null;
+  }
+
+  /** Mark the sound sections a wall stands between this listener and. Returns the input
+   * array unchanged when there is nothing to say, so the shared cue object stays shared. */
+  private fxOccludedFor(scene: SceneDocument, sections: readonly ResolvedFxSection[],
+    userId: string): readonly ResolvedFxSection[] {
+    const positioned = sections.some((section) => section.kind === "sound" && section.muffle === true &&
+      typeof section.x === "number" && typeof section.y === "number");
+    if (!positioned) return sections;
+    const listener = this.fxListener(scene, userId);
+    if (!listener) return sections;
+    const walls = soundSegments(scene.walls ?? []);
+    if (walls.length === 0) return sections;
+    let changed = false;
+    const out = sections.map((section) => {
+      if (section.kind !== "sound" || section.muffle !== true ||
+          typeof section.x !== "number" || typeof section.y !== "number") return section;
+      const source = { x: section.x, y: section.y };
+      const blocked = walls.some((wall) => segmentsCross(listener, source,
+        { x: wall.x1, y: wall.y1 }, { x: wall.x2, y: wall.y2 }));
+      if (!blocked) return section;
+      changed = true;
+      return { ...section, occluded: true };
+    });
+    return changed ? out : sections;
+  }
+
+  // ─── D-308 (SQ-13): the media acknowledgment, host side ─────────────────────
+  //
+  // A cue with image/sound sections makes every entitled viewer a promise the host
+  // cannot keep on their behalf: "the bytes will be there". The viewers answer through
+  // `fx.media`, and this is where those answers become one line for the requester.
+
+  /** Open the expectation for a run, or do nothing when there is nothing to wait for. */
+  private openFxMediaReceipt(session: Session, requestId: string, prepared: PreparedFx,
+    sentTo: readonly Session[]): void {
+    const seen = new Map<string, { assetId: string; index: number; kind: "image" | "sound"; mime: string }>();
+    prepared.cue.sections.forEach((section, index) => {
+      if (section.kind !== "image" && section.kind !== "sound") return;
+      if (seen.has(section.assetId)) return; // one answer per asset, not one per section
+      seen.set(section.assetId, { assetId: section.assetId, index, kind: section.kind, mime: section.mime });
+    });
+    // No media, no viewers, or a persistent instance (which loops and is re-sent on
+    // reconnect, so no single moment's answer would mean anything): no report.
+    if (seen.size === 0 || sentTo.length === 0 || prepared.cue.persistent) return;
+    const lastEnd = Math.max(...[...seen.values()].map((asset) => {
+      const section = prepared.cue.sections[asset.index];
+      return (section?.startMs ?? 0) + (section?.durationMs ?? 0);
+    }));
+    const window = Math.min(HostSync.FX_MEDIA_MAX_WINDOW_MS,
+      Math.max(HostSync.FX_MEDIA_MIN_WINDOW_MS, lastEnd + 2_000));
+    const receipt: FxMediaReceipt = { runId: prepared.cue.runId, requestId, macroId: prepared.cue.macroId,
+      sceneId: prepared.cue.sceneId, requesterPeerId: session.peerId, assets: [...seen.values()],
+      recipients: new Set(sentTo.map((recipient) => recipient.peerId)), acks: new Map(), fetchMs: new Map(),
+      deadline: this.now() + window, reported: false, corrected: false, warnKey: "unreported" };
+    this.fxMediaReceipts.set(receipt.runId, receipt);
+    while (this.fxMediaReceipts.size > HostSync.FX_MEDIA_RUNS) {
+      const oldest = this.fxMediaReceipts.keys().next().value;
+      if (oldest === undefined) break;
+      this.fxMediaReceipts.delete(oldest);
+    }
+    this.scheduleFxMediaSweep();
+  }
+
+  /** One viewer's answer about one asset. Anything unexpected is ignored, not answered:
+   * a session that guessed a run id must not even learn whether the run exists. */
+  private handleFxMedia(session: Session, msg: FxMediaAckMsg): void {
+    if (!session.user) return;
+    if (typeof msg.runId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.runId)) return;
+    const receipt = this.fxMediaReceipts.get(msg.runId);
+    if (!receipt || !receipt.recipients.has(session.peerId)) return;
+    if (typeof msg.assetId !== "string" || msg.assetId.length === 0 || msg.assetId.length > 128) return;
+    const asset = receipt.assets.find((entry) => entry.assetId === msg.assetId);
+    if (!asset) return;
+    if (msg.state !== "ready" && msg.state !== "late" && msg.state !== "failed" && msg.state !== "unsupported") return;
+    const ms = typeof msg.ms === "number" && Number.isFinite(msg.ms)
+      ? Math.max(0, Math.min(3_600_000, Math.round(msg.ms))) : undefined;
+    const states = receipt.acks.get(session.peerId) ?? new Map<string, FxMediaAckState>();
+    if (states.get(msg.assetId) === msg.state && ms === undefined) return; // nothing new to say
+    states.set(msg.assetId, msg.state);
+    receipt.acks.set(session.peerId, states);
+    if (msg.state === "ready" && ms !== undefined) {
+      const times = receipt.fetchMs.get(session.peerId) ?? new Map<string, number>();
+      times.set(msg.assetId, ms);
+      receipt.fetchMs.set(session.peerId, times);
+    }
+    // A viewer that cannot use the media is the emergency: the GM may still stop the
+    // cue, so that line goes out at once rather than waiting for the window. Anything
+    // that arrives *after* the first line takes the same door and lets `reportFxMedia`
+    // decide whether it is a correction worth sending or merely a change of record.
+    const urgent = msg.state === "failed" || msg.state === "unsupported";
+    const answered = [...receipt.acks.values()].reduce((total, byAsset) => total + byAsset.size, 0);
+    const settled = answered === receipt.recipients.size * receipt.assets.length;
+    if (urgent || settled || receipt.reported) this.reportFxMedia(receipt);
+  }
+
+  /** One line to the requester — the first answer, and at most one correction after it. */
+  private reportFxMedia(receipt: FxMediaReceipt): void {
+    // The whole answer, not just its complaints: a viewer that was silent when the first
+    // line went out and has since said "ready" makes that line's "have not reported yet"
+    // false, and a report that stayed wrong would be worse than a late one.
+    const pairs: string[] = [];
+    for (const peerId of receipt.recipients) {
+      const byAsset = receipt.acks.get(peerId);
+      for (const asset of receipt.assets)
+        pairs.push(`${peerId}:${asset.assetId}:${byAsset?.get(asset.assetId) ?? "silent"}`);
+    }
+    const lacking = pairs.sort().join(",");
+    if (!receipt.reported) {
+      receipt.reported = true;
+      receipt.warnKey = lacking;
+      // The answer can still change after the first line (a decode failure when the
+      // section actually plays, or a fetch that recovered). Keep the receipt a while
+      // longer so that change is a *correction* rather than silence.
+      receipt.deadline = Math.max(receipt.deadline, this.now() + HostSync.FX_MEDIA_CORRECTION_MS);
+      this.scheduleFxMediaSweep();
+    } else if (receipt.corrected || lacking === receipt.warnKey) {
+      return; // one correction per run, and only when the answer actually changed
+    } else {
+      receipt.corrected = true;
+      receipt.warnKey = lacking;
+    }
+    const session = this.sessions.get(receipt.requesterPeerId);
+    if (!session?.user) return; // the requester left; the record still stands
+    const report = fxMediaReport(receipt.assets, receipt.recipients.size,
+      { bySession: receipt.acks, fetchMs: receipt.fetchMs },
+      { ...(receipt.corrected ? { corrected: true } : {}) });
+    this.send(session, { kind: "fx.delivery", requestId: receipt.requestId, runId: receipt.runId,
+      macroId: receipt.macroId, recipients: receipt.recipients.size,
+      // The preflight line already carried the drops; a media follow-up repeats the
+      // recipient count so the two lines can be read together, and says nothing else.
+      skipped: { audience: 0, rights: 0, anchor: 0, media: 0 }, media: report });
+  }
+
+  /** Report every window that closed without a complete answer, then drop what is done. */
+  private sweepFxMedia(): void {
+    if (this.disposed) return;
+    const now = this.now();
+    for (const [runId, receipt] of [...this.fxMediaReceipts]) {
+      if (now < receipt.deadline) continue;
+      if (!receipt.reported) this.reportFxMedia(receipt);
+      else this.fxMediaReceipts.delete(runId);
+    }
+    this.scheduleFxMediaSweep();
+  }
+
+  /** One timer for the earliest window; browser timers can sleep, and a late sweep still
+   * reports correctly because every deadline is an absolute host time. */
+  private scheduleFxMediaSweep(): void {
+    if (this.fxMediaTimer) clearTimeout(this.fxMediaTimer);
+    this.fxMediaTimer = null;
+    if (this.disposed) return;
+    let next = Infinity;
+    for (const receipt of this.fxMediaReceipts.values()) next = Math.min(next, receipt.deadline);
+    if (!Number.isFinite(next)) return;
+    this.fxMediaTimer = setTimeout(() => this.sweepFxMedia(),
+      Math.max(0, Math.min(2_147_483_647, next - this.now())));
+    (this.fxMediaTimer as unknown as { unref?: () => void }).unref?.();
   }
 
   /** Same host scheduler for editor/macros and triggered FX. Can NARROW a graph's audience,
@@ -2918,8 +3248,12 @@ export class HostSync {
     if (!macro || macro.kind !== "sequence" || !scene || !macro.sequence)
       return invalid("sequence macro or scene missing");
     const isGm = caller.role === "GM" || caller.role === "ASSISTANT";
+    // A player may invoke only a timeline that *includes them* (D-316): the old rule
+    // refused a GM-audience cue, and a chosen-players cue the caller is not in is the
+    // same refusal — publishing a cue is not a licence to fire it at other people.
     if (!can(caller, "read", macro, "macros") || !can(caller, "read", scene, "scenes") ||
-        (!isGm && (macro.flags?.core?.playerCallable !== true || macro.sequence.audience === "gm")))
+        (!isGm && (macro.flags?.core?.playerCallable !== true ||
+          !fxAudienceAllows(macro.sequence.audience, { id: caller.id, isGm }, ownerId))))
       return forbidden("FX macro is not published for this caller");
     const callerScene = projectWorld(this.store.world, this.store.seq, caller).collections.scenes
       ?.find((s) => s._id === scene._id);
@@ -2940,30 +3274,43 @@ export class HostSync {
       ...(macro.sequence.persistent ? { persistent: true } : {}),
     };
     const recipients: Session[] = [];
+    // SQ-13 (A10): preflight says who will NOT get this cue. Counts are per reason so
+    // the requester hears "two viewers are missing the media", not a silent drop.
+    const skipped: FxDeliverySkips = { audience: 0, rights: 0, anchor: 0, media: 0 };
+    // D-303: preflight also says who got a *reduced* payload (a targeted camera section,
+    // D-300) and who was left with nothing, which is a different fact from a skip.
+    const targeting = { targeted: 0, empty: 0 };
+    // D-316: one rule for every audience form, evaluated per viewer. A caller-side
+    // narrowing can only ever *narrow* what the saved macro already allows.
+    const audience: FxAudience = narrowAudience === "gm" ? "gm" : macro.sequence.audience ?? "scene";
     for (const viewer of this.sessions.values()) {
       const user = viewer.user;
       if (!user) continue;
-      if ((macro.sequence.audience === "gm" || narrowAudience === "gm") &&
-          user.role !== "GM" && user.role !== "ASSISTANT") continue;
-      if (macro.sequence.audience === "caller" && user.id !== ownerId) continue;
-      if (!can(user, "read", macro, "macros") || !can(user, "read", scene, "scenes")) continue;
+      const asViewer = { id: user.id, isGm: user.role === "GM" || user.role === "ASSISTANT" };
+      if (!fxAudienceAllows(audience, asViewer, ownerId)) { skipped.audience++; continue; }
+      if (!can(user, "read", macro, "macros") || !can(user, "read", scene, "scenes")) { skipped.rights++; continue; }
       const visibleScene = projectWorld(this.store.world, this.store.seq, user).collections.scenes
         ?.find((s) => s._id === scene._id);
       if (!visibleScene || (source && !visibleScene.tokens.some((t) => t._id === source._id)) ||
-          (target && !visibleScene.tokens.some((t) => t._id === target._id))) continue;
+          (target && !visibleScene.tokens.some((t) => t._id === target._id))) { skipped.anchor++; continue; }
       const available = projectAssetManifest(this.store.world, manifest, user);
       if (resolved.sections.some((step) =>
-        (step.kind === "image" || step.kind === "sound") && !available[step.assetId])) continue;
+        (step.kind === "image" || step.kind === "sound") && !available[step.assetId])) { skipped.media++; continue; }
+      // Would this viewer receive the whole run? Targeting is decided by the author's
+      // audiences, not by a document change, so it is settled here rather than later.
+      const entitled = fxSectionsForViewer(resolved.sections, asViewer, ownerId);
+      if (entitled.length === 0) { targeting.empty++; continue; }
+      if (entitled.length < resolved.sections.length) targeting.targeted++;
       recipients.push(viewer);
     }
-    return { ok: true, cue, recipients, callerId: ownerId,
-      audience: narrowAudience === "gm" ? "gm" : macro.sequence.audience ?? "scene",
+    return { ok: true, cue, recipients, callerId: ownerId, skipped, targeting,
+      audience,
       checkedAtSeq: this.store.seq,
       ...(source ? { sourceTokenId: source._id } : {}),
       ...(target ? { targetTokenId: target._id } : {}) };
   }
 
-  private emitPreparedFx(prepared: PreparedFx): boolean {
+  private emitPreparedFx(prepared: PreparedFx, sentTo?: Session[]): boolean {
     if (prepared.cue.persistent) {
       const macro = this.store.get("macros", prepared.cue.macroId) as MacroDocument | undefined;
       const scene = this.store.get("scenes", prepared.cue.sceneId) as SceneDocument | undefined;
@@ -2985,6 +3332,9 @@ export class HostSync {
     // never deliver an old entitlement/anchor just because it was valid earlier.
     const changed = prepared.checkedAtSeq !== this.store.seq;
     const scene = changed ? this.store.get("scenes", prepared.cue.sceneId) as SceneDocument | undefined : undefined;
+    // D-309: occlusion is *per recipient*, so the scene is needed even when nothing
+    // changed since the preflight — a cue's walls are the host's to know, not the client's.
+    const hostScene = scene ?? this.store.get("scenes", prepared.cue.sceneId) as SceneDocument | undefined;
     const macro = changed ? this.store.get("macros", prepared.cue.macroId) as MacroDocument | undefined : undefined;
     const manifest = changed ? this.manifestSource() : undefined;
     for (const recipient of prepared.recipients) {
@@ -2992,9 +3342,12 @@ export class HostSync {
       if (this.sessions.get(recipient.peerId) !== recipient || !user) continue;
       if (changed) {
         if (!scene || !macro || macro.kind !== "sequence" || !macro.sequence || !manifest ||
-            !can(user, "read", macro, "macros") || !can(user, "read", scene, "scenes") ||
-            (macro.sequence.audience === "gm" && user.role !== "GM" && user.role !== "ASSISTANT") ||
-            (macro.sequence.audience === "caller" && user.id !== prepared.callerId)) continue;
+            !can(user, "read", macro, "macros") || !can(user, "read", scene, "scenes")) continue;
+        // The macro may have been edited between preflight and commit, so the CURRENT
+        // audience decides; a forced GM narrowing survives the re-read.
+        const current: FxAudience = prepared.audience === "gm" ? "gm" : macro.sequence.audience ?? "scene";
+        if (!fxAudienceAllows(current, { id: user.id, isGm: user.role === "GM" || user.role === "ASSISTANT" },
+          prepared.callerId)) continue;
         const view = projectWorld(this.store.world, this.store.seq, user).collections.scenes
           ?.find((s) => s._id === scene._id);
         if (!view || (prepared.sourceTokenId && !view.tokens.some((t) => t._id === prepared.sourceTokenId)) ||
@@ -3003,7 +3356,20 @@ export class HostSync {
         if (prepared.cue.sections.some((step) =>
           (step.kind === "image" || step.kind === "sound") && !available[step.assetId])) continue;
       }
-      this.send(recipient, prepared.cue);
+      // SQ-15/D-300: a camera section can be targeted, so the payload is built per
+      // recipient. A viewer excluded from every section of a run receives nothing at
+      // all rather than an empty cue they would have to reason about.
+      const entitled = fxSectionsForViewer(prepared.cue.sections,
+        { id: user.id, isGm: user.role === "GM" || user.role === "ASSISTANT" }, prepared.callerId);
+      if (entitled.length === 0) continue;
+      // D-316: the audience is the host's business and does not travel. A recipient of a
+      // chosen-players section would otherwise read the whole list out of their own
+      // payload — the membership query SQ-18 keeps out of socket traffic, one hop in.
+      const forViewer = hostWithoutAudience(entitled);
+      sentTo?.push(recipient);
+      const forSound = hostScene ? this.fxOccludedFor(hostScene, forViewer, user.id) : forViewer;
+      const shared = forViewer === prepared.cue.sections && forSound === forViewer;
+      this.send(recipient, shared ? prepared.cue : { ...prepared.cue, sections: [...forSound] });
     }
     return true;
   }
@@ -3018,9 +3384,11 @@ export class HostSync {
     if (!scene || !macro || macro.kind !== "sequence" || !macro.sequence ||
         !validateFxInstance(doc, scene, manifest) ||
         !can(user, "read", scene, "scenes") || !can(user, "read", macro, "macros")) return false;
-    const isGm = user.role === "GM" || user.role === "ASSISTANT";
-    if ((doc.audience === "gm" || macro.sequence.audience === "gm") && !isGm) return false;
-    if ((doc.audience === "caller" || macro.sequence.audience === "caller") && user.id !== doc.ownerId) return false;
+    // Both the record's own audience and the timeline's must include this viewer: either
+    // one narrowing is enough to keep a stored instance out of a client's reach.
+    const asViewer = { id: user.id, isGm: user.role === "GM" || user.role === "ASSISTANT" };
+    if (!fxAudienceAllows(doc.audience, asViewer, doc.ownerId) ||
+        !fxAudienceAllows(macro.sequence.audience, asViewer, doc.ownerId)) return false;
     // `playerCallable` gates who may *request* playback, not who may see a GM's
     // scene-audience cue. Keep the same recipient policy as one-shot sequences.
     const view = projectWorld(this.store.world, this.store.seq, user).collections.scenes
@@ -3032,9 +3400,15 @@ export class HostSync {
       (section.kind !== "image" && section.kind !== "sound") || available[section.assetId] !== undefined);
   }
 
-  private fxCue(doc: FxInstanceDocument): FxStartMsg {
+  private fxCue(doc: FxInstanceDocument, userId?: string): FxStartMsg {
+    // D-309: a *loop* is where per-recipient occlusion matters most — one hum heard
+    // through a door on this side of the map and muffled on the other — so a stored
+    // instance's cue is built per recipient too, and recomputed on reconnect.
+    const scene = userId ? this.store.get("scenes", doc.sceneId) as SceneDocument | undefined : undefined;
+    const sections = scene && userId ? this.fxOccludedFor(scene, doc.sections, userId) : doc.sections;
     return { kind: "fx.start", runId: doc._id, macroId: doc.macroId,
-      sceneId: doc.sceneId, atHostTime: doc.atHostTime, persistent: true, sections: doc.sections };
+      sceneId: doc.sceneId, atHostTime: doc.atHostTime, persistent: true,
+      sections: [...sections] };
   }
 
   /** Reconcile past recipients after *every* committed operation: hiding a
@@ -3058,7 +3432,7 @@ export class HostSync {
         const eligible = this.canViewFxInstance(session, doc, manifest);
         const wasSent = state.peers.has(session.peerId);
         if (eligible && !wasSent) {
-          this.send(session, this.fxCue(doc));
+          this.send(session, this.fxCue(doc, session.user?.id));
           state.peers.add(session.peerId);
         } else if (!eligible && wasSent) {
           this.send(session, { kind: "fx.end", runId: doc._id, sceneId: doc.sceneId });
@@ -3079,7 +3453,7 @@ export class HostSync {
     const manifest = this.manifestSource();
     for (const doc of this.store.getAll("fxInstances")) {
       if (doc.sceneId !== sceneId || !this.canViewFxInstance(session, doc, manifest)) continue;
-      this.send(session, this.fxCue(doc));
+      this.send(session, this.fxCue(doc, session.user.id));
       const state = this.fxViewers.get(doc._id) ?? { sceneId, peers: new Set<string>() };
       state.peers.add(session.peerId);
       this.fxViewers.set(doc._id, state);

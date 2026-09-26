@@ -6,8 +6,9 @@
  */
 import type { AssetManifest, FxInstanceDocument, SceneDocument, WorldCollections } from "./documents";
 import type { Op } from "./ops";
-import { validateFxSequence, type FxSection } from "./fx";
+import { fxAudienceError, validateFxSequence, type FxSection } from "./fx";
 import { tagMatcher } from "./tags";
+import { crosshairPxPerUnit } from "./crosshair";
 
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -51,7 +52,7 @@ export function validateFxInstance(
 ): boolean {
   if (!scene || doc.type !== "fxInstance" || !ID.test(doc._id) || !ID.test(doc.macroId) ||
       !ID.test(doc.ownerId) || doc.sceneId !== scene._id || !doc.name || doc.name.length > 128 ||
-      !["scene", "gm", "caller"].includes(doc.audience) ||
+      fxAudienceError(doc.audience) !== null ||
       !Number.isFinite(doc.atHostTime) || doc.atHostTime < 0 ||
       !Array.isArray(doc.sections) || doc.sections.length < 1 || doc.sections.length > 16 ||
       (doc.sourceTokenId !== undefined && (!ID.test(doc.sourceTokenId) || !scene.tokens.some((t) => t._id === doc.sourceTokenId))) ||
@@ -60,10 +61,24 @@ export function validateFxInstance(
   for (const section of doc.sections) {
     if (!section || typeof section !== "object") return false;
     if (section.kind === "wait") { sections.push(section); continue; }
+    // A durable instance can never hold a camera cue (`validateFxSequence`
+    // forbids camera sections in a persistent timeline), so fail closed rather
+    // than treat an imported one as a visual.
+    if (section.kind === "camera") return false;
     if (section.kind === "sound") {
-      const { mime, ...saved } = section;
+      const { mime, x, y, radiusPx, ...authored } = section;
       if (manifest[section.assetId]?.mime !== mime) return false;
-      sections.push(saved);
+      // A stored positional sound keeps its geometry in the host's own pixels — the very
+      // form a recipient receives. Rebuild the authored anchor so one validator (the
+      // sequence schema) owns the bounds and the radius range, rather than a second set
+      // of numbers that could disagree. The pixel→unit division is the exact inverse of
+      // resolution, rounded so float noise cannot push a legal reach past its own limit.
+      const placed = x === undefined || y === undefined || radiusPx === undefined
+        ? x === undefined && y === undefined && radiusPx === undefined ? null : undefined
+        : { at: { kind: "point" as const, x, y },
+            radius: Math.round((radiusPx / crosshairPxPerUnit(scene.grid)) * 1e6) / 1e6 };
+      if (placed === undefined) return false;
+      sections.push({ ...authored, ...(placed ?? {}) });
       continue;
     }
     const { x, y, toX, toY, followTokenId, followToTokenId } = section;
@@ -83,20 +98,39 @@ export function validateFxInstance(
         : { kind: "point" as const, x: px, y: py };
     const at = anchor(followTokenId, x, y);
     const to = toX !== undefined && toY !== undefined ? { to: anchor(followToTokenId, toX, toY) } : {};
+    // A stored cue carries its mask already resolved to a polygon (world px offsets
+    // from the anchor), which is what a replay sends — so it is checked in that form
+    // rather than reconstructed. The authored scene-unit numbers are not kept.
+    if ((section.kind === "image" || section.kind === "text") && section.mask !== undefined &&
+        !validResolvedMask(section.mask)) return false;
     if (section.kind === "image") {
-      const { x: _x, y: _y, toX: _toX, toY: _toY,
+      const { x: _x, y: _y, toX: _toX, toY: _toY, mask: _mask,
         followTokenId: _follow, followToTokenId: _followTo, mime, ...authored } = section;
-      void _x; void _y; void _toX; void _toY; void _follow; void _followTo;
+      void _x; void _y; void _toX; void _toY; void _mask; void _follow; void _followTo;
       if (manifest[section.assetId]?.mime !== mime) return false;
       sections.push({ ...authored, at, ...to });
     } else if (section.kind === "text") {
-      const { x: _x, y: _y, toX: _toX, toY: _toY,
+      const { x: _x, y: _y, toX: _toX, toY: _toY, mask: _mask,
         followTokenId: _follow, followToTokenId: _followTo, ...authored } = section;
-      void _x; void _y; void _toX; void _toY; void _follow; void _followTo;
+      void _x; void _y; void _toX; void _toY; void _mask; void _follow; void _followTo;
       sections.push({ ...authored, at, ...to });
     } else return false;
   }
   return validateFxSequence({ version: 1, persistent: true, sections }).ok;
+}
+
+/**
+ * The resolved form of a mask, as a stored cue carries it: a closed polygon of finite
+ * offsets (enough to enclose an area, bounded so a hand-edited document cannot ask a
+ * renderer for a million vertices) and which side of it survives.
+ */
+function validResolvedMask(mask: { area?: unknown; invert?: unknown }): boolean {
+  const area = mask.area;
+  return Array.isArray(area) && area.length >= 3 && area.length <= 256 &&
+    area.every((point) => !!point && typeof point === "object" &&
+      Number.isFinite((point as { x?: number }).x) && Number.isFinite((point as { y?: number }).y)) &&
+    (mask.invert === undefined || typeof mask.invert === "boolean") &&
+    Object.keys(mask).every((key) => ["area", "invert"].includes(key));
 }
 
 /** Deleting a source/target, saved macro or scene ends its FX in the SAME

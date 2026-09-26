@@ -68,8 +68,13 @@ function references(collections: Partial<WorldCollections>, manifest: AssetManif
     for (const sound of playlist.sounds ?? []) { add(sound.audio); custom(sound); }
   }
   for (const macro of collections.macros ?? []) {
-    if (macro.kind !== "sequence" || !Array.isArray(macro.sequence?.sections)) continue;
-    for (const section of macro.sequence.sections) {
+    // A preset (D-310) is invisible to players, so counting its media as *referenced*
+    // is also what withholds those bytes from a player's manifest: the preset is not in
+    // their projected world, and the asset is not world-readable on its own.
+    const sections = macro.kind === "sequence" ? macro.sequence?.sections
+      : macro.kind === "fxPreset" ? macro.preset?.sections : undefined;
+    if (!Array.isArray(sections)) continue;
+    for (const section of sections) {
       if (section.kind === "image" || section.kind === "sound") add(section.assetId);
     }
   }

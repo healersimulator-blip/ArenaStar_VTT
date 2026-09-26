@@ -181,3 +181,30 @@ export function polygonBounds(poly: Float32Array): {
   }
   return { minX, minY, maxX, maxY };
 }
+
+/**
+ * Where two segments cross, or `null` when they do not (including parallel/collinear,
+ * which have either no crossing or infinitely many). Touching counts: a point exactly on
+ * a wall is *behind* it, which is the answer both the D-307 trim and a sight block need.
+ */
+export function segmentCrossingPoint(
+  a: { x: number; y: number }, b: { x: number; y: number },
+  c: { x: number; y: number }, d: { x: number; y: number },
+): { x: number; y: number } | null {
+  const ex = b.x - a.x; const ey = b.y - a.y;
+  const fx = d.x - c.x; const fy = d.y - c.y;
+  const denom = ex * fy - ey * fx;
+  if (Math.abs(denom) < 1e-12) return null;
+  const t = ((c.x - a.x) * fy - (c.y - a.y) * fx) / denom;
+  const u = ((c.x - a.x) * ey - (c.y - a.y) * ex) / denom;
+  if (t < -1e-9 || t > 1 + 1e-9 || u < -1e-9 || u > 1 + 1e-9) return null;
+  return { x: a.x + ex * t, y: a.y + ey * t };
+}
+
+/** The yes/no form, for the callers that only need to know. */
+export function segmentsCross(
+  a: { x: number; y: number }, b: { x: number; y: number },
+  c: { x: number; y: number }, d: { x: number; y: number },
+): boolean {
+  return segmentCrossingPoint(a, b, c, d) !== null;
+}

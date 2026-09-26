@@ -324,6 +324,19 @@ export function setCurrencyOp(actorId: string, currency: PF1eCurrency): Op {
   };
 }
 
+/**
+ * D-312: the item a line at that index was authored from, when it names one. Written and read
+ * in the same place (`createAttackFromWeaponOp` writes `itemId`), because the join between an
+ * attack line and an item *is* this field — a hand-authored line that merely shares a weapon's
+ * name is not that item's line, and guessing would fire the wrong cue.
+ */
+export function attackLineItemId(actor: ActorDocument, index: number): string | null {
+  const pf1e = asRecord(actor.system.pf1e) ?? {};
+  const attacks = Array.isArray(pf1e.attacks) ? pf1e.attacks : [];
+  const id = asRecord(attacks[index])?.itemId;
+  return typeof id === "string" && id !== "" ? id : null;
+}
+
 /** "Create attack from this weapon": append the item's line to `system.pf1e.attacks`. */
 export function createAttackFromWeaponOp(
   actor: ActorDocument,

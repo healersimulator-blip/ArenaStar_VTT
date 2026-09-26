@@ -19,6 +19,8 @@ export * from "./permissions";
 export * from "./tags";
 export * from "./fx";
 export * from "./fxInstances";
+export * from "./fxPresets";
+export * from "./fxBinding";
 export * from "./automation";
 export * from "./actionRevert";
 export * from "./prefabs";

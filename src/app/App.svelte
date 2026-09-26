@@ -46,7 +46,8 @@
   import { WindowHost } from "../ui/windows";
   import { WindowManager } from "../ui/windows";
   import { macroSlots, runChatMacro } from "../ui/macros";
-  import type { FxImportPermissions } from "../core/fx";
+  import { resolveFxSequence, type FxImportPermissions } from "../core/fx";
+import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   import { gmState } from "../ui/armies/gmState.svelte";
   import { buildStrategicFog, sceneIsStrategic } from "../core/strategicFog";
   import { FogExploration } from "../client/fogExploration";
@@ -57,8 +58,11 @@
   import { PoolInterpolator } from "../sim/interpolate";
   import { TrustedModuleHost } from "../packages/trustedModule";
   import { screenToWorld, worldToScreen, zoomAt } from "../canvas/camera";
-  import SummonCrosshair from "../ui/macros/SummonCrosshair.svelte";
+  import CrosshairOverlay from "../ui/macros/CrosshairOverlay.svelte";
+  import { resolveCrosshairPick, summonCrosshairOptions, type CrosshairPickOptions } from "../ui/macros/crosshairPicker";
   import type { RequestSummonPick, SummonPickOptions, SummonPickPoint } from "../ui/macros/summonPicker";
+  import type { CrosshairPlacement, RequestCrosshairPick } from "../ui/macros/crosshairPicker";
+  import type { PreviewFxSequence } from "../ui/macros/fxPreview";
   import Icon from "../ui/icons/Icon.svelte";
   import CanvasToolbar, {
     type CanvasAction,
@@ -564,6 +568,7 @@ const WALL_PICK_RADIUS = 12;
           x: (host?.width ?? view.app.canvas.width) / 2,
           y: (host?.height ?? view.app.canvas.height) / 2,
         };
+        fxPlayer?.cancelCamera(); // an explicit zoom button is user input too
         view.setCamera(
           zoomAt(view.camera, centre.x, centre.y, action === "zoom-in" ? 1.25 : 1 / 1.25),
         );
@@ -571,6 +576,7 @@ const WALL_PICK_RADIUS = 12;
       }
       case "zoom-fit": {
         const scene = activeScene();
+        fxPlayer?.cancelCamera();
         if (view && scene) view.fit(scene.width, scene.height);
         break;
       }
@@ -785,6 +791,8 @@ const WALL_PICK_RADIUS = 12;
   const rtInterp = new PoolInterpolator();
   let rtSampleTimer: ReturnType<typeof setInterval> | null = null;
   let offSimBus: (() => void) | null = null;
+  /** SQ-13: the host's partial-audience report for a cue this tab requested. */
+  let offFxDelivery: (() => void) | null = null;
   let moduleHost: ModuleHost | null = null;
 
   /** The active encounter of the active scene (null before any is activated). */
@@ -1992,6 +2000,53 @@ const WALL_PICK_RADIUS = 12;
     return new Promise((resolve) => { pendingSummonPick = { options, resolve }; });
   };
 
+  /**
+   * D-293/D-296: the same gesture contract for FX anchors, now through the shared
+   * crosshair (shapes, constraints, named reuse). It answers **authored geometry**,
+   * not a mechanical placement — the host still validates the whole saved sequence,
+   * so this is UI convenience with no authority of its own.
+   */
+  let pendingAnchorPick = $state.raw<{ options: CrosshairPickOptions;
+    resolve: (placement: CrosshairPlacement | null) => void } | null>(null);
+  function settleAnchorPick(placement: CrosshairPlacement | null): void {
+    const pending = pendingAnchorPick;
+    pendingAnchorPick = null;
+    pending?.resolve(placement !== null && activeScene()?._id === pending.options.sceneId ? placement : null);
+  }
+  const requestAnchorPick: RequestCrosshairPick = (options) => {
+    if (options.sceneId !== activeScene()?._id || !stage) return Promise.resolve(null);
+    settleAnchorPick(null);
+    return new Promise((resolve) => { pendingAnchorPick = { options, resolve }; });
+  };
+
+  /**
+   * D-293: render an **unsaved** FX draft for its author. Deliberately not a host
+   * request: no world op, no durable `fxInstance`, no recipient — so a preview
+   * cannot create state, survive the author's session or grant a player a read.
+   * The sequence still goes through the same `resolveFxSequence` the host uses, so
+   * what previews is what a save would accept (persistent drafts preview one pass).
+   */
+  const previewFxSequence: PreviewFxSequence = async (sequence, sceneId,
+    sourceTokenId, targetTokenId) => {
+    const current = app;
+    const view = stage;
+    if (!current || !view || !fxPlayer) return { ok: false, error: "The canvas is not ready yet" };
+    const scene = activeScene();
+    if (!scene || scene._id !== sceneId) return { ok: false, error: "Open the timeline's scene before previewing" };
+    const source = sourceTokenId ? scene.tokens.find((token) => token._id === sourceTokenId) : undefined;
+    const target = targetTokenId ? scene.tokens.find((token) => token._id === targetTokenId) : undefined;
+    const resolved = resolveFxSequence({ ...sequence, persistent: false }, scene, source, target,
+      (id) => current.gm.client.store.world.assetManifest[id]?.mime);
+    if (!resolved.ok) return { ok: false, error: resolved.error };
+    const runId = `preview-${globalThis.crypto.randomUUID()}`;
+    fxPlayer.preview({ kind: "fx.start", runId, macroId: "preview", sceneId, sections: resolved.sections,
+      atHostTime: Date.now() + 120 });
+    return { ok: true, runId };
+  }
+  function stopFxPreview(): void {
+    fxPlayer?.clearPreview();
+  }
+
   function activeScene(): SceneDocument | null {
     if (!app) return null;
     const scenes = app.gm.client.store.getAll(
@@ -2912,6 +2967,8 @@ const WALL_PICK_RADIUS = 12;
       audioPlayer.dispose();
       fxPlayer?.dispose();
       fxPlayer = null;
+      offFxDelivery?.();
+      offFxDelivery = null;
       offRejected();
       offWm();
       globalThis.removeEventListener("keydown", onKey);
@@ -2935,6 +2992,31 @@ const WALL_PICK_RADIUS = 12;
           fetchAsset: (hash) => current.gm.fetcher.request(hash, "ui"),
           sceneId: () => viewAsPlayer === null ? (activeScene()?._id ?? null) : null,
           onError: (message) => console.warn(message),
+          // SQ-13/A10: a GM whose own client could not keep up hears one line about
+          // it, in the same notice stack every other warning lands in.
+          onDelivery: (report) => {
+            notifyLog = [...notifyLog.slice(-49), { message: report.message, level: report.level }];
+          },
+          macroName: (macroId) => current.gm.client.store.get("macros", macroId)?.name ?? null,
+          // D-297: the device-local sound list names a cue the way the world does.
+          assetName: (hash) => current.gm.client.store.world.assetManifest[hash]?.name ?? null,
+        });
+        // SQ-13: the host tells the requester when a cue reached fewer viewers than the
+        // scene has. The action already completed exactly once; this is the explanation.
+        offFxDelivery?.();
+        offFxDelivery = current.gm.bus.on("fxDelivery", (msg) => {
+          const name = current.gm.client.store.get("macros", msg.macroId)?.name ?? "FX timeline";
+          // D-308: a second line for the same run — what the viewers themselves did with
+          // the media, once the lead time has run out ("in hand for everybody" is an
+          // answer too, so this one is reported at its own level).
+          if (msg.media) {
+            const media = summarizeMedia(msg.media, name);
+            notifyLog = [...notifyLog.slice(-49), { message: media.message, level: media.level }];
+            return;
+          }
+          const line = summarizeSkips(msg.skipped, msg.recipients, name,
+            { targeted: msg.targeted ?? 0, empty: msg.empty ?? 0 });
+          if (line) notifyLog = [...notifyLog.slice(-49), { message: line, level: "warn" }];
         });
         const canvas = view.app.canvas as HTMLCanvasElement;
         const toWorld = (event: PointerEvent) => {
@@ -3449,6 +3531,8 @@ const WALL_PICK_RADIUS = 12;
             view.getEffectsLayer().spawnPing(at);
             current.gm.client.sendEphemeral("ping", { ...at });
           },
+          // D-294: a real drag/zoom beats a scripted camera cue.
+          onCameraInput: () => fxPlayer?.cancelCamera(),
           onRulerChange: (points) => {
             const scene = activeScene();
             const grid = sceneGridSpec(scene?.grid);
@@ -4452,6 +4536,9 @@ const WALL_PICK_RADIUS = 12;
           importImage={importMapFile}
           onFxImport={importFxFile}
           onPickSummon={requestSummonPick}
+          onPickAnchor={requestAnchorPick}
+          onPreviewFx={previewFxSequence}
+          onStopFxPreview={stopFxPreview}
           listFxAssets={() => Promise.resolve(app?.assets.manifest() ?? {})}
           {setFxAssetRights}
           getFxAsset={(hash) => app?.assets.get(hash) ?? Promise.resolve(undefined)}
@@ -4471,9 +4558,20 @@ const WALL_PICK_RADIUS = 12;
         {#if pendingSummonPick}
           {@const summonScene = activeScene()}
           {#if summonScene && summonScene._id === pendingSummonPick.options.sceneId}
-            <SummonCrosshair scene={summonScene} options={pendingSummonPick.options}
+            {@const resolved = resolveCrosshairPick(summonScene,
+              summonCrosshairOptions(summonScene, pendingSummonPick.options))}
+            <CrosshairOverlay options={resolved.options} request={resolved.request}
               camera={() => stage?.camera ?? { x: 0, y: 0, scale: 1 }}
-              pick={(at) => settleSummonPick(at)} cancel={() => settleSummonPick(null)} />
+              pick={(placement) => settleSummonPick(placement.point)} cancel={() => settleSummonPick(null)} />
+          {/if}
+        {/if}
+        {#if pendingAnchorPick}
+          {@const anchorScene = activeScene()}
+          {#if anchorScene && anchorScene._id === pendingAnchorPick.options.sceneId}
+            {@const resolved = resolveCrosshairPick(anchorScene, pendingAnchorPick.options)}
+            <CrosshairOverlay options={resolved.options} request={resolved.request}
+              camera={() => stage?.camera ?? { x: 0, y: 0, scale: 1 }}
+              pick={(placement) => settleAnchorPick(placement)} cancel={() => settleAnchorPick(null)} />
           {/if}
         {/if}
         {#if pendingReaction}

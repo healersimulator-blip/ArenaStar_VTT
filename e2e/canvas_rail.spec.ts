@@ -201,8 +201,12 @@ test.describe("canvas rail — tools (§10, D-256)", () => {
     await expect.poll(() => hostCall<number>(page, "fogMaskStrokes")).toBe(4);
     expect(await surfaceCallArg<boolean>(page, "app", "fogMaskAt", middle)).toBe(false);
 
-    // the log rides the scene flag, so a reload has to come back with the same cover
+    // the log rides the scene flag, so a reload has to come back with the same cover.
+    // The IDB append is asynchronous, so wait for the durable barrier before navigating
+    // away — one run in three reloaded mid-append and came back one stroke short, which
+    // is the recorded "reload before the oplog append finishes" caveat, not a lost stroke.
     const before = await hostCall<number>(page, "fogMaskStrokes");
+    expect(await hostCall<number>(page, "drainOps")).toBe(await hostCall<number>(page, "seq"));
     await page.reload();
     await bootHost(page);
     await expect.poll(() => hostCall<number>(page, "fogMaskStrokes")).toBe(before);

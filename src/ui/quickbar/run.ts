@@ -9,11 +9,13 @@
  */
 import type { ClientSync } from "../../client/sync";
 import type { ActorDocument } from "../../core/documents";
+import type { FxItemEvent, FxItemOutcome } from "../sheets/fxItemCue";
 import { worldSettingsFrom } from "../../core/worldSettings";
 import { consumableCastAuthored } from "../../packages/pf1e/consumables";
 import { pf1eAttackRollGroups } from "../../packages/pf1e/rollData";
 import { resolveCastFlow } from "../sheets/pf1eCastFlow";
-import { pf1eItemView } from "../sheets/pf1eItemsTab";
+import { fireBoundItemCue, fxCastOutcome, fxItemCueNote } from "../sheets/fxItemCue";
+import { attackLineItemId, pf1eItemView } from "../sheets/pf1eItemsTab";
 import { resolveAttackFlow } from "../sheets/pf1eResolveFlow";
 import { pf1eSheetView } from "../sheets/pf1eSheetModel";
 import type { PF1eQuickbarEntry } from "./model";
@@ -30,6 +32,42 @@ export interface PF1eQuickbarRunInput {
 export type PF1eQuickbarRunResult =
   | { ok: true; note: string }
   | { ok: false; error: string };
+
+/**
+ * D-311/D-312: the note a bound cue adds to a committed item use — empty when the item has no
+ * binding this reader can see, and a sentence when it does (including when the binding is
+ * disabled or has no cue for that outcome, because "nothing happened" needs saying then).
+ */
+function boundCueNote(
+  client: ClientSync,
+  actor: ActorDocument,
+  item: { _id: string },
+  outcome: FxItemOutcome,
+  target: ActorDocument,
+  event: FxItemEvent = "use",
+): string {
+  return fxItemCueNote(
+    fireBoundItemCue({ client, actor, item, outcome, event, targetActor: target }));
+}
+
+/**
+ * D-312: a line authored from an item is the item attacking, so a binding that fires on the
+ * `attack` event follows the roll — and only a line that **names** its item (`itemId`, written
+ * by `createAttackFromWeaponOp`) can be recognized as that item's. A hand-authored line is not
+ * any item's, and guessing by name would fire the wrong cue.
+ */
+function attackCueNote(
+  client: ClientSync,
+  actor: ActorDocument,
+  index: number,
+  outcome: "miss" | "hit" | "crit",
+  target: ActorDocument,
+): string {
+  const itemId = attackLineItemId(actor, index);
+  if (itemId === null) return "";
+  return boundCueNote(client, actor, { _id: itemId },
+    outcome === "miss" ? "failure" : "success", target, "attack");
+}
 
 export async function runQuickbarEntry(
   input: PF1eQuickbarRunInput,
@@ -83,7 +121,10 @@ export async function runQuickbarEntry(
         (result.outcome === "miss"
           ? ` (AC ${String(result.defenseAc)})`
           : ` for ${String(dealt)} — ${target.name} hp ${String(result.hp.before)} → ${String(result.hp.after)}`) +
-        (outcome.hpWriteError === null ? "" : ` (⚠ hit points not written: ${outcome.hpWriteError})`),
+        (outcome.hpWriteError === null ? "" : ` (⚠ hit points not written: ${outcome.hpWriteError})`) +
+        // D-312: after the resolve, never before — a refused or errored attack above returns
+        // without ever reaching this note, so a bound attack cue can only follow a committed swing.
+        attackCueNote(client, actor, entry.attackIndex, result.outcome, target),
     };
   }
 
@@ -118,7 +159,8 @@ export async function runQuickbarEntry(
     return { ok: false, error: `${source.spellName} was lost before it resolved` };
   }
   if (outcome.pending) {
-    // F03: the target's save is still to be rolled from the pending card.
+    // F03: the target's save is still to be rolled from the pending card. Nothing has landed
+    // yet, so a bound cue has no committed result to recognise and none is requested.
     return {
       ok: true,
       note: `${source.spellName} from ${item.item.name} → ${target.name} — awaiting the save`,
@@ -127,13 +169,15 @@ export async function runQuickbarEntry(
   if (outcome.held) {
     return {
       ok: true,
-      note: `${source.spellName} held for delivery — the charge is spent`,
+      note: `${source.spellName} held for delivery — the charge is spent` +
+        boundCueNote(client, actor, { _id: item.item.id }, fxCastOutcome(outcome), target),
     };
   }
   return {
     ok: true,
     note: `${source.spellName} from ${item.item.name} → ${target.name} — DC ${String(
       outcome.dc,
-    )}, ${String(Math.max(0, source.charges - 1))} charge(s) left`,
+    )}, ${String(Math.max(0, source.charges - 1))} charge(s) left` +
+      boundCueNote(client, actor, { _id: item.item.id }, fxCastOutcome(outcome), target),
   };
 }

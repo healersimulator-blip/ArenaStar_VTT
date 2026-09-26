@@ -40,6 +40,23 @@ export function sightSegments(walls: readonly WallDocument[]): Segment[] {
   return out;
 }
 
+/**
+ * Sound-blocking segments — D-309's muffling input: a wall between a source and a
+ * listener dulls it. This is the **sound** axis, not sight's, because the two are
+ * allowed to disagree: a window passes sight and light by its own axes, and whatever it
+ * says about sound is what muffling obeys. Doors obey their state here too — an open
+ * door lets sound through, a closed or locked one does not.
+ */
+export function soundSegments(walls: readonly WallDocument[]): Segment[] {
+  const out: Segment[] = [];
+  for (const w of walls) {
+    if (!axisBlocks(w.sound, w.door)) continue;
+    const c = w.c;
+    out.push({ x1: c[0] ?? 0, y1: c[1] ?? 0, x2: c[2] ?? 0, y2: c[3] ?? 0 });
+  }
+  return out;
+}
+
 /** The movement axis's own blocked segments — P03/D-198's walker input. */
 export function moveSegments(walls: readonly WallDocument[]): Segment[] {
   const out: Segment[] = [];

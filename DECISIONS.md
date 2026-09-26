@@ -8884,3 +8884,2203 @@ in an unrelated argument description. The generated section now states the count
   visible set to settle, and under two-core parallel load it does not within 45 s); run alone it
   passes in 41 s. The skip is `content_world.spec.ts`, which needs the converted content package this
   machine has not built.
+
+## D-293 — the FX wizard draws on the map: point picking and a local draft preview (2026-09-24)
+
+The FX timeline wizard could author a burst, a beam or a sound and run it — but it
+could only be *placed* by typing numbers. A GM who wanted an effect on the door in
+front of the party had to read the coordinates off the canvas, guess the cell, type
+them, save, run, look, and do it again. That is not an authoring tool; it is a
+remote control for one. This decision gives the wizard the two gestures every
+Foundry-side FX tool has: click the map to say *where*, and look before you save.
+
+**Point picking (`Pick on map…`).** Next to the X/Y of a point anchor — and next to
+To X/To Y for a point destination — a button opens a full-canvas crosshair
+(`AnchorPicker.svelte`) with a live `x, y` readout, a snap toggle and Cancel/Esc.
+It is a sibling of the summon crosshair, deliberately not a generalisation of it:
+a summon answers a *mechanical* placement the host re-validates (range, footprint,
+line of sight), while an anchor answers **authored data** the host validates only
+when the timeline is runs as part of the sequence. Two rules are shared because
+they are the correct ones:
+
+- **Snapping uses the token rule.** `snapTokenCenter` (`canvas/grid`) puts a point
+  on a cell centre in a square grid and a hex centre in a hex grid — the summon
+  crosshair has always snapped to the square cell centre, and an FX meant to sit
+  "on the square" should land where a token on that square lands, not on the
+  intersection between four of them. Gridless scenes stay exact.
+- **The overlay refuses what the host refuses.** `anchorPickError` mirrors
+  `resolveFxSequence`'s own bounds check, so a point outside the scene shows a red
+  marker instead of saving a timeline that fails at run time. Cancel, Esc, closing
+  the wizard or starting a new gesture all resolve `null` — the draft is untouched,
+  which is the same promise the summon crosshair makes with `Cancel` (A04).
+
+**Preview on canvas.** `Preview on canvas` renders the **unsaved draft** on the
+GM's own canvas. It is deliberately *not* a host request: it calls the same
+`resolveFxSequence` a save would, then hands the resolved sections to the tab's own
+`FxPlayer.preview()`. So there is no `fx.request`, no world op, no durable
+`fxInstance`, no recipient, no oplog entry and nothing for Undo to do. A persistent
+draft previews a single pass, because "loop until stopped" without an instance is a
+cue with no owner; the status line says so instead of silently behaving differently
+from Run. `Stop preview` (and window close, `New`, or a scene switch) ends exactly
+the cue the panel started, via the player's own run-id bookkeeping.
+
+This is what the parity spec asks for in WZ-09 ("dry-run … without mutations", and
+"preview must not grant player reads") and it moves SQ-12 from "no on-canvas
+player" to "click-at-point placement with preset save/load/edit". It is **not** the
+full SQ-10 crosshair: no circle/cone/ray/rect shapes, no range or line-of-sight
+constraints, no drag source→target mode, no reusable named position yet. Those
+remain parity gaps, and `Pick on map…` does not pretend otherwise: it picks a
+point, nothing more.
+
+**Two guards worth naming.** Picking and preview both draw on *the app's* canvas, so
+both are disabled unless the wizard's chosen scene is the scene the canvas is
+showing (`activeSceneId`), with the reason in the tooltip — previewing another
+scene's coordinates over this map would be a quiet lie about what the draft looks
+like. And preview can only ever be local: the tab that renders it is the GM's host
+tab, `FxPlayer.preview` never touches `ClientSync`, and a player shell does not
+render the wizard at all.
+
+**Gates.**
+
+- `pnpm test` — **3 568 passed / 12 skipped** (289 files: 287 passed, 2 skipped).
+  New: nine cases in `tests/ui/anchorPicker.test.ts` (square snap is the *cell
+  centre* not the intersection, snap-off and gridless stay exact, malformed grid
+  size does not produce NaN, hex snapping stays inside the hex, bounds/NaN
+  refusals). One earlier run under full parallelism failed
+  `tests/packages/pf1eMassBattleScale.test.ts` (p95 273 ms against its 250 ms
+  ceiling) — the same load-sensitive gate D-291/D-292 recorded; it is green on
+  every re-run, including the recorded one.
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`)
+  · `pnpm lint` **exit 0** · `pnpm build` → `pnpm size` **3 744 751 B raw / 1 072 958 B
+  gzip**, inside the 6 MB budget.
+- e2e (Chromium, production `file://` build; the Playwright CDN is unreachable in
+  this sandbox, so `@sparticuz/chromium` is the executable, as the README
+  documents): `e2e/fx_sequence.spec.ts` **8/8**, including two new specs — picking
+  puts `(274, 231)` on the cell centre `(250, 250)` and writes it into the draft
+  while Esc changes nothing, and a preview of an unsaved 4-second section renders
+  one cue with `seq` unmoved while the same sections saved and Run do go through the
+  host. The five other wizard suites are **36/38** with two `active_zones` specs
+  timing out at 30 s under two-worker load (one waiting for a click to settle, one
+  still at "Starting world…"), and `active_zones.spec.ts` alone with one worker is
+  **16/16** in 2.9 m — the load flake D-291 named, not a regression.
+
+## D-294 — the FX wizard moves the *viewer's own* view: camera pan and shake (2026-09-24)
+
+Every FX section so far drew something *into* the world: a burst, a beam, a sound.
+Parity item SQ-15 asks for the section that has no world position at all — a pan to
+a point, a shake in place — and the interesting part is not the easing, it is
+**ownership**. A camera cue writes `stage.camera` on every frame, which is the same
+field the viewer's own drag and wheel write. A cue that keeps writing after the
+viewer grabs the map is not an effect; it is a fight.
+
+**Camera is view state, so nothing about it crosses the network.** The host resolves
+a pan destination through the same `anchor()` path as every other anchor —
+`to`/`toToken` in, bounds-checked `toX`/`toY` out — and a shake carries no anchor at
+all. Message kinds are untouched (`fx.request`, `fx.start`, `fx.sync`, `fx.stop`,
+`fx.end`, `fx.stopMatching`), there is no op, no `fxInstance`, no recipient, no
+oplog entry and nothing for Undo to do: two recipients of one cue end up looking at
+the same world point, not at the same camera. That also means a camera section can
+never *loop* (a persistent timeline must not hold a view forever) and never
+replays; `validateFxSequence` refuses both, along with more than eight camera
+sections, under 100 ms, an intensity outside 0.05–1 and a zoom outside 0.1–10, and
+the authoring panel hides the replay controls instead of offering what the host
+would reject.
+
+**The maths that keeps a pan honest (`canvas/fxCamera.ts`).** A pan interpolates the
+viewport **centre**, not `camera.x`/`camera.y`: with a zoom attached, moving the
+camera origin linearly would make the destination drift as the scale changes, while
+centring is what an author means by "look at the gate". `cameraPanEnd` is exactly
+progress 1, so the frame after the last one cannot land somewhere new. A shake is a
+bounded screen-space budget (24 px) divided by the current scale — the same visual
+size at any zoom — decaying to zero by the last frame, and its end state is the
+base camera object itself.
+
+**Handover: the loser yields in the same frame.** `FxPlayer` holds at most one claim;
+it starts a cue on the stage's frame sink (`Stage.onFrame`) and never starts one
+late (a view claim is not a visual to catch up on). The rule that took an e2e
+failure to find is the exact one worth writing down: when a viewer's real gesture
+(drag with middle/right/shift+left, a wheel, or a zoom button) interrupts a cue, the
+handover must be **quiet** — `cancelCamera()` drops the claim, blacklists the rest
+of that run's camera track, and writes *no* camera, because restoring the pre-cue
+position would undo the very gesture that just took control. The frame tick obeys
+the same rule: a taken-back run releases without writing, while a claim invalidated
+for any *other* reason (scene switch, reconnect, dispose) restores the base. The
+other case is not a gesture: an explicit **stop** (`fxEnd`, clearLocal) hands the
+view back exactly where the cue found it, a finished pan stays on its destination,
+and a finished shake restores the base — three different endings, three deliberate
+behaviours, all pinned in `tests/client/fxViewClaim.test.ts`.
+
+**Gates.**
+
+- `pnpm test` — **3 588 passed / 12 skipped** (291 files: 289 passed, 2 skipped; no
+  load flake this run). New: `tests/canvas/fxCamera.test.ts` (14 cases — half-way
+  centre, monotonic centre through a zoom, an eased midpoint, shake bounded by
+  scale and decaying to the base, `null` on a non-finite elapsed time), two camera
+  cases added to `tests/core/fx.test.ts` (resolves to `toX`/`toY` and drops `to`,
+  shake stays anchor-free; persistent/loop/replay/9 sections/<100 ms/zoom 40/easing
+  `"bounce"`/mode `"orbit"` and a shake-with-destination are all refused), and
+  `tests/client/fxViewClaim.test.ts` (4 cases — a drag is not undone by the next
+  frame and the timeline's next camera section never starts, a stop restores the
+  base exactly and then stops writing, a finished shake/pan end as above, a stale
+  cue cannot claim the view after a scene switch).
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`)
+  · `pnpm lint` **exit 0** (four non-null assertions in the new camera test were
+  rewritten rather than suppressed) · `pnpm build` → `pnpm size` **3 753 973 B raw /
+  1 075 351 B gzip**, inside the 6 MB budget.
+- e2e (Chromium, production `file://` build): `e2e/fx_sequence.spec.ts` **11/11**,
+  including three new camera specs, the last with two real browser contexts (host +
+  joined player): one cue moves **both** clients' own cameras (both centres measured
+  moving, `seq` unchanged), the player's middle-drag moves *their* camera by more
+  than the drag's own distance, then the GM's sweep completes on the destination
+  while the player's view stays exactly where their gesture left it. A 600 ms pan to `(1500, 600)` parks the viewport
+  centre there with `seq` and `drainOps` unmoved (a camera cue commits nothing); a
+  2-second sweep to `(300, 1300)` is interrupted mid-flight by a real middle-button
+  drag, the drag is measured to have moved the view *against* the sweep, and 2.4 s
+  later the view is still exactly where the drag left it instead of at the
+  destination. A 1.2-second shake at intensity 0.8 is sampled frame-by-frame inside
+  the page (peak > 1 px) and returns the base camera exactly, scale included; in the
+  same spec a wheel takes a running sweep away and the zoom it applied survives.
+- Regression batch for the two shared-path changes (the new per-frame sink on the
+  stage ticker and the interaction callback on pan/wheel):
+  `canvas_rail.spec.ts` + `canvas_toolbar.spec.ts` + `join.spec.ts` **18/18** in 1.3 m
+  on two workers, including "view actions: zoom in/out moves the camera" and
+  "pan mode drags the map with the left button".
+- Explicit non-claims: no per-user or GM-only camera modes (a camera cue goes to
+  every recipient), no camera section inside
+  a persistent timeline, no protocol change, no camera *paths* (waypoints), and no
+  reduced-motion/preload handling yet (SQ-13). Firefox/WebKit and the 41-scenario
+  acceptance matrix were not run.
+
+## D-295 — FX delivery: preload ahead, fall back visibly, and stay local about it (2026-09-24)
+
+An FX timeline fires on the host clock, so every viewer is supposed to see the same
+frame at the same moment. In practice one of them is on hotel wifi: their client asks
+for the fireball's video *when the section starts*, the bytes arrive 700 ms later, and
+the cue pops in late — or, if the section was already over, never. Nobody is told.
+SQ-13/A10 asks for three things this decision implements: fetch what a timeline will
+need **before** the table expects it, make the fallback a setting instead of an
+accident, and never let one viewer's accommodation change what anyone else sees.
+
+**Preload is a plan, not a download.** `fxPreloadPlan` (`core/fxDelivery.ts`) turns a
+cue's sections into "when to start fetching each asset": the cue arrives `FX_LEAD_MS`
+(300 ms) early, and a section due in 800 ms with a viewer's 2 s window starts its
+fetch *now*, while one due in 20 s waits until exactly 2 s before its own cue. The
+window is the viewer's choice (`preloadAheadMs`, 0–8000 ms; `0` means "lazily fetch at
+play time", the other half of SQ-13), which is also the courtesy the §7 priority
+ladder asks for: an asset belongs to the cue that needs it, not to a queue the scene
+load is waiting on. One entry per asset with the earliest need winning the deadline —
+a timeline that loops the same aura does not fetch it twice.
+
+**Readiness is measured before the fetch, not after.** `FxPlayer` prefetches through
+the same `AssetFetcher` the rest of the client uses (so a prefetched asset is a cache
+hit at cue time), and records whether the bytes were *already in hand when the section
+started*. Asking after awaiting would always answer "yes" and hide exactly the slow
+client this decision is about. Anything more than 120 ms late is "late"; the viewer's
+setting picks what happens then: `delay` (default, and today's behaviour) starts the
+cue as soon as its bytes land, jumping to the right phase, while `skip` drops that cue
+so every viewer is looking at the same frames. Either way the run produces **one**
+report line — "Fireball: 1 of 3 cue(s) degraded — image not loaded in time (up to
+480 ms late)" — and a timeline that arrived on time says nothing at all.
+
+**Local means local (SQ-16).** The new "Effects on this device" panel (GM Settings window
+and the player's *Session & guide*, one `FxViewPrefsPanel`, `localStorage` key
+`vtt-fx-view-prefs`) offers: **reduce camera motion** — a pan *cuts* to its
+host-resolved destination and a shake is skipped, because ending up looking at the
+right place without the motion is the point, and a cut is not a motion — **mute FX
+sounds** (the muted sound is not fetched either), the preload window, and the late
+policy. Nothing here is sent to the host, nothing is written into a document, and a
+muted sound in a timeline does not stop the text cue beside it: a viewer's
+accommodation is not a change to the effect. The OS `prefers-reduced-motion` switch
+only seeds the default for a profile that has never chosen, since a viewer who turns
+motion back on must not have it silently re-disabled.
+
+**The other audience gap: the host says who it could not reach.** `prepareFx` now
+counts *why* a session was dropped (audience, macros/scene read rights, an invisible
+source/target token, missing media entitlement) and answers the requester with a new
+`fx.delivery` message (`0x4d`, host → requesting session, ops) when any count is
+non-zero. It is deliberately counts-only — no user, document or asset id — so a cue
+cannot become a membership oracle, it goes only to a GM/assistant requester, and a
+player-initiated request never receives it. The GM sees "Ward: reached 1 viewer(s) —
+2 outside its audience" in the same notice stack as everything else, and the action
+itself still completed exactly once.
+
+**Authoring side.** The wizard already listed imported media and their rights; it now
+warns *before* the run when a draft references an asset the world's registry does not
+have, a codec this browser cannot decode (`canPlayType`, probed per MIME and cached),
+or GM-only media in a scene-audience timeline — the three registry gaps SQ-13 names.
+`domCanPlay()` returns `null` where there is no DOM rather than guessing, and a probe
+that throws is "no opinion", never a refusal.
+
+**Gates.**
+
+- `pnpm test` — **3 618 passed / 12 skipped** (293 files: 291 passed, 2 skipped; no
+  load flake this run). New: `tests/core/fxDelivery.test.ts` (20 — plan timing and
+  per-asset dedup, `aheadMs: 0` meaning lazy fetch, the skip/delay policy, one-line
+  summaries with the worst lateness, skip summaries, total preference parsing, codec
+  fitness and the authoring issues), `tests/client/fxDeliveryFlow.test.ts` (8 — a cue
+  really is fetched before its section starts and a clean run reports nothing; a slow
+  client gets its cue late by default and hears about it; `skip` drops it; preloading
+  off fetches at cue time; mute skips only the sound and never fetches its bytes;
+  reduced motion cuts once and never animates; a missing asset is reported and the
+  rest of the timeline still plays; a stopped run reports once), plus two host cases in
+  `tests/host/sync.test.ts` (a GM-audience cue reports `{audience: 2}` counts with no
+  user id in the message, and a player's own request never receives an aggregate).
+  Also updated for the new kind: `contracts`, `frame`, `protocol-doc`, `net/fixtures`.
+- `pnpm typecheck` **64 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`)
+  · `pnpm lint` **exit 0** · `pnpm build` → `pnpm size` **3 765 629 B raw /
+  1 079 455 B gzip**, inside the 6 MB budget. `PROTOCOL.md` documents `fx.delivery`
+  (0x4d) with its skip shape.
+- e2e (Chromium, production `file://` build): `e2e/fx_sequence.spec.ts` **13/13**,
+  including the two new specs — a viewer turns on mute and reduced motion in the
+  Settings window, runs a text+sound timeline (the text cue still renders, one notice
+  says "muted on this device") and then a 3-second camera pan, which is measured
+  already parked on its destination and *still* parked 600 ms later, with one "cut by
+  reduced motion" notice; and a two-context run where a GM-audience cue tells the
+  requesting GM "reached 1 viewer(s) — … outside its audience" while the joined player
+  sees nothing at all.
+- One earlier full-suite run failed three tests that this change had made stale or
+  flaky rather than broken: two protocol-count/doc tests updated for the new kind, and
+  the D-294 camera-claim test whose "the pan has finished by now" assumption lost
+  under load — it now drives frames until the view is actually parked (the same
+  timers-lag-under-load class as the D-291 flake, fixed in the test, not worked
+  around).
+- Explicit non-claims: no per-asset progress UI or byte-level resume beyond the
+  existing §7 chunk/resume path, no client decode-acknowledged sync (a `skip` viewer's
+  frame alignment is a policy, not a measured guarantee), no host-side codec probing
+  (a codec gap is the viewer's browser, so only the client can report it), no
+  reduced-motion handling for non-camera sections (images/text still animate), and no
+  measurement of how much the prefetch actually saves on a real network — the plan is
+  pinned by unit tests, not by a bandwidth benchmark. Firefox/WebKit and the
+  41-scenario acceptance matrix were not run.
+
+## D-296 — one shared crosshair: shapes, constraints, live refusal, named reuse (2026-09-24)
+
+Three flows wanted the same gesture — "put a point (or an area) on the map": the
+summon window (SU-03), the FX wizard's anchors (D-293), and the tile/summon paths
+coming behind them. Each had grown its own overlay and its own idea of what was
+legal, and only one of them could say *why* a spot was refused. SQ-10 asks for the
+instrument: point/circle/cone/ray/rect, snapping and rotation, min/max range,
+wall and line-of-sight constraints, live feedback, a cancel with no side effects,
+and an output that can be named and reused. This decision lands one crosshair used
+by both existing flows, with the rules in a pure module so the red preview and the
+host's refusal cannot drift apart.
+
+**The rule is one module, not a preview copy.** `core/crosshair.ts` holds the five
+shapes, snapping (cell/hex centres through the token rule, 15° for a direction),
+areas in world coordinates, and the fault list: `not-finite`, `outside-scene`,
+`too-close`, `out-of-range`, `behind-wall`, `no-path`. Fault *order* is the host's
+own order — a non-finite point outranks bounds, bounds outrank range, range
+outranks walls — so an author fixes the first thing a save would also refuse
+first. `summonPlacementError` now calls the same `sightBlockedBetween` its wall
+loop used to spell out by hand, and a unit test asserts the two agree on the same
+fixture and wall (blocked and legal) so a future edit cannot quietly diverge.
+Sight and movement stay separate axes: a window blocks a path but not a sight
+line, an open door blocks neither.
+
+**An area is measured, not committed.** A circle/cone/ray/rect is exactly what the
+author is shown and exactly what gets checked — the outline is sampled, so a
+circle whose rim is half-buried in a wall is refused instead of being discovered
+on save — but what a consumer stores is still the **point** (the FX anchor stays
+`{kind:"point",x,y}`, the summon still lands on a point). Nothing in this feature
+creates a zone, template or region document, and nothing here changes a host
+rule; the shapes exist so an author can measure a spell's footprint before
+committing to it.
+
+**Cancel is a gesture, not an edit.** Esc, the Cancel button, or standing the
+gesture down with a new request resolves `null` and touches no draft: the wizard
+keeps its X/Y, the summon window keeps its preset and coordinates, and no message
+is sent. The e2e asserts the host `seq` is unmoved after a cancel — as it is after
+a refused click, which is the other half of "invalid positions cannot commit".
+
+**Names are authoring, not data.** A committed placement can be named, and the
+overlay offers every name the window already holds for reuse, so a second section
+can be anchored on a spot the author already chose instead of re-aiming. The
+uniqueness suffix ("Portal (2)") keeps the list unambiguous, except when the author
+is deliberately standing on and re-using a name, which keeps it. The names live in
+the panel's session state: the saved sequence receives plain host-validated points,
+so a name can never become a field the host has to trust. The summon window's
+commit is immediate (place on click), so naming applies to the wizard flow, which
+is where a draft has several anchors to place.
+
+**Summon preview vs. host authority.** The summon crosshair is built from the
+preset the host will enforce — caster centre as the range origin, `maxDistance`,
+`requireLoS`, and the footprint inset that keeps a large creature inside the map.
+A GM placing without a caster keeps the host's own exemption (`gmManual`) instead
+of being shown a range nobody enforces; an unknown caster id is treated as no
+caster, so the preview stays silent rather than red. A player's rejection is still
+sanitized by the host ("Summon unavailable or placement not allowed") — the reason
+is host-side, which is why the *unit* test pins the wall reason and the *e2e* pins
+the refusal.
+
+**Gates.**
+
+- `pnpm test` — **3 640 passed / 12 skipped** (294 files: 292 passed, 2 skipped).
+  New: `tests/core/crosshair.test.ts` (22 — the unit→pixel metric, cell-centre and
+  15° snapping, each shape's outline including a malformed extent refusing to
+  draw, endpoint-touch and parallel-wall cases, the door/window axes, the
+  crosshair-vs-host agreement, the fault order, the footprint inset, unit-measured
+  range with an exact-limit point, an area refused at its outline, the reach axis,
+  and commit/naming/trim/dedupe), `tests/ui/crosshairPicker.test.ts` (9 — request
+  resolution against a live scene, the summon rules including the no-caster
+  exemption, shape switching that never yields a zero-extent area, and the named
+  placement bookkeeping), replacing the D-293 anchor-picker tests, whose snap and
+  bounds assertions now live in the core module's own file.
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing — two overlays became one, hence 63 rather than 64) · `pnpm lint`
+  **exit 0** · `pnpm build` → `pnpm size` **3 773 597 B raw / 1 081 418 B gzip**,
+  inside the 6 MB budget. No wire change: the crosshair is UI-only, so `PROTOCOL.md`,
+  the message byte map and the frame tables are untouched.
+- Chromium production `file://`, two suites. `e2e/summons.spec.ts` **4/4** — the new
+  A04 spec runs a real GM + player pair: the GM draws a wall with the rail tool
+  (coordinates read back from the committed wall, not from the drag), publishes a
+  preset with `requireLoS` and a 30-unit range, and the joined player's crosshair
+  then refuses the cell beside that wall for a **circle** (rim crosses it) and for a
+  **ray** aimed at it (far end crosses), with the commit button disabled and a click
+  that changes nothing (`seq` unmoved, no instance); the same circle on open floor
+  commits exactly once, cancelling a following gesture leaves one instance and the
+  same `seq`, and a point typed by hand behind the wall is refused **by the host**
+  with the player-facing reason. `e2e/fx_sequence.spec.ts` **13/13** — the rewritten
+  wizard spec names a placement, sees it listed, reuses it for the next anchor with
+  the same coordinates, draws a ray's area for a destination pick (a measurement)
+  and still writes only the point. The interaction batch (`canvas_rail` +
+  `canvas_toolbar` + `join`) is **18/18** on two workers.
+- Explicit non-claims: no tile/summon-caster-side "drag source→target" placement
+  gesture (the point is picked, the direction is rotated), no occupancy/terrain
+  walkability ("valid cell" means a cell centre inside the scene — this codebase
+  has no walkability data), no per-viewer visibility check (a hidden token is not a
+  fault), no cross-window persistence of names (session state, not a document
+  field), no shape semantics for the committed summon/FX (the point is what
+  travels), and no Firefox/WebKit run or the 41-scenario acceptance matrix.
+
+## D-297 — sound channels, fades and a device-local sound list (2026-09-24)
+
+A sound section was `assetId + volume`. That is enough to make a noise and not
+enough to run a table's audio: a GM wants the ambience under the sting, a player on
+a phone wants the music off without losing the dice, and someone whose loop is stuck
+in their earphones wants to stop *their* copy without ending it for everyone. SQ-09
+lists channels, fades, per-user/local routing and a manager; SQ-16 caps it — per-client
+mix "without altering authoritative mechanics or turning off other users' effects".
+This decision lands the bounded half of that: channels with per-device faders, fades
+the host validates, and a list of what *this* browser is playing.
+
+**The channel is a document field; the fader is not.** A section may name one of four
+channels (`sfx`, `music`, `ambience`, `voice`) and the host validates it as a closed
+set — an unknown channel is refused rather than silently treated as an effect, which
+is the "no control that silently does nothing" rule (`validateFxSequence`). What each
+*viewer* does with that channel lives in `FxViewPrefs.soundMix`: four gains plus the
+master `muteSound` switch, kept as one source of truth (`normalizeFxViewPrefs`
+mirrors the old boolean into the mix, so an older profile — or a panel that only flips
+the checkbox — still silences everything). The mix is stored beside the other device
+preferences and is never sent anywhere; the timeline carries the channel, not the gain.
+
+**The fade is a curve, not a volume write.** `soundFadeGain` ramps in over `fadeInMs`
+and out over the last `fadeOutMs`, with the quieter of the two winning where they
+overlap (a 300 ms blip with 200 ms fades is a blip, not a fight), and returns 0 outside
+the section so a stale timer can never produce a blip of sound. A persistent loop fades
+in **once** and then holds: a loop that faded out would go silent at the end of every
+cycle instead of when the GM stops it. The player re-evaluates the gain on a 40 ms tick
+rather than setting `volume` once, because a fade is a function of time *and* because
+moving a fader mid-cue must reach the element — both are local facts the timeline never
+learns. The host validates the fades against the section duration, like an image's.
+
+**Silence is a skip, not a zero-volume element.** If the master switch or the channel
+fader makes a sound inaudible on this device, the cue is skipped with the existing
+`muted` delivery reason and its bytes are **not fetched** — the same courtesy D-295
+extended to the mute switch, now per channel. The wizard says so before a Run as well,
+in the status line: the author is a viewer too, and a timeline they cannot hear should
+say that rather than look broken.
+
+**"Playing on this device" is a different truth from the host's instances.** A new
+device-local registry (`client/fxSounds.ts`) holds what this browser is playing right
+now — a one-shot sting that exists nowhere else, or a persistent loop that others may
+still hear — and the device panel lists it with its channel and live gain, with a
+"Stop here" action. Stopping there silences this device and nothing else: the durable
+instance stays in the Live FX manager until the GM stops it, and the e2e asserts the
+host `seq` does not move. Rows are keyed by run, section *and run epoch*, and removal
+is identity-checked, because a stopped run may legitimately reuse its ID — a bug this
+increment's own tests caught (an old element's teardown deleting the new row).
+
+**Gates.**
+
+- `pnpm test` — **3 669 passed / 12 skipped** (296 files: 294 passed, 2 skipped). New:
+  `tests/core/fxSound.test.ts` (13 — channel set and fail-safe default, total mix
+  normalization, the fade curve including overlap and the loop rule, gain composition
+  with clamping, the "is this cue audible at all" helper, and the summary line),
+  `tests/client/fxSounds.test.ts` (6 — registration/teardown idempotence, identity on a
+  reused ID, subscriber emissions including clamped/ignored gain writes, the 64-row
+  bound, a throwing stop contained, stop by run/channel/all), three host-validation
+  cases in `tests/core/fx.test.ts` (the four channels accepted and an unknown one
+  refused, fades bounded by the section, channel/fade still unknown fields elsewhere)
+  and six player-flow cases in `tests/client/fxDeliveryFlow.test.ts` (authored volume ×
+  fader on the real element, a zeroed channel skipping without spending bytes while the
+  visual still plays, a fade-in ramping up measured on the element, a fader moved
+  mid-cue reaching both element and list, a persistent loop listed as a loop and
+  stopped locally, and a host stop clearing the list).
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing) · `pnpm lint` **exit 0** · `pnpm build` → `pnpm size` **3 782 261 B raw /
+  1 083 937 B gzip**, inside the 6 MB budget. No wire change: the channel and fades ride
+  the existing `fx.start` cue, and the mix never travels.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **14/14** — the new spec
+  imports a real WAV, authors a music-channel sound with 500 ms fades, saves it, and
+  reopens the saved timeline to prove the channel and fades came back through the host;
+  running it, the Settings window's device list shows the sound with its channel and a
+  gain climbing to **80 %** (the wizard's authored volume, with the fade now complete),
+  the device fader moved to 50 % takes it to **40 %** while the cue plays, "Stop here"
+  empties the list with a "this device" note and leaves host `seq` unmoved, and with the
+  music fader at 0 the next Run produces exactly one "muted on this device" notice and
+  no list row. The `summons` suite re-ran alongside it (**18/18** together) and the
+  interaction batch (`canvas_rail` + `canvas_toolbar` + `join`) is **18/18** on two
+  workers.
+- Explicit non-claims: no positional/attenuation audio, wall occlusion/muffle or
+  elevation-dependent sound, no clip window/start offset inside the media, no separate
+  sound *manager* for the host beyond the existing Live FX instance list and its
+  matching stop, no server-side volume or per-recipient targeting (a viewer's mix still
+  changes only what that viewer hears), no persistence of the local mix across devices,
+  and no Firefox/WebKit run or the 41-scenario acceptance matrix.
+
+## D-298 — camera paths: waypoints the host resolves, a tour each viewer walks from where they are (2026-09-25)
+
+D-294 gave a camera section two verbs — `pan` to one anchor, `shake` in place. SQ-15's
+other shape, the one a GM actually reaches for when the party walks a corridor or a
+spotlight slides across a plaza, is *several* anchors with motion between them. This
+decision adds `mode: "path"`: 2–8 waypoint anchors, resolved and bounds-checked by the
+host like any other anchor, and walked once by each viewer in order.
+
+**A path is a route, not a series of pans.** The naive reading of "waypoints" is "pan to
+A, then pan to B", and it is wrong for two reasons. First, a pan interpolates the
+*viewport centre* toward its destination, so a sequence of pans would visibly lurch at
+every join — each leg would start from wherever the previous one landed, and any two
+consecutive legs authored against the same easing curve would kink at the waypoint.
+Second, a route has a direction: what matters to a viewer is that the camera passes
+*through* the published anchors in order, on the way to the last one. So the tour is
+planned as **N legs from N waypoints** — leg 0 runs from the viewer's own current centre
+to waypoint 0, leg i runs from waypoint i−1 to waypoint i — with the *whole* path's
+progress divided evenly across the legs and the section's easing applied **per leg**, not
+across the tour. Two viewers a screen apart therefore meet on the first waypoint and are
+identical from there on, which is what "same tour for everyone" means when nobody is
+allowed to teleport anybody else's view.
+
+**Zoom interpolates across the whole path, not per leg.** Per-leg zoom would restart at
+the authored value every leg — a 2× zoom-in would pulse 2×, 2×, 2× instead of doing 1→2
+once. The zoom is one curve over the tour's total progress, so a path can be authored as
+a slow push-in over a four-corner walk and it reads as one move. The end state is
+explicit and total: `cameraEnd` now answers for all three modes (a shake restores the
+*base* view, a pan keeps its destination, a path parks on its **last** waypoint with the
+authored zoom), and both the finish path and the reduced-motion cut go through it — so a
+viewer with reduced motion enabled lands exactly where the tour ends, in one step,
+rather than getting a shake-free version of a move they cannot read.
+
+**The host owns every waypoint.** A path's points are ordinary `FxAnchor`s, so they get
+the same treatment as a single pan destination: resolved on the host, refused when they
+are not finite or fall outside the scene, and refused when the author wrote `to` or
+`intensity` on the same section (a path has neither). The one invariant a single-anchor
+pan does not need is that a tour must *go* somewhere: if every waypoint resolves to the
+same point — a plausible accident when three picks snap to one cell centre — the section
+is refused with "a camera path needs two different waypoints", because a camera cue that
+promises movement and delivers a stare is a bug report, not a feature. The resolved cue
+carries the ordered points to the viewers; no new field, no new message kind, no document
+change, no Undo entry — a camera path is a view-only claim exactly like a pan.
+
+**The wizard's waypoint editor reuses the crosshair, not a second picker.** "Path through
+waypoints" swaps the single destination row for a small editor: one row per waypoint with
+x/y inputs, a per-row **Pick on map…** that calls the same `pickPoint(i, "waypoint", way)`
+plumbing D-296 built (so the shared crosshair, its snapping and its host-side refusals
+apply unchanged), a per-row remove, and an **Add waypoint** that mirrors the last point
+across the scene's centre so a fresh tour visibly goes somewhere. The default two-point
+section is a diagonal walk (25 %/30 % → 75 %/70 %, `easeInOut`, 2000 ms) and the editor
+stops at 8 waypoints, matching the host's cap. Editing a saved document — where the bug
+below was found — round-trips the waypoints through the host and back.
+
+**One bug, found by the wizard path and worth naming.** `addWaypoint` first appended
+straight into the draft's `points` array; Svelte's `$state` draft is reassigned wholesale
+elsewhere, and the appended point never reached the editor row that was supposed to show
+it (the e2e's "a third waypoint" step failed with a zero-element locator, i.e. the button
+did nothing observable). It now maps the section into a fresh array, the same way the
+other waypoint helpers do — the lesson is the same one D-294 recorded: the wizard's draft
+is replaced, never mutated in place.
+
+**Gates.**
+
+- `pnpm test` — **3 680 passed / 12 skipped** (296 files: 294 passed, 2 skipped). New:
+  seven cases in `tests/canvas/fxCamera.test.ts` (progress 0 parks on the viewer's base
+  view, progress 1 lands on the last waypoint, a three-waypoint tour walks its legs in
+  order and never backtracks, per-leg easing is applied to each leg, zoom interpolates
+  across the whole path while a single waypoint degrades to a pan, empty/one-point/NaN
+  inputs fall back safely, and `cameraAt`'s window agrees with `cameraEnd` for a path) and
+  four in `tests/core/fx.test.ts` (an unknown mode and a path with one waypoint, a
+  repeated waypoint, a bad zoom or a forbidden `to`/`intensity` are refused; the accepted
+  section's invariants hold and do not repeat; the host resolves every waypoint and
+  refuses one outside the scene; all-equal waypoints are refused at resolution).
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing) · `pnpm lint` **exit 0** · `pnpm build` → `pnpm size` **3 788 353 B raw /
+  1 085 319 B gzip**, inside the 6 MB budget. No wire change: a path rides the existing
+  `fx.start` cue, whose resolved camera section now carries `points` instead of `to`.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **15/15** — the new spec
+  authors a three-waypoint tour, places the *middle* waypoint by clicking the shared
+  crosshair on the map (readout `1050, 650`), saves it, reopens the saved timeline and
+  sees `mode: path` with all three pairs back, then Samples the live camera every frame
+  during the Run: the centre comes within 30 px of the first waypoint and 60 px of the
+  middle one, the final frame is parked **on** the last waypoint (and was still >200 px
+  away at the halfway sample, so it arrived rather than started there), and with reduced
+  motion enabled the same Run cuts straight to that last waypoint and stays there with a
+  single "cut by reduced motion" notice. The `summons` suite re-ran alongside it
+  (**19/19** together) and the canvas batch (`canvas_rail` + `canvas_toolbar` + `vision`
+  + `walls`) is **19/19** against the rebuilt production file. One load flake was
+  observed and is recorded rather than hidden: in the first combined run the D-297 sound
+  spec's *first* assertion (the device list row appearing, which waits on a fetch and a
+  decode) timed out at 5 s; it passed standalone and in the re-run, and that one wait now
+  has a 15 s ceiling with a comment saying why.
+- Explicit non-claims: no per-leg durations (the tour's time is divided evenly), no
+  curved, orbit or spline legs (straight segments between waypoints), no looping or
+  replaying the camera (a path is walked once, and a camera section still cannot repeat),
+  no GM-only or per-viewer-targeted camera delivery (every recipient of a cue gets the
+  same tour), no masks, elevation or per-waypoint zoom, and no Firefox/WebKit run or the
+  41-scenario acceptance matrix.
+
+## D-299 — appearance a section carries: blend modes and one bounded filter (2026-09-25)
+
+SQ-05 asks for "tint, supported filters/blend modes, ... mask/cutout" and D-294's own
+status notes listed "broader effect filters (blend modes, masks/cutouts)" as the gap.
+Tint has existed since the first wizard; this decision lands the other two visual
+appearance controls — **blend** and **one filter** — with the masks/cutouts left open
+and named as open.
+
+**A closed blend set, because a silent `normal` is a lie.** A visual section may now
+name `blend`: `normal`, `add`, `multiply`, `screen`, `overlay`, `darken` or `lighten`.
+Every one is a mode the renderer really implements (they are pixi's own names), and
+anything else is refused by name — the parity spec's rule is "do not offer a UI control
+that silently does nothing", and an unknown blend string would do exactly that.
+
+**One filter per section, each kind with its own range.** `filter: { kind, strength? }`
+where kind is `blur` (1–32 px), `grayscale` (0–1), `brightness` (0–2) or `saturate`
+(0–2). A single shared range would be wrong in both directions: it would make "blur 8"
+unwritable and would let "brightness 8" render a white square. `strength` is optional
+and the omission has a defined meaning per kind (the value the wizard offers first), so
+an author who picks "grayscale" gets fully grey rather than nothing. The renderer builds
+exactly one pixi `Filter` at spawn — a `BlurFilter` for blur, a `ColorMatrixFilter` for
+the three colour kinds — and never rebuilds it per frame; alpha keeps composing on top
+of it each frame, so a fade and a filter do not interfere.
+
+**A design decision about defaults: `normal` and "no filter" are absent fields, not
+stored no-ops.** The blend select's "Normal" and the filter select's "None" *remove* the
+key from the section. That matters beyond tidiness, and it is where this increment's bug
+came from: the wires are **msgpack**, which has no `undefined`, so a key left holding
+`undefined` arrives at the host as `null` — and `null` is not a blend name. The new e2e
+found it immediately: clearing the two fields and saving produced
+`invalid_schema: FX blend must be normal, add, multiply, screen, overlay, darken or
+lighten` and no commit at all (the `seq` never moved). The panel already had the right
+idiom for deleting a field — `changeDestination` destructures the key out and spreads
+the rest — and both new handlers now do the same; an immediate assertion in the spec
+pins "cleared means absent" so a future `field: undefined` cannot come back. This is a
+class of bug worth remembering: `exactOptionalPropertyTypes` catches it in typed code,
+but a cast at the section-boundary (`as FxSection`) is exactly where it slips through.
+
+**Non-claims.** No masks or cutouts, no filter *animation* (a filter is fixed for its
+section's whole life), no filter chains or per-recipient styling (every viewer of a cue
+renders the same appearance), no blend/filter on camera, sound or wait sections, no
+blur quality/performance control beyond pixi's default, and no Firefox/WebKit run or the
+41-scenario acceptance matrix.
+
+**Gates.**
+
+- `pnpm test` — **3 691 passed / 12 skipped** (297 files: 295 passed, 2 skipped). New:
+  `tests/canvas/fxStyle.test.ts` (5 — the blur builds a real `BlurFilter` whose strength
+  matches, the colour kinds build a `ColorMatrixFilter` whose grayscale weights are
+  balanced, a spawned visual carries its blend *and* its one filter with the live view
+  inspected rather than only the plan, an unstyled section is `normal` with no filter
+  array at all, inspection is per run and read-only, and alpha keeps composing with the
+  filter across a tick) plus six in `tests/core/fx.test.ts` (all seven blends accepted
+  and an unknown one refused by name; filter kind and strength including an unknown inner
+  key; appearance accepted on text but refused on sound, wait and camera; the style plan's
+  defaults and clamping plus an unknown kind; resolution keeping the style; and the
+  wizard's ranges agreeing with the validator's).
+  (`tests/canvas/fxStyle.test.ts` stubs a canvas that reports no WebGL, because pixi's
+  `BlurFilter` builds its GL programs eagerly and sniffs shader precision; that is the
+  same path pixi's own fallback takes.)
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing) · `pnpm lint` **exit 0** · `pnpm build` → `pnpm size` **3 811 476 B raw /
+  1 092 280 B gzip**, inside the 6 MB budget. No wire change: `blend`/`filter` ride the
+  existing `fx.start` cue and its resolved sections.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **16/16** — the new spec
+  imports a real PNG, authors an image cue, asserts the wizard's own filter bounds are
+  the host's (picking "blur" fills 8 and caps at 32, switching to grayscale fills 1),
+  saves and reopens (`screen` / `grayscale` / `0.5` all back), reads the **live sprite**
+  back through the layer as `{ blend: "screen", filter: "grayscale:0.5" }`, then clears
+  both, waits for the host's `seq` to move before reopening, and proves the re-read
+  sprite is `{ blend: "normal", filter: null }`. The `summons` suite ran alongside it
+  (**20/20** together) and the canvas batch (`canvas_rail` + `canvas_toolbar` + `vision`
+  + `walls`) is **19/19** against the rebuilt file.
+
+## D-300 — a camera cue can be aimed: three-word audience, one payload per viewer (2026-09-25)
+
+D-298 closed SQ-15's paths and left one clause of its own sentence standing: "GM-only
+or per-viewer-targeted camera delivery (every recipient still gets it)". SQ-15 asks for a
+camera that "can be local or recipient-targeted", and a GM has an obvious use for it —
+look at the hidden chamber without dragging the table's view with you. This decision
+lands that, and nothing else.
+
+**The vocabulary is already in the codebase.** A sequence has carried `audience:
+"scene" | "gm" | "caller"` since the first wizard, and the host already uses those three
+words to decide who receives a run at all. A camera section now carries the *same*
+`audience`, with the same meanings one level down: `scene` (the default, every recipient
+of the run), `gm` (GM/assistant only), `caller` (the session that asked for the run).
+No second vocabulary, no new message kind, no new field on the wire — the section simply
+carries one more optional key inside the cue that already travels.
+
+**The exclusion is the payload.** The interesting consequence is not "the client ignores
+the section"; it is that an excluded viewer never receives it. The host now builds a
+cue *per recipient* through one pure helper (`fxSectionsForViewer`) in `core/fx`, which
+returns the original array untouched when nothing is filtered (so the common case
+allocates nothing) and a filtered copy otherwise. A viewer left with **no** sections
+receives no cue at all, rather than an empty run they would have to reason about. A
+unit test asserts the stronger property too: the excluded viewer's payload string does
+not contain the excluded destination. This is SQ-18's rule — a bystander cannot infer a
+GM-only cue from the socket — applied to the one section kind that is a *view* claim
+rather than media.
+
+**Why only camera sections.** A targeted visual or sound section would be a different
+feature with a different risk: the media-entitlement preflight counts a viewer out when
+*any* section's asset is unavailable to them, so per-viewer media visibility has to
+decide per viewer which assets matter — and a GM-only image whose bytes are shared with
+players is a leak question this decision does not want to answer by accident. The field
+is therefore **unknown** on image/text/sound/wait sections (refused by the validator),
+not silently ignored, and the wizard offers the control only on a camera section.
+
+**Non-claims.** No per-viewer targeting by *name* (no "send this pan to Ivy"), no groups
+or tokens as audiences, no per-section targeting for visual/text/sound sections, no
+delivery-notice breakdown of who saw a targeted section (the `fx.delivery` counts still
+describe the *run*: audience/rights/anchor/media), no targeted persistent instances (a
+persistent timeline still cannot move a camera at all), no targeted camera in a
+`fx.sync` reconnect replay (that path only replays persistent cues), and no Firefox/
+WebKit run or the 41-scenario acceptance matrix.
+
+**Gates.**
+
+- `pnpm test` — **3 696 passed / 12 skipped** (297 files: 295 passed, 2 skipped). New:
+  three cases in `tests/core/fx.test.ts` (the three audiences accepted on a camera and a
+  fourth refused *by name*, with the field rejected as unknown on image/sound sections;
+  one run yielding two payloads with the excluded destination absent from the player's
+  serialized cue; `scene` as the identity case returning the same array, `caller`
+  following the requester including "a GM who is not the caller", and a targeted
+  shake filtered by the same rule) and two host cases in `tests/host/sync.test.ts` (a
+  four-section timeline run first by the GM — GM sees all three cameras, each player
+  sees only the scene pan and not the GM-only destination — then by a player, where the
+  caller-targeted pan moves to that player while the GM keeps the GM-only one; the two
+  viewers' cues share a `runId` because targeting filters a payload, it does not fork a
+  run; and a timeline whose only section is a GM-only camera is delivered to the GM and
+  to no one else).
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing) · `pnpm lint` **exit 0** · `pnpm build` → `pnpm size` **3 812 848 B raw /
+  1 092 635 B gzip**, inside the 6 MB budget. `PROTOCOL.md`'s `fx.start` section now
+  states the per-recipient payload rule; the wire kind and its byte are unchanged.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **17/17** — the new spec runs
+  **two real browser contexts**: one timeline with a text cue and a `gm`-audience pan,
+  the wizard reopening it as "GMs only" (the audience is a document fact, not a draft
+  detail), then the GM running it — the GM's own view parks on the destination while the
+  joined player's camera is *exactly* where it was, which is the difference between
+  "ignored the cue" and "never received it". Flipping the same pan to everyone, saving
+  and running again moves the player's view to that same destination. The `summons`
+  suite ran alongside it (**21/21** together) and the canvas/interaction batch
+  (`canvas_rail` + `canvas_toolbar` + `vision` + `walls` + `join`) is **20/20** against
+  the rebuilt production file.
+
+## D-301 — masks and cutouts: the crosshair's own geometry, resolved by the host (2026-09-25)
+
+D-299 landed blend and one filter and left the third word of SQ-05's sentence — "mask/
+cutout" — and SQ-19's "effects can mask tokens/templates/regions" open. This decision
+lands the bounded half of both: a visual section can be confined to a region, or have
+that region cut out of it.
+
+**The geometry is not new.** A mask is one of the **shared crosshair's** shapes —
+circle, cone, ray or rect — measured in scene units against the scene's own grid
+metric. That is deliberate: "a 15 ft circle" must mean the same thing whether an author
+is placing a summon or masking an aura, and the codebase already had exactly one
+implementation of that sentence (`crosshairArea`, D-296). The mask reuses it, so the
+polygon an author sees drawn under the cursor is the polygon that clips the sprite.
+
+**The host resolves it, in offsets.** `resolveFxSequence` turns the authored shape into
+a polygon of **world-pixel offsets from the visual's anchor**; the authored scene-unit
+numbers do not travel. Two consequences worth stating: a followed effect's mask travels
+with it (the renderer moves the polygon to whatever anchor the frame is using, so a mask
+on a token's aura does not stay behind where the host last saw the token), and a stored
+`FxInstanceDocument` keeps the polygon, so a replay is the same shape rather than a
+re-derivation that could drift with a later grid change. `validateFxInstance` checks
+that stored polygon in its resolved form — 3–256 finite offsets plus a boolean — because
+reconstructing authored anchors is exactly the bypass the previous validation existed to
+prevent.
+
+**A point cannot be a mask, and a broken grid metric is a refusal.** The crosshair's
+fifth shape is `point`, which has no area: it would hide everything or nothing, so it is
+refused with a message that says so rather than silently doing one of the two. And where
+the crosshair's own `crosshairPxPerUnit` deliberately falls back to 1:1 (it is a preview
+tool and must not produce NaN on screen), a **host-resolved mask** refuses a broken
+square/hex metric instead: an author who typed "15 ft" is owed 15 ft, not 15 px. A
+gridless scene — which has no metric by design — is read 1:1, which is the same reading
+the picker gives it.
+
+**Per-shape field sets, so switching kinds cannot leave a lie behind.** A circle takes
+`kind/length/invert`; a cone adds `spread` and `angle`; a ray and a rect take
+`length/width/angle/invert`. A stale `width` on a circle is a refusal, not a shrug — the
+panel rebuilds the shape when the kind changes, and "None" removes the field entirely
+(the D-299 msgpack lesson, applied pre-emptively this time).
+
+**Rendering.** The mask is built once at spawn (like the filter) and only *moved* per
+frame. It lives in the parent container's space, so it does **not** rotate or scale with
+the art: a circle on the ground stays a circle whichever way the sprite is turned. A
+cutout is the inverse — a rectangle large enough to cover the sprite with the shape as
+its hole (pixi's own `cut()`), so the sprite survives *outside* the shape. Tests assert
+that shape directly: the polygon's points in a plain mask, and rect-plus-hole in a
+cutout, plus the mask travelling with a followed anchor and being destroyed with the cue.
+
+**Non-claims.** No wall-bounded or polygon-authored masks, no masks that follow a
+rotating/animating region, no masks on sound/camera/wait sections, no mask *animation*
+(the region is fixed for the section's life), no per-recipient masks, no wet-erase
+softness/feather or gradient masks, no elevation-aware or occlusion-based masks, and no
+Firefox/WebKit run or the 41-scenario acceptance matrix.
+
+**Gates.**
+
+- `pnpm test` — **3 707 passed / 12 skipped** (297 files: 295 passed, 2 skipped). New:
+  five cases in `tests/core/fx.test.ts` for masks (the four shapes accepted with `point`
+  and an unknown kind refused by name; each kind's own fields enforced — a circle with a
+  width, a ray without one, a rect with a spread; metric bounds in scene units, spread
+  bounds and the invert boolean; the field refused as unknown on sound, wait and camera
+  sections; and resolution: a 15 ft circle on the fixture's 100 px/5 ft grid becoming a
+  300 px ring of offsets centred on the origin, with the authored `length` absent from
+  the travelling payload, a rotated cutout's extents, a broken metric refused and a
+  gridless scene read 1:1), one in `tests/core/fxInstances.test.ts` (a stored cue's
+  resolved polygon — accepted, and refused for two points, a non-finite vertex, 257
+  points, a non-boolean invert, or the authored `{kind, length}` form), and four in
+  `tests/canvas/fxStyle.test.ts` (a plain mask fills the ring the host resolved; a cutout
+  fills a covering rect and carries the ring as its hole; a spawned sprite is clipped by
+  a mask sitting on its anchor, reported by inspection as `{points, invert}`; a followed
+  anchor moves the mask with the art; an unmasked sprite reports none and a stop destroys
+  the mask with the cue).
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing) · `pnpm lint` **exit 0** · `pnpm build` → `pnpm size` **3 819 019 B raw /
+  1 094 400 B gzip**, inside the 6 MB budget. No wire change: `mask` rides the existing
+  `fx.start` cue as one more resolved field.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **18/18** — the new spec
+  authors a circle mask (checking that the panel's own bounds are the validator's, that
+  switching to a ray grows width/angle controls and switching back removes them), saves,
+  reopens, and reads the live sprite's mask back as `{points: 16, invert: false}` (the
+  crosshair's own circle resolution); ticking "Cut out" and saving turns the same
+  geometry into `{invert: true}`; "None" removes it, and the re-read row is `mask: null`.
+  The `summons` suite ran alongside it (**22/22** together) and the canvas/interaction
+  batch (`canvas_rail` + `canvas_toolbar` + `vision` + `walls` + `join`) is **20/20**
+  against the rebuilt production file.
+
+## D-302 — a visual animates its own transform: growth and spin, eased and per cycle (2026-09-25)
+
+SQ-05 asks to "animate opacity/fade, scale, rotation, position … with easing and loops".
+Position has been animated since the first wizard (`to` + `easing` + `repeats`), opacity
+has its fades, and the recent increments added appearance and masks — but a section's
+**scale and rotation** were still authored values, set once when the sprite was created.
+A growing fireball or a spinning coin had to be a sprite sheet. This decision lands the
+two fields that fix that, and nothing else.
+
+**Two fields, one curve.** `scaleTo` is where the visual's scale ends (it starts at
+`scale`), `spinDeg` is how far it turns. Both are eased with the section's own `easing` —
+the same shared `fxEase` the position tween, the camera pan and the camera path already
+use — so a spinning coin and a flying bolt of one timeline read as one motion rather than
+two conventions. Both are bounded (`scaleTo` 0.05–10, `spinDeg` ±3600) and both are
+optional: an empty field is *absent*, never a stored number that happens to equal the
+start, so the host can still tell an authored animation from a still frame.
+
+**A spin accumulates; it does not reset every cycle.** The first implementation eased each
+cycle from zero, which meant `repeats: 3` with a 120° spin snapped the visual *back* to
+its base bearing at every cycle boundary — a spinner that flinches once a second. The
+fix, found by the increment's own unit test, is to treat completed cycles as already
+turned and ease only the current one: `turned = completed + eased(phase)`, so 3 × 120°
+ends at 360° with no discontinuity. The distinction matters because it is the same shape
+of bug as D-298's per-leg easing question, answered the other way: the camera path *wants*
+to restart each leg (each leg is a fresh move), a spin does not (a rotating object has one
+bearing that keeps going).
+
+**The animation is applied per frame, from elapsed time.** `fxTransform` is a pure total
+function — a zero-length section, a non-finite age, or a missing field all produce the
+authored still frame rather than NaN — and `FxLayer` calls it in the same per-frame path
+that positions the sprite, then again at spawn (so a late join mid-spin starts at the
+correct phase instead of the authored still). A stretched image keeps aiming at its
+destination: its spin *adds* to the bearing, so a spinning bolt still flies along its own
+line. And the masked region does not follow the spin at all, which is what a mask in the
+parent's space means (D-301) — a visual turning inside its own clipped region.
+
+**One UI gap the e2e caught.** The easing select rendered only when a section had a
+destination (`{#if section.to}`), so a visual that grows without moving had no way to
+choose its curve — the animation would always be linear by accident. It now renders
+whenever the section has *any* animation (a destination, `scaleTo` or `spinDeg`), which
+is the honest condition.
+
+**Non-claims.** No animation of tint, alpha (beyond the existing fades), filter strength or
+mask shape — those are still fixed for a section's life — no keyframes or multi-stop
+tracks, no separate per-property easing, no animation of a mask's region, no bounce/spring
+curves beyond the four shared easings, no camera or sound animation, and no Firefox/WebKit
+run or the 41-scenario acceptance matrix.
+
+**Gates.**
+
+- `pnpm test` — **3 713 passed / 12 skipped** (297 files: 295 passed, 2 skipped). New:
+  two cases in `tests/core/fx.test.ts` (the two fields and their bounds, including the
+  "animation does not need a destination" case, and the refusal of both on sound, wait and
+  camera sections) and four in `tests/canvas/fxStyle.test.ts` (scale walking the eased
+  path and clamping at both ends with a degenerate section and a NaN age answering the
+  still frame; a spin per cycle **accumulating** across three cycles with the base
+  rotation riding along; the drawn sprite sampled at 0/500/999 ms and then removed, plus a
+  stretched bolt whose spin adds to its bearing; and a mid-section spawn starting at the
+  correct phase).
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing) · `pnpm lint` **exit 0** · `pnpm build` → `pnpm size` **3 821 347 B raw /
+  1 095 061 B gzip**, inside the 6 MB budget. No wire change: the two fields ride the
+  existing `fx.start` cue.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **19/19** — the new spec authors
+  an image that grows 1→2.5 and spins 360° with `easeInOut` over 2400 ms, reopens it to
+  prove both fields survived the host, then samples the **drawn** transform every frame:
+  the range covers 1…2.5, the middle frame is strictly between (so it travelled rather
+  than teleported), a few frames in it has barely moved (which a linear ramp would fail),
+  and the rotation ends above 340° without ever exceeding 365°. The `summons` suite ran
+  alongside it (**23/23** together) and the canvas/interaction batch (`canvas_rail` +
+  `canvas_toolbar` + `vision` + `walls` + `join`) is **20/20** against the rebuilt file.
+
+## D-303 — the delivery notice learns about targeting: a withheld section is not a skip (2026-09-25)
+
+D-295 introduced `fx.delivery`, the line a GM gets when a cue did not reach everyone, and
+D-300 added per-section targeting — a camera cue aimed at the GM alone. Between them sat
+an obvious hole: a run whose *plain* sections reached everyone and whose targeted section
+reached one viewer produced **no notice at all**, because the notice only spoke when a
+preflight reason had dropped somebody. The GM who set up the targeting therefore never
+learned whether it worked, and a player who saw nothing at all asked the table instead of
+the tool. This decision closes that: the notice now reports targeting, separately from
+skips.
+
+**Two new counters, and they are not skips.** `targeted` is how many recipients received
+the run *without* at least one section (they were entitled — the author aimed that section
+elsewhere), and `empty` is how many entitled viewers received **nothing at all** because
+every section was targeted away. Keeping them out of `FxDeliverySkips` is deliberate: a
+skip means "this session could not have this" (audience, rights, anchor, media), while
+these viewers *could* — the author's own audiences excluded them. The summary sentence
+keeps the distinction visible: `Ward: reached 2 viewer(s) — 1 skipped (1 outside its
+audience, 1 saw it without its targeted sections, 2 left with none of it)`.
+
+**Silence needs explaining more than a reduction.** `recipients` still counts sessions
+that received *something*, so a viewer the targeting emptied is counted in `empty` and not
+in `recipients` — a run aimed entirely at the GM reports "reached 1 viewer(s) … 1 left
+with none of it" rather than pretending the whole table got it. The host decides this at
+preflight (targeting follows the author's audiences, not committed visibility, so it cannot
+drift between preflight and fan-out) and the fan-out still refuses to send an empty cue.
+
+**The conditions, spelled out.** The message is sent when there is *something to explain* —
+a skip, a reduced payload, or an emptier audience — and the internal field is only
+included when it is non-zero, so a run with no targeting at all produces exactly the
+sentence it produced before. The request path, the counts-only rule (no user, document or
+asset identifier ever appears) and the GM/assistant-only restriction are unchanged.
+
+**Non-claims.** No per-viewer or per-section naming (still counts, for SQ-18's reason — a
+notice must not become a membership oracle), no notice for a player-initiated request, no
+notice when a targeted section was withheld from *nobody* (an idle GM-only camera says
+nothing), no delivery report inside the wizard before a Run, no historical log or per-run
+query, no notice about *which* section was withheld, and no Firefox/WebKit run or the
+41-scenario acceptance matrix.
+
+**Gates.**
+
+- `pnpm test` — **3 715 passed / 12 skipped** (297 files: 295 passed, 2 skipped). New: two
+  cases in `tests/core/fxDelivery.test.ts` (an omitted/zero targeting field still yields
+  `null`, targeted-only and empty-only runs each produce their own sentence, and a mixed
+  run keeps the skip total separate from viewers who were entitled) and one host case in
+  `tests/host/sync.test.ts` (a two-section timeline with a GM-only camera run for a table
+  of two players: `recipients` 3, `skipped` all zero, `targeted` 2, no `empty` — then an
+  all-targeted timeline reporting `recipients` 1 and `empty` 2, with no identity in the
+  payload).
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing) · `pnpm lint` **exit 0** · `pnpm build` → `pnpm size` **3 821 840 B raw /
+  1 095 291 B gzip**, inside the 6 MB budget. `PROTOCOL.md`'s `fx.delivery` entry documents
+  the two optional counters and why `recipients` excludes an emptied viewer; the message
+  kind and its byte are unchanged.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **20/20** — the new spec runs
+  **two real browser contexts**: a GM authors a text cue plus a GM-only pan, joins a player,
+  runs it, and reads the notice as "reached 2 viewer(s) … 1 saw it without its targeted
+  sections"; then runs a timeline that is GM-only throughout and reads "reached 1 viewer(s)
+  … 1 left with none of it", with the player's own notice log empty either way. The
+  `summons` suite ran alongside it (**24/24** together) and the canvas/interaction batch
+  (`canvas_rail` + `canvas_toolbar` + `vision` + `walls` + `join`) is **20/20** against the
+  rebuilt file.
+
+## D-304 — animate a filter's strength, without ever rebuilding the filter (2026-09-25)
+
+D-299 gave a visual section one bounded filter (blur, grayscale, brightness, saturate) and
+made a point of applying it **once** — the filter is built at spawn and never touched
+again. D-302 then animated the visual's own transform, and the asymmetry became obvious: a
+ghost could grow and spin, but its transparency had to pick one value for the whole
+section. This decision animates the filter's *strength* — `filter.strength` is where it
+starts, a new section-level `filterTo` is where it ends — while keeping D-299's property
+exactly: a filter that does not animate still costs nothing per frame.
+
+**A section-level field, like `scaleTo`.** `filterTo` sits beside `filter`, not inside it:
+`scale`/`scaleTo` and `rotation`/`spinDeg` already pair a start with an end at the section
+level, and a field named `to` inside a filter object would be a second convention for the
+same idea. It **requires** a kind — there is nothing to reach without one — and that is
+reported as itself (`filterTo needs a filter kind to animate`) rather than as an unknown
+field, because naming the author's actual mistake is the point of a validation error.
+
+**Pulses per cycle, like scale — not accumulating, like spin.** With `repeats: 2` the
+strength runs the whole animation in each cycle and returns to the start at the boundary.
+That is the useful shape for a filter (a heartbeat of blur, a pulse of grey), and it is the
+rule `scaleTo` already follows. D-302's spin accumulates instead, because a bearing is a
+position rather than a value: one answer for "keep moving" and a different one for "swing
+back and forth" is a choice, and it is now made twice in the same way.
+
+**Both ends live in the kind's own range, and that range is not negotiable.** A grayscale
+animation ends between 0 and 1; a blur between 1 and 32. So a blur cannot animate to 0:
+"stop blurring" is what dropping the filter says, and a 0-strength blur would be a
+different feature wearing the same word. Following the same logic, the *wizard* drops the
+animation when the author switches the kind: 16 is a heavy blur and an impossible
+grayscale, and carrying the number over would either be refused by the host or silently
+mean something else (D-301's rule for a mask's shape fields, applied to a filter's).
+
+**One instance, nudged — and reset before each nudge.** The renderer builds the filter once
+at spawn and, when `to` is set, writes a new strength into that same instance every frame.
+This is not merely an optimisation: pixi's colour-matrix setters *compose* onto the current
+matrix, so a naive `brightness(next)` per frame would stack onto the last one and a 0.5×
+desaturation would drift to grey within a second. `fxSetFilterStrength` therefore resets
+the matrix and then applies the absolute value, and a unit test sets the same value twice
+and reads it back to prove nothing compounds. A constant filter is left exactly as spawn
+applied it, so D-299's "not per frame" claim is still true for everything that is not
+animating.
+
+**Applied from elapsed time, and read back from the drawing.** A late join takes the
+animated strength from the same elapsed time the transform uses, so a viewer who arrives
+mid-animation sees the right frame rather than the authored start. `inspect` reports the
+strength by reading it *out of* the live filter — a blur exposes `strength`, a colour
+matrix stores the author's number in one coefficient (directly for
+`brightness`/`greyscale`, as `amount * 2/3 + 1` for `saturate`), which `fxFilterReadback`
+inverts exactly. A unit test round-trips all four kinds, so a pixi change fails there
+instead of quietly misreporting in a diagnostic.
+
+**Non-claims.** No filter chains or a second filter per section, no animating a filter on a
+sound/camera/wait section (still refused as an unknown field), no per-filter easing
+separate from the section's own curve, no animation whose end is outside its kind's range,
+no `filterTo` without a kind, no tweened *kind* (blur never becomes grayscale mid-section),
+no PROTOCOL.md change (the field rides inside `ResolvedFxSection`, exactly as
+`scaleTo`/`spinDeg` did), and no Firefox/WebKit run or the §10 41-scenario matrix.
+
+**Gates.**
+
+- `pnpm test` — **3 723 passed / 12 skipped** (297 files: 295 passed, 2 skipped). New:
+  four cases in the animated-filter block of `tests/core/fx.test.ts` (the range is the
+  kind's own and an orphan `filterTo` is named as itself; the plan carries `to` only when
+  asked for and clamps it; the strength walks, eases, pulses per cycle and answers the
+  authored start to a NaN age or a zero-length section; resolution preserves the animation)
+  and four in `tests/canvas/fxStyle.test.ts` (all four kinds round-trip through
+  `fxFilterReadback`, twice-set to prove nothing compounds; a deepening blur is the same
+  filter instance nudged per frame with the drawn value read back; a colour animation stays
+  absolute while a still filter never moves; a late join starts mid-animation).
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing) · `pnpm lint` **exit 0** · `pnpm build` → `pnpm size` **3 823 970 B raw /
+  1 095 976 B gzip**, inside the 6 MB budget. No new message kind, byte, or wire field:
+  `ResolvedFxSection` gains one optional property.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **21/21** — the new spec authors
+  a blur moving 2 px → 16 px over 2.4 s, checks the wizard's own claim changes with it
+  ("applied once" becomes "Moves from 2px to 16px"), samples the drawn strength every
+  frame (40+ frames, range 2…16, the middle strictly between 6 and 14, barely moved a few
+  frames in, above 15 at the end), and then **clears the box, saves, and re-opens** the
+  macro to prove an emptied animation field is absent rather than a stored number. The
+  `summons` suite ran alongside it (**25/25** together) and the canvas/interaction batch
+  (`canvas_rail` + `canvas_toolbar` + `vision` + `walls` + `join`) is **20/20**.
+- The e2e caught the one gap the units could not: the easing select was rendered only for
+  `to`/`scaleTo`/`spinDeg`, so a filter-only animation had no curve control — widened to
+  include `filterTo`, matching D-302's caution rather than repeating the mistake.
+
+## D-305 — animate the region itself: a mask grows and turns (2026-09-25)
+
+D-301 shipped effect masks as host-resolved polygons; D-302 and D-304 then animated the
+visual's transform and its filter. The region stayed still, so an author could grow a
+dome's art inside a fixed circle of clipping — the one part of SQ-05's
+"animate supported properties" row still missing. This decision animates the mask itself:
+`mask.lengthTo` grows it and `mask.spinDeg` turns it, eased by the section's own curve.
+
+**Two rules, reused rather than re-invented.** A turn is a bearing and a size is a value:
+D-302 already answered that question for the visual's own transform, so the region follows
+it exactly — `spinDeg` **accumulates** across `repeats` (a sweeping cone keeps sweeping,
+rather than snapping back at every cycle boundary) and `lengthTo` **restarts** each cycle
+(a pulsing dome). The shared cycle arithmetic is now one function (`fxTurned`) instead of
+two copies, so a future third inheritor cannot answer the question differently by accident.
+
+**The growth travels as a ratio, never as a second length.** The polygon is already
+host-resolved against the scene's own metric, and what the client receives for the growth
+is `lengthTo / length` — a unit-free scale. That keeps D-301's real invariant intact (a
+recipient never needs to know what "15 ft" is in pixels) and means one renderer path
+applies both animations: turn the vertices about the anchor, then scale them. Both are
+*exact* for all four shapes, because each is defined about its anchor — a circle's centre,
+a cone's apex, a rectangle's own centre — which is worth stating because it is why the
+region can be animated without ever re-deriving the shape: scaling a rectangle's four
+corners grows its width with its depth (a growing sliver would be a different shape, not a
+bigger one), and turning a centred rectangle leaves it the same rectangle, turned.
+
+**A circle takes no turn.** It has no facing, so `spinDeg` on a circle is refused as a
+field the shape does not accept — the same rule that already drops a rectangle's `width`
+from a circle — and the wizard simply does not offer the control. Following the same rule,
+switching the mask's kind **rebuilds the region and drops its animation**: `lengthTo` is
+legal for every kind, but a growth authored against a 15-unit circle means nothing once
+the shape is a 30-unit cone with a different authored reach.
+
+**A still region is still drawn once.** Only a mask with an animation is redrawn per frame,
+and it is redrawn *into the same graphics* (`fxMaskDraw` clears and re-draws), so D-301's
+one-time cost survives exactly as D-299's did for filters. The first frame and the
+thousandth come from the same recipe, and a late join takes the animated region from its
+own elapsed time.
+
+**`inspect` reports what the polygon says.** The mask row now carries `radius` (the drawn
+reach, read out of the graphics) and `bearingDeg` — and that last field is *null* for a
+circle and for a rectangle, because a circle has no facing and four symmetric corners do
+not say which way a rectangle points (`angle` and `angle + 180` produce the same polygon).
+A cone or a ray reports its axis. It is a readback that refuses to invent a number rather
+than one that always has an answer, which is the point: the e2e proves the sweep with it.
+
+**The e2e taught the flow, not the code.** The first version of the spec switched the
+mask's kind and then pressed **Run** — which plays the macro the *host* holds, so it
+faithfully rendered the previously saved circle (its growth reaching 4×, plainly visible in
+the samples) and the "sweep" assertion failed on a bearing of `null`. The fix is the
+product's own rule: author, save, then run. Recorded because a spec that edits and runs
+without saving is testing the previous document.
+
+**Non-claims.** No animating a mask's **width or spread** independently (the region scales
+as a whole), no easing separate from the section's own curve, no tweening `invert`, no
+mask animation on a sound/camera/wait section (still an unknown field), no wall-bounded or
+polygon-authored regions, no per-recipient regions, no keyframes or multi-stop tracks, no
+PROTOCOL.md change (the resolved mask gains one optional property inside `fx.start`), and
+no Firefox/WebKit run or the §10 41-scenario matrix.
+
+**Gates.**
+
+- `pnpm test` — **3 729 passed / 12 skipped** (297 files: 295 passed, 2 skipped). New: two
+  cases in the D-301 mask block of `tests/core/fx.test.ts` (a growth is bounded in the same
+  scene units as the region and a turn like the visual's own spin, with a circle's turn
+  refused by name; resolution turns an authored growth into the ratio 4 — while a cone's
+  turn travels as the degrees the author wrote — and a still region carries no recipe at
+  all) and four in `tests/canvas/fxStyle.test.ts` (`fxMaskTransform` follows the two rules,
+  including the per-cycle pulse and the accumulating turn, and answers the authored still
+  region to a NaN age or a zero-length section; a drawn region is the host's polygon scaled
+  and turned about its anchor, with the readback reporting a cone's axis, a circle's `null`
+  bearing and a cutout whose covering rectangle still covers the grown ring; a growing
+  region is redrawn per frame on the *same* graphics while a still one's polygon is
+  untouched from spawn to end; a late join starts mid-animation).
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing) · `pnpm lint` **exit 0** (after replacing two non-null assertions with
+  narrowing, the project's rule) · `pnpm build` → `pnpm size` **3 827 235 B raw /
+  1 096 985 B gzip**, inside the 6 MB budget.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **22/22** — the new spec authors
+  a circle of 2 units reaching 8 and samples the drawn polygon: the reach ratio lands on 4,
+  the middle frame sits strictly between the ends, and the last frame is past 3.5× (it
+  arrived rather than stopping short); then it switches the shape to a cone (asserting the
+  growth field reset and that a cone *has* a turn field), saves, runs, and watches the
+  drawn bearing sweep from <3° to >87° with most frames between 10° and 80° — a sweep, not
+  a jump — while the reach stays within a pixel. The `summons` suite ran alongside it
+  (**26/26** together) and the canvas/interaction batch (`canvas_rail` + `canvas_toolbar` +
+  `vision` + `walls` + `join`) is **20/20**.
+
+## D-306 — the crosshair's second gesture: drag source → target (2026-09-25)
+
+SQ-12 asks for two placement modes — click-at-point **and** drag source→target — and only
+the first existed. That mattered most for the FX wizard: a tweening or stretched section
+has two anchors, and placing them meant two separate picks with a save in between if the
+author wanted to see the line. This decision adds the drag gesture to the shared crosshair
+(D-296), so one press-and-drag fills both ends — and the drag's own bearing becomes the
+section's facing for free, which is exactly what a ray, a cone or a stretched image needs.
+
+**A drag is a line, and a line has its own claims.** The click rule (`crosshairFaults`)
+checks one point. A drag checks **both ends** — a host resolves each anchor independently —
+and adds a claim a click cannot make: the segment *between* them (`line-blocked`). A wall
+that the far end hides behind from the caster and a wall that crosses the drag are
+different questions with different fixes, so both are reported when both apply (the source
+end first, because that is where the effect starts). Faults carry `end: "source" | "target"`
+and read as "Start: …" / "End: …"; without it, "Outside the scene" would not say which end
+to move. The shape is sampled at the **source** only, because that is where a dragged
+shape lives — a cone dragged from a token points away from it.
+
+**The direction is derived, not decreed.** `crosshairCommit` derives a drag's facing from
+its own geometry through the shared 15° rule when the caller does not state one, so a
+consumer cannot forget it; an explicit angle still wins, which is how the overlay lets an
+author nudge a shape off its own line with the rotate buttons. The placement carries
+`source` and `lineLength` (scene units the gesture measured) — both **optional**, which is
+what makes every existing click consumer, document and test unchanged.
+
+**Releasing ends the gesture; it does not place it.** The line, its length, its bearing and
+its faults stay on screen after the pointer lifts, and the author commits with the one
+button both gestures use ("Use this line") or Enter — so a name can be typed or
+reused, and the facing nudged, before anything is written. A drag that never leaves its
+starting cell places **nothing**: the mode's whole purpose is the line, so a stationary
+press is a hint ("Press at the start point, drag to the end", shown in the controls panel
+because before a press there is no pointer readout to put it in), not a one-point pick.
+
+**In the wizard it is one button.** `Drag source → target…` sits beside the start pick for
+image/text sections and writes `at` and `to` together, with `follow: false` — both anchors
+are plain points now, and the host resolves `follow` only against bound tokens. The status
+line reports the whole gesture: `"Dart line": 250, 250 → 1250, 950 over 61.0 ft at 30°`.
+The mode is per-request (`gesture: "drag"`), the summon window explicitly asks for `click`,
+and a scene-unit ratio is never invented: the line's length is measured against the scene's
+own grid metric.
+
+**The batch found two pre-existing flakes, and one of them was worth fixing.**
+
+- `canvas_rail`'s fog-mask spec failed one run in three: it reloaded *before* the queued IDB
+  oplog append finished, so it came back one stroke short. That is the recorded "reload in
+  the instant before the append" caveat, not a lost stroke — the spec now waits on the
+  existing `drainOps()` durability barrier before reloading (the same pattern four other
+  specs already use) and passes 4/4.
+- `fx_sequence`'s SQ-09 sound spec timed out once inside the full batch (its first
+  `[data-fx-playing-sound]` wait), passed standalone twice and passed a re-run of the whole
+  batch: the D-291/D-297 load flake again, unchanged and unrelated to this work. Neither
+  is a regression from D-306: this diff touches the crosshair overlay, the wizard's drag
+  button and a `data-fx-status` attribute on the status paragraph.
+
+**Non-claims.** No drag for the camera pan, path waypoints or summon placement (a camera
+destination is a *look-at*, not a line, and a summon is one point by definition), no
+multi-segment or multi-point drags, no per-end shapes or per-end walls beyond the one
+segment rule, no snapping an existing authored section back *into* the crosshair, no
+undo of a drag different from any other draft edit, no new wire field of any kind (a
+placement is draft state until a save), and no Firefox/WebKit run or the §10 41-scenario
+matrix.
+
+**Gates.**
+
+- `pnpm test` — **3 732 passed / 12 skipped** (297 files: 295 passed, 2 skipped). New: three
+  cases in `tests/core/crosshair.test.ts` (a line placement carries both ends, the drag's
+  own direction — derived and snapped, with an explicit angle still winning — and its
+  length in scene units, while a click placement has neither field; both ends are checked
+  and each fault names its end, in source-then-target order; the line's own wall is refused
+  as `line-blocked`, is reported beside the caster's separate `behind-wall` claim, is not
+  checked when LoS is not required, and a refused drag commits nothing).
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing — a new advisory from reading the gesture was avoided with `untrack`, the
+  same treatment the starting shape already gets) · `pnpm lint` **exit 0** · `pnpm build` →
+  `pnpm size` **3 831 673 B raw / 1 098 455 B gzip**, inside the 6 MB budget.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **23/23** — the new spec asserts
+  that nothing is placed before a press (no readout, disabled commit, the gesture hint), that
+  a press which has not moved is still not a line, that releasing leaves the line on screen
+  with "line 61.0 ft at 30°" measured from the drawn geometry, and that committing writes
+  `250, 250 → 1250, 950` into the draft and survives a save-and-reopen through the host. The
+  `summons` suite ran alongside it (**27/27** together, after the one recorded sound-spec
+  batch flake passed standalone and on the batch re-run) and the canvas/interaction batch
+  (`canvas_rail` + `canvas_toolbar` + `vision` + `walls` + `join`) is **20/20**.
+
+## D-307 — wall-bounded masks: the region stops where sight does (2026-09-25)
+
+D-301 gave a visual a host-resolved polygon; D-305 let it grow and turn. Neither could be
+*constrained by a wall* — SQ-05's explicit clause, and the reason a light effect spilled
+through the wall it was supposed to stop at. This decision closes it: `mask.walls` trims
+the resolved region against the scene's own sight segments, so a torch in a room lights the
+room rather than the corridor behind it.
+
+**The trim reuses the fog's own rule, not a second one.** `sightSegments(scene.walls)` is
+the exact list the vision worker is fed — so a window (sight permits) never trims, a
+*closed* door does, an *open* one stops trimming, a locked one trims again, and an opaque
+wall trims whatever its door state says. That equivalence is asserted directly in the unit
+test, because "the preview and the authority must be the same computation" is the whole
+point of sharing this code, and a mask that disagreed with the fog about a door would be
+worse than no mask at all.
+
+**Exact, not sampled.** The mask polygon and the visibility polygon are both star-shaped
+about the anchor, so the region is exactly the smaller of the two radial extents. The
+renderer-side silhouette is sampled where either polygon bends — at every vertex angle of
+either, *and* at every crossing of their edges, so a switch between the mask's boundary and
+a wall's inside one span is not chorded into a straight line. The result is the polygon the
+eye would draw: cut **at** the wall, not near it (the e2e asserts the wall contact within
+2 px while the open side keeps the authored reach to the pixel).
+
+**Baked, therefore unable to animate.** The trim is computed host-side and travels as the
+finished region, which is what keeps D-301's invariant intact: a recipient is never handed
+the scene's walls (they can be secret, and each viewer's vision differs anyway). The
+corollary is a refusal rather than a compromise — `walls: true` with `lengthTo`/`spinDeg`
+is rejected with the reason, because a rotating region would drag its cut edge straight
+through the wall while the client has nothing to re-trim against. The wizard does the
+author a favour: checking the box clears any growth/turn already entered and puts the
+animation fields away (SQ-05's "do not offer a UI control that silently does nothing").
+
+**Two degenerate anchors are refused explicitly.** A region with no area is no region, and
+two ways of producing one are named rather than drawn: an anchor standing *on* a wall
+(every ray starts blocked, and the sweep degenerates to a sliver along the wall's own line)
+and a trim that leaves fewer than three points. Both report "an FX mask bounded by walls
+cannot start on a wall" / "…resolves to no region at its anchor". A wall *near* the anchor
+is fine — an anchor 2 px from a wall is merely a tight region.
+
+**Offsets, cost, and what travels.** The trim happens in the region's own space (offsets
+from the anchor, walls shifted by −anchor), so the polygon keeps travelling with a followed
+visual and no absolute coordinate leaks into the payload. Only sight blockers within the
+mask's own reach are considered: a wall farther away cannot clip a point inside it, so the
+cost scales with the mask, not the scene. A mask with no wall in reach resolves to exactly
+the polygon D-301 produced — an empty filter, not a special case.
+
+**Non-claims.** Per-viewer trimming (the region uses the *scene's* walls, not each
+recipient's own vision or their fog), trimming against one-way walls' direction, sound or
+light "vision" axes, a mask that follows a moving wall (the trim is resolved at save), a
+region that re-trims as an animated door opens mid-cue, polygon-authored regions (still not
+authorable — this only *cuts* the four shapes), no PROTOCOL.md change (one optional mask
+property inside `fx.start`, and the polygon was already opaque), and no Firefox/WebKit run
+or the §10 41-scenario matrix.
+
+**Gates.**
+
+- `pnpm test` — **3 733 passed / 12 skipped** (297 files: 295 passed, 2 skipped). New: one
+  case in the mask block of `tests/core/fx.test.ts` covering the whole rule — a vertical
+  wall 200 px from the anchor cuts the 300 px circle flat at the wall (reaching it, not
+  stopping short), the open side keeps 300 px, the polygon stays in offsets from the
+  anchor, a mask with no wall in reach is the *unchanged* 16-gon, the sight-rule
+  equivalence holds for window/closed door/open door/locked door/opaque wall, a growth is
+  refused with its reason, `walls` must be a boolean, a room around the anchor caps the
+  region in every direction, and an anchor standing on a wall is refused by name.
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** (`ReplayPanel.svelte:29`,
+  pre-existing — the new test fixture is typed `Partial<WallDocument>` rather than cast, so
+  the `0|1|2` axis unions catch a mistyped door in the test itself) · `pnpm lint` **exit 0**
+  · `pnpm build` → `pnpm size` **3 834 943 B raw / 1 099 493 B gzip**, inside the 6 MB budget.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **24/24** — the new spec places a
+  real wall through the canvas rail, anchors a 300 px mask 200 px west of it, enters a
+  growth **before** checking "Stop at walls" (asserting the wizard clears it and reports
+  why), saves, reopens (the bound and the cleared animation both survive the host), runs it,
+  and reads the **drawn** polygon: the east side stops within 2 px of the wall's own line
+  while the west side keeps −300 px and the north/south keep their reach, with more than 16
+  points (the wall's edge is in the polygon). The `summons` suite ran alongside it
+  (**28/28** together) and the canvas/interaction batch (`canvas_rail` + `canvas_toolbar` +
+  `vision` + `walls` + `join`) is **20/20**.
+
+## D-308 — the table answers: media acknowledgment (2026-09-25)
+
+SQ-13 has said "who is *entitled* to this cue" since D-295 (`fx.delivery`). That is a
+different question from "will the table actually see it": the bytes still have to arrive,
+and each browser still has to decode them. Until now only the viewer's own screen knew the
+answer — a GM could not tell a broken timeline from one that worked, and a cue that fetched
+fine but failed to decode on every player looked exactly like a success. This decision
+closes the row: **the viewers report what they did with the media**, and the host turns
+those answers into one line for the requester.
+
+**One new kind, one optional field.** `fx.media` (0x4e, client → host) carries one viewer's
+answer about one asset: `ready` (in hand, with how long the fetch took), `late` (in hand
+but past the section's start, with how late), `failed` (with `reason: fetch | decode`) or
+`unsupported` (this browser cannot decode the format — said before a byte is fetched or
+while decoding). `fx.delivery` (0x4d) gains an optional `media` report so the requester
+reads both halves in the same place. No new host → client kind was needed, and nothing
+about a cue's *authority* changed: this is reporting, not mechanics.
+
+**No identifiers, and no error strings either.** The report counts per asset and names it
+by **the requester's own section index** — no asset hash (that rule already guarded
+`fx.delivery`, and the honest way to keep it is to let the author count the section they
+wrote), and no user id. The ack carries a *closed set* of reasons rather than a `detail`
+string, because a fetch error is a place for a URL or an asset hash to reach a GM's report.
+The host also ignores anything it did not expect — a session that was not a recipient of
+that run (expectations are fixed when the cue is fanned out, so a player who joins later
+has no standing to answer), an asset the run does not use, a `runId` that is not a run,
+a state that is not one of the four, or an absurd `ms` — and it *ignores* rather than
+rejects: a session probing run ids learns nothing, not even whether the run exists.
+
+**The latest answer is the true one.** A prefetch that failed at cue start and succeeded
+when the section actually needed the bytes has the media, so a later ack replaces an
+earlier one rather than accumulating the worst of both. The client only speaks when its
+answer changes, so the wire carries transitions and not heartbeats.
+
+**Three things close the window, and at most two lines per run.** The first line goes out
+when (a) a viewer reports `failed`/`unsupported` — the emergency, because the GM may still
+stop a cue that is playing wrong — (b) every recipient has answered about every asset, or
+(c) the wait expires: the run's own last media section plus two seconds, never under four
+seconds and never over a minute, swept by one `unref`'d timer next to the summon sweep.
+Then exactly **one correction** may follow, and only when the *whole* answer changed —
+including a viewer that was silent when the first line went out and has since said "ready",
+because a report still saying "have not reported yet" after everybody has reported is worse
+than a late one. After that, further acks update the record silently: two lines per run is
+the bound, and it is deliberate.
+
+**A "ready" that means the bytes, and a skip that is nobody's business.** `ready` is the
+fetch's own fact — it is what the preload half of SQ-13 is about — so a decode failure
+arrives *later* and replaces it, and the client's own report (D-295) still carries the
+detail string for the viewer. A viewer that locally muted a sound, or turned a channel to
+zero, reports **nothing**: a device preference stays on the device, so the GM sees "no
+word" rather than learning what a player muted. A refused format is not even downloaded —
+`canPlayType` answering `""` is a hard no, so the section reports its own
+`unsupported-codec` and spends no bandwidth (a shell without a DOM claims no opinion and
+fetches as usual). A `lateMedia: "skip"` cue still reports `late`: the bytes *were* there,
+and it is the timeline's own timing that was wrong.
+
+**Where the answers are counted, and what stays out.** Receipts are bounded (32 runs, oldest
+evicted) and dropped once the correction window closes; the per-run wait is one timer, not
+one per viewer. Only a GM/assistant requester is told — the counts describe other sessions,
+the same reason a player-initiated request never gets the preflight line. A **persistent**
+instance gets no receipt at all: it loops and is re-sent on reconnect, so no single moment's
+answer would mean anything. A local draft preview never acks (it never left this client),
+and a *script*-driven cue (`fx.play` from a reviewed Worker) is not reported either — its
+trace is where a script's outcome belongs.
+
+**Gates.**
+
+- `pnpm test` — **3 747 passed / 12 skipped** (297 files: 295 passed, 2 skipped). New: 4
+  cases in `tests/core/fxDelivery.test.ts` (per-asset counting, the worst asset named by
+  section number, the all-clear with the slowest fetch, a run where nobody answers at all —
+  which caught a real bug: a recipient absent from the ack map was not counted as *silent*
+  for every asset — and a marked correction), 6 in `tests/client/fxDeliveryFlow.test.ts`
+  (a prefetch's cost reported before the section starts, a lazy fetch reported at play time,
+  a format this browser refuses reported *and not downloaded*, bytes that cannot play
+  replacing an earlier `ready`, a muted sound reporting nothing, and a draft preview saying
+  nothing), and 5 in `tests/host/sync.test.ts` (the immediate failure line, one correction
+  and then silence however the answer flips, the forging matrix, no line for a
+  player-initiated request, and — under fake timers — the window closing on its own with
+  "no word" for everybody). The frame/fixtures/contracts/protocol-doc tests pin the new
+  kind: 60 total message kinds, direction `c2h`, `PROTOCOL.md` documented.
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** · `pnpm lint` **exit 0** ·
+  `pnpm build` → `pnpm size` **3 841 737 B raw / 1 101 695 B gzip**, inside the 6 MB budget.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **26/26**, including two new
+  two-context specs over a real socket — one where a GM and a joined player both hold a
+  shared 1×1 PNG and the requester reads "media in hand … 1 asset(s) × 2 viewer(s)" while
+  the viewer hears nothing (no news is the right amount); and one where the *player's*
+  browser has `canPlayType` taken away by an init script, so the early line says "2 of 2
+  viewer(s) … 1 cannot decode this format; 1 have not reported yet" and is then **corrected**
+  to "1 of 2 viewer(s) … (corrected)" as the other viewer's honest answer lands. The
+  `summons` suite alongside is **28/28** (30/30 together) and the canvas/interaction batch
+  (`canvas_rail` + `canvas_toolbar` + `vision` + `walls` + `join`) is **20/20**.
+- A `vi.useFakeTimers()` leak was caught while writing the host tests (my first version
+  awaited a real-timer helper inside the fake scope, so the test hung and the fake clock
+  escaped into every later FX test): the request now happens under the fake clock and only
+  `advanceTimersByTimeAsync` awaits, which is what the "window closes" case actually needs.
+
+**Non-claims.** A viewer that reports nothing is never distinguished from one that muted,
+skipped or disconnected — the report's honest word is "have not reported yet". Per-recipient
+media expectations (the run's asset list is the same for every viewer while only camera
+sections are targetable), receipts for persistent instances or reviewed-script cues, a
+retry/repair flow, per-asset asset *names* in the message (deliberately only the section
+index), server-side metrics or logs, and no Firefox/WebKit run or the §10 41-scenario matrix.
+
+## D-309 — where a sound comes from: distance, panning and walls (2026-09-25)
+
+SQ-09's row has had channels, fades and a device-local mix since D-297, and a sound was
+still *everywhere*: every viewer heard the same cue at the same gain, whichever corner of the
+map they stood in. A fountain, a footstep or a chant from a shrine is the case the row is
+named for, and it needs two facts the host does not have alone. **Where the listener is** is
+the client's own answer (its token, or the centre of its own view) — the host never sees a
+camera. **What stands between** is the host's and only the host's: a client is never handed
+walls (D-301/D-307), and a client that guessed would be guessing at a scene it cannot see.
+So the row is split the way the mask trim already is: the host resolves the source and
+answers occlusion **per recipient**, baked into that recipient's cue; the client measures the
+distance and applies the two things an `<audio>` element cannot do.
+
+**Authored.** A sound gains four optional fields: `at` (any anchor the sequence already
+supports), `radius` (scene units, `SOUND_RADIUS_LIMITS` **1–1000**, required with `at`),
+`pan` and `muffle`. None of the three mean anything without a position, so each is **refused
+by name** rather than silently ignored — the SQ-05 rule that a control must not do nothing
+applies to a hand-edited file too. A sound with no `at` is exactly what it was before: the
+author's volume, for everyone, everywhere. The wizard's "Place on map…" pick is **point-only**
+(a sound is at a place and has no area, so offering a shape would offer one the host refuses),
+sets `at` plus the panel's default radius of 30 units, and "Hear everywhere" **deletes** all
+four fields rather than writing `undefined` (the D-295 trap: `undefined` becomes `null` over
+msgpack and the host answers `invalid_schema`).
+
+**Resolved.** `at` follows the same `anchor()` rule as every other section — a point, or the
+*current* centre of a source/target token, frozen at emit (a sound does not chase a token,
+and a persistent instance re-resolves on `fx.sync` like everything else). `radius` becomes
+`radiusPx` on the scene's own grid metric (`crosshairPxPerUnit`), so a recipient never
+re-derives "60 ft" against a metric the host did not validate.
+
+**Heard.** Distance is a straight line: `gain = clamp(1 − d/r)`, full at the source, silent at
+the rim. Linear rather than inverse-square because it is the *predictable* one — an author
+placing a 60 ft reach can look at the map and see where it stops, and it is bounded at the
+source. Pan is `clamp(dx/r, ±1)` in screen space (the camera has no rotation, so world x grows
+right for every viewer) and is applied only when the author asked for it. Muffle is the
+author's `muffle` **and** the host's `occluded` for *that* recipient. Occlusion is a
+segment-crossing test between the recipient's own token (ownership level 3 — a token
+*assigned* to them, not one the table's default merely lets them move) and the source, against
+`soundSegments`: the **sound** axis plus door state, which is the mechanism the documents
+already carry and which `moveSegments` and `sightSegments` read for their own axes. So a plain
+wall muffles, a closed or locked door muffles, and an open door does not.
+
+**An inconsistency surfaced on the way and is *not* silently resolved here.** `wallKinds.ts`
+says in two places (its module header and `wallAxesFor`'s own docblock, echoing D-257) that a
+window blocks movement **and sound** — `sound: 0` — while the code returns `sound: 2` and both
+`tests/canvas/wallKinds.test.ts` and the `walls` e2e pin that permit. The sound axis has no
+other consumer yet (this decision is its first), so nothing else would have caught it. D-309
+obeys the implemented, tested axis — a window passes sound, so it does not muffle — because
+changing a wall's meaning inside an audio decision would move a contract three suites assert,
+and because the axis is what a world file actually stores. The prose/code disagreement is
+recorded in the status doc and the PR for a deliberate call. A viewer with no token of their own gets **no** occlusion
+answer: the host cannot honestly name their camera, and a guess would mute the wrong people.
+Nothing measurable at the client end (no listener, no position) means a **global** cue at gain
+1, which is also the pre-D-309 behaviour.
+
+**Played.** The client's listener is its own token when it has one, else the centre of its own
+view; it is recomputed on a 100 ms tick for as long as a positioned cue sounds, so a walking
+listener hears the sound approach (a fade keeps its 40 ms ramp; a plain global sound is still
+set once). Pan and muffle need Web Audio, so they go through a small adapter
+(`fxAudioGraph`): one lazily-created `AudioContext` per page, `source → lowpass (700 Hz
+muffled / 20 kHz open, Q 0.7) → stereoPanner`, with the element's own `volume` still carrying
+the level so the mix panel and the fades keep composing. A device without a context (or without
+a panner) must not pretend: the sound plays, the level keeps following the distance, the device
+list says what it is *actually* playing (centred and open, not the author's pan), and the
+viewer's own report carries `state: reduced`, `reason: spatial-unavailable`. The graph is
+optional; the honesty is not.
+
+**Gates.**
+
+- `pnpm test` — **3 767 passed / 12 skipped** (298 files: 296 passed, 2 skipped). New: 2 cases
+  in `tests/core/fx.test.ts` (a position resolving to px with its radius, a token anchor
+  frozen at that token's current centre, and the refusal matrix — `radius`/`pan`/`muffle`
+  without `at`, an out-of-range or missing radius, a non-boolean switch, an anchor outside the
+  scene), 4 in `tests/core/fxSound.test.ts` (the linear falloff, bound panning, the whole
+  rule for one listener including "nothing to measure from means global", and which cues need
+  a graph at all), 4 in `tests/client/fxDeliveryFlow.test.ts` (the level falling with distance
+  measured from the viewer's own token *and* re-measured as it walks, a listener with no token
+  using the view centre, a device with no Web Audio still playing and reporting
+  `reduced`/`spatial-unavailable` once, and a stubbed context receiving exactly the pan and
+  the 700 Hz low-pass), 6 in `tests/client/fxAudioGraph.test.ts` (no context, no panner,
+  a throwing constructor, an already-attached element, bounded pan with an idempotent
+  dispose, and one shared context per page that a detach never closes), 2 in
+  `tests/canvas/vision.test.ts` (`soundSegments` reading the sound axis and door state where
+  `sightSegments` reads another — the window case that makes the distinction load-bearing —
+  and the point-form crossing including "touching counts"), and 2 in
+  `tests/host/sync.test.ts` (per-recipient occlusion with a door opened, a window passed and
+  an opaque wall blocking, the payload carrying no listening-point coordinates, and a stored
+  loop with the per-recipient answer absent from the durable record and recomputed on
+  `fx.sync`).
+- Two regressions the tests caught, both fixed here: `validateFxInstance` was refusing a
+  *positional* sound's stored (already-resolved) pixels, because the sequence schema only
+  knows the authored `at`/`radius` — so a persistent positioned sound could not be committed
+  at all; the stored form now reconstructs the authored anchor (the px→unit division rounded,
+  so float noise cannot push a legal 1 000-unit reach over its own limit). And the run's
+  report settled *before* the sound branch decided whether the device could honour the
+  placement, so a `reduced` note could never be sent — the settle now happens after that
+  decision.
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** · `pnpm lint` **exit 0** ·
+  `pnpm build` → `pnpm size` **3 849 522 B raw / 1 104 078 B gzip**, inside the 6 MB budget.
+- Chromium production `file://`: `e2e/fx_sequence.spec.ts` **28/28**, including two new specs
+  — one that places a real wall through the rail and drags the GM's own token across it,
+  reading "through a wall" and 25 % (450 px inside a 600 px reach), then a higher level after
+  the walk (83 % on the recorded run — the assertion recomputes it from the token's own
+  position rather than pinning a pixel) while the wall answer stays baked for that run, then a
+  fresh run from the new place with no wall in the way at the same level; and one where an init script takes `AudioContext` away,
+  so the cue still plays, the row shows the distance level and *no* pan badge, and the
+  viewer's own report says "played without spatial audio". The shared geometry the occlusion
+  test rides on was regression-checked as the usual batches: `fx_sequence` + `summons`
+  **32/32** (2.2 m) and `canvas_rail` + `canvas_toolbar` + `vision` + `walls` + `join`
+  **20/20** (26 s).
+
+**Non-claims.** The window's sound axis is left exactly as it was implemented (see above) —
+this decision does not change what a wall kind writes. No filter chain beyond the one low-pass, no HRTF/3D panner or Doppler, no
+reverb/occlusion of *rooms*, no ray-counted "how many walls" attenuation (a wall either dulls
+the cue or does not), muffle is a fixed 700 Hz (the author cannot tune the cutoff), no per-leg
+audio paths, occlusion is resolved at emit and does **not** follow a wall that opens or a
+token that walks mid-cue (the level does, the wall answer does not), no sound targeting
+(only camera sections carry an audience), no `at` on wait sections, and no Firefox/WebKit run
+or the §10 41-scenario matrix.
+
+## D-310 — the look, kept: FX presets (2026-09-25)
+
+SQ-12's last clause — "preset save/load/edit/delete" — had no home in the wizard. A GM who
+built a good fireball could keep it only by also saving a **timeline**, and a timeline carries
+the parts that belong to a *run*: is it persistent, who is the audience, which tokens are
+bound. Wanting the same look for a different audience therefore meant re-authoring it section
+by section, which is exactly the friction the clause is about.
+
+**What a preset is.** A new `MacroDocument.kind: "fxPreset"` carrying
+`preset: {version: 1, sections}` — a top-level macro document, so ownership, the ordinary
+create/update/delete/undo path and the media-entitlement scan all apply without a second
+machinery. It is **the look, not the run**: no `persistent` and no timeline-level `audience`
+(`scene`/`gm`); a camera section's *own* `audience` travels with the section, because that is
+part of the look. Loading a preset replaces `draft.sections` under **fresh section ids** (the
+same preset can be loaded twice into one timeline without the host seeing duplicate ids) and
+leaves every lifecycle field of the draft exactly as it was. Nothing about a preset reaches the
+table until the resulting timeline is saved and run, so a preset can never become a second,
+weaker path to playing an effect.
+
+**Bounded, and validated by the same rules.** `validateFxPreset` does not have its own idea of
+what a section is: it hands each one to `validateFxSequence` and blames the failure on **the
+section that caused it** ("preset section 2 (fx-two): …"), because `invalid_schema` with no
+section number is not a sentence a GM can act on. The bundle's own shape stays small — version
+1 and **1–8 sections** — a fragment to compose, well inside the 64-section timeline cap. The
+document rule (`fxPresetDocumentError`) holds the name to 1–64 characters and **refuses a mixed
+document by name** in both directions: a `sequence`/`script`/`scriptState`/`summon` on a preset
+and a `preset` on a runnable macro are both `invalid_schema`. That is the D-302 lesson (one
+document, one payload) applied to the new kind — the FX path reads the sequence while a hand
+editor reads the preset, so neither mixture may exist.
+
+**Authority and projection.** Create, update and delete follow the summon rule unchanged: GM or
+assistant, everyone else `forbidden`, all of it ordinary undoable document ops. Presets are
+**never projected to players** (`docVisibleTo`) — not because of their ownership but because
+they are authoring state; there is no rule under which a player needs the GM's saved looks. The
+media a preset references therefore counts as **referenced** (withheld from players, visible to
+the GM) rather than as loose art: the D-306 entitlement rules do not change meaning, they gain
+a case.
+
+**In the wizard.** Under the saved timelines: a name box and "Save draft as preset", then one
+row per preset with **Load / Update from draft / Rename / Delete**, and a sentence that says in
+plain words what a load does and does not carry. Saving a preset is its own act and does not
+need a timeline first; deleting one leaves the timelines built from it untouched, because a
+preset is a source and not a parent.
+
+**Gates.**
+
+- `pnpm test` — **3 775 passed / 12 skipped** (299 files: 297 passed, 2 skipped; +8 cases). New:
+  5 in `tests/core/fxPresets.test.ts` (every section re-validated by the *sequence* validator —
+  including a positional sound without its reach, the D-309 rule; a failure naming the section
+  that caused it by index and id while a bundle-level fault is reported as the bundle's; the
+  version/1–8/inclusive-eight/unknown-field shape checks; fresh ids on load, with a
+  badly-behaved id source still unable to produce a duplicate and the loaded sections proving
+  they are copies; and the document rules — a 1–64-character name, a `sequence`,
+  `scriptState` or runnable kind smuggled onto a preset refused by name), 1 in
+  `tests/core/assetAccess.test.ts` (a preset's media counts as *referenced*, so it is not
+  "loose art" — and still reaches no player, because the preset does not), 1 in
+  `tests/core/projection.test.ts` (a world-readable preset is *still* authoring state: absent
+  from the player's snapshot and from every direct op, present for the GM and the assistant),
+  and 1 in `tests/host/sync.test.ts` (a GM create/rename reaching the store, the same macro
+  refused by the FX path as an unknown timeline, a forged preset-and-sequence document
+  rejected by name, an empty bundle rejected, a player's create/update/delete all `forbidden`,
+  and the GM's delete an ordinary undoable op).
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** · `pnpm lint` **exit 0** ·
+  `pnpm build` → `pnpm size` **3 855 399 B raw / 1 105 491 B gzip**, inside the 6 MB budget.
+- Chromium production `file://`: `fx_sequence` + `summons` with the new preset spec, the whole
+  pair run **twice** (`--repeat-each=2`) — **66/66** in 12.3 m — to show the fixture fix below is
+  not a knife-edge.
+- One real flake found and fixed while running this gate, worth naming: the e2e WAV fixture
+  used since D-297 is a **header with no samples**, which Chromium accepts and then ends almost
+  immediately — so any spec that played a sound and then opened a window to read the device
+  list was racing the element's own `ended`, and lost on a loaded machine (twice in a batch run,
+  passing standalone and on re-run, with the delivery line already saying "media in hand").
+  `wavSilence()` now writes a real PCM file (30 s of silence, 8000 Hz, ~240 KB) so the row
+  outlives the assertion; the animation specs' frame-count bars were also re-stated as
+  "sampled across the span" (`> 20`) with the *shape* of the growth asserted against the
+  authored reach instead of the sample count, and the two D-309 sound specs author 20 s
+  sections so every step of them happens inside one run.
+
+**Non-claims.** No item binding (A09's stretch clause — the preset is the core the row asks for
+and item binding is explicitly not claimed), no presets of *runs* (a preset holds no instance
+and no live state), no nested presets, no preset library across worlds, no sharing UI beyond the
+world file, and no preset branch in the Live FX manager.
+
+## D-311 — the same timeline, bound to an item: a cue that follows a committed use (2026-09-25)
+
+A09's last clause — "…and the same authored sequence can be **saved/bound to an item**" — was
+the one part of SQ-12 that D-310 deliberately left unclaimed. The temptation is to put the
+binding on the **item** (`system.fxCue` or a flag), and that is the wrong half of the document
+graph: an item lives inside an actor, actors are the most-edited documents in the world
+(inventory churn, conversions, resizes), and a pointer stored there would be authored by
+whoever edits the sheet while the timeline it names belongs to the GM. The binding therefore
+lives on the **timeline**: `MacroDocument.fxItem = {actorId, itemId, onFailureId?,
+recognition?: "auto"|"success"|"failure", enabled?}`, a field beside `sequence`/`preset` on the
+document that already owns the cue. Two consequences fall out for free, and both are the point:
+
+- **Projection decides discovery.** A macro the reader cannot read is not in their replica, so
+  a player simply sees no binding — there is no second visibility rule to keep in step with the
+  macro one. What travels with a timeline the reader *may* read is the two ids it names; that is
+  deliberate: the point of publishing a timeline to a player is that their own use of the item
+  can play it, and a use path that could not read its own binding would need the very second
+  visibility rule this design avoids. The item window's line comes from the same lookup the use
+  path fires, so the sentence can never describe a cue the cast would not ask for.
+- **The run is an ordinary `fx.request`.** Firing a bound cue calls the same
+  `requestSequence` the wizard's Run button does, so `prepareFx` re-checks rights, audience,
+  token visibility and the 300 ms lead exactly as it always has. A binding **grants nothing**:
+  a player whose use would not otherwise be allowed to run that timeline is refused by the host,
+  not admitted through the item.
+
+**Which branch, and *when*.** The cue is requested **after** the caller's own flow has
+committed — charges spent, slot expended, hit points written — which is what makes A05's "uses
+the committed result" a fact rather than a hope, and is why the four outcomes split the way
+they do. `fxCastOutcome` reads the flow's own result: a lost spell, a held (missed) touch
+delivery, a missed touch attack, spell resistance or a **made save** is a *failure*; anything
+else that committed is a success; a still-pending multi-round cast is `unknown`, because
+nothing has landed to recognise and no branch can honestly be chosen. A refused use (no
+charges, no target, a denied flow) fires nothing at all, because there is no committed result
+to name. `fxBindingBranch` then answers *which* timeline: the macro the binding is stored on
+for success, `onFailureId` for a failure — and **`null`** when no failure cue is bound, which
+is the honest answer ("the item has no cue for that outcome") rather than replaying the hit cue
+on a miss. `enabled: false` short-circuits everything and is the author's manual disable; the
+`recognition` override forces either branch for effects the automatic read cannot know
+(an effect that lands later, a spell-like that "misses" narratively).
+
+**One item, one bound cue.** A second timeline naming the same actor+item is refused
+(`"another timeline is already bound to that item"`) instead of leaving the use path to pick
+arbitrarily — "which cue plays when I press this" must not be a coin toss. Re-saving the bound
+timeline is not a conflict; an update that re-states its own binding is admitted.
+
+**Where it is validated.** The host, where it is authored: `fxBindingError` runs on the `macros`
+create and update paths beside the sequence/summon/script checks and refuses a binding whose
+actor does not exist, whose item is not on that actor, whose cue is not a readable `sequence`
+macro (the cue is the document itself on create, so the check does not chase a store entry that
+does not exist yet), whose failure cue names no timeline, a preset or a script, or a timeline
+its author cannot read. A binding written on what *was* a timeline but is now refused — a
+hand-edited world file — reads as **no binding** (`fxBindingOf` returns `null` on a malformed
+shape) rather than as a cue the use path would try to fire.
+
+**Pruning is in the envelope.** Deleting the item or the whole actor emits the same transaction
+a timeline edit would — `{kind: "update", ref: {coll: "macros", id}, diff: {"-=fxItem": null}}`
+— through `fxBindingDeletionOps`, so one Undo restores both the item and the binding, and a
+re-used item id can never inherit a stale pointer. Cleared means **deleted**: the field is
+removed with the `-=` marker the rest of the wizard uses, never sent as `undefined` (msgpack
+would carry it as `null`, which the host refuses as `invalid_schema`).
+
+**Where the author meets it.** In the wizard, under the saved timeline being edited: actor,
+item, "on a failed use" (this timeline, nothing, or another timeline), recognition, an Enabled
+box, Save/Remove, and one sentence saying what the cue does and does not do. The *item* half is
+read-only: the item window shows "Bound cue: X · a failed use plays the bound failure cue ·
+recognition forced to failure · disabled" from the projected store, and appends the cue sentence
+to its cast note after the commit. The quickbar's item casts share that path.
+
+**Gates.**
+
+- `pnpm test` — **3 785 passed / 12 skipped** (301 files: 299 passed, 2 skipped; +10 cases): 5 in
+  `tests/core/fxBinding.test.ts` (the closed authored shape — unknown fields and a
+  half-binding refused by name, `recognition: "failure"` without a failure cue refused as
+  meaningless; a malformed binding reads as none, and the matcher is exact on both ids; the
+  branch table including `null` for an unrecognised failure with nothing bound, the disable,
+  and both forced-recognition directions; the host rule — real actor and item, the cue and the
+  failure cue as *readable timelines*, a preset or script refused by name, the one-binding rule
+  and the re-save exemption; and the pruning — item and actor deletes each clear the binding in
+  the same envelope, another actor's identically-named item is untouched, and an unrelated
+  delete adds nothing), 4 in `tests/ui/fxItemCue.test.ts` (recognition from the committed
+  facts including `pending` ⇒ unknown; a committed cast naming branch, scene and both tokens,
+  and a scene whose tokens are gone still running; every "nothing to play" answer —
+  unbound/disabled/no-branch/no-scene; and discovery — a binding absent from the replica reads
+  as unbound, the lookup filters by both ids and sorts by id), 1 in `tests/host/sync.test.ts`
+  (the authoring checks above through the real op path, a player's create and update both
+  `forbidden`, the player's own `requestSequence` for the bound timeline still refused as
+  unpublished, and the item delete clearing the binding **and Undo restoring it together**), and
+  1 e2e spec (`e2e/fx_item_binding.spec.ts`) that runs the whole loop in one browser: tokens, a
+  spell generated into a wand on the caster's own sheet, two timelines authored in the wizard,
+  the binding saved through the editor, then four casts — unbound (no cue, nothing requested), a
+  committed success (the bound cue drawn on `__stage` after the charge was spent), a disabled
+  binding (the note says so and nothing plays), a forced-failure recognition (the *failure*
+  timeline runs) — and the remove verb leaving the item unbound again.
+- `pnpm typecheck` **63 components, 0 blocking, 1 advisory** · `pnpm lint` exit 0 ·
+  `pnpm build` → `pnpm size` **3 865 546 B raw / 1 108 397 B gzip**, inside the 6 MB budget.
+- Chromium production `file://`: `fx_item_binding` **1/1** standalone (31.4 s), and the
+  `fx_sequence` + `fx_item_binding` + `summons` batch with `--repeat-each=2` — **68/68** in
+  13.0 m. The touched call sites were re-run too (`pf1e_cast_flow`, `pf1e_inventory`,
+  `quickbar` **7/7**; the canvas/vision/walls/join regression batch **19/20**, its one failure
+  the known D-291 load flake (`join.spec.ts:32`, a 30 s ceiling under batch load — 14.0 s
+  standalone pass, the same failure D-310 recorded).
+
+**Non-claims.** No phase binding (which casting phase a cue follows), no per-target cue, no cue
+on an attack or condition event (only the item's own cast), no chained cues (a cue never fires
+another binding), no player-authored bindings (authoring is the timeline's own GM/assistant
+rule), no cue for a non-PF1e system's item, and no UI for a binding in the Live FX manager.
+
+## D-312 — which moment fires it: phase binding, and the event contract (2026-09-25)
+
+D-311 bound a timeline to an item's *use* and wrote the one-binding-per-item rule to keep "which
+cue plays when I press this" from being a coin toss. A05's next clause asks for more: *phase*
+binding — the same weapon swings, the same wand burns a charge, and those are different moments
+with different committed facts. This entry generalises D-311's rule instead of dropping it:
+**one cue per moment**, not one cue per item.
+
+**The vocabulary (WZ-06's explicit event/context contract).** `FxItemEvent` is a closed set —
+`"use"` and `"attack"` — carried on the binding as `events?: FxItemEvent[]`, defaulting to
+`["use"]`, which is exactly the D-311 behaviour for every document already in the world (an
+absent field must keep meaning what it meant). `validateFxItemBinding` refuses a non-list, an
+empty list, an unknown name (`not "cast"`) and a repeated event, and `fxBindingEvents` — the
+reader every consumer uses — filters a *hand-edited* list down to the closed set rather than
+inventing an event from a document nobody validated. The contract is **data**, not a paragraph
+in a comment: `FX_ITEM_EVENT_CONTRACT` names each moment, the committed facts it carries and
+what `auto` recognition counts as a failure, and the wizard renders those very sentences beside
+the checkboxes, so the author and the code cannot drift apart in silence.
+
+| Event | The moment | What `auto` reads as a failure |
+| --- | --- | --- |
+| `use` | the item is used (a cast paying a charge/slot) | the spell did not land: lost, held, a missed touch attack, spell resistance, a made save (`pending` ⇒ `unknown` ⇒ nothing) |
+| `attack` | an attack line authored from this item is resolved | the attack missed (a confirmed crit is a success like any hit) |
+
+**Where each event is delivered.** `use` is where D-311 left it: the item window's cast and the
+quickbar's item slot, fired *after* the flow committed. `attack` is delivered by the two places
+an attack actually resolves — the **actor sheet's combat tab** (`resolveAttackFlow`, the GM's
+usual swing) and the **quickbar's attack slot**. Both read the item through the one join the
+sheet itself writes (`attackLineItemId` → `system.pf1e.attacks[i].itemId`, written by "make an
+attack from this item"); a hand-authored line that merely shares a weapon's name is not that
+item's line, and firing on it would play the wrong cue. The cue is requested only after
+`resolveAttackFlow` returned a resolved result — a refused attack (out of reach, no target, no
+shot loaded) returns above it and plays nothing, which is TR-17's "suppress uncommitted side
+effects on a denied action" applied to a swing. A failed *HP write* is reported beside the cue
+rather than instead of it: the swing happened, only the bookkeeping failed.
+
+**The conflict rule, narrowed.** `fxItemBindingError` now compares **events**: a second timeline
+on the same item's `use` is refused (`"another timeline is already bound to that item's use
+event"` — the refusal names the moment), while a swing cue and a charge-burn cue may share a
+weapon, which is the whole point. A both-moments cue overlapping two existing ones is refused
+on the first shared event. Re-saving a bound timeline still never conflicts with itself.
+
+**Non-claims.** `use` and `attack` are the only events: no `condition` (applying a condition to
+an actor is not an item's moment), no per-target or per-phase-of-cast binding (the item's use is
+one moment, not a sequence of phases), no cue on a spell's own save *result* arriving later than
+the cast, no chained cues, and no binding on a token or a scene. Within `attack`, only the
+**single-attack** verbs are wired — the sheet's own Resolve and the quickbar's attack slot — so a
+**Manyshot volley**, a **firearm explosion**, an **attack of opportunity**, a **combat maneuver**
+and an **aid/feint** swing post their own cards without a bound cue; an AoO is the same weapon by
+the same hand, but it is a different verb with its own flow, and claiming it without wiring it
+would be the kind of half-truth these entries exist to avoid. The wizard will not let an
+author save an event list it cannot fire (unticking the last box leaves it ticked) — the
+validator refuses the same shape anyway, so a hand-edited document fails loudly at the host
+rather than silently at the table.
+
+**Gates.** `pnpm test` **3 792 passed / 12 skipped** (302 files: 300 passed, 2 skipped), +9
+cases: 3 new blocks in
+`tests/core/fxBinding.test.ts` (the event list's closed/non-empty/repeat rules, the canonical
+round-trip; the default-is-`use` rule with a hand-edited empty list reading as the default and
+an unknown name filtered out rather than invented; the branch per event — a swing cue does not
+answer a charge burn, both moments on one timeline, and disable still winning; plus the
+contract's own shape, and the narrowed conflict rule), 1 in `tests/ui/fxItemCue.test.ts` (the
+lookup and the fire path are per event, a miss on the swing plays the swing's failure cue, and
+an item bound only to `attack` reads as unbound to a use), 1 in `tests/host/sync.test.ts`
+(through the real op path: a swing cue sharing an item with a use cue lands, a second use cue is
+refused *by moment name*, a forged `"cast"` event never reaches the store, the update path
+re-saves a cue with its own moment, and deleting the weapon clears **both** bound timelines —
+Undo restoring both bindings), and 2 in `tests/ui/pf1eAttackJoin.test.ts` (the writer/reader
+round-trip of `attacks[i].itemId`, the duplicate refusal, and every "this line names no item"
+shape reading as `null`). e2e: `e2e/fx_item_binding.spec.ts` gained phase (e) — an attack line
+authored from the generated wand, a swing timeline bound with `recognition: "success"` (so the
+phase is asserted, not the die), the sheet's own combat tab resolving the swing, the bound cue
+drawn on `__stage`, and the wand's charge-burn binding still intact beside it. Run: standalone
+**1/1** (42.4 s), and with `fx_sequence` + `summons` at `--repeat-each=2` — **68/68** in 13.8 m.
+Every touched call site was re-run in one batch (`sheets`, `pf1e_firearms`,
+`pf1e_wizard_combat`, `pf1e_cast_flow`, `pf1e_inventory`, `quickbar`) — **24/24** in 5.3 m —
+because D-312 edits the sheet's own resolve path, which those specs drive hard.
+`pnpm typecheck` 63 components / 0 blocking / 1 advisory · `pnpm lint` exit 0 ·
+`pnpm build` → `pnpm size` **3 868 649 B raw / 1 109 441 B gzip**, inside the 6 MB budget.
+- The canvas/vision/walls/join regression batch was run **twice** and came back **19/20 both
+  times**, with a *different* single failure each time — once `walls.spec.ts:105` (11.4 s
+  standalone pass), once the known `join.spec.ts:32` 30 s ceiling under batch load (14.0 s
+  standalone pass) — which is the D-291 load sensitivity these five specs have shown before,
+  not a change here: D-312 touches no canvas, vision or wall code. Recorded rather than
+  smoothed over; the batch is never claimed green.
+
+## D-313 — the look is a stack: filter chains, two spellings, one canonical write (2026-09-26)
+
+SQ-05 says a section's look is filters — plural — and D-304 shipped exactly one: a bounded filter
+with an optional strength animation. One filter is a look an author runs out of immediately. A real
+ghost is desaturated, *then* blurred, *then* dimmed, and the order is part of the look: a blur over
+a desaturation is not the reverse. This entry adds the stack without taking anything back.
+
+**Two spellings, one document.** Every stored timeline already says `filter` + `filterTo`, and a
+stored document must keep meaning what it meant, so the shorthand stays and keeps its meaning
+exactly. A chain is `filters?: FxFilterStep[]` — `{kind, strength?, to?}`, the shorthand's own
+shape plus a per-entry animation end — and it is **2–4 entries** (`FX_FILTER_CHAIN_MAX = 4`). The
+bound is deliberate in both directions: one entry would be a second spelling of the shorthand, the
+ambiguity D-310 refused for presets, and five is a stack the frame budget never agreed to. Carrying
+*both* spellings is refused by name — `"an FX section carries either one filter or a chain, not
+both"` — because the host would otherwise have to pick, and a renderer that silently preferred one
+would make a hand-edited document mean something its author never wrote.
+
+**Per-entry validation, blamed by position.** An entry is validated on its own terms: only
+`kind`/`strength`/`to` are fields, the kind is the closed four, and `strength`/`to` are bounded by
+*that entry's own kind* — a blur may animate 1–32 where a grayscale may not exceed 1. Every refusal
+names the entry: `"FX filter 2 (grayscale) strength must be 0–1"`, `"FX filter 1 (brightness) must
+animate between 0 and 2"`. The chain lives in the same field list as the shorthand, so a sound, a
+wait or a camera section is refused for carrying it at all rather than quietly dropping it.
+
+**One read, one write.** `fxAuthoredFilters(section)` is the reader every consumer uses — it returns
+the chain, or the shorthand as a one-entry chain (its `filterTo` becoming that entry's `to`), so
+"what does this look like" has exactly one answer whichever spelling is on the document, and the
+returned steps are **copies**: a caller cannot edit a document by accident through a read.
+`fxFilterFields(steps)` is the canonical writer — nothing for empty, the shorthand for one, the
+chain for two or more — which is what keeps the wizard honest in the case a hand editor gets wrong:
+trimming a three-filter look back to one stores the **shorthand**, not a one-entry chain the host
+would refuse.
+
+**The plan and the frame.** `FxVisualStyle` is now `{blend, filters: FxFilterPlan[]}` — the singular
+field is gone, because "which filter" was never a question a chain can answer. `fxStylePlan`
+resolves each entry (kind default, per-entry clamp, a forged kind skipped rather than guessed) and
+`fxFilterStrengths(filters, section, elapsedMs)` is the per-frame answer: **every entry walks its own
+`to` on the section's shared curve and cycle**, so one filter pulses while the next holds exactly as
+authored, and an entry without a `to` is a constant. `fxFilterStrength` is unchanged in meaning, now
+applied per entry; it stays pure and total (a non-finite age or a zero-length section gives the
+authored start, never `NaN`).
+
+**The renderer.** One pixi instance per entry, **in the authored order** — pixi applies a filter
+array in order, so the chain an author wrote is the chain that renders. A still chain is built once
+and never touched again (D-299/D-304's property, now per entry): only entries with a `to` are nudged
+per frame, so a deepening blur never re-touches the brightness beside it. `inspect` reads each
+strength back out of the live filter — a colour matrix stores the author's number in one coefficient
+— and now reports `filters: string[]` (e.g. `["grayscale:0.5", "blur:6"]`), which is the claim about
+what is drawn rather than about what was planned.
+
+**In the wizard.** The section's filter block is a chain, one row per entry: kind / amount / move-to
+/ Remove, in render order, with **Add filter** (disabled at four) and a hint describing the stack.
+That hint is honest because it is generated from the entries in order, and the kind select's
+**None** removes *that* entry — the row disappears instead of sitting there reading "none" as if it
+were a kind. Picking a kind for an existing row resets that entry's strength to the kind's default
+*and drops its animation*: 16 is a heavy blur and an impossible grayscale, so carrying the number
+over would be refused or silently mean something else (the D-301 rule for a mask's shape fields,
+applied to a filter's own). A new entry starts on a kind the look does not already use, so a second
+click buys something. Saves go through `fxFilterFields`, so the stored document is always canonical.
+
+**Non-claims.** A chain is 2–4 filters on an **image/text** section: masks on sound/camera/wait
+sections, polygon-authored masks, animating a mask's own width/spread, mask easing, tweened
+`invert`, keyframes or multi-stop tracks, per-filter easing (every entry shares the section's curve
+and cycle), a filter chain on a sound, and any UI for hand-ordering beyond add/remove remain
+unclaimed (the rows are the order; moving an entry means removing and re-adding it). This adds **no
+wire change**: `filters` travels where `filter` already travelled, and `MsgKind` stays 60.
+
+**Gates.** `pnpm test` **3 800 passed / 12 skipped** (302 files: 300 passed, 2 skipped), +8 cases: 3
+in `tests/core/fx.test.ts` (the 2–4 bound and both-spellings refusal with per-entry messages and
+position-blame, the read/write round-trip that stores the shorthand when a chain is trimmed to one
+and copies on read, the ordered plan with per-entry clamps plus the per-frame walk including
+`repeats` pulsing each entry), 4 in `tests/canvas/fxStyle.test.ts` (authored order with one instance
+per entry and no rebuilds, an animated entry nudging only itself, two entries animating on their own
+ends and a late join taking each entry's start from the same elapsed time, and the shorthand
+rendering as the same one-entry look), and 1 host case in `tests/host/sync.test.ts` (a real chain
+accepted and resolved onto the cue intact, an update re-checked by the same rule, and 6 forged
+shapes — one entry, five, empty, an unknown kind, an out-of-range end, a stray field — never
+reaching the store, each refused with the entry-naming sentence). e2e: `e2e/fx_sequence.spec.ts`
+gained a chain test — two rows authored through the wizard with the hint read back, the fourth entry
+disabling **Add filter**, the saved chain reopened from the host, the live sprite's own `filters`
+array matching the authored order with the blur mid-animation and the grayscale holding at 0.4, and
+then the same look trimmed to one entry rendering as `["grayscale:0.4"]` — and the existing
+blend/filter test now asserts `filters: ["grayscale:0.5"]` and that "None" removes the row rather
+than leaving a "none" select behind — the D-304 e2e had to learn the new entry point (an empty look
+has no select at all, so "Add filter" is pressed first), which is the markup change stated rather
+than hidden. Runs: `fx_sequence` alone on chromium **30/30** (4.0 m), and with `fx_item_binding` +
+`summons` at `--repeat-each=2` **70/70** (10.8 m). `pnpm typecheck` 63 components / 0 blocking / 1
+advisory · `pnpm lint` exit 0 · `pnpm build` → `pnpm size` **3 871 184 B raw / 1 110 127 B gzip**
+(+2 535 raw over D-312), inside the 6 MB budget.
+- One honest note: the first *full* vitest run (made while a lint pass was running beside it) had a
+  single failure — `tests/client/fxDeliveryFlow.test.ts`, "a fader moved mid-cue reaches the
+  element and the live list", asserting a gain one 160 ms sleep after the move — and the same file
+  was **24/24** standalone and in the uncontended re-run (**3 800 passed / 12 skipped**). Recorded
+  as load sensitivity, like the join/walls batch ceilings in D-312; nothing here touches the audio
+  graph.
+
+## D-314 — a region's cross axis: a width that widens, an aperture that opens (2026-09-26)
+
+D-301 gave a mask four shapes and D-305 let the region **grow** and **turn**. What it could not do
+was change shape: a growth is a uniform scale, deliberately (D-305's rule — "a growing sliver would
+be a different shape, not a bigger one"), so a beam that thickens while keeping its reach and a cone
+whose aperture opens at the same range were simply not expressible. That is SQ-05's width/spread
+clause, and this entry closes it without disturbing the rule it grew out of.
+
+**Two new fields, each belonging to the shapes that have the axis.** `widthTo` is the width a
+**ray/rect** widens to — scene units, the same bounds as the width itself — and `spreadTo` is the
+aperture a **cone** opens to — degrees, the crosshair's own 1–359. A circle has no cross axis at
+all and a ray has no aperture, so each field is refused *by name* on the wrong shape through the
+per-kind field list D-301 built (`"an FX ray mask takes only …"`), which is the same refusal that
+stops a stale width surviving a switch to a circle. A wall-bounded region refuses both with the
+sentence that already refuses growth and turn: the trim is baked against walls a recipient never
+receives, so nothing about such a region may move.
+
+**The cross axis is a size, so it walks like one.** It eases on the section's own curve and cycle
+and **restarts** in each cycle rather than accumulating — an aperture is a value, not a bearing, and
+three 60° cycles of a 20°-opening cone end at 40°, not at 200° (the same split D-305 drew between
+`lengthTo` and `spinDeg`, and D-304 between a filter's strength and a spin).
+
+**What travels is a ratio and the frame it lives in.** The resolved mask carries
+`animate.cross = { ratio, axisDeg, fan? }`: the ratio of the number the author wrote (never the
+scene-unit number, so a recipient still learns no metric), the screen bearing of the shape's own
+axis, and one bit that says a cone's cross axis is an **angle**. That bit is not decoration — it
+decides the drawing. A ray/rect is **stretched** across its axis, which is exactly a width: the
+depth is untouched and the two long edges move apart. A cone is **opened**: its points keep their
+distance from the apex and swing away from the axis, because a sideways stretch would fatten the arc
+into an ellipse — a different shape that would still be called "spread". The drawn vertex at
++26.565° ends at +53.13° **on the same circle**, and the tests assert exactly that vertex.
+
+**Growth keeps its own meaning, and a pinned axis wins its own number.** `lengthTo` alone is still
+D-305's uniform growth: a bigger version of the same shape, the width following the depth. Beside a
+`widthTo`/`spreadTo` it becomes the **along** axis alone, because then every axis the author named
+has a number of its own — "grow to 60, widen to 40" lands the depth on 60 and the width on 40, and
+neither is the other multiplied by a surprise. A cone keeps its uniform radius growth beside an
+opening aperture (an angle is not a distance). A still region draws through exactly the path it
+always did: no cross axis means no per-vertex work at all, so every stored timeline and every mask
+without the new fields renders byte-for-byte as before.
+
+**In the wizard.** Ray/rect gain **Widen to** (scene units) and cone gains **Open to** (degrees),
+each offered only for its own shape — a circle shows neither, which is the "do not offer a UI
+control that silently does nothing" rule from SQ-05. The mask's hint now names the axes that are
+moving and says what a widening leaves alone ("the reach it covers is untouched"); the wall switch
+clears a widening exactly as it clears a growth, and the sentence it leaves behind says
+`growth/turn/widening`. Switching the shape still rebuilds the region and drops the animation.
+An emptied box removes the key rather than storing a number, as everywhere else.
+
+**Non-claims.** Not claimed: polygon-authored masks (the wall bound only *cuts* the four shapes),
+easing a mask on a curve other than its section's, tweened `invert`, a keyframe or multi-stop track
+of either new axis, masks on sound/camera/wait sections, and a cross axis on a circle. `widthTo`
+widens a ray/rect's width **as authored** — there is no separate "grow the width while the depth
+holds at something else" beyond the two fields, and the four vertex cases that would need a
+keyframe are out of scope.
+
+**Gates.** `pnpm test` **3 808 passed / 12 skipped** (302 files: 300 passed, 2 skipped), +8 cases: 2
+in `tests/core/fx.test.ts` (the per-shape field lists, bounds and the wall refusal; the resolved
+ratio/frame/`fan` for a rect and a cone, the absent-spread default, and `scale` surviving beside a
+pinned cross axis), 5 in `tests/canvas/fxStyle.test.ts` (the ratio walking from the authored shape
+and restarting per cycle with the frame in radians; a widened ray exactly wider with its reach
+untouched; a growth beside a pinned width landing each number where it was written, versus the
+uniform growth without one; a cone's vertex swinging to +53.13° at the same radius while the stretch
+path fattens it to an ellipse; and a turn composing with a width, which only holds if the stretch is
+applied in the shape's own frame), and 1 host case in `tests/host/sync.test.ts` (a beam that
+thickens reaching the cue as `{ scale: 3, cross: { ratio: 4, axisDeg: 30 } }`, with 5 forged cross
+axes — a circle's width, a ray's aperture, a cone's width, an out-of-range aperture and a
+wall-bounded widening — never reaching the store). e2e: `e2e/fx_sequence.spec.ts` gained a phase
+that switches the mask through circle → rect → cone to check which control each shape offers,
+authors a 5-unit cone opened to 120° and reads the drawn polygon frame by frame (the radius constant
+at 100 px while the arc swings from ~26.6° to 60° half-angle), then a 8×2-unit rect widened to 8 and
+checks the depth stays ±80 px while the width grows from 40 px to 160 px — with the sampler now
+**frame-driven** (`requestAnimationFrame`) rather than `setTimeout`-driven, because a busy main
+thread was stretching the timer into ~9 samples a second and letting "how many frames the sampler
+caught" decide whether an animation claim could be made. Two existing e2e assertions had to learn
+the new wording (`growth/turn/widening was cleared`, "cannot grow, turn or widen"), which is stated
+rather than quietly retargeted. Runs: `fx_sequence` alone on chromium **31/31** (5.7 m), and with
+`fx_item_binding` + `summons` at `--repeat-each=2` **72/72** (15.5 m). `pnpm typecheck` 63
+components / 0 blocking / 1 advisory · `pnpm lint` exit 0 · `pnpm build` → `pnpm size`
+**3 873 829 B raw / 1 110 876 B gzip** (+2 645 raw over D-313), inside the 6 MB budget. One honest
+note: the first full-suite e2e run of this change was made with the unit suite running beside it and
+failed three mask tests — two on the sampler's own frame count (19–20 samples against the repo's
+`MIN_ANIMATION_SAMPLES = 20`) and one on the status sentence this entry reworded. The sentence was a
+real break and was fixed; the sample count was contention, and the sampler is now frame-driven so
+the number of frames a busy browser managed cannot decide whether the animation claim is made.
+
+## D-315 — the drawn region: a mask the author draws, point by point (2026-09-26)
+
+D-301 gave a mask the crosshair's four shapes and D-307 let a wall cut them. What no field could
+express was a region that is not one of those shapes: a room's own outline, a ridge, a cone of cold
+drawn to the map. The wall bound only *cuts* the four shapes — it cannot invent one. This entry adds
+the authored shape: `mask.kind: "polygon"`, 3–64 `points` in scene units **from the anchor**, in
+order around it.
+
+**Validated as the shape it is, not as a list.** Points are `{x, y}` and nothing else, each within
+±5000 scene units (so a typo like `-9000` is a refusal and not an off-map region); there must be at
+least three (two is a line) and at most 64 (the bound the trim's angular sweep and the wire are
+sized for). A region that **crosses itself** is refused by name — a bow-tie's fill depends on the
+renderer's winding rule, and fields the author never drew would be shown by it — and so is a set of
+points with **no area at all** ("must not lie in a line"). Self-crossing is reported *first*: a
+bow-tie's zero area is a consequence of the crossing, and "crosses itself" is the fault the author
+can act on.
+
+**The wall bound needs a star, and says so.** `fxSightTrim` answers "how far can you see this way"
+with one distance per angle, so a region a ray from the anchor can cross twice has no single answer
+— the trim would silently take a slice of it. `fxPolygonStarShaped` tests the definition (walking
+the vertices, each step must turn the same way and the walk must total exactly one turn) and a
+wall-bounded polygon that fails it is refused: *"a wall-bounded FX polygon mask must be star-shaped
+about its anchor: its points must run in order around it"*. A concave region is perfectly fine
+**without** the wall bound — the sprite is clipped to it either way — which is exactly the shape of
+that refusal. A wall-bounded region still cannot animate, the polygon's own growth included: the
+trim is baked against walls a recipient never receives.
+
+**It resolves through the scene's metric like any other shape.** Points are multiplied by
+`crosshairPxPerUnit` exactly as the crosshair's own areas are, so everything downstream is
+unchanged: the same wall trim, the same cutout (the polygon becomes the hole of the covering
+rectangle), the same renderer, the same readback. `inspect` reports the drawn polygon's own points
+and bounds — a triangle drawn at (0,0), (5,0), (0,5) is three points in the first quadrant of the
+anchor, which is a claim the drawing itself makes.
+
+**Its own growth is a ratio.** A polygon has no `length` to grow to, so `scaleTo` (0.05–10, the
+visual's own scale bounds) says "twice itself" and travels **as the number the author wrote** — it
+is already a ratio, which is the form D-305's `lengthTo` is converted into. `spinDeg` turns it about
+the **anchor** rather than its centroid, like every other region. `length`/`width`/`spread`, the
+D-314 cross axes and the four shapes' `lengthTo` are all refused on a polygon through the per-kind
+field list, and `points`/`scaleTo` are refused on the four shapes: two halves of one vocabulary,
+each taking only what it means.
+
+**The type stops claiming a shape has a length.** `FxMask.length` is optional — required on the four
+shapes, absent on a polygon — because the one type was quietly saying "every region has a length"
+when the four shapes' kind list already said otherwise. The four shapes are simply required to keep
+it *in their own fields*: `lengthTo` is a multiple of the region's own length only when there is one
+to divide by, the crosshair's area builder is reached only by shapes that have one, and the host
+refuses a shape whose length is missing or not positive (the same refusal a bad number already got).
+A document is hand-writable JSON, so the invariant that matters is the runtime one.
+
+**In the wizard.** "Drawn region" joins the mask shapes, seeding a square about the anchor (an empty
+point list is not a shape anyone can save), and the region is a numbered list of rows — the
+numbering *is* the shape, so each row is labelled and **Insert after** puts a new point on the edge
+it was added to (its midpoint, so the region keeps an area). Remove is disabled at three points and
+Insert at 64: the wizard stops *offering* an operation the host would refuse rather than offering
+one that fails on save. "Grow to (×)" replaces "Grow to (units)" for this shape, because a polygon's
+growth is a multiple of itself.
+
+**Non-claims.** Not claimed: drawing a region **on the canvas** (a crosshair drag still produces the
+four shapes, and a polygon is authored as numbers in the wizard — the map-side editor is the
+crosshair's own next unit); a wall-bound polygon that is not star-shaped about its anchor (refused
+rather than approximated); self-intersecting regions; per-point animation; holes inside a region (a
+cutout is the whole region, not a ring); and a polygon mask on a sound/camera/wait section, which
+remains refused like every other mask.
+
+**Gates.** `pnpm test` **3 814 passed / 12 skipped** (302 files: 300 passed, 2 skipped), +6 cases: 2
+in `tests/core/fx.test.ts` (the 3–64 bound, per-point fields and ranges, the self-crossing refusal
+before the area one, a line with no area, the star rule for the wall bound and its absence without
+one, the polygon's fields refused on the four shapes and theirs on it; plus resolution — 8 units →
+160 px through the scene metric, `scaleTo` travelling as the author's ratio, a still region carrying
+no animation), 3 in `tests/canvas/fxStyle.test.ts` (the drawn polygon is its own vertices and
+bounds and says nothing about facing; a cutout of it hides what is inside, read off the polygon's
+own hole; its ratio and its turn about the anchor, read out of the polygon — the flag's far edge
+60 px down-screen after a quarter turn), and 1 host case in
+`tests/host/sync.test.ts` (a drawn region reaching the cue as offsets with `animate.scale`, and 8
+forged regions — too few, too many, a line, a bow-tie, a stray field, an out-of-scene point, a
+wall-bounded U and a polygon carrying `length` — never reaching the store, while the same U unwalled
+is accepted). e2e: `e2e/fx_sequence.spec.ts` gained a phase that authors a triangle point by point,
+checks the 3-point floor disables removal, inserts and removes a point on an edge, saves, reopens it
+from the host, and then reads the live mask frame by frame (three points, everything in the first
+quadrant, the far corner walking 100 px → 200 px at a 2× ratio, the reach exactly 200√2 px at the
+end). Every animation sampler in that spec is now **frame-driven** (`requestAnimationFrame`): the
+batch run of this change caught the older D-305 mask test failing on `middle < 60` with 60.5, which
+is a claim about *sampling* rather than about the easing — a busy main thread stretches
+`setTimeout(16)` into uneven samples, and the middle *sample* stops being the middle of the motion.
+The conversion is stated here rather than presented as a green first run. Runs: `fx_sequence` alone on chromium **32/32** (6.4 m), and with `fx_item_binding` +
+`summons` at `--repeat-each=2` **74/74** (16.2 m). Both runs come from the build this commit's source
+produces; the sampler conversion above was prompted by that batch standing at 73/74. `pnpm typecheck` 63 components / 0 blocking / 1
+advisory · `pnpm lint` exit 0 · `pnpm build` → `pnpm size` **3 878 940 B raw / 1 112 038 B gzip**
+(+5 111 raw over D-314), inside the 6 MB budget.
+
+## D-316 — a cue can name the people it is for (SQ-18, 2026-09-26)
+
+SQ-18 asks for visibility "per recipient: local-only, **named recipients**/group/GM, scene
+audience and source-bound visibility evaluated by host". The words were there — `scene`, `gm`,
+`caller` — and a *list* was not: a GM who wanted to show one player a clue had to use
+`caller` (which means whoever runs it, not whoever is meant to see it), and the only way to
+address a player was to have them run the cue themselves. This entry adds the fourth form:
+`audience: { players: [...] }`, at the run level and on a camera section alike, because a
+second vocabulary for "who gets this" is how one of the two drifts.
+
+**A list is data, and its data rules are strict.** 1–32 ids, each in the id grammar the rest of
+the wire uses, in the author's own order, with **no repeats** — a repeated user is refused
+rather than folded, so "who is in this list" has exactly one answer. Empty is refused as well:
+an audience of none is a cue with no purpose, and "nobody sees this section" is what deleting
+the section says. Every refusal names the fault (*"an FX audience's chosen players must be
+1–32 users"*, *"…must not repeat a user"*, *"…must be user ids"*, *"an FX audience takes only a
+`players` list of user ids"*), and the run level now reports a bad audience **its own sentence**
+instead of the pile that also mentions versions and section counts — a mistyped audience is the
+author's to fix, and pointing them at "1–48 sections" would send them to the wrong field.
+
+**Ids are users, and they are not resolved against the current roster.** A cue addressed to a
+player who is offline, or who has not joined yet, is still a cue addressed to them; the world's
+users change between sessions, so existence is a thing the *wizard* guarantees (it offers the
+world's own list) and not something the document must re-prove on every save. A chosen-players
+timeline is not thereby hidden from other readers either: `gm` remains the only audience that
+also hides the **document** (D-316 leaves the projection rule alone and says so in
+`projection.ts`) — the audience decides *delivery*, and the host is what keeps the cue away from
+everyone else.
+
+**One rule, four call sites.** `fxAudienceAllows(audience, viewer, callerId)` is where "is this
+viewer in it" lives now, and the host's four separate decisions call it: the preflight fan-out
+(which also keeps the caller-side *narrowing* able to narrow and nothing else), the post-commit
+re-check that re-reads the macro's **current** audience (a timeline edited between preflight and
+commit cannot deliver an audience that no longer holds), the stored-instance check (both the
+record's own audience and the timeline's must include the viewer), and the request gate. That
+last one is a deliberate tightening: publishing a cue has never been a licence to fire it *at
+other people*, so a player may now invoke only a timeline that includes them — the old rule
+refused a `gm`-audience cue and a chosen-players cue the caller is not in is the same refusal.
+
+**The audience decides who, and then stops.** A delivered cue carries no audience at all: the
+host strips the field from the sections it sends (`hostWithoutAudience`, identity-preserving
+when there is nothing to strip). Without that, a player addressed by a chosen-players *camera*
+would read the whole list — including users they cannot otherwise see — straight out of their
+own payload, which is the membership query SQ-18 keeps out of socket traffic, one hop in.
+Bystanders were already covered (an excluded viewer receives the section not at all); this
+closes the recipient's side too, and the preflight report stays counts-only, as D-295 built it:
+a user id never appears in a payload or a notice. A GM who is not in a chosen list does not
+receive the cue — that is the point of a list of *people* rather than a floor of privilege.
+
+**In the wizard.** Both audience selects gain "Chosen players…", which opens a checklist of the
+world's own users (each chip shows the name and the world's word for the role — GM, assistant,
+trusted, player) instead of asking anyone to type forty-character ids. Switching to the form
+**seeds the authoring user**, so the draft is never an empty list the host would refuse — the
+control cannot put the author in a state their own save would reject — and ticking and unticking
+is the edit. Ticking appends in the order the author ticks (their order is the document's), and
+unticking removes just that id, so a list naming a user this client cannot see survives an edit
+of the others. The authoring-time fitness warning follows the same reading: a chosen list counts
+as a *player* audience unless every user in it is GM-side, and an id the client cannot resolve
+counts as a player rather than quietly excusing GM-only media.
+
+**Gates.** `pnpm test` **3 819 passed / 12 skipped** (302 files: 300 passed, 2 skipped), +5
+cases: 3 in `tests/core/fx.test.ts` — the fourth form accepted at both levels and a bad word
+still refused by name; the run-level list refusals (empty, 33 ids, a repeat, a non-string id,
+an extra field, `null`, an array, a bare word) each with its message, the words and the absent
+audience unchanged; and the resolution table (a chosen list does not silently include the GM,
+`fxAudiencePlayers` is empty for every word, and a targeted camera section filters per viewer —
+including the identity-preserving case where nothing drops) — and 2 host cases in
+`tests/host/sync.test.ts`: a chosen-players run reaching exactly the one named user with the
+requester and the other player counted as *outside its audience*, the delivered cue and the
+report naming nobody, and a player outside the list refused while the named one may run it; plus
+a chosen-players *camera* section filtered per viewer with its list absent from the delivered
+copy and two entitled viewers counted as targeted rather than skipped. e2e:
+`e2e/fx_sequence.spec.ts` gained a phase with two real browser contexts that joins a player,
+authors "Whisper" addressed to them (unticking the author the select seeded), reopens it to
+prove the list is a document fact, runs it, and reads two live stages — the player's shows the
+cue, the author's never does, and the author's notice is exactly counts
+(*"Whisper: reached 1 viewer(s) — 1 skipped (1 outside its audience)"*). Runs: that phase alone
+**1 passed (9.5 s)**, `fx_sequence` on chromium **33/33** (2.4 m), and with `fx_item_binding` +
+`summons` at `--repeat-each=2` **76/76** (5.7 m). `pnpm typecheck` 63 components / 0 blocking /
+1 advisory · `pnpm lint` exit 0 · `pnpm build` → `pnpm size` **3 882 900 B raw / 1 113 085 B
+gzip** (+3 960 raw over D-315), inside the 6 MB budget.
+
+**Non-claims.** Not claimed: named *groups* (SQ-18's word — this repository has users and roles,
+not groups, and inventing a group concept to satisfy a parenthetical would be a data model of
+its own); per-recipient targeting of a *visual or sound* section (still only a camera section
+carries an audience — D-300's deliberate boundary stands); a chosen list on a **persistent**
+timeline's sections (persistent runs cannot carry camera sections at all); a "local only" audience
+word distinct from `caller`; the wizard offering a *search* over users (the checklist is the whole
+roster, which is what a table's roster is); and an audience list surviving a user's deletion with
+any special meaning — it simply names nobody.
+
+## D-317 — the region can be drawn where it belongs (SQ-10, 2026-09-26)
+
+SQ-10's crosshair is where an area is *chosen*: the overlay draws the shape, the author sees it,
+the host re-checks it when the thing it belongs to is committed. A mask is an area too — D-305
+gave the crosshair's four shapes a document spelling and D-315 a hand-typed point list — and the
+one thing the wizard could not do was **draw the region on the map**, which is exactly what the
+same picker already does beside it for anchors, waypoints and summon footprints. Six numbers are
+a description of a region; a cone pointing at a door is a decision. This entry wires the two
+together, and the wiring is only allowed to be a *bridge*: the same overlay component, the
+crosshair's own shape vocabulary, and the host's own `fxMaskError` deciding whether the assembled
+mask is a mask rather than a second opinion that could drift from it.
+
+**The drawn region is the crosshair's shape, never a polygon.** `fxMaskFromCrosshair` is the
+whole translation: `circle`/`cone`/`ray`/`rect` keep their reach, width, aperture and angle in
+scene units — the units a mask is measured in, so there is no conversion for the two to disagree
+about — and `point` is refused, because it has no area to mask with. The mapping follows the
+**host's** field list rather than the shape's expressiveness: a circle takes no `angle` even
+though the crosshair can turn one, because `MASK_FIELDS.circle` has no `angle` and
+`fxMaskError` says so by name. A cone with no aperture gets `CROSSHAIR_DEFAULT_SPREAD` instead of
+zero, and an extentless ray reaches the validator carrying the zero the gesture left and leaves
+with the validator's own sentence (*"an FX mask's length must be 0.5–5000 scene units"*) — the
+refusal the author would have met at save time, which is the reason `fxMaskError` was **extracted
+from `validateFxSequence`** instead of copied: the validator now delegates to it, so the two call
+sites cannot say different things about one shape.
+
+**The gesture writes two things, because a mask is measured from its anchor.** A mask is offsets
+from the section's anchor, so a region drawn around a door is meaningless unless the cue's anchor
+*is* that door: the picked point becomes `at` — rounded to whole scene units like every other
+typed anchor — and the drawn shape becomes `mask`, in one immutable draft replacement (there is no
+state in which the mask moved and the anchor did not). That has a consequence the author is told
+**before** the click rather than after it: a section anchored to a token with *Follow visible
+token anchors* ticked cannot both follow that token and take its anchor from a click, so drawing
+drops the follow — the same `follow: false` rule the anchor controls themselves apply, and
+without it the host's own anchor/follow refusal would fire at save on a draft the gesture had
+just written. The pick's hint states that in the sentence for the case where it happens. The
+author's `walls` and `invert` switches survive the gesture because they describe the same region;
+a polygon's `points`/`scaleTo` do not, because the drawn shape is a different geometry and the
+leftovers are exactly what the host refuses.
+
+**The wizard offers the gesture where a mask is edited, and nowhere else.** *Draw on map* sits
+beside the mask-kind select on an image/text section, disabled until the timeline's scene is
+open like every other pick; the overlay opens **seeded with the shape the author already has**
+(`seedMaskShape` maps an existing mask back onto the crosshair, and a polygon seeds a circle
+because a point list is not one of the four), so drawing is also adjusting; a cancelled pick
+leaves the draft untouched and says so in the status line rather than as an error. The write is a
+draft write like any other — nothing reaches the table, no host is asked, no op is sent until the
+timeline is saved, where the host repeats the check.
+
+**Nothing new on the wire, and no new authority.** A mask has always travelled inside a macro's
+`sequence`; D-317 adds no message kind, no field and no host path. It adds one host-visible rule
+at the edge of the wizard (`fxMaskError` as a named export) and one gesture in front of it.
+
+**Gates.** `pnpm test` **3 820 passed / 12 skipped** (302 files: 300 passed, 2 skipped), +1 case in
+`tests/core/fx.test.ts`: the bridge in the host's own words — a point is `null`, a circle takes
+no `angle`, an aperture-less cone gets the shared default spread, an extentless ray is refused
+with the validator's own sentence rather than a zero-length mask, and every shape the bridge
+writes passes `fxMaskError` while a hand-built refusal still names its own fault. e2e:
+`e2e/fx_sequence.spec.ts` gained "a mask region can be drawn on the map, and the host resolves the
+shape that was drawn" — a real browser opens the wizard, draws a cone through the shared crosshair
+at a mapped world point (30 units of reach, 90° of aperture), and asserts the panel's own fields
+now hold the drawn shape *and* that the anchor moved to the click; the timeline saves and reopens
+with the drawn shape intact; switching the anchor to a token and ticking *Follow visible token
+anchors* and then drawing again shows the overlay seeded with the mask the author already has
+(cone, 30, 90), leaves the anchor a point, **drops the follow** and produces a draft the wizard's
+own save gate accepts; and the live sprite's mask is read back out of the renderer as a cone —
+14 points (the crosshair's 13-point arc plus the anchor), radius **600 px** for 30 units on this
+scene's 100 px / 5 unit grid, with a bearing. Runs: that spec **34/34** (2.4 m) on chromium, and
+with `fx_item_binding` + `summons` at `--repeat-each=2` **78/78** (5.8 m). `pnpm typecheck`
+63 components / 0 blocking / 1 advisory · `pnpm lint` exit 0 · `pnpm build` → `pnpm size`
+**3 884 486 B raw / 1 113 592 B gzip** (+1 586 raw over D-316), inside the 6 MB budget.
+
+**Non-claims.** Not claimed: a freehand or multi-click **polygon** gesture (the four shapes are
+what a click can draw; a point list stays typed, D-315); resize handles or drag-to-reshape on a
+drawn region (re-drawing, or the numbers, is how it is adjusted); a mask on sound/camera/wait
+sections (D-300's boundary); per-point animation inside a polygon; a mask-aware *preview* of what
+the region will contain beyond the crosshair's own preview; and any claim about which tokens a
+region happens to cover — a mask confines a visual to a shape, and who is *in* it is not a
+concept this feature has.

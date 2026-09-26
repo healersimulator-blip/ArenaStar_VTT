@@ -388,10 +388,18 @@ export interface CombatDocument extends BaseDocument {
 
 export interface MacroDocument extends BaseDocument {
   type: "macro";
-  kind: "chat" | "script" | "sequence" | "summon";
+  kind: "chat" | "script" | "sequence" | "summon" | "fxPreset";
   command: string;
   /** GM-published summoning preset. Player projection keeps only callable metadata. */
   summon?: import("./summons").SummonDefinition | import("./summons").SummonPublic;
+  /**
+   * D-311: the item this timeline is bound to. It is stored **here**, on the timeline
+   * rather than on the item, so the ordinary macro projection decides who may discover the
+   * binding — the item side needs no rule of its own.
+   */
+  fxItem?: import("./fxBinding").FxItemBinding;
+  /** D-310: a named bundle of authored FX sections — an authoring aid, never runnable. */
+  preset?: import("./fxPresets").FxPresetDefinition;
   /** A versioned, multi-section audiovisual timeline; legacy macros omit it. */
   sequence?: import("./fx").FxSequence;
   /** GM-reviewed JS source/policy. Legacy scripts without approval cannot execute. */
@@ -421,7 +429,8 @@ export interface FxInstanceDocument extends BaseDocument {
   sceneId: DocId;
   macroId: DocId;
   ownerId: UserId;
-  audience: "scene" | "gm" | "caller";
+  /** The run's audience, exactly as authored (D-316): a word or the users it names. */
+  audience: import("./fx").FxAudience;
   atHostTime: number;
   sections: import("./fx").ResolvedFxSection[];
   sourceTokenId?: DocId;

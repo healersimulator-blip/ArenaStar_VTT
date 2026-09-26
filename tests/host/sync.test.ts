@@ -13,7 +13,7 @@ import { acRevision, previewAcConversion } from "../../src/ui/sheets/pf1eAcConve
 import { pf1eAttackEdit, pf1eAttackEditorView } from "../../src/ui/sheets/pf1eAttackEditor";
 import { observePF1eSheetActor } from "../../src/ui/sheets/pf1eSheetWindow";
 import { pf1eSheetEdit, pf1eSheetView } from "../../src/ui/sheets/pf1eSheetModel";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { HostSync, gmSessionUser, type HostEvents } from "../../src/host/sync";
 import type { ScriptRunner } from "../../src/host/scriptWorker";
 import { scriptApprovalHash, type ScriptPolicy } from "../../src/core/scriptMacros";
@@ -22,24 +22,26 @@ import type { AutomationDefinition } from "../../src/core/automation";
 import { ClientSync, type ClientEvents } from "../../src/client/sync";
 import { createTransportPair, flushMicrotasks } from "../../src/net/memory";
 import { createEventBus, type EventBus } from "../../src/core/events";
+import { summarizeSkips } from "../../src/core/fxDelivery";
 import { DocumentStore, OpLog, UndoStack, type StoreMeta } from "../../src/core";
-import type { HelloMsg } from "../../src/core/messages";
+import type { FxStartMsg, HelloMsg } from "../../src/core/messages";
 import type { Op, OpEnvelope } from "../../src/core/ops";
 import type {
   ActorDocument,
   AssetManifest,
   AutomationDocument,
-  PrefabDocument,
-  TileDocument,
+  ItemDocument,
   Json,
+  MacroDocument,
   MessageDocument,
   NoteDocument,
+  PrefabDocument,
   SceneDocument,
+  TileDocument,
   TokenDocument,
-  WallDocument,
   UserDocument,
+  WallDocument,
   WorldCollections,
-  MacroDocument,
 } from "../../src/core/documents";
 import { frameMessage, channelFor } from "../../src/net/frame";
 
@@ -1314,6 +1316,7 @@ test("roll.apply refuses a card that never carried a total, and an actor that is
 
 describe("Macros / FX host authority and audience", () => {
   const imageHash = "a".repeat(64);
+  const soundHash = "5".repeat(64);
   const fxMacro = (id: string, at: "point" | "source" = "point"): MacroDocument => ({
     _id: id, type: "macro", name: id, ownership: { default: 1 },
     flags: { core: { playerCallable: true } }, system: {}, kind: "sequence", command: "",
@@ -1323,6 +1326,177 @@ describe("Macros / FX host authority and audience", () => {
       { kind: "image", id: "b", assetId: imageHash, startMs: 300, durationMs: 900,
         at: at === "point" ? { kind: "point", x: 150, y: 150 } : { kind: "source" } },
     ] },
+  });
+
+  test("a drawn region is host-validated as a shape and resolves through the scene's metric (D-315)", async () => {
+    const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    const withMask = (id: string, mask: unknown): MacroDocument => ({
+      _id: id, type: "macro", name: id, ownership: { default: 1 },
+      flags: { core: { playerCallable: true } }, system: {}, kind: "sequence", command: "",
+      sequence: { version: 1, audience: "scene", sections: [{ kind: "image", id: "a",
+        assetId: imageHash, startMs: 0, durationMs: 1000, at: { kind: "point", x: 100, y: 100 },
+        mask } as never] },
+    }) as unknown as MacroDocument;
+    const refused: string[] = [];
+    h.gmBus.on("rejected", (event) => refused.push(event.detail));
+    const square = [{ x: -8, y: -8 }, { x: 8, y: -8 }, { x: 8, y: 8 }, { x: -8, y: 8 }];
+
+    // A drawn region reaches the cue as offsets in the scene's own metric: 8 units is
+    // 100 px/5 units × 8 = 160 px, and the growth travels as the ratio the author wrote.
+    h.gm.submit([{ kind: "create", coll: "macros", data: withMask("room", { kind: "polygon",
+      points: square, scaleTo: 2, invert: true }) }]);
+    await flushMicrotasks();
+    const cues: ClientEvents["fx"][] = [];
+    h.gmBus.on("fx", (m) => cues.push(m));
+    h.gm.requestSequence("room", "s1");
+    await flushMicrotasks();
+    const started = cues.find((m) => m.kind === "fx.start");
+    expect(started).toBeDefined();
+    if (started?.kind === "fx.start") {
+      const mask = (started.sections[0] as { mask?: { area?: unknown; invert?: boolean;
+        animate?: unknown } }).mask;
+      expect(mask?.area).toEqual([{ x: -160, y: -160 }, { x: 160, y: -160 },
+        { x: 160, y: 160 }, { x: -160, y: 160 }]);
+      expect(mask?.invert).toBe(true);
+      expect(mask?.animate).toEqual({ scale: 2 });
+    }
+
+    // Forged regions never reach the store: too few points, too many, a line with no area, a
+    // bow-tie that crosses itself, a point with a field that is not x/y, an out-of-scene
+    // offset, and a wall bound on a region a ray can cross twice.
+    const u = [{ x: -10, y: -10 }, { x: 10, y: -10 }, { x: 10, y: 10 }, { x: 6, y: 10 },
+      { x: 6, y: -6 }, { x: -6, y: -6 }, { x: -6, y: 10 }, { x: -10, y: 10 }];
+    for (const [name, mask] of [
+      ["two-points", { kind: "polygon", points: [square[0], square[1]] }],
+      ["many", { kind: "polygon", points: Array.from({ length: 65 }, (_v, i) => ({
+        x: Math.cos((i / 65) * Math.PI * 2) * 10, y: Math.sin((i / 65) * Math.PI * 2) * 10 })) }],
+      ["line", { kind: "polygon", points: [{ x: -8, y: 0 }, { x: 0, y: 0 }, { x: 8, y: 0 }] }],
+      ["bow-tie", { kind: "polygon", points: [{ x: -8, y: -8 }, { x: 8, y: 8 },
+        { x: 8, y: -8 }, { x: -8, y: 8 }] }],
+      ["stray-field", { kind: "polygon", points: [{ x: 0, y: 0 }, { x: 8, y: 0, z: 1 },
+        { x: 0, y: 8 }] }],
+      ["far-off", { kind: "polygon", points: [{ x: 0, y: 0 }, { x: 9_000, y: 0 },
+        { x: 0, y: 8 }] }],
+      ["walled-u", { kind: "polygon", points: u, walls: true }],
+      ["polygon-length", { kind: "polygon", points: square, length: 10 }],
+    ] as const) {
+      h.gm.submit([{ kind: "create", coll: "macros", data: withMask(`bad-${name}`, mask) }]);
+      await flushMicrotasks();
+      expect(h.hostStore.get("macros", `bad-${name}`), name).toBeUndefined();
+    }
+    expect(refused.length).toBeGreaterThanOrEqual(8);
+    // …and the concave region it refused to wall-bound is perfectly acceptable unwalled.
+    h.gm.submit([{ kind: "create", coll: "macros", data: withMask("u-open", { kind: "polygon", points: u }) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "u-open")).toBeDefined();
+  });
+
+  test("a mask's cross axis survives the host as a ratio, and a shape without one is refused (D-314)", async () => {
+    const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    const withMask = (id: string, mask: unknown): MacroDocument => ({
+      _id: id, type: "macro", name: id, ownership: { default: 1 },
+      flags: { core: { playerCallable: true } }, system: {}, kind: "sequence", command: "",
+      sequence: { version: 1, audience: "scene", sections: [{ kind: "image", id: "a",
+        assetId: imageHash, startMs: 0, durationMs: 1000, at: { kind: "point", x: 100, y: 100 },
+        mask } as never] },
+    }) as unknown as MacroDocument;
+    const refused: string[] = [];
+    h.gmBus.on("rejected", (event) => refused.push(event.detail));
+
+    // A beam that thickens: the host resolves the *ratio* and the frame it lives in, so the
+    // recipient learns the shape and never the scene's metric.
+    h.gm.submit([{ kind: "create", coll: "macros", data: withMask("beam", { kind: "rect",
+      length: 20, width: 10, lengthTo: 60, widthTo: 40, angle: 30 }) }]);
+    await flushMicrotasks();
+    const cues: ClientEvents["fx"][] = [];
+    h.gmBus.on("fx", (m) => cues.push(m));
+    h.gm.requestSequence("beam", "s1");
+    await flushMicrotasks();
+    const started = cues.find((m) => m.kind === "fx.start");
+    expect(started).toBeDefined();
+    if (started?.kind === "fx.start") {
+      const mask = (started.sections[0] as { mask?: { animate?: unknown } }).mask;
+      expect(mask?.animate).toEqual({ scale: 3, cross: { ratio: 4, axisDeg: 30 } });
+    }
+
+    // Forged cross axes never reach the store: a shape that has no such axis, a value past
+    // its own bound, and the two axes the wall trim bakes away.
+    for (const [name, mask] of [
+      ["circle-width", { kind: "circle", length: 10, widthTo: 20 }],
+      ["ray-spread", { kind: "ray", length: 20, width: 4, spreadTo: 180 }],
+      ["cone-width", { kind: "cone", length: 20, spreadTo: 90, widthTo: 10 }],
+      ["past-range", { kind: "cone", length: 20, spreadTo: 400 }],
+      ["walled", { kind: "rect", length: 20, width: 10, widthTo: 40, walls: true }],
+    ] as const) {
+      h.gm.submit([{ kind: "create", coll: "macros", data: withMask(`bad-${name}`, mask) }]);
+      await flushMicrotasks();
+      expect(h.hostStore.get("macros", `bad-${name}`), name).toBeUndefined();
+    }
+    expect(refused.length).toBeGreaterThanOrEqual(5);
+  });
+
+  test("a filter chain is host-accepted, resolved intact, and refused when forged (D-313)", async () => {
+    const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    const chain = (id: string, filters: unknown): MacroDocument => ({
+      _id: id, type: "macro", name: id, ownership: { default: 1 },
+      flags: { core: { playerCallable: true } }, system: {}, kind: "sequence", command: "",
+      sequence: { version: 1, audience: "scene", sections: [{ kind: "image", id: "a",
+        assetId: imageHash, startMs: 0, durationMs: 800, at: { kind: "point", x: 120, y: 120 },
+        filters } as never] },
+    }) as unknown as MacroDocument;
+    const refused: string[] = [];
+    h.gmBus.on("rejected", (event) => refused.push(event.detail));
+
+    // A real look: desaturated, blurred, dimmed — three entries in the author's order, each
+    // with its own strength and the middle one animating.
+    h.gm.submit([{ kind: "create", coll: "macros", data: chain("ghost", [
+      { kind: "saturate", strength: 0.2 }, { kind: "blur", strength: 3, to: 9 },
+      { kind: "brightness", strength: 1.1 }]) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "ghost")).toBeDefined();
+
+    // …and the run resolves the chain into the cue intact: the entries, their order and the
+    // animation's end all survive to the recipient (the plan is the client's, the document is
+    // the host's, and neither may quietly drop an entry).
+    const cues: ClientEvents["fx"][] = [];
+    h.gmBus.on("fx", (m) => cues.push(m));
+    h.gm.requestSequence("ghost", "s1");
+    await flushMicrotasks();
+    const started = cues.find((m) => m.kind === "fx.start");
+    expect(started).toBeDefined();
+    if (started?.kind === "fx.start")
+      expect((started.sections[0] as { filters?: unknown }).filters).toEqual([
+        { kind: "saturate", strength: 0.2 }, { kind: "blur", strength: 3, to: 9 },
+        { kind: "brightness", strength: 1.1 }]);
+
+    // A forged chain never reaches the store: one entry is not a chain, five is over budget,
+    // both spellings at once is an ambiguity, and a blur's end is not a grayscale's bound.
+    for (const [name, filters] of [
+      ["one", [{ kind: "blur" }]],
+      ["five", [{ kind: "blur" }, { kind: "blur" }, { kind: "blur" }, { kind: "blur" }, { kind: "blur" }]],
+      ["empty", []],
+      ["odd", [{ kind: "blur" }, { kind: "sepia" }]],
+      ["range", [{ kind: "grayscale", to: 9 }, { kind: "blur" }]],
+      ["stray", [{ kind: "blur" }, { kind: "blur", opacity: 0.5 }]],
+    ] as const) {
+      h.gm.submit([{ kind: "create", coll: "macros", data: chain(`bad-${name}`, filters) }]);
+      await flushMicrotasks();
+      expect(h.hostStore.get("macros", `bad-${name}`), name).toBeUndefined();
+    }
+    expect(refused.filter((entry) => entry.includes("filter")).length).toBeGreaterThanOrEqual(5);
+    // An update is checked by the same rule, not only a create.
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: "ghost" },
+      diff: { "sequence.sections": [{ kind: "image", id: "a", assetId: imageHash, startMs: 0,
+        durationMs: 800, at: { kind: "point", x: 120, y: 120 },
+        filter: { kind: "blur", strength: 4 }, filters: [{ kind: "blur" }, { kind: "blur" }] }] } }]);
+    await flushMicrotasks();
+    const stored = h.hostStore.get("macros", "ghost") as MacroDocument | undefined;
+    expect((stored?.sequence?.sections[0] as { filters?: unknown } | undefined)?.filters)
+      .toEqual([{ kind: "saturate", strength: 0.2 }, { kind: "blur", strength: 3, to: 9 },
+        { kind: "brightness", strength: 1.1 }]);
   });
 
   test("multi-step timeline reaches entitled peers exactly once; forge is ignored", async () => {
@@ -1362,6 +1536,473 @@ describe("Macros / FX host authority and audience", () => {
     expect(b).toHaveLength(2); // no forged rebroadcast
   });
 
+  /** Run the fixture's `pulse` as the GM and hand back the cue its own session received:
+   * the run id the acks have to name. */
+  async function runPulse(h: Harness): Promise<FxStartMsg> {
+    const cues: FxStartMsg[] = [];
+    const off = h.gmBus.on("fx", (msg) => cues.push(msg));
+    try {
+      h.gm.requestSequence("pulse", "s1");
+      await flushMicrotasks();
+    } finally {
+      off();
+    }
+    const cue = cues.at(-1);
+    if (!cue) throw new Error("no cue reached the GM session");
+    return cue;
+  }
+
+  test("the table's answers become one line for the requester, and a failure is urgent", async () => {
+    const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    h.gm.submit([{ kind: "create", coll: "macros", data: fxMacro("pulse") }]);
+    await flushMicrotasks();
+    const player = await h.addPlayer(PLAYER_ID, "Rex");
+    const reports: ClientEvents["fxDelivery"][] = [];
+    h.gmBus.on("fxDelivery", (msg) => reports.push(msg));
+    const seen = await runPulse(h);
+
+    // One viewer answers for the run's only asset; the GM's own session never says
+    // anything. The answer is not complete without another voice, so nothing is sent yet…
+    const ack = (pair: ReturnType<typeof createTransportPair>, msg: Record<string, unknown>) =>
+      pair.b.send("ops", frameMessage({ kind: "fx.media", ...msg } as never));
+    ack(player.pair, { runId: seen.runId, assetId: imageHash, state: "ready", ms: 120 });
+    await flushMicrotasks();
+    expect(reports.filter((msg) => msg.media !== undefined)).toHaveLength(0);
+    // …and when the viewer says it could not decode the media, the requester hears at
+    // once: the cue is still playing, and the GM can still stop it.
+    ack(player.pair, { runId: seen.runId, assetId: imageHash, state: "unsupported" });
+    await flushMicrotasks();
+    const first = reports.filter((msg) => msg.media !== undefined);
+    expect(first).toHaveLength(1);
+    expect(first[0]?.media?.viewers).toBe(2); // the GM's own session got the cue too
+    expect(first[0]?.media?.assets[0]).toMatchObject({ index: 1, kind: "image", mime: "image/png",
+      unsupported: 1, silent: 1 });
+    expect(first[0]?.media?.complete).toBe(false);
+    // A repeat changes nothing; a recovery is the *second and last* line for this run.
+    ack(player.pair, { runId: seen.runId, assetId: imageHash, state: "unsupported" });
+    await flushMicrotasks();
+    expect(reports.filter((msg) => msg.media !== undefined)).toHaveLength(1);
+    ack(player.pair, { runId: seen.runId, assetId: imageHash, state: "ready" });
+    await flushMicrotasks();
+    const lines = reports.filter((msg) => msg.media !== undefined);
+    expect(lines).toHaveLength(2);
+    expect(lines[1]?.media?.corrected).toBe(true);
+    expect(lines[1]?.media?.assets[0]).toMatchObject({ ready: 1, unsupported: 0 });
+    // A third answer cannot produce a third line, however often it flips.
+    ack(player.pair, { runId: seen.runId, assetId: imageHash, state: "failed", reason: "fetch" });
+    await flushMicrotasks();
+    expect(reports.filter((msg) => msg.media !== undefined)).toHaveLength(2);
+  });
+
+  test("a forged media answer teaches the sender nothing and changes nothing", async () => {
+    const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    h.gm.submit([{ kind: "create", coll: "macros", data: fxMacro("pulse") }]);
+    await flushMicrotasks();
+    const reports: ClientEvents["fxDelivery"][] = [];
+    h.gmBus.on("fxDelivery", (msg) => reports.push(msg));
+    // The run goes out to the GM's own session and to nobody else, and only *then* does a
+    // player join: expectations are fixed when the cue is fanned out, so a session that
+    // never received it has no standing to answer for it.
+    const seen = await runPulse(h);
+    const player = await h.addPlayer(PLAYER_ID, "Rex");
+    const mediaLines = () => reports.filter((msg) => msg.media !== undefined).length;
+    const forge = (msg: Record<string, unknown>) =>
+      player.pair.b.send("ops", frameMessage({ kind: "fx.media", ...msg } as never));
+    forge({ runId: seen.runId, assetId: imageHash, state: "unsupported" }); // not a recipient
+    forge({ runId: seen.runId, assetId: "f".repeat(64), state: "unsupported" }); // not its media
+    forge({ runId: "no-such-run", assetId: imageHash, state: "unsupported" }); // no such run
+    forge({ runId: seen.runId, assetId: imageHash, state: "maybe" }); // not one of the four
+    forge({ runId: "bad run id", assetId: imageHash, state: "failed",
+      ms: Number.POSITIVE_INFINITY }); // shape the host never agreed to
+    await flushMicrotasks();
+    expect(mediaLines()).toBe(0);
+
+    // The session that really holds the cue answers from its own transport: one line, and
+    // it counts only the sessions that were actually sent the run.
+    h.gmPair.b.send("ops", frameMessage({ kind: "fx.media", runId: seen.runId,
+      assetId: imageHash, state: "failed", reason: "decode" } as never));
+    await flushMicrotasks();
+    expect(mediaLines()).toBe(1);
+    const line = reports.find((msg) => msg.media !== undefined);
+    expect(line?.media?.viewers).toBe(1);
+    expect(line?.media?.assets[0]).toMatchObject({ failed: 1, silent: 0 });
+    // Nothing about a viewer, an asset or a document leaves the host in that message.
+    expect(JSON.stringify(line?.media)).not.toContain(imageHash);
+    expect(JSON.stringify(line?.media)).not.toContain(PLAYER_ID);
+    expect(line?.skipped).toEqual({ audience: 0, rights: 0, anchor: 0, media: 0 });
+  });
+
+  test("a player-initiated request gets no media report about other sessions", async () => {
+    const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    h.gm.submit([{ kind: "create", coll: "macros", data: fxMacro("pulse") }]);
+    await flushMicrotasks();
+    const player = await h.addPlayer(PLAYER_ID, "Rex");
+    const reports: ClientEvents["fxDelivery"][] = [];
+    player.bus.on("fxDelivery", (msg) => reports.push(msg));
+    player.client.requestSequence("pulse", "s1");
+    await flushMicrotasks();
+    const seen = await runPulse(h);
+    player.pair.b.send("ops", frameMessage({ kind: "fx.media", runId: seen.runId,
+      assetId: imageHash, state: "unsupported" } as never));
+    await flushMicrotasks();
+    expect(reports).toEqual([]);
+  });
+
+  test("a viewer that never answers is reported as such when the window closes", async () => {
+    let clock = 1_000_000;
+    const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } }, undefined, undefined, () => clock);
+    h.gm.submit([{ kind: "create", coll: "macros", data: fxMacro("pulse") }]);
+    await flushMicrotasks();
+    await h.addPlayer(PLAYER_ID, "Rex");
+    const reports: ClientEvents["fxDelivery"][] = [];
+    h.gmBus.on("fxDelivery", (msg) => reports.push(msg));
+    // Freeze *before* the request: the host arms its window timer as the cue goes out, and
+    // the transport's own flush is a `setTimeout` too, so fake timers advance both.
+    vi.useFakeTimers();
+    try {
+      h.gm.requestSequence("pulse", "s1");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reports.filter((msg) => msg.media !== undefined)).toHaveLength(0);
+      // The window is the run's own media span plus a lead, never less than four seconds.
+      clock += 4_500;
+      await vi.advanceTimersByTimeAsync(4_500);
+      const lines = reports.filter((msg) => msg.media !== undefined);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]?.media?.complete).toBe(false);
+      expect(lines[0]?.media?.spoke).toBe(0);
+      expect(lines[0]?.media?.assets[0]).toMatchObject({ silent: 2 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("a bound item cue is validated at authoring time and pruned with its item (D-311)", async () => {
+    /** The most recent player-side rejection says the timeline was not published for them. */
+    const playerRejectedTail = (entries: string[]): boolean =>
+      entries.some((entry) => entry.includes("not published for this caller"));
+    const h = await setup();
+    const sections = [{ kind: "text", id: "s", text: "sparks", startMs: 0, durationMs: 600,
+      at: { kind: "point", x: 120, y: 120 }, color: "#ffffff", scale: 1 }];
+    const look = (id: string, name: string, patch: Record<string, unknown> = {}): MacroDocument =>
+      ({ _id: id, type: "macro", name, command: "", kind: "sequence", ownership: { default: 1 },
+        flags: {}, system: {}, sequence: { version: 1, audience: "scene", persistent: false,
+          sections }, fxItem: { actorId: "a-hero", itemId: "wand" }, ...patch }) as unknown as MacroDocument;
+    const wand: ItemDocument = { _id: "wand", type: "item", name: "Wand of Sparks",
+      ownership: { default: 0 }, flags: {}, system: {}, effects: [] };
+    const hero: ActorDocument = { _id: "a-hero", type: "actor", name: "Hero",
+      ownership: { default: 2 }, flags: {}, system: {}, items: [wand], effects: [] };
+    h.gm.submit([{ kind: "create", coll: "actors", data: hero }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("actors", "a-hero")).toBeDefined();
+
+    const refused: string[] = [];
+    h.gmBus.on("rejected", (event) => refused.push(event.detail));
+    // A binding is authored on the timeline; the item has to exist.
+    h.gm.submit([{ kind: "create", coll: "macros",
+      data: look("fx-hit", "Sparks", { fxItem: { actorId: "a-hero", itemId: "gone" } }) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-hit")).toBeUndefined();
+    expect(refused.join(" | ")).toContain("an item that exists");
+
+    // A failure cue must be a *timeline*: a preset is refused by name, exactly as the D-310
+    // mixed-document rule refuses the same mistake from the other side.
+    h.gm.submit([{ kind: "create", coll: "macros", data: { _id: "look", type: "macro",
+      name: "Fireball look", command: "", kind: "fxPreset", ownership: { default: 1 },
+      flags: {}, system: {}, preset: { version: 1, sections } } as unknown as MacroDocument }]);
+    await flushMicrotasks();
+    h.gm.submit([{ kind: "create", coll: "macros",
+      data: look("fx-miss", "Fizzle", { fxItem: { actorId: "a-hero", itemId: "wand",
+        onFailureId: "look" } }) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-miss")).toBeUndefined();
+    expect(refused.join(" | ")).toContain("not a timeline");
+
+    // The good one lands, and a *second* timeline on the same item is refused: one item, one
+    // bound cue, so the use path is never a coin toss.
+    h.gm.submit([{ kind: "create", coll: "macros", data: look("fx-hit", "Sparks") }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-hit")).toBeDefined();
+    h.gm.submit([{ kind: "create", coll: "macros", data: look("fx-other", "Other") }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-other")).toBeUndefined();
+    expect(refused.join(" | ")).toContain("already bound to that item");
+
+    // A re-save of the bound timeline is ordinary — the one-binding rule must not trip over
+    // the binding's own document — and it is how an author adds the failure branch or disables
+    // the binding without touching the item.
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: "fx-hit" },
+      diff: { fxItem: { actorId: "a-hero", itemId: "wand", onFailureId: "fx-hit", enabled: false } } }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-hit")?.fxItem?.enabled).toBe(false);
+
+    // A player cannot author a timeline at all, so they cannot bind one either.
+    const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const playerRefused: string[] = [];
+    playerBus.on("rejected", (event) => playerRefused.push(`${event.reason}: ${event.detail}`));
+    player.submit([{ kind: "create", coll: "macros", data: look("fx-mine", "Mine") }]);
+    player.submit([{ kind: "update", ref: { coll: "macros", id: "fx-hit" },
+      diff: { fxItem: { actorId: "a-hero", itemId: "wand" } } }]);
+    await flushMicrotasks();
+    expect(playerRefused.filter((entry) => entry.startsWith("forbidden"))).toHaveLength(2);
+
+    // …and the binding grants nothing: a player asking for the bound timeline by hand is
+    // refused by the ordinary published-timeline rule, not admitted through the item.
+    player.requestSequence("fx-hit", "s1");
+    await flushMicrotasks();
+    expect(playerRejectedTail(playerRefused)).toBe(true);
+
+    // Deleting the item clears the binding in the same undoable envelope (D-311's pruning):
+    // a pointer to something gone can neither linger nor revive on a re-used id.
+    const before = h.hostStore.seq;
+    h.gm.submit([{ kind: "delete", ref: { coll: "items", id: "wand",
+      parent: { coll: "actors", id: "a-hero" } } }]);
+    await flushMicrotasks();
+    expect(h.hostStore.seq).toBeGreaterThan(before);
+    expect(h.hostStore.get("actors", "a-hero")?.items).toEqual([]);
+    expect(h.hostStore.get("macros", "fx-hit")?.fxItem).toBeUndefined();
+    h.host.undo();
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-hit")?.fxItem?.enabled).toBe(false);
+    expect(h.hostStore.get("actors", "a-hero")?.items.map((entry) => entry._id)).toEqual(["wand"]);
+  });
+
+  test("phase binding: one cue per committed moment, and a swing does not answer a charge burn (D-312)", async () => {
+    const h = await setup();
+    const sections = [{ kind: "text", id: "s", text: "sparks", startMs: 0, durationMs: 600,
+      at: { kind: "point", x: 120, y: 120 }, color: "#ffffff", scale: 1 }];
+    const bound = (id: string, events?: string[]): MacroDocument =>
+      ({ _id: id, type: "macro", name: id, command: "", kind: "sequence", ownership: { default: 1 },
+        flags: {}, system: {}, sequence: { version: 1, audience: "scene", persistent: false,
+          sections }, fxItem: { actorId: "a-hero", itemId: "axe",
+          ...(events === undefined ? {} : { events }) } }) as unknown as MacroDocument;
+    const axe: ItemDocument = { _id: "axe", type: "item", name: "Greataxe",
+      ownership: { default: 0 }, flags: {}, system: {}, effects: [] };
+    const hero: ActorDocument = { _id: "a-hero", type: "actor", name: "Hero",
+      ownership: { default: 2 }, flags: {}, system: {}, items: [axe], effects: [] };
+    h.gm.submit([{ kind: "create", coll: "actors", data: hero }]);
+    await flushMicrotasks();
+
+    const refused: string[] = [];
+    h.gmBus.on("rejected", (event) => refused.push(event.detail));
+
+    // The charge-burn cue lands (no events field = the use event).
+    h.gm.submit([{ kind: "create", coll: "macros", data: bound("fx-burn") }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-burn")).toBeDefined();
+    // The swing cue shares the item legitimately — a different moment.
+    h.gm.submit([{ kind: "create", coll: "macros", data: bound("fx-swing", ["attack"]) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-swing")).toBeDefined();
+    // …but a second *use* cue on the same item is refused, and so is a both-moments cue that
+    // overlaps both existing ones. The refusal names the moment.
+    h.gm.submit([{ kind: "create", coll: "macros", data: bound("fx-second", ["use"]) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-second")).toBeUndefined();
+    expect(refused.join(" | ")).toContain("already bound to that item's use event");
+    h.gm.submit([{ kind: "create", coll: "macros", data: bound("fx-both", ["use", "attack"]) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-both")).toBeUndefined();
+    // A forged event name never reaches the store: the shape is validated before the conflict
+    // rule, so a hand-crafted op cannot smuggle an event nothing would ever fire on.
+    h.gm.submit([{ kind: "create", coll: "macros", data: bound("fx-forged", ["cast"]) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-forged")).toBeUndefined();
+    expect(refused.join(" | ")).toContain("not \"cast\"");
+
+    // Re-saving the swing cue keeps its own moment (the update path must not trip on itself).
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: "fx-swing" },
+      diff: { "fxItem.events": ["attack"] } }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-swing")?.fxItem?.events).toEqual(["attack"]);
+
+    // Deleting the weapon clears *both* bound timelines in the same envelope.
+    h.gm.submit([{ kind: "delete", ref: { coll: "items", id: "axe",
+      parent: { coll: "actors", id: "a-hero" } } }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-burn")?.fxItem).toBeUndefined();
+    expect(h.hostStore.get("macros", "fx-swing")?.fxItem).toBeUndefined();
+    h.host.undo();
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-swing")?.fxItem?.events).toEqual(["attack"]);
+  });
+
+  test("an FX preset is GM-authored, GM-visible and never runnable (D-310)", async () => {
+    const h = await setup({ [soundHash]: { name: "hum.wav", mime: "audio/wav", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    const look = (id: string, name: string, sections: unknown[]): MacroDocument =>
+      ({ _id: id, type: "macro", name, command: "", kind: "fxPreset", ownership: { default: 0 },
+        flags: {}, system: {}, preset: { version: 1, sections } as never });
+    const sections = [{ kind: "sound", id: "s", assetId: soundHash, startMs: 0, durationMs: 900, volume: 0.6 },
+      { kind: "text", id: "t", text: "boom", startMs: 0, durationMs: 900,
+        at: { kind: "point", x: 100, y: 100 }, color: "#ffffff", scale: 1 }];
+    h.gm.submit([{ kind: "create", coll: "macros", data: look("p-fire", "Fireball look", sections) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "p-fire")).toBeDefined();
+    // A preset is not a timeline: nothing about it is runnable, so an FX request naming
+    // it is refused exactly like any other unknown macro.
+    const denied: string[] = [];
+    h.gmBus.on("rejected", (event) => denied.push(event.detail));
+    h.gm.requestSequence("p-fire", "s1");
+    await flushMicrotasks();
+    expect(denied).toContain("sequence macro or scene missing");
+    // Rename (edit) survives, and so does replacing the bundle with another one.
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: "p-fire" }, diff: { name: "Big fireball" } }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "p-fire")?.name).toBe("Big fireball");
+    // A crafted document that is a preset *and* a timeline is refused by name: the FX
+    // path would run the sequence, and the file would keep the preset.
+    const forged: string[] = [];
+    h.gmBus.on("rejected", (event) => forged.push(event.detail));
+    const smuggler = { ...look("p-bad", "Smuggler", sections),
+      sequence: { version: 1, sections } } as unknown as MacroDocument;
+    h.gm.submit([{ kind: "create", coll: "macros", data: smuggler }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "p-bad")).toBeUndefined();
+    expect(forged.join(" | ")).toContain("not sequence");
+    // A preset with a section the sequence validator refuses never reaches the store.
+    h.gm.submit([{ kind: "create", coll: "macros", data: look("p-empty", "Nothing", []) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "p-empty")).toBeUndefined();
+    expect(forged.join(" | ")).toContain("1–8 sections");
+
+    // A player cannot author, edit or delete one, and never sees it in their replica.
+    const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+    expect(player.store.getAll("macros")).toEqual([]);
+    const playerRejected: string[] = [];
+    playerBus.on("rejected", (event) => playerRejected.push(`${event.reason}: ${event.detail}`));
+    player.submit([{ kind: "create", coll: "macros", data: look("p-mine", "Mine", sections) }]);
+    player.submit([{ kind: "update", ref: { coll: "macros", id: "p-fire" }, diff: { name: "Stolen" } }]);
+    player.submit([{ kind: "delete", ref: { coll: "macros", id: "p-fire" } }]);
+    await flushMicrotasks();
+    expect(playerRejected.filter((entry) => entry.startsWith("forbidden"))).toHaveLength(3);
+    expect(h.hostStore.get("macros", "p-mine")).toBeUndefined();
+    expect(h.hostStore.get("macros", "p-fire")?.name).toBe("Big fireball");
+    expect(player.store.getAll("macros")).toEqual([]);
+    // The GM's own delete is an ordinary undoable document op.
+    h.gm.submit([{ kind: "delete", ref: { coll: "macros", id: "p-fire" } }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "p-fire")).toBeUndefined();
+  });
+
+  test("a wall between the source and a viewer dulls the sound for that viewer alone", async () => {
+    const h = await setup({ [soundHash]: { name: "hum.wav", mime: "audio/wav", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    // The two players' own tokens, far apart: `t-pl` west of the sound, `t-ivy` east of it.
+    h.gm.submit([{ kind: "update", ref: { coll: "tokens", id: "t-pl", parent: { coll: "scenes", id: "s1" } },
+      diff: { x: 150, y: 500 } }]);
+    await flushMicrotasks();
+    const positioned = fxMacro("hum", "point");
+    if (!positioned.sequence) throw new Error("FX fixture missing sequence");
+    // A sound at the scene's centre with a 30-unit (600 px) reach, dulled by walls.
+    positioned.sequence.sections = [{ kind: "sound", id: "s", assetId: soundHash, startMs: 0,
+      durationMs: 4_000, volume: 1, at: { kind: "point", x: 500, y: 500 }, radius: 30,
+      muffle: true }];
+    positioned.sequence.persistent = false;
+    h.gm.submit([{ kind: "create", coll: "macros", data: positioned }]);
+    await flushMicrotasks();
+    const player = await h.addPlayer(PLAYER_ID, "Rex");
+    // A door between the sound and Ivy only (x = 900 spans her side), placed closed.
+    const door: WallDocument = { _id: "door-1", type: "wall", name: "Door", ownership: { default: 0 },
+      flags: {}, system: {}, c: [900, 100, 900, 900], move: 1, sight: 1, sound: 1, light: 1,
+      door: 0, oneWay: false };
+    h.gm.submit([{ kind: "create", coll: "walls", parent: { coll: "scenes", id: "s1" }, data: door }]);
+    await flushMicrotasks();
+
+    const cues: Record<string, ClientEvents["fx"][]> = { gm: [], rex: [], ivy: [] };
+    h.gmBus.on("fx", (msg) => cues.gm?.push(msg));
+    player.bus.on("fx", (msg) => cues.rex?.push(msg));
+    const ivy = await h.addPlayer(OTHER_ID, "Ivy");
+    ivy.bus.on("fx", (msg) => cues.ivy?.push(msg));
+    // Ivy's own token has to exist before the cue is fanned out for her to be occluded.
+    h.gm.submit([{ kind: "update", ref: { coll: "tokens", id: "t-ivy", parent: { coll: "scenes", id: "s1" } },
+      diff: { x: 950, y: 500 } }]);
+    await flushMicrotasks();
+
+    const before = cues.rex?.length ?? 0;
+    h.gm.requestSequence("hum", "s1");
+    await flushMicrotasks();
+    const rexCue = cues.rex?.[before];
+    const ivyCue = cues.ivy?.at(-1);
+    const gmCue = cues.gm?.at(-1);
+    const soundOf = (cue: ClientEvents["fx"] | undefined) =>
+      cue?.sections.find((section) => section.kind === "sound") as
+        { x?: number; y?: number; radiusPx?: number; muffle?: boolean; occluded?: boolean } | undefined;
+    // Both viewers get the same *authored* cue — the geometry, the radius in the host's
+    // own pixels, the request to muffle — and only one of them is told a wall is in the way.
+    expect(soundOf(rexCue)).toMatchObject({ x: 500, y: 500, radiusPx: 600, muffle: true });
+    expect(soundOf(rexCue)?.occluded).toBeUndefined();
+    expect(soundOf(ivyCue)).toMatchObject({ x: 500, y: 500, radiusPx: 600, occluded: true });
+    // The GM's own session holds no token of its own on this scene, so the host cannot
+    // honestly name a listening point: no answer, not a guessed one.
+    expect(soundOf(gmCue)?.occluded).toBeUndefined();
+    // Nothing in the payload says *where* the listening point was, only whether it was blocked.
+    expect(JSON.stringify(soundOf(ivyCue))).not.toContain("950");
+
+    // Opening the door lets the sound through, exactly as it lets sight through.
+    h.gm.submit([{ kind: "update", ref: { coll: "walls", id: "door-1", parent: { coll: "scenes", id: "s1" } },
+      diff: { door: 1 } }]);
+    await flushMicrotasks();
+    h.gm.requestSequence("hum", "s1");
+    await flushMicrotasks();
+    expect((cues.ivy?.at(-1)?.sections[0] as { occluded?: boolean }).occluded).toBeUndefined();
+    // A window permits sound by its own axes (it passes sight and light): no muffle, even
+    // though a listener who could not see through it would still be hidden from view.
+    h.gm.submit([{ kind: "update", ref: { coll: "walls", id: "door-1", parent: { coll: "scenes", id: "s1" } },
+      diff: { door: 0, sight: 2, light: 2, sound: 2 } }]);
+    await flushMicrotasks();
+    h.gm.requestSequence("hum", "s1");
+    await flushMicrotasks();
+    expect((cues.ivy?.at(-1)?.sections[0] as { occluded?: boolean }).occluded).toBeUndefined();
+    // An opaque wall blocks regardless of the door state, and reaches the same viewer.
+    h.gm.submit([{ kind: "update", ref: { coll: "walls", id: "door-1", parent: { coll: "scenes", id: "s1" } },
+      diff: { sight: 0, light: 0, sound: 0, move: 0, door: 1 } }]);
+    await flushMicrotasks();
+    h.gm.requestSequence("hum", "s1");
+    await flushMicrotasks();
+    expect((cues.ivy?.at(-1)?.sections[0] as { occluded?: boolean }).occluded).toBe(true);
+  });
+
+  test("a stored loop is muffled per recipient too, recomputed on reconnect", async () => {
+    const h = await setup({ [soundHash]: { name: "hum.wav", mime: "audio/wav", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    h.gm.submit([{ kind: "update", ref: { coll: "tokens", id: "t-pl", parent: { coll: "scenes", id: "s1" } },
+      diff: { x: 150, y: 500 } }]);
+    await flushMicrotasks();
+    const loop = fxMacro("aura", "point");
+    if (!loop.sequence) throw new Error("FX fixture missing sequence");
+    loop.sequence.persistent = true;
+    loop.sequence.sections = [{ kind: "sound", id: "s", assetId: soundHash, startMs: 0,
+      durationMs: 4_000, at: { kind: "point", x: 500, y: 500 }, radius: 30, muffle: true }];
+    h.gm.submit([{ kind: "create", coll: "macros", data: loop }]);
+    await flushMicrotasks();
+    const player = await h.addPlayer(PLAYER_ID, "Rex");
+    const wall: WallDocument = { _id: "wall-1", type: "wall", name: "Wall", ownership: { default: 0 },
+      flags: {}, system: {}, c: [800, 100, 800, 900], move: 0, sight: 0, sound: 0, light: 0,
+      door: 0, oneWay: false };
+    h.gm.submit([{ kind: "create", coll: "walls", parent: { coll: "scenes", id: "s1" }, data: wall }]);
+    await flushMicrotasks();
+    const cues: ClientEvents["fx"][] = [];
+    player.bus.on("fx", (msg) => cues.push(msg));
+    h.gm.requestSequence("aura", "s1");
+    await flushMicrotasks();
+    expect((cues.at(-1)?.sections[0] as { occluded?: boolean }).occluded).toBeUndefined();
+    // The durable record itself carries no per-recipient answer: it is resolved for each
+    // viewer at emit, so the same instance can be dulled for one and clear for another.
+    const stored = h.hostStore.getAll("fxInstances")[0];
+    expect(JSON.stringify(stored)).not.toContain("occluded");
+    // A reconnect asks for the live state, and the answer is recomputed for *that* viewer.
+    h.gm.submit([{ kind: "update", ref: { coll: "tokens", id: "t-pl", parent: { coll: "scenes", id: "s1" } },
+      diff: { x: 900, y: 500 } }]);
+    await flushMicrotasks();
+player.client.requestFxSync("s1");
+    await flushMicrotasks();
+    expect((cues.at(-1)?.sections[0] as { occluded?: boolean }).occluded).toBe(true);
+  });
+
   test("published repeated FX resolves clock-aligned per-section plays for entitled viewers without world ops", async () => {
     const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
       chunks: 1, visibility: "referenced" } });
@@ -1389,6 +2030,298 @@ describe("Macros / FX host authority and audience", () => {
       .toMatchObject([{ mime: "image/png" }, { mime: "image/png" }]);
     expect(cues[0]?.sections.every((section) => !Object.hasOwn(section, "repeatCount"))).toBe(true);
     expect(h.hostStore.seq).toBe(before);
+  });
+
+  test("a cue that cannot reach everyone reports counts to the requesting GM, with no user or document names", async () => {
+    const h = await setup({ [imageHash]: { name: "vfx.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    h.gm.submit([{ kind: "create", coll: "macros", data: fxMacro("counsel") }]);
+    await flushMicrotasks();
+    const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+    void player;
+    await h.addPlayer(OTHER_ID, "Ivy");
+    const reports: ClientEvents["fxDelivery"][] = [];
+    h.gmBus.on("fxDelivery", (msg) => reports.push(msg));
+    const playerReports: ClientEvents["fxDelivery"][] = [];
+    // A scene-audience cue reaches everyone, so there is nothing to explain.
+    h.gm.requestSequence("counsel", "s1");
+    await flushMicrotasks();
+    expect(reports).toHaveLength(0);
+
+    // Narrow the same cue to the GM's own audience: the two players are outside it.
+    const macro = fxMacro("counsel");
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: "counsel" },
+      diff: { sequence: { ...macro.sequence, audience: "gm" } as unknown as Json } }]);
+    await flushMicrotasks();
+    h.gm.requestSequence("counsel", "s1");
+    await flushMicrotasks();
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.recipients).toBe(1); // the GM's own loopback session
+    expect(reports[0]?.skipped).toEqual({ audience: 2, rights: 0, anchor: 0, media: 0 });
+    expect(reports[0]?.macroId).toBe("counsel");
+    const summary = summarizeSkips(reports[0]?.skipped ?? { audience: 0, rights: 0, anchor: 0, media: 0 },
+      reports[0]?.recipients ?? 0, "Counsel");
+    expect(summary).toContain("Counsel: reached 1 viewer(s)");
+    expect(summary).toContain("2 outside its audience");
+    expect(JSON.stringify(reports[0])).not.toContain(PLAYER_ID); // counts, never identities
+    expect(playerReports).toHaveLength(0);
+  });
+
+  test("a chosen-players audience reaches exactly the users it names (D-316)", async () => {
+    const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    const { bus: rexBus, client: rex } = await h.addPlayer(PLAYER_ID, "Rex");
+    const { bus: ivyBus, client: ivy } = await h.addPlayer(OTHER_ID, "Ivy");
+    const rexCues: ClientEvents["fx"][] = [];
+    const ivyCues: ClientEvents["fx"][] = [];
+    const gmCues: ClientEvents["fx"][] = [];
+    rexBus.on("fx", (msg) => rexCues.push(msg));
+    ivyBus.on("fx", (msg) => ivyCues.push(msg));
+    h.gmBus.on("fx", (msg) => gmCues.push(msg));
+    const reports: ClientEvents["fxDelivery"][] = [];
+    h.gmBus.on("fxDelivery", (msg) => reports.push(msg));
+    void rex; void ivy;
+
+    // One timeline whose run is for Rex, and whose camera is for Ivy.
+    h.gm.submit([{ kind: "create", coll: "macros", data: { _id: "chosen", type: "macro",
+      name: "chosen", ownership: { default: 1 }, flags: { core: { playerCallable: true } },
+      system: {}, kind: "sequence", command: "", sequence: { version: 1,
+        audience: { players: [PLAYER_ID] }, sections: [
+          { kind: "text", id: "a", text: "Psst", startMs: 0, durationMs: 400,
+            at: { kind: "point", x: 120, y: 120 } },
+          { kind: "camera", id: "b", mode: "pan", to: { kind: "point", x: 300, y: 300 },
+            audience: { players: [OTHER_ID] }, startMs: 0, durationMs: 400 }] } } as never }]);
+    await flushMicrotasks();
+    h.gm.requestSequence("chosen", "s1");
+    await flushMicrotasks();
+
+    // Rex is the only recipient: the GM who asked is not in the list either, and that is
+    // the point of a chosen audience — it is a list of people, not a floor of privilege.
+    expect(rexCues.filter((msg) => msg.kind === "fx.start")).toHaveLength(1);
+    expect(ivyCues).toHaveLength(0);
+    expect(gmCues.filter((msg) => msg.kind === "fx.start")).toHaveLength(0);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.recipients).toBe(1);
+    expect(reports[0]?.skipped).toEqual({ audience: 2, rights: 0, anchor: 0, media: 0 });
+    // The report counts, and the payload does not name: neither Ivy nor the audience list
+    // itself travels to Rex, who is the one client that *did* receive this cue.
+    expect(JSON.stringify(reports[0])).not.toContain(OTHER_ID);
+    const rexStart = rexCues.find((msg) => msg.kind === "fx.start");
+    const rexSections = rexStart?.kind === "fx.start" ? rexStart.sections : [];
+    expect(rexSections.map((step) => step.kind)).toEqual(["text"]);
+    expect(JSON.stringify(rexStart)).not.toContain(OTHER_ID);
+    expect(JSON.stringify(rexStart)).not.toContain(PLAYER_ID);
+
+    // Publishing a cue is not a licence to fire it at other people: Ivy, who is not in
+    // the list, is refused — while Rex, who is, may run it for himself.
+    const ivyRefused: string[] = [];
+    const rexRefused: string[] = [];
+    ivyBus.on("rejected", (event) => ivyRefused.push(event.detail));
+    rexBus.on("rejected", (event) => rexRefused.push(event.detail));
+    const rexCueCount = () => rexCues.filter((msg) => msg.kind === "fx.start").length;
+    const before = rexCueCount();
+    ivy.requestSequence("chosen", "s1");
+    await flushMicrotasks();
+    expect(ivyRefused).toHaveLength(1);
+    expect(rexCueCount()).toBe(before);
+    rex.requestSequence("chosen", "s1");
+    await flushMicrotasks();
+    expect(rexRefused).toHaveLength(0);
+    expect(rexCueCount()).toBe(before + 1);
+  });
+
+  test("a chosen-players camera section is filtered per viewer and its list never ships (D-316)", async () => {
+    const h = await setup({});
+    const { bus: rexBus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const { bus: ivyBus } = await h.addPlayer(OTHER_ID, "Ivy");
+    const rexCues: ClientEvents["fx"][] = [];
+    const ivyCues: ClientEvents["fx"][] = [];
+    const gmCues: ClientEvents["fx"][] = [];
+    rexBus.on("fx", (msg) => rexCues.push(msg));
+    ivyBus.on("fx", (msg) => ivyCues.push(msg));
+    h.gmBus.on("fx", (msg) => gmCues.push(msg));
+    const reports: ClientEvents["fxDelivery"][] = [];
+    h.gmBus.on("fxDelivery", (msg) => reports.push(msg));
+
+    h.gm.submit([{ kind: "create", coll: "macros", data: { _id: "look", type: "macro",
+      name: "look", ownership: { default: 1 }, flags: { core: { playerCallable: true } },
+      system: {}, kind: "sequence", command: "", sequence: { version: 1, audience: "scene",
+        sections: [
+          { kind: "text", id: "a", text: "Look", startMs: 0, durationMs: 400,
+            at: { kind: "point", x: 120, y: 120 } },
+          { kind: "camera", id: "b", mode: "pan", to: { kind: "point", x: 300, y: 300 },
+            audience: { players: [PLAYER_ID] }, startMs: 0, durationMs: 400 }] } } as never }]);
+    await flushMicrotasks();
+    h.gm.requestSequence("look", "s1");
+    await flushMicrotasks();
+
+    const starts = (cues: ClientEvents["fx"][]) =>
+      cues.filter((msg) => msg.kind === "fx.start").map((msg) =>
+        msg.kind === "fx.start" ? msg.sections.map((step) => step.kind) : []);
+    // Everyone entitled to the run gets it; only the named user gets the camera — and its
+    // delivered copy says nothing about who else the author addressed.
+    expect(starts(rexCues)).toEqual([["text", "camera"]]);
+    expect(starts(ivyCues)).toEqual([["text"]]);
+    expect(starts(gmCues)).toEqual([["text"]]);
+    const rexStart = rexCues.find((msg) => msg.kind === "fx.start");
+    if (rexStart?.kind === "fx.start")
+      expect(Object.keys(rexStart.sections[1] ?? {})).not.toContain("audience");
+    // Two viewers were entitled to the run and saw it without the camera: not a skip, and
+    // the report says so without naming them.
+    expect(reports[0]?.recipients).toBe(3);
+    expect(reports[0]?.skipped).toEqual({ audience: 0, rights: 0, anchor: 0, media: 0 });
+    expect(JSON.stringify(reports[0])).not.toContain(OTHER_ID);
+  });
+
+  // D-303: targeted sections are not skips, and the GM has to hear about them — both
+  // because "my targeting worked" is worth knowing and because a player who sees nothing
+  // at all will ask why.
+  test("the GM hears how many viewers got the run without a targeted section, and who got none", async () => {
+    const h = await setup();
+    const mixed = fxMacro("sightline");
+    if (!mixed.sequence) throw new Error("Missing FX fixture sequence");
+    mixed.sequence = { ...mixed.sequence, sections: [
+      { kind: "text", id: "everyone", text: "Look", at: { kind: "point", x: 100, y: 100 },
+        startMs: 0, durationMs: 400 },
+      { kind: "camera", id: "gm-only", mode: "pan", to: { kind: "point", x: 400, y: 400 },
+        audience: "gm", startMs: 0, durationMs: 500 },
+    ] };
+    const onlyTargeted = fxMacro("vista");
+    if (!onlyTargeted.sequence) throw new Error("Missing FX fixture sequence");
+    onlyTargeted.sequence = { ...onlyTargeted.sequence, sections: [
+      { kind: "camera", id: "gm-only", mode: "pan", to: { kind: "point", x: 400, y: 400 },
+        audience: "gm", startMs: 0, durationMs: 500 },
+    ] };
+    h.gm.submit([{ kind: "create", coll: "macros", data: mixed },
+      { kind: "create", coll: "macros", data: onlyTargeted }]);
+    await flushMicrotasks();
+    await h.addPlayer(PLAYER_ID, "Rex");
+    await h.addPlayer(OTHER_ID, "Ivy");
+    const reports: ClientEvents["fxDelivery"][] = [];
+    h.gmBus.on("fxDelivery", (msg) => reports.push(msg));
+
+    h.gm.requestSequence("sightline", "s1");
+    await flushMicrotasks();
+    // Both players are entitled and both receive the run — with one section withheld.
+    // Nobody was *skipped*, so the notice comes from the targeting counts alone.
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.recipients).toBe(3); // two players and the GM's own session
+    expect(reports[0]?.skipped).toEqual({ audience: 0, rights: 0, anchor: 0, media: 0 });
+    expect(reports[0]?.targeted).toBe(2);
+    expect(reports[0]?.empty).toBeUndefined();
+    expect(summarizeSkips(reports[0]?.skipped ?? { audience: 0, rights: 0, anchor: 0, media: 0 },
+      reports[0]?.recipients ?? 0, "Sightline", { targeted: reports[0]?.targeted ?? 0 }))
+      .toBe("Sightline: reached 3 viewer(s) — 2 saw it without its targeted sections");
+    expect(JSON.stringify(reports[0])).not.toContain(PLAYER_ID); // counts, never identities
+
+    // A timeline that is *entirely* GM-targeted: the players receive nothing, and the
+    // notice says so rather than reporting a run that reached everyone.
+    h.gm.requestSequence("vista", "s1");
+    await flushMicrotasks();
+    expect(reports).toHaveLength(2);
+    expect(reports[1]?.recipients).toBe(1); // the GM alone
+    expect(reports[1]?.targeted).toBeUndefined();
+    expect(reports[1]?.empty).toBe(2);
+  });
+
+  test("a player's own request never receives the host's audience aggregate", async () => {
+    const h = await setup();
+    const aura = fxMacro("open-aura");
+    aura.flags = { core: { playerCallable: true } };
+    aura.sequence = { version: 1, audience: "scene", sections: [{ kind: "text", id: "a", text: "Aura",
+      at: { kind: "point", x: 150, y: 150 }, startMs: 0, durationMs: 400 }] };
+    h.gm.submit([{ kind: "create", coll: "macros", data: aura }]);
+    await flushMicrotasks();
+    const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+    await h.addPlayer(OTHER_ID, "Ivy");
+    const seen: ClientEvents["fxDelivery"][] = [];
+    bus.on("fxDelivery", (msg) => seen.push(msg));
+    // The caller-scoped part of the audience is invisible to the other player, but a
+    // request from a player must not turn into a viewer census for that player.
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: "open-aura" }, diff: {
+      sequence: { version: 1, audience: "caller", sections: [{ kind: "text", id: "a", text: "Aura",
+        at: { kind: "point", x: 150, y: 150 }, startMs: 0, durationMs: 400 }] } as unknown as Json } }]);
+    await flushMicrotasks();
+    player.requestSequence("open-aura", "s1");
+    await flushMicrotasks();
+    expect(seen).toHaveLength(0);
+  });
+
+  test("a targeted camera section reaches only its audience, and the others never see it", async () => {
+    const h = await setup({ [imageHash]: { name: "vfx.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    // One timeline: a text cue everyone gets, a GM-only pan, a scene pan, and a pan only
+    // the requesting session gets. SQ-15's "local or recipient-targeted" camera.
+    const macro = fxMacro("sightlines");
+    if (!macro.sequence) throw new Error("Missing FX fixture sequence");
+    macro.sequence = { ...macro.sequence, sections: [
+      { kind: "text", id: "t", text: "Look", at: { kind: "point", x: 100, y: 100 }, startMs: 0, durationMs: 400 },
+      { kind: "camera", id: "gm-look", mode: "pan", to: { kind: "point", x: 900, y: 90 },
+        audience: "gm", startMs: 0, durationMs: 500 },
+      { kind: "camera", id: "all-look", mode: "pan", to: { kind: "point", x: 500, y: 500 },
+        startMs: 0, durationMs: 500 },
+      { kind: "camera", id: "mine", mode: "pan", to: { kind: "point", x: 700, y: 700 },
+        audience: "caller", startMs: 0, durationMs: 500 },
+    ] };
+    h.gm.submit([{ kind: "create", coll: "macros", data: macro }]);
+    await flushMicrotasks();
+    const first = await h.addPlayer(PLAYER_ID, "Rex");
+    const second = await h.addPlayer(OTHER_ID, "Ivy");
+    const gmCues: ClientEvents["fx"][] = [];
+    const firstCues: ClientEvents["fx"][] = [];
+    const secondCues: ClientEvents["fx"][] = [];
+    h.gmBus.on("fx", (cue) => gmCues.push(cue));
+    first.bus.on("fx", (cue) => firstCues.push(cue));
+    second.bus.on("fx", (cue) => secondCues.push(cue));
+
+    // The GM runs it: the GM sees all three cameras (they are the caller *and* a GM),
+    // each player sees only the scene pan…
+    h.gm.requestSequence("sightlines", "s1");
+    await flushMicrotasks();
+    const kinds = (cue: ClientEvents["fx"] | undefined) => cue?.sections.map((step) => step.id) ?? [];
+    expect(kinds(gmCues[0])).toEqual(["t", "gm-look", "all-look", "mine"]);
+    expect(kinds(firstCues[0])).toEqual(["t", "all-look"]);
+    expect(kinds(secondCues[0])).toEqual(["t", "all-look"]);
+    // …and the destination of the GM-only pan is not merely unrendered, it is absent:
+    // their payload carries no trace of where someone else's view went.
+    expect(JSON.stringify(firstCues[0])).not.toContain("900");
+
+    // A player runs it: now the caller-targeted pan follows *them*, and the GM-only pan
+    // still does not, while the other player still sees only the scene pan.
+    first.client.requestSequence("sightlines", "s1");
+    await flushMicrotasks();
+    // The GM still gets the GM-only panic and never gets "mine": the caller moved.
+    expect(kinds(gmCues[1])).toEqual(["t", "gm-look", "all-look"]);
+    expect(kinds(firstCues[1])).toEqual(["t", "all-look", "mine"]);
+    expect(kinds(secondCues[1])).toEqual(["t", "all-look"]);
+    // Same run, two payloads: targeting filters a cue per recipient, it does not fork
+    // the run — and the requester's own run is a new one, not a replay of the GM's.
+    expect(firstCues[1]?.runId).toBe(gmCues[1]?.runId);
+    expect(firstCues[1]?.runId).not.toBe(firstCues[0]?.runId);
+  });
+
+  test("a run whose every section is out of a viewer's audience is not delivered to them at all", async () => {
+    const h = await setup();
+    const macro = fxMacro("gm-vista");
+    if (!macro.sequence) throw new Error("Missing FX fixture sequence");
+    macro.sequence = { ...macro.sequence, sections: [
+      { kind: "camera", id: "gm-only", mode: "pan", to: { kind: "point", x: 300, y: 300 },
+        audience: "gm", startMs: 0, durationMs: 500 },
+    ] };
+    h.gm.submit([{ kind: "create", coll: "macros", data: macro }]);
+    await flushMicrotasks();
+    const player = await h.addPlayer(PLAYER_ID, "Rex");
+    const gmCues: ClientEvents["fx"][] = [];
+    const playerCues: ClientEvents["fx"][] = [];
+    h.gmBus.on("fx", (cue) => gmCues.push(cue));
+    player.bus.on("fx", (cue) => playerCues.push(cue));
+
+    h.gm.requestSequence("gm-vista", "s1");
+    await flushMicrotasks();
+    expect(gmCues).toHaveLength(1);
+    // An empty cue is not the same as no cue: the player is not sent a shell of a run
+    // they cannot see any part of.
+    expect(playerCues).toHaveLength(0);
   });
 
   test("hidden source and unpublished macros never broadcast to other players", async () => {

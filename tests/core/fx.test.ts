@@ -1,7 +1,11 @@
 import { describe, expect, test } from "vitest";
-import { resolveFxSequence, validateFxSequence, type FxSequence } from "../../src/core/fx";
+import { FX_AUDIENCE_PLAYERS_MAX, FX_FILTER_RANGES, fxAudienceAllows, fxAudiencePlayers,
+  fxAuthoredFilters, fxFilterFields, fxFilterStrengths,
+  fxFilterStrength, fxMaskError, fxMaskFromCrosshair, fxSectionsForViewer, fxStylePlan,
+  resolveFxSequence, validateFxSequence, type FxSequence } from "../../src/core/fx";
+import { CROSSHAIR_DEFAULT_SPREAD } from "../../src/core/crosshair";
 import { fxFollowAnchors, fxPosition } from "../../src/canvas/layers/FxLayer";
-import type { SceneDocument, TokenDocument } from "../../src/core/documents";
+import type { SceneDocument, TokenDocument, WallDocument } from "../../src/core/documents";
 
 const hash = "a".repeat(64);
 const sound = "b".repeat(64);
@@ -15,10 +19,17 @@ const scene: SceneDocument = {
   width: 1000, height: 1000, grid: { type: "square", size: 100, distance: 5, units: "ft", diagonals: "555", hexLayout: "oddQ" },
   darkness: 0, img: null, tokens: [source], walls: [], lights: [], sounds: [], tiles: [], drawings: [], templates: [], notes: [],
 };
+
+/** A visual section, so blend/filter cases read as one line each. */
+const visual = (patch: Record<string, unknown> = {}): FxSequence => ({
+  version: 1, sections: [{ kind: "image", id: "glow", assetId: hash,
+    at: { kind: "point", x: 100, y: 100 }, startMs: 0, durationMs: 1000, ...patch } as never] });
+
 const sequence: FxSequence = { version: 1, sections: [
   { kind: "text", id: "title", text: "Charge", at: { kind: "source" }, startMs: 0, durationMs: 1000, fadeOutMs: 200 },
   { kind: "image", id: "impact", assetId: hash, at: { kind: "target" }, startMs: 500, durationMs: 1200, scale: 1.4 },
-  { kind: "sound", id: "whoosh", assetId: sound, startMs: 500, durationMs: 800, volume: 0.7 },
+  { kind: "sound", id: "whoosh", assetId: sound, startMs: 500, durationMs: 800, volume: 0.7,
+    channel: "music", fadeInMs: 200, fadeOutMs: 300 },
 ] };
 
 describe("versioned audiovisual timeline", () => {
@@ -30,7 +41,10 @@ describe("versioned audiovisual timeline", () => {
     expect(result.sections[0]).toMatchObject({ kind: "text", x: 120, y: 150, startMs: 0 });
     expect(result.sections[1]).toMatchObject({ kind: "image", x: 120, y: 150, mime: "video/webm", startMs: 500 });
     expect("at" in (result.sections[0] ?? {})).toBe(false); // do not send author-only anchor extras
-    expect(result.sections[2]).toMatchObject({ kind: "sound", mime: "audio/ogg", volume: 0.7 });
+    // D-297: the channel and fades are part of the host-approved cue — they are a
+    // document fact, while the *gain* each viewer applies to them is not.
+    expect(result.sections[2]).toMatchObject({ kind: "sound", mime: "audio/ogg", volume: 0.7,
+      channel: "music", fadeInMs: 200, fadeOutMs: 300 });
   });
 
   test("bounded one-shot section replays expand into host-clock cues, distinct from motion cycles", () => {
@@ -165,6 +179,52 @@ describe("versioned audiovisual timeline", () => {
     expect(validateFxSequence({ ...sequence, persistent: "untrusted" }).ok).toBe(false);
   });
 
+  test("camera cues resolve a host-side destination, and a shake carries no anchor", () => {
+    const camera: FxSequence = { version: 1, sections: [
+      { kind: "camera", id: "look", mode: "pan", to: { kind: "target" }, easing: "easeInOut",
+        zoom: 1.5, startMs: 0, durationMs: 1200 },
+      { kind: "camera", id: "impact", mode: "shake", intensity: 0.6, startMs: 400, durationMs: 600 },
+      { kind: "text", id: "title", text: "Steady", at: { kind: "point", x: 300, y: 300 },
+        startMs: 0, durationMs: 900 },
+    ] };
+    expect(validateFxSequence(camera).ok).toBe(true);
+    const result = resolveFxSequence(camera, scene, source, source, () => "image/png");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // The client is told where to look — never given an anchor to resolve itself.
+    expect(result.sections[0]).toMatchObject({ kind: "camera", mode: "pan", toX: 120, toY: 150, zoom: 1.5 });
+    expect("to" in (result.sections[0] ?? {})).toBe(false);
+    expect(result.sections[1]).toMatchObject({ kind: "camera", mode: "shake", intensity: 0.6 });
+    expect("toX" in (result.sections[1] ?? {})).toBe(false);
+    // A camera cue is view-only: it changes no document and needs no media.
+    expect(resolveFxSequence(camera, scene, source, source, () => undefined).ok).toBe(true);
+  });
+
+  test("a camera cue cannot loop, replay, crowd a timeline or leave the scene", () => {
+    const bad = (sections: unknown[], persistent = false) =>
+      validateFxSequence({ version: 1, persistent, sections });
+    const pan = { kind: "camera", id: "p", mode: "pan", to: { kind: "point", x: 10, y: 10 },
+      startMs: 0, durationMs: 500 };
+    expect(bad([{ kind: "text", id: "t", text: "Loop", at: { kind: "point", x: 1, y: 1 },
+      startMs: 0, durationMs: 500 }, pan], true).ok).toBe(false); // persistent = a view held forever
+    expect(bad([{ ...pan, repeatCount: 3 }]).ok).toBe(false); // a view claim never replays
+    expect(bad([{ ...pan, intensity: 0.5 }]).ok).toBe(false); // pan fields are not shake fields
+    expect(bad([{ kind: "camera", id: "s", mode: "shake", startMs: 0, durationMs: 500 }]).ok).toBe(false);
+    expect(bad([{ kind: "camera", id: "s", mode: "shake", intensity: 2, startMs: 0, durationMs: 500 }]).ok).toBe(false);
+    expect(bad([{ kind: "camera", id: "s", mode: "shake", intensity: 0.5,
+      to: { kind: "point", x: 1, y: 1 }, startMs: 0, durationMs: 500 }]).ok).toBe(false);
+    expect(bad([{ ...pan, durationMs: 50 }]).ok).toBe(false);
+    expect(bad([{ ...pan, zoom: 40 }]).ok).toBe(false);
+    expect(bad([{ ...pan, easing: "bounce" }]).ok).toBe(false);
+    expect(bad([{ kind: "camera", id: "x", mode: "orbit", startMs: 0, durationMs: 500 }]).ok).toBe(false);
+    expect(bad(Array.from({ length: 9 }, (_, i) => ({ ...pan, id: `p${i}`, startMs: i * 1000 }))).ok).toBe(false);
+    // …and the destination is bounded by the scene, exactly like every other anchor.
+    const off: FxSequence = { version: 1, sections: [{ kind: "camera", id: "p", mode: "pan",
+      to: { kind: "point", x: 5000, y: 10 }, startMs: 0, durationMs: 500 }] };
+    expect(validateFxSequence(off).ok).toBe(true); // in-range as data…
+    expect(resolveFxSequence(off, scene, source, undefined, () => undefined).ok).toBe(false); // …out of the scene in fact
+  });
+
   test("missing target, off-scene point and SVG are explicit errors", () => {
     expect(resolveFxSequence(sequence, scene, source, undefined, () => "image/png").ok).toBe(false);
     const off: FxSequence = { version: 1, sections: [{ kind: "text", id: "t", startMs: 0, durationMs: 100,
@@ -173,5 +233,1006 @@ describe("versioned audiovisual timeline", () => {
     const png: FxSequence = { version: 1, sections: [{ kind: "image", id: "a", assetId: hash,
       at: { kind: "point", x: 30, y: 40 }, startMs: 0, durationMs: 100 }] };
     expect(resolveFxSequence(png, scene, undefined, undefined, () => "image/svg+xml").ok).toBe(false);
+  });
+});
+
+describe("sound channels and fades (D-297)", () => {
+  const withSound = (patch: Record<string, unknown>): FxSequence => ({ version: 1, sections: [
+    { kind: "sound", id: "hum", assetId: sound, startMs: 0, durationMs: 1_000, ...patch } as never,
+  ] });
+
+  test("the four channels are accepted and an unknown one is refused, not silently ignored", () => {
+    for (const channel of ["sfx", "music", "ambience", "voice"])
+      expect(validateFxSequence(withSound({ channel })).ok).toBe(true);
+    const bad = validateFxSequence(withSound({ channel: "bass" }));
+    expect(bad.ok).toBe(false);
+    expect(bad.ok ? "" : bad.error).toContain("channel");
+    // An absent channel is the default effect, so old timelines keep working.
+    const plain = validateFxSequence(withSound({}));
+    expect(plain.ok).toBe(true);
+    if (plain.ok) expect(plain.sequence.sections[0]).not.toHaveProperty("channel");
+  });
+
+  test("fades must fit inside the section, and zero is a legal fade", () => {
+    expect(validateFxSequence(withSound({ fadeInMs: 400, fadeOutMs: 600 })).ok).toBe(true);
+    expect(validateFxSequence(withSound({ fadeInMs: 1_000, fadeOutMs: 1_000 })).ok).toBe(true);
+    expect(validateFxSequence(withSound({ fadeInMs: 0, fadeOutMs: 0 })).ok).toBe(true);
+    for (const patch of [{ fadeInMs: 1_001 }, { fadeOutMs: 2_000 }, { fadeInMs: -1 },
+      { fadeOutMs: Number.NaN }, { fadeInMs: "fast" }]) {
+      const checked = validateFxSequence(withSound(patch));
+      expect(checked.ok, JSON.stringify(patch)).toBe(false);
+      expect(checked.ok ? "" : checked.error).toContain("fade");
+    }
+  });
+
+  test("a positioned sound travels as a resolved point and a radius in pixels", () => {
+    // The scene grid is 100 px per 5 units: a 30-unit reach is 600 px.
+    const placed = validateFxSequence(withSound({ at: { kind: "point", x: 300, y: 400 }, radius: 30 }));
+    expect(placed.ok).toBe(true);
+    const resolved = resolveFxSequence(placed.ok ? placed.sequence : withSound({}), scene, source, source,
+      (id) => (id === sound ? "audio/ogg" : undefined));
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    const section = resolved.sections[0] as { x?: number; y?: number; radiusPx?: number; at?: unknown;
+      radius?: unknown; mime?: string };
+    expect(section).toMatchObject({ x: 300, y: 400, radiusPx: 600 });
+    // The authored anchor and its scene-unit radius are gone: a recipient measures
+    // against its own view, so it gets the metric the host validated, not a second one.
+    expect(section.at).toBeUndefined();
+    expect(section.radius).toBeUndefined();
+    expect(section.mime).toBe("audio/ogg");
+
+    // A token anchor resolves to that token's *current* centre — the same rule every
+    // other anchor follows, and never a two-way follow (a sound does not chase a token).
+    const bound = validateFxSequence(withSound({ at: { kind: "source" }, radius: 10, pan: true, muffle: true }));
+    expect(bound.ok).toBe(true);
+    const boundResolved = resolveFxSequence(bound.ok ? bound.sequence : withSound({}), scene, source, source,
+      () => "audio/ogg");
+    if (!boundResolved.ok) return;
+    expect(boundResolved.sections[0]).toMatchObject({ x: source.x, y: source.y, radiusPx: 200,
+      pan: true, muffle: true });
+  });
+
+  test("position is what makes a sound positional: the three fields that measure from one are refused without it", () => {
+    for (const patch of [{ radius: 30 }, { pan: true }, { muffle: true }]) {
+      const checked = validateFxSequence(withSound(patch));
+      expect(checked.ok, JSON.stringify(patch)).toBe(false);
+      expect(checked.ok ? "" : checked.error).toContain("position");
+    }
+    // A position needs a reach: "where it is" without "how far it carries" is half a cue.
+    const noRadius = validateFxSequence(withSound({ at: { kind: "point", x: 10, y: 10 } }));
+    expect(noRadius.ok).toBe(false);
+    expect(noRadius.ok ? "" : noRadius.error).toContain("radius");
+    for (const radius of [0, -5, 1_001, Number.NaN]) {
+      expect(validateFxSequence(withSound({ at: { kind: "point", x: 10, y: 10 }, radius })).ok,
+        String(radius)).toBe(false);
+    }
+    expect(validateFxSequence(withSound({ at: { kind: "point", x: 10, y: 10 }, radius: 1 })).ok).toBe(true);
+    expect(validateFxSequence(withSound({ at: { kind: "point", x: 10, y: 10 }, radius: 1_000,
+      pan: false, muffle: false })).ok).toBe(true);
+    // The two switches are switches, not free text.
+    expect(validateFxSequence(withSound({ at: { kind: "point", x: 10, y: 10 }, radius: 5, pan: "yes" })).ok).toBe(false);
+    expect(validateFxSequence(withSound({ at: { kind: "point", x: 10, y: 10 }, radius: 5, muffle: 1 })).ok).toBe(false);
+    // An anchor outside the scene is refused at resolution, like every other anchor.
+    const outside = validateFxSequence(withSound({ at: { kind: "point", x: 5_000, y: 10 }, radius: 5 }));
+    expect(outside.ok).toBe(true);
+    const resolved = resolveFxSequence(outside.ok ? outside.sequence : withSound({}), scene, source, source,
+      () => "audio/ogg");
+    expect(resolved.ok).toBe(false);
+    if (!resolved.ok) expect(resolved.error).toContain("outside the scene");
+  });
+
+  test("a channel or fade on a non-sound section is still an unknown field", () => {
+    const wrong = { version: 1, sections: [
+      { kind: "text", id: "t", text: "hi", at: { kind: "source" }, startMs: 0, durationMs: 500,
+        channel: "music" }] } as unknown as FxSequence;
+    expect(validateFxSequence(wrong).ok).toBe(false);
+  });
+});
+
+describe("camera paths (D-298, SQ-15)", () => {
+  const path = (patch: Record<string, unknown> = {}): FxSequence => ({ version: 1, sections: [
+    { kind: "camera", id: "tour", mode: "path", startMs: 0, durationMs: 2_000,
+      points: [{ kind: "point", x: 200, y: 200 }, { kind: "source" }, { kind: "target" }],
+      ...patch } as never,
+  ] });
+
+  test("2–8 waypoint anchors are accepted; fewer, more or a non-anchor is refused", () => {
+    expect(validateFxSequence(path()).ok).toBe(true);
+    expect(validateFxSequence(path({ points: [{ kind: "point", x: 1, y: 1 }] })).ok).toBe(false);
+    expect(validateFxSequence(path({ points: Array.from({ length: 9 }, (_, i) => ({ kind: "point", x: i, y: i })) })).ok)
+      .toBe(false);
+    expect(validateFxSequence(path({ points: "gate" })).ok).toBe(false);
+    expect(validateFxSequence(path({ points: [{ kind: "point", x: 1, y: 1 }, { kind: "nope", x: 2, y: 2 }] })).ok)
+      .toBe(false);
+    for (const bad of [{ zoom: 0.05 }, { zoom: 11 }, { easing: "springy" }, { intensity: 0.5 }, { to: { kind: "source" } }]) {
+      const checked = validateFxSequence(path(bad));
+      expect(checked.ok, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  test("camera invariants still hold: one section, ≥100 ms, never in a persistent timeline", () => {
+    expect(validateFxSequence(path({ durationMs: 50 })).ok).toBe(false);
+    expect(validateFxSequence(path({ durationMs: 100 })).ok).toBe(true);
+    expect(validateFxSequence({ ...path(), persistent: true }).ok).toBe(false);
+    expect(validateFxSequence(path({ repeatCount: 2 })).ok).toBe(false); // a camera never replays
+  });
+
+  test("the host resolves every waypoint and refuses one outside the scene", () => {
+    const checked = resolveFxSequence(path(), scene, source, source, () => undefined);
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    const section = checked.sections[0] as Extract<typeof checked.sections[number], { mode: "path" }>;
+    expect(section.points).toEqual([{ x: 200, y: 200 }, { x: 120, y: 150 }, { x: 120, y: 150 }]);
+    expect("points" in section && section.points.every((point) => "kind" in point === false)).toBe(true);
+    const outside = path({ points: [{ kind: "point", x: 5_000, y: 10 }, { kind: "point", x: 20, y: 20 }] });
+    expect(resolveFxSequence(outside, scene, source, source, () => undefined).ok).toBe(false);
+  });
+
+  test("a path whose waypoints all resolve to the same place is refused as a no-op tour", () => {
+    const stationary = path({ points: [{ kind: "source" }, { kind: "source" }, { kind: "source" }] });
+    expect(validateFxSequence(stationary).ok).toBe(true); // authored, it looks like a tour…
+    const resolved = resolveFxSequence(stationary, scene, source, source, () => undefined);
+    expect(resolved.ok).toBe(false); // …resolved, it never goes anywhere
+    if (!resolved.ok) expect(resolved.error).toContain("two different waypoints");
+  });
+});
+
+describe("FX appearance: blend modes and one bounded filter (§SQ-05)", () => {
+  test("every supported blend is accepted and an unknown one is refused by name", () => {
+    for (const blend of ["normal", "add", "multiply", "screen", "overlay", "darken", "lighten"]) {
+      expect(validateFxSequence(visual({ blend })).ok, blend).toBe(true);
+    }
+    const bad = validateFxSequence(visual({ blend: "glow" }));
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.error).toBe("FX blend must be normal, add, multiply, screen, overlay, darken or lighten");
+  });
+
+  test("a filter carries its kind and an optional strength; both are checked", () => {
+    expect(validateFxSequence(visual({ filter: { kind: "blur", strength: 12 } })).ok).toBe(true);
+    expect(validateFxSequence(visual({ filter: { kind: "grayscale" } })).ok).toBe(true); // strength is optional
+    const kind = validateFxSequence(visual({ filter: { kind: "sepia" } }));
+    expect(kind.ok).toBe(false);
+    if (!kind.ok) expect(kind.error).toBe("FX filter must be blur, grayscale, brightness or saturate");
+    // Each kind has its own range: 8 px of blur is legitimate, 8× of brightness is not.
+    expect(validateFxSequence(visual({ filter: { kind: "blur", strength: 32 } })).ok).toBe(true);
+    expect(validateFxSequence(visual({ filter: { kind: "blur", strength: 33 } })).ok).toBe(false);
+    expect(validateFxSequence(visual({ filter: { kind: "blur", strength: 0 } })).ok).toBe(false);
+    expect(validateFxSequence(visual({ filter: { kind: "brightness", strength: 2 } })).ok).toBe(true);
+    expect(validateFxSequence(visual({ filter: { kind: "brightness", strength: 8 } })).ok).toBe(false);
+    expect(validateFxSequence(visual({ filter: { kind: "saturate", strength: -0.5 } })).ok).toBe(false);
+    expect(validateFxSequence(visual({ filter: { kind: "grayscale", strength: "all" } })).ok).toBe(false);
+    // An unknown key inside the filter object is not a place to smuggle a setting.
+    expect(validateFxSequence(visual({ filter: { kind: "blur", radius: 4 } })).ok).toBe(false);
+  });
+
+  test("a filter kind's range is the one the wizard offers, so authoring cannot lie to the host", () => {
+    // The panel's min/max/default come from the same table the host validates against.
+    expect(FX_FILTER_RANGES.blur.max).toBe(32);
+    expect(FX_FILTER_RANGES.grayscale.default).toBe(1);
+    for (const [kind, range] of Object.entries(FX_FILTER_RANGES)) {
+      expect(validateFxSequence(visual({ filter: { kind, strength: range.default } })).ok, kind).toBe(true);
+      expect(validateFxSequence(visual({ filter: { kind, strength: range.min } })).ok, kind).toBe(true);
+      expect(validateFxSequence(visual({ filter: { kind, strength: range.max } })).ok, kind).toBe(true);
+    }
+  });
+
+  test("appearance belongs to a visual section: a sound, text and camera cannot carry it", () => {
+    // Text genuinely can — it is a visual — while sound and camera/wait cannot.
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "text", id: "t", text: "hi",
+      at: { kind: "source" }, startMs: 0, durationMs: 500, blend: "screen" } as never] }).ok).toBe(true);
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "sound", id: "s", assetId: sound,
+      startMs: 0, durationMs: 500, blend: "add" } as never] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "wait", id: "w",
+      startMs: 0, durationMs: 500, filter: { kind: "blur" } } as never] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "camera", id: "c", mode: "pan",
+      to: { kind: "point", x: 10, y: 10 }, startMs: 0, durationMs: 500, blend: "add" } as never] }).ok).toBe(false);
+  });
+
+  test("the style plan fills in a default, clamps, and never invents a filter", () => {
+    expect(fxStylePlan({})).toEqual({ blend: "normal", filters: [] });
+    expect(fxStylePlan({ blend: "add" })).toEqual({ blend: "add", filters: [] });
+    expect(fxStylePlan({ filter: { kind: "grayscale" } })).toEqual({ blend: "normal",
+      filters: [{ kind: "grayscale", strength: 1 }] });
+    expect(fxStylePlan({ filter: { kind: "blur" } }).filters[0]).toEqual({ kind: "blur", strength: 8 });
+    // A cue that never passed the host must still render something sane.
+    expect(fxStylePlan({ filter: { kind: "blur", strength: 500 } }).filters[0])
+      .toEqual({ kind: "blur", strength: 32 });
+    expect(fxStylePlan({ filter: { kind: "brightness", strength: -3 } }).filters[0])
+      .toEqual({ kind: "brightness", strength: 0 });
+    // A forged kind renders as no filter at all rather than as a guess.
+    expect(fxStylePlan({ filter: { kind: "nonsense" as never } })).toEqual({ blend: "normal", filters: [] });
+    expect(fxStylePlan({ filters: [{ kind: "blur", strength: 4 },
+      { kind: "nonsense" as never }, { kind: "saturate" }] }).filters)
+      .toEqual([{ kind: "blur", strength: 4 }, { kind: "saturate", strength: 0.5 }]);
+  });
+
+  test("resolving a visual keeps its appearance: the host adds anchors, not style", () => {
+    const resolved = resolveFxSequence(visual({ blend: "screen", filter: { kind: "saturate", strength: 0.5 } }),
+      scene, source, source, () => "image/png");
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.sections[0]).toMatchObject({ blend: "screen", filter: { kind: "saturate", strength: 0.5 } });
+  });
+});
+
+describe("camera targeting: one run, different views (§SQ-15/SQ-18, D-300)", () => {
+  const camera = (patch: Record<string, unknown> = {}) => ({
+    kind: "camera", id: "look", mode: "pan", to: { kind: "point", x: 300, y: 300 },
+    startMs: 0, durationMs: 1000, ...patch });
+  const cue = (patch: Record<string, unknown> = {}) => ({ version: 1,
+    sections: [{ kind: "text", id: "t", text: "Now", at: { kind: "point", x: 10, y: 10 },
+      startMs: 0, durationMs: 500 }, camera(patch)] });
+
+  test("the audience vocabulary is one vocabulary, and a section takes it only there", () => {
+    for (const audience of ["scene", "gm", "caller", { players: ["p-1"] }]) {
+      expect(validateFxSequence(cue({ audience })).ok, JSON.stringify(audience)).toBe(true);
+    }
+    const bad = validateFxSequence(cue({ audience: "party" }));
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.error)
+      .toBe("a camera section's audience must be scene, gm, caller or a list of chosen players");
+    // A visual or sound section has no targeted delivery, so the field is unknown there.
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "image", id: "i", assetId: hash,
+      at: { kind: "point", x: 1, y: 1 }, startMs: 0, durationMs: 500, audience: "gm" } as never] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "sound", id: "s", assetId: sound,
+      startMs: 0, durationMs: 500, audience: "gm" } as never] }).ok).toBe(false);
+  });
+
+  test("one run, one payload per viewer: an excluded viewer never receives the section", () => {
+    const resolved = resolveFxSequence(cue({ audience: "gm" }) as FxSequence, scene, source, source, () => undefined);
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    const gm = fxSectionsForViewer(resolved.sections, { id: "gm-1", isGm: true }, "gm-1");
+    const player = fxSectionsForViewer(resolved.sections, { id: "p-1", isGm: false }, "gm-1");
+    expect(gm).toHaveLength(2);
+    expect(player).toHaveLength(1);
+    expect(player[0]?.kind).toBe("text");
+    // The exclusion is the *payload*: nothing about the destination survives it.
+    expect(JSON.stringify(player)).not.toContain("300");
+  });
+
+  test("scene is the default, caller means the requester, and nothing else is touched", () => {
+    const resolved = resolveFxSequence(cue() as FxSequence, scene, source, source, () => undefined);
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    // Nothing to exclude: the host hands back the very same array (no allocation).
+    expect(fxSectionsForViewer(resolved.sections, { id: "p", isGm: false }, "p")).toBe(resolved.sections);
+    const requested = resolveFxSequence(cue({ audience: "caller" }) as FxSequence, scene, source, source, () => undefined);
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+    expect(fxSectionsForViewer(requested.sections, { id: "p", isGm: false }, "p")).toHaveLength(2);
+    // A GM who is not the caller is not "the caller", even though they are a GM.
+    expect(fxSectionsForViewer(requested.sections, { id: "gm-2", isGm: true }, "p")).toHaveLength(1);
+    // A targeted *shake* is filtered by the same rule as a pan.
+    const shake = resolveFxSequence({ version: 1, sections: [{ kind: "camera", id: "s", mode: "shake",
+      intensity: 0.5, audience: "gm", startMs: 0, durationMs: 500 }] } as FxSequence,
+      scene, source, source, () => undefined);
+    expect(shake.ok).toBe(true);
+    if (!shake.ok) return;
+    expect(fxSectionsForViewer(shake.sections, { id: "p", isGm: false }, "p")).toHaveLength(0);
+  });
+
+  test("a run can name the users it is for, and a list that says nothing is refused (D-316)", () => {
+    const run = (audience: unknown) => validateFxSequence({ version: 1, audience, sections: [
+      { kind: "text", id: "t", text: "Now", at: { kind: "point", x: 10, y: 10 },
+        startMs: 0, durationMs: 500 }] });
+    // The words are unchanged, and an absent audience is still "everyone watching".
+    for (const audience of [undefined, "scene", "gm", "caller"]) {
+      expect(run(audience).ok, JSON.stringify(audience)).toBe(true);
+    }
+    expect(run({ players: ["p-1", "p-2"] }).ok).toBe(true);
+    const tooMany = Array.from({ length: FX_AUDIENCE_PLAYERS_MAX + 1 }, (_, index) => `p-${index}`);
+    for (const [audience, message] of [
+      [{ players: [] }, "an FX audience's chosen players must be 1–32 users"],
+      [{ players: tooMany }, "an FX audience's chosen players must be 1–32 users"],
+      [{ players: ["p-1", "p-1"] }, "an FX audience's chosen players must not repeat a user"],
+      [{ players: ["p-1", 2] }, "an FX audience's chosen players must be user ids"],
+      [{ players: ["p-1"], gm: true }, "an FX audience takes only a `players` list of user ids"],
+      [{ play: ["p-1"] }, "an FX audience takes only a `players` list of user ids"],
+      ["party", "an FX audience must be scene, gm, caller or a list of chosen players"],
+      [null, "an FX audience must be scene, gm, caller or a list of chosen players"],
+      [[], "an FX audience must be scene, gm, caller or a list of chosen players"],
+    ] as const) {
+      const result = run(audience);
+      expect(result.ok, JSON.stringify(audience) ?? "null").toBe(false);
+      if (!result.ok) expect(result.error).toBe(message);
+    }
+  });
+
+  test("a chosen list is resolved per viewer, and a word is never read as a list (D-316)", () => {
+    const gm = { id: "gm-1", isGm: true };
+    const listed = { id: "p-1", isGm: false };
+    const other = { id: "p-2", isGm: false };
+    const chosen = { players: ["p-1", "p-3"] };
+    // A chosen list does not silently include the GM: addressing people is an author's
+    // act, and "the GM sees everything" is what the other three forms are for.
+    expect(fxAudienceAllows(chosen, gm, "gm-1")).toBe(false);
+    expect(fxAudienceAllows(chosen, listed, "gm-1")).toBe(true);
+    expect(fxAudienceAllows(chosen, other, "gm-1")).toBe(false);
+    expect(fxAudienceAllows(undefined, other, "gm-1")).toBe(true);
+    expect(fxAudienceAllows("scene", other, "gm-1")).toBe(true);
+    expect(fxAudienceAllows("gm", gm, "gm-1")).toBe(true);
+    expect(fxAudienceAllows("gm", other, "gm-1")).toBe(false);
+    expect(fxAudienceAllows("caller", gm, "gm-1")).toBe(true);
+    expect(fxAudienceAllows("caller", other, "gm-1")).toBe(false);
+    // A word is a policy, not a list waiting to be expanded.
+    expect(fxAudiencePlayers(undefined)).toEqual([]);
+    expect(fxAudiencePlayers("gm")).toEqual([]);
+    expect(fxAudiencePlayers("scene")).toEqual([]);
+    expect(fxAudiencePlayers(chosen)).toEqual(["p-1", "p-3"]);
+  });
+
+  test("one section, different payloads: a chosen list cuts exactly the unlisted viewers", () => {
+    const resolved = resolveFxSequence(cue({ audience: { players: ["p-1"] } }) as FxSequence,
+      scene, source, source, () => undefined);
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    // Nothing to exclude → the host hands back the very same array.
+    expect(fxSectionsForViewer(resolved.sections, { id: "p-1", isGm: false }, "gm-1"))
+      .toBe(resolved.sections);
+    for (const viewer of [{ id: "p-2", isGm: false }, { id: "gm-1", isGm: true }]) {
+      const filtered = fxSectionsForViewer(resolved.sections, viewer, "gm-1");
+      expect(filtered, viewer.id).toHaveLength(1);
+      expect(filtered[0]?.kind, viewer.id).toBe("text");
+      expect(JSON.stringify(filtered), viewer.id).not.toContain("300");
+    }
+  });
+});
+
+describe("effect masks and cutouts (§SQ-19/SQ-05, D-301)", () => {
+  const masked = (mask: unknown) => ({ version: 1, sections: [{ kind: "image", id: "aura", assetId: hash,
+    at: { kind: "point", x: 200, y: 200 }, startMs: 0, durationMs: 1000, mask } as never] });
+
+  test("four shapes are accepted; a point is refused because it has nothing to mask with", () => {
+    expect(validateFxSequence(masked({ kind: "circle", length: 15 })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "cone", length: 30, spread: 90 })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "ray", length: 60, width: 5, angle: 45 })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "rect", length: 20, width: 10 })).ok).toBe(true);
+    const point = validateFxSequence(masked({ kind: "point" }));
+    expect(point.ok).toBe(false);
+    if (!point.ok) expect(point.error).toContain("cannot be a point");
+    const unknown = validateFxSequence(masked({ kind: "star", length: 5 }));
+    expect(unknown.ok).toBe(false);
+    if (!unknown.ok) expect(unknown.error).toBe("an FX mask must be a circle, cone, ray, rect or polygon");
+  });
+
+  test("each shape takes only its own fields, so a stale width is a refusal and not a shrug", () => {
+    expect(validateFxSequence(masked({ kind: "circle", length: 10, width: 4 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "circle", length: 10, angle: 30 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "cone", length: 10, width: 4 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "ray", length: 10 })).ok).toBe(false); // no width
+    expect(validateFxSequence(masked({ kind: "rect", length: 10, width: 4, spread: 90 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "rect", length: 10, width: 4, opacity: 1 })).ok).toBe(false);
+  });
+
+  test("metrics are bounded in scene units, and invert is a boolean", () => {
+    expect(validateFxSequence(masked({ kind: "circle", length: 0.4 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "circle", length: 5_001 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "ray", length: 20, width: 0 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "cone", length: 20, spread: 400 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "cone", length: 20, spread: 0 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "ray", length: 20, width: 4, angle: -400 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "circle", length: 10, invert: "yes" })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "circle", length: 10, invert: true })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "circle", length: "ten" })).ok).toBe(false);
+  });
+
+  test("a region animates by its own two rules: a growth in scene units and a turn in degrees", () => {
+    expect(validateFxSequence(masked({ kind: "circle", length: 10, lengthTo: 40 })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "rect", length: 10, width: 4, lengthTo: 30, spinDeg: 90 })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "cone", length: 20, spinDeg: -3600 })).ok).toBe(true);
+    // A growth is measured in the same scene units as the region itself, so it has the
+    // same bounds — and a turn is bounded like the visual's own spin.
+    expect(validateFxSequence(masked({ kind: "circle", length: 10, lengthTo: 0.4 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "circle", length: 10, lengthTo: 5_001 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "cone", length: 20, spinDeg: 3_601 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "cone", length: 20, spinDeg: "sweep" })).ok).toBe(false);
+    // A circle has no facing, so it takes no turn — a field the shape cannot use.
+    const circleTurn = validateFxSequence(masked({ kind: "circle", length: 10, spinDeg: 90 }));
+    expect(circleTurn.ok).toBe(false);
+    if (!circleTurn.ok) expect(circleTurn.error).toContain("an FX circle mask takes only");
+  });
+
+  test("a wall-bounded region is trimmed against the scene's own sight, and cannot animate", () => {
+    const wall = (c: [number, number, number, number], patch: Partial<WallDocument> = {}): WallDocument =>
+      ({ _id: `w-${c[0]}-${c[1]}`, type: "wall", name: "W", ownership: { default: 0 },
+        flags: {}, system: {}, c, door: 0, oneWay: false, move: 0, sight: 0, sound: 0, light: 0, ...patch });
+    // A vertical wall 200 px (10 units) east of the anchor at (200, 200), spanning far
+    // past the mask's 300 px reach on BOTH sides — a shorter wall would leave a real gap
+    // around its ends, which is correct visibility rather than a missed trim.
+    const walled: SceneDocument = { ...scene, walls: [wall([400, -200, 400, 1_000])] };
+    const at200 = masked({ kind: "circle", length: 15, walls: true });
+    const trimmed = resolveFxSequence(at200 as FxSequence, walled, source, source, () => "image/png");
+    expect(trimmed.ok).toBe(true);
+    if (!trimmed.ok) return;
+    const mask = (trimmed.sections[0] as Extract<typeof trimmed.sections[number], { mask?: unknown }>)
+      .mask as { area: Array<{ x: number; y: number }> };
+    // The authored reach is 15 units = 300 px; the wall is 200 px away and the anchor sits
+    // at (200, 200), so the region reaches 300 px west and stops at 200 px east.
+    const reachOf = (pick: (point: { x: number; y: number }) => number, most: boolean) =>
+      most ? Math.max(...mask.area.map(pick)) : Math.min(...mask.area.map(pick));
+    expect(reachOf((point) => point.x, true)).toBeCloseTo(200, 0);
+    expect(reachOf((point) => point.x, false)).toBeCloseTo(-300, 0);
+    expect(Math.max(...mask.area.map((point) => Math.hypot(point.x, point.y)))).toBeCloseTo(300, 0);
+    // It touches the wall rather than stopping short of it — the trim is the wall's own line.
+    expect(mask.area.some((point) => Math.abs(point.x - 200) < 0.5)).toBe(true);
+    // Offsets from the anchor, like any other resolved mask: the shape travels with it.
+    expect(mask.area.every((point) => Math.abs(point.x) <= 300.5)).toBe(true);
+
+    // Nothing in reach is nothing to trim: the authored circle stands exactly as it was.
+    const open = resolveFxSequence(masked({ kind: "circle", length: 15, walls: true }) as FxSequence,
+      scene, source, source, () => "image/png");
+    if (!open.ok) return;
+    const plain = (open.sections[0] as Extract<typeof open.sections[number], { mask?: unknown }>)
+      .mask as { area: Array<{ x: number; y: number }> };
+    expect(plain.area).toHaveLength(16);
+    expect(Math.max(...plain.area.map((point) => point.x))).toBeCloseTo(300, 3);
+
+    // The same sight rule the fog uses: a window (sight: 2 = passes) never trims, a closed
+    // door does, and opening that door stops trimming — doors obey state here too.
+    const places = (patch: Partial<WallDocument>) => resolveFxSequence(
+      masked({ kind: "circle", length: 15, walls: true }) as FxSequence,
+      { ...scene, walls: [wall([400, -200, 400, 1_000], patch)] }, source, source, () => "image/png");
+    const maxX = (result: ReturnType<typeof resolveFxSequence>) => {
+      if (!result.ok) return null;
+      const found = (result.sections[0] as Extract<typeof result.sections[number], { mask?: unknown }>)
+        .mask as { area: Array<{ x: number; y: number }> };
+      return Math.max(...found.area.map((point) => point.x));
+    };
+    // `door`: 0 closed | 1 open | 2 locked, and `sight`: 0 always blocks | 1 conditional | 2 passes.
+    expect(maxX(places({ sight: 2, door: 0 }))).toBeCloseTo(300, 0); // a window passes sight
+    expect(maxX(places({ sight: 1, door: 0 }))).toBeCloseTo(200, 0); // a closed door blocks
+    expect(maxX(places({ sight: 1, door: 1 }))).toBeCloseTo(300, 0); // an open door does not
+    expect(maxX(places({ sight: 1, door: 2 }))).toBeCloseTo(200, 0); // a locked door does
+    expect(maxX(places({ sight: 0, door: 1 }))).toBeCloseTo(200, 0); // an opaque wall, open door or not
+
+    // A growth or a turn is refused rather than silently ignored: the trim is baked, and a
+    // recipient has no walls to re-trim against.
+    const growing = validateFxSequence(masked({ kind: "circle", length: 15, walls: true, lengthTo: 30 }));
+    expect(growing.ok).toBe(false);
+    if (!growing.ok) expect(growing.error).toContain("cannot animate");
+    expect(validateFxSequence(masked({ kind: "circle", length: 15, walls: true })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "circle", length: 15, walls: "yes" })).ok).toBe(false);
+    // Walls on every side cap the region in every direction: an anchor in a 200×200 room
+    // sees the room, not its authored 300 px circle — the reach is the *smaller* of the two.
+    const room: SceneDocument = { ...scene, walls: [
+      wall([100, 100, 300, 100]), wall([300, 100, 300, 300]),
+      wall([300, 300, 100, 300]), wall([100, 300, 100, 100]),
+    ] };
+    const enclosed = resolveFxSequence(masked({ kind: "circle", length: 15, walls: true }) as FxSequence,
+      room, source, source, () => "image/png");
+    expect(enclosed.ok).toBe(true);
+    if (!enclosed.ok) return;
+    const inside = (enclosed.sections[0] as Extract<typeof enclosed.sections[number], { mask?: unknown }>)
+      .mask as { area: Array<{ x: number; y: number }> };
+    expect(inside.area.length).toBeGreaterThanOrEqual(3);
+    for (const point of inside.area) {
+      expect(Math.abs(point.x)).toBeLessThan(100.5);
+      expect(Math.abs(point.y)).toBeLessThan(100.5);
+    }
+
+    // An anchor standing *on* a wall sees nothing at all, and that is refused rather than
+    // drawn as an empty mask — "a control that would do nothing" again.
+    const onWall: SceneDocument = { ...scene, walls: [wall([0, 200, 400, 200])] };
+    const blind = resolveFxSequence(masked({ kind: "circle", length: 15, walls: true }) as FxSequence,
+      onWall, source, source, () => "image/png");
+    expect(blind.ok).toBe(false);
+    if (!blind.ok) expect(blind.error).toContain("cannot start on a wall");
+  });
+
+  test("a mask belongs to a visual: sound, wait and camera sections refuse it as unknown", () => {
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "sound", id: "s", assetId: sound,
+      startMs: 0, durationMs: 500, mask: { kind: "circle", length: 5 } } as never] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "wait", id: "w", startMs: 0,
+      durationMs: 500, mask: { kind: "circle", length: 5 } } as never] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "camera", id: "c", mode: "pan",
+      to: { kind: "point", x: 10, y: 10 }, startMs: 0, durationMs: 500,
+      mask: { kind: "circle", length: 5 } } as never] }).ok).toBe(false);
+  });
+
+  test("D-315: a drawn region is validated as the shape it is: an area, no self-crossing, and a star for the wall bound", () => {
+    const square = [{ x: -8, y: -8 }, { x: 8, y: -8 }, { x: 8, y: 8 }, { x: -8, y: 8 }];
+    expect(validateFxSequence(masked({ kind: "polygon", points: square })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "polygon", points: square, invert: true })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "polygon", points: square, scaleTo: 3 })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "polygon", points: square, spinDeg: 90 })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "polygon", points: square, walls: true })).ok).toBe(true);
+
+    // 3–64 points: two is a line, and 65 is past the bound the trim's sweep is sized for.
+    const tri = [{ x: -8, y: -8 }, { x: 8, y: -8 }, { x: 0, y: 8 }];
+    expect(validateFxSequence(masked({ kind: "polygon", points: tri })).ok).toBe(true);
+    for (const points of [square.slice(0, 2), Array.from({ length: 65 }, (_v, i) => ({
+      x: Math.cos((i / 65) * Math.PI * 2) * 10, y: Math.sin((i / 65) * Math.PI * 2) * 10 })),
+    []]) {
+      const bad = validateFxSequence(masked({ kind: "polygon", points }));
+      expect(bad.ok).toBe(false);
+      if (!bad.ok) expect(bad.error).toContain("3–64 points");
+    }
+    // A point is a scene-unit offset from the anchor, and nothing else.
+    const named = validateFxSequence(masked({ kind: "polygon",
+      points: [{ x: 1, y: 1 }, { x: 4, y: 1, z: 2 }, { x: 1, y: 4 }] }));
+    expect(named.ok).toBe(false);
+    if (!named.ok) expect(named.error).toContain("FX polygon point 2");
+    const offGrid = validateFxSequence(masked({ kind: "polygon",
+      points: [{ x: 1, y: 1 }, { x: 5_001, y: 1 }, { x: 1, y: 4 }] }));
+    expect(offGrid.ok).toBe(false);
+    if (!offGrid.ok) expect(offGrid.error).toContain("within ±5000 scene units");
+
+    // A line has no area, and a bow-tie crosses itself: both are refused by the fault they
+    // are rather than resolved into *some* region the author never drew.
+    const line = validateFxSequence(masked({ kind: "polygon",
+      points: [{ x: -8, y: 0 }, { x: 0, y: 0 }, { x: 8, y: 0 }] }));
+    expect(line.ok).toBe(false);
+    if (!line.ok) expect(line.error).toContain("must not lie in a line");
+    const bowTie = validateFxSequence(masked({ kind: "polygon",
+      points: [{ x: -8, y: -8 }, { x: 8, y: 8 }, { x: 8, y: -8 }, { x: -8, y: 8 }] }));
+    expect(bowTie.ok).toBe(false);
+    if (!bowTie.ok) expect(bowTie.error).toContain("must not cross itself");
+
+    // A concave region is still a region: the sprite is clipped to it either way.
+    const notched = [{ x: -10, y: -10 }, { x: 10, y: -10 }, { x: 10, y: 10 }, { x: 0, y: 2 },
+      { x: -10, y: 10 }];
+    expect(validateFxSequence(masked({ kind: "polygon", points: notched })).ok).toBe(true);
+    // The wall trim answers with one distance per angle, so a region a ray can cross twice
+    // has no answer — refused by name, and *only* when the author asked for the wall bound.
+    // This is a U opening eastward: a ray along +x meets its inner arms twice.
+    const u = [{ x: -10, y: -10 }, { x: 10, y: -10 }, { x: 10, y: 10 }, { x: 6, y: 10 },
+      { x: 6, y: -6 }, { x: -6, y: -6 }, { x: -6, y: 10 }, { x: -10, y: 10 }];
+    expect(validateFxSequence(masked({ kind: "polygon", points: u })).ok).toBe(true);
+    const walled = validateFxSequence(masked({ kind: "polygon", points: u, walls: true }));
+    expect(walled.ok).toBe(false);
+    if (!walled.ok) expect(walled.error).toContain("star-shaped about its anchor");
+
+    // …and a wall-bounded region cannot animate, the polygon's own ratio included.
+    const growing = validateFxSequence(masked({ kind: "polygon", points: square, walls: true, scaleTo: 2 }));
+    expect(growing.ok).toBe(false);
+    if (!growing.ok) expect(growing.error).toContain("cannot animate");
+    // A polygon takes no length, width, aperture or cross axis: its geometry is its own.
+    expect(validateFxSequence(masked({ kind: "polygon", points: square, length: 10 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "polygon", points: square, widthTo: 10 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "polygon", points: square, lengthTo: 20 })).ok).toBe(false);
+    // …and the four shapes refuse the polygon's own fields.
+    expect(validateFxSequence(masked({ kind: "circle", length: 10, points: square })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "circle", length: 10, scaleTo: 2 })).ok).toBe(false);
+    // A polygon's growth is a ratio, bounded like the sprite's own scale.
+    expect(validateFxSequence(masked({ kind: "polygon", points: square, scaleTo: 0.01 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "polygon", points: square, scaleTo: 40 })).ok).toBe(false);
+  });
+
+  test("D-315: a drawn region resolves through the scene's metric like any other shape", () => {
+    // The fixture scene is 100 px per 5 units, so 8 units is 160 px: the square's corners
+    // land at ±160 px, in the region's own offsets.
+    const resolved = resolveFxSequence(
+      masked({ kind: "polygon", points: [{ x: -8, y: -8 }, { x: 8, y: -8 }, { x: 8, y: 8 },
+        { x: -8, y: 8 }], scaleTo: 2, spinDeg: 90 }) as FxSequence,
+      scene, source, source, () => "image/png");
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    const mask = (resolved.sections[0] as Extract<typeof resolved.sections[number], { mask?: unknown }>)
+      .mask as { area: Array<{ x: number; y: number }>; invert: boolean; animate?: unknown };
+    expect(mask.area).toEqual([{ x: -160, y: -160 }, { x: 160, y: -160 },
+      { x: 160, y: 160 }, { x: -160, y: 160 }]);
+    // Its growth is already a ratio, so it travels as the number the author wrote — and the
+    // turn travels as the visual's own does.
+    expect(mask.animate).toEqual({ scale: 2, spinDeg: 90 });
+    // A still region carries no animation at all.
+    const still = resolveFxSequence(masked({ kind: "polygon", points: [{ x: -8, y: -8 },
+      { x: 8, y: -8 }, { x: 0, y: 8 }] }) as FxSequence, scene, source, source, () => "image/png");
+    if (!still.ok) return;
+    expect((((still.sections[0] as { mask?: { animate?: unknown } }).mask)?.animate)).toBeUndefined();
+  });
+
+  test("D-314: the cross axis belongs to the shapes that have one, and is bounded by its own numbers", () => {
+    // A width animates a ray/rect; an aperture animates a cone. Each is offered where it
+    // means something and refused by name where it does not — the field list is the rule.
+    expect(validateFxSequence(masked({ kind: "rect", length: 20, width: 10, widthTo: 40 })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "ray", length: 40, width: 4, widthTo: 12, angle: 30 })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "cone", length: 30, spread: 90, spreadTo: 240 })).ok).toBe(true);
+    expect(validateFxSequence(masked({ kind: "cone", length: 30, spreadTo: 180 })).ok).toBe(true);
+    const circle = validateFxSequence(masked({ kind: "circle", length: 10, widthTo: 20 }));
+    expect(circle.ok).toBe(false);
+    if (!circle.ok) expect(circle.error).toContain("an FX circle mask takes only");
+    // A ray has no aperture and a cone no width: the cross axis is not a blank cheque.
+    expect(validateFxSequence(masked({ kind: "ray", length: 40, width: 4, spreadTo: 180 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "cone", length: 30, spread: 90, widthTo: 20 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "rect", length: 20, width: 10, spreadTo: 60 })).ok).toBe(false);
+
+    // Bounds are the axis's own: a width is measured like a width, an aperture like a spread.
+    expect(validateFxSequence(masked({ kind: "rect", length: 20, width: 10, widthTo: 0.4 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "rect", length: 20, width: 10, widthTo: 5_001 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "cone", length: 30, spread: 90, spreadTo: 0 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "cone", length: 30, spread: 90, spreadTo: 400 })).ok).toBe(false);
+    expect(validateFxSequence(masked({ kind: "cone", length: 30, spread: 90, spreadTo: "wide" })).ok).toBe(false);
+
+    // A wall-bounded region is baked, so *nothing* about it can animate — the new axes
+    // are refused by the same sentence that refuses growth and turn.
+    const walled = masked({ kind: "rect", length: 20, width: 10, widthTo: 40, walls: true });
+    const refused = validateFxSequence(walled);
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.error).toContain("cannot animate");
+  });
+
+  test("D-314: the cross axis travels as a ratio in the shape's own frame, and the growth keeps its own meaning", () => {
+    // A rect's width animation: the ratio of the number the author wrote, plus the bearing
+    // that frame points along. No scene unit and no shape kind beyond one bit (see below).
+    const widened = resolveFxSequence(
+      masked({ kind: "rect", length: 20, width: 10, widthTo: 40, angle: 30 }) as FxSequence,
+      scene, source, source, () => "image/png");
+    expect(widened.ok).toBe(true);
+    if (!widened.ok) return;
+    const rect = (widened.sections[0] as Extract<typeof widened.sections[number], { mask?: unknown }>)
+      .mask as { animate?: unknown };
+    expect(rect.animate).toEqual({ cross: { ratio: 4, axisDeg: 30 } });
+
+    // A cone's cross axis is an angle: the same ratio shape, plus the one bit that says the
+    // polygon must *open* rather than stretch. An absent spread is the crosshair's default,
+    // which is what the polygon was built from — so the ratio is measured against it.
+    const opened = resolveFxSequence(
+      masked({ kind: "cone", length: 30, spreadTo: 180 }) as FxSequence,
+      scene, source, source, () => "image/png");
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const cone = (opened.sections[0] as Extract<typeof opened.sections[number], { mask?: unknown }>)
+      .mask as { animate?: unknown };
+    expect(cone.animate).toEqual({ cross: { ratio: 180 / 53.13, axisDeg: 0, fan: true } });
+
+    // A growth alone is still the D-305 uniform scale, and a pinned cross axis is carried
+    // beside it rather than replacing it: "grow to 60, widen to 40" is two statements, and
+    // both survive resolution (each axis lands on its own number, further down the pipe).
+    const both = resolveFxSequence(
+      masked({ kind: "rect", length: 20, width: 10, lengthTo: 60, widthTo: 40 }) as FxSequence,
+      scene, source, source, () => "image/png");
+    expect(both.ok).toBe(true);
+    if (!both.ok) return;
+    const pair = (both.sections[0] as Extract<typeof both.sections[number], { mask?: unknown }>)
+      .mask as { animate?: unknown };
+    expect(pair.animate).toEqual({ scale: 3, cross: { ratio: 4, axisDeg: 0 } });
+  });
+
+  test("resolution turns an authored growth into a unit-free ratio, not a second length", () => {
+    const resolved = resolveFxSequence(
+      masked({ kind: "circle", length: 15, lengthTo: 60 }) as FxSequence,
+      scene, source, source, () => "image/png");
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    const section = resolved.sections[0] as Extract<typeof resolved.sections[number], { mask?: unknown }>;
+    const mask = section.mask as { area: Array<{ x: number; y: number }>; invert: boolean; animate?: unknown };
+    // Four times the reach, as a ratio: a client still never learns what "15 ft" is. A
+    // circle takes no turn, so the recipe carries only the growth it was given.
+    expect(mask.animate).toEqual({ scale: 4 });
+    const radius = Math.max(...mask.area.map((point) => Math.hypot(point.x, point.y)));
+    expect(radius).toBeCloseTo(300, 3);
+    // A cone's turn travels as the degrees the author wrote — the polygon already holds
+    // the authored bearing, so the client only ever applies the delta.
+    const turning = resolveFxSequence(
+      masked({ kind: "cone", length: 20, angle: 90, spinDeg: 120 }) as FxSequence,
+      scene, source, source, () => "image/png");
+    expect(turning.ok).toBe(true);
+    if (!turning.ok) return;
+    const cone = turning.sections[0] as Extract<typeof turning.sections[number], { mask?: unknown }>;
+    expect((cone.mask as { animate?: unknown }).animate).toEqual({ spinDeg: 120 });
+    // A still region carries no animation at all — not an identity recipe.
+    const still = resolveFxSequence(masked({ kind: "circle", length: 15 }) as FxSequence,
+      scene, source, source, () => "image/png");
+    expect(still.ok).toBe(true);
+    if (!still.ok) return;
+    const plain = still.sections[0] as Extract<typeof still.sections[number], { mask?: unknown }>;
+    expect((plain.mask as { animate?: unknown }).animate).toBeUndefined();
+  });
+
+  test("the host resolves the shape into an offset polygon against the scene's own grid", () => {
+    // The fixture scene is 100 px per 5 ft, so a 15 ft circle is 300 px of radius.
+    const resolved = resolveFxSequence(masked({ kind: "circle", length: 15 }) as FxSequence,
+      scene, source, source, () => "image/png");
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    const section = resolved.sections[0] as Extract<typeof resolved.sections[number], { mask?: unknown }>;
+    const mask = section.mask as { area: Array<{ x: number; y: number }>; invert: boolean };
+    expect(mask.invert).toBe(false);
+    expect(mask.area.length).toBeGreaterThan(8);
+    const radius = Math.max(...mask.area.map((point) => Math.hypot(point.x, point.y)));
+    expect(radius).toBeCloseTo(300, 3);
+    // Relative to the anchor: the polygon is centred on the origin, not on (200, 200).
+    const centroid = mask.area.reduce((sum, point) => ({ x: sum.x + point.x, y: sum.y + point.y }),
+      { x: 0, y: 0 });
+    expect(Math.abs(centroid.x / mask.area.length)).toBeLessThan(1);
+    expect(Math.abs(centroid.y / mask.area.length)).toBeLessThan(1);
+    // The authored numbers are gone: what travels is the polygon.
+    expect(section.mask && "kind" in section.mask).toBe(false);
+    expect(JSON.stringify(resolved.sections)).not.toContain('"length"');
+  });
+
+  test("a cutout and an angle survive resolution; a shape with no metric is refused", () => {
+    const cut = resolveFxSequence(masked({ kind: "rect", length: 20, width: 10, angle: 90, invert: true }) as FxSequence,
+      scene, source, source, () => "image/png");
+    expect(cut.ok).toBe(true);
+    if (!cut.ok) return;
+    const mask = (cut.sections[0] as { mask?: { area: Array<{ x: number; y: number }>; invert: boolean } }).mask;
+    expect(mask?.invert).toBe(true);
+    // A 90° rect is taller than it is wide: its vertical extent is the length.
+    const height = Math.max(...(mask?.area ?? []).map((point) => Math.abs(point.y)));
+    const width = Math.max(...(mask?.area ?? []).map((point) => Math.abs(point.x)));
+    expect(height).toBeGreaterThan(width);
+    // A broken grid metric is refused: "15 ft" with no scale is not 15 px, it is a
+    // document the author cannot mean. A gridless scene is read 1:1 instead, which is
+    // the crosshair's own rule for a scene that has no metric by design.
+    const metricless = { ...scene, grid: { ...scene.grid, distance: 0 } };
+    const refused = resolveFxSequence(masked({ kind: "circle", length: 15 }) as FxSequence,
+      metricless, source, source, () => "image/png");
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.error).toContain("grid metric");
+    // A gridless scene *with* a metric converts exactly the same way (the picker reads
+    // the same fields), and a gridless scene without one is read 1:1 — its own rule for
+    // a scene that has no scale by design.
+    const gridless = { ...scene, grid: { ...scene.grid, type: "gridless" as const } };
+    const sameMetric = resolveFxSequence(masked({ kind: "circle", length: 15 }) as FxSequence,
+      gridless, source, source, () => "image/png");
+    expect(sameMetric.ok).toBe(true);
+    if (sameMetric.ok)
+      expect(Math.max(...((sameMetric.sections[0] as { mask?: { area: Array<{ x: number; y: number }> } })
+        .mask?.area ?? []).map((point) => Math.hypot(point.x, point.y)))).toBeCloseTo(300, 3);
+    const unmeasured = { ...scene,
+      grid: { ...scene.grid, type: "gridless" as const, size: 0, distance: 0 } };
+    const oneToOne = resolveFxSequence(masked({ kind: "circle", length: 15 }) as FxSequence,
+      unmeasured, source, source, () => "image/png");
+    expect(oneToOne.ok).toBe(true);
+    if (oneToOne.ok) {
+      const shape = (oneToOne.sections[0] as { mask?: { area: Array<{ x: number; y: number }> } }).mask;
+      expect(Math.max(...(shape?.area ?? []).map((point) => Math.hypot(point.x, point.y)))).toBeCloseTo(15, 3);
+    }
+  });
+
+  test("a drawn region becomes the mask it means, in the host's own words (D-317)", () => {
+    // A point has no area: the validator's own refusal, said before a draft is written.
+    expect(fxMaskFromCrosshair({ kind: "point" })).toBeNull();
+    // A circle has no facing: the drawn angle is not written, because the host's own field
+    // list for a circle has no `angle` to ignore.
+    expect(fxMaskFromCrosshair({ kind: "circle", length: 15, angle: 90 }))
+      .toEqual({ kind: "circle", length: 15 });
+    expect(fxMaskFromCrosshair({ kind: "cone", length: 30, spread: 90, angle: 45 }))
+      .toEqual({ kind: "cone", length: 30, spread: 90, angle: 45 });
+    expect(fxMaskFromCrosshair({ kind: "ray", length: 60, width: 5 }))
+      .toEqual({ kind: "ray", length: 60, width: 5, angle: 0 });
+    expect(fxMaskFromCrosshair({ kind: "rect", length: 20, width: 10, angle: -15 }))
+      .toEqual({ kind: "rect", length: 20, width: 10, angle: -15 });
+    // A cone drawn without an aperture keeps the crosshair's usual wedge — the same default
+    // the mask itself uses, so a drawn region and a typed one are the same shape.
+    expect(fxMaskFromCrosshair({ kind: "cone", length: 30 }))
+      .toMatchObject({ kind: "cone", spread: CROSSHAIR_DEFAULT_SPREAD });
+
+    // Everything a gesture can produce is a mask the host accepts: one rule, one
+    // implementation, so the wizard cannot accept what the save will refuse.
+    for (const shape of [{ kind: "circle", length: 15 }, { kind: "cone", length: 30, spread: 90 },
+      { kind: "ray", length: 60, width: 5 }, { kind: "rect", length: 20, width: 10 }] as const) {
+      const mask = fxMaskFromCrosshair(shape);
+      expect(mask, shape.kind).not.toBeNull();
+      expect(fxMaskError(mask), shape.kind).toBeNull();
+      expect(validateFxSequence({ version: 1, sections: [{ kind: "image", id: "drawn",
+        assetId: hash, at: { kind: "point", x: 10, y: 10 }, startMs: 0, durationMs: 500,
+        mask }] }).ok, shape.kind).toBe(true);
+    }
+
+    // A shape with no extent comes back as a mask *and* as the sentence that says why it
+    // cannot be saved, rather than as a second opinion invented in a window.
+    expect(fxMaskError(fxMaskFromCrosshair({ kind: "circle" })))
+      .toBe("an FX mask's length must be 0.5–5000 scene units");
+    // The extracted check keeps the vocabulary's own refusals and accepts the flags.
+    expect(fxMaskError({ kind: "point" }))
+      .toBe("an FX mask cannot be a point: it has no area to mask with");
+    expect(fxMaskError({ kind: "blob", length: 5 }))
+      .toBe("an FX mask must be a circle, cone, ray, rect or polygon");
+    expect(fxMaskError({ kind: "circle", length: 5, invert: true, walls: true })).toBeNull();
+  });
+});
+
+describe("animated transform: growth and spin (§SQ-05, D-302)", () => {
+  const visual = (patch: Record<string, unknown> = {}) => ({ version: 1, sections: [
+    { kind: "image", id: "coin", assetId: hash, at: { kind: "point", x: 200, y: 200 },
+      startMs: 0, durationMs: 1000, ...patch } as never] });
+
+  test("scaleTo and spinDeg are bounded, and a bad one names the field's own range", () => {
+    expect(validateFxSequence(visual({ scaleTo: 2.5 })).ok).toBe(true);
+    expect(validateFxSequence(visual({ spinDeg: 720 })).ok).toBe(true);
+    expect(validateFxSequence(visual({ spinDeg: -3600 })).ok).toBe(true);
+    expect(validateFxSequence(visual({ scaleTo: 0.01 })).ok).toBe(false);
+    expect(validateFxSequence(visual({ scaleTo: 11 })).ok).toBe(false);
+    expect(validateFxSequence(visual({ spinDeg: 3601 })).ok).toBe(false);
+    expect(validateFxSequence(visual({ spinDeg: -3601 })).ok).toBe(false);
+    expect(validateFxSequence(visual({ spinDeg: "fast" })).ok).toBe(false);
+    // The animation is a transform, not a movement: it does not need a destination.
+    expect(validateFxSequence(visual({ to: undefined, scaleTo: 2 })).ok).toBe(true);
+  });
+
+  test("neither field is a place for another kind of section to smuggle a setting", () => {
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "sound", id: "s", assetId: sound,
+      startMs: 0, durationMs: 500, spinDeg: 90 } as never] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "wait", id: "w", startMs: 0,
+      durationMs: 500, scaleTo: 2 } as never] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "camera", id: "c", mode: "pan",
+      to: { kind: "point", x: 10, y: 10 }, startMs: 0, durationMs: 500, spinDeg: 90 } as never] }).ok).toBe(false);
+  });
+});
+
+// D-304 (SQ-05): the filter's own strength animates now — `filter.strength` is where it
+// starts, `filterTo` where it ends, on the same curve the transform uses.
+describe("animated filter strength (§SQ-05, D-304)", () => {
+  const hash = "a".repeat(64);
+  const visual = (patch: Record<string, unknown> = {}) => ({ version: 1,
+    sections: [{ kind: "image", id: "ghost", assetId: hash, at: { kind: "point", x: 200, y: 200 },
+      startMs: 0, durationMs: 1000, filter: { kind: "blur", strength: 2 }, ...patch } as never] });
+
+  test("a filter animation needs a kind, and both of its ends live in that kind's range", () => {
+    expect(validateFxSequence(visual({ filterTo: 16 })).ok).toBe(true);
+    expect(validateFxSequence(visual({ filterTo: 1 })).ok).toBe(true); // the low end is still a blur
+    // A blur that faded to 0 would be a blur that stopped existing, which is what
+    // dropping the filter says — so 0 is out of range for this kind, not a special case.
+    expect(validateFxSequence(visual({ filterTo: 0 })).ok).toBe(false);
+    expect(validateFxSequence(visual({ filterTo: 33 })).ok).toBe(false);
+    expect(validateFxSequence(visual({ filterTo: "heavy" })).ok).toBe(false);
+    // The range belongs to the KIND: 1.5 is a blur and an impossible grayscale.
+    expect(validateFxSequence(visual({ filter: { kind: "grayscale" }, filterTo: 1 })).ok).toBe(true);
+    expect(validateFxSequence(visual({ filter: { kind: "grayscale" }, filterTo: 1.5 })).ok).toBe(false);
+    // Named as itself rather than as an unknown field.
+    const orphan = validateFxSequence({ version: 1, sections: [{ kind: "image", id: "g", assetId: hash,
+      at: { kind: "point", x: 1, y: 1 }, startMs: 0, durationMs: 500, filterTo: 4 } as never] });
+    expect(orphan.ok).toBe(false);
+    expect(orphan.ok ? "" : orphan.error).toContain("filter kind to animate");
+  });
+
+  test("D-313: a chain is bounded, each entry checked by its own kind's range, and the two spellings never mix", () => {
+    // This fixture's helper seeds the shorthand `filter`, so a chain case has to drop it —
+    // which is itself the point of the next block.
+    const ok = validateFxSequence(visual({ blend: "normal", filter: undefined,
+      filters: [{ kind: "grayscale", strength: 1 }, { kind: "blur", strength: 4 }] }) as never);
+    expect(ok.ok, ok.ok ? "" : ok.error).toBe(true);
+
+    // 2–4 entries: a one-entry chain is a second spelling of the shorthand, and five would
+    // be a stack the frame budget never agreed to.
+    for (const chain of [[{ kind: "blur" }], [{ kind: "blur" }, { kind: "blur" }, { kind: "blur" },
+      { kind: "blur" }, { kind: "blur" }], "blur", []]) {
+      const bad = validateFxSequence(visual({ filter: undefined, filters: chain }) as never);
+      expect(bad.ok, JSON.stringify(chain)).toBe(false);
+      if (!bad.ok) expect(bad.error).toContain("2–4");
+    }
+    // Both spellings at once is an ambiguity, refused by name.
+    const mixed = validateFxSequence(visual({
+      filter: { kind: "blur", strength: 4 },
+      filters: [{ kind: "grayscale" }, { kind: "saturate" }] }) as never);
+    expect(mixed.ok).toBe(false);
+    if (!mixed.ok) expect(mixed.error).toContain("either one filter or a chain");
+
+    // Each entry is validated on its own terms and blamed by position: a blur may hold 32
+    // and a grayscale may not, and the sentence says which entry offended.
+    const badKind = validateFxSequence(visual({ filter: undefined,
+      filters: [{ kind: "blur" }, { kind: "sepia" }] }) as never);
+    expect(badKind.ok).toBe(false);
+    if (!badKind.ok) expect(badKind.error).toContain("FX filter 2");
+    const badStrength = validateFxSequence(visual({ filter: undefined,
+      filters: [{ kind: "grayscale" }, { kind: "grayscale", strength: 9 }] }) as never);
+    expect(badStrength.ok).toBe(false);
+    if (!badStrength.ok) expect(badStrength.error).toContain("FX filter 2 (grayscale) strength must be 0–1");
+    const badTo = validateFxSequence(visual({ filter: undefined,
+      filters: [{ kind: "brightness", to: 80 }, { kind: "blur" }] }) as never);
+    expect(badTo.ok).toBe(false);
+    if (!badTo.ok) expect(badTo.error).toContain("FX filter 1 (brightness) must animate between 0 and 2");
+    const strayKey = validateFxSequence(visual({ filter: undefined,
+      filters: [{ kind: "blur" }, { kind: "blur", opacity: 0.5 }] }) as never);
+    expect(strayKey.ok).toBe(false);
+    if (!strayKey.ok) expect(strayKey.error).toContain("FX filter 2");
+
+    // …and a chain is refused where a single filter is: not on a sound, a wait or a camera
+    // section. The field list is the same one, so the refusal is the unknown-field one.
+    const onSound = validateFxSequence({ version: 1, sections: [{ kind: "sound", id: "s",
+      assetId: "a".repeat(64), at: { kind: "point", x: 1, y: 1 }, radius: 30,
+      startMs: 0, durationMs: 500, filters: [{ kind: "blur" }, { kind: "blur" }] }] } as never);
+    expect(onSound.ok).toBe(false);
+  });
+
+  test("D-313: the two spellings are two views of one look, and the write shape is canonical", () => {
+    expect(fxAuthoredFilters({})).toEqual([]);
+    expect(fxAuthoredFilters({ filter: { kind: "blur", strength: 4 } }))
+      .toEqual([{ kind: "blur", strength: 4 }]);
+    // The shorthand's animation end becomes the *entry's* end — one look, one reading.
+    expect(fxAuthoredFilters({ filter: { kind: "blur", strength: 4 }, filterTo: 12 }))
+      .toEqual([{ kind: "blur", strength: 4, to: 12 }]);
+    expect(fxAuthoredFilters({ filters: [{ kind: "blur", to: 12 }, { kind: "grayscale" }] }))
+      .toEqual([{ kind: "blur", to: 12 }, { kind: "grayscale" }]);
+    // …and the read is a copy: a caller that edits it cannot reach the document.
+    const authored = { filters: [{ kind: "blur" as const }] };
+    const copy = fxAuthoredFilters(authored)[0];
+    if (copy) copy.strength = 99;
+    expect(authored.filters[0]).toEqual({ kind: "blur" });
+
+    // Writing back: nothing for an empty chain, the shorthand for one, the chain for two+.
+    expect(fxFilterFields([])).toEqual({});
+    expect(fxFilterFields([{ kind: "blur" }])).toEqual({ filter: { kind: "blur" } });
+    expect(fxFilterFields([{ kind: "blur", strength: 4 }]))
+      .toEqual({ filter: { kind: "blur", strength: 4 } });
+    expect(fxFilterFields([{ kind: "blur", strength: 4, to: 12 }]))
+      .toEqual({ filter: { kind: "blur", strength: 4 }, filterTo: 12 });
+    expect(fxFilterFields([{ kind: "blur" }, { kind: "saturate", strength: 0.5 }]))
+      .toEqual({ filters: [{ kind: "blur" }, { kind: "saturate", strength: 0.5 }] });
+    // Round trip: a look read out of either spelling writes back as the same document a hand
+    // author would have written — that is what keeps "trim a chain to one" from leaving a
+    // one-entry chain behind (the host refuses that shape by name).
+    const trim = fxAuthoredFilters({ filters: [{ kind: "grayscale" }, { kind: "blur", strength: 6 }] })
+      .slice(1);
+    expect(fxFilterFields(trim)).toEqual({ filter: { kind: "blur", strength: 6 } });
+  });
+
+  test("D-313: a chain resolves in order, each entry by its own kind's rules", () => {
+    const plan = fxStylePlan({ filters: [{ kind: "grayscale", strength: 0.4 },
+      { kind: "blur", strength: 2, to: 16 }, { kind: "brightness" }] });
+    expect(plan).toEqual({ blend: "normal", filters: [
+      { kind: "grayscale", strength: 0.4 },
+      { kind: "blur", strength: 2, to: 16 },
+      { kind: "brightness", strength: 1.5 },
+    ] });
+    // A chain whose ends are out of range clamps per entry, never against a shared bound.
+    expect(fxStylePlan({ filters: [{ kind: "blur", strength: 900, to: 900 },
+      { kind: "grayscale", strength: 900, to: -4 }] }).filters)
+      .toEqual([{ kind: "blur", strength: 32, to: 32 }, { kind: "grayscale", strength: 1, to: 0 }]);
+
+    // The per-frame answer: entries walk their own ends on the shared curve, and an entry
+    // without an end holds exactly as authored while its neighbour moves.
+    const section = { durationMs: 1000 };
+    expect(fxFilterStrengths(plan.filters, section, 0)).toEqual([0.4, 2, 1.5]);
+    const half = fxFilterStrengths(plan.filters, section, 500);
+    expect(half[0]).toBe(0.4);
+    expect(half[1]).toBeCloseTo(9, 5);
+    expect(half[2]).toBe(1.5);
+    expect(fxFilterStrengths(plan.filters, section, 1000)[1]).toBe(16);
+    // A pulse says the same thing per entry: 3 cycles is 3 ramps, not one long one.
+    expect(fxFilterStrengths([{ kind: "blur", strength: 2, to: 16 }],
+      { durationMs: 900, repeats: 3 }, 150)[0]).toBeCloseTo(9, 5);
+    // Pure and total: a non-finite age or a zero-length section gives the authored start.
+    expect(fxFilterStrengths(plan.filters, section, Number.NaN)).toEqual([0.4, 2, 1.5]);
+    expect(fxFilterStrengths(plan.filters, { durationMs: 0 }, 10)).toEqual([0.4, 2, 1.5]);
+    expect(fxFilterStrengths([], section, 500)).toEqual([]);
+  });
+
+  test("the plan carries an animation's end only when the author asked for one", () => {
+    expect(fxStylePlan({ filter: { kind: "blur", strength: 2 } })).toEqual({ blend: "normal",
+      filters: [{ kind: "blur", strength: 2 }] });
+    expect(fxStylePlan({ filter: { kind: "blur", strength: 2 }, filterTo: 16 }).filters[0])
+      .toEqual({ kind: "blur", strength: 2, to: 16 });
+    // Clamped like the start: a hand-written cue must not render past its kind's range.
+    expect(fxStylePlan({ filter: { kind: "blur", strength: 2 }, filterTo: 900 }).filters[0])
+      .toEqual({ kind: "blur", strength: 2, to: 32 });
+    // Without a kind there is nothing to animate and nothing to clamp against.
+    expect(fxStylePlan({ filterTo: 16 })).toEqual({ blend: "normal", filters: [] });
+  });
+
+  test("the strength walks from one end to the other, eased, and pulses per cycle", () => {
+    const plan = { kind: "blur" as const, strength: 2, to: 10 };
+    const section = { durationMs: 1000 };
+    expect(fxFilterStrength(plan, section, 0)).toBeCloseTo(2, 5);
+    expect(fxFilterStrength(plan, section, 500)).toBeCloseTo(6, 5);
+    expect(fxFilterStrength(plan, section, 1000)).toBeCloseTo(10, 5);
+    // The section's own curve carries it, exactly like position, scale and spin.
+    expect(fxFilterStrength(plan, { ...section, easing: "easeIn" }, 500)).toBeCloseTo(4, 5);
+    expect(fxFilterStrength(plan, { ...section, easing: "easeOut" }, 500)).toBeCloseTo(8, 5);
+    // Two cycles over one window is a pulse: each cycle runs the whole animation, so the
+    // peak lands at the END of a cycle and the strength snaps back at the boundary.
+    const pulsed = { ...section, repeats: 2 };
+    expect(fxFilterStrength(plan, pulsed, 250)).toBeCloseTo(6, 5);
+    expect(fxFilterStrength(plan, pulsed, 499)).toBeCloseTo(10, 1);
+    expect(fxFilterStrength(plan, pulsed, 500)).toBeCloseTo(2, 5);
+    expect(fxFilterStrength(plan, pulsed, 1000)).toBeCloseTo(10, 5);
+    // A still filter is the start value, whatever the clock says.
+    expect(fxFilterStrength({ kind: "grayscale", strength: 0.5 }, section, 999)).toBeCloseTo(0.5, 5);
+    expect(fxFilterStrength(plan, section, Number.NaN)).toBeCloseTo(2, 5);
+    expect(fxFilterStrength(plan, { durationMs: 0 }, 100)).toBeCloseTo(2, 5);
+  });
+
+  test("resolving a visual keeps its animated filter: the host adds anchors, not style", () => {
+    const resolved = resolveFxSequence(
+      visual({ filter: { kind: "saturate", strength: 0.2 }, filterTo: 1.8 }) as FxSequence,
+      scene, source, source, () => "image/png");
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.sections[0]).toMatchObject({ filter: { kind: "saturate", strength: 0.2 },
+      filterTo: 1.8 });
   });
 });

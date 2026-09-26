@@ -20,6 +20,8 @@ import type {
   EphemeralMsg,
   FxStartMsg,
   FxEndMsg,
+  FxDeliveryMsg,
+  FxMediaAckState,
   AutomationTraceMsg,
   TaggerRulesResultMsg,
   PrefabResultMsg,
@@ -84,6 +86,7 @@ export interface ClientEvents {
   fx: FxStartMsg;
   /** Only a recipient of a persistent cue receives its end/revocation. */
   fxEnd: FxEndMsg;
+  fxDelivery: FxDeliveryMsg;
   /** GM-only tile/zone execution diagnostics. */
   automationTrace: AutomationTraceMsg;
   /** Host-allocated Tagger rules on exact scene-qualified refs (GM only). */
@@ -252,6 +255,17 @@ export class ClientSync {
   /** Best-effort host-clock offset estimate (null before the first pong). */
   clockOffset(): { offsetMs: number; rttMs: number } | null {
     return estimateClockOffset(this.clockSamples);
+  }
+
+  /**
+   * SQ-13/D-308: one viewer's answer about one asset of a cue it was sent — the bytes are
+   * in hand, they arrived late, or this device could not use them. No user, URL or asset
+   * name travels: the host matches the asset against the cue it fanned out to *this*
+   * session and turns the answers into one line for the requester.
+   */
+  reportFxMedia(ack: { runId: string; assetId: string; state: FxMediaAckState;
+    reason?: "fetch" | "decode"; ms?: number }): void {
+    this.send({ kind: "fx.media", ...ack });
   }
 
   /** §7 playback request (host stamps + rebroadcasts; GM/ASSISTANT only). */
@@ -525,6 +539,9 @@ export class ClientSync {
         return;
       case "fx.end":
         this.bus.emit("fxEnd", msg);
+        return;
+      case "fx.delivery":
+        this.bus.emit("fxDelivery", msg);
         return;
       case "automation.trace":
         this.bus.emit("automationTrace", msg);

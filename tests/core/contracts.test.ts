@@ -10,7 +10,8 @@ import type { CanFn } from "../../src/core/ownership";
 describe("§13 MsgKind map", () => {
   test("all byte values are unique", () => {
     const values = Object.values(MsgKind);
-    expect(values).toHaveLength(58);
+    expect(values).toHaveLength(60);
+    // The direction Record below is exhaustive by type: a new kind must appear there too.
     expect(new Set(values).size).toBe(values.length);
   });
 
@@ -44,6 +45,8 @@ describe("§13 MsgKind map", () => {
       "fx.stop": "c2h",
       "fx.stopMatching": "c2h",
       "fx.end": "h2c",
+      "fx.delivery": "h2c",
+      "fx.media": "c2h",
       "asset.manifest": "h2c",
       "roll.challenge": "h2c",
       ephemeral: "both",
@@ -75,7 +78,7 @@ describe("§13 MsgKind map", () => {
       pong: "internal",
       "relay.frame": "internal",
     };
-    expect(Object.keys(direction)).toHaveLength(58);
+    expect(Object.keys(direction)).toHaveLength(60);
     expect(direction.hello).toBe("c2h");
   });
 });
