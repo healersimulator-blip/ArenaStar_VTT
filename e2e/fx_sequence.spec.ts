@@ -1203,6 +1203,94 @@ test("a targeted camera moves only its audience's view", async ({ browser }) => 
   }
 });
 
+// D-316 (SQ-18): a timeline can be addressed to the people it is for, by name. The
+// assertion is two live stages: the chosen player's client shows the cue and the author
+// — who is not in the list — never receives it at all.
+test("a timeline addressed to chosen players reaches them and not its own author (D-316)", async ({ browser }) => {
+  test.setTimeout(180_000);
+  const hostCtx = await browser.newContext();
+  const playerCtx = await browser.newContext();
+  try {
+    const host = await hostCtx.newPage();
+    const player = await playerCtx.newPage();
+    await host.goto(entry + "?e2e=1");
+    await waitForSurface(host, "app");
+
+    // The person the cue is for has to exist before the author can pick them: the
+    // checklist is the world's own user list, not a field to type ids into.
+    await host.locator("#share").click();
+    const fragment = manualFragment(await host.locator("#invite-link").inputValue());
+    await player.goto(`${entry}?e2e=1&join=1#${fragment}`);
+    await expect.poll(() => player.locator("#offer-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await host.locator("#peer-code").fill(await player.locator("#offer-out").inputValue());
+    await host.locator("#code-apply").click();
+    await expect.poll(() => host.locator("#share-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await player.locator("#answer-input").fill(await host.locator("#share-out").inputValue());
+    await player.locator("#answer-apply").click();
+    await expect.poll(() => playerCall<boolean>(player, "connected"), { timeout: 30_000 }).toBe(true);
+    await waitForSurface(player, "playerCanvas");
+
+    await host.locator("#gm-macros").click();
+    await host.locator("[data-macro-fx-tab]").click();
+    const wizard = host.locator("[data-fx-wizard]");
+    await wizard.getByRole("button", { name: "New", exact: true }).click();
+    await wizard.getByRole("button", { name: "Text", exact: true }).click();
+    const textSection = wizard.locator("[data-fx-section]").nth(0);
+    await textSection.getByLabel("X", { exact: true }).fill("300");
+    await textSection.getByLabel("Y", { exact: true }).fill("300");
+    await textSection.getByLabel("Text", { exact: true }).fill("For your eyes");
+    await textSection.getByLabel("Duration ms").fill("1200");
+
+    // The run itself is addressed: chosen players, and the joined player is the one
+    // ticked. The author's own chip stays unticked — a chosen list names people.
+    await wizard.locator("[data-fx-audience]").selectOption("players");
+    const picker = wizard.locator("[data-fx-audience-players]");
+    const chips = picker.locator("label");
+    // The select seeds the author's own user, so the draft is never an empty list the
+    // host would refuse; addressing the player means unticking yourself, which is what a
+    // list of people is for.
+    const seeded = picker.locator("input:checked");
+    await expect(seeded).toHaveCount(1);
+    await seeded.uncheck();
+    const playerChip = chips.filter({ hasText: "player" });
+    await expect(playerChip).toHaveCount(1);
+    await playerChip.locator("input").check();
+    await expect(picker.locator("input:checked")).toHaveCount(1);
+    await wizard.locator("[data-fx-name]").fill("Whisper");
+    await wizard.locator("[data-fx-save]").click();
+    await expect(wizard.locator("li")).toContainText(["Whisper"]);
+
+    // A chosen list is a document fact, not a draft: reopening shows the list and the
+    // single name in it.
+    await wizard.locator("li").filter({ hasText: "Whisper" }).getByRole("button", { name: "Edit" }).click();
+    await expect(wizard.locator("[data-fx-audience]")).toHaveValue("players");
+    await expect(picker.locator("input:checked")).toHaveCount(1);
+
+    const fxCount = (page: import("@playwright/test").Page) => page.evaluate(() => {
+      const g = globalThis as unknown as {
+        __stage?: { getFxLayer: () => { count: number } };
+        __canvasStage?: { getFxLayer: () => { count: number } };
+      };
+      return (g.__stage ?? g.__canvasStage)?.getFxLayer().count ?? 0;
+    });
+    await wizard.locator("[data-fx-run]").click();
+    await expect.poll(() => fxCount(player), { timeout: 8_000 }).toBeGreaterThan(0);
+    // The author's own stage never shows it: the cue did not so much as travel there.
+    expect(await fxCount(host)).toBe(0);
+    await expect.poll(() => fxCount(player), { timeout: 8_000 }).toBe(0);
+
+    // The author is told the reach in counts — the whole line is counts, so no user is
+    // named in a payload or a notice (SQ-18).
+    const notice = host.locator("[data-notify]").filter({ hasText: "Whisper" });
+    await expect(notice).toHaveCount(1);
+    await expect(notice).toHaveText(/^Whisper: reached 1 viewer\(s\) — 1 skipped \(1 outside its audience\)$/);
+    await expect(player.locator("[data-player-notify]")).toHaveCount(0);
+  } finally {
+    await playerCtx.close();
+    await hostCtx.close();
+  }
+});
+
 // D-301 (SQ-19/SQ-05): an effect can be confined to a region or cut out of one. The
 // assertion is on the live sprite again — the polygon the host resolved has to be the
 // mask the renderer actually applied.

@@ -429,7 +429,8 @@ export interface FxInstanceDocument extends BaseDocument {
   sceneId: DocId;
   macroId: DocId;
   ownerId: UserId;
-  audience: "scene" | "gm" | "caller";
+  /** The run's audience, exactly as authored (D-316): a word or the users it names. */
+  audience: import("./fx").FxAudience;
   atHostTime: number;
   sections: import("./fx").ResolvedFxSection[];
   sourceTokenId?: DocId;

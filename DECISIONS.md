@@ -10914,3 +10914,94 @@ The conversion is stated here rather than presented as a green first run. Runs: 
 produces; the sampler conversion above was prompted by that batch standing at 73/74. `pnpm typecheck` 63 components / 0 blocking / 1
 advisory · `pnpm lint` exit 0 · `pnpm build` → `pnpm size` **3 878 940 B raw / 1 112 038 B gzip**
 (+5 111 raw over D-314), inside the 6 MB budget.
+
+## D-316 — a cue can name the people it is for (SQ-18, 2026-09-26)
+
+SQ-18 asks for visibility "per recipient: local-only, **named recipients**/group/GM, scene
+audience and source-bound visibility evaluated by host". The words were there — `scene`, `gm`,
+`caller` — and a *list* was not: a GM who wanted to show one player a clue had to use
+`caller` (which means whoever runs it, not whoever is meant to see it), and the only way to
+address a player was to have them run the cue themselves. This entry adds the fourth form:
+`audience: { players: [...] }`, at the run level and on a camera section alike, because a
+second vocabulary for "who gets this" is how one of the two drifts.
+
+**A list is data, and its data rules are strict.** 1–32 ids, each in the id grammar the rest of
+the wire uses, in the author's own order, with **no repeats** — a repeated user is refused
+rather than folded, so "who is in this list" has exactly one answer. Empty is refused as well:
+an audience of none is a cue with no purpose, and "nobody sees this section" is what deleting
+the section says. Every refusal names the fault (*"an FX audience's chosen players must be
+1–32 users"*, *"…must not repeat a user"*, *"…must be user ids"*, *"an FX audience takes only a
+`players` list of user ids"*), and the run level now reports a bad audience **its own sentence**
+instead of the pile that also mentions versions and section counts — a mistyped audience is the
+author's to fix, and pointing them at "1–48 sections" would send them to the wrong field.
+
+**Ids are users, and they are not resolved against the current roster.** A cue addressed to a
+player who is offline, or who has not joined yet, is still a cue addressed to them; the world's
+users change between sessions, so existence is a thing the *wizard* guarantees (it offers the
+world's own list) and not something the document must re-prove on every save. A chosen-players
+timeline is not thereby hidden from other readers either: `gm` remains the only audience that
+also hides the **document** (D-316 leaves the projection rule alone and says so in
+`projection.ts`) — the audience decides *delivery*, and the host is what keeps the cue away from
+everyone else.
+
+**One rule, four call sites.** `fxAudienceAllows(audience, viewer, callerId)` is where "is this
+viewer in it" lives now, and the host's four separate decisions call it: the preflight fan-out
+(which also keeps the caller-side *narrowing* able to narrow and nothing else), the post-commit
+re-check that re-reads the macro's **current** audience (a timeline edited between preflight and
+commit cannot deliver an audience that no longer holds), the stored-instance check (both the
+record's own audience and the timeline's must include the viewer), and the request gate. That
+last one is a deliberate tightening: publishing a cue has never been a licence to fire it *at
+other people*, so a player may now invoke only a timeline that includes them — the old rule
+refused a `gm`-audience cue and a chosen-players cue the caller is not in is the same refusal.
+
+**The audience decides who, and then stops.** A delivered cue carries no audience at all: the
+host strips the field from the sections it sends (`hostWithoutAudience`, identity-preserving
+when there is nothing to strip). Without that, a player addressed by a chosen-players *camera*
+would read the whole list — including users they cannot otherwise see — straight out of their
+own payload, which is the membership query SQ-18 keeps out of socket traffic, one hop in.
+Bystanders were already covered (an excluded viewer receives the section not at all); this
+closes the recipient's side too, and the preflight report stays counts-only, as D-295 built it:
+a user id never appears in a payload or a notice. A GM who is not in a chosen list does not
+receive the cue — that is the point of a list of *people* rather than a floor of privilege.
+
+**In the wizard.** Both audience selects gain "Chosen players…", which opens a checklist of the
+world's own users (each chip shows the name and the world's word for the role — GM, assistant,
+trusted, player) instead of asking anyone to type forty-character ids. Switching to the form
+**seeds the authoring user**, so the draft is never an empty list the host would refuse — the
+control cannot put the author in a state their own save would reject — and ticking and unticking
+is the edit. Ticking appends in the order the author ticks (their order is the document's), and
+unticking removes just that id, so a list naming a user this client cannot see survives an edit
+of the others. The authoring-time fitness warning follows the same reading: a chosen list counts
+as a *player* audience unless every user in it is GM-side, and an id the client cannot resolve
+counts as a player rather than quietly excusing GM-only media.
+
+**Gates.** `pnpm test` **3 819 passed / 12 skipped** (302 files: 300 passed, 2 skipped), +5
+cases: 3 in `tests/core/fx.test.ts` — the fourth form accepted at both levels and a bad word
+still refused by name; the run-level list refusals (empty, 33 ids, a repeat, a non-string id,
+an extra field, `null`, an array, a bare word) each with its message, the words and the absent
+audience unchanged; and the resolution table (a chosen list does not silently include the GM,
+`fxAudiencePlayers` is empty for every word, and a targeted camera section filters per viewer —
+including the identity-preserving case where nothing drops) — and 2 host cases in
+`tests/host/sync.test.ts`: a chosen-players run reaching exactly the one named user with the
+requester and the other player counted as *outside its audience*, the delivered cue and the
+report naming nobody, and a player outside the list refused while the named one may run it; plus
+a chosen-players *camera* section filtered per viewer with its list absent from the delivered
+copy and two entitled viewers counted as targeted rather than skipped. e2e:
+`e2e/fx_sequence.spec.ts` gained a phase with two real browser contexts that joins a player,
+authors "Whisper" addressed to them (unticking the author the select seeded), reopens it to
+prove the list is a document fact, runs it, and reads two live stages — the player's shows the
+cue, the author's never does, and the author's notice is exactly counts
+(*"Whisper: reached 1 viewer(s) — 1 skipped (1 outside its audience)"*). Runs: that phase alone
+**1 passed (9.5 s)**, `fx_sequence` on chromium **33/33** (2.4 m), and with `fx_item_binding` +
+`summons` at `--repeat-each=2` **76/76** (5.7 m). `pnpm typecheck` 63 components / 0 blocking /
+1 advisory · `pnpm lint` exit 0 · `pnpm build` → `pnpm size` **3 882 900 B raw / 1 113 085 B
+gzip** (+3 960 raw over D-315), inside the 6 MB budget.
+
+**Non-claims.** Not claimed: named *groups* (SQ-18's word — this repository has users and roles,
+not groups, and inventing a group concept to satisfy a parenthetical would be a data model of
+its own); per-recipient targeting of a *visual or sound* section (still only a camera section
+carries an audience — D-300's deliberate boundary stands); a chosen list on a **persistent**
+timeline's sections (persistent runs cannot carry camera sections at all); a "local only" audience
+word distinct from `caller`; the wizard offering a *search* over users (the checklist is the whole
+roster, which is what a table's roster is); and an audience list surviving a user's deletion with
+any special meaning — it simply names nobody.

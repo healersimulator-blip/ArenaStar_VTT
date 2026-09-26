@@ -303,14 +303,71 @@ export function fxPolygonSelfCrossing(points: readonly { x: number; y: number }[
 export const FX_MASK_LIMITS = { min: 0.5, max: 5_000, spreadMin: 1, spreadMax: 359 } as const;
 
 /**
- * Who a run — or one camera section of it — is delivered to. The same three words at
- * both levels, so an author does not have to learn a second vocabulary for "the GM's
- * view only"; the sequence level has always had them.
+ * Who a run — or one camera section of it — is delivered to. The words are one
+ * vocabulary at both levels, so an author does not have to learn a second one for
+ * "the GM's view only". SQ-18's **named recipients** are the fourth form: the words
+ * name a *rule*, and `{ players: [...] }` names users instead.
+ *
+ * A list is 1–32 user ids, in the author's own order, with no repeats. Empty is
+ * refused rather than read as "nobody": an audience of none is a cue with no purpose,
+ * and "nobody sees this section" is what deleting the section says. Ids are the
+ * world's user ids, so a cue addressed to a player who is offline, or who has not
+ * joined yet, is still a cue addressed to them.
  */
-export type FxSectionAudience = "scene" | "gm" | "caller";
+export type FxAudience = "scene" | "gm" | "caller" | { players: readonly string[] };
+/** One vocabulary at both levels; the name is kept for call sites that mean one section. */
+export type FxSectionAudience = FxAudience;
+export const FX_AUDIENCE_PLAYERS_MAX = 32;
 const AUDIENCES: readonly string[] = ["scene", "gm", "caller"];
+const AUDIENCE_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+/** Why this is not an audience, or null when it is one. */
+export function fxAudienceError(value: unknown): string | null {
+  if (typeof value === "string")
+    return AUDIENCES.includes(value) ? null
+      : "an FX audience must be scene, gm, caller or a list of chosen players";
+  if (!isObject(value) || Array.isArray(value))
+    return "an FX audience must be scene, gm, caller or a list of chosen players";
+  if (Object.keys(value).length !== 1 || !Array.isArray(value.players))
+    return "an FX audience takes only a `players` list of user ids";
+  const players = value.players as unknown[];
+  if (players.length < 1 || players.length > FX_AUDIENCE_PLAYERS_MAX)
+    return `an FX audience's chosen players must be 1–${FX_AUDIENCE_PLAYERS_MAX} users`;
+  if (players.some((id) => typeof id !== "string" || !AUDIENCE_ID.test(id)))
+    return "an FX audience's chosen players must be user ids";
+  if (new Set(players).size !== players.length)
+    return "an FX audience's chosen players must not repeat a user";
+  return null;
+}
+
 export const isFxSectionAudience = (value: unknown): value is FxSectionAudience =>
-  typeof value === "string" && AUDIENCES.includes(value);
+  fxAudienceError(value) === null;
+
+/**
+ * Does this audience include that viewer? One rule, used by the run level and by a
+ * section level alike, because two spellings of "who gets this" is how one of them
+ * drifts. The caller id is the *request's* owner, which for a GM-elevated script is
+ * the invoking caller rather than the system user.
+ */
+export function fxAudienceAllows(
+  audience: FxAudience | undefined,
+  viewer: FxViewer,
+  callerId: string,
+): boolean {
+  if (audience === undefined || audience === "scene") return true;
+  if (audience === "gm") return viewer.isGm;
+  if (audience === "caller") return viewer.id === callerId;
+  return audience.players.includes(viewer.id);
+}
+
+/**
+ * The users a chosen-players audience names; empty for every word. A word is a
+ * *policy*, not a list waiting to be expanded — a caller that treated `gm` as "every
+ * GM in the world" could turn one audience into a membership directory.
+ */
+export const fxAudiencePlayers = (audience: FxAudience | undefined): readonly string[] =>
+  typeof audience === "object" && audience !== null && Array.isArray(audience.players)
+    ? audience.players : [];
 
 export type FxFilterKind = "blur" | "grayscale" | "brightness" | "saturate";
 /**
@@ -656,10 +713,13 @@ function validAnchor(at: unknown): at is FxAnchor {
 export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequence } | { ok: false; error: string } {
   if (!isObject(value) || value.version !== 1 || !Array.isArray(value.sections) ||
     value.sections.length < 1 || value.sections.length > MAX_SECTIONS ||
-    (value.audience !== undefined && !["scene", "gm", "caller"].includes(String(value.audience))) ||
     (value.persistent !== undefined && typeof value.persistent !== "boolean")) {
-    return { ok: false, error: "FX sequence needs version 1, an audience, persistence flag and 1–48 sections" };
+    return { ok: false, error: "FX sequence needs version 1, a persistence flag and 1–48 sections" };
   }
+  // Its own sentence rather than the pile above: a mistyped audience is the author's
+  // fault and they can fix it, and "1–48 sections" would point them at the wrong field.
+  const audienceError = value.audience === undefined ? null : fxAudienceError(value.audience);
+  if (audienceError) return { ok: false, error: audienceError };
   if (Object.keys(value).some((key) => !["version", "sections", "audience", "persistent"].includes(key))) {
     return { ok: false, error: "unknown FX sequence field" };
   }
@@ -700,7 +760,7 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
       // Targeting is a camera cue's own business: a visual or sound section is still
       // delivered to every recipient, and its `audience` is an unknown field.
       if (section.audience !== undefined && !isFxSectionAudience(section.audience))
-        return { ok: false, error: "a camera section's audience must be scene, gm or caller" };
+        return { ok: false, error: "a camera section's audience must be scene, gm, caller or a list of chosen players" };
       if (section.mode === "pan") {
         if (!validAnchor(section.to) || section.intensity !== undefined ||
             (section.easing !== undefined && !isEasing(section.easing)) ||
@@ -913,7 +973,8 @@ export interface FxViewer {
 /**
  * Which sections of a run one viewer may receive. A camera section carries its own
  * audience (SQ-15's "local or recipient-targeted"): `scene` is everyone who gets the
- * run, `gm` is GM/assistant only, `caller` is the session that asked for the run.
+ * run, `gm` is GM/assistant only, `caller` is the session that asked for the run and
+ * `{ players }` is the users it names (D-316).
  * Everything else is `scene`-equivalent — targeting a visual or sound section would
  * need per-viewer media entitlement, which this helper deliberately does not pretend
  * to do.
@@ -930,10 +991,7 @@ export function fxSectionsForViewer(
 ): readonly ResolvedFxSection[] {
   const allowed = (section: ResolvedFxSection): boolean => {
     if (section.kind !== "camera") return true;
-    const audience = section.audience ?? "scene";
-    if (audience === "gm") return viewer.isGm;
-    if (audience === "caller") return viewer.id === callerId;
-    return true;
+    return fxAudienceAllows(section.audience, viewer, callerId);
   };
   return sections.every(allowed) ? sections : sections.filter(allowed);
 }

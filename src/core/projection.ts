@@ -139,6 +139,9 @@ export function docVisibleTo(
   if (doc.type === "macro" && (doc as MacroDocument).kind === "summon" &&
       !(validateSummon((doc as MacroDocument).summon).ok &&
         (doc as MacroDocument).summon?.playerCallable === true)) return false;
+  // `gm` is the one audience that also hides the DOCUMENT (D-316): the other forms,
+  // chosen players included, decide delivery only — a reader who may see a timeline may
+  // see who it is addressed to, and the host is what keeps it away from everyone else.
   if (doc.type === "macro" && (doc as MacroDocument).kind === "sequence" &&
       (doc as MacroDocument).sequence?.audience === "gm") return false;
   // D-310: a preset is an authoring aid — its own name and the media it references are

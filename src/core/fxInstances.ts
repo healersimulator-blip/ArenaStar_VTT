@@ -6,7 +6,7 @@
  */
 import type { AssetManifest, FxInstanceDocument, SceneDocument, WorldCollections } from "./documents";
 import type { Op } from "./ops";
-import { validateFxSequence, type FxSection } from "./fx";
+import { fxAudienceError, validateFxSequence, type FxSection } from "./fx";
 import { tagMatcher } from "./tags";
 import { crosshairPxPerUnit } from "./crosshair";
 
@@ -52,7 +52,7 @@ export function validateFxInstance(
 ): boolean {
   if (!scene || doc.type !== "fxInstance" || !ID.test(doc._id) || !ID.test(doc.macroId) ||
       !ID.test(doc.ownerId) || doc.sceneId !== scene._id || !doc.name || doc.name.length > 128 ||
-      !["scene", "gm", "caller"].includes(doc.audience) ||
+      fxAudienceError(doc.audience) !== null ||
       !Number.isFinite(doc.atHostTime) || doc.atHostTime < 0 ||
       !Array.isArray(doc.sections) || doc.sections.length < 1 || doc.sections.length > 16 ||
       (doc.sourceTokenId !== undefined && (!ID.test(doc.sourceTokenId) || !scene.tokens.some((t) => t._id === doc.sourceTokenId))) ||

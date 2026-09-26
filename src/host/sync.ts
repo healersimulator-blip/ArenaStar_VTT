@@ -105,7 +105,8 @@ import { OpLog } from "../core/oplog";
 import { UndoStack } from "../core/undo";
 import { can } from "../core/permissions";
 import { canFetchAsset, projectAssetManifest } from "../core/assetAccess";
-import { fxSectionsForViewer, resolveFxSequence, validateFxSequence } from "../core/fx";
+import { fxAudienceAllows, fxSectionsForViewer, resolveFxSequence, validateFxSequence,
+  type FxAudience } from "../core/fx";
 import type { ResolvedFxSection } from "../core/fx";
 import { planAutomation, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState,
   type AutomationEvent, type AutomationMethod } from "../core/automation";
@@ -230,7 +231,8 @@ interface PreparedFx {
    * viewers were entitled to the run. */
   targeting: { targeted: number; empty: number };
   callerId: string;
-  audience: "scene" | "gm" | "caller";
+  /** The run's effective audience: the narrowing if one was asked for, else the macro's. */
+  audience: FxAudience;
   checkedAtSeq: number;
   sourceTokenId?: string;
   targetTokenId?: string;
@@ -278,6 +280,28 @@ interface Session {
   assetBucket: TokenBucket;
   /** Last projected metadata sent to this peer (not asset bytes). */
   manifestFingerprint: string | null;
+}
+
+/**
+ * D-316: a delivered cue carries no audience. The host has already decided who gets
+ * what; repeating the audience in the payload would let a recipient read a
+ * chosen-players list — including users they cannot otherwise see — straight out of
+ * their own socket traffic, and SQ-18 keeps membership out of payloads. Returns the
+ * input array unchanged when there is nothing to remove, so an untargeted cue is still
+ * the very same object for every recipient.
+ */
+function hostWithoutAudience(
+  sections: readonly ResolvedFxSection[],
+): readonly ResolvedFxSection[] {
+  // Only a camera section carries one, so the kind check is the type's own rule, not a guess.
+  const strip = (section: ResolvedFxSection): ResolvedFxSection => {
+    if (section.kind !== "camera") return section;
+    const { audience: _audience, ...rest } = section;
+    void _audience;
+    return rest as ResolvedFxSection;
+  };
+  return sections.some((section) => section.kind === "camera" && section.audience !== undefined)
+    ? sections.map(strip) : sections;
 }
 
 function randomId(): string {
@@ -3224,8 +3248,12 @@ export class HostSync {
     if (!macro || macro.kind !== "sequence" || !scene || !macro.sequence)
       return invalid("sequence macro or scene missing");
     const isGm = caller.role === "GM" || caller.role === "ASSISTANT";
+    // A player may invoke only a timeline that *includes them* (D-316): the old rule
+    // refused a GM-audience cue, and a chosen-players cue the caller is not in is the
+    // same refusal — publishing a cue is not a licence to fire it at other people.
     if (!can(caller, "read", macro, "macros") || !can(caller, "read", scene, "scenes") ||
-        (!isGm && (macro.flags?.core?.playerCallable !== true || macro.sequence.audience === "gm")))
+        (!isGm && (macro.flags?.core?.playerCallable !== true ||
+          !fxAudienceAllows(macro.sequence.audience, { id: caller.id, isGm }, ownerId))))
       return forbidden("FX macro is not published for this caller");
     const callerScene = projectWorld(this.store.world, this.store.seq, caller).collections.scenes
       ?.find((s) => s._id === scene._id);
@@ -3252,12 +3280,14 @@ export class HostSync {
     // D-303: preflight also says who got a *reduced* payload (a targeted camera section,
     // D-300) and who was left with nothing, which is a different fact from a skip.
     const targeting = { targeted: 0, empty: 0 };
+    // D-316: one rule for every audience form, evaluated per viewer. A caller-side
+    // narrowing can only ever *narrow* what the saved macro already allows.
+    const audience: FxAudience = narrowAudience === "gm" ? "gm" : macro.sequence.audience ?? "scene";
     for (const viewer of this.sessions.values()) {
       const user = viewer.user;
       if (!user) continue;
-      if ((macro.sequence.audience === "gm" || narrowAudience === "gm") &&
-          user.role !== "GM" && user.role !== "ASSISTANT") { skipped.audience++; continue; }
-      if (macro.sequence.audience === "caller" && user.id !== ownerId) { skipped.audience++; continue; }
+      const asViewer = { id: user.id, isGm: user.role === "GM" || user.role === "ASSISTANT" };
+      if (!fxAudienceAllows(audience, asViewer, ownerId)) { skipped.audience++; continue; }
       if (!can(user, "read", macro, "macros") || !can(user, "read", scene, "scenes")) { skipped.rights++; continue; }
       const visibleScene = projectWorld(this.store.world, this.store.seq, user).collections.scenes
         ?.find((s) => s._id === scene._id);
@@ -3268,14 +3298,13 @@ export class HostSync {
         (step.kind === "image" || step.kind === "sound") && !available[step.assetId])) { skipped.media++; continue; }
       // Would this viewer receive the whole run? Targeting is decided by the author's
       // audiences, not by a document change, so it is settled here rather than later.
-      const entitled = fxSectionsForViewer(resolved.sections,
-        { id: user.id, isGm: user.role === "GM" || user.role === "ASSISTANT" }, ownerId);
+      const entitled = fxSectionsForViewer(resolved.sections, asViewer, ownerId);
       if (entitled.length === 0) { targeting.empty++; continue; }
       if (entitled.length < resolved.sections.length) targeting.targeted++;
       recipients.push(viewer);
     }
     return { ok: true, cue, recipients, callerId: ownerId, skipped, targeting,
-      audience: narrowAudience === "gm" ? "gm" : macro.sequence.audience ?? "scene",
+      audience,
       checkedAtSeq: this.store.seq,
       ...(source ? { sourceTokenId: source._id } : {}),
       ...(target ? { targetTokenId: target._id } : {}) };
@@ -3313,9 +3342,12 @@ export class HostSync {
       if (this.sessions.get(recipient.peerId) !== recipient || !user) continue;
       if (changed) {
         if (!scene || !macro || macro.kind !== "sequence" || !macro.sequence || !manifest ||
-            !can(user, "read", macro, "macros") || !can(user, "read", scene, "scenes") ||
-            (macro.sequence.audience === "gm" && user.role !== "GM" && user.role !== "ASSISTANT") ||
-            (macro.sequence.audience === "caller" && user.id !== prepared.callerId)) continue;
+            !can(user, "read", macro, "macros") || !can(user, "read", scene, "scenes")) continue;
+        // The macro may have been edited between preflight and commit, so the CURRENT
+        // audience decides; a forced GM narrowing survives the re-read.
+        const current: FxAudience = prepared.audience === "gm" ? "gm" : macro.sequence.audience ?? "scene";
+        if (!fxAudienceAllows(current, { id: user.id, isGm: user.role === "GM" || user.role === "ASSISTANT" },
+          prepared.callerId)) continue;
         const view = projectWorld(this.store.world, this.store.seq, user).collections.scenes
           ?.find((s) => s._id === scene._id);
         if (!view || (prepared.sourceTokenId && !view.tokens.some((t) => t._id === prepared.sourceTokenId)) ||
@@ -3327,9 +3359,13 @@ export class HostSync {
       // SQ-15/D-300: a camera section can be targeted, so the payload is built per
       // recipient. A viewer excluded from every section of a run receives nothing at
       // all rather than an empty cue they would have to reason about.
-      const forViewer = fxSectionsForViewer(prepared.cue.sections,
+      const entitled = fxSectionsForViewer(prepared.cue.sections,
         { id: user.id, isGm: user.role === "GM" || user.role === "ASSISTANT" }, prepared.callerId);
-      if (forViewer.length === 0) continue;
+      if (entitled.length === 0) continue;
+      // D-316: the audience is the host's business and does not travel. A recipient of a
+      // chosen-players section would otherwise read the whole list out of their own
+      // payload — the membership query SQ-18 keeps out of socket traffic, one hop in.
+      const forViewer = hostWithoutAudience(entitled);
       sentTo?.push(recipient);
       const forSound = hostScene ? this.fxOccludedFor(hostScene, forViewer, user.id) : forViewer;
       const shared = forViewer === prepared.cue.sections && forSound === forViewer;
@@ -3348,9 +3384,11 @@ export class HostSync {
     if (!scene || !macro || macro.kind !== "sequence" || !macro.sequence ||
         !validateFxInstance(doc, scene, manifest) ||
         !can(user, "read", scene, "scenes") || !can(user, "read", macro, "macros")) return false;
-    const isGm = user.role === "GM" || user.role === "ASSISTANT";
-    if ((doc.audience === "gm" || macro.sequence.audience === "gm") && !isGm) return false;
-    if ((doc.audience === "caller" || macro.sequence.audience === "caller") && user.id !== doc.ownerId) return false;
+    // Both the record's own audience and the timeline's must include this viewer: either
+    // one narrowing is enough to keep a stored instance out of a client's reach.
+    const asViewer = { id: user.id, isGm: user.role === "GM" || user.role === "ASSISTANT" };
+    if (!fxAudienceAllows(doc.audience, asViewer, doc.ownerId) ||
+        !fxAudienceAllows(macro.sequence.audience, asViewer, doc.ownerId)) return false;
     // `playerCallable` gates who may *request* playback, not who may see a GM's
     // scene-audience cue. Keep the same recipient policy as one-shot sequences.
     const view = projectWorld(this.store.world, this.store.seq, user).collections.scenes

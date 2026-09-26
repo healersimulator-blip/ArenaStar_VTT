@@ -2,14 +2,16 @@
   import { onDestroy, onMount, untrack } from "svelte";
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
-  import type { ActorDocument, AssetManifest, MacroDocument, SceneDocument } from "../../core/documents";
-  import { FX_FILTER_CHAIN_MAX, FX_FILTER_RANGES, FX_MASK_LIMITS, FX_POLYGON_POINTS, FX_SCALE_LIMITS,
-    FX_SPIN_LIMIT,
-    fxAuthoredFilters, fxFilterFields, resolveFxSequence,
+  import type { ActorDocument, AssetManifest, MacroDocument, SceneDocument,
+    UserDocument } from "../../core/documents";
+  import { FX_AUDIENCE_PLAYERS_MAX, FX_FILTER_CHAIN_MAX, FX_FILTER_RANGES, FX_MASK_LIMITS,
+    FX_POLYGON_POINTS, FX_SCALE_LIMITS, FX_SPIN_LIMIT,
+    fxAudiencePlayers, fxAuthoredFilters, fxFilterFields, resolveFxSequence,
     validateFxSequence, type FxAnchor,
-    type FxBlendMode, type FxCameraPathSection, type FxEasing, type FxFilterKind, type FxFilterStep,
+    type FxAudience, type FxBlendMode, type FxCameraPathSection, type FxEasing, type FxFilterKind,
+    type FxFilterStep,
     type FxMask,
-    type FxSection, type FxSectionAudience, type FxSequence, type FxImportPermissions } from "../../core/fx";
+    type FxSection, type FxSequence, type FxImportPermissions } from "../../core/fx";
   import { fxFitnessIssues } from "../../core/fxDelivery";
   import { SOUND_CHANNELS, SOUND_CHANNEL_LABELS, SOUND_RADIUS_LIMITS, cueSilentForViewer,
     soundChannelOf } from "../../core/fxSound";
@@ -60,6 +62,12 @@
   /** D-312: which committed moments fire it. `use` alone is the D-311 behaviour. */
   let bindEvents = $state<FxItemEvent[]>(["use"]);
   let scenes = $state<SceneDocument[]>([]);
+  /**
+   * D-316: the world's users, so a "chosen players" audience is picked from real names
+   * rather than typed ids. In the world's own order — the same order the checklist
+   * walks, so what the author reads is what the host compares.
+   */
+  let users = $state<UserDocument[]>([]);
   let media = $state<Array<{ hash: string; name: string; mime: string;
     visibility: AssetManifest[string]["visibility"]; exportRights: AssetManifest[string]["exportRights"] }>>([]);
   /**
@@ -107,7 +115,7 @@
       (id) => entries[id]?.mime);
     if (!resolved.ok) return [] as string[]; // the validator already shows the error
     return fxFitnessIssues(resolved.sections, { entries, canPlay,
-      ...(draft.audience === "gm" ? { audience: "gm" as const } : { audience: "scene" as const }) });
+      ...(audienceIsGmOnly(draft.audience) ? { audience: "gm" as const } : { audience: "scene" as const }) });
   });
   /** Picking and preview draw on the app's own canvas, so the wizard must point at the open scene. */
   const onOpenScene = $derived(!!activeSceneId && activeSceneId === sceneId);
@@ -116,6 +124,7 @@
     macros = [...client.store.getAll("macros")].filter((m) => m.kind === "sequence");
     presets = [...client.store.getAll("macros")].filter((m) => m.kind === "fxPreset");
     scenes = [...client.store.getAll("scenes")];
+    users = [...client.store.getAll("users")];
     actors = [...client.store.getAll("actors")];
     if (!actors.some((actor) => actor._id === bindActorId)) {
       bindActorId = actors[0]?._id ?? "";
@@ -422,12 +431,72 @@
   function changeCameraAudience(index: number, value: string): void {
     const before = draft.sections[index];
     if (!before || before.kind !== "camera") return;
+    const chosen = sectionAudience(value, before.audience);
     const { audience: _audience, ...remaining } = before;
     void _audience;
     draft = { ...draft, sections: draft.sections.map((old, i) => i === index
-      ? (value === "scene" ? remaining : { ...remaining, audience: value as FxSectionAudience }) as FxSection
+      ? (chosen === "scene" ? remaining : { ...remaining, audience: chosen }) as FxSection
       : old) };
   }
+
+  /** The word the audience selects show; the object form is the "players" option. */
+  const audienceWord = (audience: FxAudience | undefined): string =>
+    typeof audience === "object" && audience !== null ? "players" : audience ?? "scene";
+
+  /**
+   * D-316: turning a select into the chosen-players form must leave a **valid** draft
+   * behind, so an empty list is seeded with the authoring user — the one person the
+   * author knows is at the table — and the checklist is right there to add the rest.
+   * An audience of nobody is refused by the host, and a control that produces a draft
+   * the host would reject is not a control.
+   */
+  function chosenPlayers(audience: FxAudience | undefined): string[] {
+    const ids = [...fxAudiencePlayers(audience)];
+    if (ids.length) return ids;
+    const self = client.user?.id;
+    if (self) return [self];
+    return users.length ? [users[0]._id] : [];
+  }
+
+  /** One select value → the audience it means, keeping a list the author already has. */
+  function sectionAudience(value: string, before: FxAudience | undefined): FxAudience {
+    if (value === "players") return { players: chosenPlayers(before) };
+    return value === "gm" || value === "caller" ? value : "scene";
+  }
+
+  /**
+   * Ticking adds a player in the order the author ticks them (the order is theirs to
+   * keep); unticking removes just that id, so a list naming a user this client cannot
+   * see — a player who has not joined yet — survives an edit of the others.
+   */
+  function toggleAudiencePlayer(audience: FxAudience, id: string, on: boolean): FxAudience {
+    const ids = [...fxAudiencePlayers(audience)];
+    if (on) return { players: ids.includes(id) ? ids : [...ids, id] };
+    return { players: ids.filter((player) => player !== id) };
+  }
+
+  function changeRunAudience(value: string): void {
+    draft = { ...draft, audience: sectionAudience(value, draft.audience) };
+  }
+
+  /**
+   * Does this run reach only GM-side users? A chosen list of players is a player
+   * audience, so GM-only media is still the "cannot reach them" case for it — and an id
+   * this client cannot resolve is treated as a player rather than quietly excused.
+   */
+  function audienceIsGmOnly(audience: FxAudience | undefined): boolean {
+    if (audience === "gm") return true;
+    if (typeof audience !== "object" || audience === null) return false;
+    return fxAudiencePlayers(audience).every((id) => {
+      const user = users.find((entry) => entry._id === id);
+      return user?.role === "GM" || user?.role === "ASSISTANT";
+    });
+  }
+
+  /** The role tag beside a name in the checklist; the words the world itself uses. */
+  const roleTag = (user: UserDocument): string =>
+    user.role === "GM" ? "GM" : user.role === "ASSISTANT" ? "assistant"
+      : user.role === "TRUSTED" ? "trusted" : "player";
 
   /**
    * A mask is rebuilt from scratch when its shape changes: a circle that kept a ray's
@@ -1002,9 +1071,24 @@
     <label>Target <select bind:value={targetId}><option value="">None</option>
       {#each scene?.tokens ?? [] as t (t._id)}<option value={t._id}>{t.name}</option>{/each}
     </select></label>
-    <label>Audience <select data-fx-audience bind:value={draft.audience}>
-      <option value="scene">Entitled scene viewers</option><option value="gm">GM only</option><option value="caller">Caller only</option>
+    <label>Audience <select data-fx-audience value={audienceWord(draft.audience)}
+      onchange={(e) => changeRunAudience(e.currentTarget.value)}>
+      <option value="scene">Entitled scene viewers</option><option value="gm">GM only</option>
+      <option value="caller">Caller only</option><option value="players">Chosen players…</option>
     </select></label>
+    {#if audienceWord(draft.audience) === "players"}
+      <div class="audience-picker" data-fx-audience-players>
+        <small>Only these users receive the cue — everyone else is not sent it at all.
+          {fxAudiencePlayers(draft.audience).length}/{FX_AUDIENCE_PLAYERS_MAX} chosen.</small>
+        {#each users as user (user._id)}
+          <label class="audience-chip"><input type="checkbox" data-fx-audience-player={user._id}
+            checked={fxAudiencePlayers(draft.audience).includes(user._id)}
+            onchange={(e) => draft = { ...draft,
+              audience: toggleAudiencePlayer(draft.audience, user._id, e.currentTarget.checked) }} />
+            {user.name} <span class="audience-role">{roleTag(user)}</span></label>
+        {/each}
+      </div>
+    {/if}
     <label><input type="checkbox" bind:checked={playerCallable} /> Published for player invocation</label>
     <label><input type="checkbox" data-fx-persistent checked={draft.persistent === true}
       onchange={(e) => draft = { ...draft, persistent: e.currentTarget.checked }} /> Persist / loop until stopped</label>
@@ -1109,12 +1193,32 @@
         {/if}
         {#if section.kind === "camera"}
           <div class="controls">
-            <label>Seen by <select data-fx-camera-audience value={section.audience ?? "scene"}
+            <label>Seen by <select data-fx-camera-audience value={audienceWord(section.audience)}
               onchange={(e) => changeCameraAudience(i, e.currentTarget.value)}>
               <option value="scene">Everyone watching this timeline</option>
               <option value="gm">GMs only</option>
               <option value="caller">Only whoever runs it</option>
+              <option value="players">Chosen players…</option>
             </select></label>
+            {#if audienceWord(section.audience) === "players"}
+              <div class="audience-picker" data-fx-camera-audience-players>
+                <small>A viewer outside this list receives the run without this camera.</small>
+                {#each users as user (user._id)}
+                  <label class="audience-chip"><input type="checkbox"
+                    data-fx-camera-audience-player={user._id}
+                    checked={fxAudiencePlayers(section.audience).includes(user._id)}
+                    onchange={(e) => {
+                      const before = draft.sections[i];
+                      if (!before || before.kind !== "camera" || typeof before.audience !== "object" ||
+                          before.audience === null) return;
+                      const audience = toggleAudiencePlayer(before.audience, user._id, e.currentTarget.checked);
+                      draft = { ...draft, sections: draft.sections.map((old, index) => index === i
+                        ? { ...before, audience } as FxSection : old) };
+                    }} />
+                    {user.name} <span class="audience-role">{roleTag(user)}</span></label>
+                {/each}
+              </div>
+            {/if}
             <label>Camera <select data-fx-camera-mode value={section.mode}
               onchange={(e) => changeCameraMode(i, (e.target as HTMLSelectElement).value as "pan" | "shake" | "path")}>
               <option value="pan">Pan to a point</option><option value="shake">Shake in place</option>
@@ -1565,6 +1669,14 @@
   .waypoints strong { min-width: 1.4em; }
   .placements { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; color: #cfe6d8; }
   .placements span { border: 1px solid #4f7a61; border-radius: 3px; padding: 1px 5px; }
+  /* D-316: the checklist is a list of *people*, so it wraps as chips and shows each
+     name with the world's own word for their role. */
+  .audience-picker { display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
+    border: 1px solid #4a4f61; border-radius: 4px; padding: 4px 6px; }
+  .audience-picker > small { flex-basis: 100%; color: #b9c2d6; }
+  .audience-chip { display: inline-flex; gap: 4px; align-items: center; border: 1px solid #5a6076;
+    border-radius: 999px; padding: 1px 8px; }
+  .audience-role { color: #9aa3b8; font-size: 0.75rem; }
   .sections { display: grid; gap: 6px; max-height: 270px; overflow: auto; }
   fieldset { border: 1px solid #53586a; border-radius: 4px; padding: 6px; min-width: 0; display: grid; gap: 5px; }
   legend { color: #e6d6a1; }

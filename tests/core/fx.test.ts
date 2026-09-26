@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
-import { FX_FILTER_RANGES, fxAuthoredFilters, fxFilterFields, fxFilterStrengths,
+import { FX_AUDIENCE_PLAYERS_MAX, FX_FILTER_RANGES, fxAudienceAllows, fxAudiencePlayers,
+  fxAuthoredFilters, fxFilterFields, fxFilterStrengths,
   fxFilterStrength, fxSectionsForViewer, fxStylePlan, resolveFxSequence,
   validateFxSequence, type FxSequence } from "../../src/core/fx";
 import { fxFollowAnchors, fxPosition } from "../../src/canvas/layers/FxLayer";
@@ -462,13 +463,14 @@ describe("camera targeting: one run, different views (§SQ-15/SQ-18, D-300)", ()
     sections: [{ kind: "text", id: "t", text: "Now", at: { kind: "point", x: 10, y: 10 },
       startMs: 0, durationMs: 500 }, camera(patch)] });
 
-  test("the three audiences are accepted on a camera section, and only there", () => {
-    for (const audience of ["scene", "gm", "caller"]) {
-      expect(validateFxSequence(cue({ audience })).ok, audience).toBe(true);
+  test("the audience vocabulary is one vocabulary, and a section takes it only there", () => {
+    for (const audience of ["scene", "gm", "caller", { players: ["p-1"] }]) {
+      expect(validateFxSequence(cue({ audience })).ok, JSON.stringify(audience)).toBe(true);
     }
     const bad = validateFxSequence(cue({ audience: "party" }));
     expect(bad.ok).toBe(false);
-    if (!bad.ok) expect(bad.error).toBe("a camera section's audience must be scene, gm or caller");
+    if (!bad.ok) expect(bad.error)
+      .toBe("a camera section's audience must be scene, gm, caller or a list of chosen players");
     // A visual or sound section has no targeted delivery, so the field is unknown there.
     expect(validateFxSequence({ version: 1, sections: [{ kind: "image", id: "i", assetId: hash,
       at: { kind: "point", x: 1, y: 1 }, startMs: 0, durationMs: 500, audience: "gm" } as never] }).ok).toBe(false);
@@ -508,6 +510,72 @@ describe("camera targeting: one run, different views (§SQ-15/SQ-18, D-300)", ()
     expect(shake.ok).toBe(true);
     if (!shake.ok) return;
     expect(fxSectionsForViewer(shake.sections, { id: "p", isGm: false }, "p")).toHaveLength(0);
+  });
+
+  test("a run can name the users it is for, and a list that says nothing is refused (D-316)", () => {
+    const run = (audience: unknown) => validateFxSequence({ version: 1, audience, sections: [
+      { kind: "text", id: "t", text: "Now", at: { kind: "point", x: 10, y: 10 },
+        startMs: 0, durationMs: 500 }] });
+    // The words are unchanged, and an absent audience is still "everyone watching".
+    for (const audience of [undefined, "scene", "gm", "caller"]) {
+      expect(run(audience).ok, JSON.stringify(audience)).toBe(true);
+    }
+    expect(run({ players: ["p-1", "p-2"] }).ok).toBe(true);
+    const tooMany = Array.from({ length: FX_AUDIENCE_PLAYERS_MAX + 1 }, (_, index) => `p-${index}`);
+    for (const [audience, message] of [
+      [{ players: [] }, "an FX audience's chosen players must be 1–32 users"],
+      [{ players: tooMany }, "an FX audience's chosen players must be 1–32 users"],
+      [{ players: ["p-1", "p-1"] }, "an FX audience's chosen players must not repeat a user"],
+      [{ players: ["p-1", 2] }, "an FX audience's chosen players must be user ids"],
+      [{ players: ["p-1"], gm: true }, "an FX audience takes only a `players` list of user ids"],
+      [{ play: ["p-1"] }, "an FX audience takes only a `players` list of user ids"],
+      ["party", "an FX audience must be scene, gm, caller or a list of chosen players"],
+      [null, "an FX audience must be scene, gm, caller or a list of chosen players"],
+      [[], "an FX audience must be scene, gm, caller or a list of chosen players"],
+    ] as const) {
+      const result = run(audience);
+      expect(result.ok, JSON.stringify(audience) ?? "null").toBe(false);
+      if (!result.ok) expect(result.error).toBe(message);
+    }
+  });
+
+  test("a chosen list is resolved per viewer, and a word is never read as a list (D-316)", () => {
+    const gm = { id: "gm-1", isGm: true };
+    const listed = { id: "p-1", isGm: false };
+    const other = { id: "p-2", isGm: false };
+    const chosen = { players: ["p-1", "p-3"] };
+    // A chosen list does not silently include the GM: addressing people is an author's
+    // act, and "the GM sees everything" is what the other three forms are for.
+    expect(fxAudienceAllows(chosen, gm, "gm-1")).toBe(false);
+    expect(fxAudienceAllows(chosen, listed, "gm-1")).toBe(true);
+    expect(fxAudienceAllows(chosen, other, "gm-1")).toBe(false);
+    expect(fxAudienceAllows(undefined, other, "gm-1")).toBe(true);
+    expect(fxAudienceAllows("scene", other, "gm-1")).toBe(true);
+    expect(fxAudienceAllows("gm", gm, "gm-1")).toBe(true);
+    expect(fxAudienceAllows("gm", other, "gm-1")).toBe(false);
+    expect(fxAudienceAllows("caller", gm, "gm-1")).toBe(true);
+    expect(fxAudienceAllows("caller", other, "gm-1")).toBe(false);
+    // A word is a policy, not a list waiting to be expanded.
+    expect(fxAudiencePlayers(undefined)).toEqual([]);
+    expect(fxAudiencePlayers("gm")).toEqual([]);
+    expect(fxAudiencePlayers("scene")).toEqual([]);
+    expect(fxAudiencePlayers(chosen)).toEqual(["p-1", "p-3"]);
+  });
+
+  test("one section, different payloads: a chosen list cuts exactly the unlisted viewers", () => {
+    const resolved = resolveFxSequence(cue({ audience: { players: ["p-1"] } }) as FxSequence,
+      scene, source, source, () => undefined);
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    // Nothing to exclude → the host hands back the very same array.
+    expect(fxSectionsForViewer(resolved.sections, { id: "p-1", isGm: false }, "gm-1"))
+      .toBe(resolved.sections);
+    for (const viewer of [{ id: "p-2", isGm: false }, { id: "gm-1", isGm: true }]) {
+      const filtered = fxSectionsForViewer(resolved.sections, viewer, "gm-1");
+      expect(filtered, viewer.id).toHaveLength(1);
+      expect(filtered[0]?.kind, viewer.id).toBe("text");
+      expect(JSON.stringify(filtered), viewer.id).not.toContain("300");
+    }
   });
 });
 

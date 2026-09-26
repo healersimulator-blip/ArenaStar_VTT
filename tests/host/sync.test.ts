@@ -2067,6 +2067,112 @@ player.client.requestFxSync("s1");
     expect(playerReports).toHaveLength(0);
   });
 
+  test("a chosen-players audience reaches exactly the users it names (D-316)", async () => {
+    const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    const { bus: rexBus, client: rex } = await h.addPlayer(PLAYER_ID, "Rex");
+    const { bus: ivyBus, client: ivy } = await h.addPlayer(OTHER_ID, "Ivy");
+    const rexCues: ClientEvents["fx"][] = [];
+    const ivyCues: ClientEvents["fx"][] = [];
+    const gmCues: ClientEvents["fx"][] = [];
+    rexBus.on("fx", (msg) => rexCues.push(msg));
+    ivyBus.on("fx", (msg) => ivyCues.push(msg));
+    h.gmBus.on("fx", (msg) => gmCues.push(msg));
+    const reports: ClientEvents["fxDelivery"][] = [];
+    h.gmBus.on("fxDelivery", (msg) => reports.push(msg));
+    void rex; void ivy;
+
+    // One timeline whose run is for Rex, and whose camera is for Ivy.
+    h.gm.submit([{ kind: "create", coll: "macros", data: { _id: "chosen", type: "macro",
+      name: "chosen", ownership: { default: 1 }, flags: { core: { playerCallable: true } },
+      system: {}, kind: "sequence", command: "", sequence: { version: 1,
+        audience: { players: [PLAYER_ID] }, sections: [
+          { kind: "text", id: "a", text: "Psst", startMs: 0, durationMs: 400,
+            at: { kind: "point", x: 120, y: 120 } },
+          { kind: "camera", id: "b", mode: "pan", to: { kind: "point", x: 300, y: 300 },
+            audience: { players: [OTHER_ID] }, startMs: 0, durationMs: 400 }] } } as never }]);
+    await flushMicrotasks();
+    h.gm.requestSequence("chosen", "s1");
+    await flushMicrotasks();
+
+    // Rex is the only recipient: the GM who asked is not in the list either, and that is
+    // the point of a chosen audience — it is a list of people, not a floor of privilege.
+    expect(rexCues.filter((msg) => msg.kind === "fx.start")).toHaveLength(1);
+    expect(ivyCues).toHaveLength(0);
+    expect(gmCues.filter((msg) => msg.kind === "fx.start")).toHaveLength(0);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.recipients).toBe(1);
+    expect(reports[0]?.skipped).toEqual({ audience: 2, rights: 0, anchor: 0, media: 0 });
+    // The report counts, and the payload does not name: neither Ivy nor the audience list
+    // itself travels to Rex, who is the one client that *did* receive this cue.
+    expect(JSON.stringify(reports[0])).not.toContain(OTHER_ID);
+    const rexStart = rexCues.find((msg) => msg.kind === "fx.start");
+    const rexSections = rexStart?.kind === "fx.start" ? rexStart.sections : [];
+    expect(rexSections.map((step) => step.kind)).toEqual(["text"]);
+    expect(JSON.stringify(rexStart)).not.toContain(OTHER_ID);
+    expect(JSON.stringify(rexStart)).not.toContain(PLAYER_ID);
+
+    // Publishing a cue is not a licence to fire it at other people: Ivy, who is not in
+    // the list, is refused — while Rex, who is, may run it for himself.
+    const ivyRefused: string[] = [];
+    const rexRefused: string[] = [];
+    ivyBus.on("rejected", (event) => ivyRefused.push(event.detail));
+    rexBus.on("rejected", (event) => rexRefused.push(event.detail));
+    const rexCueCount = () => rexCues.filter((msg) => msg.kind === "fx.start").length;
+    const before = rexCueCount();
+    ivy.requestSequence("chosen", "s1");
+    await flushMicrotasks();
+    expect(ivyRefused).toHaveLength(1);
+    expect(rexCueCount()).toBe(before);
+    rex.requestSequence("chosen", "s1");
+    await flushMicrotasks();
+    expect(rexRefused).toHaveLength(0);
+    expect(rexCueCount()).toBe(before + 1);
+  });
+
+  test("a chosen-players camera section is filtered per viewer and its list never ships (D-316)", async () => {
+    const h = await setup({});
+    const { bus: rexBus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const { bus: ivyBus } = await h.addPlayer(OTHER_ID, "Ivy");
+    const rexCues: ClientEvents["fx"][] = [];
+    const ivyCues: ClientEvents["fx"][] = [];
+    const gmCues: ClientEvents["fx"][] = [];
+    rexBus.on("fx", (msg) => rexCues.push(msg));
+    ivyBus.on("fx", (msg) => ivyCues.push(msg));
+    h.gmBus.on("fx", (msg) => gmCues.push(msg));
+    const reports: ClientEvents["fxDelivery"][] = [];
+    h.gmBus.on("fxDelivery", (msg) => reports.push(msg));
+
+    h.gm.submit([{ kind: "create", coll: "macros", data: { _id: "look", type: "macro",
+      name: "look", ownership: { default: 1 }, flags: { core: { playerCallable: true } },
+      system: {}, kind: "sequence", command: "", sequence: { version: 1, audience: "scene",
+        sections: [
+          { kind: "text", id: "a", text: "Look", startMs: 0, durationMs: 400,
+            at: { kind: "point", x: 120, y: 120 } },
+          { kind: "camera", id: "b", mode: "pan", to: { kind: "point", x: 300, y: 300 },
+            audience: { players: [PLAYER_ID] }, startMs: 0, durationMs: 400 }] } } as never }]);
+    await flushMicrotasks();
+    h.gm.requestSequence("look", "s1");
+    await flushMicrotasks();
+
+    const starts = (cues: ClientEvents["fx"][]) =>
+      cues.filter((msg) => msg.kind === "fx.start").map((msg) =>
+        msg.kind === "fx.start" ? msg.sections.map((step) => step.kind) : []);
+    // Everyone entitled to the run gets it; only the named user gets the camera — and its
+    // delivered copy says nothing about who else the author addressed.
+    expect(starts(rexCues)).toEqual([["text", "camera"]]);
+    expect(starts(ivyCues)).toEqual([["text"]]);
+    expect(starts(gmCues)).toEqual([["text"]]);
+    const rexStart = rexCues.find((msg) => msg.kind === "fx.start");
+    if (rexStart?.kind === "fx.start")
+      expect(Object.keys(rexStart.sections[1] ?? {})).not.toContain("audience");
+    // Two viewers were entitled to the run and saw it without the camera: not a skip, and
+    // the report says so without naming them.
+    expect(reports[0]?.recipients).toBe(3);
+    expect(reports[0]?.skipped).toEqual({ audience: 0, rights: 0, anchor: 0, media: 0 });
+    expect(JSON.stringify(reports[0])).not.toContain(OTHER_ID);
+  });
+
   // D-303: targeted sections are not skips, and the GM has to hear about them — both
   // because "my targeting worked" is worth knowing and because a player who sees nothing
   // at all will ask why.
