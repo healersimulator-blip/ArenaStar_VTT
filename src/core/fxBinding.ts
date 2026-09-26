@@ -27,6 +27,14 @@
  * `onFailureId` when one is bound, and **nothing** when one is not — the binding says nothing
  * about misses, so playing the hit cue would be a lie), an author can override the
  * recognition either way, and `enabled: false` disables the binding without deleting it.
+ *
+ * **Which moment fires it** (D-312) is the other half of the contract: a sword's cue belongs
+ * to the swing, a wand's to the charge it burns, and the same item can therefore carry more
+ * than one bound cue — **one per event**, which is the D-311 "one item, one cue" rule
+ * generalised rather than dropped: what must stay a single answer is "which cue plays *when I
+ * do this*", not "which cue may this item ever play". Each event carries its own committed
+ * facts ({@link FX_ITEM_EVENT_CONTRACT}), so recognition reads the right thing: a saved-against
+ * spell for a use, the attack roll for an attack.
  */
 import type { ActorDocument, MacroDocument } from "./documents";
 import type { DocId } from "./ids";
@@ -34,6 +42,51 @@ import type { Op } from "./ops";
 
 /** How the cue for a use is chosen. `auto` follows the committed outcome. */
 export type FxRecognition = "auto" | "success" | "failure";
+
+/**
+ * What a committed moment turned out to be, as recognition reads it. `unknown` is an answer:
+ * a cast whose effect has not landed yet has no committed result, so no branch can honestly be
+ * chosen (and nothing fires).
+ */
+export type FxItemOutcome = "success" | "failure" | "unknown";
+
+/**
+ * The committed moments a bound cue can fire on (WZ-05's phase binding). Closed set: the use
+ * path can only deliver what it actually knows, and an unknown name is refused rather than
+ * kept as a field that never matches.
+ */
+export type FxItemEvent = "use" | "attack";
+
+export const FX_ITEM_EVENTS: readonly FxItemEvent[] = ["use", "attack"];
+
+/**
+ * WZ-06's **event/context contract**, as data rather than prose so the wizard, the use path and
+ * the tests read the same sentences: which moment each event is, which committed facts it
+ * carries, and what `auto` recognition counts as a failure.
+ */
+export interface FxItemEventContract {
+  /** What the moment is, in the author's words (the wizard shows this). */
+  label: string;
+  /** The committed facts the event carries — the context a binding's recognition reads. */
+  facts: string;
+  /** What `auto` recognition reads as a failure for this event. */
+  failure: string;
+}
+
+export const FX_ITEM_EVENT_CONTRACT: Readonly<Record<FxItemEvent, FxItemEventContract>> = {
+  use: {
+    label: "the item is used",
+    facts: "the item's own use as it committed: a cast paying a charge or slot, and whether the spell landed",
+    failure: "the spell did not land — it was lost or held, a touch attack missed, " +
+      "spell resistance turned it, or the target made its save (a multi-round cast that has " +
+      "not landed yet is `unknown` and fires nothing)",
+  },
+  attack: {
+    label: "the item attacks",
+    facts: "an attack line authored from this item, resolved: the attack roll's own outcome",
+    failure: "the attack missed (a confirmed critical is a success like any hit)",
+  },
+};
 
 export const FX_RECOGNITION_MODES: readonly FxRecognition[] = ["auto", "success", "failure"];
 
@@ -52,10 +105,24 @@ export interface FxItemBinding {
   recognition?: FxRecognition;
   /** Manual disable (default true): the item plays no cue, whatever the outcome. */
   enabled?: boolean;
+  /** Which committed moments fire it. Default `["use"]` — the D-311 behaviour, unchanged. */
+  events?: FxItemEvent[];
 }
 
 /** Every field a binding may carry — anything else is refused by name. */
-export const FX_BINDING_KEYS = ["actorId", "itemId", "onFailureId", "recognition", "enabled"] as const;
+export const FX_BINDING_KEYS = ["actorId", "itemId", "onFailureId", "recognition", "enabled",
+  "events"] as const;
+
+/** The events of a *valid* binding, defaulted and in the closed set's own order. */
+export function fxBindingEvents(binding: FxItemBinding): FxItemEvent[] {
+  if (binding.events === undefined || binding.events.length === 0) return ["use"];
+  return FX_ITEM_EVENTS.filter((event) => binding.events?.includes(event) === true);
+}
+
+/** Does this item's cue fire on that committed moment? */
+export function fxBindingFiresOn(binding: FxItemBinding, event: FxItemEvent): boolean {
+  return fxBindingEvents(binding).includes(event);
+}
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === "object" && !Array.isArray(value);
@@ -81,10 +148,23 @@ export function validateFxItemBinding(
     return invalid("an FX item binding's enabled must be a boolean");
   if (value.recognition === "failure" && value.onFailureId === undefined)
     return invalid("forcing the failure cue needs a bound failure timeline to play");
+  const events: FxItemEvent[] = [];
+  if (value.events !== undefined) {
+    if (!Array.isArray(value.events) || value.events.length === 0)
+      return invalid("an FX item binding fires on at least one event");
+    for (const event of value.events) {
+      if (!(FX_ITEM_EVENTS as readonly string[]).includes(String(event)))
+        return invalid(`an FX item binding fires on ${FX_ITEM_EVENTS.join(" or ")}, not "${String(event)}"`);
+      if (events.includes(event as FxItemEvent))
+        return invalid(`an FX item binding lists the ${String(event)} event twice`);
+      events.push(event as FxItemEvent);
+    }
+  }
   const binding: FxItemBinding = { actorId: value.actorId, itemId: value.itemId };
   if (typeof value.onFailureId === "string") binding.onFailureId = value.onFailureId;
   if (typeof value.recognition === "string") binding.recognition = value.recognition as FxRecognition;
   if (typeof value.enabled === "boolean") binding.enabled = value.enabled;
+  if (events.length > 0) binding.events = events;
   return { ok: true, binding };
 }
 
@@ -107,14 +187,19 @@ export function fxBindingMatches(macro: MacroDocument, actorId: DocId, itemId: D
 }
 
 /**
- * Which timeline a **committed** use plays. `null` means "play nothing", which is an answer:
- * a disabled binding, and an unrecognised failure with no failure cue bound. The default
- * branch is the timeline the binding is stored on, so a binding never has to repeat its own
- * id (and cannot point at a different one).
+ * Which timeline a **committed** moment plays. `null` means "play nothing", which is an
+ * answer: a disabled binding, a moment the binding does not fire on, and an unrecognised
+ * failure with no failure cue bound. The default branch is the timeline the binding is stored
+ * on, so a binding never has to repeat its own id (and cannot point at a different one).
+ *
+ * `event` defaults to `"use"`, which is exactly the D-311 behaviour: a binding that says
+ * nothing about events fires on the item's own use.
  */
-export function fxBindingBranch(macro: MacroDocument, outcome: "success" | "failure"): DocId | null {
+export function fxBindingBranch(macro: MacroDocument, outcome: "success" | "failure",
+  event: FxItemEvent = "use"): DocId | null {
   const binding = fxBindingOf(macro);
   if (binding === null || binding.enabled === false) return null;
+  if (!fxBindingFiresOn(binding, event)) return null;
   const recognition = binding.recognition ?? "auto";
   if (recognition === "success") return macro._id;
   if (recognition === "failure") return binding.onFailureId ?? null;
@@ -133,8 +218,12 @@ export interface FxBindingLookup {
   macro(id: DocId): MacroDocument | undefined;
   /** Whether the *editor* may read that document — the host passes its own `can(...)`. */
   readable(coll: "actors" | "macros", doc: { _id: DocId }): boolean;
-  /** Every timeline already bound to that item, so one item has exactly one bound cue. */
-  boundTimelines(actorId: DocId, itemId: DocId): readonly DocId[];
+  /**
+   * Every timeline already bound to that item and the events it fires on, so a *moment* on an
+   * item has exactly one cue (two timelines may share an item as long as they fire on
+   * different moments).
+   */
+  boundTimelines(actorId: DocId, itemId: DocId): readonly { id: DocId; events: readonly FxItemEvent[] }[];
 }
 
 /** The document rule for a timeline's binding, or `null` when it may be stored. */
@@ -160,11 +249,17 @@ export function fxItemBindingError(macro: MacroDocument, lookup: FxBindingLookup
     if (!lookup.readable("macros", target))
       return `${which} names a timeline its author cannot read`;
   }
-  // One item, one bound cue: two timelines naming the same item would make the use path
-  // choose arbitrarily, and "which cue plays when I press this" must never be a coin toss.
-  const others = lookup.boundTimelines(binding.actorId, binding.itemId)
-    .filter((id) => id !== macro._id);
-  if (others.length > 0) return "another timeline is already bound to that item";
+  // One cue per moment: two timelines firing on the same event of the same item would make the
+  // use path choose arbitrarily, and "which cue plays when I press this" must never be a coin
+  // toss. Two timelines *may* share an item when they fire on different moments — that is the
+  // point of phase binding (a swing cue and a charge-burn cue on the same weapon).
+  const mine = fxBindingEvents(binding);
+  const clash = lookup.boundTimelines(binding.actorId, binding.itemId)
+    .filter((other) => other.id !== macro._id)
+    .flatMap((other) => other.events)
+    .find((event) => mine.includes(event));
+  if (clash !== undefined)
+    return `another timeline is already bound to that item's ${clash} event`;
   return null;
 }
 

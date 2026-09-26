@@ -100,6 +100,8 @@
     SceneDocument,
   } from "../../core/documents";
   import { resolveAttackFlow, resolveManyshotFlow, resolveFirearmExplosionFlow } from "./pf1eResolveFlow";
+  import { attackLineItemId } from "./pf1eItemsTab";
+  import { fireBoundItemCue, fxItemCueNote } from "./fxItemCue";
   import { resolveManeuverFlow } from "../combat/pf1eManeuverFlow";
   import { resolveAidAnotherFlow, resolveFeintFlow } from "../combat/pf1eAidFeintFlow";
   import type { PF1eDefenseChoice } from "../../packages/pf1e/resolve";
@@ -916,8 +918,23 @@
         ...(resolveVerifiable ? { verifiable: true } : {}),
       });
       if (!outcome.ok) resolveError = outcome.error;
-      else if (outcome.hpWriteError !== null) {
-        resolveError = outcome.hpWriteError;
+      else {
+        // D-312: the swing has committed (the roll is made and the card posted) — a timeline
+        // bound to this weapon's `attack` event plays now. A refused or unresolvable attack
+        // returned above, so a bound cue can never precede a real hit or miss; a failed HP
+        // write is reported beside the cue, because the swing itself still happened.
+        if (outcome.result.ok) {
+          const itemId = attackLineItemId(doc, resolveAttackIndex);
+          if (itemId !== null) {
+            const cue = fxItemCueNote(fireBoundItemCue({ client, actor: doc, item: { _id: itemId },
+              outcome: outcome.result.outcome === "miss" ? "failure" : "success",
+              event: "attack", targetActor: info.actor }));
+            if (cue !== "") resolveWarning += cue;
+          }
+        }
+        if (outcome.hpWriteError !== null) {
+          resolveError = outcome.hpWriteError;
+        }
       }
     } finally {
       resolveBusy = false;

@@ -112,7 +112,7 @@ import { planAutomation, sweptTileEvents, tileContainsPoint, validateAutomation,
 import { attachedDeletionOps, attachedMovementOps, planPrefabPlacement, PREFAB_COLLECTIONS, validatePrefab } from "../core/prefabs";
 import { boundFxDeletionOps, fxInstanceMatches, validateFxInstance, validateFxInstanceFilter } from "../core/fxInstances";
 import { fxPresetDocumentError, macroStrayPresetError } from "../core/fxPresets";
-import { fxBindingDeletionOps, fxItemBindingError } from "../core/fxBinding";
+import { fxBindingDeletionOps, fxBindingEvents, fxItemBindingError } from "../core/fxBinding";
 import { planSummon, summonDeletionOps, summonMarker, summonPlacementError, validateSummon,
   type SummonSource } from "../core/summons";
 import { getByTag, isWorldTagRef, listTaggable, tagEditOps, tagRuleOps, tagsOf, TAGGABLE_COLLECTIONS, validSceneTagRefs,
@@ -1266,10 +1266,13 @@ export class HostSync {
       actor: (id) => this.store.get("actors", id) as ActorDocument | undefined,
       macro: (id) => this.store.get("macros", id) as MacroDocument | undefined,
       readable: (coll, doc) => can(user, "read", doc as BaseDocument, coll),
+      // D-312: the conflict is per *moment*, so the lookup answers with each bound timeline's
+      // events — D-311's rule, narrowed from "this item" to "this item's use"/"…'s attack".
       boundTimelines: (actorId, itemId) => (this.store.getAll("macros") as readonly MacroDocument[])
         .filter((candidate) => candidate.kind === "sequence" &&
           candidate.fxItem?.actorId === actorId && candidate.fxItem?.itemId === itemId)
-        .map((candidate) => candidate._id),
+        .map((candidate) => ({ id: candidate._id,
+          events: candidate.fxItem ? fxBindingEvents(candidate.fxItem) : [] })),
     });
   }
 

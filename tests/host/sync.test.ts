@@ -1599,6 +1599,66 @@ describe("Macros / FX host authority and audience", () => {
     expect(h.hostStore.get("actors", "a-hero")?.items.map((entry) => entry._id)).toEqual(["wand"]);
   });
 
+  test("phase binding: one cue per committed moment, and a swing does not answer a charge burn (D-312)", async () => {
+    const h = await setup();
+    const sections = [{ kind: "text", id: "s", text: "sparks", startMs: 0, durationMs: 600,
+      at: { kind: "point", x: 120, y: 120 }, color: "#ffffff", scale: 1 }];
+    const bound = (id: string, events?: string[]): MacroDocument =>
+      ({ _id: id, type: "macro", name: id, command: "", kind: "sequence", ownership: { default: 1 },
+        flags: {}, system: {}, sequence: { version: 1, audience: "scene", persistent: false,
+          sections }, fxItem: { actorId: "a-hero", itemId: "axe",
+          ...(events === undefined ? {} : { events }) } }) as unknown as MacroDocument;
+    const axe: ItemDocument = { _id: "axe", type: "item", name: "Greataxe",
+      ownership: { default: 0 }, flags: {}, system: {}, effects: [] };
+    const hero: ActorDocument = { _id: "a-hero", type: "actor", name: "Hero",
+      ownership: { default: 2 }, flags: {}, system: {}, items: [axe], effects: [] };
+    h.gm.submit([{ kind: "create", coll: "actors", data: hero }]);
+    await flushMicrotasks();
+
+    const refused: string[] = [];
+    h.gmBus.on("rejected", (event) => refused.push(event.detail));
+
+    // The charge-burn cue lands (no events field = the use event).
+    h.gm.submit([{ kind: "create", coll: "macros", data: bound("fx-burn") }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-burn")).toBeDefined();
+    // The swing cue shares the item legitimately — a different moment.
+    h.gm.submit([{ kind: "create", coll: "macros", data: bound("fx-swing", ["attack"]) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-swing")).toBeDefined();
+    // …but a second *use* cue on the same item is refused, and so is a both-moments cue that
+    // overlaps both existing ones. The refusal names the moment.
+    h.gm.submit([{ kind: "create", coll: "macros", data: bound("fx-second", ["use"]) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-second")).toBeUndefined();
+    expect(refused.join(" | ")).toContain("already bound to that item's use event");
+    h.gm.submit([{ kind: "create", coll: "macros", data: bound("fx-both", ["use", "attack"]) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-both")).toBeUndefined();
+    // A forged event name never reaches the store: the shape is validated before the conflict
+    // rule, so a hand-crafted op cannot smuggle an event nothing would ever fire on.
+    h.gm.submit([{ kind: "create", coll: "macros", data: bound("fx-forged", ["cast"]) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-forged")).toBeUndefined();
+    expect(refused.join(" | ")).toContain("not \"cast\"");
+
+    // Re-saving the swing cue keeps its own moment (the update path must not trip on itself).
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: "fx-swing" },
+      diff: { "fxItem.events": ["attack"] } }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-swing")?.fxItem?.events).toEqual(["attack"]);
+
+    // Deleting the weapon clears *both* bound timelines in the same envelope.
+    h.gm.submit([{ kind: "delete", ref: { coll: "items", id: "axe",
+      parent: { coll: "actors", id: "a-hero" } } }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-burn")?.fxItem).toBeUndefined();
+    expect(h.hostStore.get("macros", "fx-swing")?.fxItem).toBeUndefined();
+    h.host.undo();
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-swing")?.fxItem?.events).toEqual(["attack"]);
+  });
+
   test("an FX preset is GM-authored, GM-visible and never runnable (D-310)", async () => {
     const h = await setup({ [soundHash]: { name: "hum.wav", mime: "audio/wav", size: 4,
       chunks: 1, visibility: "referenced" } });

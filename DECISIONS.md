@@ -10555,3 +10555,89 @@ to its cast note after the commit. The quickbar's item casts share that path.
 on an attack or condition event (only the item's own cast), no chained cues (a cue never fires
 another binding), no player-authored bindings (authoring is the timeline's own GM/assistant
 rule), no cue for a non-PF1e system's item, and no UI for a binding in the Live FX manager.
+
+## D-312 — which moment fires it: phase binding, and the event contract (2026-09-25)
+
+D-311 bound a timeline to an item's *use* and wrote the one-binding-per-item rule to keep "which
+cue plays when I press this" from being a coin toss. A05's next clause asks for more: *phase*
+binding — the same weapon swings, the same wand burns a charge, and those are different moments
+with different committed facts. This entry generalises D-311's rule instead of dropping it:
+**one cue per moment**, not one cue per item.
+
+**The vocabulary (WZ-06's explicit event/context contract).** `FxItemEvent` is a closed set —
+`"use"` and `"attack"` — carried on the binding as `events?: FxItemEvent[]`, defaulting to
+`["use"]`, which is exactly the D-311 behaviour for every document already in the world (an
+absent field must keep meaning what it meant). `validateFxItemBinding` refuses a non-list, an
+empty list, an unknown name (`not "cast"`) and a repeated event, and `fxBindingEvents` — the
+reader every consumer uses — filters a *hand-edited* list down to the closed set rather than
+inventing an event from a document nobody validated. The contract is **data**, not a paragraph
+in a comment: `FX_ITEM_EVENT_CONTRACT` names each moment, the committed facts it carries and
+what `auto` recognition counts as a failure, and the wizard renders those very sentences beside
+the checkboxes, so the author and the code cannot drift apart in silence.
+
+| Event | The moment | What `auto` reads as a failure |
+| --- | --- | --- |
+| `use` | the item is used (a cast paying a charge/slot) | the spell did not land: lost, held, a missed touch attack, spell resistance, a made save (`pending` ⇒ `unknown` ⇒ nothing) |
+| `attack` | an attack line authored from this item is resolved | the attack missed (a confirmed crit is a success like any hit) |
+
+**Where each event is delivered.** `use` is where D-311 left it: the item window's cast and the
+quickbar's item slot, fired *after* the flow committed. `attack` is delivered by the two places
+an attack actually resolves — the **actor sheet's combat tab** (`resolveAttackFlow`, the GM's
+usual swing) and the **quickbar's attack slot**. Both read the item through the one join the
+sheet itself writes (`attackLineItemId` → `system.pf1e.attacks[i].itemId`, written by "make an
+attack from this item"); a hand-authored line that merely shares a weapon's name is not that
+item's line, and firing on it would play the wrong cue. The cue is requested only after
+`resolveAttackFlow` returned a resolved result — a refused attack (out of reach, no target, no
+shot loaded) returns above it and plays nothing, which is TR-17's "suppress uncommitted side
+effects on a denied action" applied to a swing. A failed *HP write* is reported beside the cue
+rather than instead of it: the swing happened, only the bookkeeping failed.
+
+**The conflict rule, narrowed.** `fxItemBindingError` now compares **events**: a second timeline
+on the same item's `use` is refused (`"another timeline is already bound to that item's use
+event"` — the refusal names the moment), while a swing cue and a charge-burn cue may share a
+weapon, which is the whole point. A both-moments cue overlapping two existing ones is refused
+on the first shared event. Re-saving a bound timeline still never conflicts with itself.
+
+**Non-claims.** `use` and `attack` are the only events: no `condition` (applying a condition to
+an actor is not an item's moment), no per-target or per-phase-of-cast binding (the item's use is
+one moment, not a sequence of phases), no cue on a spell's own save *result* arriving later than
+the cast, no chained cues, and no binding on a token or a scene. Within `attack`, only the
+**single-attack** verbs are wired — the sheet's own Resolve and the quickbar's attack slot — so a
+**Manyshot volley**, a **firearm explosion**, an **attack of opportunity**, a **combat maneuver**
+and an **aid/feint** swing post their own cards without a bound cue; an AoO is the same weapon by
+the same hand, but it is a different verb with its own flow, and claiming it without wiring it
+would be the kind of half-truth these entries exist to avoid. The wizard will not let an
+author save an event list it cannot fire (unticking the last box leaves it ticked) — the
+validator refuses the same shape anyway, so a hand-edited document fails loudly at the host
+rather than silently at the table.
+
+**Gates.** `pnpm test` **3 792 passed / 12 skipped** (302 files: 300 passed, 2 skipped), +9
+cases: 3 new blocks in
+`tests/core/fxBinding.test.ts` (the event list's closed/non-empty/repeat rules, the canonical
+round-trip; the default-is-`use` rule with a hand-edited empty list reading as the default and
+an unknown name filtered out rather than invented; the branch per event — a swing cue does not
+answer a charge burn, both moments on one timeline, and disable still winning; plus the
+contract's own shape, and the narrowed conflict rule), 1 in `tests/ui/fxItemCue.test.ts` (the
+lookup and the fire path are per event, a miss on the swing plays the swing's failure cue, and
+an item bound only to `attack` reads as unbound to a use), 1 in `tests/host/sync.test.ts`
+(through the real op path: a swing cue sharing an item with a use cue lands, a second use cue is
+refused *by moment name*, a forged `"cast"` event never reaches the store, the update path
+re-saves a cue with its own moment, and deleting the weapon clears **both** bound timelines —
+Undo restoring both bindings), and 2 in `tests/ui/pf1eAttackJoin.test.ts` (the writer/reader
+round-trip of `attacks[i].itemId`, the duplicate refusal, and every "this line names no item"
+shape reading as `null`). e2e: `e2e/fx_item_binding.spec.ts` gained phase (e) — an attack line
+authored from the generated wand, a swing timeline bound with `recognition: "success"` (so the
+phase is asserted, not the die), the sheet's own combat tab resolving the swing, the bound cue
+drawn on `__stage`, and the wand's charge-burn binding still intact beside it. Run: standalone
+**1/1** (42.4 s), and with `fx_sequence` + `summons` at `--repeat-each=2` — **68/68** in 13.8 m.
+Every touched call site was re-run in one batch (`sheets`, `pf1e_firearms`,
+`pf1e_wizard_combat`, `pf1e_cast_flow`, `pf1e_inventory`, `quickbar`) — **24/24** in 5.3 m —
+because D-312 edits the sheet's own resolve path, which those specs drive hard.
+`pnpm typecheck` 63 components / 0 blocking / 1 advisory · `pnpm lint` exit 0 ·
+`pnpm build` → `pnpm size` **3 868 649 B raw / 1 109 441 B gzip**, inside the 6 MB budget.
+- The canvas/vision/walls/join regression batch was run **twice** and came back **19/20 both
+  times**, with a *different* single failure each time — once `walls.spec.ts:105` (11.4 s
+  standalone pass), once the known `join.spec.ts:32` 30 s ceiling under batch load (14.0 s
+  standalone pass) — which is the D-291 load sensitivity these five specs have shown before,
+  not a change here: D-312 touches no canvas, vision or wall code. Recorded rather than
+  smoothed over; the batch is never claimed green.

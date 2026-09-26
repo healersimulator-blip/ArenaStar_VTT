@@ -21,7 +21,7 @@
     setItemUsesOp,
   } from "./pf1eItemsTab";
   import { resolveCastFlow } from "./pf1eCastFlow";
-  import { boundCueFor, fireBoundItemCue, fxCastOutcome } from "./fxItemCue";
+  import { boundCueFor, fireBoundItemCue, fxCastOutcome, fxItemCueNote } from "./fxItemCue";
   import { observePF1eItem } from "./pf1eItemWindow";
 
   let {
@@ -56,6 +56,10 @@
    * ask for — and a player simply sees nothing when the bound timeline is GM-only.
    */
   const boundCue = $derived(held === null ? null : boundCueFor(client, held.actor._id, held.item._id));
+  /** D-312: the same item may also carry a cue for the attack event (an attack line from it). */
+  const boundAttackCue = $derived(
+    held === null ? null : boundCueFor(client, held.actor._id, held.item._id, "attack"),
+  );
   const editable = $derived(
     held !== null && client.user !== null && can(client.user, "update", held.actor, "actors"),
   );
@@ -148,13 +152,10 @@
         } else {
           note = `${source.spellName} cast from ${view.item.name} — DC ${outcome.dc}, ${Math.max(0, source.charges - 1)} charge(s) left`;
         }
-        // D-311: the cue is requested *after* the commit — the branch follows the result the
-        // host just wrote, and a use the flow refused above plays nothing at all.
-        const cue = fireBoundItemCue({ client, actor: held.actor, item: held.item,
-          outcome: fxCastOutcome(outcome), targetActor: target });
-        if (cue.fired) note += ` · ${cue.note}`;
-        else if (cue.reason === "disabled") note += " · the item's bound cue is disabled";
-        else if (cue.reason === "no-branch") note += " · the item has no cue for that outcome";
+        // D-311/D-312: the cue is requested *after* the commit — the branch follows the result
+        // the host just wrote, and a use the flow refused above plays nothing at all.
+        note += fxItemCueNote(fireBoundItemCue({ client, actor: held.actor, item: held.item,
+          outcome: fxCastOutcome(outcome), targetActor: target }));
       }
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
@@ -260,6 +261,14 @@
           · recognition forced to {boundCue.fxItem.recognition}
         {/if}
         {#if boundCue.fxItem?.enabled === false}
+          · <span class="warn">disabled</span>
+        {/if}
+      </p>
+    {/if}
+    {#if boundAttackCue}
+      <p class="note" data-pf1e-item-window-fx-attack>
+        Bound attack cue: <strong>{boundAttackCue.name}</strong>
+        {#if boundAttackCue.fxItem?.enabled === false}
           · <span class="warn">disabled</span>
         {/if}
       </p>

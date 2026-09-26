@@ -13,8 +13,9 @@
   import { domCanPlay, fxViewPrefs } from "../../core/fxPrefs";
   import { FX_PRESET_LIMITS, fxPresetSections, validateFxPreset,
     type FxPresetDefinition } from "../../core/fxPresets";
-  import { FX_RECOGNITION_MODES, validateFxItemBinding,
-    type FxItemBinding, type FxRecognition } from "../../core/fxBinding";
+  import { FX_ITEM_EVENT_CONTRACT, FX_ITEM_EVENTS, FX_RECOGNITION_MODES, fxBindingEvents,
+    validateFxItemBinding,
+    type FxItemBinding, type FxItemEvent, type FxRecognition } from "../../core/fxBinding";
   import type { Json } from "../../core/documents";
   import { rememberPlacement, type NamedPlacement, type RequestCrosshairPick } from "./crosshairPicker";
   import type { PreviewFxSequence } from "./fxPreview";
@@ -53,6 +54,8 @@
   let bindFailureId = $state("");
   let bindRecognition = $state<FxRecognition>("auto");
   let bindEnabled = $state(true);
+  /** D-312: which committed moments fire it. `use` alone is the D-311 behaviour. */
+  let bindEvents = $state<FxItemEvent[]>(["use"]);
   let scenes = $state<SceneDocument[]>([]);
   let media = $state<Array<{ hash: string; name: string; mime: string;
     visibility: AssetManifest[string]["visibility"]; exportRights: AssetManifest[string]["exportRights"] }>>([]);
@@ -611,17 +614,31 @@
     bindFailureId = binding?.onFailureId ?? "";
     bindRecognition = binding?.recognition ?? "auto";
     bindEnabled = binding?.enabled !== false;
+    bindEvents = binding === undefined ? ["use"] : [...fxBindingEvents(binding)];
   }
+  /** The checkbox helper: at least one event stays ticked, so the author cannot save "never". */
+  function toggleBindEvent(event: FxItemEvent, on: boolean): void {
+    const next = on ? [...new Set([...bindEvents, event])] : bindEvents.filter((e) => e !== event);
+    bindEvents = next.length > 0 ? next : bindEvents;
+  }
+  /** The contract sentence the wizard shows for the moments this binding fires on. */
+  const bindEventHelp = $derived(bindEvents
+    .map((event) => `${FX_ITEM_EVENT_CONTRACT[event].label} — ${FX_ITEM_EVENT_CONTRACT[event].failure}`)
+    .join("; "));
   function selectBindActor(id: string): void {
     bindActorId = id;
     bindItemId = "";
   }
   /** The authored shape, or the reason it cannot be stored — the host repeats this check. */
   function bindingDraft(): FxItemBinding {
+    const events = FX_ITEM_EVENTS.filter((event) => bindEvents.includes(event));
     return { actorId: bindActorId, itemId: bindItemId,
       ...(bindFailureId ? { onFailureId: bindFailureId } : {}),
       ...(bindRecognition !== "auto" ? { recognition: bindRecognition } : {}),
-      ...(bindEnabled ? {} : { enabled: false }) };
+      ...(bindEnabled ? {} : { enabled: false }),
+      // The default is written out only when it is not the default: a binding saved from the
+      // wizard carries the events the author actually ticked.
+      ...(events.length === 1 && events[0] === "use" ? {} : { events }) };
   }
   function saveBinding(): void {
     error = ""; status = "";
@@ -640,6 +657,7 @@
     // Cleared means *deleted* (the D-295 msgpack trap: `undefined` arrives as `null`).
     client.submit([{ kind: "update", ref: { coll: "macros", id: editing }, diff: { "-=fxItem": null } }]);
     bindItemId = ""; bindFailureId = ""; bindRecognition = "auto"; bindEnabled = true;
+    bindEvents = ["use"];
     status = "Binding removed — the item plays nothing";
   }
 
@@ -1283,6 +1301,16 @@
             <option value={macro._id}>{macro.name}</option>
           {/each}
         </select></label>
+        <fieldset class="events" data-fx-binding-events>
+          <legend>Fires when</legend>
+          {#each FX_ITEM_EVENTS as event (event)}
+            <label title={FX_ITEM_EVENT_CONTRACT[event].facts}>
+              <input type="checkbox" data-fx-binding-event={event}
+                checked={bindEvents.includes(event)}
+                onchange={(e) => toggleBindEvent(event, e.currentTarget.checked)} />{event}
+            </label>
+          {/each}
+        </fieldset>
         <label>Recognition <select data-fx-binding-recognition bind:value={bindRecognition}>
           {#each FX_RECOGNITION_MODES as mode (mode)}
             <option value={mode}>{mode}</option>
@@ -1294,11 +1322,12 @@
           <button type="button" data-fx-binding-remove onclick={removeBinding}>Remove binding</button>
         {/if}
       </div>
-      <small>The cue is requested by the item's own use — a cast, from the item window or the
-        quickbar — <strong>after</strong> that use has committed, so a failed use can play its
-        own cue and a refused one plays nothing. The binding never rolls, damages or spends
-        anything, and it grants nothing: a player still needs the timeline published for them
-        ("players may run this") or the host refuses the cue.</small>
+      <small>The cue is requested <strong>after</strong> the moment it names has committed, so a
+        failed moment can play its own cue and a refused one plays nothing. What counts as a
+        failure here: {bindEventHelp}. One timeline may fire on each moment (a swing cue and a
+        charge-burn cue can share a weapon, but not the same moment). The binding never rolls,
+        damages or spends anything, and it grants nothing: a player still needs the timeline
+        published for them ("players may run this") or the host refuses the cue.</small>
     </div>
   {/if}
   <h4>Presets</h4>

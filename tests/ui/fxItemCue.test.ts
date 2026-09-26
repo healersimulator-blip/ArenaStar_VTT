@@ -134,4 +134,43 @@ describe("firing an item's bound cue (D-311)", () => {
     const both = client({ macros: [gmOnly, second], scenes: [scene([{ id: "t", actorId: "a-hero" }])] });
     expect(boundCuesFor(both, "a-hero", "wand").map((m) => m._id)).toEqual(["aaa", "secret"]);
   });
+
+  test("the lookup and the fire path are per event: a swing cue is not a use cue (D-312)", () => {
+    const burn = timeline("burn", { actorId: "a-hero", itemId: "axe" });
+    const swing = timeline("swing", { actorId: "a-hero", itemId: "axe", events: ["attack"],
+      onFailureId: "whiff" });
+    const whiff = timeline("whiff");
+    const c = client({ macros: [burn, swing, whiff],
+      scenes: [scene([{ id: "t-hero", actorId: "a-hero" }, { id: "t-ogre", actorId: "a-ogre" }])] });
+
+    // The item window reads two independent lines; each event finds its own cue.
+    expect(boundCueFor(c, "a-hero", "axe")?._id).toBe("burn");
+    expect(boundCueFor(c, "a-hero", "axe", "attack")?._id).toBe("swing");
+    expect(boundCuesFor(c, "a-hero", "axe", "attack").map((m) => m._id)).toEqual(["swing"]);
+
+    // A charge burn neither borrows the swing cue nor its failure cue.
+    const burnOutcome = fireBoundItemCue({ client: c, actor: hero(), item: { _id: "axe" },
+      outcome: "failure", targetActor: ogre() });
+    expect(burnOutcome).toEqual({ fired: false, reason: "no-branch" }); // burn has no failure cue
+
+    // The swing follows its own roll, and a miss plays the swing's failure cue.
+    const hit = fireBoundItemCue({ client: c, actor: hero(), item: { _id: "axe" },
+      outcome: "success", event: "attack", targetActor: ogre() });
+    expect(hit).toMatchObject({ fired: true, macroId: "swing" });
+    expect(c.requested.at(-1)).toEqual({ macroId: "swing", sceneId: "s1", source: "t-hero", target: "t-ogre" });
+    const miss = fireBoundItemCue({ client: c, actor: hero(), item: { _id: "axe" },
+      outcome: "failure", event: "attack", targetActor: ogre() });
+    expect(miss).toMatchObject({ fired: true, macroId: "whiff" });
+    if (miss.fired) expect(miss.note).toContain('bound failure cue "whiff" requested');
+
+    // An item bound only to a swing reads as unbound to a use — and vice versa.
+    const swingOnly = client({ macros: [swing, whiff],
+      scenes: [scene([{ id: "t", actorId: "a-hero" }])] });
+    expect(fireBoundItemCue({ client: swingOnly, actor: hero(), item: { _id: "axe" },
+      outcome: "success" })).toEqual({ fired: false, reason: "unbound" });
+    expect(swingOnly.requested).toHaveLength(0);
+    const burnOnly = client({ macros: [burn], scenes: [scene([{ id: "t", actorId: "a-hero" }])] });
+    expect(fireBoundItemCue({ client: burnOnly, actor: hero(), item: { _id: "axe" },
+      outcome: "success", event: "attack" })).toEqual({ fired: false, reason: "unbound" });
+  });
 });
