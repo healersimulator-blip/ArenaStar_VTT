@@ -63,6 +63,8 @@ export interface TokenDocument extends BaseDocument {
   rotation: number;
   width: number;
   height: number;
+  /** Vertical position in scene grid units; omitted legacy tokens are at zero. */
+  elevation?: number;
   /** Asset hash or external URL (§7 allows both). */
   img: string;
   actorId?: DocId;
@@ -122,6 +124,23 @@ export interface SoundDocument extends BaseDocument {
   loop: boolean;
 }
 
+export interface RegionDocument extends BaseDocument {
+  type: "region";
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Degrees clockwise about the region's center. */
+  rotation?: number;
+  /** Convex polygon in normalized, region-local coordinates. */
+  shape: { kind: "polygon"; points: Array<[number, number]> };
+  /** GM-only regions are retained in the host scene but omitted from player replicas. */
+  hidden?: boolean;
+  /** Inclusive active vertical band in scene grid units. */
+  triggerElevation?: { min: number; max: number };
+  sort?: number;
+}
+
 export interface TileDocument extends BaseDocument {
   type: "tile";
   /** GM-only tile until explicitly revealed; legacy tiles without this field remain visible. */
@@ -135,6 +154,10 @@ export interface TileDocument extends BaseDocument {
   rotation?: number;
   /** Optional trigger priority/z-sort; ties default to zero and then tile ID. */
   sort?: number;
+  /** Optional convex tile-local trigger polygon; absent preserves the rectangular trigger shape. */
+  triggerZone?: import("./tileTriggerZone").TileTriggerZone;
+  /** Inclusive active vertical band in scene grid units; absent has no elevation restriction. */
+  triggerElevation?: { min: number; max: number };
   above: boolean;
   occlusion: { mode: "roof" | "fade"; alpha: number };
 }
@@ -539,6 +562,8 @@ export interface SceneDocument extends BaseDocument {
   lights: LightDocument[];
   sounds: SoundDocument[];
   tiles: TileDocument[];
+  /** Optional on legacy scenes; first-class convex scene regions (D-358). */
+  regions?: RegionDocument[];
   drawings: DrawingDocument[];
   templates: TemplateDocument[];
   notes: NoteDocument[];
@@ -670,6 +695,7 @@ export type EmbeddedCollectionName =
   | "lights"
   | "sounds"
   | "tiles"
+  | "regions"
   | "drawings"
   | "templates"
   | "notes"

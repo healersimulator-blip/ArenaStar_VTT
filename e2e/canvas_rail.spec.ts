@@ -256,6 +256,15 @@ test.describe("canvas rail — tools (§10, D-256)", () => {
     await expect.poll(() => hostCall<Array<{ dim: number }>>(page, "lights")).toHaveLength(1);
     const [light] = await hostCall<Array<{ dim: number; color: string }>>(page, "lights");
     expect(light?.dim).toBe(cellSize * 2);
+    // The production lighting layer, not merely the saved light document, draws
+    // a scene-sized glow (the formerly smoke-only layer used normalized unit geometry).
+    await expect.poll(() => page.evaluate(() => {
+      type Node={children:Node[];getBounds():{width:number;height:number}};
+      type View={app:{stage:{getChildByLabel(label:string,deep:boolean):Node|null}}};
+      const stage=(globalThis as unknown as {__stage?:View}).__stage;
+      const glow=stage?.app.stage.getChildByLabel("lights",true)?.children[0];
+      return glow ? Math.min(glow.getBounds().width,glow.getBounds().height) : 0;
+    })).toBeGreaterThan(10);
   });
 
   test("map pins: hidden by default, visible pins lose their ownership gate", async ({ page }) => {

@@ -193,7 +193,7 @@
     <FxManagerPanel {client} {bus} />
   </div>
   <div class="tab-page" hidden={tab !== "zones"}>
-    <AutomationPanel {client} {bus} />
+    <AutomationPanel {client} {bus} getAsset={getFxAsset} />
   </div>
   <div class="tab-page" hidden={tab !== "tags"}>
     <TaggerPanel {client} {bus} />

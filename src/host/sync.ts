@@ -1,3 +1,5 @@
+import { snapshotMoveEntry } from "../core/moveDestination";
+import { snapTokenCenter } from "../canvas/grid";
 /**
  * §5/§6.4 HostSync — the authoritative sync endpoint (host side).
  *
@@ -69,7 +71,11 @@ import {
   randomSeedHex,
   sha256Hex,
 } from "../dice/commitReveal";
-import { worldSettingsFrom } from "../core/worldSettings";
+import { encumbranceOptionsOf, worldSettingsFrom } from "../core/worldSettings";
+import { sceneDifficultCells } from "../core/rules";
+import { tileTriggerElevationError, tileTriggerZoneError } from "../core/tileTriggerZone";
+import { automationSourceTile, regionGeometryError } from "../core/regionGeometry";
+import { pf1eMovePlan } from "../packages/pf1e/movement";
 import {
   isPendingExpired,
   pendingPruneOps,
@@ -108,8 +114,8 @@ import { canFetchAsset, projectAssetManifest } from "../core/assetAccess";
 import { fxAudienceAllows, fxSectionsForViewer, resolveFxSequence, validateFxSequence,
   type FxAudience } from "../core/fx";
 import type { ResolvedFxSection } from "../core/fx";
-import { planAutomation, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState,
-  type AutomationEvent, type AutomationMethod } from "../core/automation";
+import { automationImageError, pinnedSelectorError, planAutomation, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState,
+  type AutomationEvent, type AutomationMethod, type AutomationOutcome } from "../core/automation";
 import { attachedDeletionOps, attachedMovementOps, planPrefabPlacement, PREFAB_COLLECTIONS, validatePrefab } from "../core/prefabs";
 import { boundFxDeletionOps, fxInstanceMatches, validateFxInstance, validateFxInstanceFilter } from "../core/fxInstances";
 import { fxPresetDocumentError, macroStrayPresetError } from "../core/fxPresets";
@@ -142,7 +148,7 @@ import {
 } from "../core/ratelimit";
 import type { AssetGetMsg, FogGetMsg, FogPutMsg, FxDeliverySkips, FxMediaAckMsg, FxMediaAckState } from "../core/messages";
 import { fxMediaReport } from "../core/fxDelivery";
-import { soundSegments } from "../canvas/vision/wallSight";
+import { axisBlocks, soundSegments } from "../canvas/vision/wallSight";
 import { segmentsCross } from "../canvas/vision/polygon";
 import { MAX_FOG_PNG_BYTES } from "../core/fogExploration";
 import type { AssetServer } from "./assets";
@@ -617,6 +623,11 @@ interface ScriptInvocation {
   /** One durable Revert control for this script and its nested direct RPCs. */
   audit: ActionAudit;
 }
+
+type PlannedMovementPath = { endpoint: TokenDocument; stopFraction: number };
+type PreplannedMovementTrigger = { outcome: AutomationOutcome };
+const movementAutomationKey = (sceneId: string, tokenId: string, docId: string, tileId: string, method: AutomationMethod) =>
+  `${sceneId}\u0000${tokenId}\u0000${docId}\u0000${tileId}\u0000${method}`;
 
 export class HostSync {
   private readonly store: DocumentStore;
@@ -1218,10 +1229,486 @@ export class HostSync {
       this.reject(session, txId, validation.reason, validation.error);
       return;
     }
-    const committed = this.commitOps(normalized.ops, session.user.id, txId);
-    if (!committed.ok) {
-      this.reject(session, txId, "invariant", committed.error);
+    const movementError = this.playerMovementError(session.user, normalized.ops, txId);
+    if (movementError) {
+      this.reject(session, txId, "invariant", movementError);
+      return;
     }
+    const prepared = this.precommitStopMovement(normalized.ops, session.user.id, txId);
+    if (!prepared.ok) { this.reject(session, txId, "invariant", prepared.error); return; }
+    // User ops were permission-checked above; the only host-generated addition is
+    // a token-boundary correction for the same already-authorized moving token.
+    const finalValidation = this.validateOps(session.user, prepared.ops);
+    if (!finalValidation.ok) {
+      this.reject(session, txId, finalValidation.reason, finalValidation.error); return;
+    }
+    const commitOps = prepared.paths.size ? prepared.ops : normalized.ops;
+    const committed = this.commitOps(commitOps, session.user.id, txId, true, undefined, undefined,
+      false, prepared.paths, prepared.triggers, prepared.at);
+    if (!committed.ok) this.reject(session, txId, "invariant", committed.error);
+  }
+
+  /**
+   * PF1e walk allowance is enforced at the host for non-GM intents, never trusted
+   * to a player's canvas callback. The GM's own drag is an explicit override and
+   * bypasses both this guard and the local movement/AoO preflight. Every player
+   * budget comes from the linked actor's live derived speed (including encumbrance),
+   * rather than a duplicated 30-ft constant.
+   */
+  private playerMovementError(user: SessionUser, ops: readonly Op[], txId: TxId): string | null {
+    if (user.role === "GM") return null;
+    const moving = new Map<string, { sceneId: string; tokenId: string; before: TokenDocument }>();
+    for (const op of ops) {
+      if (op.kind !== "update" || op.ref.coll !== "tokens" || op.ref.parent?.coll !== "scenes" ||
+          !Object.keys(op.diff).some((key) => key === "x" || key === "y")) continue;
+      const before = this.store.resolve(op.ref) as TokenDocument | undefined;
+      if (before) moving.set(`${op.ref.parent.id}\\u0000${op.ref.id}`, {
+        sceneId: op.ref.parent.id, tokenId: op.ref.id, before,
+      });
+    }
+    if (moving.size === 0) return null;
+    const shadow = this.store.forkForPreflight();
+    const preview = shadow.applyEnvelope({ seq: shadow.seq + 1, ts: this.now(), by: user.id, txId,
+      ops: ops as Op[] });
+    if (!preview.ok) return null; // the ordinary commit path reports the authoritative schema error
+    const settings = encumbranceOptionsOf(worldSettingsFrom(this.store.getAll("settings")));
+    const derivedByActor = new Map<string, ReturnType<typeof deriveFromActorDocument>>();
+    const derived = (token: TokenDocument) => {
+      if (!token.actorId) return null;
+      const actor = this.store.get("actors", token.actorId) as ActorDocument | undefined;
+      const block = actor?.system?.pf1e;
+      if (!actor || actor.type !== "actor" || !block || typeof block !== "object" || Array.isArray(block)) return null;
+      let value = derivedByActor.get(actor._id);
+      if (!value) { value = deriveFromActorDocument(actor, settings); derivedByActor.set(actor._id, value); }
+      return value;
+    };
+    const byScene = new Map<string, Array<{ tokenId: string; before: TokenDocument }>>();
+    for (const row of moving.values()) {
+      const rows = byScene.get(row.sceneId) ?? [];
+      rows.push(row); byScene.set(row.sceneId, rows);
+    }
+    for (const [sceneId, rows] of byScene) {
+      const beforeScene = this.store.get("scenes", sceneId) as SceneDocument | undefined;
+      const afterScene = shadow.get("scenes", sceneId) as SceneDocument | undefined;
+      if (!beforeScene || !afterScene) continue;
+      const movedIds = new Set(rows.map((row) => row.tokenId));
+      const afterById = new Map(afterScene.tokens.map((token) => [token._id, token]));
+      const visibleScene = projectWorld(this.store.world, this.store.seq, user).collections.scenes
+        ?.find((scene) => scene._id === sceneId);
+      const visibleById = new Map((visibleScene?.tokens ?? []).map((token) => [token._id, token]));
+      const moverFacts = new Map(beforeScene.tokens.map((token) => [token._id, derived(token)]));
+      // Do not let a movement refusal disclose hidden opponents, walls or terrain.
+      // Reconstruct only this caller's projected scene, then stage the other moved
+      // companions at their submitted destinations for simultaneous group drags.
+      const visibleTokens = [...(visibleScene?.tokens ?? [])];
+      for (const row of rows) if (!visibleById.has(row.tokenId)) visibleTokens.push(row.before);
+      const tokens = visibleTokens.map((token) => {
+        const position = movedIds.has(token._id) ? afterById.get(token._id) ?? token : token;
+        const stats = moverFacts.get(token._id);
+        return { ...position, ...(stats ? { size: stats.size, shape: stats.reachShape } : {}) };
+      });
+      const explicitDispositions = visibleTokens.length > 0 && visibleTokens.every((token) => token.disposition !== "neutral");
+      const isAlly = explicitDispositions
+        ? (a: string, b: string) => visibleTokens.find((token) => token._id === a)?.disposition ===
+          visibleTokens.find((token) => token._id === b)?.disposition
+        : undefined;
+      const walls = (visibleScene?.walls ?? []).filter((wall) => axisBlocks(wall.move, wall.door)).map((wall) => ({
+        x1: wall.c[0] ?? 0, y1: wall.c[1] ?? 0, x2: wall.c[2] ?? 0, y2: wall.c[3] ?? 0,
+      }));
+      const terrain = sceneDifficultCells(visibleScene);
+      for (const row of rows) {
+        const endpoint = afterById.get(row.tokenId);
+        const actorStats = moverFacts.get(row.tokenId);
+        if (!endpoint || !actorStats || (row.before.x === endpoint.x && row.before.y === endpoint.y)) continue;
+        const tokenList = tokens.map((token) => token._id === row.tokenId
+          ? { ...token, x: row.before.x, y: row.before.y } : token);
+        const plan = pf1eMovePlan({ grid: beforeScene.grid, tokens: tokenList,
+          mover: { tokenId: row.tokenId, to: { x: endpoint.x, y: endpoint.y }, speedFt: actorStats.speedFt,
+            size: actorStats.size }, walls, ...(terrain ? { difficultCells: terrain.difficultCells } : {}),
+          ...(isAlly ? { isAlly } : {}) });
+        if (plan.refusal !== null)
+          return `${row.before.name} can't move there — ${plan.refusal}`;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Bounded Stop preflight. For one moving token, plan only the first movement
+   * graph that contains Stop, cache that exact outcome (including gates/RNG),
+   * and clip only when Stop actually ran and its world ops are limited to the
+   * triggering token correction plus that graph's own history. Conditional
+   * skips and graphs with additional effects keep ordinary post-commit behavior;
+   * multi-token intents retain D-347's narrower path.
+   */
+  private precommitStopMovement(
+    ops: Op[], by: UserId, txId: TxId,
+  ): { ok: true; ops: Op[]; paths: Map<string, PlannedMovementPath>; triggers?: Map<string, PreplannedMovementTrigger>; at?: number } | { ok: false; error: string } {
+    const movingTokens = new Map<string, { sceneId: string; tokenId: string; before: TokenDocument }>();
+    for (const op of ops) {
+      if (op.kind !== "update" || op.ref.coll !== "tokens" || op.ref.parent?.coll !== "scenes" ||
+          !Object.keys(op.diff).some((key) => key === "x" || key === "y")) continue;
+      const before = this.store.resolve(op.ref) as TokenDocument | undefined;
+      if (before) movingTokens.set(`${op.ref.parent.id}\u0000${op.ref.id}`, {
+        sceneId: op.ref.parent.id, tokenId: op.ref.id, before,
+      });
+    }
+    if (movingTokens.size === 1) {
+      const source = movingTokens.values().next().value as { sceneId: string; tokenId: string; before: TokenDocument } | undefined;
+      if (source) return this.preplanSingleTokenStop(ops, by, txId, source);
+    }
+    if (movingTokens.size > 1 && movingTokens.size <= 128) {
+      const multiple = this.preplanMultipleStops(ops, by, txId, movingTokens);
+      if (multiple) return multiple;
+    }
+    if (!movingTokens.size || movingTokens.size > 128) return { ok: true, ops, paths: new Map() };
+
+    const shadow = this.store.forkForPreflight();
+    const preview = shadow.applyEnvelope({ seq: shadow.seq + 1, ts: this.now(), by, txId, ops });
+    if (!preview.ok) return { ok: true, ops, paths: new Map() }; // normal validation reports authoritative errors
+    const movementGraphs = shadow.getAll("automations");
+    if (movementGraphs.length > 4096 || movingTokens.size * movementGraphs.length > 65_536)
+      return { ok: true, ops, paths: new Map() };
+
+    type MovementEvent = { docId: string; tileId: string; fraction: number; method: "enter" | "exit" };
+    type StopCandidate = {
+      sceneId: string; tokenId: string; tile: TileDocument; docId: string;
+      fraction: number; method: "enter" | "exit"; x: number; y: number; snap: boolean;
+    };
+    const selected = new Map<string, StopCandidate>();
+    for (const [key, source] of movingTokens) {
+      const scene = shadow.get("scenes", source.sceneId) as SceneDocument | undefined;
+      const endpoint = scene?.tokens.find((token) => token._id === source.tokenId);
+      if (!scene || !endpoint || (source.before.x === endpoint.x && source.before.y === endpoint.y)) continue;
+
+      const movementEvents: MovementEvent[] = [];
+      const stopEvents: StopCandidate[] = [];
+      for (const doc of movementGraphs) {
+        const checked = validateAutomation(doc.definition);
+        if (!checked.ok || checked.definition.sceneId !== scene._id ||
+            !checked.definition.methods.some((method) => method === "enter" || method === "exit")) continue;
+        const tile = automationSourceTile(scene, checked.definition.tileId, checked.definition.sourceKind);
+        if (!tile) continue;
+
+        for (const hit of sweptTileEvents(tile, source.before, endpoint, scene.grid)) {
+          if ((hit.method !== "enter" && hit.method !== "exit") || !checked.definition.methods.includes(hit.method)) continue;
+          movementEvents.push({ docId: doc._id, tileId: tile._id, fraction: hit.fraction, method: hit.method });
+
+          const gates = checked.definition.gates;
+          const step = checked.definition.steps.length === 1 ? checked.definition.steps[0] : undefined;
+          if (step?.kind !== "stopMovement" || (gates && (gates.paused || gates.chance !== undefined ||
+              gates.oncePerToken || gates.cooldownMs || gates.maxRuns))) continue;
+          // The graph's bookkeeping must also be able to commit. Avoid clipping when its only
+          // remaining reason to fail would otherwise be discovered after the movement envelope.
+          const state = doc.state ?? { count: 0, lastAt: 0, byToken: {} };
+          const tokenHistory = state.byToken?.[source.tokenId];
+          if (!validateAutomationState(state) || state.count >= 1_000_000 ||
+              (tokenHistory?.count ?? 0) >= 1_000_000 ||
+              (!tokenHistory && Object.keys(state.byToken ?? {}).length >= 4096)) continue;
+
+          const x = source.before.x + (endpoint.x - source.before.x) * hit.fraction;
+          const y = source.before.y + (endpoint.y - source.before.y) * hit.fraction;
+          if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+          stopEvents.push({
+            sceneId: scene._id, tokenId: source.tokenId, tile, docId: doc._id,
+            fraction: hit.fraction, method: hit.method, x, y, snap: step.snapToGrid === true,
+          });
+        }
+      }
+
+      stopEvents.sort((a, b) => a.fraction - b.fraction ||
+        (a.method === "enter" ? 0 : 1) - (b.method === "enter" ? 0 : 1) ||
+        (b.tile.sort ?? 0) - (a.tile.sort ?? 0) || a.tile._id.localeCompare(b.tile._id) ||
+        a.docId.localeCompare(b.docId));
+      const stop = stopEvents[0];
+      if (!stop) continue;
+      // Pre-commit is safe only if this is the sole movement trigger reached before the stop.
+      // Other graphs can branch, fail atomically, or redirect the token before this action runs.
+      const preceding = movementEvents.filter((event) => event.fraction <= stop.fraction + 1e-8);
+      if (preceding.length !== 1 || preceding[0]?.docId !== stop.docId ||
+          preceding[0]?.tileId !== stop.tile._id || preceding[0]?.method !== stop.method) continue;
+      selected.set(key, stop);
+    }
+    if (!selected.size) return { ok: true, ops, paths: new Map() };
+
+    const prepared = [...ops];
+    const paths = new Map<string, PlannedMovementPath>();
+    for (const [key, stop] of selected) {
+      const scene = shadow.get("scenes", stop.sceneId) as SceneDocument | undefined;
+      const endpoint = scene?.tokens.find((token) => token._id === stop.tokenId);
+      if (!scene || !endpoint)
+        return { ok: false, error: "Stop Token Movement endpoint disappeared during preflight" };
+
+      let point = { x: stop.x, y: stop.y };
+      if (stop.snap && scene.grid.type !== "gridless") {
+        if (!Number.isFinite(scene.grid.size) || scene.grid.size <= 0 ||
+            (scene.grid.type === "hex" && !(["oddQ", "evenQ", "oddR", "evenR"] as string[]).includes(scene.grid.hexLayout)))
+          continue; // leave ordinary movement intact; runtime action fails closed
+        point = snapTokenCenter(scene.grid.type === "hex"
+          ? { type: "hex", size: scene.grid.size, layout: scene.grid.hexLayout }
+          : { type: "square", size: scene.grid.size }, point.x, point.y);
+      }
+      if (point.x < 0 || point.y < 0 || point.x > scene.width || point.y > scene.height) continue;
+
+      paths.set(key, { endpoint: structuredClone(endpoint), stopFraction: stop.fraction });
+      if (endpoint.x !== point.x || endpoint.y !== point.y) prepared.push({
+        kind: "update",
+        ref: { coll: "tokens", id: stop.tokenId, parent: { coll: "scenes", id: stop.sceneId } },
+        diff: { x: point.x, y: point.y },
+      });
+    }
+    return { ok: true, ops: prepared, paths };
+  }
+
+  /**
+   * Group movement may cross one Stop-bearing graph per token. Plan those
+   * outcomes in the same deterministic order as post-commit dispatch, applying
+   * each plan only to the fork so later gates see earlier staged history. Keep
+   * the whole group conservative if a token has competing crossings or any
+   * candidate graph leaves the supported step family.
+   */
+  private preplanMultipleStops(
+    ops: Op[], by: UserId, txId: TxId,
+    sources: ReadonlyMap<string, { sceneId: string; tokenId: string; before: TokenDocument }>,
+  ): { ok: true; ops: Op[]; paths: Map<string, PlannedMovementPath>;
+    triggers: Map<string, PreplannedMovementTrigger>; at?: number } | undefined {
+    const shadow = this.store.forkForPreflight();
+    const preview = shadow.applyEnvelope({ seq: shadow.seq + 1, ts: this.now(), by, txId, ops });
+    if (!preview.ok) return undefined;
+    const definitions = shadow.getAll("automations");
+    if (definitions.length > 4096 || sources.size * definitions.length > 65_536) return undefined;
+
+    type Candidate = {
+      sceneId: string; tokenId: string; sourceKey: string;
+      before: TokenDocument; endpoint: TokenDocument; tile: TileDocument; docId: string;
+      method: "enter" | "exit"; fraction: number;
+      crossing: NonNullable<AutomationEvent["movementCrossing"]>;
+      direction: NonNullable<AutomationEvent["direction"]>;
+      movementEntry?: AutomationEvent["movementEntry"];
+    };
+    const candidates: Candidate[] = [];
+    for (const [sourceKey, source] of sources) {
+      const scene = shadow.get("scenes", source.sceneId) as SceneDocument | undefined;
+      const endpoint = scene?.tokens.find((token) => token._id === source.tokenId);
+      if (!scene || !endpoint || (source.before.x === endpoint.x && source.before.y === endpoint.y)) continue;
+      const dx = endpoint.x - source.before.x, dy = endpoint.y - source.before.y;
+      const direction: AutomationEvent["direction"] = {
+        ...(dx < -1e-6 ? { x: "left" as const } : dx > 1e-6 ? { x: "right" as const } : {}),
+        ...(dy < -1e-6 ? { y: "up" as const } : dy > 1e-6 ? { y: "down" as const } : {}),
+      };
+      const tokenCandidates: Candidate[] = [];
+      for (const doc of definitions) {
+        const checked = validateAutomation(doc.definition);
+        if (!checked.ok || checked.definition.sceneId !== scene._id) continue;
+        const tile = automationSourceTile(scene, checked.definition.tileId, checked.definition.sourceKind);
+        if (!tile) continue;
+        for (const hit of sweptTileEvents(tile, source.before, endpoint, scene.grid)) {
+          if (!checked.definition.methods.includes(hit.method)) continue;
+          if (hit.method !== "enter" && hit.method !== "exit") return undefined;
+          if (!checked.definition.steps.some((step) => step.kind === "stopMovement") ||
+              checked.definition.steps.some((step) => ["move", "rotate", "triggerTile", "sequence", "script", "summon", "resetHistory"]
+                .includes(step.kind))) return undefined;
+          const contact = { x: source.before.x + dx * hit.fraction, y: source.before.y + dy * hit.fraction };
+          const entry = hit.method === "enter" ? snapshotMoveEntry(tile, contact, true) : undefined;
+          tokenCandidates.push({ sceneId: scene._id, tokenId: source.tokenId, sourceKey,
+            before: source.before, endpoint, tile, docId: doc._id, method: hit.method, fraction: hit.fraction,
+            crossing: { tileId: tile._id, tokenId: source.tokenId, method: hit.method,
+              fraction: hit.fraction, ...contact }, direction,
+            ...(entry ? { movementEntry: { ...entry, tileId: tile._id, tokenId: source.tokenId } } : {}) });
+        }
+      }
+      // More than one trigger for a token needs normal post-commit arbitration;
+      // this bounded slice does not speculate through competing graphs.
+      if (tokenCandidates.length > 1) return undefined;
+      candidates.push(...tokenCandidates);
+    }
+    if (!candidates.length) return undefined;
+    const sceneIds = new Set(candidates.map((candidate) => candidate.sceneId));
+    if (sceneIds.size !== 1) return undefined;
+    candidates.sort((a, b) => a.sceneId.localeCompare(b.sceneId) || a.fraction - b.fraction ||
+      a.tokenId.localeCompare(b.tokenId) || (a.method === "enter" ? 0 : 1) - (b.method === "enter" ? 0 : 1) ||
+      (b.tile.sort ?? 0) - (a.tile.sort ?? 0) || a.tile._id.localeCompare(b.tile._id) || a.docId.localeCompare(b.docId));
+
+    const plannedAt = this.now();
+    const caller = this.sessionUsers().find((user) => user.id === by) ??
+      { id: by, role: "GM" as const, name: "System" };
+    const triggers = new Map<string, PreplannedMovementTrigger>();
+    const paths = new Map<string, PlannedMovementPath>();
+    const prepared = [...ops];
+    for (const candidate of candidates) {
+      const scene = shadow.get("scenes", candidate.sceneId) as SceneDocument | undefined;
+      const doc = shadow.get("automations", candidate.docId) as AutomationDocument | undefined;
+      const token = scene?.tokens.find((item) => item._id === candidate.tokenId);
+      const tile = scene?.tiles.find((item) => item._id === candidate.tile._id);
+      if (!scene || !doc || !token || !tile)
+        return { ok: true, ops: paths.size ? prepared : ops, paths, triggers, at: plannedAt };
+      const outcome = planAutomation(shadow.world, doc, {
+        scene, tile, token, method: candidate.method, caller, direction: candidate.direction,
+        movementOriginal: { tokenId: candidate.tokenId, x: candidate.endpoint.x, y: candidate.endpoint.y },
+        movementCrossing: candidate.crossing,
+        ...(candidate.movementEntry ? { movementEntry: candidate.movementEntry } : {}),
+        at: plannedAt, rng: this.rng,
+        hurtHeal: planAutomationHealth,
+        imageAssetError: (hash) => automationImageError(hash, this.manifestSource()),
+      }, this.systemUserId);
+      const key = movementAutomationKey(candidate.sceneId, candidate.tokenId, candidate.docId,
+        candidate.tile._id, candidate.method);
+      triggers.set(key, { outcome });
+      if (!outcome.ok || "skipped" in outcome) continue;
+      const applied = shadow.applyEnvelope({ seq: shadow.seq + 1, ts: plannedAt, by: this.systemUserId,
+        txId: `stop-plan-preview-${randomId()}`, ops: outcome.plan.ops });
+      if (!applied.ok || !outcome.plan.stoppedMovement.includes(`${candidate.sceneId}\u0000${candidate.tokenId}`)) continue;
+      const plannedGraph = shadow.get("automations", candidate.docId) as AutomationDocument | undefined;
+      if (!plannedGraph || JSON.stringify(plannedGraph.state?.variables ?? null) !==
+          JSON.stringify(doc.state?.variables ?? null)) continue;
+      const settledScene = shadow.get("scenes", candidate.sceneId) as SceneDocument | undefined;
+      const settled = settledScene?.tokens.find((item) => item._id === candidate.tokenId);
+      if (!settled) continue;
+      let stopPositionWrites = 0;
+      const stopOnly = outcome.plan.ops.every((op) => {
+        if (op.kind !== "update") return false;
+        if (op.ref.coll === "automations" && op.ref.id === candidate.docId)
+          return Object.keys(op.diff).every((field) => field === "state");
+        if (op.ref.coll === "tokens" && op.ref.id === candidate.tokenId &&
+            op.ref.parent?.coll === "scenes" && op.ref.parent.id === candidate.sceneId &&
+            Object.keys(op.diff).every((field) => ["x", "y", "flags"].includes(field))) {
+          stopPositionWrites++;
+          return stopPositionWrites === 1;
+        }
+        return false;
+      });
+      if (!stopOnly) continue;
+      paths.set(candidate.sourceKey, { endpoint: structuredClone(candidate.endpoint), stopFraction: candidate.fraction });
+      if (candidate.endpoint.x !== settled.x || candidate.endpoint.y !== settled.y) prepared.push({
+        kind: "update", ref: { coll: "tokens", id: candidate.tokenId,
+          parent: { coll: "scenes", id: candidate.sceneId } }, diff: { x: settled.x, y: settled.y },
+      });
+    }
+    return { ok: true, ops: paths.size ? prepared : ops, paths, triggers, at: plannedAt };
+  }
+
+  /**
+   * For one moving token, evaluate the first movement graph that can stop it
+   * against the exact post-intent shadow state. Reuse that plan after commit;
+   * use it to clip the intent only when its writes are limited to the Stop
+   * correction and root graph history. This preserves gates, random choices
+   * and conditional branches without executing planners twice.
+   */
+  private preplanSingleTokenStop(
+    ops: Op[], by: UserId, txId: TxId,
+    source: { sceneId: string; tokenId: string; before: TokenDocument },
+  ): { ok: true; ops: Op[]; paths: Map<string, PlannedMovementPath>;
+    triggers: Map<string, PreplannedMovementTrigger>; at?: number } | { ok: false; error: string } {
+    const unchanged = () => ({ ok: true as const, ops, paths: new Map<string, PlannedMovementPath>(),
+      triggers: new Map<string, PreplannedMovementTrigger>() });
+    const shadow = this.store.forkForPreflight();
+    const preview = shadow.applyEnvelope({ seq: shadow.seq + 1, ts: this.now(), by, txId, ops });
+    if (!preview.ok) return unchanged(); // authoritative validation reports the original error
+    const scene = shadow.get("scenes", source.sceneId) as SceneDocument | undefined;
+    const endpoint = scene?.tokens.find((token) => token._id === source.tokenId);
+    if (!scene || !endpoint || (source.before.x === endpoint.x && source.before.y === endpoint.y)) return unchanged();
+    const definitions = shadow.getAll("automations");
+    if (definitions.length > 4096) return unchanged();
+
+    type Candidate = {
+      doc: AutomationDocument; tile: TileDocument; method: "enter" | "exit"; fraction: number;
+      crossing: NonNullable<AutomationEvent["movementCrossing"]>;
+      movementEntry?: AutomationEvent["movementEntry"];
+    };
+    const dx = endpoint.x - source.before.x, dy = endpoint.y - source.before.y;
+    const direction: AutomationEvent["direction"] = {
+      ...(dx < -1e-6 ? { x: "left" as const } : dx > 1e-6 ? { x: "right" as const } : {}),
+      ...(dy < -1e-6 ? { y: "up" as const } : dy > 1e-6 ? { y: "down" as const } : {}),
+    };
+    const candidates: Candidate[] = [];
+    for (const doc of definitions) {
+      const checked = validateAutomation(doc.definition);
+      if (!checked.ok || checked.definition.sceneId !== scene._id) continue;
+      const tile = automationSourceTile(scene, checked.definition.tileId, checked.definition.sourceKind);
+      if (!tile) continue;
+      for (const hit of sweptTileEvents(tile, source.before, endpoint, scene.grid)) {
+        if ((hit.method !== "enter" && hit.method !== "exit") || !checked.definition.methods.includes(hit.method)) continue;
+        const contact = { x: source.before.x + dx * hit.fraction, y: source.before.y + dy * hit.fraction };
+        const entry = hit.method === "enter" ? snapshotMoveEntry(tile, contact, true) : undefined;
+        candidates.push({ doc, tile, method: hit.method, fraction: hit.fraction,
+          crossing: { tileId: tile._id, tokenId: source.tokenId, method: hit.method,
+            fraction: hit.fraction, ...contact },
+          ...(entry ? { movementEntry: { ...entry, tileId: tile._id, tokenId: source.tokenId } } : {}) });
+      }
+    }
+    const methodOrder = { enter: 0, exit: 1 } as const;
+    candidates.sort((a, b) => a.fraction - b.fraction || methodOrder[a.method] - methodOrder[b.method] ||
+      (b.tile.sort ?? 0) - (a.tile.sort ?? 0) || a.tile._id.localeCompare(b.tile._id) || a.doc._id.localeCompare(b.doc._id));
+    const first = candidates[0];
+    if (!first) return unchanged();
+    const checked = validateAutomation(first.doc.definition);
+    if (!checked.ok || !checked.definition.steps.some((step) => step.kind === "stopMovement")) return unchanged();
+    // Avoid executing planner work for graphs that leave the bounded atomic
+    // world-plan model (secondary movement, nested graphs or external actions).
+    if (checked.definition.steps.some((step) => ["move", "rotate", "triggerTile", "sequence", "script", "summon", "resetHistory"]
+      .includes(step.kind))) return unchanged();
+
+    const plannedAt = this.now();
+    const caller = this.sessionUsers().find((user) => user.id === by) ??
+      { id: by, role: "GM" as const, name: "System" };
+    const event: AutomationEvent = {
+      scene, tile: first.tile, token: endpoint, method: first.method, caller, direction,
+      movementOriginal: { tokenId: source.tokenId, x: endpoint.x, y: endpoint.y },
+      movementCrossing: first.crossing,
+      ...(first.movementEntry ? { movementEntry: first.movementEntry } : {}),
+      at: plannedAt, rng: this.rng,
+    };
+    const outcome = planAutomation(shadow.world, first.doc, { ...event,
+      hurtHeal: planAutomationHealth,
+      imageAssetError: (hash) => automationImageError(hash, this.manifestSource()),
+    }, this.systemUserId);
+    const key = movementAutomationKey(scene._id, source.tokenId, first.doc._id, first.tile._id, first.method);
+    const triggers = new Map<string, PreplannedMovementTrigger>([[key, { outcome }]]);
+    if (!outcome.ok || "skipped" in outcome ||
+        !outcome.plan.stoppedMovement.includes(`${scene._id}\u0000${source.tokenId}`))
+      return { ok: true, ops, paths: new Map(), triggers, at: plannedAt };
+
+    // Preview the cached graph plan after the submitted endpoint to extract its
+    // authoritative Stop result (including grid snap). The plan itself remains
+    // a second, ordinary graph commit with its own receipt and undo boundary.
+    const planned = shadow.applyEnvelope({ seq: shadow.seq + 1, ts: this.now(), by: this.systemUserId,
+      txId: `stop-plan-preview-${randomId()}`, ops: outcome.plan.ops });
+    if (!planned.ok) return { ok: true, ops, paths: new Map(), triggers, at: plannedAt };
+    const plannedGraph = shadow.get("automations", first.doc._id) as AutomationDocument | undefined;
+    if (!plannedGraph || JSON.stringify(plannedGraph.state?.variables ?? null) !==
+        JSON.stringify(first.doc.state?.variables ?? null))
+      return { ok: true, ops, paths: new Map(), triggers, at: plannedAt };
+    const settledScene = shadow.get("scenes", source.sceneId) as SceneDocument | undefined;
+    const settled = settledScene?.tokens.find((token) => token._id === source.tokenId);
+    if (!settled) return { ok: true, ops, paths: new Map(), triggers, at: plannedAt };
+    // Keep existing transaction/undo boundaries for graphs with additional world
+    // effects. Only a token correction plus the root graph's own history update
+    // may join the movement intent; all other successful plans run post-commit.
+    let stopPositionWrites = 0;
+    const stopOnly = outcome.plan.ops.every((op) => {
+      if (op.kind !== "update") return false;
+      if (op.ref.coll === "automations" && op.ref.id === first.doc._id)
+        return Object.keys(op.diff).every((field) => field === "state");
+      if (op.ref.coll === "tokens" && op.ref.id === source.tokenId &&
+          op.ref.parent?.coll === "scenes" && op.ref.parent.id === scene._id &&
+          Object.keys(op.diff).every((field) => ["x", "y", "flags"].includes(field))) {
+        stopPositionWrites++;
+        return stopPositionWrites === 1;
+      }
+      return false;
+    });
+    if (!stopOnly) return { ok: true, ops, paths: new Map(), triggers, at: plannedAt };
+
+    const prepared = [...ops];
+    if (endpoint.x !== settled.x || endpoint.y !== settled.y) prepared.push({
+      kind: "update", ref: { coll: "tokens", id: source.tokenId, parent: { coll: "scenes", id: source.sceneId } },
+      diff: { x: settled.x, y: settled.y },
+    });
+    triggers.set(key, { outcome });
+    return { ok: true, ops: prepared,
+      paths: new Map([[`${scene._id}\u0000${source.tokenId}`, {
+        endpoint: structuredClone(endpoint), stopFraction: first.fraction,
+      }]]), triggers, at: plannedAt };
   }
 
   /** Host-side normalization: chat messages carry the caller's identity (§4);
@@ -1262,9 +1749,24 @@ export class HostSync {
     if (!checked.ok) return checked.error;
     if (!validateAutomationState(doc.state)) return "invalid trigger history";
     const scene = this.store.get("scenes", checked.definition.sceneId) as SceneDocument | undefined;
-    if (!scene || !scene.tiles.some((tile) => tile._id === checked.definition.tileId))
-      return "automation anchor tile/scene does not exist";
+    if (!scene || !automationSourceTile(scene, checked.definition.tileId, checked.definition.sourceKind))
+      return "automation anchor source/scene does not exist";
     for (const step of checked.definition.steps) {
+      if ((step.kind === "select" || step.kind === "collection") && step.selector) {
+        const error = pinnedSelectorError(scene, step.selector);
+        if (error) return `${step.id}: ${error}`;
+      }
+      if (step.kind === "move" && step.destination && !scene[step.destination.coll].some((item) => item._id === step.destination?.id))
+        return `${step.id}: Move destination entity is unavailable`;
+      if (step.kind === "sceneBackground" && step.targetSceneId && !this.store.get("scenes", step.targetSceneId))
+        return `${step.id}: Scene Background target scene is unavailable`;
+      if (step.kind === "sceneBackground" || step.kind === "tileImage") {
+        const images = step.kind === "tileImage" && step.images ? step.images : step.image ? [step.image] : [];
+        for (const image of images) {
+          const error = automationImageError(image, this.manifestSource());
+          if (error) return `${step.id}: ${error}`;
+        }
+      }
       if (step.kind !== "sequence" && step.kind !== "script") continue;
       const macro = this.store.get("macros", step.macroId) as MacroDocument | undefined;
       if (step.kind === "sequence") {
@@ -1344,9 +1846,19 @@ export class HostSync {
               error: "users are assigned by the host only",
             };
           }
-          if (op.coll === "tiles" && user.role !== "GM" && user.role !== "ASSISTANT" &&
-              (op.data as TileDocument).sort !== undefined)
-            return { ok: false, reason: "forbidden", error: "only GMs set tile trigger priority" };
+          if (op.coll === "regions") {
+            if (user.role !== "GM" && user.role !== "ASSISTANT")
+              return { ok: false, reason: "forbidden", error: "only GMs author scene regions" };
+            const regionError = regionGeometryError(op.data);
+            if (regionError) return { ok: false, reason: "invalid_schema", error: regionError };
+          }
+          if (op.coll === "tiles") {
+            const tile = op.data as TileDocument;
+            if (user.role !== "GM" && user.role !== "ASSISTANT" && tile.sort !== undefined)
+              return { ok: false, reason: "forbidden", error: "only GMs set tile trigger priority" };
+            const shapeError = tileTriggerZoneError(tile.triggerZone) ?? tileTriggerElevationError(tile.triggerElevation);
+            if (shapeError) return { ok: false, reason: "invalid_schema", error: shapeError };
+          }
           // Attachment metadata is host-owned on placement. A player must not
           // forge a parent/instance relationship that moves hidden GM objects.
           if (user.role !== "GM" && user.role !== "ASSISTANT" &&
@@ -1426,6 +1938,23 @@ export class HostSync {
               error: `update ${op.ref.coll}/${op.ref.id}`,
             };
           }
+          if (op.ref.coll === "tiles" &&
+              (Object.hasOwn(op.diff, "triggerZone") || Object.hasOwn(op.diff, "triggerElevation"))) {
+            const shapeError = tileTriggerZoneError(op.diff.triggerZone) ?? tileTriggerElevationError(op.diff.triggerElevation);
+            if (shapeError) return { ok: false, reason: "invalid_schema", error: shapeError };
+          }
+          if (op.ref.coll === "regions") {
+            if (user.role !== "GM" && user.role !== "ASSISTANT")
+              return { ok: false, reason: "forbidden", error: "only GMs edit scene regions" };
+            const regionError = regionGeometryError({ ...doc, ...op.diff });
+            if (regionError) return { ok: false, reason: "invalid_schema", error: regionError };
+          }
+          if (op.ref.coll === "tokens" && Object.hasOwn(op.diff, "elevation") &&
+              (typeof op.diff.elevation !== "number" || !Number.isFinite(op.diff.elevation) || Math.abs(op.diff.elevation) > 1_000_000))
+            return { ok: false, reason: "invalid_schema", error: "token elevation must be finite and within ±1,000,000 scene units" };
+          if (user.role !== "GM" && user.role !== "ASSISTANT" && op.ref.coll === "tokens" &&
+              Object.keys(op.diff).some((field) => field === "actorId" || field === "-=actorId"))
+            return { ok: false, reason: "forbidden", error: "only GMs link tokens to actors" };
           if (user.role !== "GM" && user.role !== "ASSISTANT" &&
               (op.ref.coll === "actors" || op.ref.coll === "tokens") &&
               Object.keys(op.diff).some((field) =>
@@ -1557,12 +2086,16 @@ export class HostSync {
     txId: TxId,
     recordUndo = true,
     audit?: ActionAudit,
+    suppressedMovement?: ReadonlySet<string>,
+    restoring = false, // Host-only Undo/Redo/Revert; never inferred from a client transaction ID.
+    movementPaths?: ReadonlyMap<string, PlannedMovementPath>,
+    preplannedMovement?: ReadonlyMap<string, PreplannedMovementTrigger>,
+    movementTimestamp?: number,
   ): { ok: true; seq: number } | { ok: false; error: string } {
     // Expand parent transforms BEFORE auditing; the receipt MUST describe the
     // actual committed envelope, not the unexpanded client/script proposal.
     // Undo/redo and named Revert already contain every child pre-image.
-    if (!txId.startsWith("undo-") && !txId.startsWith("redo-") &&
-        !txId.startsWith("action-revert-")) {
+    if (!restoring) {
       const attached = attachedMovementOps(this.store.world, ops);
       if (!attached.ok) return { ok: false, error: attached.error };
       const deleting = attachedDeletionOps(this.store.world, attached.ops);
@@ -1597,7 +2130,7 @@ export class HostSync {
     for (const op of ops) {
       const ref = op.kind === "create" ? { coll: op.coll, id: op.data._id, parent: op.parent } : op.ref;
       if (ref.coll !== "tokens" || ref.parent?.coll !== "scenes" ||
-          (op.kind === "update" && !Object.keys(op.diff).some((key) => ["x", "y", "rotation"].includes(key))) ||
+          (op.kind === "update" && !Object.keys(op.diff).some((key) => ["x", "y", "rotation", "elevation"].includes(key))) ||
           op.kind === "delete") continue;
       const key = `${ref.parent.id}\u0000${ref.id}`;
       if (!moving.has(key)) {
@@ -1608,7 +2141,7 @@ export class HostSync {
     }
     const envelope: OpEnvelope = {
       seq: this.store.seq + 1,
-      ts: this.now(),
+      ts: movementTimestamp ?? this.now(),
       by,
       ops,
       txId,
@@ -1623,14 +2156,17 @@ export class HostSync {
     if (recordUndo) this.undoStack.push(envelope, applied.value.inverses);
     this.broadcastEnvelope(envelope, applied.value.inverses);
     this.scheduleSummonExpiry();
-    // Reverting a movement must not re-trigger a trap while reversing it. A graph's
+    // Undo/Redo/Revert restore recorded state, without re-firing traps or RNG. A graph's
     // own committed Move/Rotation re-enters here through its commit; the depth cap
     // keeps a ping-pong graph pair from growing the host's call stack unboundedly.
-    if (moving.size > 0 && !txId.startsWith("action-revert-")) {
+    if (moving.size > 0 && !restoring) {
       if (this.movementAutomationDepth < HostSync.MOVEMENT_AUTOMATION_DEPTH) {
         this.movementAutomationDepth++;
         try {
-          this.fireMovementAutomations([...moving.values()], by);
+          this.fireMovementAutomations([...moving.values()].map((source)=>{
+            const path=movementPaths?.get(`${source.sceneId}\u0000${source.tokenId}`);
+            return path?{...source,pathEnd:path.endpoint,stopFraction:path.stopFraction}:source;
+          }), by, suppressedMovement, preplannedMovement);
         } finally {
           this.movementAutomationDepth--;
         }
@@ -1920,7 +2456,7 @@ export class HostSync {
         !ops.some((saved) => saved.kind === "delete" && saved.ref.coll === "messages" &&
           saved.ref.id === op.ref.id));
     if (trimmed) { this.reject(session, id, "invalid_schema", "Revert would evict later chat; refused"); return; }
-    const committed = this.commitOps(ops, this.systemUserId, `action-revert-${id}`, false);
+    const committed = this.commitOps(ops, this.systemUserId, `action-revert-${id}`, false, undefined, undefined, true);
     if (!committed.ok) this.reject(session, id, "invariant", committed.error);
   }
 
@@ -2326,19 +2862,19 @@ export class HostSync {
       return { instanceId: placed.instanceId, rootId: placed.rootId, seq: placed.seq };
     }
     if (method === "automation.fire") {
-      if (typeof payload.automationId !== "string" || !["click", "manual", "enter", "exit", "stop", "create", "rotate"].includes(String(payload.method)) ||
+      if (typeof payload.automationId !== "string" || !["click", "manual", "enter", "exit", "stop", "elevation", "create", "rotate"].includes(String(payload.method)) ||
           (payload.tokenId !== undefined && typeof payload.tokenId !== "string"))
         throw new Error("Invalid automation call");
       const graph = this.store.get("automations", payload.automationId) as AutomationDocument | undefined;
       const checked = graph ? validateAutomation(graph.definition) : null;
       const definition = checked?.ok ? checked.definition : null;
-      const tile = scene.tiles.find((item) => item._id === definition?.tileId);
+      const tile = definition ? automationSourceTile(scene, definition.tileId, definition.sourceKind) : undefined;
       const token = payload.tokenId ? scene.tokens.find((item) => item._id === payload.tokenId) : undefined;
       const gm = caller.role === "GM" || caller.role === "ASSISTANT";
       if (!graph || !definition || !tile || definition.sceneId !== scene._id ||
           !definition.methods.includes(payload.method as AutomationMethod) ||
           (payload.tokenId && !token) ||
-          (!gm && (payload.method !== "click" || !definition.gates?.playerRunnable ||
+          (!gm && (definition.sourceKind === "region" || payload.method !== "click" || !definition.gates?.playerRunnable ||
             !can(caller, "read", tile, "tiles", { parent: scene }) ||
             !docVisibleTo(caller, tile, scene) ||
             (token && !can(caller, "update", token, "tokens", { parent: scene })))))
@@ -2671,7 +3207,7 @@ export class HostSync {
     const graphs = this.store.getAll("automations").flatMap((doc) => {
       const checked = validateAutomation(doc.definition);
       return checked.ok && checked.definition.sceneId === scene._id &&
-        checked.definition.tileId === tile._id && checked.definition.methods.includes("click") &&
+        (checked.definition.sourceKind ?? "tile") === "tile" && checked.definition.tileId === tile._id && checked.definition.methods.includes("click") &&
         (gm || checked.definition.gates?.playerRunnable === true) ? [doc] : [];
     }).sort((a, b) => a._id.localeCompare(b._id));
     // Visible tiles are ordinary art too. Do not distinguish an unpublished graph
@@ -2702,7 +3238,7 @@ export class HostSync {
     }
     if (typeof msg.requestId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.requestId) ||
         typeof msg.automationId !== "string" || typeof msg.sceneId !== "string" ||
-        !["enter", "exit", "stop", "create", "rotate", "click", "manual"].includes(msg.method) ||
+        !["enter", "exit", "stop", "elevation", "create", "rotate", "click", "manual"].includes(msg.method) ||
         (msg.tokenId !== undefined && typeof msg.tokenId !== "string") ||
         (msg.dryRun !== undefined && typeof msg.dryRun !== "boolean") ||
         Object.keys(msg).some((key) => !["kind", "requestId", "automationId", "sceneId", "method", "tokenId", "dryRun"].includes(key))) {
@@ -2726,7 +3262,7 @@ export class HostSync {
     const checked = doc ? validateAutomation(doc.definition) : null;
     const definition = checked?.ok ? checked.definition : null;
     const scene = this.store.get("scenes", msg.sceneId) as SceneDocument | undefined;
-    const tile = scene?.tiles.find((t) => t._id === definition?.tileId);
+    const tile = scene && definition ? automationSourceTile(scene, definition.tileId, definition.sourceKind) : undefined;
     const token = msg.tokenId ? scene?.tokens.find((t) => t._id === msg.tokenId) : undefined;
     if (!doc || !scene || !tile || !definition || definition.sceneId !== scene._id ||
         !definition.methods.includes(msg.method) || (msg.tokenId && !token)) {
@@ -2748,18 +3284,21 @@ export class HostSync {
   }
 
   private fireMovementAutomations(
-    sources: Array<{ sceneId: string; tokenId: string; before?: TokenDocument }>, by: UserId,
+    sources: Array<{ sceneId: string; tokenId: string; before?: TokenDocument; pathEnd?:TokenDocument; stopFraction?:number }>, by: UserId,
+    suppressedMovement?: ReadonlySet<string>,
+    preplannedMovement?: ReadonlyMap<string, PreplannedMovementTrigger>,
   ): void {
     const caller = this.sessionUsers().find((user) => user.id === by) ??
       { id: by, role: "GM" as const, name: "System" };
     const candidates: Array<{ docId: string; sceneId: string; tokenId: string; tileId: string;
-      method: AutomationMethod; fraction: number; sort: number; direction?: AutomationEvent["direction"] }> = [];
+      method: AutomationMethod; fraction: number; sort: number; direction?: AutomationEvent["direction"]; movementEntry?: AutomationEvent["movementEntry"]; movementOriginal?: AutomationEvent["movementOriginal"]; movementCrossing?: AutomationEvent["movementCrossing"] }> = [];
     for (const source of sources) {
       const scene = this.store.get("scenes", source.sceneId) as SceneDocument | undefined;
       const token = scene?.tokens.find((t) => t._id === source.tokenId);
       if (!scene || !token) continue;
-      const dx = source.before ? token.x - source.before.x : 0;
-      const dy = source.before ? token.y - source.before.y : 0;
+      const pathEnd=source.pathEnd??token;
+      const dx = source.before ? pathEnd.x - source.before.x : 0;
+      const dy = source.before ? pathEnd.y - source.before.y : 0;
       const direction: AutomationEvent["direction"] = {
         ...(dx < -1e-6 ? { x: "left" as const } : dx > 1e-6 ? { x: "right" as const } : {}),
         ...(dy < -1e-6 ? { y: "up" as const } : dy > 1e-6 ? { y: "down" as const } : {}),
@@ -2767,12 +3306,23 @@ export class HostSync {
       for (const doc of this.store.getAll("automations")) {
         const checked = validateAutomation(doc.definition);
         if (!checked.ok || checked.definition.sceneId !== scene._id) continue;
-        const tile = scene.tiles.find((t) => t._id === checked.definition.tileId);
+        const tile = automationSourceTile(scene, checked.definition.tileId, checked.definition.sourceKind);
         if (!tile) continue;
-        for (const hit of sweptTileEvents(tile, source.before, token)) {
+        for (const hit of sweptTileEvents(tile, source.before, pathEnd, scene.grid)) {
+          if (source.stopFraction!==undefined&&hit.fraction>source.stopFraction+1e-8)continue;
+          if (suppressedMovement?.has(`${source.sceneId}\u0000${source.tokenId}`) && ["enter", "exit", "stop", "elevation"].includes(hit.method)) continue;
+          const contact = source.before && (hit.method === "enter" || hit.method === "exit") ? {
+            x: source.before.x + dx * hit.fraction, y: source.before.y + dy * hit.fraction,
+          } : null;
+          const entry = hit.method === "enter" && contact ? snapshotMoveEntry(tile, contact, true) : null;
           if (checked.definition.methods.includes(hit.method)) candidates.push({
             docId: doc._id, sceneId: scene._id, tokenId: token._id, tileId: tile._id,
             method: hit.method, fraction: hit.fraction, direction,
+            ...(entry ? { movementEntry: { ...entry, tileId: tile._id, tokenId: token._id } } : {}),
+            ...(source.before && (dx !== 0 || dy !== 0) ? { movementOriginal: { tokenId: token._id, x: pathEnd.x, y: pathEnd.y } } : {}),
+            ...(contact && (hit.method === "enter" || hit.method === "exit") ? { movementCrossing: {
+              tileId: tile._id, tokenId: token._id, method: hit.method, fraction: hit.fraction, ...contact,
+            } } : {}),
             sort: typeof tile.sort === "number" && Number.isFinite(tile.sort) ? tile.sort : 0,
           });
         }
@@ -2781,7 +3331,7 @@ export class HostSync {
     // Path fraction determines first contact; for coincident tiles use method,
     // descending tile Sort (not elevation), then stable IDs. No player sets priority.
     const methodOrder: Record<AutomationMethod, number> = {
-      enter: 0, exit: 1, stop: 2, create: 3, rotate: 4, click: 5, manual: 6,
+      enter: 0, exit: 1, stop: 2, elevation: 3, create: 4, rotate: 5, click: 6, manual: 7,
     };
     candidates.sort((a, b) => a.sceneId.localeCompare(b.sceneId) ||
       a.fraction - b.fraction || a.tokenId.localeCompare(b.tokenId) ||
@@ -2793,11 +3343,18 @@ export class HostSync {
       if (stopped.has(scope) && stopped.get(scope) !== hit.tileId) continue;
       const doc = this.store.get("automations", hit.docId) as AutomationDocument | undefined;
       const scene = this.store.get("scenes", hit.sceneId) as SceneDocument | undefined;
-      const tile = scene?.tiles.find((t) => t._id === doc?.definition?.tileId);
+      const tile = scene && doc?.definition
+        ? automationSourceTile(scene, doc.definition.tileId, doc.definition.sourceKind) : undefined;
       const token = scene?.tokens.find((t) => t._id === hit.tokenId);
       if (!doc || !scene || !tile || !token) continue;
-      const result = this.fireAutomation(doc, { scene, tile, token, caller, method: hit.method,
-        ...(hit.direction ? { direction: hit.direction } : {}), at: this.now(), rng: this.rng });
+      const event: AutomationEvent = { scene, tile, token, caller, method: hit.method,
+        ...(hit.direction ? { direction: hit.direction } : {}),
+        ...(hit.movementEntry ? { movementEntry: hit.movementEntry } : {}),
+        ...(hit.movementOriginal ? { movementOriginal: hit.movementOriginal } : {}),
+        ...(hit.movementCrossing ? { movementCrossing: hit.movementCrossing } : {}), at: this.now(), rng: this.rng };
+      const planned = preplannedMovement?.get(movementAutomationKey(
+        hit.sceneId, hit.tokenId, hit.docId, hit.tileId, hit.method));
+      const result = this.fireAutomation(doc, event, false, planned?.outcome);
       if (result.ok && result.stopOthers) stopped.set(scope, hit.tileId);
     }
   }
@@ -2818,10 +3375,11 @@ export class HostSync {
   }
 
   private fireAutomation(
-    doc: AutomationDocument, event: AutomationEvent, dryRun = false,
+    doc: AutomationDocument, event: AutomationEvent, dryRun = false, planned?: AutomationOutcome,
   ): { ok: true; stopOthers: boolean } | { ok: false; error: string } {
-    const result = planAutomation(this.store.world, doc,
-      { ...event, hurtHeal: planAutomationHealth }, this.systemUserId);
+    const result = planned ?? planAutomation(this.store.world, doc,
+      { ...event, hurtHeal: planAutomationHealth,
+        imageAssetError: (hash) => automationImageError(hash, this.manifestSource()) }, this.systemUserId);
     if (!result.ok) {
       this.reportAutomation(doc, event.method, "rejected", result.error, result.trace);
       return { ok: false, error: result.error };
@@ -2917,7 +3475,7 @@ export class HostSync {
     JSON.stringify(doc.definition));
     const audit = this.newActionAudit(`Active zone: ${doc.name} (${event.method})`, postActions.length > 0);
     const committed = this.commitOps(result.plan.ops, this.systemUserId,
-      `zone-${randomId()}`, true, audit);
+      `zone-${randomId()}`, true, audit, new Set(result.plan.suppressedMovement));
     if (!committed.ok) {
       this.reportAutomation(doc, event.method, "rejected", committed.error, result.plan.trace);
       return { ok: false, error: committed.error };
@@ -4588,7 +5146,7 @@ export class HostSync {
       item.ops,
       this.systemUserId,
       `undo-${randomId()}`,
-      false,
+      false, undefined, undefined, true,
     );
     return committed.ok ? { ok: true } : { ok: false, error: committed.error };
   }
@@ -4600,7 +5158,7 @@ export class HostSync {
       item.ops,
       this.systemUserId,
       `redo-${randomId()}`,
-      false,
+      false, undefined, undefined, true,
     );
     return committed.ok ? { ok: true } : { ok: false, error: committed.error };
   }

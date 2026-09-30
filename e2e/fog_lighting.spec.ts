@@ -15,6 +15,7 @@ import { expect, test, type Browser, type Page } from "@playwright/test";
 import {
   entry,
   gmCall,
+  hostCall,
   manualFragment,
   playerCall,
   surfaceCall,
@@ -45,12 +46,28 @@ const pickable = (page: Page): Promise<string[]> =>
  * draws, and the tokens a click can still reach. A hidden token is unselectable too — the same
  * three-way assertion the D-251 fog spec makes.
  */
-async function expectSeen(page: Page, ids: string[]): Promise<void> {
+async function expectSeen(page: Page, ids: string[], host: Page): Promise<void> {
+  try {
   await expect
     .poll(async () => (await playerFog(page)).visibleTokenIds, { timeout: 45_000 })
     .toEqual(ids);
   expect(await drawn(page)).toEqual(ids);
   expect(await pickable(page)).toEqual(ids);
+  } catch (error) {
+    const diagnostics = {
+      expected: ids,
+      hostSeq: await hostCall(host, "seq"), playerSeq: await playerCall(page, "seq"),
+      hostDarkness: await gmCall(host, "sceneDarkness"), playerDarkness: await playerCall(page, "sceneDarkness"),
+      rtc: {
+        host: await host.evaluate(() => (globalThis as unknown as { __lightingRtc?: unknown }).__lightingRtc),
+        player: await page.evaluate(() => (globalThis as unknown as { __lightingRtc?: unknown }).__lightingRtc),
+      },
+      fog: await playerFog(page), drawn: await drawn(page), pickable: await pickable(page),
+    };
+    await test.info().attach("lighting-replication", { body: JSON.stringify(diagnostics, null, 2), contentType: "application/json" });
+    console.error("Lighting failure diagnostics:", JSON.stringify(diagnostics));
+    throw error;
+  }
 }
 
 test.describe("sight bounded by lighting (§2.1, G-24)", () => {
@@ -62,11 +79,40 @@ test.describe("sight bounded by lighting (§2.1, G-24)", () => {
     test.setTimeout(240_000); // 2-core sandbox: every lighting change re-encodes the fog PNG
     const hostCtx = await browser.newContext();
     const playerCtx = await browser.newContext();
+    // Failure-only diagnostics for real browser transport state; no retries or transport mocking.
+    for (const context of [hostCtx, playerCtx]) await context.addInitScript(() => {
+      const events: unknown[] = [];
+      (globalThis as unknown as { __lightingRtc: unknown[] }).__lightingRtc = events;
+      const record = (event: unknown) => { events.push(event); if (events.length > 100) events.shift(); };
+      const Original = RTCPeerConnection;
+      globalThis.RTCPeerConnection = class extends Original {
+        constructor(config?: RTCConfiguration) {
+          super(config);
+          for (const type of ["connectionstatechange", "iceconnectionstatechange"]) this.addEventListener(type,
+            () => record({ type, connection: this.connectionState, ice: this.iceConnectionState }));
+          this.addEventListener("datachannel", (event) => this.watch(event.channel));
+        }
+        private watch(channel: RTCDataChannel): RTCDataChannel {
+          for (const type of ["open", "close", "error"]) channel.addEventListener(type, (event) => record({
+            type, channel: channel.label, state: channel.readyState,
+            error: "error" in event ? String(event.error) : null,
+          }));
+          return channel;
+        }
+        override close(): void {
+          record({ type: "local-close", stack: new Error().stack });
+          super.close();
+        }
+        override createDataChannel(label: string, options?: RTCDataChannelInit): RTCDataChannel {
+          return this.watch(super.createDataChannel(label, options));
+        }
+      };
+    });
     const host = await hostCtx.newPage();
     const player = await playerCtx.newPage();
     const runtimeErrors: string[] = [];
-    host.on("pageerror", (error) => runtimeErrors.push(error.message));
-    player.on("pageerror", (error) => runtimeErrors.push(error.message));
+    host.on("pageerror", (error) => { runtimeErrors.push(error.message); console.error("Host pageerror:", error.message); });
+    player.on("pageerror", (error) => { runtimeErrors.push(error.message); console.error("Player pageerror:", error.message); });
 
     // ── host: the party's hero, a GM-only orc two squares away, and a farther GM-only scout ──
     await host.goto(entry + "?e2e=1");
@@ -123,7 +169,7 @@ test.describe("sight bounded by lighting (§2.1, G-24)", () => {
 
     // ── daylight (darkness 0): ambient light reaches everywhere, so sight alone decides ──
     // The scout is 40 ft. out, well inside the 12-square sight range.
-    await expectSeen(player, ["hero", "orc", "scout"]);
+    await expectSeen(player, ["hero", "orc", "scout"], host);
     const litExplored = (await playerFog(player)).explored;
     expect(litExplored).toBeGreaterThan(0.02);
     const pos = await playerCall<{ x: number; y: number } | null>(player, "tokenPos");
@@ -141,7 +187,7 @@ test.describe("sight bounded by lighting (§2.1, G-24)", () => {
 
     // a torchless hero in the dark has nothing to see with: his own token is all that is left,
     // even though the orc is 10 ft. away and the scout never moved
-    await expectSeen(player, ["hero"]);
+    await expectSeen(player, ["hero"], host);
     expect(await playerCall<{ x: number; y: number } | null>(player, "tokenPos")).toEqual(pos);
     // and the map he already explored stays explored (D-250's memory survives the lights)
     expect((await playerFog(player)).explored).toBeGreaterThanOrEqual(litExplored - 1e-6);
@@ -168,7 +214,7 @@ test.describe("sight bounded by lighting (§2.1, G-24)", () => {
 
     // standing in the torch's light the hero sees out to its edge: the orc at 10 ft. appears,
     // the scout at 40 ft. is beyond the light's reach and stays hidden
-    await expectSeen(player, ["hero", "orc"]);
+    await expectSeen(player, ["hero", "orc"], host);
     expect(await playerCall<{ x: number; y: number } | null>(player, "tokenPos")).toEqual(pos);
 
     // ── the GM takes the light away: exactly the acceptance — the visible set shrinks, no
@@ -176,7 +222,7 @@ test.describe("sight bounded by lighting (§2.1, G-24)", () => {
     const revealsBefore = (await playerFog(player)).reveals;
     await host.click('[data-canvas-action="delete-last-placement"]');
     await expect.poll(() => surfaceCall<unknown[]>(host, "app", "lights")).toHaveLength(0);
-    await expectSeen(player, ["hero"]);
+    await expectSeen(player, ["hero"], host);
     expect(await playerCall<number>(player, "tokenCount")).toBe(3);
     expect(await playerCall<{ x: number; y: number } | null>(player, "tokenPos")).toEqual(pos);
     expect((await playerFog(player)).reveals).toBeGreaterThan(revealsBefore); // the loop re-ran
@@ -189,7 +235,7 @@ test.describe("sight bounded by lighting (§2.1, G-24)", () => {
     await slider.press("Home");
     await expect.poll(() => gmCall<number>(host, "sceneDarkness"), { timeout: 20_000 }).toBe(0);
     await third.locator("[data-window-close]").click();
-    await expectSeen(player, ["hero", "orc", "scout"]);
+    await expectSeen(player, ["hero", "orc", "scout"], host);
     expect(await playerCall<{ x: number; y: number } | null>(player, "tokenPos")).toEqual(pos);
     expect(runtimeErrors).toEqual([]);
 

@@ -1,7 +1,8 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
   ClientPeerSession,
   HostSessions,
+  ManagedTransport,
   type PeerConnectionFactory,
   type PeerWire,
 } from "../../src/net/peerSession";
@@ -12,6 +13,8 @@ import type {
   Transport,
 } from "../../src/core/net";
 import { createTransportPair } from "../../src/net/memory";
+
+import { frameMessage } from "../../src/net/frame";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -145,6 +148,70 @@ function makeClient(bus: SignalBus, factory: SimpleFactory, id: string): ClientP
 }
 
 describe("PeerSession layer (§6.5)", () => {
+  test("manual negotiation has a separate deadline and connecting starts a fresh heartbeat window", async () => {
+    vi.useFakeTimers();
+    const bus = new SignalBus(), factory = new SimpleFactory();
+    const host = new HostSessions({ adapter: new FakeAdapter(bus, "host"), factory,
+      heartbeatMs: 5, staleMs: 40, handshakeMs: 200 });
+    const closed: string[] = []; host.onClosed = (_id, reason) => closed.push(reason); host.start();
+    try {
+      const client = factory.createClientPeer();
+      const offer = await client.offer();
+      await new FakeAdapter(bus, "player").send("host", { t: "offer", sdp: offer });
+      await vi.advanceTimersByTimeAsync(100); // user still copying the answer; > heartbeat timeout
+      expect(host.size).toBe(1);
+      await client.acceptAnswer(`ans-${offer}`);
+      await vi.advanceTimersByTimeAsync(35);
+      expect(host.size).toBe(1);
+      await vi.advanceTimersByTimeAsync(15); // suspected silent AFTER connection: probe, not immediate eviction
+      expect(host.size).toBe(1);
+      await vi.advanceTimersByTimeAsync(45);
+      expect(host.size).toBe(0); expect(closed).toEqual(["heartbeat timeout"]);
+      const abandoned = factory.createClientPeer();
+      await new FakeAdapter(bus, "absent").send("host", { t: "offer", sdp: await abandoned.offer() });
+      await vi.advanceTimersByTimeAsync(210);
+      expect(closed).toEqual(["heartbeat timeout", "handshake timeout"]);
+    } finally { host.close(); vi.useRealTimers(); }
+  });
+
+  test("a delayed client heartbeat is not eviction when the peer still answers host probes", async () => {
+    vi.useFakeTimers();
+    const bus = new SignalBus(), factory = new SimpleFactory();
+    const { host } = await makeHost(bus, factory);
+    const client = makeClient(bus, factory, "busy");
+    try {
+      await client.connect(); await vi.advanceTimersByTimeAsync(10);
+      // Suppress timer-originated beats, but leave the actual receiving transport alive.
+      (client as unknown as { state: string }).state = "connecting";
+      await vi.advanceTimersByTimeAsync(500);
+      expect(host.size).toBe(1);
+    } finally { client.close(); host.close(); vi.useRealTimers(); }
+  });
+
+  test("valid application frames count as liveness; malformed traffic does not", async () => {
+    const pair = createTransportPair(); let now = 10;
+    const managed = new ManagedTransport(pair.b, { answerPings: true, now: () => now });
+    now = 100;
+    pair.a.send("ops", frameMessage({ kind: "fog.get", sceneId: "scene" }));
+    await Promise.resolve(); expect(managed.lastSeen).toBe(100);
+    now = 200; pair.a.send("ops", new Uint8Array([9, 9, 9]));
+    await Promise.resolve(); expect(managed.lastSeen).toBe(100);
+    managed.close(); pair.a.close();
+  });
+
+  test("a late old-peer failure cannot close its replacement", async () => {
+    const bus = new SignalBus(), factory = new SimpleFactory();
+    const { host } = await makeHost(bus, factory);
+    const client = makeClient(bus, factory, "replace");
+    try {
+      await client.connect(); await sleep(10);
+      const old = factory.hostByToken.get("off-1");
+      factory.lastClient?.setState("failed"); await sleep(30);
+      expect(host.size).toBe(1); expect(factory.offersSent).toBe(2);
+      old?.setState("failed"); expect(host.size).toBe(1);
+    } finally { client.close(); host.close(); }
+  });
+
   test("handshake over signaling establishes both transports and fires onSession", async () => {
     const bus = new SignalBus();
     const factory = new SimpleFactory();
@@ -213,7 +280,9 @@ describe("PeerSession layer (§6.5)", () => {
 
     // go silent: leave "connected" without closing (heartbeats stop)
     (client as unknown as { state: string }).state = "connecting";
-    await sleep(80);
+    if (!factory.lastClient) throw new Error("missing client");
+    factory.lastClient.transport.onMessage = null;
+    await sleep(110);
 
     expect(closed).toContainEqual({ peerId: "client-4", reason: "heartbeat timeout" });
     expect(host.size).toBe(0);

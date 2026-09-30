@@ -147,6 +147,7 @@ class FakeSource implements PointerEventSource {
 
 class FakeStage implements StageLike {
   cameraValue: Camera = { x: 0, y: 0, scale: 1 };
+  visualPositions = new Map<string, { x: number; y: number }>();
   tokenRenders: TokenDocument[][] = [];
   marquees: Array<{
     a: { x: number; y: number } | null;
@@ -161,6 +162,9 @@ class FakeStage implements StageLike {
   }
   syncTokens(tokens: readonly TokenDocument[]): void {
     this.tokenRenders.push([...tokens]);
+  }
+  tokenVisualPosition(id: string): { x: number; y: number } | undefined {
+    return this.visualPositions.get(id);
   }
   setMarquee(
     a: { x: number; y: number } | null,
@@ -197,9 +201,11 @@ function makeHarness(
       tokenId: string;
     }) => void;
     interactionMode?: () => "select" | "pan" | "suppress";
+    visualPositions?: ReadonlyMap<string, { x: number; y: number }>;
   } = {},
 ) {
   const stage = new FakeStage();
+  stage.visualPositions = new Map(opts.visualPositions ?? []);
   const source = new FakeSource();
   const client = new RecordingClient();
   const selectionChanges: string[][] = [];
@@ -294,6 +300,22 @@ describe("CanvasController (§10)", () => {
     expect(h.controller.selected).toEqual([]);
     expect(h.selectionChanges.at(-1)).toEqual([]);
     expect(h.client.submitted).toEqual([]);
+  });
+
+  test("an in-flight animated token can be grabbed at its rendered point and drag rebases from there", () => {
+    const t = token("hero", 100, 100);
+    const h = makeHarness([view(t)], { grid: null,
+      visualPositions: new Map([["hero", { x: 250, y: 250 }]]) });
+    // The committed document endpoint is centered at (100,100), but its local
+    // animation has drawn it centered at (300,300). The visible sprite is hittable.
+    h.source.down(300, 300);
+    h.source.move(320, 300);
+    const preview = h.stage.tokenRenders.at(-1)?.[0];
+    expect(preview).toMatchObject({ _id: "hero", x: 320, y: 300 });
+    h.source.up(320, 300);
+    const op = h.client.submitted[0]?.[0];
+    if (op?.kind !== "update") throw new Error("expected update op");
+    expect(op.diff).toEqual({ x: 320, y: 300 });
   });
 
   test("token drag: preview follows the pointer; release submits one snapped move op", () => {

@@ -7,8 +7,10 @@
  *          ◀──── answer / ice / leave ────┘
  *
  * - Heartbeat (§6.5): the client pings every 2 s on `ops`; the host's managed
- *   transport replies pong{t0,t1,t2} and stamps lastSeen. The host closes
- *   sessions silent for > 3 intervals + 1 s (staleness).
+ *   transport replies pong{t0,t1,t2} and stamps lastSeen. Host
+ *   sessions silent for > 3 intervals + 1 s are probed once, then closed only
+ *   if no valid frame arrives within another staleness window. Negotiating manual
+ *   offers have a separate 120 s deadline; connecting starts a fresh liveness window.
  * - Clock (§7 prep): NTP-style offset = ((t1−t0)+(t2−t3))/2, rtt = (t2−t1)+(t3−t0).
  * - Reconnect (§6.5): on failure the client re-offers through signaling with
  *   exponential backoff (1 s → 30 s cap, reset on connect) — with non-trickle
@@ -108,7 +110,7 @@ export class ManagedTransport implements Transport {
   private readonly now: () => number;
   private readonly answerPings: boolean;
   private readonly onPong: ManagedTransportOptions["onPong"];
-  /** Host liveness: last ping arrival (epoch ms). */
+  /** Host liveness: last valid frame arrival (epoch ms). */
   lastSeen = 0;
   /** WebRTC transports expose this; resolves when all channels are open. */
   readonly opened: Promise<void> | null;
@@ -136,6 +138,7 @@ export class ManagedTransport implements Transport {
   private route(channel: ChannelName, bytes: Uint8Array): void {
     const decoded = deframeMessage(bytes);
     if (decoded.ok) {
+      if (this.answerPings) this.lastSeen = this.now();
       const msg = decoded.value;
       if (msg.kind === "ping") {
         if (this.answerPings) {
@@ -181,6 +184,8 @@ export interface HostSessionsOptions {
   heartbeatMs?: number;
   /** Stale threshold (default 3 × heartbeat + 1 s, §6.5). */
   staleMs?: number;
+  /** Manual signaling has its own bounded grace period before the peer connects. */
+  handshakeMs?: number;
   now?: () => number;
 }
 
@@ -188,6 +193,9 @@ interface HostEntry {
   peerId: string;
   peer: PeerWire;
   managed: ManagedTransport;
+  connected: boolean;
+  createdAt: number;
+  probeAt?: number;
 }
 
 export class HostSessions {
@@ -198,6 +206,7 @@ export class HostSessions {
   private readonly factory: PeerConnectionFactory;
   private readonly heartbeatMs: number;
   private readonly staleMs: number;
+  private readonly handshakeMs: number;
   private readonly now: () => number;
   private staleTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -205,6 +214,7 @@ export class HostSessions {
     this.factory = options.factory ?? new RtcPeerFactory();
     this.heartbeatMs = options.heartbeatMs ?? 2_000;
     this.staleMs = options.staleMs ?? 3 * this.heartbeatMs + 1_000;
+    this.handshakeMs = options.handshakeMs ?? 120_000;
     this.now = options.now ?? (() => Date.now());
   }
 
@@ -225,9 +235,17 @@ export class HostSessions {
         await this.closeSession(from, "replaced by new offer");
         const peer = await this.factory.createHostPeer(msg.sdp);
         const managed = new ManagedTransport(peer.transport, { now: this.now, answerPings: true });
-        const entry: HostEntry = { peerId: from, peer, managed };
+        const entry: HostEntry = { peerId: from, peer, managed, connected: false, createdAt: this.now() };
         this.entries.set(from, entry);
+        const connected = () => {
+          if (this.entries.get(from) !== entry || entry.connected) return;
+          entry.connected = true;
+          managed.lastSeen = this.now(); // negotiation time is NOT silent connected time
+        };
+        void managed.opened?.then(connected);
         peer.onStateChange((state) => {
+          if (this.entries.get(from) !== entry) return;
+          if (state === "connected") connected();
           if (state === "failed" || state === "closed") {
             void this.closeSession(from, `connection ${state}`);
           }
@@ -251,9 +269,19 @@ export class HostSessions {
   }
 
   private reapStale(): void {
-    const cutoff = this.now() - this.staleMs;
+    const now = this.now();
     for (const entry of [...this.entries.values()]) {
-      if (entry.managed.lastSeen < cutoff) {
+      const expired = entry.connected ? now - entry.managed.lastSeen > this.staleMs
+        : now - entry.createdAt > this.handshakeMs;
+      if (!expired) { delete entry.probeAt; continue; }
+      if (!entry.connected) { void this.closeSession(entry.peerId, "handshake timeout"); continue; }
+      // A browser can run overdue timers before delivering already-queued network events
+      // after a long canvas task. Silence is suspicion, not proof: actively probe first.
+      if (entry.probeAt === undefined) {
+        entry.probeAt = now;
+        try { entry.managed.send(channelFor("ping"), frameMessage({ kind: "ping", t0: now })); }
+        catch { void this.closeSession(entry.peerId, "heartbeat transport unavailable"); }
+      } else if (now - entry.probeAt > this.staleMs) {
         void this.closeSession(entry.peerId, "heartbeat timeout");
       }
     }
@@ -361,6 +389,7 @@ export class ClientPeerSession implements PeerSession {
     const peer = this.factory.createClientPeer();
     const managed = new ManagedTransport(peer.transport, {
       now: this.now,
+      answerPings: true, // answer host liveness probes even if this tab's heartbeat timer was delayed
       onPong: ({ rttMs, clockOffsetMs }) => {
         this.rttMs = rttMs;
         this.clockOffsetMs = clockOffsetMs;

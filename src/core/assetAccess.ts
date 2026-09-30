@@ -78,6 +78,16 @@ function references(collections: Partial<WorldCollections>, manifest: AssetManif
       if (section.kind === "image" || section.kind === "sound") add(section.assetId);
     }
   }
+  // Saved graph media is a known private reference, not a loose legacy asset.
+  // Graphs never project to players. Only the resulting visible scene/tile image
+  // grants access after commit; undo removes that grant again.
+  for (const graph of collections.automations ?? []) {
+    if (!Array.isArray(graph.definition?.steps)) continue;
+    for (const step of graph.definition.steps) {
+      if (step?.kind === "sceneBackground" || step?.kind === "tileImage") add(step.image);
+      if (step?.kind === "tileImage" && Array.isArray(step.images)) for (const image of step.images) add(image);
+    }
+  }
   for (const cards of collections.cards ?? []) {
     for (const card of cards.cards ?? []) add(card.img);
   }

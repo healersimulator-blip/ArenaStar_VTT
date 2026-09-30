@@ -7,10 +7,12 @@ import { makeToken, type HostApp } from "./hostBoot";
 import type {
   ActorDocument,
   MessageDocument,
+  RegionDocument,
   CombatDocument,
   Json,
   Ownership,
   SceneDocument,
+  TileDocument,
   TokenDocument,
 } from "../core/documents";
 import type { DocId } from "../core/ids";
@@ -244,6 +246,8 @@ export interface AppSurface {
     sceneId: string | null;
     atClock: number;
   }>;
+  /** Create a test region through the same submitted embedded-document op path as the GM UI. */
+  authorRegion(spec: { sceneId: string; region: RegionDocument }): void;
   sceneChildren(id?: string): {
     id: string;
     name: string;
@@ -261,6 +265,11 @@ export interface AppSurface {
       img: string;
     }>;
     walls: Array<{ id: string; c: [number, number, number, number]; door: number }>;
+    tiles: Array<{ id: string; name: string; x: number; y: number; width: number; height: number;
+      rotation: number; img: string; triggerZone?: TileDocument["triggerZone"];
+      triggerElevation?: TileDocument["triggerElevation"] }>;
+    regions: Array<{ id: string; name: string; x: number; y: number; width: number; height: number;
+      rotation: number; shape: RegionDocument["shape"]; hidden: boolean }>;
     counts: Record<string, number>;
   } | null;
   sceneCount(): number;
@@ -870,6 +879,8 @@ export interface AppSurface {
 }
 
 export interface PlayerSurface {
+  /** Replicated darkness, separate from the canvas gate for sync diagnostics. */
+  sceneDarkness(): number | null;
   userId(): string;
   worldId(): string;
   worldName(): string;
@@ -1246,7 +1257,7 @@ export interface GmFogSurface {
   /** D-250: upload the map now (the debounce is 1.5 s); resolves with the save count. */
   fogFlush(): Promise<number>;
   /** D-250: is the world point explored on the GM's texture? (null = no fog layer) */
-  fogExploredAt(spec: { x: number; y: number }): boolean | null;
+  fogExploredAt(spec: { x: number; y: number }): Promise<boolean | null>;
   /**
    * §2.3/D-262: the bytes the host's fog store holds for one user on a scene — what a *preview*
    * must never change (it reads that player's map; every write stays the player's own).
@@ -1316,6 +1327,8 @@ export interface PlayerCanvasSurface {
     style: string | null;
     visibleTokenIds: string[] | null;
   }>;
+  /** D-250: is a world point explored in this player's own per-user fog texture? */
+  fogExploredAt(spec: { x: number; y: number }): Promise<boolean | null>;
   /** Token views the stage draws right now (sorted ids). */
   drawnTokens(): string[];
   /** Token ids the controller can pick (select / sheet / menu) — fog-hidden ones are not. */
@@ -1444,6 +1457,7 @@ function playerSurface(playerApp: PlayerApp): PlayerSurface {
     return s ?? c.store.getAll("scenes")[0] ?? null;
   };
   return {
+    sceneDarkness: () => scene()?.darkness ?? null,
     userId: () => client()?.user?.id ?? playerApp.identity.publicKeyHex,
     worldId: () => playerApp.roomId,
     worldName: () => client()?.world?.name ?? "—",
@@ -1881,6 +1895,10 @@ function appSurface(app: HostApp): AppSurface {
         : (scenes.find((sc) => sc.active) ?? scenes[0] ?? null);
       return encounterLogOf(doc, String(cellKey)).map((e) => ({ ...e }));
     },
+    authorRegion: (spec: { sceneId: string; region: RegionDocument }) => {
+      if (!client.store.get("scenes", spec.sceneId)) throw new Error("scene unavailable");
+      client.submit([{ kind: "create", coll: "regions", parent: { coll: "scenes", id: spec.sceneId }, data: spec.region }]);
+    },
     sceneChildren: (id?: string) => {
       const scenes = client.store.getAll("scenes");
       const doc = id
@@ -1904,11 +1922,20 @@ function appSurface(app: HostApp): AppSurface {
           img: t.img,
         })),
         walls: (doc.walls ?? []).map((w) => ({ id: w._id, c: w.c, door: w.door })),
+        tiles: (doc.tiles ?? []).map((tile) => ({ id: tile._id, name: tile.name, x: tile.x, y: tile.y,
+          width: tile.width, height: tile.height, rotation: tile.rotation ?? 0, img: tile.img,
+          ...(tile.triggerZone ? { triggerZone: tile.triggerZone } : {}),
+          ...(tile.triggerElevation ? { triggerElevation: tile.triggerElevation } : {}) })),
+        regions: (doc.regions ?? []).map((region) => ({ id: region._id, name: region.name, x: region.x, y: region.y,
+          width: region.width, height: region.height, rotation: region.rotation ?? 0, shape: region.shape,
+          hidden: region.hidden === true })),
+
         counts: {
           cells: (doc.cells ?? []).length,
           lights: (doc.lights ?? []).length,
           notes: (doc.notes ?? []).length,
           tiles: (doc.tiles ?? []).length,
+          regions: (doc.regions ?? []).length,
           drawings: (doc.drawings ?? []).length,
           templates: (doc.templates ?? []).length,
           sounds: (doc.sounds ?? []).length,

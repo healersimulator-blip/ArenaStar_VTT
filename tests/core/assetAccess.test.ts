@@ -23,6 +23,24 @@ function scene(): SceneDocument {
 }
 
 describe("asset entitlement / per-viewer manifest", () => {
+  test("saved graph art is private until a visible world-image write, including legacy metadata", () => {
+    const world = emptyWorld(); const s = scene(); world.scenes.push(s);
+    const hash = "a".repeat(64), other = "b".repeat(64), future = "c".repeat(64);
+    world.automations.push({ _id: "graph", type: "automation", name: "Hidden plan", flags: {}, system: {},
+      ownership: { default: 3 }, definition: { version: 1, sceneId: s._id, tileId: "future", methods: ["manual"], steps: [
+        { id: "bg", kind: "sceneBackground", image: hash }, { id: "tile", kind: "tileImage", image: other },
+        { id: "cycle", kind: "tileImage", images: [other, future], selection: "next" },
+      ] } });
+    const manifest: AssetManifest = { [hash]: entry("legacy map"), [other]: entry("legacy trap"), [future]: entry("future secret art") };
+    expect(projectAssetManifest(world, manifest, player)).toEqual({});
+    expect(canFetchAsset(world, manifest, player, hash)).toBe(false);
+    s.img = hash;
+    expect(Object.keys(projectAssetManifest(world, manifest, player))).toEqual([hash]);
+    s.img = null;
+    expect(projectAssetManifest(world, manifest, player)).toEqual({});
+    expect(projectAssetManifest(world, manifest, gm)).toEqual(manifest);
+  });
+
   test("unreferenced new assets stay GM-only; visible refs grant parent and variants", () => {
     const world = emptyWorld();
     world.scenes.push(scene());

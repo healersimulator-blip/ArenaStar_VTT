@@ -93,6 +93,7 @@ export function duplicateSceneOps(input: DuplicateSceneInput): Op[] {
     lights: (scene.lights ?? []).map((light) => ({ ...light, _id: nextId("l", light._id) })),
     sounds: (scene.sounds ?? []).map((sound) => ({ ...sound, _id: nextId("s", sound._id) })),
     tiles: (scene.tiles ?? []).map((tile) => ({ ...tile, _id: nextId("tl", tile._id) })),
+    ...(scene.regions ? { regions: scene.regions.map((region) => ({ ...region, _id: nextId("rg", region._id), shape: structuredClone(region.shape) })) } : {}),
     drawings: (scene.drawings ?? []).map((drawing) => ({
       ...drawing,
       _id: nextId("d", drawing._id),

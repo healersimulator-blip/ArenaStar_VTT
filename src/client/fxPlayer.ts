@@ -75,7 +75,7 @@ export class FxPlayer {
   private prefs: FxViewPrefs = fxViewPrefs();
   private readonly offPrefs: () => void;
   /** Assets this run asked for ahead of time; `done` is the readiness signal at cue time. */
-  private readonly prefetched = new Map<string, { done: boolean; failed: boolean }>();
+  private readonly prefetched = new Map<string, { done: boolean; failed: boolean; work: Promise<void>; startedAt: number }>();
   /** Per-run delivery entries plus how many media cues are still unresolved. */
   private readonly delivery = new Map<string, { macroId: string; entries: FxDeliveryEntry[];
     pending: number; reported: boolean }>();
@@ -335,20 +335,28 @@ export class FxPlayer {
   }
 
   private async prefetch(assetId: string, runId: string): Promise<void> {
-    if (this.prefetched.has(assetId)) return;
-    const record = { done: false, failed: false };
-    this.prefetched.set(assetId, record);
-    const startedAt = Date.now();
-    try {
-      await this.options.fetchAsset(assetId);
-      record.done = true;
-      // SQ-13's "progress" half: the requester learns not only *that* everyone has the
-      // bytes but how long the slowest fetch took.
-      this.ackMedia(runId, assetId, "ready", { ms: Math.max(0, Date.now() - startedAt) });
-    } catch {
-      record.failed = true; // the section still reports its own failure when it plays
-      this.ackMedia(runId, assetId, "failed", { reason: "fetch" });
+    const generation = this.generation;
+    const epoch = this.runEpoch.get(runId);
+    let record = this.prefetched.get(assetId);
+    if (!record) {
+      const fresh = { done: false, failed: false, work: Promise.resolve(), startedAt: Date.now() };
+      this.prefetched.set(assetId, fresh);
+      fresh.work = (async () => {
+        try {
+          await this.options.fetchAsset(assetId);
+          fresh.done = true;
+        } catch {
+          fresh.failed = true; // the section still reports its own failure when it plays
+        }
+      })();
+      record = fresh;
     }
+    // The bytes are shared, but the answer belongs to EVERY waiting run, not just
+    // the first requester. A cancelled/replaced run must never answer for its successor.
+    await record.work;
+    if (this.disposed || generation !== this.generation || this.runEpoch.get(runId) !== epoch) return;
+    if (record.done) this.ackMedia(runId, assetId, "ready", { ms: Math.max(0, Date.now() - record.startedAt) });
+    else this.ackMedia(runId, assetId, "failed", { reason: "fetch" });
   }
 
   /**
@@ -451,6 +459,17 @@ export class FxPlayer {
     const elapsed = () => Math.max(0, this.hostNow() - cue.atHostTime - section.startMs);
     const active = () => !this.disposed && generation === this.generation &&
       this.runEpoch.get(cue.runId) === epoch && this.options.sceneId() === cue.sceneId;
+    const skipExpired = (): boolean => {
+      if (cue.persistent || elapsed() < section.durationMs) return false;
+      if (section.kind === "image" || section.kind === "sound") {
+        const lateMs = Math.round(elapsed());
+        this.noteDelivery(cue.runId, { index, kind: section.kind, state: "skipped",
+          reason: "not-ready", assetId: section.assetId, lateMs });
+        this.ackMedia(cue.runId, section.assetId, "late", { ms: lateMs });
+        this.settleCue(cue.runId);
+      }
+      return true;
+    };
     if (section.kind === "camera") return; // animated per frame by tickCamera
     if (section.kind === "text") {
       if (active()) this.options.stage.getFxLayer().spawn(cue.runId, section, elapsed(), undefined, undefined,
@@ -481,6 +500,9 @@ export class FxPlayer {
     const fetchStarted = this.hostNow();
     try {
       const bytes = await this.options.fetchAsset(section.assetId);
+      // Cancellation belongs to this invocation, not only to the run's reusable ID.
+      // Check before *any* late/failure reporting can touch a replacement run.
+      if (!active() || skipExpired()) return;
       const lateMs = this.hostNow() - scheduledFor;
       if (lateMs > LATE_TOLERANCE_MS) {
         const decision = lateMediaDecision(this.prefs.lateMedia, lateMs);
@@ -524,10 +546,14 @@ export class FxPlayer {
           this.noteDelivery(cue.runId, { index, kind: "sound", state: "reduced",
             reason: "spatial-unavailable", assetId: section.assetId });
         }
-        // A run settles only once this viewer knows everything it will report — which
-        // includes whether its device could honour the author's placement at all. A note
-        // written after the report has gone out would never be sent.
-        this.settleCue(cue.runId);
+        // Starting the element is asynchronous too. Do not settle before play() can
+        // reject; otherwise the local report has already forgotten this section.
+        let settled = false;
+        const settle = () => {
+          if (settled || !active()) return;
+          settled = true;
+          this.settleCue(cue.runId);
+        };
         // The gain is recomputed on a timer rather than set once, because a fade is a
         // curve and a viewer may move a channel fader while the cue is playing. Both
         // facts are local: the timeline never learns that this device changed its mix.
@@ -566,7 +592,7 @@ export class FxPlayer {
         let ramp: ReturnType<typeof setInterval> | null = null;
         let unregister: (() => void) | null = null;
         let stopped = false;
-        const stop = () => {
+        const stop = (settleStopped = true) => {
           if (stopped) return;
           stopped = true;
           if (timer !== null) clearTimeout(timer);
@@ -579,11 +605,12 @@ export class FxPlayer {
           const stops = this.stopAudio.get(cue.runId);
           stops?.delete(stop);
           if (stops?.size === 0) this.stopAudio.delete(cue.runId);
+          if (settleStopped) settle(); // local stop/expiry must not strand a pending play
         };
         const stops = this.stopAudio.get(cue.runId) ?? new Set<() => void>();
         stops.add(stop);
         this.stopAudio.set(cue.runId, stops);
-        audio.onended = stop;
+        audio.onended = () => stop();
         // A fade needs a fast ramp; a *positioned* sound needs a tick for as long as it
         // plays, because the listener can walk (or pan the view) while it sounds. A plain
         // global sound with no fade is set once and left alone — nothing about it changes.
@@ -598,13 +625,19 @@ export class FxPlayer {
         unregister = registerFxSound({ id: soundId, runId: cue.runId, index, channel,
           name: this.options.assetName?.(section.assetId) ?? null,
           gain: audio.volume, persistent: cue.persistent === true, startedAt, stop });
-        void audio.play().catch((err: unknown) => {
-          this.options.onError?.(`FX audio unavailable: ${String(err)}`);
-          stop();
-        });
+        try {
+          await audio.play();
+        } catch (err) {
+          const report = active() && !stopped;
+          stop(false); // genuine failure is settled by the outer failure-report path
+          if (report) throw err;
+          return; // interruption after host/device stop is not a playback failure
+        }
+        if (!active() || stopped) { stop(); return; }
+        settle();
         return;
       }
-      this.settleCue(cue.runId);
+      // Decode is still pending: settling here would discard a later local failure report.
       let texture: Texture;
       let video: HTMLVideoElement | null = null;
       try {
@@ -619,6 +652,11 @@ export class FxPlayer {
             video.onloadeddata = () => resolve();
             video.onerror = () => reject(new Error("video format unsupported"));
           });
+          if (!active() || skipExpired()) {
+            video.pause();
+            URL.revokeObjectURL(url);
+            return;
+          }
           // Restored instances may have started hours ago. Seek into the
           // decoded clip's actual loop, not past EOF (which can stall WebM).
           const seconds = elapsed() / 1000;
@@ -632,7 +670,7 @@ export class FxPlayer {
           await image.decode();
           texture = Texture.from(image);
         }
-        if (!active() || !cue.persistent && elapsed() >= section.durationMs) {
+        if (!active() || skipExpired()) {
           video?.pause();
           texture.destroy(true);
           URL.revokeObjectURL(url);
@@ -644,12 +682,14 @@ export class FxPlayer {
           texture.destroy(true);
           URL.revokeObjectURL(url);
         }, cue.persistent === true);
+        this.settleCue(cue.runId);
       } catch (err) {
         video?.pause();
         URL.revokeObjectURL(url);
         throw err;
       }
     } catch (err) {
+      if (!active()) return; // a dead fetch/decode must not report into a reused run ID
       const detail = String(err);
       const unsupported = /unsupported|format|decode|not supported/i.test(detail);
       this.noteDelivery(cue.runId, { index, kind: section.kind, state: "failed", assetId: section.assetId,

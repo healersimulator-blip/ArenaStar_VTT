@@ -73,6 +73,7 @@ const EMBEDDED_COLLECTION_NAMES: readonly EmbeddedCollectionName[] = [
   "lights",
   "sounds",
   "tiles",
+  "regions",
   "drawings",
   "templates",
   "notes",
@@ -106,6 +107,8 @@ function embeddedArray(doc: BaseDocument, name: EmbeddedCollectionName): BaseDoc
       return null;
     case "tiles":
       return doc.type === "scene" ? (doc as SceneDocument).tiles : null;
+    case "regions":
+      return doc.type === "scene" ? ((doc as SceneDocument).regions ?? []) : null;
     case "drawings":
       return doc.type === "scene" ? (doc as SceneDocument).drawings : null;
     case "templates":

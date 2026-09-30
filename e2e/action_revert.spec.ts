@@ -1,7 +1,7 @@
 import { expect, test, type Browser } from "@playwright/test";
 import { entry, hostCall, manualFragment, playerCall, surfaceCallArg, waitForSurface } from "./lib";
 
-test("GM Revert button restores a trap's PF1e HP and temporary HP, graph history and chat in the built app", async ({ page }) => {
+for (const formula of [false, true]) test(`GM Revert restores a ${formula ? "dice/math" : "fixed"} trap's PF1e HP, temporary HP, history and chat`, async ({ page }) => {
   await page.goto(entry + "?e2e=1");
   await waitForSurface(page, "app");
   expect(await surfaceCallArg<{ ok: boolean }>(page, "app", "pf1ePlaceTokens",
@@ -31,11 +31,22 @@ test("GM Revert button restores a trap's PF1e HP and temporary HP, graph history
   await zones.getByRole("button", { name: "Remove step 2" }).click();
   await zones.getByRole("button", { name: "Remove step 1" }).click();
   await zones.locator('[data-zone-add="hurtHeal"]').click();
-  await zones.getByLabel("Hurt / Heal HP change").fill("-7");
+  if (formula) {
+    await zones.getByLabel("Hurt / Heal amount source").selectOption("formula");
+    await zones.getByLabel("Hurt / Heal formula", { exact: true }).fill("-(1d1 + 6)");
+  } else await zones.getByLabel("Hurt / Heal HP change").fill("-7");
   await zones.locator('[data-zone-add="chat"]').click();
   await zones.locator("[data-zone-step]").last().getByLabel("Text").fill("Trap caused damage");
   await zones.locator("[data-zone-save]").click();
   await expect(zones.getByRole("alert")).toHaveCount(0);
+  if (formula) {
+    await expect(zones.locator("li").filter({ hasText: "PF1e damage trap" })).toHaveCount(1);
+    await hostCall(page, "drainOps"); await page.reload(); await waitForSurface(page, "app");
+    await page.locator("#gm-macros").click(); await page.locator("[data-macro-zones-tab]").click();
+    await zones.locator("li").filter({ hasText: "PF1e damage trap" }).getByRole("button", { name: "Edit" }).click();
+    await expect(zones.getByLabel("Hurt / Heal formula", { exact: true })).toHaveValue("-(1d1 + 6)");
+    await zones.getByLabel("Origin token").selectOption({ label: "trap-victim" });
+  }
   const before = await hostCall<number>(page, "seq");
   await zones.locator("[data-zone-run]").click();
   await expect.poll(() => hostCall<number>(page, "seq")).toBe(before + 1);

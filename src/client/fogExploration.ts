@@ -126,6 +126,8 @@ export interface FogExplorationStats {
 
 export class FogExploration {
   private chain: Promise<void> = Promise.resolve();
+  /** Only the latest replica may publish visibility; exploration/saves remain ordered. */
+  private requestedRevision = 0;
   private surface: FogSurface | null = null;
   private sceneId: string | null = null;
   private key: string | null = null;
@@ -162,7 +164,21 @@ export class FogExploration {
 
   /** Feed the current scene (null = none) and how this shell draws the cover. */
   sync(scene: SceneDocument | null, view: { style: FogStyle }): Promise<void> {
-    return this.enqueue("sync", () => this.syncInner(scene, view.style));
+    if (this.destroyed) return Promise.resolve();
+    const revision = ++this.requestedRevision;
+    // PNG readback, restore and workers can be slow. Never leave yesterday's visible
+    // tokens on screen while today's restrictive lighting/wall change waits in that queue.
+    if (scene && sceneFogSettings(scene).enabled) {
+      const user = this.options.user();
+      const actors = this.options.actors();
+      const viewers = fogViewers(scene, user, { actors });
+      const key = fogRevealKey(scene, viewers, fogSightRadius(scene, sceneFogSettings(scene)));
+      const sameView = this.viewerKey === `${user?.id ?? "-"}:${user?.role ?? "-"}`;
+      const polys = this.sceneId === scene._id && sameView && key === this.key ? this.polys : [];
+      this.publishVisibility(fogVisibleTokenIds(scene, user, polys,
+        { actors, lighting: sceneLighting(scene), viewers }), scene);
+    } else this.publishVisibility(this.maskOnlyVisibility(scene), scene);
+    return this.enqueue("sync", () => this.syncInner(scene, view.style, revision));
   }
 
   /** Upload now if anything changed since the last save (scene switch, close, pagehide). */
@@ -229,8 +245,11 @@ export class FogExploration {
     return this.chain;
   }
 
-  private async syncInner(scene: SceneDocument | null, style: FogStyle): Promise<void> {
+  private async syncInner(scene: SceneDocument | null, style: FogStyle, revision: number): Promise<void> {
     if (this.destroyed) return;
+    const publish = (ids: Set<string> | null): void => {
+      if (revision === this.requestedRevision && !this.destroyed) this.publishVisibility(ids, scene);
+    };
     const settings = scene ? sceneFogSettings(scene) : { enabled: false, rangeSquares: null };
     const user = this.options.user();
     // D-262: who this loop runs as is part of the scene's identity — a GM pointing the loop at a
@@ -246,7 +265,7 @@ export class FogExploration {
       // polygons to intersect, but a painted stroke still withholds the tokens under it
       // (Roll20's Mask is static and independent of Dynamic Lighting) — `null` stays the
       // answer only for a scene nobody painted.
-      this.publishVisibility(this.maskOnlyVisibility(scene));
+      publish(this.maskOnlyVisibility(scene));
       return;
     }
     this.enabled = true;
@@ -267,7 +286,7 @@ export class FogExploration {
       this.restored = false;
       this.restoredBytes = 0;
       // fail closed: until the first polygons exist only the user's own tokens are shown
-      this.publishVisibility(
+      publish(
         fogVisibleTokenIds(scene, user, [], { actors, lighting: sceneLighting(scene) }),
       );
       const stored = await this.fetchStored(scene._id);
@@ -288,7 +307,6 @@ export class FogExploration {
     const radius = fogSightRadius(scene, settings);
     const key = fogRevealKey(scene, viewers, radius);
     if (key !== this.key) {
-      this.key = key;
       const segments = flatSegments(sightSegments(scene.walls));
       // §2.1: each viewer reveals within its own light-bounded radius — a token in an unlit
       // room reveals nothing while a lit one next door reveals its torch's reach.
@@ -299,6 +317,7 @@ export class FogExploration {
       for (const poly of polys) surface.reveal(poly);
       surface.setVisible(polys);
       this.polys = polys;
+      this.key = key; // never cache a failed computation/reveal as a successful pass
       this.reveals++;
       if (polys.length > 0) {
         this.dirty = true;
@@ -308,7 +327,7 @@ export class FogExploration {
     // every replica change: a token may have walked into (or out of) an unmoved eye's sight
     // — or a light may have changed, which is why the lighting state and the viewers' senses
     // ride the gate too (§2.1).
-    this.publishVisibility(
+    publish(
       fogVisibleTokenIds(scene, user, this.polys, { actors, lighting, viewers }),
     );
   }
@@ -328,11 +347,11 @@ export class FogExploration {
   }
 
   /** Hand the shell the visible set, only when it changed (null = fog off, everything). */
-  private publishVisibility(ids: Set<string> | null): void {
+  private publishVisibility(ids: Set<string> | null, scene = this.scene): void {
     // D-262: the caller's last word (the preview's §5 filter) — applied here, at the one funnel
     // every publish goes through, so no path can hand a shell an unfiltered set.
     const filtered = this.options.visibilityFilter
-      ? this.options.visibilityFilter(this.scene, ids)
+      ? this.options.visibilityFilter(scene, ids)
       : ids;
     const key = filtered === null ? null : [...filtered].sort().join("\n");
     if (key === this.visibleKey) return;
@@ -391,8 +410,14 @@ export class FogExploration {
     const sceneId = this.sceneId;
     if (!this.dirty || !surface || sceneId === null) return;
     this.dirty = false;
-    const png = await surface.readbackPng();
-    this.options.transport.sendFogPng(sceneId, png);
+    let png: Uint8Array;
+    try {
+      png = await surface.readbackPng();
+      this.options.transport.sendFogPng(sceneId, png);
+    } catch (error) {
+      this.dirty = true;
+      throw error;
+    }
     this.saves++;
     this.lastSaveBytes = png.length;
   }

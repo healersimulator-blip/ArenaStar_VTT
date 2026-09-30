@@ -1,3 +1,4 @@
+import { environmentPlaceables } from "../fixtures/automationPlaceables";
 // Checklist: S03 — host/GM/two-player replication of a sheet edit and host rejection of a forged non-owner update.
 import { editSelectedRoster, selectedTokens } from "../../src/ui/combat/tokenSelection";
 import {
@@ -30,12 +31,15 @@ import type {
   ActorDocument,
   AssetManifest,
   AutomationDocument,
+  DrawingDocument,
   ItemDocument,
   Json,
   MacroDocument,
   MessageDocument,
   NoteDocument,
   PrefabDocument,
+  RegionDocument,
+  RollTableDocument,
   SceneDocument,
   TileDocument,
   TokenDocument,
@@ -249,6 +253,43 @@ async function setup(manifest: AssetManifest = {}, scriptRunner?: ScriptRunner, 
 }
 
 describe("HostSync ⇄ ClientSync over InMemoryTransport (§2, §5, §6.4)", () => {
+  test("player walk uses the linked PF1e speed; GM movement bypasses the allowance", async () => {
+    const h = await setup();
+    const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const actor: ActorDocument = {
+      _id: "slow-walker", type: "actor", name: "Slow Walker",
+      ownership: { default: 0, [PLAYER_ID]: 3 }, flags: {},
+      system: { pf1e: { landSpeedFt: 20, size: "Medium", abilities: { str: 10, dex: 10, con: 10 } } },
+      items: [], effects: [],
+    };
+    h.gm.submit([
+      { kind: "create", coll: "actors", data: actor },
+      { kind: "update", ref: tokenRef, diff: { actorId: actor._id, x: 50, y: 250 } },
+      { kind: "update", ref: { ...tokenRef, id: "t-ivy" }, diff: { x: 900, y: 900 } },
+    ]);
+    await flushMicrotasks();
+    const refused: ClientEvents["rejected"][] = [];
+    bus.on("rejected", (event) => refused.push(event));
+    player.submit([{ kind: "update", ref: tokenRef, diff: { actorId: null, x: 550, y: 250 } }]);
+    await flushMicrotasks();
+    expect(refused.at(-1)?.detail).toMatch(/only GMs link tokens to actors/i);
+    expect(h.hostStore.resolve(tokenRef)).toMatchObject({ actorId: actor._id, x: 50, y: 250 });
+    const beforeRejected = h.hostStore.seq;
+    player.submit([{ kind: "update", ref: tokenRef, diff: { x: 550, y: 250 } }]); // 25 ft > linked actor's 20 ft speed
+    await flushMicrotasks();
+    expect(refused.at(-1)?.detail).toMatch(/walk costs 25 ft/i);
+    expect(h.hostStore.seq).toBe(beforeRejected);
+    expect(h.hostStore.resolve(tokenRef)).toMatchObject({ x: 50, y: 250 });
+
+    player.submit([{ kind: "update", ref: tokenRef, diff: { x: 450, y: 250 } }]); // exactly the derived 20 ft
+    await flushMicrotasks();
+    expect(h.hostStore.resolve(tokenRef)).toMatchObject({ x: 450, y: 250 });
+
+    h.gm.submit([{ kind: "update", ref: tokenRef, diff: { x: 950, y: 250 } }]); // 25 ft: GM override
+    await flushMicrotasks();
+    expect(h.hostStore.resolve(tokenRef)).toMatchObject({ x: 950, y: 250 });
+  });
+
   test("join flow: hello → approval → welcome + projected snapshot", async () => {
     const h = await setup();
     const { client } = await h.addPlayer(PLAYER_ID, "Rex");
@@ -2284,7 +2325,10 @@ player.client.requestFxSync("s1");
     expect(kinds(secondCues[0])).toEqual(["t", "all-look"]);
     // …and the destination of the GM-only pan is not merely unrendered, it is absent:
     // their payload carries no trace of where someone else's view went.
-    expect(JSON.stringify(firstCues[0])).not.toContain("900");
+    // Inspect camera payloads, not a substring that can also occur in the host timestamp/UUID.
+    expect(firstCues[0]?.sections.filter((section) => section.kind === "camera")).toEqual([
+      { kind: "camera", id: "all-look", mode: "pan", startMs: 0, durationMs: 500, toX: 500, toY: 500 },
+    ]);
 
     // A player runs it: now the caller-targeted pan follows *them*, and the GM-only pan
     // still does not, while the other player still sees only the scene pan.
@@ -2667,6 +2711,123 @@ const zoneTile = (): TileDocument => ({
   x: 100, y: 100, width: 200, height: 200, img: "", above: false,
   occlusion: { mode: "roof", alpha: 0.5 },
 });
+test("host stores only bounded convex first-class scene regions and reserves authoring to the GM", async () => {
+  const h = await setup();
+  const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const playerRejected: ClientEvents["rejected"][] = [];
+  const gmRejected: ClientEvents["rejected"][] = [];
+  playerBus.on("rejected", (event) => playerRejected.push(event));
+  h.gmBus.on("rejected", (event) => gmRejected.push(event));
+  const base: RegionDocument = {
+    _id: "courtyard", type: "region", name: "Courtyard", ownership: { default: 0 }, flags: {}, system: {},
+    x: 100, y: 100, width: 200, height: 120,
+    shape: { kind: "polygon", points: [[0.5, 0], [1, 1], [0, 1]] },
+  };
+  player.submit([{ kind: "create", coll: "regions", parent: { coll: "scenes", id: "s1" }, data: base }]);
+  await flushMicrotasks();
+  expect(playerRejected.at(-1)?.reason).toBe("forbidden");
+  expect(h.hostStore.get("scenes", "s1")?.regions).toBeUndefined();
+
+  h.gm.submit([{ kind: "create", coll: "regions", parent: { coll: "scenes", id: "s1" },
+    data: { ...base, shape: { kind: "polygon", points: [[0, 0], [1, 1], [1, 0], [0, 1]] } } as unknown as RegionDocument }]);
+  await flushMicrotasks();
+  expect(gmRejected.at(-1)?.reason).toBe("invalid_schema");
+  h.gm.submit([{ kind: "create", coll: "regions", parent: { coll: "scenes", id: "s1" }, data: base }]);
+  await flushMicrotasks();
+  expect(h.hostStore.get("scenes", "s1")?.regions?.[0]).toEqual(base);
+  h.gm.submit([{ kind: "update", ref: { coll: "regions", id: base._id, parent: { coll: "scenes", id: "s1" } },
+    diff: { width: -10 } }]);
+  await flushMicrotasks();
+  expect(gmRejected.at(-1)?.reason).toBe("invalid_schema");
+  expect(h.hostStore.get("scenes", "s1")?.regions?.[0]?.width).toBe(200);
+});
+
+test("HostSync dispatches swept enter/exit through a region-anchored active-zone graph", async () => {
+  const h = await setup();
+  const region: RegionDocument = { _id: "crossing-region", type: "region", name: "Crossing region",
+    ownership: { default: 0 }, flags: {}, system: {}, x: 100, y: 100, width: 200, height: 200,
+    shape: { kind: "polygon", points: [[0, 0], [1, 0], [1, 1], [0, 1]] } };
+  h.gm.submit([{ kind: "create", coll: "regions", parent: { coll: "scenes", id: "s1" }, data: region }]);
+  await flushMicrotasks();
+  const graph: AutomationDocument = { ...zoneDoc(), _id: "region-graph", name: "Region crossing",
+    definition: { ...zoneDoc().definition, sourceKind: "region", tileId: region._id, methods: ["enter", "exit"], gates: {},
+      steps: [{ id: "announce", kind: "chat", audience: "gm", content: "region {{method}}" }] } };
+  h.gm.submit([{ kind: "create", coll: "automations", data: graph }]);
+  await flushMicrotasks();
+  expect(h.hostStore.get("automations", graph._id)?.definition.sourceKind).toBe("region");
+  h.gm.submit([{ kind: "update", ref: tokenRef, diff: { x: 400, y: 200 } }]);
+  await flushMicrotasks();
+  expect(h.hostStore.getAll("messages").map((message) => message.content)).toEqual(["region enter", "region exit"]);
+  expect(h.hostStore.get("automations", graph._id)?.state?.count).toBe(2);
+});
+
+test("region Stop Token Movement clips the host path before commit at the swept boundary", async () => {
+  const h = await setup();
+  const region: RegionDocument = { _id: "stop-region", type: "region", name: "Stop region",
+    ownership: { default: 0 }, flags: {}, system: {}, x: 100, y: 100, width: 200, height: 200,
+    shape: { kind: "polygon", points: [[0, 0], [1, 0], [1, 1], [0, 1]] } };
+  h.gm.submit([{ kind: "create", coll: "regions", parent: { coll: "scenes", id: "s1" }, data: region }]);
+  await flushMicrotasks();
+  const graph: AutomationDocument = { ...zoneDoc(), _id: "region-stop-graph", name: "Region stop",
+    definition: { ...zoneDoc().definition, sourceKind: "region", tileId: region._id,
+      methods: ["enter"], gates: {}, steps: [{ id: "stop", kind: "stopMovement", snapToGrid: false }] } };
+  h.gm.submit([{ kind: "create", coll: "automations", data: graph }]);
+  await flushMicrotasks();
+  const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+  const start = h.hostStore.seq;
+  player.submit([{ kind: "update", ref: tokenRef, diff: { x: 400, y: 200 } }]);
+  await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(start + 2);
+  expect(h.hostStore.get("scenes", "s1")?.tokens.find((token) => token._id === "t-pl"))
+    .toMatchObject({ x: 100, y: 50 });
+  expect(h.hostStore.get("automations", graph._id)?.state?.count).toBe(1);
+});
+
+test("host rejects invalid authored tile trigger polygons on create and direct update", async () => {
+  const h = await setup();
+  const rejected: ClientEvents["rejected"][] = [];
+  h.gmBus.on("rejected", (event) => rejected.push(event));
+  const invalid = { ...zoneTile(), triggerZone: { kind: "polygon", points: [[0, 0], [1, 1], [1, 0], [0, 1]] } } as unknown as TileDocument;
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: invalid }]);
+  await flushMicrotasks();
+  expect(rejected.at(-1)?.reason).toBe("invalid_schema");
+  expect(h.hostStore.get("scenes", "s1")?.tiles).toHaveLength(0);
+
+  const valid = { ...zoneTile(), triggerZone: { kind: "polygon" as const, points: [[0.5, 0], [1, 1], [0, 1]] as Array<[number, number]> } };
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: valid }]);
+  await flushMicrotasks();
+  expect(h.hostStore.get("scenes", "s1")?.tiles.find((tile) => tile._id === "zone")?.triggerZone).toEqual(valid.triggerZone);
+  h.gm.submit([{ kind: "update", ref: { coll: "tiles", id: "zone", parent: { coll: "scenes", id: "s1" } },
+    diff: { triggerZone: { kind: "polygon", points: [[0, 0], [1.1, 0], [0, 1]] } as unknown as Json } }]);
+  await flushMicrotasks();
+  expect(rejected.at(-1)?.reason).toBe("invalid_schema");
+  expect(h.hostStore.get("scenes", "s1")?.tiles.find((tile) => tile._id === "zone")?.triggerZone).toEqual(valid.triggerZone);
+
+  const alphaHash = "c".repeat(64);
+  const alpha = { ...zoneTile(), _id: "alpha-zone", img: alphaHash, triggerZone: { kind: "alpha" as const, width: 64 as const,
+    height: 64 as const, imageHash: alphaHash, rows: Array.from({ length: 64 }, (_row, index) => index === 0 ? [[0, 1] as [number, number]] : []) } };
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: alpha }]);
+  await flushMicrotasks();
+  expect(h.hostStore.get("scenes", "s1")?.tiles.find((tile) => tile._id === "alpha-zone")?.triggerZone).toEqual(alpha.triggerZone);
+  h.gm.submit([{ kind: "update", ref: { coll: "tiles", id: "alpha-zone", parent: { coll: "scenes", id: "s1" } },
+    diff: { triggerZone: { kind: "alpha", width: 64, height: 64, rows: Array.from({ length: 64 }, () => []) } as unknown as Json } }]);
+  await flushMicrotasks();
+  expect(rejected.at(-1)?.reason).toBe("invalid_schema");
+  expect(h.hostStore.get("scenes", "s1")?.tiles.find((tile) => tile._id === "alpha-zone")?.triggerZone).toEqual(alpha.triggerZone);
+
+  const elevationZone = { ...zoneTile(), _id: "elevation-zone", triggerElevation: { min: 5, max: 10 } };
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: elevationZone }]);
+  await flushMicrotasks();
+  expect(h.hostStore.get("scenes", "s1")?.tiles.find((tile) => tile._id === "elevation-zone")?.triggerElevation)
+    .toEqual({ min: 5, max: 10 });
+  h.gm.submit([{ kind: "update", ref: { coll: "tiles", id: "elevation-zone", parent: { coll: "scenes", id: "s1" } },
+    diff: { triggerElevation: { min: 20, max: 10 } as unknown as Json } }]);
+  await flushMicrotasks();
+  expect(rejected.at(-1)?.reason).toBe("invalid_schema");
+  expect(h.hostStore.get("scenes", "s1")?.tiles.find((tile) => tile._id === "elevation-zone")?.triggerElevation)
+    .toEqual({ min: 5, max: 10 });
+});
+
 const zoneMacro = (): MacroDocument => ({
   _id: "fx-plate", type: "macro", name: "Spark", ownership: { default: 2 }, flags: {}, system: {},
   kind: "sequence", command: "", sequence: { version: 1, audience: "scene", sections: [{
@@ -2698,7 +2859,766 @@ async function seedZone(h: Harness): Promise<void> {
   await flushMicrotasks();
 }
 
+test("HostSync dispatches host-observed elevation changes through active-zone methods", async () => {
+  const h = await setup();
+  const tile = { ...zoneTile(), triggerElevation: { min: 5, max: 10 } };
+  h.gm.submit([
+    { kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: tile },
+    { kind: "update", ref: { coll: "tokens", id: "t-pl", parent: { coll: "scenes", id: "s1" } }, diff: { x: 150, y: 150 } },
+  ]);
+  await flushMicrotasks();
+  const graph: AutomationDocument = { ...zoneDoc(), definition: {
+    ...zoneDoc().definition, methods: ["elevation"], gates: {},
+    steps: [{ id: "elevation-message", kind: "chat", audience: "gm", content: "entered vertical band" }],
+  } };
+  h.gm.submit([{ kind: "create", coll: "automations", data: graph }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "update", ref: { coll: "tokens", id: "t-pl", parent: { coll: "scenes", id: "s1" } },
+    diff: { elevation: 6 } }]);
+  await flushMicrotasks();
+  expect(h.hostStore.getAll("messages").map((message) => message.content)).toEqual(["entered vertical band"]);
+  expect(h.hostStore.get("automations", graph._id)?.state?.count).toBe(1);
+});
+
+async function seedRotatedZonePair(
+  h: Harness,
+  firstSteps: AutomationDefinition["steps"],
+): Promise<void> {
+  // Put the token at the left edge before any zone graph exists; initial fixture placement must
+  // not consume once-per-token history or masquerade as one of the swept crossings.
+  h.gm.submit([{ kind: "update", ref: { coll: "tokens", id: "t-pl", parent: { coll: "scenes", id: "s1" } },
+    diff: { x: 0, y: 250 } }]);
+  await flushMicrotasks();
+  await seedZone(h);
+  const secondTile: TileDocument = {
+    ...zoneTile(), _id: "zone-later", name: "Later rotated plate",
+    x: 550, y: 200, width: 200, height: 100, rotation: 135,
+  };
+  const secondGraph: AutomationDocument = {
+    ...zoneDoc(), _id: "zone-later-graph", name: "Later rotated trigger",
+    definition: { ...zoneDoc().definition, tileId: secondTile._id, methods: ["enter"], gates: {},
+      steps: [{ id: "later-chat", kind: "chat", audience: "gm", content: "later rotated zone" }] },
+  };
+  const rejected: ClientEvents["rejected"][] = [];
+  h.gmBus.on("rejected", (message) => rejected.push(message));
+  h.gm.submit([
+    { kind: "update", ref: { coll: "tiles", id: "zone", parent: { coll: "scenes", id: "s1" } },
+      diff: { x: 200, y: 200, width: 200, height: 100, rotation: 45 } },
+    { kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: secondTile },
+  ]);
+  await flushMicrotasks();
+  h.gm.submit([
+    { kind: "update", ref: { coll: "automations", id: "zone-graph" }, diff: { definition: {
+      ...zoneDoc().definition, methods: ["enter"], gates: {}, steps: firstSteps,
+    } as unknown as Json } },
+    { kind: "create", coll: "automations", data: secondGraph },
+  ]);
+  await flushMicrotasks();
+  expect(rejected).toEqual([]);
+  expect(h.hostStore.get("automations", "zone-graph")?.definition.steps).toEqual(firstSteps);
+  expect(h.hostStore.get("automations", "zone-later-graph")?.definition.tileId).toBe("zone-later");
+}
+
 describe("Active-zone host evaluation and graph secrecy", () => {
+  test.each([undefined, 1500])("published appearance actions stage lighting (%s ms) and art atomically; privacy, catch-up and undo hold", async (durationMs) => {
+    const hash = "a".repeat(64);
+    const h = await setup({ [hash]: { name: "private-until-used.png", mime: "image/png", size: 8, chunks: 1 } });
+    await seedZone(h);
+    const def: AutomationDefinition = { ...zoneDoc().definition, methods: ["click", "manual"], gates: { playerRunnable: true }, steps: [
+      { id: "light", kind: "sceneLighting", mode: "set", darkness: 0.75, ...(durationMs === undefined ? {} : {durationMs}) },
+      { id: "check", kind: "checkValue", source: "darkness", compare: "eq", value: 0.75 },
+      { id: "bg", kind: "sceneBackground", image: hash },
+      { id: "tile", kind: "select", selector: { kind: "tile" } },
+      { id: "art", kind: "tileImage", image: hash },
+      { id: "chat", kind: "chat", audience: "scene", content: "Night falls" },
+    ] };
+    h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" }, diff: { definition: def as unknown as Json } }]);
+    await flushMicrotasks();
+    const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const received: ClientEvents["ops"][] = [], rejected: ClientEvents["rejected"][] = [];
+    bus.on("ops", (msg) => received.push(msg)); bus.on("rejected", (msg) => rejected.push(msg));
+    expect(player.store.world.assetManifest[hash]).toBeUndefined();
+    const before = h.hostStore.seq;
+    h.gm.requestAutomation("zone-graph", "s1", "manual", "t-pl", true);
+    await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(before);
+    expect(h.hostStore.get("scenes", "s1")?.darkness).toBe(0);
+    player.requestAutomationClick("s1", "zone", { x: 150, y: 150 }, "t-pl");
+    await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(before + 1);
+    expect(h.hostStore.get("scenes", "s1")).toMatchObject({ darkness: 0.75, img: hash });
+    expect(h.hostStore.get("scenes", "s1")?.tiles.find((t) => t._id === "zone")?.img).toBe(hash);
+    expect(player.store.get("scenes", "s1")).toMatchObject({ darkness: 0.75, img: hash });
+    expect(player.store.get("scenes", "s1")?.flags.arenaDarkness).toEqual(durationMs === undefined ? undefined : {darkness:0.75,durationMs});
+    expect(player.store.world.assetManifest[hash]?.name).toBe("private-until-used.png");
+    expect(player.store.getAll("automations")).toEqual([]);
+    expect(JSON.stringify(received)).not.toMatch(/zone-graph|sceneLighting|sceneBackground|tileImage/);
+    player.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" }, diff: { definition: def as unknown as Json } }]);
+    await flushMicrotasks();
+    expect(rejected.at(-1)?.reason).toBe("forbidden");
+    const { client: rejoined } = await h.addPlayer(PLAYER_ID, "Rex", { lastSeq: before });
+    expect(rejoined.store.get("scenes", "s1")).toMatchObject({ darkness: 0.75, img: hash });
+    expect(rejoined.store.getAll("automations")).toEqual([]);
+    expect(rejoined.store.world.assetManifest[hash]).toBeDefined();
+    expect(h.host.undo().ok).toBe(true);
+    await flushMicrotasks();
+    expect(h.hostStore.get("scenes", "s1")).toMatchObject({ darkness: 0, img: null });
+    expect(h.hostStore.get("scenes", "s1")?.tiles.find((t) => t._id === "zone")?.img).toBe("");
+    expect(h.hostStore.get("automations", "zone-graph")?.state).toBeUndefined();
+    expect(rejoined.store.world.assetManifest[hash]).toBeUndefined();
+    expect(rejoined.store.getAll("messages")).toHaveLength(0);
+  });
+
+  test("pinned entity publication/execution is exact, private and undoable for a player trigger",async()=>{
+    const h=await setup();await seedZone(h);
+    const secret:TileDocument={...zoneTile(),_id:"private-pin",hidden:true};
+    h.gm.submit([{kind:"create",coll:"tiles",parent:{coll:"scenes",id:"s1"},data:secret}]);await flushMicrotasks();
+    const refs=[{coll:"tiles" as const,id:"missing",parent:{coll:"scenes" as const,id:"s1"}},
+      {coll:"tokens" as const,id:"t-pl",parent:{coll:"scenes" as const,id:"s1"}}];
+    const definition:AutomationDefinition={...zoneDoc().definition,methods:["click","manual"],gates:{playerRunnable:true},steps:[
+      {id:"pin",kind:"select",selector:{kind:"ids",refs}},
+      {id:"turn",kind:"rotate",mode:"add",angle:90,targets:"current"},
+    ]};
+    const prior=h.hostStore.seq;
+    h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(prior);
+    const first=refs[0];if(!first)throw new Error("missing pin");first.id="private-pin";
+    h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(prior+1);
+    const {client:player,bus}=await h.addPlayer(PLAYER_ID,"Rex");const received:ClientEvents["ops"][]=[];bus.on("ops",(msg)=>received.push(msg));
+    const before=h.hostStore.seq;player.requestAutomationClick("s1","zone",{x:150,y:150},"t-pl");await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(before+1);expect(h.hostStore.get("scenes","s1")?.tiles.find((t)=>t._id==="private-pin")?.rotation).toBe(90);
+    expect(player.store.get("scenes","s1")?.tokens.find((t)=>t._id==="t-pl")?.rotation).toBe(90);
+    expect(player.store.get("scenes","s1")?.tiles.some((t)=>t._id==="private-pin")).toBe(false);
+    expect(JSON.stringify(received)).not.toMatch(/private-pin|zone-graph/);expect(player.store.getAll("automations")).toEqual([]);
+    expect(h.host.undo().ok).toBe(true);await flushMicrotasks();
+    expect(player.store.get("scenes","s1")?.tokens.find((t)=>t._id==="t-pl")?.rotation).toBe(0);
+    h.gm.submit([{kind:"delete",ref:{coll:"tiles",id:"private-pin",parent:{coll:"scenes",id:"s1"}}}]);await flushMicrotasks();
+    const seq=h.hostStore.seq;h.gm.requestAutomation("zone-graph","s1","manual","t-pl");await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(seq);expect(player.store.get("scenes","s1")?.tokens.find((t)=>t._id==="t-pl")?.rotation).toBe(0);
+  });
+
+  test("timed token rotation commits facing and dispatches rotate triggers immediately",async()=>{
+    const h=await setup();await seedZone(h);
+    const definition:AutomationDefinition={...zoneDoc().definition,methods:["click"],gates:{playerRunnable:true},steps:[
+      {id:"turn",kind:"rotate",mode:"add",angle:90,targets:"triggering",durationMs:60000},
+    ]};
+    h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}},
+      {kind:"update",ref:{coll:"tokens",id:"t-pl",parent:{coll:"scenes",id:"s1"}},diff:{x:150,y:150}},
+      {kind:"create",coll:"automations",data:{...zoneDoc(),_id:"rotation-observer",definition:{...zoneDoc().definition,methods:["rotate"],gates:{},steps:[
+        {id:"message",kind:"chat",audience:"gm",content:"Rotation committed, not waiting for animation"},
+      ]}} as AutomationDocument}]);await flushMicrotasks();
+    const {client:player}=await h.addPlayer(PLAYER_ID,"Rex");
+    player.requestAutomationClick("s1","zone",{x:150,y:150},"t-pl");await flushMicrotasks();
+    expect(h.hostStore.get("scenes","s1")?.tokens.find((token)=>token._id==="t-pl"))
+      .toMatchObject({rotation:90,flags:{arenaRotation:{rotation:90,durationMs:60000}}});
+    expect(player.store.get("scenes","s1")?.tokens.find((token)=>token._id==="t-pl")?.rotation).toBe(90);
+    expect(h.hostStore.getAll("messages").some((m)=>m.content==="Rotation committed, not waiting for animation")).toBe(true);
+    expect(player.store.getAll("messages")).toEqual([]);expect(player.store.getAll("automations")).toEqual([]);
+  });
+
+  test.each([{formula:false,animated:false},{formula:true,animated:false},{formula:false,animated:true},{formula:true,animated:true}])("player click rotates a tile relatively with Undo/catch-up (formula $formula, animated $animated)", async ({formula,animated}) => {
+    const h = await setup(); await seedZone(h);
+    const def: AutomationDefinition = { ...zoneDoc().definition, methods: ["click"], gates: { playerRunnable: true }, steps: [
+      { id: "sel", kind: "select", selector: { kind: "tile" } },
+      { id: "turn", kind: "rotate", mode: "add", ...(formula ? { formula: "1d1 * 90" } : { angle: 90 }), targets: "current", ...(animated ? {durationMs:1000} : {}) },
+    ] };
+    h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" }, diff: { definition: def as unknown as Json } }]);
+    await flushMicrotasks();
+    const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+    const before = h.hostStore.seq;
+    for (const angle of [90, 180]) {
+      player.requestAutomationClick("s1", "zone", { x: 150, y: 150 }, "t-pl"); await flushMicrotasks();
+      expect(h.hostStore.get("scenes", "s1")?.tiles.find((tile) => tile._id === "zone")?.rotation).toBe(angle);
+      expect(player.store.get("scenes", "s1")?.tiles.find((tile) => tile._id === "zone")?.rotation).toBe(angle);
+      expect(player.store.getAll("automations")).toEqual([]);
+      expect(player.store.get("scenes","s1")?.tiles.find((tile)=>tile._id==="zone")?.flags.arenaRotation)
+        .toEqual(animated ? {rotation:angle,durationMs:1000} : undefined);
+    }
+    const { client: rejoined } = await h.addPlayer(PLAYER_ID, "Rex", { lastSeq: before });
+    expect(rejoined.store.get("scenes", "s1")?.tiles.find((tile) => tile._id === "zone")?.rotation).toBe(180);
+    expect(h.host.undo().ok).toBe(true); await flushMicrotasks();
+    expect(rejoined.store.get("scenes", "s1")?.tiles.find((tile) => tile._id === "zone")?.rotation).toBe(90);
+    expect(h.hostStore.get("automations", "zone-graph")?.state?.count).toBe(1);
+  });
+
+  test("player click moves its tile without stationary-token triggers, with private history, catch-up and Undo", async () => {
+    const h = await setup(); await seedZone(h);
+    const def: AutomationDefinition = { ...zoneDoc().definition, methods: ["click", "enter", "exit", "stop"], gates: { playerRunnable: true }, steps: [
+      { id: "sel", kind: "select", selector: { kind: "tile" } },
+      { id: "move", kind: "move", mode: "add", x: 10, y: 20, targets: "current" },
+    ] };
+    h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" }, diff: { definition: def as unknown as Json } }]);
+    await flushMicrotasks();
+    const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+    const before = h.hostStore.seq;
+    const initial = h.hostStore.get("scenes", "s1")?.tiles.find((tile) => tile._id === "zone");
+    if (!initial) throw new Error("missing tile");
+    for (const count of [1, 2]) {
+      player.requestAutomationClick("s1", "zone", { x: 150, y: 150 }, "t-pl"); await flushMicrotasks();
+      expect(h.hostStore.seq).toBe(before + count);
+      expect(player.store.get("scenes", "s1")?.tiles.find((tile) => tile._id === "zone"))
+        .toMatchObject({ x: initial.x + 10 * count, y: initial.y + 20 * count });
+      expect(h.hostStore.get("automations", "zone-graph")?.state?.count).toBe(count);
+      expect(player.store.getAll("automations")).toEqual([]);
+    }
+    const { client: rejoined } = await h.addPlayer(PLAYER_ID, "Rex", { lastSeq: before });
+    expect(rejoined.store.get("scenes", "s1")?.tiles.find((tile) => tile._id === "zone"))
+      .toMatchObject({ x: initial.x + 20, y: initial.y + 40 });
+    expect(h.host.undo().ok).toBe(true); await flushMicrotasks();
+    expect(rejoined.store.get("scenes", "s1")?.tiles.find((tile) => tile._id === "zone"))
+      .toMatchObject({ x: initial.x + 10, y: initial.y + 20 });
+    expect(h.hostStore.get("automations", "zone-graph")?.state?.count).toBe(1);
+  });
+
+  test.each([false,true])("host snaps a player-triggered move and restores it on Undo (coordinate formulas %s)", async (formula) => {
+    const h = await setup(); await seedZone(h);
+    const def: AutomationDefinition = { ...zoneDoc().definition, methods: ["click"], gates: { playerRunnable: true }, steps: [
+      { id: "sel", kind: "select", selector: { kind: "tile" } },
+      { id: "move", kind: "move", ...(formula ? {mode:"add" as const,xMode:"set" as const,yMode:"set" as const,xFormula:"1d1 * 276",yFormula:"162 * 2"} : {x:276,y:324}), targets: "current", snapToGrid: true, wallCollision: "block", durationMs: 1200 },
+    ] };
+    h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" }, diff: { definition: def as unknown as Json } }]);
+    await flushMicrotasks();
+    const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+    const original = structuredClone(h.hostStore.get("scenes", "s1")?.tiles.find((tile) => tile._id === "zone"));
+    if (!original) throw new Error("missing tile");
+    player.requestAutomationClick("s1", "zone", { x: 150, y: 150 }, "t-pl"); await flushMicrotasks();
+    expect(player.store.get("scenes", "s1")?.tiles.find((tile) => tile._id === "zone"))
+      .toMatchObject({ x: 250 - original.width / 2, y: 350 - original.height / 2 });
+    const moved = player.store.get("scenes", "s1")?.tiles.find((tile) => tile._id === "zone");
+    expect(moved?.flags.arenaMove).toEqual({ x: 250 - original.width / 2, y: 350 - original.height / 2, durationMs: 1200 });
+    expect(player.store.getAll("automations")).toEqual([]);
+    expect(h.host.undo().ok).toBe(true); await flushMicrotasks();
+    expect(player.store.get("scenes", "s1")?.tiles.find((tile) => tile._id === "zone"))
+      .toMatchObject({ x: original.x, y: original.y });
+  });
+
+  test("Undo and Redo restore crossing and graph envelopes without re-firing entry actions or RNG",async()=>{
+    let draws=0;const h=await setup({},undefined,()=>{draws++;return 0;});await seedZone(h);
+    for(const id of ["entry-a","entry-b"])h.gm.submit([{kind:"create",coll:"tiles",parent:{coll:"scenes",id:"s1"},
+      data:{...zoneTile(),_id:id,x:400,y:400,width:200,height:100,rotation:90,taggerTags:["entry-target"]} as TileDocument}]);await flushMicrotasks();
+    const definition:AutomationDefinition={...zoneDoc().definition,methods:["enter"],gates:{},steps:[
+      {id:"chat",kind:"chat",audience:"gm",content:"one crossing"},
+      {id:"move",kind:"move",targets:"triggering",destinationTag:{kind:"tag",query:"entry-target",collections:["tiles"]},destinationChoice:"random",destinationPosition:"entry",x:0,y:0,triggerTiles:false},
+    ]};
+    h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    const {client:player}=await h.addPlayer(PLAYER_ID,"Rex");player.submit([{kind:"update",ref:tokenRef,diff:{x:400,y:200}}]);await flushMicrotasks();
+    const messages=structuredClone(h.hostStore.getAll("messages"));expect(messages).toHaveLength(1);expect(draws).toBe(1);
+    const seq=h.hostStore.seq;
+    for(const [action,x,y,count] of [["undo",400,200,0],["undo",0,0,0],["redo",400,200,0],["redo",550,350,1]] as const){
+      expect(h.host[action]().ok).toBe(true);await flushMicrotasks();
+      expect(player.store.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x,y});
+      expect(h.hostStore.getAll("messages")).toHaveLength(count);expect(h.hostStore.get("automations","zone-graph")?.state?.count??0).toBe(count);expect(draws).toBe(1);
+    }
+    expect(h.hostStore.seq).toBe(seq+4);expect(h.hostStore.getAll("messages")).toEqual(messages);
+  });
+
+  test.each(["undo-","redo-","action-revert-"])("a client %s transaction name cannot suppress crossing automation",async(prefix)=>{
+    const h=await setup();await seedZone(h);
+    const definition:AutomationDefinition={...zoneDoc().definition,methods:["enter"],gates:{},steps:[{id:"chat",kind:"chat",audience:"gm",content:"crossed"}]};
+    h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    const pair=createTransportPair();h.host.addSession("prefix-test",pair.a,{id:PLAYER_ID,role:"PLAYER",name:"Rex"});
+    const seq=h.hostStore.seq;pair.b.send("ops",frameMessage({kind:"intent",txId:prefix+"forgery",ops:[{kind:"update",ref:tokenRef,diff:{x:400,y:200}}]}));await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(seq+2);expect(h.hostStore.getAll("messages").map(m=>m.content)).toEqual(["crossed"]);h.host.removeSession("prefix-test");
+  });
+
+  test("Original Destination follows the host-observed token endpoint through a staged redirect and stays private/undoable",async()=>{
+    const h=await setup();await seedZone(h);
+    const definition:AutomationDefinition={...zoneDoc().definition,methods:["enter","manual"],gates:{playerRunnable:true},steps:[
+      {id:"notice",kind:"chat",audience:"gm",content:"original endpoint saved"},
+      {id:"detour",kind:"move",targets:"triggering",x:800,y:800,triggerTiles:false},
+      {id:"return",kind:"move",targets:"triggering",destinationOriginal:true,x:25,y:-25,triggerTiles:false},
+    ]};
+    h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    const {client:player,bus}=await h.addPlayer(PLAYER_ID,"Rex"),received:ClientEvents["ops"][]=[];bus.on("ops",msg=>received.push(msg));
+    h.gm.requestAutomation("zone-graph","s1","manual","t-pl",true);await flushMicrotasks();
+    expect(h.hostStore.getAll("messages")).toEqual([]);
+    const start=h.hostStore.seq;
+    // Host observes (0,0)->(400,200); the swept enter happens before that endpoint.
+    player.submit([{kind:"update",ref:tokenRef,diff:{x:400,y:200}}]);await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(start+2);expect(h.hostStore.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:425,y:175});
+    expect(h.hostStore.getAll("messages").map(m=>m.content)).toEqual(["original endpoint saved"]);
+    expect(player.store.getAll("messages")).toEqual([]);expect(player.store.getAll("automations")).toEqual([]);
+    expect(JSON.stringify(received)).not.toMatch(/movementOriginal|destinationOriginal|original endpoint saved|zone-graph/);
+    expect(h.hostStore.get("automations","zone-graph")?.state?.count).toBe(1);
+    expect(h.host.undo().ok).toBe(true);await flushMicrotasks();expect(player.store.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:400,y:200});
+    expect(h.host.undo().ok).toBe(true);await flushMicrotasks();expect(player.store.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:0,y:0});
+    expect(h.hostStore.getAll("messages")).toEqual([]);expect(h.hostStore.get("automations","zone-graph")?.state?.count??0).toBe(0);
+  });
+
+  test("a sole unconditional Stop Token Movement clips the submitted endpoint before its first commit",async()=>{
+    const h=await setup();await seedZone(h);
+    const laterTile={...zoneTile(),_id:"beyond-stop",x:300,y:130,width:100,height:100};
+    const laterGraph:AutomationDocument={...zoneDoc(),_id:"beyond-stop-graph",definition:{...zoneDoc().definition,tileId:"beyond-stop",methods:["enter"],gates:{},steps:[
+      {id:"later-chat",kind:"chat",audience:"gm",content:"must not trigger past the stop"},
+    ]}};
+    h.gm.submit([{kind:"create",coll:"tiles",parent:{coll:"scenes",id:"s1"},data:laterTile},
+      {kind:"create",coll:"automations",data:laterGraph}]);await flushMicrotasks();
+    const definition:AutomationDefinition={...zoneDoc().definition,methods:["enter"],gates:{},steps:[
+      {id:"stop",kind:"stopMovement",snapToGrid:true},
+    ]};h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    const {client:player,bus}=await h.addPlayer(PLAYER_ID,"Rex"),observed:number[]=[];
+    bus.on("ops",()=>observed.push(player.store.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")?.x??-1));
+    const start=h.hostStore.seq;player.submit([{kind:"update",ref:tokenRef,diff:{x:400,y:200}}]);await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(start+2);expect(h.hostStore.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:150,y:50});
+    // The first client-visible envelope is already at the swept-footprint boundary: x=400 was never committed alone.
+    expect(observed[0]).toBe(150);expect(h.hostStore.get("automations","zone-graph")?.state?.count).toBe(1);
+    expect(h.hostStore.getAll("messages")).toEqual([]);expect(h.hostStore.get("automations","beyond-stop-graph")?.state?.count??0).toBe(0);
+    expect(h.host.undo().ok).toBe(true);await flushMicrotasks();expect(player.store.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:150,y:50});
+    expect(h.host.undo().ok).toBe(true);await flushMicrotasks();expect(player.store.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:0,y:0});
+  });
+
+  test("pre-commit Stop Token Movement clips an Exit crossing from inside the trigger",async()=>{
+    const h=await setup();await seedZone(h);
+    const definition:AutomationDefinition={...zoneDoc().definition,methods:["exit"],gates:{},steps:[{id:"stop",kind:"stopMovement",snapToGrid:true}]};
+    h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    const {client:player,bus}=await h.addPlayer(PLAYER_ID,"Rex"),observed:number[]=[];
+    bus.on("ops",()=>observed.push(player.store.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")?.x??-1));
+    player.submit([{kind:"update",ref:tokenRef,diff:{x:200,y:200}}]);await flushMicrotasks();
+    const start=h.hostStore.seq;player.submit([{kind:"update",ref:tokenRef,diff:{x:400,y:400}}]);await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(start+2);expect(h.hostStore.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:350,y:350});
+    expect(observed).toContain(350);expect(h.hostStore.get("automations","zone-graph")?.state?.count).toBe(1);
+  });
+
+  test("a conditional Stop Token Movement branch that skips does not clip player movement",async()=>{
+    const h=await setup();await seedZone(h);
+    const definition:AutomationDefinition={...zoneDoc().definition,methods:["enter"],gates:{},steps:[
+      {id:"direction",kind:"checkValue",source:"direction.x",compare:"eq",value:"left",otherwise:"skip"},
+      {id:"stop",kind:"stopMovement",snapToGrid:true},{id:"skip",kind:"landing",name:"skip"},
+    ]};h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    const {client:player}=await h.addPlayer(PLAYER_ID,"Rex"),start=h.hostStore.seq;
+    player.submit([{kind:"update",ref:tokenRef,diff:{x:400,y:200}}]);await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(start+2);expect(h.hostStore.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:400,y:200});
+    expect(h.hostStore.get("automations","zone-graph")?.state?.count).toBe(1);
+  });
+
+  test("a conditional Stop branch that runs clips from its cached plan without changing undo boundaries",async()=>{
+    const h=await setup();await seedZone(h);
+    const definition:AutomationDefinition={...zoneDoc().definition,methods:["enter"],gates:{},steps:[
+      {id:"direction",kind:"checkValue",source:"direction.x",compare:"eq",value:"right",otherwise:"skip"},
+      {id:"stop",kind:"stopMovement",snapToGrid:true},{id:"skip",kind:"landing",name:"skip"},
+    ]};h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    const {client:player,bus}=await h.addPlayer(PLAYER_ID,"Rex"),observed:number[]=[];
+    bus.on("ops",()=>observed.push(player.store.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")?.x??-1));
+    const start=h.hostStore.seq;player.submit([{kind:"update",ref:tokenRef,diff:{x:400,y:200}}]);await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(start+2);expect(observed[0]).toBe(150);
+    expect(h.hostStore.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:150,y:50});
+    expect(h.hostStore.get("automations","zone-graph")?.state?.count).toBe(1);
+    expect(h.host.undo().ok).toBe(true);await flushMicrotasks();expect(player.store.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:150,y:50});
+    expect(h.host.undo().ok).toBe(true);await flushMicrotasks();expect(player.store.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:0,y:0});
+  });
+
+  test("Stop with a root-graph variable effect keeps movement and graph commits separate",async()=>{
+    const h=await setup();await seedZone(h);
+    const definition:AutomationDefinition={...zoneDoc().definition,methods:["enter"],gates:{},steps:[
+      {id:"mark",kind:"set",scope:"tile",name:"visited",value:true},
+      {id:"stop",kind:"stopMovement",snapToGrid:true},
+    ]};
+    h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    const {client:player,bus}=await h.addPlayer(PLAYER_ID,"Rex"),observed:number[]=[];
+    bus.on("ops",()=>observed.push(player.store.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")?.x??-1));
+    const start=h.hostStore.seq;player.submit([{kind:"update",ref:tokenRef,diff:{x:400,y:200}}]);await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(start+2);expect(observed[0]).toBe(400);
+    expect(h.hostStore.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:150,y:50});
+    expect(h.hostStore.get("automations","zone-graph")?.state?.variables).toMatchObject({visited:true});
+    expect(h.host.undo().ok).toBe(true);await flushMicrotasks();expect(player.store.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:400,y:200});
+    expect(h.host.undo().ok).toBe(true);await flushMicrotasks();expect(player.store.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:0,y:0});
+  });
+
+  test.each([{roll:0.25,stops:true},{roll:0.75,stops:false}])(
+    "chance-gated Stop uses one planner roll ($roll; stops=$stops)",async({roll,stops})=>{
+      let rolls=0;const h=await setup({},undefined,()=>{rolls++;return roll;});await seedZone(h);
+      const definition:AutomationDefinition={...zoneDoc().definition,methods:["enter"],gates:{chance:0.5},
+        steps:[{id:"stop",kind:"stopMovement",snapToGrid:true}]};
+      h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+      const player=(await h.addPlayer(PLAYER_ID,"Rex")).client,start=h.hostStore.seq,beforeRolls=rolls;
+      player.submit([{kind:"update",ref:tokenRef,diff:{x:400,y:200}}]);await flushMicrotasks();
+      expect(rolls-beforeRolls).toBe(1);
+      expect(h.hostStore.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl"))
+        .toMatchObject(stops?{x:150,y:50}:{x:400,y:200});
+      expect(h.hostStore.seq).toBe(start+(stops?2:1));
+    });
+
+  test("conditional chance Stop preflights a moved group once per token and preserves graph Undo boundaries",async()=>{
+    let rolls=0;const h=await setup({},undefined,()=>{rolls++;return 0.25;});await seedZone(h);
+    const definition:AutomationDefinition={...zoneDoc().definition,methods:["enter"],gates:{chance:0.5},steps:[
+      {id:"direction",kind:"checkValue",source:"direction.x",compare:"eq",value:"right",otherwise:"skip"},
+      {id:"stop",kind:"stopMovement",snapToGrid:true},{id:"skip",kind:"landing",name:"skip"},
+    ]};
+    h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    const beforeRolls=rolls,start=h.hostStore.seq;
+    h.gm.submit([
+      {kind:"update",ref:{coll:"tokens",id:"t-ivy",parent:{coll:"scenes",id:"s1"}},diff:{x:400,y:200}},
+      {kind:"update",ref:{coll:"tokens",id:"t-pl",parent:{coll:"scenes",id:"s1"}},diff:{x:400,y:200}},
+    ]);await flushMicrotasks();
+    expect(rolls-beforeRolls).toBe(2);expect(h.hostStore.seq).toBe(start+3);
+    for(const tokenId of ["t-ivy","t-pl"])
+      expect(h.hostStore.get("scenes","s1")?.tokens.find((token)=>token._id===tokenId)).toMatchObject({x:150,y:50});
+    const state=h.hostStore.get("automations","zone-graph")?.state;
+    expect(state?.count).toBe(2);expect(state?.byToken?.["t-ivy"]?.count).toBe(1);expect(state?.byToken?.["t-pl"]?.count).toBe(1);
+    expect(h.host.undo().ok).toBe(true);await flushMicrotasks();expect(h.hostStore.get("automations","zone-graph")?.state?.count).toBe(1);
+    expect(h.host.undo().ok).toBe(true);await flushMicrotasks();expect(h.hostStore.get("automations","zone-graph")?.state?.count??0).toBe(0);
+    expect(h.host.undo().ok).toBe(true);await flushMicrotasks();
+    for(const tokenId of ["t-ivy","t-pl"])
+      expect(h.hostStore.get("scenes","s1")?.tokens.find((token)=>token._id===tokenId)).toMatchObject({x:0,y:0});
+  });
+
+  test("an earlier non-stop movement graph keeps the later Stop on the post-commit path",async()=>{
+    const h=await setup();await seedZone(h);
+    const earlierTile={...zoneTile(),_id:"earlier",x:100,y:0,width:50,height:50};
+    const earlierGraph:AutomationDocument={...zoneDoc(),_id:"earlier-graph",definition:{...zoneDoc().definition,
+      tileId:"earlier",methods:["enter"],gates:{},steps:[{id:"notice",kind:"chat",audience:"gm",content:"earlier trigger"}]}};
+    const stopDefinition:AutomationDefinition={...zoneDoc().definition,methods:["enter"],gates:{},steps:[{id:"stop",kind:"stopMovement",snapToGrid:true}]};
+    h.gm.submit([{kind:"create",coll:"tiles",parent:{coll:"scenes",id:"s1"},data:earlierTile}]);await flushMicrotasks();
+    h.gm.submit([{kind:"create",coll:"automations",data:earlierGraph}]);await flushMicrotasks();
+    h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:stopDefinition as unknown as Json}}]);await flushMicrotasks();
+    expect(h.hostStore.get("automations","earlier-graph")).toBeDefined();
+    const {client:player,bus}=await h.addPlayer(PLAYER_ID,"Rex"),observed:number[]=[];
+    bus.on("ops",()=>observed.push(player.store.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")?.x??-1));
+    const start=h.hostStore.seq;player.submit([{kind:"update",ref:tokenRef,diff:{x:400,y:200}}]);await flushMicrotasks();
+    expect(observed[0]).toBe(400);expect(h.hostStore.seq).toBe(start+3);
+    expect(h.hostStore.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:150,y:50});
+    expect(h.hostStore.get("automations","earlier-graph")?.state?.count).toBe(1);
+    expect(h.hostStore.get("automations","zone-graph")?.state?.count).toBe(1);
+  });
+
+  test("Stop Token Movement settles at the host enter boundary, suppresses its correction path and undoes cleanly",async()=>{
+    const h=await setup();await seedZone(h);const definition:AutomationDefinition={...zoneDoc().definition,methods:["enter","exit"],steps:[
+      {id:"private",kind:"chat",audience:"gm",content:"movement stopped"},
+      {id:"stop",kind:"stopMovement",snapToGrid:true},
+    ]};h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    const {client:player}=await h.addPlayer(PLAYER_ID,"Rex"),start=h.hostStore.seq;
+    // The client requests (400,200); the 100x100 token's leading corner reaches the tile at center (100,50), square-snapping to (150,50).
+    player.submit([{kind:"update",ref:tokenRef,diff:{x:400,y:200}}]);await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(start+2);expect(h.hostStore.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:150,y:50});
+    expect(h.hostStore.getAll("messages").map(m=>m.content)).toEqual(["movement stopped"]);expect(player.store.getAll("messages")).toEqual([]);
+    expect(h.hostStore.get("automations","zone-graph")?.state?.count).toBe(1);
+    // The correction path crosses back over the source but is suppressed; no recursive trigger.
+    expect(h.hostStore.seq).toBe(start+2);expect(h.hostStore.get("automations","zone-graph")?.state?.count).toBe(1);
+    expect(h.host.undo().ok).toBe(true);await flushMicrotasks();expect(player.store.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:400,y:200});
+    expect(h.host.undo().ok).toBe(true);await flushMicrotasks();expect(player.store.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:0,y:0});
+    expect(h.hostStore.getAll("messages")).toEqual([]);expect(h.hostStore.get("automations","zone-graph")?.state?.count??0).toBe(0);
+  });
+
+  test("client-supplied movementOriginal cannot override the host-observed endpoint",async()=>{
+    const h=await setup();await seedZone(h);const definition:AutomationDefinition={...zoneDoc().definition,methods:["enter"],steps:[
+      {id:"move",kind:"move",targets:"triggering",destinationOriginal:true,x:25,y:-25,triggerTiles:false},
+    ]};h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    const pair=createTransportPair();h.host.addSession("forged-original",pair.a,{id:PLAYER_ID,role:"PLAYER",name:"Rex"});
+    const seq=h.hostStore.seq;pair.b.send("ops",frameMessage({kind:"intent",txId:"forged-original",ops:[{kind:"update",ref:tokenRef,diff:{x:400,y:200}}],
+      movementOriginal:{tokenId:"t-pl",x:900,y:900}} as unknown as import("../../src/core/messages").IntentMsg));await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(seq+2);expect(h.hostStore.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:425,y:175});h.host.removeSession("forged-original");
+  });
+
+  test.each(["undo","revert"] as const)("entry-relative Move uses the host crossing, keeps context private and restores via %s",async(restore)=>{
+    let draws=0;const h=await setup({},undefined,()=>{draws++;return 0;});await seedZone(h);
+    h.gm.submit([{kind:"create",coll:"tiles",parent:{coll:"scenes",id:"s1"},data:{...zoneTile(),_id:"private-entry-destination",x:400,y:400,width:200,height:100,rotation:90,hidden:true} as TileDocument}]);await flushMicrotasks();
+    const definition:AutomationDefinition={...zoneDoc().definition,methods:["enter","click","manual"],gates:{playerRunnable:true},steps:[
+      {id:"notice",kind:"chat",audience:"gm",content:"private crossing"},
+      {id:"move",kind:"move",targets:"triggering",destination:{coll:"tiles",id:"private-entry-destination"},destinationPosition:"entry",x:0,y:0,durationMs:500,triggerTiles:false},
+    ]};
+    h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    const {client:player,bus}=await h.addPlayer(PLAYER_ID,"Rex"),received:ClientEvents["ops"][]=[];bus.on("ops",msg=>received.push(msg));
+    // Click/run/dry-run cannot invent an entry from the token's current position.
+    const before=h.hostStore.seq;player.requestAutomationClick("s1","zone",{x:150,y:150},"t-pl");
+    h.gm.requestAutomation("zone-graph","s1","manual","t-pl",true);await flushMicrotasks();expect(h.hostStore.seq).toBe(before);
+    const pair=createTransportPair();h.host.addSession("forged-entry",pair.a,{id:PLAYER_ID,role:"PLAYER",name:"Rex"});
+    pair.b.send("ops",frameMessage({kind:"automation.click",requestId:"forged-entry",sceneId:"s1",tileId:"zone",point:{x:150,y:150},tokenId:"t-pl",
+      movementEntry:{tileId:"zone",tokenId:"t-pl",u:1,v:1}} as unknown as import("../../src/core/messages").AutomationClickMsg));
+    await flushMicrotasks();expect(h.hostStore.seq).toBe(before);h.host.removeSession("forged-entry");
+    // (0,0)->(400,200) passes right through the source. Contact is (200,100), not (400,200).
+    player.submit([{kind:"update",ref:tokenRef,diff:{x:400,y:200}}]);await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(before+2);expect(draws).toBe(0);
+    expect(player.store.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:550,y:350,flags:{arenaMove:{x:550,y:350,durationMs:500}}});
+    expect(player.store.getAll("automations")).toEqual([]);expect(player.store.getAll("messages")).toEqual([]);
+    expect(JSON.stringify(received)).not.toMatch(/private-entry-destination|movementEntry|destinationPosition|private crossing|zone-graph/);
+    const {client:late}=await h.addPlayer(PLAYER_ID,"Rex",{lastSeq:before});expect(late.store.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:550,y:350});
+    if(restore==="undo")expect(h.host.undo().ok).toBe(true);
+    else {const receipt=h.hostStore.getAll("actionReceipts").find(r=>r.status==="ready");if(!receipt)throw new Error("missing receipt");h.gm.actionRevert(receipt._id);}
+    await flushMicrotasks();expect(late.store.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:400,y:200});
+    expect(h.hostStore.getAll("messages")).toEqual([]);expect(h.hostStore.get("automations","zone-graph")?.state?.count??0).toBe(0);expect(draws).toBe(0);
+    const seq=h.hostStore.seq;late.requestAutomationClick("s1","zone",{x:150,y:150},"t-pl");await flushMicrotasks();expect(h.hostStore.seq).toBe(seq);
+    // A later failing entry graph does not roll back the preceding committed player drag.
+    definition.steps.push({id:"dark",kind:"sceneLighting",mode:"set",darkness:1},{id:"fail",kind:"sceneLighting",mode:"add",darkness:1});
+    h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    const failureSeq=h.hostStore.seq;late.submit([{kind:"update",ref:tokenRef,diff:{x:0,y:0}}]);await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(failureSeq+1);expect(h.hostStore.get("scenes","s1")).toMatchObject({darkness:0});
+    expect(h.hostStore.getAll("messages")).toEqual([]);expect(late.store.get("scenes","s1")?.tokens.find(t=>t._id==="t-pl")).toMatchObject({x:0,y:0});
+  });
+
+  test("player-triggered random Move uses host draws, keeps private destinations secret and restores the sampled endpoint",async()=>{
+    let draws=0;const h=await setup({},undefined,()=>{draws++;return 0.75;});await seedZone(h);
+    for(const [id,x] of [["private-a",400],["private-b",700]] as const)h.gm.submit([{kind:"create",coll:"tiles",parent:{coll:"scenes",id:"s1"},
+      data:{...zoneTile(),_id:id,x,y:400,hidden:true,taggerTags:["secret-destinations"]} as TileDocument}]);await flushMicrotasks();
+    const definition:AutomationDefinition={...zoneDoc().definition,methods:["click","manual"],gates:{playerRunnable:true},steps:[
+      {id:"light",kind:"sceneLighting",mode:"set",darkness:0.5},
+      {id:"self",kind:"select",selector:{kind:"tile"}},
+      {id:"move",kind:"move",destinationTag:{kind:"tag",query:"secret-destinations",collections:["tiles"]},
+        destinationChoice:"random",destinationPosition:"random",x:0,y:0,targets:"current",durationMs:60000},
+    ]};
+    h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    const {client:player,bus}=await h.addPlayer(PLAYER_ID,"Rex");const received:ClientEvents["ops"][]=[];bus.on("ops",(msg)=>received.push(msg));
+    draws=0;const before=h.hostStore.seq;player.requestAutomationClick("s1","zone",{x:150,y:150},"t-pl");await flushMicrotasks();
+    expect(draws).toBe(3);expect(h.hostStore.seq).toBe(before+1);
+    // 0.75 picks b, then samples (850,550); the mover's native half-size is 100.
+    const expected={x:750,y:450,flags:{arenaMove:{x:750,y:450,durationMs:60000}}};
+    expect(player.store.get("scenes","s1")?.tiles.find((t)=>t._id==="zone")).toMatchObject(expected);
+    expect(player.store.get("scenes","s1")?.tiles).toHaveLength(1);expect(player.store.getAll("automations")).toEqual([]);
+    expect(JSON.stringify(received)).not.toMatch(/private-a|private-b|secret-destinations|destinationChoice|destinationPosition|zone-graph/);
+    const {client:late}=await h.addPlayer(PLAYER_ID,"Rex",{lastSeq:before});
+    expect(late.store.get("scenes","s1")?.tiles.find((t)=>t._id==="zone")).toMatchObject(expected);expect(draws).toBe(3);
+    expect(h.host.undo().ok).toBe(true);await flushMicrotasks();expect(draws).toBe(3);
+    expect(late.store.get("scenes","s1")?.tiles.find((t)=>t._id==="zone")?.x).toBe(100);
+    definition.steps.push({id:"overflow",kind:"sceneLighting",mode:"add",darkness:1});
+    h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    const seq=h.hostStore.seq;player.requestAutomationClick("s1","zone",{x:150,y:150},"t-pl");await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(seq);expect(draws).toBe(6);expect(h.hostStore.get("scenes","s1")?.darkness).toBe(0);
+    expect(h.hostStore.get("automations","zone-graph")?.state?.count??0).toBe(0);
+  });
+
+  test("Move live tag destinations are private, unique at execution, atomic and undoable from player clicks",async()=>{
+    const h=await setup();await seedZone(h);
+    const definition:AutomationDefinition={...zoneDoc().definition,methods:["click","manual"],gates:{playerRunnable:true},steps:[
+      {id:"light",kind:"sceneLighting",mode:"set",darkness:0.5},
+      {id:"self",kind:"select",selector:{kind:"tile"}},
+      {id:"move",kind:"move",destinationTag:{kind:"tag",query:"private-destination",collections:["tiles"]},x:25,y:-25,targets:"current",durationMs:500},
+    ]};
+    // Live queries can be published before their targets exist; execution cannot silently succeed.
+    const published=h.hostStore.seq;
+    h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(published+1);
+    const {client:player}=await h.addPlayer(PLAYER_ID,"Rex");
+    const rejected=async()=>{const seq=h.hostStore.seq;player.requestAutomationClick("s1","zone",{x:150,y:150},"t-pl");await flushMicrotasks();
+      expect(h.hostStore.seq).toBe(seq);expect(h.hostStore.get("scenes","s1")?.darkness).toBe(0);};
+    await rejected();
+    const destination:TileDocument={...zoneTile(),_id:"private-anchor",x:400,y:400,hidden:true,taggerTags:["private-destination"]};
+    h.gm.submit([{kind:"create",coll:"tiles",parent:{coll:"scenes",id:"s1"},data:destination}]);await flushMicrotasks();
+    const seq=h.hostStore.seq;
+    player.requestAutomationClick("s1","zone",{x:150,y:150},"t-pl");await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(seq+1);
+    expect(player.store.get("scenes","s1")?.tiles.find((tile)=>tile._id==="zone"))
+      .toMatchObject({x:425,y:375,flags:{arenaMove:{x:425,y:375,durationMs:500}}});
+    expect(player.store.getAll("automations")).toEqual([]);
+    expect(player.store.get("scenes","s1")?.tiles.some((tile)=>tile._id===destination._id)).toBe(false);
+    expect(JSON.stringify(player.store.world)).not.toContain("private-destination");
+    expect(h.host.undo().ok).toBe(true);await flushMicrotasks();
+    expect(player.store.get("scenes","s1")?.tiles.find((tile)=>tile._id==="zone")?.x).toBe(zoneTile().x);
+    h.gm.submit([{kind:"create",coll:"tiles",parent:{coll:"scenes",id:"s1"},data:{...destination,_id:"duplicate-anchor"}}]);await flushMicrotasks();
+    await rejected();
+    h.gm.submit([{kind:"delete",ref:{coll:"tiles",id:"duplicate-anchor",parent:{coll:"scenes",id:"s1"}}},
+      {kind:"update",ref:{coll:"tiles",id:"private-anchor",parent:{coll:"scenes",id:"s1"}},diff:{taggerTags:[]}}]);await flushMicrotasks();
+    await rejected();
+  });
+
+  test("Move destination publication and runtime checks preserve private anchors and atomicity", async () => {
+    const h=await setup();await seedZone(h);
+    const destination:TileDocument={...zoneTile(),_id:"private-destination",x:400,y:400,hidden:true};
+    h.gm.submit([{kind:"create",coll:"tiles",parent:{coll:"scenes",id:"s1"},data:destination}]);await flushMicrotasks();
+    const definition:AutomationDefinition={...zoneDoc().definition,methods:["click","manual"],gates:{playerRunnable:true},steps:[
+      {id:"light",kind:"sceneLighting",mode:"set",darkness:0.5},
+      {id:"sel",kind:"select",selector:{kind:"tile"}},
+      {id:"move",kind:"move",destination:{coll:"tiles",id:"missing"},x:25,y:-25,targets:"current"},
+    ]};
+    const before=h.hostStore.seq;
+    h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(before);
+    const move=definition.steps[2];if(move?.kind!=="move"||!move.destination)throw new Error("missing move");move.destination.id=destination._id;
+    h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    const {client:player}=await h.addPlayer(PLAYER_ID,"Rex");
+    player.requestAutomationClick("s1","zone",{x:150,y:150},"t-pl");await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(before+2);
+    expect(player.store.get("scenes","s1")?.tiles.find((t)=>t._id==="zone"))
+      .toMatchObject({x:400+destination.width/2+25-zoneTile().width/2,y:400+destination.height/2-25-zoneTile().height/2});
+    expect(player.store.get("scenes","s1")?.tiles.some((t)=>t._id===destination._id)).toBe(false);
+    expect(player.store.getAll("automations")).toEqual([]);
+    expect(h.host.undo().ok).toBe(true);await flushMicrotasks();
+    expect(player.store.get("scenes","s1")?.tiles.find((t)=>t._id==="zone")?.x).toBe(zoneTile().x);
+    h.gm.submit([{kind:"delete",ref:{coll:"tiles",id:destination._id,parent:{coll:"scenes",id:"s1"}}}]);await flushMicrotasks();
+    const seq=h.hostStore.seq;
+    h.gm.requestAutomation("zone-graph","s1","manual","t-pl");await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(seq);expect(h.hostStore.get("scenes","s1")?.darkness).toBe(0);
+  });
+
+  test("published tile image lists cycle on host, grant only displayed art, and restore via undo/catch-up", async () => {
+    const first = "a".repeat(64), second = "b".repeat(64);
+    const h = await setup({
+      [first]: { name: "first.png", mime: "image/png", size: 8, chunks: 1 },
+      [second]: { name: "second.png", mime: "image/png", size: 8, chunks: 1 },
+    });
+    await seedZone(h);
+    const def: AutomationDefinition = { ...zoneDoc().definition, methods: ["manual", "click"], gates: { playerRunnable: true }, steps: [
+      { id: "sel", kind: "select", selector: { kind: "tile" } },
+      { id: "cycle", kind: "tileImage", images: [first, second], selection: "next" },
+    ] };
+    h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" }, diff: { definition: def as unknown as Json } }]);
+    await flushMicrotasks();
+    const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+    expect(player.store.world.assetManifest[first]).toBeUndefined();
+    expect(player.store.world.assetManifest[second]).toBeUndefined();
+    const before = h.hostStore.seq;
+    const image = () => h.hostStore.get("scenes", "s1")?.tiles.find((tile) => tile._id === "zone")?.img;
+    h.gm.requestAutomation("zone-graph", "s1", "manual", "t-pl", true); await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(before); expect(image()).toBe("");
+    player.requestAutomationClick("s1", "zone", { x: 150, y: 150 }, "t-pl"); await flushMicrotasks();
+    expect(image()).toBe(first); expect(h.hostStore.seq).toBe(before + 1);
+    expect(player.store.world.assetManifest[first]).toBeDefined(); expect(player.store.world.assetManifest[second]).toBeUndefined();
+    player.requestAutomationClick("s1", "zone", { x: 150, y: 150 }, "t-pl"); await flushMicrotasks();
+    expect(image()).toBe(second); expect(h.hostStore.seq).toBe(before + 2);
+    expect(player.store.world.assetManifest[first]).toBeUndefined(); expect(player.store.world.assetManifest[second]).toBeDefined();
+    const { client: rejoined } = await h.addPlayer(PLAYER_ID, "Rex", { lastSeq: before });
+    expect(rejoined.store.world.assetManifest[first]).toBeUndefined(); expect(rejoined.store.world.assetManifest[second]).toBeDefined();
+    expect(rejoined.store.getAll("automations")).toEqual([]);
+    expect(h.host.undo().ok).toBe(true); await flushMicrotasks();
+    expect(image()).toBe(first);
+    expect(rejoined.store.world.assetManifest[first]).toBeDefined(); expect(rejoined.store.world.assetManifest[second]).toBeUndefined();
+    expect(h.hostStore.get("automations", "zone-graph")?.state?.count).toBe(1);
+  });
+
+  test.each(["numbers", "formula"] as const)("host executes private %s image selectors and rejects invalid formula results atomically", async (selection) => {
+    const first = "a".repeat(64), second = "b".repeat(64);
+    const h = await setup({
+      [first]: { name: "first.png", mime: "image/png", size: 8, chunks: 1 },
+      [second]: { name: "second.png", mime: "image/png", size: 8, chunks: 1 },
+    });
+    await seedZone(h);
+    const def: AutomationDefinition = { ...zoneDoc().definition, steps: [
+      { id: "sel", kind: "select", selector: { kind: "tile" } },
+      { id: "image", kind: "tileImage", images: [first, second], selection,
+        ...(selection === "numbers" ? { numbers: "[2]" } : { formula: "1d1 + 1" }) },
+    ] };
+    h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" }, diff: { definition: def as unknown as Json } }]);
+    await flushMicrotasks();
+    const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+    const before = h.hostStore.seq;
+    h.gm.requestAutomation("zone-graph", "s1", "manual", "t-pl"); await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(before + 1);
+    expect(h.hostStore.get("scenes", "s1")?.tiles.find((tile) => tile._id === "zone")?.img).toBe(second);
+    expect(player.store.world.assetManifest[first]).toBeUndefined(); expect(player.store.world.assetManifest[second]).toBeDefined();
+    expect(player.store.getAll("automations")).toEqual([]);
+    expect(h.host.undo().ok).toBe(true); await flushMicrotasks();
+    expect(player.store.world.assetManifest[second]).toBeUndefined();
+    const invalid: AutomationDefinition = { ...def, steps: [
+      { id: "light", kind: "sceneLighting", mode: "set", darkness: 0.9 },
+      { id: "sel", kind: "select", selector: { kind: "tile" } }, { id: "bad", kind: "tileImage", images: [first, second], selection: "formula", formula: "1d1 + 2" },
+    ] };
+    h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" }, diff: { definition: invalid as unknown as Json } }]);
+    await flushMicrotasks();
+    const seq = h.hostStore.seq, scene = structuredClone(h.hostStore.get("scenes", "s1"));
+    h.gm.requestAutomation("zone-graph", "s1", "manual", "t-pl"); await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(seq); expect(h.hostStore.get("scenes", "s1")).toEqual(scene);
+  });
+
+  test("all image-list alternatives are revalidated at publication and execution, not only the chosen first image", async () => {
+    const first = "a".repeat(64), second = "b".repeat(64);
+    const assets: AssetManifest = {
+      [first]: { name: "first.png", mime: "image/png", size: 8, chunks: 1 },
+      [second]: { name: "second.png", mime: "image/png", size: 8, chunks: 1, visibility: "gm" },
+    };
+    const h = await setup(assets); await seedZone(h);
+    const rejected: ClientEvents["rejected"][] = []; h.gmBus.on("rejected", (msg) => rejected.push(msg));
+    const def: AutomationDefinition = { ...zoneDoc().definition, steps: [
+      { id: "light", kind: "sceneLighting", mode: "set", darkness: 0.5 },
+      { id: "sel", kind: "select", selector: { kind: "tile" } },
+      { id: "cycle", kind: "tileImage", images: [first, second], selection: "first" },
+    ] };
+    const save = () => h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" }, diff: { definition: def as unknown as Json } }]);
+    save(); await flushMicrotasks(); expect(rejected.at(-1)?.detail).toMatch(/GM-only/);
+    const alternative = assets[second]; if (!alternative) throw new Error("fixture missing");
+    alternative.visibility = "referenced"; save(); await flushMicrotasks();
+    expect(h.hostStore.get("automations", "zone-graph")?.definition.steps).toEqual(def.steps);
+    alternative.visibility = "gm";
+    const before = h.hostStore.seq;
+    h.gm.requestAutomation("zone-graph", "s1", "manual", "t-pl"); await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(before);
+    expect(h.hostStore.get("scenes", "s1")?.darkness).toBe(0);
+    expect(h.hostStore.get("automations", "zone-graph")?.state).toBeUndefined();
+  });
+
+  test("a published player trigger can change an authorized remote background without exposing the private scene or graph", async () => {
+    const hash = "a".repeat(64);
+    const h = await setup({ [hash]: { name: "private-map.png", mime: "image/png", size: 8, chunks: 1 } });
+    await seedZone(h);
+    const source = h.hostStore.get("scenes", "s1");
+    if (!source) throw new Error("missing fixture scene");
+    const remote = { ...structuredClone(source), _id: "remote", name: "Secret room",
+      active: false, ownership: { default: 0 as const }, tokens: [], tiles: [] };
+    h.gm.submit([{ kind: "create", coll: "scenes", data: remote }]); await flushMicrotasks();
+    const def: AutomationDefinition = { ...zoneDoc().definition, methods: ["click", "manual"], gates: { playerRunnable: true }, steps: [
+      { id: "light", kind: "sceneLighting", mode: "set", darkness: 0.5 },
+      { id: "bg", kind: "sceneBackground", image: hash, targetSceneId: "remote" },
+    ] };
+    h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" }, diff: { definition: def as unknown as Json } }]);
+    await flushMicrotasks();
+    const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const received: ClientEvents["ops"][] = []; bus.on("ops", (msg) => received.push(msg));
+    const before = h.hostStore.seq;
+    player.requestAutomationClick("s1", "zone", { x: 150, y: 150 }, "t-pl"); await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(before + 1);
+    expect(h.hostStore.get("scenes", "remote")).toMatchObject({ img: hash, active: false });
+    expect(h.hostStore.get("scenes", "s1")).toMatchObject({ img: null, darkness: 0.5 });
+    expect(player.store.get("scenes", "remote")).toBeUndefined();
+    expect(player.store.world.assetManifest[hash]).toBeUndefined();
+    expect(JSON.stringify(received)).not.toMatch(/Secret room|targetSceneId|zone-graph|private-map/);
+    const { client: rejoined } = await h.addPlayer(PLAYER_ID, "Rex", { lastSeq: before });
+    expect(rejoined.store.get("scenes", "remote")).toBeUndefined();
+    expect(rejoined.store.world.assetManifest[hash]).toBeUndefined();
+    expect(h.host.undo().ok).toBe(true); await flushMicrotasks();
+    expect(h.hostStore.get("scenes", "remote")?.img).toBeNull();
+    expect(h.hostStore.get("scenes", "s1")?.darkness).toBe(0);
+    expect(h.hostStore.get("automations", "zone-graph")?.state).toBeUndefined();
+    h.gm.submit([{ kind: "delete", ref: { coll: "scenes", id: "remote" } }]); await flushMicrotasks();
+    const afterDelete = h.hostStore.seq;
+    player.requestAutomationClick("s1", "zone", { x: 150, y: 150 }, "t-pl"); await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(afterDelete); expect(h.hostStore.get("scenes", "s1")?.darkness).toBe(0);
+    const rejected: ClientEvents["rejected"][] = []; h.gmBus.on("rejected", (msg) => rejected.push(msg));
+    h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" }, diff: { definition: def as unknown as Json } }]);
+    await flushMicrotasks(); expect(rejected.at(-1)?.detail).toMatch(/target scene is unavailable/);
+  });
+
+  test("appearance media is checked at publication and rechecked on nested execution before any writes", async () => {
+    const hash = "a".repeat(64);
+    const assets: AssetManifest = { [hash]: { name: "scene.png", mime: "image/png", size: 8, chunks: 1, visibility: "gm" } };
+    const h = await setup(assets); await seedZone(h);
+    const rejected: ClientEvents["rejected"][] = [], traces: ClientEvents["automationTrace"][] = [];
+    h.gmBus.on("rejected", (msg) => rejected.push(msg)); h.gmBus.on("automationTrace", (msg) => traces.push(msg));
+    const child: AutomationDocument = { ...zoneDoc(), _id: "appearance-child", definition: {
+      ...zoneDoc().definition, tileId: "child", methods: ["manual"], gates: {},
+      steps: [{ id: "image", kind: "sceneBackground", image: hash }],
+    } };
+    h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: { ...zoneTile(), _id: "child", hidden: true } as TileDocument }]);
+    await flushMicrotasks();
+    h.gm.submit([{ kind: "create", coll: "automations", data: child }]);
+    await flushMicrotasks();
+    expect(rejected.at(-1)?.detail).toMatch(/GM-only/);
+    expect(h.hostStore.get("automations", child._id)).toBeUndefined();
+    const asset = assets[hash];
+    if (!asset) throw new Error("missing image fixture");
+    asset.visibility = "referenced";
+    h.gm.submit([{ kind: "create", coll: "automations", data: child }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("automations", child._id)).toBeDefined();
+    const parent: AutomationDefinition = { ...zoneDoc().definition, gates: {}, steps: [
+      { id: "light", kind: "sceneLighting", mode: "set", darkness: 0.5 },
+      { id: "chat", kind: "chat", audience: "scene", content: "No partial write" },
+      { id: "child", kind: "triggerTile", target: { kind: "id", tileId: "child" }, tokens: "triggering" },
+    ] };
+    h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" }, diff: { definition: parent as unknown as Json } }]);
+    await flushMicrotasks();
+    const before = h.hostStore.seq;
+    asset.visibility = "gm";
+    h.gm.requestAutomation("zone-graph", "s1", "manual", "t-pl"); await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(before);
+    expect(traces.at(-1)).toMatchObject({ result: "rejected", detail: expect.stringMatching(/GM-only/) });
+    expect(h.hostStore.get("scenes", "s1")).toMatchObject({ darkness: 0, img: null });
+    expect(h.hostStore.getAll("messages")).toHaveLength(0);
+    expect(h.hostStore.get("automations", "zone-graph")?.state).toBeUndefined();
+    expect(h.hostStore.get("automations", child._id)?.state).toBeUndefined();
+    Reflect.deleteProperty(assets, hash);
+    h.gm.requestAutomation("zone-graph", "s1", "manual", "t-pl"); await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(before);
+    expect(traces.at(-1)?.detail).toMatch(/missing/);
+  });
+
   test("player click activates a concealed tagged tile graph and invokes it atomically, without projecting its gate", async () => {
     const h = await setup(); await seedZone(h);
     const relay: TileDocument = { ...zoneTile(), _id: "relay", name: "Hidden relay",
@@ -3008,11 +3928,11 @@ describe("Active-zone host evaluation and graph secrecy", () => {
     expect(h.hostStore.getAll("messages").map((m) => m.content)).toEqual(["wide tile"]);
   });
 
-  test("published Game Time click creates an undoable replicated clock and stages later time checks", async () => {
+  test.each([false, true])("published Game Time click creates an undoable replicated clock (formula %s) and stages later time checks", async (formula) => {
     const h = await setup(); await seedZone(h);
     const definition: AutomationDefinition = { ...zoneDoc().definition, methods: ["click"],
       gates: { playerRunnable: true }, steps: [
-        { id: "advance", kind: "gameTime", minutes: 90 },
+        { id: "advance", kind: "gameTime", ...(formula ? { formula: "1d1 * 60 + 30" } : { minutes: 90 }) },
         { id: "clock", kind: "checkValue", source: "time", compare: "eq", value: 90 },
         { id: "gm", kind: "chat", audience: "gm", content: "Clock set by approved zone" },
       ] };
@@ -3059,7 +3979,7 @@ describe("Active-zone host evaluation and graph secrecy", () => {
     expect(h.hostStore.getAll("messages")).toEqual([]);
 
     const broken: AutomationDefinition = { ...definition, steps: [
-      { id: "advance", kind: "gameTime", minutes: 90 },
+      { id: "advance", kind: "gameTime", ...(formula ? { formula: "1d1 * 60 + 30" } : { minutes: 90 }) },
       { id: "select", kind: "select", selector: { kind: "tile" } },
       { id: "invalid", kind: "door", mode: "open" },
     ] };
@@ -3161,6 +4081,48 @@ describe("Active-zone host evaluation and graph secrecy", () => {
     await flushMicrotasks();
     expect(h.hostStore.getAll("messages").map((m) => m.content)).toEqual(["before one"]);
     expect(h.hostStore.get("settings", "world-settings")?.system.clockSeconds).toBe(3600);
+  });
+
+  test("player-triggered variable deletion is private, atomic, undoable and absent on catch-up", async () => {
+    const h = await setup(); await seedZone(h);
+    const def: AutomationDefinition = { ...zoneDoc().definition, methods: ["click"], gates: { playerRunnable: true }, steps: [
+      { id: "erase", kind: "set", name: "privateCharge", scope: "tile", operation: "delete" },
+      { id: "check", kind: "checkVariable", name: "privateCharge", compare: "eq", value: null },
+      { id: "notice", kind: "chat", audience: "scene", content: "Disarmed" },
+    ] };
+    h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" }, diff: {
+      definition: def as unknown as Json,
+      state: { count: 4, lastAt: 0, byToken: {}, variables: { privateCharge: 9, keep: true } },
+    } }]);
+    await flushMicrotasks();
+    const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const received: ClientEvents["ops"][] = [];
+    const rejected: ClientEvents["rejected"][] = [];
+    bus.on("ops", (msg) => received.push(msg)); bus.on("rejected", (msg) => rejected.push(msg));
+    const before = h.hostStore.seq;
+    player.requestAutomationClick("s1", "zone", { x: 150, y: 150 }, "t-pl");
+    await flushMicrotasks();
+    const state = () => (h.hostStore.get("automations", "zone-graph") as AutomationDocument).state;
+    expect(h.hostStore.seq).toBe(before + 1);
+    expect(state()?.variables).toEqual({ keep: true });
+    expect(state()?.count).toBe(5);
+    expect(player.store.getAll("messages").map((m) => m.content)).toEqual(["Disarmed"]);
+    expect(player.store.getAll("automations")).toEqual([]);
+    expect(JSON.stringify(received)).not.toMatch(/privateCharge|erase|variables/);
+    player.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" }, diff: {
+      "-=state.variables.keep": null,
+    } }]);
+    await flushMicrotasks();
+    expect(rejected.at(-1)?.reason).toBe("forbidden");
+    expect(state()?.variables).toEqual({ keep: true });
+    const { client: joined } = await h.addPlayer(PLAYER_ID, "Rex", { lastSeq: before });
+    expect(joined.store.getAll("automations")).toEqual([]);
+    expect(joined.store.getAll("messages").map((m) => m.content)).toEqual(["Disarmed"]);
+    expect(h.host.undo().ok).toBe(true);
+    await flushMicrotasks();
+    expect(state()?.variables).toEqual({ privateCharge: 9, keep: true });
+    expect(state()?.count).toBe(4);
+    expect(joined.store.getAll("messages")).toHaveLength(0);
   });
 
   test("player click updates private tile variables atomically, survives catch-up and undoes one fire", async () => {
@@ -3441,6 +4403,97 @@ describe("Active-zone host evaluation and graph secrecy", () => {
     expect(h.hostStore.getAll("messages")).toEqual([]);
     expect(traces.at(-1)).toMatchObject({ result: "rejected", detail: expect.stringMatching(/FX preflight failed/) });
     expect(rejected).toEqual([]); // public clicks never reveal child graph or FX IDs
+  });
+
+  test("one swept player path dispatches two rotated-zone enters in crossing order; Undo/Redo restores them without re-firing", async () => {
+    const h = await setup();
+    await seedRotatedZonePair(h, [{ id: "early-chat", kind: "chat", audience: "gm", content: "early rotated zone" }]);
+    const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+    const startSeq = h.hostStore.seq;
+    player.submit([{ kind: "update", ref: tokenRef, diff: { x: 900, y: 250 } }]);
+    await flushMicrotasks();
+
+    expect(h.hostStore.get("scenes", "s1")?.tokens.find((token) => token._id === "t-pl"))
+      .toMatchObject({ x: 900, y: 250 });
+    const crossed = h.hostStore.getAll("messages") as MessageDocument[];
+    expect(crossed.map((message) => message.content)).toEqual(["early rotated zone", "later rotated zone"]);
+    expect(h.hostStore.seq).toBe(startSeq + 3); // movement, then each crossing's independent graph envelope
+    expect(h.hostStore.get("automations", "zone-graph")?.state?.count).toBe(1);
+    expect(h.hostStore.get("automations", "zone-later-graph")?.state?.count).toBe(1);
+
+    // History replay restores the exact crossing envelopes; it is not a new movement intent.
+    expect(h.host.undo().ok).toBe(true); await flushMicrotasks();
+    expect(h.hostStore.getAll("messages").map((message) => message.content)).toEqual(["early rotated zone"]);
+    expect(h.hostStore.get("automations", "zone-later-graph")?.state?.count).toBeUndefined();
+    expect(h.host.undo().ok).toBe(true); await flushMicrotasks();
+    expect(h.hostStore.getAll("messages")).toEqual([]);
+    expect(h.hostStore.get("automations", "zone-graph")?.state?.count).toBeUndefined();
+    expect(h.host.undo().ok).toBe(true); await flushMicrotasks();
+    expect(h.hostStore.get("scenes", "s1")?.tokens.find((token) => token._id === "t-pl"))
+      .toMatchObject({ x: 0, y: 250 });
+
+    expect(h.host.redo().ok).toBe(true); await flushMicrotasks();
+    expect(h.hostStore.get("scenes", "s1")?.tokens.find((token) => token._id === "t-pl"))
+      .toMatchObject({ x: 900, y: 250 });
+    expect(h.hostStore.getAll("messages")).toEqual([]);
+    expect(h.host.redo().ok).toBe(true); await flushMicrotasks();
+    expect(h.hostStore.getAll("messages").map((message) => message.content)).toEqual(["early rotated zone"]);
+    expect(h.host.redo().ok).toBe(true); await flushMicrotasks();
+    expect(h.hostStore.getAll("messages").map((message) => message.content))
+      .toEqual(["early rotated zone", "later rotated zone"]);
+    expect(h.hostStore.get("automations", "zone-graph")?.state?.count).toBe(1);
+    expect(h.hostStore.get("automations", "zone-later-graph")?.state?.count).toBe(1);
+    expect(h.hostStore.seq).toBeGreaterThan(startSeq + 3); // undo/redo envelopes, but no new automation fire
+  });
+
+  test("Stop Additional Tiles Triggering suppresses a later rotated zone without clipping movement", async () => {
+    const h = await setup();
+    await seedRotatedZonePair(h, [
+      { id: "suppress", kind: "stopOthers" },
+      { id: "early-chat", kind: "chat", audience: "gm", content: "stop-others ran" },
+    ]);
+    const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+    player.submit([{ kind: "update", ref: tokenRef, diff: { x: 900, y: 250 } }]);
+    await flushMicrotasks();
+
+    // stopOthers affects only later tile events in this committed intent. Unlike Stop Movement,
+    // it leaves the full host-observed destination in place.
+    expect(h.hostStore.get("scenes", "s1")?.tokens.find((token) => token._id === "t-pl"))
+      .toMatchObject({ x: 900, y: 250 });
+    expect(h.hostStore.getAll("messages").map((message) => message.content)).toEqual(["stop-others ran"]);
+    expect(h.hostStore.get("automations", "zone-graph")?.state?.count).toBe(1);
+    expect(h.hostStore.get("automations", "zone-later-graph")?.state?.count).toBeUndefined();
+  });
+
+  test("Stop Movement clips at the first rotated zone and replay does not dispatch the later zone", async () => {
+    const h = await setup();
+    await seedRotatedZonePair(h, [{ id: "stop", kind: "stopMovement", snapToGrid: false }]);
+    const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+    player.submit([{ kind: "update", ref: tokenRef, diff: { x: 900, y: 250 } }]);
+    await flushMicrotasks();
+    const stopped = h.hostStore.get("scenes", "s1")?.tokens.find((token) => token._id === "t-pl");
+    if (!stopped) throw new Error("missing stopped token");
+    expect(stopped.x).toBeGreaterThan(100);
+    expect(stopped.x).toBeLessThan(200); // swept-footprint contact on the first rotated plate, not the later plate
+    expect(stopped.y).toBe(250);
+    expect(h.hostStore.get("automations", "zone-graph")?.state?.count).toBe(1);
+    expect(h.hostStore.get("automations", "zone-later-graph")?.state?.count).toBeUndefined();
+    expect(h.hostStore.getAll("messages")).toEqual([]);
+
+    const stoppedX = stopped.x;
+    expect(h.host.undo().ok).toBe(true); await flushMicrotasks(); // Stop graph history
+    expect(h.hostStore.get("scenes", "s1")?.tokens.find((token) => token._id === "t-pl")?.x).toBe(stoppedX);
+    expect(h.hostStore.get("automations", "zone-graph")?.state?.count).toBeUndefined();
+    expect(h.host.undo().ok).toBe(true); await flushMicrotasks(); // movement
+    expect(h.hostStore.get("scenes", "s1")?.tokens.find((token) => token._id === "t-pl"))
+      .toMatchObject({ x: 0, y: 250 });
+    expect(h.host.redo().ok).toBe(true); await flushMicrotasks();
+    expect(h.hostStore.get("scenes", "s1")?.tokens.find((token) => token._id === "t-pl")?.x).toBe(stoppedX);
+    expect(h.hostStore.get("automations", "zone-later-graph")?.state?.count).toBeUndefined();
+    expect(h.host.redo().ok).toBe(true); await flushMicrotasks();
+    expect(h.hostStore.get("automations", "zone-graph")?.state?.count).toBe(1);
+    expect(h.hostStore.get("automations", "zone-later-graph")?.state?.count).toBeUndefined();
+    expect(h.hostStore.getAll("messages")).toEqual([]);
   });
 
   test("Stop Additional Tiles Triggering suppresses later movement tiles by fraction and tile sort, not other tokens", async () => {
@@ -4068,7 +5121,7 @@ describe("Active-zone host evaluation and graph secrecy", () => {
     expect(h.hostStore.getAll("messages")).toHaveLength(0);
   });
 
-  test("a committed Move lands the token and fires the destination tile's graph through the normal dispatch", async () => {
+  test.each([true,false])("committed Move dispatch obeys private triggerTiles=%s and does not persist suppression", async (triggerTiles) => {
     const h = await setup();
     const trap2: TileDocument = { ...zoneTile(), _id: "trap2", name: "Destination",
       x: 400, y: 100, sort: 0 };
@@ -4078,7 +5131,7 @@ describe("Active-zone host evaluation and graph secrecy", () => {
     const moveGraph: AutomationDocument = { ...zoneDoc(), name: "Mover",
       definition: { ...zoneDoc().definition, methods: ["manual"], gates: {},
         steps: [
-          { id: "move", kind: "move", x: 450, y: 150, targets: "triggering" },
+          { id: "move", kind: "move", x: 450, y: 150, targets: "triggering", triggerTiles, speed: 2, wallCollision: "footprint" },
           { id: "notice", kind: "chat", audience: "gm", content: "moved" },
         ] } };
     h.gm.submit([
@@ -4096,8 +5149,13 @@ describe("Active-zone host evaluation and graph secrecy", () => {
     await flushMicrotasks();
     const token = (h.hostStore.get("scenes", "s1") as SceneDocument).tokens.find((t) => t._id === "t-pl");
     expect(token && { x: token.x, y: token.y }).toEqual({ x: 450, y: 150 });
-    expect((h.hostStore.get("automations", "trap2-graph") as AutomationDocument).state?.count).toBe(1);
-    expect(h.hostStore.getAll("messages").some((m) => m.content === "trap2 fired")).toBe(true);
+    expect((h.hostStore.get("automations", "trap2-graph") as AutomationDocument).state?.count).toBe(triggerTiles ? 1 : undefined);
+    expect(h.hostStore.getAll("messages").some((m) => m.content === "trap2 fired")).toBe(triggerTiles);
+    if (!triggerTiles) {
+      h.gm.submit([{kind:"update",ref:tokenRef,diff:{x:100,y:100}}]); await flushMicrotasks();
+      h.gm.submit([{kind:"update",ref:tokenRef,diff:{x:450,y:150}}]); await flushMicrotasks();
+      expect((h.hostStore.get("automations","trap2-graph") as AutomationDocument).state?.count).toBe(1);
+    }
   });
 
   test("Stop Additional Tiles Triggering suppresses the sibling tile for the movement that fired the graph", async () => {
@@ -4182,6 +5240,98 @@ describe("Active-zone host evaluation and graph secrecy", () => {
     expect(h.hostStore.getAll("messages").some((m) => m.content === "still alive")).toBe(true);
   });
 
+  test.each(["undo","revert"] as const)("player-triggered Move of environment placeables and drawing restores with %s",async(restore)=>{
+    const audio="a".repeat(64),h=await setup({[audio]:{name:"fountain.wav",mime:"audio/wav",size:8,chunks:1}});await seedZone(h);
+    const parts=environmentPlaceables(),drawing:DrawingDocument={_id:"moving-drawing",type:"drawing",name:"Path",ownership:{default:1},flags:{},system:{},
+      taggerTags:["cleanup"],kind:"line",points:[100,100,200,100],box:null,stroke:"#ffffff",fill:"none",strokeWidth:2,text:null};
+    for(const coll of ["lights","sounds","templates"] as const)for(const data of parts[coll])h.gm.submit([{kind:"create",coll,parent:{coll:"scenes",id:"s1"},data}]);
+    h.gm.submit([{kind:"create",coll:"drawings",parent:{coll:"scenes",id:"s1"},data:drawing}]);await flushMicrotasks();
+    const definition:AutomationDefinition={...zoneDoc().definition,methods:["click","manual"],gates:{playerRunnable:true},steps:[
+      {id:"select",kind:"select",selector:{kind:"tag",query:"cleanup",collections:["drawings","lights","sounds","templates"]}},
+      {id:"move",kind:"move",mode:"add",x:150,y:-50,targets:"current",durationMs:60000},
+      {id:"chat",kind:"chat",audience:"gm",content:"Private environmental move"},
+    ]};
+    h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    const {client:player,bus}=await h.addPlayer(PLAYER_ID,"Rex");const received:ClientEvents["ops"][]=[],rejected:ClientEvents["rejected"][]=[];
+    bus.on("ops",(msg)=>received.push(msg));bus.on("rejected",(msg)=>rejected.push(msg));
+    const before=h.hostStore.seq;
+    player.submit([{kind:"update",ref:{coll:"sounds",id:"environment-sound",parent:{coll:"scenes",id:"s1"}},diff:{x:900}}]);await flushMicrotasks();
+    expect(rejected.at(-1)?.reason).toBe("forbidden");expect(h.hostStore.seq).toBe(before);
+    h.gm.requestAutomation("zone-graph","s1","manual","t-pl",true);await flushMicrotasks();expect(h.hostStore.seq).toBe(before);
+    player.requestAutomationClick("s1","zone",{x:150,y:150},"t-pl");await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(before+1);
+    for(const coll of ["lights","sounds","templates"] as const)expect(player.store.get("scenes","s1")?.[coll][0]).toMatchObject({x:450,y:250,flags:{}});
+    expect(player.store.get("scenes","s1")?.drawings[0]?.points).toEqual([250,50,350,50]);
+    expect(received.flatMap((msg)=>msg.envelope.ops).filter((op)=>op.kind==="update"&&op.ref.parent?.coll==="scenes")).toHaveLength(4);
+    expect(JSON.stringify(received)).not.toMatch(/zone-graph|Private environmental move|arenaMove/);
+    expect(player.store.getAll("automations")).toEqual([]);expect(player.store.getAll("messages")).toEqual([]);
+    const {client:late}=await h.addPlayer(PLAYER_ID,"Rex",{lastSeq:before});
+    expect(late.store.get("scenes","s1")?.drawings[0]?.points).toEqual([250,50,350,50]);
+    if(restore==="undo")expect(h.host.undo().ok).toBe(true);
+    else {const receipt=h.hostStore.getAll("actionReceipts").find((r)=>r.status==="ready");if(!receipt)throw new Error("missing receipt");h.gm.actionRevert(receipt._id);}
+    await flushMicrotasks();
+    for(const coll of ["lights","sounds","templates"] as const)expect(late.store.get("scenes","s1")?.[coll]).toEqual(parts[coll]);
+    expect(late.store.get("scenes","s1")?.drawings).toEqual([drawing]);expect(h.hostStore.get("automations","zone-graph")?.state?.count??0).toBe(0);
+    definition.steps.push({id:"max",kind:"sceneLighting",mode:"set",darkness:1},{id:"overflow",kind:"sceneLighting",mode:"add",darkness:1});
+    h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    const prior=h.hostStore.seq;h.gm.requestAutomation("zone-graph","s1","manual","t-pl");await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(prior);expect(h.hostStore.get("scenes","s1")?.drawings).toEqual([drawing]);
+    expect(h.hostStore.world.assetManifest[audio]?.name).toBe("fountain.wav");
+  });
+
+  test.each([{restore:"undo",flush:false},{restore:"undo",flush:true},{restore:"revert",flush:false},{restore:"revert",flush:true}] as const)("player-triggered environment deletion: $restore restores documents/history (flush $flush)", async ({restore,flush}) => {
+    const audio="a".repeat(64);
+    const h=await setup({[audio]:{name:"fountain.wav",mime:"audio/wav",size:8,chunks:1}});await seedZone(h);
+    const parts=environmentPlaceables();
+    for(const coll of ["lights","sounds","templates"] as const) for(const data of parts[coll])
+      h.gm.submit([{kind:"create",coll,parent:{coll:"scenes",id:"s1"},data}]);
+    await flushMicrotasks();
+    const definition:AutomationDefinition={...zoneDoc().definition,methods:["click","manual"],gates:{playerRunnable:true},steps:[
+      {id:"sel",kind:"select",selector:{kind:"tag",query:"cleanup",collections:["lights","sounds","templates"]}},
+      {id:"tag",kind:"tags",edit:"add",tags:["pending"]},...(flush?[{id:"flush",kind:"batchFlush"} as const]:[]),{id:"delete",kind:"delete"},
+      {id:"empty",kind:"filter",test:{kind:"count",min:0,max:0}},
+      {id:"chat",kind:"chat",audience:"gm",content:"private cleanup complete"},
+    ]};
+    h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    const {client:player,bus}=await h.addPlayer(PLAYER_ID,"Rex");
+    const received:ClientEvents["ops"][]=[],rejected:ClientEvents["rejected"][]=[];
+    bus.on("ops",(msg)=>received.push(msg));bus.on("rejected",(msg)=>rejected.push(msg));
+    const before=h.hostStore.seq;
+    player.submit([{kind:"delete",ref:{coll:"sounds",id:"environment-sound",parent:{coll:"scenes",id:"s1"}}}]);await flushMicrotasks();
+    expect(rejected.at(-1)?.reason).toBe("forbidden");expect(h.hostStore.seq).toBe(before);
+    h.gm.requestAutomation("zone-graph","s1","manual","t-pl",true);await flushMicrotasks();expect(h.hostStore.seq).toBe(before);
+    player.requestAutomationClick("s1","zone",{x:150,y:150},"t-pl");await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(before+1);
+    for(const coll of ["lights","sounds","templates"] as const) {
+      expect(h.hostStore.get("scenes","s1")?.[coll]).toHaveLength(0);
+      expect(player.store.get("scenes","s1")?.[coll]).toHaveLength(0);
+    }
+    expect(received.flatMap((msg)=>msg.envelope.ops).filter((op)=>op.kind==="delete")).toHaveLength(3);
+    expect(JSON.stringify(received)).not.toMatch(/zone-graph|private cleanup/);
+    if(!flush)expect(JSON.stringify(received)).not.toContain("pending");
+    expect(player.store.getAll("automations")).toEqual([]);expect(player.store.getAll("actionReceipts")).toEqual([]);
+    expect(h.hostStore.world.assetManifest[audio]?.name).toBe("fountain.wav");
+    const {client:late}=await h.addPlayer(PLAYER_ID,"Rex",{lastSeq:before});
+    for(const coll of ["lights","sounds","templates"] as const) expect(late.store.get("scenes","s1")?.[coll]).toHaveLength(0);
+    if(restore==="undo") expect(h.host.undo().ok).toBe(true);
+    else {
+      const receipt=h.hostStore.getAll("actionReceipts").find((r)=>r.status==="ready");
+      if(!receipt)throw new Error("missing deletion receipt");h.gm.actionRevert(receipt._id);
+    }
+    await flushMicrotasks();
+    for(const coll of ["lights","sounds","templates"] as const) {
+      expect(h.hostStore.get("scenes","s1")?.[coll]).toEqual(parts[coll]);
+      expect(late.store.get("scenes","s1")?.[coll]).toEqual(parts[coll]);
+    }
+    expect(h.hostStore.get("automations","zone-graph")?.state?.count??0).toBe(0);
+    expect(h.hostStore.getAll("messages")).toEqual([]);
+    // A valid staged delete followed by failure must commit neither deletes nor tags.
+    definition.steps.push({id:"bad",kind:"sceneLighting",mode:"add",darkness:1},{id:"overflow",kind:"sceneLighting",mode:"add",darkness:1});
+    h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    const prior=h.hostStore.seq;h.gm.requestAutomation("zone-graph","s1","manual","t-pl");await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(prior);expect(h.hostStore.get("scenes","s1")?.sounds).toEqual(parts.sounds);
+  });
+
   test("Delete Entities removes the placeable in the graph envelope and legacy Undo restores it", async () => {
     const h = await setup();
     const sweep: AutomationDocument = { ...zoneDoc(), name: "Sweeper",
@@ -4209,6 +5359,40 @@ describe("Active-zone host evaluation and graph secrecy", () => {
     const restored = (h.hostStore.get("scenes", "s1") as SceneDocument).tokens.find((t) => t._id === "t-ivy");
     expect(restored).toBeDefined();
     expect(restored?.taggerTags).toEqual(["victim"]);
+  });
+
+  test.each(["undo","revert"] as const)("private Roll Table coordinates move on player invocation and restore with %s",async(restore)=>{
+    const h=await setup();await seedZone(h);
+    const table:RollTableDocument={_id:"private-locations",type:"rollTable",name:"Secret destinations",ownership:{default:0},flags:{},system:{},formula:"1d2",
+      results:[{range:[1,1],text:'{"x":600,"y":400}',documentRef:null},{range:[2,2],text:'{"x":800,"y":600}',documentRef:null}]};
+    h.gm.submit([{kind:"create",coll:"rollTables",data:table}]);await flushMicrotasks();
+    const definition:AutomationDefinition={...zoneDoc().definition,methods:["click","manual"],gates:{playerRunnable:true},steps:[
+      {id:"self",kind:"select",selector:{kind:"tile"}},
+      {id:"table",kind:"rollTable",tableId:table._id,audience:"gm"},
+      {id:"move",kind:"move",destinationResult:"rollTable",xFormula:"-1d1 * 25",y:50,targets:"current",durationMs:60000},
+      {id:"light",kind:"sceneLighting",mode:"set",darkness:0.5},
+    ]};
+    h.gm.submit([{kind:"update",ref:{coll:"automations",id:"zone-graph"},diff:{definition:definition as unknown as Json}}]);await flushMicrotasks();
+    const {client:player,bus}=await h.addPlayer(PLAYER_ID,"Rex");const received:ClientEvents["ops"][]=[],rejected:ClientEvents["rejected"][]=[];
+    bus.on("ops",(msg)=>received.push(msg));bus.on("rejected",(msg)=>rejected.push(msg));
+    const before=h.hostStore.seq;
+    player.submit([{kind:"update",ref:{coll:"rollTables",id:table._id},diff:{formula:"1d1"}}]);await flushMicrotasks();
+    expect(rejected.at(-1)?.reason).toBe("forbidden");expect(h.hostStore.seq).toBe(before);
+    h.gm.requestAutomation("zone-graph","s1","manual","t-pl",true);await flushMicrotasks();expect(h.hostStore.seq).toBe(before);expect(h.hostStore.getAll("messages")).toEqual([]);
+    player.requestAutomationClick("s1","zone",{x:150,y:150},"t-pl");await flushMicrotasks();expect(h.hostStore.seq).toBe(before+1);
+    expect(player.store.get("scenes","s1")?.tiles.find((t)=>t._id==="zone")).toMatchObject({x:475,y:350,flags:{arenaMove:{x:475,y:350,durationMs:60000}}});
+    expect(h.hostStore.getAll("messages")).toHaveLength(1);expect(player.store.getAll("messages")).toEqual([]);expect(player.store.getAll("rollTables")).toEqual([]);
+    expect(JSON.stringify(received)).not.toMatch(/private-locations|Secret destinations|destinationResult|zone-graph|&quot;/);
+    const {client:late}=await h.addPlayer(PLAYER_ID,"Rex",{lastSeq:before});
+    expect(late.store.get("scenes","s1")?.tiles.find((t)=>t._id==="zone")).toMatchObject({x:475,y:350});expect(late.store.getAll("rollTables")).toEqual([]);
+    if(restore==="undo")expect(h.host.undo().ok).toBe(true);
+    else {const receipt=h.hostStore.getAll("actionReceipts").find((r)=>r.status==="ready");if(!receipt)throw new Error("missing receipt");h.gm.actionRevert(receipt._id);}
+    await flushMicrotasks();expect(late.store.get("scenes","s1")?.tiles.find((t)=>t._id==="zone")).toMatchObject({x:100,y:100});
+    expect(h.hostStore.getAll("messages")).toEqual([]);expect(h.hostStore.get("automations","zone-graph")?.state?.count??0).toBe(0);
+    // Live table edits, not a stale saved point, determine the next run.
+    h.gm.submit([{kind:"update",ref:{coll:"rollTables",id:table._id},diff:{results:[{range:[1,2],text:'{"x":"bad","y":400}',documentRef:null}]}}]);await flushMicrotasks();
+    const seq=h.hostStore.seq;player.requestAutomationClick("s1","zone",{x:150,y:150},"t-pl");await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(seq);expect(h.hostStore.getAll("messages")).toEqual([]);expect(h.hostStore.get("scenes","s1")?.darkness).toBe(0);
   });
 
   test("Roll Table rolls on the host RNG, posts a scene or GM-only message and stores the variable", async () => {
@@ -5454,8 +6638,11 @@ describe("durable GM Revert for world actions", () => {
     await flushMicrotasks();
   }
 
-  test("player-fired Hurt / Heal spends temporary HP; GM Revert atomically restores actor, history and chat", async () => {
-    const h = await setup(); await readyTrap(h);
+  test.each([false, true])("player-fired Hurt / Heal spends temporary HP; GM Revert restores actor/history/chat (formula %s)", async (formula) => {
+    const h = await setup(); await readyTrap(h, [
+      { id: "hurt", kind: "hurtHeal", ...(formula ? { formula: "-(1d1 + 5)" } : { amount: -6 }), targets: "triggering" },
+      { id: "notice", kind: "chat", audience: "gm", content: "A trap snapped" },
+    ]);
     const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
     const rejected: ClientEvents["rejected"][] = [];
     bus.on("rejected", (r) => rejected.push(r));

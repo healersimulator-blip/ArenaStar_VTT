@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { SceneLightingPlayer } from "../client/sceneLighting";
+  import { SceneBackgroundPlayer } from "../client/sceneBackground";
   import { onMount, untrack } from "svelte";
   import { detectCapabilities } from "./capabilities";
   import { DEFAULT_SCENE_ID, GM_USER_ID, makeToken, type HostApp } from "./hostBoot";
@@ -16,9 +18,7 @@
   import type { PF1eAreaKind, PF1eAreaSpec } from "../packages/pf1e/targeting";
   import { moveSegments, sightSegments } from "../canvas/vision";
   import { SvelteMap } from "svelte/reactivity";
-  // static import: a dynamic import("pixi.js") would inline a SECOND copy of
-  // pixi into the single-file bundle (+290 KB, D-083)
-  import { Assets } from "pixi.js";
+  import { TileImageCache } from "../canvas/imageTexture";
   import {
     CanvasController,
     domPointerSource,
@@ -351,7 +351,8 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   const PIN_PICK_RADIUS = 16;
 /** Wall pick tolerance in screen pixels (D-257). */
 const WALL_PICK_RADIUS = 12;
-  let loadedMapHash: string | null = null;
+  const sceneBackground = new SceneBackgroundPlayer();
+  const sceneLighting = new SceneLightingPlayer(createVisionComputer());
   /** `$state.raw`: the stage is a Pixi object graph — assignment must re-run the
    *  effects that read it, but it must never be deep-proxied. */
   let stage = $state.raw<Stage | null>(null);
@@ -741,9 +742,13 @@ const WALL_PICK_RADIUS = 12;
   // computed from the replica on demand and never replicated.
   let pf1ePreview: PF1eAreaPreviewModel | null = null;
   let pf1ePreviewSceneId: string | null = null;
-  /** §9 tile textures by asset hash/URL (session cache; blob URLs stay alive).
-   * SvelteMap satisfies the reactive-state lint rule; used as a plain cache. */
-  let tileTextureCache: SvelteMap<string, Promise<unknown>> | null = null;
+  /** Owned tile textures are shared while in use, then released with the canvas. */
+  const tileImages = new TileImageCache(async (hash) => {
+    const owner = app;
+    if (!owner) throw new Error("world closed");
+    return { bytes: await owner.gm.fetcher.request(hash, "scene"),
+      mime: owner.gm.client.store.world.assetManifest[hash]?.mime ?? "image/png" };
+  });
   let share = $state<HostShare | null>(null);
   let shareError = $state<string | null>(null);
   let peerCode = $state("");
@@ -2321,29 +2326,6 @@ const WALL_PICK_RADIUS = 12;
 
   const massBattle = createMassBattleBasic();
 
-  /** §9: resolve a tile image (asset hash or URL) to a pixi texture. */
-  function tileTexture(img: string): Promise<unknown> {
-    tileTextureCache ??= new SvelteMap<string, Promise<unknown>>();
-    let cached = tileTextureCache.get(img);
-    if (!cached) {
-      cached = (async () => {
-        if (/^(https?:|data:|blob:)/.test(img)) {
-          return Assets.load(img).catch(() => null);
-        }
-        const owner = app;
-        if (!owner) return null;
-        const bytes = await owner.gm.fetcher
-          .request(img, "scene")
-          .catch(() => null);
-        if (!bytes) return null;
-        const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)]));
-        return Assets.load(url).catch(() => null);
-      })();
-      tileTextureCache.set(img, cached);
-    }
-    return cached;
-  }
-
   /** §9A: strategic fog from the local replica (god view = no cover). */
   function syncStrategicFog(): void {
     if (!app || !stage) return;
@@ -2537,6 +2519,7 @@ const WALL_PICK_RADIUS = 12;
     if (!current || !view) return;
     const scene = activeScene();
     fxPlayer?.syncScene();
+    sceneLighting.sync(scene, view);
     if (tokenSelection.sceneId !== (scene?._id ?? null)) clearTokenSelection();
     // A preview belongs to the scene it was resolved against; switching scenes
     // clears it rather than repainting stale cells.
@@ -2592,6 +2575,9 @@ const WALL_PICK_RADIUS = 12;
     // D-256 map pins: the notes layer draws whatever this replica holds (players only ever
     // hold pins the GM made visible — the projection withholds the rest).
     view.getNotesLayer().sync(scene?.notes ?? [], view.camera);
+    // Replica-only scene geometry; both holders remain below the fog layer.
+    view.getDrawingsLayer().sync(scene?.drawings ?? [], view.camera);
+    view.getTemplatesLayer().sync(scene?.templates ?? [], view.camera);
     // D-271: the hex overlay follows the replica — reveals, terrain, the party's ring. A scene
     // without a hexcrawl profile clears it (the feature switch), and a *view as* preview paints
     // what that player would see: the cover, not the GM's dimmed preparation view.
@@ -2609,26 +2595,11 @@ const WALL_PICK_RADIUS = 12;
       .filter((t) => t.vision)
       .map((t) => tokenRect(t));
     view
-      .getTilesLayer({ loadTexture: tileTexture })
-      .sync(scene?.tiles ?? [], occupied);
-    const img = scene?.img ?? null;
-    if (img !== null && img !== loadedMapHash) {
-      loadedMapHash = img;
-      const manifest = current.gm.client.store.world.assetManifest[img];
-      const mime = manifest?.mime ?? "image/png";
-      // §7 thumbnail-first: paint the 256px preview, upgrade to full async
-      const thumb = manifest?.thumb;
-      if (thumb && thumb.hash !== img) {
-        void current.gm.fetcher
-          .request(thumb.hash, "ui")
-          .then((bytes) => view.setBackgroundImage(bytes, thumb.mime))
-          .catch(() => undefined);
-      }
-      void current.gm.fetcher
-        .request(img, "scene")
-        .then((bytes) => view.setBackgroundImage(bytes, mime))
-        .catch(() => undefined);
-    }
+      .getTilesLayer({ loadTexture: tileImages.load })
+      .sync(scene?.tiles ?? [], occupied, scene?.regions ?? []);
+    tileImages.retain((scene?.tiles ?? []).map((tile) => tile.img));
+    sceneBackground.sync(scene?.img ?? null, current.gm.client.store.world.assetManifest,
+      (hash, priority) => current.gm.fetcher.request(hash, priority), view);
     view.setGrid(sceneGridSpec(scene?.grid));
   }
 
@@ -3294,6 +3265,13 @@ const WALL_PICK_RADIUS = 12;
            * this handler.
            */
           onTokenMove: ({ view: moved, to, commit }) => {
+            // The GM is the rules override on their own canvas: do not apply PF1e
+            // speed, collision or AoO limits to a GM-issued drag. Player intents
+            // are independently checked by HostSync against the linked actor.
+            if (current.gm.client.user?.role === "GM") {
+              commit();
+              return;
+            }
             const scene = activeScene();
             if (!scene) return;
             const actors = current.gm.client.store.getAll("actors");
@@ -3798,7 +3776,10 @@ const WALL_PICK_RADIUS = 12;
             await fog?.flush();
             return fog?.stats().saves ?? 0;
           },
-          fogExploredAt: ({ x, y }) => view.peekFogLayer()?.exploredAt(x, y) ?? null,
+          fogExploredAt: async ({ x, y }) => {
+            await fog?.settle();
+            return view.peekFogLayer()?.exploredAt(x, y) ?? null;
+          },
           fogStoredBytesFor: async ({ sceneId, userId }) => {
             try {
               const stored = await getFog(current.db, current.worldId, sceneId, userId);
@@ -4116,7 +4097,10 @@ const WALL_PICK_RADIUS = 12;
       controller?.destroy();
       fog?.destroy();
       fog = null;
+      sceneBackground.destroy();
+      sceneLighting.destroy();
       stage?.destroy();
+      tileImages.destroy();
       stage = null;
     };
   });
@@ -4126,6 +4110,7 @@ const WALL_PICK_RADIUS = 12;
   $effect(() => {
     const style = fogStyle();
     fxPlayer?.syncScene();
+
     void fog?.sync(activeScene(), { style });
   });
 

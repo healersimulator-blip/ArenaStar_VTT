@@ -7,6 +7,7 @@ import type {
   FxInstanceDocument,
   MacroDocument,
   MessageDocument,
+  RegionDocument,
   SceneDocument,
   TokenDocument,
   WorldCollections,
@@ -220,6 +221,23 @@ describe("projectWorld (§5)", () => {
     expect(sc?.tokens.map((t) => t._id)).toEqual(["t-public", "t-hidden-owned"]);
     expect(sc?.walls).toHaveLength(1);
     expect(sc?.lights).toHaveLength(1);
+  });
+
+  test("region geometry is projected only to its entitled scene viewers", () => {
+    const w = world();
+    const region = (id: string, level: 0 | 1): RegionDocument => ({
+      _id: id, type: "region", name: id, ownership: { default: level }, flags: {}, system: {},
+      x: 100, y: 100, width: 200, height: 100,
+      shape: { kind: "polygon", points: [[0.5, 0], [1, 1], [0, 1]] },
+      hidden: level === 0,
+    });
+    const projectedScene = w.scenes[0];
+    if (!projectedScene) throw new Error("fixture scene missing");
+    projectedScene.regions = [region("public-region", 1), region("gm-region", 0)];
+    expect(projectWorld(w, 5, player).collections.scenes?.[0]?.regions?.map((doc) => doc._id))
+      .toEqual(["public-region"]);
+    expect(projectWorld(w, 5, gm).collections.scenes?.[0]?.regions?.map((doc) => doc._id))
+      .toEqual(["public-region", "gm-region"]);
   });
 
   test("player snapshots hide prefab attachment IDs and source scenes without changing GM state", () => {

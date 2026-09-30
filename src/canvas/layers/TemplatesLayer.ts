@@ -27,7 +27,7 @@ export class TemplatesLayer {
     const key = `${zoomBucket}|${templates
       .map(
         (t) =>
-          `${t._id}:${t.kind}:${Math.round(t.x)}:${Math.round(t.y)}:${Math.round(t.distance)}:${Math.round(t.direction * 100)}:${Math.round(t.width)}`,
+          `${t._id}:${t.kind}:${t.x}:${t.y}:${Math.round(t.distance)}:${Math.round(t.direction * 100)}:${Math.round(t.width)}`,
       )
       .join("#")}`;
     if (key === this.key) return;
@@ -87,6 +87,7 @@ export class TemplatesLayer {
     const pooled = this.labelPool.pop();
     const t = pooled ?? new Text({ text: "", style: { fontSize: 11, fill: 0x9fd4ff } });
     if (!pooled) this.labels.addChild(t);
+    t.visible = true;
     this.labelActive.push(t);
     return t;
   }

@@ -2,19 +2,23 @@
   import { onMount } from "svelte";
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
-  import type { AutomationDocument, DocRef, Json, MacroDocument, RollTableDocument, SceneDocument,
-    TileDocument } from "../../core/documents";
+  import type { AssetManifest, AutomationDocument, DocRef, Json, MacroDocument, RollTableDocument, SceneDocument,
+    RegionDocument, TileDocument } from "../../core/documents";
   import { listTaggable } from "../../core/tags";
   import {
-    validateAutomation, type AutomationDefinition, type AutomationGates, type AutomationMethod,
+    PINNABLE_COLLECTIONS, automationImageError, validateAutomation, type AutomationDefinition, type AutomationGates, type AutomationMethod,
     type AutomationSelector, type AutomationStep, type AutomationScriptBinding, type AutomationTileTarget,
   } from "../../core/automation";
+  import { tileAlphaMaskFromRgba, tileTriggerCirclePolygon, type TileTriggerZone } from "../../core/tileTriggerZone";
+  import { regionGeometryError } from "../../core/regionGeometry";
 
-  let { client, bus }: { client: ClientSync; bus: EventBus<ClientEvents> } = $props();
-  const METHODS: AutomationMethod[] = ["enter", "exit", "stop", "create", "rotate", "click", "manual"];
-  const KINDS: AutomationStep["kind"][] = ["select", "filter", "checkVariable", "checkValue", "shuffle", "position", "distance", "attributes", "checkData", "condition", "inventory", "tokenTriggerCount", "routeMethod", "routeUser", "forEach", "endEach", "resetHistory", "batchFlush", "collection", "triggerTile", "setActive", "stopOthers", "set", "gameTime", "hurtHeal", "random", "tags", "visibility", "door", "move", "rotate", "delete", "chat", "sequence", "script", "summon", "rollTable", "landing", "jump", "stop"];
+  let { client, bus, getAsset = null }: { client: ClientSync; bus: EventBus<ClientEvents>;
+    getAsset?: ((hash: string) => Promise<Uint8Array | undefined>) | null } = $props();
+  const METHODS: AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "rotate", "click", "manual"];
+  const KINDS: AutomationStep["kind"][] = ["select", "filter", "checkVariable", "checkValue", "shuffle", "position", "distance", "attributes", "checkData", "condition", "inventory", "tokenTriggerCount", "routeMethod", "routeUser", "forEach", "endEach", "resetHistory", "batchFlush", "collection", "triggerTile", "setActive", "stopOthers", "stopMovement", "set", "gameTime", "sceneLighting", "sceneBackground", "tileImage", "hurtHeal", "random", "tags", "visibility", "door", "move", "rotate", "delete", "chat", "sequence", "script", "summon", "rollTable", "landing", "jump", "stop"];
   const ADD_KINDS = KINDS.filter((kind) => kind !== "endEach");
-  const KIND_LABEL: Record<string, string> = { batchFlush: "Run All Batch Actions", gameTime: "Game Time",
+  const KIND_LABEL: Record<string, string> = { stopMovement: "Stop Token Movement", batchFlush: "Run All Batch Actions", gameTime: "Game Time",
+    sceneLighting: "Scene Lighting", sceneBackground: "Scene Background", tileImage: "Switch Tile Image",
     hurtHeal: "Hurt / Heal", move: "Move", rotate: "Rotation", delete: "Delete Entities", rollTable: "Roll Table" };
   const kindLabel = (kind: string): string => KIND_LABEL[kind] ?? kind;
   const canEdit = $derived(client.user?.role === "GM" || client.user?.role === "ASSISTANT");
@@ -23,15 +27,27 @@
   let scripts = $state<MacroDocument[]>([]);
   let summons = $state<MacroDocument[]>([]);
   let rollTables = $state<RollTableDocument[]>([]);
+  let assets = $state<AssetManifest>({});
+  const imageAssets = $derived(Object.entries(assets).filter(([hash]) => !automationImageError(hash, assets)));
   let saved = $state<AutomationDocument[]>([]);
   let editing = $state("");
   let name = $state("");
   let sceneId = $state("");
+  let sourceKind = $state<"tile" | "region">("tile");
   let tileId = $state("");
   let tileName = $state("Active zone");
   let tileX = $state(100), tileY = $state(100);
   let tileWidth = $state(200), tileHeight = $state(200), tileRotation = $state(0);
   let tileSort = $state(0), tileHidden = $state(false);
+  let tileElevationLimited = $state(false), tileElevationMin = $state(0), tileElevationMax = $state(10);
+  let tileTriggerShape = $state<"rectangle" | "triangle" | "diamond" | "circle" | "alpha">("rectangle");
+  let tileTriggerImage = $state("");
+  let tileCreating = $state(false);
+  let regionName = $state("Scene region");
+  let regionX = $state(100), regionY = $state(100), regionWidth = $state(200), regionHeight = $state(200);
+  let regionRotation = $state(0), regionSort = $state(0), regionHidden = $state(false);
+  let regionShape = $state<"rectangle" | "triangle" | "diamond" | "circle">("rectangle");
+  let regionElevationLimited = $state(false), regionElevationMin = $state(0), regionElevationMax = $state(10);
   let tokenId = $state("");
   let triggerMethod = $state<AutomationMethod>("enter");
   let definition = $state<AutomationDefinition>({
@@ -45,18 +61,21 @@
   let error = $state("");
   let lastTrace = $state<ClientEvents["automationTrace"] | null>(null);
   const scene = $derived(scenes.find((s) => s._id === sceneId) ?? null);
-  const selectedTile = $derived(scene?.tiles.find((t) => t._id === tileId));
+  const selectedTile = $derived(sourceKind === "tile" ? scene?.tiles.find((t) => t._id === tileId) : undefined);
+  const selectedRegion = $derived(sourceKind === "region" ? scene?.regions?.find((region) => region._id === tileId) : undefined);
   const tagOptions = $derived(scene ? listTaggable(client.store.world, { sceneId: scene._id }) : []);
 
   function refresh(): void {
     scenes = [...client.store.getAll("scenes")];
+    assets = { ...client.store.world.assetManifest };
     saved = [...client.store.getAll("automations")];
     macros = [...client.store.getAll("macros")].filter((m) => m.kind === "sequence");
     scripts = [...client.store.getAll("macros")].filter((m) => m.kind === "script");
     summons = [...client.store.getAll("macros")].filter((m) => m.kind === "summon");
     rollTables = [...client.store.getAll("rollTables")];
     if (!scenes.some((s) => s._id === sceneId)) sceneId = scenes.find((s) => s.active)?._id ?? scenes[0]?._id ?? "";
-    if (!scene?.tiles.some((tile) => tile._id === tileId)) tileId = scene?.tiles[0]?._id ?? "";
+    const sources = sourceKind === "region" ? scene?.regions ?? [] : scene?.tiles ?? [];
+    if (!sources.some((source) => source._id === tileId)) tileId = sources[0]?._id ?? "";
   }
   function pick(doc: AutomationDocument): void {
     const checked = validateAutomation(doc.definition);
@@ -65,6 +84,7 @@
     name = doc.name;
     definition = { ...$state.snapshot(checked.definition), gates: { ...checked.definition.gates } };
     sceneId = checked.definition.sceneId;
+    sourceKind = checked.definition.sourceKind ?? "tile";
     tileId = checked.definition.tileId;
     triggerMethod = checked.definition.methods[0] ?? "manual";
     error = "";
@@ -73,6 +93,7 @@
   function reset(): void {
     editing = "";
     name = "";
+    sourceKind = "tile";
     triggerMethod = "enter";
     definition = { version: 1, sceneId: "", tileId: "", methods: ["enter", "stop", "manual"],
       gates: { paused: false }, steps: [
@@ -111,8 +132,12 @@
       case "setActive": return { id, kind, mode: "deactivate",
         target: { kind: "id", tileId: scene?.tiles.find((t) => t._id !== tileId)?._id ?? tileId } };
       case "stopOthers": return { id, kind };
+      case "stopMovement": return { id, kind, snapToGrid: false };
       case "set": return { id, kind, name: "value", value: 1 };
       case "gameTime": return { id, kind, minutes: 60 };
+      case "sceneLighting": return { id, kind, mode: "set", darkness: 0.5 };
+      case "sceneBackground": return { id, kind, image: null };
+      case "tileImage": return { id, kind, image: "" };
       case "hurtHeal": return { id, kind, amount: -5, targets: "triggering" };
       case "random": return { id, kind, name: "roll", min: 1, max: 20 };
       case "tags": return { id, kind, edit: "add", tags: ["activated"] };
@@ -168,8 +193,50 @@
     const step = definition.steps[index];
     if (step?.kind !== "select" && step?.kind !== "collection") return;
     const selector: AutomationSelector = kind === "tag"
-      ? { kind, query: "trap", pattern: "literal", caseSensitive: true } : { kind };
+      ? { kind, query: "trap", pattern: "literal", caseSensitive: true } : kind === "ids" ? {kind, refs: []} : { kind };
     definition.steps[index] = { ...step, selector };
+  }
+  const pinKey = (ref: DocRef) => JSON.stringify([ref.parent?.id, ref.coll, ref.id]);
+  function pinnedChoices(refs: DocRef[]) {
+    const live = tagOptions.filter((item) => PINNABLE_COLLECTIONS.includes(item.ref.coll as typeof PINNABLE_COLLECTIONS[number]))
+      .map((item) => ({ref:item.ref, name:`${item.collection}: ${item.doc.name} (${item.ref.id})`}));
+    // Saved order is meaningful to Position/For Each; Undo may reorder scene arrays.
+    // Keep selected references first in authored order, including unavailable ones.
+    return [...refs.map((ref) => live.find((item) => pinKey(item.ref) === pinKey(ref))
+      ?? {ref, name:`Unavailable: ${ref.coll}/${ref.id}`}),
+      ...live.filter((item) => !refs.some((ref) => pinKey(item.ref) === pinKey(ref)))];
+  }
+  function changeMoveDestination(index: number, source: string): void {
+    const step = definition.steps[index];
+    if (step?.kind !== "move") return;
+    delete step.destination; delete step.destinationTag; delete step.destinationResult; delete step.destinationOriginal;
+    delete step.destinationChoice; delete step.destinationPosition;
+    if (source === "tokens" || source === "tiles") step.destination = { coll: source, id: scene?.[source][0]?._id ?? "" };
+    else if (source === "rollTable") step.destinationResult = "rollTable";
+    else if (source === "original") step.destinationOriginal = true;
+    else if (source === "tag") step.destinationTag = { kind: "tag", query: "destination", collections: ["tokens", "tiles"], mode: "all", pattern: "literal" };
+    delete step.mode; delete step.xMode; delete step.yMode;
+    delete step.xFormula; delete step.yFormula; step.x = 0; step.y = 0;
+  }
+  function changeMoveTagRefs(index: number, field: "includeRefs" | "excludeRefs", element: HTMLSelectElement): void {
+    const step = definition.steps[index];
+    if (step?.kind !== "move" || !step.destinationTag) return;
+    const choices = pinnedChoices(step.destinationTag[field] ?? []);
+    step.destinationTag[field] = [...element.selectedOptions].flatMap((option) => {
+      const item = choices.find((choice) => pinKey(choice.ref) === option.value);
+      return item ? [item.ref] : [];
+    });
+  }
+  function changePinned(index: number, element: HTMLSelectElement): void {
+    const step = definition.steps[index];
+    if ((step?.kind !== "select" && step?.kind !== "collection") || step.selector?.kind !== "ids") return;
+    const choices = pinnedChoices(step.selector.refs);
+    const refs = Array.from(element.selectedOptions).flatMap((option) => {
+      const found = choices.find((item) => pinKey(item.ref) === option.value);
+      return found ? [found.ref] : [];
+    });
+    if (refs.length > 100) { error = "Pin at most 100 entities."; return; }
+    error = ""; step.selector.refs = refs;
   }
   function changeCollectionMode(index: number, mode: Extract<AutomationStep, { kind: "collection" }>["mode"]): void {
     const step = definition.steps[index];
@@ -317,6 +384,14 @@
     const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(input);
     step.value = match ? Number(match[1]) * 60 + Number(match[2]) : NaN;
   }
+  function changeSetOperation(index: number, operation: "assign" | "add" | "delete"): void {
+    const step = definition.steps[index];
+    if (step?.kind !== "set") return;
+    step.operation = operation;
+    // Omit the key on the wire: msgpack encodes an undefined property as null.
+    if (operation === "delete") Reflect.deleteProperty(step, "value");
+    else if (step.value === undefined || operation === "add" && typeof step.value !== "number") step.value = 0;
+  }
   function changeSetType(index: number, kind: "string" | "number" | "boolean"): void {
     const step = definition.steps[index];
     if (step?.kind !== "set") return;
@@ -396,25 +471,98 @@
     else Object.assign(gates, { [key]: value });
     definition.gates = gates;
   }
-  function createTile(): void {
+  async function createTile(): Promise<void> {
     error = ""; status = "";
+    if (tileCreating) return;
     if (!canEdit || !scene) { error = "Choose a scene first"; return; }
     if (!tileName.trim() || tileName.length > 128 ||
         ![tileX, tileY, tileWidth, tileHeight, tileRotation].every(Number.isFinite) ||
         !Number.isSafeInteger(tileSort) || Math.abs(tileSort) > 1_000_000 ||
         tileWidth <= 0 || tileHeight <= 0 || tileX < 0 || tileY < 0 ||
         tileX + tileWidth > scene.width || tileY + tileHeight > scene.height ||
-        Math.abs(tileRotation) > 360) {
-      error = "Tile zone needs a name and a finite rectangle inside this scene (rotation ±360°, sort ±1,000,000).";
+        Math.abs(tileRotation) > 360 ||
+        (tileElevationLimited && (!Number.isFinite(tileElevationMin) || !Number.isFinite(tileElevationMax) ||
+          tileElevationMin < -1_000_000 || tileElevationMax > 1_000_000 || tileElevationMin > tileElevationMax))) {
+      error = "Tile zone needs a name and a finite rectangle inside this scene; elevation must be an ordered scene-unit range.";
       return;
     }
-    const doc: TileDocument = { _id: crypto.randomUUID(), type: "tile", name: tileName.trim(),
-      ownership: { default: tileHidden ? 0 : 1 }, flags: {}, system: {},
-      x: tileX, y: tileY, width: tileWidth, height: tileHeight, rotation: tileRotation, sort: tileSort,
-      img: "", hidden: tileHidden, above: false, occlusion: { mode: "roof", alpha: 0.5 } };
-    client.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: scene._id }, data: doc }]);
+    let triggerZone: TileTriggerZone | undefined = tileTriggerShape === "triangle"
+      ? { kind: "polygon", points: [[0.5, 0], [1, 1], [0, 1]] }
+      : tileTriggerShape === "diamond"
+        ? { kind: "polygon", points: [[0.5, 0], [1, 0.5], [0.5, 1], [0, 0.5]] }
+        : tileTriggerShape === "circle" ? tileTriggerCirclePolygon() : undefined;
+    tileCreating = true;
+    try {
+      if (tileTriggerShape === "alpha") {
+        if (!tileTriggerImage || !imageAssets.some(([hash]) => hash === tileTriggerImage)) {
+          error = "Choose an available imported image for its alpha trigger shape."; return;
+        }
+        if (!getAsset) { error = "Image bytes are unavailable in this session; reload the GM asset cache and retry."; return; }
+        const bytes = await getAsset(tileTriggerImage);
+        if (!bytes) { error = "The selected image is not cached on this GM. Open its asset preview and retry."; return; }
+        const mime = assets[tileTriggerImage]?.mime ?? "image/png";
+        const bitmap = await createImageBitmap(new Blob([Uint8Array.from(bytes)], { type: mime }));
+        try {
+          const canvas = document.createElement("canvas");
+          canvas.width = 64; canvas.height = 64;
+          const context = canvas.getContext("2d", { willReadFrequently: true });
+          if (!context) { error = "This browser cannot read the selected image alpha."; return; }
+          context.imageSmoothingEnabled = false;
+          context.clearRect(0, 0, 64, 64);
+          context.drawImage(bitmap, 0, 0, 64, 64);
+          const rgba = context.getImageData(0, 0, 64, 64).data;
+          triggerZone = tileAlphaMaskFromRgba(rgba, 64, 64, tileTriggerImage) ?? undefined;
+          if (!triggerZone) {
+            error = "Image alpha is empty or too complex for the safe 64×64 trigger mask (maximum 1,024 opaque runs).";
+            return;
+          }
+        } finally { bitmap.close(); }
+      }
+      const doc: TileDocument = { _id: crypto.randomUUID(), type: "tile", name: tileName.trim(),
+        ownership: { default: tileHidden ? 0 : 1 }, flags: {}, system: {},
+        x: tileX, y: tileY, width: tileWidth, height: tileHeight, rotation: tileRotation, sort: tileSort,
+        ...(triggerZone ? { triggerZone } : {}),
+        ...(tileElevationLimited ? { triggerElevation: { min: tileElevationMin, max: tileElevationMax } } : {}),
+        img: tileTriggerShape === "alpha" ? tileTriggerImage : "", hidden: tileHidden, above: false,
+        occlusion: { mode: "roof", alpha: 0.5 } };
+      client.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: scene._id }, data: doc }]);
+      tileId = doc._id;
+      status = `Creating ${tileHidden ? "concealed" : "visible"} zone tile; save the graph after it appears in the tile list.`;
+    } catch (cause) {
+      error = cause instanceof Error ? `Could not read image alpha: ${cause.message}` : "Could not read image alpha.";
+    } finally { tileCreating = false; }
+  }
+  function createRegion(): void {
+    error = ""; status = "";
+    if (!canEdit || !scene) { error = "Choose a scene first"; return; }
+    if (!regionName.trim() || regionName.length > 128 ||
+        ![regionX, regionY, regionWidth, regionHeight, regionRotation].every(Number.isFinite) ||
+        !Number.isSafeInteger(regionSort) || Math.abs(regionSort) > 1_000_000 ||
+        regionWidth <= 0 || regionHeight <= 0 || regionX < 0 || regionY < 0 ||
+        regionX + regionWidth > scene.width || regionY + regionHeight > scene.height || Math.abs(regionRotation) > 360 ||
+        (regionElevationLimited && (!Number.isFinite(regionElevationMin) || !Number.isFinite(regionElevationMax) ||
+          regionElevationMin < -1_000_000 || regionElevationMax > 1_000_000 || regionElevationMin > regionElevationMax))) {
+      error = "Region needs a finite convex shape inside this scene; elevation must be an ordered scene-unit range.";
+      return;
+    }
+    const shape = regionShape === "triangle"
+      ? { kind: "polygon" as const, points: [[0.5, 0], [1, 1], [0, 1]] as Array<[number, number]> }
+      : regionShape === "diamond"
+        ? { kind: "polygon" as const, points: [[0.5, 0], [1, 0.5], [0.5, 1], [0, 0.5]] as Array<[number, number]> }
+        : regionShape === "rectangle"
+          ? { kind: "polygon" as const, points: [[0, 0], [1, 0], [1, 1], [0, 1]] as Array<[number, number]> }
+          : tileTriggerCirclePolygon();
+    const doc: RegionDocument = { _id: crypto.randomUUID(), type: "region", name: regionName.trim(),
+      ownership: { default: regionHidden ? 0 : 1 }, flags: {}, system: {},
+      x: regionX, y: regionY, width: regionWidth, height: regionHeight, rotation: regionRotation, shape,
+      sort: regionSort, hidden: regionHidden,
+      ...(regionElevationLimited ? { triggerElevation: { min: regionElevationMin, max: regionElevationMax } } : {}) };
+    const invalid = regionGeometryError(doc);
+    if (invalid) { error = invalid; return; }
+    client.submit([{ kind: "create", coll: "regions", parent: { coll: "scenes", id: scene._id }, data: doc }]);
+    sourceKind = "region";
     tileId = doc._id;
-    status = `Creating ${tileHidden ? "concealed" : "visible"} zone tile; save the graph after it appears in the tile list.`;
+    status = `Creating ${regionHidden ? "concealed" : "visible"} region; save its graph after it appears in the source list.`;
   }
   function updateTileSort(raw: string): void {
     if (!canEdit || !scene || !selectedTile) return;
@@ -431,8 +579,8 @@
   function save(): void {
     error = ""; status = "";
     if (!canEdit) return;
-    if (!name.trim() || !sceneId || !tileId) { error = "Choose a name, scene and zone tile"; return; }
-    const candidate: AutomationDefinition = { ...$state.snapshot(definition), sceneId, tileId };
+    if (!name.trim() || !sceneId || !tileId) { error = "Choose a name, scene and zone source"; return; }
+    const candidate: AutomationDefinition = { ...$state.snapshot(definition), sceneId, sourceKind, tileId };
     const valid = validateAutomation(candidate);
     if (!valid.ok) { error = valid.error; return; }
     if (editing) {
@@ -473,10 +621,11 @@
   onMount(() => {
     const offSnapshot = bus.on("snapshot", refresh);
     const offOps = bus.on("ops", refresh);
+    const offAssets = bus.on("assetManifest", refresh);
     const offTrace = bus.on("automationTrace", (msg) => { lastTrace = msg; status = `${msg.result}: ${msg.detail}`; });
     const offRejected = bus.on("rejected", (msg) => { error = `${msg.reason}: ${msg.detail}`; });
     refresh();
-    return () => { offSnapshot(); offOps(); offTrace(); offRejected(); };
+    return () => { offSnapshot(); offOps(); offAssets(); offTrace(); offRejected(); };
   });
 </script>
 
@@ -487,11 +636,20 @@
     <p>Active zone definitions and traces are GM-only.</p>
   {:else}
     <div class="row"><label>Name <input bind:value={name} placeholder="e.g. Gate trap" data-zone-name /></label>
-      <label>Scene <select bind:value={sceneId} onchange={() => tileId = scene?.tiles[0]?._id ?? ""} data-zone-scene>
+      <label>Scene <select bind:value={sceneId} onchange={() => tileId = sourceKind === "region"
+        ? scene?.regions?.[0]?._id ?? "" : scene?.tiles[0]?._id ?? ""} data-zone-scene>
         {#each scenes as sc (sc._id)}<option value={sc._id}>{sc.name}</option>{/each}
       </select></label>
-      <label>Tile / zone <select bind:value={tileId} data-zone-tile><option value="">Select tile…</option>
-        {#each scene?.tiles ?? [] as tile (tile._id)}<option value={tile._id}>{tile.name} ({tile.x},{tile.y})</option>{/each}
+      <label>Source kind <select bind:value={sourceKind} onchange={() => tileId = sourceKind === "region"
+        ? scene?.regions?.[0]?._id ?? "" : scene?.tiles[0]?._id ?? ""} data-zone-source-kind>
+        <option value="tile">Tile zone</option><option value="region">Scene region</option>
+      </select></label>
+      <label>{sourceKind === "region" ? "Region source" : "Tile source"} <select bind:value={tileId} data-zone-tile><option value="">Select source…</option>
+        {#if sourceKind === "region"}
+          {#each scene?.regions ?? [] as region (region._id)}<option value={region._id}>{region.name} ({region.x},{region.y})</option>{/each}
+        {:else}
+          {#each scene?.tiles ?? [] as tile (tile._id)}<option value={tile._id}>{tile.name} ({tile.x},{tile.y})</option>{/each}
+        {/if}
       </select></label>
       <label>Origin token <select bind:value={tokenId}><option value="">None</option>
         {#each scene?.tokens ?? [] as tok (tok._id)}<option value={tok._id}>{tok.name}</option>{/each}
@@ -502,7 +660,11 @@
         <input type="number" step="1" min="-1000000" max="1000000" value={selectedTile.sort ?? 0}
           onchange={(event) => updateTileSort(event.currentTarget.value)} />
       </label>
+    {:else if selectedRegion}
+      <p class="hint">Region {selectedRegion.name}: convex polygon, {selectedRegion.rotation ?? 0}° rotation
+        {selectedRegion.hidden ? " · concealed from players" : " · projected to players"}.</p>
     {/if}
+    {#if sourceKind === "tile"}
     <details data-zone-tile-create><summary>Create a rotated tile / zone in this scene</summary>
       <div class="row">
         <label>Tile name <input bind:value={tileName} /></label>
@@ -512,12 +674,52 @@
         <label>Height <input type="number" min="1" bind:value={tileHeight} /></label>
         <label>Trigger sort <input type="number" step="1" min="-1000000" max="1000000" bind:value={tileSort} /></label>
         <label>Rotation ° <input type="number" min="-360" max="360" bind:value={tileRotation} /></label>
+        <label>Trigger shape <select bind:value={tileTriggerShape} data-zone-trigger-shape>
+          <option value="rectangle">Rectangle</option><option value="triangle">Triangle</option><option value="diamond">Diamond</option>
+          <option value="circle">Circle (32-point convex approximation)</option><option value="alpha">Image alpha</option>
+        </select></label>
+        {#if tileTriggerShape === "alpha"}
+          <label>Alpha mask image <select bind:value={tileTriggerImage} data-zone-alpha-image>
+            <option value="">Choose an imported image…</option>
+            {#each imageAssets as [hash, asset] (hash)}<option value={hash}>{asset.name} ({hash.slice(0, 8)})</option>{/each}
+          </select></label>
+        {/if}
+        <label><input type="checkbox" bind:checked={tileElevationLimited} />Limit trigger elevation</label>
+        {#if tileElevationLimited}
+          <label>Min elevation ({scene?.grid.units ?? "scene units"}) <input type="number" bind:value={tileElevationMin} /></label>
+          <label>Max elevation ({scene?.grid.units ?? "scene units"}) <input type="number" bind:value={tileElevationMax} /></label>
+        {/if}
         <label title="Concealed tiles trigger movement but players cannot click what they cannot see">
           <input type="checkbox" bind:checked={tileHidden} />Concealed trap tile</label>
-        <button type="button" data-zone-create-tile onclick={createTile}>Create zone tile</button>
+        <button type="button" data-zone-create-tile disabled={tileCreating} onclick={createTile}>{tileCreating ? "Reading trigger image…" : "Create zone tile"}</button>
       </div>
-      <p class="hint">Visible tiles can receive player clicks on the canvas; concealed tiles trigger movement without exposing their zone or media to players.</p>
+      <p class="hint">Visible tiles can receive player clicks on the canvas; concealed tiles trigger movement without exposing their zone or media to players. Image alpha is sampled at tile creation into a bounded 64×64 mask, saved with its source hash, and host-validated; later art changes do not reshape this authored trigger mask.</p>
     </details>
+    {:else}
+    <details data-zone-region-create><summary>Create a convex scene region</summary>
+      <div class="row">
+        <label>Region name <input bind:value={regionName} /></label>
+        <label>X <input type="number" bind:value={regionX} /></label>
+        <label>Y <input type="number" bind:value={regionY} /></label>
+        <label>Width <input type="number" min="1" bind:value={regionWidth} /></label>
+        <label>Height <input type="number" min="1" bind:value={regionHeight} /></label>
+        <label>Rotation ° <input type="number" min="-360" max="360" bind:value={regionRotation} /></label>
+        <label>Trigger sort <input type="number" step="1" min="-1000000" max="1000000" bind:value={regionSort} /></label>
+        <label>Convex shape <select bind:value={regionShape} data-zone-region-shape>
+          <option value="rectangle">Rectangle</option><option value="triangle">Triangle</option>
+          <option value="diamond">Diamond</option><option value="circle">Circle (32-point approximation)</option>
+        </select></label>
+        <label><input type="checkbox" bind:checked={regionElevationLimited} />Limit trigger elevation</label>
+        {#if regionElevationLimited}
+          <label>Min elevation ({scene?.grid.units ?? "scene units"}) <input type="number" bind:value={regionElevationMin} /></label>
+          <label>Max elevation ({scene?.grid.units ?? "scene units"}) <input type="number" bind:value={regionElevationMax} /></label>
+        {/if}
+        <label title="Concealed regions are omitted from player scene projections"><input type="checkbox" bind:checked={regionHidden} />Concealed region</label>
+        <button type="button" data-zone-create-region onclick={createRegion}>Create scene region</button>
+      </div>
+      <p class="hint">This creates a bounded convex region document in the scene. Choose it as this graph’s source; movement Enter/Exit/Stop and elevation contacts are swept by the host. Region click triggers are not supported.</p>
+    </details>
+    {/if}
     <div class="methods">Methods:
       {#each METHODS as method (method)}
         <label><input type="checkbox" checked={definition.methods.includes(method)} onchange={() => toggle(method)} />{method}</label>
@@ -547,9 +749,16 @@
           </div>
           {#if step.kind === "select"}
             <label>Current collection <select value={step.selector.kind} onchange={(e) => changeSelector(i, (e.target as HTMLSelectElement).value as AutomationSelector["kind"])}>
-              <option value="triggering">Triggering token</option><option value="inside">Tokens in tile</option><option value="tile">This tile</option><option value="tag">Live tag selector</option>
+              <option value="triggering">Triggering token</option><option value="inside">Tokens in tile</option><option value="tile">This tile</option><option value="tag">Live tag selector</option><option value="ids">Pinned entities</option>
             </select></label>
-            {#if step.selector.kind === "tag"}
+            {#if step.selector.kind === "ids"}
+              <label>Pinned entities <select aria-label="Pinned entities" multiple size="5" value={step.selector.refs.map(pinKey)} onchange={(e) => changePinned(i, e.currentTarget)}>
+                {#each pinnedChoices(step.selector.refs) as item (pinKey(item.ref))}
+                  <option value={pinKey(item.ref)}>{item.name}</option>
+                {/each}
+              </select></label>
+              <small>Choose 1–100 exact scene entities, including untagged ones. Missing entities reject the whole graph; unavailable saved choices stay visible. Prefab copies rebind internal pins and reject external pins.</small>
+            {:else if step.selector.kind === "tag"}
               <label>Tags <input value={Array.isArray(step.selector.query) ? step.selector.query.join(", ") : step.selector.query}
                 onchange={(e) => { if (step.kind === "select" && step.selector.kind === "tag") {
                   const value = (e.target as HTMLInputElement).value;
@@ -813,9 +1022,16 @@
             </select></label>
             {#if step.mode !== "clear"}
               <label>Entities <select value={step.selector?.kind ?? "inside"} onchange={(e) => changeSelector(i, e.currentTarget.value as AutomationSelector["kind"])}>
-                <option value="triggering">Triggering token</option><option value="inside">Tokens in tile</option><option value="tile">This tile</option><option value="tag">Live tag selector</option>
+                <option value="triggering">Triggering token</option><option value="inside">Tokens in tile</option><option value="tile">This tile</option><option value="tag">Live tag selector</option><option value="ids">Pinned entities</option>
               </select></label>
-              {#if step.selector?.kind === "tag"}
+              {#if step.selector?.kind === "ids"}
+                <label>Pinned collection entities <select aria-label="Pinned collection entities" multiple size="5" value={step.selector.refs.map(pinKey)} onchange={(e) => changePinned(i, e.currentTarget)}>
+                  {#each pinnedChoices(step.selector.refs) as item (pinKey(item.ref))}
+                    <option value={pinKey(item.ref)}>{item.name}</option>
+                  {/each}
+                </select></label>
+                <small>Exact same-scene entities. A missing pin rejects even a Remove operation; no silent partial selection.</small>
+              {:else if step.selector?.kind === "tag"}
                 <label>Tags <input value={Array.isArray(step.selector.query) ? step.selector.query.join(", ") : step.selector.query}
                   onchange={(e) => { if (step.kind === "collection" && step.selector?.kind === "tag") {
                     const value = e.currentTarget.value;
@@ -993,15 +1209,15 @@
                 </select></label>
               {/if}
             {/if}
+            <label>Operation <select aria-label="Variable operation" value={step.operation ?? "assign"}
+              onchange={(e) => changeSetOperation(i, e.currentTarget.value as "assign" | "add" | "delete")}>
+              <option value="assign">Set value</option><option value="add">Add to previous (starts at 0)</option>
+              <option value="delete">Delete variable</option>
+            </select></label>
+            {#if step.operation !== "delete"}
             <label>Value type <select value={typeof step.value} onchange={(e) => changeSetType(i, e.currentTarget.value as "string" | "number" | "boolean")}>
               <option value="string">Text</option><option value="number">Number</option><option value="boolean">Boolean</option>
             </select></label>
-            {#if typeof step.value === "number"}
-              <label>Operation <select aria-label="Variable operation" value={step.operation ?? "assign"}
-                onchange={(e) => { if (step.kind === "set") step.operation = e.currentTarget.value as "assign" | "add"; }}>
-                <option value="assign">Set value</option><option value="add">Add to previous (starts at 0)</option>
-              </select></label>
-            {/if}
             {#if typeof step.value === "boolean"}
               <label>Value <select value={String(step.value)} onchange={(e) => changeSetValue(i, e.currentTarget.value)}>
                 <option value="true">True</option><option value="false">False</option>
@@ -1009,19 +1225,129 @@
             {:else}
               <label>Value <input type={typeof step.value === "number" ? "number" : "text"} value={String(step.value)} onchange={(e) => changeSetValue(i, e.currentTarget.value)} /></label>
             {/if}
+            {:else}
+              <small>Remove this exact name. A missing variable is a no-op; later Check Variable reads a deleted tile value as null. Other variables and trigger history are preserved.</small>
+            {/if}
             <small>Private, persisted graph variables survive history reset and undo with this graph. Targeting an ID, current tiles or Tagger tiles writes each graph's separate variable map (at most 32 tiles / 128 graph states) within one atomic plan; later Trigger Tile calls read staged values. Filters and {"{{name}}"} on the current graph read its own values. No expression evaluation or cross-scene targets; numeric additions are bounded to ±1,000,000,000.</small>
           {:else if step.kind === "gameTime"}
-            <label>World clock change (minutes) <input aria-label="Game Time minutes" type="number"
-              step="1" min="-525600" max="525600" bind:value={step.minutes} /></label>
-            <small>Game Time advances or rewinds the host-owned, replicated world clock by whole minutes (±1 year per step). Later Check Value steps, including child tiles, read the new time. It is one undoable graph transaction; failed actions leave the clock unchanged. A published player trigger uses only this GM-authored amount. The clock stays within 0–3153600000 seconds. Expressions and automatic time-trigger scheduling are not supported yet.</small>
+            <label>Amount source <select aria-label="Game Time source" value={step.formula !== undefined ? "formula" : "fixed"}
+              onchange={(event) => {
+                if (event.currentTarget.value === "formula") { step.formula = String(step.minutes ?? 60); delete step.minutes; }
+                else { step.minutes = 60; delete step.formula; }
+              }}><option value="fixed">Fixed minutes</option><option value="formula">Dice / math</option></select></label>
+            {#if step.formula !== undefined}
+              <label>Minute expression <input aria-label="Game Time formula" maxlength="128" bind:value={step.formula} placeholder="1d6 * 10 - 30" /></label>
+            {:else}
+              <label>World clock change (minutes) <input aria-label="Game Time minutes" type="number"
+                step="1" min="-525600" max="525600" bind:value={step.minutes} /></label>
+            {/if}
+            <small>Game Time advances or rewinds the host-owned clock by whole minutes (±1 year per step). Safe dice/math resolves once per step on the host; no scripts, document paths or templates. Up to 64 random draws per formula and 1024 across the nested plan. Later time checks read the staged clock; any failed action rolls back the whole transaction. The clock stays within 0–3153600000 seconds. Automatic time-trigger scheduling is not supported yet.</small>
+          {:else if step.kind === "sceneLighting"}
+            <label>Lighting operation <select aria-label="Lighting operation" bind:value={step.mode}>
+              <option value="set">Set darkness</option><option value="add">Add to darkness</option>
+            </select></label>
+            <label>Darkness <input aria-label="Scene Lighting darkness" type="number" min={step.mode === "add" ? -1 : 0}
+              max="1" step="0.05" bind:value={step.darkness} /></label>
+            <label>Visual transition (ms) <input aria-label="Scene Lighting duration" type="number" min="0" max="60000" step="100"
+              value={step.durationMs ?? ""} onchange={(e) => { if (e.currentTarget.value === "") delete step.durationMs; else step.durationMs = Number(e.currentTarget.value); }} /></label>
+            <small>0 is bright, 1 is dark; additions outside that range reject the whole graph. Optional 0–60000 ms fades the ambient tint locally; blank or zero cuts immediately. Vision rules, later checks and child tiles use the committed value immediately. New fades start from the drawn value; reduced motion, first appearance and reload cut to the endpoint. Undo restores lighting and graph history together. Not a shared-clock or deferred-mechanics transition.</small>
+          {:else if step.kind === "sceneBackground" || step.kind === "tileImage"}
+            {#if step.kind === "sceneBackground"}
+              <label>Background scene <select aria-label="Background scene" value={step.targetSceneId ?? ""}
+                onchange={(e) => { if (step.kind === "sceneBackground") {
+                  if (e.currentTarget.value) step.targetSceneId = e.currentTarget.value;
+                  else delete step.targetSceneId;
+                } }}>
+                <option value="">This graph's scene</option>
+                {#if step.targetSceneId && !scenes.some((s) => s._id === step.targetSceneId)}
+                  <option value={step.targetSceneId}>Unavailable scene</option>
+                {/if}
+                {#each scenes as target (target._id)}<option value={target._id}>{target.name}</option>{/each}
+              </select></label>
+            {/if}
+            {#if step.kind === "tileImage"}
+              <label>Image source <select aria-label="Tile image source" value={step.images ? "list" : "direct"}
+                onchange={(e) => { if (step.kind === "tileImage") {
+                  definition.steps[i] = e.currentTarget.value === "list"
+                    ? { id: step.id, kind: "tileImage", images: step.image ? [step.image] : [], selection: "next" }
+                    : { id: step.id, kind: "tileImage", image: step.images?.[0] ?? step.image ?? "" };
+                } }}>
+                <option value="direct">One image / clear</option><option value="list">Ordered image list</option>
+              </select></label>
+            {/if}
+            {#if step.kind === "tileImage" && step.images}
+              <label>Change to <select aria-label="Tile image selection" value={step.selection}
+                onchange={(e) => { if (step.kind === "tileImage" && step.images) {
+                  step.selection = e.currentTarget.value as typeof step.selection;
+                  if (step.selection === "index") step.index = 1; else delete step.index;
+                  if (step.selection === "numbers") step.numbers = "1"; else delete step.numbers;
+                  if (step.selection === "formula") step.formula = "1d1"; else delete step.formula;
+                } }}>
+                <option value="first">First</option><option value="last">Last</option>
+                <option value="next">Next (wrap)</option><option value="previous">Previous (wrap)</option>
+                <option value="index">Number</option><option value="random">Random</option>
+                <option value="other">Random other (no repeat)</option>
+                <option value="numbers">Number list / range</option><option value="formula">Dice / math formula</option>
+              </select></label>
+              {#if step.selection === "index"}
+                <label>Image number <input aria-label="Tile image number" type="number" min="1" max={step.images.length}
+                  step="1" bind:value={step.index} /></label>
+              {/if}
+              {#if step.selection === "numbers"}
+                <label>Image numbers <input aria-label="Tile image numbers" maxlength="128" bind:value={step.numbers} placeholder="1-3, 5" /></label>
+                <small>Choose randomly from these 1-based numbers. Inclusive ranges and optional brackets, e.g. [1, 3-5]. No repeats/overlaps; every number must exist in the image list. A single number needs no roll.</small>
+              {:else if step.selection === "formula"}
+                <label>Image formula <input aria-label="Tile image formula" maxlength="128" bind:value={step.formula} placeholder="1d6 or floor(5 / 2)" /></label>
+                <small>The host evaluates dice/math separately per tile. The result must be a whole image number in this list, otherwise the entire graph is rejected without writes. Arithmetic, parentheses and the dice engine's math functions/modifiers are supported. No JavaScript, document paths or Handlebars. At most 64 random draws per formula and 1024 per nested graph plan.</small>
+              {/if}
+              {#each step.images as image, imageIndex (imageIndex)}
+                <div class="row">
+                  <label>Image {imageIndex + 1} <select aria-label={`Tile list image ${imageIndex + 1}`} value={image}
+                    onchange={(e) => { if (step.kind === "tileImage" && step.images) step.images[imageIndex] = e.currentTarget.value; }}>
+                    {#if !imageAssets.some(([hash]) => hash === image)}<option value={image}>Unavailable image</option>{/if}
+                    {#each imageAssets as [hash, asset] (hash)}<option value={hash}>{asset.name} ({hash.slice(0, 8)})</option>{/each}
+                  </select></label>
+                  <button type="button" aria-label={`Remove tile list image ${imageIndex + 1}`}
+                    onclick={() => { if (step.kind === "tileImage" && step.images) step.images.splice(imageIndex, 1); }}>Remove</button>
+                </div>
+              {/each}
+              <button type="button" aria-label="Add tile list image" disabled={step.images.length >= 32 || !imageAssets.some(([hash]) => !step.images?.includes(hash))}
+                onclick={() => { if (step.kind === "tileImage" && step.images) {
+                  const next = imageAssets.find(([hash]) => !step.images?.includes(hash));
+                  if (next) step.images.push(next[0]);
+                } }}>Add image</button>
+              <small>1–32 distinct images, stored privately on this action. Each tile uses its current image to find the next/previous entry; if absent, Next starts at first and Previous at last. Number is 1-based. Random other requires at least two images. The host chooses separately per tile and validates every entry on every fire. No transitions, temporary art or loops yet.</small>
+            {:else}
+            <label>Owned image <select aria-label="World action image" value={step.image ?? ""}
+              onchange={(e) => { if (step.kind === "sceneBackground" || step.kind === "tileImage" && !step.images) {
+                step.image = e.currentTarget.value || (step.kind === "sceneBackground" ? null : "");
+              } }}>
+              <option value="">Clear image</option>
+              {#if step.image && !imageAssets.some(([hash]) => hash === step.image)}
+                <option value={step.image}>Unavailable image — import or approve sharing</option>
+              {/if}
+              {#each imageAssets as [hash, asset] (hash)}<option value={hash}>{asset.name} ({hash.slice(0, 8)})</option>{/each}
+            </select></label>
+            {/if}
+            <small>Import images in FX timelines and approve player sharing first. Only owned PNG/JPEG/WebP/GIF/AVIF assets are accepted; no remote URLs. The host rechecks availability and sharing on every fire. {step.kind === "tileImage" ? "Select 1–32 tiles first (This tile or Tagger); geometry, visibility and other fields are unchanged." : "Changes the selected saved scene's background without activating it or changing dimensions/grid. A deleted target rejects the whole graph."} Changes and history share one undoable transaction; export rights remain separate.</small>
           {:else if step.kind === "hurtHeal"}
+            <label>Amount source <select aria-label="Hurt / Heal amount source" value={step.formula === undefined ? "fixed" : "formula"}
+              onchange={(e) => { if (e.currentTarget.value === "formula") { delete step.amount; step.formula = "-1d6"; }
+                else { delete step.formula; step.amount = -5; } }}>
+              <option value="fixed">Fixed HP change</option><option value="formula">Dice/math formula</option>
+            </select></label>
+            {#if step.formula !== undefined}
+            <label>HP formula (negative hurts, positive heals) <input aria-label="Hurt / Heal formula" maxlength="128" bind:value={step.formula} /></label>
+            <small>Host rolls independently once per linked actor. A nonzero whole result within ±100000 is required; invalid results reject the whole graph. Up to 64 random draws per formula, 1024 across nested HP actions. No document paths or scripts.</small>
+            {:else}
             <label>HP change (negative hurts, positive heals) <input aria-label="Hurt / Heal HP change"
               type="number" step="1" min="-100000" max="100000" bind:value={step.amount} /></label>
+            {/if}
             <label>Token targets <select aria-label="Hurt / Heal targets" bind:value={step.targets}>
               <option value="triggering">Triggering token</option>
               <option value="current">Current token collection (Inside / Tagger selection)</option>
             </select></label>
-            <small>Uses PF1e hit points, temporary HP and nonlethal healing. Every token needs a linked actor with authored HP; 1–32 tokens, one application per actor. No damage type, dice expression or inline script. Changes share the graph's GM Revert receipt and refuse later conflicting edits.</small>
+            <small>Uses PF1e hit points, temporary HP and nonlethal healing. Every token needs a linked actor with authored HP; 1–32 tokens, one application per actor. No damage type or inline script. Changes share the graph's GM Revert receipt and refuse later conflicting edits.</small>
           {:else if step.kind === "random"}
             <label>Variable <input bind:value={step.name} /></label>
             <label>Minimum <input type="number" step="1" bind:value={step.min} /></label>
@@ -1034,23 +1360,140 @@
           {:else if step.kind === "door"}
             <label>Tagged door state <select bind:value={step.mode}><option value="open">Open</option><option value="close">Close</option><option value="lock">Lock</option><option value="unlock">Unlock</option><option value="toggle">Toggle</option></select></label>
           {:else if step.kind === "move"}
-            <label>Point X <input aria-label="Move X" type="number" step="1" bind:value={step.x} /></label>
-            <label>Point Y <input aria-label="Move Y" type="number" step="1" bind:value={step.y} /></label>
-            <label>Token targets <select aria-label="Move targets" bind:value={step.targets}>
-              <option value="current">Current token collection (Inside / Tagger selection)</option>
+            <label>Destination source <select aria-label="Move destination source" value={step.destinationOriginal ? "original" : step.destinationResult ?? (step.destinationTag ? "tag" : step.destination?.coll ?? "coordinates")}
+              onchange={(e) => changeMoveDestination(i, e.currentTarget.value)}>
+              <option value="coordinates">Coordinates / offsets</option><option value="tokens">Token center</option><option value="tiles">Tile center</option><option value="tag">Live Tagger destination</option><option value="rollTable">Last Roll Table coordinates</option><option value="original">Original Destination</option>
+            </select></label>
+            {#if step.destinationOriginal}
+              <small>Uses the triggering token's host-observed committed endpoint from this movement crossing, before this graph changes it. Requires an actual enter/exit/stop movement event for that same token; manual/click/dry-run and unrelated child tokens have no endpoint context. This does not intercept or cancel movement, and does not restore the endpoint unless this graph moves a token to it.</small>
+            {:else if step.destinationResult}
+              <small>Uses the latest Roll Table action executed in this graph invocation, not a chat message, named variable or nested graph's result. Text must be at most 256 characters and contain exactly numeric {'{"x": 600, "y": 400}'} coordinates. X/Y below are offsets from that point. Missing, missed, malformed or out-of-scene results reject the entire graph, including the roll message. Table RNG is host-owned and capped at 1024 draws across nested calls.</small>
+            {:else if step.destinationTag}
+              <label>Multiple destinations <select aria-label="Move destination choice" value={step.destinationChoice ?? "unique"}
+                onchange={(e) => step.destinationChoice = e.currentTarget.value === "random" ? "random" : "unique"}>
+                <option value="unique">Require exactly one match</option><option value="random">Host chooses one at random</option>
+              </select></label>
+              <label>Destination tags <input aria-label="Move destination tags" value={Array.isArray(step.destinationTag.query) ? step.destinationTag.query.join(", ") : step.destinationTag.query}
+                onchange={(e) => { if (step.destinationTag) step.destinationTag.query = step.destinationTag.pattern === "regex" ? e.currentTarget.value : e.currentTarget.value.split(",").map((v) => v.trim()); }} /></label>
+              <label>Destination match <select aria-label="Move destination match" bind:value={step.destinationTag.mode}>
+                <option value="all">All</option><option value="any">Any</option><option value="exactSet">Exact set</option>
+              </select></label>
+              <label>Destination pattern <select aria-label="Move destination pattern" bind:value={step.destinationTag.pattern}>
+                <option value="literal">Exact</option><option value="wildcard">Wildcard</option><option value="regex">Safe regex</option>
+              </select></label>
+              <label>Destination types <select aria-label="Move destination types" value={step.destinationTag.collections?.join(",") ?? "tokens,tiles"}
+                onchange={(e) => { if (step.destinationTag) step.destinationTag.collections = e.currentTarget.value.split(",") as ("tokens" | "tiles")[]; }}>
+                <option value="tokens,tiles">Tokens and tiles</option><option value="tokens">Tokens</option><option value="tiles">Tiles</option>
+              </select></label>
+              <label><input type="checkbox" aria-label="Move destination case sensitive" checked={step.destinationTag.caseSensitive !== false}
+                onchange={(e) => { if (step.destinationTag) step.destinationTag.caseSensitive = e.currentTarget.checked; }} />Case sensitive destination tags</label>
+              <label><input type="checkbox" aria-label="Move destination substring" checked={step.destinationTag.contains ?? false}
+                disabled={step.destinationTag.pattern !== "literal" && step.destinationTag.pattern !== undefined}
+                onchange={(e) => { if (step.destinationTag) step.destinationTag.contains = e.currentTarget.checked; }} />Substring destination tags</label>
+              {#each ["includeRefs", "excludeRefs"] as field (field)}
+                {@const refField = field as "includeRefs" | "excludeRefs"}
+                <label>{field === "includeRefs" ? "Only destination refs (none = all)" : "Exclude destination refs"}
+                  <select multiple size="3" aria-label={field === "includeRefs" ? "Include Move destination refs" : "Exclude Move destination refs"}
+                    value={(step.destinationTag[refField] ?? []).map(pinKey)} onchange={(e) => changeMoveTagRefs(i, refField, e.currentTarget)}>
+                    {#each pinnedChoices(step.destinationTag[refField] ?? []).filter((item) => item.ref.coll === "tokens" || item.ref.coll === "tiles") as item (pinKey(item.ref))}
+                      <option value={pinKey(item.ref)}>{item.name}</option>
+                    {/each}
+                  </select>
+                </label>
+              {/each}
+              <small>The default requires exactly one match. Random choice selects one shared destination from up to 1024 matching tokens/tiles. Zero matches always reject; ambiguity rejects unless random choice is explicitly enabled. Reads staged tags and positions, including hidden GM targets. Ref filters narrow tag matches; they do not substitute missing matches.</small>
+            {:else if step.destination}
+              <label>Destination entity <select aria-label="Move destination entity" bind:value={step.destination.id}>
+                <option value="">Choose destination…</option>
+                {#if step.destination.id && !scene?.[step.destination.coll].some((item) => item._id === step.destination?.id)}
+                  <option value={step.destination.id}>Unavailable destination</option>
+                {/if}
+                {#each scene?.[step.destination.coll] ?? [] as entity (entity._id)}<option value={entity._id}>{entity.name}</option>{/each}
+              </select></label>
+            {:else}
+            <label>Move mode <select aria-label="Move mode" value={step.mode ?? "set"}
+              onchange={(e) => step.mode = e.currentTarget.value === "add" ? "add" : "set"}>
+              <option value="set">Set destination</option><option value="add">Add relative offset</option>
+            </select></label>
+            {/if}
+            {#if step.destination || step.destinationTag}
+              <label>Destination positioning <select aria-label="Move destination positioning" value={step.destinationPosition ?? "center"}
+                onchange={(e) => step.destinationPosition = e.currentTarget.value === "entry" ? "entry" : e.currentTarget.value === "random" ? "random" : "center"}>
+                <option value="center">Center</option><option value="random">Random within tile</option><option value="entry">Relative to entry</option>
+              </select></label>
+              <small>Relative to entry maps the triggering token's host-observed boundary contact into the destination tile's local rectangle, scaling between sizes and rotating with both tiles. Requires this tile's enter event; manual/click/stop/exit and nested Trigger Tile calls have no entry context and reject the graph. All movers share that contact. Token destinations ignore positioning and use their center. Offsets and snap apply afterwards; no footprint fitting or retries.</small>
+              <small>The destination geometry is captured once per action. Random within tile samples a separate point for each mover inside its rotated rectangle; token destinations still use their center. X/Y are scene-axis offsets added afterwards, before snap/collision/speed. Offsets, snapping or the mover's footprint may extend beyond the tile; blocked/out-of-scene results reject the whole plan without retries. Choice, placement and offset dice share 1024 host draws per plan. Prefabs rebind internal entity IDs and unambiguous Tagger templates; unsafe template bindings are refused.</small>
+            {/if}
+            {#each ["x", "y"] as axis (axis)}
+              {@const coordinate = axis as "x" | "y"}
+              {@const formula = coordinate === "x" ? "xFormula" : "yFormula"}
+              {@const mode = coordinate === "x" ? "xMode" : "yMode"}
+              {#if !step.destination && !step.destinationTag && !step.destinationResult && !step.destinationOriginal}
+              <label>{axis.toUpperCase()} operation <select aria-label={`Move ${axis.toUpperCase()} mode`} value={step[mode] ?? "inherit"}
+                onchange={(e) => { if (e.currentTarget.value === "inherit") { if (coordinate === "x") delete step.xMode; else delete step.yMode; } else step[mode] = e.currentTarget.value === "add" ? "add" : "set"; }}>
+                <option value="inherit">Use Move mode</option><option value="set">Set coordinate</option><option value="add">Add offset</option>
+              </select></label>
+              {/if}
+              <label>{axis.toUpperCase()} source <select aria-label={`Move ${axis.toUpperCase()} source`} value={step[formula] === undefined ? "fixed" : "formula"}
+                onchange={(e) => { if (e.currentTarget.value === "formula") { if (coordinate === "x") delete step.x; else delete step.y; step[formula] = "0"; }
+                  else { if (coordinate === "x") delete step.xFormula; else delete step.yFormula; step[coordinate] = 0; } }}>
+                <option value="fixed">Fixed pixels</option><option value="formula">Dice/math formula</option>
+              </select></label>
+              {#if step[formula] !== undefined}
+                <label>{axis.toUpperCase()} formula <input aria-label={`Move ${axis.toUpperCase()} formula`} maxlength="128" bind:value={step[formula]} /></label>
+              {:else}
+                <label>{axis.toUpperCase()} / offset <input aria-label={`Move ${axis.toUpperCase()}`} type="number" step="any" bind:value={step[coordinate]} /></label>
+              {/if}
+            {/each}
+            <small>X and Y can independently set a coordinate or add an offset. The host evaluates X then Y separately per target before snapping, collision and speed. Safe dice/math only, no scripts/templates/document paths. Each formula is limited to 128 characters and 64 draws; nested Move actions share 1024 draws. Nonfinite/out-of-bounds results reject the whole plan.</small>
+            <small>Moves tokens, tiles, drawings, lights, sounds and templates. Drawings translate around their bounding center without changing shape; lights/sounds/templates use their point anchor. Only tokens/tiles animate: duration and speed have no visual effect on other types. Footprint collision uses drawing bounds and point paths for emitters/templates, not their displayed area. Walls and map pins are not Move targets.</small>
+            <label>Entity targets <select aria-label="Move targets" bind:value={step.targets}>
+              <option value="current">Current movable collection (tokens, tiles, drawings, lights, sounds, templates)</option>
               <option value="triggering">Triggering token</option>
             </select></label>
-            <small>Host-authorized reposition inside this scene (pixel coordinates within the scene rectangle). The committed move goes through the normal movement-trigger dispatch, so a destination that crosses a tile can fire that tile; add Stop Additional Tiles Triggering to suppress it. One update op per moved token; unchanged positions commit nothing.</small>
+            <label><input type="checkbox" aria-label="Move snap to grid" checked={step.snapToGrid ?? false}
+              onchange={(e) => step.snapToGrid = e.currentTarget.checked} /> Snap destination to grid</label>
+            <label>Wall collision <select aria-label="Move wall collision" value={step.wallCollision ?? "ignore"}
+              onchange={(e) => step.wallCollision = e.currentTarget.value === "footprint" ? "footprint" : e.currentTarget.value === "block" ? "block" : "ignore"}>
+              <option value="ignore">Ignore walls (legacy)</option><option value="block">Reject blocked center path</option><option value="footprint">Reject swept footprint collision</option>
+            </select></label>
+            <label>Animation duration (ms; blank uses speed or native behavior) <input aria-label="Move duration" type="number" min="0" max="60000" step="100"
+              value={step.durationMs ?? ""} onchange={(e) => { if (e.currentTarget.value === "") delete step.durationMs; else step.durationMs = Number(e.currentTarget.value); }} /></label>
+            <label>Movement speed (grid sizes/second; optional) <input aria-label="Move speed" type="number" min="0.01" max="10000" step="0.1"
+              value={step.speed ?? ""} onchange={(e) => { if (e.currentTarget.value === "") delete step.speed; else step.speed = Number(e.currentTarget.value); }} /></label>
+            <label><input type="checkbox" aria-label="Move trigger tiles" checked={step.triggerTiles ?? true}
+              onchange={(e) => step.triggerTiles = e.currentTarget.checked} /> Trigger tiles while moving</label>
+            <small>Duration overrides speed, including zero. Speed uses final snapped distance divided by grid.size (also in gridless scenes); over 60 seconds rejects the plan rather than clamping. Disabling triggers suppresses enter/exit/stop for explicitly moved tokens in this commit, not future manual moves or Rotation. For multiple actual moves of one token in a nested plan, the last Move controls the final committed path.</small>
+            <small>Animation is local presentation of the committed destination, not delayed game state. Existing visible entities move from their drawn position; newly visible/reloaded entities appear at the destination. Zero cuts instantly. Clients may start at different receipt times. Wall checks use the final snapped destination and staged door state. Footprint mode sweeps the native token rectangle or rotated tile rectangle along the straight path; it does not rotate during travel or find detours. One-way walls remain conservatively two-sided.</small>
+            <small>Host-authorized movement in this scene, in pixels. Set uses the token or tile center; Add offsets each target's staged position. Optional snapping runs after offsets and uses the nearest square-cell or hex center; gridless scenes are unchanged. Negative offsets are allowed, but the resulting center (and tile top-left) must remain inside the scene. Other collection types reject the graph. Undo restores movement and history. Token movement can fire other tiles unless Trigger tiles while moving is disabled. Moving a tile over stationary tokens does not fire movement triggers. The host validates all targets before committing; a blocked path rejects the entire graph.</small>
           {:else if step.kind === "rotate"}
-            <label>Rotation (degrees) <input aria-label="Rotation angle" type="number" step="1" bind:value={step.angle} /></label>
-            <label>Token targets <select aria-label="Rotation targets" bind:value={step.targets}>
-              <option value="current">Current token collection (Inside / Tagger selection)</option>
+            <label>Rotation mode <select aria-label="Rotation mode" value={step.mode ?? "set"}
+              onchange={(e) => step.mode = e.currentTarget.value === "add" ? "add" : "set"}>
+              <option value="set">Set absolute angle</option><option value="add">Add relative angle</option>
+            </select></label>
+            <label>Angle source <select aria-label="Rotation angle source" value={step.formula === undefined ? "fixed" : "formula"}
+              onchange={(e) => { if (e.currentTarget.value === "formula") { delete step.angle; step.formula = "1d4 * 90"; }
+                else { delete step.formula; step.angle = 90; } }}>
+              <option value="fixed">Fixed degrees</option><option value="formula">Dice/math formula</option>
+            </select></label>
+            {#if step.formula !== undefined}
+            <label>Angle formula <input aria-label="Rotation formula" maxlength="128" bind:value={step.formula} /></label>
+            <small>Host evaluates separately per token/tile. Zero and fractional results are allowed; finite degrees within ±1000000 are required. Invalid results reject the whole graph. At most 64 random draws per formula and 1024 across nested rotation actions. No scripts, templates or document paths.</small>
+            {:else}
+            <label>Rotation (degrees) <input aria-label="Rotation angle" type="number" step="any" min="-1000000" max="1000000" bind:value={step.angle} /></label>
+            {/if}
+            <label>Visual transition (ms) <input aria-label="Rotation duration" type="number" min="0" max="60000" step="100"
+              value={step.durationMs ?? ""} onchange={(e) => { if (e.currentTarget.value === "") delete step.durationMs; else step.durationMs = Number(e.currentTarget.value); }} /></label>
+            <small>Optional 0–60000 ms animates the shortest turn from the currently drawn angle (180° ties turn clockwise). Blank or zero cuts. Full revolutions are not replayed. Reduced motion and first appearance/reload cut to the endpoint; labels and HP bars stay upright. Local receipt-time presentation, not deferred mechanics or shared-clock playback.</small>
+            <label>Entity targets <select aria-label="Rotation targets" bind:value={step.targets}>
+              <option value="current">Current token/tile collection (This tile / Inside / Tagger)</option>
               <option value="triggering">Triggering token</option>
             </select></label>
-            <small>Absolute rotation, normalized to 0–360. A committed rotation of a token inside a tile can fire that tile's rotate method.</small>
+            <small>Set or add degrees, normalized to [0, 360). Negative additions subtract degrees; visual animation still takes the shortest arc. Reads each target's staged rotation, including earlier and nested actions. Only live tokens/tiles are supported; other collection types reject the graph. Mechanical rotation commits immediately and is undoable. A committed token rotation inside a tile can fire that tile's rotate method.</small>
           {:else if step.kind === "delete"}
-            <small>Deletes the current collection's tokens, tiles, walls, drawings or map pins — one delete op each, atomic with the rest of the graph (undo restores them). Deleting a token never touches its linked actor; the collection is empty afterwards. Lights, sounds, templates and other documents are refused.</small>
+            <small>Deletes the current collection's scene tokens, tiles, walls, drawings, map pins, lights, ambient sounds or measured templates — one delete op each, atomic with the rest of the graph (Undo restores them). Deleting a token never touches its linked actor; deleting a sound never removes its audio asset. The collection is empty afterwards. Pending tag/visibility/door edits on deleted entities are superseded; edits to surviving entities remain. Scenes, strategic cells and other documents are refused.</small>
           {:else if step.kind === "rollTable"}
+            <small>The result text also becomes this invocation's latest Roll Table result for a following Move → Last Roll Table coordinates. It does not replace the current entity collection or pass into/out of nested graphs.</small>
             <label>Roll table <select bind:value={step.tableId}><option value="">Choose table…</option>{#each rollTables as table (table._id)}<option value={table._id}>{table.name} ({table.formula})</option>{/each}</select></label>
             <label>Audience <select bind:value={step.audience}><option value="scene">Scene</option><option value="gm">GM only</option></select></label>
             <label>Store result text in variable (optional)
@@ -1114,6 +1557,10 @@
               <option value="current">First selected token</option>
             </select></label>
             <small>GM-approved preset ID; players cannot choose the actor or override its data. A player-triggered graph requires an owned caster token. The summon is a separate host commit after the graph, bounded by the preset's range/LOS and still private when its source is private. Failed source lookup produces a GM-only trace, not a rolled-back graph.</small>
+          {:else if step.kind === "stopMovement"}
+            <label><input type="checkbox" aria-label="Stop movement snap to grid" checked={step.snapToGrid ?? false}
+              onchange={(e) => step.snapToGrid = e.currentTarget.checked} /> Snap to Grid</label>
+            <small>Only valid on this tile's host-observed Enter or Exit movement trigger. The token settles at its swept boundary contact; optional grid snap moves it to the nearest cell/hex center. A sole unconditional Stop action with no earlier competing movement trigger is clipped into the initial movement commit. Conditional or multi-step graphs use a follow-up atomic correction instead. Neither path cancels an in-flight client animation or waypoint movement; a later Original Destination Move can continue to the host-saved endpoint.</small>
           {:else if step.kind === "landing"}<label>Landing name <input bind:value={step.name} /></label>
           {:else if step.kind === "jump"}<label>Go to landing <input bind:value={step.to} /></label>{/if}
         </fieldset>
