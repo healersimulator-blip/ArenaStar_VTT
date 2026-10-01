@@ -1,8 +1,16 @@
 # Macros / FX Wizard — implementation status
 
-Reference target: [`MACROS_FX_WIZARD_PARITY_SPEC.md`](MACROS_FX_WIZARD_PARITY_SPEC.md). **This is an integrated, incrementally verified implementation, not yet complete Sequencer/Tagger/MATT parity or a redefinition of that target.** The status below is intentionally stricter than “a type/editor field exists”: a criterion remains partial until its entire §10 scenario runs end to end. Older verification reports through D356 are consolidated in [FX_WIZARD_VERIFICATION_HISTORY.md](FX_WIZARD_VERIFICATION_HISTORY.md); D359–D363 are the latest standalone reports.
+Reference target: [`MACROS_FX_WIZARD_PARITY_SPEC.md`](MACROS_FX_WIZARD_PARITY_SPEC.md). **This is an integrated, incrementally verified implementation, not yet complete Sequencer/Tagger/MATT parity or a redefinition of that target.** The status below is intentionally stricter than “a type/editor field exists”: a criterion remains partial until its entire §10 scenario runs end to end. Older verification reports through D356 are consolidated in [FX_WIZARD_VERIFICATION_HISTORY.md](FX_WIZARD_VERIFICATION_HISTORY.md); D359–D364 are the latest standalone reports.
 
-## Latest verification increment — 2026-10-01 (D-363)
+## Latest verification increment — 2026-10-01 (D-364)
+
+The GM Tagger explorer now applies Tagger-style `tag:` clauses in its combined name search: plain or quoted name terms and multiple quoted/unquoted tag clauses are ANDed; tag clauses default to case-insensitive substring matching, with `*`/`?` wildcards. The query is bounded and compiled once for the projected result scan. A green “Lenient sidebar tag search” state explains those defaults, while the separate Tag API search remains exact and case-sensitive by default. This wires the previously unconnected sidebar-query semantics into the GM UI; it is not complete TG-01–TG-12 or A13 parity.
+
+Focused Tagger unit coverage passes **10/10**. Production Chromium `e2e/script_macros.spec.ts` (`Tag search autocomplete...`) passes **1/1 in 17.0 s**, verifying name + quoted multi-term tag search, a miss, the visible lenient-mode state, and the API's unchanged exact/case-sensitive default. Full Vitest passes **4,628 tests / 12 skipped**, 323 files passed / 2 skipped, **114.54 s**. Typecheck and lint pass; one Svelte advisory remains at `src/ui/sim/ReplayPanel.svelte:29`. Production build/size passes at **3,975,447 raw / 1,137,337 gzip bytes**, within the 6 MB raw budget. Full details: [FX_WIZARD_VERIFICATION_D364.md](FX_WIZARD_VERIFICATION_D364.md).
+
+**Still partial:** object-sheet/prototype-token/actor-item tag authoring, complete Tagger APIs and references, full A13–A18 coverage, prefab and active-trigger gaps, cross-browser/multiplayer gates, and the rest of A01–A41 remain open. The full-suite PF1e p95s in this run were **88.8 ms** (20 × 500 models), **113.9 ms** (40 × 250), and **72.0 ms** (10k-model turn), all above the printed `<50 ms` target. These measurements do not satisfy A41, and full A01–A41 parity remains incomplete.
+
+## Previous verification increment — 2026-10-01 (D-363)
 
 The GM Tagger placeable-type filter now includes `regions`, aligning visible discovery with the region read/edit path already supported by the Tagger client and host. The production-browser regression selects the Regions filter, finds the authored trigger, adds a tag, waits for the host sequence to advance and reads the updated tag back; it then continues the region-root prefab capture/place flow with its linked active-zone graph. The end-to-end test ceiling is 60 seconds because the complete production flow takes about 27 seconds in this environment. This closes one UI mismatch only; it does not establish Tagger parity or complete A28.
 

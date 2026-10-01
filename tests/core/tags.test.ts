@@ -1,7 +1,8 @@
 import { describe, expect, test } from "vitest";
 import {
-  TagIndex, expandTagTemplate, getByTag, groupTagsByScene, normalizeTags, sidebarTagMatch,
-  sidebarTagTerm, sidebarTagTerms, tagAutocompleteSuggestions, tagEditOps, tagMatcher, tagRuleOps, tagsOf,
+  TagIndex, expandTagTemplate, getByTag, groupTagsByScene, normalizeTags, sidebarSearchMatcher,
+  sidebarTagMatch, sidebarTagTerm, sidebarTagTerms, tagAutocompleteSuggestions, tagEditOps, tagMatcher,
+  tagRuleOps, tagsOf,
   validWorldTagRefs,
 } from "../../src/core/tags";
 import { DocumentStore } from "../../src/core/store";
@@ -78,6 +79,22 @@ describe("Tagger-compatible query semantics", () => {
     expect(sidebarTagMatch(token("t", ["boss fight", "Door-A"]), 'tag:"Boss Fight" tag:door-B')).toBe(false);
     expect(sidebarTagMatch(token("t", ["EnemyBoss"]), "tag:boss")).toBe(true);
     expect(tagMatcher("boss")(["EnemyBoss"])).toBe(false);
+  });
+
+  test("sidebar search combines lenient tag clauses with name terms without changing API matching", () => {
+    const doc = { ...token("goblin", ["enemy", "EnemyBoss", "arch-enemy", "boss fight", "Door-A"]),
+      name: "Goblin Scout" };
+    expect(sidebarSearchMatcher('goblin "scout" tag:"BOSS FIGHT" tag:door-*')(doc)).toBe(true);
+    expect(sidebarSearchMatcher('"Goblin Scout" tag:enemy tag:door-?')(doc)).toBe(true);
+    expect(sidebarSearchMatcher('goblin tag:missing')(doc)).toBe(false);
+    expect(sidebarSearchMatcher('orc tag:enemy')(doc)).toBe(false);
+    expect(sidebarSearchMatcher('tag:"BOSS FIGHT"')(doc)).toBe(true);
+    expect(sidebarSearchMatcher("")(doc)).toBe(true);
+    expect(sidebarTagMatch(doc, 'tag:"BOSS FIGHT" tag:door-*')).toBe(true);
+    expect(tagMatcher("Enemy")(doc.taggerTags ?? [])).toBe(false); // API stays exact/case-sensitive.
+    expect(() => sidebarSearchMatcher("x".repeat(513))).toThrow(/too long/);
+    expect(() => sidebarSearchMatcher(Array.from({ length: 33 }, () => "tag:x").join(" ")))
+      .toThrow(/too many tag terms/);
   });
 
   test("Tagger autocomplete completes only the final comma term, safely and deterministically", () => {

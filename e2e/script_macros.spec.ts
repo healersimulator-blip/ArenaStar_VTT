@@ -357,11 +357,29 @@ return { changed: applied.changed, after };`);
     const token = tags.locator(".result").filter({ hasText: "Token 1" });
     await expect(token).toHaveCount(1);
     await token.locator('input[type="checkbox"]').check();
-    await tags.getByLabel("Tags to edit").fill("trap-door, trap-light");
+    await tags.getByLabel("Tags to edit").fill("trap-door, trap-light, boss fight");
     await tags.getByRole("button", { name: "Add", exact: true }).click();
     await expect(token).toContainText("trap-light");
+    await expect(token).toContainText("boss fight");
+
+    const sidebarQuery = tags.locator("[data-tagger-sidebar-query]");
+    await sidebarQuery.fill("Token 1");
+    await expect(token).toHaveCount(1);
+    await sidebarQuery.fill('Token 1 tag:"BOSS FIGHT"');
+    await expect(token).toHaveCount(1);
+    await sidebarQuery.fill('Token 1 tag:"BOSS FIGHT" tag:TRAP-*');
+    await expect(token).toHaveCount(1);
+    await expect(tags.locator('[data-tag-search-mode="lenient"]'))
+      .toContainText("case-insensitive substring");
+    await sidebarQuery.fill('Token 1 tag:"boss fight" tag:missing');
+    await expect(token).toHaveCount(0);
+    await sidebarQuery.fill("");
 
     const search = tags.locator("[data-tag-search]");
+    await search.fill("BOSS FIGHT");
+    await expect(token).toHaveCount(0); // The API remains case-sensitive and exact by default.
+    await search.fill("boss fight");
+    await expect(token).toHaveCount(1);
     await search.fill("trap-");
     const listbox = tags.getByRole("listbox", { name: "Tag suggestions" });
     await expect(listbox.getByRole("option")).toHaveText(["trap-door", "trap-light"]);

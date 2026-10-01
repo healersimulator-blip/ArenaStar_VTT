@@ -400,21 +400,61 @@ export function tagRuleOps(
   return ops;
 }
 
-/** Sidebar `tag:` accepts several quoted/unquoted terms. It does not change API defaults. */
+/** Sidebar `tag:` accepts quoted phrases and multiple ANDed terms without changing API defaults. */
+const MAX_SIDEBAR_QUERY_LENGTH = 512;
+const MAX_SIDEBAR_TERMS = 32;
+
+function sidebarTagClausePattern(): RegExp {
+  return /(?:^|\s)tag:(?:"([^"\r\n]{1,128})"|([^\s"]{1,128}))(?=\s|$)/gi;
+}
+
 export function sidebarTagTerms(input: string): string[] {
-  return [...input.matchAll(/(?:^|\s)tag:(?:"([^"]{1,128})"|([^\s"]{1,128}))(?=\s|$)/gi)]
+  if (input.length > MAX_SIDEBAR_QUERY_LENGTH) throw new Error("sidebar query is too long");
+  const terms = [...input.matchAll(sidebarTagClausePattern())]
     .map((match) => match[1] ?? match[2] ?? "");
+  if (terms.length > MAX_SIDEBAR_TERMS) throw new Error("sidebar query has too many tag terms");
+  return terms;
 }
 
 export function sidebarTagTerm(input: string): string | null {
   return sidebarTagTerms(input)[0] ?? null;
 }
 
+function sidebarTagMatchers(terms: readonly string[]): Array<(tags: readonly string[]) => boolean> {
+  return terms.map((term) => {
+    const match = /[*?]/.test(term)
+      ? tagMatcher(`*${term}*`, { pattern: "wildcard", caseSensitive: false })
+      : tagMatcher(term, { contains: true, caseSensitive: false });
+    return match;
+  });
+}
+
 export function sidebarTagMatch(doc: BaseDocument, input: string): boolean {
-  const terms = sidebarTagTerms(input);
-  if (!terms.length) return false;
-  const tags = tagsOf(doc);
-  return terms.every((term) => /[*?]/.test(term)
-    ? tagMatcher(`*${term}*`, { pattern: "wildcard", caseSensitive: false })(tags)
-    : tagMatcher(term, { contains: true, caseSensitive: false })(tags));
+  const matchers = sidebarTagMatchers(sidebarTagTerms(input));
+  return matchers.length > 0 && matchers.every((match) => match(tagsOf(doc)));
+}
+
+/**
+ * Compile the combined sidebar name/tag query once before scanning a projected
+ * result list. Plain name words and each `tag:` clause are ANDed; tag clauses
+ * use the intentionally lenient, case-insensitive substring default.
+ */
+export function sidebarSearchMatcher(input: string): (doc: BaseDocument) => boolean {
+  const tagTerms = sidebarTagTerms(input);
+  const nameQuery = input.replace(sidebarTagClausePattern(), " ");
+  const nameTerms = [...nameQuery.matchAll(/"([^"\r\n]{1,128})"|(\S+)/g)]
+    .map((match) => (match[1] ?? match[2] ?? "").trim())
+    .filter(Boolean);
+  if (nameTerms.length > MAX_SIDEBAR_TERMS || nameTerms.some((term) => term.length > 128)) {
+    throw new Error("sidebar query has too many or oversized name terms");
+  }
+  const normalizedNames = nameTerms.map((term) => term.toLocaleLowerCase());
+  const tagMatchers = sidebarTagMatchers(tagTerms);
+  return (doc) => {
+    const name = doc.name.toLocaleLowerCase();
+    if (!normalizedNames.every((term) => name.includes(term))) return false;
+    if (!tagMatchers.length) return true;
+    const tags = tagsOf(doc);
+    return tagMatchers.every((match) => match(tags));
+  };
 }

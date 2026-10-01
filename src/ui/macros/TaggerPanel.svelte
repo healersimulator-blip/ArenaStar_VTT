@@ -4,7 +4,7 @@
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import {
-    listTaggable, tagAutocompleteSuggestions, tagEditOps, tagMatcher,
+    listTaggable, sidebarSearchMatcher, sidebarTagTerms, tagAutocompleteSuggestions, tagEditOps, tagMatcher,
     type TagMatchMode, type TagPattern, type TagSearchResult, type TagEdit,
   } from "../../core/tags";
 
@@ -17,6 +17,7 @@
   let pattern = $state<TagPattern>("literal");
   let exact = $state(true);
   let caseSensitive = $state(true);
+  let sidebarTagMode = $state(false);
   let editText = $state("");
   let error = $state("");
   let status = $state("");
@@ -51,13 +52,13 @@
       const match = query.trim()
         ? tagMatcher(terms, { mode, pattern, contains: !exact, caseSensitive }) : null;
       const matches = match ? candidates.filter((row) => match(row.tags)) : candidates;
-      const needle = nameFilter.toLocaleLowerCase().trim();
-      results = needle
-        ? matches.filter((row) => row.doc.name.toLocaleLowerCase().includes(needle))
-        : matches;
+      const sidebarMatcher = nameFilter.trim() ? sidebarSearchMatcher(nameFilter) : null;
+      sidebarTagMode = sidebarMatcher ? sidebarTagTerms(nameFilter).length > 0 : false;
+      results = sidebarMatcher ? matches.filter((row) => sidebarMatcher(row.doc)) : matches;
       error = "";
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause);
+      sidebarTagMode = false;
       results = [];
     }
   }
@@ -165,7 +166,8 @@
         <option value={c}>{c}</option>
       {/each}
     </select>
-    <input aria-label="Search placeable name" placeholder="Name…" bind:value={nameFilter} oninput={refresh} />
+    <input aria-label="Search placeable name or tag" data-tagger-sidebar-query
+      placeholder='Name · tag:"boss fight" tag:door-*' bind:value={nameFilter} oninput={refresh} />
     <div class="tag-search">
       <input aria-label="Search tags" data-tag-search placeholder="tag, another tag…" bind:value={query}
         role="combobox" aria-autocomplete="list" aria-expanded={showingSuggestions}
@@ -197,7 +199,10 @@
     <label><input type="checkbox" bind:checked={exact} onchange={refresh} /> Exact</label>
     <label><input type="checkbox" bind:checked={caseSensitive} onchange={refresh} /> Case sensitive</label>
   </div>
-  <p class="hint">API: exact, case-sensitive by default. Empty query shows untagged objects too. Select objects to edit atomically. Apply Tag Rules expands templates already on selected documents (not the text field); scene-wide numbering is allocated by the host.</p>
+  {#if sidebarTagMode}
+    <p class="match-mode" data-tag-search-mode="lenient">Lenient sidebar tag search: case-insensitive substring matches; quoted phrases, multiple AND terms and * / ? wildcards are supported. The separate API tag search keeps its own matching defaults.</p>
+  {/if}
+  <p class="hint">The separate Tag API search defaults to exact whole-tag, case-sensitive matching. Empty query shows untagged objects too. Select objects to edit atomically. Apply Tag Rules expands templates already on selected documents (not the text field); scene-wide numbering is allocated by the host.</p>
   {#if error}<p role="alert" class="error">{error}</p>{/if}
   {#if status}<p role="status">{status}</p>{/if}
   <div class="results" data-tag-results>
@@ -238,6 +243,7 @@
   .tag-suggestions button[aria-selected="true"], .tag-suggestions button:hover { background: #35485e; }
   select { min-width: 95px; max-width: 175px; }
   .hint { color: #b4bdc8; margin: 0; }
+  .match-mode { color: #91d9a6; margin: 0; padding-left: 6px; border-left: 2px solid #59ae72; }
   .results { max-height: 180px; overflow-y: auto; border: 1px solid #444; border-radius: 3px; }
   .result { display: flex; gap: 6px; align-items: center; padding: 3px 5px; border-bottom: 1px solid #303540; }
   .result strong { flex: 1; overflow: hidden; text-overflow: ellipsis; }
