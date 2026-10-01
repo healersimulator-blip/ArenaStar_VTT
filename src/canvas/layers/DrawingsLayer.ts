@@ -34,7 +34,7 @@ export class DrawingsLayer {
     const key = `${zoomBucket}|${drawings
       .map(
         (d) =>
-          `${d._id}:${d.kind}:${d.points.length}:${d.box ? d.box.join(",") : ""}:${d.stroke}:${d.fill}:${d.strokeWidth}:${d.text ?? ""}`,
+          `${d._id}:${d.kind}:${d.points.join(",")}:${d.box ? d.box.join(",") : ""}:${d.stroke}:${d.fill}:${d.strokeWidth}:${d.text ?? ""}`,
       )
       .join("#")}`;
     if (key === this.key) return;

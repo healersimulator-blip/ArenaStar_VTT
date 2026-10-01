@@ -15,7 +15,7 @@ import { lightAffectsViewport, parseLightColor, rgba } from "../vision/lights";
 export type { AmbientLighting as Ambient } from "../vision/lights";
 
 export interface LightView {
-  light: LightDocument;
+  light: LightDocument | Pick<LightDocument, "_id" | "x" | "y" | "dim" | "bright" | "color" | "alpha">;
   /** Visibility polygon (flat [x,y,…]) from the vision worker, or null. */
   poly: Float32Array | null;
 }
@@ -51,10 +51,15 @@ export class LightingLayer {
   private readonly lights = new Container();
   private readonly views = new Map<string, Graphics>();
   private key = "";
+  private ambientKey = "";
+  private lastViews: readonly LightView[] | undefined;
 
   constructor() {
     this.container.label = "lighting";
     this.darkness.label = "darkness";
+    // Tint the existing map instead of replacing it with a flat opaque rectangle at night.
+    // Fog/vision is the authority for concealment, including darkvision.
+    this.darkness.blendMode = "multiply";
     this.lights.label = "lights";
     this.container.addChild(this.darkness, this.lights);
   }
@@ -71,27 +76,19 @@ export class LightingLayer {
       width: viewport.width / camera.scale,
       height: viewport.height / camera.scale,
     };
-    const zoomBucket = Math.max(1, Math.round(6 / camera.scale));
-    const key = [
-      zoomBucket,
-      ambient.darkness.toFixed(3),
-      ambient.color,
-      views
-        .map(
-          (v) =>
-            `${v.light._id}:${Math.round(v.light.x)}:${Math.round(v.light.y)}:${v.light.bright}:${v.light.dim}:${v.light.color}:${v.light.alpha}:${v.poly ? v.poly.length : -1}`,
-        )
-        .join("#"),
-    ].join("|");
-    if (key === this.key) return;
-    this.key = key;
-
-    // darkness overlay (colored ambient), additive lights punch through
-    const color = parseLightColor(ambient.color, 0x0a0e1a);
-    this.darkness
-      .clear()
-      .rect(view.x - 2, view.y - 2, view.width + 4, view.height + 4)
-      .fill({ color, alpha: Math.max(0, Math.min(1, ambient.darkness)) });
+    const viewportKey = [view.x, view.y, view.width, view.height].join("|");
+    const ambientKey = `${viewportKey}|${ambient.color}`;
+    this.darkness.alpha = Math.max(0, Math.min(1, ambient.darkness));
+    if (ambientKey !== this.ambientKey) {
+      this.ambientKey = ambientKey;
+      this.darkness.clear().rect(view.x - 2, view.y - 2, view.width + 4, view.height + 4)
+        .fill({ color: parseLightColor(ambient.color, 0x0a0e1a) });
+    }
+    // Interpolation changes only alpha, not geometry or light gradients. New light-view
+    // arrays invalidate polygons even when their vertex count is unchanged.
+    if (viewportKey === this.key && views === this.lastViews) return;
+    this.key = viewportKey;
+    this.lastViews = views;
 
     const seen = new Set<string>();
     for (const { light, poly } of views) {
@@ -115,6 +112,7 @@ export class LightingLayer {
       // draw in a LOCAL frame (light center = origin, 1 = dim radius) so the
       // 0-1 radial gradient aligns; the container translation places it.
       g.position.set(light.x, light.y);
+      g.scale.set(radius);
       if (poly && poly.length >= 6) {
         g.moveTo(((poly[0] ?? 0) - light.x) / radius, ((poly[1] ?? 0) - light.y) / radius);
         for (let i = 2; i < poly.length; i += 2) {

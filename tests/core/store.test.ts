@@ -3,6 +3,7 @@ import { DocumentStore, type StoreMeta } from "../../src/core/store";
 import type {
   ActorDocument,
   MessageDocument,
+  RegionDocument,
   SceneDocument,
   TokenDocument,
   UserDocument,
@@ -163,6 +164,20 @@ describe("DocumentStore — create/update/delete (§4)", () => {
     expect(scene?.tokens).toHaveLength(1);
     expect(scene?.tokens[0]?.x).toBe(120);
     expect(store.resolve(tokenRef("t1"))?._id).toBe("t1");
+  });
+
+  test("creates, resolves and deletes first-class regions embedded in scenes", () => {
+    const store = setup();
+    const data: RegionDocument = {
+      _id: "r1", type: "region", name: "Courtyard", ownership: { default: 0 }, flags: {}, system: {},
+      x: 100, y: 100, width: 200, height: 100,
+      shape: { kind: "polygon", points: [[0.5, 0], [1, 1], [0, 1]] },
+    };
+    expect(store.applyEnvelope(env(2, [{ kind: "create", coll: "regions", parent: sceneRef, data }])).ok).toBe(true);
+    expect(store.resolve({ coll: "regions", id: "r1", parent: sceneRef })).toEqual(data);
+    expect(store.get("scenes", "s1")?.regions).toEqual([data]);
+    expect(store.applyEnvelope(env(3, [{ kind: "delete", ref: { coll: "regions", id: "r1", parent: sceneRef } }])).ok).toBe(true);
+    expect(store.get("scenes", "s1")?.regions).toEqual([]);
   });
 
   test("rejects embedding into the wrong parent type", () => {

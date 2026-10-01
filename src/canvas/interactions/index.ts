@@ -29,6 +29,7 @@ export interface StageLike {
   readonly camera: Camera;
   setCamera(camera: Camera): void;
   syncTokens(tokens: readonly TokenDocument[]): void;
+  tokenVisualPosition?(id: string): { x: number; y: number } | undefined;
   setMarquee(
     a: { x: number; y: number } | null,
     b?: { x: number; y: number },
@@ -87,18 +88,26 @@ export interface TokenView {
 export function pickToken(
   views: readonly TokenView[],
   world: { x: number; y: number },
+  visualPosition?: (tokenId: string) => { x: number; y: number } | undefined,
 ): TokenView | undefined {
   for (let i = views.length - 1; i >= 0; i--) {
     const view = views[i];
     if (!view) continue;
     const rect = tokenRect(view.token);
+    const visual = visualPosition?.(view.token._id);
+    const x = visual?.x ?? rect.x;
+    const y = visual?.y ?? rect.y;
     if (
-      world.x >= rect.x &&
-      world.x <= rect.x + rect.width &&
-      world.y >= rect.y &&
-      world.y <= rect.y + rect.height
+      world.x >= x &&
+      world.x <= x + rect.width &&
+      world.y >= y &&
+      world.y <= y + rect.height
     ) {
-      return view;
+      // Rebase a drag on the point the player actually sees, not the already
+      // committed endpoint hidden underneath an in-flight local animation.
+      return visual
+        ? { ...view, token: { ...view.token, x: view.token.x + x - rect.x, y: view.token.y + y - rect.y } }
+        : view;
     }
   }
   return undefined;
@@ -256,6 +265,7 @@ export class CanvasController {
         : pickToken(
             this.options.getTokens(),
             screenToWorld(this.options.stage.camera, ev.x, ev.y),
+            (id) => this.options.stage.tokenVisualPosition?.(id),
           );
     if (hit && this.options.onTokenActivate) {
       ev.preventDefault();
@@ -336,7 +346,7 @@ export class CanvasController {
     }
     const hit = this.options.tokenLayerActive?.() === false
       ? null
-      : pickToken(this.options.getTokens(), world);
+      : pickToken(this.options.getTokens(), world, (id) => this.options.stage.tokenVisualPosition?.(id));
     if (hit) {
       this.selection.clear();
       this.selection.add(hit.token._id);
@@ -483,7 +493,7 @@ export class CanvasController {
           if (!moved) {
             const camera = this.options.stage.camera;
             const world = screenToWorld(camera, ev.x, ev.y);
-            const hit = pickToken(this.options.getTokens(), world);
+            const hit = pickToken(this.options.getTokens(), world, (id) => this.options.stage.tokenVisualPosition?.(id));
             if (hit && this.options.onContextMenu) {
               this.mode = "idle";
               this.panButton = 0;
@@ -530,8 +540,8 @@ export class CanvasController {
       if (this.grabbed && view.token._id === this.grabbed.token._id) {
         out.push({
           ...view.token,
-          x: view.token.x + delta.x,
-          y: view.token.y + delta.y,
+          x: this.grabbed.token.x + delta.x,
+          y: this.grabbed.token.y + delta.y,
         });
       } else {
         out.push(view.token);

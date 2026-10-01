@@ -6,18 +6,19 @@
  * transform (scale + pan). Rendering is ticker-driven; render() forces a frame
  * for deterministic tests.
  */
+import { RotationAnimation } from "./rotationAnimation";
+import { MovementAnimation, movementDuration } from "./movementAnimation";
 import {
   Application,
-  Assets,
   Container,
   Graphics,
   Sprite,
   Text,
-  Texture,
 } from "pixi.js";
 // file:// and CSP-restricted contexts forbid unsafe-eval; this side-effect
 // import swaps Pixi's Function()-based fast paths for eval-free ones (D-058).
 import "pixi.js/unsafe-eval";
+import { imageTexture } from "./imageTexture";
 import type { TokenDocument } from "../core/documents";
 import type { Camera, Viewport } from "./camera";
 import { fitRect, screenToWorld } from "./camera";
@@ -121,6 +122,7 @@ export interface Stage {
   /** §9 tiles below/above with roof/fade occlusion. */
   getTilesLayer(options?: TilesLayerOptions): TilesLayer;
   setBackground(color: number): void;
+  clearBackgroundImage(): void;
   setBackgroundImage(bytes: Uint8Array, mime?: string): Promise<void>;
   setGrid(grid: GridSpec | null): void;
   /** §9 templates overlay (cone/circle/ray/rect). */
@@ -155,6 +157,8 @@ export interface Stage {
     badges?: ReadonlyMap<string, readonly { code: string; tint: number }[]>,
     hpBars?: ReadonlyMap<string, TokenHpBarNumbers>,
   ): void;
+  /** Current locally rendered top-left; differs from document position during an animation. */
+  tokenVisualPosition(id: string): { x: number; y: number } | undefined;
   /**
    * §2.2/G-10a: `"all"` draws every bar it was handed, `"hover"` draws only the bar of the token
    * under the pointer. (Whether a replica was handed bars at all is the world setting's business —
@@ -362,7 +366,8 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   const bgFill = new Graphics();
   backgroundLayer.addChild(bgFill);
   let bgSprite: Sprite | null = null;
-  let bgTextureUrl: string | null = null;
+  let bgRevision = 0;
+  let bgColor = options.background ?? 0x14171c;
   root.addChild(backgroundLayer);
 
   // ── Tiles(below) (§9 order: Background → Tiles(below) → Grid) ───────────────
@@ -423,6 +428,9 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   let tokenFilter: ReadonlySet<string> | null = null;
   /** Glide targets (§9 animated movement): views lerp here each tick. */
   const tokenTargets = new Map<string, { x: number; y: number }>();
+  const tokenRotation = new Map<string, RotationAnimation>();
+  const tokenMovement = new Map<string, MovementAnimation>();
+  const movementMedia = globalThis.matchMedia?.("(prefers-reduced-motion: reduce)");
   // §2.2/G-10a — HP bars. This state is deliberately *per stage* (the badge signature cache above
   // is module-level, which two stages in one page would share); `tokenRects` is what the hover
   // hit-test walks, since the DOM pointer source does not make token bodies interactive.
@@ -531,22 +539,21 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       return { ...state.camera };
     },
     setBackground(color: number): void {
+      bgColor = color;
       bgFill.clear().rect(0, 0, viewport.width, viewport.height).fill(color);
       if (bgSprite) bgSprite.tint = color;
     },
-    async setBackgroundImage(
-      bytes: Uint8Array,
-      mime = "image/png",
-    ): Promise<void> {
-      const blob = new Blob([new Uint8Array(bytes)], { type: mime });
-      const url = URL.createObjectURL(blob);
-      const texture = (await Assets.load(url)) as Texture;
-      if (bgTextureUrl !== null) URL.revokeObjectURL(bgTextureUrl);
-      bgTextureUrl = url;
-      if (bgSprite) {
-        backgroundLayer.removeChild(bgSprite);
-        bgSprite.destroy();
-      }
+    clearBackgroundImage(): void {
+      bgRevision++;
+      bgSprite?.destroy({ texture: true, textureSource: true });
+      bgSprite = null;
+      bgFill.clear().rect(0, 0, viewport.width, viewport.height).fill(bgColor);
+    },
+    async setBackgroundImage(bytes: Uint8Array, mime = "image/png"): Promise<void> {
+      const revision = ++bgRevision;
+      const texture = await imageTexture(bytes, mime);
+      if (revision !== bgRevision) { texture.destroy(true); return; }
+      bgSprite?.destroy({ texture: true, textureSource: true });
       bgSprite = new Sprite(texture);
       backgroundLayer.addChildAt(bgSprite, 0);
       bgFill.clear();
@@ -677,6 +684,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
         const jump = !view;
         if (!view) {
           view = new Container();
+          view.label = `token:${token._id}`;
           const body = new Graphics();
           body.label = "body";
           const label = new Text({
@@ -689,6 +697,12 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           tokenLayer.addChild(view);
           tokenViews.set(token._id, view);
         }
+        let animation = tokenMovement.get(token._id);
+        if (!animation) { animation = new MovementAnimation(); tokenMovement.set(token._id, animation); }
+        const duration = movementDuration(token);
+        const cut = duration === 0 || !view.visible || movementMedia?.matches === true;
+        animation.update({ x: rect.x, y: rect.y }, { x: view.x, y: view.y }, cut ? 0 : duration, performance.now(), JSON.stringify(token.flags.arenaMove ?? null));
+        if (cut) { animation.cancel(); view.position.set(rect.x, rect.y); }
         tokenTargets.set(token._id, { x: rect.x, y: rect.y });
         tokenRects.set(token._id, {
           x: rect.x,
@@ -699,6 +713,9 @@ export async function createStage(options: StageOptions): Promise<Stage> {
         if (jump) view.position.set(rect.x, rect.y); // new tokens appear in place
         view.alpha = token.hidden ? 0.5 : 1;
         view.visible = tokenFilter === null || tokenFilter.has(token._id);
+        let rotation = tokenRotation.get(token._id);
+        if (!rotation) { rotation = new RotationAnimation(); tokenRotation.set(token._id, rotation); }
+        const angle = rotation.update(token, performance.now(), !view.visible || movementMedia?.matches === true);
         const body = view.getChildByLabel("body") as Graphics | null;
         if (body) {
           body
@@ -706,6 +723,14 @@ export async function createStage(options: StageOptions): Promise<Stage> {
             .rect(0, 0, rect.width, rect.height)
             .fill({ color: 0x2b3138, alpha: 0.9 })
             .stroke({ width: 2, color: dispositionColor(token.disposition) });
+          // Native tokens have no artwork renderer yet: a facing marker makes rotation
+          // visible. Only the body turns; labels, selection, badges and HP stay upright.
+          const cx = rect.width / 2, cy = rect.height / 2;
+          const marker = Math.min(8, rect.width / 6, rect.height / 6);
+          body.moveTo(cx, 2).lineTo(cx + marker, 2 + marker * 1.5)
+            .lineTo(cx - marker, 2 + marker * 1.5).closePath().fill({ color: 0xffd166 });
+          body.pivot.set(cx, cy); body.position.set(cx, cy);
+          body.rotation = angle * Math.PI / 180;
         }
         const label = view.children.find((c) => c instanceof Text) as
           Text | undefined;
@@ -729,6 +754,8 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           view.destroy({ children: true });
           tokenViews.delete(id);
           tokenTargets.delete(id);
+          tokenMovement.delete(id);
+          tokenRotation.delete(id);
           tokenRects.delete(id);
           badgeChips.delete(id);
           hpBarSignatures.delete(id);
@@ -736,6 +763,12 @@ export async function createStage(options: StageOptions): Promise<Stage> {
         }
       }
       applyHpBarVisibility();
+    },
+    tokenVisualPosition(id: string): { x: number; y: number } | undefined {
+      const view = tokenViews.get(id);
+      return view && tokenMovement.get(id)?.isRunning(performance.now())
+        ? { x: view.x, y: view.y }
+        : undefined;
     },
     setTokenHpBarMode(mode: "all" | "hover"): void {
       hpBarMode = mode;
@@ -756,6 +789,11 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       tokenFilter = visible;
       for (const [id, view] of tokenViews) {
         view.visible = visible === null || visible.has(id);
+        if (!view.visible) {
+          tokenRotation.get(id)?.cancel();
+          const body = view.getChildByLabel("body");
+          if (body) body.rotation = (tokenRotation.get(id)?.sample(performance.now()) ?? 0) * Math.PI / 180;
+        }
       }
     },
     drawnTokenIds(): string[] {
@@ -851,11 +889,14 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       fogLayer?.destroy();
       fogLayer = null;
       tokenViews.clear();
+      tokenMovement.clear();
+      tokenRotation.clear();
       frameSinks.clear();
       app.canvas.removeEventListener("pointermove", onStagePointerMove);
+      bgRevision++; // pending image decodes must not touch a destroyed canvas
+      bgSprite?.destroy({ texture: true, textureSource: true });
+      bgSprite = null;
       app.destroy({ removeView: true }, { children: true });
-      if (bgTextureUrl !== null) URL.revokeObjectURL(bgTextureUrl);
-      bgTextureUrl = null;
     },
   };
 
@@ -865,10 +906,20 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     fxLayer?.tick(t.deltaMS);
     // Copy: a sink is allowed to unsubscribe while it runs (a finished camera cue).
     for (const sink of [...frameSinks]) sink(t.deltaMS);
-    // §9 animated movement: exponential glide toward each token target
+    tilesLayer?.tick();
+    // Authored movement duration overrides the legacy exponential glide.
     for (const [id, view] of tokenViews) {
+      const rotation = tokenRotation.get(id);
+      if (movementMedia?.matches === true || !view.visible) rotation?.cancel();
+      const body = view.getChildByLabel("body");
+      if (body && rotation) body.rotation = rotation.sample(performance.now()) * Math.PI / 180;
       const target = tokenTargets.get(id);
       if (!target) continue;
+      if (movementMedia?.matches === true) {
+        tokenMovement.get(id)?.cancel(); view.position.set(target.x, target.y); continue;
+      }
+      const animated = tokenMovement.get(id)?.sample(performance.now());
+      if (animated) { view.position.set(animated.x, animated.y); continue; }
       const dx = target.x - view.position.x;
       const dy = target.y - view.position.y;
       if (Math.abs(dx) < 0.25 && Math.abs(dy) < 0.25) {

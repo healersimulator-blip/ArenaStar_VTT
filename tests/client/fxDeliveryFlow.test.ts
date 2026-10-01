@@ -20,11 +20,12 @@ vi.stubGlobal("URL", { createObjectURL: () => "blob:test", revokeObjectURL: () =
  * D-297: sound sections now really start an element, so the audio decoder is a double
  * too — `audios` is what those tests read the applied gain from.
  */
+let playAudio: () => Promise<void> = () => Promise.resolve();
 const audios: Array<{ src: string; volume: number; loop: boolean; currentTime: number; duration: number;
   play: ReturnType<typeof vi.fn>; pause: ReturnType<typeof vi.fn> }> = [];
 vi.stubGlobal("Audio", class {
   src: string; volume = 1; loop = false; currentTime = 0; duration = 2;
-  play = vi.fn(() => Promise.resolve());
+  play = vi.fn(() => playAudio());
   pause = vi.fn();
   constructor(src: string) { this.src = src; audios.push(this); }
 });
@@ -112,6 +113,12 @@ function harness(listener: { userId?: string; scenes?: unknown[] } = {}) {
       job.resolve();
       await sleep(20);
     },
+    rejectAsset: async (hash: string) => {
+      const job = pending.get(hash);
+      if (!job) throw new Error(`no pending fetch for ${hash}`);
+      job.reject(new Error("fetch failed"));
+      await sleep(20);
+    },
     pendingCount: () => pending.size,
     // The live-sound registry keys rows by `runId:index:epoch`, and a cue's ramp keeps
     // ticking after its own test ends: a test that reads that registry gives its run its
@@ -132,6 +139,7 @@ const sound = (startMs: number, assetId = "bb".repeat(32)): ResolvedFxSection =>
 const resetMix = () => setFxViewPrefs({ reduceMotion: false, muteSound: false, preloadAheadMs: 2_000,
   lateMedia: "delay", soundMix: { ...DEFAULT_SOUND_MIX, channels: { ...DEFAULT_SOUND_MIX.channels } } });
 beforeEach(() => {
+  playAudio = () => Promise.resolve();
   audios.length = 0;
   resetFxSounds();
   resetMix();
@@ -354,6 +362,129 @@ describe("sound channels, fades and the device-local list (D-297, SQ-09)", () =>
 });
 
 describe("the table answers with what it actually did (D-308, SQ-13)", () => {
+  test("overlapping runs sharing an in-flight preload each acknowledge it before their sections start", async () => {
+    const h = harness();
+    try {
+      h.send([image(1500)], { runId: "first" });
+      h.send([image(1500)], { runId: "second" });
+      expect(h.requests).toEqual(["aa".repeat(32)]);
+      await h.resolveAsset("aa".repeat(32));
+      expect(h.mediaAcks.map(({ runId, state }) => ({ runId, state }))).toEqual([
+        { runId: "first", state: "ready" }, { runId: "second", state: "ready" },
+      ]);
+      expect(h.spawned).toEqual([]);
+    } finally { h.player.dispose(); }
+  });
+
+  test("a shared failed preload answers every waiting run, not just its first requester", async () => {
+    const h = harness();
+    try {
+      h.fail("aa".repeat(32));
+      h.send([image(1500)], { runId: "first" });
+      h.send([image(1500)], { runId: "second" });
+      await sleep(20);
+      expect(h.mediaAcks.map(({ runId, state }) => ({ runId, state }))).toEqual([
+        { runId: "first", state: "failed" }, { runId: "second", state: "failed" },
+      ]);
+    } finally { h.player.dispose(); }
+  });
+
+  test("a stopped run's late preload cannot acknowledge its reused ID", async () => {
+    const h = harness(); const hash = "aa".repeat(32);
+    try {
+      h.send([image(1500, hash)]);
+      h.bus.emit("fxEnd", { kind: "fx.end", runId: "run-1", sceneId: SCENE });
+      h.send([image(1500, "cc".repeat(32))]);
+      await h.resolveAsset(hash);
+      expect(h.mediaAcks).toEqual([]);
+      await h.resolveAsset("cc".repeat(32));
+      expect(h.mediaAcks).toMatchObject([{ runId: "run-1", assetId: "cc".repeat(32), state: "ready" }]);
+    } finally { h.player.dispose(); }
+  });
+
+  test.each(["reject", "late"] as const)("a cancelled lazy %s cannot report into a reused run ID", async (outcome) => {
+    setFxViewPrefs({ preloadAheadMs: 0, lateMedia: "skip" });
+    const h = harness(); const oldHash = "aa".repeat(32);
+    try {
+      h.send([image(0, oldHash)]);
+      await sleep(200); // the old cue is fetching, past its late tolerance
+      h.bus.emit("fxEnd", { kind: "fx.end", runId: "run-1", sceneId: SCENE });
+      h.send([image(1000, "cc".repeat(32))]);
+      if (outcome === "reject") await h.rejectAsset(oldHash);
+      else await h.resolveAsset(oldHash);
+      expect(h.mediaAcks).toEqual([]);
+      expect(h.reports).toEqual([]);
+      expect(h.errors).toEqual([]);
+      expect(h.spawned).toEqual([]);
+    } finally { h.player.dispose(); }
+  });
+
+  test("a cancelled image decoder cannot fail a replacement run or issue a local warning", async () => {
+    let rejectDecode: ((error: Error) => void) | undefined;
+    vi.spyOn(Image.prototype, "decode").mockImplementation(() => new Promise((_resolve, reject) => { rejectDecode = reject; }));
+    const h = harness();
+    try {
+      h.send([image(0)]); await sleep(60); await h.resolveAsset("aa".repeat(32));
+      if (!rejectDecode) throw new Error("decode did not start");
+      h.bus.emit("fxEnd", { kind: "fx.end", runId: "run-1", sceneId: SCENE });
+      h.send([image(1000, "cc".repeat(32))]);
+      const before = [...h.mediaAcks];
+      rejectDecode(new Error("image decode unsupported")); await sleep(20);
+      expect(h.mediaAcks).toEqual(before);
+      expect(h.reports).toEqual([]); expect(h.errors).toEqual([]);
+      expect(h.spawned).toEqual([]);
+    } finally { h.player.dispose(); }
+  });
+
+  test("expired lazy media settles its delivery instead of stranding the run", async () => {
+    setFxViewPrefs({ preloadAheadMs: 0 });
+    const h = harness();
+    try {
+      h.send([{ ...image(0), durationMs: 30 }]);
+      await sleep(200); await h.resolveAsset("aa".repeat(32));
+      expect(h.spawned).toEqual([]);
+      expect(h.mediaAcks).toMatchObject([{ state: "late" }]);
+      expect(h.reports).toHaveLength(1);
+      expect(h.reports[0]?.entries).toMatchObject([{ state: "skipped", reason: "not-ready" }]);
+    } finally { h.player.dispose(); }
+  });
+
+  test("a live audio play rejection corrects the host acknowledgement and completes the local failure report", async () => {
+    playAudio = () => Promise.reject(new Error("audio format unsupported"));
+    const h = harness();
+    try {
+      h.send([sound(0)]); await sleep(60); await h.resolveAsset("bb".repeat(32));
+      expect(h.mediaAcks.map(({ state }) => state)).toEqual(["ready", "unsupported"]);
+      expect(h.reports).toHaveLength(1);
+      expect(h.reports[0]?.entries).toContainEqual(expect.objectContaining({ kind: "sound", state: "failed" }));
+      expect(h.errors).toHaveLength(1);
+      expect(fxSounds()).toEqual([]);
+      expect(audios[0]?.pause).toHaveBeenCalledTimes(1);
+    } finally { h.player.dispose(); }
+  });
+
+  test.each(["host", "device"] as const)("a late audio rejection after %s stop stays silent", async (source) => {
+    let rejectPlay: ((error: Error) => void) | undefined;
+    playAudio = () => new Promise((_resolve, reject) => { rejectPlay = reject; });
+    const h = harness();
+    try {
+      h.send([sound(0)], { persistent: true });
+      await sleep(60); await h.resolveAsset("bb".repeat(32));
+      if (!rejectPlay) throw new Error("audio did not start");
+      if (source === "host") {
+        h.bus.emit("fxEnd", { kind: "fx.end", runId: "run-1", sceneId: SCENE });
+        h.send([image(1500, "cc".repeat(32))]);
+      } else stopFxSounds({ runId: "run-1" });
+      const before = [...h.mediaAcks];
+      rejectPlay(new Error("play interrupted by stop")); await sleep(20);
+      expect(h.errors).toEqual([]);
+      expect(h.mediaAcks).toEqual(before);
+      expect(h.reports).toEqual([]);
+      expect(fxSounds()).toEqual([]);
+      expect(audios[0]?.pause).toHaveBeenCalledTimes(1);
+    } finally { h.player.dispose(); }
+  });
+
   test("a prefetch that arrived is reported, with what it cost", async () => {
     const h = harness();
     h.send([image(600)]);
@@ -413,6 +544,8 @@ describe("the table answers with what it actually did (D-308, SQ-13)", () => {
       // format is what it refused — the second, later answer is the true one.
       expect(h.mediaAcks.map((ack) => ack.state)).toEqual(["ready", "unsupported"]);
       expect(h.mediaAcks[1]).toMatchObject({ runId: "run-1", assetId: "aa".repeat(32) });
+      expect(h.reports).toHaveLength(1);
+      expect(h.reports[0]?.entries).toContainEqual(expect.objectContaining({ state: "failed", reason: "unsupported-codec" }));
     } finally {
       vi.stubGlobal("Image", original);
     }

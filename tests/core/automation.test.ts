@@ -47,6 +47,7 @@ describe("host-side active-zone graph", () => {
     expect(validateAutomation({ ...base, steps: [{ id: "jump", kind: "jump", to: "nowhere" }] }).ok).toBe(false);
     expect(validateAutomation({ ...base, steps: [{ id: "x", kind: "tags", tags: ["bad\u0000"], edit: "add" }] }).ok).toBe(false);
     expect(validateAutomation({ ...base, methods: ["enter", "enter"] }).ok).toBe(false);
+    expect(validateAutomation({ ...base, sourceKind: "scene" }).ok).toBe(false);
     expect(validateAutomation({ ...base, gates: { playerRunnable: "yes" } }).ok).toBe(false);
   });
 
@@ -433,13 +434,37 @@ describe("host-side active-zone graph", () => {
     expect(tileContainsPoint(strip, { x: Number.NaN, y: 150 })).toBe(false);
   });
 
-  test("swept paths use token centers, not top-left offsets, at narrow zone boundaries", () => {
+  test("swept paths use the moving token footprint at axis-aligned tile boundaries", () => {
     const narrow = { ...tile, x: 200, y: 100, width: 100, height: 100, rotation: 0 };
     expect(sweptTileEvents(narrow, undefined, token("outside", 180, 150))).toEqual([]);
     expect(sweptTileEvents(narrow, undefined, token("inside", 220, 150)))
       .toEqual([{ method: "create", fraction: 1 }]);
-    expect(sweptTileEvents(narrow, token("moving", 180, 150), token("moving", 220, 150))
-      .map((event) => event.method)).toEqual(["enter", "stop"]);
+    const events = sweptTileEvents(narrow, token("moving", 180, 150), token("moving", 220, 150));
+    expect(events.map((event) => event.method)).toEqual(["enter", "stop"]);
+    expect(events[0]?.fraction).toBeCloseTo(0.25); // 20px footprint touches x=200 when its center reaches 190
+  });
+
+  test("a footprint triggers when its center path remains outside the tile", () => {
+    const zone = { ...tile, x: 100, y: 100, width: 100, height: 100 };
+    const events = sweptTileEvents(zone, token("moving", 0, 95), token("moving", 300, 95));
+    expect(events.map((event) => event.method)).toEqual(["enter", "exit"]);
+    expect(events[0]?.fraction).toBeCloseTo(0.3);
+    expect(events[1]?.fraction).toBeCloseTo(0.7);
+  });
+
+  test("changing-footprint sweeps classify endpoint overlap using each exact endpoint shape", () => {
+    const zone = { ...tile, x: 100, y: 100, width: 100, height: 100 };
+    const before = token("moving", 40, 150);
+    const after = { ...token("moving", 360, 150), width: 200 };
+    expect(sweptTileEvents(zone, before, after).map((event) => event.method)).toEqual(["enter", "exit"]);
+  });
+
+  test("swept paths compute the exact footprint crossing fraction for a rotated rectangle", () => {
+    const rotated = { ...tile, x: 100, y: 100, width: 200, height: 40, rotation: 45 };
+    const events = sweptTileEvents(rotated, token("moving", 80, 120), token("moving", 320, 120));
+    expect(events.map((event) => event.method)).toEqual(["enter", "exit"]);
+    expect(events[0]?.fraction).toBeCloseTo((200 - (20 + 10 * Math.SQRT2) / Math.SQRT1_2 - 80) / 240, 8);
+    expect(events[1]?.fraction).toBeCloseTo((200 + (20 + 10 * Math.SQRT2) / Math.SQRT1_2 - 80) / 240, 8);
   });
 
   test("swept paths produce enter, exit, stop, rotation and fast pass-through in order", () => {
@@ -1189,6 +1214,91 @@ describe("host-side active-zone graph", () => {
     expect(validateAutomation({ ...base, steps: [{ id: "x", kind: "stopOthers", action: "inject" }] }).ok).toBe(false);
   });
 
+  test("variable deletion is an exact, value-free operation with protected context names", () => {
+    const step = { id: "erase", kind: "set", name: "charge", scope: "tile", operation: "delete" };
+    expect(validateAutomation({ ...base, steps: [step] }).ok).toBe(true);
+    for (const extra of [{ value: 0 }, { value: null }, { value: undefined }, { name: "charge*" },
+      { name: "__proto__" }, { name: "count" }, { scope: "global" }, { operation: "remove" }]) {
+      expect(validateAutomation({ ...base, steps: [{ ...step, ...extra }] }).ok).toBe(false);
+    }
+    expect(validateAutomation({ ...base, steps: [{ ...step, scope: "run", name: "count" }] }).ok).toBe(false);
+    expect(validateAutomation({ ...base, steps: [{ ...step, operation: "assign" }] }).ok).toBe(false);
+  });
+
+  test("deleting a tile value stages null, clears interpolation and frees capacity without resetting history", () => {
+    const doc = automation({ ...base, gates: {}, steps: [
+      { id: "erase", kind: "set", name: "charge", scope: "tile", operation: "delete" },
+      { id: "missing", kind: "checkVariable", name: "charge", compare: "eq", value: null },
+      { id: "notice", kind: "chat", audience: "gm", content: "charge={{charge}}" },
+      { id: "new", kind: "set", name: "fresh", scope: "tile", value: 7 },
+    ] });
+    const variables = { charge: 10, ...Object.fromEntries(Array.from({ length: 63 }, (_, i) => [`v${i}`, i])) };
+    doc.state = { count: 5, lastAt: 900, byToken: {}, variables };
+    const result = planAutomation(world, doc, { scene, tile, method: "enter", token: runner,
+      caller: actor, at: 1000, rng: () => 0 }, "gm");
+    if (!result.ok || !("plan" in result)) throw new Error("deletion must plan");
+    expect(result.plan.state.count).toBe(6);
+    expect(result.plan.state.variables).not.toHaveProperty("charge");
+    expect(result.plan.state.variables?.fresh).toBe(7);
+    expect(Object.keys(result.plan.state.variables ?? {})).toHaveLength(64);
+    expect(result.plan.ops.filter((op) => op.kind === "create")).toMatchObject([
+      { data: { content: "charge=" } },
+    ]);
+    expect(doc.state.variables).toEqual(variables);
+    expect(doc.state.variables?.charge).toBe(10);
+  });
+
+  test("missing deletion is idempotent and run deletion leaves persisted values alone", () => {
+    for (const scope of ["run", "tile"] as const) {
+      const doc = automation({ ...base, gates: {}, steps: [
+        { id: "one", kind: "set", name: "absent", scope, operation: "delete" },
+        { id: "two", kind: "set", name: "absent", scope, operation: "delete" },
+        { id: "three", kind: "set", name: "charge", scope, operation: "delete" },
+        { id: "notice", kind: "chat", audience: "gm", content: "charge={{charge}}" },
+      ] });
+      doc.state = { count: 2, lastAt: 500, byToken: {}, variables: { charge: 9, keep: true } };
+      const result = planAutomation(world, doc, { scene, tile, method: "enter", token: runner,
+        caller: actor, at: 1000, rng: () => 0 }, "gm");
+      if (!result.ok || !("plan" in result)) throw new Error("missing deletion must plan");
+      expect(result.plan.state.variables).toEqual(scope === "tile" ? { keep: true } : { charge: 9, keep: true });
+      expect(result.plan.ops.filter((op) => op.kind === "create")).toMatchObject([{ data: { content: "charge=" } }]);
+    }
+  });
+
+  test.each(["id", "current", "tag"] as const)("targeted deletion via %s reaches paused graphs and later children, with rollback", (kind) => {
+    const local = structuredClone(scene);
+    local.tiles.push({ ...structuredClone(tile), _id: "child", taggerTags: ["relay"], hidden: true });
+    const target = kind === "id" ? { kind, tileId: "child" } : kind === "tag" ? { kind, query: "relay" } : { kind };
+    const parent = automation({ ...base, gates: {}, steps: [
+      { id: "find", kind: "select", selector: { kind: "tag", query: "relay", collections: ["tiles"] } },
+      { id: "erase", kind: "set", name: "charge", scope: "tile", operation: "delete", target },
+      { id: "call", kind: "triggerTile", target: { kind: "id", tileId: "child" }, tokens: "triggering" },
+    ] });
+    const child: AutomationDocument = { ...automation({ ...base, tileId: "child", methods: ["manual"], gates: {}, steps: [
+      { id: "missing", kind: "checkVariable", name: "charge", compare: "eq", value: null },
+      { id: "notice", kind: "chat", audience: "gm", content: "Deleted in child" },
+    ] }), _id: "child-graph", state: { count: 2, lastAt: 500, byToken: {}, variables: { charge: 4, keep: true } } };
+    const paused: AutomationDocument = { ...structuredClone(child), _id: "paused-graph",
+      definition: { ...child.definition, gates: { paused: true } } };
+    const w = emptyWorld(); w.scenes.push(local); w.automations.push(parent, child, paused);
+    const event = { scene: local, tile, token: runner, method: "enter" as const, caller: actor, at: 1000, rng: () => 0 };
+    const result = planAutomation(w, parent, event, "gm");
+    if (!result.ok || !("plan" in result)) throw new Error("targeted deletion must plan");
+    const edits = result.plan.ops.filter((op) => op.kind === "update" && op.ref.coll === "automations");
+    expect(edits).toMatchObject([
+      { ref: { id: "a1" } },
+      { ref: { id: "child-graph" }, diff: { state: { count: 3, variables: { keep: true } } } },
+      { ref: { id: "paused-graph" }, diff: { state: { count: 2, variables: { keep: true } } } },
+    ]);
+    expect(JSON.stringify(edits)).not.toContain('"charge"');
+    expect(result.plan.ops.filter((op) => op.kind === "create")).toMatchObject([{ data: { content: "Deleted in child" } }]);
+    expect(child.state?.variables?.charge).toBe(4);
+    parent.definition.steps.push({ id: "bad", kind: "set", name: "keep", value: 1, scope: "tile", operation: "add", target });
+    expect(planAutomation(w, parent, event, "gm")).toMatchObject({ ok: false, error: expect.stringMatching(/not numeric/) });
+    expect(child.state?.variables).toEqual({ charge: 4, keep: true });
+    expect(paused.state?.variables).toEqual({ charge: 4, keep: true });
+  });
+
   test("tile variables persist across triggers, filter and interpolate without mutating source history", () => {
     const def: AutomationDefinition = { ...base, gates: {}, steps: [
       { id: "add", kind: "set", name: "visits", value: 1, scope: "tile", operation: "add" },
@@ -1749,7 +1859,7 @@ describe("host-side active-zone graph", () => {
 describe("MATT Hurt / Heal planning", () => {
   const healActor: ActorDocument = { _id: "health", type: "actor", name: "Health",
     ownership: { default: 0 }, flags: {}, system: { hp: 10 }, items: [], effects: [] };
-  test("validates fixed authored amount and token targets, never evaluates expressions", () => {
+  test("validates fixed authored amount and token targets, rejecting expression strings in the numeric field", () => {
     for (const amount of [0, 0.5, Infinity, NaN, 100_001, -100_001, "-1d6"]) {
       expect(validateAutomation({ ...base, steps: [{ id: "hurt", kind: "hurtHeal", amount,
         targets: "triggering" }] }).ok).toBe(false);
@@ -1758,6 +1868,50 @@ describe("MATT Hurt / Heal planning", () => {
       targets: "GM-controlled" }] }).ok).toBe(false);
     expect(validateAutomation({ ...base, steps: [{ id: "hurt", kind: "hurtHeal", amount: 5,
       targets: "current" }] }).ok).toBe(true);
+  });
+
+  test.each([false, true])("formula rolls once per linked actor and is atomic when a later result is invalid: %s", (invalid) => {
+    const linked = structuredClone(scene);
+    linked.tokens.forEach((token, i) => { token.actorId = i === 0 ? "health" : "second"; token.taggerTags = ["hurt"]; });
+    const first = linked.tokens[0];
+    if (!first || linked.tokens.length < 2) throw new Error("missing tokens");
+    linked.tokens.push({ ...first, _id: "duplicate-link" });
+    const w = emptyWorld(); w.scenes.push(linked); w.actors.push(healActor, { ...healActor, _id: "second" });
+    const def: AutomationDefinition = { ...base, gates: {}, steps: [
+      { id: "select", kind: "select", selector: { kind: "tag", query: "hurt", collections: ["tokens"] } },
+      { id: "heal", kind: "hurtHeal", formula: invalid ? "1d2 - 1" : "-1d2", targets: "current" },
+    ] };
+    let rolls = 0;
+    const result = planAutomation(w, automation(def), { scene: linked, tile, token: first,
+      method: "enter", caller: actor, at: 1000, rng: () => rolls++ === 0 ? 0.999 : 0,
+      hurtHeal: (target, amount) => ({ ok: true, diff: { "system.hp": (target.system.hp as number) + amount }, note: "rolled" }),
+    }, "gm");
+    expect(rolls).toBe(2); expect(result.ok).toBe(!invalid);
+    if (result.ok && "plan" in result) expect(result.plan.ops.filter((op) => op.kind === "update" && op.ref.coll === "actors"))
+      .toMatchObject([{ diff: { "system.hp": 8 } }, { diff: { "system.hp": 9 } }]);
+    expect(w.actors.map((row) => row.system.hp)).toEqual([10, 10]);
+  });
+
+  test("nested HP formulas share their random budget even with no-op adapter results", () => {
+    const linked = structuredClone(scene);
+    const first = linked.tokens[0]; if (!first) throw new Error("missing token");
+    first.actorId = "health"; linked.tiles.push({ ...tile, _id: "child" });
+    const rolls: AutomationDefinition["steps"] = Array.from({ length: 16 }, (_, i) => ({
+      id: `roll-${i}`, kind: "hurtHeal", formula: "64d1", targets: "triggering",
+    }));
+    const parent = automation({ ...base, gates: {}, steps: [...rolls,
+      { id: "call", kind: "triggerTile", target: { kind: "id", tileId: "child" }, tokens: "triggering" },
+    ] });
+    const child = { ...automation({ ...base, tileId: "child", methods: ["manual"], gates: {}, steps: [
+      { id: "extra", kind: "hurtHeal", formula: "1d1", targets: "triggering" },
+    ] }), _id: "child-graph" };
+    const w = emptyWorld(); w.scenes.push(linked); w.actors.push(healActor); w.automations.push(parent, child);
+    let draws = 0;
+    const result = planAutomation(w, parent, { scene: linked, tile, token: first, method: "enter", caller: actor,
+      at: 1000, rng: () => { draws++; return 0; }, hurtHeal: () => ({ ok: true, diff: {}, note: "unchanged" }),
+    }, "gm");
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining("1024 random draws") });
+    expect(draws).toBe(1024); expect(w.actors[0]?.system.hp).toBe(10);
   });
 
   test("two steps and shared linked tokens read staged HP, hit once per actor, and leave the host world unmutated", () => {
@@ -1786,6 +1940,33 @@ describe("MATT Hurt / Heal planning", () => {
     expect(plan.plan.ops.filter((op) => op.kind === "update" && op.ref.coll === "actors"))
       .toMatchObject([{ diff: { "system.hp": 15 } }, { diff: { "system.hp": 12 } }]);
     expect(w.actors[0]?.system.hp).toBe(10);
+  });
+
+  test("nested Trigger Tile preserves the host HP adapter and reads parent-staged health", () => {
+    const linked = structuredClone(scene);
+    const trigger = linked.tokens[0];
+    if (!trigger) throw new Error("missing token");
+    trigger.actorId = "health";
+    linked.tiles.push({ ...tile, _id: "child" });
+    const parent = automation({ ...base, gates: {}, steps: [
+      { id: "hurt", kind: "hurtHeal", amount: -2, targets: "triggering" },
+      { id: "call", kind: "triggerTile", target: { kind: "id", tileId: "child" }, tokens: "triggering" },
+    ] });
+    const child = { ...automation({ ...base, tileId: "child", methods: ["manual"], gates: {}, steps: [
+      { id: "hurt", kind: "hurtHeal", amount: -3, targets: "triggering" },
+    ] }), _id: "child-graph" };
+    const w = emptyWorld(); w.scenes.push(linked); w.actors.push(healActor); w.automations.push(parent, child);
+    const seen: number[] = [];
+    const result = planAutomation(w, parent, { scene: linked, tile, token: trigger, method: "enter", caller: actor,
+      at: 1000, rng: () => 0, hurtHeal: (target, amount) => {
+        const hp = target.system.hp as number; seen.push(hp);
+        return { ok: true, diff: { "system.hp": hp + amount }, note: "nested" };
+      } }, "gm");
+    expect(result.ok).toBe(true);
+    expect(seen).toEqual([10, 8]);
+    expect(result.ok && "plan" in result ? result.plan.ops.filter((op) => op.kind === "update" && op.ref.coll === "actors") : [])
+      .toMatchObject([{ diff: { "system.hp": 8 } }, { diff: { "system.hp": 5 } }]);
+    expect(healActor.system.hp).toBe(10);
   });
 
   test("missing actor/health adapter fails the entire plan before committing history", () => {
@@ -1854,6 +2035,66 @@ describe("MATT Move / Rotation / Delete Entities / Roll Table actions", () => {
     }
   });
 
+  test("Move token destinations use native centers with signed offsets", () => {
+    const result=fire({...base,gates:{},steps:[
+      {id:"tile",kind:"select",selector:{kind:"tile"}},
+      {id:"move",kind:"move",destination:{coll:"tokens",id:"runner"},x:30,y:-20,targets:"current"},
+    ]});
+    if(!result.ok||!("plan" in result))throw new Error(JSON.stringify(result));
+    expect(result.plan.ops.find((op)=>op.kind==="update"&&op.ref.coll==="tiles")).toMatchObject({diff:{x:80,y:30}});
+    expect(tile.x).toBe(100);expect(runner.x).toBe(150);
+  });
+
+  test("Move snaps native token centers without applying a half-footprint conversion", () => {
+    const result = fire({ ...base, gates: {}, steps: [
+      { id: "m", kind: "move", x: 276, y: 324, targets: "triggering", snapToGrid: true },
+    ] });
+    if (!result.ok || !("plan" in result)) throw new Error(JSON.stringify(result));
+    expect(result.plan.ops.find((op) => op.kind === "update" && op.ref.coll === "tokens"))
+      .toMatchObject({ diff: { x: 250, y: 350 } });
+    expect(runner.x).toBe(150);
+  });
+
+  test("nested Move shares trigger policy but a later Rotation does not erase it", () => {
+    const sc=structuredClone(scene); sc.tiles.push({...tile,_id:"child"});
+    const parent=automation({...base,gates:{},steps:[
+      {id:"m",kind:"move",x:200,y:200,targets:"triggering",triggerTiles:true},
+      {id:"child",kind:"triggerTile",target:{kind:"id",tileId:"child"},tokens:"triggering"},
+      {id:"turn",kind:"rotate",angle:90,targets:"triggering"},
+    ]});
+    const child={...automation({...base,tileId:"child",methods:["manual"],gates:{},steps:[
+      {id:"m",kind:"move",x:250,y:250,targets:"triggering",triggerTiles:false},
+    ]}),_id:"child-graph"};
+    const w=emptyWorld();w.scenes.push(sc);w.automations.push(parent,child);
+    const tok=sc.tokens[0];if(!tok)throw new Error("missing token");
+    const result=planAutomation(w,parent,{scene:sc,tile:sc.tiles[0]??tile,token:tok,method:"enter",caller:actor,at:1000,rng:()=>0},"gm");
+    if(!result.ok||!("plan" in result))throw new Error(JSON.stringify(result));
+    expect(result.plan.suppressedMovement).toEqual(["s1\u0000runner"]);
+    expect(tok.x).toBe(150);
+  });
+
+  test.each([[false,false],[false,true],[true,false],[true,true]])("last actual Move controls private trigger suppression: %s then %s", (first, last) => {
+    const result = fire({...base,gates:{},steps:[
+      {id:"m1",kind:"move",x:200,y:200,targets:"triggering",triggerTiles:first},
+      {id:"m2",kind:"move",x:250,y:250,targets:"triggering",triggerTiles:last},
+    ]});
+    if (!result.ok || !("plan" in result)) throw new Error(JSON.stringify(result));
+    expect(result.plan.suppressedMovement).toEqual(last ? [] : ["s1\u0000runner"]);
+    expect(JSON.stringify(result.plan.ops)).not.toContain("triggerTiles");
+  });
+
+  test("relative Move preserves each token's offset", () => {
+    const def: AutomationDefinition = { ...base, gates: {}, steps: [
+      { id: "sel", kind: "select", selector: { kind: "inside" } },
+      { id: "move", kind: "move", mode: "add", x: -50, y: 25, targets: "current" },
+    ] };
+    const result = fire(def); if (!result.ok || !("plan" in result)) throw new Error(JSON.stringify(result));
+    expect(result.plan.ops.filter((op) => op.kind === "update" && op.ref.coll === "tokens"))
+      .toMatchObject([{ diff: { x: 100, y: 175 } }, { diff: { x: 130, y: 185 } }]);
+    expect(runner.x).toBe(150);
+
+  });
+
   test("Move with no live target token fails closed, including after its own delete", () => {
     const noTokens = fire({ ...base, steps: [
       { id: "move", kind: "move", x: 100, y: 100, targets: "current" },
@@ -1893,11 +2134,35 @@ describe("MATT Move / Rotation / Delete Entities / Roll Table actions", () => {
     } else {
       throw new Error("negative angle must normalize to 270");
     }
-    const wallsOnly = fire({ ...base, steps: [
+    const thisTile = fire({ ...base, steps: [
       { id: "select", kind: "select", selector: { kind: "tile" } },
       { id: "spin", kind: "rotate", angle: 45, targets: "current" },
     ] });
-    expect(wallsOnly).toMatchObject({ ok: false, error: expect.stringMatching(/live target token/) });
+    if (!thisTile.ok || !("plan" in thisTile)) throw new Error("tile must rotate");
+    expect(thisTile.plan.ops.filter((op) => op.kind === "update" && op.ref.coll === "tiles"))
+      .toMatchObject([{ ref: { id: "zone" }, diff: { rotation: 45 } }]);
+  });
+
+  test.each(["rotate", "move"] as const)("relative %s updates mixed token/tile targets once and rejects unsupported members atomically", (kind) => {
+    const staged = structuredClone(scene);
+    for (const doc of [...staged.tokens, ...staged.tiles]) { doc.taggerTags = ["turn"]; doc.rotation = 350; }
+    const w = emptyWorld(); w.scenes.push(staged);
+    const def: AutomationDefinition = { ...base, gates: {}, steps: [
+      { id: "sel", kind: "select", selector: { kind: "tag", query: "turn", collections: ["tokens", "tiles", "walls"] } },
+      kind === "rotate" ? { id: "turn", kind, mode: "add", angle: 20, targets: "current" }
+        : { id: "move", kind, mode: "add", x: 20, y: 20, targets: "current" },
+    ] };
+    const run = () => planAutomation(w, automation(def), { scene: staged, tile: staged.tiles[0] ?? tile,
+      method: "click", caller: actor, at: 1000, rng: () => 0 }, "gm");
+    const result = run();
+    if (!result.ok || !("plan" in result)) throw new Error(JSON.stringify(result));
+    expect(result.plan.ops.filter((op) => op.kind === "update" && ["tokens", "tiles"].includes(op.ref.coll)))
+      .toHaveLength(3);
+    expect(staged.tokens[0]?.rotation).toBe(350);
+    staged.walls.push({ _id: "wall", type: "wall", name: "wall", ownership: {}, flags: {}, system: {},
+      taggerTags: ["turn"], c: [0, 0, 10, 10], move: 1, sight: 1, light: 1, sound: 1, door: 0, dir: 0 } as unknown as WallDocument);
+    expect(run()).toMatchObject({ ok: false, error: expect.stringContaining("only supports tokens and tiles") });
+    expect(staged.tiles[0]?.rotation).toBe(350);
   });
 
   test("Delete Entities removes the staged placeables, commits delete ops and empties the collection", () => {
@@ -1923,7 +2188,7 @@ describe("MATT Move / Rotation / Delete Entities / Roll Table actions", () => {
     expect(emptyAgain).toMatchObject({ ok: false, error: expect.stringMatching(/non-empty/) });
   });
 
-  test("Delete Entities removes walls, drawings and notes, and refuses collections it cannot remove", () => {
+  test("Delete Entities removes walls, drawings, notes and lights", () => {
     const withWall: SceneDocument = { ...scene, walls: [{ _id: "w1", type: "wall", name: "w1",
       ownership: { default: 0 }, flags: {}, system: {}, taggerTags: ["wall-x"],
       c: [0, 0, 200, 0], door: 0, oneWay: false, move: 0, sight: 0, sound: 0, light: 0 }],
@@ -1944,15 +2209,13 @@ describe("MATT Move / Rotation / Delete Entities / Roll Table actions", () => {
         caller: actor, at: 1000, rng: () => 0.25 }, "gm");
     };
     for (const [query, coll, id] of [["wall-x", "walls", "w1"], ["draw-x", "drawings", "d1"],
-      ["note-x", "notes", "n1"]] as Array<[string, "walls" | "drawings" | "notes", string]>) {
+      ["note-x", "notes", "n1"], ["light-x", "lights", "l1"]] as Array<[string, "walls" | "drawings" | "notes" | "lights", string]>) {
       const fired = fireIn(query, [coll]);
       if (!fired.ok || !("plan" in fired)) throw new Error(`${query} delete must plan`);
       expect(fired.plan.ops.filter((op) => op.kind === "delete"))
         .toEqual([{ kind: "delete", ref: { coll, id, parent: { coll: "scenes", id: "s1" } } }]);
     }
-    const refused = fireIn("light-x", ["lights"]);
-    expect(refused).toMatchObject({ ok: false,
-      error: expect.stringMatching(/only removes tokens, tiles, walls, drawings or map pins/) });
+
   });
 
   test("Roll Table posts a host roll to the audience, stores the optional variable and branches on it", () => {

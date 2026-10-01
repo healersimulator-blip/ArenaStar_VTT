@@ -1,4 +1,8 @@
 <script lang="ts">
+  import { SceneLightingPlayer } from "../client/sceneLighting";
+  import { SceneBackgroundPlayer } from "../client/sceneBackground";
+  import { TileImageCache } from "../canvas/imageTexture";
+  import { tokenRect } from "../canvas/tokens";
   import { onMount } from "svelte";
   import { bootPlayerApp, type PlayerApp } from "./joinBoot";
   import { parseInvite } from "./hostShare";
@@ -271,7 +275,14 @@
       height: 520,
     });
   }
-  let loadedMapHash: string | null = null;
+  const sceneBackground = new SceneBackgroundPlayer();
+  const sceneLighting = new SceneLightingPlayer(createVisionComputer());
+  const tileImages = new TileImageCache(async (hash) => {
+    const owner = app;
+    if (!owner?.fetcher || !owner.client) throw new Error("session unavailable");
+    return { bytes: await owner.fetcher.request(hash, "scene"),
+      mime: owner.client.store.world.assetManifest[hash]?.mime ?? "image/png" };
+  });
   /** `$state.raw`: the stage is a Pixi object graph — assignment must re-run the
    *  effects that read it, but it must never be deep-proxied. */
   let stage = $state.raw<Stage | null>(null);
@@ -591,6 +602,7 @@
     storeVersion++;
     const scene = activeScene();
     fxPlayer?.syncScene();
+    sceneLighting.sync(scene, view);
     worldName = client.world?.name ?? "—";
     seq = client.store.seq;
     tokenCount = scene?.tokens.length ?? 0;
@@ -614,28 +626,20 @@
     // pin the GM has not made visible, so this layer only ever draws player-visible pins).
     view.peekFogLayer()?.applyManualMask(fogMaskLog(scene));
     view.getNotesLayer().sync(scene?.notes ?? [], view.camera);
+    // Replica-only scene geometry; both holders remain below the fog layer.
+    view.getDrawingsLayer().sync(scene?.drawings ?? [], view.camera);
+    view.getTemplatesLayer().sync(scene?.templates ?? [], view.camera);
     // D-271: the hexcrawl overlay — on a player's shell the closed cells are covered, and the
     // cover is painted from this replica's open cells alone (a closed hex is not sent to a
     // player at all, so there is nothing else to paint it from).
     syncHexOverlay(view, hexOverlay, scene, "player", client.store.getAll("settings"));
-    const img = scene?.img ?? null;
-    if (img !== null && img !== loadedMapHash && current.fetcher) {
-      loadedMapHash = img;
-      const manifest = client.store.world.assetManifest[img];
-      const mime = manifest?.mime ?? "image/png";
-      // §7 thumbnail-first: preview paints immediately; full replaces async
-      const thumb = manifest?.thumb;
-      if (thumb && thumb.hash !== img) {
-        void current.fetcher
-          .request(thumb.hash, "ui")
-          .then((bytes) => view.setBackgroundImage(bytes, thumb.mime))
-          .catch(() => undefined);
-      }
-      void current.fetcher
-        .request(img, "scene")
-        .then((bytes) => view.setBackgroundImage(bytes, mime))
-        .catch(() => undefined);
-    }
+    // Only projected tiles are present; hidden GM tiles and their images never arrive.
+    view.getTilesLayer({ loadTexture: tileImages.load }).sync(scene?.tiles ?? [],
+      (scene?.tokens ?? []).filter((token) => token.vision).map(tokenRect), scene?.regions ?? []);
+    tileImages.retain((scene?.tiles ?? []).map((tile) => tile.img));
+    const fetcher = current.fetcher;
+    if (fetcher) sceneBackground.sync(scene?.img ?? null, client.store.world.assetManifest,
+      (hash, priority) => fetcher.request(hash, priority), view);
     const grid = squareGrid(scene?.grid);
     if (grid) view.setGrid(grid);
   }
@@ -724,6 +728,10 @@
                   style: layer ? layer.style : null,
                   visibleTokenIds: stats.visibleTokenIds,
                 };
+              },
+              fogExploredAt: async ({ x, y }) => {
+                await fogLoop.settle();
+                return view.peekFogLayer()?.exploredAt(x, y) ?? null;
               },
               drawnTokens: () => view.drawnTokenIds(),
               // D-271: what this player's hexcrawl overlay painted (its own cover included).
@@ -925,7 +933,10 @@
       controller?.destroy();
       fog?.destroy();
       fog = null;
+      sceneBackground.destroy();
+      sceneLighting.destroy();
       stage?.destroy();
+      tileImages.destroy();
       stage = null;
       app?.close();
     };

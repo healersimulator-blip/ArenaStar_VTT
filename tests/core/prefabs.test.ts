@@ -35,6 +35,136 @@ const def = (): PrefabDefinition => ({ version: 1, sourceSceneId: "s1", gridSize
 const ids = (prefix = "fresh") => { let i = 0; return () => `${prefix}_${++i}`; };
 
 describe("GM-owned prefab planner and transaction", () => {
+  test("prefab Roll Table location remains an invocation result, not a rebound or captured coordinate",()=>{
+    const world=emptyWorld();world.scenes.push({...scene(),_id:"s2"});
+    const template=def(),graph=template.graphs[0]?.doc;if(!graph)throw new Error("missing graph");
+    graph.definition.steps=[{id:"roll",kind:"rollTable",tableId:"locations",audience:"gm"},
+      {id:"move",kind:"move",destinationResult:"rollTable",x:25,y:-25,targets:"triggering"}];
+    const before=structuredClone(template);
+    for(const prefix of ["first","second"]) {
+      const placed=planPrefabPlacement(world,template,"s2",{at:{x:500,y:500}},ids(prefix));if(!placed.ok)throw new Error(placed.error);
+      expect(placed.plan.ops.at(-1)).toMatchObject({data:{definition:{sceneId:"s2",tileId:placed.plan.ids["tile-a"],steps:graph.definition.steps}}});
+    }
+    expect(template).toEqual(before);
+  });
+
+  test("prefab preserves Stop Token Movement and Original Destination policies without a captured movement context",()=>{
+    const world=emptyWorld();world.scenes.push({...scene(),_id:"s2"});const template=def(),graph=template.graphs[0]?.doc;if(!graph)throw new Error("missing graph");
+    graph.definition.methods=["enter"];graph.definition.steps=[{id:"stop",kind:"stopMovement",snapToGrid:true},
+      {id:"continue",kind:"move",destinationOriginal:true,x:25,y:-25,targets:"triggering"}];const before=structuredClone(template);
+    for(const prefix of ["first","second"]){const result=planPrefabPlacement(world,template,"s2",{at:{x:500,y:500}},ids(prefix));if(!result.ok)throw new Error(result.error);
+      expect(result.plan.ops.at(-1)).toMatchObject({data:{definition:{sceneId:"s2",tileId:result.plan.ids["tile-a"],steps:[{kind:"stopMovement",snapToGrid:true},{destinationOriginal:true,x:25,y:-25}]}}});}
+    expect(template).toEqual(before);
+  });
+
+  test("prefab Original Destination policy remains invocation context, never a captured point",()=>{
+    const world=emptyWorld();world.scenes.push({...scene(),_id:"s2"});const template=def(),graph=template.graphs[0]?.doc;if(!graph)throw new Error("missing graph");
+    graph.definition.methods=["enter"];graph.definition.steps=[{id:"move",kind:"move",destinationOriginal:true,x:25,y:-25,targets:"triggering"}];const before=structuredClone(template);
+    for(const prefix of ["first","second"]){const result=planPrefabPlacement(world,template,"s2",{at:{x:500,y:500}},ids(prefix));if(!result.ok)throw new Error(result.error);
+      expect(result.plan.ops.at(-1)).toMatchObject({data:{definition:{sceneId:"s2",tileId:result.plan.ids["tile-a"],steps:[{destinationOriginal:true,x:25,y:-25}]}}});}
+    expect(template).toEqual(before);
+  });
+
+  test.each(["random","entry"] as const)("prefab entity destination retains %s policy and clone reference",(position)=>{
+    const world=emptyWorld();world.scenes.push({...scene(),_id:"s2"});
+    const template=def(),graph=template.graphs[0]?.doc;if(!graph)throw new Error("missing graph");
+    graph.definition.methods=["enter"];graph.definition.steps=[{id:"move",kind:"move",x:0,y:0,targets:"triggering",destinationPosition:position,destination:{coll:"tiles",id:"tile-a"}}];
+    const before=structuredClone(template);
+    for(const prefix of ["first","second"]){
+      const result=planPrefabPlacement(world,template,"s2",{at:{x:500,y:500}},ids(prefix));if(!result.ok)throw new Error(result.error);
+      expect(result.plan.ops.at(-1)).toMatchObject({data:{definition:{methods:["enter"],tileId:result.plan.ids["tile-a"],steps:[{destinationPosition:position,destination:{coll:"tiles",id:result.plan.ids["tile-a"]}}]}}});
+    }
+    expect(template).toEqual(before);
+  });
+
+  test.each(["entity","tag"] as const)("prefab %s destination keeps explicit random placement/choice policy and clone references",(source)=>{
+    const world=emptyWorld();world.scenes.push({...scene(),_id:"s2"});
+    const template=def(),graph=template.graphs[0]?.doc;if(!graph)throw new Error("missing graph");
+    graph.definition.steps=[{id:"move",kind:"move",x:0,y:0,targets:"triggering",destinationPosition:"random",
+      ...(source==="entity"?{destination:{coll:"tiles",id:"tile-a"}}:{destinationTag:{kind:"tag",query:"trap-{#}",collections:["tiles"]},destinationChoice:"random"})}];
+    const before=structuredClone(template);
+    for(const prefix of ["first","second"]){
+      const result=planPrefabPlacement(world,template,"s2",{at:{x:500,y:500}},ids(prefix));if(!result.ok)throw new Error(result.error);
+      expect(result.plan.ops.at(-1)).toMatchObject({data:{definition:{steps:[{destinationPosition:"random",...(source==="entity"?
+        {destination:{coll:"tiles",id:result.plan.ids["tile-a"]}}:{destinationChoice:"random",destinationTag:{query:"trap-1"}})}]}}});
+    }
+    expect(template).toEqual(before);
+  });
+
+  test.each(["tiles","tokens"] as const)("Move live tag destination templates rebind %s tags and ref filters for two clones",(coll)=>{
+    const world=emptyWorld();world.scenes.push({...scene(),_id:"s2"});
+    const template=def(),source=template.graphs[0]?.doc;if(!source)throw new Error("missing graph");
+    const query=coll==="tiles"?"trap-{#}":"guard-{id}",id=coll==="tiles"?"tile-a":"child-a";
+    source.definition.steps=[{id:"move",kind:"move",destinationTag:{kind:"tag",query,
+      includeRefs:[{coll,id,parent:{coll:"scenes",id:"s1"}}]},x:0,y:0,targets:"triggering"}];
+    const before=structuredClone(template);
+    for(const prefix of ["first","second"]) {
+      const result=planPrefabPlacement(world,template,"s2",{at:{x:500,y:500}},ids(prefix));if(!result.ok)throw new Error(result.error);
+      const mapped=result.plan.ids[id];
+      expect(result.plan.ops.at(-1)).toMatchObject({kind:"create",coll:"automations",data:{definition:{steps:[{
+        destinationTag:{query:coll==="tiles"?"trap-1":`guard-${mapped}`,collections:["tokens","tiles"],
+          includeRefs:[{coll,id:mapped,parent:{coll:"scenes",id:"s2"}}]}
+      }]}}});
+    }
+    expect(template).toEqual(before);
+    const move=source.definition.steps[0];if(move?.kind!=="move"||!move.destinationTag)throw new Error("missing move");
+    move.destinationTag.includeRefs=[{coll,id:"external",parent:{coll:"scenes",id:"s1"}}];
+    expect(planPrefabPlacement(world,template,"s2",{at:{x:500,y:500}},ids())).toMatchObject({ok:false,error:expect.stringContaining("Move destination tag")});
+    move.destinationTag.includeRefs=[];move.destinationTag.query="unknown-{#}";
+    expect(planPrefabPlacement(world,template,"s2",{at:{x:500,y:500}},ids())).toMatchObject({ok:false,error:expect.stringContaining("Move destination tag")});
+  });
+
+  test.each(["tiles","tokens"] as const)("Move %s destinations rebind to each clone and external IDs fail", (coll) => {
+    const world=emptyWorld();world.scenes.push({...scene(),_id:"s2"});
+    const template=def(),source=template.graphs[0]?.doc;if(!source)throw new Error("missing graph");
+    const id=coll==="tiles"?"tile-a":"child-a";
+    source.definition.steps=[{id:"move",kind:"move",destination:{coll,id},x:0,y:0,targets:"triggering"}];
+    for(const prefix of ["first","second"]) {
+      const result=planPrefabPlacement(world,template,"s2",{at:{x:500,y:500}},ids(prefix));
+      if(!result.ok)throw new Error(result.error);
+      const part=result.plan.ops.find((op)=>op.kind==="create"&&op.coll===coll);
+      if(!part||part.kind!=="create")throw new Error("missing clone part");
+      expect(result.plan.ops.at(-1)).toMatchObject({kind:"create",coll:"automations",data:{definition:{steps:[{destination:{coll,id:part.data._id}}]}}});
+    }
+    expect(source.definition.steps[0]).toMatchObject({destination:{coll,id}});
+    source.definition.steps=[{id:"move",kind:"move",destination:{coll,id:"external"},x:0,y:0,targets:"triggering"}];
+    expect(planPrefabPlacement(world,template,"s2",{at:{x:500,y:500}},ids())).toMatchObject({ok:false,error:expect.stringContaining("dangling Move destination")});
+  });
+
+  test.each(["select","collection"] as const)("pinned %s references rebind in each clone, external/wrong-type refs fail closed",(kind)=>{
+    const world=emptyWorld();world.scenes.push({...scene(),_id:"s2"});
+    const template=def(),source=template.graphs[0]?.doc;if(!source)throw new Error("missing graph");
+    const selector={kind:"ids" as const,refs:[{coll:"walls" as const,id:"wall-a",parent:{coll:"scenes" as const,id:"s1"}}]};
+    source.definition.steps=[kind==="select"?{id:"pin",kind,selector}:{id:"pin",kind,mode:"replace",selector}];
+    const before=structuredClone(template);
+    for(const prefix of ["first","second"]){
+      const result=planPrefabPlacement(world,template,"s2",{at:{x:500,y:500}},ids(prefix));if(!result.ok)throw new Error(result.error);
+      const id=result.plan.ids["wall-a"];
+      expect(result.plan.ops.at(-1)).toMatchObject({kind:"create",coll:"automations",data:{definition:{steps:[{selector:{kind:"ids",refs:[{coll:"walls",id,parent:{coll:"scenes",id:"s2"}}]}}]}}});
+    }
+    expect(template).toEqual(before);
+    for(const id of ["external","child-a"]){
+      selector.refs[0]={coll:"walls",id,parent:{coll:"scenes",id:"s1"}};
+      expect(planPrefabPlacement(world,template,"s2",{at:{x:500,y:500}},ids())).toMatchObject({ok:false,error:expect.stringContaining("dangling pinned entity")});
+    }
+  });
+
+  test("explicit local background targets rebind to the placement scene; external targets fail closed", () => {
+    const world = emptyWorld(); world.scenes.push({ ...scene(), _id: "s2" });
+    const template = def(); const graph = template.graphs[0]?.doc;
+    if (!graph) throw new Error("missing fixture graph");
+    graph.definition.steps = [{ id: "bg", kind: "sceneBackground", image: null, targetSceneId: "s1" }];
+    const placed = planPrefabPlacement(world, template, "s2", { at: { x: 500, y: 500 } }, ids());
+    if (!placed.ok) throw new Error(placed.error);
+    expect(placed.plan.ops.at(-1)).toMatchObject({ kind: "create", coll: "automations", data: {
+      definition: { sceneId: "s2", steps: [{ targetSceneId: "s2" }] },
+    } });
+    expect(graph.definition.steps[0]).toMatchObject({ targetSceneId: "s1" });
+    graph.definition.steps = [{ id: "bg", kind: "sceneBackground", image: null, targetSceneId: "external" }];
+    expect(planPrefabPlacement(world, template, "s2", { at: { x: 500, y: 500 } }, ids()))
+      .toMatchObject({ ok: false, error: expect.stringMatching(/external Scene Background target/) });
+  });
+
   test("allocates scene-unique {#} and per-part {id}, binds refs, retains nested private children, never mutates source", () => {
     const world = emptyWorld();
     const sc = scene();

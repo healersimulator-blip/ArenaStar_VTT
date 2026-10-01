@@ -357,6 +357,24 @@ export function planPrefabPlacement(
           if (!rebound) return { ok: false, error: `prefab graph ${graph.id} has an ambiguous or external ${label} tag` };
           steps.push({ ...structuredClone(step), target: rebound });
         } else steps.push(structuredClone(step));
+      } else if (step.kind === "move" && step.destinationTag) {
+        const rebound = rebindTag({ ...step.destinationTag,
+          collections: step.destinationTag.collections ?? ["tokens", "tiles"] }, false);
+        if (!rebound) return { ok: false, error: `prefab graph ${graph.id} has an ambiguous or unbound Move destination tag` };
+        steps.push({ ...structuredClone(step), destinationTag: rebound });
+      } else if (step.kind === "move" && step.destination) {
+        const mapped = mapping.get(step.destination.id);
+        if (!mapped || mapped.coll !== step.destination.coll)
+          return { ok: false, error: `prefab graph ${graph.id} has a dangling Move destination` };
+        steps.push({ ...structuredClone(step), destination: { coll: step.destination.coll, id: mapped.id } });
+      } else if (step.kind === "sceneBackground" && step.targetSceneId) {
+        if (step.targetSceneId !== def.sourceSceneId)
+          return { ok: false, error: `prefab graph ${graph.id} has an external Scene Background target` };
+        steps.push({ ...step, targetSceneId: sceneId });
+      } else if ((step.kind === "select" || step.kind === "collection") && step.selector?.kind === "ids") {
+        const refs = step.selector.refs.map((ref) => reboundRef(ref, def.sourceSceneId, sceneId, mapping));
+        if (refs.some((ref) => !ref)) return { ok: false, error: `prefab graph ${graph.id} has a dangling pinned entity reference` };
+        steps.push({ ...step, selector: { kind: "ids", refs: refs as DocRef[] } });
       } else if ((step.kind === "select" || step.kind === "collection") && step.selector?.kind === "tag") {
         const selector = rebindTag(step.selector, false);
         if (!selector) return { ok: false, error: `prefab graph ${graph.id} has ambiguous or unbound tag selector / dangling external reference` };

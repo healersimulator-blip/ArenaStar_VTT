@@ -123,7 +123,7 @@ test.describe("fog of war hides tokens from players (§9, D-251)", () => {
     expect(await drawn(player)).toEqual(["hero"]);
     expect((await playerFog(player)).reveals).toBe(revealsBefore); // no eye moved: nothing recomputed
     // the corner is remembered (explored) yet the orc standing there is not shown
-    expect(await surfaceCallArg<boolean | null>(host, "gm", "fogExploredAt", { x: 150, y: 150 })).toBe(true);
+    expect(await surfaceCallArg<boolean | null>(player, "playerCanvas", "fogExploredAt", { x: 150, y: 150 })).toBe(true);
 
     // ── fog off for the scene → everything is drawn again ──
     await host.click("#gm-settings");

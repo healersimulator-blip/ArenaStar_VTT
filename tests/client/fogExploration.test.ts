@@ -9,7 +9,7 @@ import { describe, expect, test } from "vitest";
 import { FogExploration, type FogSurface, type FogTransport } from "../../src/client/fogExploration";
 import type { SceneDocument, TokenDocument, WallDocument } from "../../src/core/documents";
 import { pointInPolygon } from "../../src/canvas/vision/polygon";
-import { InlineVisionWorker } from "../../src/workers/visionWorkerClient";
+import { InlineVisionWorker, type VisionComputer } from "../../src/workers/visionWorkerClient";
 
 // ─── fixtures ────────────────────────────────────────────────────────────────
 
@@ -163,6 +163,7 @@ class Timers {
 function harness(
   opts: {
     user?: { id: string; role: "GM" | "PLAYER" } | null;
+    computer?: VisionComputer;
     /** §2.3/D-262: the caller's filter on the published set (the preview's §5 rule). */
     visibilityFilter?: (
       scene: SceneDocument | null,
@@ -195,7 +196,7 @@ function harness(
     hideSurface: () => {
       hidden++;
     },
-    computer: new InlineVisionWorker(),
+    computer: opts.computer ?? new InlineVisionWorker(),
     transport,
     user: () => user,
     actors: () => [],
@@ -355,6 +356,9 @@ describe("FogExploration loop", () => {
     for (let i = 0; i < 50 && h.visibility.length === 0; i++) await Promise.resolve();
     expect(h.visibility).toEqual([["hero"]]);
     expect(h.fog.stats().restored).toBe(false);
+    // Visibility is now synchronous; the serialized restore starts on a later microtask.
+    for (let i = 0; i < 50 && !h.timers.armed(15_000); i++) await Promise.resolve();
+    expect(h.timers.armed(15_000)).toBe(true);
     h.timers.fire(15_000);
     await first;
     // polygons in: the far orc is behind the wall → still just the hero (no re-publish)
@@ -511,6 +515,113 @@ describe("FogExploration loop", () => {
     // the filter saw this scene and the *unfiltered* gate (the caller decides, the loop reports)
     expect(seen.at(-1)?.[0]).toBe("s1");
     expect(seen.at(-1)?.[1]).toEqual(["t-secret", "t-seen"]);
+  });
+
+  test("a pending PNG save cannot delay darkness gating or let an older sync reopen tokens", async () => {
+    const h = harness({ user: { id: "rex", role: "PLAYER" } });
+    const bright = scene("s1", { tokens: [
+      token("hero", 100, 100, { ownership: { rex: 3, default: 0 } }),
+      token("orc", 200, 100, { ownership: { default: 0 }, vision: false }),
+    ] });
+    await h.fog.sync(bright, { style: "opaque" });
+    expect(h.fog.stats().visibleTokenIds).toEqual(["hero", "orc"]);
+    let release: ((png: Uint8Array) => void) | undefined;
+    h.surface().readbackPng = () => new Promise((resolve) => { release = resolve; });
+    const saving = h.fog.flush();
+    for (let i = 0; i < 20 && !release; i++) await Promise.resolve();
+    if (!release) throw new Error("save did not begin");
+    const oldSync = h.fog.sync(bright, { style: "opaque" });
+    const start = h.visibility.length;
+    const night = h.fog.sync({ ...bright, darkness: 1 }, { style: "opaque" });
+    // No await, no timer advancement, no PNG completion: fail closed NOW.
+    expect(h.fog.stats().visibleTokenIds).toEqual(["hero"]);
+    release(new Uint8Array([1]));
+    await Promise.all([saving, oldSync, night]);
+    expect(h.visibility.slice(start)).toEqual([["hero"]]);
+    expect(h.fog.stats().visibleTokenIds).toEqual(["hero"]);
+  });
+
+  test("a failed vision computation cannot poison the key and skip a retry of the same scene", async () => {
+    const inline = new InlineVisionWorker();
+    let attempts = 0;
+    const h = harness({ user: { id: "rex", role: "PLAYER" }, computer: {
+      compute: (...args) => ++attempts === 1 ? Promise.reject(new Error("worker failed")) : inline.compute(...args),
+      terminate: () => {},
+    } });
+    const s = scene("s1", { tokens: [
+      token("hero", 100, 100, { ownership: { rex: 3, default: 0 } }),
+      token("orc", 200, 100, { ownership: { default: 0 }, vision: false }),
+    ] });
+    await h.fog.sync(s, { style: "opaque" });
+    expect(h.fog.stats().visibleTokenIds).toEqual(["hero"]);
+    await h.fog.sync(s, { style: "opaque" });
+    expect(attempts).toBe(2);
+    expect(h.fog.stats().visibleTokenIds).toEqual(["hero", "orc"]);
+    expect(h.errors).toEqual(["sync: Error: worker failed"]);
+  });
+
+  test("a pending worker cannot reopen tokens after the latest replica disables sight behind a manual mask", async () => {
+    const inline = new InlineVisionWorker();
+    let release: (() => void) | undefined;
+    const h = harness({ user: { id: "rex", role: "PLAYER" }, computer: {
+      compute: (...args) => new Promise((resolve, reject) => {
+        release = () => { void inline.compute(...args).then(resolve, reject); };
+      }),
+      terminate: () => {},
+    } });
+    const s = scene("s1", { tokens: [
+      token("hero", 100, 100, { ownership: { rex: 3, default: 0 } }),
+      token("orc", 200, 100, { ownership: { default: 0 }, vision: false }),
+    ] });
+    const pending = h.fog.sync(s, { style: "opaque" });
+    for (let i = 0; i < 50 && !release; i++) await Promise.resolve();
+    if (!release) throw new Error("worker did not begin");
+    const masked = scene("s1", { tokens: s.tokens, flags: { core: {
+      fog: { enabled: false }, fogMask: [
+        { mode: "hide", poly: [0, 0, 1000, 0, 1000, 1000, 0, 1000] },
+      ],
+    } } });
+    const start = h.visibility.length;
+    const latest = h.fog.sync(masked, { style: "opaque" });
+    expect(h.fog.stats().visibleTokenIds).toEqual(["hero"]);
+    release();
+    await Promise.all([pending, latest]);
+    expect(h.visibility.slice(start)).toEqual([]);
+    expect(h.fog.stats().visibleTokenIds).toEqual(["hero"]);
+  });
+
+  test("immediate visibility filtering receives the new scene even while old exploration is saving", async () => {
+    const scenes: Array<string | undefined> = [];
+    const h = harness({ user: { id: "rex", role: "PLAYER" }, visibilityFilter: (s, ids) => {
+      scenes.push(s?._id); return ids;
+    } });
+    const first = scene("s1", { tokens: [token("first", 100, 100, { ownership: { rex: 3, default: 0 } })] });
+    await h.fog.sync(first, { style: "opaque" });
+    let release: ((png: Uint8Array) => void) | undefined;
+    h.surface().readbackPng = () => new Promise((resolve) => { release = resolve; });
+    const next = h.fog.sync(scene("s2", { tokens: [
+      token("second", 100, 100, { ownership: { rex: 3, default: 0 } }),
+    ] }), { style: "opaque" });
+    expect(scenes.at(-1)).toBe("s2");
+    expect(h.fog.stats().visibleTokenIds).toEqual(["second"]);
+    for (let i = 0; i < 50 && !release; i++) await Promise.resolve();
+    if (!release) throw new Error("old scene save did not begin");
+    release(new Uint8Array([1]));
+    await next;
+    expect(h.transport.puts[0]?.sceneId).toBe("s1");
+    expect(h.fog.stats().sceneId).toBe("s2");
+  });
+
+  test("failed PNG readback retains dirty exploration for an explicit retry", async () => {
+    const h = harness();
+    await h.fog.sync(scene("s1", { tokens: [token("t", 100, 100)] }), { style: "opaque" });
+    h.surface().readbackPng = () => Promise.reject(new Error("encoder failed"));
+    await h.fog.flush();
+    expect(h.fog.stats().dirty).toBe(true);
+    h.surface().readbackPng = () => Promise.resolve(new Uint8Array([7]));
+    await h.fog.flush();
+    expect(h.transport.puts).toHaveLength(1);
+    expect(h.fog.stats().dirty).toBe(false);
   });
 
   test("a surface/transport failure is reported, not thrown, and the loop keeps serving", async () => {

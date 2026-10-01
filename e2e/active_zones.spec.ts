@@ -45,6 +45,32 @@ test("GM authors a real tile and graph in the wizard, then activates it by click
   await expect(page.locator("[data-zone-history]")).toHaveCount(0);
 });
 
+test("GM authors a convex scene region and binds an active-zone graph to that region", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-zones-tab]").click();
+  const zones = page.locator("[data-active-zones]");
+  await zones.locator("[data-zone-source-kind]").selectOption("region");
+  await zones.locator("[data-zone-region-create] summary").click();
+  const region = zones.locator("[data-zone-region-create]");
+  await region.getByLabel("Region name").fill("Courtyard trigger");
+  await region.getByLabel("X", { exact: true }).fill("300");
+  await region.getByLabel("Y", { exact: true }).fill("300");
+  await region.getByLabel("Width").fill("200");
+  await region.getByLabel("Height").fill("200");
+  await region.locator("[data-zone-region-shape]").selectOption("diamond");
+  await region.locator("[data-zone-create-region]").click();
+  await expect(zones.locator("[data-zone-tile] option").filter({ hasText: "Courtyard trigger" })).toHaveCount(1);
+  await zones.locator("[data-zone-name]").fill("Courtyard crossing");
+  await zones.locator(".methods label").filter({ hasText: "exit" }).locator("input").check();
+  await zones.locator("[data-zone-save]").click();
+  await expect(zones.locator("li").filter({ hasText: "Courtyard crossing" })).toHaveCount(1);
+  await expect(zones.getByRole("alert")).toHaveCount(0);
+  await zones.locator("[data-zone-run]").click();
+  await expect(page.locator("#chat-log")).toContainText("enter by");
+});
+
 test("wizard filters the current collection by a typed attribute before a count check, using the live host tile", async ({ page }) => {
   await page.goto(entry + "?e2e=1");
   await waitForSurface(page, "app");
@@ -174,6 +200,7 @@ test("Token Trigger Count wizard branches separately for two real tokens, with u
 });
 
 test("Check Variable wizard branches on a staged tile value, persists, and undo restores the prior value", async ({ page }) => {
+  test.setTimeout(90_000);
   await page.goto(entry + "?e2e=1");
   await waitForSurface(page, "app");
   await page.locator("#gm-macros").click();
@@ -306,7 +333,8 @@ test("Check Value wizard reads committed scene darkness and routes to an alterna
   await expect(zones.locator("details[open] li").filter({ hasText: "Check Value darkness: 1 gte 0.5 -> pass" })).toHaveCount(1);
 });
 
-test("Game Time wizard stages multiple minute changes, branches on the new clock and undoes the whole fire", async ({ page }) => {
+for (const formula of [false, true]) test(`Game Time wizard stages minute changes, branches and undoes (formula ${formula})`, async ({ page }) => {
+  test.setTimeout(60_000);
   await page.goto(entry + "?e2e=1");
   await waitForSurface(page, "app");
   await page.locator("#gm-macros").click();
@@ -318,7 +346,10 @@ test("Game Time wizard stages multiple minute changes, branches on the new clock
   await zones.locator("[data-zone-name]").fill("Clock lever");
   await zones.getByRole("button", { name: "Remove step 2" }).click();
   await zones.locator('[data-zone-add="gameTime"]').click();
-  await zones.locator("[data-zone-step]").last().getByLabel("Game Time minutes").fill("90");
+  if (formula) {
+    await zones.locator("[data-zone-step]").last().getByLabel("Game Time source").selectOption("formula");
+    await zones.getByLabel("Game Time formula").fill("1d1 * 60 + 30");
+  } else await zones.getByLabel("Game Time minutes",{exact:true}).fill("90");
   await zones.locator('[data-zone-add="checkValue"]').click();
   const first = zones.locator("[data-zone-step]").last();
   await first.getByLabel("Check Value source").selectOption("time");
@@ -334,6 +365,12 @@ test("Game Time wizard stages multiple minute changes, branches on the new clock
   await zones.locator("[data-zone-step]").last().getByLabel("Text").fill("Lever advanced the world clock");
   await zones.locator("[data-zone-save]").click();
   await expect(zones.getByRole("alert")).toHaveCount(0);
+  if (formula) {
+    await hostCall(page,"drainOps");await page.reload();await waitForSurface(page,"app");
+    await page.locator("#gm-macros").click();await page.locator("[data-macro-zones-tab]").click();
+    await zones.locator("li").filter({hasText:"Clock lever"}).getByRole("button",{name:"Edit"}).click();
+    await expect(zones.getByLabel("Game Time formula")).toHaveValue("1d1 * 60 + 30");
+  }
   await zones.getByLabel("Simulate method").selectOption("manual");
   const before = await hostCall<number>(page, "seq");
   await zones.locator("[data-zone-run]").click();
@@ -349,6 +386,17 @@ test("Game Time wizard stages multiple minute changes, branches on the new clock
   await page.locator("#gm-settings").click();
   await expect(settings.locator("[data-clock-readout]")).toContainText("00:00");
   await settings.locator("[data-window-close]").click();
+  if (formula) {
+    await zones.getByLabel("Game Time formula").fill("1/0");
+    const beforeSave=await hostCall<number>(page,"seq");
+    await zones.locator("[data-zone-save]").click();
+    await expect.poll(()=>hostCall<number>(page,"seq")).toBe(beforeSave+1);
+    await zones.locator("[data-zone-run]").click();
+    await expect(zones.getByRole("alert")).toBeVisible();
+    expect(await hostCall<number>(page,"seq")).toBe(beforeSave+1);
+    await page.locator("#gm-settings").click();
+    await expect(settings.locator("[data-clock-readout]")).toContainText("00:00");
+  }
 });
 
 test("Check Value wizard branches on the GM-replicated world clock, including day rollover", async ({ page }) => {
@@ -577,6 +625,7 @@ test("GM authors a persistent tile counter, branches on its next fire, reloads a
 });
 
 test("wizard activates a paused tile graph and invokes it in one undoable host fire", async ({ page }) => {
+  test.setTimeout(90_000);
   await page.goto(entry + "?e2e=1");
   await waitForSurface(page, "app");
   await page.locator("#gm-macros").click();
@@ -655,7 +704,6 @@ test("wizard activates a paused tile graph and invokes it in one undoable host f
 });
 
 test("a connected player's canvas click invokes the published tile without receiving a graph ID", async ({ browser }: { browser: Browser }) => {
-  test.setTimeout(90_000);
   const hostCtx = await browser.newContext();
   const playerCtx = await browser.newContext();
   try {
@@ -816,4 +864,68 @@ test("wizard authors a current-collection edit and atomic Trigger Tile call with
   await page.locator("[data-macro-zones-tab]").click();
   await expect(zones.locator("li").filter({ hasText: "Relay parent graph" })).toContainText("1 run(s)");
   await expect(zones.locator("li").filter({ hasText: "Relay child graph" })).toContainText("1 run(s)");
+});
+
+test("wizard deletes one persistent variable, keeps its sibling, undoes and reloads the deletion", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-zones-tab]").click();
+  const zones = page.locator("[data-active-zones]");
+  await zones.locator("[data-zone-tile-create] summary").click();
+  await zones.locator("[data-zone-tile-create]").getByLabel("Tile name").fill("Variable tile");
+  await zones.locator("[data-zone-create-tile]").click();
+  await expect(zones.locator("[data-zone-tile] option").filter({ hasText: "Variable tile" })).toHaveCount(1);
+  await zones.locator("[data-zone-name]").fill("Variable eraser");
+  await zones.getByRole("button", { name: "Remove step 2" }).click();
+  for (const name of ["charge", "keep"]) {
+    await zones.locator('[data-zone-add="set"]').click();
+    const step = zones.locator("[data-zone-step]").last();
+    await step.getByLabel("Name", { exact: true }).fill(name);
+    await step.getByLabel("Variable scope").selectOption("tile");
+    await step.getByLabel("Value", { exact: true }).fill("9");
+  }
+  await zones.locator("[data-zone-save]").click();
+  await expect(zones.getByRole("alert")).toHaveCount(0);
+  await expect(zones.locator("li").filter({ hasText: "Variable eraser" })).toHaveCount(1);
+  await zones.getByLabel("Simulate method").selectOption("manual");
+  await zones.locator("[data-zone-run]").click();
+  await zones.locator("[data-zone-variables] summary").click();
+  await expect(zones.locator("[data-zone-variables] li")).toHaveText(["charge: 9", "keep: 9"]);
+
+  const charge = zones.locator("[data-zone-step]").nth(1);
+  await charge.getByLabel("Variable operation").selectOption("delete");
+  await expect(charge.getByLabel("Value", { exact: true })).toHaveCount(0);
+  // Switching back seeds a valid numeric assignment; switching to Delete omits value again.
+  await charge.getByLabel("Variable operation").selectOption("assign");
+  await expect(charge.getByLabel("Value", { exact: true })).toHaveValue("0");
+  await charge.getByLabel("Variable operation").selectOption("delete");
+  await zones.locator("[data-zone-save]").click();
+  await expect(zones.getByRole("alert")).toHaveCount(0);
+  await zones.locator("li").filter({ hasText: "Variable eraser" }).getByRole("button", { name: "Edit" }).click();
+  await expect(charge.getByLabel("Variable operation")).toHaveValue("delete");
+  const before = await hostCall<number>(page, "seq");
+  await zones.locator("[data-zone-run]").click();
+  await expect.poll(() => hostCall<number>(page, "seq")).toBe(before + 1);
+  await expect(zones.locator("[data-zone-variables] li")).toHaveText(["keep: 9"]);
+  await page.getByRole("button", { name: /Undo \(Ctrl\+Z\)/ }).click();
+  await expect(zones.locator("[data-zone-variables] li")).toHaveText(["charge: 9", "keep: 9"]);
+  await zones.locator("[data-zone-run]").click();
+  await expect(zones.locator("[data-zone-variables] li")).toHaveText(["keep: 9"]);
+  await hostCall<number>(page, "drainOps");
+  await page.reload();
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-zones-tab]").click();
+  await zones.locator("li").filter({ hasText: "Variable eraser" }).getByRole("button", { name: "Edit" }).click();
+  await expect(charge.getByLabel("Variable operation")).toHaveValue("delete");
+  await expect(charge.getByLabel("Value", { exact: true })).toHaveCount(0);
+  await zones.locator("[data-zone-variables] summary").click();
+  await expect(zones.locator("[data-zone-variables] li")).toHaveText(["keep: 9"]);
+  // Repeated deletion of an absent name still commits only the normal graph fire.
+  const reloadedSeq = await hostCall<number>(page, "seq");
+  await zones.locator("[data-zone-run]").click();
+  await expect.poll(() => hostCall<number>(page, "seq")).toBe(reloadedSeq + 1);
+  await expect(zones.locator("[data-zone-variables] li")).toHaveText(["keep: 9"]);
 });

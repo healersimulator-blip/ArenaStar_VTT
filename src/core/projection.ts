@@ -30,6 +30,7 @@ import {
   type MacroDocument,
   type MessageDocument,
   type NoteDocument,
+  type RegionDocument,
   type SceneDocument,
   type TileDocument,
   type TokenDocument,
@@ -148,7 +149,8 @@ export function docVisibleTo(
   // a GM's library, not table state. A player never receives one (an assistant does).
   if (doc.type === "macro" && (doc as MacroDocument).kind === "fxPreset") return false;
   if ((doc.type === "token" && (doc as TokenDocument).hidden ||
-       doc.type === "tile" && (doc as TileDocument).hidden) && parent?.type === "scene") {
+       doc.type === "tile" && (doc as TileDocument).hidden ||
+       doc.type === "region" && (doc as RegionDocument).hidden) && parent?.type === "scene") {
     return getEffectiveOwnership(user, doc, parent) >= OWNERSHIP_LEVELS.OWNER;
   }
   if (doc.type === "note") {
@@ -170,7 +172,7 @@ export function docVisibleTo(
  */
 export function visibilityFields(doc: BaseDocument): readonly string[] {
   return doc.type === "note" ? ["ownership", "visible"]
-    : doc.type === "token" || doc.type === "tile" ? ["ownership", "hidden"]
+    : doc.type === "token" || doc.type === "tile" || doc.type === "region" ? ["ownership", "hidden"]
       : doc.type === "macro" ? ["ownership", "kind", "sequence", "summon"] : ["ownership"];
 }
 
@@ -202,6 +204,7 @@ function projectSceneCells(scene: SceneDocument): CellDocument[] | null {
  * IDs, invisible parent IDs and the GM's source-scene ID are never needed by
  * player rendering; only the authoritative host retains attachment metadata. */
 const PREFAB_PARTS = ["tokens", "tiles", "walls", "lights", "sounds", "drawings", "templates", "notes"] as const;
+const SCENE_PROJECTED_PARTS = [...PREFAB_PARTS, "regions"] as const;
 function stripPrefabMarker<T extends BaseDocument>(doc: T): T {
   if (doc.flags?.prefab === undefined && doc.flags?.summon === undefined &&
       doc.flags?.summonStatus === undefined) return doc;
@@ -251,7 +254,7 @@ function projectPrefabDiff(op: Extract<Op, { kind: "update" }>): Op | null {
 function projectSceneEmbedUpdate(
   user: PermissionUser, op: Extract<Op, { kind: "update" }>, scene: SceneDocument,
 ): Op {
-  const touched = PREFAB_PARTS.filter((part) => Object.keys(op.diff).some((key) => {
+  const touched = SCENE_PROJECTED_PARTS.filter((part) => Object.keys(op.diff).some((key) => {
     const path = key.startsWith("-=") ? key.slice(2) : key;
     return path === part || path.startsWith(`${part}.`);
   }));
@@ -269,13 +272,15 @@ function projectSceneEmbedUpdate(
 function projectScene(user: PermissionUser, scene: SceneDocument): SceneDocument {
   const tokens = scene.tokens.filter((t) => tokenVisible(user, t, scene)).map(stripPrefabMarker);
   const tiles = scene.tiles.filter((t) => docVisibleTo(user, t, scene)).map(stripPrefabMarker);
+  const regions = scene.regions?.filter((region) => docVisibleTo(user, region, scene)).map(stripPrefabMarker);
   const notes = scene.notes.filter((n) => docVisibleTo(user, n, scene)).map(stripPrefabMarker);
   const cells = projectSceneCells(scene);
   const markers = PREFAB_PARTS.some((coll) => scene[coll].some((doc) => doc.flags?.prefab !== undefined || doc.flags?.summon !== undefined ||
     doc.flags?.summonStatus !== undefined));
   if (tokens.length === scene.tokens.length && tiles.length === scene.tiles.length &&
+      regions?.length === scene.regions?.length &&
       notes.length === scene.notes.length && !cells && !markers) return scene;
-  return { ...scene, tokens, tiles, notes,
+  return { ...scene, tokens, tiles, ...(regions ? { regions } : {}), notes,
     ...(markers ? { walls: scene.walls.map(stripPrefabMarker), lights: scene.lights.map(stripPrefabMarker),
       sounds: scene.sounds.map(stripPrefabMarker), drawings: scene.drawings.map(stripPrefabMarker),
       templates: scene.templates.map(stripPrefabMarker) } : {}),
@@ -496,7 +501,7 @@ function updateVisible(
     // Making a pin hidden again is a delete for the player (it leaves their replica).
     return { kind: "delete", ref: op.ref };
   }
-  if (op.ref.coll === "tiles" && !docVisibleTo(user, doc, parent)) return null;
+  if ((op.ref.coll === "tiles" || op.ref.coll === "regions") && !docVisibleTo(user, doc, parent)) return null;
   if (getEffectiveOwnership(user, doc, parent) < OWNERSHIP_LEVELS.LIMITED) return null;
   if (op.ref.coll === "scenes") return projectSceneEmbedUpdate(user, op, doc as SceneDocument);
   if (op.ref.coll === "macros" && (["script", "summon"].includes((doc as MacroDocument).kind) ||

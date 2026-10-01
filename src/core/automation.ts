@@ -7,10 +7,21 @@
  * This is a bounded action registry foundation, not the full §5.4 inventory.
  */
 import type {
-  ActorDocument, AutomationDocument, BaseDocument, DocRef, Json, MessageDocument,
-  SceneDocument, NoteDocument, TileDocument, TokenDocument, WallDocument, WorldCollections,
+  ActorDocument, AssetManifest, AutomationDocument, BaseDocument, DocRef, Json, MessageDocument,
+  SceneDocument, SceneGrid, NoteDocument, TileDocument, TokenDocument, WallDocument, WorldCollections,
 } from "./documents";
+import { gameTimeAmountError, resolveGameTimeAmount, type GameTimeAmount } from "./gameTimeAmount";
+import { healthAmountError, resolveHealthAmount, type HealthAmount } from "./healthAmount";
+import { rotationAngleError, resolveRotationAngle, type RotationAngle } from "./rotationAngle";
+import { hexCorners, snapTokenCenter, type GridSpec } from "../canvas/grid";
+import { moveTableLocation, snapshotMoveDestination, moveDestinationPoint, type MoveDestinationSnapshot } from "./moveDestination";
+import { regionTriggerTile } from "./regionGeometry";
+import { MOVABLE_COLLECTIONS, applyMovePosition, moveGeometry, type MovePlaceable } from "./movePlaceable";
+import { movementWallBlocked, movementFootprintBlocked, movementSpeedDuration } from "./movementPolicy";
+import { moveCoordinatesError, resolveMoveCoordinates, type MoveCoordinates } from "./moveCoordinates";
 import { isDoorWall } from "./documents";
+import { tileTriggerAlphaContains, tileTriggerElevationError, tileTriggerPolygonContains, tileTriggerWorldPolygon } from "./tileTriggerZone";
+import { resolveTileImageIndex, tileImageSelectionError, type TileImageList } from "./tileImageSelection";
 import { drawFromTable, validateTable } from "./rollTable";
 import { applyDiff } from "./diff";
 import { DAY_SECONDS, MINUTE_SECONDS } from "./clock";
@@ -20,7 +31,7 @@ import type { PermissionUser } from "./ownership";
 import { getByTag, listTaggable, normalizeTags, tagMatcher, tagsOf, TAGGABLE_COLLECTIONS, validSceneTagRefs,
   type TagEdit, type TagMatchMode, type TagPattern, type TagSearchCollection } from "./tags";
 
-export type AutomationMethod = "enter" | "exit" | "stop" | "create" | "rotate" | "click" | "manual";
+export type AutomationMethod = "enter" | "exit" | "stop" | "elevation" | "create" | "rotate" | "click" | "manual";
 /** Explicitly bound event fields, never arbitrary code/field paths from a player request. */
 export type AutomationScriptBinding = "triggerToken" | "currentToken" | "method" | "user" | "scene" | "tile" | "count";
 export interface AutomationGates {
@@ -36,6 +47,7 @@ export type AutomationSelector =
   | { kind: "triggering" }
   | { kind: "inside" }
   | { kind: "tile" }
+  | { kind: "ids"; refs: DocRef[] }
   | { kind: "tag"; query: string | string[]; mode?: TagMatchMode; pattern?: TagPattern;
       caseSensitive?: boolean; contains?: boolean; collections?: TagSearchCollection[];
       includeRefs?: DocRef[]; excludeRefs?: DocRef[] };
@@ -112,28 +124,37 @@ export type AutomationStep =
       mode: "activate" | "deactivate" | "toggle" }
   /** Suppress later tiles for this movement source after a successful commit. */
   | { id: string; kind: "stopOthers" }
+  /** MATT Stop Token Movement: settle the triggering token at its swept enter/exit boundary. */
+  | { id: string; kind: "stopMovement"; snapToGrid?: boolean }
   /** Set Active Tiles Variable. Run variables last only for this invocation;
    * tile variables live in the private, undoable graph state across triggers.
-   * Numeric addition is bounded and uses zero for a previously unset name. */
-  | { id: string; kind: "set"; name: string; value: string | number | boolean;
-      scope?: "run" | "tile"; operation?: "assign" | "add";
+   * Numeric addition is bounded and uses zero for a previously unset name.
+   * Delete removes one exact key (missing is a no-op); it carries no value. */
+  | { id: string; kind: "set"; name: string; value?: string | number | boolean;
+      scope?: "run" | "tile"; operation?: "assign" | "add" | "delete";
       /** Optional same-scene MATT tile targeting. All graphs on each selected
        * tile receive the durable value; without a target, only this graph does. */
       target?: AutomationTileTarget }
-  /** MATT Game Time: a bounded fixed minute delta applied to the host-owned
+  /** MATT Game Time: a bounded fixed or dice/math minute delta applied to the host-owned
    * replicated world clock. Later Check Value steps see the staged change. */
-  | { id: string; kind: "gameTime"; minutes: number }
-  /** MATT Hurt / Heal: fixed, GM-authored whole HP points; positive heals,
+  | ({ id: string; kind: "gameTime" } & GameTimeAmount)
+  /** Scene-local appearance writes, separate from transient visual FX. */
+  | { id: string; kind: "sceneLighting"; mode: "set" | "add"; darkness: number; durationMs?: number }
+  | { id: string; kind: "sceneBackground"; image: string | null; targetSceneId?: string }
+  /** Static, owned image on the current tile collection; empty clears it. */
+  | { id: string; kind: "tileImage"; image: string; images?: never; selection?: never; index?: never; numbers?: never; formula?: never }
+  | ({ id: string; kind: "tileImage"; image?: never } & TileImageList)
+  /** MATT Hurt / Heal: fixed or dice/math GM-authored whole HP points; positive heals,
    * negative hurts. Current selection may come from Inside/Tagger filters. */
-  | { id: string; kind: "hurtHeal"; amount: number; targets: "triggering" | "current" }
-  /** MATT Move: host-authorized reposition of the targeted tokens to an
+  | ({ id: string; kind: "hurtHeal"; targets: "triggering" | "current" } & HealthAmount)
+  /** MATT Move: host-authorized set/add reposition of six movable scene placeable types to an
    * authored point on THIS scene. The committed move goes through the host's
    * normal movement-trigger dispatch, so a destination crossing a tile can
    * legitimately fire that tile; Stop Additional Tiles Triggering suppresses
    * it. A token deleted earlier in the same plan is never rewritten. */
-  | { id: string; kind: "move"; x: number; y: number; targets: "triggering" | "current" }
-  /** MATT Rotation: set an absolute token rotation; degrees normalize to 0–360. */
-  | { id: string; kind: "rotate"; angle: number; targets: "triggering" | "current" }
+  | ({ id: string; kind: "move"; destination?: { coll: "tokens" | "tiles"; id: string }; destinationTag?: Extract<AutomationSelector, {kind: "tag"}>; destinationResult?: "rollTable"; destinationOriginal?: true; destinationChoice?: "unique" | "random"; destinationPosition?: "center" | "random" | "entry"; snapToGrid?: boolean; wallCollision?: "ignore" | "block" | "footprint"; durationMs?: number; speed?: number; triggerTiles?: boolean; targets: "triggering" | "current" } & MoveCoordinates)
+  /** MATT Rotation: set/add token or tile rotation; degrees normalize to [0, 360). */
+  | ({ id: string; kind: "rotate"; durationMs?: number; mode?: "set" | "add"; targets: "triggering" | "current" } & RotationAngle)
   /** MATT Delete Entities: remove the current collection's scene placeables
    * (token, tile, wall, drawing, map pin). Deleting a token never touches its
    * linked actor; the collection is empty afterwards. */
@@ -168,6 +189,9 @@ export type AutomationStep =
 export interface AutomationDefinition {
   version: 1;
   sceneId: string;
+  /** Source collection; omission preserves legacy tile-anchored graphs. */
+  sourceKind?: "tile" | "region";
+  /** ID of the selected tile or first-class scene region. */
   tileId: string;
   methods: AutomationMethod[];
   gates?: AutomationGates;
@@ -194,9 +218,17 @@ export interface AutomationEvent {
   token?: TokenDocument;
   /** Host-observed vector on committed token movement, never client-supplied. */
   direction?: { x?: "left" | "right"; y?: "up" | "down" };
+  /** Private contact snapshot from this tile's committed enter event; not inherited by children. */
+  movementEntry?: { tileId: string; tokenId: string; u: number; v: number };
+  /** Host-observed intended endpoint for this triggering token's committed movement. */
+  movementOriginal?: { tokenId: string; x: number; y: number };
+  /** Host-observed swept boundary contact; never sent by a client. */
+  movementCrossing?: { tileId: string; tokenId: string; method: "enter" | "exit"; fraction: number; x: number; y: number };
   caller: PermissionUser;
   at: number;
   rng: () => number;
+  /** Host-owned manifest check, re-read at execution, never a player callback. */
+  imageAssetError?: (hash: string) => string | null;
   /** System-package HP arithmetic. The graph remains pure and refuses the
    * action when the host has no adapter or an actor has unusable HP. */
   hurtHeal?: (actor: ActorDocument, amount: number) =>
@@ -228,13 +260,17 @@ export interface AutomationPlan {
   state: AutomationState;
   /** Suppress later tiles for this moving token after a successful host commit. */
   stopOthers: boolean;
+  /** Private per-commit policy, never a document flag or caller-controlled op field. */
+  suppressedMovement: string[];
+  /** Tokens for which a host-observed Stop Token Movement step actually ran, even if later actions resume them. */
+  stoppedMovement: string[];
 }
 export type AutomationOutcome =
   | { ok: true; plan: AutomationPlan }
   | { ok: false; error: string; trace: string[] }
   | { ok: true; skipped: string; trace: string[] };
 
-const METHODS: readonly AutomationMethod[] = ["enter", "exit", "stop", "create", "rotate", "click", "manual"];
+const METHODS: readonly AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "rotate", "click", "manual"];
 const SCRIPT_BINDINGS: readonly AutomationScriptBinding[] = ["triggerToken", "currentToken", "method", "user", "scene", "tile", "count"];
 const IDENT = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
 const INPUT_NAME = /^[a-zA-Z][a-zA-Z0-9_]{0,31}$/;
@@ -250,6 +286,18 @@ const validVariable = (value: unknown): value is string | number | boolean =>
   typeof value === "number" && finite(value, -VARIABLE_NUMBER_LIMIT, VARIABLE_NUMBER_LIMIT);
 const keys = (v: Record<string, unknown>, allowed: readonly string[]) => Object.keys(v).every((k) => allowed.includes(k));
 const nonEmptyId = (v: unknown) => typeof v === "string" && v.length > 0 && v.length <= 128;
+
+/** These world-image actions intentionally accept no remote URLs or arbitrary MIME types.
+ * Publishing to a scene/tile must not smuggle GM-only imported FX media into a public ref.
+ * Permission to redistribute the world remains a separate export-time policy. */
+export function automationImageError(hash: string, manifest: AssetManifest): string | null {
+  if (!/^[a-f0-9]{64}$/.test(hash)) return "image must be an owned asset hash";
+  const entry = Object.hasOwn(manifest, hash) ? manifest[hash] : undefined;
+  if (!entry || !["image/png", "image/jpeg", "image/webp", "image/gif", "image/avif"].includes(entry.mime))
+    return "image asset is missing or its format is unsupported";
+  if (entry.visibility === "gm") return "image is GM-only; approve player sharing before using it in a world-image action";
+  return null;
+}
 
 /** Filter by Attributes is a *data* query, not an expression evaluator. The
  * allowlisted roots prevent reading ownership, media, hidden document internals,
@@ -283,9 +331,27 @@ function validInventoryName(value: unknown): value is string {
   return core.length > 0 && !core.includes("*");
 }
 
+export const PINNABLE_COLLECTIONS = ["tokens", "tiles", "walls", "drawings", "notes", "lights", "sounds", "templates"] as const;
+/** Pinned selection is exact: missing references reject, never silently shrink selection. */
+export function pinnedSelectorError(scene: SceneDocument, selector: AutomationSelector): string | null {
+  if (selector.kind !== "ids") return null;
+  for (const ref of selector.refs) {
+    const coll = ref.coll as typeof PINNABLE_COLLECTIONS[number];
+    if (!PINNABLE_COLLECTIONS.includes(coll) || ref.parent?.coll !== "scenes" || ref.parent.id !== scene._id ||
+        !scene[coll].some((doc) => doc._id === ref.id))
+      return `Pinned entity is unavailable: ${ref.coll}/${ref.id}`;
+  }
+  return null;
+}
+
 /** Shared publish-time selector check for collection edits and Tagger tile targets. */
 function selectorError(s: unknown, sceneId: string, tileOnly = false): string | null {
   if (!isObject(s)) return "invalid selector";
+  if (s.kind === "ids") {
+    return tileOnly || !keys(s, ["kind", "refs"]) || !Array.isArray(s.refs) || s.refs.length < 1 ||
+      !validSceneTagRefs(s.refs, sceneId) || s.refs.some((ref) => !PINNABLE_COLLECTIONS.includes(ref.coll as typeof PINNABLE_COLLECTIONS[number]))
+      ? "Pinned entities need 1–100 distinct same-scene placeable references" : null;
+  }
   if (s.kind !== "tag") {
     if (tileOnly || !["triggering", "inside", "tile"].includes(String(s.kind)) || !keys(s, ["kind"]))
       return "unknown selector";
@@ -335,7 +401,8 @@ export function validateAutomation(value: unknown): { ok: true; definition: Auto
   const bad = (error: string) => ({ ok: false as const, error });
   if (!isObject(value) || value.version !== 1 || !nonEmptyId(value.sceneId) || !nonEmptyId(value.tileId) ||
       !Array.isArray(value.methods) || !Array.isArray(value.steps) || value.steps.length < 1 || value.steps.length > 2048 ||
-      !keys(value, ["version", "sceneId", "tileId", "methods", "gates", "steps"])) return bad("automation needs version 1, scene/tile, methods and 1–2048 steps");
+      !keys(value, ["version", "sceneId", "sourceKind", "tileId", "methods", "gates", "steps"]) ||
+      (value.sourceKind !== undefined && value.sourceKind !== "tile" && value.sourceKind !== "region")) return bad("automation needs version 1, scene/source, methods and 1–2048 steps");
   if (value.methods.length < 1 || value.methods.length > METHODS.length ||
       value.methods.some((m: unknown) => !METHODS.includes(m as AutomationMethod)) ||
       new Set(value.methods).size !== value.methods.length) return bad("unknown/duplicate trigger method");
@@ -417,6 +484,10 @@ export function validateAutomation(value: unknown): { ok: true; definition: Auto
       case "batchFlush":
       case "stopOthers":
         if (!keys(step, common)) return bad(`invalid ${String(step.kind)} action`);
+        break;
+      case "stopMovement":
+        if (!keys(step, [...common, "snapToGrid"]) || (step.snapToGrid !== undefined && typeof step.snapToGrid !== "boolean"))
+          return bad("Stop Token Movement accepts only the optional Snap to Grid flag");
         break;
       case "collection": {
         if (!keys(step, [...common, "mode", "selector"]) ||
@@ -510,11 +581,12 @@ export function validateAutomation(value: unknown): { ok: true; definition: Auto
         if (!keys(step, [...common, "name", "value", "scope", "operation", "target"]) ||
             typeof step.name !== "string" || !IDENT.test(step.name) ||
             (step.scope !== undefined && !["run", "tile"].includes(String(step.scope))) ||
-            (step.operation !== undefined && !["assign", "add"].includes(String(step.operation))) ||
+            (step.operation !== undefined && !["assign", "add", "delete"].includes(String(step.operation))) ||
             (step.target !== undefined && step.scope !== "tile") ||
-            (step.scope === "tile" && RESERVED_VARIABLES.has(step.name)) ||
-            (step.scope === "tile" && !validVariable(step.value)) ||
-            (step.scope !== "tile" && (!["string", "number", "boolean"].includes(typeof step.value) ||
+            ((step.scope === "tile" || step.operation === "delete") && RESERVED_VARIABLES.has(step.name)) ||
+            (step.operation === "delete" && Object.hasOwn(step, "value")) ||
+            (step.operation !== "delete" && step.scope === "tile" && !validVariable(step.value)) ||
+            (step.operation !== "delete" && step.scope !== "tile" && (!["string", "number", "boolean"].includes(typeof step.value) ||
               typeof step.value === "string" && step.value.length > 256 ||
               typeof step.value === "number" && !Number.isFinite(step.value))) ||
             (step.operation === "add" && typeof step.value !== "number"))
@@ -524,17 +596,20 @@ export function validateAutomation(value: unknown): { ok: true; definition: Auto
           if (error) return bad(error);
         }
         break;
-      case "gameTime":
-        if (!keys(step, [...common, "minutes"]) || !Number.isSafeInteger(step.minutes) ||
-            !finite(step.minutes, -525_600, 525_600))
-          return bad("Game Time requires a fixed whole-minute change within ±525600 minutes");
+      case "gameTime": {
+        if (!keys(step, [...common, "minutes", "formula"])) return bad("invalid Game Time fields");
+        const invalid = gameTimeAmountError(step);
+        if (invalid) return bad(invalid);
         break;
-      case "hurtHeal":
-        if (!keys(step, [...common, "amount", "targets"]) || !Number.isSafeInteger(step.amount) ||
-            !finite(step.amount, -100_000, 100_000) || step.amount === 0 ||
+      }
+      case "hurtHeal": {
+        if (!keys(step, [...common, "amount", "formula", "targets"]) ||
             !["triggering", "current"].includes(String(step.targets)))
-          return bad("Hurt / Heal needs a fixed nonzero whole HP change within ±100000 and a token target");
+          return bad("Hurt / Heal needs a fixed HP change or formula and a token target");
+        const invalid = healthAmountError(step);
+        if (invalid) return bad(`Hurt / Heal: ${invalid}`);
         break;
+      }
       case "random":
         if (!keys(step, [...common, "name", "min", "max"]) || typeof step.name !== "string" || !IDENT.test(step.name) ||
             !Number.isSafeInteger(step.min) || !Number.isSafeInteger(step.max) ||
@@ -554,18 +629,82 @@ export function validateAutomation(value: unknown): { ok: true; definition: Auto
         if (!keys(step, [...common, "mode"]) || !["open", "close", "lock", "unlock", "toggle"].includes(String(step.mode)))
           return bad("invalid door action");
         break;
+      case "sceneLighting":
+        if (!keys(step, [...common, "mode", "darkness", "durationMs"]) || !["set", "add"].includes(String(step.mode)) ||
+            !finite(step.darkness, step.mode === "add" ? -1 : 0, 1))
+          return bad("Scene Lighting needs set/add and a bounded darkness value (set 0–1, add −1–1)");
+        if (step.durationMs !== undefined && !finite(step.durationMs, 0, 60_000))
+          return bad("Scene Lighting duration must be 0–60000 ms");
+        break;
+      case "tileImage":
+        if (step.images !== undefined) {
+          if (!keys(step, [...common, "images", "selection", "index", "numbers", "formula"]) || !Array.isArray(step.images) ||
+              step.images.length < 1 || step.images.length > 32 ||
+              step.images.some((image) => typeof image !== "string" || !/^[a-f0-9]{64}$/.test(image)) ||
+              new Set(step.images).size !== step.images.length)
+            return bad("Tile image list needs 1–32 distinct owned images");
+          const selectionError = tileImageSelectionError(step, step.images.length);
+          if (selectionError) return bad(selectionError);
+          break;
+        }
+        if (!keys(step, [...common, "image"]) || !(step.image === "" ||
+            typeof step.image === "string" && /^[a-f0-9]{64}$/.test(step.image)))
+          return bad("Tile image needs an owned image hash, explicit clear, or a valid image list");
+        break;
+      case "sceneBackground":
+        if (!keys(step, [...common, "image", "targetSceneId"]) ||
+            (step.targetSceneId !== undefined && !nonEmptyId(step.targetSceneId)) || !(typeof step.image === "string" && /^[a-f0-9]{64}$/.test(step.image) ||
+            step.image === null))
+          return bad("World image actions need an owned image hash, or an explicit clear");
+        break;
       case "move":
-        if (!keys(step, [...common, "x", "y", "targets"]) ||
-            !finite(step.x, 0, 1e9) || !finite(step.y, 0, 1e9) ||
+        if (step.destinationResult !== undefined && (step.destinationResult !== "rollTable" || step.destination !== undefined || step.destinationTag !== undefined || step.destinationOriginal !== undefined))
+          return bad("Move result destination must be the last Roll Table result, without another destination");
+        if (step.destinationOriginal !== undefined && (step.destinationOriginal !== true || step.destination !== undefined || step.destinationTag !== undefined || step.destinationResult !== undefined))
+          return bad("Move Original Destination must be the only destination source");
+        if (step.destinationChoice !== undefined && (!step.destinationTag || !["unique", "random"].includes(String(step.destinationChoice))))
+          return bad("Move destination choice requires a tag destination and unique/random policy");
+        if (step.destinationPosition !== undefined && (!(step.destination || step.destinationTag) || !["center", "random", "entry"].includes(String(step.destinationPosition))))
+          return bad("Move destination position requires an entity/tag destination and center/random/entry policy");
+        if (step.destinationTag !== undefined) {
+          if (!isObject(step.destinationTag) || step.destinationTag.kind !== "tag" || selectorError(step.destinationTag, value.sceneId as string))
+            return bad("Move tag destination needs a valid scene-local tag selector");
+          const target = step.destinationTag as Extract<AutomationSelector, {kind: "tag"}>;
+          if ((target.collections !== undefined && (target.collections.length === 0 ||
+                target.collections.some((coll) => coll !== "tokens" && coll !== "tiles"))) ||
+              [...(target.includeRefs ?? []), ...(target.excludeRefs ?? [])].some((ref) => ref.coll !== "tokens" && ref.coll !== "tiles") ||
+              step.destination !== undefined)
+            return bad("Move tag destination needs a same-scene token/tile tag selector, not an entity ID as well");
+        }
+        if ((step.destination !== undefined || step.destinationTag !== undefined || step.destinationResult !== undefined || step.destinationOriginal !== undefined) &&
+            (step.mode !== undefined || step.xMode !== undefined || step.yMode !== undefined))
+          return bad("Move entity/tag/result destinations use offset-only coordinates");
+        if (step.destination !== undefined && (!isObject(step.destination) ||
+            !keys(step.destination, ["coll", "id"]) || !["tokens", "tiles"].includes(String(step.destination.coll)) ||
+            !nonEmptyId(step.destination.id) || step.mode !== undefined || step.xMode !== undefined || step.yMode !== undefined))
+          return bad("Move entity destination needs a local token/tile ID and offset-only coordinates");
+        if (step.speed !== undefined && !finite(step.speed, 0.01, 10000)) return bad("Move speed must be 0.01–10000 grid sizes per second");
+        if (step.triggerTiles !== undefined && typeof step.triggerTiles !== "boolean") return bad("Move triggerTiles must be boolean");
+        if (step.wallCollision !== undefined && !["ignore", "block", "footprint"].includes(String(step.wallCollision))) return bad("Move wall collision must be ignore/block/footprint");
+        if (step.durationMs !== undefined && !finite(step.durationMs, 0, 60000)) return bad("Move duration must be 0–60000 milliseconds");
+        if (step.snapToGrid !== undefined && typeof step.snapToGrid !== "boolean") return bad("Move snapToGrid must be boolean");
+        if (!keys(step, [...common, "x", "y", "xFormula", "yFormula", "mode", "xMode", "yMode", "snapToGrid", "wallCollision", "durationMs", "speed", "triggerTiles", "destination", "destinationTag", "destinationResult", "destinationOriginal", "destinationChoice", "destinationPosition", "targets"]) ||
+            (step.mode !== undefined && !["set", "add"].includes(String(step.mode))) ||
+            moveCoordinatesError(step.destination || step.destinationTag || step.destinationResult || step.destinationOriginal ? { ...step, mode: "add" } : step) !== null ||
             !["triggering", "current"].includes(String(step.targets)))
           return bad("Move needs finite scene points and triggering/current targets");
         break;
-      case "rotate":
-        if (!keys(step, [...common, "angle", "targets"]) ||
-            !finite(step.angle, -1e6, 1e6) ||
+      case "rotate": {
+        if (!keys(step, [...common, "angle", "formula", "mode", "targets", "durationMs"]) ||
+            (step.mode !== undefined && !["set", "add"].includes(String(step.mode))) ||
             !["triggering", "current"].includes(String(step.targets)))
-          return bad("Rotation needs a bounded angle in degrees and triggering/current targets");
+          return bad("Rotation needs set/add mode and triggering/current targets");
+        if (step.durationMs !== undefined && !finite(step.durationMs, 0, 60_000))
+          return bad("Rotation duration must be 0–60000 ms");
+        const invalid = rotationAngleError(step);
+        if (invalid) return bad(invalid);
         break;
+      }
       case "delete":
         if (!keys(step, common)) return bad("invalid delete action");
         break;
@@ -659,53 +798,200 @@ export function validateAutomationState(value: unknown): boolean {
     Number.isSafeInteger(item.count) && finite(item.count, 0, 1_000_000) && finite(item.lastAt, 0, 9e15));
 }
 
-/** A pointer is inside this tile's rotated rectangle. Shared by client picking and host verification. */
+/** Pointer hit test for the rotated rectangle, polygon, or image-alpha tile-local mask. */
 export function tileContainsPoint(tile: TileDocument, point: { x: number; y: number }): boolean {
-  if (![tile.x, tile.y, tile.width, tile.height, tile.rotation ?? 0, point.x, point.y].every(Number.isFinite) ||
-      tile.width <= 0 || tile.height <= 0) return false;
-  const cx = tile.x + tile.width / 2, cy = tile.y + tile.height / 2;
-  const angle = -((tile.rotation ?? 0) * Math.PI / 180);
-  const dx = point.x - cx, dy = point.y - cy;
-  const x = dx * Math.cos(angle) - dy * Math.sin(angle);
-  const y = dx * Math.sin(angle) + dy * Math.cos(angle);
-  return Math.abs(x) <= tile.width / 2 && Math.abs(y) <= tile.height / 2;
+  if (tile.triggerZone?.kind === "alpha") return tileTriggerAlphaContains(tile, point);
+  const polygon = tileTriggerWorldPolygon(tile);
+  return polygon !== null && tileTriggerPolygonContains(polygon, point);
 }
 
-/** Ray/rotated-rectangle segment intersection. Return ordered entry/exit, including a fast pass-through. */
-export function sweptTileEvents(
-  tile: TileDocument, before: TokenDocument | undefined, after: TokenDocument | undefined,
-): Array<{ method: AutomationMethod; fraction: number }> {
-  if (!after) return [];
-  if (![tile.x, tile.y, tile.width, tile.height, tile.rotation ?? 0].every(Number.isFinite) || tile.width <= 0 || tile.height <= 0) return [];
-  const cx = tile.x + tile.width / 2, cy = tile.y + tile.height / 2;
-  const angle = -((tile.rotation ?? 0) * Math.PI / 180);
-  const cos = Math.cos(angle), sin = Math.sin(angle);
-  const local = (token: TokenDocument) => {
-    // TokenDocument positions denote the center, not the upper-left corner.
-    const x = token.x - cx, y = token.y - cy;
-    return { x: x * cos - y * sin, y: x * sin + y * cos };
-  };
-  const end = local(after), start = before ? local(before) : end;
-  const xmin = -tile.width / 2, xmax = tile.width / 2, ymin = -tile.height / 2, ymax = tile.height / 2;
-  const inside = (p: { x: number; y: number }) => p.x >= xmin && p.x <= xmax && p.y >= ymin && p.y <= ymax;
-  if (!before) return inside(end) ? [{ method: "create", fraction: 1 }] : [];
-  const moved = start.x !== end.x || start.y !== end.y;
-  if (!moved) return before.rotation !== after.rotation && inside(end) ? [{ method: "rotate", fraction: 1 }] : [];
-  let lo = 0, hi = 1;
-  const dx = end.x - start.x, dy = end.y - start.y;
-  const bounds: Array<[number, number]> = [[-dx, start.x - xmin], [dx, xmax - start.x], [-dy, start.y - ymin], [dy, ymax - start.y]];
-  for (const [p, q] of bounds) {
-    if (p === 0) { if (q < 0) return []; continue; }
-    const t = q / p;
-    if (p < 0) lo = Math.max(lo, t);
-    else hi = Math.min(hi, t);
+/** Convert opaque row runs into convex tile-local strips for the common continuous SAT solver. */
+function alphaRunTiles(tile: TileDocument): TileDocument[] {
+  const mask = tile.triggerZone;
+  if (!mask || mask.kind !== "alpha") return [];
+  const parts: TileDocument[] = [];
+  for (let y = 0; y < mask.height; y++) for (const [start, end] of mask.rows[y] ?? []) {
+    const x0 = start / mask.width, x1 = end / mask.width;
+    const y0 = y / mask.height, y1 = (y + 1) / mask.height;
+    parts.push({ ...tile, triggerZone: { kind: "polygon", points: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]] } });
   }
-  if (lo > hi) return [];
-  const from = inside(start), to = inside(end);
+  return parts;
+}
+
+/**
+ * Sweep through the union of alpha-mask runs, merging per-strip intervals so a
+ * disconnected image produces events only when the footprint enters/exits the union.
+ */
+function sweptAlphaTileEvents(tile: TileDocument, before: TokenDocument | undefined,
+  after: TokenDocument | undefined, grid?: SceneGrid): Array<{ method: AutomationMethod; fraction: number }> {
+  const parts = alphaRunTiles(tile);
+  if (!parts.length || !after) return [];
+  const intervals: Array<{ start: number; end: number }> = [];
+  let startsInside = false, endsInside = false;
+  for (const part of parts) {
+    const events = sweptTileEvents(part, before, after, grid);
+    if (!before) {
+      if (events.some(({ method }) => method === "create")) return [{ method: "create", fraction: 1 }];
+      continue;
+    }
+    if (events.length === 0) continue;
+    const enter = events.find(({ method }) => method === "enter");
+    const exit = events.find(({ method }) => method === "exit");
+    const stop = events.some(({ method }) => method === "stop");
+    const start = enter?.fraction ?? 0;
+    const end = exit?.fraction ?? 1;
+    if (!enter && (exit || stop)) startsInside = true;
+    if (stop) endsInside = true;
+    if (end > start + 1e-9) intervals.push({ start, end });
+  }
+  if (!before) return [];
+  const moved = before.x !== after.x || before.y !== after.y;
+  if (!moved) return before.rotation !== after.rotation && endsInside ? [{ method: "rotate", fraction: 1 }] : [];
+  intervals.sort((a, b) => a.start - b.start || a.end - b.end);
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const interval of intervals) {
+    const last = merged.at(-1);
+    if (last && interval.start <= last.end + 1e-9) last.end = Math.max(last.end, interval.end);
+    else merged.push({ ...interval });
+  }
   const events: Array<{ method: AutomationMethod; fraction: number }> = [];
-  if (!from) events.push({ method: "enter", fraction: lo });
-  if (!to) events.push({ method: "exit", fraction: hi });
-  if (to) events.push({ method: "stop", fraction: 1 });
+  for (const interval of merged) {
+    if (interval.start > 1e-9 || !startsInside && interval.start === 0)
+      events.push({ method: "enter", fraction: interval.start });
+    if (interval.end < 1 - 1e-9 || !endsInside && interval.end === 1)
+      events.push({ method: "exit", fraction: interval.end });
+  }
+  if (endsInside) events.push({ method: "stop", fraction: 1 });
+  return events;
+}
+
+/** Continuous swept-token intersection against a rotated rectangle or convex tile-local zone. */
+export function sweptTileEvents(
+  tile: TileDocument, before: TokenDocument | undefined, after: TokenDocument | undefined, grid?: SceneGrid,
+): Array<{ method: AutomationMethod; fraction: number }> {
+  if (!after || ![tile.x, tile.y, tile.width, tile.height, tile.rotation ?? 0].every(Number.isFinite) ||
+      tile.width <= 0 || tile.height <= 0 || !Number.isFinite(after.x) || !Number.isFinite(after.y) ||
+      (after.elevation !== undefined && !Number.isFinite(after.elevation)) ||
+      tileTriggerElevationError(tile.triggerElevation) !== null ||
+      (before !== undefined && (!Number.isFinite(before.x) || !Number.isFinite(before.y) ||
+        (before.elevation !== undefined && !Number.isFinite(before.elevation))))) return [];
+  if (tile.triggerZone?.kind === "alpha") return sweptAlphaTileEvents(tile, before, after, grid);
+  const polygon = tileTriggerWorldPolygon(tile);
+  if (!polygon || polygon.length < 3) return [];
+  const tileCenter = { x: tile.x + tile.width / 2, y: tile.y + tile.height / 2 };
+  type Axis = { x: number; y: number };
+  const tileAxes: Axis[] = polygon.map((point, i) => {
+    const next = polygon[(i + 1) % polygon.length] as { x: number; y: number };
+    const dx = next.x - point.x, dy = next.y - point.y;
+    const length = Math.hypot(dx, dy) || 1;
+    return { x: -dy / length, y: dx / length };
+  });
+  type TokenGeometry = { axes: Axis[]; offsets: Axis[]; radius: number };
+  const isHex = grid?.type === "hex" && Number.isFinite(grid.size) && grid.size > 0 &&
+    ["oddQ", "evenQ", "oddR", "evenR"].includes(grid.hexLayout);
+  const geometry = (token: TokenDocument): TokenGeometry => {
+    const halfWidth = Number.isFinite(token.width) && token.width > 0 ? token.width / 2 : 0;
+    const halfHeight = Number.isFinite(token.height) && token.height > 0 ? token.height / 2 : 0;
+    const rotation = Number.isFinite(token.rotation) ? token.rotation * Math.PI / 180 : 0;
+    const offsets: Axis[] = [];
+    const axes: Axis[] = [];
+    if (isHex) {
+      // Grid occupancy is a regular hex inscribed into the square token bounds,
+      // not the full rectangular artwork. Use the same layout orientation as
+      // the canvas grid renderer, including odd/even row and column layouts.
+      const corners = hexCorners({ type: "hex", size: Math.min(halfWidth, halfHeight), layout: grid.hexLayout },
+        { x: 0, y: 0 });
+      offsets.push(...corners);
+      for (let i = 0; i < 3; i++) {
+        const a = corners[i] as Axis, b = corners[(i + 1) % corners.length] as Axis;
+        const dx = b.x - a.x, dy = b.y - a.y, length = Math.hypot(dx, dy) || 1;
+        axes.push({ x: -dy / length, y: dx / length });
+      }
+      // Hex-grid token occupancy follows its grid orientation, not artwork rotation.
+    } else {
+      const cosine = Math.cos(rotation), sine = Math.sin(rotation);
+      const xAxis = { x: cosine, y: sine }, yAxis = { x: -sine, y: cosine };
+      axes.push(xAxis, yAxis);
+      for (const [x, y] of [[-halfWidth, -halfHeight], [halfWidth, -halfHeight],
+        [halfWidth, halfHeight], [-halfWidth, halfHeight]] as const)
+        offsets.push({ x: x * cosine - y * sine, y: x * sine + y * cosine });
+    }
+    if (axes.length === 0) axes.push({ x: 1, y: 0 }, { x: 0, y: 1 });
+    return { axes, offsets, radius: Math.max(0, ...offsets.map((point) => Math.hypot(point.x, point.y))) };
+  };
+  const afterGeometry = geometry(after);
+  const beforeGeometry = before ? geometry(before) : afterGeometry;
+  // A movement normally preserves footprint. If one Op also resizes/rotates the token,
+  // use the enclosing circle for the swept portion so a changing footprint cannot tunnel.
+  const footprintChanged = !!before && (before.width !== after.width || before.height !== after.height ||
+    (!isHex && before.rotation !== after.rotation));
+  const sweptRadius = footprintChanged ? Math.max(beforeGeometry.radius, afterGeometry.radius) : undefined;
+  const axes = [...tileAxes, ...afterGeometry.axes];
+  const projectionRadius = (shape: TokenGeometry, axis: Axis) =>
+    Math.max(0, ...shape.offsets.map((point) => Math.abs(point.x * axis.x + point.y * axis.y)));
+  const tileRange = (axis: Axis) => {
+    const projections = polygon.map((point) => (point.x - tileCenter.x) * axis.x + (point.y - tileCenter.y) * axis.y);
+    return { min: Math.min(...projections), max: Math.max(...projections) };
+  };
+  const footprintRadius = (axis: Axis) => sweptRadius ?? projectionRadius(afterGeometry, axis);
+  const elevationInterval = (from: number, to: number): [number, number] | null => {
+    const range = tile.triggerElevation;
+    if (!range) return [0, 1];
+    if (from === to) return from >= range.min && from <= range.max ? [0, 1] : null;
+    const a = (range.min - from) / (to - from), b = (range.max - from) / (to - from);
+    const lo = Math.max(0, Math.min(a, b)), hi = Math.min(1, Math.max(a, b));
+    return hi >= lo - 1e-9 ? [lo, hi] : null;
+  };
+  const inside = (token: TokenDocument) => {
+    const elevation = token.elevation ?? 0;
+    if (tile.triggerElevation && (elevation < tile.triggerElevation.min || elevation > tile.triggerElevation.max)) return false;
+    const shape = geometry(token);
+    const endpointAxes = [...tileAxes, ...shape.axes];
+    return endpointAxes.every((axis) => {
+      const range = tileRange(axis);
+      const center = (token.x - tileCenter.x) * axis.x + (token.y - tileCenter.y) * axis.y;
+      const radius = projectionRadius(shape, axis);
+      return center + radius > range.min + 1e-9 && center - radius < range.max - 1e-9;
+    });
+  };
+  if (!before) return inside(after) ? [{ method: "create", fraction: 1 }] : [];
+  const moved = before.x !== after.x || before.y !== after.y;
+  const elevationChanged = (before.elevation ?? 0) !== (after.elevation ?? 0);
+  if (!moved && !elevationChanged) return before.rotation !== after.rotation && inside(after)
+    ? [{ method: "rotate", fraction: 1 }] : [];
+
+  // Continuous SAT: for each polygon/token edge normal, the valid token-center
+  // positions form an expanded slab. Intersect those slabs with the movement ray.
+  let lo = 0, hi = 1;
+  const dx = after.x - before.x, dy = after.y - before.y;
+  for (const axis of axes) {
+    const range = tileRange(axis);
+    const radius = footprintRadius(axis);
+    const low = range.min - radius, high = range.max + radius;
+    const start = (before.x - tileCenter.x) * axis.x + (before.y - tileCenter.y) * axis.y;
+    const delta = dx * axis.x + dy * axis.y;
+    if (Math.abs(delta) < 1e-12) {
+      if (start <= low + 1e-9 || start >= high - 1e-9) return [];
+      continue;
+    }
+    const a = (low - start) / delta;
+    const b = (high - start) / delta;
+    lo = Math.max(lo, Math.min(a, b));
+    hi = Math.min(hi, Math.max(a, b));
+    if (lo > hi + 1e-9) return [];
+  }
+  if (hi < 0 || lo > 1) return [];
+  const elevation = elevationInterval(before.elevation ?? 0, after.elevation ?? 0);
+  if (!elevation) return [];
+  lo = Math.max(lo, elevation[0]);
+  hi = Math.min(hi, elevation[1]);
+  if (hi < lo - 1e-9) return [];
+  const from = inside(before), to = inside(after);
+  const events: Array<{ method: AutomationMethod; fraction: number }> = [];
+  if (!from) events.push({ method: "enter", fraction: Math.max(0, Math.min(1, lo)) });
+  if (!to) events.push({ method: "exit", fraction: Math.max(0, Math.min(1, hi)) });
+  if (to && moved) events.push({ method: "stop", fraction: 1 });
+  if (elevationChanged) events.push({ method: "elevation", fraction: 1 });
   return events;
 }
 
@@ -717,9 +1003,14 @@ function select(
   const token = (t: TokenDocument): { ref: DocRef; doc: BaseDocument } =>
     ({ ref: { coll: "tokens", id: t._id, parent }, doc: t });
   switch (selector.kind) {
+    case "ids": return selector.refs.flatMap((ref) => {
+      const doc = event.scene[ref.coll as typeof PINNABLE_COLLECTIONS[number]].find((item) => item._id === ref.id);
+      return doc ? [{ref,doc}] : [];
+    });
     case "triggering": return event.token ? [token(event.token)] : [];
     case "tile": return [{ ref: { coll: "tiles", id: event.tile._id, parent }, doc: event.tile }];
-    case "inside": return event.scene.tokens.filter((t) => sweptTileEvents(event.tile, undefined, t).some((e) => e.method === "create")).map(token);
+    case "inside": return event.scene.tokens.filter((t) =>
+      sweptTileEvents(event.tile, undefined, t, event.scene.grid).some((e) => e.method === "create")).map(token);
     case "tag": return getByTag(world, selector.query, { sceneId: event.scene._id,
       ...(selector.mode ? { mode: selector.mode } : {}),
       ...(selector.pattern ? { pattern: selector.pattern } : {}),
@@ -943,7 +1234,7 @@ function filterByInventory(ctx: PlanningContext, current: Target[],
 
 type GraphOutcome = { ok: true; skipped?: string; stopped?: boolean } | { ok: false; error: string };
 interface PlanningContext {
-  /** One isolated active-scene clone for the whole nested call chain. */
+  /** Isolated active-scene tree and remote scene headers for the whole nested call chain. */
   world: Readonly<WorldCollections>;
   originals: Map<string, BaseDocument>;
   ops: Op[];
@@ -958,6 +1249,8 @@ interface PlanningContext {
   definitionOps: Map<string, Extract<Op, { kind: "update" }>>;
   /** One clock op for the entire nested plan, coalesced across Game Time steps. */
   clockOp?: Extract<Op, { kind: "update" | "create" }>;
+  /** Shared by parent/children: one final appearance update per scene, staged reads stay ordered. */
+  sceneAppearanceOps: Map<string, Extract<Op, { kind: "update" }>>;
   pendingTags: Map<string, { ref: DocRef; tags: string[] }>;
   pendingVisibility: Map<string, { ref: DocRef; visible: boolean }>;
   pendingDoors: Map<string, { ref: DocRef; door: 0 | 1 | 2 }>;
@@ -967,14 +1260,27 @@ interface PlanningContext {
   attributeReads: number;
   actorFilterReads: number;
   tileVariableReads: number;
+  /** Shared work budget for random image selection and dice across nested calls. */
+  imageSelectionRolls: number;
+  healthRolls: number;
+  rotationRolls: number;
+  moveRolls: number;
+  gameTimeRolls: number;
+  tableRolls: number;
   /** Lazy index shared by every nested attribute, condition and inventory filter. */
   actorIndex?: Map<string, BaseDocument>;
   stopOthers: boolean;
+  suppressedMovement: Set<string>;
+  stoppedMovement: Set<string>;
 }
 const targetKey = (ref: DocRef) => JSON.stringify([ref.parent?.coll ?? "", ref.parent?.id ?? "", ref.coll, ref.id]);
 
 function writeTileVariable(state: AutomationState, step: Extract<AutomationStep, { kind: "set" }>):
-  { ok: true; value: string | number | boolean } | { ok: false; error: string } {
+  { ok: true; value: string | number | boolean | undefined } | { ok: false; error: string } {
+  if (step.operation === "delete") {
+    if (state.variables) Reflect.deleteProperty(state.variables, step.name);
+    return { ok: true, value: undefined };
+  }
   const stored = state.variables ??= {};
   const prior = Object.hasOwn(stored, step.name) ? stored[step.name] : undefined;
   if (step.operation === "add" && prior !== undefined && typeof prior !== "number")
@@ -1072,10 +1378,12 @@ export function planAutomation(
 ): AutomationOutcome {
   const trace: string[] = [];
   const fail = (error: string): AutomationOutcome => ({ ok: false, error, trace });
+  const validated = validateAutomation(doc.definition);
+  if (!validated.ok) return fail(validated.error);
   if (!world.scenes.some((s) => s._id === event.scene._id)) return fail("scene unavailable for automation");
   const stagedScene = structuredClone(event.scene);
   const stagedWorld: Readonly<WorldCollections> = {
-    ...world, scenes: world.scenes.map((s) => s._id === stagedScene._id ? stagedScene : s),
+    ...world, scenes: world.scenes.map((s) => s._id === stagedScene._id ? stagedScene : { ...s }),
     // Share untouched definitions, copy on edit. A paused-gate action must not
     // mutate the authoritative store during dry-run or a failed child plan.
     automations: [...world.automations],
@@ -1086,8 +1394,12 @@ export function planAutomation(
     // read it in action order without exposing a speculative clock to players.
     settings: structuredClone(world.settings),
   };
-  const tile = stagedScene.tiles.find((t) => t._id === event.tile._id);
-  if (!tile) return fail("automation tile unavailable");
+  const region = validated.definition.sourceKind === "region"
+    ? stagedScene.regions?.find((candidate) => candidate._id === event.tile._id) : undefined;
+  const tile = validated.definition.sourceKind === "region"
+    ? region ? regionTriggerTile(region) : undefined
+    : stagedScene.tiles.find((candidate) => candidate._id === event.tile._id);
+  if (!tile) return fail("automation source unavailable");
   const token = event.token ? stagedScene.tokens.find((t) => t._id === event.token?._id) : undefined;
   if (event.token && !token) return fail("automation token unavailable");
   const stagedEvent: AutomationEvent = { ...event, scene: stagedScene, tile,
@@ -1097,9 +1409,9 @@ export function planAutomation(
     originals: new Map(listTaggable(world, { sceneId: stagedScene._id })
       .map(({ ref, doc: original }) => [targetKey(ref), original])),
     ops: [], cues: [], scripts: [], postActions: [], trace, histories: new Map(), historyOps: new Map(),
-    definitionOps: new Map(), pendingTags: new Map(), pendingVisibility: new Map(), pendingDoors: new Map(),
+    definitionOps: new Map(), sceneAppearanceOps: new Map(), pendingTags: new Map(), pendingVisibility: new Map(), pendingDoors: new Map(),
     stack: [], steps: 0, invocations: 0, attributeReads: 0, actorFilterReads: 0,
-    tileVariableReads: 0, stopOthers: false,
+    tileVariableReads: 0, imageSelectionRolls: 0, healthRolls: 0, rotationRolls: 0, moveRolls: 0, gameTimeRolls: 0, tableRolls: 0, stopOthers: false, suppressedMovement: new Set(), stoppedMovement: new Set(),
   };
   const result = planGraph(ctx, doc, stagedEvent, hostUserId);
   if (!result.ok) return fail(result.error);
@@ -1110,7 +1422,8 @@ export function planAutomation(
   const state = ctx.histories.get(doc._id);
   if (!state) return fail("root graph did not record its history");
   return { ok: true, plan: { ops: ctx.ops, cues: ctx.cues, scripts: ctx.scripts,
-    postActions: ctx.postActions, trace, state, stopOthers: ctx.stopOthers } };
+    postActions: ctx.postActions, trace, state, stopOthers: ctx.stopOthers,
+    suppressedMovement: [...ctx.suppressedMovement], stoppedMovement: [...ctx.stoppedMovement] } };
 }
 
 /** A child is never committed on its own: failures discard ALL staged parent work. */
@@ -1123,8 +1436,11 @@ function planGraph(
   const definition = validateAutomation(doc.definition);
   if (!definition.ok) return fail(definition.error);
   const d = definition.definition;
+  const anchorExists = d.sourceKind === "region"
+    ? event.scene.regions?.some((region) => region._id === event.tile._id) === true
+    : event.scene.tiles.some((t) => t._id === event.tile._id);
   if (event.scene._id !== d.sceneId || event.tile._id !== d.tileId ||
-      !event.scene.tiles.some((t) => t._id === event.tile._id) || !d.methods.includes(event.method)) return { ok: true, skipped: "method/anchor mismatch" };
+      !anchorExists || !d.methods.includes(event.method)) return { ok: true, skipped: "method/anchor mismatch" };
   if (ctx.stack.includes(doc._id)) return fail(`trigger tile recursion: ${[...ctx.stack, doc._id].join(" -> ")}`);
   if (ctx.stack.length >= 8 || ++ctx.invocations > 128)
     return fail("trigger tile depth/invocation budget (8/128) exceeded");
@@ -1171,6 +1487,8 @@ function planGraph(
     nextState.variables ?? {}, { method: event.method,
       originMethod: event.originMethod ?? event.method, originTile: event.originTileId ?? event.tile._id,
       user: event.caller.id, count: nextState.count });
+  // Result scope is this invocation, not graph history or a nested caller's result.
+  let lastTableResult: string | null | undefined;
   let current: Target[] = select(world, event, { kind: "triggering" });
   const landings = new Map(d.steps.flatMap((s, i) => s.kind === "landing" ? [[s.name, i] as const] : []));
   const loopEnds = new Map(d.steps.flatMap((s, i) => s.kind === "endEach" ? [[s.startId, i] as const] : []));
@@ -1202,11 +1520,14 @@ function planGraph(
       if (!step) break; // defensive for imported sparse arrays
       trace.push(`${pc}: ${step.kind} [${step.id}]`);
       switch (step.kind) {
-        case "select":
+        case "select": {
+          const error = pinnedSelectorError(event.scene, step.selector);
+          if (error) return fail(error);
           current = select(world, event, step.selector);
           if (current.length > 1024) return fail("current collection exceeds 1024 targets");
           trace.push(`selected ${current.length} ${step.selector.kind} target(s)`);
           break;
+        }
         case "filter": {
           const t = step.test;
           const count = t.kind === "count" ? current.length : t.kind === "tileCount" ? nextState.count
@@ -1232,7 +1553,7 @@ function planGraph(
             if (!resolved.ok) return fail(resolved.error);
             for (const tile of resolved.tiles) {
               const graphs = world.automations.filter((graph) => graph.definition?.sceneId === event.scene._id &&
-                graph.definition?.tileId === tile._id);
+                (graph.definition?.sourceKind ?? "tile") === "tile" && graph.definition?.tileId === tile._id);
               // A selected tile without any graph still has a missing (null)
               // variable. Do not silently invent a zero or pick one graph at random.
               if (!graphs.length) found.push(null);
@@ -1423,6 +1744,8 @@ function planGraph(
           break;
         }
         case "collection": {
+          const error = step.selector ? pinnedSelectorError(event.scene, step.selector) : null;
+          if (error) return fail(error);
           const selected = step.selector ? select(world, event, step.selector) : [];
           if (selected.length > 1024) return fail("current collection exceeds 1024 targets");
           const matching = new Set(selected.map(({ ref }) => targetKey(ref)));
@@ -1448,7 +1771,8 @@ function planGraph(
           let changed = 0;
           for (const tile of resolved.tiles) {
             for (const [index, graph] of world.automations.entries()) {
-              if (graph.definition?.sceneId !== event.scene._id || graph.definition?.tileId !== tile._id) continue;
+              if (graph.definition?.sceneId !== event.scene._id || (graph.definition?.sourceKind ?? "tile") !== "tile" ||
+                  graph.definition?.tileId !== tile._id) continue;
               const checked = validateAutomation(graph.definition);
               if (!checked.ok) return fail(`tile ${tile._id} graph ${graph._id}: ${checked.error}`);
               const paused = graph.definition.gates?.paused === true;
@@ -1488,7 +1812,7 @@ function planGraph(
                   .map(({ doc }) => doc as TokenDocument);
             if (tokens.length > 32) return fail("trigger tile token fanout exceeds 32 tokens");
             const children = world.automations.filter((child) => child.definition?.sceneId === event.scene._id &&
-              child.definition?.tileId === tile._id).sort((a, b) => a._id.localeCompare(b._id));
+              (child.definition?.sourceKind ?? "tile") === "tile" && child.definition?.tileId === tile._id).sort((a, b) => a._id.localeCompare(b._id));
             for (const token of tokens) {
               for (const child of children) {
                 const checked = validateAutomation(child.definition);
@@ -1499,6 +1823,9 @@ function planGraph(
                   at: event.at, rng: event.rng, method: "manual",
                   originMethod: event.originMethod ?? event.method, originTileId: event.originTileId ?? event.tile._id,
                   ...(event.direction ? { direction: event.direction } : {}),
+                  ...(event.movementOriginal ? { movementOriginal: event.movementOriginal } : {}),
+                  ...(event.imageAssetError ? { imageAssetError: event.imageAssetError } : {}),
+                  ...(event.hurtHeal ? { hurtHeal: event.hurtHeal } : {}),
                   ...(token ? { token } : {}) }, hostUserId, step.landing);
                 if (!result.ok) return result;
                 if (result.skipped) trace.push(`graph ${child._id} skipped: ${result.skipped}`);
@@ -1512,6 +1839,41 @@ function planGraph(
           ctx.stopOthers = true;
           trace.push("suppress later movement tiles after commit");
           break;
+        case "stopMovement": {
+          const crossing = event.movementCrossing;
+          if ((event.method !== "enter" && event.method !== "exit") || !event.token || !crossing ||
+              crossing.tileId !== event.tile._id || crossing.tokenId !== event.token._id || crossing.method !== event.method ||
+              !Number.isFinite(crossing.fraction) || crossing.fraction < 0 || crossing.fraction > 1 ||
+              !finite(crossing.x, 0, event.scene.width) || !finite(crossing.y, 0, event.scene.height))
+            return fail("Stop Token Movement requires this tile's host-observed enter/exit crossing");
+          const flushed = flushBatch(ctx, event.scene._id);
+          if (!flushed.ok) return fail(flushed.error);
+          const target = event.scene.tokens.find((token) => token._id === event.token?._id);
+          if (!target) return fail("Stop Token Movement triggering token is unavailable");
+          const geometry = moveGeometry(target);
+          if (!geometry) return fail("Stop Token Movement token geometry is invalid");
+          let point = {x:crossing.x,y:crossing.y};
+          if (step.snapToGrid && event.scene.grid.type !== "gridless") {
+            const grid = event.scene.grid;
+            if (!finite(grid.size, Number.EPSILON, 1e9) ||
+                (grid.type === "hex" && !["oddQ", "evenQ", "oddR", "evenR"].includes(grid.hexLayout)))
+              return fail("Stop Token Movement cannot snap to an invalid grid");
+            point = snapTokenCenter(grid.type === "hex" ? {type:"hex",size:grid.size,layout:grid.hexLayout}
+              : {type:"square",size:grid.size}, point.x, point.y);
+          }
+          if (!finite(point.x, 0, event.scene.width) || !finite(point.y, 0, event.scene.height))
+            return fail("Stop Token Movement endpoint is outside the scene");
+          if (ctx.ops.length >= 1024) return fail("automation exceeds 1024 world operations");
+          if (target.x !== point.x || target.y !== point.y) {
+            const diff = applyMovePosition(target, geometry, point.x, point.y);
+            if (target.flags.arenaMove !== undefined) { target.flags = {...target.flags,arenaMove:{}}; diff["flags.arenaMove"] = {}; }
+            ctx.ops.push({kind:"update",ref:{coll:"tokens",id:target._id,parent:{coll:"scenes",id:event.scene._id}},diff});
+          }
+          ctx.suppressedMovement.add(`${event.scene._id}\u0000${target._id}`);
+          ctx.stoppedMovement.add(`${event.scene._id}\u0000${target._id}`);
+          trace.push(`stopped triggering token at ${point.x},${point.y}${step.snapToGrid ? " (grid snapped)" : ""}`);
+          break;
+        }
         case "set": {
           if (step.scope === "tile" && step.target) {
             const resolved = tileTargets(world, event, current, step.target);
@@ -1522,7 +1884,7 @@ function planGraph(
               // variable map. The same graph reached by multiple tiles or
               // calls is updated once per *action*, in deterministic ID order.
               const graphs = world.automations.filter((graph) => graph.definition?.sceneId === event.scene._id &&
-                graph.definition?.tileId === tile._id).sort((a, b) => a._id.localeCompare(b._id));
+                (graph.definition?.sourceKind ?? "tile") === "tile" && graph.definition?.tileId === tile._id).sort((a, b) => a._id.localeCompare(b._id));
               for (const graph of graphs) {
                 const checked = validateAutomation(graph.definition);
                 if (!checked.ok) return fail(`tile ${tile._id} graph ${graph._id}: ${checked.error}`);
@@ -1546,19 +1908,28 @@ function planGraph(
                   ctx.historyOps.set(graph._id, update);
                 }
                 update.diff.state = state as unknown as Json;
-                if (graph._id === doc._id) values[step.name] = written.value;
+                if (graph._id === doc._id) {
+                  if (written.value === undefined) Reflect.deleteProperty(values, step.name);
+                  else values[step.name] = written.value;
+                }
                 changed++;
               }
             }
-            trace.push(`tile variable ${step.name} ${step.operation === "add" ? "+=" : "="} on ${changed} graph(s) of ${resolved.tiles.length} tile(s) (private)`);
+            trace.push(`tile variable ${step.name} ${step.operation === "delete" ? "deleted" : step.operation === "add" ? "+=" : "="} on ${changed} graph(s) of ${resolved.tiles.length} tile(s) (private)`);
             break;
           }
           if (step.scope === "tile") {
             // A run-local shadow cannot change the base of a durable counter.
             const written = writeTileVariable(nextState, step);
             if (!written.ok) return fail(written.error);
-            values[step.name] = written.value;
-            trace.push(`tile variable ${step.name} ${step.operation === "add" ? "+=" : "="} (private)`);
+            if (written.value === undefined) Reflect.deleteProperty(values, step.name);
+            else values[step.name] = written.value;
+            trace.push(`tile variable ${step.name} ${step.operation === "delete" ? "deleted" : step.operation === "add" ? "+=" : "="} (private)`);
+            break;
+          }
+          if (step.operation === "delete") {
+            Reflect.deleteProperty(values, step.name);
+            trace.push(`run variable ${step.name} deleted`);
             break;
           }
           const prior = values[step.name];
@@ -1566,6 +1937,7 @@ function planGraph(
             return fail(`variable ${step.name} is not numeric`);
           const value = step.operation === "add" ? ((prior ?? 0) as number) + (step.value as number) : step.value;
           if (typeof value === "number" && !Number.isFinite(value)) return fail(`variable ${step.name} overflowed`);
+          if (value === undefined) return fail(`variable ${step.name} needs a value`);
           values[step.name] = value;
           break;
         }
@@ -1573,7 +1945,13 @@ function planGraph(
           const old = worldSettingsFrom(world.settings).clockSeconds;
           if (old !== undefined && !finite(old, 0, 3_153_600_000))
             return fail("invalid committed world clock");
-          const next = (old ?? 0) + step.minutes * MINUTE_SECONDS;
+          const amount = resolveGameTimeAmount(step, () => {
+            if (++ctx.gameTimeRolls > 1024) throw new Error("Game Time formulas exceed 1024 random draws per graph plan");
+            return event.rng();
+          });
+          if (!amount.ok) return fail(amount.error);
+          const minutes = amount.value;
+          const next = (old ?? 0) + minutes * MINUTE_SECONDS;
           if (!finite(next, 0, 3_153_600_000))
             return fail("Game Time would move the world clock outside 0–3153600000 seconds");
           let settings = world.settings.find((item) => item._id === WORLD_SETTINGS_ID);
@@ -1596,7 +1974,7 @@ function planGraph(
           // the time advanced if one of them shadows the canonical clock.
           if (worldSettingsFrom(world.settings).clockSeconds !== next)
             return fail("a noncanonical settings document overrides the world clock");
-          trace.push(`Game Time ${step.minutes >= 0 ? "+" : ""}${step.minutes} minute(s) -> ${next} host seconds`);
+          trace.push(`Game Time ${minutes >= 0 ? "+" : ""}${minutes} minute(s) -> ${next} host seconds`);
           break;
         }
         case "hurtHeal": {
@@ -1616,7 +1994,12 @@ function planGraph(
           for (const id of actorIds) {
             const actor = ctx.actorIndex.get(id) as ActorDocument | undefined;
             if (!actor) return fail(`Hurt / Heal actor ${id} is missing`);
-            const planned = event.hurtHeal(actor, step.amount);
+            const amount = resolveHealthAmount(step, () => {
+              if (++ctx.healthRolls > 1024) throw new Error("HP formulas exceed 1024 random draws per graph plan");
+              return event.rng();
+            });
+            if (!amount.ok) return fail(`Hurt / Heal: ${amount.error}`);
+            const planned = event.hurtHeal(actor, amount.value);
             if (!planned.ok) return fail(`Hurt / Heal ${actor.name}: ${planned.error}`);
             if (Object.keys(planned.diff).length) {
               if (ops.length >= 1024) return fail("automation exceeds 1024 world operations");
@@ -1697,50 +2080,262 @@ function planGraph(
           }
           break;
         }
-        case "move": {
-          const docs = motionTargets(event, step.targets, current);
-          if (!docs.length) return fail("Move needs at least one live target token");
-          if (ops.length + docs.length > 1024) return fail("automation exceeds 1024 world operations");
-          if (!finite(step.x, 0, event.scene.width) || !finite(step.y, 0, event.scene.height))
-            return fail(`Move point ${step.x},${step.y} is outside the ${event.scene.width}x${event.scene.height} scene`);
-          const parent: DocRef = { coll: "scenes", id: event.scene._id };
-          for (const doc of docs) {
-            if (doc.x === step.x && doc.y === step.y) continue; // an unchanged position commits nothing
-            doc.x = step.x; doc.y = step.y;
-            ops.push({ kind: "update", ref: { coll: "tokens", id: doc._id, parent }, diff: { x: step.x, y: step.y } });
+        case "sceneLighting":
+        case "sceneBackground": {
+          const target = step.kind === "sceneBackground" && step.targetSceneId
+            ? world.scenes.find((scene) => scene._id === step.targetSceneId) : event.scene;
+          if (!target) return fail("Scene Background target scene is unavailable");
+          let diff: Record<string, Json>;
+          if (step.kind === "sceneLighting") {
+            if (!finite(event.scene.darkness, 0, 1)) return fail("invalid committed scene darkness");
+            const darkness = step.mode === "add" ? event.scene.darkness + step.darkness : step.darkness;
+            if (!finite(darkness, 0, 1)) return fail("Scene Lighting would move darkness outside 0–1");
+            trace.push(`Scene Lighting: ${event.scene.darkness} -> ${darkness}`);
+            if (event.scene.darkness === darkness) break;
+            event.scene.darkness = darkness;
+            diff = { darkness };
+            if (step.durationMs !== undefined) {
+              const hint = { darkness, durationMs: step.durationMs };
+              event.scene.flags = { ...event.scene.flags, arenaDarkness: hint };
+              diff["flags.arenaDarkness"] = hint;
+            } else if (event.scene.flags.arenaDarkness !== undefined) {
+              event.scene.flags = { ...event.scene.flags, arenaDarkness: {} };
+              diff["flags.arenaDarkness"] = {};
+            }
+          } else {
+            if (step.image !== null) {
+              const error = event.imageAssetError ? event.imageAssetError(step.image) : "image asset validation unavailable";
+              if (error) return fail(`Scene Background: ${error}`);
+            }
+            trace.push(`Scene Background: ${step.image === null ? "clear" : "owned image"}`);
+            if (target.img === step.image) break;
+            target.img = step.image;
+            diff = { img: step.image };
           }
-          trace.push(`move ${docs.length} token(s) to ${step.x},${step.y}`);
+          let appearance = ctx.sceneAppearanceOps.get(target._id);
+          if (!appearance) {
+            if (ops.length >= 1024) return fail("automation exceeds 1024 world operations");
+            appearance = { kind: "update", ref: { coll: "scenes", id: target._id }, diff: {} };
+            ctx.sceneAppearanceOps.set(target._id, appearance);
+            ops.push(appearance);
+          }
+          Object.assign(appearance.diff, diff);
           break;
         }
-        case "rotate": {
-          const angle = ((step.angle % 360) + 360) % 360;
-          const docs = motionTargets(event, step.targets, current);
-          if (!docs.length) return fail("Rotation needs at least one live target token");
-          if (ops.length + docs.length > 1024) return fail("automation exceeds 1024 world operations");
-          const parent: DocRef = { coll: "scenes", id: event.scene._id };
-          for (const doc of docs) {
-            if (doc.rotation === angle) continue;
-            doc.rotation = angle;
-            ops.push({ kind: "update", ref: { coll: "tokens", id: doc._id, parent }, diff: { rotation: angle } });
+        case "tileImage": {
+          // Validate the complete authored list, not only today's selected image: a
+          // revoked/missing alternative must not silently remain in a published action.
+          for (const image of step.images ?? (step.image ? [step.image] : [])) {
+            const error = event.imageAssetError ? event.imageAssetError(image) : "image asset validation unavailable";
+            if (error) return fail(`Switch Tile Image: ${error}`);
           }
-          trace.push(`rotate ${docs.length} token(s) to ${angle} degrees`);
+          if (current.length < 1 || current.length > 32 || current.some(({ ref, doc }) => ref.coll !== "tiles" || doc.type !== "tile"))
+            return fail("Switch Tile Image needs 1–32 current tiles");
+          if (ops.length + current.length > 1024) return fail("automation exceeds 1024 world operations");
+          for (const { ref, doc } of current) {
+            const target = doc as TileDocument;
+            let image = step.image ?? "";
+            if (step.images) {
+              const selected = resolveTileImageIndex(step, step.images.indexOf(target.img), () => {
+                if (++ctx.imageSelectionRolls > 1024) throw new Error("image selection exceeds 1024 random draws per graph plan");
+                return event.rng();
+              });
+              if (!selected.ok) return fail(`Switch Tile Image: ${selected.error}`);
+              const chosen = step.images[selected.value];
+              if (!chosen) return fail("Switch Tile Image selected an unavailable slot");
+              image = chosen;
+            }
+            if (target.img === image) continue;
+            target.img = image;
+            ops.push({ kind: "update", ref, diff: { img: image } });
+          }
+          trace.push(`Switch Tile Image: ${current.length} tile(s), ${step.images ? step.selection : step.image === "" ? "clear" : "owned image"}`);
+          break;
+        }
+        case "move": {
+          try {
+            // Snapshot the destination once per action, so selecting it as a mover cannot
+            // change the anchor for later targets. Earlier steps/children remain visible.
+            const moveRandom = () => {
+              if (++ctx.moveRolls > 1024) throw new Error("Move exceeds 1024 random draws per graph plan");
+              const roll = event.rng();
+              if (!Number.isFinite(roll) || roll < 0 || roll >= 1) throw new Error("Move received invalid host RNG");
+              return roll;
+            };
+            let destinationSnapshot: MoveDestinationSnapshot | undefined;
+            if (step.destinationOriginal) {
+              const originMethod = event.originMethod ?? event.method;
+              if (!event.token || event.movementOriginal?.tokenId !== event.token._id ||
+                  !["enter", "exit", "stop", "elevation"].includes(originMethod) ||
+                  (!finite(event.movementOriginal.x, 0, event.scene.width) || !finite(event.movementOriginal.y, 0, event.scene.height)))
+                return fail("Move Original Destination requires the triggering token's host-observed movement event");
+              destinationSnapshot = {x:event.movementOriginal.x,y:event.movementOriginal.y};
+            } else if (step.destinationResult) {
+              if (lastTableResult === undefined) return fail("Move needs a Roll Table result from this graph invocation");
+              const point = moveTableLocation(lastTableResult);
+              if (!point) return fail('Move Roll Table result must contain exactly numeric {"x":...,"y":...} coordinates (0–1000000000, at most 256 characters)');
+              destinationSnapshot = point;
+            } else if (step.destination || step.destinationTag) {
+              let destination: TokenDocument | TileDocument | undefined;
+              if (step.destinationTag) {
+                const matches = select(world, event, { ...step.destinationTag,
+                  collections: step.destinationTag.collections ?? ["tokens", "tiles"] });
+                if (matches.length > 1024) return fail("Move tag destination exceeds 1024 candidates");
+                if (!matches.length || (step.destinationChoice !== "random" && matches.length !== 1))
+                  return fail(`Move tag destination must match ${step.destinationChoice === "random" ? "at least" : "exactly"} one token or tile (matched ${matches.length})`);
+                // One chosen destination per action, independent placement points per mover.
+                const match = matches[step.destinationChoice === "random" && matches.length > 1 ? Math.floor(moveRandom() * matches.length) : 0];
+                // Read the staged document again; neither a cached selection nor the client is authoritative.
+                if (match?.ref.coll === "tokens" || match?.ref.coll === "tiles")
+                  destination = event.scene[match.ref.coll].find((item) => item._id === match.ref.id);
+              } else if (step.destination) {
+                destination = event.scene[step.destination.coll].find((item) => item._id === step.destination?.id);
+              }
+              if (!destination) return fail("Move destination entity is unavailable in this scene");
+              const snapshot = snapshotMoveDestination(destination);
+              if (!snapshot) return fail("Move destination has invalid geometry");
+              destinationSnapshot = snapshot;
+            }
+            const parent: DocRef = { coll: "scenes", id: event.scene._id };
+            const selected = step.targets === "triggering"
+              ? motionTargets(event, "triggering", current).map((doc) => ({ ref: { coll: "tokens" as const, id: doc._id, parent }, doc }))
+              : current;
+            if (!selected.length) return fail("Move needs at least one live target token, tile, drawing, light, sound or template");
+            const targets = new Map<string, { ref: DocRef; doc: MovePlaceable }>();
+            for (const row of selected) {
+              const list = MOVABLE_COLLECTIONS.includes(row.ref.coll as typeof MOVABLE_COLLECTIONS[number])
+                ? event.scene[row.ref.coll as typeof MOVABLE_COLLECTIONS[number]] : null;
+              if (!list) return fail("Move only supports tokens and tiles, drawings, lights, sounds and templates");
+              const doc = list.find((item) => item._id === row.ref.id);
+              if (!doc) return fail("Move target is no longer in the scene");
+              targets.set(`${row.ref.coll}/${doc._id}`, { ref: { coll: row.ref.coll, id: doc._id, parent }, doc });
+            }
+            if (ops.length + targets.size > 1024) return fail("automation exceeds 1024 world operations");
+            for (const { ref, doc } of targets.values()) {
+              const geometry = moveGeometry(doc);
+              if (!geometry) return fail("Move target has invalid committed geometry");
+              const {x: oldX, y: oldY, dx, dy} = geometry;
+              const animated = doc.type === "token" || doc.type === "tile";
+              const anchor = destinationSnapshot ? moveDestinationPoint(destinationSnapshot, step.destinationPosition ?? "center", moveRandom,
+                event.method === "enter" && event.movementEntry?.tileId === event.tile._id &&
+                  event.movementEntry.tokenId === event.token?._id ? event.movementEntry : undefined) : undefined;
+              const coordinates = resolveMoveCoordinates(anchor || step.destinationOriginal ? { ...step, mode: "add" } : step, moveRandom);
+              if (!coordinates.ok) return fail(coordinates.error);
+              let x = anchor || step.destinationOriginal ? (anchor?.x ?? destinationSnapshot?.x ?? 0) + coordinates.value.x - dx : (step.xMode ?? step.mode) === "add" ? oldX + coordinates.value.x : coordinates.value.x - dx;
+              let y = anchor || step.destinationOriginal ? (anchor?.y ?? destinationSnapshot?.y ?? 0) + coordinates.value.y - dy : (step.yMode ?? step.mode) === "add" ? oldY + coordinates.value.y : coordinates.value.y - dy;
+              if (step.snapToGrid && event.scene.grid.type !== "gridless") {
+                const grid = event.scene.grid;
+                if (!Number.isFinite(grid.size) || grid.size <= 0 ||
+                    (grid.type === "hex" && !["oddQ", "evenQ", "oddR", "evenR"].includes(grid.hexLayout)))
+                  return fail("Move cannot snap to an invalid grid");
+                const spec: GridSpec = grid.type === "hex" ? { type: "hex", size: grid.size, layout: grid.hexLayout }
+                  : { type: "square", size: grid.size };
+                const point = snapTokenCenter(spec, x + dx, y + dy);
+                x = point.x - dx; y = point.y - dy;
+              }
+              if (!finite(x, 0, event.scene.width) || !finite(y, 0, event.scene.height) ||
+                  !finite(x + dx, 0, event.scene.width) || !finite(y + dy, 0, event.scene.height) ||
+                  (doc.type === "drawing" && (!finite(x + geometry.width, 0, event.scene.width) || !finite(y + geometry.height, 0, event.scene.height))))
+                return fail(`Move point ${x + dx},${y + dy} is outside the ${event.scene.width}x${event.scene.height} scene`);
+              if (step.wallCollision === "block" && movementWallBlocked(
+                { x: oldX + dx, y: oldY + dy }, { x: x + dx, y: y + dy }, event.scene.walls))
+                return fail("Move path is blocked by a movement wall");
+              if (step.wallCollision === "footprint" && (geometry.point
+                ? movementWallBlocked({x:oldX,y:oldY}, {x,y}, event.scene.walls)
+                : movementFootprintBlocked(
+                  { x: oldX + dx, y: oldY + dy }, { x: x + dx, y: y + dy },
+                  Math.max(geometry.width, 1e-7), Math.max(geometry.height, 1e-7), geometry.rotation, event.scene.walls)))
+                return fail("Move footprint is blocked by a movement wall");
+              let durationMs = animated ? step.durationMs : undefined;
+              if (animated && durationMs === undefined && step.speed !== undefined) {
+                const calculated = movementSpeedDuration(Math.hypot(x-oldX,y-oldY),event.scene.grid.size,step.speed);
+                if (calculated === null) return fail("Move speed requires a valid grid size and a duration no longer than 60000 ms");
+                durationMs = calculated;
+              }
+              if (oldX === x && oldY === y) continue;
+              if (doc.type === "token") {
+                const key = `${event.scene._id}\u0000${doc._id}`;
+                if (step.triggerTiles === false) ctx.suppressedMovement.add(key);
+                else ctx.suppressedMovement.delete(key);
+              }
+              const diff = applyMovePosition(doc, geometry, x, y);
+              if (durationMs !== undefined) {
+                const hint = { x, y, durationMs };
+                doc.flags = { ...doc.flags, arenaMove: hint };
+                diff["flags.arenaMove"] = hint;
+              } else if (doc.flags.arenaMove !== undefined) {
+                doc.flags = { ...doc.flags, arenaMove: {} };
+                diff["flags.arenaMove"] = {};
+              }
+              ops.push({ kind: "update", ref, diff });
+            }
+            trace.push(`move ${targets.size} placeable target(s): ${step.mode ?? "set"} ${step.xFormula ?? step.x},${step.yFormula ?? step.y}`);
+            break;
+          } catch (cause) {
+            return fail(cause instanceof Error ? cause.message : "Move destination randomization failed");
+          }
+        }
+        case "rotate": {
+          const parent: DocRef = { coll: "scenes", id: event.scene._id };
+          const selected = step.targets === "triggering"
+            ? motionTargets(event, "triggering", current).map((doc) => ({ ref: { coll: "tokens" as const, id: doc._id, parent }, doc }))
+            : current;
+          if (!selected.length) return fail("Rotation needs at least one live target token or tile");
+          const targets = new Map<string, { ref: DocRef; doc: TokenDocument | TileDocument }>();
+          for (const row of selected) {
+            const list = row.ref.coll === "tokens" ? event.scene.tokens : row.ref.coll === "tiles" ? event.scene.tiles : null;
+            if (!list) return fail("Rotation only supports tokens and tiles");
+            const doc = list.find((item) => item._id === row.ref.id);
+            if (!doc) return fail("Rotation target is no longer in the scene");
+            targets.set(`${row.ref.coll}/${doc._id}`, { ref: { coll: row.ref.coll, id: doc._id, parent }, doc });
+          }
+          if (ops.length + targets.size > 1024) return fail("automation exceeds 1024 world operations");
+          for (const { ref, doc } of targets.values()) {
+            const old = doc.rotation ?? 0;
+            if (!Number.isFinite(old)) return fail("Rotation target has invalid committed rotation");
+            const resolved = resolveRotationAngle(step, () => {
+              if (++ctx.rotationRolls > 1024) throw new Error("Rotation formulas exceed 1024 random draws per graph plan");
+              return event.rng();
+            });
+            if (!resolved.ok) return fail(`Rotation: ${resolved.error}`);
+            const raw = step.mode === "add" ? old + resolved.value : resolved.value;
+            const angle = ((raw % 360) + 360) % 360;
+            if (old === angle) continue;
+            doc.rotation = angle;
+            const diff: Record<string, Json> = { rotation: angle };
+            if (step.durationMs !== undefined) {
+              const hint = { rotation: angle, durationMs: step.durationMs };
+              doc.flags = { ...doc.flags, arenaRotation: hint };
+              diff["flags.arenaRotation"] = hint;
+            } else if (doc.flags.arenaRotation !== undefined) {
+              doc.flags = { ...doc.flags, arenaRotation: {} };
+              diff["flags.arenaRotation"] = {};
+            }
+            ops.push({ kind: "update", ref, diff });
+          }
+          trace.push(`rotate ${targets.size} token/tile target(s): ${step.mode ?? "set"} ${step.formula ?? step.angle} degrees`);
           break;
         }
         case "delete": {
           if (!current.length) return fail("Delete Entities needs a non-empty current collection");
-          if (current.some(({ ref }) => !["tokens", "tiles", "walls", "drawings", "notes"].includes(ref.coll)))
-            return fail("Delete Entities only removes tokens, tiles, walls, drawings or map pins");
+          if (current.some(({ ref }) => !["tokens", "tiles", "walls", "drawings", "notes", "lights", "sounds", "templates"].includes(ref.coll)))
+            return fail("Delete Entities only removes scene tokens, tiles, walls, drawings, map pins, lights, sounds or templates");
           if (ops.length + current.length > 1024) return fail("automation exceeds 1024 world operations");
           const sceneList = (coll: string): Array<{ _id: string }> | null =>
             coll === "tokens" ? event.scene.tokens : coll === "tiles" ? event.scene.tiles :
             coll === "walls" ? event.scene.walls : coll === "drawings" ? event.scene.drawings :
-            coll === "notes" ? event.scene.notes : null;
+            coll === "notes" ? event.scene.notes : coll === "lights" ? event.scene.lights :
+            coll === "sounds" ? event.scene.sounds : coll === "templates" ? event.scene.templates : null;
           const names: string[] = [];
           for (const { ref, doc } of current) {
             const list = sceneList(ref.coll);
             const index = list ? list.findIndex((item) => item._id === ref.id) : -1;
             if (index < 0) return fail(`delete target ${ref.coll}/${ref.id} is already gone from the scene`);
             list?.splice(index, 1);
+            // Unflushed edits to an entity removed in this transaction are superseded.
+            // Previously flushed writes retain their order and normal inverse operations.
+            const key = targetKey(ref);
+            pendingTags.delete(key); pendingVisibility.delete(key); pendingDoors.delete(key);
             ops.push({ kind: "delete", ref });
             names.push(String(doc.name ?? ref.id));
           }
@@ -1754,7 +2349,18 @@ function planGraph(
           if (!table) return fail(`roll table ${step.tableId} is missing from the world`);
           const invalid = validateTable(table);
           if (invalid) return fail(`roll table ${table.name}: ${invalid}`);
-          const draw = drawFromTable(table, event.rng);
+          let draw: ReturnType<typeof drawFromTable>;
+          try {
+            draw = drawFromTable(table, () => {
+              if (++ctx.tableRolls > 1024) throw new Error("Roll Table exceeds 1024 random draws per graph plan");
+              const roll = event.rng();
+              if (!Number.isFinite(roll) || roll < 0 || roll >= 1) throw new Error("Roll Table received invalid host RNG");
+              return roll;
+            });
+          } catch (cause) { return fail(cause instanceof Error ? cause.message : "Roll Table draw failed"); }
+          if (draw.result && typeof draw.result.text !== "string") return fail("Roll Table result text must be a string");
+          // Even a miss replaces the previous result; never fall back to stale coordinates.
+          lastTableResult = draw.result?.text ?? null;
           if (step.variable !== undefined && draw.result && draw.result.text.length > 256)
             return fail(`roll table ${table.name}: result text exceeds the 256-character variable bound`);
           if (step.variable !== undefined) values[step.variable] = draw.result?.text ?? "";

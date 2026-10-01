@@ -24,6 +24,10 @@ pnpm content:fetch   # clones the pinned sources into tools/content/vendor/ (git
 pnpm content:convert # → dist/content/pf1e (manifest + packs + OGL.txt + CREDITS.md)
 ```
 
+For shorter FX regression runs (one batch at a time, 15-minute global cap), see
+[FX_TEST_BATCHES.md](FX_TEST_BATCHES.md).
+
+
 Requires Node 20+ and pnpm 10.
 
 **Play PF1e Mass Battles in three clicks:** `pnpm build && pnpm build:systems && pnpm build:worlds`,

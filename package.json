@@ -7,7 +7,7 @@
   "engines": {
     "node": ">=20"
   },
-  "description": "Serverless browser-only Virtual Tabletop — single self-contained index.html (host = GM tab)",
+  "description": "Serverless browser-only Virtual Tabletop \u2014 single self-contained index.html (host = GM tab)",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -25,7 +25,12 @@
     "coverage:rules": "node scripts/coverage.mjs",
     "content:convert": "node tools/convert/index.mjs",
     "content:fetch": "node tools/content/fetch.mjs",
-    "content:package": "node scripts/buildContentPackage.mjs"
+    "content:package": "node scripts/buildContentPackage.mjs",
+    "test:fx:prepare": "vite build && node scripts/buildSystemPackages.mjs && node scripts/buildStarterWorlds.mjs",
+    "test:fx:visual": "playwright test --project=chromium --workers=1 --retries=0 --global-timeout=900000 e2e/fx_sequence.spec.ts e2e/fx_lifecycle.spec.ts",
+    "test:fx:automation": "playwright test --project=chromium --workers=1 --retries=0 --global-timeout=900000 e2e/active_zones.spec.ts e2e/automation_appearance.spec.ts e2e/movement_actions.spec.ts e2e/action_revert.spec.ts",
+    "test:fx:integrations": "playwright test --project=chromium --workers=1 --retries=0 --global-timeout=900000 e2e/fx_item_binding.spec.ts e2e/prefabs.spec.ts e2e/script_macros.spec.ts e2e/summon_script.spec.ts e2e/summon_zone.spec.ts e2e/summons.spec.ts",
+    "test:fx:canvas": "playwright test --project=chromium --workers=1 --retries=0 --global-timeout=900000 e2e/assets.spec.ts e2e/canvas_rail.spec.ts e2e/canvas_toolbar.spec.ts e2e/join.spec.ts e2e/vision.spec.ts e2e/walls.spec.ts e2e/fog.spec.ts e2e/fog_lighting.spec.ts e2e/fog_player.spec.ts"
   },
   "dependencies": {
     "@msgpack/msgpack": "^3.1.3",
