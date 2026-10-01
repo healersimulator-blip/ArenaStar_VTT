@@ -5594,6 +5594,182 @@ describe("GM prefabs: atomic Tagger allocation, graph rebind, projection and und
     expect((player.store.get("scenes", "s1") as SceneDocument).tiles.some((t) => t._id === b?._id)).toBe(true);
   });
 
+  test("an owned wall root carries locked and hidden descendants atomically without leaking hidden IDs", async () => {
+    const h = await setup();
+    const root: WallDocument = { _id: "prefab-wall-root", type: "wall", name: "Public wall root",
+      ownership: { default: 3 }, flags: {}, system: {}, c: [100, 100, 200, 100],
+      door: 0, oneWay: false, move: 1, sight: 1, sound: 1, light: 1 };
+    const childTile: TileDocument = { ...zoneTile(), _id: "locked-platform", name: "Locked platform",
+      ownership: { default: 3 }, x: 200, y: 100, width: 100, height: 100 };
+    const secretChild = tokenDoc("hidden-descendant", { x: 350, y: 120, width: 40, height: 40, hidden: true });
+    const prefab: PrefabDocument = { _id: "wall-root-prefab", type: "prefab", name: "Wall root",
+      ownership: { default: 0 }, flags: {}, system: {}, definition: {
+        version: 1, sourceSceneId: "s1", gridSize: 100, origin: { x: 100, y: 100 },
+        parts: [
+          { id: root._id, coll: "walls", doc: root },
+          { id: childTile._id, coll: "tiles", parentId: root._id, locked: true, doc: childTile },
+          { id: secretChild._id, coll: "tokens", parentId: childTile._id, doc: secretChild },
+        ], graphs: [],
+      } };
+    h.gm.submit([{ kind: "create", coll: "prefabs", data: prefab }]);
+    await flushMicrotasks();
+    const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const rejected: ClientEvents["rejected"][] = [];
+    const projected: OpEnvelope[] = [];
+    bus.on("rejected", (event) => rejected.push(event));
+    bus.on("ops", (event) => projected.push(event.envelope));
+    const results: ClientEvents["prefabResult"][] = [];
+    h.gmBus.on("prefabResult", (event) => results.push(event));
+    h.gm.requestPrefabPlace(prefab._id, "s1", { x: 400, y: 400 });
+    await flushMicrotasks();
+    expect(results.at(-1)).toMatchObject({ ok: true });
+    const placedScene = h.hostStore.get("scenes", "s1") as SceneDocument;
+    const placedWall = placedScene.walls.find((doc) =>
+      (doc.flags.prefab as { instanceId?: string } | undefined)?.instanceId === results.at(-1)?.instanceId);
+    const instanceId = (placedWall?.flags.prefab as { instanceId?: string } | undefined)?.instanceId;
+    const placedTile = placedScene.tiles.find((doc) =>
+      (doc.flags.prefab as { instanceId?: string } | undefined)?.instanceId === instanceId);
+    const placedToken = placedScene.tokens.find((doc) =>
+      (doc.flags.prefab as { instanceId?: string } | undefined)?.instanceId === instanceId);
+    if (!placedWall || !placedTile || !placedToken) throw new Error("prefab descendants were not placed");
+    expect(placedWall.c).toEqual([400, 400, 500, 400]);
+    expect(player.store.get("scenes", "s1")?.walls.some((doc) => doc._id === placedWall._id)).toBe(true);
+    expect(player.store.get("scenes", "s1")?.tiles.some((doc) => doc._id === placedTile._id)).toBe(true);
+    expect(player.store.get("scenes", "s1")?.tokens.some((doc) => doc._id === placedToken._id)).toBe(false);
+
+    const beforeLockedEdit = h.hostStore.seq;
+    player.submit([{ kind: "update", ref: { coll: "tiles", id: placedTile._id,
+      parent: { coll: "scenes", id: "s1" } }, diff: { x: placedTile.x + 1 } }]);
+    await flushMicrotasks();
+    expect(rejected.at(-1)?.reason).toBe("forbidden");
+    expect(h.hostStore.seq).toBe(beforeLockedEdit);
+
+    const beforeMove = h.hostStore.seq;
+    player.submit([{ kind: "update", ref: { coll: "walls", id: placedWall._id,
+      parent: { coll: "scenes", id: "s1" } }, diff: { c: [400, 400, 400, 600] } }]);
+    await flushMicrotasks();
+    expect(rejected).toHaveLength(1);
+    expect(h.hostStore.seq).toBe(beforeMove + 1);
+    expect(h.hostLog.at(h.hostStore.seq)?.env.ops).toHaveLength(3);
+    const moved = h.hostStore.get("scenes", "s1") as SceneDocument;
+    expect(moved.walls.find((doc) => doc._id === placedWall._id)?.c).toEqual([400, 400, 400, 600]);
+    expect(moved.tiles.find((doc) => doc._id === placedTile._id))
+      .toMatchObject({ x: 200, y: 600, width: 200, height: 200, rotation: 90 });
+    expect(moved.tokens.find((doc) => doc._id === placedToken._id))
+      .toMatchObject({ x: 280, y: 900, width: 80, height: 80, rotation: 90 });
+    expect(player.store.get("scenes", "s1")?.tokens.some((doc) => doc._id === placedToken._id)).toBe(false);
+    expect(JSON.stringify(projected)).not.toContain(placedToken._id);
+
+    expect(h.host.undo().ok).toBe(true);
+    await flushMicrotasks();
+    const restored = h.hostStore.get("scenes", "s1") as SceneDocument;
+    expect(restored.walls.find((doc) => doc._id === placedWall._id)?.c).toEqual([400, 400, 500, 400]);
+    expect(restored.tiles.find((doc) => doc._id === placedTile._id))
+      .toMatchObject({ x: 500, y: 400, width: 100, height: 100, rotation: 0 });
+    expect(restored.tokens.find((doc) => doc._id === placedToken._id))
+      .toMatchObject({ x: 650, y: 420, width: 40, height: 40, rotation: 0 });
+    expect(player.store.get("scenes", "s1")?.tokens.some((doc) => doc._id === placedToken._id)).toBe(false);
+
+    const beforeRejectedMove = h.hostStore.seq;
+    player.submit([{ kind: "update", ref: { coll: "walls", id: placedWall._id,
+      parent: { coll: "scenes", id: "s1" } }, diff: { c: [720, 400, 820, 400] } }]);
+    await flushMicrotasks();
+    const refusal = rejected.at(-1);
+    expect(refusal).toMatchObject({ reason: "invariant", detail: "attached child would lie outside scene bounds" });
+    expect(refusal?.detail).not.toContain(placedToken._id);
+    expect(h.hostStore.seq).toBe(beforeRejectedMove);
+  });
+
+  test("region prefab roots carry descendants in one undoable host commit and remain GM-authored", async () => {
+    const h = await setup();
+    const polygon = { kind: "polygon" as const, points: [[0, 0], [1, 0], [1, 1], [0, 1]] as Array<[number, number]> };
+    const root: RegionDocument = { _id: "root-region", type: "region", name: "Public region root",
+      ownership: { default: 3 }, flags: {}, system: {}, x: 200, y: 200, width: 100, height: 100,
+      rotation: 0, shape: polygon };
+    const childTile: TileDocument = { ...zoneTile(), _id: "child-tile", name: "Region child",
+      ownership: { default: 3 }, x: 300, y: 200, width: 100, height: 100 };
+    const secretChild = tokenDoc("hidden-region-child", { x: 320, y: 220, width: 40, height: 40, hidden: true });
+    const regionGraph: AutomationDocument = { ...zoneDoc(), _id: "region-root-graph",
+      definition: { ...zoneDoc().definition, sourceKind: "region", tileId: root._id,
+        methods: ["manual"], steps: [{ id: "region-stop", kind: "stop" }] } };
+    const prefab: PrefabDocument = { _id: "region-root-prefab", type: "prefab", name: "Region root",
+      ownership: { default: 0 }, flags: {}, system: {}, definition: {
+        version: 1, sourceSceneId: "s1", gridSize: 100, origin: { x: 250, y: 250 },
+        parts: [
+          { id: root._id, coll: "regions", doc: root },
+          { id: childTile._id, coll: "tiles", parentId: root._id, doc: childTile },
+          { id: secretChild._id, coll: "tokens", parentId: childTile._id, doc: secretChild },
+        ], graphs: [{ id: regionGraph._id, doc: regionGraph }],
+      } };
+    h.gm.submit([{ kind: "create", coll: "prefabs", data: prefab }]);
+    await flushMicrotasks();
+    const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const rejected: ClientEvents["rejected"][] = [];
+    bus.on("rejected", (event) => rejected.push(event));
+    const results: ClientEvents["prefabResult"][] = [];
+    h.gmBus.on("prefabResult", (event) => results.push(event));
+    h.gm.requestPrefabPlace(prefab._id, "s1", { x: 500, y: 500 });
+    await flushMicrotasks();
+    const placedScene = h.hostStore.get("scenes", "s1") as SceneDocument;
+    const instanceId = results.at(-1)?.instanceId;
+    const placedRegion = placedScene.regions?.find((doc) =>
+      (doc.flags.prefab as { instanceId?: string } | undefined)?.instanceId === instanceId);
+    const placedTile = placedScene.tiles.find((doc) =>
+      (doc.flags.prefab as { instanceId?: string } | undefined)?.instanceId === instanceId);
+    const placedToken = placedScene.tokens.find((doc) =>
+      (doc.flags.prefab as { instanceId?: string } | undefined)?.instanceId === instanceId);
+    const placedGraph = h.hostStore.getAll("automations").find((doc) =>
+      (doc.flags.prefab as { instanceId?: string } | undefined)?.instanceId === instanceId);
+    if (!placedRegion || !placedTile || !placedToken || !placedGraph)
+      throw new Error("region prefab descendants or bound graph were not placed");
+    expect(placedGraph.definition).toMatchObject({ sourceKind: "region", tileId: placedRegion._id, sceneId: "s1" });
+    expect(player.store.getAll("automations").some((doc) => doc._id === placedGraph._id)).toBe(false);
+    expect(player.store.get("scenes", "s1")?.regions?.some((doc) => doc._id === placedRegion._id)).toBe(true);
+    expect(player.store.get("scenes", "s1")?.regions?.find((doc) => doc._id === placedRegion._id)?.flags.prefab)
+      .toBeUndefined();
+    expect(player.store.get("scenes", "s1")?.tokens.some((doc) => doc._id === placedToken._id)).toBe(false);
+
+    const beforeDenied = h.hostStore.seq;
+    player.submit([{ kind: "update", ref: { coll: "regions", id: placedRegion._id,
+      parent: { coll: "scenes", id: "s1" } }, diff: { x: 510 } }]);
+    await flushMicrotasks();
+    expect(rejected.at(-1)?.reason).toBe("forbidden");
+    expect(h.hostStore.seq).toBe(beforeDenied);
+
+    const beforeMove = h.hostStore.seq;
+    h.gm.submit([{ kind: "update", ref: { coll: "regions", id: placedRegion._id,
+      parent: { coll: "scenes", id: "s1" } }, diff: { x: 600, y: 600, width: 200, height: 200, rotation: 90 } }]);
+    await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(beforeMove + 1);
+    expect(h.hostLog.at(h.hostStore.seq)?.env.ops).toHaveLength(3);
+    const moved = h.hostStore.get("scenes", "s1") as SceneDocument;
+    expect(moved.regions?.find((doc) => doc._id === placedRegion._id))
+      .toMatchObject({ x: 600, y: 600, width: 200, height: 200, rotation: 90, shape: polygon });
+    expect(moved.tiles.find((doc) => doc._id === placedTile._id))
+      .toMatchObject({ x: 600, y: 800, width: 200, height: 200, rotation: 90 });
+    expect(moved.tokens.find((doc) => doc._id === placedToken._id))
+      .toMatchObject({ x: 680, y: 840, width: 80, height: 80, rotation: 90 });
+    expect(player.store.get("scenes", "s1")?.tokens.some((doc) => doc._id === placedToken._id)).toBe(false);
+
+    expect(h.host.undo().ok).toBe(true);
+    await flushMicrotasks();
+    const restored = h.hostStore.get("scenes", "s1") as SceneDocument;
+    expect(restored.regions?.find((doc) => doc._id === placedRegion._id))
+      .toMatchObject({ x: 450, y: 450, width: 100, height: 100, rotation: 0 });
+    expect(restored.tiles.find((doc) => doc._id === placedTile._id))
+      .toMatchObject({ x: 550, y: 450, width: 100, height: 100, rotation: 0 });
+    expect(restored.tokens.find((doc) => doc._id === placedToken._id))
+      .toMatchObject({ x: 570, y: 470, width: 40, height: 40, rotation: 0 });
+    const beforeDespawn = h.hostStore.seq;
+    h.gm.submit([{ kind: "delete", ref: { coll: "regions", id: placedRegion._id,
+      parent: { coll: "scenes", id: "s1" } } }]);
+    await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(beforeDespawn + 1);
+    expect((h.hostStore.get("scenes", "s1") as SceneDocument).regions?.some((doc) => doc._id === placedRegion._id))
+      .toBe(false);
+    expect(h.hostStore.get("automations", placedGraph._id)).toBeUndefined();
+  });
+
   test("failed template dependency/asset preflight preserves world; prefab placement is undoable", async () => {
     const h = await setup();
     await seedZone(h);

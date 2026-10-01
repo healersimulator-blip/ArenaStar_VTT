@@ -102,6 +102,61 @@ describe("world.zip export/import (§8)", () => {
     await deleteWorldData(db, app.worldId);
   });
 
+  test("legacy FX media referenced by timelines and presets needs explicit export review", async () => {
+    const root = new MemDirHandle();
+    const app = await boot(root);
+    const timelineBytes = new Uint8Array([3, 5, 8]);
+    const presetBytes = new Uint8Array([13, 21, 34]);
+    const unrelatedBytes = new Uint8Array([55, 89, 144]);
+    const { hash: timelineHash } = await app.assets.import(
+      timelineBytes, "legacy-timeline.webm", "video/webm", "referenced");
+    const { hash: presetHash } = await app.assets.import(
+      presetBytes, "legacy-preset.ogg", "audio/ogg", "referenced");
+    const { hash: unrelatedHash } = await app.assets.import(
+      unrelatedBytes, "legacy-background.png", "image/png", "referenced");
+    const imageSection = { id: "legacy-video", kind: "image" as const, assetId: timelineHash,
+      startMs: 0, durationMs: 800, at: { kind: "point" as const, x: 100, y: 100 } };
+    const soundSection = { id: "legacy-sound", kind: "sound" as const, assetId: presetHash,
+      startMs: 0, durationMs: 800 };
+    const timeline: MacroDocument = { _id: "legacy-timeline", type: "macro", name: "Legacy timeline",
+      ownership: { default: 0 }, flags: {}, system: {}, kind: "sequence", command: "",
+      sequence: { version: 1, audience: "gm", sections: [imageSection] } };
+    const preset: MacroDocument = { _id: "legacy-preset", type: "macro", name: "Legacy preset",
+      ownership: { default: 0 }, flags: {}, system: {}, kind: "fxPreset", command: "",
+      preset: { version: 1, sections: [soundSection] } };
+    app.gm.client.submit([{ kind: "create", coll: "macros", data: timeline },
+      { kind: "create", coll: "macros", data: preset }]);
+    await settle();
+
+    const exportWorld = () => exportWorldZip({ db, worldId: app.worldId, root, persister: app.persister });
+    const expectExportBlock = async (name: string, reason: string) => {
+      let caught: unknown;
+      try { await exportWorld(); } catch (error) { caught = error; }
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message).toContain("world-export rights");
+      expect((caught as Error).message).toContain(name);
+      expect((caught as Error).message).toContain(reason);
+    };
+
+    // A legacy asset has no affirmative rights fact. Both runnable timelines and
+    // authoring-only presets are included in the archive and therefore need review.
+    await expectExportBlock("legacy-timeline.webm", "unreviewed legacy FX media");
+    await app.assets.describe(timelineHash, { exportRights: "restricted" });
+    await expectExportBlock("legacy-timeline.webm", "restricted");
+    await app.assets.describe(timelineHash, { exportRights: "granted" });
+    await expectExportBlock("legacy-preset.ogg", "unreviewed legacy FX media");
+    await app.assets.describe(presetHash, { exportRights: "granted" });
+
+    const archive = await exportWorld();
+    const files = parseZip(new Uint8Array(await archive.arrayBuffer()));
+    expect(files.get(`assets/${timelineHash}`)).toEqual(timelineBytes);
+    expect(files.get(`assets/${presetHash}`)).toEqual(presetBytes);
+    expect((await app.assets.meta(unrelatedHash))?.exportRights).toBeUndefined();
+    expect(files.get(`assets/${unrelatedHash}`)).toEqual(unrelatedBytes);
+    await app.close();
+    await deleteWorldData(db, app.worldId);
+  });
+
   test("archive copies and restores keep script source but require this host to review and republish", async () => {
     const root = new MemDirHandle();
     const app = await boot(root);

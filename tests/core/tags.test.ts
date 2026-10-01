@@ -1,11 +1,12 @@
 import { describe, expect, test } from "vitest";
 import {
   TagIndex, expandTagTemplate, getByTag, groupTagsByScene, normalizeTags, sidebarTagMatch,
-  sidebarTagTerm, sidebarTagTerms, tagEditOps, tagMatcher, tagRuleOps, tagsOf, validWorldTagRefs,
+  sidebarTagTerm, sidebarTagTerms, tagAutocompleteSuggestions, tagEditOps, tagMatcher, tagRuleOps, tagsOf,
+  validWorldTagRefs,
 } from "../../src/core/tags";
 import { DocumentStore } from "../../src/core/store";
 import type { Op, OpEnvelope } from "../../src/core/ops";
-import type { SceneDocument, TokenDocument, TileDocument } from "../../src/core/documents";
+import type { RegionDocument, SceneDocument, TokenDocument, TileDocument } from "../../src/core/documents";
 import { emptyWorld } from "../net/fixtures";
 
 const meta = { worldId: "world", name: "Tags", system: "test", systemVersion: "1" };
@@ -79,6 +80,15 @@ describe("Tagger-compatible query semantics", () => {
     expect(tagMatcher("boss")(["EnemyBoss"])).toBe(false);
   });
 
+  test("Tagger autocomplete completes only the final comma term, safely and deterministically", () => {
+    const vocabulary = ["trap-door", "trap-light", "Trap-gate", "other", "trap-door", "invalid\nvalue"];
+    expect(tagAutocompleteSuggestions(vocabulary, "trap-door, trap-l")).toEqual(["trap-light"]);
+    expect(tagAutocompleteSuggestions(vocabulary, "trap-", 2)).toEqual(["trap-door", "Trap-gate"]);
+    expect(tagAutocompleteSuggestions(vocabulary, "trap-door")).toEqual([]);
+    expect(tagAutocompleteSuggestions(vocabulary, "other, ")).toEqual([]);
+    expect(tagAutocompleteSuggestions(vocabulary, "trap-", 0)).toEqual([]);
+  });
+
   test("legacy flags read, normalization preserves case/order; clone placeholders", () => {
     const legacy: TileDocument = { ...tile("tile"), flags: { tagger: { tags: ["old", "Old"] } } };
     delete legacy.taggerTags;
@@ -146,6 +156,23 @@ describe("Tagger-compatible query semantics", () => {
     expect(() => tagRuleOps(store.world, [...docs, { ref: { coll: "tiles", id: "c",
       parent: { coll: "scenes", id: "s1" } }, sceneId: "s1", doc: bad }])).toThrow(/128/);
     expect((store.resolve(secondRef) as TileDocument).taggerTags).toEqual(["trap-{#}", "other-{id}"]);
+  });
+
+  test("first-class regions participate in scene-local Tagger reads and edits", () => {
+    const w = emptyWorld();
+    const s = scene("s1");
+    const region: RegionDocument = { _id: "region-a", type: "region", name: "Ash ring",
+      ownership: { default: 3 }, flags: {}, system: {}, taggerTags: ["hazard"],
+      x: 100, y: 100, width: 200, height: 120,
+      shape: { kind: "polygon", points: [[0, 0], [1, 0], [1, 1], [0, 1]] } };
+    s.regions = [region];
+    w.scenes.push(s);
+    expect(getByTag(w, "hazard", { sceneId: "s1" }).map((row) => [row.ref.coll, row.doc._id]))
+      .toEqual([["regions", "region-a"]]);
+    expect(getByTag(w, "hazard", { sceneId: "s1", viewer: player })).toHaveLength(1);
+    const ref = { coll: "regions" as const, id: region._id, parent: { coll: "scenes" as const, id: "s1" } };
+    const ops = tagEditOps([{ ref, doc: region }], "add", ["searchable"]);
+    expect(ops).toEqual([{ kind: "update", ref, diff: { taggerTags: ["hazard", "searchable"] } }]);
   });
 
   test("bulk edits are transactional, undoable, and invalidate scene index", () => {

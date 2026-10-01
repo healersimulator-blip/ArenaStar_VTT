@@ -16,7 +16,7 @@ import type { DocumentStore } from "./store";
 import type { Op } from "./ops";
 
 export const TAGGABLE_COLLECTIONS = [
-  "tokens", "walls", "tiles", "drawings", "templates", "lights", "sounds", "notes", "cells",
+  "tokens", "walls", "tiles", "regions", "drawings", "templates", "lights", "sounds", "notes", "cells",
 ] as const;
 export type TaggableCollection = (typeof TAGGABLE_COLLECTIONS)[number];
 export type TagSearchCollection = TaggableCollection | "scenes";
@@ -49,6 +49,27 @@ export function normalizeTags(input: readonly string[]): string[] {
     }
   }
   return tags;
+}
+
+/**
+ * Complete the final comma-separated term in the GM explorer from its visible tag vocabulary.
+ * Callers must source `available` from the current projected world; this helper never reads host state.
+ */
+export function tagAutocompleteSuggestions(available: readonly string[], input: string, limit = 8): string[] {
+  const prefix = input.slice(input.lastIndexOf(",") + 1).trim();
+  if (!prefix || prefix.length > MAX_QUERY_LENGTH || !Number.isSafeInteger(limit) || limit < 1) return [];
+  const needle = prefix.toLocaleLowerCase();
+  const unique = new Set<string>();
+  for (const tag of available) {
+    if (typeof tag !== "string" || tag !== tag.trim() || !tag || tag.length > MAX_TAG_LENGTH ||
+        [...tag].some((char) => char.charCodeAt(0) < 32)) continue;
+    const folded = tag.toLocaleLowerCase();
+    if (folded.startsWith(needle) && folded !== needle) unique.add(tag);
+  }
+  return [...unique].sort((a, b) => {
+    const left = a.toLocaleLowerCase(), right = b.toLocaleLowerCase();
+    return left < right ? -1 : left > right ? 1 : a < b ? -1 : a > b ? 1 : 0;
+  }).slice(0, Math.min(limit, 16));
 }
 
 export type TagMatchMode = "all" | "any" | "exactSet";

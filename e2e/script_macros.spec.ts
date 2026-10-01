@@ -345,4 +345,34 @@ return { changed: applied.changed, after };`);
     await expect(wizard.locator("details pre")).toContainText('"has": false');
     await expect(page.locator("#chat-log")).toContainText("Worker RPC succeeded");
   });
+
+  test("Tag search autocomplete completes the final comma term from visible tags", async ({ page }) => {
+    await page.goto(entry + "?e2e=1");
+    await waitForSurface(page, "app");
+    await page.locator("#add-token").click();
+    await page.locator("#gm-macros").click();
+    await page.locator("[data-macro-tags-tab]").click();
+    const tags = page.locator("[data-tagger]");
+    await tags.getByLabel("Placeable type").selectOption("tokens");
+    const token = tags.locator(".result").filter({ hasText: "Token 1" });
+    await expect(token).toHaveCount(1);
+    await token.locator('input[type="checkbox"]').check();
+    await tags.getByLabel("Tags to edit").fill("trap-door, trap-light");
+    await tags.getByRole("button", { name: "Add", exact: true }).click();
+    await expect(token).toContainText("trap-light");
+
+    const search = tags.locator("[data-tag-search]");
+    await search.fill("trap-");
+    const listbox = tags.getByRole("listbox", { name: "Tag suggestions" });
+    await expect(listbox.getByRole("option")).toHaveText(["trap-door", "trap-light"]);
+    await listbox.getByRole("option", { name: "trap-door" }).click();
+    await expect(search).toHaveValue("trap-door");
+
+    await search.fill("trap-door, trap-l");
+    await expect(listbox.getByRole("option")).toHaveText(["trap-light"]);
+    await search.press("ArrowDown");
+    await search.press("Enter");
+    await expect(search).toHaveValue("trap-door, trap-light");
+    await expect(tags.locator(".result").filter({ hasText: "Token 1" })).toHaveCount(1);
+  });
 });

@@ -4,7 +4,7 @@
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import {
-    getByTag, listTaggable, tagEditOps,
+    listTaggable, tagAutocompleteSuggestions, tagEditOps, tagMatcher,
     type TagMatchMode, type TagPattern, type TagSearchResult, type TagEdit,
   } from "../../core/tags";
 
@@ -23,10 +23,15 @@
   let pendingRules = $state<string | null>(null);
   let results = $state<TagSearchResult[]>([]);
   let scenes = $state<Array<{ _id: string; name: string }>>([]);
+  let tagVocabulary = $state<string[]>([]);
+  let tagSearchFocused = $state(false);
+  let activeSuggestion = $state(-1);
   const selected = new SvelteSet<string>();
 
   const canEdit = $derived(client.user?.role === "GM" || client.user?.role === "ASSISTANT");
   const selectedResults = $derived(results.filter((row) => selected.has(key(row))));
+  const suggestions = $derived(tagAutocompleteSuggestions(tagVocabulary, query));
+  const showingSuggestions = $derived(tagSearchFocused && suggestions.length > 0);
   function key(row: TagSearchResult): string {
     return `${row.sceneId}:${row.collection}:${row.doc._id}`;
   }
@@ -38,12 +43,14 @@
         ...(sceneId ? { sceneId } : {}),
         ...(kind ? { collections: [kind as TagSearchResult["collection"]] } : {}),
       };
+      // This is the client's projected world, so autocomplete never learns tags
+      // from hidden or private documents held only by the host.
+      const candidates = listTaggable(client.store.world, opts);
+      tagVocabulary = [...new Set(candidates.flatMap((row) => row.tags))];
       const terms = pattern === "regex" ? [query.trim()] : query.split(",").map((s) => s.trim()).filter(Boolean);
-      const matches = query.trim()
-        ? getByTag(client.store.world, terms, {
-            ...opts, mode, pattern, contains: !exact, caseSensitive,
-          })
-        : listTaggable(client.store.world, opts);
+      const match = query.trim()
+        ? tagMatcher(terms, { mode, pattern, contains: !exact, caseSensitive }) : null;
+      const matches = match ? candidates.filter((row) => match(row.tags)) : candidates;
       const needle = nameFilter.toLocaleLowerCase().trim();
       results = needle
         ? matches.filter((row) => row.doc.name.toLocaleLowerCase().includes(needle))
@@ -52,6 +59,40 @@
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause);
       results = [];
+    }
+  }
+
+  function searchInput(): void {
+    tagSearchFocused = true;
+    activeSuggestion = -1;
+    refresh();
+  }
+
+  function applySuggestion(tag: string): void {
+    const comma = query.lastIndexOf(",");
+    query = `${comma < 0 ? "" : `${query.slice(0, comma + 1)} `}${tag}`;
+    activeSuggestion = -1;
+    refresh();
+  }
+
+  function searchKeydown(event: KeyboardEvent): void {
+    if (event.key === "Escape") {
+      tagSearchFocused = false;
+      activeSuggestion = -1;
+      return;
+    }
+    if (!showingSuggestions) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      activeSuggestion = (activeSuggestion + 1) % suggestions.length;
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      activeSuggestion = activeSuggestion < 0 ? suggestions.length - 1
+        : (activeSuggestion - 1 + suggestions.length) % suggestions.length;
+    } else if (event.key === "Enter" && activeSuggestion >= 0) {
+      event.preventDefault();
+      const tag = suggestions[activeSuggestion];
+      if (tag) applySuggestion(tag);
     }
   }
 
@@ -120,12 +161,31 @@
     </select>
     <select aria-label="Placeable type" bind:value={kind} onchange={refresh}>
       <option value="">All placeables</option>
-      {#each ["scenes", "tokens", "tiles", "walls", "lights", "sounds", "drawings", "templates", "notes", "cells"] as c (c)}
+      {#each ["scenes", "tokens", "tiles", "regions", "walls", "lights", "sounds", "drawings", "templates", "notes", "cells"] as c (c)}
         <option value={c}>{c}</option>
       {/each}
     </select>
     <input aria-label="Search placeable name" placeholder="Name…" bind:value={nameFilter} oninput={refresh} />
-    <input aria-label="Search tags" data-tag-search placeholder="tag, another tag…" bind:value={query} oninput={refresh} />
+    <div class="tag-search">
+      <input aria-label="Search tags" data-tag-search placeholder="tag, another tag…" bind:value={query}
+        role="combobox" aria-autocomplete="list" aria-expanded={showingSuggestions}
+        aria-controls={showingSuggestions ? "tag-suggestions" : undefined}
+        aria-activedescendant={activeSuggestion >= 0 ? `tag-suggestion-${activeSuggestion}` : undefined}
+        onfocus={() => tagSearchFocused = true}
+        onblur={() => { tagSearchFocused = false; activeSuggestion = -1; }}
+        oninput={searchInput} onkeydown={searchKeydown} />
+      {#if showingSuggestions}
+        <div class="tag-suggestions" id="tag-suggestions" role="listbox" aria-label="Tag suggestions">
+          {#each suggestions as suggestion, index (suggestion)}
+            <button type="button" role="option" id={`tag-suggestion-${index}`}
+              aria-selected={activeSuggestion === index} data-tag-suggestion={suggestion}
+              onmousedown={(event) => event.preventDefault()} onclick={() => applySuggestion(suggestion)}>
+              {suggestion}
+            </button>
+          {/each}
+        </div>
+      {/if}
+    </div>
   </div>
   <div class="filters">
     <select aria-label="Tag match mode" bind:value={mode} onchange={refresh}>
@@ -169,6 +229,13 @@
   h3 { margin: 0; font-size: .95rem; }
   .filters, .edit { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
   input:not([type="checkbox"]) { min-width: 100px; flex: 1; }
+  .tag-search { position: relative; min-width: 180px; flex: 1; }
+  .tag-search > input { width: 100%; min-width: 0; }
+  .tag-suggestions { position: absolute; z-index: 20; top: calc(100% + 2px); left: 0; right: 0;
+    display: grid; max-height: 180px; overflow-y: auto; border: 1px solid #68768a; border-radius: 3px;
+    background: #202936; box-shadow: 0 4px 12px #0008; }
+  .tag-suggestions button { text-align: left; border: 0; border-radius: 0; padding: 5px 7px; }
+  .tag-suggestions button[aria-selected="true"], .tag-suggestions button:hover { background: #35485e; }
   select { min-width: 95px; max-width: 175px; }
   .hint { color: #b4bdc8; margin: 0; }
   .results { max-height: 180px; overflow-y: auto; border: 1px solid #444; border-radius: 3px; }
