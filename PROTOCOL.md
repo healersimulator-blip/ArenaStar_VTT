@@ -329,6 +329,27 @@ interface MacroRequestMsg {
 }
 ```
 
+### macros.invoke (0x4f · client → host · ops)
+
+TR-12/MC-01: run a saved **automation macro** — a world macro that references one graph. The client
+sends only the macro id, never a graph id, action, scene or token, so a player can hold a callable
+directory/hotbar entry without ever learning which private graph it names (the projection strips the
+binding from every player replica, on snapshots, creates and rebinds alike). The host re-resolves the
+binding against live state: the definition must still validate, the graph must still subscribe to
+`manual`, and for a player the anchor must be a **tile** the caller can see with the `playerRunnable`
+gate and the graph's own scene must be the scene that caller currently has loaded. The macro grants no
+authority of its own — it is a second way to ask for an already-published trigger, so nothing here
+widens a graph's audience. One fire per `requestId`; the result travels as `macro.result` and never
+names the graph, its id or a refusal reason to a non-GM.
+
+```ts
+interface MacroInvokeMsg {
+  kind: "macros.invoke";
+  requestId: string;
+  macroId: DocId;
+}
+```
+
 ### macro.result (0x3b · host → caller and GMs · ops)
 
 Other GMs see bounded execution traces, errors and JSON return values. The player caller sees only a generic completed/failed status: script output and logs are never a hidden-data read channel. No recipient executes the code again; mechanical work is singular on the host. The durable invocation marker and op log support reconnect/replay diagnostics, but there is no transactional rollback across multiple script actions yet.

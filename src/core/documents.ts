@@ -421,8 +421,11 @@ export interface CombatDocument extends BaseDocument {
 
 export interface MacroDocument extends BaseDocument {
   type: "macro";
-  kind: "chat" | "script" | "sequence" | "summon" | "fxPreset";
+  kind: "chat" | "script" | "sequence" | "summon" | "fxPreset" | "automation";
   command: string;
+  /** TR-12/MC-01 (D-381): a GM-authored reference to one saved graph. The binding is
+   * private state — players receive the macro as a callable entry, never this id. */
+  automation?: import("./macroAutomation").MacroAutomationBinding;
   /** GM-published summoning preset. Player projection keeps only callable metadata. */
   summon?: import("./summons").SummonDefinition | import("./summons").SummonPublic;
   /**

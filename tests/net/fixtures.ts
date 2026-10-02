@@ -64,6 +64,8 @@ export function sampleMessage(kind: WireMessage["kind"]): WireMessage {
       return { kind: "summon.result", requestId: "sp-1", ok: true, detail: "summoned", seq: 4, tokenId: "t1" };
     case "macro.request":
       return { kind: "macro.request", requestId: "mr-1", macroId: "m-1", args: { target: "t-1" } };
+    case "macros.invoke":
+      return { kind: "macros.invoke", requestId: "mi-1", macroId: "m-2" };
     case "macro.result":
       return { kind: "macro.result", requestId: "mr-1", macroId: "m-1", callerId: "u1", ok: true, detail: "done", trace: ["tag edit"] };
     case "fx.request":

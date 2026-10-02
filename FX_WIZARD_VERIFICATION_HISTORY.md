@@ -1,6 +1,6 @@
 # FX Wizard Verification History
 
-Consolidated historical archive through D-372, with the D-374 double-click, D-375 hover, D-376 scene-change, D-377 door-change, D-378 combat-change, D-379 environment-change and D-380 scene-load follow-ups appended below. D-373 remains the latest standalone verification report.
+Consolidated historical archive through D-372, with the D-374 double-click, D-375 hover, D-376 scene-change, D-377 door-change, D-378 combat-change, D-379 environment-change, D-380 scene-load and D-381 automation-macro follow-ups appended below. D-373 remains the latest standalone verification report.
 
 **Recovery note:** the former archive body was unavailable after an overwrite. D-293–D-346 below are reconstructed from the preserved, detailed `DECISIONS.md` records, rather than copied from the original report bodies. D-347 is retained from its original standalone verification report. Existing status summaries and verification counts remain available in `MACROS_FX_WIZARD_IMPLEMENTATION_STATUS.md`.
 
@@ -41,6 +41,7 @@ Consolidated historical archive through D-372, with the D-374 double-click, D-37
 - [D-378 archived verification report](#report-d378)
 - [D-379 archived verification report](#report-d379)
 - [D-380 archived verification report](#report-d380)
+- [D-381 archived verification report](#report-d381)
 
 <a id="report-d293-d319"></a>
 
@@ -4267,4 +4268,26 @@ The browser cases used npm-provisioned Chromium 153 for functional input coverag
 ### Remaining acceptance work
 
 - This closes only the per-viewer load slice. MATT's `canvasready` also fires when a GM's own canvas is retargeted and its triggers carry `controlled: gm/player` restrictions; neither is modelled. MATT's per-percent Lighting Animation, journal/macro initiation, region-initiated methods, the full overlap/guard matrix and cross-browser coverage remain open.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d381"></a>
+
+## D381 — Automation macros: a saved graph, run by reference (2026-10-02)
+
+**Scope:** TR-12 ("door/journal/macro triggers can fire a named automation without recreating it") and MC-01's `automation` macro kind. This covers only macro initiation; journal initiation, region redirects, chat-command invocation and the rest of MC-01–MC-11 remain open.
+
+### Implemented
+
+- `MacroDocument.kind` gains `"automation"` with one private binding, `automation: { graphId }`. The document rule (`src/core/macroAutomation.ts`) requires a bounded graph id, a name and an empty command, and forbids a stray binding on any other kind (and any other payload on this one).
+- **Authoring** (host, create and update): GM/assistant only; the referenced graph must exist in this world, validate, have a real anchor tile/region, and subscribe to `manual`. Fail-fast, with the runtime re-checking all of it before every fire.
+- **Invocation:** `macros.invoke` (0x4f) carries a macro id only. The host re-validates the definition and the `manual` method, and for a player requires a tile anchor (not a region), the `playerRunnable` gate, `read` + visibility on the anchor, and the graph's scene to be the scene that player currently has loaded. The fire is a `manual` event under the invoker's identity, with no triggering token, inside the graph's ordinary atomic envelope/undo. One fire per `requestId`; `macro.result` answers failures, and a non-GM never receives the graph's name, id or refusal reason.
+- **Secrecy:** `projectMacro` strips the binding for every non-script kind, the op path replaces the whole macro shape on a rebind or kind transition, and `stripMacroBindingDiff` blanks the key even when a caller has no resolver — so no path, including envelope-only mode, can forward a graph id to a player.
+- **UI:** *Saved zones* gains **Publish macro** (create, or refresh the name of, the macro bound to that graph); the Macros window gains an **Automation macros** tab for both shells (name, hotbar slot and delete for a GM; Run for everyone); the GM hotbar dispatches the kind through the same helper as the directory.
+
+### Verification
+
+- `tests/core/macroAutomation.test.ts` — **5/5**: binding validation, the document and stray rules, the snapshot projection (player keeps name/kind/slot, loses the binding; the GM keeps it), and the per-op paths — create, rename, rebind and kind transition — including the resolver-less path that previously forwarded the raw diff.
+- `tests/host/sync.test.ts` — **206/206**. New: a published macro fires for a player as that player (one `manual` history entry, neutral `Automation fired` detail, no messages in the player replica, macro delivered without binding or automations collection) and for the GM (`Fired Courtyard alert`), with Undo reverting exactly the graph's own transaction; the refusal matrix (unpublished gate, region anchor, hidden macro, missing macro, a graph in a scene the player is not in, `manual` removed then restored); authoring refusals (player-authored, missing graph, click-only graph, binding on a chat macro, command on an automation macro); a forged extra `graphId` field (`invalid_schema`) and a replayed request id (one fire). Writing those cases also pinned a real ordering rule: a graph must be committed before a macro may reference it.
+- Production `file://` Chromium 153: `e2e/active_zones.spec.ts:1371` authors the graph, publishes the macro from the zone list, runs it from the directory as the GM, then joins a real second browser context, asserts the graph id appears nowhere in the player's shell, runs the macro there and checks the host chat and per-graph history name each invoker. `active_zones.spec.ts` (25 cases) + `join.spec.ts`: **26/26 in 4.2 min**.
+- Full `corepack pnpm test` — **4,687 passed / 12 skipped** across 326 passing / 2 skipped files (**101.53 s**). `pnpm typecheck` — 64 components, 0 blocking, 1 existing advisory; lint clean. `pnpm size` — **3.870 MB raw / 1.107 MB gzip** (4,057,625 / 1,160,426 bytes), within the 6 MB budget; `git diff --check` clean. `PROTOCOL.md` documents the new kind; the wire boundary tables (`contracts`, `frame`, `fixtures`) were updated with it.
 - A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**

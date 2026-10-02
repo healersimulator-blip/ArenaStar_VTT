@@ -23,6 +23,19 @@ export function runChatMacro(client: ClientSync, macro: MacroDocument): void {
   client.submit([{ kind: "create", coll: "messages", data: message }]);
 }
 
+/**
+ * TR-12/MC-01: run a saved macro from the directory or a hotbar slot, by kind.
+ * Chat macros keep their pure-chat path; an automation macro asks the **host** to
+ * fire the graph it references — the client never sees that graph's id.
+ */
+export function runSavedMacro(client: ClientSync, macro: MacroDocument): void {
+  if (macro.kind === "automation") {
+    client.invokeMacro(macro._id);
+    return;
+  }
+  runChatMacro(client, macro);
+}
+
 /** Macros bound to a hotbar slot (flags.core.slot, §10). */
 export function macroSlots(macros: readonly MacroDocument[]): Array<MacroDocument | null> {
   const slots: Array<MacroDocument | null> = [null, null, null, null, null];

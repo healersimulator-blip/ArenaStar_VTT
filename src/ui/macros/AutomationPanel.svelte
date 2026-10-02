@@ -12,6 +12,7 @@
   } from "../../core/automation";
   import { tileAlphaMaskFromRgba, tileTriggerCirclePolygon, type TileTriggerZone } from "../../core/tileTriggerZone";
   import { regionGeometryError } from "../../core/regionGeometry";
+  import { macroAutomationGraphId } from "../../core/macroAutomation";
 
   let { client, bus, getAsset = null }: { client: ClientSync; bus: EventBus<ClientEvents>;
     getAsset?: ((hash: string) => Promise<Uint8Array | undefined>) | null } = $props();
@@ -44,6 +45,7 @@
   const canEdit = $derived(client.user?.role === "GM" || client.user?.role === "ASSISTANT");
   let scenes = $state<SceneDocument[]>([]);
   let macros = $state<MacroDocument[]>([]);
+  let automationMacros = $state<MacroDocument[]>([]);
   let scripts = $state<MacroDocument[]>([]);
   let summons = $state<MacroDocument[]>([]);
   let rollTables = $state<RollTableDocument[]>([]);
@@ -90,6 +92,7 @@
     assets = { ...client.store.world.assetManifest };
     saved = [...client.store.getAll("automations")];
     macros = [...client.store.getAll("macros")].filter((m) => m.kind === "sequence");
+    automationMacros = [...client.store.getAll("macros")].filter((m) => m.kind === "automation");
     scripts = [...client.store.getAll("macros")].filter((m) => m.kind === "script");
     summons = [...client.store.getAll("macros")].filter((m) => m.kind === "summon");
     rollTables = [...client.store.getAll("rollTables")];
@@ -666,6 +669,31 @@
       diff: { state: state as unknown as Json } }]);
     status = `Requested clearing ${doc.name}'s tile variables (history kept)`;
   }
+  /**
+   * TR-12/MC-01: publish (or refresh) a macro that runs this graph by reference.
+   * The macro stores the graph id — players receive only its name and hotbar slot,
+   * and the host re-checks publication on every run.
+   */
+  function publishMacro(doc: AutomationDocument): void {
+    error = ""; status = "";
+    const checked = validateAutomation(doc.definition);
+    if (!checked.ok) { error = checked.error; return; }
+    if (!checked.definition.methods.includes("manual")) {
+      error = "Add the manual method before publishing this graph as a macro."; return;
+    }
+    const existing = automationMacros.find((m) => macroAutomationGraphId(m) === doc._id);
+    if (existing) {
+      client.submit([{ kind: "update", ref: { coll: "macros", id: existing._id }, diff: { name: doc.name } }]);
+      status = `Refreshed automation macro "${doc.name}" — run it from the Macros window or a hotbar slot.`;
+      return;
+    }
+    const macro: MacroDocument = { _id: globalThis.crypto.randomUUID(), type: "macro",
+      name: doc.name.slice(0, 64) || "Automation", ownership: { default: 1 }, flags: {}, system: {},
+      kind: "automation", command: "", automation: { graphId: doc._id } };
+    client.submit([{ kind: "create", coll: "macros", data: macro }]);
+    status = `Published automation macro "${macro.name}" — assign a hotbar slot in the Macros window.`;
+  }
+
   function invoke(id: string, dryRun = false, method = triggerMethod): void {
     error = "";
     if (isHostDispatchedMethod(method)) { error = hostEventHint([method]); return; }
@@ -1704,6 +1732,7 @@
       <li>{doc.name} · {checked.ok ? checked.definition.methods.join("/") : "Invalid imported graph"} · {doc.state?.count ?? 0} run(s)
         {#if checked.ok}
           <button type="button" onclick={() => pick(doc)}>Edit</button>
+          <button type="button" data-zone-macro={doc._id} onclick={() => publishMacro(doc)}>{automationMacros.some((m) => macroAutomationGraphId(m) === doc._id) ? "Refresh macro" : "Publish macro"}</button>
           <button type="button" disabled={!firstSimulatableMethod(checked.definition.methods)} onclick={() => { sceneId = checked.definition.sceneId; invoke(doc._id, true, firstSimulatableMethod(checked.definition.methods) ?? "sceneChange"); }}>Dry-run</button>
           <button type="button" disabled={!firstSimulatableMethod(checked.definition.methods)} onclick={() => { sceneId = checked.definition.sceneId; invoke(doc._id, false, firstSimulatableMethod(checked.definition.methods) ?? "sceneChange"); }}>Fire</button>
           {#if doc.state?.count}

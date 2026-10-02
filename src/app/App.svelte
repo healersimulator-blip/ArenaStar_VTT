@@ -45,7 +45,7 @@
   import { JournalsPanel } from "../ui/journals";
   import { WindowHost } from "../ui/windows";
   import { WindowManager } from "../ui/windows";
-  import { macroSlots, runChatMacro } from "../ui/macros";
+  import { macroSlots, runChatMacro, runSavedMacro } from "../ui/macros";
   import { resolveFxSequence, type FxImportPermissions } from "../core/fx";
 import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   import { gmState } from "../ui/armies/gmState.svelte";
@@ -2154,6 +2154,7 @@ const WALL_PICK_RADIUS = 12;
     const macro = hotbarSlots[i];
     if (!macro || !app) return;
     if (macro.kind === "chat") runChatMacro(app.gm.client, macro);
+    else if (macro.kind === "automation") runSavedMacro(app.gm.client, macro);
     else if (macro.kind === "script") {
       if (macro.script?.inputs.some((field) => field.required))
         openWindow("macros", "Macros", "macros"); // collect declared inputs in the script tab

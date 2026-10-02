@@ -68,6 +68,8 @@ export const MsgKind = {
   "fx.delivery": 0x4d,
   // SQ-13 (D-308) — the table answers: what each viewer actually did with the media
   "fx.media": 0x4e,
+  // TR-12/MC-01 (D-381) — run a GM-authored automation macro by reference (id only)
+  "macros.invoke": 0x4f,
   // D-250 — explored fog restore: the client asks, the host answers from its fog store
   "fog.get": 0x0e,
   // host → client
@@ -305,6 +307,14 @@ export interface MacroRequestMsg {
   requestId: string;
   macroId: DocId;
   args: Record<string, Json>;
+}
+
+/** Run a saved automation macro. The client names a MACRO, never the graph: the host
+ * resolves the private binding and re-validates it against live publication rules. */
+export interface MacroInvokeMsg {
+  kind: "macros.invoke";
+  requestId: string;
+  macroId: DocId;
 }
 
 /** Private diagnostic for GMs; players receive only a generic status, never logs/results. */
@@ -732,6 +742,7 @@ export type WireMessage =
   | SummonDismissMsg
   | SummonResultMsg
   | MacroRequestMsg
+  | MacroInvokeMsg
   | MacroResultMsg
   | FxRequestMsg
   | FxStartMsg

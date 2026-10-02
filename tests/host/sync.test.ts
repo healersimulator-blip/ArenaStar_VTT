@@ -8370,3 +8370,230 @@ test("a GM loopback session loads the active scene on connect", async () => {
   expect(h.hostStore.getAll("messages").map((message) => message.content))
     .toEqual(["sceneLoad by " + OTHER_ID]);
 });
+
+// ─── TR-12/MC-01 (D-381): a saved macro runs a graph by reference ─────────────────
+
+const automationMacro = (graphId: string, over: Partial<MacroDocument> = {}): MacroDocument => ({
+  _id: "auto-macro", type: "macro", name: "Courtyard alert", ownership: { default: 1 },
+  flags: {}, system: {}, kind: "automation", command: "", automation: { graphId }, ...over,
+});
+
+/** A graph whose only action posts a GM-audience line naming the invocation context. */
+const macroGraph = (over: Partial<AutomationDocument> = {}): AutomationDocument => ({
+  ...zoneDoc(), _id: "macro-graph", name: "Courtyard alert",
+  definition: { ...zoneDoc().definition, tileId: "zone", methods: ["manual"], gates: { playerRunnable: true },
+    steps: [{ id: "notice", kind: "chat", audience: "gm", content: "{{method}} by {{user}}" }] },
+  ...over,
+});
+
+const visibleZoneTile = (): TileDocument => ({ ...zoneTile(), ownership: { default: 2 } });
+
+test("a published automation macro runs its saved graph, under the invoker's identity, without leaking the graph", async () => {
+  const h = await setup();
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: visibleZoneTile() }]);
+  await flushMicrotasks();
+  // A macro is a reference: the graph must already be committed when the macro is authored.
+  h.gm.submit([{ kind: "create", coll: "automations", data: macroGraph() }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "macros", data: automationMacro("macro-graph") }]);
+  await flushMicrotasks();
+  const messages = () => h.hostStore.getAll("messages").map((message) => message.content);
+  const recent = () => h.hostStore.get("automations", "macro-graph")?.state?.recent
+    ?.map((entry) => ({ method: entry.method, userId: entry.userId }));
+
+  const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+  // The macro travels as a callable entry; the graph id, the graph name and the
+  // automations collection do not.
+  const delivered = player.store.get("macros", "auto-macro");
+  expect(delivered?.name).toBe("Courtyard alert");
+  expect(delivered?.kind).toBe("automation");
+  expect(delivered?.automation).toBeUndefined();
+  expect(player.store.getAll("automations")).toEqual([]);
+
+  const playerResults: ClientEvents["macroResult"][] = [];
+  playerBus.on("macroResult", (event) => playerResults.push(event));
+  player.invokeMacro("auto-macro");
+  await flushMicrotasks();
+  expect(messages()).toEqual(["manual by " + PLAYER_ID]);
+  expect(recent()).toEqual([{ method: "manual", userId: PLAYER_ID }]);
+  expect(playerResults.at(-1)).toMatchObject({ ok: true, macroId: "auto-macro", callerId: PLAYER_ID });
+  // Success and refusal read the same to a player: no graph name, no id, no reason.
+  expect(playerResults.at(-1)?.detail).toBe("Automation fired");
+  expect(player.store.getAll("messages")).toEqual([]);
+
+  const gmResults: ClientEvents["macroResult"][] = [];
+  h.gmBus.on("macroResult", (event) => gmResults.push(event));
+  h.gm.invokeMacro("auto-macro");
+  await flushMicrotasks();
+  expect(messages()).toEqual(["manual by " + PLAYER_ID, "manual by " + GM_ID]);
+  expect(gmResults.at(-1)?.detail).toBe("Fired Courtyard alert");
+
+  // Undo belongs to the graph's own envelope: the macro adds no second transaction.
+  expect(h.host.undo().ok).toBe(true);
+  expect(messages()).toEqual(["manual by " + PLAYER_ID]);
+});
+
+test("an automation macro grants no authority: refusals follow the graph's live publication", async () => {
+  const h = await setup();
+  h.gm.submit([
+    { kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: visibleZoneTile() },
+    { kind: "create", coll: "regions", parent: { coll: "scenes", id: "s1" },
+      data: { _id: "courtyard", type: "region", name: "Courtyard", ownership: { default: 2 }, flags: {}, system: {},
+        x: 100, y: 100, width: 200, height: 200,
+        shape: { kind: "polygon", points: [[0.5, 0], [1, 1], [0, 1]] } } as RegionDocument },
+  ]);
+  await flushMicrotasks();
+  h.gm.submit([
+    { kind: "create", coll: "automations", data: macroGraph() },
+    { kind: "create", coll: "automations", data: macroGraph({ _id: "private-graph", name: "Private graph",
+      definition: { ...macroGraph().definition, gates: {} } }) },
+    { kind: "create", coll: "automations", data: macroGraph({ _id: "click-graph", name: "Click graph",
+      definition: { ...macroGraph().definition, methods: ["click"] } }) },
+    { kind: "create", coll: "automations", data: macroGraph({ _id: "region-graph", name: "Region graph",
+      definition: { ...macroGraph().definition, sourceKind: "region", tileId: "courtyard" } }) },
+  ]);
+  await flushMicrotasks();
+  h.gm.submit([
+    { kind: "create", coll: "macros", data: automationMacro("macro-graph") },
+    { kind: "create", coll: "macros", data: automationMacro("private-graph", { _id: "private-macro", name: "Private" }) },
+    { kind: "create", coll: "macros", data: automationMacro("region-graph", { _id: "region-macro", name: "Region" }) },
+    // A macro the player may not read is never delivered — and never invocable.
+    { kind: "create", coll: "macros", data: automationMacro("macro-graph", { _id: "hidden-macro", name: "Hidden", ownership: { default: 0 } }) },
+  ]);
+  await flushMicrotasks();
+  const { client: player, bus: playerBus, pair: playerPair } = await h.addPlayer(PLAYER_ID, "Rex");
+  const results: ClientEvents["macroResult"][] = [];
+  playerBus.on("macroResult", (event) => results.push(event));
+  const messages = () => h.hostStore.getAll("messages").map((message) => message.content);
+  const fireCount = (id: string) => h.hostStore.get("automations", id)?.state?.count ?? 0;
+
+  for (const macroId of ["private-macro", "region-macro", "hidden-macro", "missing-macro"]) {
+    player.invokeMacro(macroId);
+    await flushMicrotasks();
+  }
+  expect(results.map((event) => event.ok)).toEqual([false, false, false, false]);
+  expect(results.map((event) => event.detail)).toEqual(Array(4).fill("automation macro unavailable"));
+  expect(messages()).toEqual([]);
+  expect(fireCount("private-graph")).toBe(0);
+
+  // The authoring gate refuses a macro over a graph that never runs on `manual` …
+  const refused: ClientEvents["rejected"][] = [];
+  h.gmBus.on("rejected", (event) => refused.push(event));
+  expect(h.hostStore.getAll("macros").map((doc) => doc._id).sort())
+    .toEqual(["auto-macro", "hidden-macro", "private-macro", "region-macro"]);
+  h.gm.submit([{ kind: "create", coll: "macros", data: automationMacro("click-graph", { _id: "click-macro" }) }]);
+  await flushMicrotasks();
+  expect(refused.at(-1)?.reason).toBe("invalid_schema");
+  expect(refused.at(-1)?.detail).toContain("manual");
+  expect(h.hostStore.get("macros", "click-macro")).toBeUndefined();
+
+  // … and the run itself re-reads live state: dropping the method refuses, restoring it fires.
+  const gmResults: ClientEvents["macroResult"][] = [];
+  h.gmBus.on("macroResult", (event) => gmResults.push(event));
+  const stored = h.hostStore.get("automations", "private-graph");
+  if (!stored) throw new Error("expected the published graph to be committed");
+  h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "private-graph" },
+    diff: { definition: { ...stored.definition, methods: ["click"] } as unknown as Json } }]);
+  await flushMicrotasks();
+  h.gm.invokeMacro("private-macro");
+  await flushMicrotasks();
+  expect(gmResults.at(-1)?.ok).toBe(false);
+  expect(gmResults.at(-1)?.detail).toContain("manual");
+  h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "private-graph" },
+    diff: { definition: { ...stored.definition, methods: ["manual"] } as unknown as Json } }]);
+  await flushMicrotasks();
+  h.gm.invokeMacro("private-macro");
+  await flushMicrotasks();
+  expect(gmResults.at(-1)?.ok).toBe(true);
+  expect(messages()).toEqual(["manual by " + GM_ID]);
+  expect(fireCount("private-graph")).toBe(1);
+
+  // A published graph in a scene this player is not looking at cannot be reached
+  // through a macro either.
+  h.gm.submit([{ kind: "create", coll: "scenes", data: { ...sceneDoc("s2"), active: false } as SceneDocument }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s2" },
+    data: { ...visibleZoneTile(), _id: "zone-two" } }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "automations", data: macroGraph({ _id: "far-graph", name: "Far graph",
+    definition: { ...macroGraph().definition, sceneId: "s2", tileId: "zone-two" } }) }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "macros", data: automationMacro("far-graph", { _id: "far-macro", name: "Far away" }) }]);
+  await flushMicrotasks();
+  player.invokeMacro("far-macro");
+  await flushMicrotasks();
+  expect(results.at(-1)).toMatchObject({ ok: false, detail: "automation macro unavailable" });
+  expect(fireCount("far-graph")).toBe(0);
+
+  // A forged request cannot smuggle a graph id, and a replayed request id is a retransmit.
+  const rejected: ClientEvents["rejected"][] = [];
+  playerBus.on("rejected", (event) => rejected.push(event));
+  const before = messages().length;
+  playerPair.b.send("ops", frameMessage({ kind: "macros.invoke", requestId: "spoof-1",
+    macroId: "auto-macro", graphId: "macro-graph" } as never));
+  await flushMicrotasks();
+  expect(rejected.at(-1)?.reason).toBe("invalid_schema");
+  expect(messages().length).toBe(before);
+  playerPair.b.send("ops", frameMessage({ kind: "macros.invoke", requestId: "spoof-2", macroId: "auto-macro" }));
+  await flushMicrotasks();
+  const afterOne = messages().length;
+  expect(afterOne).toBe(before + 1);
+  playerPair.b.send("ops", frameMessage({ kind: "macros.invoke", requestId: "spoof-2", macroId: "auto-macro" }));
+  await flushMicrotasks();
+  expect(messages().length).toBe(afterOne);
+});
+
+test("only a GM may author an automation macro, and only over a real manual graph", async () => {
+  const h = await setup();
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: zoneTile() }]);
+  await flushMicrotasks();
+  const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const rejected: ClientEvents["rejected"][] = [];
+  playerBus.on("rejected", (event) => rejected.push(event));
+  h.gmBus.on("rejected", (event) => rejected.push(event));
+
+  // A player can neither author one nor edit/remove one.
+  player.submit([{ kind: "create", coll: "macros", data: automationMacro("macro-graph") }]);
+  await flushMicrotasks();
+  expect(rejected.at(-1)?.reason).toBe("forbidden");
+  expect(h.hostStore.get("macros", "auto-macro")).toBeUndefined();
+
+  // The referenced graph must exist, validate, run on `manual` and have a real tile.
+  h.gm.submit([{ kind: "create", coll: "macros", data: automationMacro("missing-graph") }]);
+  await flushMicrotasks();
+  expect(rejected.at(-1)?.reason).toBe("invalid_schema");
+  expect(rejected.at(-1)?.detail).toContain("saved graph");
+  h.gm.submit([{ kind: "create", coll: "automations", data: macroGraph({ _id: "click-graph",
+    definition: { ...macroGraph().definition, methods: ["click"] } }) }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "macros", data: automationMacro("click-graph", { _id: "click-macro" }) }]);
+  await flushMicrotasks();
+  expect(rejected.at(-1)?.detail).toContain("manual");
+
+  // A binding may not ride on another kind, and the kind may not smuggle a command.
+  h.gm.submit([{ kind: "create", coll: "macros", data: { ...automationMacro("macro-graph"),
+    kind: "chat", command: "hello", _id: "chat-with-binding" } as MacroDocument }]);
+  await flushMicrotasks();
+  expect(rejected.at(-1)?.detail).toContain("automation binding");
+  h.gm.submit([{ kind: "create", coll: "macros", data: { ...automationMacro("macro-graph"),
+    _id: "chatty", command: "/me waves" } as MacroDocument }]);
+  await flushMicrotasks();
+  expect(rejected.at(-1)?.detail).toContain("chat command");
+
+  // Deleting the graph leaves the macro in place; the next run refuses rather than fires.
+  h.gm.submit([{ kind: "create", coll: "automations", data: macroGraph() }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "macros", data: automationMacro("macro-graph") }]);
+  await flushMicrotasks();
+  const results: ClientEvents["macroResult"][] = [];
+  h.gmBus.on("macroResult", (event) => results.push(event));
+  h.gm.invokeMacro("auto-macro");
+  await flushMicrotasks();
+  expect(results.at(-1)?.ok).toBe(true);
+  h.gm.submit([{ kind: "delete", ref: { coll: "automations", id: "macro-graph" } }]);
+  await flushMicrotasks();
+  h.gm.invokeMacro("auto-macro");
+  await flushMicrotasks();
+  expect(results.at(-1)?.ok).toBe(false);
+  expect(results.at(-1)?.detail).toBe("macro unavailable");
+});

@@ -453,6 +453,14 @@ export class ClientSync {
     return requestId;
   }
 
+  /** TR-12/MC-01: run a saved automation macro. Only the macro id travels — the host
+   * resolves its private graph binding and re-validates publication. */
+  invokeMacro(macroId: DocId): string {
+    const requestId = globalThis.crypto.randomUUID();
+    this.send({ kind: "macros.invoke", requestId, macroId });
+    return requestId;
+  }
+
   /** Request a host-approved saved sequence. No client-authored cue or audience travels. */
   requestSequence(macroId: DocId, sceneId: DocId, sourceTokenId?: DocId, targetTokenId?: DocId): string {
     const requestId = globalThis.crypto.randomUUID();
@@ -588,6 +596,7 @@ export class ClientSync {
       case "tagger.rules":
       case "prefab.place":
       case "macro.request":
+      case "macros.invoke":
       case "fx.request":
       case "fx.sync":
       case "fx.stop":

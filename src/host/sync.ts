@@ -50,6 +50,7 @@ import type {
   SummonPlaceMsg,
   SummonDismissMsg,
   SummonResultMsg,
+  MacroInvokeMsg,
   MacroRequestMsg,
   MacroResultMsg,
   FxRequestMsg,
@@ -124,6 +125,8 @@ import { automationImageError, doorTransitionMethod, pinnedSelectorError, planAu
 import { attachedDeletionOps, attachedMovementOps, planPrefabPlacement, PREFAB_COLLECTIONS, validatePrefab } from "../core/prefabs";
 import { boundFxDeletionOps, fxInstanceMatches, validateFxInstance, validateFxInstanceFilter } from "../core/fxInstances";
 import { fxPresetDocumentError, macroStrayPresetError } from "../core/fxPresets";
+import { MACRO_AUTOMATION_METHOD, macroAutomationDocumentError, macroAutomationGraphId,
+  macroStrayAutomationError } from "../core/macroAutomation";
 import { fxBindingDeletionOps, fxBindingEvents, fxItemBindingError } from "../core/fxBinding";
 import { planSummon, summonDeletionOps, summonMarker, summonPlacementError, validateSummon,
   type SummonSource } from "../core/summons";
@@ -970,6 +973,9 @@ export class HostSync {
         return;
       case "macro.request":
         void this.handleMacroRequest(session, msg);
+        return;
+      case "macros.invoke":
+        this.handleMacroInvoke(session, msg);
         return;
       // Host→client kinds and later-milestone kinds are never accepted here:
       case "welcome":
@@ -1950,6 +1956,16 @@ export class HostSync {
             const error = fxPresetDocumentError(op.data as MacroDocument);
             if (error) return { ok: false, reason: "invalid_schema", error };
           }
+          if (op.coll === "macros" && (op.data as MacroDocument).kind === "automation") {
+            if (user.role !== "GM" && user.role !== "ASSISTANT")
+              return { ok: false, reason: "forbidden", error: "only GMs publish automations" };
+            const error = macroAutomationDocumentError(op.data as MacroDocument) ??
+              this.macroAutomationGraphError(op.data as MacroDocument);
+            if (error) return { ok: false, reason: "invalid_schema", error };
+          }
+          const strayAutomation = op.coll === "macros"
+            ? macroStrayAutomationError(op.data as MacroDocument) : null;
+          if (strayAutomation) return { ok: false, reason: "invalid_schema", error: strayAutomation };
           if (op.coll === "macros" && (op.data as MacroDocument).kind === "summon") {
             if (user.role !== "GM" && user.role !== "ASSISTANT")
               return { ok: false, reason: "forbidden", error: "only GMs publish summons" };
@@ -2031,9 +2047,9 @@ export class HostSync {
             return { ok: false, reason: "forbidden", error: "only GMs edit active zones" };
           if (op.ref.coll === "prefabs" && user.role !== "GM" && user.role !== "ASSISTANT")
             return { ok: false, reason: "forbidden", error: "only GMs edit prefabs" };
-          if (op.ref.coll === "macros" && ["sequence", "script", "summon", "fxPreset"].includes((doc as MacroDocument).kind) &&
+          if (op.ref.coll === "macros" && ["sequence", "script", "summon", "fxPreset", "automation"].includes((doc as MacroDocument).kind) &&
               user.role !== "GM" && user.role !== "ASSISTANT") {
-            return { ok: false, reason: "forbidden", error: "only GMs edit FX/script/summon macros" };
+            return { ok: false, reason: "forbidden", error: "only GMs edit FX/script/summon/automation macros" };
           }
           if (op.ref.coll === "macros" && Object.keys(op.diff).some((key) => key === "scriptState" || key.startsWith("scriptState.")))
             return { ok: false, reason: "forbidden", error: "execution history is host-owned" };
@@ -2077,6 +2093,16 @@ export class HostSync {
             const error = fxPresetDocumentError(dry.value as MacroDocument);
             if (error) return { ok: false, reason: "invalid_schema", error };
           }
+          if (op.ref.coll === "macros" && (dry.value as MacroDocument).kind === "automation") {
+            if (user.role !== "GM" && user.role !== "ASSISTANT")
+              return { ok: false, reason: "forbidden", error: "only GMs publish automations" };
+            const error = macroAutomationDocumentError(dry.value as MacroDocument) ??
+              this.macroAutomationGraphError(dry.value as MacroDocument);
+            if (error) return { ok: false, reason: "invalid_schema", error };
+          }
+          const strayAutomationUpdate = op.ref.coll === "macros"
+            ? macroStrayAutomationError(dry.value as MacroDocument) : null;
+          if (strayAutomationUpdate) return { ok: false, reason: "invalid_schema", error: strayAutomationUpdate };
           if (op.ref.coll === "macros" && (dry.value as MacroDocument).kind === "summon") {
             if (user.role !== "GM" && user.role !== "ASSISTANT")
               return { ok: false, reason: "forbidden", error: "only GMs publish summons" };
@@ -2106,9 +2132,9 @@ export class HostSync {
           if (PREFAB_COLLECTIONS.includes(op.ref.coll as (typeof PREFAB_COLLECTIONS)[number]) &&
               doc.flags?.prefab !== undefined && user.role !== "GM" && user.role !== "ASSISTANT")
             return { ok: false, reason: "forbidden", error: "only GMs delete attached prefab parts" };
-          if (op.ref.coll === "macros" && ["sequence", "script", "summon", "fxPreset"].includes((doc as MacroDocument).kind) &&
+          if (op.ref.coll === "macros" && ["sequence", "script", "summon", "fxPreset", "automation"].includes((doc as MacroDocument).kind) &&
               user.role !== "GM" && user.role !== "ASSISTANT") {
-            return { ok: false, reason: "forbidden", error: "only GMs delete FX/script/summon macros" };
+            return { ok: false, reason: "forbidden", error: "only GMs delete FX/script/summon/automation macros" };
           }
           const parent =
             op.ref.parent !== undefined
@@ -2673,6 +2699,101 @@ export class HostSync {
         this.send(session, { ...base, detail: ok ? "Script completed" : "Script failed" });
       }
     }
+  }
+
+  /**
+   * TR-12 / MC-01 (D-381): run a saved automation macro.
+   *
+   * The client names a **macro**, never a graph, so a player can hold a callable
+   * directory entry without ever holding a private graph id. The host resolves the
+   * GM-authored binding against live state and applies the same publication rules a
+   * direct trigger obeys: the definition must still validate, the graph must still
+   * subscribe to `manual`, a region anchor and the `playerRunnable` gate decide
+   * whether a player may ask, and a player must be looking at the graph's own scene.
+   * Success and refusal both answer with `macro.result`; a refusal never tells a
+   * player whether the graph exists, what it is called, or why it said no.
+   */
+  private handleMacroInvoke(session: Session, msg: MacroInvokeMsg): void {
+    const caller = session.user;
+    if (!caller) return;
+    if (!session.intentBucket.tryRemove()) {
+      this.reject(session, String(msg.requestId), "rate_limited", "macro invocation rate-limited");
+      return;
+    }
+    if (typeof msg.requestId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.requestId) ||
+        typeof msg.macroId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.macroId) ||
+        Object.keys(msg).some((key) => !["kind", "requestId", "macroId"].includes(key))) {
+      this.reject(session, String(msg.requestId), "invalid_schema", "invalid automation macro request");
+      return;
+    }
+    const requestKey = `${caller.id}:${msg.requestId}`;
+    if (this.seenMacroInvokes.has(requestKey)) return;
+    this.seenMacroInvokes.set(requestKey, this.now());
+    if (this.seenMacroInvokes.size > 256) {
+      const first = this.seenMacroInvokes.keys().next().value;
+      if (first) this.seenMacroInvokes.delete(first);
+    }
+    const isGm = caller.role === "GM" || caller.role === "ASSISTANT";
+    const macro = this.store.get("macros", msg.macroId) as MacroDocument | undefined;
+    // Same predicate the projection used to hand this macro out in the first place.
+    const delivered = macro ? docVisibleTo(caller, macro) : false;
+    const graphId = macro ? macroAutomationGraphId(macro) : null;
+    const graph = graphId ? this.store.get("automations", graphId) as AutomationDocument | undefined : undefined;
+    const checked = graph ? validateAutomation(graph.definition) : null;
+    const definition = checked?.ok ? checked.definition : null;
+    const scene = definition ? this.store.get("scenes", definition.sceneId) as SceneDocument | undefined : undefined;
+    const tile = scene && definition ? automationSourceTile(scene, definition.tileId, definition.sourceKind) : undefined;
+    // A macro grants no authority of its own: it is a second way to ask for an
+    // already-published graph, so the click rules apply unchanged, plus the player's
+    // own loaded scene (a macro cannot reach into a scene they are not looking at).
+    const playerAllowed = definition !== null && scene !== undefined && tile !== undefined &&
+      definition.sourceKind !== "region" && definition.gates?.playerRunnable === true &&
+      this.loadedSceneByUser.get(caller.id) === scene._id &&
+      can(caller, "read", tile, "tiles", { parent: scene }) && docVisibleTo(caller, tile, scene);
+    const base = { kind: "macro.result" as const, requestId: msg.requestId,
+      macroId: msg.macroId, callerId: caller.id };
+    const refused = (detail: string): void => {
+      this.send(session, { ...base, ok: false,
+        detail: isGm ? detail : "automation macro unavailable" });
+    };
+    if (!macro || !delivered || !graphId || !graph || !definition || !scene || !tile) {
+      refused("macro unavailable");
+      return;
+    }
+    if (!definition.methods.includes(MACRO_AUTOMATION_METHOD)) {
+      refused("macro is not published for manual invocation");
+      return;
+    }
+    if (!isGm && !playerAllowed) {
+      refused("macro is not published for this caller");
+      return;
+    }
+    const fired = this.fireAutomation(graph, { scene, tile, caller,
+      method: MACRO_AUTOMATION_METHOD, at: this.now(), rng: this.rng });
+    if (!fired.ok) {
+      refused(fired.error);
+      return;
+    }
+    // The graph's own name is GM-private (players never receive the automations
+    // collection), so the success line stays generic for a player.
+    this.send(session, { ...base, ok: true,
+      detail: isGm ? `Fired ${graph.name}` : "Automation fired" });
+  }
+
+  /** Creation/update gate: a macro may only reference a graph that exists and can be
+   * invoked by hand. Runtime re-checks everything, because publication can change. */
+  private macroAutomationGraphError(doc: MacroDocument): string | null {
+    const graphId = macroAutomationGraphId(doc);
+    if (!graphId) return "an automation macro needs a bounded graph id";
+    const graph = this.store.get("automations", graphId) as AutomationDocument | undefined;
+    const checked = graph ? validateAutomation(graph.definition) : null;
+    if (!graph || !checked?.ok) return "an automation macro must reference a saved graph in this world";
+    if (!checked.definition.methods.includes(MACRO_AUTOMATION_METHOD))
+      return "the referenced graph does not run on the manual method";
+    const scene = this.store.get("scenes", checked.definition.sceneId);
+    if (!scene || !automationSourceTile(scene, checked.definition.tileId, checked.definition.sourceKind))
+      return "the referenced graph has no tile in its scene";
+    return null;
   }
 
   private async handleMacroRequest(session: Session, msg: MacroRequestMsg): Promise<void> {
@@ -3403,6 +3524,8 @@ export class HostSync {
   // ─── Active-zone graphs: host events → atomic world plan → projected cues ───
 
   private readonly seenAutomationRequests = new Map<string, number>();
+  /** TR-12/MC-01: one fire per (caller, requestId) for macro-initiated graphs. */
+  private readonly seenMacroInvokes = new Map<string, number>();
   /** Reentry depth of movement-trigger dispatch. A graph's committed Move/Rotation
    * can land a token in another tile whose graph moves it on, so the chain is
    * bounded at the host, not by each plan's own invocation budget. */

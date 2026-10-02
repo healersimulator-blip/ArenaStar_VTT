@@ -1367,3 +1367,93 @@ test("a connecting player loading the scene fires its sceneLoad graph, and a rec
     await hostCtx.close();
   }
 });
+
+test("a published automation macro runs its graph from the directory for the GM and for a player, without leaking the graph", async ({ browser }: { browser: Browser }) => {
+  test.setTimeout(120_000); // two shells, a manual-signaling join and five DOM surfaces
+  const hostCtx = await browser.newContext();
+  const playerCtx = await browser.newContext();
+  try {
+    const host = await hostCtx.newPage();
+    const player = await playerCtx.newPage();
+    await host.goto(entry + "?e2e=1");
+    await waitForSurface(host, "app");
+    await host.locator("#gm-macros").click();
+    await host.locator("[data-macro-zones-tab]").click();
+    const zones = host.locator("[data-active-zones]");
+    await zones.locator("[data-zone-tile-create] summary").click();
+    const tile = zones.locator("[data-zone-tile-create]");
+    await tile.getByLabel("Tile name").fill("Bell plate");
+    await tile.getByLabel("X", { exact: true }).fill("350");
+    await tile.getByLabel("Y", { exact: true }).fill("400");
+    await tile.getByLabel("Width").fill("200");
+    await tile.getByLabel("Height").fill("160");
+    await tile.locator("[data-zone-create-tile]").click();
+    await expect(zones.locator("[data-zone-tile] option").filter({ hasText: "Bell plate" })).toHaveCount(1);
+
+    // A manual-only graph, published for players: exactly what a macro may reference.
+    await zones.locator("[data-zone-name]").fill("Courtyard bell");
+    for (const method of ["enter", "stop"])
+      await zones.locator(".methods label").filter({ hasText: new RegExp(`^${method}$`) })
+        .locator("input").uncheck();
+    await zones.getByLabel("Player canvas triggers (published)").check();
+    await zones.getByPlaceholder("{{user}}, {{count}}, {{method}}").fill("Bell {{method}} {{user}}");
+    await zones.locator("[data-zone-save]").click();
+    const graphRow = zones.locator("li").filter({ hasText: "Courtyard bell" });
+    await expect(graphRow).toHaveCount(1);
+
+    // Publishing stores a reference: the macro list shows it, the graph id stays in the panel.
+    await graphRow.locator("[data-zone-macro]").click();
+    await expect(zones.getByText(/Published automation macro/)).toHaveCount(1);
+    const graphId = await graphRow.locator("[data-zone-macro]").getAttribute("data-zone-macro");
+    expect(graphId).toBeTruthy();
+
+    // The directory tab and its status live beside the zones panel, inside the same window.
+    const hostMacros = host.locator('[data-window="macros"]');
+    await hostMacros.locator("[data-macro-automations-tab]").click();
+    const macroRow = hostMacros.locator("[data-automation-macro]").filter({ hasText: "Courtyard bell" });
+    await expect(macroRow).toHaveCount(1);
+    await macroRow.locator("[data-automation-macro-run]").click();
+    await expect(hostMacros.locator("[data-automation-status]")).toContainText("Fired Courtyard bell");
+    await expect(host.locator("#chat-log")).toContainText("Bell manual gm");
+    const gmRuns = (await host.locator("#chat-log").innerText()).split("Bell manual gm").length - 1;
+    expect(gmRuns).toBe(1);
+
+    // The player's own connection: they receive the macro entry, never the graph id.
+    await host.locator("#share").click();
+    const fragment = manualFragment(await host.locator("#invite-link").inputValue());
+    await player.goto(`${entry}?e2e=1&join=1#${fragment}`);
+    await expect.poll(() => player.locator("#offer-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await host.locator("#peer-code").fill(await player.locator("#offer-out").inputValue());
+    await host.locator("#code-apply").click();
+    await expect.poll(() => host.locator("#share-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await player.locator("#answer-input").fill(await host.locator("#share-out").inputValue());
+    await player.locator("#answer-apply").click();
+    await expect.poll(() => playerCall<boolean>(player, "connected"), { timeout: 30_000 }).toBe(true);
+    await waitForSurface(player, "playerCanvas");
+    const playerId = await playerCall<string>(player, "userId");
+
+    await player.locator("[data-player-macros]").click();
+    const playerMacros = player.locator('[data-window="macros"]');
+    await expect(playerMacros.locator("[data-macro-automations-tab]")).toHaveCount(1);
+    await playerMacros.locator("[data-macro-automations-tab]").click();
+    const playerMacro = playerMacros.locator("[data-automation-macro]").filter({ hasText: "Courtyard bell" });
+    await expect(playerMacro).toHaveCount(1);
+    // The callable entry carries no reference to the private graph anywhere in the shell.
+    expect(await player.content()).not.toContain(graphId as string);
+    await playerMacro.locator("[data-automation-macro-run]").click();
+    await expect(playerMacros.locator("[data-automation-status]")).toContainText("Automation fired");
+
+    // The graph ran under the player's identity; its GM-only line reached nobody else.
+    await expect(host.locator("#chat-log")).toContainText(`Bell manual ${playerId}`);
+    expect(await player.content()).not.toContain("Bell manual");
+    await host.locator("#gm-macros").click();
+    await host.locator("[data-macro-zones-tab]").click();
+    const history = host.locator("[data-zone-history]");
+    await history.locator("summary").click();
+    await expect(history.locator("li").filter({ hasText: `: manual · gm` })).toHaveCount(1);
+    await expect(history.locator("li").filter({ hasText: `: manual · ${playerId}` })).toHaveCount(1);
+  } finally {
+    await playerCtx.close();
+    await hostCtx.close();
+  }
+});

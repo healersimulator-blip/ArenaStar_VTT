@@ -302,12 +302,16 @@ function projectMacro(macro: MacroDocument): MacroDocument {
         : {}) };
     if (!check.ok || !check.definition.playerCallable) delete safe.summon;
     delete safe.script; delete safe.scriptState; delete safe.sequence;
+    delete safe.automation;
     return safe;
   }
   if (macro.kind !== "script") {
-    if (macro.scriptState === undefined && macro.summon === undefined) return macro;
+    // `automation` is a graph id: it must not reach a player replica in ANY kind,
+    // so its presence alone forces the copy (create, snapshot and update alike).
+    if (macro.scriptState === undefined && macro.summon === undefined &&
+        macro.automation === undefined) return macro;
     const safe = { ...macro };
-    delete safe.scriptState; delete safe.summon;
+    delete safe.scriptState; delete safe.summon; delete safe.automation;
     return safe;
   }
   // Public macros are a CALLABLE CATALOG, never a copy of source, grants,
@@ -329,6 +333,7 @@ function projectMacro(macro: MacroDocument): MacroDocument {
   delete safe.scriptState;
   delete safe.sequence;
   delete safe.summon;
+  delete safe.automation;
   return safe;
 }
 
@@ -475,6 +480,21 @@ function createVisible(
   return op.parent !== undefined && parent === undefined ? projectPrefabCreate(op) : null;
 }
 
+/**
+ * D-381: an automation macro's binding names a private graph, so a partial diff must
+ * never carry it — not even to a caller that cannot resolve the document (envelope-only
+ * mode). Blanking the key is enough for a player replica, which never held a value.
+ */
+function stripMacroBindingDiff(
+  diff: Record<string, Json | null>,
+): Record<string, Json | null> {
+  const keys = Object.keys(diff).filter((key) => key === "automation" || key.startsWith("automation."));
+  if (keys.length === 0) return diff;
+  const safe = { ...diff };
+  for (const key of keys) safe[key] = null;
+  return safe;
+}
+
 function updateVisible(
   user: PermissionUser,
   op: Extract<Op, { kind: "update" }>,
@@ -482,6 +502,10 @@ function updateVisible(
 ): Op | null {
   if (op.ref.coll === "automations" || op.ref.coll === "actionReceipts" || op.ref.coll === "prefabs" || op.ref.coll === "fxInstances") return null;
   if (op.ref.coll === "walls" || op.ref.coll === "lights") return projectPrefabDiff(op);
+  if (op.ref.coll === "macros") {
+    const stripped = stripMacroBindingDiff(op.diff);
+    if (stripped !== op.diff) op = { ...op, diff: stripped };
+  }
   const doc = resolver?.resolve(op.ref);
   if (!doc) return projectPrefabDiff(op); // envelope-only mode (D-023): host always passes a resolver
   if (op.ref.coll === "macros" && !docVisibleTo(user, doc)) return null;
@@ -504,15 +528,16 @@ function updateVisible(
   if ((op.ref.coll === "tiles" || op.ref.coll === "regions") && !docVisibleTo(user, doc, parent)) return null;
   if (getEffectiveOwnership(user, doc, parent) < OWNERSHIP_LEVELS.LIMITED) return null;
   if (op.ref.coll === "scenes") return projectSceneEmbedUpdate(user, op, doc as SceneDocument);
-  if (op.ref.coll === "macros" && (["script", "summon"].includes((doc as MacroDocument).kind) ||
-      Object.keys(op.diff).some((key) => ["kind", "script", "scriptState", "summon"].includes(key)))) {
+  if (op.ref.coll === "macros" && (["script", "summon", "automation"].includes((doc as MacroDocument).kind) ||
+      Object.keys(op.diff).some((key) => ["kind", "script", "scriptState", "summon", "automation"].includes(key)))) {
     const safe = projectMacro(doc as MacroDocument);
-    // A kind transition can leave a previous script's code in a client's replica;
-    // replace all macro-specific fields rather than forwarding a partial diff.
+    // A kind transition can leave a previous script's code — or a graph binding — in a
+    // client's replica; replace all macro-specific fields rather than forwarding a partial diff.
     return { ...op, diff: { name: safe.name, kind: safe.kind, command: safe.command,
       script: (safe.script as unknown as Json | undefined) ?? null, scriptState: null,
       sequence: (safe.sequence as unknown as Json | undefined) ?? null,
       summon: (safe.summon as unknown as Json | undefined) ?? null,
+      automation: (safe.automation as unknown as Json | undefined) ?? null,
       flags: safe.flags, system: safe.system, ownership: safe.ownership } };
   }
   if (op.ref.coll === "pages" || op.ref.coll === "journals") {

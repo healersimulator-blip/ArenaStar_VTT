@@ -6,6 +6,7 @@
    * macros use a separate host-run Worker with action grants and typed inputs.
    */
   import { onMount } from "svelte";
+  import { SvelteSet } from "svelte/reactivity";
   import type { ClientSync } from "../../client/sync";
   import type { ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
@@ -54,7 +55,7 @@
     onPreviewFx?: PreviewFxSequence | null;
     onStopFxPreview?: (() => void) | null;
   } = $props();
-  let tab = $state<"chat" | "fx" | "assets" | "manager" | "zones" | "tags" | "prefabs" | "summons" | "scripts">("chat");
+  let tab = $state<"chat" | "fx" | "assets" | "manager" | "zones" | "tags" | "prefabs" | "summons" | "scripts" | "automations">("chat");
   let pickedAsset = $state<{ hash: string } | null>(null);
 
   function useAsset(hash: string): void {
@@ -65,6 +66,11 @@
   const gm = $derived(viewerRole === "GM" || viewerRole === "ASSISTANT");
 
   let macros = $state<MacroDocument[]>([]);
+  /** TR-12/MC-01: a macro that runs one saved graph. The binding stays with the host. */
+  let automationMacros = $state<MacroDocument[]>([]);
+  let macroStatus = $state("");
+  /** Request ids whose result should surface here; the host answers each one once. */
+  const pendingInvokes = new SvelteSet<string>();
   let name = $state("");
   let command = $state("");
 
@@ -72,6 +78,7 @@
     viewerRole = client.user?.role ?? "";
     if (viewerRole !== "GM" && viewerRole !== "ASSISTANT" && tab !== "summons") tab = "scripts";
     macros = [...(client.store.getAll("macros") as readonly MacroDocument[])].filter((m) => m.kind === "chat");
+    automationMacros = [...(client.store.getAll("macros") as readonly MacroDocument[])].filter((m) => m.kind === "automation");
   }
 
   function create(): void {
@@ -116,16 +123,24 @@
   }
 
   function runMacro(m: MacroDocument): void {
-    runChatMacro(client, m);
+    if (m.kind !== "automation") { runChatMacro(client, m); return; }
+    macroStatus = `Requested ${m.name}…`;
+    pendingInvokes.add(client.invokeMacro(m._id));
   }
 
   onMount(() => {
     const offSnapshot = bus.on("snapshot", refresh);
     const offOps = bus.on("ops", refresh);
+    const offResult = bus.on("macroResult", (msg) => {
+      if (!pendingInvokes.has(msg.requestId)) return;
+      pendingInvokes.delete(msg.requestId);
+      macroStatus = msg.ok ? msg.detail : `Refused: ${msg.detail}`;
+    });
     refresh();
     return () => {
       offSnapshot();
       offOps();
+      offResult();
     };
   });
 </script>
@@ -143,6 +158,7 @@
     {/if}
     <button type="button" data-macro-summons-tab aria-pressed={tab === "summons"} onclick={() => tab = "summons"}>Summons</button>
     <button type="button" data-macro-script-tab aria-pressed={tab === "scripts"} onclick={() => tab = "scripts"}>Script macros</button>
+    <button type="button" data-macro-automations-tab aria-pressed={tab === "automations"} onclick={() => tab = "automations"}>Automation macros</button>
   </nav>
   <div class="tab-page" hidden={tab !== "chat"}>
   <form
@@ -206,6 +222,34 @@
   </div>
   <div class="tab-page" hidden={tab !== "scripts"}>
     <ScriptMacroPanel {client} {bus} />
+  </div>
+  <div class="tab-page" hidden={tab !== "automations"}>
+    <ul>
+      {#each automationMacros as m (m._id)}
+        <li data-automation-macro={m._id}>
+          <span class="name">{m.name}</span>
+          {#if gm}
+            <select
+              data-macro-slot
+              value={slotOf(m)}
+              aria-label={`Hotbar slot for ${m.name}`}
+              onchange={(e) => assignSlot(m, Number((e.target as HTMLSelectElement).value))}
+            >
+              <option value={0}>—</option>
+              {#each [1, 2, 3, 4, 5] as s (s)}
+                <option value={s}>{s}</option>
+              {/each}
+            </select>
+            <button type="button" onclick={() => remove(m._id)}>✕</button>
+          {/if}
+          <button data-automation-macro-run type="button" onclick={() => runMacro(m)}>Run</button>
+        </li>
+      {/each}
+    </ul>
+    {#if automationMacros.length === 0}
+      <small>No automation macros yet — a GM publishes one from a saved graph in Active zones.</small>
+    {/if}
+    {#if macroStatus}<small data-automation-status role="status">{macroStatus}</small>{/if}
   </div>
 </div>
 
