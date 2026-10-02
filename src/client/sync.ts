@@ -44,7 +44,7 @@ import type {
   WelcomeSimInfo,
   WireMessage,
 } from "../core/messages";
-import type { AssetManifest, DocRef, Json } from "../core/documents";
+import type { AssetManifest, Json } from "../core/documents";
 import { randomSeedHex, sha256Hex } from "../dice/commitReveal";
 import type { AssetId, TxId, UserId } from "../core/ids";
 import type { Role } from "../core/documents";
@@ -56,6 +56,7 @@ import type { ModelPool } from "../core/strategic";
 import type { SimDelta } from "../core/sim";
 import type { DocId } from "../core/ids";
 import type { FxInstanceFilter } from "../core/fxInstances";
+import type { TagRef } from "../core/tags";
 import type { SysSchema } from "../sim/pool";
 import type { RollHighlightRequest } from "./rollHighlight";
 import { applySimDelta, decodeSimDelta, decodeSimSnapshot, poolFromSnapshot } from "../sim/codec";
@@ -89,7 +90,7 @@ export interface ClientEvents {
   fxDelivery: FxDeliveryMsg;
   /** GM-only tile/zone execution diagnostics. */
   automationTrace: AutomationTraceMsg;
-  /** Host-allocated Tagger rules on exact scene-qualified refs (GM only). */
+  /** Host-allocated Tagger rules on exact scene or world-document refs (GM/assistant only). */
   taggerRulesResult: TaggerRulesResultMsg;
   /** Host-validated atomic prefab placement (GM only). */
   prefabResult: PrefabResultMsg;
@@ -416,8 +417,8 @@ export class ClientSync {
     return requestId;
   }
 
-  /** Expand existing {#}/{id} templates on live host documents; GM/assistant only. */
-  requestTagRules(refs: DocRef[]): string {
+  /** Expand existing {#}/{id} templates on live scene/world documents; GM/assistant only. */
+  requestTagRules(refs: TagRef[]): string {
     const requestId = globalThis.crypto.randomUUID();
     this.send({ kind: "tagger.rules", requestId, refs });
     return requestId;
@@ -430,12 +431,19 @@ export class ClientSync {
     return requestId;
   }
 
-  /** Canvas click names a visible tile/point, never a GM-only graph ID or step. */
-  requestAutomationClick(sceneId: DocId, tileId: DocId, point: { x: number; y: number }, tokenId?: DocId): string {
+  /** Canvas pointer event names a visible tile, never a GM-only graph ID or step. */
+  requestAutomationTileTrigger(sceneId: DocId, tileId: DocId, point: { x: number; y: number }, tokenId?: DocId,
+    method: import("../core/automation").AutomationPointerMethod = "click"): string {
     const requestId = globalThis.crypto.randomUUID();
-    this.send({ kind: "automation.click", requestId, sceneId, tileId, point,
+    this.send({ kind: "automation.click", requestId, sceneId, tileId, point, method,
       ...(tokenId ? { tokenId } : {}) });
     return requestId;
+  }
+
+  /** @deprecated Use requestAutomationTileTrigger for new canvas event methods. */
+  requestAutomationClick(sceneId: DocId, tileId: DocId, point: { x: number; y: number }, tokenId?: DocId,
+    method: import("../core/automation").AutomationPointerMethod = "click"): string {
+    return this.requestAutomationTileTrigger(sceneId, tileId, point, tokenId, method);
   }
 
   /** Execute a published, revision-pinned script by ID; no code/grants/ops cross the wire. */

@@ -196,6 +196,7 @@ export function characterImportActorDoc(
     },
     flags: { core: { importedFrom: character.format } },
     system: { pf1e: character.system } as unknown as ActorDocument["system"],
+    ...(character.prototypeToken ? { prototypeToken: structuredClone(character.prototypeToken) } : {}),
     items,
     effects: [],
   };

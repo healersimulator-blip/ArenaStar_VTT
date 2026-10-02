@@ -8,6 +8,8 @@
  */
 import { RotationAnimation } from "./rotationAnimation";
 import { MovementAnimation, movementDuration } from "./movementAnimation";
+import { AdaptiveQualityController } from "./adaptiveQuality";
+import type { AdaptiveQualitySnapshot } from "./adaptiveQuality";
 import {
   Application,
   Container,
@@ -115,6 +117,8 @@ export interface Stage {
   getHexOverlayLayer(): HexOverlayLayer;
   /** The mounted hexcrawl overlay, if any (readbacks for e2e). */
   peekHexOverlayLayer(): HexOverlayLayer | null;
+  /** D-372: live frame-budget and renderer-resolution readback for adaptive quality. */
+  getAdaptiveQuality(): AdaptiveQualitySnapshot;
   /** §9 pings + rulers (ephemeral overlays, ticker-driven). */
   getEffectsLayer(): EffectsLayer;
   /** Macros/FX: bounded timeline visuals, always below fog. */
@@ -354,7 +358,17 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     antialias: true,
     autoDensity: false,
   });
+  // Keep a stable logical canvas size while adaptive quality changes only the
+  // backing-store resolution. Without explicit CSS dimensions, lowering the
+  // canvas element's intrinsic width/height would also shrink its layout box.
+  app.canvas.style.width = "100%";
+  app.canvas.style.height = "100%";
   (options.hostElement ?? globalThis.document.body).appendChild(app.canvas);
+  const adaptiveQuality = new AdaptiveQualityController({
+    baseResolution: app.renderer.resolution,
+    targetFrameMs: 50,
+    onResolutionChange: (resolution) => { app.renderer.resolution = resolution; },
+  });
 
   const root = new Container();
   root.label = "world";
@@ -580,6 +594,9 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     },
     peekHexOverlayLayer(): HexOverlayLayer | null {
       return hexOverlayLayer;
+    },
+    getAdaptiveQuality(): AdaptiveQualitySnapshot {
+      return adaptiveQuality.snapshot();
     },
     getEffectsLayer(): EffectsLayer {
       if (!effectsLayer) {
@@ -900,8 +917,11 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     },
   };
 
-  // initial grid pass once a camera exists
+  // The same ticker that advances visible FX, camera cues, and tile animation
+  // also governs backing-store quality; an auxiliary timer cannot report a
+  // healthy budget while the scene itself is rendering slowly.
   app.ticker.add((t) => {
+    adaptiveQuality.sample(t.deltaMS);
     effectsLayer?.tick(t.deltaMS);
     fxLayer?.tick(t.deltaMS);
     // Copy: a sink is allowed to unsubscribe while it runs (a finished camera cue).

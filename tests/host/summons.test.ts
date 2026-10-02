@@ -482,7 +482,7 @@ describe("authoritative summons: publication, isolation, cleanup and privacy", (
     await flushMicrotasks();
     const cancelled = waitForZone(h.gm.bus, "Summon failed after the graph committed");
     release?.({ ...actor, _id: "pack-source" });
-    expect((await cancelled).trace.at(-1)).toContain("POST-COMMIT SUMMON FAILED");
+    expect((await cancelled).trace.at(-1)).toContain("POST-COMMIT SUMMON [call] FAILED");
     expect(created(h)).toHaveLength(0);
     expect(playerTraces).toEqual([]);
     expect(JSON.stringify(rex.client.store.world)).not.toContain("pack-wolf");

@@ -13,6 +13,8 @@ export interface ScriptContext {
   sceneId: string;
   callerId: string;
   requestId: string;
+  /** Effective mode for this invocation; `gm` must already be approved by the saved policy. */
+  runAs?: "caller" | "gm";
 }
 export type ScriptAction = (method: string, payload: unknown, isActive: () => boolean) => Promise<Json>;
 export type ScriptRunner = (
@@ -112,8 +114,12 @@ const api = Object.freeze({
     getTags: (ref) => rpc("tags.get", { ref }),
     hasTags: async (ref, query, options = {}) => {
       const refScene = ref?.coll === "scenes" ? ref.id : ref?.parent?.id;
-      const scoped = options.allScenes === true || options.sceneId !== undefined || typeof refScene !== "string"
-        ? options : { ...options, sceneId: refScene };
+      const worldDocument = (ref?.coll === "actors" || ref?.coll === "items") &&
+        (ref.parent === undefined || ref.coll === "items" && ref.parent?.coll === "actors");
+      const scoped = worldDocument
+        ? { ...options, allScenes: options.allScenes ?? true, includeWorldDocs: options.includeWorldDocs ?? true }
+        : options.allScenes === true || options.sceneId !== undefined || typeof refScene !== "string"
+          ? options : { ...options, sceneId: refScene };
       return (await rpc("tags.find", { query, options: { ...scoped,
         ...(scoped.groupByScene ? { groupByScene: false } : {}), includeRefs: [ref] } })).length > 0;
     },

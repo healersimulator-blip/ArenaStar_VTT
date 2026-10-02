@@ -501,6 +501,7 @@ describe("actors from the library and from text (§5.4)", () => {
     if (created?.kind === "create" && token?.kind === "create") {
       const linked = token.data as unknown as Record<string, Json>;
       expect(linked["actorId"]).toBe(created.data["_id"]);
+      expect(linked["taggerTags"]).toEqual(["bestiary-goblin"]);
     }
   });
 

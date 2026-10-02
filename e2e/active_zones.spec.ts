@@ -1,7 +1,7 @@
 import { expect, test, type Browser } from "@playwright/test";
 import { entry, hostCall, manualFragment, playerCall, surfaceCallArg, waitForSurface } from "./lib";
 
-test("GM authors a real tile and graph in the wizard, then activates it by clicking the map", async ({ page }) => {
+test("GM authors a tile graph and verifies native click/right-click/double-click and pointer hover events", async ({ page }) => {
   await page.goto(entry + "?e2e=1");
   await waitForSurface(page, "app");
   await page.locator("#gm-macros").click();
@@ -17,7 +17,11 @@ test("GM authors a real tile and graph in the wizard, then activates it by click
   await tile.locator("[data-zone-create-tile]").click();
   await expect(zones.locator("[data-zone-tile] option").filter({ hasText: "Bell tile" })).toHaveCount(1);
   await zones.locator("[data-zone-name]").fill("Bell trap");
-  await zones.locator(".methods label").filter({ hasText: "click" }).locator("input").check();
+  await zones.locator(".methods label").filter({ hasText: /^click$/ }).locator("input").check();
+  await zones.locator(".methods label").filter({ hasText: "right click" }).locator("input").check();
+  await zones.locator(".methods label").filter({ hasText: "double click" }).locator("input").check();
+  await zones.locator(".methods label").filter({ hasText: "hover in" }).locator("input").check();
+  await zones.locator(".methods label").filter({ hasText: "hover out" }).locator("input").check();
   await zones.locator("[data-zone-save]").click();
   await expect(zones.locator("li").filter({ hasText: "Bell trap" })).toHaveCount(1);
   await page.locator('[data-window="macros"] [data-window-close]').click();
@@ -32,17 +36,104 @@ test("GM authors a real tile and graph in the wizard, then activates it by click
     return { x: rect.left + (450 - stage.camera.x) * stage.camera.scale,
       y: rect.top + (480 - stage.camera.y) * stage.camera.scale };
   });
+  const outside = await page.evaluate(() => {
+    const stage = (globalThis as unknown as { __stage?: {
+      app: { canvas: HTMLCanvasElement }; camera: { x: number; y: number; scale: number };
+    } }).__stage;
+    if (!stage) throw new Error("GM canvas missing");
+    const rect = stage.app.canvas.getBoundingClientRect();
+    return { x: rect.left + (900 - stage.camera.x) * stage.camera.scale,
+      y: rect.top + (900 - stage.camera.y) * stage.camera.scale };
+  });
   await page.mouse.click(point.x, point.y);
   await expect.poll(() => hostCall<number>(page, "seq")).toBeGreaterThan(before);
   await expect(page.locator("#chat-log")).toContainText("click by");
+  const afterFirstHover = await hostCall<number>(page, "seq");
+  await page.mouse.move(point.x + 6, point.y + 6);
+  await expect.poll(() => hostCall<number>(page, "seq")).toBe(afterFirstHover);
+  const beforeRightClick = await hostCall<number>(page, "seq");
+  await page.mouse.click(point.x, point.y, { button: "right" });
+  await expect.poll(() => hostCall<number>(page, "seq")).toBe(beforeRightClick + 1);
+  await expect(page.locator("#chat-log")).toContainText("rightClick by");
+  const beforeDoubleClick = await hostCall<number>(page, "seq");
+  await page.mouse.dblclick(point.x, point.y);
+  await expect.poll(() => hostCall<number>(page, "seq")).toBe(beforeDoubleClick + 2);
+  await expect(page.locator("#chat-log")).toContainText("doubleClick by");
+  const beforeHoverOut = await hostCall<number>(page, "seq");
+  await page.mouse.move(outside.x, outside.y);
+  await expect.poll(() => hostCall<number>(page, "seq")).toBe(beforeHoverOut + 1);
+  await expect(page.locator("#chat-log")).toContainText("hoverOut by");
+  const beforeHoverIn = await hostCall<number>(page, "seq");
+  await page.mouse.move(point.x, point.y);
+  await expect.poll(() => hostCall<number>(page, "seq")).toBe(beforeHoverIn + 1);
+  await expect(page.locator("#chat-log")).toContainText("hoverIn by");
   await page.locator("#gm-macros").click();
   await page.locator("[data-macro-zones-tab]").click();
   const history = page.locator("[data-zone-history]");
   await history.locator("summary").click();
-  await expect(history.locator("li")).toContainText("click · gm");
+  await expect(history.locator("li").filter({ hasText: /: click · gm$/ })).toHaveCount(2);
+  await expect(history.locator("li").filter({ hasText: /: rightClick · gm$/ })).toHaveCount(1);
+  await expect(history.locator("li").filter({ hasText: /: doubleClick · gm$/ })).toHaveCount(1);
+  await expect(history.locator("li").filter({ hasText: /: hoverOut · gm$/ })).toHaveCount(2);
+  await expect(history.locator("li").filter({ hasText: /: hoverIn · gm$/ })).toHaveCount(2);
   await page.locator("[data-zone-reset-history]").click();
   await expect(page.locator("[data-active-zones] li").filter({ hasText: "Bell trap" })).toContainText("0 run(s)");
   await expect(page.locator("[data-zone-history]")).toHaveCount(0);
+});
+
+test("GM scene activation fires a destination-scene scene-change graph once", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  const scenes = page.locator(".scenenav [data-scene]");
+  await expect(scenes).toHaveCount(1);
+  const sourceId = await scenes.first().getAttribute("data-scene");
+  if (!sourceId) throw new Error("initial scene ID missing");
+
+  await page.locator("#scene-add").click();
+  await page.locator("#scene-new-blank").click();
+  await expect(scenes).toHaveCount(2);
+  const destination = scenes.nth(1);
+  const destinationId = await destination.getAttribute("data-scene");
+  if (!destinationId) throw new Error("destination scene ID missing");
+  await destination.click();
+  await expect.poll(() => hostCall<string | null>(page, "activeSceneId")).toBe(destinationId);
+
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-zones-tab]").click();
+  const zones = page.locator("[data-active-zones]");
+  await zones.locator("[data-zone-tile-create] summary").click();
+  const tile = zones.locator("[data-zone-tile-create]");
+  await tile.getByLabel("Tile name").fill("Arrival marker");
+  await tile.getByLabel("X", { exact: true }).fill("350");
+  await tile.getByLabel("Y", { exact: true }).fill("400");
+  await tile.locator("[data-zone-create-tile]").click();
+  await expect(zones.locator("[data-zone-tile] option").filter({ hasText: "Arrival marker" })).toHaveCount(1);
+  await zones.locator("[data-zone-name]").fill("Scene arrival");
+  for (const method of ["enter", "stop", "manual"]) {
+    await zones.locator(".methods label").filter({ hasText: new RegExp(`^${method}$`) }).locator("input").uncheck();
+  }
+  await zones.locator(".methods label").filter({ hasText: "scene change" }).locator("input").check();
+  await zones.locator("[data-zone-save]").click();
+  await expect(zones.locator("li").filter({ hasText: "Scene arrival" })).toContainText("sceneChange");
+  await expect(zones.getByRole("alert")).toHaveCount(0);
+  await page.locator('[data-window="macros"] [data-window-close]').click();
+
+  await scenes.first().click();
+  await expect.poll(() => hostCall<string | null>(page, "activeSceneId")).toBe(sourceId);
+  expect((await hostCall<string[]>(page, "chatLines")).some((line) => line.includes("sceneChange by"))).toBe(false);
+  const before = await hostCall<number>(page, "seq");
+  await destination.click();
+  await expect.poll(() => hostCall<string | null>(page, "activeSceneId")).toBe(destinationId);
+  await expect.poll(() => hostCall<number>(page, "seq")).toBe(before + 2);
+  await expect(page.locator("#chat-log")).toContainText("sceneChange by");
+
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-zones-tab]").click();
+  const history = page.locator("[data-zone-history]");
+  await expect(history).toHaveCount(1);
+  await history.locator("summary").click();
+  await expect(history.locator("li")).toHaveText(/sceneChange ·/);
+  await expect(history.locator("li")).toHaveCount(1);
 });
 
 test("GM authors a convex scene region and binds an active-zone graph to that region", async ({ page }) => {
@@ -520,7 +611,7 @@ test("wizard publishes a bounded per-token loop with a tile-count branch and nam
   await tile.locator("[data-zone-create-tile]").click();
   await expect(zones.locator("[data-zone-tile] option").filter({ hasText: "Two tokens zone" })).toHaveCount(1);
   await zones.locator("[data-zone-name]").fill("Visitors graph");
-  await zones.locator(".methods label").filter({ hasText: "click" }).locator("input").check();
+  await zones.locator(".methods label").filter({ hasText: /^click$/ }).locator("input").check();
   await zones.locator('[data-zone-step="select"]').getByLabel("Current collection").selectOption("inside");
   await zones.getByRole("button", { name: "Remove step 2" }).click();
   await zones.locator('[data-zone-add="forEach"]').click();
@@ -534,7 +625,7 @@ test("wizard publishes a bounded per-token loop with a tile-count branch and nam
   await zones.locator('[data-zone-add="routeMethod"]').click();
   const route = zones.locator('[data-zone-step]').nth(5);
   await route.getByLabel("enter landing").fill("");
-  await route.getByLabel("click landing").fill("clicked");
+  await route.getByLabel("click landing", { exact: true }).fill("clicked");
   await zones.locator('[data-zone-add="landing"]').click();
   await zones.locator('[data-zone-step]').nth(6).getByLabel("Landing name").fill("clicked");
   await zones.locator('[data-zone-add="chat"]').click();
@@ -703,7 +794,7 @@ test("wizard activates a paused tile graph and invokes it in one undoable host f
   await expect(page.locator("#chat-log")).not.toContainText("Gate awakened");
 });
 
-test("a connected player's canvas click invokes the published tile without receiving a graph ID", async ({ browser }: { browser: Browser }) => {
+test("a connected player's canvas click/right-click/double-click/hover invokes the published tile without a graph ID", async ({ browser }: { browser: Browser }) => {
   const hostCtx = await browser.newContext();
   const playerCtx = await browser.newContext();
   try {
@@ -724,8 +815,12 @@ test("a connected player's canvas click invokes the published tile without recei
     await tile.locator("[data-zone-create-tile]").click();
     await expect(zones.locator("[data-zone-tile] option").filter({ hasText: "Public bell" })).toHaveCount(1);
     await zones.locator("[data-zone-name]").fill("Player bell");
-    await zones.locator(".methods label").filter({ hasText: "click" }).locator("input").check();
-    await zones.getByLabel("Player click (published)").check();
+    await zones.locator(".methods label").filter({ hasText: /^click$/ }).locator("input").check();
+    await zones.locator(".methods label").filter({ hasText: /^right click$/ }).locator("input").check();
+    await zones.locator(".methods label").filter({ hasText: /^double click$/ }).locator("input").check();
+    await zones.locator(".methods label").filter({ hasText: /^hover in$/ }).locator("input").check();
+    await zones.locator(".methods label").filter({ hasText: /^hover out$/ }).locator("input").check();
+    await zones.getByLabel("Player canvas triggers (published)").check();
     await zones.locator("[data-zone-save]").click();
     await expect(zones.locator("li").filter({ hasText: "Player bell" })).toHaveCount(1);
     await host.locator('[data-window="macros"] [data-window-close]').click();
@@ -744,10 +839,30 @@ test("a connected player's canvas click invokes the published tile without recei
     const before = await hostCall<number>(host, "seq");
     await expect.poll(() => playerCall<number>(player, "seq")).toBeGreaterThanOrEqual(before);
     const point = await surfaceCallArg<{ x: number; y: number } | null>(player, "playerCanvas", "screenOf", { x: 450, y: 480 });
-    if (!point) throw new Error("player canvas point unavailable");
+    const outside = await surfaceCallArg<{ x: number; y: number } | null>(player, "playerCanvas", "screenOf", { x: 900, y: 900 });
+    if (!point || !outside) throw new Error("player canvas point unavailable");
     await player.mouse.click(point.x, point.y);
     await expect.poll(() => hostCall<number>(host, "seq"), { timeout: 20_000 }).toBeGreaterThan(before);
     await expect(host.locator("#chat-log")).toContainText("click by");
+    const afterFirstHover = await hostCall<number>(host, "seq");
+    await player.mouse.move(point.x + 6, point.y + 6);
+    await expect.poll(() => hostCall<number>(host, "seq")).toBe(afterFirstHover);
+    const afterLeftClick = await hostCall<number>(host, "seq");
+    await player.mouse.click(point.x, point.y, { button: "right" });
+    await expect.poll(() => hostCall<number>(host, "seq"), { timeout: 20_000 }).toBe(afterLeftClick + 1);
+    await expect(host.locator("#chat-log")).toContainText("rightClick by");
+    const beforeDoubleClick = await hostCall<number>(host, "seq");
+    await player.mouse.dblclick(point.x, point.y);
+    await expect.poll(() => hostCall<number>(host, "seq"), { timeout: 20_000 }).toBe(beforeDoubleClick + 2);
+    await expect(host.locator("#chat-log")).toContainText("doubleClick by");
+    const beforeHoverOut = await hostCall<number>(host, "seq");
+    await player.mouse.move(outside.x, outside.y);
+    await expect.poll(() => hostCall<number>(host, "seq"), { timeout: 20_000 }).toBe(beforeHoverOut + 1);
+    await expect(host.locator("#chat-log")).toContainText("hoverOut by");
+    const beforeHoverIn = await hostCall<number>(host, "seq");
+    await player.mouse.move(point.x, point.y);
+    await expect.poll(() => hostCall<number>(host, "seq"), { timeout: 20_000 }).toBe(beforeHoverIn + 1);
+    await expect(host.locator("#chat-log")).toContainText("hoverIn by");
   } finally {
     await playerCtx.close();
     await hostCtx.close();
@@ -825,7 +940,7 @@ test("wizard authors a current-collection edit and atomic Trigger Tile call with
   await zones.getByRole("button", { name: "New" }).click();
   await zones.locator("[data-zone-tile]").selectOption(parentTile);
   await zones.locator("[data-zone-name]").fill("Relay parent graph");
-  await zones.locator(".methods label").filter({ hasText: "click" }).locator("input").check();
+  await zones.locator(".methods label").filter({ hasText: /^click$/ }).locator("input").check();
   await zones.locator('[data-zone-step="notice"]').getByLabel("Text").fill("Parent {{method}}");
   await zones.locator('[data-zone-add="collection"]').click();
   const collection = zones.locator("[data-zone-step]").last();

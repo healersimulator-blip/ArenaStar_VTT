@@ -91,8 +91,8 @@ test("GM Revert button reverses a reviewed script's world tags and chat (not onl
   await page.locator("[data-macro-tags-tab]").click();
   const tags = page.locator("[data-tagger]");
   await tags.getByLabel("Tag scene").selectOption(sceneId);
-  await tags.getByLabel("Placeable type").selectOption("scenes");
-  const row = tags.locator(".result").filter({ hasText: `${sceneId}/scenes` });
+  await tags.getByLabel("Taggable object type").selectOption("scenes");
+  const row = tags.locator(`.result[data-tag-scope="scene"][data-scene-id="${sceneId}"][data-tag-collection="scenes"]`);
   await expect(row).toContainText("script-written");
   await expect(page.locator("#chat-log")).toContainText("Script wrote a world tag");
   await page.locator('[data-window="macros"] [data-window-close]').click();
@@ -105,7 +105,7 @@ test("GM Revert button reverses a reviewed script's world tags and chat (not onl
   await page.locator("#gm-macros").click();
   await page.locator("[data-macro-tags-tab]").click();
   await tags.getByLabel("Tag scene").selectOption(sceneId);
-  await tags.getByLabel("Placeable type").selectOption("scenes");
+  await tags.getByLabel("Taggable object type").selectOption("scenes");
   await expect(row).not.toContainText("script-written");
   await expect(row).toContainText("(untagged)");
 });
@@ -140,8 +140,8 @@ test("a real connected player's tile click damages an owned token; the GM Revert
     await tile.getByLabel("Height").fill("160");
     await tile.locator("[data-zone-create-tile]").click();
     await zones.locator("[data-zone-name]").fill("Player damage trap");
-    await zones.locator(".methods label").filter({ hasText: "click" }).locator("input").check();
-    await zones.getByLabel("Player click (published)").check();
+    await zones.locator(".methods label").filter({ hasText: /^click$/ }).locator("input").check();
+    await zones.getByLabel("Player canvas triggers (published)").check();
     await zones.getByRole("button", { name: "Remove step 2" }).click();
     await zones.getByRole("button", { name: "Remove step 1" }).click();
     await zones.locator('[data-zone-add="hurtHeal"]').click();

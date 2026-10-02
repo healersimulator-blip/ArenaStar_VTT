@@ -178,7 +178,7 @@ return await api.fx.sequence()
     await page.locator("[data-macro-tags-tab]").click();
     const tags = page.locator("[data-tagger]");
     await tags.getByLabel("Tag scene").selectOption(second);
-    await tags.getByLabel("Placeable type").selectOption("tokens");
+    await tags.getByLabel("Taggable object type").selectOption("tokens");
     const token = tags.locator(".result").filter({ hasText: "Token 1" });
     await expect(token).toHaveCount(1);
     await token.locator('input[type="checkbox"]').check();
@@ -238,9 +238,9 @@ return { scenes: Object.keys(groups), rows: rows.length, scene: rows[0].sceneId,
     await page.locator("#gm-macros").click();
     await page.locator("[data-macro-tags-tab]").click();
     let tags = page.locator("[data-tagger]");
-    await tags.getByLabel("Placeable type").selectOption("tokens");
-    let local = tags.locator(".result").filter({ hasText: `${first}/tokens` });
-    let remote = tags.locator(".result").filter({ hasText: `${second}/tokens` });
+    await tags.getByLabel("Taggable object type").selectOption("tokens");
+    let local = tags.locator(`.result[data-tag-scope="scene"][data-scene-id="${first}"][data-tag-collection="tokens"]`);
+    let remote = tags.locator(`.result[data-tag-scope="scene"][data-scene-id="${second}"][data-tag-collection="tokens"]`);
     await expect(local).toHaveCount(1);
     await expect(remote).toHaveCount(1);
     await local.locator('input[type="checkbox"]').check();
@@ -274,9 +274,9 @@ return { scenes: Object.keys(groups), rows: rows.length, scene: rows[0].sceneId,
     await page.locator("#gm-macros").click();
     await page.locator("[data-macro-tags-tab]").click();
     tags = page.locator("[data-tagger]");
-    await tags.getByLabel("Placeable type").selectOption("tokens");
-    local = tags.locator(".result").filter({ hasText: `${first}/tokens` });
-    remote = tags.locator(".result").filter({ hasText: `${second}/tokens` });
+    await tags.getByLabel("Taggable object type").selectOption("tokens");
+    local = tags.locator(`.result[data-tag-scope="scene"][data-scene-id="${first}"][data-tag-collection="tokens"]`);
+    remote = tags.locator(`.result[data-tag-scope="scene"][data-scene-id="${second}"][data-tag-collection="tokens"]`);
     await expect(local).toContainText("ward-1");
     await expect(remote).toContainText("ward-1");
   });
@@ -288,7 +288,7 @@ return { scenes: Object.keys(groups), rows: rows.length, scene: rows[0].sceneId,
     await page.locator("#gm-macros").click();
     await page.locator("[data-macro-tags-tab]").click();
     const tags = page.locator("[data-tagger]");
-    await tags.getByLabel("Placeable type").selectOption("tokens");
+    await tags.getByLabel("Taggable object type").selectOption("tokens");
     const token = tags.locator(".result").filter({ hasText: "Token 1" });
     await expect(token).toHaveCount(1);
     await token.locator('input[type="checkbox"]').check();
@@ -344,5 +344,179 @@ return { changed: applied.changed, after };`);
     await expect(wizard.locator("details pre")).toContainText('"tagCount": 0');
     await expect(wizard.locator("details pre")).toContainText('"has": false');
     await expect(page.locator("#chat-log")).toContainText("Worker RPC succeeded");
+  });
+
+  test("global Tagger discovers world actors/items and the reviewed API reads/edits them", async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.goto(entry + "?e2e=1");
+    await waitForSurface(page, "app");
+
+    await page.locator('[data-tab="actors"]').click();
+    const sheet = page.locator("#sheets");
+    await sheet.locator("#new-doc").click();
+    const actorEditor = sheet.locator('[data-document-tags="actor"]');
+    await expect(actorEditor).toBeVisible();
+    await actorEditor.getByLabel("New actor tag").fill("world-party");
+    await actorEditor.getByRole("button", { name: "Add tag", exact: true }).click();
+    await actorEditor.locator("[data-tag-save]").click();
+    await expect(actorEditor.getByRole("status")).toHaveText("Tags saved.");
+    const prototypeEditor = sheet.locator('[data-document-tags="prototypeToken"]');
+    await expect(prototypeEditor).toBeVisible();
+    await prototypeEditor.getByLabel("New prototype token tag").fill("world-prototype");
+    await prototypeEditor.getByRole("button", { name: "Add tag", exact: true }).click();
+    await prototypeEditor.locator("[data-tag-save]").click();
+    await expect(prototypeEditor.getByRole("status")).toHaveText("Tags saved.");
+
+    await sheet.locator(".tabs").getByRole("button", { name: "Items", exact: true }).click();
+    await sheet.locator("#new-doc").click();
+    const itemEditor = sheet.locator('[data-document-tags="item"]');
+    await expect(itemEditor).toBeVisible();
+    await itemEditor.getByLabel("New item tag").fill("world-map");
+    await itemEditor.getByRole("button", { name: "Add tag", exact: true }).click();
+    await itemEditor.locator("[data-tag-save]").click();
+    await expect(itemEditor.getByRole("status")).toHaveText("Tags saved.");
+
+    await page.locator("#gm-macros").click();
+    await page.locator("[data-macro-tags-tab]").click();
+    const tags = page.locator("[data-tagger]");
+    const kind = tags.getByLabel("Taggable object type");
+    const search = tags.locator("[data-tag-search]");
+    await kind.selectOption("actors");
+    await search.fill("world-party");
+    const actor = tags.locator('.result[data-tag-scope="world"][data-tag-collection="actors"]')
+      .filter({ hasText: "world-party" });
+    await expect(actor).toHaveCount(1);
+    await expect(actor).toContainText("World · actors");
+    await expect(tags.locator("[data-tagger-apply-rules]")).toBeDisabled();
+    await actor.locator('input[type="checkbox"]').check();
+    await tags.getByLabel("Tags to edit").fill("bulk-party");
+    await tags.getByRole("button", { name: "Add", exact: true }).click();
+    await expect(tags.getByRole("status")).toContainText("1 object(s) added on host at seq");
+    await expect(actor).toContainText("bulk-party");
+
+    await kind.selectOption("prototypeTokens");
+    await search.fill("world-prototype");
+    const prototype = tags.locator('.result[data-tag-scope="world"][data-tag-collection="prototypeTokens"]')
+      .filter({ hasText: "world-prototype" });
+    await expect(prototype).toHaveCount(1);
+    await expect(prototype).toContainText("prototype token");
+    await prototype.locator('input[type="checkbox"]').check();
+    await tags.getByLabel("Tags to edit").fill("bulk-prototype");
+    await tags.getByRole("button", { name: "Add", exact: true }).click();
+    await expect(tags.getByRole("status")).toContainText("1 object(s) added on host at seq");
+    await expect(prototype).toContainText("bulk-prototype");
+    const prototypeActorId = await prototype.getAttribute("data-document-id");
+    expect(prototypeActorId).toBeTruthy();
+    await prototype.locator('input[type="checkbox"]').check();
+    await tags.getByLabel("Tags to edit").fill("spawn-{#}, owner-{id}");
+    await tags.getByRole("button", { name: "Add", exact: true }).click();
+    await expect(tags.getByRole("status")).toContainText("1 object(s) added on host at seq");
+    await prototype.locator('input[type="checkbox"]').check();
+    await expect(tags.locator("[data-tagger-apply-rules]")).toBeEnabled();
+    await tags.locator("[data-tagger-apply-rules]").click();
+    await expect(tags.getByRole("status")).toContainText("1 target(s) expanded on the host at seq");
+    await expect(prototype).toContainText("spawn-1");
+    await expect(prototype).toContainText(`owner-${prototypeActorId}`);
+
+    await kind.selectOption("items");
+    await search.fill("world-map");
+    const item = tags.locator('.result[data-tag-scope="world"][data-tag-collection="items"]')
+      .filter({ hasText: "world-map" });
+    await expect(item).toHaveCount(1);
+    await expect(item).toContainText("World · items");
+    await item.locator('input[type="checkbox"]').check();
+    await tags.getByLabel("Tags to edit").fill("bulk-map");
+    await tags.getByRole("button", { name: "Add", exact: true }).click();
+    await expect(tags.getByRole("status")).toContainText("1 object(s) added on host at seq");
+    await expect(item).toContainText("bulk-map");
+
+    await kind.selectOption("");
+    await search.fill("world-");
+    const suggestions = tags.getByRole("listbox", { name: "Tag suggestions" });
+    await expect(suggestions.getByRole("option", { name: "world-party" })).toBeVisible();
+    await expect(suggestions.getByRole("option", { name: "world-prototype" })).toBeVisible();
+    await expect(suggestions.getByRole("option", { name: "world-map" })).toBeVisible();
+
+    await page.locator("[data-macro-script-tab]").click();
+    const scripts = page.locator("[data-script-wizard]");
+    await scripts.locator("[data-script-name]").fill("Read and edit world Tagger refs");
+    await scripts.locator("[data-script-source]").fill(`const actors = await api.tags.find('world-party', {
+  allScenes: true, includeWorldDocs: true, collections: ['actors']
+});
+const items = await api.tags.getByTag('world-map', {
+  allScenes: true, includeWorldDocs: true, collections: ['items']
+});
+const prototypes = await api.tags.getByTag('bulk-prototype', {
+  allScenes: true, includeWorldDocs: true, collections: ['prototypeTokens']
+});
+const actorRef = actors[0]?.ref, itemRef = items[0]?.ref, prototypeRef = prototypes[0]?.ref;
+if (!actorRef || !itemRef || !prototypeRef) throw new Error('Global targets missing');
+const before = await api.tags.getTags(actorRef);
+const hasMap = await api.tags.hasTags(itemRef, 'bulk-map');
+const hasPrototype = await api.tags.hasTags(prototypeRef, 'bulk-prototype');
+await api.tags.addTags([actorRef, itemRef, prototypeRef], ['script-world']);
+return { scope: actors[0].scope, before, hasMap, hasPrototype,
+  actorTags: await api.tags.getTags(actorRef), itemTags: await api.tags.getTags(itemRef),
+  prototypeTags: await api.tags.getTags(prototypeRef) };`);
+    await scripts.locator(".grants label").filter({ hasText: "tags.read" }).locator("input").check();
+    await scripts.locator(".grants label").filter({ hasText: "tags.write" }).locator("input").check();
+    await scripts.getByLabel("I reviewed this exact revision and its host grants").check();
+    await scripts.locator("[data-script-save]").click();
+    await expect(scripts.getByRole("status")).toContainText("Script revision published");
+    await scripts.locator("[data-script-run]").click();
+    await expect(scripts.getByRole("status")).toContainText("Script completed");
+    await expect(scripts.locator("details pre")).toContainText('"scope": "world"');
+    await expect(scripts.locator("details pre")).toContainText('"hasMap": true');
+    await expect(scripts.locator("details pre")).toContainText('"hasPrototype": true');
+    await expect(scripts.locator("details pre")).toContainText("script-world");
+    await expect(scripts.locator("details pre")).toContainText("prototypeTags");
+  });
+
+  test("Tag search autocomplete completes the final comma term from visible tags", async ({ page }) => {
+    await page.goto(entry + "?e2e=1");
+    await waitForSurface(page, "app");
+    await page.locator("#add-token").click();
+    await page.locator("#gm-macros").click();
+    await page.locator("[data-macro-tags-tab]").click();
+    const tags = page.locator("[data-tagger]");
+    await tags.getByLabel("Taggable object type").selectOption("tokens");
+    const token = tags.locator(".result").filter({ hasText: "Token 1" });
+    await expect(token).toHaveCount(1);
+    await token.locator('input[type="checkbox"]').check();
+    await tags.getByLabel("Tags to edit").fill("trap-door, trap-light, boss fight");
+    await tags.getByRole("button", { name: "Add", exact: true }).click();
+    await expect(token).toContainText("trap-light");
+    await expect(token).toContainText("boss fight");
+
+    const sidebarQuery = tags.locator("[data-tagger-sidebar-query]");
+    await sidebarQuery.fill("Token 1");
+    await expect(token).toHaveCount(1);
+    await sidebarQuery.fill('Token 1 tag:"BOSS FIGHT"');
+    await expect(token).toHaveCount(1);
+    await sidebarQuery.fill('Token 1 tag:"BOSS FIGHT" tag:TRAP-*');
+    await expect(token).toHaveCount(1);
+    await expect(tags.locator('[data-tag-search-mode="lenient"]'))
+      .toContainText("case-insensitive substring");
+    await sidebarQuery.fill('Token 1 tag:"boss fight" tag:missing');
+    await expect(token).toHaveCount(0);
+    await sidebarQuery.fill("");
+
+    const search = tags.locator("[data-tag-search]");
+    await search.fill("BOSS FIGHT");
+    await expect(token).toHaveCount(0); // The API remains case-sensitive and exact by default.
+    await search.fill("boss fight");
+    await expect(token).toHaveCount(1);
+    await search.fill("trap-");
+    const listbox = tags.getByRole("listbox", { name: "Tag suggestions" });
+    await expect(listbox.getByRole("option")).toHaveText(["trap-door", "trap-light"]);
+    await listbox.getByRole("option", { name: "trap-door" }).click();
+    await expect(search).toHaveValue("trap-door");
+
+    await search.fill("trap-door, trap-l");
+    await expect(listbox.getByRole("option")).toHaveText(["trap-light"]);
+    await search.press("ArrowDown");
+    await search.press("Enter");
+    await expect(search).toHaveValue("trap-door, trap-light");
+    await expect(tags.locator(".result").filter({ hasText: "Token 1" })).toHaveCount(1);
   });
 });

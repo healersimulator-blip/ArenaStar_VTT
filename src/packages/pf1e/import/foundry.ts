@@ -23,6 +23,7 @@
 import type { Result } from "../../../core/result";
 import { err } from "../../../core/result";
 import { normalizeSizeKey } from "../rulesTables";
+import { normalizeTags } from "../../../core/tags";
 import { sizeRollToDice } from "./dice";
 import {
   abilitiesBlock,
@@ -311,6 +312,22 @@ export function importFoundryCharacter(
   const warnings: string[] = [];
   const read: string[] = [];
   const pf1e: Record<string, unknown> = {};
+  let prototypeToken: ImportedCharacter["prototypeToken"];
+  if (isRecord(raw.prototypeToken)) {
+    const prototype = raw.prototypeToken;
+    const flags = isRecord(prototype.flags) ? prototype.flags : {};
+    const tagger = isRecord(flags.tagger) ? flags.tagger : {};
+    const sourceTags = prototype.taggerTags ?? tagger.tags;
+    if (Array.isArray(sourceTags) && sourceTags.length > 0) {
+      try {
+        const taggerTags = normalizeTags(sourceTags as string[]);
+        prototypeToken = { taggerTags };
+        read.push(`prototype token tags: ${taggerTags.length}`);
+      } catch {
+        warnings.push("prototype token tags were not imported: the export contains invalid or oversized labels");
+      }
+    }
+  }
 
   const abilities = abilitiesBlock(
     isRecord(system.abilities) ? system.abilities : {},
@@ -593,5 +610,5 @@ export function importFoundryCharacter(
       "foundry: nothing recognisable was found in this actor's system data",
     );
   }
-  return imported("foundry", { name, system: pf1e, items, read, warnings });
+  return imported("foundry", { name, system: pf1e, items, ...(prototypeToken ? { prototypeToken } : {}), read, warnings });
 }

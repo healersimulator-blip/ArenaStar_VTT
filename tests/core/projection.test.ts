@@ -395,15 +395,20 @@ describe("projectEnvelope (§5)", () => {
     const flagged = token("new-piece", { flags: { prefab: marker, public: { tint: "red" } } });
     const wall = scene().walls[0];
     if (!wall) throw new Error("Missing fixture wall");
+    const region: RegionDocument = { _id: "new-region", type: "region", name: "Region",
+      ownership: { default: 3 }, flags: { prefab: marker }, system: {}, x: 100, y: 100,
+      width: 100, height: 100, shape: { kind: "polygon", points: [[0, 0], [1, 0], [1, 1], [0, 1]] } };
     const e = env([
       { kind: "create", coll: "tokens", parent: sceneRef, data: flagged },
       { kind: "create", coll: "walls", parent: sceneRef,
         data: { ...wall, _id: "new-wall", flags: { prefab: marker } } },
+      { kind: "create", coll: "regions", parent: sceneRef, data: region },
     ]);
     const projected = projectEnvelope(e, player, resolver);
     if (!projected) throw new Error("Expected player projection");
     expect(projected.ops[0]).toMatchObject({ kind: "create", data: { flags: { public: { tint: "red" } } } });
     expect(projected.ops[1]).toMatchObject({ kind: "create", data: { flags: {} } });
+    expect(projected.ops[2]).toMatchObject({ kind: "create", data: { flags: {} } });
     expect(projectEnvelope(e, gm, resolver)).toBe(e);
     expect(flagged.flags.prefab).toEqual(marker);
 

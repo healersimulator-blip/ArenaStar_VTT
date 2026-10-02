@@ -297,6 +297,18 @@ describe("the dice spellings the exporters use", () => {
 });
 
 describe("Foundry PF1e actor JSON", () => {
+  test("prototype-token Tagger flags are preserved in the imported actor document", () => {
+    const source = { ...FOUNDRY_CHARACTER, prototypeToken: { flags: { tagger: { tags: ["enemy", "scout"] } } } };
+    const character = ok(importFoundryCharacter(source));
+    expect(character.prototypeToken).toEqual({ taggerTags: ["enemy", "scout"] });
+    expect(character.read).toContain("prototype token tags: 2");
+    const op = characterImportOps(character, { id: "imported-actor", gmId: "gm" })[0];
+    expect(op?.kind).toBe("create");
+    if (op?.kind === "create") expect(op.data).toMatchObject({
+      _id: "imported-actor", prototypeToken: { taggerTags: ["enemy", "scout"] },
+    });
+  });
+
   test("the system's own weapon becomes an item whose attack line the sheet's own rule authors", () => {
     const character = ok(importFoundryCharacter(FOUNDRY_CHARACTER));
     const spear = character.items.find((item) => item.name === "Shortspear");

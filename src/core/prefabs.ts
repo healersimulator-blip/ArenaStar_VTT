@@ -7,7 +7,7 @@
  */
 import type {
   AutomationDocument, BaseDocument, DocRef, DrawingDocument, LightDocument,
-  NoteDocument, SceneDocument, SoundDocument, TemplateDocument, TileDocument, TokenDocument,
+  NoteDocument, RegionDocument, SceneDocument, SoundDocument, TemplateDocument, TileDocument, TokenDocument,
   WallDocument, WorldCollections,
 } from "./documents";
 import type { Op } from "./ops";
@@ -15,11 +15,12 @@ import { applyDiff } from "./diff";
 import { validateAutomation, type AutomationDefinition, type AutomationSelector, type AutomationStep,
   type AutomationTileTarget } from "./automation";
 import { normalizeTags, tagsOf, TAGGABLE_COLLECTIONS } from "./tags";
+import { regionGeometryError } from "./regionGeometry";
 
-export const PREFAB_COLLECTIONS = ["tokens", "tiles", "walls", "lights", "sounds", "drawings", "templates", "notes"] as const;
+export const PREFAB_COLLECTIONS = ["tokens", "tiles", "walls", "lights", "sounds", "drawings", "templates", "notes", "regions"] as const;
 export type PrefabCollection = (typeof PREFAB_COLLECTIONS)[number];
 export type PrefabPlaceable = TokenDocument | TileDocument | WallDocument | LightDocument |
-  SoundDocument | DrawingDocument | TemplateDocument | NoteDocument;
+  SoundDocument | DrawingDocument | TemplateDocument | NoteDocument | RegionDocument;
 export interface PrefabPart {
   /** Source scene-local ID, not a player-visible or permanent placement ID. */
   id: string;
@@ -61,7 +62,7 @@ const point = (v: unknown): v is { x: number; y: number } => object(v) && keys(v
   finite(v.x, -1e6, 1e6) && finite(v.y, -1e6, 1e6);
 const label = (v: unknown) => typeof v === "string" && v.length > 0 && v.length <= 256;
 const TYPE: Record<PrefabCollection, string> = { tokens: "token", tiles: "tile", walls: "wall",
-  lights: "light", sounds: "sound", drawings: "drawing", templates: "template", notes: "note" };
+  lights: "light", sounds: "sound", drawings: "drawing", templates: "template", notes: "note", regions: "region" };
 
 /** Reject imported/GM-authored malformed templates before any placement or write. */
 export function validatePrefab(value: unknown): { ok: true; definition: PrefabDefinition } | { ok: false; error: string } {
@@ -90,7 +91,10 @@ export function validatePrefab(value: unknown): { ok: true; definition: PrefabDe
     const doc = part.doc;
     try { normalizeTags(tagsOf(doc as unknown as BaseDocument)); }
     catch { return bad("prefab has invalid tag template"); }
-    if (part.coll === "walls") {
+    if (part.coll === "regions") {
+      const geometryError = regionGeometryError(doc);
+      if (geometryError) return bad(`prefab region geometry invalid: ${geometryError}`);
+    } else if (part.coll === "walls") {
       if (!Array.isArray(doc.c) || doc.c.length !== 4 || !doc.c.every((n: unknown) => finite(n, -1e6, 1e6)))
         return bad("prefab wall endpoints are invalid");
     } else if (part.coll === "drawings") {
@@ -125,9 +129,11 @@ export function validatePrefab(value: unknown): { ok: true; definition: PrefabDe
         !label(valueGraph.doc.name) || valueGraph.doc.state !== undefined) return bad("invalid prefab graph");
     graphIds.add(valueGraph.id);
     const checked = validateAutomation(valueGraph.doc.definition);
+    const sourceCollection = checked.ok && checked.definition.sourceKind === "region" ? "regions" : "tiles";
     if (!checked.ok || checked.definition.sceneId !== value.sourceSceneId ||
-        !parts.some((p) => (p as PrefabPart).id === checked.definition.tileId && (p as PrefabPart).coll === "tiles"))
-      return bad("prefab graph needs an included tile from its source scene");
+        !parts.some((p) => (p as PrefabPart).id === checked.definition.tileId &&
+          (p as PrefabPart).coll === sourceCollection))
+      return bad("prefab graph needs an included tile or region from its source scene");
   }
   return { ok: true, definition: value as unknown as PrefabDefinition };
 }
@@ -199,6 +205,13 @@ function transform(doc: PrefabPlaceable, coll: PrefabCollection, origin: { x: nu
     return { ...placeable, x: center.x - width / 2, y: center.y - height / 2,
       width, height, rotation: (((placeable.rotation ?? 0) + degrees) % 360 + 360) % 360 };
   }
+  if (coll === "regions") {
+    const region = doc as RegionDocument;
+    const center = xy(region.x + region.width / 2, region.y + region.height / 2);
+    const width = region.width * scale, height = region.height * scale;
+    return { ...region, x: center.x - width / 2, y: center.y - height / 2, width, height,
+      rotation: (((region.rotation ?? 0) + degrees) % 360 + 360) % 360 };
+  }
   const located = doc as LightDocument | SoundDocument | TemplateDocument | NoteDocument;
   const p = xy(located.x, located.y);
   if (coll === "lights") {
@@ -225,6 +238,17 @@ function inside(scene: SceneDocument, part: PrefabPlaceable, coll: PrefabCollect
     const pts = d.points;
     return pts.every((n, i) => i % 2 === 0 ? inBounds(n, pts[i + 1] ?? NaN) : true) &&
       (!d.box || inBounds(d.box[0], d.box[1]) && inBounds(d.box[0] + d.box[2], d.box[1] + d.box[3]));
+  }
+  if (coll === "regions") {
+    const region = part as RegionDocument;
+    if (regionGeometryError(region)) return false;
+    const centerX = region.x + region.width / 2, centerY = region.y + region.height / 2;
+    const radians = (region.rotation ?? 0) * Math.PI / 180;
+    const cos = Math.cos(radians), sin = Math.sin(radians);
+    return region.shape.points.every(([u, v]) => {
+      const x = region.x + u * region.width - centerX, y = region.y + v * region.height - centerY;
+      return inBounds(centerX + x * cos - y * sin, centerY + x * sin + y * cos);
+    });
   }
   const d = part as TokenDocument | TileDocument | LightDocument;
   if (!inBounds(d.x, d.y)) return false;
@@ -271,7 +295,7 @@ export function planPrefabPlacement(
   const seen = new Set<string>([instanceId]);
   for (const part of def.parts) {
     const id = makeId();
-    if (!ID.test(id) || seen.has(id) || scene[part.coll].some((doc) => doc._id === id))
+    if (!ID.test(id) || seen.has(id) || (scene[part.coll] ?? []).some((doc) => doc._id === id))
       return { ok: false, error: "prefab ID allocator returned a duplicate/invalid ID" };
     ids[part.id] = id; seen.add(id);
   }
@@ -305,8 +329,11 @@ export function planPrefabPlacement(
       return { ok: false, error: "prefab graph ID allocator returned duplicate/invalid ID" };
     seen.add(freshId);
     const original = graph.doc.definition;
+    const sourceCollection = original.sourceKind === "region" ? "regions" : "tiles";
+    const sourcePart = def.parts.find((part) => part.id === original.tileId);
     const tileId = ids[original.tileId];
-    if (!tileId) return { ok: false, error: "prefab graph lost its tile binding" };
+    if (!tileId || sourcePart?.coll !== sourceCollection)
+      return { ok: false, error: `prefab graph lost its ${sourceCollection} binding` };
     type TagSelector = Extract<AutomationSelector, { kind: "tag" }> |
       Extract<AutomationTileTarget, { kind: "tag" }>;
     const rebindTag = <T extends TagSelector>(rawSelector: T, onlyTiles: boolean): T | null => {
@@ -393,6 +420,163 @@ export function planPrefabPlacement(
   return { ok: true, plan: { ops, instanceId, rootId, tags: allocated.tags, ids } };
 }
 
+interface AttachmentTransform {
+  origin: { x: number; y: number };
+  destination: { x: number; y: number };
+  scale: number;
+  angle: number;
+}
+
+function matchingScale(pairs: readonly (readonly [number, number])[]): number | null {
+  let scale: number | undefined;
+  for (const [before, after] of pairs) {
+    if (!Number.isFinite(before) || !Number.isFinite(after)) return null;
+    if (before === 0) {
+      if (after !== 0) return null;
+      continue;
+    }
+    const ratio = after / before;
+    if (!Number.isFinite(ratio) || (scale !== undefined && Math.abs(scale - ratio) > 1e-5)) return null;
+    scale = ratio;
+  }
+  return scale ?? 1;
+}
+
+function angleDelta(from: number, to: number): number {
+  const delta = ((to - from + 180) % 360 + 360) % 360 - 180;
+  return delta === -180 ? 180 : delta;
+}
+
+/** Infer a single rigid/uniform transform from a root's own document geometry. */
+function attachmentTransform(
+  before: PrefabPlaceable, after: PrefabPlaceable, coll: PrefabCollection, scene: SceneDocument,
+): { ok: true; value: AttachmentTransform } | { ok: false; error: string } {
+  const bad = (error: string) => ({ ok: false as const, error });
+  const point = (x: number, y: number) => ({ x, y });
+  let origin: { x: number; y: number };
+  let destination: { x: number; y: number };
+  let scale = 1;
+  let angle = 0;
+
+  if (coll === "tokens" || coll === "tiles") {
+    const old = before as TokenDocument | TileDocument;
+    const next = after as TokenDocument | TileDocument;
+    const matched = matchingScale([[old.width, next.width], [old.height, next.height]]);
+    if (matched === null || !finite(matched, 0.05, 20) || !finite(next.x, 0, scene.width) ||
+        !finite(next.y, 0, scene.height) || !finite(next.rotation ?? 0, -360, 360))
+      return bad("prefab parent needs a finite uniform resize within scene bounds");
+    scale = matched;
+    angle = (next.rotation ?? 0) - (old.rotation ?? 0);
+    origin = point(old.x + old.width / 2, old.y + old.height / 2);
+    destination = point(next.x + next.width / 2, next.y + next.height / 2);
+  } else if (coll === "walls") {
+    // A wall has no x/y/rotation fields: its directed endpoint pair is its
+    // transform. Use the segment midpoint as the attachment origin, its
+    // length ratio as uniform scale and its bearing delta as rotation.
+    const old = (before as WallDocument).c;
+    const next = (after as WallDocument).c;
+    if (!Array.isArray(old) || !Array.isArray(next) || old.length !== 4 || next.length !== 4 ||
+        !old.every(Number.isFinite) || !next.every(Number.isFinite))
+      return bad("prefab wall parent needs finite endpoints");
+    const oldDx = old[2] - old[0], oldDy = old[3] - old[1];
+    const nextDx = next[2] - next[0], nextDy = next[3] - next[1];
+    const oldLength = Math.hypot(oldDx, oldDy), nextLength = Math.hypot(nextDx, nextDy);
+    if ((oldLength <= 1e-8) !== (nextLength <= 1e-8))
+      return bad("prefab wall parent cannot infer rotation from a zero-length segment");
+    if (oldLength > 1e-8) {
+      scale = nextLength / oldLength;
+      angle = angleDelta(Math.atan2(oldDy, oldDx) * 180 / Math.PI,
+        Math.atan2(nextDy, nextDx) * 180 / Math.PI);
+    }
+    if (!finite(scale, 0.05, 20)) return bad("prefab wall parent needs a uniform resize between 0.05× and 20×");
+    origin = point((old[0] + old[2]) / 2, (old[1] + old[3]) / 2);
+    destination = point((next[0] + next[2]) / 2, (next[1] + next[3]) / 2);
+  } else if (coll === "regions") {
+    const old = before as RegionDocument, next = after as RegionDocument;
+    const matched = matchingScale([[old.width, next.width], [old.height, next.height]]);
+    if (matched === null || !finite(matched, 0.05, 20) || !finite(next.rotation ?? 0, -1e6, 1e6) ||
+        !inside(scene, next, "regions"))
+      return bad("prefab region parent needs a uniform resize and in-bounds geometry");
+    scale = matched;
+    angle = angleDelta(old.rotation ?? 0, next.rotation ?? 0);
+    origin = point(old.x + old.width / 2, old.y + old.height / 2);
+    destination = point(next.x + next.width / 2, next.y + next.height / 2);
+  } else if (coll === "templates") {
+    const old = before as TemplateDocument, next = after as TemplateDocument;
+    const matched = matchingScale([[old.distance, next.distance], [old.width, next.width]]);
+    if (matched === null || !finite(matched, 0.05, 20) || !finite(next.direction, -360, 360))
+      return bad("prefab template parent needs a uniform resize and finite direction");
+    scale = matched;
+    angle = angleDelta(old.direction, next.direction);
+    origin = point(old.x, old.y); destination = point(next.x, next.y);
+  } else if (coll === "lights") {
+    const old = before as LightDocument, next = after as LightDocument;
+    const matched = matchingScale([[old.dim, next.dim], [old.bright, next.bright]]);
+    if (matched === null || !finite(matched, 0.05, 20))
+      return bad("prefab light parent needs a uniform resize between 0.05× and 20×");
+    scale = matched;
+    origin = point(old.x, old.y); destination = point(next.x, next.y);
+  } else if (coll === "sounds") {
+    const old = before as SoundDocument, next = after as SoundDocument;
+    const matched = matchingScale([[old.radius, next.radius]]);
+    if (matched === null || !finite(matched, 0.05, 20))
+      return bad("prefab sound parent needs a finite radius resize between 0.05× and 20×");
+    scale = matched;
+    origin = point(old.x, old.y); destination = point(next.x, next.y);
+  } else if (coll === "notes") {
+    const old = before as NoteDocument, next = after as NoteDocument;
+    origin = point(old.x, old.y); destination = point(next.x, next.y);
+  } else if (coll === "drawings") {
+    const old = before as DrawingDocument, next = after as DrawingDocument;
+    if (old.kind !== next.kind || (old.box === null) !== (next.box === null) ||
+        old.points.length !== next.points.length || old.points.length % 2 !== 0)
+      return bad("prefab drawing parent changed its geometry schema");
+    if (old.box && next.box) {
+      const matched = matchingScale([[old.box[2], next.box[2]], [old.box[3], next.box[3]],
+        [old.strokeWidth, next.strokeWidth]]);
+      if (matched === null || !finite(matched, 0.05, 20))
+        return bad("prefab drawing parent needs a uniform box/stroke resize");
+      scale = matched;
+      origin = point(old.box[0], old.box[1]);
+      destination = point(next.box[0], next.box[1]);
+      // Rectangular/text drawings have no rotation field in the document format.
+      angle = 0;
+    } else if (old.points.length >= 2) {
+      const firstX = old.points[0] ?? 0, firstY = old.points[1] ?? 0;
+      const nextX = next.points[0] ?? 0, nextY = next.points[1] ?? 0;
+      origin = point(firstX, firstY); destination = point(nextX, nextY);
+      let second = -1;
+      for (let i = 2; i + 1 < old.points.length; i += 2) {
+        if (Math.hypot((old.points[i] ?? 0) - firstX, (old.points[i + 1] ?? 0) - firstY) > 1e-8) {
+          second = i; break;
+        }
+      }
+      if (second >= 0) {
+        const ox = (old.points[second] ?? 0) - firstX, oy = (old.points[second + 1] ?? 0) - firstY;
+        const nx = (next.points[second] ?? 0) - nextX, ny = (next.points[second + 1] ?? 0) - nextY;
+        scale = Math.hypot(nx, ny) / Math.hypot(ox, oy);
+        angle = angleDelta(Math.atan2(oy, ox) * 180 / Math.PI, Math.atan2(ny, nx) * 180 / Math.PI);
+      }
+      if (!finite(scale, 0.05, 20) || !finite(old.strokeWidth, 0, 1e6) ||
+          Math.abs(next.strokeWidth - old.strokeWidth * scale) > 1e-4)
+        return bad("prefab drawing parent needs a uniform point/stroke transform");
+      const radians = angle * Math.PI / 180, cos = Math.cos(radians), sin = Math.sin(radians);
+      for (let i = 0; i < old.points.length; i += 2) {
+        const x = (old.points[i] ?? 0) - origin.x, y = (old.points[i + 1] ?? 0) - origin.y;
+        const expectedX = destination.x + (x * cos - y * sin) * scale;
+        const expectedY = destination.y + (x * sin + y * cos) * scale;
+        if (Math.abs(expectedX - (next.points[i] ?? 0)) > 1e-4 ||
+            Math.abs(expectedY - (next.points[i + 1] ?? 0)) > 1e-4)
+          return bad("prefab drawing parent points must share one uniform transform");
+      }
+    } else return bad("prefab drawing parent has no transformable geometry");
+  } else return bad("unsupported prefab parent collection");
+
+  if (!finite(destination.x, 0, scene.width) || !finite(destination.y, 0, scene.height))
+    return { ok: false, error: "prefab parent destination is outside scene bounds" };
+  return { ok: true, value: { origin, destination, scale, angle } };
+}
+
 /** Untrusted document flags are never an authority source. Only the host calls
  * this for a verified, host-placed instance after validating caller permissions.
  * A parent's committed translation/uniform resize/rotation carries all of its
@@ -413,7 +597,7 @@ export function attachedMovementOps(
         !Object.keys(op.diff).some((field) => movementKeys.includes(field))) continue;
     const scene = world.scenes.find((s) => s._id === op.ref.parent?.id);
     const coll = op.ref.coll as PrefabCollection;
-    const before = scene?.[coll].find((d) => d._id === op.ref.id) as PrefabPlaceable | undefined;
+    const before = (scene?.[coll] ?? []).find((d) => d._id === op.ref.id) as PrefabPlaceable | undefined;
     if (!scene || !before) continue; // DocumentStore will reject the original op.
     const id = key(scene._id, coll, before._id);
     const previous = updates.get(id)?.after ?? before;
@@ -427,7 +611,7 @@ export function attachedMovementOps(
     const { scene, before, after, coll } = update;
     const marker = before.flags?.prefab as Record<string, unknown> | undefined;
     if (!marker || typeof marker.instanceId !== "string" || typeof marker.rootId !== "string") continue;
-    const members = PREFAB_COLLECTIONS.flatMap((collection) => scene[collection].map((doc) => ({
+    const members = PREFAB_COLLECTIONS.flatMap((collection) => (scene[collection] ?? []).map((doc) => ({
       coll: collection, doc: doc as PrefabPlaceable,
     }))).filter(({ doc }) => (doc.flags?.prefab as Record<string, unknown> | undefined)?.instanceId === marker.instanceId);
     const byId = new Map(members.map((m) => [m.doc._id, m] as const));
@@ -447,18 +631,9 @@ export function attachedMovementOps(
       if (isChild) descendants.push(member);
     }
     if (!descendants.length) continue;
-    if (coll !== "tokens" && coll !== "tiles")
-      return { ok: false, error: "moving this prefab parent type is not supported yet" };
-    const was = before as TokenDocument | TileDocument;
-    const now = after as TokenDocument | TileDocument;
-    const sx = now.width / was.width, sy = now.height / was.height;
-    if (!finite(sx, 0.05, 20) || !finite(sy, 0.05, 20) || Math.abs(sx - sy) > 1e-5 ||
-        !finite(now.x, 0, scene.width) || !finite(now.y, 0, scene.height) ||
-        !finite(now.rotation ?? 0, -360, 360))
-      return { ok: false, error: "prefab parent needs a finite uniform resize within scene bounds" };
-    const origin = { x: was.x + was.width / 2, y: was.y + was.height / 2 };
-    const destination = { x: now.x + now.width / 2, y: now.y + now.height / 2 };
-    const angle = (now.rotation ?? 0) - (was.rotation ?? 0);
+    const inferred = attachmentTransform(before, after, coll, scene);
+    if (!inferred.ok) return inferred;
+    const { origin, destination, scale: sx, angle } = inferred.value;
     if (origin.x === destination.x && origin.y === destination.y && sx === 1 && angle === 0) continue;
     for (const { coll: childColl, doc } of descendants) {
       if (updates.has(key(scene._id, childColl, doc._id)) ||
@@ -466,10 +641,13 @@ export function attachedMovementOps(
             op.ref.id === doc._id && op.ref.parent?.id === scene._id))
         return { ok: false, error: "cannot move/delete a prefab child in the same transaction as its parent" };
       const rotated = transform(doc, childColl, origin, destination, sx, angle);
+      // This may be a hidden descendant; never put its collection or ID in a
+      // rejection that is returned to the caller moving an otherwise visible root.
       if (!inside(scene, rotated, childColl))
-        return { ok: false, error: `attached ${childColl}/${doc._id} lies outside scene bounds` };
+        return { ok: false, error: "attached child would lie outside scene bounds" };
       const geometry = childColl === "walls" ? ["c"] : childColl === "drawings" ? ["points", "box", "strokeWidth"] :
         childColl === "tokens" || childColl === "tiles" ? ["x", "y", "width", "height", "rotation"] :
+        childColl === "regions" ? ["x", "y", "width", "height", "rotation"] :
         childColl === "lights" ? ["x", "y", "dim", "bright"] :
         childColl === "sounds" ? ["x", "y", "radius"] :
         childColl === "templates" ? ["x", "y", "distance", "width", "direction"] : ["x", "y"];
@@ -486,7 +664,7 @@ export function attachedMovementOps(
 }
 
 /** Deleting any prefab member also deletes its descendants and graphs bound to
- * deleted tiles. Other instances and the saved template remain untouched.
+ * deleted tile or region sources. Other instances and the saved template remain untouched.
  * Missing links fail closed; an explicit whole-instance despawn is idempotent
  * with the automatic expansion. All deletes are part of the original undo.
  */
@@ -501,13 +679,14 @@ export function attachedDeletionOps(
     if (op.kind !== "delete" || op.ref.parent?.coll !== "scenes" ||
         !PREFAB_COLLECTIONS.includes(op.ref.coll as PrefabCollection)) continue;
     const scene = world.scenes.find((s) => s._id === op.ref.parent?.id);
-    const doc = scene?.[op.ref.coll as PrefabCollection].find((item) => item._id === op.ref.id);
+    const doc = (scene?.[op.ref.coll as PrefabCollection] ?? []).find((item) => item._id === op.ref.id);
     const marker = doc?.flags.prefab as { instanceId?: string } | undefined;
     if (!scene || !marker?.instanceId) continue;
-    const members = PREFAB_COLLECTIONS.flatMap((coll) => scene[coll].map((member) => ({ coll, doc: member })))
+    const members = PREFAB_COLLECTIONS.flatMap((coll) => (scene[coll] ?? []).map((member) => ({ coll, doc: member })))
       .filter((row) => (row.doc.flags.prefab as { instanceId?: string } | undefined)?.instanceId === marker.instanceId);
     const byId = new Map(members.map((m) => [m.doc._id, m] as const));
     const removedTiles = new Set<string>(op.ref.coll === "tiles" ? [op.ref.id] : []);
+    const removedRegions = new Set<string>(op.ref.coll === "regions" ? [op.ref.id] : []);
     for (const member of members) {
       if (member.doc._id === op.ref.id) continue;
       let at = (member.doc.flags.prefab as { parentId?: string } | undefined)?.parentId;
@@ -523,6 +702,7 @@ export function attachedDeletionOps(
             deleting.add(ref);
           }
           if (member.coll === "tiles") removedTiles.add(member.doc._id);
+          if (member.coll === "regions") removedRegions.add(member.doc._id);
           break;
         }
         visited.add(at);
@@ -530,8 +710,10 @@ export function attachedDeletionOps(
       }
     }
     for (const graph of world.automations) {
+      const removedSource = graph.definition.sourceKind === "region"
+        ? removedRegions.has(graph.definition.tileId) : removedTiles.has(graph.definition.tileId);
       if ((graph.flags.prefab as { instanceId?: string } | undefined)?.instanceId !== marker.instanceId ||
-          graph.definition.sceneId !== scene._id || !removedTiles.has(graph.definition.tileId)) continue;
+          graph.definition.sceneId !== scene._id || !removedSource) continue;
       const ref = unique("automations", graph._id);
       if (deleting.has(ref)) continue;
       operations.push({ kind: "delete", ref: { coll: "automations", id: graph._id } });

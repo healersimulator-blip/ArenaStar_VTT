@@ -23,6 +23,7 @@
   import { resolveCastFlow } from "./pf1eCastFlow";
   import { boundCueFor, fireBoundItemCue, fxCastOutcome, fxItemCueNote } from "./fxItemCue";
   import { observePF1eItem } from "./pf1eItemWindow";
+  import TagEditor from "./TagEditor.svelte";
 
   let {
     client,
@@ -178,6 +179,15 @@
         >
       {/if}
     </header>
+
+    <TagEditor
+      doc={held.item}
+      targetRef={{ coll: "items", id: held.item._id, parent: { coll: "actors", id: actorId } }}
+      {client}
+      {bus}
+      editable={editable}
+      scope="item"
+    />
 
     {#if view.item.uses}
       <div class="uses" data-pf1e-item-window-uses>

@@ -8,7 +8,8 @@ import { emptyWorld } from "../net/fixtures";
 const definition: SummonDefinition = { version: 1, sceneId: "s1", source: { kind: "world", actorId: "source" },
   playerCallable: true, maxDistance: 30, durationMs: 60_000, size: 1.5 };
 const source: ActorDocument = { _id: "source", type: "actor", name: "Wolf", ownership: { default: 0 },
-  flags: { private: { value: "secret flag" } }, system: { hp: 22 }, items: [], effects: [] };
+  flags: { private: { value: "secret flag" } }, system: { hp: 22 }, items: [], effects: [],
+  prototypeToken: { taggerTags: ["summoned", "ally"] } };
 const caster: TokenDocument = { _id: "caster", type: "token", name: "Caster", ownership: { default: 0, rex: 3 },
   flags: {}, system: {}, x: 150, y: 150, width: 100, height: 100, rotation: 0, img: "", hidden: false,
   disposition: "friendly", vision: true, light: { radius: 0, alpha: 0, color: "#ffffff" } };
@@ -47,7 +48,9 @@ describe("GM-reviewed summon definition, instance planning and lifecycle", () =>
     expect(first.ops).toHaveLength(2);
     expect(first.actor).toMatchObject({ _id: "actor-1", system: { hp: 22 }, flags: { summon: {
       ownerId: "rex", actorId: "actor-1", tokenId: "token-1", expiresAt: 61_000 } } });
-    expect(first.token).toMatchObject({ actorId: "actor-1", x: 350, y: 350, width: 150, height: 150 });
+    expect(first.token).toMatchObject({ actorId: "actor-1", x: 350, y: 350, width: 150, height: 150,
+      taggerTags: ["summoned", "ally"] });
+    expect(first.actor.prototypeToken?.taggerTags).toEqual(["summoned", "ally"]);
     expect(source.flags.private).toBeDefined();
     expect(first.actor.flags.private).toBeUndefined();
     (first.actor.system as { hp: number }).hp = 1;

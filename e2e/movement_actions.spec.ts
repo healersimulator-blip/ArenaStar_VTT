@@ -201,7 +201,7 @@ test("circle zones apply elevation ranges and dispatch authoritative elevation c
     triggerZone: { kind: "polygon", points: expect.any(Array) }, triggerElevation: { min: 5, max: 10 },
   });
   await zones.locator("[data-zone-name]").fill("Elevation only");
-  for (const method of ["enter", "exit", "stop", "elevation", "create", "rotate", "click", "manual"])
+  for (const method of ["enter", "exit", "stop", "elevation", "create", "rotate", "click", "right click", "manual"])
     await zones.getByRole("checkbox", { name: method, exact: true }).setChecked(method === "elevation");
   await zones.locator("[data-zone-step]").last().getByLabel("Text").fill("Changed elevation in range");
   await zones.locator("[data-zone-save]").click(); await expect(zones.getByRole("alert")).toHaveCount(0);

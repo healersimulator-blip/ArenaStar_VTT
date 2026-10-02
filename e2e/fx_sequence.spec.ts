@@ -86,10 +86,17 @@ test("media import separates player playback from world-export rights and reappr
   await expect(wizard.locator("[data-fx-rights]")).toContainText("licensed-effect.png");
   expect(await wizard.locator("[data-fx-rights-share]").isChecked()).toBe(false);
   expect(await wizard.locator("[data-fx-rights-export]").isChecked()).toBe(false);
+  await expect(wizard.locator("[data-fx-rights-status]")).toContainText("Restricted");
   await page.locator("[data-macro-assets-tab]").click();
   const browser = page.locator("[data-fx-assets]");
   await browser.locator("[data-fx-asset-search]").fill("licensed-effect");
   await expect(browser.locator("[data-fx-asset]")).toHaveCount(1);
+  const exportFilter = browser.locator("[data-fx-asset-export-filter]");
+  await exportFilter.selectOption("granted");
+  await expect(browser.locator("[data-fx-asset]")).toHaveCount(0);
+  await exportFilter.selectOption("restricted");
+  await expect(browser.locator("[data-fx-asset] [data-fx-asset-rights='restricted']"))
+    .toContainText("world export restricted");
   await browser.getByRole("button", { name: "Compare" }).click();
   await expect(browser.locator("[data-fx-preview]")).toHaveCount(1);
   const hash = await browser.locator("[data-fx-asset]").getAttribute("data-fx-asset");
@@ -106,6 +113,10 @@ test("media import separates player playback from world-export rights and reappr
   await wizard.locator("[data-fx-rights-export]").check();
   await wizard.locator("[data-fx-update-rights]").click();
   await expect(wizard.getByRole("status")).toContainText("Media permissions updated");
+  await page.locator("[data-macro-assets-tab]").click();
+  await exportFilter.selectOption("granted");
+  await expect(browser.locator("[data-fx-asset] [data-fx-asset-rights='granted']"))
+    .toContainText("world export granted");
   await page.locator('[data-window="macros"] [data-window-close]').click();
   const [download] = await Promise.all([page.waitForEvent("download"), page.locator("#export-world").click()]);
   expect(download.suggestedFilename()).toMatch(/\.zip$/);

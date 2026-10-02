@@ -115,16 +115,18 @@ import { fxAudienceAllows, fxSectionsForViewer, resolveFxSequence, validateFxSeq
   type FxAudience } from "../core/fx";
 import type { ResolvedFxSection } from "../core/fx";
 import { automationImageError, pinnedSelectorError, planAutomation, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState,
-  type AutomationEvent, type AutomationMethod, type AutomationOutcome } from "../core/automation";
+  type AutomationContinuation, type AutomationEvent, type AutomationMethod, type AutomationPointerMethod, type AutomationOutcome,
+  type AutomationScriptResult } from "../core/automation";
 import { attachedDeletionOps, attachedMovementOps, planPrefabPlacement, PREFAB_COLLECTIONS, validatePrefab } from "../core/prefabs";
 import { boundFxDeletionOps, fxInstanceMatches, validateFxInstance, validateFxInstanceFilter } from "../core/fxInstances";
 import { fxPresetDocumentError, macroStrayPresetError } from "../core/fxPresets";
 import { fxBindingDeletionOps, fxBindingEvents, fxItemBindingError } from "../core/fxBinding";
 import { planSummon, summonDeletionOps, summonMarker, summonPlacementError, validateSummon,
   type SummonSource } from "../core/summons";
-import { getByTag, isWorldTagRef, listTaggable, tagEditOps, tagRuleOps, tagsOf, TAGGABLE_COLLECTIONS, validSceneTagRefs,
-  validWorldTagRefs,
-  type TagEdit, type TagMatchMode, type TagPattern } from "../core/tags";
+import { getByTag, isPrototypeTokenTagRef, isWorldDocumentTagRef, isWorldTagRef, listTaggable, tagDataError, tagEditOps, tagRefKey,
+  taggerTagsError, tagRuleOps, tagsOf, TAGGABLE_COLLECTIONS, WORLD_TAGGABLE_COLLECTIONS,
+  validGlobalTagRefs, validSceneTagRefs, validWorldTagRefs,
+  type TagEdit, type TagMatchMode, type TagPattern, type TagRef, type TagSearchCollection } from "../core/tags";
 import { boundedJson, scriptApprovalHash, scriptApprovalHashSync, validateScriptArgs, validateScriptMacro,
   type ScriptGrant, type ScriptPolicy } from "../core/scriptMacros";
 import { runScriptWorker, type ScriptRunner } from "./scriptWorker";
@@ -612,6 +614,12 @@ function withCellReveals(
   return { ...envelope, ops };
 }
 
+/** Bounded, GM-only serialization for a reviewed script's awaited return value. */
+function scriptResultSummary(result: Json): string {
+  const text = JSON.stringify(result);
+  return text.length > 512 ? `${text.slice(0, 509)}…` : text;
+}
+
 /** One top-level invocation shares a deadline and action budget with all nested scripts. */
 interface ScriptInvocation {
   session: Session;
@@ -622,6 +630,17 @@ interface ScriptInvocation {
   trace: string[];
   /** One durable Revert control for this script and its nested direct RPCs. */
   audit: ActionAudit;
+}
+interface AutomationPostActionRun {
+  audit: ActionAudit;
+  session: Session;
+  caller: SessionUser;
+  deadline: number;
+  budget: { calls: number };
+  trace: string[];
+  continuedFailures: number;
+  actionCount: number;
+  summonCount: number;
 }
 
 type PlannedMovementPath = { endpoint: TokenDocument; stopFraction: number };
@@ -931,7 +950,7 @@ export class HostSync {
         this.handleAutomationRequest(session, msg);
         return;
       case "automation.click":
-        this.handleAutomationClick(session, msg);
+        this.handleAutomationTileTrigger(session, msg);
         return;
       case "tagger.rules":
         this.handleTaggerRules(session, msg);
@@ -1743,12 +1762,16 @@ export class HostSync {
   }
 
   /** A saved graph never trusts a client-supplied step, anchor or media identifier. */
-  private automationDocumentError(doc: AutomationDocument): string | null {
+  private automationDocumentError(
+    doc: AutomationDocument,
+    stagedScenes?: ReadonlyMap<string, SceneDocument>,
+  ): string | null {
     if (doc.type !== "automation") return "automation document type required";
     const checked = validateAutomation(doc.definition);
     if (!checked.ok) return checked.error;
     if (!validateAutomationState(doc.state)) return "invalid trigger history";
-    const scene = this.store.get("scenes", checked.definition.sceneId) as SceneDocument | undefined;
+    const sceneById = (id: string) => stagedScenes?.get(id) ?? this.store.get("scenes", id) as SceneDocument | undefined;
+    const scene = sceneById(checked.definition.sceneId);
     if (!scene || !automationSourceTile(scene, checked.definition.tileId, checked.definition.sourceKind))
       return "automation anchor source/scene does not exist";
     for (const step of checked.definition.steps) {
@@ -1758,7 +1781,7 @@ export class HostSync {
       }
       if (step.kind === "move" && step.destination && !scene[step.destination.coll].some((item) => item._id === step.destination?.id))
         return `${step.id}: Move destination entity is unavailable`;
-      if (step.kind === "sceneBackground" && step.targetSceneId && !this.store.get("scenes", step.targetSceneId))
+      if (step.kind === "sceneBackground" && step.targetSceneId && !sceneById(step.targetSceneId))
         return `${step.id}: Scene Background target scene is unavailable`;
       if (step.kind === "sceneBackground" || step.kind === "tileImage") {
         const images = step.kind === "tileImage" && step.images ? step.images : step.image ? [step.image] : [];
@@ -1816,6 +1839,14 @@ export class HostSync {
   ):
     | { ok: true }
     | { ok: false; reason: "forbidden" | "invalid_schema"; error: string } {
+    // Scene-copy envelopes create the scene and its independently stored automation graphs
+    // together. Preflight all automation refs against those staged scenes so neither the copy nor
+    // its graphs can partially publish when their mutually bound documents are new to the store.
+    const stagedScenes = new Map<string, SceneDocument>();
+    for (const op of ops) {
+      if (op.kind === "create" && op.coll === "scenes" && op.data.type === "scene")
+        stagedScenes.set(op.data._id, op.data as SceneDocument);
+    }
     for (const op of ops) {
       if ((op.kind === "create" ? op.coll : op.ref.coll) === "actionReceipts")
         return { ok: false, reason: "forbidden", error: "Revert history is host-owned" };
@@ -1846,6 +1877,8 @@ export class HostSync {
               error: "users are assigned by the host only",
             };
           }
+          const tagError = tagDataError(op.data);
+          if (tagError) return { ok: false, reason: "invalid_schema", error: tagError };
           if (op.coll === "regions") {
             if (user.role !== "GM" && user.role !== "ASSISTANT")
               return { ok: false, reason: "forbidden", error: "only GMs author scene regions" };
@@ -1870,7 +1903,7 @@ export class HostSync {
           if (op.coll === "automations") {
             if (user.role !== "GM" && user.role !== "ASSISTANT")
               return { ok: false, reason: "forbidden", error: "only GMs author active zones" };
-            const error = this.automationDocumentError(op.data as AutomationDocument);
+            const error = this.automationDocumentError(op.data as AutomationDocument, stagedScenes);
             if (error) return { ok: false, reason: "invalid_schema", error };
           }
           if (op.coll === "prefabs") {
@@ -1990,8 +2023,18 @@ export class HostSync {
           const dry = applyDiff(doc, op.diff);
           if (!dry.ok)
             return { ok: false, reason: "invalid_schema", error: dry.error };
+          if (Object.keys(op.diff).some((field) =>
+            field === "taggerTags" || field === "-=taggerTags" || field.startsWith("taggerTags."))) {
+            const tagError = taggerTagsError((dry.value as BaseDocument).taggerTags);
+            if (tagError) return { ok: false, reason: "invalid_schema", error: tagError };
+          }
+          if (op.ref.coll === "actors" && Object.keys(op.diff).some((field) =>
+            field === "prototypeToken" || field.startsWith("prototypeToken."))) {
+            const tagError = taggerTagsError((dry.value as ActorDocument).prototypeToken?.taggerTags);
+            if (tagError) return { ok: false, reason: "invalid_schema", error: tagError };
+          }
           if (op.ref.coll === "automations") {
-            const error = this.automationDocumentError(dry.value as AutomationDocument);
+            const error = this.automationDocumentError(dry.value as AutomationDocument, stagedScenes);
             if (error) return { ok: false, reason: "invalid_schema", error };
           }
           if (op.ref.coll === "prefabs") {
@@ -2075,6 +2118,10 @@ export class HostSync {
     return (ref.parent ? ref.coll : ref.coll) as CollectionName;
   }
 
+  private activeSceneDocument(): SceneDocument | undefined {
+    return (this.store.getAll("scenes") as readonly SceneDocument[]).find((scene) => scene.active);
+  }
+
   /**
    * The single commit path (invariant: only HostSync mutates authoritative
    * state, always as an OpEnvelope with monotonic seq). Broadcasts the
@@ -2139,6 +2186,15 @@ export class HostSync {
           ...(before ? { before } : {}) });
       }
     }
+    // Scene activation is a document update, not a separate protocol message. Compare the
+    // authoritative active scene around this envelope so retries, snapshots and client-provided
+    // trigger claims cannot synthesize scene-change events.
+    const sceneActivationCandidate = !restoring && ops.some((op) =>
+      (op.kind === "update" && op.ref.coll === "scenes" && Object.hasOwn(op.diff, "active")) ||
+      (op.kind === "create" && op.coll === "scenes" && op.data.type === "scene" &&
+        (op.data as SceneDocument).active === true) ||
+      (op.kind === "delete" && op.ref.coll === "scenes"));
+    const activeSceneBefore = sceneActivationCandidate ? this.activeSceneDocument() : undefined;
     const envelope: OpEnvelope = {
       seq: this.store.seq + 1,
       ts: movementTimestamp ?? this.now(),
@@ -2171,6 +2227,11 @@ export class HostSync {
           this.movementAutomationDepth--;
         }
       }
+    }
+    if (activeSceneBefore && sceneActivationCandidate) {
+      const activeSceneAfter = this.activeSceneDocument();
+      if (activeSceneAfter && activeSceneAfter._id !== activeSceneBefore._id)
+        this.fireSceneChangeAutomations(activeSceneAfter, by);
     }
     // F03: prune expired pending rolls (T+2 window) when a combat round/turn advanced
     try {
@@ -2308,7 +2369,7 @@ export class HostSync {
     if (typeof msg.requestId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(msg.requestId) ||
         !Array.isArray(msg.refs) || msg.refs.length < 1 || msg.refs.length > 32 ||
         Object.keys(msg).some((key) => !["kind", "requestId", "refs"].includes(key)) ||
-        msg.refs.some((ref) => !isWorldTagRef(ref))) {
+        msg.refs.some((ref) => !isWorldTagRef(ref) && !isWorldDocumentTagRef(ref))) {
       this.reject(session, String(msg.requestId), "invalid_schema", "Invalid Tagger rule references");
       return;
     }
@@ -2316,21 +2377,32 @@ export class HostSync {
     const previous = this.taggerRuleResults.get(requestKey);
     if (previous) { this.send(session, previous); return; } // reconnect/retry never allocates twice
     const seen = new Set<string>();
-    const docs: Array<{ ref: DocRef; sceneId: string; doc: BaseDocument }> = [];
+    const docs: Array<{ ref: TagRef; sceneId: string; doc: BaseDocument }> = [];
     for (const ref of msg.refs) {
-      const sceneId = ref.coll === "scenes" ? ref.id : ref.parent?.id;
+      const sceneQualified = isWorldTagRef(ref);
+      const prototypeTarget = isPrototypeTokenTagRef(ref);
+      const sceneId = sceneQualified ? ref.coll === "scenes" ? ref.id : ref.parent?.id ?? "" : "";
       const scene = sceneId ? this.store.get("scenes", sceneId) : undefined;
-      const doc = this.store.resolve(ref);
-      const identity = JSON.stringify([sceneId, ref.coll, ref.id]);
-      if (!scene || !doc || seen.has(identity) ||
-          !can(caller, "read", scene, "scenes") ||
-          !can(caller, "update", doc, ref.coll,
-            ref.coll === "scenes" ? {} : { parent: scene })) {
+      const identity = tagRefKey(ref);
+      const entry = listTaggable(this.store.world, { viewer: caller,
+        ...(sceneQualified ? { sceneId } : { includeWorldDocs: true }), includeRefs: [ref] })[0];
+      const live = prototypeTarget ? this.store.get("actors", ref.id)
+        : entry ? this.store.resolve(entry.ref) : undefined;
+      const permissionParent = ref.parent?.coll === "actors"
+        ? this.store.get("actors", ref.parent.id)
+        : sceneQualified && ref.coll !== "scenes" ? scene : undefined;
+      const permissionCollection = prototypeTarget ? "actors" : ref.coll;
+      if (!entry || !live || seen.has(identity) ||
+          (sceneQualified && (!scene || !can(caller, "read", scene, "scenes"))) ||
+          (ref.parent?.coll === "actors" && !permissionParent) ||
+          !can(caller, "update", live, permissionCollection,
+            permissionParent ? { parent: permissionParent } : {})) {
         this.reject(session, msg.requestId, "invalid_schema", "Missing, duplicate or unauthorized Tagger target");
         return;
       }
       seen.add(identity);
-      docs.push({ ref, sceneId: scene._id, doc });
+      // Prototype rows are virtual Tagger views, while authorization and writes target the actor.
+      docs.push({ ref, sceneId: scene?._id ?? "", doc: prototypeTarget ? entry.doc : live });
     }
     let ops: Op[];
     try { ops = tagRuleOps(this.store.world, docs); }
@@ -2516,6 +2588,7 @@ export class HostSync {
   private async executeScript(
     macroId: string, rawArgs: unknown, ctx: ScriptInvocation, suffix: string,
     stack: readonly string[] = [], isActive: () => boolean = () => true,
+    runAsChoice?: "approved" | "caller" | "gm",
   ): Promise<Json> {
     const { caller, session } = ctx;
     if (!isActive() || Date.now() >= ctx.deadline || stack.length >= 32 || stack.includes(macroId))
@@ -2524,6 +2597,9 @@ export class HostSync {
     const checked = doc?.kind === "script" ? validateScriptMacro(doc) : null;
     if (!doc || !checked?.ok) throw new Error("Script is missing, unapproved or malformed");
     const policy = checked.policy;
+    const runAs = runAsChoice === undefined || runAsChoice === "approved" ? policy.runAs : runAsChoice;
+    if (runAs === "gm" && policy.runAs !== "gm")
+      throw new Error("GM run-as is not approved by the saved script policy");
     const gm = caller.role === "GM" || caller.role === "ASSISTANT";
     const scene = this.store.get("scenes", policy.sceneId) as SceneDocument | undefined;
     if (!scene || !can(caller, "read", scene, "scenes") || !can(caller, "read", doc, "macros") ||
@@ -2556,8 +2632,9 @@ export class HostSync {
     const remaining = ctx.deadline - Date.now();
     if (remaining <= 0) throw new Error("Script deadline reached");
     const result = await this.scriptRunner(doc.command, inputs.args,
-      { sceneId: policy.sceneId, callerId: caller.id, requestId: ctx.requestId },
-      (method, payload, live) => this.scriptAction(doc, policy, method, payload, ctx, path, () => isActive() && live()),
+      { sceneId: policy.sceneId, callerId: caller.id, requestId: ctx.requestId, runAs },
+      (method, payload, live) => this.scriptAction(doc, policy, runAs, method, payload, ctx, path,
+        () => isActive() && live()),
       Math.min(remaining, 10_000));
     if (!boundedJson(result)) throw new Error("Script result is not bounded JSON");
     ctx.trace.push(`return ${macroId}`);
@@ -2565,8 +2642,8 @@ export class HostSync {
   }
 
   private async scriptAction(
-    macro: MacroDocument, policy: ScriptPolicy, method: string, payload: unknown, ctx: ScriptInvocation,
-    stack: readonly string[], isActive: () => boolean,
+    macro: MacroDocument, policy: ScriptPolicy, runAs: "caller" | "gm", method: string,
+    payload: unknown, ctx: ScriptInvocation, stack: readonly string[], isActive: () => boolean,
   ): Promise<Json> {
     if (!isActive() || ++ctx.budget.calls > 256 || Date.now() >= ctx.deadline)
       throw new Error("Script action/deadline budget exceeded");
@@ -2591,16 +2668,23 @@ export class HostSync {
     if (!grant || !policy.grants.includes(grant)) throw new Error(`Action ${method} not granted`);
     ctx.trace.push(`${seq}: ${macro._id} ${method}`);
     if (method === "tags.get") {
-      if (Object.keys(payload).length !== 1 || !isWorldTagRef(payload.ref))
-        throw new Error("Invalid explicit-scene tag reference");
+      if (Object.keys(payload).length !== 1 ||
+          !(isWorldTagRef(payload.ref) || isWorldDocumentTagRef(payload.ref)))
+        throw new Error("Invalid explicit-scene or world-document tag reference");
       const ref = payload.ref;
-      const targetSceneId = ref.coll === "scenes" ? ref.id : ref.parent?.id;
-      const targetScene = targetSceneId ? this.store.get("scenes", targetSceneId) : undefined;
-      // The ref itself names the requested scene; neither GM-elevated code nor
-      // an explicit ID may declassify an unseen placeable or private scene.
-      if (!targetScene || !can(caller, "read", targetScene, "scenes"))
-        throw new Error("Tag target unavailable");
-      const hit = listTaggable(this.store.world, { sceneId: targetScene._id, viewer: caller,
+      if (isWorldTagRef(ref)) {
+        const targetSceneId = ref.coll === "scenes" ? ref.id : ref.parent?.id;
+        const targetScene = targetSceneId ? this.store.get("scenes", targetSceneId) : undefined;
+        // The ref itself names the requested scene; neither GM-elevated code nor
+        // an explicit ID may declassify an unseen placeable or private scene.
+        if (!targetScene || !can(caller, "read", targetScene, "scenes"))
+          throw new Error("Tag target unavailable");
+        const hit = listTaggable(this.store.world, { sceneId: targetScene._id, viewer: caller,
+          includeRefs: [ref] })[0];
+        if (!hit) throw new Error("Tag target unavailable");
+        return [...hit.tags];
+      }
+      const hit = listTaggable(this.store.world, { includeWorldDocs: true, viewer: caller,
         includeRefs: [ref] })[0];
       if (!hit) throw new Error("Tag target unavailable");
       return [...hit.tags];
@@ -2609,15 +2693,18 @@ export class HostSync {
       const options = payload.options ?? {};
       if (!isRecord(options) || Object.keys(options).some((k) =>
             !["mode", "pattern", "caseSensitive", "contains", "collections", "includeRefs", "excludeRefs",
-              "sceneId", "allScenes", "groupByScene"].includes(k)) ||
-          (options.collections !== undefined && (!Array.isArray(options.collections) || options.collections.length > 12 ||
-            options.collections.some((c: unknown) => c !== "scenes" && !TAGGABLE_COLLECTIONS.includes(c as typeof TAGGABLE_COLLECTIONS[number])))) ||
+              "sceneId", "allScenes", "groupByScene", "includeWorldDocs"].includes(k)) ||
+          (options.collections !== undefined && (!Array.isArray(options.collections) || options.collections.length > 14 ||
+            options.collections.some((c: unknown) => c !== "scenes" &&
+              !TAGGABLE_COLLECTIONS.includes(c as typeof TAGGABLE_COLLECTIONS[number]) &&
+              !WORLD_TAGGABLE_COLLECTIONS.includes(c as typeof WORLD_TAGGABLE_COLLECTIONS[number])))) ||
           (options.mode !== undefined && !["all", "any", "exactSet"].includes(String(options.mode))) ||
           (options.pattern !== undefined && !["literal", "wildcard", "regex"].includes(String(options.pattern))) ||
           (options.caseSensitive !== undefined && typeof options.caseSensitive !== "boolean") ||
           (options.contains !== undefined && typeof options.contains !== "boolean") ||
           (options.allScenes !== undefined && typeof options.allScenes !== "boolean") ||
           (options.groupByScene !== undefined && typeof options.groupByScene !== "boolean") ||
+          (options.includeWorldDocs !== undefined && typeof options.includeWorldDocs !== "boolean") ||
           (options.sceneId !== undefined && (typeof options.sceneId !== "string" ||
             !options.sceneId || options.sceneId.length > 128 ||
             [...options.sceneId].some((char) => char.charCodeAt(0) < 32))) ||
@@ -2628,30 +2715,39 @@ export class HostSync {
       const targetScene = targetSceneId ? this.store.get("scenes", targetSceneId) : undefined;
       if (targetSceneId && (!targetScene || !can(caller, "read", targetScene, "scenes")))
         throw new Error("Tag scene unavailable");
+      const worldCollectionRequested = Array.isArray(options.collections) && options.collections.some((coll: unknown) =>
+        WORLD_TAGGABLE_COLLECTIONS.includes(coll as typeof WORLD_TAGGABLE_COLLECTIONS[number]));
+      const includeWorldDocs = options.includeWorldDocs === true || worldCollectionRequested;
+      if (targetSceneId && includeWorldDocs)
+        throw new Error("World documents require an all-scene tag query");
       // In an all-scene query, refs must still explicitly identify their
-      // parent scene. Entitlement is enforced by projection at query time.
+      // parent scene or world-document parent. Entitlement is enforced by
+      // projecting from the actual caller's view at query time.
       const validRefs = targetSceneId
         ? validSceneTagRefs(options.includeRefs, targetSceneId) &&
           validSceneTagRefs(options.excludeRefs, targetSceneId)
-        : validWorldTagRefs(options.includeRefs) && validWorldTagRefs(options.excludeRefs);
+        : includeWorldDocs
+          ? validGlobalTagRefs(options.includeRefs) && validGlobalTagRefs(options.excludeRefs)
+          : validWorldTagRefs(options.includeRefs) && validWorldTagRefs(options.excludeRefs);
       if (!validRefs) throw new Error("Invalid tag query references");
       if (!(typeof payload.query === "string" || Array.isArray(payload.query) &&
           payload.query.every((q: unknown) => typeof q === "string"))) throw new Error("Invalid tag query");
       const hits = getByTag(this.store.world, payload.query as string | string[], {
-        ...(targetSceneId ? { sceneId: targetSceneId } : {}), viewer: caller,
+        ...(targetSceneId ? { sceneId: targetSceneId } : {}), viewer: caller, includeWorldDocs,
         ...(options.mode !== undefined ? { mode: options.mode as TagMatchMode } : {}),
         ...(options.pattern !== undefined ? { pattern: options.pattern as TagPattern } : {}),
         ...(options.caseSensitive !== undefined ? { caseSensitive: options.caseSensitive as boolean } : {}),
         ...(options.contains !== undefined ? { contains: options.contains as boolean } : {}),
-        ...(options.collections !== undefined ? { collections: options.collections as typeof TAGGABLE_COLLECTIONS[number][] } : {}),
-        ...(options.includeRefs !== undefined ? { includeRefs: options.includeRefs as unknown as DocRef[] } : {}),
-        ...(options.excludeRefs !== undefined ? { excludeRefs: options.excludeRefs as unknown as DocRef[] } : {}),
+        ...(options.collections !== undefined ? { collections: options.collections as TagSearchCollection[] } : {}),
+        ...(options.includeRefs !== undefined ? { includeRefs: options.includeRefs as unknown as TagRef[] } : {}),
+        ...(options.excludeRefs !== undefined ? { excludeRefs: options.excludeRefs as unknown as TagRef[] } : {}),
       });
       if (hits.length > 100) throw new Error("Tag query matched over 100 documents; narrow the selector");
       // No entire documents or hidden host-only fields cross the worker
-      // boundary. Grouping uses a null-prototype record for arbitrary scene IDs.
-      const rows = hits.map((hit) => ({ sceneId: hit.sceneId,
+      // boundary. World rows have empty sceneId plus an explicit world scope.
+      const rows = hits.map((hit) => ({ scope: hit.scope, sceneId: hit.sceneId,
         ref: { coll: hit.ref.coll, id: hit.ref.id,
+          ...("target" in hit.ref ? { target: hit.ref.target } : {}),
           ...(hit.ref.parent ? { parent: { coll: hit.ref.parent.coll, id: hit.ref.parent.id } } : {}) },
         name: hit.doc.name, tags: [...hit.tags] }));
       const result = options.groupByScene === true ? rows.reduce<Record<string, typeof rows>>((grouped, row) => {
@@ -2669,41 +2765,57 @@ export class HostSync {
             Object.keys(payload).some((key) => !["refs", "edit", "tags"].includes(key))))
         throw new Error("Invalid tag edit/rule call");
       // Build one fresh projection for the ACTUAL caller, not the GM run-as
-      // principal. Even reviewed, elevated player code cannot write a secret
-      // tile/scene merely by supplying its ID. Each ref names its scene; unlike
-      // Tagger reads, writes always require concrete refs, never `allScenes`.
-      const visible = listTaggable(this.store.world, { viewer: caller });
+      // principal. Even reviewed, elevated player code cannot write a hidden
+      // target by supplying its ID. Scene targets carry a scene parent; embedded
+      // world items carry an actor parent. Writes always require concrete refs.
+      const visible = listTaggable(this.store.world, { viewer: caller, includeWorldDocs: true });
       const seen = new Set<string>();
-      const docs: Array<{ ref: DocRef; sceneId: string; doc: BaseDocument }> = [];
+      const docs: Array<{ ref: TagRef; sceneId: string; doc: BaseDocument }> = [];
       for (const input of payload.refs) {
-        if (!isWorldTagRef(input)) throw new Error("Invalid explicit-scene tag target");
-        const targetSceneId = input.coll === "scenes" ? input.id : input.parent?.id;
+        if (!(isWorldTagRef(input) || isWorldDocumentTagRef(input)))
+          throw new Error("Invalid explicit-scene or world-document tag target");
+        const ref = input as unknown as TagRef;
+        const sceneQualified = isWorldTagRef(ref);
+        const prototypeTarget = isPrototypeTokenTagRef(ref);
+        const targetSceneId = sceneQualified ? ref.coll === "scenes" ? ref.id : ref.parent?.id : undefined;
         const targetScene = targetSceneId ? this.store.get("scenes", targetSceneId) : undefined;
-        if (!targetScene || !can(caller, "read", targetScene, "scenes"))
+        if (sceneQualified && (!targetScene || !can(caller, "read", targetScene, "scenes")))
           throw new Error("Tag scene unavailable");
-        const identity = JSON.stringify([targetScene._id, input.coll, input.id]);
+        const identity = tagRefKey(ref);
         if (seen.has(identity)) throw new Error("Duplicate tag target");
         seen.add(identity);
-        const entry = visible.find((item) => item.sceneId === targetSceneId &&
-          item.ref.coll === input.coll && item.ref.id === input.id);
+        const entry = visible.find((item) => tagRefKey(item.ref) === identity);
         if (!entry) throw new Error("Invisible or missing tag target");
-        const live = this.store.resolve(entry.ref);
-        if (!live || (policy.runAs === "caller" &&
-            !can(caller, "update", live, input.coll,
-              input.coll === "scenes" ? {} : { parent: targetScene })))
+        const live = prototypeTarget ? this.store.get("actors", ref.id) : this.store.resolve(entry.ref);
+        const permissionParent = ref.parent?.coll === "actors"
+          ? this.store.get("actors", ref.parent.id)
+          : sceneQualified && ref.coll !== "scenes" ? targetScene : undefined;
+        if (ref.parent?.coll === "actors" && !permissionParent)
           throw new Error("Tag target not authorized");
-        docs.push({ ref: entry.ref, sceneId: targetScene._id, doc: live });
+        const permissionCollection = prototypeTarget ? "actors" : ref.coll;
+        if (!live || (runAs === "caller" &&
+            !can(caller, "update", live, permissionCollection,
+              permissionParent ? { parent: permissionParent } : {})))
+          throw new Error("Tag target not authorized");
+        // Prototype rows are intentionally synthetic tag views; the stored actor is the
+        // permission target, while tagEditOps emits an ordinary nested actor update.
+        docs.push({ ref: entry.ref, sceneId: targetScene?._id ?? "", doc: prototypeTarget ? entry.doc : live });
       }
-      // A scene-unique ordinal depends on *all* tags, including hidden ones.
-      // A player could infer a secret 'trap-1' from receiving 'trap-2' even
-      // after every ref was projected. GM elevation must NOT launder this read.
+      // World uniqueness depends on every world actor/item/prototype tag, even on
+      // documents hidden from this caller. Never let GM elevation launder that read.
+      if (method === "tags.rules" && caller.role !== "GM" && caller.role !== "ASSISTANT" &&
+          docs.some(({ ref }) => isWorldDocumentTagRef(ref)))
+        throw new Error("World-document Tagger rule allocation requires a GM caller");
+      // Scene-unique ordinals depend on all tags in the referenced scene, including
+      // hidden ones; a player cannot infer a secret tag from the chosen ordinal.
       if (method === "tags.rules" && caller.role !== "GM" && caller.role !== "ASSISTANT" &&
           docs.some(({ doc }) => tagsOf(doc).some((tag) => tag.includes("{#}"))))
         throw new Error("Scene-unique Tagger numbering requires a GM caller");
-      const ops = method === "tags.rules" ? tagRuleOps(this.store.world, docs)
+      const ops = method === "tags.rules"
+        ? tagRuleOps(this.store.world, docs as Array<{ ref: DocRef; sceneId: string; doc: BaseDocument }>)
         : tagEditOps(docs, payload.edit as TagEdit, payload.tags as string[]);
       if (!ops.length) return { changed: 0 };
-      const committed = this.commitOps(ops, policy.runAs === "gm" ? this.systemUserId : caller.id,
+      const committed = this.commitOps(ops, runAs === "gm" ? this.systemUserId : caller.id,
         `macro-${ctx.requestId}-${seq}`, true, ctx.audit);
       if (!committed.ok) throw new Error(`Tag commit failed: ${committed.error}`);
       ctx.trace.push(`  committed ${ops.length} ${method === "tags.rules" ? "tag rules" : "tag edits"} at seq ${committed.seq}`);
@@ -2721,7 +2833,7 @@ export class HostSync {
         content: payload.content, whisper: gmOnly ? [this.systemUserId] : [],
         roll: null, flavor: `Script macro: ${macro.name}` };
       const committed = this.commitOps([{ kind: "create", coll: "messages", data: message }],
-        policy.runAs === "gm" ? this.systemUserId : caller.id, `macro-${ctx.requestId}-${seq}`, true, ctx.audit);
+        runAs === "gm" ? this.systemUserId : caller.id, `macro-${ctx.requestId}-${seq}`, true, ctx.audit);
       if (!committed.ok) throw new Error(`Chat commit failed: ${committed.error}`);
       ctx.trace.push(`  chat seq ${committed.seq} audience ${payload.audience}`);
       return { messageId: message._id };
@@ -2740,7 +2852,7 @@ export class HostSync {
           throw new Error("Invisible FX target");
       }
       const gm: SessionUser = { id: this.systemUserId, role: "GM", name: "Script" };
-      const prepared = this.prepareFx(policy.runAs === "gm" ? gm : caller, {
+      const prepared = this.prepareFx(runAs === "gm" ? gm : caller, {
         macroId: payload.macroId, sceneId: scene._id,
         ...(payload.sourceTokenId ? { sourceTokenId: payload.sourceTokenId } : {}),
         ...(payload.targetTokenId ? { targetTokenId: payload.targetTokenId } : {}),
@@ -2807,7 +2919,7 @@ export class HostSync {
     }
     if (method === "summons.place") {
       const gm = caller.role === "GM" || caller.role === "ASSISTANT";
-      const elevated = policy.runAs === "gm";
+      const elevated = runAs === "gm";
       if (typeof payload.presetId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(payload.presetId) ||
           !isRecord(payload.at) || typeof payload.at.x !== "number" || !Number.isFinite(payload.at.x) ||
           typeof payload.at.y !== "number" || !Number.isFinite(payload.at.y) ||
@@ -2847,7 +2959,7 @@ export class HostSync {
       return { dismissed: true, seq: dismissed.seq };
     }
     if (method === "prefabs.place") {
-      const elevated = policy.runAs === "gm";
+      const elevated = runAs === "gm";
       const gm = caller.role === "GM" || caller.role === "ASSISTANT";
       if ((!gm && (!elevated || !policy.prefabIds?.includes(String(payload.prefabId)))) ||
           typeof payload.prefabId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(payload.prefabId) ||
@@ -2862,7 +2974,7 @@ export class HostSync {
       return { instanceId: placed.instanceId, rootId: placed.rootId, seq: placed.seq };
     }
     if (method === "automation.fire") {
-      if (typeof payload.automationId !== "string" || !["click", "manual", "enter", "exit", "stop", "elevation", "create", "rotate"].includes(String(payload.method)) ||
+      if (typeof payload.automationId !== "string" || !["click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "manual", "enter", "exit", "stop", "elevation", "create", "rotate"].includes(String(payload.method)) ||
           (payload.tokenId !== undefined && typeof payload.tokenId !== "string"))
         throw new Error("Invalid automation call");
       const graph = this.store.get("automations", payload.automationId) as AutomationDocument | undefined;
@@ -3169,12 +3281,55 @@ export class HostSync {
   private movementAutomationDepth = 0;
   private static readonly MOVEMENT_AUTOMATION_DEPTH = 8;
 
-  /** Public canvas gesture resolves a tile to private graphs on the host. */
-  private handleAutomationClick(session: Session, msg: AutomationClickMsg): void {
+  /** A committed change in the active scene fires destination-scene graphs once, host-side. */
+  private fireSceneChangeAutomations(scene: SceneDocument, by: UserId): void {
+    const caller = this.sessionUsers().find((user) => user.id === by);
+    if (!caller || !scene.active || !can(caller, "read", scene, "scenes")) return;
+    const gm = caller.role === "GM" || caller.role === "ASSISTANT";
+    const candidates = this.store.getAll("automations").flatMap((doc) => {
+      const checked = validateAutomation(doc.definition);
+      if (!checked.ok || checked.definition.sceneId !== scene._id ||
+          !checked.definition.methods.includes("sceneChange") ||
+          (!gm && checked.definition.gates?.playerRunnable !== true)) return [];
+      const sourceKind = checked.definition.sourceKind ?? "tile";
+      const source = sourceKind === "region"
+        ? scene.regions?.find((region) => region._id === checked.definition.tileId)
+        : scene.tiles.find((tile) => tile._id === checked.definition.tileId);
+      const tile = automationSourceTile(scene, checked.definition.tileId, sourceKind);
+      const collection = sourceKind === "region" ? "regions" : "tiles";
+      if (!source || !tile || !can(caller, "read", source, collection, { parent: scene }) ||
+          !docVisibleTo(caller, source, scene)) return [];
+      return [{ doc, tile }];
+    }).sort((a, b) => (b.tile.sort ?? 0) - (a.tile.sort ?? 0) ||
+      a.tile._id.localeCompare(b.tile._id) || a.doc._id.localeCompare(b.doc._id));
+
+    for (const candidate of candidates) {
+      const liveScene = this.store.get("scenes", scene._id) as SceneDocument | undefined;
+      if (!liveScene?.active || !can(caller, "read", liveScene, "scenes")) return;
+      const liveDoc = this.store.get("automations", candidate.doc._id) as AutomationDocument | undefined;
+      const checked = liveDoc ? validateAutomation(liveDoc.definition) : null;
+      if (!liveDoc || !checked?.ok || checked.definition.sceneId !== liveScene._id ||
+          !checked.definition.methods.includes("sceneChange") ||
+          (!gm && checked.definition.gates?.playerRunnable !== true)) continue;
+      const sourceKind = checked.definition.sourceKind ?? "tile";
+      const source = sourceKind === "region"
+        ? liveScene.regions?.find((region) => region._id === checked.definition.tileId)
+        : liveScene.tiles.find((tile) => tile._id === checked.definition.tileId);
+      const tile = automationSourceTile(liveScene, checked.definition.tileId, sourceKind);
+      const collection = sourceKind === "region" ? "regions" : "tiles";
+      if (!source || !tile || !can(caller, "read", source, collection, { parent: liveScene }) ||
+          !docVisibleTo(caller, source, liveScene)) continue;
+      this.fireAutomation(liveDoc, { method: "sceneChange", scene: liveScene, tile, caller,
+        at: this.now(), rng: this.rng });
+    }
+  }
+
+  /** Public canvas pointer event resolves a visible tile to private graphs on the host. */
+  private handleAutomationTileTrigger(session: Session, msg: AutomationClickMsg): void {
     const caller = session.user;
     if (!caller) return;
     if (!session.intentBucket.tryRemove()) {
-      this.reject(session, String(msg.requestId), "rate_limited", "tile clicks rate-limited");
+      this.reject(session, String(msg.requestId), "rate_limited", "tile interactions rate-limited");
       return;
     }
     if (typeof msg.requestId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.requestId) ||
@@ -3182,13 +3337,15 @@ export class HostSync {
         !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.sceneId) || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.tileId) ||
         (msg.tokenId !== undefined && (typeof msg.tokenId !== "string" ||
           !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.tokenId))) ||
+        (msg.method !== undefined && !["click", "rightClick", "doubleClick", "hoverIn", "hoverOut"].includes(msg.method as string)) ||
         !isRecord(msg.point) || Object.keys(msg.point).some((key) => !["x", "y"].includes(key)) ||
         typeof msg.point.x !== "number" || !Number.isFinite(msg.point.x) ||
         typeof msg.point.y !== "number" || !Number.isFinite(msg.point.y) ||
-        Object.keys(msg).some((key) => !["kind", "requestId", "sceneId", "tileId", "point", "tokenId"].includes(key))) {
-      this.reject(session, String(msg.requestId), "invalid_schema", "invalid tile click");
+        Object.keys(msg).some((key) => !["kind", "requestId", "sceneId", "tileId", "point", "method", "tokenId"].includes(key))) {
+      this.reject(session, String(msg.requestId), "invalid_schema", "invalid tile interaction");
       return;
     }
+    const method: AutomationPointerMethod = msg.method ?? "click";
     const key = `${caller.id}:${msg.requestId}`;
     if (this.seenAutomationRequests.has(key)) return;
     const scene = this.store.get("scenes", msg.sceneId) as SceneDocument | undefined;
@@ -3207,7 +3364,7 @@ export class HostSync {
     const graphs = this.store.getAll("automations").flatMap((doc) => {
       const checked = validateAutomation(doc.definition);
       return checked.ok && checked.definition.sceneId === scene._id &&
-        (checked.definition.sourceKind ?? "tile") === "tile" && checked.definition.tileId === tile._id && checked.definition.methods.includes("click") &&
+        (checked.definition.sourceKind ?? "tile") === "tile" && checked.definition.tileId === tile._id && checked.definition.methods.includes(method) &&
         (gm || checked.definition.gates?.playerRunnable === true) ? [doc] : [];
     }).sort((a, b) => a._id.localeCompare(b._id));
     // Visible tiles are ordinary art too. Do not distinguish an unpublished graph
@@ -3224,7 +3381,7 @@ export class HostSync {
       if (!liveScene || !liveTile || !docVisibleTo(caller, liveTile, liveScene)) break;
       const liveToken = token ? liveScene.tokens.find((item) => item._id === token._id) : undefined;
       if (token && (!liveToken || !docVisibleTo(caller, liveToken, liveScene))) break;
-      this.fireAutomation(graph, { scene: liveScene, tile: liveTile, caller, method: "click",
+      this.fireAutomation(graph, { scene: liveScene, tile: liveTile, caller, method,
         at: this.now(), rng: this.rng, ...(liveToken ? { token: liveToken } : {}) });
     }
   }
@@ -3238,7 +3395,7 @@ export class HostSync {
     }
     if (typeof msg.requestId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.requestId) ||
         typeof msg.automationId !== "string" || typeof msg.sceneId !== "string" ||
-        !["enter", "exit", "stop", "elevation", "create", "rotate", "click", "manual"].includes(msg.method) ||
+        !["enter", "exit", "stop", "elevation", "create", "rotate", "click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "manual"].includes(msg.method) ||
         (msg.tokenId !== undefined && typeof msg.tokenId !== "string") ||
         (msg.dryRun !== undefined && typeof msg.dryRun !== "boolean") ||
         Object.keys(msg).some((key) => !["kind", "requestId", "automationId", "sceneId", "method", "tokenId", "dryRun"].includes(key))) {
@@ -3331,7 +3488,8 @@ export class HostSync {
     // Path fraction determines first contact; for coincident tiles use method,
     // descending tile Sort (not elevation), then stable IDs. No player sets priority.
     const methodOrder: Record<AutomationMethod, number> = {
-      enter: 0, exit: 1, stop: 2, elevation: 3, create: 4, rotate: 5, click: 6, manual: 7,
+      enter: 0, exit: 1, stop: 2, elevation: 3, create: 4, sceneChange: 5, rotate: 6, click: 7, rightClick: 8, doubleClick: 9,
+      hoverIn: 10, hoverOut: 11, manual: 12,
     };
     candidates.sort((a, b) => a.sceneId.localeCompare(b.sceneId) ||
       a.fraction - b.fraction || a.tokenId.localeCompare(b.tokenId) ||
@@ -3363,7 +3521,11 @@ export class HostSync {
     doc: AutomationDocument, method: AutomationMethod,
     result: AutomationTraceMsg["result"], detail: string, trace: string[], seq?: number,
   ): void {
-    const maxTrace = 4_096;
+    // A bounded-graph rejection can follow 10,000 executed steps. Keep its
+    // GM-facing diagnostic compact too: AutomationPanel renders every row.
+    const budgetDiagnostic = result === "rejected" &&
+      /cycle\/resource budget|depth\/invocation budget|trigger tile recursion/.test(detail);
+    const maxTrace = budgetDiagnostic ? 128 : 4_096;
     const shown = trace.length > maxTrace
       ? [...trace.slice(0, maxTrace - 1), `… ${trace.length - maxTrace + 1} more trace entries omitted (delivery limit)`]
       : trace;
@@ -3376,7 +3538,8 @@ export class HostSync {
 
   private fireAutomation(
     doc: AutomationDocument, event: AutomationEvent, dryRun = false, planned?: AutomationOutcome,
-  ): { ok: true; stopOthers: boolean } | { ok: false; error: string } {
+    postActionRun?: AutomationPostActionRun,
+  ): { ok: true; stopOthers: boolean; completion?: Promise<void> } | { ok: false; error: string } {
     const result = planned ?? planAutomation(this.store.world, doc,
       { ...event, hurtHeal: planAutomationHealth,
         imageAssetError: (hash) => automationImageError(hash, this.manifestSource()) }, this.systemUserId);
@@ -3407,9 +3570,10 @@ export class HostSync {
     // the host, in authored order. No player request names a graph or source
     // actor. Preflight the complete list before consuming graph history.
     const postActions = result.plan.postActions;
-    const actionSession = postActions.length ? [...this.sessions.values()].find((s) =>
-      s.user === event.caller) : undefined;
-    if (postActions.length && (this.activeMacroRuns >= 8 || !actionSession?.user)) {
+    const actionSession = postActionRun?.session ?? (postActions.length ? [...this.sessions.values()].find((s) =>
+      s.user === event.caller) : undefined);
+    if (postActions.length && (!actionSession?.user || this.sessions.get(actionSession.peerId) !== actionSession ||
+        (!postActionRun && this.activeMacroRuns >= 8))) {
       const error = "No authorized session/capacity for post-commit zone actions";
       this.reportAutomation(doc, event.method, "rejected", error, result.plan.trace);
       return { ok: false, error };
@@ -3423,8 +3587,14 @@ export class HostSync {
         // A player-triggered zone cannot grant access to unpublished scripts.
         const macro = this.store.get("macros", action.macroId) as MacroDocument | undefined;
         const checked = macro?.kind === "script" ? validateScriptMacro(macro) : null;
+        const selectedRunAs = action.runAs ?? "approved";
         const validated = checked?.ok ? validateScriptArgs(action.args, checked.policy,
           (id) => !!view?.tokens.some((t) => t._id === id)) : null;
+        if (checked?.ok && selectedRunAs === "gm" && checked.policy.runAs !== "gm") {
+          const error = `Reviewed script ${action.macroId} does not approve GM run-as`;
+          this.reportAutomation(doc, event.method, "rejected", error, result.plan.trace);
+          return { ok: false, error };
+        }
         if (!macro || !checked?.ok || checked.policy.sceneId !== event.scene._id ||
             !can(event.caller, "read", macro, "macros") ||
             ((event.caller.role !== "GM" && event.caller.role !== "ASSISTANT") && !checked.policy.playerCallable) ||
@@ -3473,7 +3643,8 @@ export class HostSync {
       op.kind === "update" && op.ref.coll === "automations" && op.ref.id === doc._id &&
       op.diff.definition !== undefined ? JSON.stringify(op.diff.definition) : expected,
     JSON.stringify(doc.definition));
-    const audit = this.newActionAudit(`Active zone: ${doc.name} (${event.method})`, postActions.length > 0);
+    const audit = postActionRun?.audit ??
+      this.newActionAudit(`Active zone: ${doc.name} (${event.method})`, postActions.length > 0);
     const committed = this.commitOps(result.plan.ops, this.systemUserId,
       `zone-${randomId()}`, true, audit, new Set(result.plan.suppressedMovement));
     if (!committed.ok) {
@@ -3486,18 +3657,31 @@ export class HostSync {
       fxFailed ? `${fxFailed} persistent FX could not be committed; graph state was not rolled back` :
         `${result.plan.ops.length} ops, ${prepared.length} cues, ${postActions.length} post-commit actions queued`,
       result.plan.trace, committed.seq);
-    const actionCaller = actionSession?.user;
+    if (postActionRun) postActionRun.trace.push(...result.plan.trace);
+    const actionCaller = postActionRun?.caller ?? actionSession?.user;
+    let completion: Promise<void> | undefined;
     if (actionCaller && actionSession && postActions.length) {
-      this.activeMacroRuns++;
+      if (!postActionRun) this.activeMacroRuns++;
       // External source resolution and Worker RPCs cannot be folded into an
-      // atomic graph transaction. Execute in graph order with one bounded
-      // budget; failed actions send only GM diagnostics, not player secrets.
-      void (async () => {
-        const trace = [...result.plan.trace];
+      // atomic graph transaction. Result-capturing scripts resume a later
+      // graph segment only after their awaited outcome is known.
+      const runState = postActionRun ?? { audit, session: actionSession, caller: actionCaller,
+        deadline: Date.now() + 30_000, budget: { calls: 0 }, trace: [...result.plan.trace],
+        continuedFailures: 0, actionCount: postActions.length, summonCount: summonsQueued };
+      if (postActionRun) {
+        runState.actionCount += postActions.length;
+        runState.summonCount += summonsQueued;
+      }
+      const trace = runState.trace;
+      let currentKind: "script" | "summon" = "script";
+      let currentStepId = "";
+      completion = (async () => {
         let outcome: "completed" | "partial" = "completed";
-        const deadline = Date.now() + 30_000;
-        const budget = { calls: 0 };
-        let currentKind: "script" | "summon" = "script";
+        const deadline = runState.deadline;
+        const budget = runState.budget;
+        const actionSession = runState.session;
+        const actionCaller = runState.caller;
+        const capturedResults = new Map<string, AutomationScriptResult>();
         const graphLive = () => Date.now() < deadline &&
           this.store.get("actionReceipts", audit.id)?.status === "pending" &&
           this.sessions.get(actionSession.peerId) === actionSession && actionSession.user === actionCaller &&
@@ -3506,54 +3690,106 @@ export class HostSync {
         try {
           for (const [i, action] of postActions.entries()) {
             currentKind = action.kind;
+            currentStepId = action.stepId;
             if (!graphLive()) throw new Error("Zone changed or caller disconnected after graph commit");
-            if (action.kind === "script") {
-              const ctx: ScriptInvocation = { session: actionSession, caller: actionCaller,
-                requestId: `zone-${committed.seq}-${i}`, deadline, budget, trace: [], audit };
-              try {
-                await this.executeScript(action.macroId, action.args, ctx, "", [], graphLive);
-                trace.push(`reviewed script [${action.stepId}] completed`);
-              } finally { trace.push(...ctx.trace); }
-              continue;
-            }
-            let active = true;
-            let timer: ReturnType<typeof setTimeout> | undefined;
-            const expired = new Promise<{ ok: false; error: string }>((resolve) => {
-              timer = setTimeout(() => { active = false; resolve({ ok: false, error: "Summon source resolution timed out" }); },
-                Math.max(1, Math.min(10_000, deadline - Date.now())));
-            });
-            const approved = approvedSummons.get(action);
             try {
-              const placed = await Promise.race([this.commitSummonFromPreset({
-                session: actionSession, caller: actionCaller, presetId: action.presetId,
-                sceneId: event.scene._id, at: action.at,
-                ...(action.summonerTokenId ? { summonerTokenId: action.summonerTokenId } : {}),
-                txId: `zone-summon-${committed.seq}-${i}`, asReviewedGM: true, audit,
-                isActive: () => active && graphLive() &&
-                  JSON.stringify((this.store.get("macros", action.presetId) as MacroDocument | undefined)?.summon) === approved,
-              }), expired]);
-              if (!placed.ok) throw new Error(placed.error);
-              trace.push(`summon [${action.stepId}] placed token ${placed.tokenId} at seq ${placed.seq}`);
-            } finally { active = false; if (timer) clearTimeout(timer); }
+              if (action.kind === "script") {
+                const ctx: ScriptInvocation = { session: actionSession, caller: actionCaller,
+                  requestId: `zone-${committed.seq}-${i}`, deadline, budget, trace: [], audit };
+                try {
+                  const value = await this.executeScript(action.macroId, action.args, ctx, "", [], graphLive,
+                    action.runAs);
+                  if (action.captureResult) capturedResults.set(action.stepId, { ok: true, value });
+                  trace.push(`reviewed script [${action.stepId}] completed with ${scriptResultSummary(value)}`);
+                } finally { trace.push(...ctx.trace); }
+              } else {
+                let active = true;
+                let timer: ReturnType<typeof setTimeout> | undefined;
+                const expired = new Promise<{ ok: false; error: string }>((resolve) => {
+                  timer = setTimeout(() => { active = false; resolve({ ok: false, error: "Summon source resolution timed out" }); },
+                    Math.max(1, Math.min(10_000, deadline - Date.now())));
+                });
+                const approved = approvedSummons.get(action);
+                try {
+                  const placed = await Promise.race([this.commitSummonFromPreset({
+                    session: actionSession, caller: actionCaller, presetId: action.presetId,
+                    sceneId: event.scene._id, at: action.at,
+                    ...(action.summonerTokenId ? { summonerTokenId: action.summonerTokenId } : {}),
+                    txId: `zone-summon-${committed.seq}-${i}`, asReviewedGM: true, audit,
+                    isActive: () => active && graphLive() &&
+                      JSON.stringify((this.store.get("macros", action.presetId) as MacroDocument | undefined)?.summon) === approved,
+                  }), expired]);
+                  if (!placed.ok) throw new Error(placed.error);
+                  trace.push(`summon [${action.stepId}] placed token ${placed.tokenId} at seq ${placed.seq}`);
+                } finally { active = false; if (timer) clearTimeout(timer); }
+              }
+            } catch (cause) {
+              // A failed captured call becomes a branchable result only when
+              // this authored step explicitly permits continuing. Revocation,
+              // timeout or disconnect still cancels the graph continuation.
+              const reason = cause instanceof Error ? cause.message : "unknown error";
+              if (action.kind === "script" && action.captureResult)
+                capturedResults.set(action.stepId, { ok: false, error: reason.slice(0, 500) });
+              if (action.onError !== "continue" || !graphLive()) throw cause;
+              runState.continuedFailures++;
+              outcome = "partial";
+              trace.push(`POST-COMMIT ${currentKind.toUpperCase()} [${currentStepId}] FAILED: ${reason}; continuing with remaining authorized actions`);
+            }
           }
-          this.reportAutomation(doc, event.method, "committed",
-            summonsQueued ? `${postActions.length} post-commit actions completed` :
-              `${postActions.length} post-commit scripts completed`, trace, committed.seq);
+          if (result.plan.continuation) {
+            const suspended = result.plan.continuation;
+            const captured = capturedResults.get(suspended.captureStepId);
+            if (!captured) throw new Error(`Missing awaited result for script [${suspended.captureStepId}]`);
+            if (!graphLive()) throw new Error("Zone changed or caller disconnected before graph continuation");
+            const liveDoc = this.store.get("automations", doc._id) as AutomationDocument | undefined;
+            const liveScene = this.store.get("scenes", event.scene._id) as SceneDocument | undefined;
+            const liveTile = liveScene && liveDoc?.definition
+              ? automationSourceTile(liveScene, liveDoc.definition.tileId, liveDoc.definition.sourceKind) : undefined;
+            const liveToken = event.token ? liveScene?.tokens.find((token) => token._id === event.token?._id) : undefined;
+            if (!liveDoc || !liveScene || !liveTile || (event.token && !liveToken))
+              throw new Error("Automation source or triggering token is unavailable after the awaited script");
+            const nextEvent: AutomationEvent = { ...event, scene: liveScene, tile: liveTile,
+              ...(liveToken ? { token: liveToken } : {}) };
+            const nextContinuation: AutomationContinuation = { ...suspended,
+              scriptResults: { ...suspended.scriptResults, [suspended.captureStepId]: captured } };
+            const next = planAutomation(this.store.world, liveDoc, { ...nextEvent, hurtHeal: planAutomationHealth,
+              imageAssetError: (hash) => automationImageError(hash, this.manifestSource()) },
+            this.systemUserId, nextContinuation);
+            if (!next.ok) throw new Error(`Automation continuation rejected: ${next.error}`);
+            if ("skipped" in next) throw new Error(`Automation continuation skipped: ${next.skipped}`);
+            const continued = this.fireAutomation(liveDoc, nextEvent, false, next, runState);
+            if (!continued.ok) throw new Error(`Automation continuation failed: ${continued.error}`);
+            if (continued.completion) await continued.completion;
+          }
+          if (runState.continuedFailures) outcome = "partial";
+          if (!postActionRun) {
+            if (runState.continuedFailures) {
+              this.reportAutomation(doc, event.method, "post-commit-failed",
+                `${runState.continuedFailures} post-commit action(s) failed; remaining authorized actions completed`, trace, committed.seq);
+            } else {
+              this.reportAutomation(doc, event.method, "committed",
+                runState.summonCount ? `${runState.actionCount} post-commit actions completed` :
+                  `${runState.actionCount} post-commit scripts completed`, trace, committed.seq);
+            }
+          }
         } catch (cause) {
           outcome = "partial";
-          trace.push(`POST-COMMIT ${currentKind.toUpperCase()} FAILED: ${cause instanceof Error ? cause.message : "unknown error"}`);
+          if (postActionRun) throw cause;
+          trace.push(`POST-COMMIT ${currentKind.toUpperCase()} [${currentStepId}] FAILED: ${cause instanceof Error ? cause.message : "unknown error"}`);
           this.reportAutomation(doc, event.method, "post-commit-failed",
             currentKind === "script" ? "Script failed after the graph committed; graph state was not rolled back" :
               "Summon failed after the graph committed; graph state was not rolled back", trace, committed.seq);
         } finally {
-          this.finishActionAudit(audit, outcome);
-          this.activeMacroRuns--;
+          if (!postActionRun) {
+            this.finishActionAudit(audit, outcome);
+            this.activeMacroRuns--;
+          }
         }
       })();
     } else if (postActions.length) {
       this.finishActionAudit(audit, "partial");
     }
-    return { ok: true, stopOthers: result.plan.stopOthers };
+    return { ok: true, stopOthers: result.plan.stopOthers, ...(completion ? { completion } : {}) };
   }
 
   // ─── Macros / FX Wizard: approved, recipient-projected timeline ─────────────

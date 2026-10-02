@@ -48,6 +48,8 @@ import type {
   WorldCollections,
 } from "../../src/core/documents";
 import { frameMessage, channelFor } from "../../src/net/frame";
+import { tagEditOps } from "../../src/core/tags";
+import { planDuplicateSceneOps } from "../../src/core/sceneCopy";
 
 const meta: StoreMeta = {
   worldId: "w1",
@@ -684,6 +686,62 @@ describe("HostSync ⇄ ClientSync over InMemoryTransport (§2, §5, §6.4)", () 
     expect(a.store.seq).toBe(h.hostStore.seq);
     expect(b.store.seq).toBe(h.hostStore.seq);
   });
+});
+
+test("Tagger actor and embedded-item sheet edits replicate, authorize owners, validate and undo", async () => {
+  const h = await setup();
+  const { client: owner, bus: ownerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const other = await h.addPlayer(OTHER_ID, "Ivy");
+  const blade: ItemDocument = { _id: "tag-blade", type: "item", name: "Blade", ownership: { default: 0 },
+    flags: {}, system: {}, effects: [], taggerTags: ["weapon"] };
+  const actor: ActorDocument = { _id: "tag-hero", type: "actor", name: "Tagged hero",
+    ownership: { default: 2, [PLAYER_ID]: 3 }, flags: {}, system: {}, items: [blade], effects: [],
+    taggerTags: ["party"] };
+  h.gm.submit([{ kind: "create", coll: "actors", data: actor }]);
+  await flushMicrotasks();
+
+  const actorRef = { coll: "actors" as const, id: actor._id };
+  const itemRef = { coll: "items" as const, id: blade._id, parent: actorRef };
+  const actorDoc = owner.store.get("actors", actor._id) as ActorDocument;
+  const itemDoc = owner.store.resolve(itemRef) as ItemDocument;
+  const seqBefore = h.hostStore.seq;
+  owner.submit([
+    ...tagEditOps([{ ref: actorRef, doc: actorDoc }], "add", ["quest giver"]),
+    ...tagEditOps([{ ref: itemRef, doc: itemDoc }], "replace", ["silver", "heirloom"]),
+  ]);
+  await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(seqBefore + 1);
+  for (const store of [h.hostStore, h.gm.store, owner.store, other.client.store]) {
+    expect((store.resolve(actorRef) as ActorDocument).taggerTags).toEqual(["party", "quest giver"]);
+    expect((store.resolve(itemRef) as ItemDocument).taggerTags).toEqual(["silver", "heirloom"]);
+  }
+
+  expect(h.host.undo().ok).toBe(true);
+  await flushMicrotasks();
+  expect((h.hostStore.resolve(actorRef) as ActorDocument).taggerTags).toEqual(["party"]);
+  expect((h.hostStore.resolve(itemRef) as ItemDocument).taggerTags).toEqual(["weapon"]);
+
+  const denied: string[] = [];
+  other.bus.on("rejected", ({ reason }) => denied.push(reason));
+  other.client.submit([{ kind: "update", ref: itemRef, diff: { taggerTags: ["forged"] } }]);
+  await flushMicrotasks();
+  expect(denied).toEqual(["forbidden"]);
+  expect((h.hostStore.resolve(itemRef) as ItemDocument).taggerTags).toEqual(["weapon"]);
+
+  const invalid: string[] = [];
+  ownerBus.on("rejected", ({ reason }) => invalid.push(reason));
+  owner.submit([{ kind: "update", ref: itemRef, diff: { taggerTags: ["duplicate", "duplicate"] } }]);
+  await flushMicrotasks();
+  expect(invalid).toEqual(["invalid_schema"]);
+  expect((h.hostStore.resolve(itemRef) as ItemDocument).taggerTags).toEqual(["weapon"]);
+
+  const gmRejected: string[] = [];
+  h.gmBus.on("rejected", ({ reason }) => gmRejected.push(reason));
+  h.gm.submit([{ kind: "create", coll: "actors", data: { ...actor, _id: "bad-tag-create",
+    items: [{ ...blade, taggerTags: [" padded "] }] } as ActorDocument }]);
+  await flushMicrotasks();
+  expect(gmRejected).toEqual(["invalid_schema"]);
+  expect(h.hostStore.get("actors", "bad-tag-create")).toBeUndefined();
 });
 
 test("PF1e sheet Ops replicate through host authorization; forged non-owner edit is rejected", async () => {
@@ -1990,10 +2048,18 @@ describe("Macros / FX host authority and audience", () => {
     h.gm.requestSequence("hum", "s1");
     await flushMicrotasks();
     expect((cues.ivy?.at(-1)?.sections[0] as { occluded?: boolean }).occluded).toBeUndefined();
-    // A window permits sound by its own axes (it passes sight and light): no muffle, even
-    // though a listener who could not see through it would still be hidden from view.
+    // A standard window lets sight/light through but blocks sound, so only this
+    // listener's cue is muffled despite the visual opening.
     h.gm.submit([{ kind: "update", ref: { coll: "walls", id: "door-1", parent: { coll: "scenes", id: "s1" } },
-      diff: { door: 0, sight: 2, light: 2, sound: 2 } }]);
+      diff: { door: 0, sight: 2, light: 2, move: 0, sound: 0 } }]);
+    await flushMicrotasks();
+    h.gm.requestSequence("hum", "s1");
+    await flushMicrotasks();
+    expect((cues.ivy?.at(-1)?.sections[0] as { occluded?: boolean }).occluded).toBe(true);
+    // Axes remain independently editable: an explicitly sound-porous window
+    // passes sound without changing its sight/light/movement classification.
+    h.gm.submit([{ kind: "update", ref: { coll: "walls", id: "door-1", parent: { coll: "scenes", id: "s1" } },
+      diff: { sound: 2 } }]);
     await flushMicrotasks();
     h.gm.requestSequence("hum", "s1");
     await flushMicrotasks();
@@ -2858,6 +2924,81 @@ async function seedZone(h: Harness): Promise<void> {
   h.gm.submit([{ kind: "create", coll: "automations", data: zoneDoc() }]);
   await flushMicrotasks();
 }
+
+test("HostSync dispatches sceneChange only on a real switch into its destination scene and undo never replays it", async () => {
+  const h = await setup();
+  const destination: SceneDocument = { ...sceneDoc("scene-destination"), active: false };
+  h.gm.submit([{ kind: "create", coll: "scenes", data: destination }]);
+  await flushMicrotasks();
+  const tile: TileDocument = { ...zoneTile(), _id: "scene-change-tile", name: "Arrival plate" };
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: destination._id }, data: tile }]);
+  await flushMicrotasks();
+  const graph: AutomationDocument = { ...zoneDoc(), _id: "scene-change-graph", name: "Arrival message",
+    definition: { ...zoneDoc().definition, sceneId: destination._id, tileId: tile._id,
+      methods: ["sceneChange"], gates: {},
+      steps: [{ id: "arrival", kind: "chat", audience: "gm", content: "{{method}} by {{user}}" }] } };
+  h.gm.submit([{ kind: "create", coll: "automations", data: graph }]);
+  await flushMicrotasks();
+  expect(h.hostStore.get("scenes", destination._id)?.active).toBe(false);
+  expect(h.hostStore.get("automations", graph._id)?.state?.count ?? 0).toBe(0);
+  expect(h.hostStore.getAll("messages")).toEqual([]);
+
+  const rejected: ClientEvents["rejected"][] = [];
+  h.gmBus.on("rejected", (event) => rejected.push(event));
+  const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const playerRejected: ClientEvents["rejected"][] = [];
+  playerBus.on("rejected", (event) => playerRejected.push(event));
+  expect(player.store.getAll("automations")).toEqual([]);
+  const beforeSpoof = h.hostStore.seq;
+  h.gm.requestAutomation(graph._id, destination._id, "sceneChange");
+  await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(beforeSpoof);
+  expect(rejected.at(-1)?.reason).toBe("invalid_schema");
+  player.requestAutomation(graph._id, destination._id, "sceneChange");
+  await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(beforeSpoof);
+  expect(playerRejected.at(-1)?.reason).toBe("invalid_schema");
+  expect(h.hostStore.get("automations", graph._id)?.state?.count ?? 0).toBe(0);
+
+  const beforeSwitch = h.hostStore.seq;
+  h.gm.submit([
+    { kind: "update", ref: { coll: "scenes", id: "s1" }, diff: { active: false } },
+    { kind: "update", ref: { coll: "scenes", id: destination._id }, diff: { active: true } },
+  ]);
+  await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(beforeSwitch + 2);
+  expect(h.hostStore.get("scenes", "s1")?.active).toBe(false);
+  expect(h.hostStore.get("scenes", destination._id)?.active).toBe(true);
+  expect(h.hostStore.getAll("messages").map((message) => message.content)).toEqual(["sceneChange by gm-key"]);
+  expect(player.store.getAll("messages")).toEqual([]);
+  expect(player.store.getAll("automations")).toEqual([]);
+  expect(h.hostStore.get("automations", graph._id)?.state?.recent?.map((entry) => entry.method)).toEqual(["sceneChange"]);
+  expect(h.hostStore.get("automations", graph._id)?.state?.count).toBe(1);
+
+  const beforeSameSceneUpdate = h.hostStore.seq;
+  h.gm.submit([{ kind: "update", ref: { coll: "scenes", id: destination._id }, diff: { active: true } }]);
+  await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(beforeSameSceneUpdate + 1);
+  expect(h.hostStore.get("automations", graph._id)?.state?.count).toBe(1);
+  expect(h.hostStore.getAll("messages").map((message) => message.content)).toEqual(["sceneChange by gm-key"]);
+
+  expect(h.host.undo().ok).toBe(true);
+  await flushMicrotasks();
+  expect(h.hostStore.get("scenes", destination._id)?.active).toBe(true);
+  expect(h.hostStore.get("automations", graph._id)?.state?.count).toBe(1);
+  expect(h.hostStore.getAll("messages").map((message) => message.content)).toEqual(["sceneChange by gm-key"]);
+  expect(h.host.undo().ok).toBe(true);
+  await flushMicrotasks();
+  expect(h.hostStore.get("scenes", destination._id)?.active).toBe(true);
+  expect(h.hostStore.get("automations", graph._id)?.state?.count ?? 0).toBe(0);
+  expect(h.hostStore.getAll("messages")).toEqual([]);
+  expect(h.host.undo().ok).toBe(true);
+  await flushMicrotasks();
+  expect(h.hostStore.get("scenes", "s1")?.active).toBe(true);
+  expect(h.hostStore.get("scenes", destination._id)?.active).toBe(false);
+  expect(h.hostStore.get("automations", graph._id)?.state?.count ?? 0).toBe(0);
+  expect(h.hostStore.getAll("messages")).toEqual([]);
+});
 
 test("HostSync dispatches host-observed elevation changes through active-zone methods", async () => {
   const h = await setup();
@@ -4993,6 +5134,136 @@ describe("Active-zone host evaluation and graph secrecy", () => {
     expect((h.hostStore.get("automations", "zone-graph") as AutomationDocument).state?.count).toBe(1);
   });
 
+  test("published right-click is a distinct visible-tile event, host-revalidated and private", async () => {
+    const h = await setup();
+    await seedZone(h);
+    const definition: AutomationDefinition = { ...zoneDoc().definition, methods: ["rightClick"],
+      gates: { playerRunnable: true }, steps: [
+        { id: "notice", kind: "chat", audience: "gm", content: "{{method}} by {{user}}" },
+      ] };
+    h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" },
+      diff: { definition: definition as unknown as Json } }]);
+    await flushMicrotasks();
+    const { client: player, bus, pair } = await h.addPlayer(PLAYER_ID, "Rex");
+    const rejected: ClientEvents["rejected"][] = [];
+    const traces: ClientEvents["automationTrace"][] = [];
+    bus.on("rejected", (message) => rejected.push(message));
+    h.gmBus.on("automationTrace", (message) => traces.push(message));
+    const before = h.hostStore.seq;
+    const requestId = player.requestAutomationClick("s1", "zone", { x: 150, y: 150 }, undefined, "rightClick");
+    await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(before + 1);
+    expect((h.hostStore.get("automations", "zone-graph") as AutomationDocument).state?.count).toBe(1);
+    expect(h.hostStore.getAll("messages").map((message) => message.content)).toContain("rightClick by pl-key");
+    expect(traces.at(-1)).toMatchObject({ method: "rightClick", result: "committed" });
+    expect(player.store.getAll("messages")).toEqual([]);
+    expect(player.store.getAll("automations")).toEqual([]);
+
+    // Neither an ID-bearing method request nor a forged point can bypass the player click boundary.
+    player.requestAutomation("zone-graph", "s1", "rightClick");
+    player.requestAutomationClick("s1", "zone", { x: 50, y: 50 }, undefined, "rightClick");
+    await flushMicrotasks();
+    expect(rejected.map((message) => message.reason)).toEqual(["forbidden", "forbidden"]);
+    expect(h.hostStore.seq).toBe(before + 1);
+
+    // Replaying the same event is ignored; a left click does not match this right-click-only graph.
+    pair.b.send("ops", frameMessage({ kind: "automation.click", requestId, sceneId: "s1", tileId: "zone",
+      point: { x: 150, y: 150 }, method: "rightClick" }));
+    player.requestAutomationClick("s1", "zone", { x: 150, y: 150 });
+    await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(before + 1);
+    expect((h.hostStore.get("automations", "zone-graph") as AutomationDocument).state?.count).toBe(1);
+  });
+
+  test("published double-click is a distinct visible-tile event with one overlapping ordinary click", async () => {
+    const h = await setup();
+    await seedZone(h);
+    const definition: AutomationDefinition = { ...zoneDoc().definition, methods: ["click", "doubleClick"],
+      gates: { playerRunnable: true }, steps: [
+        { id: "notice", kind: "chat", audience: "gm", content: "{{method}} by {{user}}" },
+      ] };
+    h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" },
+      diff: { definition: definition as unknown as Json } }]);
+    await flushMicrotasks();
+    const { client: player, bus, pair } = await h.addPlayer(PLAYER_ID, "Rex");
+    const rejected: ClientEvents["rejected"][] = [];
+    const traces: ClientEvents["automationTrace"][] = [];
+    bus.on("rejected", (message) => rejected.push(message));
+    h.gmBus.on("automationTrace", (message) => traces.push(message));
+
+    const before = h.hostStore.seq;
+    player.requestAutomationClick("s1", "zone", { x: 150, y: 150 });
+    await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(before + 1);
+    expect(h.hostStore.getAll("messages").map((message) => message.content)).toEqual(["click by pl-key"]);
+
+    // A native double-click has an ordinary first click, a suppressed second click, and one
+    // completed doubleClick event. The first event remains intentionally observable.
+    const doubleRequestId = player.requestAutomationClick("s1", "zone", { x: 150, y: 150 }, undefined, "doubleClick");
+    await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(before + 2);
+    expect(h.hostStore.getAll("messages").map((message) => message.content)).toEqual([
+      "click by pl-key", "doubleClick by pl-key",
+    ]);
+    expect((h.hostStore.get("automations", "zone-graph") as AutomationDocument).state?.count).toBe(2);
+    expect(traces.at(-1)).toMatchObject({ method: "doubleClick", result: "committed" });
+    expect(player.store.getAll("messages")).toEqual([]);
+    expect(player.store.getAll("automations")).toEqual([]);
+
+    player.requestAutomation("zone-graph", "s1", "doubleClick");
+    player.requestAutomationClick("s1", "zone", { x: 50, y: 50 }, undefined, "doubleClick");
+    pair.b.send("ops", frameMessage({ kind: "automation.click", requestId: doubleRequestId,
+      sceneId: "s1", tileId: "zone", point: { x: 150, y: 150 }, method: "doubleClick" }));
+    await flushMicrotasks();
+    expect(rejected.map((message) => message.reason)).toEqual(["forbidden", "forbidden"]);
+    expect(h.hostStore.seq).toBe(before + 2);
+    expect((h.hostStore.get("automations", "zone-graph") as AutomationDocument).state?.count).toBe(2);
+  });
+
+  test("published hover-in/out dispatch only from validated visible tiles with private graph state", async () => {
+    const h = await setup();
+    await seedZone(h);
+    const definition: AutomationDefinition = { ...zoneDoc().definition, methods: ["hoverIn", "hoverOut"],
+      gates: { playerRunnable: true }, steps: [
+        { id: "notice", kind: "chat", audience: "gm", content: "{{method}} by {{user}}" },
+      ] };
+    h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" },
+      diff: { definition: definition as unknown as Json } }]);
+    await flushMicrotasks();
+    const { client: player, bus, pair } = await h.addPlayer(PLAYER_ID, "Rex");
+    const rejected: ClientEvents["rejected"][] = [];
+    const traces: ClientEvents["automationTrace"][] = [];
+    bus.on("rejected", (message) => rejected.push(message));
+    h.gmBus.on("automationTrace", (message) => traces.push(message));
+    const before = h.hostStore.seq;
+    const hoverInRequestId = player.requestAutomationTileTrigger("s1", "zone", { x: 150, y: 150 }, undefined, "hoverIn");
+    await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(before + 1);
+    expect(h.hostStore.getAll("messages").map((message) => message.content)).toEqual(["hoverIn by pl-key"]);
+    expect(traces.at(-1)).toMatchObject({ method: "hoverIn", result: "committed" });
+    expect(player.store.getAll("messages")).toEqual([]);
+    expect(player.store.getAll("automations")).toEqual([]);
+
+    // A hover-out carries the last in-tile point; it does not send an outside pointer coordinate.
+    player.requestAutomationTileTrigger("s1", "zone", { x: 150, y: 150 }, undefined, "hoverOut");
+    await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(before + 2);
+    expect(h.hostStore.getAll("messages").map((message) => message.content)).toEqual([
+      "hoverIn by pl-key", "hoverOut by pl-key",
+    ]);
+    expect(traces.at(-1)).toMatchObject({ method: "hoverOut", result: "committed" });
+
+    // IDs and forged points cannot invoke the private graph or skip the visible hit test.
+    player.requestAutomation("zone-graph", "s1", "hoverIn");
+    player.requestAutomationTileTrigger("s1", "zone", { x: 50, y: 50 }, undefined, "hoverIn");
+    pair.b.send("ops", frameMessage({ kind: "automation.click", requestId: hoverInRequestId,
+      sceneId: "s1", tileId: "zone", point: { x: 150, y: 150 }, method: "hoverIn" }));
+    await flushMicrotasks();
+    expect(rejected.map((message) => message.reason)).toEqual(["forbidden", "forbidden"]);
+    expect(h.hostStore.seq).toBe(before + 2);
+    expect((h.hostStore.get("automations", "zone-graph") as AutomationDocument).state?.count).toBe(2);
+  });
+
   test("hidden trigger tiles are absent from player replicas/assets and cannot be invoked by guessed ID", async () => {
     const image = "d".repeat(64);
     const h = await setup({ [image]: { name: "hidden-plate.png", mime: "image/png", size: 10,
@@ -5007,8 +5278,9 @@ describe("Active-zone host evaluation and graph secrecy", () => {
     expect((player.store.get("scenes", "s1") as SceneDocument).tiles).toEqual([]);
     expect(player.store.world.assetManifest[image]).toBeUndefined();
     player.requestAutomationClick("s1", "zone", { x: 150, y: 150 }, "t-pl");
+    player.requestAutomationTileTrigger("s1", "zone", { x: 150, y: 150 }, undefined, "hoverIn");
     await flushMicrotasks();
-    expect(rejected.at(-1)?.reason).toBe("forbidden");
+    expect(rejected.map((message) => message.reason)).toEqual(["forbidden", "forbidden"]);
     expect((h.hostStore.get("automations", "zone-graph") as AutomationDocument).state).toBeUndefined();
 
     h.gm.submit([{ kind: "update", ref, diff: { hidden: false } }]);
@@ -5238,6 +5510,58 @@ describe("Active-zone host evaluation and graph secrecy", () => {
     await flushMicrotasks();
     expect(h.hostStore.seq).toBeGreaterThan(before);
     expect(h.hostStore.getAll("messages").some((m) => m.content === "still alive")).toBe(true);
+  });
+
+  test("A27 intentional landing/jump cycle returns a bounded private diagnostic without committing world state", async () => {
+    const h = await setup();
+    await seedZone(h);
+    const { bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const gmTraces: ClientEvents["automationTrace"][] = [];
+    const playerTraces: ClientEvents["automationTrace"][] = [];
+    h.gmBus.on("automationTrace", (message) => gmTraces.push(message));
+    playerBus.on("automationTrace", (message) => playerTraces.push(message));
+
+    const cycle: AutomationDefinition = { ...zoneDoc().definition, methods: ["manual"], gates: {}, steps: [
+      { id: "cycle-start", kind: "landing", name: "again" },
+      { id: "cycle-jump", kind: "jump", to: "again" },
+    ] };
+    h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" },
+      diff: { definition: cycle as unknown as Json } }]);
+    await flushMicrotasks();
+    const beforeCycle = h.hostStore.seq;
+    const originalToken = h.hostStore.get("scenes", "s1")?.tokens.find((token) => token._id === "t-pl");
+    h.gm.requestAutomation("zone-graph", "s1", "manual", "t-pl");
+    await flushMicrotasks();
+
+    const diagnostic = gmTraces.at(-1);
+    expect(diagnostic).toMatchObject({
+      automationId: "zone-graph",
+      method: "manual",
+      result: "rejected",
+      detail: "automation cycle/resource budget (10000 per graph, 25000 total steps)",
+    });
+    expect(diagnostic?.trace[0]).toBe("0: landing [cycle-start]");
+    expect(diagnostic?.trace[1]).toBe("1: jump [cycle-jump]");
+    expect(diagnostic?.trace).toHaveLength(128);
+    expect(diagnostic?.trace.at(-1)).toBe("… 9873 more trace entries omitted (delivery limit)");
+    expect(playerTraces).toHaveLength(0); // recursion details and graph structure are GM-only
+    expect(h.hostStore.seq).toBe(beforeCycle); // no staged history, action or partial write
+    expect(h.hostStore.get("automations", "zone-graph")?.state).toBeUndefined();
+    expect(h.hostStore.getAll("messages")).toHaveLength(0);
+    expect(h.hostStore.get("scenes", "s1")?.tokens.find((token) => token._id === "t-pl"))
+      .toEqual(originalToken);
+
+    const calm: AutomationDocument = { ...zoneDoc(), _id: "calm-graph", name: "After the cycle",
+      definition: { ...zoneDoc().definition, methods: ["manual"], gates: {},
+        steps: [{ id: "alive", kind: "chat", audience: "gm", content: "host still responsive" }] } };
+    h.gm.submit([{ kind: "create", coll: "automations", data: calm }]);
+    await flushMicrotasks();
+    const beforeRecovery = h.hostStore.seq;
+    h.gm.requestAutomation("calm-graph", "s1", "manual");
+    await flushMicrotasks();
+    expect(h.hostStore.seq).toBeGreaterThan(beforeRecovery);
+    expect(gmTraces.at(-1)).toMatchObject({ automationId: "calm-graph", result: "committed" });
+    expect(h.hostStore.getAll("messages").some((message) => message.content === "host still responsive")).toBe(true);
   });
 
   test.each(["undo","revert"] as const)("player-triggered Move of environment placeables and drawing restores with %s",async(restore)=>{
@@ -5594,6 +5918,182 @@ describe("GM prefabs: atomic Tagger allocation, graph rebind, projection and und
     expect((player.store.get("scenes", "s1") as SceneDocument).tiles.some((t) => t._id === b?._id)).toBe(true);
   });
 
+  test("an owned wall root carries locked and hidden descendants atomically without leaking hidden IDs", async () => {
+    const h = await setup();
+    const root: WallDocument = { _id: "prefab-wall-root", type: "wall", name: "Public wall root",
+      ownership: { default: 3 }, flags: {}, system: {}, c: [100, 100, 200, 100],
+      door: 0, oneWay: false, move: 1, sight: 1, sound: 1, light: 1 };
+    const childTile: TileDocument = { ...zoneTile(), _id: "locked-platform", name: "Locked platform",
+      ownership: { default: 3 }, x: 200, y: 100, width: 100, height: 100 };
+    const secretChild = tokenDoc("hidden-descendant", { x: 350, y: 120, width: 40, height: 40, hidden: true });
+    const prefab: PrefabDocument = { _id: "wall-root-prefab", type: "prefab", name: "Wall root",
+      ownership: { default: 0 }, flags: {}, system: {}, definition: {
+        version: 1, sourceSceneId: "s1", gridSize: 100, origin: { x: 100, y: 100 },
+        parts: [
+          { id: root._id, coll: "walls", doc: root },
+          { id: childTile._id, coll: "tiles", parentId: root._id, locked: true, doc: childTile },
+          { id: secretChild._id, coll: "tokens", parentId: childTile._id, doc: secretChild },
+        ], graphs: [],
+      } };
+    h.gm.submit([{ kind: "create", coll: "prefabs", data: prefab }]);
+    await flushMicrotasks();
+    const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const rejected: ClientEvents["rejected"][] = [];
+    const projected: OpEnvelope[] = [];
+    bus.on("rejected", (event) => rejected.push(event));
+    bus.on("ops", (event) => projected.push(event.envelope));
+    const results: ClientEvents["prefabResult"][] = [];
+    h.gmBus.on("prefabResult", (event) => results.push(event));
+    h.gm.requestPrefabPlace(prefab._id, "s1", { x: 400, y: 400 });
+    await flushMicrotasks();
+    expect(results.at(-1)).toMatchObject({ ok: true });
+    const placedScene = h.hostStore.get("scenes", "s1") as SceneDocument;
+    const placedWall = placedScene.walls.find((doc) =>
+      (doc.flags.prefab as { instanceId?: string } | undefined)?.instanceId === results.at(-1)?.instanceId);
+    const instanceId = (placedWall?.flags.prefab as { instanceId?: string } | undefined)?.instanceId;
+    const placedTile = placedScene.tiles.find((doc) =>
+      (doc.flags.prefab as { instanceId?: string } | undefined)?.instanceId === instanceId);
+    const placedToken = placedScene.tokens.find((doc) =>
+      (doc.flags.prefab as { instanceId?: string } | undefined)?.instanceId === instanceId);
+    if (!placedWall || !placedTile || !placedToken) throw new Error("prefab descendants were not placed");
+    expect(placedWall.c).toEqual([400, 400, 500, 400]);
+    expect(player.store.get("scenes", "s1")?.walls.some((doc) => doc._id === placedWall._id)).toBe(true);
+    expect(player.store.get("scenes", "s1")?.tiles.some((doc) => doc._id === placedTile._id)).toBe(true);
+    expect(player.store.get("scenes", "s1")?.tokens.some((doc) => doc._id === placedToken._id)).toBe(false);
+
+    const beforeLockedEdit = h.hostStore.seq;
+    player.submit([{ kind: "update", ref: { coll: "tiles", id: placedTile._id,
+      parent: { coll: "scenes", id: "s1" } }, diff: { x: placedTile.x + 1 } }]);
+    await flushMicrotasks();
+    expect(rejected.at(-1)?.reason).toBe("forbidden");
+    expect(h.hostStore.seq).toBe(beforeLockedEdit);
+
+    const beforeMove = h.hostStore.seq;
+    player.submit([{ kind: "update", ref: { coll: "walls", id: placedWall._id,
+      parent: { coll: "scenes", id: "s1" } }, diff: { c: [400, 400, 400, 600] } }]);
+    await flushMicrotasks();
+    expect(rejected).toHaveLength(1);
+    expect(h.hostStore.seq).toBe(beforeMove + 1);
+    expect(h.hostLog.at(h.hostStore.seq)?.env.ops).toHaveLength(3);
+    const moved = h.hostStore.get("scenes", "s1") as SceneDocument;
+    expect(moved.walls.find((doc) => doc._id === placedWall._id)?.c).toEqual([400, 400, 400, 600]);
+    expect(moved.tiles.find((doc) => doc._id === placedTile._id))
+      .toMatchObject({ x: 200, y: 600, width: 200, height: 200, rotation: 90 });
+    expect(moved.tokens.find((doc) => doc._id === placedToken._id))
+      .toMatchObject({ x: 280, y: 900, width: 80, height: 80, rotation: 90 });
+    expect(player.store.get("scenes", "s1")?.tokens.some((doc) => doc._id === placedToken._id)).toBe(false);
+    expect(JSON.stringify(projected)).not.toContain(placedToken._id);
+
+    expect(h.host.undo().ok).toBe(true);
+    await flushMicrotasks();
+    const restored = h.hostStore.get("scenes", "s1") as SceneDocument;
+    expect(restored.walls.find((doc) => doc._id === placedWall._id)?.c).toEqual([400, 400, 500, 400]);
+    expect(restored.tiles.find((doc) => doc._id === placedTile._id))
+      .toMatchObject({ x: 500, y: 400, width: 100, height: 100, rotation: 0 });
+    expect(restored.tokens.find((doc) => doc._id === placedToken._id))
+      .toMatchObject({ x: 650, y: 420, width: 40, height: 40, rotation: 0 });
+    expect(player.store.get("scenes", "s1")?.tokens.some((doc) => doc._id === placedToken._id)).toBe(false);
+
+    const beforeRejectedMove = h.hostStore.seq;
+    player.submit([{ kind: "update", ref: { coll: "walls", id: placedWall._id,
+      parent: { coll: "scenes", id: "s1" } }, diff: { c: [720, 400, 820, 400] } }]);
+    await flushMicrotasks();
+    const refusal = rejected.at(-1);
+    expect(refusal).toMatchObject({ reason: "invariant", detail: "attached child would lie outside scene bounds" });
+    expect(refusal?.detail).not.toContain(placedToken._id);
+    expect(h.hostStore.seq).toBe(beforeRejectedMove);
+  });
+
+  test("region prefab roots carry descendants in one undoable host commit and remain GM-authored", async () => {
+    const h = await setup();
+    const polygon = { kind: "polygon" as const, points: [[0, 0], [1, 0], [1, 1], [0, 1]] as Array<[number, number]> };
+    const root: RegionDocument = { _id: "root-region", type: "region", name: "Public region root",
+      ownership: { default: 3 }, flags: {}, system: {}, x: 200, y: 200, width: 100, height: 100,
+      rotation: 0, shape: polygon };
+    const childTile: TileDocument = { ...zoneTile(), _id: "child-tile", name: "Region child",
+      ownership: { default: 3 }, x: 300, y: 200, width: 100, height: 100 };
+    const secretChild = tokenDoc("hidden-region-child", { x: 320, y: 220, width: 40, height: 40, hidden: true });
+    const regionGraph: AutomationDocument = { ...zoneDoc(), _id: "region-root-graph",
+      definition: { ...zoneDoc().definition, sourceKind: "region", tileId: root._id,
+        methods: ["manual"], steps: [{ id: "region-stop", kind: "stop" }] } };
+    const prefab: PrefabDocument = { _id: "region-root-prefab", type: "prefab", name: "Region root",
+      ownership: { default: 0 }, flags: {}, system: {}, definition: {
+        version: 1, sourceSceneId: "s1", gridSize: 100, origin: { x: 250, y: 250 },
+        parts: [
+          { id: root._id, coll: "regions", doc: root },
+          { id: childTile._id, coll: "tiles", parentId: root._id, doc: childTile },
+          { id: secretChild._id, coll: "tokens", parentId: childTile._id, doc: secretChild },
+        ], graphs: [{ id: regionGraph._id, doc: regionGraph }],
+      } };
+    h.gm.submit([{ kind: "create", coll: "prefabs", data: prefab }]);
+    await flushMicrotasks();
+    const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const rejected: ClientEvents["rejected"][] = [];
+    bus.on("rejected", (event) => rejected.push(event));
+    const results: ClientEvents["prefabResult"][] = [];
+    h.gmBus.on("prefabResult", (event) => results.push(event));
+    h.gm.requestPrefabPlace(prefab._id, "s1", { x: 500, y: 500 });
+    await flushMicrotasks();
+    const placedScene = h.hostStore.get("scenes", "s1") as SceneDocument;
+    const instanceId = results.at(-1)?.instanceId;
+    const placedRegion = placedScene.regions?.find((doc) =>
+      (doc.flags.prefab as { instanceId?: string } | undefined)?.instanceId === instanceId);
+    const placedTile = placedScene.tiles.find((doc) =>
+      (doc.flags.prefab as { instanceId?: string } | undefined)?.instanceId === instanceId);
+    const placedToken = placedScene.tokens.find((doc) =>
+      (doc.flags.prefab as { instanceId?: string } | undefined)?.instanceId === instanceId);
+    const placedGraph = h.hostStore.getAll("automations").find((doc) =>
+      (doc.flags.prefab as { instanceId?: string } | undefined)?.instanceId === instanceId);
+    if (!placedRegion || !placedTile || !placedToken || !placedGraph)
+      throw new Error("region prefab descendants or bound graph were not placed");
+    expect(placedGraph.definition).toMatchObject({ sourceKind: "region", tileId: placedRegion._id, sceneId: "s1" });
+    expect(player.store.getAll("automations").some((doc) => doc._id === placedGraph._id)).toBe(false);
+    expect(player.store.get("scenes", "s1")?.regions?.some((doc) => doc._id === placedRegion._id)).toBe(true);
+    expect(player.store.get("scenes", "s1")?.regions?.find((doc) => doc._id === placedRegion._id)?.flags.prefab)
+      .toBeUndefined();
+    expect(player.store.get("scenes", "s1")?.tokens.some((doc) => doc._id === placedToken._id)).toBe(false);
+
+    const beforeDenied = h.hostStore.seq;
+    player.submit([{ kind: "update", ref: { coll: "regions", id: placedRegion._id,
+      parent: { coll: "scenes", id: "s1" } }, diff: { x: 510 } }]);
+    await flushMicrotasks();
+    expect(rejected.at(-1)?.reason).toBe("forbidden");
+    expect(h.hostStore.seq).toBe(beforeDenied);
+
+    const beforeMove = h.hostStore.seq;
+    h.gm.submit([{ kind: "update", ref: { coll: "regions", id: placedRegion._id,
+      parent: { coll: "scenes", id: "s1" } }, diff: { x: 600, y: 600, width: 200, height: 200, rotation: 90 } }]);
+    await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(beforeMove + 1);
+    expect(h.hostLog.at(h.hostStore.seq)?.env.ops).toHaveLength(3);
+    const moved = h.hostStore.get("scenes", "s1") as SceneDocument;
+    expect(moved.regions?.find((doc) => doc._id === placedRegion._id))
+      .toMatchObject({ x: 600, y: 600, width: 200, height: 200, rotation: 90, shape: polygon });
+    expect(moved.tiles.find((doc) => doc._id === placedTile._id))
+      .toMatchObject({ x: 600, y: 800, width: 200, height: 200, rotation: 90 });
+    expect(moved.tokens.find((doc) => doc._id === placedToken._id))
+      .toMatchObject({ x: 680, y: 840, width: 80, height: 80, rotation: 90 });
+    expect(player.store.get("scenes", "s1")?.tokens.some((doc) => doc._id === placedToken._id)).toBe(false);
+
+    expect(h.host.undo().ok).toBe(true);
+    await flushMicrotasks();
+    const restored = h.hostStore.get("scenes", "s1") as SceneDocument;
+    expect(restored.regions?.find((doc) => doc._id === placedRegion._id))
+      .toMatchObject({ x: 450, y: 450, width: 100, height: 100, rotation: 0 });
+    expect(restored.tiles.find((doc) => doc._id === placedTile._id))
+      .toMatchObject({ x: 550, y: 450, width: 100, height: 100, rotation: 0 });
+    expect(restored.tokens.find((doc) => doc._id === placedToken._id))
+      .toMatchObject({ x: 570, y: 470, width: 40, height: 40, rotation: 0 });
+    const beforeDespawn = h.hostStore.seq;
+    h.gm.submit([{ kind: "delete", ref: { coll: "regions", id: placedRegion._id,
+      parent: { coll: "scenes", id: "s1" } } }]);
+    await flushMicrotasks();
+    expect(h.hostStore.seq).toBe(beforeDespawn + 1);
+    expect((h.hostStore.get("scenes", "s1") as SceneDocument).regions?.some((doc) => doc._id === placedRegion._id))
+      .toBe(false);
+    expect(h.hostStore.get("automations", placedGraph._id)).toBeUndefined();
+  });
+
   test("failed template dependency/asset preflight preserves world; prefab placement is undoable", async () => {
     const h = await setup();
     await seedZone(h);
@@ -5698,6 +6198,62 @@ describe("GM prefabs: atomic Tagger allocation, graph rebind, projection and und
     expect((h.hostStore.get("scenes", "s1") as SceneDocument).tiles).toHaveLength(2);
     expect((player.store.get("scenes", "s1") as SceneDocument).tiles).toHaveLength(2);
     expect(JSON.stringify(player.store.world)).not.toContain("GM-SOURCE-ONLY");
+  });
+});
+
+describe("scene clone automation rebinding (A17)", () => {
+  test("one host envelope publishes a copied graph that opens only its copied tagged door", async () => {
+    const h = await setup();
+    await seedZone(h);
+    const sourceDoor: WallDocument = { _id: "clone-door", type: "wall", name: "Clone door",
+      ownership: { default: 3 }, flags: {}, system: {}, c: [300, 100, 500, 100],
+      taggerTags: ["door-{id}"], move: 1, sight: 1, sound: 1, light: 1, door: 0, oneWay: false };
+    h.gm.submit([{ kind: "create", coll: "walls", parent: { coll: "scenes", id: "s1" }, data: sourceDoor }]);
+    await flushMicrotasks();
+    const graph: AutomationDocument = { ...zoneDoc(), _id: "clone-door-graph", name: "Open cloned door",
+      definition: { version: 1, sceneId: "s1", tileId: "zone", methods: ["manual"], gates: {}, steps: [
+        { id: "target", kind: "select", selector: { kind: "tag", query: "door-{id}",
+          collections: ["walls"], includeRefs: [{ coll: "walls", id: sourceDoor._id,
+            parent: { coll: "scenes", id: "s1" } }] } },
+        { id: "open", kind: "door", mode: "open" },
+      ] } };
+    h.gm.submit([{ kind: "create", coll: "automations", data: graph }]);
+    await flushMicrotasks();
+
+    const source = h.hostStore.get("scenes", "s1") as SceneDocument;
+    let n = 0;
+    const planned = planDuplicateSceneOps({ scene: source, id: "scene-clone", name: "Copied trap",
+      world: h.hostStore.world, nextId: (kind) => `${kind}-copy-${(n += 1)}` });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) throw new Error(planned.error);
+    const rejected: ClientEvents["rejected"][] = [];
+    h.gmBus.on("rejected", (message) => rejected.push(message));
+    const seqBeforeCopy = h.hostStore.seq;
+    h.gm.submit(planned.ops);
+    await flushMicrotasks();
+    expect(rejected).toEqual([]);
+    expect(h.hostStore.seq).toBe(seqBeforeCopy + 1);
+    expect(h.hostLog.at(h.hostStore.seq)?.env.ops.filter((op) => op.kind === "create"))
+      .toHaveLength(1 + h.hostStore.getAll("automations").filter((doc) => doc.definition.sceneId === "scene-clone").length);
+
+    const copy = h.hostStore.get("scenes", "scene-clone") as SceneDocument;
+    const copiedDoor = copy.walls.find((wall) => wall._id !== sourceDoor._id);
+    const copiedGraph = h.hostStore.getAll("automations").find((candidate) =>
+      candidate.name === "Open cloned door (copy)");
+    if (!copiedDoor || !copiedGraph) throw new Error("scene clone omitted its graph or tagged door");
+    expect(copiedDoor.taggerTags).toEqual([`door-${copiedDoor._id}`]);
+    expect(copiedGraph.definition.sceneId).toBe(copy._id);
+    expect(copiedGraph.definition.tileId).toBe(copy.tiles[0]?._id);
+    expect(copiedGraph.definition.steps[0]).toMatchObject({ selector: { query: `door-${copiedDoor._id}`,
+      includeRefs: [{ coll: "walls", id: copiedDoor._id, parent: { coll: "scenes", id: copy._id } }] } });
+    expect(copiedGraph.state).toBeUndefined();
+
+    h.gm.requestAutomation(copiedGraph._id, copy._id, "manual");
+    await flushMicrotasks();
+    expect((h.hostStore.get("scenes", copy._id) as SceneDocument).walls
+      .find((wall) => wall._id === copiedDoor._id)?.door).toBe(1);
+    expect((h.hostStore.get("scenes", "s1") as SceneDocument).walls
+      .find((wall) => wall._id === sourceDoor._id)?.door).toBe(0);
   });
 });
 
@@ -5867,6 +6423,196 @@ describe("GM-reviewed scripted macros: authority, projection, persistence", () =
     expect(JSON.stringify(player.store.world)).not.toMatch(/GM SECRET|s3|priv/);
   });
 
+  test("actor prototype-token tag arrays are validated on host create and update", async () => {
+    const h = await setup();
+    const rejected: Array<{ reason: string; detail: string }> = [];
+    h.gmBus.on("rejected", ({ reason, detail }) => rejected.push({ reason, detail }));
+    const base: ActorDocument = { _id: "prototype-validation", type: "actor", name: "Sentinel",
+      ownership: { default: 0 }, flags: {}, system: {}, items: [], effects: [],
+      prototypeToken: { taggerTags: [" prototype "] } };
+    const before = h.hostStore.seq;
+    h.gm.submit([{ kind: "create", coll: "actors", data: base }]);
+    await flushMicrotasks();
+    expect(rejected.at(-1)).toMatchObject({ reason: "invalid_schema" });
+    expect(rejected.at(-1)?.detail).toMatch(/unique, trimmed/);
+    expect(h.hostStore.get("actors", base._id)).toBeUndefined();
+    expect(h.hostStore.seq).toBe(before);
+
+    const valid = { ...base, prototypeToken: { taggerTags: ["sentinel"] } };
+    h.gm.submit([{ kind: "create", coll: "actors", data: valid }]);
+    await flushMicrotasks();
+    const afterCreate = h.hostStore.seq;
+    h.gm.submit([{ kind: "update", ref: { coll: "actors", id: valid._id },
+      diff: { "prototypeToken.taggerTags": ["invalid "] } }]);
+    await flushMicrotasks();
+    expect(rejected.at(-1)).toMatchObject({ reason: "invalid_schema" });
+    expect(rejected.at(-1)?.detail).toMatch(/unique, trimmed/);
+    expect(h.hostStore.seq).toBe(afterCreate);
+    expect((h.hostStore.get("actors", valid._id) as ActorDocument).prototypeToken?.taggerTags)
+      .toEqual(["sentinel"]);
+  });
+
+  test("Tagger script APIs read and edit projected world documents while world rule allocation stays GM-only", async () => {
+    const blade: ItemDocument = { _id: "world-blade", type: "item", name: "Visible Blade",
+      ownership: { default: 0 }, flags: {}, system: {}, effects: [], taggerTags: ["world-blade"] };
+    const actor: ActorDocument = { _id: "world-hero", type: "actor", name: "Visible Hero",
+      ownership: { default: 2, [PLAYER_ID]: 3 }, flags: {}, system: {}, items: [blade], effects: [],
+      taggerTags: ["world-party"], prototypeToken: { taggerTags: ["world-prototype"] } };
+    const hiddenActor: ActorDocument = { _id: "world-secret-actor", type: "actor", name: "Private Hero",
+      ownership: { default: 0 }, flags: {}, system: {}, items: [], effects: [], taggerTags: ["world-secret"],
+      prototypeToken: { taggerTags: ["world-secret-prototype"] } };
+    const worldItem: ItemDocument = { _id: "world-map", type: "item", name: "Visible Map",
+      ownership: { default: 2 }, flags: {}, system: {}, effects: [], taggerTags: ["world-map"] };
+    const hiddenItem: ItemDocument = { _id: "world-secret-item", type: "item", name: "Private Map",
+      ownership: { default: 0 }, flags: {}, system: {}, effects: [], taggerTags: ["world-secret-item"] };
+    const actorRef = { coll: "actors" as const, id: actor._id };
+    const prototypeRef = { coll: "actors" as const, id: actor._id, target: "prototypeToken" as const };
+    const hiddenPrototypeRef = { coll: "actors" as const, id: hiddenActor._id, target: "prototypeToken" as const };
+    const embeddedRef = { coll: "items" as const, id: blade._id, parent: actorRef };
+    const itemRef = { coll: "items" as const, id: worldItem._id };
+    const hiddenActorRef = { coll: "actors" as const, id: hiddenActor._id };
+    const hiddenItemRef = { coll: "items" as const, id: hiddenItem._id };
+    let playerInvocations = 0;
+    const h = await setup({}, async (_source, _args, context, action) => {
+      expect([PLAYER_ID, OTHER_ID]).toContain(context.callerId);
+      if (context.callerId === PLAYER_ID && playerInvocations++ === 0) {
+        const groups = await action("tags.find", { query: "world-*", options: {
+          allScenes: true, includeWorldDocs: true, pattern: "wildcard", groupByScene: true,
+        } }, () => true) as Record<string, Array<{ scope: string; sceneId: string; ref: unknown; name: string }>>;
+        expect(Object.keys(groups)).toEqual([""]);
+        expect(groups[""]?.map((row) => [row.scope, row.sceneId, row.name])).toEqual([
+          ["world", "", "Visible Hero"], ["world", "", "Visible Hero (prototype token)"],
+          ["world", "", "Visible Map"], ["world", "", "Visible Blade"],
+        ]);
+        expect(groups[""]?.map((row) => row.ref)).toEqual([actorRef, prototypeRef, itemRef, embeddedRef]);
+        const actors = await action("tags.find", { query: "world-party", options: {
+          allScenes: true, collections: ["actors"],
+        } }, () => true) as Array<{ ref: unknown; scope: string }>;
+        expect(actors).toEqual([{ scope: "world", sceneId: "", ref: actorRef,
+          name: "Visible Hero", tags: ["world-party"] }]);
+        const prototypes = await action("tags.find", { query: "world-prototype", options: {
+          allScenes: true, collections: ["prototypeTokens"],
+        } }, () => true);
+        expect(prototypes).toEqual([{ scope: "world", sceneId: "", ref: prototypeRef,
+          name: "Visible Hero (prototype token)", tags: ["world-prototype"] }]);
+        const pinned = await action("tags.find", { query: "world-prototype", options: {
+          allScenes: true, includeWorldDocs: true, includeRefs: [prototypeRef],
+        } }, () => true);
+        expect(pinned).toMatchObject([{ scope: "world", ref: prototypeRef }]);
+        await expect(action("tags.find", { query: "world-party", options: {
+          allScenes: true, includeRefs: [actorRef],
+        } }, () => true)).rejects.toThrow(/references/);
+        await expect(action("tags.find", { query: "world-party", options: {
+          includeWorldDocs: true,
+        } }, () => true)).rejects.toThrow(/all-scene/);
+        expect(await action("tags.get", { ref: actorRef }, () => true)).toEqual(["world-party"]);
+        expect(await action("tags.get", { ref: prototypeRef }, () => true)).toEqual(["world-prototype"]);
+        expect(await action("tags.get", { ref: itemRef }, () => true)).toEqual(["world-map"]);
+        expect(await action("tags.get", { ref: embeddedRef }, () => true)).toEqual(["world-blade"]);
+        await expect(action("tags.get", { ref: hiddenActorRef }, () => true)).rejects.toThrow(/unavailable/);
+        await expect(action("tags.get", { ref: hiddenPrototypeRef }, () => true)).rejects.toThrow(/unavailable/);
+        await expect(action("tags.get", { ref: hiddenItemRef }, () => true)).rejects.toThrow(/unavailable/);
+        const edit = await action("tags.edit", { refs: [actorRef, prototypeRef, itemRef, embeddedRef],
+          edit: "add", tags: ["scripted"] }, () => true);
+        expect(edit).toMatchObject({ changed: 4 });
+        await expect(action("tags.rules", { refs: [actorRef] }, () => true))
+          .rejects.toThrow(/World-document Tagger rule allocation requires a GM caller/);
+        await expect(action("tags.rules", { refs: [prototypeRef] }, () => true))
+          .rejects.toThrow(/World-document Tagger rule allocation requires a GM caller/);
+        await expect(action("tags.edit", { refs: [actorRef, hiddenActorRef],
+          edit: "add", tags: ["must-not-partially-write"] }, () => true))
+          .rejects.toThrow(/Invisible/);
+        expect(await action("tags.get", { ref: actorRef }, () => true)).toEqual(["world-party", "scripted"]);
+        expect(await action("tags.get", { ref: prototypeRef }, () => true)).toEqual(["world-prototype", "scripted"]);
+        return { worldRows: groups[""]?.length ?? 0, edited: edit };
+      }
+      if (context.callerId === PLAYER_ID) {
+        const edit = await action("tags.edit", { refs: [actorRef, prototypeRef, embeddedRef],
+          edit: "add", tags: ["owner-write"] }, () => true);
+        expect(edit).toMatchObject({ changed: 3 });
+        await expect(action("tags.edit", { refs: [itemRef], edit: "add", tags: ["denied"] }, () => true))
+          .rejects.toThrow(/not authorized/);
+        return edit;
+      }
+      await expect(action("tags.edit", { refs: [actorRef], edit: "add", tags: ["forged"] }, () => true))
+        .rejects.toThrow(/not authorized/);
+      return true;
+    });
+    const gmScript = await reviewedScript({ grants: ["tags.read", "tags.write"], inputs: [] },
+      { _id: "world-tag-gm-script" });
+    const callerScript = await reviewedScript({ runAs: "caller", grants: ["tags.read", "tags.write"], inputs: [] },
+      { _id: "world-tag-caller-script" });
+    h.gm.submit([
+      { kind: "create", coll: "actors", data: actor },
+      { kind: "create", coll: "actors", data: hiddenActor },
+      { kind: "create", coll: "items", data: worldItem },
+      { kind: "create", coll: "items", data: hiddenItem },
+      { kind: "create", coll: "macros", data: gmScript },
+      { kind: "create", coll: "macros", data: callerScript },
+    ]);
+    await flushMicrotasks();
+    const { client: owner, bus: ownerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const { client: other, bus: otherBus } = await h.addPlayer(OTHER_ID, "Ivy");
+    expect(owner.store.get("actors", hiddenActor._id)).toBeUndefined();
+    expect(owner.store.get("items", hiddenItem._id)).toBeUndefined();
+    expect(JSON.stringify(owner.store.world)).not.toMatch(/Private Hero|Private Map|world-secret-item/);
+
+    const gmRequest = owner.requestMacro(gmScript._id, {});
+    expect((await awaitMacroResult(ownerBus, gmRequest)).ok).toBe(true);
+    const callerRequest = owner.requestMacro(callerScript._id, {});
+    expect((await awaitMacroResult(ownerBus, callerRequest)).ok).toBe(true);
+    const otherRequest = other.requestMacro(callerScript._id, {});
+    expect((await awaitMacroResult(otherBus, otherRequest)).ok).toBe(true);
+    await flushMicrotasks();
+    expect((h.hostStore.resolve(actorRef) as ActorDocument).taggerTags)
+      .toEqual(["world-party", "scripted", "owner-write"]);
+    expect((h.hostStore.resolve(actorRef) as ActorDocument).prototypeToken?.taggerTags)
+      .toEqual(["world-prototype", "scripted", "owner-write"]);
+    expect((h.hostStore.resolve(hiddenActorRef) as ActorDocument).prototypeToken?.taggerTags)
+      .toEqual(["world-secret-prototype"]);
+    expect((h.hostStore.resolve(itemRef) as ItemDocument).taggerTags).toEqual(["world-map", "scripted"]);
+    expect((h.hostStore.resolve(embeddedRef) as ItemDocument).taggerTags)
+      .toEqual(["world-blade", "scripted", "owner-write"]);
+    expect((h.hostStore.resolve(hiddenActorRef) as ActorDocument).taggerTags).toEqual(["world-secret"]);
+    expect((h.hostStore.resolve(hiddenItemRef) as ItemDocument).taggerTags).toEqual(["world-secret-item"]);
+  });
+
+  test("reviewed GM scripts can apply world Tagger rules against the global namespace", async () => {
+    const blocker: ActorDocument = { _id: "macro-rule-blocker", type: "actor", name: "Private blocker",
+      ownership: { default: 0 }, flags: {}, system: {}, items: [], effects: [], taggerTags: ["macro-global-1"] };
+    const actor: ActorDocument = { _id: "macro-rule-actor", type: "actor", name: "Rule actor",
+      ownership: { default: 0 }, flags: {}, system: {}, items: [], effects: [],
+      taggerTags: ["macro-global-{#}"], prototypeToken: { taggerTags: ["macro-prototype-{id}"] } };
+    const item: ItemDocument = { _id: "macro-rule-item", type: "item", name: "Rule item",
+      ownership: { default: 0 }, flags: {}, system: {}, effects: [], taggerTags: ["macro-global-{#}"] };
+    const actorRef = { coll: "actors" as const, id: actor._id };
+    const prototypeRef = { coll: "actors" as const, id: actor._id, target: "prototypeToken" as const };
+    const itemRef = { coll: "items" as const, id: item._id };
+    const h = await setup({}, async (_source, _args, context, action) => {
+      expect(context.callerId).toBe(GM_ID);
+      const before = h.hostStore.seq;
+      const applied = await action("tags.rules", { refs: [actorRef, prototypeRef, itemRef] }, () => true);
+      expect(applied).toMatchObject({ changed: 3, seq: before + 1 });
+      return applied;
+    });
+    const script = await reviewedScript({ grants: ["tags.write"], inputs: [] },
+      { _id: "world-rule-macro" });
+    h.gm.submit([
+      { kind: "create", coll: "actors", data: blocker },
+      { kind: "create", coll: "actors", data: actor },
+      { kind: "create", coll: "items", data: item },
+      { kind: "create", coll: "macros", data: script },
+    ]);
+    await flushMicrotasks();
+    const requestId = h.gm.requestMacro(script._id, {});
+    expect((await awaitMacroResult(h.gmBus, requestId)).ok).toBe(true);
+    await flushMicrotasks();
+    expect((h.hostStore.get("actors", actor._id) as ActorDocument).taggerTags).toEqual(["macro-global-2"]);
+    expect((h.hostStore.get("actors", actor._id) as ActorDocument).prototypeToken?.taggerTags)
+      .toEqual(["macro-prototype-macro-rule-actor"]);
+    expect((h.hostStore.get("items", item._id) as ItemDocument).taggerTags).toEqual(["macro-global-3"]);
+  });
+
   test("GM Tagger explorer rules resolve live, hidden and remote-scene tags, replicate and undo atomically", async () => {
     const h = await setup();
     const distant = sceneDoc("s2"); distant.active = false;
@@ -5961,6 +6707,52 @@ describe("GM-reviewed scripted macros: authority, projection, persistence", () =
     await flushMicrotasks();
     expect(gmResults.at(-1)).toMatchObject({ requestId: noop, changed: 0, seq: before + 1 });
     expect(h.hostStore.seq).toBe(before + 1);
+  });
+
+  test("GM Tagger rules allocate world actors, prototype tokens and items in one hidden-safe namespace", async () => {
+    const h = await setup();
+    const blocker: ActorDocument = { _id: "world-rule-blocker", type: "actor", name: "Private blocker",
+      ownership: { default: 0 }, flags: {}, system: {}, items: [], effects: [], taggerTags: ["global-1"] };
+    const embedded: ItemDocument = { _id: "world-rule-embedded", type: "item", name: "Embedded target",
+      ownership: { default: 0 }, flags: {}, system: {}, effects: [], taggerTags: ["embedded-{id}"] };
+    const actor: ActorDocument = { _id: "world-rule-actor", type: "actor", name: "Visible target",
+      ownership: { default: 2 }, flags: {}, system: {}, items: [embedded], effects: [],
+      taggerTags: ["global-{#}"], prototypeToken: { taggerTags: ["prototype-{id}"], sight: { enabled: true } } };
+    const item: ItemDocument = { _id: "world-rule-item", type: "item", name: "Visible item",
+      ownership: { default: 2 }, flags: {}, system: {}, effects: [], taggerTags: ["global-{#}"] };
+    h.gm.submit([
+      { kind: "create", coll: "actors", data: blocker },
+      { kind: "create", coll: "actors", data: actor },
+      { kind: "create", coll: "items", data: item },
+    ]);
+    await flushMicrotasks();
+    const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const results: ClientEvents["taggerRulesResult"][] = [];
+    const playerResults: ClientEvents["taggerRulesResult"][] = [];
+    h.gmBus.on("taggerRulesResult", (msg) => results.push(msg));
+    playerBus.on("taggerRulesResult", (msg) => playerResults.push(msg));
+    expect(player.store.get("actors", blocker._id)).toBeUndefined();
+    const actorRef = { coll: "actors" as const, id: actor._id };
+    const prototypeRef = { coll: "actors" as const, id: actor._id, target: "prototypeToken" as const };
+    const itemRef = { coll: "items" as const, id: item._id };
+    const embeddedRef = { coll: "items" as const, id: embedded._id, parent: actorRef };
+    const before = h.hostStore.seq;
+    const requestId = h.gm.requestTagRules([actorRef, prototypeRef, itemRef, embeddedRef]);
+    await flushMicrotasks();
+    expect(results).toEqual([{ kind: "tagger.rules.result", requestId, changed: 4, seq: before + 1 }]);
+    expect(playerResults).toEqual([]);
+    expect((h.hostStore.get("actors", actor._id) as ActorDocument).taggerTags).toEqual(["global-2"]);
+    expect((h.hostStore.get("actors", actor._id) as ActorDocument).prototypeToken)
+      .toMatchObject({ taggerTags: ["prototype-world-rule-actor"], sight: { enabled: true } });
+    expect((h.hostStore.get("items", item._id) as ItemDocument).taggerTags).toEqual(["global-3"]);
+    expect((h.hostStore.resolve(embeddedRef) as ItemDocument).taggerTags)
+      .toEqual(["embedded-world-rule-embedded"]);
+    expect(player.store.get("actors", blocker._id)).toBeUndefined();
+    expect(h.host.undo().ok).toBe(true);
+    expect((h.hostStore.get("actors", actor._id) as ActorDocument).taggerTags).toEqual(["global-{#}"]);
+    expect((h.hostStore.get("actors", actor._id) as ActorDocument).prototypeToken?.taggerTags)
+      .toEqual(["prototype-{id}"]);
+    expect((h.hostStore.get("items", item._id) as ItemDocument).taggerTags).toEqual(["global-{#}"]);
   });
 
   test("GM Tagger rule numbering includes hidden occupancy and stays undoable", async () => {
@@ -6381,6 +7173,153 @@ describe("GM-reviewed scripted macros: authority, projection, persistence", () =
     expect(runs).toBe(1);
   });
 
+  test("post-commit scripts await return values, honor run-as narrowing, and continue after an opted-in failure", async () => {
+    const runAs: string[] = [];
+    let calls = 0;
+    const runner: ScriptRunner = async (_source, _args, context) => {
+      runAs.push(context.runAs ?? "missing");
+      if (++calls === 1) throw new Error("FIRST SCRIPT FAILED");
+      return { runAs: context.runAs ?? null, callerId: context.callerId };
+    };
+    const h = await setup({}, runner);
+    await seedZone(h);
+    const source = "return { runAs: context.runAs };";
+    const policy: Omit<ScriptPolicy, "approvedHash"> = { version: 1, sceneId: "s1", runAs: "gm",
+      playerCallable: true, grants: [], inputs: [] };
+    const script: MacroDocument = { _id: "run-as-script", type: "macro", kind: "script", name: "Run-as test",
+      ownership: { default: 1 }, flags: {}, system: {}, command: source,
+      script: { ...policy, approvedHash: await scriptApprovalHash(source, policy) } };
+    h.gm.submit([{ kind: "create", coll: "macros", data: script }]);
+    h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" }, diff: {
+      definition: { ...zoneDoc().definition, methods: ["click"], steps: [
+        { id: "narrowed", kind: "script", macroId: script._id, runAs: "caller", onError: "continue" },
+        { id: "approved", kind: "script", macroId: script._id, runAs: "approved" },
+      ] } as unknown as Json,
+    } }]);
+    await flushMicrotasks();
+    const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+    const gmTraces: ClientEvents["automationTrace"][] = [];
+    h.gmBus.on("automationTrace", (message) => gmTraces.push(message));
+    const finished = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => { off(); reject(new Error("continued post-commit run timed out")); }, 3000);
+      const off = h.gmBus.on("automationTrace", (message) => {
+        if (message.result !== "post-commit-failed" ||
+            !message.detail.includes("remaining authorized actions completed")) return;
+        clearTimeout(timer); off(); resolve();
+      });
+    });
+    player.requestAutomationClick("s1", "zone", { x: 150, y: 150 }, "t-pl");
+    await finished;
+    expect(runAs).toEqual(["caller", "gm"]);
+    expect(calls).toBe(2);
+    expect((h.hostStore.get("automations", "zone-graph") as AutomationDocument).state?.count).toBe(1);
+    expect((h.hostStore.get("macros", script._id) as MacroDocument).scriptState?.recent).toHaveLength(2);
+    expect(gmTraces.at(-1)).toMatchObject({ result: "post-commit-failed",
+      detail: "1 post-commit action(s) failed; remaining authorized actions completed" });
+    expect(gmTraces.at(-1)?.trace.some((line) => line.includes("FIRST SCRIPT FAILED"))).toBe(true);
+    expect(gmTraces.at(-1)?.trace.some((line) => line.includes('{"runAs":"gm","callerId":"pl-key"}'))).toBe(true);
+  });
+
+  test("an awaited reviewed-script result branches after commit, resumes the same collection and keeps one run history", async () => {
+    const h = await setup({}, async () => ({ hit: true, detail: { score: 17 } }));
+    await seedZone(h);
+    const script = await reviewedScript({ runAs: "gm", grants: [], inputs: [] });
+    h.gm.submit([{ kind: "create", coll: "macros", data: script }]);
+    h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" }, diff: {
+      definition: { ...zoneDoc().definition, methods: ["click"], gates: { oncePerToken: true }, steps: [
+        { id: "select", kind: "select", selector: { kind: "tag", query: "door-1", collections: ["tokens"] } },
+        { id: "run", kind: "script", macroId: script._id, captureResult: true },
+        { id: "check", kind: "checkScriptResult", scriptStepId: "run", path: "value.hit",
+          compare: "eq", value: true, otherwise: "miss" },
+        { id: "mark", kind: "tags", edit: "add", tags: ["result-hit"] },
+        { id: "notice", kind: "chat", audience: "gm", content: "Result branch passed" },
+        { id: "stop", kind: "stop" },
+        { id: "miss", kind: "landing", name: "miss" },
+        { id: "failed", kind: "chat", audience: "gm", content: "Result branch missed" },
+      ] } as unknown as Json,
+    } }]);
+    await flushMicrotasks();
+    const traces: ClientEvents["automationTrace"][] = [];
+    h.gmBus.on("automationTrace", (message) => traces.push(message));
+    const completed = new Promise<ClientEvents["automationTrace"]>((resolve, reject) => {
+      const timer = setTimeout(() => { off(); reject(new Error("result branch continuation timed out")); }, 3000);
+      const off = h.gmBus.on("automationTrace", (message) => {
+        if (!message.detail.includes("post-commit scripts completed") ||
+            !message.trace.some((line) => line.includes("Check Script Result [run] value.hit"))) return;
+        clearTimeout(timer); off(); resolve(message);
+      });
+    });
+    h.gm.requestAutomation("zone-graph", "s1", "click", "t-pl");
+    const finished = await completed;
+    expect((h.hostStore.get("automations", "zone-graph") as AutomationDocument).state?.count).toBe(1);
+    expect((h.hostStore.get("scenes", "s1") as SceneDocument).tokens
+      .find((token) => token._id === "t-ivy")?.taggerTags).toContain("result-hit");
+    expect(h.hostStore.getAll("messages").map((message) => message.content)).toContain("Result branch passed");
+    expect(h.hostStore.getAll("messages").map((message) => message.content)).not.toContain("Result branch missed");
+    expect(finished.trace).toContain("reviewed script [run] completed with {\"hit\":true,\"detail\":{\"score\":17}}");
+    expect(finished.trace).toContain("Check Script Result [run] value.hit: true eq true -> pass");
+    expect(traces.some((message) => message.detail.includes("1 ops, 0 cues, 1 post-commit actions queued"))).toBe(true);
+  });
+
+  test("a captured ordinary script failure can route to an error landing only when continuation is opted in", async () => {
+    const h = await setup({}, async () => { throw new Error("SCRIPT SOURCE FAILURE"); });
+    await seedZone(h);
+    const script = await reviewedScript({ runAs: "gm", grants: [], inputs: [] });
+    h.gm.submit([{ kind: "create", coll: "macros", data: script }]);
+    h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" }, diff: {
+      definition: { ...zoneDoc().definition, methods: ["click"], gates: {}, steps: [
+        { id: "run", kind: "script", macroId: script._id, captureResult: true, onError: "continue" },
+        { id: "check", kind: "checkScriptResult", scriptStepId: "run", path: "ok",
+          compare: "eq", value: true, otherwise: "failed" },
+        { id: "success", kind: "chat", audience: "gm", content: "Unexpected script success" },
+        { id: "stop", kind: "stop" },
+        { id: "failed", kind: "landing", name: "failed" },
+        { id: "notice", kind: "chat", audience: "gm", content: "Failure branch ran" },
+      ] } as unknown as Json,
+    } }]);
+    await flushMicrotasks();
+    const final = new Promise<ClientEvents["automationTrace"]>((resolve, reject) => {
+      const timer = setTimeout(() => { off(); reject(new Error("failed-result branch timed out")); }, 3000);
+      const off = h.gmBus.on("automationTrace", (message) => {
+        if (message.result !== "post-commit-failed" ||
+            !message.detail.includes("remaining authorized actions completed") ||
+            !message.trace.some((line) => line.includes("Check Script Result [run] ok"))) return;
+        clearTimeout(timer); off(); resolve(message);
+      });
+    });
+    h.gm.requestAutomation("zone-graph", "s1", "click", "t-pl");
+    const trace = await final;
+    expect(h.hostStore.getAll("messages").map((message) => message.content)).toContain("Failure branch ran");
+    expect(h.hostStore.getAll("messages").map((message) => message.content)).not.toContain("Unexpected script success");
+    expect(trace.trace).toContain("Check Script Result [run] ok: false eq true -> fail");
+    expect(trace.trace.some((line) => line.includes("POST-COMMIT SCRIPT [run] FAILED: SCRIPT SOURCE FAILURE"))).toBe(true);
+  });
+
+  test("a zone cannot elevate a caller-only saved script and rejects before consuming graph history", async () => {
+    let runs = 0;
+    const h = await setup({}, async () => { runs++; return null; });
+    await seedZone(h);
+    const script = await reviewedScript({ runAs: "caller", grants: [], inputs: [] });
+    h.gm.submit([{ kind: "create", coll: "macros", data: script }]);
+    h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" }, diff: {
+      definition: { ...zoneDoc().definition, methods: ["click"], steps: [
+        { id: "elevate", kind: "script", macroId: script._id, runAs: "gm" },
+      ] } as unknown as Json,
+    } }]);
+    await flushMicrotasks();
+    const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+    const gmTraces: ClientEvents["automationTrace"][] = [];
+    h.gmBus.on("automationTrace", (message) => gmTraces.push(message));
+    const before = h.hostStore.seq;
+    player.requestAutomationClick("s1", "zone", { x: 150, y: 150 }, "t-pl");
+    await flushMicrotasks();
+    expect(runs).toBe(0);
+    expect(h.hostStore.seq).toBe(before);
+    expect((h.hostStore.get("automations", "zone-graph") as AutomationDocument).state?.count ?? 0).toBe(0);
+    expect(gmTraces.at(-1)).toMatchObject({ result: "rejected",
+      detail: `Reviewed script ${script._id} does not approve GM run-as` });
+  });
+
   test("a failed post-commit Worker cannot undo a committed zone or leak diagnostics to a player", async () => {
     let runs = 0;
     const h = await setup({}, async () => { runs++; throw new Error("SECRET WORKER FAILURE"); });
@@ -6391,6 +7330,7 @@ describe("GM-reviewed scripted macros: authority, projection, persistence", () =
     h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "zone-graph" }, diff: {
       definition: { ...zoneDoc().definition, methods: ["click"], steps: [
         { id: "script", kind: "script", macroId: script._id, bindings: { target: "triggerToken" } },
+        { id: "later", kind: "script", macroId: script._id, bindings: { target: "triggerToken" } },
       ] } as unknown as Json,
     } }]);
     await flushMicrotasks();

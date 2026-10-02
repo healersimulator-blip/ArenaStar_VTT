@@ -20,13 +20,19 @@
   let previews = $state<Preview[]>([]);
   let query = $state("");
   let kind = $state<"all" | "image" | "video" | "audio">("all");
+  let exportRights = $state<"all" | "unreviewed" | "granted" | "restricted">("all");
   let busy = $state("");
   let error = $state("");
   let disposed = false;
+  const unreviewedCount = $derived(assets.filter(({ entry }) => entry.exportRights === undefined).length);
   const filtered = $derived(assets.filter(({ hash, entry }) => {
     const text = `${entry.name} ${entry.mime} ${hash}`.toLocaleLowerCase();
     const terms = query.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
-    return (kind === "all" || entry.mime.startsWith(`${kind}/`)) && terms.every((term) => text.includes(term));
+    const rightsMatch = exportRights === "all" ||
+      (exportRights === "unreviewed" && entry.exportRights === undefined) ||
+      entry.exportRights === exportRights;
+    return (kind === "all" || entry.mime.startsWith(`${kind}/`)) && rightsMatch &&
+      terms.every((term) => text.includes(term));
   }));
 
   function refresh(): void {
@@ -88,6 +94,15 @@
       <option value="all">All</option><option value="image">Images</option>
       <option value="video">Video</option><option value="audio">Sound</option>
     </select></label>
+    <label>World export <select data-fx-asset-export-filter bind:value={exportRights}>
+      <option value="all">All rights states</option>
+      <option value="unreviewed">Unreviewed legacy</option>
+      <option value="granted">Granted</option>
+      <option value="restricted">Restricted</option>
+    </select></label>
+    <span data-fx-unreviewed-count={unreviewedCount}>
+      {unreviewedCount} legacy file(s) lack explicit export review; FX timeline/preset references require review before world export.
+    </span>
     <span>{filtered.length} of {assets.length} files</span>
   </div>
   {#if error}<p class="error" role="alert">{error}</p>{/if}
@@ -96,8 +111,11 @@
     {#each filtered as asset (asset.hash)}
       <li data-fx-asset={asset.hash}>
         <strong>{asset.entry.name}</strong> <small>{asset.entry.mime} · {(asset.entry.size / 1024).toFixed(1)} KiB</small>
-        <small>{asset.entry.visibility === "gm" ? "GM-only playback" : "reference-gated playback"}
-          · {asset.entry.exportRights === "restricted" ? "world export blocked" : asset.entry.exportRights === "granted" ? "world export approved" : "legacy export policy"}</small>
+        <small data-fx-asset-rights={asset.entry.exportRights ?? "unreviewed"}>
+          {asset.entry.visibility === "gm" ? "GM-only playback" : "reference-gated playback"}
+          · {asset.entry.exportRights === "restricted" ? "world export restricted"
+            : asset.entry.exportRights === "granted" ? "world export granted"
+              : "unreviewed legacy — review needed if referenced by FX"}</small>
         <button type="button" disabled={busy === asset.hash}
           onclick={() => void inspect(asset)}>{previews.some((preview) => preview.hash === asset.hash) ? "Remove preview" : "Compare"}</button>
         <button type="button" onclick={() => useAsset(asset.hash)}>Use in timeline</button>

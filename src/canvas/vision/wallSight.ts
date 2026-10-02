@@ -43,8 +43,9 @@ export function sightSegments(walls: readonly WallDocument[]): Segment[] {
 /**
  * Sound-blocking segments — D-309's muffling input: a wall between a source and a
  * listener dulls it. This is the **sound** axis, not sight's, because the two are
- * allowed to disagree: a window passes sight and light by its own axes, and whatever it
- * says about sound is what muffling obeys. Doors obey their state here too — an open
+ * allowed to disagree: a standard window passes sight and light but blocks sound; custom
+ * sound axes remain independent, and muffling obeys the stored sound restriction. Doors obey
+ * their state here too — an open
  * door lets sound through, a closed or locked one does not.
  */
 export function soundSegments(walls: readonly WallDocument[]): Segment[] {

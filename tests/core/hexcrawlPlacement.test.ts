@@ -6,10 +6,13 @@
  */
 import { describe, expect, test } from "vitest";
 import type {
+  AutomationDocument,
   CellDocument,
   SceneDocument,
+  TileDocument,
   TokenDocument,
   WallDocument,
+  WorldCollections,
 } from "../../src/core/documents";
 import {
   encounterLogOf,
@@ -22,7 +25,7 @@ import {
   placementSpacing,
   wallDistance,
 } from "../../src/core/hexcrawl/placement";
-import { copyName, duplicateSceneOps } from "../../src/core/sceneCopy";
+import { copyName, duplicateSceneOps, planDuplicateSceneOps } from "../../src/core/sceneCopy";
 
 function scene(over: Partial<SceneDocument> = {}): SceneDocument {
   return {
@@ -170,7 +173,8 @@ describe("encounterTokenData (§5.5)", () => {
     let n = 0;
     const tokens = encounterTokenData(
       [
-        { actorId: "actor-1", name: "Goblin", img: "goblin.png", width: 100, height: 100 },
+        { actorId: "actor-1", name: "Goblin", img: "goblin.png", width: 100, height: 100,
+          taggerTags: ["enemy", "patrol"] },
         { actorId: null, name: "A wary merchant", img: "" },
       ],
       [
@@ -185,6 +189,8 @@ describe("encounterTokenData (§5.5)", () => {
     ]);
     expect(tokens[0]?.actorId).toBe("actor-1");
     expect(tokens[0]?.img).toBe("goblin.png");
+    expect(tokens[0]?.taggerTags).toEqual(["enemy", "patrol"]);
+    expect(tokens[1]?.taggerTags).toBeUndefined();
     // A bare text row places a token too — it is what the party actually sees.
     expect(tokens[1]?.actorId).toBeUndefined(); // a text row has no actor to link to
     expect(tokens.every((t) => t.disposition === "hostile")).toBe(true);
@@ -231,6 +237,146 @@ describe("duplicateSceneOps (§5.6)", () => {
     expect(copy.templates.map((template) => template._id)).toEqual(["tp-new-10"]);
     // …and the original is untouched: the copy is a new document, not a mutation.
     expect(source.tokens.map((t) => t._id)).toEqual(["t1", "t2"]);
+  });
+
+  test("scene copy atomically rebinds trigger graphs, pinned/tag refs, tag rules and private state", () => {
+    const sourceWall = { ...wall("door-source", [100, 100, 200, 100]),
+      taggerTags: ["door-{id}"] } as WallDocument;
+    const trigger = { _id: "trigger-source", type: "tile", name: "Trigger",
+      ownership: { default: 0 }, flags: {}, system: {}, x: 100, y: 100, width: 100, height: 100,
+      img: "", above: false, occlusion: { mode: "fade", alpha: 0.5 },
+      taggerTags: ["plate-{#}"] } as TileDocument;
+    const source = scene({ _id: "scene-source", tiles: [trigger], walls: [sourceWall],
+      tokens: [token("party")], notes: [{ _id: "self-note", type: "note", x: 10, y: 10,
+        text: "Return", icon: "", linkedSceneId: "scene-source" } as never],
+      flags: { core: { hexcrawl: { partyTokenId: "party" } } } });
+    const graph: AutomationDocument = { _id: "door-graph", type: "automation", name: "Open linked door",
+      ownership: { default: 0 }, flags: {}, system: {},
+      state: { count: 9, lastAt: 500, byToken: { party: { count: 4, lastAt: 500 } } },
+      definition: { version: 1, sceneId: source._id, tileId: trigger._id, methods: ["manual"], gates: {}, steps: [
+        { id: "door-target", kind: "select", selector: { kind: "tag", query: "door-{id}",
+          collections: ["walls"], includeRefs: [{ coll: "walls", id: sourceWall._id,
+            parent: { coll: "scenes", id: source._id } }] } },
+        { id: "open", kind: "door", mode: "open" },
+      ] },
+    };
+    const world = { scenes: [source], automations: [graph], actors: [], rollTables: [],
+      encounterTables: [], macros: [], assetManifest: {} } as unknown as WorldCollections;
+    let n = 0;
+    const planned = planDuplicateSceneOps({ scene: source, id: "scene-copy", world,
+      nextId: (kind) => `${kind}-copy-${(n += 1)}` });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) throw new Error(planned.error);
+
+    const copy = planned.copy;
+    const door = copy.walls[0];
+    const copyGraphOp = planned.ops.find((op) => op.kind === "create" && op.coll === "automations");
+    if (!door || !copyGraphOp || copyGraphOp.kind !== "create" || copyGraphOp.coll !== "automations")
+      throw new Error("scene copy did not include its door graph");
+    const copyGraph = copyGraphOp.data as AutomationDocument;
+    expect(copy._id).toBe("scene-copy");
+    expect(copy.tiles[0]?.taggerTags).toEqual(["plate-1"]);
+    expect(door.taggerTags).toEqual([`door-${door._id}`]);
+    expect(copy.notes[0]?.linkedSceneId).toBe(copy._id);
+    expect(copy.flags.core).toMatchObject({ hexcrawl: { partyTokenId: copy.tokens[0]?._id } });
+    expect(copyGraph.definition).toMatchObject({ sceneId: copy._id, tileId: copy.tiles[0]?._id,
+      steps: [{ selector: { query: `door-${door._id}`, includeRefs: [{ coll: "walls", id: door._id,
+        parent: { coll: "scenes", id: copy._id } }] } }, { kind: "door", mode: "open" }] });
+    expect(copyGraph.state).toBeUndefined(); // the new trigger has no copied cooldown/token history
+    expect(source._id).toBe("scene-source");
+    expect(source.walls[0]?.taggerTags).toEqual(["door-{id}"]);
+    expect(graph.definition.sceneId).toBe(source._id);
+    expect(graph.state?.count).toBe(9);
+  });
+
+  test("all scene-local graph reference forms are remapped rather than left pointing to the source", () => {
+    const taggedTile = (id: string, name: string, tag: string): TileDocument => ({ _id: id,
+      type: "tile", name, ownership: { default: 0 }, flags: {}, system: {}, x: 0, y: 0,
+      width: 100, height: 100, rotation: 0, hidden: false, img: "", above: false,
+      occlusion: { mode: "fade", alpha: 0.5 }, taggerTags: [tag] });
+    const trigger = taggedTile("trigger", "Trigger", "trigger-{#}");
+    const relay = taggedTile("relay", "Relay", "relay-{id}");
+    const sourceWall = { ...wall("door", [100, 100, 200, 100]), name: "Door",
+      ownership: { default: 0 }, taggerTags: ["door-{id}"] } as WallDocument;
+    const sourceParty = { ...token("party"), taggerTags: ["march-{id}"] };
+    const source = scene({ _id: "scene-all-refs", tiles: [trigger, relay], walls: [sourceWall], tokens: [sourceParty] });
+    const wallRef = { coll: "walls" as const, id: sourceWall._id,
+      parent: { coll: "scenes" as const, id: source._id } };
+    const tileRef = { coll: "tiles" as const, id: relay._id,
+      parent: { coll: "scenes" as const, id: source._id } };
+    const tokenRef = { coll: "tokens" as const, id: sourceParty._id,
+      parent: { coll: "scenes" as const, id: source._id } };
+    const graph: AutomationDocument = { _id: "all-ref-graph", type: "automation", name: "All refs",
+      ownership: { default: 0 }, flags: {}, system: {}, definition: { version: 1,
+        sceneId: source._id, tileId: trigger._id, methods: ["manual"], steps: [
+          { id: "pins", kind: "select", selector: { kind: "ids", refs: [wallRef, tokenRef] } },
+          { id: "tagCollection", kind: "collection", mode: "add", selector: { kind: "tag",
+            query: "door-{id}", collections: ["walls"], includeRefs: [wallRef] } },
+          { id: "child", kind: "triggerTile", target: { kind: "id", tileId: relay._id }, tokens: "current" },
+          { id: "active", kind: "setActive", target: { kind: "id", tileId: relay._id }, mode: "deactivate" },
+          { id: "set", kind: "set", name: "charge", value: 1, scope: "tile",
+            target: { kind: "tag", query: "relay-{id}", includeRefs: [tileRef] } },
+          { id: "check", kind: "checkVariable", name: "charge", compare: "gte", value: 1,
+            target: { kind: "id", tileId: relay._id } },
+          { id: "directMove", kind: "move", destination: { coll: "tokens", id: sourceParty._id },
+            x: 0, y: 0, targets: "triggering" },
+          { id: "tagMove", kind: "move", destinationTag: { kind: "tag", query: "march-{id}",
+            collections: ["tokens"], includeRefs: [tokenRef] }, x: 0, y: 0, targets: "triggering" },
+          { id: "background", kind: "sceneBackground", image: null, targetSceneId: source._id },
+          { id: "tagEdit", kind: "tags", edit: "add", tags: ["march-{id}"] },
+        ] } };
+    const world = { scenes: [source], automations: [graph], actors: [], rollTables: [],
+      encounterTables: [], macros: [], assetManifest: {} } as unknown as WorldCollections;
+    let n = 0;
+    const planned = planDuplicateSceneOps({ scene: source, id: "scene-all-refs-copy", world,
+      nextId: (kind) => `${kind}-all-${(n += 1)}` });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) throw new Error(planned.error);
+    const copiedTrigger = planned.copy.tiles[0];
+    const copiedRelay = planned.copy.tiles[1];
+    const copiedWall = planned.copy.walls[0];
+    const copiedParty = planned.copy.tokens[0];
+    const copiedGraphOp = planned.ops.find((op) => op.kind === "create" && op.coll === "automations");
+    if (!copiedTrigger || !copiedRelay || !copiedWall || !copiedParty ||
+        !copiedGraphOp || copiedGraphOp.kind !== "create" || copiedGraphOp.coll !== "automations")
+      throw new Error("clone is missing a mapped scene entity or graph");
+    const steps = (copiedGraphOp.data as AutomationDocument).definition.steps;
+    expect((copiedGraphOp.data as AutomationDocument).definition).toMatchObject({
+      sceneId: planned.copy._id, tileId: copiedTrigger._id,
+    });
+    expect(steps[0]).toMatchObject({ selector: { refs: [
+      { coll: "walls", id: copiedWall._id, parent: { coll: "scenes", id: planned.copy._id } },
+      { coll: "tokens", id: copiedParty._id, parent: { coll: "scenes", id: planned.copy._id } },
+    ] } });
+    expect(steps[1]).toMatchObject({ selector: { query: `door-${copiedWall._id}`, includeRefs: [
+      { coll: "walls", id: copiedWall._id, parent: { coll: "scenes", id: planned.copy._id } },
+    ] } });
+    expect(steps[2]).toMatchObject({ target: { kind: "id", tileId: copiedRelay._id } });
+    expect(steps[3]).toMatchObject({ target: { kind: "id", tileId: copiedRelay._id } });
+    expect(steps[4]).toMatchObject({ target: { kind: "tag", query: `relay-${copiedRelay._id}`,
+      includeRefs: [{ coll: "tiles", id: copiedRelay._id, parent: { coll: "scenes", id: planned.copy._id } }] } });
+    expect(steps[5]).toMatchObject({ target: { kind: "id", tileId: copiedRelay._id } });
+    expect(steps[6]).toMatchObject({ destination: { coll: "tokens", id: copiedParty._id } });
+    expect(steps[7]).toMatchObject({ destinationTag: { query: `march-${copiedParty._id}`,
+      includeRefs: [{ coll: "tokens", id: copiedParty._id, parent: { coll: "scenes", id: planned.copy._id } }] } });
+    expect(steps[8]).toMatchObject({ targetSceneId: planned.copy._id });
+    expect(steps[9]).toMatchObject({ tags: [`march-${copiedParty._id}`] });
+    expect(graph.definition.sceneId).toBe(source._id);
+    expect(graph.definition.steps[6]).toMatchObject({ destination: { coll: "tokens", id: sourceParty._id } });
+  });
+
+  test("missing external graph dependencies fail before a clone produces any ops", () => {
+    const source = scene({ _id: "scene-source", tiles: [{ _id: "trigger-source", type: "tile" } as never] });
+    const graph: AutomationDocument = { _id: "missing-table-graph", type: "automation", name: "Missing table",
+      ownership: { default: 0 }, flags: {}, system: {}, definition: { version: 1, sceneId: source._id,
+        tileId: "trigger-source", methods: ["manual"], steps: [
+          { id: "roll", kind: "rollTable", tableId: "deleted-table", audience: "gm" },
+        ] } };
+    const world = { scenes: [source], automations: [graph], actors: [], rollTables: [],
+      encounterTables: [], macros: [], assetManifest: {} } as unknown as WorldCollections;
+    const planned = planDuplicateSceneOps({ scene: source, id: "scene-copy", world });
+    expect(planned).toMatchObject({ ok: false, error: expect.stringContaining("deleted-table") });
+    expect(source._id).toBe("scene-source");
   });
 
   test("the encounter's own tokens ride inside the copy", () => {

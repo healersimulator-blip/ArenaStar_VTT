@@ -19,6 +19,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import {
   entry,
+  gmCall,
   hostCall,
   importShippedCore,
   manualFragment,
@@ -62,6 +63,7 @@ interface SceneChildren {
   id: string;
   name: string;
   active: boolean;
+  scale: "tactical" | "strategic";
   img: string | null;
   width: number;
   height: number;
@@ -74,7 +76,7 @@ interface SceneChildren {
     disposition: string;
     img: string;
   }>;
-  walls: Array<{ id: string; c: [number, number, number, number]; door: number }>;
+  walls: Array<{ id: string; c: [number, number, number, number]; door: number; kind: "wall" | "door" | "window" }>;
   counts: Record<string, number>;
 }
 
@@ -443,7 +445,7 @@ test.describe("encounter engine (§8 Phase 4, D-273)", () => {
   /**
    * Requirement 5c/5d, plan §8 Phase 5's own acceptance line: *roll a two-entry table, `Place all`,
    * assert both tokens exist and are not co-located (distance ≥ one cell), then create the battle
-   * scene and assert the copy has the original's walls and the new tokens.*
+   * scene and assert the copy has the original tactical scene's door/window walls and new tokens.*
    *
    * The unit suite holds the geometry (`placeEncounterTokens`' spiral, `duplicateSceneOps`'
    * re-keying). What only the browser can prove is that the *gestures* reach it: the window's button
@@ -459,22 +461,60 @@ test.describe("encounter engine (§8 Phase 4, D-273)", () => {
     // The pack the roll's row points at (the same import a GM does from the compendia tab).
     await importShippedCore(page);
 
-    // ── the battle scene to link: the default scene, with a wall drawn on it ──
-    // (Drawn first, the way `canvas_rail.spec.ts` does it: the wall tool's listeners belong to the
-    // stage the boot built, and the wizard's scene swap is not what this assertion is about.)
+    // ── the battle scene to link: the default tactical scene, with a door and window drawn on it ──
+    // The hexcrawl is the encounter context; this ordinary scene is the actual scene being copied.
     const box = await page.locator(".canvas-host canvas").boundingBox();
     if (!box) throw new Error("canvas not mounted");
     await page.locator('[data-canvas-tool="wall"]').click();
-    await page.locator('[data-canvas-wall-kind="wall"]').click();
+    await page.locator('[data-canvas-wall-kind="door"]').click();
     await page.mouse.move(box.x + 240, box.y + 200);
     await page.mouse.down();
     await page.mouse.move(box.x + 420, box.y + 200, { steps: 8 });
     await page.mouse.up();
     await expect.poll(() => hostCall<Array<{ id: string }>>(page, "walls")).toHaveLength(1);
-    // Put the wall tool away again: a right-click on the map is the hex menu only while nothing is
-    // armed (the rail's own rule, and D-272's lesson about a window eating the next gesture).
-    await page.locator('[data-canvas-tool="select"]').click();
+    await page.locator('[data-canvas-wall-kind="window"]').click();
+    await page.mouse.move(box.x + 240, box.y + 300);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 420, box.y + 300, { steps: 8 });
+    await page.mouse.up();
+    await expect.poll(() => hostCall<Array<{ id: string }>>(page, "walls")).toHaveLength(2);
     const battleSceneId = (await sceneChildren(page))?.id ?? "";
+    const sourceScene = await sceneChildren(page, battleSceneId);
+    expect(sourceScene?.scale).toBe("tactical");
+    expect(sourceScene?.walls.map((wall) => wall.kind)).toEqual(["door", "window"]);
+    const sourceDoorId = sourceScene?.walls[0]?.id;
+    if (!sourceDoorId) throw new Error("source battle door missing");
+
+    // Author a real zone graph against the door, then let D-274's copy operation rebind its
+    // pinned ID. The original stays closed; firing only the copied graph must open only the copy.
+    await page.locator('[data-canvas-tool="select"]').click();
+    await page.locator("#gm-macros").click();
+    await page.locator("[data-macro-zones-tab]").click();
+    const zones = page.locator("[data-active-zones]");
+    await zones.locator("[data-zone-tile-create] summary").click();
+    const trigger = zones.locator("[data-zone-tile-create]");
+    await trigger.getByLabel("Tile name").fill("Copy door trigger");
+    await trigger.getByLabel("X", { exact: true }).fill("650");
+    await trigger.getByLabel("Y", { exact: true }).fill("450");
+    await trigger.getByLabel("Width").fill("120");
+    await trigger.getByLabel("Height").fill("120");
+    await trigger.locator("[data-zone-create-tile]").click();
+    await expect(zones.locator("[data-zone-tile] option").filter({ hasText: "Copy door trigger" })).toHaveCount(1);
+    await zones.locator("[data-zone-name]").fill("Open copied door");
+    await zones.locator(".methods label").filter({ hasText: "enter" }).locator("input").uncheck();
+    await zones.locator(".methods label").filter({ hasText: "stop" }).locator("input").uncheck();
+    await zones.locator('[data-zone-step="select"]').getByLabel("Current collection").selectOption("ids");
+    await zones.getByLabel("Pinned entities", { exact: true })
+      .selectOption(JSON.stringify([battleSceneId, "walls", sourceDoorId]));
+    await zones.locator('[data-zone-step="notice"]').getByLabel("Action 2").selectOption("door");
+    await expect(zones.locator('[data-zone-step="notice"] [aria-label="Action 2"]')).toHaveValue("door");
+    await zones.locator("[data-zone-save]").click();
+    await expect(zones.locator("li").filter({ hasText: "Open copied door" })).toContainText("manual");
+    await page.locator('[data-window="macros"] [data-window-close]').click();
+    await expect(page.locator('[data-window="macros"]')).toBeHidden();
+    // A right-click on the map is the hex menu only while no tool is armed (D-272's lesson).
+    const battleSceneIdAfterAuthoring = (await sceneChildren(page))?.id ?? "";
+    expect(battleSceneIdAfterAuthoring).toBe(battleSceneId);
     const battleName = (await sceneChildren(page, battleSceneId))?.name ?? "";
     expect(battleSceneId).not.toBe("");
     expect(battleName).not.toBe("");
@@ -535,8 +575,10 @@ test.describe("encounter engine (§8 Phase 4, D-273)", () => {
     await expect(battle).toBeEnabled();
     await battle.click();
     await expect(result.locator("[data-result-battle-confirm]")).toBeVisible();
+    const seqBeforeCopy = await hostCall<number>(page, "seq");
     await result.locator("[data-result-battle-yes]").click();
 
+    await expect.poll(() => hostCall<number>(page, "seq")).toBe(seqBeforeCopy + 1);
     await expect
       .poll(async () => (await page.locator(".scenenav [data-scene]").count()), {
         timeout: 20_000,
@@ -547,12 +589,14 @@ test.describe("encounter engine (§8 Phase 4, D-273)", () => {
     const copy = await sceneChildren(page, copyId);
     expect(copy?.name).toBe("Goblin scouts — encounter");
     expect(copy?.active).toBe(true);
-    // The original's wall travelled, re-keyed, and so did the map image (by asset hash — a copy
-    // shares the bytes rather than duplicating them, which is the one thing §5.6 is emphatic about).
-    expect(copy?.walls).toHaveLength(1);
-    expect(copy?.walls[0]?.c).toEqual((await sceneChildren(page, battleSceneId))?.walls[0]?.c);
-    expect(copy?.walls[0]?.id).not.toBe((await sceneChildren(page, battleSceneId))?.walls[0]?.id);
-    expect(copy?.img).toBe((await sceneChildren(page, battleSceneId))?.img ?? null);
+    // This is a copy of the ordinary tactical source scene, not a hexcrawl scene: both the closed
+    // door and the window keep their authored kind/geometry, receive fresh IDs, and share the map hash.
+    expect(copy?.scale).toBe("tactical");
+    expect(copy?.walls).toHaveLength(2);
+    expect(copy?.walls.map((wall) => wall.kind)).toEqual(sourceScene?.walls.map((wall) => wall.kind));
+    expect(copy?.walls.map((wall) => wall.c)).toEqual(sourceScene?.walls.map((wall) => wall.c));
+    expect(copy?.walls.every((wall, index) => wall.id !== sourceScene?.walls[index]?.id)).toBe(true);
+    expect(copy?.img).toBe(sourceScene?.img ?? null);
     // …and the encounter's own creatures are in it, at least a cell apart, as in the original.
     const copyEncounter = (copy?.tokens ?? []).filter((t) => t.name === "Dire Wolf Pack");
     expect(copyEncounter).toHaveLength(2);
@@ -562,6 +606,19 @@ test.describe("encounter engine (§8 Phase 4, D-273)", () => {
         (copyEncounter[0]?.y ?? 0) - (copyEncounter[1]?.y ?? 0),
       ),
     ).toBeGreaterThanOrEqual(100);
+
+    // The real UI's saved-zone list exposes the copied graph; its pinned door ref must resolve
+    // inside the destination scene rather than operating on the original battle scene.
+    await page.locator("#gm-macros").click();
+    await page.locator("[data-macro-zones-tab]").click();
+    const copiedGraph = zones.locator("li").filter({ hasText: "Open copied door (copy)" });
+    await expect(copiedGraph).toContainText("manual");
+    const seqBeforeFire = await hostCall<number>(page, "seq");
+    await copiedGraph.getByRole("button", { name: "Fire", exact: true }).click();
+    await expect.poll(() => hostCall<number>(page, "seq")).toBeGreaterThan(seqBeforeFire);
+    await expect.poll(async () => (await sceneChildren(page, copyId))?.walls[0]?.door).toBe(1);
+    expect((await sceneChildren(page, battleSceneId))?.walls[0]?.door).toBe(0);
+    await page.locator('[data-window="macros"] [data-window-close]').click();
 
     // The origin hex remembers the fight, so the return trip is one click (§5.6's own note).
     const log = await surfaceCallArgs<Array<{ sceneId: string | null; text: string }>>(
@@ -589,5 +646,116 @@ test.describe("encounter engine (§8 Phase 4, D-273)", () => {
     await expect
       .poll(async () => (await sceneChildren(page, hexcrawlId))?.active)
       .toBe(false);
+  });
+
+  test("strategic-scale linked scenes also clone ordinary doors and windows", async ({ page }) => {
+    test.setTimeout(240_000);
+    await page.goto(entry + "?e2e=1");
+    await waitForSurface(page, "app");
+    await importShippedCore(page);
+
+    const box = await page.locator(".canvas-host canvas").boundingBox();
+    if (!box) throw new Error("canvas not mounted");
+    await page.locator('[data-canvas-tool="wall"]').click();
+    await page.locator('[data-canvas-wall-kind="door"]').click();
+    await page.mouse.move(box.x + 240, box.y + 200);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 420, box.y + 200, { steps: 8 });
+    await page.mouse.up();
+    await expect.poll(() => hostCall<Array<{ id: string }>>(page, "walls")).toHaveLength(1);
+    await page.locator('[data-canvas-wall-kind="window"]').click();
+    await page.mouse.move(box.x + 240, box.y + 300);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 420, box.y + 300, { steps: 8 });
+    await page.mouse.up();
+    await expect.poll(() => hostCall<Array<{ id: string }>>(page, "walls")).toHaveLength(2);
+    await page.locator('[data-canvas-tool="select"]').click();
+    // Draw the architectural placeables normally, then switch the same scene to strategic scale;
+    // the battle-scene clone must preserve both the mode flag and these scene-local walls.
+    await page.locator("#gm-settings").click();
+    const settings = page.locator('[data-window="settings"]');
+    await expect(settings).toBeVisible();
+    await settings.locator("[data-scene-scale]").selectOption("strategic");
+    await expect.poll(() => gmCall<string>(page, "sceneScale")).toBe("strategic");
+    await settings.locator("[data-window-close]").click();
+    const source = await sceneChildren(page);
+    if (!source) throw new Error("strategic source scene missing");
+    expect(source.scale).toBe("strategic");
+    expect(source.walls.map((wall) => wall.kind)).toEqual(["door", "window"]);
+    const sourceDoorId = source.walls[0]?.id;
+    if (!sourceDoorId) throw new Error("strategic source door missing");
+
+    // Publish a graph in strategic mode too; its pinned door must follow the scene copy.
+    await page.locator("#gm-macros").click();
+    await page.locator("[data-macro-zones-tab]").click();
+    const zones = page.locator("[data-active-zones]");
+    await zones.locator("[data-zone-tile-create] summary").click();
+    const trigger = zones.locator("[data-zone-tile-create]");
+    await trigger.getByLabel("Tile name").fill("Strategic door trigger");
+    await trigger.getByLabel("X", { exact: true }).fill("650");
+    await trigger.getByLabel("Y", { exact: true }).fill("450");
+    await trigger.getByLabel("Width").fill("120");
+    await trigger.getByLabel("Height").fill("120");
+    await trigger.locator("[data-zone-create-tile]").click();
+    await zones.locator("[data-zone-name]").fill("Open strategic copied door");
+    await zones.locator(".methods label").filter({ hasText: "enter" }).locator("input").uncheck();
+    await zones.locator(".methods label").filter({ hasText: "stop" }).locator("input").uncheck();
+    await zones.locator('[data-zone-step="select"]').getByLabel("Current collection").selectOption("ids");
+    await zones.getByLabel("Pinned entities", { exact: true })
+      .selectOption(JSON.stringify([source.id, "walls", sourceDoorId]));
+    await zones.locator('[data-zone-step="notice"]').getByLabel("Action 2").selectOption("door");
+    await zones.locator("[data-zone-save]").click();
+    await expect(zones.locator("li").filter({ hasText: "Open strategic copied door" })).toContainText("manual");
+    await page.locator('[data-window="macros"] [data-window-close]').click();
+
+    const battleName = source.name;
+    const hexcrawlId = await createHexcrawlScene(page);
+    const target = await hexBesideParty(page);
+    const table = await attachTable(page, target, { linkScene: battleName, bestiaryRef: true });
+    await page.mouse.click(target.at.x, target.at.y, { button: "right" });
+    const menu = page.locator("[data-hex-menu]");
+    await expect(menu).toBeVisible();
+    await menu.locator('[data-hex-menu-action="roll"]').click();
+    const hexWindow = page
+      .locator("[data-window]")
+      .filter({ has: page.locator(`[data-hex-window="${target.key}"]`) });
+    await expect(hexWindow).toBeVisible();
+    await hexWindow.locator(`[data-hex-roll="${table.id}"]`).click();
+    const result = page
+      .locator("[data-window]")
+      .filter({ has: page.locator("[data-encounter-result]") });
+    await expect(result).toBeVisible({ timeout: 20_000 });
+
+    const idsBefore = await page.locator(".scenenav [data-scene]")
+      .evaluateAll((elements) => elements.map((element) => element.getAttribute("data-scene") ?? ""));
+    const seqBeforeCopy = await hostCall<number>(page, "seq");
+    const battle = result.locator("[data-result-battle-scene]");
+    await expect(battle).toBeEnabled();
+    await battle.click();
+    await result.locator("[data-result-battle-yes]").click();
+    await expect.poll(() => hostCall<number>(page, "seq")).toBe(seqBeforeCopy + 1);
+    await expect.poll(() => page.locator(".scenenav [data-scene]").count()).toBe(idsBefore.length + 1);
+    const idsAfter = await page.locator(".scenenav [data-scene]")
+      .evaluateAll((elements) => elements.map((element) => element.getAttribute("data-scene") ?? ""));
+    const copyId = idsAfter.find((id) => !idsBefore.includes(id));
+    if (!copyId) throw new Error("strategic scene copy missing");
+    const copy = await sceneChildren(page, copyId);
+    expect(copy?.scale).toBe("strategic");
+    expect(copy?.active).toBe(true);
+    expect(copy?.walls.map((wall) => wall.kind)).toEqual(source.walls.map((wall) => wall.kind));
+    expect(copy?.walls.map((wall) => wall.c)).toEqual(source.walls.map((wall) => wall.c));
+    expect(copy?.walls.every((wall, index) => wall.id !== source.walls[index]?.id)).toBe(true);
+
+    await page.locator("#gm-macros").click();
+    await page.locator("[data-macro-zones-tab]").click();
+    const copiedGraph = zones.locator("li").filter({ hasText: "Open strategic copied door (copy)" });
+    await expect(copiedGraph).toContainText("manual");
+    const seqBeforeFire = await hostCall<number>(page, "seq");
+    await copiedGraph.getByRole("button", { name: "Fire", exact: true }).click();
+    await expect.poll(() => hostCall<number>(page, "seq")).toBeGreaterThan(seqBeforeFire);
+    await expect.poll(async () => (await sceneChildren(page, copyId))?.walls[0]?.door).toBe(1);
+    expect((await sceneChildren(page, source.id))?.walls[0]?.door).toBe(0);
+    await page.locator('[data-window="macros"] [data-window-close]').click();
+    await expect.poll(async () => (await sceneChildren(page, hexcrawlId))?.active).toBe(false);
   });
 });

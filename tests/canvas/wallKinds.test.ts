@@ -43,7 +43,7 @@ describe("wall kinds (D-257)", () => {
   });
 
   test("a window passes sight and light but blocks movement and sound — no door state", () => {
-    expect(wallAxesFor("window")).toEqual({ sight: 2, move: 0, sound: 2, light: 2 });
+    expect(wallAxesFor("window")).toEqual({ sight: 2, move: 0, sound: 0, light: 2 });
   });
 
   test("every kind has a display name", () => {

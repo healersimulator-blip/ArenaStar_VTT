@@ -291,10 +291,20 @@ export interface ItemDocument extends BaseDocument {
   effects: EffectDocument[];
 }
 
+/** Actor token defaults that are not themselves a scene placeable. Tagger reads and writes
+ * `taggerTags` here, then token creation copies the tags onto the placed token document. */
+export interface TokenPrototypeData {
+  taggerTags?: string[];
+  flags?: FlagStore;
+  [key: string]: Json | undefined;
+}
+
 export interface ActorDocument extends BaseDocument {
   type: "actor";
   items: ItemDocument[];
   effects: EffectDocument[];
+  /** Defaults for tokens created from this actor; optional on older/imported documents. */
+  prototypeToken?: TokenPrototypeData;
 }
 
 export interface JournalPageDocument extends BaseDocument {

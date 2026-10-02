@@ -31,7 +31,8 @@ import type { PermissionUser } from "./ownership";
 import { getByTag, listTaggable, normalizeTags, tagMatcher, tagsOf, TAGGABLE_COLLECTIONS, validSceneTagRefs,
   type TagEdit, type TagMatchMode, type TagPattern, type TagSearchCollection } from "./tags";
 
-export type AutomationMethod = "enter" | "exit" | "stop" | "elevation" | "create" | "rotate" | "click" | "manual";
+export type AutomationMethod = "enter" | "exit" | "stop" | "elevation" | "create" | "sceneChange" | "rotate" | "click" | "rightClick" | "doubleClick" | "hoverIn" | "hoverOut" | "manual";
+export type AutomationPointerMethod = Extract<AutomationMethod, "click" | "rightClick" | "doubleClick" | "hoverIn" | "hoverOut">;
 /** Explicitly bound event fields, never arbitrary code/field paths from a player request. */
 export type AutomationScriptBinding = "triggerToken" | "currentToken" | "method" | "user" | "scene" | "tile" | "count";
 export interface AutomationGates {
@@ -78,6 +79,11 @@ export type AutomationStep =
   | { id: string; kind: "checkValue"; source: "darkness" | "time" | "direction.x" | "direction.y";
       compare: "eq" | "ne" | "gt" | "gte" | "lt" | "lte";
       value: number | "left" | "right" | "up" | "down"; otherwise?: string }
+  /** Compare a bounded own-property path on an awaited Run Macro result.
+   * `ok`, `error`, and `value[.path]` are the available roots. */
+  | { id: string; kind: "checkScriptResult"; scriptStepId: string; path: string;
+      compare: "eq" | "ne" | "gt" | "gte" | "lt" | "lte";
+      value: string | number | boolean | null; otherwise?: string }
   | { id: string; kind: "shuffle" }
   | { id: string; kind: "position"; index: number }
   | { id: string; kind: "distance"; from: "trigger" | "tile"; min?: number; max: number }
@@ -177,11 +183,19 @@ export type AutomationStep =
    * this graph's atomic transaction. No inline code or caller-supplied grants. */
   | { id: string; kind: "script"; macroId: string;
       args?: Record<string, string | number | boolean>;
-      bindings?: Record<string, AutomationScriptBinding> }
+      bindings?: Record<string, AutomationScriptBinding>;
+      /** `approved` uses the published policy; caller can narrow, GM can only
+       * be selected when the published policy already grants that elevation. */
+      runAs?: "approved" | "caller" | "gm";
+      /** A failed awaited action can stop the queue or preserve later authorized actions. */
+      onError?: "stop" | "continue";
+      /** Yield here and resume with a typed result after the host awaits this call. */
+      captureResult?: boolean }
   /** GM-authored, exact preset ID. Post-commit like a reviewed script because
    * a compendium source may need asynchronous resolution. No actor data from
    * the triggering client is accepted; the host creates the linked instance. */
-  | { id: string; kind: "summon"; presetId: string; anchor: "tile" | "trigger" | "current" }
+  | { id: string; kind: "summon"; presetId: string; anchor: "tile" | "trigger" | "current";
+      onError?: "stop" | "continue" }
   | { id: string; kind: "landing"; name: string }
   | { id: string; kind: "jump"; to: string }
   | { id: string; kind: "stop" };
@@ -244,11 +258,34 @@ export interface AutomationScriptCall {
   stepId: string;
   macroId: string;
   args: Record<string, Json>;
+  runAs?: "approved" | "caller" | "gm";
+  onError?: "stop" | "continue";
+  /** Pause the graph after this awaited call so later steps can branch on its return. */
+  captureResult?: true;
+}
+export type AutomationScriptResult =
+  | { ok: true; value: Json }
+  | { ok: false; error: string };
+export interface AutomationContinuation {
+  graphId: string;
+  stepIndex: number;
+  captureStepId: string;
+  current: DocRef[];
+  values: Record<string, string | number | boolean>;
+  scriptResults: Record<string, AutomationScriptResult>;
+  tableResult: { present: false } | { present: true; value: string | null };
+  graphSteps: number;
+  postActionCount: number;
+  budgets: {
+    steps: number; invocations: number; attributeReads: number; actorFilterReads: number;
+    tileVariableReads: number; imageSelectionRolls: number; healthRolls: number;
+    rotationRolls: number; moveRolls: number; gameTimeRolls: number; tableRolls: number;
+  };
 }
 export type AutomationPostAction =
   | ({ kind: "script" } & AutomationScriptCall)
   | { kind: "summon"; stepId: string; presetId: string; at: { x: number; y: number };
-      summonerTokenId?: string };
+      summonerTokenId?: string; onError?: "stop" | "continue" };
 export interface AutomationPlan {
   ops: Op[];
   cues: AutomationFx[];
@@ -256,6 +293,8 @@ export interface AutomationPlan {
   /** Authored order across reviewed scripts and real summons. Separate commits
    * follow the single graph envelope; GM trace reports failures explicitly. */
   postActions: AutomationPostAction[];
+  /** Present when an awaited script result suspends the graph at a safe boundary. */
+  continuation?: AutomationContinuation;
   trace: string[];
   state: AutomationState;
   /** Suppress later tiles for this moving token after a successful host commit. */
@@ -270,7 +309,7 @@ export type AutomationOutcome =
   | { ok: false; error: string; trace: string[] }
   | { ok: true; skipped: string; trace: string[] };
 
-const METHODS: readonly AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "rotate", "click", "manual"];
+const METHODS: readonly AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "sceneChange", "rotate", "click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "manual"];
 const SCRIPT_BINDINGS: readonly AutomationScriptBinding[] = ["triggerToken", "currentToken", "method", "user", "scene", "tile", "count"];
 const IDENT = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
 const INPUT_NAME = /^[a-zA-Z][a-zA-Z0-9_]{0,31}$/;
@@ -286,6 +325,21 @@ const validVariable = (value: unknown): value is string | number | boolean =>
   typeof value === "number" && finite(value, -VARIABLE_NUMBER_LIMIT, VARIABLE_NUMBER_LIMIT);
 const keys = (v: Record<string, unknown>, allowed: readonly string[]) => Object.keys(v).every((k) => allowed.includes(k));
 const nonEmptyId = (v: unknown) => typeof v === "string" && v.length > 0 && v.length <= 128;
+const SCRIPT_RESULT_SEGMENT = /^[a-zA-Z_][a-zA-Z0-9_-]{0,31}$/;
+const SCRIPT_RESULT_UNSAFE = new Set(["__proto__", "prototype", "constructor"]);
+function validScriptResultPath(path: unknown): path is string {
+  if (typeof path !== "string" || path.length > 128) return false;
+  const parts = path.split(".");
+  if (parts.length < 1 || parts.length > 8 || parts.some((part) =>
+    !SCRIPT_RESULT_SEGMENT.test(part) || SCRIPT_RESULT_UNSAFE.has(part))) return false;
+  return ["ok", "error", "value"].includes(parts[0] ?? "") &&
+    (parts[0] === "value" || parts.length === 1);
+}
+function validScriptResultValue(value: unknown): value is string | number | boolean {
+  return typeof value === "boolean" || typeof value === "number" && finite(value, -1e9, 1e9) ||
+    typeof value === "string" && value.length <= 256 &&
+      !Array.from(value).some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127);
+}
 
 /** These world-image actions intentionally accept no remote URLs or arbitrary MIME types.
  * Publishing to a scene/tile must not smuggle GM-only imported FX media into a public ref.
@@ -453,7 +507,7 @@ export function validateAutomation(value: unknown): { ok: true; definition: Auto
             (step.mode !== undefined && !["all", "any", "none"].includes(String(step.mode))) ||
             !["eq", "ne", "gt", "gte", "lt", "lte", "mod"].includes(String(step.compare)) ||
             (step.otherwise !== undefined && (typeof step.otherwise !== "string" || !IDENT.test(step.otherwise))))
-          return bad("invalid Check Variable name, aggregation or comparison");
+          return bad("invalid Check Variable name,  aggregation or comparison");
         if (step.target !== undefined) {
           const error = tileTargetError(step.target, value.sceneId as string);
           if (error) return bad(error);
@@ -477,6 +531,17 @@ export function validateAutomation(value: unknown): { ok: true; definition: Auto
                 !["eq", "ne"].includes(String(step.compare)) ||
                 !(step.source === "direction.x" ? ["left", "right"] : ["up", "down"]).includes(String(step.value))))
           return bad("Check Value requires committed darkness 0–1, time 0–1439, or a movement direction");
+        break;
+      }
+      case "checkScriptResult": {
+        if (!keys(step, [...common, "scriptStepId", "path", "compare", "value", "otherwise"]) ||
+            typeof step.scriptStepId !== "string" || !IDENT.test(step.scriptStepId) ||
+            !validScriptResultPath(step.path) ||
+            !["eq", "ne", "gt", "gte", "lt", "lte"].includes(String(step.compare)) ||
+            (step.value !== null && !validScriptResultValue(step.value)) ||
+            (["gt", "gte", "lt", "lte"].includes(String(step.compare)) && typeof step.value !== "number") ||
+            (step.otherwise !== undefined && (typeof step.otherwise !== "string" || !IDENT.test(step.otherwise))))
+          return bad("Check Script Result needs a safe path, typed comparison and optional failure landing");
         break;
       }
       case "shuffle":
@@ -727,11 +792,15 @@ export function validateAutomation(value: unknown): { ok: true; definition: Auto
             !["scene", "gm"].includes(String(step.audience))) return bad("invalid sequence action");
         break;
       case "script": {
-        if (!keys(step, [...common, "macroId", "args", "bindings"]) ||
+        if (!keys(step, [...common, "macroId", "args", "bindings", "runAs", "onError", "captureResult"]) ||
             typeof step.macroId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(step.macroId) ||
             (step.args !== undefined && !isObject(step.args)) ||
-            (step.bindings !== undefined && !isObject(step.bindings)) || ++asyncSteps > 16)
-          return bad("a script action needs a saved macro; at most 16 post-commit actions may run per graph");
+            (step.bindings !== undefined && !isObject(step.bindings)) ||
+            (step.runAs !== undefined && !["approved", "caller", "gm"].includes(String(step.runAs))) ||
+            (step.onError !== undefined && !["stop", "continue"].includes(String(step.onError))) ||
+            (step.captureResult !== undefined && typeof step.captureResult !== "boolean") ||
+            (step.captureResult === true && loopStack.length > 0) || ++asyncSteps > 16)
+          return bad("a script action needs a saved macro, valid run-as/result/error policy; result capture must be outside loops; at most 16 post-commit actions may run per graph");
         const args = step.args as Record<string, unknown> | undefined;
         const bindings = step.bindings as Record<string, unknown> | undefined;
         if (Object.keys(args ?? {}).length + Object.keys(bindings ?? {}).length > 16 ||
@@ -745,10 +814,11 @@ export function validateAutomation(value: unknown): { ok: true; definition: Auto
         break;
       }
       case "summon":
-        if (!keys(step, [...common, "presetId", "anchor"]) ||
+        if (!keys(step, [...common, "presetId", "anchor", "onError"]) ||
             typeof step.presetId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(step.presetId) ||
-            !["tile", "trigger", "current"].includes(String(step.anchor)) || ++asyncSteps > 16)
-          return bad("summon needs one saved preset and tile/trigger/current anchor; at most 16 post-commit actions");
+            !["tile", "trigger", "current"].includes(String(step.anchor)) ||
+            (step.onError !== undefined && !["stop", "continue"].includes(String(step.onError))) || ++asyncSteps > 16)
+          return bad("summon needs one saved preset, tile/trigger/current anchor and valid error policy; at most 16 post-commit actions");
         break;
       case "landing":
         if (loopStack.length) return bad("named landings cannot be inside a collection loop");
@@ -766,14 +836,26 @@ export function validateAutomation(value: unknown): { ok: true; definition: Auto
     }
   }
   if (loopStack.length) return bad("collection loop is missing its closing step");
-  for (const step of value.steps) {
+  const stepIndexes = new Map<string, number>();
+  value.steps.forEach((candidate, index) => {
+    if (isObject(candidate) && typeof candidate.id === "string") stepIndexes.set(candidate.id, index);
+  });
+  for (const [index, step] of value.steps.entries()) {
+    if (isObject(step) && step.kind === "checkScriptResult") {
+      const sourceIndex = stepIndexes.get(String(step.scriptStepId));
+      const source = sourceIndex === undefined ? undefined : value.steps[sourceIndex];
+      if (sourceIndex === undefined || sourceIndex >= index || !isObject(source) ||
+          source.kind !== "script" || source.captureResult !== true)
+        return bad(`Check Script Result source must be an earlier result-capturing script step: ${String(step.scriptStepId)}`);
+    }
+    if (!isObject(step)) continue;
     const targets = step.kind === "jump" ? [step.to]
       : step.kind === "filter" || step.kind === "routeMethod" ? (step.kind === "routeMethod"
-        ? [...Object.values(step.routes), step.otherwise] : [step.otherwise])
+        ? [...Object.values(step.routes as Record<string, unknown>), step.otherwise] : [step.otherwise])
       : step.kind === "routeUser" ? [step.gm, step.player, step.otherwise]
-      : step.kind === "checkVariable" || step.kind === "checkValue" || step.kind === "checkData"
+      : ["checkVariable", "checkValue", "checkData", "checkScriptResult"].includes(String(step.kind))
         ? [step.otherwise] : [];
-    for (const target of targets) if (target && !landings.has(target)) return bad(`landing not found: ${target}`);
+    for (const target of targets) if (target && !landings.has(target as string)) return bad(`landing not found: ${String(target)}`);
   }
   return { ok: true, definition: value as unknown as AutomationDefinition };
 }
@@ -996,6 +1078,16 @@ export function sweptTileEvents(
 }
 
 /** Resolve tag and spatial selectors against CURRENT host documents, never author-time IDs. */
+function resolveContinuationTargets(scene: SceneDocument, refs: readonly DocRef[]): Target[] {
+  return refs.flatMap((ref) => {
+    if (ref.parent?.coll !== "scenes" || ref.parent.id !== scene._id ||
+        !PINNABLE_COLLECTIONS.includes(ref.coll as typeof PINNABLE_COLLECTIONS[number])) return [];
+    const collection = ref.coll as typeof PINNABLE_COLLECTIONS[number];
+    const doc = scene[collection].find((item) => item._id === ref.id);
+    return doc ? [{ ref, doc }] : [];
+  });
+}
+
 function select(
   world: Readonly<WorldCollections>, event: AutomationEvent, selector: AutomationSelector,
 ): Array<{ ref: DocRef; doc: BaseDocument }> {
@@ -1232,7 +1324,7 @@ function filterByInventory(ctx: PlanningContext, current: Target[],
   return { ok: true, targets };
 }
 
-type GraphOutcome = { ok: true; skipped?: string; stopped?: boolean } | { ok: false; error: string };
+type GraphOutcome = { ok: true; skipped?: string; stopped?: boolean; continuation?: AutomationContinuation } | { ok: false; error: string };
 interface PlanningContext {
   /** Isolated active-scene tree and remote scene headers for the whole nested call chain. */
   world: Readonly<WorldCollections>;
@@ -1242,6 +1334,9 @@ interface PlanningContext {
   scripts: AutomationScriptCall[];
   postActions: AutomationPostAction[];
   trace: string[];
+  rootAutomationId: string;
+  scriptResults: Map<string, AutomationScriptResult>;
+  postActionCount: number;
   histories: Map<string, AutomationState>;
   historyOps: Map<string, Extract<Op, { kind: "update" }>>;
   /** Same-envelope graph gate edits share an update with trigger history when
@@ -1300,6 +1395,32 @@ function variableMatches(actual: string | number | boolean | null,
     return typeof actual === "number" && Number.isSafeInteger(actual) && divisor > 0 &&
       ((actual % divisor) + divisor) % divisor === step.remainder;
   }
+  if (step.compare === "eq") return actual === step.value;
+  if (step.compare === "ne") return actual !== step.value;
+  if (typeof actual !== "number" || typeof step.value !== "number") return false;
+  switch (step.compare) {
+    case "gt": return actual > step.value;
+    case "gte": return actual >= step.value;
+    case "lt": return actual < step.value;
+    case "lte": return actual <= step.value;
+  }
+  return false;
+}
+function scriptResultPathValue(result: AutomationScriptResult, path: string):
+  { found: true; value: string | number | boolean | null } | { found: false } {
+  let source: unknown = result;
+  for (const part of path.split(".")) {
+    if (!isObject(source)) return { found: false };
+    const descriptor = Object.getOwnPropertyDescriptor(source, part);
+    if (!descriptor || !("value" in descriptor)) return { found: false };
+    source = descriptor.value;
+  }
+  if (source === null || typeof source === "string" || typeof source === "boolean" ||
+      typeof source === "number" && Number.isFinite(source)) return { found: true, value: source };
+  return { found: false };
+}
+function scriptResultMatches(actual: string | number | boolean | null,
+  step: Extract<AutomationStep, { kind: "checkScriptResult" }>): boolean {
   if (step.compare === "eq") return actual === step.value;
   if (step.compare === "ne") return actual !== step.value;
   if (typeof actual !== "number" || typeof step.value !== "number") return false;
@@ -1375,11 +1496,33 @@ function flushBatch(ctx: PlanningContext, sceneId: string):
  * all nested graphs, then return ONE preflightable, undoable envelope. */
 export function planAutomation(
   world: Readonly<WorldCollections>, doc: AutomationDocument, event: AutomationEvent, hostUserId: string,
+  resume?: AutomationContinuation,
 ): AutomationOutcome {
   const trace: string[] = [];
   const fail = (error: string): AutomationOutcome => ({ ok: false, error, trace });
   const validated = validateAutomation(doc.definition);
   if (!validated.ok) return fail(validated.error);
+  if (resume) {
+    const source = validated.definition.steps.find((step) => step.id === resume.captureStepId);
+    const sourceIndex = validated.definition.steps.findIndex((step) => step.id === resume.captureStepId);
+    const budgetValues = isObject(resume.budgets) ? Object.values(resume.budgets) : [];
+    if (resume.graphId !== doc._id || !Number.isSafeInteger(resume.stepIndex) ||
+        resume.stepIndex !== sourceIndex + 1 || sourceIndex < 0 ||
+        source?.kind !== "script" || source.captureResult !== true ||
+        !Array.isArray(resume.current) || resume.current.length > 1024 ||
+        resume.current.some((ref) => !isObject(ref) || !PINNABLE_COLLECTIONS.includes(ref.coll as typeof PINNABLE_COLLECTIONS[number]) ||
+          ref.parent?.coll !== "scenes" || ref.parent.id !== event.scene._id || !nonEmptyId(ref.id)) ||
+        !isObject(resume.values) || Object.entries(resume.values).some(([name, item]) =>
+          !IDENT.test(name) || !validVariable(item)) ||
+        !isObject(resume.scriptResults) || Object.keys(resume.scriptResults).length > 16 ||
+        !isObject(resume.budgets) || budgetValues.length !== 11 ||
+        budgetValues.some((item) => !Number.isSafeInteger(item) || (item as number) < 0 || (item as number) > 100_000) ||
+        !Number.isSafeInteger(resume.postActionCount) || resume.postActionCount < 1 || resume.postActionCount > 16 ||
+        !Number.isSafeInteger(resume.graphSteps) || resume.graphSteps < 1 || resume.graphSteps > 25_000 ||
+        !(resume.tableResult?.present === false || resume.tableResult?.present === true &&
+          (resume.tableResult.value === null || typeof resume.tableResult.value === "string" && resume.tableResult.value.length <= 256)))
+      return fail("invalid or stale automation continuation");
+  }
   if (!world.scenes.some((s) => s._id === event.scene._id)) return fail("scene unavailable for automation");
   const stagedScene = structuredClone(event.scene);
   const stagedWorld: Readonly<WorldCollections> = {
@@ -1408,12 +1551,18 @@ export function planAutomation(
     world: stagedWorld,
     originals: new Map(listTaggable(world, { sceneId: stagedScene._id })
       .map(({ ref, doc: original }) => [targetKey(ref), original])),
-    ops: [], cues: [], scripts: [], postActions: [], trace, histories: new Map(), historyOps: new Map(),
+    ops: [], cues: [], scripts: [], postActions: [], trace, rootAutomationId: doc._id,
+    scriptResults: new Map(Object.entries(resume?.scriptResults ?? {})),
+    postActionCount: resume?.postActionCount ?? 0, histories: new Map(), historyOps: new Map(),
     definitionOps: new Map(), sceneAppearanceOps: new Map(), pendingTags: new Map(), pendingVisibility: new Map(), pendingDoors: new Map(),
-    stack: [], steps: 0, invocations: 0, attributeReads: 0, actorFilterReads: 0,
-    tileVariableReads: 0, imageSelectionRolls: 0, healthRolls: 0, rotationRolls: 0, moveRolls: 0, gameTimeRolls: 0, tableRolls: 0, stopOthers: false, suppressedMovement: new Set(), stoppedMovement: new Set(),
+    stack: [], steps: resume?.budgets.steps ?? 0, invocations: resume?.budgets.invocations ?? 0,
+    attributeReads: resume?.budgets.attributeReads ?? 0, actorFilterReads: resume?.budgets.actorFilterReads ?? 0,
+    tileVariableReads: resume?.budgets.tileVariableReads ?? 0, imageSelectionRolls: resume?.budgets.imageSelectionRolls ?? 0,
+    healthRolls: resume?.budgets.healthRolls ?? 0, rotationRolls: resume?.budgets.rotationRolls ?? 0,
+    moveRolls: resume?.budgets.moveRolls ?? 0, gameTimeRolls: resume?.budgets.gameTimeRolls ?? 0,
+    tableRolls: resume?.budgets.tableRolls ?? 0, stopOthers: false, suppressedMovement: new Set(), stoppedMovement: new Set(),
   };
-  const result = planGraph(ctx, doc, stagedEvent, hostUserId);
+  const result = planGraph(ctx, doc, stagedEvent, hostUserId, undefined, resume);
   if (!result.ok) return fail(result.error);
   if (result.skipped) return { ok: true, skipped: result.skipped, trace };
   const flushed = flushBatch(ctx, stagedScene._id); // implicit final batch execution
@@ -1422,14 +1571,15 @@ export function planAutomation(
   const state = ctx.histories.get(doc._id);
   if (!state) return fail("root graph did not record its history");
   return { ok: true, plan: { ops: ctx.ops, cues: ctx.cues, scripts: ctx.scripts,
-    postActions: ctx.postActions, trace, state, stopOthers: ctx.stopOthers,
+    postActions: ctx.postActions, ...(result.continuation ? { continuation: result.continuation } : {}),
+    trace, state, stopOthers: ctx.stopOthers,
     suppressedMovement: [...ctx.suppressedMovement], stoppedMovement: [...ctx.stoppedMovement] } };
 }
 
 /** A child is never committed on its own: failures discard ALL staged parent work. */
 function planGraph(
   ctx: PlanningContext, doc: AutomationDocument, event: AutomationEvent, hostUserId: string,
-  landing?: string,
+  landing?: string, resume?: AutomationContinuation,
 ): GraphOutcome {
   const fail = (error: string): GraphOutcome => ({ ok: false, error });
   const { world, trace, ops, cues, scripts, postActions, pendingTags, pendingVisibility, pendingDoors } = ctx;
@@ -1442,33 +1592,41 @@ function planGraph(
   if (event.scene._id !== d.sceneId || event.tile._id !== d.tileId ||
       !anchorExists || !d.methods.includes(event.method)) return { ok: true, skipped: "method/anchor mismatch" };
   if (ctx.stack.includes(doc._id)) return fail(`trigger tile recursion: ${[...ctx.stack, doc._id].join(" -> ")}`);
-  if (ctx.stack.length >= 8 || ++ctx.invocations > 128)
+  if (ctx.stack.length >= 8 || (!resume && ++ctx.invocations > 128))
     return fail("trigger tile depth/invocation budget (8/128) exceeded");
+  if (resume && doc._id !== ctx.rootAutomationId)
+    return fail("only the root active-zone graph can resume an awaited script result");
   if (landing && !d.steps.some((step) => step.kind === "landing" && step.name === landing))
     return fail(`landing ${landing} not found in ${doc._id}`);
   const state: AutomationState = ctx.histories.get(doc._id) ?? doc.state ?? { count: 0, lastAt: 0, byToken: {} };
   if (!validateAutomationState(state)) return fail("invalid trigger history");
   const gates = d.gates ?? {};
-  if (gates.paused) return { ok: true, skipped: "paused" };
   const key = event.token?._id ?? `user:${event.caller.id}`;
-  const history = state.byToken[key];
-  if (gates.maxRuns && state.count >= gates.maxRuns) return { ok: true, skipped: "run limit" };
-  if (gates.oncePerToken && history?.count) return { ok: true, skipped: "already fired for this token/user" };
-  if (gates.cooldownMs && history && event.at - history.lastAt < gates.cooldownMs) return { ok: true, skipped: "cooldown" };
-  if (gates.chance !== undefined && event.rng() >= gates.chance) return { ok: true, skipped: "chance gate" };
-  if (state.count >= 1_000_000 || (history?.count ?? 0) >= 1_000_000)
-    return fail("trigger history count cap reached; reset history before running");
-  const nextState: AutomationState = {
-    count: state.count + 1,
-    lastAt: event.at,
-    byToken: { ...state.byToken, [key]: { count: (history?.count ?? 0) + 1, lastAt: event.at } },
-    recent: [...(state.recent ?? []).slice(-99), {
-      at: event.at, method: event.method, userId: event.caller.id,
-      ...(event.token ? { tokenId: event.token._id } : {}),
-    }],
-    ...(state.variables ? { variables: { ...state.variables } } : {}),
-  };
-  if (Object.keys(nextState.byToken).length > 4096) return fail("trigger history cap reached; reset history before running");
+  let nextState: AutomationState;
+  if (resume) {
+    // This is another segment of the same invocation; do not consume gates or history twice.
+    nextState = structuredClone(state);
+  } else {
+    if (gates.paused) return { ok: true, skipped: "paused" };
+    const history = state.byToken[key];
+    if (gates.maxRuns && state.count >= gates.maxRuns) return { ok: true, skipped: "run limit" };
+    if (gates.oncePerToken && history?.count) return { ok: true, skipped: "already fired for this token/user" };
+    if (gates.cooldownMs && history && event.at - history.lastAt < gates.cooldownMs) return { ok: true, skipped: "cooldown" };
+    if (gates.chance !== undefined && event.rng() >= gates.chance) return { ok: true, skipped: "chance gate" };
+    if (state.count >= 1_000_000 || (history?.count ?? 0) >= 1_000_000)
+      return fail("trigger history count cap reached; reset history before running");
+    nextState = {
+      count: state.count + 1,
+      lastAt: event.at,
+      byToken: { ...state.byToken, [key]: { count: (history?.count ?? 0) + 1, lastAt: event.at } },
+      recent: [...(state.recent ?? []).slice(-99), {
+        at: event.at, method: event.method, userId: event.caller.id,
+        ...(event.token ? { tokenId: event.token._id } : {}),
+      }],
+      ...(state.variables ? { variables: { ...state.variables } } : {}),
+    };
+    if (Object.keys(nextState.byToken).length > 4096) return fail("trigger history cap reached; reset history before running");
+  }
 
   ctx.histories.set(doc._id, nextState);
   let historyOp = ctx.historyOps.get(doc._id);
@@ -1484,12 +1642,12 @@ function planGraph(
   // No inherited object keys can masquerade as variables in Check Variable.
   // Event bindings always win over imported state, even on malformed worlds.
   const values: Record<string, string | number | boolean> = Object.assign(Object.create(null) as Record<string, string | number | boolean>,
-    nextState.variables ?? {}, { method: event.method,
+    resume?.values ?? nextState.variables ?? {}, { method: event.method,
       originMethod: event.originMethod ?? event.method, originTile: event.originTileId ?? event.tile._id,
       user: event.caller.id, count: nextState.count });
-  // Result scope is this invocation, not graph history or a nested caller's result.
-  let lastTableResult: string | null | undefined;
-  let current: Target[] = select(world, event, { kind: "triggering" });
+  let lastTableResult: string | null | undefined = resume?.tableResult.present ? resume.tableResult.value : undefined;
+  let current: Target[] = resume ? resolveContinuationTargets(event.scene, resume.current)
+    : select(world, event, { kind: "triggering" });
   const landings = new Map(d.steps.flatMap((s, i) => s.kind === "landing" ? [[s.name, i] as const] : []));
   const loopEnds = new Map(d.steps.flatMap((s, i) => s.kind === "endEach" ? [[s.startId, i] as const] : []));
   type LoopFrame = { start: number; selection: Target[]; index: number;
@@ -1510,7 +1668,7 @@ function planGraph(
     return landings.get(name) ?? d.steps.length;
   };
   const budget = Math.min(25_000, Math.max(10_000, d.steps.length * 16));
-  let executed = 0, pc = landing ? landings.get(landing) ?? 0 : 0;
+  let executed = resume?.graphSteps ?? 0, pc = resume?.stepIndex ?? (landing ? landings.get(landing) ?? 0 : 0);
   ctx.stack.push(doc._id);
   try {
     while (pc < d.steps.length) {
@@ -1600,6 +1758,18 @@ function planGraph(
                     step.compare === "gt" ? actual > step.value : step.compare === "gte" ? actual >= step.value
                       : step.compare === "lt" ? actual < step.value : actual <= step.value));
           trace.push(`Check Value ${step.source}: ${String(actual ?? "missing")} ${step.compare} ${String(step.value)} -> ${pass ? "pass" : "fail"}`);
+          if (!pass) {
+            pc = step.otherwise ? jumpTo(step.otherwise) : d.steps.length;
+            continue;
+          }
+          break;
+        }
+        case "checkScriptResult": {
+          const result = ctx.scriptResults.get(step.scriptStepId);
+          if (!result) return fail(`script result [${step.scriptStepId}] is unavailable in this graph invocation`);
+          const actual = scriptResultPathValue(result, step.path);
+          const pass = actual.found && scriptResultMatches(actual.value, step);
+          trace.push(`Check Script Result [${step.scriptStepId}] ${step.path}: ${actual.found ? String(actual.value) : "missing"} ${step.compare} ${String(step.value)} -> ${pass ? "pass" : "fail"}`);
           if (!pass) {
             pc = step.otherwise ? jumpTo(step.otherwise) : d.steps.length;
             continue;
@@ -2399,7 +2569,10 @@ function planGraph(
           break;
         }
         case "script": {
-          if (postActions.length >= 16) return fail("automation exceeds 16 post-commit actions");
+          if (ctx.postActionCount >= 16) return fail("automation exceeds 16 post-commit actions");
+          const captureResult = step.captureResult === true;
+          if (captureResult && (doc._id !== ctx.rootAutomationId || ctx.stack.length !== 1 || frames.length > 0))
+            return fail("awaited script-result branching must be at the root graph level and outside collection loops");
           const args: Record<string, Json> = { ...step.args };
           const currentToken = current.find((c) => c.doc.type === "token")?.doc._id;
           const bindings: Record<AutomationScriptBinding, Json | undefined> = {
@@ -2410,13 +2583,34 @@ function planGraph(
             const value = bindings[binding];
             if (value !== undefined) args[name] = value;
           }
-          scripts.push({ stepId: step.id, macroId: step.macroId, args });
-          postActions.push({ kind: "script", stepId: step.id, macroId: step.macroId, args });
-          trace.push(`queued reviewed script ${step.macroId} (post-commit; ${Object.keys(args).length} input(s))`);
+          const policy = {
+            ...(step.runAs ? { runAs: step.runAs } : {}),
+            ...(step.onError ? { onError: step.onError } : {}),
+            ...(captureResult ? { captureResult: true as const } : {}),
+          };
+          scripts.push({ stepId: step.id, macroId: step.macroId, args, ...policy });
+          postActions.push({ kind: "script", stepId: step.id, macroId: step.macroId, args, ...policy });
+          ctx.postActionCount++;
+          trace.push(`queued reviewed script ${step.macroId} (post-commit; ${Object.keys(args).length} input(s); ${step.runAs ?? "approved"} run-as; ${step.onError ?? "stop"} on error${captureResult ? "; result branch boundary" : ""})`);
+          if (captureResult) {
+            const continuation: AutomationContinuation = {
+              graphId: doc._id, stepIndex: pc + 1, captureStepId: step.id,
+              current: current.map(({ ref }) => structuredClone(ref)),
+              values: { ...values }, scriptResults: Object.fromEntries(ctx.scriptResults),
+              tableResult: lastTableResult === undefined ? { present: false } : { present: true, value: lastTableResult },
+              graphSteps: executed, postActionCount: ctx.postActionCount,
+              budgets: { steps: ctx.steps, invocations: ctx.invocations, attributeReads: ctx.attributeReads,
+                actorFilterReads: ctx.actorFilterReads, tileVariableReads: ctx.tileVariableReads,
+                imageSelectionRolls: ctx.imageSelectionRolls, healthRolls: ctx.healthRolls,
+                rotationRolls: ctx.rotationRolls, moveRolls: ctx.moveRolls,
+                gameTimeRolls: ctx.gameTimeRolls, tableRolls: ctx.tableRolls },
+            };
+            return { ok: true, continuation };
+          }
           break;
         }
         case "summon": {
-          if (postActions.length >= 16) return fail("automation exceeds 16 post-commit actions");
+          if (ctx.postActionCount >= 16) return fail("automation exceeds 16 post-commit actions");
           const anchor = step.anchor === "tile"
             ? { x: event.tile.x + event.tile.width / 2, y: event.tile.y + event.tile.height / 2 }
             : step.anchor === "trigger" ? event.token
@@ -2427,8 +2621,10 @@ function planGraph(
             return fail(`summon ${step.id} needs an owned triggering caster`);
           postActions.push({ kind: "summon", stepId: step.id, presetId: step.presetId,
             at: { x: anchor.x, y: anchor.y },
-            ...(event.token ? { summonerTokenId: event.token._id } : {}) });
-          trace.push(`queued summon ${step.presetId} at ${step.anchor} (post-commit)`);
+            ...(event.token ? { summonerTokenId: event.token._id } : {}),
+            ...(step.onError ? { onError: step.onError } : {}) });
+          ctx.postActionCount++;
+          trace.push(`queued summon ${step.presetId} at ${step.anchor} (post-commit; ${step.onError ?? "stop"} on error)`);
           break;
         }
         case "landing": break;

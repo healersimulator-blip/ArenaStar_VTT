@@ -152,7 +152,7 @@ test.describe("walls, doors and windows (D-257)", () => {
       sight: 2,
       light: 2,
       move: 0,
-      sound: 2,
+      sound: 0,
     });
     expect((await probe(page, lane2.from, lane2.to)).sees).toBe(true);
     await remove(placedWindow);

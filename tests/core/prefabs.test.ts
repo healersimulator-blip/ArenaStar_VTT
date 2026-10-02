@@ -1,8 +1,8 @@
 import { describe, expect, test } from "vitest";
-import type { AutomationDocument, SceneDocument, TileDocument, TokenDocument, WallDocument } from "../../src/core/documents";
+import type { AutomationDocument, RegionDocument, SceneDocument, TileDocument, TokenDocument, WallDocument } from "../../src/core/documents";
 import { DocumentStore } from "../../src/core/store";
 import { attachedDeletionOps, attachedMovementOps, planPrefabPlacement, validatePrefab,
-  type PrefabDefinition } from "../../src/core/prefabs";
+  type PrefabDefinition, type PrefabPart } from "../../src/core/prefabs";
 import { emptyWorld } from "../net/fixtures";
 
 const tile = (): TileDocument => ({ _id: "tile-a", type: "tile", name: "Trap", flags: {}, system: {},
@@ -361,6 +361,206 @@ describe("GM-owned prefab planner and transaction", () => {
     if (!original) throw new Error("missing root movement");
     expect(attachedMovementOps(store.world, [{ ...original, diff: { x: 1900 } }]))
       .toMatchObject({ ok: false, error: expect.stringMatching(/outside scene/) });
+  });
+
+  test("wall roots translate, uniformly resize and rotate three-level attachments atomically", () => {
+    const world = emptyWorld();
+    const sourceScene = scene();
+    world.scenes.push(sourceScene);
+    const template = def();
+    const rootWall = template.parts.find((part) => part.id === "wall-a");
+    const childTile = template.parts.find((part) => part.id === "tile-a");
+    const nestedToken = template.parts.find((part) => part.id === "child-a");
+    if (!rootWall || !childTile || !nestedToken) throw new Error("missing nested prefab parts");
+    delete rootWall.parentId;
+    rootWall.locked = false;
+    childTile.parentId = rootWall.id;
+    nestedToken.parentId = childTile.id;
+
+    const placed = planPrefabPlacement(world, template, "s1", { at: { x: 500, y: 500 } }, ids());
+    expect(placed.ok).toBe(true);
+    if (!placed.ok) return;
+    const store = new DocumentStore({ meta: { worldId: "w", name: "w", system: "s", systemVersion: "1" } });
+    expect(store.applyEnvelope({ seq: 1, ts: 1, by: "gm", txId: "fixture", ops: [
+      { kind: "create", coll: "scenes", data: sourceScene }, ...placed.plan.ops,
+    ] }).ok).toBe(true);
+    const root = placed.plan.rootId;
+    const originalWall = (store.get("scenes", "s1") as SceneDocument).walls
+      .find((doc) => doc._id === placed.plan.ids["wall-a"]);
+    expect(originalWall?.c).toEqual([600, 500, 700, 500]);
+    const proposed = [{ kind: "update" as const, ref: { coll: "walls" as const, id: root,
+      parent: { coll: "scenes" as const, id: "s1" } }, diff: { c: [700, 600, 700, 800] } }];
+    const expanded = attachedMovementOps(store.world, proposed);
+    expect(expanded.ok).toBe(true);
+    if (!expanded.ok) return;
+    expect(expanded.ops).toHaveLength(3);
+    expect(expanded.ops.find((op) => op.kind === "update" && op.ref.coll === "tiles"))
+      .toMatchObject({ ref: { id: placed.plan.ids["tile-a"] }, diff: { x: 300, y: 400, width: 400, height: 400, rotation: 90 } });
+    expect(expanded.ops.find((op) => op.kind === "update" && op.ref.coll === "tokens"))
+      .toMatchObject({ ref: { id: placed.plan.ids["child-a"] }, diff: { x: 480, y: 540, width: 80, height: 80, rotation: 90 } });
+    expect(store.applyEnvelope({ seq: 2, ts: 2, by: "gm", txId: "wall-root-transform", ops: expanded.ops }).ok).toBe(true);
+    expect((store.get("scenes", "s1") as SceneDocument).tiles[0]).toMatchObject({ x: 300, y: 400, width: 400, height: 400 });
+    expect((store.get("scenes", "s1") as SceneDocument).tokens[0]).toMatchObject({ x: 480, y: 540, width: 80, height: 80 });
+    expect(template.parts.find((part) => part.id === "wall-a")?.parentId).toBeUndefined();
+    expect(proposed).toHaveLength(1); // planning never mutates the caller's root request
+  });
+
+  test("template roots carry nested descendants through shared scale and facing changes", () => {
+    const world = emptyWorld();
+    const sc = scene();
+    world.scenes.push(sc);
+    const root: PrefabDefinition = { version: 1, sourceSceneId: "s1", gridSize: 100,
+      origin: { x: 200, y: 200 }, parts: [
+        { id: "root-template", coll: "templates", doc: { _id: "root-template", type: "template",
+          name: "Ray root", ownership: { default: 0 }, flags: {}, system: {}, kind: "ray",
+          x: 200, y: 200, distance: 100, direction: 0, width: 20 } },
+        { id: "child-tile", coll: "tiles", parentId: "root-template", doc: { ...tile(), _id: "child-tile",
+          x: 300, y: 200, width: 100, height: 100 } },
+      ], graphs: [] };
+    const placed = planPrefabPlacement(world, root, "s1", { at: { x: 500, y: 500 } }, ids());
+    expect(placed.ok).toBe(true);
+    if (!placed.ok) return;
+    const store = new DocumentStore({ meta: { worldId: "w", name: "w", system: "s", systemVersion: "1" } });
+    expect(store.applyEnvelope({ seq: 1, ts: 1, by: "gm", txId: "fixture", ops: [
+      { kind: "create", coll: "scenes", data: sc }, ...placed.plan.ops,
+    ] }).ok).toBe(true);
+    const proposed = [{ kind: "update" as const, ref: { coll: "templates" as const,
+      id: placed.plan.rootId, parent: { coll: "scenes" as const, id: "s1" } },
+      diff: { x: 600, y: 600, distance: 200, direction: 90, width: 40 } }];
+    const expanded = attachedMovementOps(store.world, proposed);
+    expect(expanded.ok).toBe(true);
+    if (!expanded.ok) return;
+    expect(expanded.ops).toHaveLength(2);
+    expect(expanded.ops[1]).toMatchObject({ kind: "update", ref: { coll: "tiles", id: placed.plan.ids["child-tile"] },
+      diff: { x: 400, y: 800, width: 200, height: 200, rotation: 90 } });
+  });
+
+  test.each(["lights", "sounds"] as const)("%s roots carry translated and uniformly resized children", (coll) => {
+    const world = emptyWorld();
+    const sc = scene();
+    world.scenes.push(sc);
+    const rootDoc: PrefabPart["doc"] = coll === "lights"
+      ? { _id: "root-light", type: "light", name: "Root light", ownership: { default: 0 },
+          flags: {}, system: {}, x: 200, y: 200, dim: 100, bright: 50, color: "#fff", alpha: 1 }
+      : { _id: "root-sound", type: "sound", name: "Root sound", ownership: { default: 0 },
+          flags: {}, system: {}, x: 200, y: 200, radius: 100, audio: "", volume: 1, loop: false };
+    const id = rootDoc._id;
+    const prefab: PrefabDefinition = { version: 1, sourceSceneId: "s1", gridSize: 100,
+      origin: { x: 200, y: 200 }, parts: [
+        { id, coll, doc: rootDoc },
+        { id: "child-note", coll: "notes", parentId: id, doc: { _id: "child-note", type: "note",
+          name: "Nested note", ownership: { default: 0 }, flags: {}, system: {}, x: 300, y: 200,
+          text: "", icon: "", visible: false } },
+      ], graphs: [] };
+    const placed = planPrefabPlacement(world, prefab, "s1", { at: { x: 500, y: 500 } }, ids());
+    expect(placed.ok).toBe(true);
+    if (!placed.ok) return;
+    const store = new DocumentStore({ meta: { worldId: "w", name: "w", system: "s", systemVersion: "1" } });
+    expect(store.applyEnvelope({ seq: 1, ts: 1, by: "gm", txId: "fixture", ops: [
+      { kind: "create", coll: "scenes", data: sc }, ...placed.plan.ops,
+    ] }).ok).toBe(true);
+    const movement = coll === "lights"
+      ? { kind: "update" as const, ref: { coll, id: placed.plan.rootId, parent: { coll: "scenes" as const, id: "s1" } },
+          diff: { x: 600, y: 600, dim: 200, bright: 100 } }
+      : { kind: "update" as const, ref: { coll, id: placed.plan.rootId, parent: { coll: "scenes" as const, id: "s1" } },
+          diff: { x: 600, y: 600, radius: 200 } };
+    const expanded = attachedMovementOps(store.world, [movement]);
+    expect(expanded.ok).toBe(true);
+    if (!expanded.ok) return;
+    expect(expanded.ops[1]).toMatchObject({ kind: "update", ref: { coll: "notes", id: placed.plan.ids["child-note"] },
+      diff: { x: 800, y: 600 } });
+  });
+
+  test("region roots transform nested region and placeable geometry as one hierarchy", () => {
+    const world = emptyWorld();
+    const sc = scene();
+    world.scenes.push(sc);
+    const polygon = { kind: "polygon" as const, points: [[0, 0], [1, 0], [1, 1], [0, 1]] as Array<[number, number]> };
+    const rootRegion: RegionDocument = { _id: "root-region", type: "region", name: "Root region",
+      ownership: { default: 0 }, flags: {}, system: {}, x: 200, y: 200, width: 100, height: 100,
+      rotation: 0, shape: polygon };
+    const childRegion: RegionDocument = { _id: "child-region", type: "region", name: "Nested region",
+      ownership: { default: 0 }, flags: {}, system: {}, x: 300, y: 300, width: 100, height: 50,
+      rotation: 0, shape: polygon };
+    const regionGraph = graph();
+    regionGraph._id = "region-graph";
+    regionGraph.definition = { ...regionGraph.definition, sourceKind: "region", tileId: rootRegion._id,
+      methods: ["enter"], steps: [{ id: "region-stop", kind: "stop" }] };
+    const prefab: PrefabDefinition = { version: 1, sourceSceneId: "s1", gridSize: 100,
+      origin: { x: 250, y: 250 }, parts: [
+        { id: rootRegion._id, coll: "regions", doc: rootRegion },
+        { id: childRegion._id, coll: "regions", parentId: rootRegion._id, doc: childRegion },
+        { id: "child-tile", coll: "tiles", parentId: childRegion._id, doc: { ...tile(), _id: "child-tile",
+          x: 350, y: 325, width: 100, height: 100 } },
+      ], graphs: [{ id: regionGraph._id, doc: regionGraph }] };
+    const placed = planPrefabPlacement(world, prefab, "s1", { at: { x: 500, y: 500 } }, ids());
+    expect(placed.ok).toBe(true);
+    if (!placed.ok) return;
+    expect(placed.plan.ops.find((op) => op.kind === "create" && op.coll === "automations"))
+      .toMatchObject({ data: { definition: { sourceKind: "region", sceneId: "s1",
+        tileId: placed.plan.ids[rootRegion._id] } } });
+    const store = new DocumentStore({ meta: { worldId: "w", name: "w", system: "s", systemVersion: "1" } });
+    expect(store.applyEnvelope({ seq: 1, ts: 1, by: "gm", txId: "fixture", ops: [
+      { kind: "create", coll: "scenes", data: sc }, ...placed.plan.ops,
+    ] }).ok).toBe(true);
+    const movement = { kind: "update" as const, ref: { coll: "regions" as const,
+      id: placed.plan.rootId, parent: { coll: "scenes" as const, id: "s1" } },
+      diff: { x: 600, y: 600, width: 200, height: 200, rotation: 90 } };
+    const expanded = attachedMovementOps(store.world, [movement]);
+    expect(expanded.ok).toBe(true);
+    if (!expanded.ok) return;
+    expect(expanded.ops).toHaveLength(3);
+    expect(expanded.ops.find((op) => op.kind === "update" && op.ref.coll === "regions" &&
+      op.ref.id === placed.plan.ids["child-region"]))
+      .toMatchObject({ diff: { x: 450, y: 850, width: 200, height: 100, rotation: 90 } });
+    expect(expanded.ops.find((op) => op.kind === "update" && op.ref.coll === "tiles"))
+      .toMatchObject({ ref: { id: placed.plan.ids["child-tile"] },
+        diff: { x: 350, y: 900, width: 200, height: 200, rotation: 90 } });
+    expect(store.applyEnvelope({ seq: 2, ts: 2, by: "gm", txId: "move", ops: expanded.ops }).ok).toBe(true);
+    const moved = store.get("scenes", "s1") as SceneDocument;
+    expect(moved.regions?.find((region) => region._id === placed.plan.rootId))
+      .toMatchObject({ x: 600, y: 600, width: 200, height: 200, rotation: 90, shape: polygon });
+    expect(moved.regions?.find((region) => region._id === placed.plan.ids["child-region"]))
+      .toMatchObject({ x: 450, y: 850, width: 200, height: 100, rotation: 90, shape: polygon });
+    const cascade = attachedDeletionOps(store.world, [{ kind: "delete", ref: { coll: "regions",
+      id: placed.plan.rootId, parent: { coll: "scenes", id: "s1" } } }]);
+    expect(cascade).toMatchObject({ ok: true });
+    if (!cascade.ok) return;
+    expect(cascade.ops).toHaveLength(4); // root region, nested region, tile and region-bound graph
+    const regionGraphCreate = placed.plan.ops.find((op) => op.kind === "create" && op.coll === "automations");
+    expect(regionGraphCreate?.kind).toBe("create");
+    if (!regionGraphCreate || regionGraphCreate.kind !== "create") return;
+    expect(cascade.ops.some((op) => op.kind === "delete" && op.ref.coll === "automations" &&
+      op.ref.id === regionGraphCreate.data._id)).toBe(true);
+  });
+
+  test("point-drawing roots rotate and scale descendants when their points share one similarity", () => {
+    const world = emptyWorld();
+    const sc = scene();
+    world.scenes.push(sc);
+    const prefab: PrefabDefinition = { version: 1, sourceSceneId: "s1", gridSize: 100,
+      origin: { x: 200, y: 200 }, parts: [
+        { id: "root-drawing", coll: "drawings", doc: { _id: "root-drawing", type: "drawing",
+          name: "Root outline", ownership: { default: 0 }, flags: {}, system: {}, kind: "poly",
+          points: [200, 200, 300, 200, 300, 300], box: null, stroke: "#fff", fill: "", strokeWidth: 2, text: null } },
+        { id: "child-token", coll: "tokens", parentId: "root-drawing", doc: { ...token(), _id: "child-token",
+          x: 200, y: 300 } },
+      ], graphs: [] };
+    const placed = planPrefabPlacement(world, prefab, "s1", { at: { x: 500, y: 500 } }, ids());
+    expect(placed.ok).toBe(true);
+    if (!placed.ok) return;
+    const store = new DocumentStore({ meta: { worldId: "w", name: "w", system: "s", systemVersion: "1" } });
+    expect(store.applyEnvelope({ seq: 1, ts: 1, by: "gm", txId: "fixture", ops: [
+      { kind: "create", coll: "scenes", data: sc }, ...placed.plan.ops,
+    ] }).ok).toBe(true);
+    const movement = { kind: "update" as const, ref: { coll: "drawings" as const,
+      id: placed.plan.rootId, parent: { coll: "scenes" as const, id: "s1" } },
+      diff: { points: [600, 600, 600, 800, 400, 800], strokeWidth: 4 } };
+    const expanded = attachedMovementOps(store.world, [movement]);
+    expect(expanded.ok).toBe(true);
+    if (!expanded.ok) return;
+    expect(expanded.ops[1]).toMatchObject({ kind: "update", ref: { coll: "tokens", id: placed.plan.ids["child-token"] },
+      diff: { x: 320, y: 600, width: 80, height: 80, rotation: 90 } });
   });
 
   test("deleting the root cascades nested placeables and only its bound graph atomically", () => {

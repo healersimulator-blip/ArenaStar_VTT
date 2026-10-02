@@ -266,6 +266,8 @@ export interface AgentWorldView {
     actorId?: string | null;
     col: number;
     row: number;
+    /** Actor prototype Tagger labels copied onto the created token. */
+    taggerTags?: string[];
   }): Op | { error: string };
 }
 

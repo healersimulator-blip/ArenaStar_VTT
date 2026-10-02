@@ -121,6 +121,13 @@
   });
   /** Picking and preview draw on the app's own canvas, so the wizard must point at the open scene. */
   const onOpenScene = $derived(!!activeSceneId && activeSceneId === sceneId);
+  const rightsAsset = $derived(media.find((asset) => asset.hash === rightsHash) ?? null);
+  const rightsExportState = $derived(rightsAsset === null ? "" :
+    rightsAsset.exportRights === undefined
+      ? "Unreviewed legacy media — a timeline or preset using this file blocks world ZIP export until reviewed."
+      : rightsAsset.exportRights === "restricted"
+        ? "Restricted — world ZIP export is blocked for this file."
+        : "Marked for world ZIP export on this copy; importing GMs must review again.");
 
   function refresh(): void {
     macros = [...client.store.getAll("macros")].filter((m) => m.kind === "sequence");
@@ -1115,6 +1122,9 @@
       <button type="button" data-fx-update-rights disabled={busy || !rightsHash || !onAssetRights}
         onclick={() => void saveRights()}>Save media permissions</button>
     </div>
+    {#if rightsAsset}
+      <p class="hint" data-fx-rights-status>{rightsExportState}</p>
+    {/if}
     <p class="hint">Restored files require this GM to review sharing and export rights again. A playable pack is not a redistribution license.</p>
   </details>
   <label>Name <input data-fx-name bind:value={name} placeholder="e.g. Arcane ward" /></label>

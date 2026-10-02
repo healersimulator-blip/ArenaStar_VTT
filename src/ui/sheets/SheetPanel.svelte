@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import PF1eActorSheet from "./PF1eActorSheet.svelte";
+  import TagEditor from "./TagEditor.svelte";
   import { isPF1eActor } from "./pf1eSheetModel";
   import { can } from "../../core/permissions";
   import {
@@ -391,6 +392,18 @@
           <PF1eActorSheet doc={selected} {client} {bus} />
         {/key}
       {:else}
+        <TagEditor
+          doc={selected}
+          targetRef={{ coll, id: selected._id }}
+          {client}
+          {bus}
+          {editable}
+          scope={coll === "actors" ? "actor" : "item"}
+        />
+        {#if coll === "actors"}
+          <TagEditor doc={selected} targetRef={{ coll: "actors", id: selected._id, target: "prototypeToken" }}
+            {client} {bus} {editable} scope="prototypeToken" />
+        {/if}
         <div id="sheet-fields">
           {#each Object.entries(selected.system) as [key, value] (key)}
             <label class="edrow">

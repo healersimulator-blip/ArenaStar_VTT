@@ -130,6 +130,8 @@ const ITEM_PACK_ENTRIES = [
 test("§1.3 acceptance — import, equip, load, attack from the item, cast from the wand, reload", async ({
   page,
 }) => {
+  // D365 adds actor/item tag persistence checks to the existing inventory/reload flow.
+  test.setTimeout(90_000);
   const runtimeErrors: string[] = [];
   page.on("pageerror", (error) => runtimeErrors.push(error.message));
 
@@ -190,6 +192,12 @@ test("§1.3 acceptance — import, equip, load, attack from the item, cast from 
   await page.click("[data-open-pf1e-sheet]");
   const sheet = page.locator(".wm-window [data-pf1e-sheet]");
   await expect(sheet).toBeVisible();
+  const actorTags = sheet.locator('[data-document-tags="actor"]');
+  await actorTags.locator("[data-tag-input]").fill("quest giver");
+  await actorTags.getByRole("button", { name: "Add tag" }).click();
+  await actorTags.locator("[data-tag-save]").click();
+  await expect(actorTags.locator("[data-tag-status]")).toHaveText("Tags saved.");
+  await expect(actorTags.locator('[data-tag-pill="quest giver"]')).toBeVisible();
   await sheet.getByRole("button", { name: "items", exact: true }).click();
   const tab = sheet.locator("[data-pf1e-items]");
   await expect(tab).toBeVisible();
@@ -243,6 +251,14 @@ test("§1.3 acceptance — import, equip, load, attack from the item, cast from 
   await expect(cloakWindow.locator('[data-pf1e-item-window-change="saves"]')).toContainText(
     "resistance +1",
   );
+  const cloakTags = cloakWindow.locator('[data-document-tags="item"]');
+  await cloakTags.locator("[data-tag-input]").fill("quest");
+  await cloakTags.locator('[data-tag-suggestion="quest giver"]').click();
+  await cloakTags.locator("[data-tag-input]").fill("rare");
+  await cloakTags.getByRole("button", { name: "Add tag" }).click();
+  await cloakTags.locator("[data-tag-save]").click();
+  await expect(cloakTags.locator("[data-tag-status]")).toHaveText("Tags saved.");
+  await expect(cloakTags.locator('[data-tag-pill="rare"]')).toBeVisible();
   // Closing through the window chrome (one `.wm-window` per open window).
   await page
     .locator(".wm-window")
@@ -324,12 +340,22 @@ test("§1.3 acceptance — import, equip, load, attack from the item, cast from 
   await page.click("[data-open-pf1e-sheet]");
   const sheet2 = page.locator(".wm-window [data-pf1e-sheet]");
   await expect(sheet2).toBeVisible();
+  const actorTags2 = sheet2.locator('[data-document-tags="actor"]');
+  await expect(actorTags2.locator('[data-tag-pill="quest giver"]')).toBeVisible();
   await sheet2.getByRole("button", { name: "items", exact: true }).click();
   const tab2 = sheet2.locator("[data-pf1e-items]");
   const wandRow2 = tab2.locator('[data-pf1e-item-name="Wand of Bless"]');
   await expect(wandRow2.locator("[data-pf1e-item-uses]")).toContainText("49/50");
   await expect(tab2.locator("[data-pf1e-load]")).toHaveAttribute("data-pf1e-load", "heavy");
   await expect(tab2.locator("[data-pf1e-carried-weight]")).toHaveText("80 lb");
+  const cloakRow2 = tab2.locator('[data-pf1e-item-name="Cloak of Resistance +1"]');
+  await cloakRow2.locator("[data-pf1e-item-open]").click();
+  const cloakWindow2 = page.locator(".wm-window [data-pf1e-item-window]");
+  const cloakTags2 = cloakWindow2.locator('[data-document-tags="item"]');
+  await expect(cloakTags2.locator('[data-tag-pill="quest giver"]')).toBeVisible();
+  await expect(cloakTags2.locator('[data-tag-pill="rare"]')).toBeVisible();
+  await page.locator(".wm-window").filter({ has: page.locator("[data-pf1e-item-window]") })
+    .locator("[data-window-close]").click();
   await sheet2.getByRole("button", { name: "summary", exact: true }).click();
   await expect(sheet2.locator("[data-pf1e-ac]")).toHaveText("15 / 11 / 14");
   await expect(sheet2.locator("[data-pf1e-speed]")).toHaveText("20 ft");

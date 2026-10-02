@@ -1,6 +1,6 @@
 # FX Wizard Verification History
 
-Consolidated historical archive through D-356. D-357 and D-358 remain the latest two standalone verification reports.
+Consolidated historical archive through D-372, with the D-374 double-click, D-375 hover and D-376 scene-change follow-ups appended below. D-373 remains the latest standalone verification report.
 
 **Recovery note:** the former archive body was unavailable after an overwrite. D-293–D-346 below are reconstructed from the preserved, detailed `DECISIONS.md` records, rather than copied from the original report bodies. D-347 is retained from its original standalone verification report. Existing status summaries and verification counts remain available in `MACROS_FX_WIZARD_IMPLEMENTATION_STATUS.md`.
 
@@ -18,6 +18,25 @@ Consolidated historical archive through D-356. D-357 and D-358 remain the latest
 - [D354 archived verification report](#report-d354)
 - [D355 archived verification report](#report-d355)
 - [D356 archived verification report](#report-d356)
+- [D-357 archived verification report](#report-d357)
+- [D-358 archived verification report](#report-d358)
+- [D-359 archived verification report](#report-d359)
+- [D-360 archived verification report](#report-d360)
+- [D-361 archived verification report](#report-d361)
+- [D-362 archived verification report](#report-d362)
+- [D-363 archived verification report](#report-d363)
+- [D-364 archived verification report](#report-d364)
+- [D-365 archived verification report](#report-d365)
+- [D-366 archived verification report](#report-d366)
+- [D-367 archived verification report](#report-d367)
+- [D-368 archived verification report](#report-d368)
+- [D-369 archived verification report](#report-d369)
+- [D-370 archived verification report](#report-d370)
+- [D-371 archived verification report](#report-d371)
+- [D-372 archived verification report](#report-d372)
+- [D-374 archived verification report](#report-d374)
+- [D-375 archived verification report](#report-d375)
+- [D-376 archived verification report](#report-d376)
 
 <a id="report-d293-d319"></a>
 
@@ -3482,3 +3501,667 @@ The override is keyed to authenticated GM role; assistants and players do not re
 ## Remaining parity gaps
 
 TR-02/A20 alpha-mask/shape/region zones, grid-specific sweep rules, in-flight drag/waypoint interruption, cross-browser/performance gates and broader A01–A41 acceptance remain open. Player movement coverage is PF1e actor speed plus existing walk planning, not full movement-mode/action-economy or all-system parity. No full-parity claim.
+
+---
+
+<a id="report-d357"></a>
+
+
+## D-357 — Grid-aware sweeps, circular zones, and elevation ranges
+
+D-357 advances TR-02/A19/A20 active-zone behavior in three bounded areas.
+
+- **Grid-aware movement sweep:** `sweptTileEvents` accepts the scene grid. Hex scenes use the shared canvas corner geometry and layout orientation for all four flat/pointy and odd/even layouts; the movement footprint is a regular hex inscribed within the token's rectangular bounds. All four HostSync movement-dispatch paths pass their scene grid. The same grid is forwarded through alpha-run sweeps and the `inside` selector. This is a bounded single-hex rule, not a compound multi-cell token footprint.
+- **Circular tile zones:** the active-zone authoring UI can create circles as canonical 32-vertex convex polygons, using the same bounded polygon validation, pointer picking, rendering and swept intersection behavior as other authored convex shapes.
+- **Elevation ranges and events:** tokens may carry a finite elevation in scene grid units (legacy absence means zero). A tile may author a finite inclusive min/max elevation band. Host validation rejects malformed bands and invalid token elevations. Continuous movement sweeps clip the spatial contact interval to the token's interpolated vertical-band interval; committed elevation changes dispatch the new host-owned `elevation` automation method. The wizard exposes the method and band fields.
+
+The full unit suite passes **4,607 tests**, 12 skipped, across 322 passing files and two skipped (128.42 s). The focused core automation, tile-trigger geometry and HostSync batch passes **276/276**. Typecheck passes (63 Svelte components; zero blocking issues and one existing `ReplayPanel.svelte:29` advisory), lint and production build pass, and the production-browser runs are documented below. The latest bundle size check reports **3,954,258 raw / 1,131,423 gzip bytes**, within the 6 MB raw budget; `git diff --check` passes.
+
+The production-browser circle/elevation regression and grid-aware hex-footprint regression both ran in the production Chromium workaround documented by D-222. The complete `e2e/movement_actions.spec.ts` file now passes **12/12 in 7.5 minutes**, one worker/zero retries. This includes alpha masks, odd-q hex versus square footprint behavior, triangle sweeps, circle elevation-band entry/exit and authoritative elevation changes, Move snap variants, trigger policy, relative/Original Destination movement, Stop preflight, and D-355 rotated-zone ordering/Undo/Redo. This closes browser verification for these bounded cases only; it does not close the cross-browser or performance gates.
+
+The first combined Active Zones/Automation Appearance attempt hit its 15-minute global timeout after **24 passed, 4 timed out, and 8 did not run**. Traces and focused reruns showed these cases were exceeding narrow per-test timeouts rather than exposing a production behavior failure. I raised only those bounded test budgets (90 seconds for three Active Zones round-trip scenarios and 180 seconds for the long Move authoring scenario), without skipping or weakening assertions, then reran both full specs separately to stay within the 20-minute batch limit: `active_zones.spec.ts` **18/18 in 7.7 minutes** and `automation_appearance.spec.ts` **18/18 in 14.0 minutes**, one worker/zero retries. This closes those Chromium regression runs, not cross-browser or performance acceptance.
+
+### Remaining parity gaps
+
+TR-02/A19/A20 remain partial. D-358 now adds first-class convex scene-region documents and canvas rendering, but region authoring in the wizard and region-to-graph/event wiring remain open; D-357's circle/elevation/grid sweep work itself remains tile-based. Multi-hex/compound token footprints, remaining event methods and acceptance scenarios, in-flight drag/waypoint interruption, cross-browser and performance gates, and broader A01–A41 parity remain open. No full-parity claim.
+
+
+---
+
+<a id="report-d358"></a>
+
+## D-358 — First-class convex scene regions and Active Zone triggers
+
+D-358 began as a region-document/rendering foundation and is now extended through authoring, graph binding, swept trigger dispatch, and production behavior. Regions are optional scene-embedded documents, preserving legacy scenes. The host validates bounded convex geometry and limits authoring/update authority to GM/assistant roles. Hidden regions are excluded from player projections (including whole-scene embedded-array updates), copied regions receive new IDs, and GM/player canvas replicas render region outlines.
+
+The production wizard supports region authoring/selection and active-zone graph binding. HostSync resolves region-anchored definitions, computes swept enter/exit contacts for movement, and dispatches the graph; Stop Token Movement uses the region crossing in preflight. `automation.fire` resolves region sources and rejects non-GM script callers for region-anchored graphs.
+
+A movement-interruption follow-up now lets users grab a token at its locally rendered point while an authored movement tween is active. The drag rebases from that displayed position, so the next committed move supersedes the tween instead of requiring a click on the token's already-committed destination. The stage exposes visual positions only while a duration-based animation is running; legacy glides, Undo and static token hit testing retain their prior document-position behavior.
+
+### Executed verification
+
+| Gate | Result |
+| --- | --- |
+| Focused region-trigger HostSync tests | **2/2 passed**, including region-anchored enter/exit and region Stop Token Movement |
+| Full production Chromium `e2e/active_zones.spec.ts` | **19/19 passed in 4.6 minutes**, one worker, zero retries; includes region creation, graph binding, and dispatch |
+| Full production Chromium `e2e/movement_actions.spec.ts` | **14/14 passed in 4.9 minutes**, one worker, zero retries; includes a real drag interrupting a five-second authored Move at its rendered point, plus region, shape, movement, Stop/Original Destination and rotated-zone cases |
+| Focused canvas interaction/animation Vitest | **39/39 passed** |
+| Full Vitest | **4,616 passed / 12 skipped**, 323 files passed / 2 skipped (325 total), 98.45 s |
+| Production build | Pass; **3,964,170 raw / 1,142,840 gzip bytes** |
+| Typecheck | Pass; Svelte reports one existing advisory in `src/ui/sim/ReplayPanel.svelte:29` |
+| Lint and whitespace | Pass; `git diff --check` passes |
+
+An earlier full Vitest run had one timing failure in `tests/client/fxDeliveryFlow.test.ts` (mid-cue fader expected gain `0.25`, got `1`). The test passed alone and in both clean full reruns; record this as a transient timing flake, not a code fix or a remaining test failure. The first full movement-action run after adding the new interruption scenario had one browser failure because that scenario's graph still had Enter/Stop methods enabled and re-fired while the test dragged back through its tile. The fixture was corrected to a manual-only movement graph; the full 14-case production suite then passed without reducing assertions or timeout limits.
+
+### Remaining parity gaps
+
+Region authoring and swept event wiring are implemented. A real drag now interrupts an authored client-side tween at the rendered point. Automatic Stop interruption of every in-flight presentation and waypoint-path behavior remain open. Cross-browser coverage is still unverified: the Firefox Active Zones attempt could not launch because Playwright's Firefox binary is absent; `playwright install firefox` was attempted but all download mirrors failed with TLS `ECONNRESET`. This is an environment/install blocker, not a Firefox behavior result. Cross-browser and performance gates and broader A01–A41 parity remain open. The latest passing production-browser proof is Chromium-only. No full-parity claim.
+
+
+---
+
+<a id="report-d359"></a>
+
+## D-359 — Legacy FX media rights at world export
+
+World archive collection now traces image/sound `assetId`s in saved FX sequence and preset macros. A referenced media asset with no `exportRights` is treated as unreviewed and blocks ZIP/folder export until the GM reviews it. Explicit `granted` rights allow export; explicit `restricted` rights remain blocked. The gate is reference-aware: unrelated legacy assets without rights retain the existing export behavior. The FX existing-media review panel also tells the GM when a selected file is unreviewed legacy media, restricted, or marked for export.
+
+Regression coverage creates an unreviewed timeline image and preset sound, confirms each blocks export until granted, verifies a referenced restricted file remains blocked, then exports both granted FX assets alongside an unrelated legacy image with no rights declaration. The existing restricted-media round-trip test continues to check the archive/import review path.
+
+### Executed verification
+
+| Gate | Result |
+| --- | --- |
+| Focused `tests/host/worldFile.test.ts` | **8/8 passed** |
+| Full Vitest (`pnpm test`, serial rerun) | **4,617 passed / 12 skipped**, 323 files passed / 2 skipped (325 total), **110.24 s** |
+| Focused FX media-import browser regression | **1/1 passed** (`e2e/fx_sequence.spec.ts`, media import/export-rights case) |
+| Production build and size | Pass; **3,965,418 raw / 1,134,106 gzip bytes**, within the 6 MB raw budget |
+| Typecheck | Pass; 63 Svelte components, 0 blocking issues, one existing advisory at `src/ui/sim/ReplayPanel.svelte:29` |
+| Lint | `pnpm lint` passes |
+| Whitespace | `git diff --check` passes |
+
+The initial full Vitest run overlapped typecheck, lint and build, and two unrelated timing-budget assertions failed: FX sound-fader gain remained at its old value for one check, and a compendium-index keystroke measured 16.77 ms against a 16 ms budget. With no changes to either subsystem, the serial full-suite rerun passed both. The focused world-file suite also passed independently.
+
+The Playwright-pinned Chromium binary was absent and its CDN install attempt failed with TLS `ECONNRESET`. The focused browser case was therefore run using npm-provisioned `@sparticuz/chromium@153.0.0`, with its packaged AL2023 libraries and sandbox disabled; the full FX browser suite was not run.
+
+### Remaining gaps
+
+This closes only the scoped legacy FX media world-export rule. The broader pre-wizard asset rights migration/audit, remaining Tagger/prefab reference rules, full FX browser acceptance, cross-browser/performance gates, and broader A01–A41 parity remain open. No full-parity claim.
+
+
+---
+
+<a id="report-d360"></a>
+
+## D-360 — Tag and asset-rights discovery checkpoints
+
+This increment closes two small pieces of the next dependency cluster without claiming the remaining Tagger/prefab or asset-platform work is complete.
+
+### Checkpoint 1 — Tag explorer autocomplete
+
+The GM Tag explorer now suggests existing visible tags for the active comma-separated search term. Suggestions follow the selected scene/placeable filters, are prefix-matched case-insensitively and deterministically sorted, and are bounded to eight results. Click or ArrowUp/ArrowDown + Enter completes only the final term; Esc dismisses the list. The vocabulary is assembled from the current client's projected world, so hidden/private host-only tags are not exposed. Core tests cover term completion, duplicate/case ordering, exact matches, empty terms and the suggestion bound. A production browser regression checks mouse completion and keyboard completion while retaining earlier comma-separated terms.
+
+### Checkpoint 2 — export-rights audit filter
+
+The GM FX asset browser can filter media by all rights states, unreviewed legacy, granted, or restricted. It reports the unreviewed legacy count and explains that such a file needs explicit review when used by an FX timeline/preset; each row also states the precise rights status. This is discovery/filtering only: it does not grant rights, change export policy, migrate metadata, or claim legal license verification. The production media-import browser regression checks that restricted and granted assets appear in their respective filters while preserving the existing export/reapproval flow. The D-359 archive tests cover actual missing-rights blocking and unrelated legacy compatibility.
+
+### Executed verification
+
+| Gate | Result |
+| --- | --- |
+| Focused `tests/core/tags.test.ts` | **8/8 passed** |
+| Full Vitest (`pnpm test`) | **4,618 passed / 12 skipped**, 323 files passed / 2 skipped (325 total), **111.71 s** |
+| Focused production-browser regressions | **2/2 passed**: Tag autocomplete and FX media rights-filter/import flow |
+| Typecheck | Pass; 63 Svelte components, 0 blocking issues, one existing advisory at `src/ui/sim/ReplayPanel.svelte:29` |
+| Lint | `pnpm lint` passes |
+| Production build and size | Pass; **3,969,053 raw / 1,135,332 gzip bytes**, within the 6 MB raw budget |
+| Whitespace | `git diff --check` passes |
+
+The first targeted browser run caught a Tag explorer search regression: the compiled matcher was passed a result row instead of its tag list. The matcher now receives `row.tags`; both browser regressions pass on the rebuilt production app. Playwright's pinned Chromium download remains unavailable due to the earlier CDN TLS `ECONNRESET`; the focused browser checks used npm-provisioned `@sparticuz/chromium@153.0.0` with its packaged libraries and sandbox disabled. No full browser batch was run.
+
+### Still partial
+
+Broader Tagger API coverage on prototype tokens/regions/extensions and every object sheet, arbitrary third-party graph/flag reference rebinding, the remaining prefab attachment/reference features, a full pre-wizard asset rights migration/audit, creator/license registry and full cross-browser/performance/A01–A41 acceptance remain open. These two checkpoints do not close the Tagger/prefab or asset-platform workstreams.
+
+
+---
+
+<a id="report-d361"></a>
+
+## FX Wizard verification — D-361
+
+Date: 2026-10-01
+
+### Increment
+
+This increment expands a bounded part of PF-01/PF-02 (A28). `attachedMovementOps` now infers nested-child transforms from additional prefab root geometries:
+
+- Tokens and tiles retain translation, rotation and uniform resize support.
+- Walls use endpoint-pair midpoint, segment-length ratio and bearing delta.
+- Measured templates use position, uniform distance/width scale and facing.
+- Lights and sounds translate and support their modeled uniform size changes.
+- Notes translate.
+- Box drawings translate and uniformly scale; point drawings can translate, uniformly scale and rotate when all points share one similarity transform.
+
+Derived descendant updates are added to the same planned host transaction. Invalid, unsupported or nonuniform parent geometries fail closed. The Prefab panel now summarizes the supported roots and named gaps. These changes do **not** complete A28: the parity spec also requires all relevant root/child types, visibility/lock behavior, cross-grid scaling, copy/edit/detach, tags and cleanup to work coherently.
+
+### Verification
+
+- `corepack pnpm exec vitest run tests/core/prefabs.test.ts` — **25/25 passed**.
+- Production Chromium `e2e/prefabs.spec.ts --project=chromium --workers=1 --retries=0` — **4/4 passed** (legacy, pins, tag-destination and random-destination capture/place/despawn flows). These existing browser cases do not exercise the new wall/template/light/sound/drawing-root transforms.
+- `corepack pnpm test` — **4,623 passed / 12 skipped**, 323 files passed / 2 skipped, 109.97 s. A Node `MaxListenersExceededWarning` was emitted; the run completed successfully.
+- `corepack pnpm typecheck` — passed; Svelte check reports 63 components, zero blocking issues and one existing advisory at `src/ui/sim/ReplayPanel.svelte:29` (`state_referenced_locally`).
+- `corepack pnpm lint` — passed.
+- `corepack pnpm build && corepack pnpm size` — passed; production output is **3,972,607 raw bytes / 1,136,519 gzip bytes**, within the 6 MB raw budget.
+
+The full test run's PF1e microbenchmarks logged p95 **60.1 ms** for 20 × 500 models, **92.3 ms** for 40 × 250, and **66.4 ms** for the 10k-model turn, against their printed `<50 ms` targets. The tests passed, but these results are not evidence that A41's reference-browser frame/dispatch/heap requirements pass; no A41 browser profile was run in this increment, and I do not count the performance requirement as satisfied.
+
+### Remaining scope
+
+- The root-transform extension has focused core tests, not browser tests for each added root geometry or dedicated multiplayer/security/Undo/Redo acceptance scenarios for those geometries.
+- FX-emitter and region roots, complete root/child geometry transforms, full-matrix cross-grid verification (the existing portable-placement test covers token/wall geometry), visibility-policy parity, and interactive attach/detach, edit and copy workflows remain incomplete.
+- Existing support for locks, tag/graph rebinding, privacy, undo and scripted placement does not establish the entire A28 scenario.
+- The full A01–A41 acceptance matrix, including its functional, security, multiplayer, browser and measured-performance criteria, has not been demonstrated. No full-parity claim is made.
+
+
+---
+
+<a id="report-d362"></a>
+
+## FX Wizard verification — D-362
+
+Date: 2026-10-01
+
+### Increment
+
+This increment continues bounded PF-01/A28 work and closes the specific hidden-descendant error-detail leak found during HostSync review.
+
+- Convex scene regions are now eligible prefab parts and roots across validation, capture, placement, attachment movement, cascade deletion and the Prefab panel. Region placement and child transforms use the shared center-based similarity transform; uniform resizing and rotation retain valid polygon geometry, and bounds checks examine transformed polygon vertices.
+- Regions participate in Tagger collection discovery/read/edit and in prefab-marker projection stripping. Capture includes saved region-anchored active-zone graphs, placement rebinds those graphs to the cloned region, and deleting the region cascades its bound graph in the same undoable transaction. Player projections can receive an entitled visible region without receiving the private hierarchy marker.
+- Attachment-transform failures no longer include a child's collection or ID in the host rejection detail. A hidden descendant that would exceed scene bounds is refused with the generic message `attached child would lie outside scene bounds`.
+- A HostSync wall-root integration test verifies that an owned root carries a locked visible tile and hidden token descendant atomically, a direct edit of the locked child is rejected, the hidden token stays out of the player projection, Undo restores the group, and an out-of-bounds refusal does not expose the hidden child ID.
+- A HostSync region-root test verifies GM-only region edits, region-anchored graph rebinding to the clone, region-plus-tile+token descendant transforms in one commit, hidden-token and private-graph projection redaction, graph cascade deletion, and Undo. A production Chromium flow authors a region and its active-zone graph in the wizard, captures them as a region-root prefab and places the transformed instance.
+
+This is bounded progress only. It does **not** complete PF-01–PF-07 or A28.
+
+### Verification
+
+- `corepack pnpm exec vitest run tests/core/prefabs.test.ts` — **26/26 passed**.
+- `corepack pnpm exec vitest run tests/core/tags.test.ts` — **9/9 passed**.
+- `corepack pnpm exec vitest run tests/core/projection.test.ts` — **25/25 passed**.
+- `corepack pnpm exec vitest run tests/host/sync.test.ts -t 'GM prefabs'` — **6 matching tests passed**, 177 unrelated tests skipped.
+- Production Chromium `e2e/prefab_regions.spec.ts --project=chromium --workers=1 --retries=0` — **1/1 passed**, covering region and active-zone graph creation, root capture, graph rebinding and transformed placement.
+- Production Chromium `e2e/prefabs.spec.ts --project=chromium --workers=1 --retries=0` — **4/4 passed** (legacy, pins, tag-destination and random-destination capture/place/despawn flows).
+- `corepack pnpm test` — **4,627 passed / 12 skipped**, 323 files passed / 2 skipped, **107.07 s**. Node emitted a `MaxListenersExceededWarning`; the suite completed successfully.
+- `corepack pnpm typecheck` — passed; Svelte check reports 63 components, zero blocking issues and one advisory at `src/ui/sim/ReplayPanel.svelte:29` (`state_referenced_locally`).
+- `corepack pnpm lint` — passed.
+- `corepack pnpm build && corepack pnpm size` — passed; production output is **3,973,993 raw bytes / 1,136,846 gzip bytes**, within the 6 MB raw budget.
+- `git diff --check` — passed.
+
+The full test run's PF1e microbenchmarks logged p95 **61.8 ms** for 20 × 500 models, **94.6 ms** for 40 × 250, and **59.5 ms** for the 10k-model turn, against their printed `<50 ms` targets. Although those tests passed, their measured values do not meet the printed budgets and are not evidence that A41's browser frame/dispatch/heap requirements pass. No A41 browser profile was run in this increment; the performance requirement remains open.
+
+### Remaining scope
+
+- FX-emitter and other unmodeled prefab roots; complete transform semantics and full cross-grid testing across the root/child geometry matrix.
+- Full visibility/lock/copy/edit/detach behavior, third-party serializers, nested summons and portable asset/license rebinding.
+- Browser coverage for root transforms and interactions beyond region capture/place, plus cross-browser and multiplayer acceptance across the full A28 scenario.
+- The complete A01–A41 acceptance matrix, including all functional, security, multiplayer, browser and measured-performance criteria, has not been demonstrated. No full-parity claim is made.
+
+
+---
+
+<a id="report-d363"></a>
+
+## FX Wizard verification — D-363
+
+Date: 2026-10-01
+
+### Increment
+
+The Tagger panel's placeable-type filter now includes `regions`. The core Tagger and host already supported region read/edit operations; the filter omission made them undiscoverable through this part of the GM UI.
+
+`e2e/prefab_regions.spec.ts` now verifies the production flow: create a region, switch to the Tagger tab, choose **Regions**, locate the named region, select it, add `courtyard-root`, wait for exactly one host sequence increment, and verify the updated tag is displayed. The same test then continues through the region-root prefab flow, including capture and placement of the region with its linked active-zone graph. Its timeout is 60 seconds because the complete production scenario takes about 27 seconds here; all interaction, host-acknowledgement and placement assertions remain in force.
+
+This is a narrow UI-discovery correction. It does **not** complete Tagger parity, A28, or any other full-parity criterion.
+
+### Verification
+
+- Production Chromium `e2e/prefab_regions.spec.ts --project=chromium --workers=1 --retries=0` — **1/1 passed** in 27.8 seconds, using npm-provisioned `@sparticuz/chromium@153.0.0`.
+- The Playwright-pinned browser download was attempted but failed with TLS `ECONNRESET` from `cdn.playwright.dev`; using the npm-registry Chromium fallback, the production-browser regression passed. The temporary browser provisioning is outside the repository and did not change project dependencies.
+- `corepack pnpm test` — **4,627 passed / 12 skipped**, 323 files passed / 2 skipped, **127.55 s**. The process emitted a `MaxListenersExceededWarning`; the suite completed successfully.
+- `corepack pnpm typecheck` — passed; Svelte check reports 63 components, zero blocking issues and one advisory at `src/ui/sim/ReplayPanel.svelte:29` (`state_referenced_locally`).
+- `corepack pnpm lint` — passed.
+- `corepack pnpm build && corepack pnpm size` — passed; production output is **3,974,003 raw bytes / 1,136,853 gzip bytes**, within the 6 MB raw budget.
+- `git diff --check` — passed.
+
+The latest recorded PF1e p95 measurements are from D362: **61.8 ms** for 20 × 500 models, **94.6 ms** for 40 × 250, and **59.5 ms** for the 10k-model turn. They exceed the printed `<50 ms` targets; D363 did not change performance-sensitive logic. No A41 browser profile or full cross-browser run was performed.
+
+### Remaining scope
+
+- Broader Tagger discovery, query/filter behavior, selection, editing, rule/reference rebinding and multiplayer permissions remain only partially demonstrated.
+- FX-emitter and other prefab roots, complete transform/visibility/lock/copy/edit/detach semantics, cross-grid geometry coverage and portable asset/reference behavior remain open.
+- The full A01–A41 functional, security, multiplayer, browser and measured-performance acceptance matrix has not been demonstrated. No full-parity claim is made.
+
+
+---
+
+<a id="report-d364"></a>
+
+## FX Wizard verification — D-364
+
+Date: 2026-10-01
+
+### Increment
+
+Wired the existing Tagger-style `tag:` search semantics into the GM Tagger explorer's combined name query. The query accepts plain or quoted name terms plus quoted/unquoted `tag:` clauses; all terms are required. Tag clauses use case-insensitive substring matching, with `*` and `?` wildcards, while quoted values preserve spaces. Query length and term count are bounded, and the matcher is compiled once per projected-result scan. A green “Lenient sidebar tag search” indicator explains this behavior. The separate Tag API query remains exact and case-sensitive by default; the sidebar query does not silently change API semantics.
+
+This closes one unconnected UI path only. It does **not** complete TG-01–TG-12 or A13.
+
+### Verification
+
+- `corepack pnpm exec vitest run tests/core/tags.test.ts` — **10/10 passed**, including combined name/tag AND search, quoted phrases, case-insensitive substring/wildcard matching, negative terms and query bounds.
+- Production Chromium `e2e/script_macros.spec.ts --project=chromium --workers=1 --retries=0 --grep "Tag search autocomplete"` — **1/1 passed** in 17.0 seconds. It verifies combined search with a quoted multiword tag and wildcard clause, a negative query, the visible lenient-mode indicator, and the separate API query's exact/case-sensitive default.
+- `corepack pnpm test` — **4,628 passed / 12 skipped**, 323 files passed / 2 skipped, **114.54 s**.
+- `corepack pnpm typecheck` — passed; 63 Svelte components, zero blocking issues and one advisory at `src/ui/sim/ReplayPanel.svelte:29` (`state_referenced_locally`).
+- `corepack pnpm lint` — passed.
+- `corepack pnpm build && corepack pnpm size` — passed; production output is **3,975,447 raw bytes / 1,137,337 gzip bytes**, within the 6 MB raw budget.
+- `git diff --check` — passed.
+
+The full-suite PF1e measurements were p95 **88.8 ms** for 20 × 500 models, **113.9 ms** for 40 × 250, and **72.0 ms** for the 10k-model turn. All exceed their printed `<50 ms` targets. They are not A41 browser frame/dispatch/heap evidence; performance parity remains open.
+
+### Remaining scope
+
+- Tagging is not yet supported across prototype tokens, actor/item documents, every relevant object sheet or system extensions. Complete Tagger API, reference binding, clone/import and multiuser coverage remain open.
+- A13–A18, A22 and A28 are still only partially covered; the production test is one focused GM Chromium flow, not the complete functional/security/multiplayer matrix.
+- Cross-browser acceptance, A41 profiling on a published reference device, and the full A01–A41 acceptance matrix remain incomplete. No full-parity claim is made.
+
+
+---
+
+<a id="report-d365"></a>
+
+## FX Wizard verification — D-365
+
+Date: 2026-10-01
+
+### Increment
+
+Actor and embedded-item tags can now be edited in the document sheets that own them. A reusable `TagEditor` renders current tags as pills, supports individual removal and clear/reset, and offers bounded autocomplete drawn only from tags on documents in the client's projected actor/item store. Saves use the existing `tagEditOps` replace path and wait for HostSync reconciliation; a rejection stays visible instead of being presented as success.
+
+The editor appears in the PF1e actor summary, PF1e embedded-item window, and generic actor/item inspector for non-PF1e documents. Embedded-item updates include the parent actor reference. HostSync uses the existing parent-aware effective-ownership checks, and now validates canonical `taggerTags` arrays on tag updates and on actor creation (including embedded item records): at most 64 unique, trimmed printable strings, each no longer than 128 characters. This adds sheet authoring only; it does not expose actor/items in the Tagger placeable query/sidebar or claim complete Tagger parity.
+
+### Verification
+
+- `corepack pnpm exec vitest run tests/core/tags.test.ts tests/host/sync.test.ts` — **195/195 passed** (Tagger core **11/11**, HostSync **184/184**). Coverage includes parent-qualified embedded-item refs, owner write replication, non-owner rejection, canonical tag validation, and one-envelope undo of actor and item tags.
+- Production Chromium `e2e/pf1e_inventory.spec.ts --project=chromium --workers=1 --retries=0` — **1/1 passed** in **54.2 s**. The existing actor/inventory flow now adds and saves actor tags, uses the projected actor vocabulary to autocomplete an embedded-item tag, saves a second item tag, reloads, and verifies both document tags persisted. It also exercises the host acknowledgement UI.
+- `corepack pnpm test` — **4,630 passed / 12 skipped**, 323 files passed / 2 skipped, **116.08 s**.
+- `corepack pnpm typecheck` — passed; 64 Svelte components, zero blocking issues, one existing advisory at `src/ui/sim/ReplayPanel.svelte:29` (`state_referenced_locally`).
+- `corepack pnpm lint` — passed.
+- `corepack pnpm build && corepack pnpm size` — passed; **3,982,061 raw bytes / 1,139,319 gzip bytes**, within the 6 MB raw budget.
+- `git diff --check` — passed.
+
+The first browser attempt exceeded the original 30-second timeout after adding the new checks; the test limit is now 90 seconds, with all assertions retained. A subsequent run identified and corrected a reload-flow window-close locator; the final un-retried production Chromium run passed in 54.2 seconds. Playwright's pinned-browser CDN was unreachable (`ECONNRESET`), so the test used Chromium provisioned from npm (`@sparticuz/chromium`), with `LD_LIBRARY_PATH=/tmp/al2023/lib`, `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/chromium`, and `PLAYWRIGHT_CHROMIUM_NO_SANDBOX=1` for this container.
+
+### Remaining scope
+
+- Prototype-token tags and tags on other system-specific extensions are not established by this slice.
+- Actor/item tags are not included in the Tagger placeable query/sidebar; the sidebar remains placeable-oriented.
+- Complete public Tagger API parity, references/rebinding, clone/import/export, cross-scene selectors, broader bulk semantics, and all TG-01–TG-12/A13–A18 acceptance remain partial.
+- Cross-browser/multiplayer criteria and full A01–A41 scenario verification remain incomplete. Latest known PF1e p95 measurements remain above the printed `<50 ms` targets (88.8 ms, 113.9 ms, 72.0 ms). A41 and full parity are not satisfied.
+
+
+---
+
+<a id="report-d366"></a>
+
+## FX Wizard verification — D366: global Tagger discovery of world documents
+
+**Date:** 2026-10-01
+
+**Scope:** Continue A01–A41 parity work with an explicitly bounded slice: global Tagger discovery and bulk editing for world actors, top-level world items, and embedded actor items. This report does not redefine the parity target or claim complete Tagger/A13–A18/A01–A41 coverage.
+
+### Implementation
+
+- The core Tagger query distinguishes `scene` and `world` result scope. World records have no scene owner; embedded item refs include their parent actor.
+- World-document enumeration is opt-in for scene-oriented callers (`includeWorldDocs`) and is omitted whenever a concrete scene is selected. Selecting the `actors` or `items` collection requests those world records explicitly.
+- `TagIndex` caches world actors/items separately and invalidates that cache when an actor or item root changes, including embedded-item updates rooted at their actor.
+- The GM Tagger explorer's global filter now includes actors and items alongside scenes/placeables. Result rows display `World · actors` or `World · items`; name/tag matching and autocomplete use the client-projected world. Selecting an individual scene narrows the list to that scene.
+- Bulk edits use existing `tagEditOps` and ordinary host authorization. The UI keeps the selection while pending, displays success only when the submitted transaction is reconciled by the host, and displays host rejection as an error. The existing `{#}`/`{id}` rule allocator remains scene-qualified; its control is disabled when a world actor/item is selected.
+- `listTaggable` applies viewer projection before enumerating world documents. Core coverage confirms hidden actors and hidden top-level items are absent from player queries while visible actors and their parent-qualified embedded items remain searchable.
+
+### Verification
+
+- Focused core tests: `tests/core/tags.test.ts` — **13/13 passed**. Added cases cover global actor/item results, explicit scope, top-level and embedded refs, hidden-document projection, scene-scoped exclusion, and `TagIndex` invalidation for actor and embedded-item updates.
+- Focused host tests: `tests/host/sync.test.ts` — **184/184 passed**. This also reruns D365's actor/embedded-item update authorization, canonical-tag validation, replication and undo coverage; D366 adds no new script RPC for world-document references.
+- Production Chromium Tagger-dependent regression scenarios passed: remote-scene read/edit, scene rule application, global actor/item discovery and acknowledged bulk editing, autocomplete, GM Revert, region discovery, two prefab Tagger-destination variants, and two light-selection/undo variants (**11 distinct scenarios**, with the global-discovery test also repeated in a second run).
+- Full Vitest: **4,632 passed / 12 skipped** across **323 passed / 2 skipped** test files; **113.69 s**.
+- `npm run typecheck`: pass; 64 Svelte components, zero blocking issues, one existing advisory at `src/ui/sim/ReplayPanel.svelte:29`. `npm run lint`: pass. `npm run build`: pass. `npm run size`: **3,984,235 raw bytes / 1,140,049 gzip bytes**, below the 6 MiB raw budget. `git diff --check`: pass.
+
+### Acceptance gaps that remain
+
+- This does not extend the reviewed-script Tagger RPCs (`tags.find/get/edit/rules`) to actor/item refs. Their public reference and read/write scopes remain scene-based; the rule allocator intentionally remains scene-only.
+- Prototype-token tag fields, broader system-specific actor/item extensions, and full TG-01–TG-12/A13–A18 criteria remain incomplete.
+- The focused UI flow is a real production Chromium browser test but does not establish the full browser matrix, connected-player/multiplayer acceptance for all Tagger behaviors, or every A13–A18 scenario.
+- A41 is still not met. The latest full-suite PF1e measurements were **68.6 ms p95** (20 × 500 models), **144.9 ms p95** (40 × 250), and **60.6 ms p95** (10k-model turn), each above the printed `<50 ms` target.
+- Full A01–A41 parity remains incomplete; no broader completion claim is made.
+
+
+---
+
+<a id="report-d367"></a>
+
+## FX Wizard verification — D367: world-document Tagger script references
+
+**Date:** 2026-10-01
+
+**Scope:** Extend reviewed-script Tagger reads and ordinary edits to explicitly referenced top-level actors, top-level world items, and embedded actor items, building on D366's global sidebar discovery. This is a bounded API slice; it does not complete TG-01–TG-12 or A01–A41.
+
+### Implementation
+
+- Added strict world-document ref validation: actor/item top-level refs have no parent; embedded item refs carry an actor parent. Duplicate detection uses the complete parent-qualified ref.
+- Reviewed-script `tags.get` accepts those refs. `tags.find` accepts `includeWorldDocs: true` with `allScenes: true`, or an explicit `actors`/`items` collection in all-scenes scope; supplying a concrete/current scene together with world documents is rejected. World rows return `scope: "world"` and empty `sceneId`; scene rows remain `scope: "scene"`.
+- `tags.edit` accepts up to 32 concrete actor/item or scene-qualified refs and commits one ordinary undoable transaction. Embedded-item permission checks include the parent actor. For `runAs: "caller"`, effective ownership is required; GM-elevated code remains limited to the actual caller's freshly projected targets.
+- `api.tags.hasTags` now scopes an actor/item ref to an explicit global query automatically. Query limits (100 hits / 16 KiB) and existing caller-projection rules remain in force.
+- `tags.rules` remains deliberately scene-only. Actor/item refs are rejected before reaching the scene-unique `{#}`/`{id}` allocator.
+- The Script Macro editor's read/write help now documents world-document scope and parent-qualified refs.
+
+### Verification
+
+- Core Tagger validators/query/index tests: `tests/core/tags.test.ts` — **13/13 passed**.
+- Host Tagger/script-worker tests: `tests/host/sync.test.ts` — **185/185 passed**; `tests/host/scriptWorker.test.ts` — **14/14 passed**. Coverage includes caller-projected global actor/item reads, hidden actor/item refusal, strict ref shape, atomic multi-document writes, scene-only rule refusal, owner-authorized actor/embedded-item caller writes, and non-owner rejection.
+- Production Chromium: Tagger-focused `e2e/script_macros.spec.ts` scenarios — **5/5 passed** (non-active scene refs, scene rule application, live-token rules, global actor/item sidebar plus reviewed API reads/writes, autocomplete); reviewed-script Revert in `e2e/action_revert.spec.ts` — **1/1 passed**.
+- Full Vitest: **4,634 passed / 12 skipped** across **323 passed / 2 skipped** files; **124.44 s**.
+- `npm run typecheck`: pass; 64 Svelte components, zero blocking issues, one existing advisory at `src/ui/sim/ReplayPanel.svelte:29`. `npm run lint`: pass. `npm run build`: pass. `npm run size`: **3,986,256 raw bytes / 1,140,532 gzip bytes**, below the 6 MiB raw budget. `git diff --check`: pass.
+
+### Acceptance gaps that remain
+
+- Actor/item `{#}`/`{id}` rule allocation is not implemented; the rule allocator stays scene-qualified. Prototype-token tags and broader system-specific actor/item extensions remain open.
+- Complete TG-01–TG-12 API semantics, reference/rebinding/clone workflows, multiplayer permission cases, and all A13–A18 scenario criteria remain incomplete.
+- The Chromium tests cover the bounded global/sidebar/API routes only; they are not the required full browser/multiplayer acceptance matrix.
+- A41 remains unmet. In this full-suite run PF1e p95 was **86.7 ms** (20 × 500 models), **138.3 ms** (40 × 250), and **72.7 ms** (10k-model turn), each over the printed `<50 ms` target.
+- Full A01–A41 parity remains incomplete; no full-parity claim is made.
+
+
+---
+
+<a id="report-d368"></a>
+
+## D368 — Prototype-token Tagger support verification
+
+**Date:** 2026-10-02
+
+**Scope:** Extend the D366/D367 world-document Tagger work to actor prototype-token tags. This is an incremental parity slice, not a claim of A01–A41 completion. The source of truth remains [`MACROS_FX_WIZARD_PARITY_SPEC.md`](MACROS_FX_WIZARD_PARITY_SPEC.md).
+
+### Implemented
+
+- Prototype-token labels use an explicit `{ coll: "actors", id, target: "prototypeToken" }` tag ref. They remain stored on the owning actor rather than introducing a separate persisted document collection.
+- The global Tagger explorer exposes `prototypeTokens` alongside world actors/items. Actor sheets expose a separate Prototype token tags editor. Tag reads and writes use the projected actor and ordinary host-checked actor updates; malformed canonical tag arrays are rejected. Creating a prototype-token tag on an actor with no `prototypeToken` creates the nested object, while an existing prototype record is updated without replacing its other fields.
+- Reviewed-script Tagger reads, `hasTags`, searches, and writes accept prototype refs. The E2E verifies discovery, bulk editing, script-side `hasTags`/`getTags`, and a reviewed script's write through the real Worker/host path.
+- PF1e Foundry import maps canonical prototype tags and legacy `prototypeToken.flags.tagger.tags`. Prototype labels are copied to newly built tokens in the supported placement, compendium/app, agent compendium/encounter, and summon paths. Focused unit tests cover import, placement, agent writes, and summons.
+- These labels do **not** add actor/item/prototype `{#}` or `{id}` rule allocation; that allocator remains scene-only.
+
+### Verification
+
+- `npm run typecheck` — pass; 64 Svelte components, 0 blocking issues, 1 existing advisory at `src/ui/sim/ReplayPanel.svelte:29`.
+- `npm run lint` — pass.
+- `npm run build` — pass.
+- `npm run size` — pass: `dist/index.html` **3,990,237 raw bytes / 1,141,660 gzip bytes**, within the 6 MiB raw budget.
+- Full `./node_modules/.bin/vitest run` — **4,637 passed / 12 skipped**; **323 files passed / 2 skipped** (112.66 s).
+- Production Chromium: `e2e/script_macros.spec.ts` plus `e2e/pf1e_inventory.spec.ts` — **10/10 passed** (9 script-macro flows and 1 PF1e inventory/sheet flow; 2.9 min). This includes the new prototype-token Tagger/script flow. Chromium was launched from a temporary `/tmp` install; no browser package or generated binary was added to the repository.
+- `git diff --check` — pass.
+
+### Remaining acceptance gaps
+
+- This run verifies one Chromium engine, not the spec's full browser matrix. It is not a substitute for every required multiplayer/session, security, import/clone, and scenario-specific acceptance check in A01–A41.
+- D368 did not run A41's required pre-published GPU-browser workload, so its visible-frame, dispatch, heap, and asset/codec targets remain unverified. The latest recorded PF1e p95 measurements—**86.7 ms** (20 × 500 models), **138.3 ms** (40 × 250), and **72.7 ms** (10k-model turn)—exceed that separate benchmark's `<50 ms` target and are not a substitute for A41 evidence.
+- Actor/item/prototype rule allocation and the other gaps listed in the implementation-status document remain open. **Full A01–A41 parity is not established.**
+
+
+---
+
+<a id="report-d369"></a>
+
+## D369 — World-document Tagger rule allocation verification
+
+**Date:** 2026-10-02
+
+**Scope:** Extend Tagger `{#}` / `{id}` expansion to explicit world actor, prototype-token, top-level item, and embedded-item refs. This remains an incremental slice of [`MACROS_FX_WIZARD_PARITY_SPEC.md`](MACROS_FX_WIZARD_PARITY_SPEC.md), not completion of A01–A41.
+
+### Implemented
+
+- Scene targets retain per-scene allocation. World documents use a separate world namespace shared across world actors, prototype tokens, top-level items, and embedded actor items. Host allocation includes existing tags plus earlier targets in the same batch, then commits all updates in one ordinary undoable envelope. Deterministic `{id}` collisions are rejected before scanning `{#}` ordinals, avoiding pointless repeated work.
+- The Tagger explorer enables rule application only when selected targets contain `{#}` or `{id}` templates. The host accepts explicit scene or world refs, re-resolves them from the caller's visible projection, checks update authorization, and returns only the request result. World uniqueness examines hidden world tags, so world-document expansion is restricted to GM/assistant callers; a player cannot use a GM-elevated reviewed script to infer that hidden state.
+- Reviewed `api.tags.applyTagRules(refs)` now accepts explicit world-document refs for an actual GM/assistant caller. Caller-run world edits remain limited by the caller's visible documents and update rights. Prototype-token expansions write through the owning actor without replacing other prototype fields.
+
+### Verification
+
+- `npm run typecheck` — pass; 64 Svelte components, 0 blocking issues, 1 existing advisory at `src/ui/sim/ReplayPanel.svelte:29`.
+- `npm run lint` — pass.
+- `npm run build` — pass.
+- `npm run size` — pass: `dist/index.html` **3,991,284 raw bytes / 1,142,038 gzip bytes**, below the 6 MiB raw budget.
+- Full `./node_modules/.bin/vitest run` — **4,640 passed / 12 skipped**; **323 files passed / 2 skipped** (107.81 s).
+- Production Chromium `e2e/script_macros.spec.ts` — **9/9 passed** (2.3 min, one worker, zero retries). The global-world flow exercises the Tagger UI's prototype-token `{#}` / `{id}` expansion and the reviewed script API. Browser evidence is Chromium-only.
+- `git diff --check` — pass.
+
+### Remaining parity work
+
+- This does not complete the nested trap-prefab clone/rebind flow (A16–A18), the remaining TG-01–TG-12 semantics, the full MATT action/event matrix, all multiplayer/privacy/browser criteria, or the remaining A01–A41 scenarios.
+- A41 remains open: this increment did not run its required pre-published GPU-browser workload of 100 simultaneous effects, 1,000 tagged placeables, 200 active tiles, and the long graph, nor measure its frame-time, dispatch, heap, or asset/codec targets. The latest recorded PF1e p95s—**61.7 ms** (20 × 500), **96.4 ms** (40 × 250), and **57.0 ms** (10k-model turn)—remain above that separate benchmark's `<50 ms` target; they are not a substitute for the A41 workload or a parity pass.
+- **Full A01–A41 parity is not established.**
+
+
+---
+
+<a id="report-d370"></a>
+
+## D370 — Scene-copy automation rebinding verification
+
+**Date:** 2026-10-02
+
+**Scope:** Strengthen the battle-scene clone path for the A17 acceptance scenario. This is an incremental verification report, not completion of A17 or A01–A41.
+
+### Implemented
+
+- The hexcrawl battle-scene caller uses `planDuplicateSceneOps` and the current stored world for graph/dependency preflight. If planning fails, it logs the reason and returns before submitting any ops.
+- The clone planner re-keys scene children and remaps copied automation anchors, pinned refs, internal tag selectors, and Tagger `{#}` / `{id}` templates; rewrites scene-local links and copied party-token references; resets copied trigger history; and refuses unresolved external graph dependencies before it returns a publishable plan.
+- HostSync pre-scans scene creates and validates copied automation graphs against those staged scenes. The scene and its saved graphs can therefore be accepted in one host envelope instead of rejecting valid references to the new scene.
+- Core regressions cover graph anchors, pinned/tag selectors, tile targets, Move destinations, Scene Background, Tagger edits, scene-local note and party references, copied history reset, external dependency failure, and source immutability. A HostSync integration regression publishes the scene and graphs atomically, fires the copied graph, and verifies that only the copied tagged door opens.
+- The production Chromium D-274 flow authors a pinned-door graph through the real UI, creates the linked battle-scene copy, checks it is one host commit, and fires the copied graph from the saved-zone UI. The original door remains closed.
+
+### Verification
+
+- `corepack pnpm exec vitest run` — **4,644 passed / 12 skipped**; **323 files passed / 2 skipped** (114.26 s).
+- `corepack pnpm typecheck` — pass; TypeScript and 64 Svelte components, 0 blocking issues, 1 existing advisory at `src/ui/sim/ReplayPanel.svelte:29`.
+- `corepack pnpm lint` — pass.
+- Production `vite build`, systems-package build, and starter-world build — pass.
+- `corepack pnpm size` — pass: `dist/index.html` **4,004,745 raw bytes / 1,145,792 gzip bytes**, below the 6 MiB raw budget.
+- Production Chromium `e2e/hexcrawl_encounters.spec.ts -g 'place all and the linked battle scene'` — **1/1 passed** (1.2 min, one worker, zero retries).
+- `git diff --check` — pass.
+
+### Remaining parity work
+
+- The tested clone path does not prove every internal/external graph reference type or the scene-import path, and does not close the full A17 scenario. Broader clone/import dependency, authorization, and multi-viewer cases remain open.
+- This increment does not close A01–A41 or the rest of the browser/cross-browser matrix.
+- A41 remains open: its required pre-published GPU-browser workload (100 simultaneous effects, 1,000 tagged placeables, 200 active tiles, and the long graph), frame-time/dispatch/heap measurements, and asset/codec reporting were not run. PF1e benchmarks are not a substitute.
+- **Full A01–A41 parity is not established.**
+
+
+---
+
+<a id="report-d371"></a>
+
+## D371 — Tactical/strategic scene-copy coverage
+
+**Date:** 2026-10-02
+
+**Scope:** Clarify and extend D370's battle-scene copy verification across ordinary tactical and strategic-scale source scenes, including doors and windows. This is not completion of A17 or A01–A41.
+
+### Implemented and tested
+
+- The earlier D-274 browser flow lives in `hexcrawl_encounters.spec.ts`, but the hexcrawl is only its encounter context: the linked scene being copied is the ordinary default **tactical** scene. That real-UI flow now authors both a door and a window, verifies their copied wall kinds and geometry, and fires a pinned-door graph on the copy. Only the copied door opens; the source door stays closed.
+- Added a separate real-UI flow that creates a door and window, switches that ordinary source scene to **strategic** scale through Settings, authors a pinned-door graph there, links the scene from an encounter table, and creates a battle-scene copy. It verifies the copy remains strategic, preserves both wall kinds and coordinates with fresh IDs, and fires the copied graph so only the copied door opens.
+- The e2e readback now exposes scene scale and each wall's classified kind so the browser assertions observe the actual stored scene rather than infer it from a file name.
+- Core planner tests also cover both `tactical` and `strategic` flags while checking that door/window semantics, coordinates, door state, and child-ID re-keying survive cloning.
+
+### Verification
+
+- Full Vitest — **4,646 passed / 12 skipped**; **324 files passed / 2 skipped** (108.45 s).
+- Production Chromium focused runs for both the normal/tactical D-274 flow and the strategic-scale door/window/graph copy — **2/2 passed together** (2.5 min, one worker, zero retries).
+- `corepack pnpm typecheck` — pass; TypeScript and 64 Svelte components, 0 blocking issues, 1 existing advisory at `src/ui/sim/ReplayPanel.svelte:29`.
+- `corepack pnpm lint` — pass.
+- Production build, systems-package build, and starter-world build — pass. `corepack pnpm size` reports **4,004,819 raw / 1,145,825 gzip bytes**, below the 6 MiB raw budget.
+- `git diff --check` — pass.
+
+### Remaining parity work
+
+- This is stronger normal/strategic clone coverage, not proof of every scene-child, external dependency, import, authorization, and multi-viewer case in A17.
+- The broader A01–A41 matrix and cross-browser suite remain open. A41's specified reference-browser workload and measured frame-time, dispatch, heap, and asset/codec targets were not run.
+- **Full A01–A41 parity is not established.**
+
+
+---
+
+<a id="report-d372"></a>
+
+## D372 verification — A41 performance harness and diagnostic
+
+**Date:** 2026-10-02
+
+**Result:** Harness workload and reporting completed. The run was explicitly **non-qualifying**; A41 and overall A01–A41 parity remain incomplete.
+
+### Implementation
+
+- Added an opt-in Playwright A41 workload against the production `file://` app and actual client/host APIs. The profile preflight requires a tracked, clean, pre-published profile that matches the live browser, GPU backend, and declared runner identity. The template is illustrative only and cannot qualify a run.
+- Added client-local adaptive renderer-resolution control with levels 1.0, 0.75, and 0.5. It uses sampled ticker p95 with degradation and slower recovery hysteresis; it preserves CSS canvas dimensions and does not skip FX, hide tokens/tiles, or alter authoritative mechanics.
+- Added runtime telemetry for renderer identification, visible-page animation-frame intervals, committed simple-trigger dispatch, long-graph traces, fixture/media integrity, adaptive-quality state, and post-GC V8 heap.
+- Added focused adaptive-quality unit tests covering degradation, recovery, invalid samples, and configured bounds.
+
+### Diagnostic environment and qualification
+
+The latest rerun used headless Chromium **153.0.8010.0** on Linux x86_64, with 2 reported hardware threads and 4 GiB reported device memory. Pixi renderer type `1` identified **WebGL**, backed by ANGLE/SwiftShader (`Google Inc.`, `SwiftShader Device (Subzero)`): a software renderer, not a physical GPU. The CSS canvas remained 904×844 (1280×960 browser viewport), while adaptive resolution reduced the backing store to 452×422.
+
+No matching pre-published GPU reference profile was available (`profile: null`). The run used diagnostic mode and an ephemeral Chromium binary because the Playwright browser CDN download failed with `ECONNRESET`. The test process exited successfully because the workload completed and the diagnostics were collected; that is **not a performance-budget pass or A41 qualification**.
+
+### Executed workload
+
+| Check | Result |
+|---|---:|
+| FX visuals per cycle × cycles | 100 × 50 |
+| Peak FX visuals / visuals in each cycle | 100 / exactly 100 |
+| FX start/stop intents | 700 |
+| FX instances after cleanup | 0 (`allStopped: true`) |
+| Tagged placeables | 800 tokens + 200 active image-backed tiles = 1,000 |
+| Rendered tile images | 200 / 200 |
+| Simple tag-selecting trigger runs | 100; all 100 committed; 1,000 selected targets |
+| Acyclic automation graph | 600 run-scope steps plus terminal stop; committed with exactly 601 trace entries |
+| Test PNG | 180 bytes, static PNG, 64×64, one frame |
+| Test PNG SHA-256 | `9457dd30be45c475e5dce9f398b605abfe0dd6b9c555c275bd8918ede9d54f4f` |
+
+### Measured results
+
+| Metric | Diagnostic result | A41 budget | Result |
+|---|---:|---:|---|
+| Visible-page rAF interval p95 | **150 ms** (1,579 samples; p50 50 ms, p99 166.7 ms) | ≤50 ms | **Miss** |
+| Simple-trigger dispatch p95 | **86 ms** (100 runs; p50 49.2 ms, p99 114 ms) | ≤100 ms | **Pass** |
+| Stabilized V8 heap after GC | **47,001,244 bytes**; warmed median **40,934,000 bytes**; ratio **1.1482×** | ≤1.10× | **Miss** |
+
+The adaptive controller changed resolution twice and reached 0.5. Its final internal sampled p95 was 66.8 ms; this is controller telemetry and does not replace the independent visible-page rAF measurement above. The visible-frame and heap budgets missed; the trigger-dispatch p95 passed in this diagnostic. The heap measurement is JavaScript heap only and does not include GPU-driver allocations.
+
+### Verification
+
+- `corepack pnpm test`: **4,649 passed / 12 skipped**; 325 files passed / 2 skipped; 125.57 seconds. Its separate PF1e scale benchmarks logged p95s of **77.6 ms** (20×500), **116.2 ms** (40×250), and **64.2 ms** (10k-model turn), above their printed `<50 ms` target. The test suite uses a wider regression ceiling, so passing Vitest is not evidence that those performance targets passed.
+- `corepack pnpm typecheck`: passed; 64 Svelte components, zero blocking issues, one existing advisory at `src/ui/sim/ReplayPanel.svelte:29`.
+- `corepack pnpm lint`: passed.
+- `corepack pnpm test:fx:prepare`: production Vite app, system packages, and available starter-world artifacts built. The optional tester starter was skipped because `dist/content/pf1e` was not present.
+- A41 diagnostic Playwright scenario: 1 passed in 1.8 minutes, with the qualification and budget caveats above.
+
+### Remaining acceptance work
+
+A41 still requires a clean run on the declared target GPU/browser/runner with its exact reference profile committed before measurement, followed by passing all three budgets. D373 adds the separate A27 intentional-cycle host diagnostic. This report is workload and diagnostic evidence only; it does not close A41 or establish full A01–A41 feature, security, multiplayer, browser, or performance parity.
+
+---
+
+<a id="report-d374"></a>
+
+## D374 — Active-zone native double-click dispatch (2026-10-02)
+
+**Scope:** Add a distinct native double-click method for visible tile automation while retaining ordinary single-click behavior. This is one TR-01/A19 input-source slice, not completion of A19 or A01–A41.
+
+### Implemented
+
+- `doubleClick` is part of the validated automation method contract, wizard methods and labels, client `automation.click` request, host validation, and click dispatch. Legacy messages with no method still mean `click`.
+- GM and connected-player canvases track the first tile click, accept only the native second press on the same scene/tile/screen and world point/token context, suppress its ordinary `click`, then send one `doubleClick`. The first press continues to send one ordinary click. A graph subscribed to both methods can receive both distinct events, subject to its configured run gates; an unmatched second click and a third rapid click retain ordinary-click behavior.
+- HostSync resolves graphs from the host's live visible tile and validates the active scene, rotated hit, optional token ownership/visibility, player publication, rate limit, and replay ID; no graph ID, graph body or trace is sent to the player.
+
+### Verification
+
+- `corepack pnpm exec vitest run tests/core/automation.test.ts tests/host/sync.test.ts` — **288/288 passed** (92 core automation and 196 HostSync tests). Coverage checks distinct method planning, the ordinary-click/double-click host dispatch, the expected overlap count, forged-point rejection, graph-ID denial, replay deduplication, and player privacy.
+- Production `file://` Chromium 153 run of the two focused `e2e/active_zones.spec.ts` cases — **2/2 passed in 29.3 s** (one worker, zero retries): the GM and connected-player canvas each exercise a real native single-click, right-click, and double-click. Each native double-click results in one ordinary `click` and one `doubleClick` when the graph subscribes to both, with no duplicate second `click`.
+- Full `corepack pnpm test` — **4,658 passed / 12 skipped**; 325 files passed / 2 skipped; 121.46 s.
+- `corepack pnpm typecheck` — pass; TypeScript and 64 Svelte components, zero blocking issues, one existing advisory at `src/ui/sim/ReplayPanel.svelte:29`.
+- `corepack pnpm lint` and `git diff --check` — pass. `corepack pnpm size` — **3.850 MB raw / 1.102 MB gzip**, within the 6 MB raw bundle budget; this is not A41 performance evidence.
+- `corepack pnpm test:fx:prepare` — production app, system packages, and available starter-world artifacts built; the optional tester starter was skipped because `dist/content/pf1e` was not present.
+
+The Playwright CDN was unreachable (`ECONNRESET`); the focused functional run used npm-provisioned Chromium 153. This was not a hardware-GPU run or A41 performance evidence.
+
+### Remaining acceptance work
+
+- This closes only the separate tile double-click input/event slice. Hover, combat/time/document/scene event sources, the full MATT click overlap/priority algorithm, cross-browser criteria, and the rest of TR-01/A19 remain open.
+- A41 still requires its pre-published target GPU/browser/runner profile and a qualifying workload with every performance budget met. **Full A01–A41 parity is not established.**
+
+---
+
+<a id="report-d375"></a>
+
+## D375 — Active-zone tile hover in/out dispatch (2026-10-02)
+
+**Scope:** Add pointer hover-in/out as separate tile-trigger methods. This is a bounded TR-01/A19 event-source slice, not completion of A19 or A01–A41.
+
+### Implemented
+
+- `hoverIn` and `hoverOut` are distinct validated `AutomationMethod` values. The wizard exposes “hover in/out” labels, method filters and method-route entries; saved graphs keep these methods in their ordinary validated definitions and history.
+- GM and connected-player canvases track the reverse-order hit-tested, visible tile under mouse/pen movement while the select tool owns the canvas. Entering a tile emits one `hoverIn`; moving to another tile emits `hoverOut` for the previous tile before `hoverIn` for the new one; moving within a tile does not resend. Touch pointers do not synthesize hover, and a token hit is not treated as a tile hit. Leaving the canvas/tool hit area emits one `hoverOut` using the last in-tile world point, preserving host point-hit validation.
+- A generic `requestAutomationTileTrigger` client method carries typed pointer methods; the old `requestAutomationClick` name remains a forwarding compatibility wrapper. HostSync accepts only the closed pointer-method set, revalidates the active scene, visible rotated tile hit, optional visible owned token, player publication gate, rate limit and request replay ID, then resolves private graphs on the host. Hidden-tile guesses and graph-ID requests do not bypass that boundary or expose graph definitions/traces to players.
+
+### Verification
+
+- `corepack pnpm exec vitest run tests/core/automation.test.ts tests/host/sync.test.ts` — **289/289 passed** (92 core automation and 197 HostSync tests); covers distinct method planning, visible published hover-in/out dispatch, last in-tile point validation, replay deduplication, forged-point/graph-ID denial, hidden-tile denial and player privacy.
+- Production `file://` Chromium 153 `e2e/active_zones.spec.ts` — **2/2 passed in 22.0 s** (one worker, zero retries): actual pointer movement enters/leaves and re-enters the authored tile on both GM and connected-player canvases, confirms movement within one tile adds no event, and exercises real click/right/double-click input.
+- Full `corepack pnpm test` — **4,659 passed / 12 skipped**; 325 files passed / 2 skipped; **96.54 s**.
+- `corepack pnpm typecheck` — passed; TypeScript and 64 Svelte components, zero blocking issues, one existing advisory at `src/ui/sim/ReplayPanel.svelte:29`. `corepack pnpm lint` passed.
+- `corepack pnpm test:fx:prepare` built the production app, systems and available starter-world artifacts; the optional PF1e tester starter was skipped because `dist/content/pf1e` is absent. `corepack pnpm size` — **3.852 MB raw / 1.102 MB gzip** (4,038,772 / 1,155,702 bytes), within the 6 MB raw budget. `git diff --check` passed.
+
+The browser cases used npm-provisioned Chromium 153 for functional input coverage only. This is not cross-browser acceptance or A41 performance evidence.
+
+### Remaining acceptance work
+
+- This closes only visible-tile pointer hover-in/out dispatch. Combat, time, door/journal/macro/scene-change/lighting/game-time, region hover and other trigger sources; full MATT overlap/priority and guard semantics; cross-browser and multiplayer acceptance remain open.
+- A41 still requires its pre-published target GPU/browser/runner profile and a qualifying workload with every performance budget met. **Full A01–A41 parity is not established.**
+
+
+---
+
+<a id="report-d376"></a>
+
+## D376 — Host-dispatched active-scene change trigger (2026-10-02)
+
+**Scope:** Add a `sceneChange` active-zone method for an actual transition to a different active scene. This covers only that event source; `sceneLoad` and the rest of TR-01/A19 and A01–A41 remain open.
+
+### Implemented
+
+- Added `sceneChange` to the validated automation-method contract and wizard authoring/routing/history. The wizard labels it **scene change** and does not offer it as a manual simulation; the direct `automation.request` method remains closed to this host-dispatched event.
+- HostSync detects activation by comparing the authoritative active-scene document before and after a committed envelope. It dispatches only when the active scene ID changes, to graphs anchored in the newly active destination scene. Tile and region anchors are resolved on the host, ordered deterministically by descending trigger sort and stable IDs, and rechecked immediately before each fire.
+- Creating an inactive scene, updating the same active scene, a direct request claiming `sceneChange`, and Undo/Redo restore envelopes do not synthesize or replay the trigger. A non-GM caller additionally needs a readable/visible source and a graph published with `playerRunnable`; the graph definition and GM trace remain private.
+
+### Verification
+
+- Focused HostSync integration test — **1/1 passed**. It verifies inactive-scene creation does not fire; GM and player direct `sceneChange` requests are rejected without mutation; a real switch into the destination fires one history entry and one GM-only chat action; the connected player's replica receives neither graph/history nor message; updating the already-active destination and undoing that no-op do not dispatch again or remove the original trigger; undoing the graph and then the scene activation does not replay the event.
+- Production `file://` Chromium 153 `e2e/active_zones.spec.ts` — **20/20 passed in 3.1 min** (one worker, zero retries). The new browser case authors a scene-change graph in a second scene, switches away without firing it, then uses real scene navigation to activate the destination and observes exactly one `sceneChange` result. This is functional browser evidence, not cross-browser or A41 performance evidence. The run used npm-provisioned Chromium 153; an existing route-input locator was narrowed to an exact accessible label after the first full-file run exposed Playwright substring ambiguity between click/right-click/double-click.
+- Full `corepack pnpm test` — **4,660 passed / 12 skipped**; 325 files passed / 2 skipped; 133.60 s.
+- `corepack pnpm typecheck` — pass; TypeScript and 64 Svelte components, zero blocking issues, one existing advisory at `src/ui/sim/ReplayPanel.svelte:29`. `corepack pnpm lint` — pass.
+- `corepack pnpm test:fx:prepare` — production app, systems and available starter-world artifacts built; the optional tester starter was skipped because `dist/content/pf1e` was absent. `corepack pnpm size` — **3.854 MB raw / 1.103 MB gzip** (4,041,481 / 1,156,441 bytes), within the 6 MB raw bundle budget. `git diff --check` — pass.
+
+### Remaining acceptance work
+
+- This closes only the host-observed active-scene-transition slice. `sceneLoad`, combat/time/document, door/journal/macro, lighting/game-time, additional region triggers, complete MATT overlap/priority/guard behavior and cross-browser coverage remain incomplete.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
