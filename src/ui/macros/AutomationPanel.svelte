@@ -15,7 +15,7 @@
 
   let { client, bus, getAsset = null }: { client: ClientSync; bus: EventBus<ClientEvents>;
     getAsset?: ((hash: string) => Promise<Uint8Array | undefined>) | null } = $props();
-  const METHODS: AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "sceneChange", "rotate", "click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "doorOpen", "doorClose", "doorLock", "doorUnlock", ...COMBAT_TRIGGER_METHODS, "lightingChange", "timeChange", "manual"];
+  const METHODS: AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "sceneChange", "sceneLoad", "rotate", "click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "doorOpen", "doorClose", "doorLock", "doorUnlock", ...COMBAT_TRIGGER_METHODS, "lightingChange", "timeChange", "manual"];
   const KINDS: AutomationStep["kind"][] = ["select", "filter", "checkVariable", "checkValue", "checkScriptResult", "shuffle", "position", "distance", "attributes", "checkData", "condition", "inventory", "tokenTriggerCount", "routeMethod", "routeUser", "forEach", "endEach", "resetHistory", "batchFlush", "collection", "triggerTile", "setActive", "stopOthers", "stopMovement", "set", "gameTime", "sceneLighting", "sceneBackground", "tileImage", "hurtHeal", "random", "tags", "visibility", "door", "move", "rotate", "delete", "chat", "sequence", "script", "summon", "rollTable", "landing", "jump", "stop"];
   const ADD_KINDS = KINDS.filter((kind) => kind !== "endEach");
   const KIND_LABEL: Record<string, string> = { stopMovement: "Stop Token Movement", checkScriptResult: "Check Script Result",
@@ -26,6 +26,7 @@
   const methodLabel = (method: AutomationMethod): string => method === "rightClick" ? "right click"
     : method === "doubleClick" ? "double click" : method === "hoverIn" ? "hover in"
       : method === "hoverOut" ? "hover out" : method === "sceneChange" ? "scene change"
+        : method === "sceneLoad" ? "scene load"
         : method === "doorOpen" ? "door open" : method === "doorClose" ? "door close"
           : method === "doorLock" ? "door lock" : method === "doorUnlock" ? "door unlock"
             : method === "combatStart" ? "combat start" : method === "combatRound" ? "combat round"

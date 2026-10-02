@@ -1172,6 +1172,19 @@ export class HostSync {
       snapshotSeq: this.catchUpSeq(session, hello),
       ...(this.simInfo !== null ? { sim: this.simInfo } : {}),
     });
+    // A viewer loading the active scene it does not already hold hears `sceneLoad` — the
+    // per-player half of MATT's scene trigger (its wiki: "triggers for each player loading
+    // in"). Fired after the snapshot so the graph's own commits arrive as later ops; a scene
+    // activation stays the separate `sceneChange` event, so the two never coincide.
+    const loaded = this.activeSceneDocument();
+    if (!loaded) {
+      this.loadedSceneByUser.delete(user.id);
+      return;
+    }
+    if (this.loadedSceneByUser.get(user.id) !== loaded._id) {
+      this.loadedSceneByUser.set(user.id, loaded._id);
+      this.fireSceneGraphs(loaded, "sceneLoad", user.id);
+    }
   }
 
   /**
@@ -2278,8 +2291,15 @@ export class HostSync {
     }
     if (activeSceneBefore && sceneActivationCandidate) {
       const activeSceneAfter = this.activeSceneDocument();
-      if (activeSceneAfter && activeSceneAfter._id !== activeSceneBefore._id)
+      if (activeSceneAfter && activeSceneAfter._id !== activeSceneBefore._id) {
+        // Every connected viewer follows the activation, so record the scene they now hold:
+        // the commit itself is the `sceneChange` event, and a later reconnect must not replay
+        // `sceneLoad` for a scene they already loaded.
+        for (const session of this.sessions.values()) {
+          if (session.user) this.loadedSceneByUser.set(session.user.id, activeSceneAfter._id);
+        }
         this.fireSceneChangeAutomations(activeSceneAfter, by);
+      }
     }
     if (doors.size > 0 && !restoring) {
       if (this.doorAutomationDepth < HostSync.DOOR_AUTOMATION_DEPTH) {
@@ -3400,6 +3420,14 @@ export class HostSync {
    * Lighting or Game Time action commits another environment change. */
   private environmentAutomationDepth = 0;
   private static readonly ENVIRONMENT_AUTOMATION_DEPTH = 8;
+  /**
+   * MATT's scene trigger is a single `canvasready` mode that fires "for each player loading
+   * in", while this engine keeps the two moments distinguishable: `sceneChange` is the
+   * committed activation transition (once per commit) and `sceneLoad` is a viewer loading the
+   * active scene it does not already hold. This remembers what each user last loaded, so a
+   * plain reconnect never re-fires and a return to a different scene does.
+   */
+  private readonly loadedSceneByUser = new Map<UserId, string>();
 
   /** The encounter's own scene: its `flags.core.sceneId` binding, or — for a document saved
    * before the binding — the scene whose active encounter pointer names it. */
@@ -3742,10 +3770,10 @@ export class HostSync {
     // Path fraction determines first contact; for coincident tiles use method,
     // descending tile Sort (not elevation), then stable IDs. No player sets priority.
     const methodOrder: Record<AutomationMethod, number> = {
-      enter: 0, exit: 1, stop: 2, elevation: 3, create: 4, sceneChange: 5, rotate: 6, click: 7, rightClick: 8, doubleClick: 9,
-      hoverIn: 10, hoverOut: 11, doorOpen: 12, doorClose: 13, doorLock: 14, doorUnlock: 15,
-      combatStart: 16, combatRound: 17, combatTurnStart: 18, combatTurnEnd: 19, combatEnd: 20,
-      lightingChange: 21, timeChange: 22, manual: 23,
+      enter: 0, exit: 1, stop: 2, elevation: 3, create: 4, sceneChange: 5, sceneLoad: 6, rotate: 7, click: 8, rightClick: 9, doubleClick: 10,
+      hoverIn: 11, hoverOut: 12, doorOpen: 13, doorClose: 14, doorLock: 15, doorUnlock: 16,
+      combatStart: 17, combatRound: 18, combatTurnStart: 19, combatTurnEnd: 20, combatEnd: 21,
+      lightingChange: 22, timeChange: 23, manual: 24,
     };
     candidates.sort((a, b) => a.sceneId.localeCompare(b.sceneId) ||
       a.fraction - b.fraction || a.tokenId.localeCompare(b.tokenId) ||

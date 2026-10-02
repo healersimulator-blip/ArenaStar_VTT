@@ -8267,3 +8267,106 @@ test("HostSync dispatches lightingChange for a committed darkness edit and timeC
   expect(darknessOf("s1")).toBeCloseTo(0.4, 5);
   expect(messages()).toEqual(beforeActionMessages);
 });
+
+test("HostSync fires sceneLoad for each viewer that loads the active scene, once per scene held", async () => {
+  const h = await setup();
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: zoneTile() }]);
+  await flushMicrotasks();
+  const published: AutomationDocument = { ...zoneDoc(), _id: "arrival-plate", name: "Arrival plate",
+    definition: { ...zoneDoc().definition, tileId: "zone", methods: ["sceneLoad"],
+      gates: { playerRunnable: true }, steps: [{ id: "notice", kind: "chat", audience: "gm",
+        content: "{{method}} by {{user}}" }] } };
+  const privateGraph: AutomationDocument = { ...zoneDoc(), _id: "private-arrival", name: "Private arrival",
+    definition: { ...zoneDoc().definition, tileId: "zone", methods: ["sceneLoad"],
+      gates: {}, steps: [{ id: "notice", kind: "chat", audience: "gm", content: "private {{user}}" }] } };
+  h.gm.submit([{ kind: "create", coll: "automations", data: published },
+    { kind: "create", coll: "automations", data: privateGraph }]);
+  await flushMicrotasks();
+  const messages = () => h.hostStore.getAll("messages").map((message) => message.content);
+  const recent = (id: string) =>
+    h.hostStore.get("automations", id)?.state?.recent?.map((entry) => ({ method: entry.method, userId: entry.userId }));
+
+  // Neither GM nor player may ask for the event; it comes from a real session load.
+  const rejected: ClientEvents["rejected"][] = [];
+  h.gmBus.on("rejected", (event) => rejected.push(event));
+  const beforeSpoof = h.hostStore.seq;
+  h.gm.requestAutomation("arrival-plate", "s1", "sceneLoad");
+  await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(beforeSpoof);
+  expect(rejected.at(-1)?.reason).toBe("invalid_schema");
+
+  // A player joining loads the active scene: the published graph hears it under that player,
+  // the private one stays silent for them, and the player's replica keeps no messages.
+  const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const playerRejected: ClientEvents["rejected"][] = [];
+  playerBus.on("rejected", (event) => playerRejected.push(event));
+  expect(messages()).toEqual(["sceneLoad by " + PLAYER_ID]);
+  expect(recent("arrival-plate")).toEqual([{ method: "sceneLoad", userId: PLAYER_ID }]);
+  expect(recent("private-arrival")).toBeUndefined();
+  expect(player.store.getAll("messages")).toEqual([]);
+  expect(player.store.getAll("automations")).toEqual([]);
+
+  // A second player loads the same scene under their own identity, and the unpublished graph
+  // stays silent for players through every load.
+  await h.addPlayer(OTHER_ID, "Ivy");
+  expect(messages().slice(-1)).toEqual(["sceneLoad by " + OTHER_ID]);
+  expect(recent("private-arrival")).toBeUndefined();
+
+  // Reconnecting the same viewer to the same scene is not a new load. A viewer who was away
+  // while the table moved does load the new active scene on return; one who was present for the
+  // activation already follows it, so their reconnect is not a load.
+  const before = messages().length;
+  await h.addPlayer(PLAYER_ID, "Rex");
+  expect(messages().length).toBe(before);
+  const second: SceneDocument = { ...sceneDoc("scene-two"), active: false };
+  h.gm.submit([{ kind: "create", coll: "scenes", data: second }]);
+  await flushMicrotasks();
+  const secondTile: TileDocument = { ...zoneTile(), _id: "zone-two", name: "Second plate" };
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: second._id }, data: secondTile }]);
+  await flushMicrotasks();
+  const secondGraph: AutomationDocument = { ...zoneDoc(), _id: "second-arrival", name: "Second arrival",
+    definition: { ...zoneDoc().definition, sceneId: second._id, tileId: "zone-two",
+      methods: ["sceneLoad"], gates: { playerRunnable: true },
+      steps: [{ id: "notice", kind: "chat", audience: "gm", content: "{{method}} by {{user}}" }] } };
+  h.gm.submit([{ kind: "create", coll: "automations", data: secondGraph }]);
+  await flushMicrotasks();
+  h.host.removeSession("peer-" + PLAYER_ID); // Rex leaves before the move
+  const beforeSwitch = messages().length;
+  h.gm.submit([{ kind: "update", ref: { coll: "scenes", id: "s1" }, diff: { active: false } },
+    { kind: "update", ref: { coll: "scenes", id: second._id }, diff: { active: true } }]);
+  await flushMicrotasks();
+  expect(messages().length).toBe(beforeSwitch); // activation is sceneChange, not a load
+  await h.addPlayer(PLAYER_ID, "Rex");
+  expect(messages().slice(beforeSwitch)).toEqual(["sceneLoad by " + PLAYER_ID]);
+  // The graph belongs to the new scene and heard it; the old scene's graph did not.
+  expect(recent("second-arrival")).toEqual([{ method: "sceneLoad", userId: PLAYER_ID }]);
+  expect(recent("arrival-plate")).toHaveLength(2); // Rex's first load, then Ivy's
+  // Ivy stayed connected through the activation, so her session already holds the new scene.
+  const beforeIvy = messages().length;
+  await h.addPlayer(OTHER_ID, "Ivy");
+  expect(messages().length).toBe(beforeIvy);
+
+  // A world with no active scene has nothing to load.
+  const beforeNone = messages().length;
+  h.gm.submit([{ kind: "update", ref: { coll: "scenes", id: second._id }, diff: { active: false } }]);
+  await flushMicrotasks();
+  await h.addPlayer(OTHER_ID, "Ivy");
+  expect(messages().length).toBe(beforeNone);
+});
+
+test("a GM loopback session loads the active scene on connect", async () => {
+  const h = await setup();
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: zoneTile() }]);
+  await flushMicrotasks();
+  const graph: AutomationDocument = { ...zoneDoc(), _id: "gm-arrival", name: "GM arrival",
+    definition: { ...zoneDoc().definition, tileId: "zone", methods: ["sceneLoad"], gates: {},
+      steps: [{ id: "notice", kind: "chat", audience: "gm", content: "{{method}} by {{user}}" }] } };
+  h.gm.submit([{ kind: "create", coll: "automations", data: graph }]);
+  await flushMicrotasks();
+  // The GM's own loopback session (addSession with a user) is a load too.
+  const pair = createTransportPair();
+  h.host.addSession("gm-two", pair.a, { id: OTHER_ID, role: "ASSISTANT", name: "Ivy" });
+  await flushMicrotasks();
+  expect(h.hostStore.getAll("messages").map((message) => message.content))
+    .toEqual(["sceneLoad by " + OTHER_ID]);
+});

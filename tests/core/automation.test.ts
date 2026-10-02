@@ -117,6 +117,30 @@ describe("host-side active-zone graph", () => {
     expect(new Set(SIMULATABLE_METHODS).size).toBe(SIMULATABLE_METHODS.length);
   });
 
+  test("sceneLoad is a host-dispatched, routable method distinct from sceneChange", () => {
+    const definition: AutomationDefinition = { ...base,
+      methods: ["sceneLoad"], gates: {},
+      steps: [
+        { id: "router", kind: "routeMethod", routes: { sceneChange: "arrival" }, otherwise: "other" },
+        { id: "arrival", kind: "landing", name: "arrival" },
+        { id: "notice", kind: "chat", audience: "gm", content: "{{method}} by {{user}}" },
+        { id: "done", kind: "stop" },
+        { id: "other", kind: "landing", name: "other" },
+        { id: "fallback", kind: "chat", audience: "gm", content: "{{method}} ignored" },
+      ] };
+    expect(validateAutomation(definition).ok).toBe(true);
+    const message = (method: "sceneLoad") => {
+      const outcome = planAutomation(world, automation(definition), { scene, tile, method,
+        caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+      return outcome.ok && "plan" in outcome
+        ? outcome.plan.ops.find((op) => op.kind === "create" && op.coll === "messages") : undefined;
+    };
+    // A load is not an activation: the router falls through to the other branch.
+    expect(message("sceneLoad")).toMatchObject({ data: { content: "sceneLoad ignored" } });
+    expect(isHostDispatchedMethod("sceneLoad")).toBe(true);
+    expect(SIMULATABLE_METHODS).not.toContain("sceneLoad");
+  });
+
   test("lighting and time changes are host-dispatched, routable methods with no manual simulation", () => {
     const definition: AutomationDefinition = { ...base,
       methods: ["lightingChange", "timeChange"], gates: {},

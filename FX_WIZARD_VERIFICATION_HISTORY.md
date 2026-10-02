@@ -1,6 +1,6 @@
 # FX Wizard Verification History
 
-Consolidated historical archive through D-372, with the D-374 double-click, D-375 hover, D-376 scene-change, D-377 door-change, D-378 combat-change and D-379 environment-change follow-ups appended below. D-373 remains the latest standalone verification report.
+Consolidated historical archive through D-372, with the D-374 double-click, D-375 hover, D-376 scene-change, D-377 door-change, D-378 combat-change, D-379 environment-change and D-380 scene-load follow-ups appended below. D-373 remains the latest standalone verification report.
 
 **Recovery note:** the former archive body was unavailable after an overwrite. D-293–D-346 below are reconstructed from the preserved, detailed `DECISIONS.md` records, rather than copied from the original report bodies. D-347 is retained from its original standalone verification report. Existing status summaries and verification counts remain available in `MACROS_FX_WIZARD_IMPLEMENTATION_STATUS.md`.
 
@@ -40,6 +40,7 @@ Consolidated historical archive through D-372, with the D-374 double-click, D-37
 - [D-377 archived verification report](#report-d377)
 - [D-378 archived verification report](#report-d378)
 - [D-379 archived verification report](#report-d379)
+- [D-380 archived verification report](#report-d380)
 
 <a id="report-d293-d319"></a>
 
@@ -4242,4 +4243,28 @@ The browser cases used npm-provisioned Chromium 153 for functional input coverag
 ### Remaining acceptance work
 
 - This closes only the two committed environment-change slices. MATT's per-percent **Lighting Animation** (a local canvas animation tick, not a world-state change) and its controlled-token context for these triggers are not modelled. `sceneLoad`, journal/macro and region-initiated methods are still open, as are the full MATT overlap/guard matrix and cross-browser coverage.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d380"></a>
+
+## D380 — Host-dispatched per-viewer scene load (2026-10-02)
+
+**Scope:** Add the per-viewer half of MATT's scene trigger as a host-dispatched method, separated from the activation event this engine already ships. This covers only that slice; the rest of TR-01/A19 and A01–A41 remain open.
+
+### Implemented
+
+- MATT has one `canvasready` mode, labelled "Scene Change", which its wiki describes as running "when the scene is loaded by a player … for each player loading in". This engine keeps the two moments distinguishable: `sceneChange` remains the committed activation transition (D-376, once per commit) and the new `sceneLoad` is **a viewer loading the active scene it does not already hold**. They never coincide, so a graph may declare both without double-firing.
+- HostSync keeps `loadedSceneByUser`: a session completing its join (approved player, or a GM/assistant loopback session added with a user) fires `sceneLoad` for the active scene when it differs from the remembered one. A plain reconnect to the same scene is silent; a viewer away while the table moved fires on return; a viewer present through the activation has its record updated by that commit (they already follow the scene) and is silent; with no active scene nothing fires. The dispatch is the shared scene-wide ordered loop (descending Sort, stable IDs, live re-validation), carries no triggering token, runs under the loading viewer's identity, and requires the graph to be `playerRunnable` for a non-GM viewer. `automation.request`/`automation.fire` refuse the method.
+- The wizard labels it "scene load" and reports it in the host-event hint; a scene-load-only graph offers no Simulate control.
+
+### Verification
+
+- `tests/host/sync.test.ts` — **203 passed**. New cases: a published graph fires once for a joining player with that player as `{{user}}` and one `sceneLoad` history entry; an unpublished graph stays silent for players across every load; a second player loads under their own id; GM and player spoofed requests are `invalid_schema` with an unchanged host sequence; a same-scene reconnect is silent; a returning viewer fires the *new* scene's graph and not the old scene's; a viewer connected through the activation is silent on reconnect; a world with no active scene fires nothing; and a GM/assistant loopback session counts as a load.
+- `tests/core/automation.test.ts` — **96 passed**: the method validates, calls no extra fields, routes through `routeMethod` (a load is not an activation, so the `sceneChange` route falls through to the other branch) and is host-dispatched and absent from `SIMULATABLE_METHODS`.
+- Production `file://` Chromium 153: the new `e2e/active_zones.spec.ts:1301` case authored a published scene-load graph, joined a real second browser context as a player, read the joining player's own user id from the player surface, and asserted the GM chat names that id exactly once, the host history holds one `sceneLoad` row for it, the graph shows the host-event hint with no Simulate control, and the player's shell holds no such message. `active_zones.spec.ts` (24 cases) + `join.spec.ts`: **25/25 passed in 4.2 min** (one worker, zero retries).
+- Full `corepack pnpm test` — **4,679 passed / 12 skipped** across 325 passing / 2 skipped files (**107.79 s**). `pnpm typecheck` — 64 Svelte components, 0 blocking, 1 existing advisory at `src/ui/sim/ReplayPanel.svelte:29`; lint clean. `pnpm size` — **3.862 MB raw / 1.105 MB gzip** (4,049,540 / 1,158,615 bytes), within the 6 MB budget; `git diff --check` clean.
+
+### Remaining acceptance work
+
+- This closes only the per-viewer load slice. MATT's `canvasready` also fires when a GM's own canvas is retargeted and its triggers carry `controlled: gm/player` restrictions; neither is modelled. MATT's per-percent Lighting Animation, journal/macro initiation, region-initiated methods, the full overlap/guard matrix and cross-browser coverage remain open.
 - A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**

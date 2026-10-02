@@ -1111,7 +1111,7 @@ test("GM door open/close fires a door-method graph anchored over the door, once 
   await expect(zones.locator("li").filter({ hasText: "Door bell" })).toHaveCount(1);
   // A graph whose only methods are host-observed offers no Simulate control, and says why.
   await zones.locator("li").filter({ hasText: "Door bell" }).getByRole("button", { name: "Edit" }).click();
-  await expect(zones.locator(".methods ~ small, small").filter({ hasText: "fire automatically" })).toHaveCount(1);
+  await expect(zones.locator("small").filter({ hasText: /fires? automatically/ })).toHaveCount(1);
   await expect(zones.getByText("Simulate method")).toHaveCount(0);
   await page.locator('[data-window="macros"] [data-window-close]').click();
 
@@ -1168,7 +1168,7 @@ test("GM combat start/round/turn/end fires combat-method graphs in the encounter
   await expect(zones.locator("li").filter({ hasText: "Combat alarm" })).toHaveCount(1);
   // Combat-only graphs are host-observed: no Simulate control, and the panel says why.
   await zones.locator("li").filter({ hasText: "Combat alarm" }).getByRole("button", { name: "Edit" }).click();
-  await expect(zones.locator(".methods ~ small, small").filter({ hasText: "fire automatically" })).toHaveCount(1);
+  await expect(zones.locator("small").filter({ hasText: /fires? automatically/ })).toHaveCount(1);
   await expect(zones.getByText("Simulate method")).toHaveCount(0);
   await page.locator('[data-window="macros"] [data-window-close]').click();
 
@@ -1254,7 +1254,7 @@ test("GM lighting and world-clock changes fire their host-dispatched graph, once
   await zones.locator("[data-zone-save]").click();
   await expect(zones.locator("li").filter({ hasText: "Environment alarm" })).toHaveCount(1);
   await zones.locator("li").filter({ hasText: "Environment alarm" }).getByRole("button", { name: "Edit" }).click();
-  await expect(zones.locator(".methods ~ small, small").filter({ hasText: "fire automatically" })).toHaveCount(1);
+  await expect(zones.locator("small").filter({ hasText: /fires? automatically/ })).toHaveCount(1);
   await expect(zones.getByText("Simulate method")).toHaveCount(0);
   await page.locator('[data-window="macros"] [data-window-close]').click();
 
@@ -1296,4 +1296,74 @@ test("GM lighting and world-clock changes fire their host-dispatched graph, once
   // Environment events carry no triggering token, so the row ends at the user.
   await expect(history.locator("li").filter({ hasText: /: lightingChange · gm$/ })).toHaveCount(2);
   await expect(history.locator("li").filter({ hasText: /: timeChange · gm$/ })).toHaveCount(1);
+});
+
+test("a connecting player loading the scene fires its sceneLoad graph, and a reconnect of the same scene does not", async ({ browser }: { browser: Browser }) => {
+  const hostCtx = await browser.newContext();
+  const playerCtx = await browser.newContext();
+  try {
+    const host = await hostCtx.newPage();
+    const player = await playerCtx.newPage();
+    await host.goto(entry + "?e2e=1");
+    await waitForSurface(host, "app");
+    await host.locator("#gm-macros").click();
+    await host.locator("[data-macro-zones-tab]").click();
+    const zones = host.locator("[data-active-zones]");
+    await zones.locator("[data-zone-tile-create] summary").click();
+    const tile = zones.locator("[data-zone-tile-create]");
+    await tile.getByLabel("Tile name").fill("Arrival plate");
+    await tile.getByLabel("X", { exact: true }).fill("350");
+    await tile.getByLabel("Y", { exact: true }).fill("400");
+    await tile.getByLabel("Width").fill("200");
+    await tile.getByLabel("Height").fill("160");
+    await tile.locator("[data-zone-create-tile]").click();
+    await expect(zones.locator("[data-zone-tile] option").filter({ hasText: "Arrival plate" })).toHaveCount(1);
+    await zones.locator("[data-zone-name]").fill("Arrival bell");
+    for (const method of ["enter", "stop", "manual"])
+      await zones.locator(".methods label").filter({ hasText: new RegExp(`^${method}$`) })
+        .locator("input").uncheck();
+    await zones.locator(".methods label").filter({ hasText: "scene load" }).locator("input").check();
+    await zones.getByLabel("Player canvas triggers (published)").check();
+    await zones.locator("[data-zone-save]").click();
+    await expect(zones.locator("li").filter({ hasText: "Arrival bell" })).toHaveCount(1);
+    await zones.locator("li").filter({ hasText: "Arrival bell" }).getByRole("button", { name: "Edit" }).click();
+    await expect(zones.locator("small").filter({ hasText: /fires? automatically/ })).toHaveCount(1);
+    await expect(zones.getByText("Simulate method")).toHaveCount(0);
+    await host.locator('[data-window="macros"] [data-window-close]').click();
+
+    // The player's own connection load is the event: the GM's log names that player.
+    await host.locator("#share").click();
+    const fragment = manualFragment(await host.locator("#invite-link").inputValue());
+    await player.goto(`${entry}?e2e=1&join=1#${fragment}`);
+    await expect.poll(() => player.locator("#offer-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await host.locator("#peer-code").fill(await player.locator("#offer-out").inputValue());
+    await host.locator("#code-apply").click();
+    await expect.poll(() => host.locator("#share-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await player.locator("#answer-input").fill(await host.locator("#share-out").inputValue());
+    await player.locator("#answer-apply").click();
+    await expect.poll(() => playerCall<boolean>(player, "connected"), { timeout: 30_000 }).toBe(true);
+    await waitForSurface(player, "playerCanvas");
+    await expect(host.locator("#chat-log")).toContainText(/sceneLoad by/);
+    const chatText = async () => host.locator("#chat-log").innerText();
+    const occurrences = (await chatText()).split("sceneLoad by").length - 1;
+    expect(occurrences).toBe(1);
+    // The graph is a GM-authored rule: the player's shell holds no such message. (A reload of
+    // the same scene is covered deterministically by the host suite as "not a new load".)
+    if ((await player.locator("#chat-log").count()) > 0)
+      expect(await player.locator("#chat-log").innerText()).not.toContain("sceneLoad by");
+    await host.waitForTimeout(300);
+    expect((await chatText()).split("sceneLoad by").length - 1).toBe(1);
+
+    // Host history keeps one entry for the load, keyed by the joining player's own user id.
+    const playerId = await playerCall<string>(player, "userId");
+    await expect(host.locator("#chat-log")).toContainText(`sceneLoad by ${playerId}`);
+    await host.locator("#gm-macros").click();
+    await host.locator("[data-macro-zones-tab]").click();
+    const history = host.locator("[data-zone-history]");
+    await history.locator("summary").click();
+    await expect(history.locator("li").filter({ hasText: `: sceneLoad · ${playerId}` })).toHaveCount(1);
+  } finally {
+    await playerCtx.close();
+    await hostCtx.close();
+  }
 });
