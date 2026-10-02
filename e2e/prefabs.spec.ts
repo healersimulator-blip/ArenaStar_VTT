@@ -44,13 +44,13 @@ for (const targeting of ["legacy","pins","tag-destination","random-destination"]
       }
     }
   }
-  await zones.locator(".methods label").filter({ hasText: "click" }).locator("input").check();
+  await zones.locator(".methods label").filter({ hasText: /^click$/ }).locator("input").check();
   await zones.locator("[data-zone-save]").click();
   await expect(zones.locator("li").filter({ hasText: "Bell graph" })).toHaveCount(1);
 
   if(tagDestination) {
     await page.locator("[data-macro-tags-tab]").click();
-    const tags=page.locator("[data-tagger]");await tags.getByLabel("Placeable type").selectOption("tiles");
+    const tags=page.locator("[data-tagger]");await tags.getByLabel("Taggable object type").selectOption("tiles");
     const row=tags.locator(".result").filter({hasText:"Prefab bell"});
     await row.locator('input[type="checkbox"]').check();await tags.getByLabel("Tags to edit").fill("follow-{id}");
     await tags.getByRole("button",{name:"Add",exact:true}).click();await expect(row).toContainText("follow-{id}");

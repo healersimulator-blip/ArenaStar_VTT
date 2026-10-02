@@ -202,6 +202,26 @@ async function readDocuments(
   return docs;
 }
 
+/** Media hashes referenced by saved FX definitions, including non-runnable presets. */
+function fxMediaReferences(docs: WorldFileDocuments["docs"]): Set<AssetId> {
+  const hashes = new Set<AssetId>();
+  for (const row of docs) {
+    if (row.coll !== "macros" || row.doc.type !== "macro") continue;
+    const macro = row.doc as MacroDocument;
+    const sections: unknown = macro.kind === "sequence" ? macro.sequence?.sections
+      : macro.kind === "fxPreset" ? macro.preset?.sections : undefined;
+    if (!Array.isArray(sections)) continue;
+    for (const raw of sections) {
+      if (!raw || typeof raw !== "object") continue;
+      const section = raw as { kind?: unknown; assetId?: unknown };
+      if ((section.kind === "image" || section.kind === "sound") &&
+          typeof section.assetId === "string" && section.assetId.length > 0)
+        hashes.add(section.assetId as AssetId);
+    }
+  }
+  return hashes;
+}
+
 // ─── archive collection (shared by the zip and the folder exporters) ──────────
 
 export interface WorldArchiveEntry {
@@ -252,13 +272,27 @@ export async function collectWorldArchive(options: ExportWorldOptions): Promise<
   const blobs: Array<{ hash: AssetId; bytes: Uint8Array }> = [];
   // Playback/importing licensed media does not grant permission to distribute
   // its bytes in a downloadable world ZIP or folder. Refuse the entire export
-  // before emitting even one archive entry; the GM can reclassify only media
-  // for which they have separately established redistribution rights.
-  const restricted = assets.filter((asset) => asset.exportRights === "restricted");
-  if (restricted.length) throw new Error(
-    `world file: ${restricted.length} FX media file(s) have no world-export rights (${restricted.slice(0, 3)
-      .map((asset) => asset.name).join(", ")}); export cancelled — confirm redistribution rights separately`,
-  );
+  // before emitting even one archive entry. New FX imports carry an explicit
+  // decision; a legacy FX reference with no decision is *unreviewed*, not granted.
+  // Non-FX legacy art remains compatible with older worlds.
+  const fxRefs = fxMediaReferences(docs);
+  const blocked = new Map<AssetId, { asset: (typeof assets)[number]; reason: string }>();
+  for (const asset of assets) {
+    if (asset.exportRights === "restricted") {
+      blocked.set(asset.hash, { asset, reason: "restricted" });
+    } else if (fxRefs.has(asset.hash) && asset.exportRights !== "granted") {
+      blocked.set(asset.hash, { asset, reason: asset.exportRights === undefined
+        ? "unreviewed legacy FX media" : "not explicitly granted for FX" });
+    }
+  }
+  if (blocked.size) {
+    const entries = [...blocked.values()];
+    const detail = entries.slice(0, 3).map(({ asset, reason }) => `${asset.name} (${reason})`).join(", ");
+    throw new Error(
+      `world file: ${blocked.size} media file(s) need explicit world-export rights (${detail}); ` +
+      "export cancelled — review existing media permissions and separately confirm redistribution rights",
+    );
+  }
   for (const record of assets) {
     const bytes = record.bytes ?? (await opfs?.get(record.hash));
     if (!bytes) throw new Error(`world file: missing blob for asset ${record.hash}`);

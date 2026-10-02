@@ -777,7 +777,7 @@ for (const pinned of [false,true]) test(`Delete Entities selects a live light ($
   });
   await expect.poll(glows).toBe(2);
   await page.locator("#gm-macros").click();await page.locator("[data-macro-tags-tab]").click();
-  const tags=page.locator("[data-tagger]");await tags.getByLabel("Placeable type").selectOption("lights");
+  const tags=page.locator("[data-tagger]");await tags.getByLabel("Taggable object type").selectOption("lights");
   if(!pinned) {
   const victim=tags.locator(".result").first();await victim.locator('input[type="checkbox"]').check();
   await tags.getByLabel("Tags to edit").fill("extinguish-me");
@@ -827,7 +827,7 @@ for (const pinned of [false,true]) test(`Delete Entities selects a live light ($
   await receipt.getByTestId("action-revert").click();
   await expect.poll(()=>hostCall<unknown[]>(page,"lights")).toHaveLength(2);await expect.poll(glows).toBe(2);
   await page.locator("#gm-macros").click();await page.locator("[data-macro-tags-tab]").click();
-  await tags.getByLabel("Placeable type").selectOption("lights");
+  await tags.getByLabel("Taggable object type").selectOption("lights");
   if(!pinned)await expect(tags.locator(".result").filter({hasText:"extinguish-me"})).toHaveCount(1);
   else await expect(tags.locator(".result")).toHaveCount(2);
   await expect(tags.locator(".result").filter({hasText:"pending-cleanup"})).toHaveCount(0);

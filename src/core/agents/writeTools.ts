@@ -28,6 +28,7 @@ import type {
   SceneGrid,
 } from "../documents";
 import { OWNERSHIP_LEVELS, TOP_LEVEL_COLLECTIONS } from "../documents";
+import { prototypeTokenTagsOf } from "../tags";
 import type { Op } from "../ops";
 import { bool, invalid, num, numIn, obj, refusal, str, text } from "./answer";
 import {
@@ -786,6 +787,7 @@ function placeTokenOp(
   args: Record<string, Json>,
   what: string,
   actorId: string,
+  taggerTags: string[] = [],
 ): { op: Op | null } | { error: string } | { invalid: string } {
   const col = numIn(args["col"], -1_000_000, 1_000_000);
   const row = numIn(args["row"], -1_000_000, 1_000_000);
@@ -808,7 +810,8 @@ function placeTokenOp(
       error: "there is no scene to place a token on — scene.create makes one",
     };
   }
-  const made = build({ sceneId, name: what, actorId, col, row });
+  const made = build({ sceneId, name: what, actorId, col, row,
+    ...(taggerTags.length > 0 ? { taggerTags: [...taggerTags] } : {}) });
   return "error" in made ? { error: made.error } : { op: made };
 }
 
@@ -902,6 +905,7 @@ const actorFromCompendium: ToolDefinition = {
     if (typeof data["name"] !== "string")
       data["name"] = str(args["name"]) ?? entry.name;
     const name = String(data["name"]);
+    const prototypeTags = prototypeTokenTagsOf(data as unknown as BaseDocument);
     const ops: Op[] = [
       {
         kind: "create",
@@ -913,7 +917,7 @@ const actorFromCompendium: ToolDefinition = {
         data: data as unknown as BaseDocument,
       },
     ];
-    const placed = await placeTokenOp(ctx, args, name, actorId);
+    const placed = await placeTokenOp(ctx, args, name, actorId, prototypeTags);
     if ("invalid" in placed) return invalid(placed.invalid);
     if ("error" in placed) return refusal(placed.error);
     if (placed.op) ops.push(placed.op);

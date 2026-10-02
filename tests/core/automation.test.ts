@@ -51,6 +51,25 @@ describe("host-side active-zone graph", () => {
     expect(validateAutomation({ ...base, gates: { playerRunnable: "yes" } }).ok).toBe(false);
   });
 
+  test("pointer methods are distinct validated events and never alias ordinary click", () => {
+    const definition: AutomationDefinition = { ...base,
+      methods: ["click", "doubleClick", "hoverIn", "hoverOut"], gates: {},
+      steps: [{ id: "method", kind: "chat", audience: "gm", content: "{{method}}" }] };
+    expect(validateAutomation(definition).ok).toBe(true);
+    const fire = (method: "click" | "doubleClick" | "hoverIn" | "hoverOut" | "enter") =>
+      planAutomation(world, automation(definition), {
+        scene, tile, method, caller: actor, at: 1000, rng: () => 0.25,
+      }, "gm");
+    const message = (method: Parameters<typeof fire>[0]) => {
+      const outcome = fire(method);
+      return outcome.ok && "plan" in outcome
+        ? outcome.plan.ops.find((op) => op.kind === "create" && op.coll === "messages") : undefined;
+    };
+    for (const method of ["click", "doubleClick", "hoverIn", "hoverOut"] as const)
+      expect(message(method)).toMatchObject({ kind: "create", coll: "messages", data: { content: method } });
+    expect(fire("enter")).toMatchObject({ ok: true, skipped: "method/anchor mismatch" });
+  });
+
   test("Filter by Token Trigger Count uses each selected token's staged per-graph history, not a global count", () => {
     const s: SceneDocument = { ...scene, tokens: [...scene.tokens, token("new", 160, 170)] };
     const def: AutomationDefinition = { ...base, gates: {}, steps: [
@@ -127,13 +146,14 @@ describe("host-side active-zone graph", () => {
     const def: AutomationDefinition = { ...base, steps: [
       { id: "find", kind: "select", selector: { kind: "tag", query: "door-1", collections: ["tokens"] } },
       { id: "run", kind: "script", macroId: "reviewed-code", args: { message: "hello" },
-        bindings: { target: "currentToken", source: "triggerToken", ordinal: "count", method: "method" } },
+        bindings: { target: "currentToken", source: "triggerToken", ordinal: "count", method: "method" },
+        runAs: "caller", onError: "continue" },
       { id: "end", kind: "stop" },
     ] };
     const result = plan(def);
     expect(result.ok && "plan" in result ? result.plan.scripts : []).toEqual([{ stepId: "run",
       macroId: "reviewed-code", args: { message: "hello", target: "gate", source: "runner",
-        ordinal: 1, method: "enter" } }]);
+        ordinal: 1, method: "enter" }, runAs: "caller", onError: "continue" }]);
     expect(result.ok && "plan" in result ? result.plan.ops : []).toHaveLength(1); // history only
     expect(validateAutomation({ ...def, steps: [{ id: "bad", kind: "script", macroId: "reviewed-code",
       args: { target: "a" }, bindings: { target: "triggerToken" } }] }).ok).toBe(false);
@@ -143,6 +163,66 @@ describe("host-side active-zone graph", () => {
       args: { count: Number.POSITIVE_INFINITY } }] }).ok).toBe(false);
     expect(validateAutomation({ ...def, steps: [{ id: "bad", kind: "script", macroId: "reviewed-code",
       source: "return 123" }] }).ok).toBe(false); // inline code cannot smuggle a grant
+    expect(validateAutomation({ ...def, steps: [{ id: "bad", kind: "script", macroId: "reviewed-code",
+      runAs: "root" }] }).ok).toBe(false);
+    expect(validateAutomation({ ...def, steps: [{ id: "bad", kind: "script", macroId: "reviewed-code",
+      onError: "ignore" }] }).ok).toBe(false);
+  });
+
+  test("an awaited script result resumes once, preserves the current collection and routes to the matching landing", () => {
+    const def: AutomationDefinition = { ...base, gates: { oncePerToken: true }, steps: [
+      { id: "find", kind: "select", selector: { kind: "tag", query: "door-1", collections: ["tokens"] } },
+      { id: "run", kind: "script", macroId: "reviewed-code", captureResult: true },
+      { id: "result", kind: "checkScriptResult", scriptStepId: "run", path: "value.hit",
+        compare: "eq", value: true, otherwise: "miss" },
+      { id: "hit", kind: "tags", edit: "add", tags: ["script-hit"] },
+      { id: "done", kind: "stop" },
+      { id: "miss", kind: "landing", name: "miss" },
+      { id: "miss-message", kind: "chat", audience: "gm", content: "script missed" },
+    ] };
+    expect(validateAutomation(def).ok).toBe(true);
+    expect(validateAutomation({ ...def, steps: def.steps.map((step) => step.id === "result"
+      ? { ...step, path: "value.__proto__.secret" } : step) }).ok).toBe(false);
+    expect(validateAutomation({ ...def, steps: [
+      { id: "loop", kind: "forEach", endId: "end" },
+      { id: "run", kind: "script", macroId: "reviewed-code", captureResult: true },
+      { id: "end", kind: "endEach", startId: "loop" },
+    ] }).ok).toBe(false);
+    expect(validateAutomation({ ...def, steps: def.steps.map((step) => step.id === "result"
+      ? { ...step, scriptStepId: "missing" } : step) }).ok).toBe(false);
+
+    const initial = plan(def);
+    if (!initial.ok || !("plan" in initial)) throw new Error("result-capturing graph did not plan");
+    expect(initial.plan.postActions).toMatchObject([{ kind: "script", stepId: "run", captureResult: true }]);
+    expect(initial.plan.continuation).toMatchObject({ graphId: "a1", captureStepId: "run", stepIndex: 2,
+      current: [{ coll: "tokens", id: "gate", parent: { coll: "scenes", id: "s1" } }] });
+    expect(initial.plan.state.count).toBe(1);
+    const continuation = initial.plan.continuation;
+    if (!continuation) throw new Error("result-capturing graph omitted its continuation");
+    const resumedDoc = { ...automation(def), state: initial.plan.state };
+    const success = planAutomation(world, resumedDoc, { scene, tile, token: runner, method: "enter",
+      caller: actor, at: 1000, rng: () => 0.25 }, "gm", {
+      ...continuation,
+      scriptResults: { run: { ok: true, value: { hit: true } } },
+    });
+    if (!success.ok || !("plan" in success)) throw new Error("successful script result did not resume");
+    expect(success.plan.ops).toMatchObject([
+      { kind: "update", ref: { coll: "automations", id: "a1" }, diff: { state: { count: 1 } } },
+      { kind: "update", ref: { coll: "tokens", id: "gate" }, diff: { taggerTags: ["door-1", "script-hit"] } },
+    ]);
+    expect(success.plan.state.count).toBe(1); // once-per-token gate was not consumed a second time
+    expect(success.plan.trace).toContain("Check Script Result [run] value.hit: true eq true -> pass");
+    expect(success.plan.continuation).toBeUndefined();
+
+    const failure = planAutomation(world, resumedDoc, { scene, tile, token: runner, method: "enter",
+      caller: actor, at: 1000, rng: () => 0.25 }, "gm", {
+      ...continuation,
+      scriptResults: { run: { ok: false, error: "reviewed script failed" } },
+    });
+    if (!failure.ok || !("plan" in failure)) throw new Error("failed-but-continued result did not resume");
+    expect(failure.plan.ops.find((op) => op.kind === "create" && op.coll === "messages"))
+      .toMatchObject({ data: { content: "script missed" } });
+    expect(failure.plan.trace).toContain("Check Script Result [run] value.hit: missing eq true -> fail");
   });
 
   test("a tile graph queues exact summon presets alongside scripts in graph order, never a cosmetic token", () => {

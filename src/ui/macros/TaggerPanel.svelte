@@ -4,8 +4,8 @@
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import {
-    getByTag, listTaggable, tagEditOps,
-    type TagMatchMode, type TagPattern, type TagSearchResult, type TagEdit,
+    listTaggable, sidebarSearchMatcher, sidebarTagTerms, tagAutocompleteSuggestions, tagEditOps, tagMatcher,
+    type TagMatchMode, type TagPattern, type TagSearchResult, type TagEdit, type TagRef,
   } from "../../core/tags";
 
   let { client, bus }: { client: ClientSync; bus: EventBus<ClientEvents> } = $props();
@@ -17,18 +17,34 @@
   let pattern = $state<TagPattern>("literal");
   let exact = $state(true);
   let caseSensitive = $state(true);
+  let sidebarTagMode = $state(false);
   let editText = $state("");
   let error = $state("");
   let status = $state("");
+  let pendingEdit = $state<string | null>(null);
+  let pendingEditLabel = $state("");
   let pendingRules = $state<string | null>(null);
   let results = $state<TagSearchResult[]>([]);
   let scenes = $state<Array<{ _id: string; name: string }>>([]);
+  let tagVocabulary = $state<string[]>([]);
+  let tagSearchFocused = $state(false);
+  let activeSuggestion = $state(-1);
   const selected = new SvelteSet<string>();
 
   const canEdit = $derived(client.user?.role === "GM" || client.user?.role === "ASSISTANT");
   const selectedResults = $derived(results.filter((row) => selected.has(key(row))));
+  const canApplyRules = $derived(selectedResults.length > 0 && selectedResults.length <= 32 &&
+    selectedResults.every((row) => row.tags.some((tag) => tag.includes("{#}") || tag.includes("{id}"))));
+  const suggestions = $derived(tagAutocompleteSuggestions(tagVocabulary, query));
+  const showingSuggestions = $derived(tagSearchFocused && suggestions.length > 0);
   function key(row: TagSearchResult): string {
-    return `${row.sceneId}:${row.collection}:${row.doc._id}`;
+    return `${row.scope}:${JSON.stringify(row.ref)}`;
+  }
+
+  function location(row: TagSearchResult): string {
+    if (row.scope === "world") return `World · ${row.collection}`;
+    const scene = scenes.find((candidate) => candidate._id === row.sceneId);
+    return `${scene?.name ?? row.sceneId} · ${row.collection}`;
   }
 
   function refresh(): void {
@@ -37,21 +53,58 @@
       const opts = {
         ...(sceneId ? { sceneId } : {}),
         ...(kind ? { collections: [kind as TagSearchResult["collection"]] } : {}),
+        includeWorldDocs: !sceneId,
       };
+      // This is the client's projected world, so autocomplete never learns tags
+      // from hidden or private documents held only by the host.
+      const candidates = listTaggable(client.store.world, opts);
+      tagVocabulary = [...new Set(candidates.flatMap((row) => row.tags))];
       const terms = pattern === "regex" ? [query.trim()] : query.split(",").map((s) => s.trim()).filter(Boolean);
-      const matches = query.trim()
-        ? getByTag(client.store.world, terms, {
-            ...opts, mode, pattern, contains: !exact, caseSensitive,
-          })
-        : listTaggable(client.store.world, opts);
-      const needle = nameFilter.toLocaleLowerCase().trim();
-      results = needle
-        ? matches.filter((row) => row.doc.name.toLocaleLowerCase().includes(needle))
-        : matches;
+      const match = query.trim()
+        ? tagMatcher(terms, { mode, pattern, contains: !exact, caseSensitive }) : null;
+      const matches = match ? candidates.filter((row) => match(row.tags)) : candidates;
+      const sidebarMatcher = nameFilter.trim() ? sidebarSearchMatcher(nameFilter) : null;
+      sidebarTagMode = sidebarMatcher ? sidebarTagTerms(nameFilter).length > 0 : false;
+      results = sidebarMatcher ? matches.filter((row) => sidebarMatcher(row.doc)) : matches;
       error = "";
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause);
+      sidebarTagMode = false;
       results = [];
+    }
+  }
+
+  function searchInput(): void {
+    tagSearchFocused = true;
+    activeSuggestion = -1;
+    refresh();
+  }
+
+  function applySuggestion(tag: string): void {
+    const comma = query.lastIndexOf(",");
+    query = `${comma < 0 ? "" : `${query.slice(0, comma + 1)} `}${tag}`;
+    activeSuggestion = -1;
+    refresh();
+  }
+
+  function searchKeydown(event: KeyboardEvent): void {
+    if (event.key === "Escape") {
+      tagSearchFocused = false;
+      activeSuggestion = -1;
+      return;
+    }
+    if (!showingSuggestions) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      activeSuggestion = (activeSuggestion + 1) % suggestions.length;
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      activeSuggestion = activeSuggestion < 0 ? suggestions.length - 1
+        : (activeSuggestion - 1 + suggestions.length) % suggestions.length;
+    } else if (event.key === "Enter" && activeSuggestion >= 0) {
+      event.preventDefault();
+      const tag = suggestions[activeSuggestion];
+      if (tag) applySuggestion(tag);
     }
   }
 
@@ -61,36 +114,52 @@
   }
 
   function apply(edit: TagEdit): void {
-    if (!canEdit) return;
+    if (!canEdit || pendingEdit || pendingRules) return;
     error = "";
     status = "";
     try {
-      if (selectedResults.length === 0) throw new Error("Select placeables first");
+      if (selectedResults.length === 0) throw new Error("Select objects first");
       const tags = editText.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
       if (tags.length === 0 && edit !== "replace") throw new Error("Enter at least one tag");
       const ops = tagEditOps(selectedResults, edit, tags);
-      if (ops.length > 0) client.submit(ops);
-      status = `${ops.length} placeable(s) ${edit === "replace" ? "updated" : edit + "ed"}`;
-      selected.clear();
+      if (ops.length === 0) {
+        status = "No tag changes to save.";
+        return;
+      }
+      const verb = { add: "added", remove: "removed", toggle: "toggled", replace: "replaced" }[edit];
+      pendingEditLabel = `${ops.length} object(s) ${verb}`;
+      pendingEdit = client.submit(ops);
+      status = `Saving tags for ${ops.length} object(s)…`;
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause);
     }
   }
 
   function applyRules(): void {
-    if (!canEdit || pendingRules) return;
+    if (!canEdit || pendingRules || pendingEdit) return;
     error = ""; status = "";
-    if (selectedResults.length === 0 || selectedResults.length > 32) {
-      error = "Select 1–32 scene-qualified targets for Tagger rules.";
+    if (!canApplyRules) {
+      error = "Select 1–32 targets with existing {#} or {id} tags.";
       return;
     }
-    pendingRules = client.requestTagRules(selectedResults.map((row) => row.ref));
-    status = "Allocating existing {#}/{id} templates against live scene tags on the host…";
+    const hasWorldTargets = selectedResults.some((row) => row.scope === "world");
+    const hasSceneTargets = selectedResults.some((row) => row.scope === "scene");
+    pendingRules = client.requestTagRules(selectedResults.map((row) => row.ref as TagRef));
+    const scope = hasWorldTargets && hasSceneTargets ? "scene and world"
+      : hasWorldTargets ? "world" : "scene";
+    status = `Allocating existing {#}/{id} templates in the ${scope} scope(s) on the host…`;
   }
 
   onMount(() => {
     const offSnapshot = bus.on("snapshot", refresh);
-    const offOps = bus.on("ops", refresh);
+    const offOps = bus.on("ops", (event) => {
+      refresh();
+      if (!pendingEdit || event.reconciled !== pendingEdit) return;
+      status = `${pendingEditLabel} on host at seq ${event.envelope.seq}`;
+      pendingEdit = null;
+      pendingEditLabel = "";
+      selected.clear();
+    });
     const offRules = bus.on("taggerRulesResult", (result) => {
       if (result.requestId !== pendingRules) return;
       pendingRules = null;
@@ -99,8 +168,12 @@
       refresh();
     });
     const offRejected = bus.on("rejected", (msg) => {
-      if (msg.txId !== pendingRules) return;
-      pendingRules = null;
+      if (msg.txId === pendingEdit) {
+        pendingEdit = null;
+        pendingEditLabel = "";
+      } else if (msg.txId === pendingRules) {
+        pendingRules = null;
+      } else return;
       status = "";
       error = `${msg.reason}: ${msg.detail}`;
     });
@@ -110,22 +183,45 @@
 </script>
 
 <section class="tagger" aria-label="Tag explorer and editor" data-tagger>
-  <h3>Tags · scene-wide explorer</h3>
+  <h3>Tags · scene + world explorer</h3>
   <div class="filters">
     <select aria-label="Tag scene" data-tag-scene bind:value={sceneId} onchange={refresh}>
-      <option value="">All scenes</option>
+      <option value="">All scenes + world documents</option>
       {#each scenes as scene (scene._id)}
         <option value={scene._id}>{scene.name}</option>
       {/each}
     </select>
-    <select aria-label="Placeable type" bind:value={kind} onchange={refresh}>
-      <option value="">All placeables</option>
-      {#each ["scenes", "tokens", "tiles", "walls", "lights", "sounds", "drawings", "templates", "notes", "cells"] as c (c)}
-        <option value={c}>{c}</option>
-      {/each}
+    <select aria-label="Taggable object type" bind:value={kind} onchange={refresh}>
+      <option value="">All objects</option>
+      <optgroup label="Scenes and placeables">
+        {#each ["scenes", "tokens", "tiles", "regions", "walls", "lights", "sounds", "drawings", "templates", "notes", "cells"] as c (c)}
+          <option value={c}>{c}</option>
+        {/each}
+      </optgroup>
+      <optgroup label="World documents"><option value="actors">actors</option><option value="prototypeTokens">prototype tokens</option><option value="items">items</option></optgroup>
     </select>
-    <input aria-label="Search placeable name" placeholder="Name…" bind:value={nameFilter} oninput={refresh} />
-    <input aria-label="Search tags" data-tag-search placeholder="tag, another tag…" bind:value={query} oninput={refresh} />
+    <input aria-label="Search object name or tag" data-tagger-sidebar-query
+      placeholder='Name · tag:"boss fight" tag:door-*' bind:value={nameFilter} oninput={refresh} />
+    <div class="tag-search">
+      <input aria-label="Search tags" data-tag-search placeholder="tag, another tag…" bind:value={query}
+        role="combobox" aria-autocomplete="list" aria-expanded={showingSuggestions}
+        aria-controls={showingSuggestions ? "tag-suggestions" : undefined}
+        aria-activedescendant={activeSuggestion >= 0 ? `tag-suggestion-${activeSuggestion}` : undefined}
+        onfocus={() => tagSearchFocused = true}
+        onblur={() => { tagSearchFocused = false; activeSuggestion = -1; }}
+        oninput={searchInput} onkeydown={searchKeydown} />
+      {#if showingSuggestions}
+        <div class="tag-suggestions" id="tag-suggestions" role="listbox" aria-label="Tag suggestions">
+          {#each suggestions as suggestion, index (suggestion)}
+            <button type="button" role="option" id={`tag-suggestion-${index}`}
+              aria-selected={activeSuggestion === index} data-tag-suggestion={suggestion}
+              onmousedown={(event) => event.preventDefault()} onclick={() => applySuggestion(suggestion)}>
+              {suggestion}
+            </button>
+          {/each}
+        </div>
+      {/if}
+    </div>
   </div>
   <div class="filters">
     <select aria-label="Tag match mode" bind:value={mode} onchange={refresh}>
@@ -137,28 +233,32 @@
     <label><input type="checkbox" bind:checked={exact} onchange={refresh} /> Exact</label>
     <label><input type="checkbox" bind:checked={caseSensitive} onchange={refresh} /> Case sensitive</label>
   </div>
-  <p class="hint">API: exact, case-sensitive by default. Empty query shows untagged objects too. Select objects to edit atomically. Apply Tag Rules expands templates already on selected documents (not the text field); scene-wide numbering is allocated by the host.</p>
+  {#if sidebarTagMode}
+    <p class="match-mode" data-tag-search-mode="lenient">Lenient sidebar tag search: case-insensitive substring matches; quoted phrases, multiple AND terms and * / ? wildcards are supported. The separate API tag search keeps its own matching defaults.</p>
+  {/if}
+  <p class="hint">The separate Tag API search defaults to exact whole-tag, case-sensitive matching. Empty query shows untagged objects too. All scenes includes visible actors, their prototype tokens, world items, and embedded actor items; a selected scene narrows results to that scene. Select objects to edit atomically; edits report success only after host acknowledgement. Apply Tag Rules expands existing {`{#}`} / {`{id}`} templates on the selected targets, not the text field. Scene targets allocate per scene; world documents share a separate world namespace. World allocations are GM/assistant-only because their uniqueness check spans all world tags.</p>
   {#if error}<p role="alert" class="error">{error}</p>{/if}
   {#if status}<p role="status">{status}</p>{/if}
   <div class="results" data-tag-results>
     {#each results.slice(0, 200) as row (key(row))}
-      <label class="result">
-        <input type="checkbox" checked={selected.has(key(row))} disabled={!canEdit} onchange={() => toggle(row)} />
-        <strong>{row.doc.name}</strong> <small>{row.sceneId}/{row.collection}</small>
+      <label class="result" data-tag-scope={row.scope} data-tag-collection={row.collection}
+        data-scene-id={row.scope === "scene" ? row.sceneId : undefined} data-document-id={row.doc._id}>
+        <input type="checkbox" checked={selected.has(key(row))} disabled={!canEdit || pendingEdit !== null || pendingRules !== null} onchange={() => toggle(row)} />
+        <strong>{row.doc.name}</strong> <small>{location(row)}</small>
         <span>{row.tags.join(", ") || "(untagged)"}</span>
       </label>
     {/each}
     {#if results.length > 200}<p>Showing 200 of {results.length}; narrow your search to edit more.</p>{/if}
-    {#if results.length === 0 && !error}<p>No matching placeables.</p>{/if}
+    {#if results.length === 0 && !error}<p>No matching objects.</p>{/if}
   </div>
   {#if canEdit}
     <div class="edit">
       <input aria-label="Tags to edit" data-tags-edit placeholder="Tags (comma-separated)" bind:value={editText} />
-      <button type="button" disabled={selectedResults.length === 0} onclick={() => apply("add")}>Add</button>
-      <button type="button" disabled={selectedResults.length === 0} onclick={() => apply("remove")}>Remove</button>
-      <button type="button" disabled={selectedResults.length === 0} onclick={() => apply("toggle")}>Toggle</button>
-      <button type="button" disabled={selectedResults.length === 0} onclick={() => apply("replace")}>Replace</button>
-      <button type="button" data-tagger-apply-rules disabled={pendingRules !== null || selectedResults.length === 0 || selectedResults.length > 32}
+      <button type="button" disabled={selectedResults.length === 0 || pendingEdit !== null || pendingRules !== null} onclick={() => apply("add")}>Add</button>
+      <button type="button" disabled={selectedResults.length === 0 || pendingEdit !== null || pendingRules !== null} onclick={() => apply("remove")}>Remove</button>
+      <button type="button" disabled={selectedResults.length === 0 || pendingEdit !== null || pendingRules !== null} onclick={() => apply("toggle")}>Toggle</button>
+      <button type="button" disabled={selectedResults.length === 0 || pendingEdit !== null || pendingRules !== null} onclick={() => apply("replace")}>Replace</button>
+      <button type="button" data-tagger-apply-rules disabled={pendingRules !== null || pendingEdit !== null || !canApplyRules}
         onclick={applyRules}>Apply Tag Rules</button>
     </div>
   {/if}
@@ -169,8 +269,16 @@
   h3 { margin: 0; font-size: .95rem; }
   .filters, .edit { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
   input:not([type="checkbox"]) { min-width: 100px; flex: 1; }
+  .tag-search { position: relative; min-width: 180px; flex: 1; }
+  .tag-search > input { width: 100%; min-width: 0; }
+  .tag-suggestions { position: absolute; z-index: 20; top: calc(100% + 2px); left: 0; right: 0;
+    display: grid; max-height: 180px; overflow-y: auto; border: 1px solid #68768a; border-radius: 3px;
+    background: #202936; box-shadow: 0 4px 12px #0008; }
+  .tag-suggestions button { text-align: left; border: 0; border-radius: 0; padding: 5px 7px; }
+  .tag-suggestions button[aria-selected="true"], .tag-suggestions button:hover { background: #35485e; }
   select { min-width: 95px; max-width: 175px; }
   .hint { color: #b4bdc8; margin: 0; }
+  .match-mode { color: #91d9a6; margin: 0; padding-left: 6px; border-left: 2px solid #59ae72; }
   .results { max-height: 180px; overflow-y: auto; border: 1px solid #444; border-radius: 3px; }
   .result { display: flex; gap: 6px; align-items: center; padding: 3px 5px; border-bottom: 1px solid #303540; }
   .result strong { flex: 1; overflow: hidden; text-overflow: ellipsis; }

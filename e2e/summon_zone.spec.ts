@@ -27,7 +27,7 @@ test("a saved tile graph summons an independent actor at its center through the 
   await tile.locator("[data-zone-create-tile]").click();
   await expect(zones.locator("[data-zone-tile] option").filter({ hasText: "Conjuring circle" })).toHaveCount(1);
   await zones.locator("[data-zone-name]").fill("Call a real wolf");
-  await zones.locator(".methods label").filter({ hasText: "click" }).locator("input").check();
+  await zones.locator(".methods label").filter({ hasText: /^click$/ }).locator("input").check();
   await zones.getByRole("button", { name: "Remove step 2" }).click();
   await zones.getByRole("button", { name: "Remove step 1" }).click();
   await zones.locator('[data-zone-add="summon"]').click();

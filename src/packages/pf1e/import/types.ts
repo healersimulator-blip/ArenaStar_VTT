@@ -64,6 +64,8 @@ export interface ImportedCharacter {
   /** The authored `system.pf1e` block `parsePF1eActorSystem` validates. */
   system: Record<string, unknown>;
   items: ImportedItem[];
+  /** Imported Tagger labels from a Foundry actor's prototype token, when present. */
+  prototypeToken?: { taggerTags?: string[] };
   /** What was read, one line per fact — the report's good news, and the e2e's readback. */
   read: string[];
   /** Everything the source stated that this importer does not place, named as the source named it. */

@@ -42,7 +42,7 @@ export function wallAxesFor(kind: WallKind): WallAxes {
     case "door":
       return { sight: 1, move: 1, sound: 1, light: 1 };
     case "window":
-      return { sight: 2, move: 0, sound: 2, light: 2 };
+      return { sight: 2, move: 0, sound: 0, light: 2 };
   }
 }
 

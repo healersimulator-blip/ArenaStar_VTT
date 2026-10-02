@@ -43,6 +43,14 @@ export class TilesLayer {
     this.opts = options;
   }
 
+  /** D-372/A41: count the live tile views and successfully decoded image sprites. */
+  get count(): number { return this.views.size; }
+  get renderedImageCount(): number {
+    let count = 0;
+    for (const view of this.views.values()) if (view.sprite) count += 1;
+    return count;
+  }
+
   /**
    * Reconcile tile views; `occupied` are rects of tokens with vision (roof
    * tiles over one of them fade to their occlusion alpha).

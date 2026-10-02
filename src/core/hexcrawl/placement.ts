@@ -140,6 +140,8 @@ export interface PlacementEntry {
   /** The token prototype's own size, when the source actor has one (§ the bestiary's footprint). */
   width?: number;
   height?: number;
+  /** Tagger labels authored on an actor prototype; new placeables inherit them. */
+  taggerTags?: string[];
 }
 
 /**
@@ -178,6 +180,7 @@ export function encounterTokenData(
       // was a merchant caravan rather than a warband.
       disposition: "hostile",
       actorId: entry.actorId ?? undefined,
+      ...(entry.taggerTags && entry.taggerTags.length > 0 ? { taggerTags: [...entry.taggerTags] } : {}),
       vision: true,
       light: { radius: 0, color: "#ffffff", alpha: 0.5 },
     } as TokenDocument);

@@ -514,6 +514,7 @@ export function fakeView(
               system: { pf1e: { size: "Small", bab: 1, hp: 6, hpMax: 6 } },
               items: [],
               effects: [],
+              prototypeToken: { taggerTags: ["bestiary-goblin"] },
             } as unknown as Json,
           } satisfies AgentCompendiumEntry)
         : id === "fireball"
@@ -1062,6 +1063,7 @@ export function fakeView(
         type: "token",
         name: spec.name,
         actorId: spec.actorId ?? null,
+        ...(spec.taggerTags && spec.taggerTags.length > 0 ? { taggerTags: [...spec.taggerTags] } : {}),
       } as unknown as BaseDocument,
     }),
   };

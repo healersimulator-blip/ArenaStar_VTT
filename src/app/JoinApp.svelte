@@ -63,6 +63,7 @@
     ActorDocument,
     SceneDocument,
     SceneGrid,
+    TileDocument,
   } from "../core/documents";
   import type { Op } from "../core/ops";
   import { copyText } from "../ui/clipboard";
@@ -805,31 +806,125 @@
           editTextAt(toWorld({ clientX: e.clientX, clientY: e.clientY } as PointerEvent));
         };
         let tileDown: { x: number; y: number; tokenId?: string } | null = null;
+        let tileClickForDouble: { sceneId: string; tileId: string; x: number; y: number;
+          point: { x: number; y: number }; tokenId?: string } | null = null;
+        let tileHoverForAutomation: { sceneId: string; tileId: string; point: { x: number; y: number };
+          tokenId?: string } | null = null;
         const onTileDown = (e: PointerEvent) => {
           // Capture selection before the canvas controller clears it on an empty-space click.
           tileDown = { x: e.clientX, y: e.clientY,
             ...(selection.length === 1 && selection[0] ? { tokenId: selection[0] } : {}) };
         };
+        const resolveTileClick = (e: MouseEvent) => {
+          if (canvasTool !== "select" || e.button !== 0 || e.altKey || e.ctrlKey || e.shiftKey || !tileDown ||
+              Math.hypot(e.clientX - tileDown.x, e.clientY - tileDown.y) > 4) return null;
+          const scene = activeScene();
+          if (!scene) return null;
+          const point = toWorld({ clientX: e.clientX, clientY: e.clientY } as PointerEvent);
+          if (pickToken(tokenViews(), point)) return null; // a token click is not also a tile click
+          const tile = [...scene.tiles].reverse().find((item) => tileContainsPoint(item, point));
+          return tile ? { scene, tile, point } : null;
+        };
         const onTileClick = (e: MouseEvent) => {
-          if (canvasTool !== "select" || e.button !== 0 || e.detail > 1 ||
-              e.altKey || e.ctrlKey || e.shiftKey || !tileDown ||
+          const candidate = tileClickForDouble;
+          const isSecondPress = e.detail >= 2 && e.detail % 2 === 0;
+          if (isSecondPress && candidate?.tokenId && tileDown && !tileDown.tokenId &&
+              activeScene()?._id === candidate.sceneId &&
+              Math.hypot(e.clientX - candidate.x, e.clientY - candidate.y) <= 4 &&
+              Math.hypot(e.clientX - tileDown.x, e.clientY - tileDown.y) <= 4)
+            tileDown = { ...tileDown, tokenId: candidate.tokenId };
+          const target = resolveTileClick(e);
+          if (isSecondPress) {
+            const sameCandidate = !!target && !!candidate && !!tileDown &&
+              candidate.sceneId === target.scene._id && candidate.tileId === target.tile._id &&
+              candidate.tokenId === tileDown.tokenId &&
+              Math.hypot(e.clientX - candidate.x, e.clientY - candidate.y) <= 4 &&
+              Math.hypot(target.point.x - candidate.point.x, target.point.y - candidate.point.y) <=
+                4 / (view.camera.scale || 1);
+            if (sameCandidate) return; // the matching native dblclick owns this second press
+            tileClickForDouble = null;
+            if (target) client.requestAutomationTileTrigger(target.scene._id, target.tile._id,
+              target.point, tileDown?.tokenId);
+            return;
+          }
+          if (e.detail < 1 || !target || !tileDown) { tileClickForDouble = null; return; }
+          tileClickForDouble = { sceneId: target.scene._id, tileId: target.tile._id,
+            x: e.clientX, y: e.clientY, point: target.point,
+            ...(tileDown.tokenId ? { tokenId: tileDown.tokenId } : {}) };
+          client.requestAutomationTileTrigger(target.scene._id, target.tile._id, target.point, tileDown.tokenId);
+        };
+        const onTileDoubleClick = (e: MouseEvent) => {
+          const candidate = tileClickForDouble;
+          tileClickForDouble = null; // one native double-click can consume at most one first-click candidate
+          if (canvasTool !== "select" || e.button !== 0 || e.detail < 2 || e.altKey || e.ctrlKey || e.shiftKey ||
+              !tileDown || !candidate || Math.hypot(e.clientX - candidate.x, e.clientY - candidate.y) > 4 ||
+              candidate.tokenId !== tileDown.tokenId || Math.hypot(e.clientX - tileDown.x, e.clientY - tileDown.y) > 4) return;
+          const scene = activeScene();
+          if (!scene || scene._id !== candidate.sceneId) return;
+          const world = toWorld({ clientX: e.clientX, clientY: e.clientY } as PointerEvent);
+          if (pickToken(tokenViews(), world)) return;
+          const tile = [...scene.tiles].reverse().find((item) => tileContainsPoint(item, world));
+          if (!tile || tile._id !== candidate.tileId ||
+              Math.hypot(world.x - candidate.point.x, world.y - candidate.point.y) > 4 / (view.camera.scale || 1)) return;
+          client.requestAutomationTileTrigger(scene._id, tile._id, world, tileDown.tokenId, "doubleClick");
+        };
+        const clearTileHoverAutomation = () => {
+          const previous = tileHoverForAutomation;
+          tileHoverForAutomation = null;
+          if (previous) client.requestAutomationTileTrigger(previous.sceneId, previous.tileId,
+            previous.point, previous.tokenId, "hoverOut");
+        };
+        const onTileHoverMove = (e: PointerEvent) => {
+          if (e.pointerType === "touch") return;
+          let target: { scene: SceneDocument; tile: TileDocument; point: { x: number; y: number } } | null = null;
+          if (canvasTool === "select") {
+            const scene = activeScene();
+            if (scene) {
+              const point = toWorld(e);
+              const tile = [...scene.tiles].reverse().find((item) => tileContainsPoint(item, point));
+              if (tile && !pickToken(tokenViews(), point)) target = { scene, tile, point };
+            }
+          }
+          const previous = tileHoverForAutomation;
+          if (target && previous?.sceneId === target.scene._id && previous.tileId === target.tile._id) {
+            tileHoverForAutomation = { ...previous, point: target.point };
+            return;
+          }
+          clearTileHoverAutomation();
+          if (!target) return;
+          const tokenId = selection.length === 1 ? selection[0] : undefined;
+          tileHoverForAutomation = { sceneId: target.scene._id, tileId: target.tile._id, point: target.point,
+            ...(tokenId ? { tokenId } : {}) };
+          client.requestAutomationTileTrigger(target.scene._id, target.tile._id, target.point, tokenId, "hoverIn");
+        };
+        const onTileHoverLeave = () => clearTileHoverAutomation();
+        const onTileContextMenu = (e: MouseEvent) => {
+          if (canvasTool !== "select" || e.button !== 2 || e.altKey || e.ctrlKey || e.shiftKey || !tileDown ||
               Math.hypot(e.clientX - tileDown.x, e.clientY - tileDown.y) > 4) return;
           const scene = activeScene();
           if (!scene) return;
           const world = toWorld({ clientX: e.clientX, clientY: e.clientY } as PointerEvent);
-          if (pickToken(tokenViews(), world)) return; // a token click is not also a tile click
+          if (pickToken(tokenViews(), world)) return;
           const tile = [...scene.tiles].reverse().find((item) => tileContainsPoint(item, world));
-          if (tile) client.requestAutomationClick(scene._id, tile._id, world, tileDown.tokenId);
+          if (tile) client.requestAutomationTileTrigger(scene._id, tile._id, world, tileDown.tokenId, "rightClick");
         };
         canvas.addEventListener("pointerdown", onTileDown);
+        canvas.addEventListener("pointermove", onTileHoverMove);
+        canvas.addEventListener("pointerleave", onTileHoverLeave);
         canvas.addEventListener("click", onTileClick);
+        canvas.addEventListener("dblclick", onTileDoubleClick);
+        canvas.addEventListener("contextmenu", onTileContextMenu);
         canvas.addEventListener("pointerdown", toolDown); canvas.addEventListener("pointermove", toolMove); canvas.addEventListener("pointerup", toolUp);
         canvas.addEventListener("contextmenu", onToolContext);
         canvas.addEventListener("dblclick", onTextEdit);
         globalThis.addEventListener("keydown", onToolKey);
         toolCleanup = () => {
           canvas.removeEventListener("pointerdown", onTileDown);
+          canvas.removeEventListener("pointermove", onTileHoverMove);
+          canvas.removeEventListener("pointerleave", onTileHoverLeave);
           canvas.removeEventListener("click", onTileClick);
+          canvas.removeEventListener("dblclick", onTileDoubleClick);
+          canvas.removeEventListener("contextmenu", onTileContextMenu);
           canvas.removeEventListener("pointerdown", toolDown);
           canvas.removeEventListener("pointermove", toolMove);
           canvas.removeEventListener("pointerup", toolUp);

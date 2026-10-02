@@ -7,6 +7,7 @@
 import type { ActorDocument, AssetManifest, FlagStore, Json, SceneDocument, TokenDocument,
   WorldCollections } from "./documents";
 import { sightBlockedBetween } from "./crosshair";
+import { prototypeTokenTagsOf } from "./tags";
 import type { Op } from "./ops";
 import type { PermissionUser } from "./ownership";
 
@@ -148,10 +149,12 @@ export function planSummon(input: {
   const actor: ActorDocument = { ...structuredClone(source), _id: actorId, name: source.name,
     ownership: { default: 0, [caller.id]: 3 }, flags,
     items: structuredClone(source.items), effects: structuredClone(source.effects), img: image } as ActorDocument;
+  const prototypeTags = prototypeTokenTagsOf(source);
   const token: TokenDocument = { _id: tokenId, type: "token", name: source.name,
     ownership: { default: 1, [caller.id]: 3 }, flags: structuredClone(flags), system: {},
     x: at.x, y: at.y, width: cell, height: cell, rotation: 0, img: image,
-    actorId, hidden: false, disposition: definition.disposition ?? "friendly", vision: true,
+    actorId, ...(prototypeTags.length > 0 ? { taggerTags: prototypeTags } : {}),
+    hidden: false, disposition: definition.disposition ?? "friendly", vision: true,
     light: { radius: 0, alpha: 0, color: "#ffffff" } };
   return { ok: true, actor, token, marker, ops: [
     { kind: "create", coll: "actors", data: actor },

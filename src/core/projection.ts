@@ -203,8 +203,8 @@ function projectSceneCells(scene: SceneDocument): CellDocument[] | null {
 /** Scene-visible placeables may belong to a secret nested hierarchy. Instance
  * IDs, invisible parent IDs and the GM's source-scene ID are never needed by
  * player rendering; only the authoritative host retains attachment metadata. */
-const PREFAB_PARTS = ["tokens", "tiles", "walls", "lights", "sounds", "drawings", "templates", "notes"] as const;
-const SCENE_PROJECTED_PARTS = [...PREFAB_PARTS, "regions"] as const;
+const PREFAB_PARTS = ["tokens", "tiles", "walls", "lights", "sounds", "drawings", "templates", "notes", "regions"] as const;
+const SCENE_PROJECTED_PARTS = [...PREFAB_PARTS] as const;
 function stripPrefabMarker<T extends BaseDocument>(doc: T): T {
   if (doc.flags?.prefab === undefined && doc.flags?.summon === undefined &&
       doc.flags?.summonStatus === undefined) return doc;
@@ -275,7 +275,7 @@ function projectScene(user: PermissionUser, scene: SceneDocument): SceneDocument
   const regions = scene.regions?.filter((region) => docVisibleTo(user, region, scene)).map(stripPrefabMarker);
   const notes = scene.notes.filter((n) => docVisibleTo(user, n, scene)).map(stripPrefabMarker);
   const cells = projectSceneCells(scene);
-  const markers = PREFAB_PARTS.some((coll) => scene[coll].some((doc) => doc.flags?.prefab !== undefined || doc.flags?.summon !== undefined ||
+  const markers = PREFAB_PARTS.some((coll) => (scene[coll] ?? []).some((doc) => doc.flags?.prefab !== undefined || doc.flags?.summon !== undefined ||
     doc.flags?.summonStatus !== undefined));
   if (tokens.length === scene.tokens.length && tiles.length === scene.tiles.length &&
       regions?.length === scene.regions?.length &&

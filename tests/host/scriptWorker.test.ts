@@ -89,15 +89,15 @@ describe("script runner RPC and termination", () => {
     const result = await runScriptWorker(`const hits = await api.tags.find('door-*', { pattern: 'wildcard' });
 await api.fx.play('fx-1');
 await api.automation.fire('zone-1');
-return { count: hits.length, caller: context.callerId };`, {},
-    { sceneId: "s1", callerId: "gm", requestId: "run1" }, async (method, payload, active) => {
+return { count: hits.length, caller: context.callerId, runAs: context.runAs };`, {},
+    { sceneId: "s1", callerId: "gm", requestId: "run1", runAs: "gm" }, async (method, payload, active) => {
       expect(active()).toBe(true);
       actions.push(method);
       if (method === "fx.play") expect(payload).toEqual({ macroId: "fx-1" });
       if (method === "automation.fire") expect(payload).toEqual({ automationId: "zone-1", method: "click" });
       return method === "tags.find" ? [{ ref: { coll: "tokens", id: "t1" } }] : null;
     }, 500);
-    expect(result).toEqual({ count: 1, caller: "gm" });
+    expect(result).toEqual({ count: 1, caller: "gm", runAs: "gm" });
     expect(actions).toEqual(["tags.find", "fx.play", "automation.fire"]);
   });
 
@@ -137,6 +137,30 @@ return { untagged, absent, present, hits: hits.length };`, { ref },
         { refs: [ref], edit: "remove", tags: ["door"] },
         { refs: [ref], edit: "replace", tags: [] },
       ]);
+  });
+
+  test("hasTags automatically scopes top-level and embedded world-document refs globally", async () => {
+    vi.stubGlobal("Worker", WorkerShim);
+    const actorRef = { coll: "actors", id: "actor" };
+    const itemRef = { coll: "items", id: "blade", parent: actorRef };
+    const calls: Array<{ method: string; payload: unknown }> = [];
+    const result = await runScriptWorker(`return {
+  actor: await api.tags.hasTags(args.actor, 'party'),
+  item: await api.tags.hasTags(args.item, 'magic')
+};`, { actor: actorRef, item: itemRef },
+    { sceneId: "s1", callerId: "player", requestId: "world-tag-has" }, async (method, payload) => {
+      calls.push({ method, payload });
+      return [{ scope: "world", sceneId: "", ref: actorRef }];
+    }, 500);
+    expect(result).toEqual({ actor: true, item: true });
+    expect(calls).toEqual([
+      { method: "tags.find", payload: { query: "party", options: {
+        allScenes: true, includeWorldDocs: true, includeRefs: [actorRef],
+      } } },
+      { method: "tags.find", payload: { query: "magic", options: {
+        allScenes: true, includeWorldDocs: true, includeRefs: [itemRef],
+      } } },
+    ]);
   });
 
   test("the reviewed Worker exposes awaited, explicit-ref Tagger rule application", async () => {

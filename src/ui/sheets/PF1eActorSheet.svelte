@@ -37,6 +37,7 @@
     type SheetField,
   } from "./pf1eSheetModel";
   import PF1eItemsTab from "./PF1eItemsTab.svelte";
+  import TagEditor from "./TagEditor.svelte";
   import {
     pf1eSpellbookEdit,
     pf1eSpellbookView,
@@ -2267,6 +2268,9 @@
       <dt>Conditions</dt>
       <dd>{d.conditions.join(", ") || "None"}</dd>
     </dl>
+    <TagEditor doc={doc} targetRef={{ coll: "actors", id: doc._id }} {client} {bus} editable={editable} scope="actor" />
+    <TagEditor doc={doc} targetRef={{ coll: "actors", id: doc._id, target: "prototypeToken" }}
+      {client} {bus} editable={editable} scope="prototypeToken" />
     {#each slotReadout.view.warnings as warning (warning)}
       <p class="note" data-pf1e-spell-slot-warning>{warning}</p>
     {/each}

@@ -14,13 +14,19 @@
 
   let { client, bus, getAsset = null }: { client: ClientSync; bus: EventBus<ClientEvents>;
     getAsset?: ((hash: string) => Promise<Uint8Array | undefined>) | null } = $props();
-  const METHODS: AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "rotate", "click", "manual"];
-  const KINDS: AutomationStep["kind"][] = ["select", "filter", "checkVariable", "checkValue", "shuffle", "position", "distance", "attributes", "checkData", "condition", "inventory", "tokenTriggerCount", "routeMethod", "routeUser", "forEach", "endEach", "resetHistory", "batchFlush", "collection", "triggerTile", "setActive", "stopOthers", "stopMovement", "set", "gameTime", "sceneLighting", "sceneBackground", "tileImage", "hurtHeal", "random", "tags", "visibility", "door", "move", "rotate", "delete", "chat", "sequence", "script", "summon", "rollTable", "landing", "jump", "stop"];
+  const METHODS: AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "sceneChange", "rotate", "click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "manual"];
+  const KINDS: AutomationStep["kind"][] = ["select", "filter", "checkVariable", "checkValue", "checkScriptResult", "shuffle", "position", "distance", "attributes", "checkData", "condition", "inventory", "tokenTriggerCount", "routeMethod", "routeUser", "forEach", "endEach", "resetHistory", "batchFlush", "collection", "triggerTile", "setActive", "stopOthers", "stopMovement", "set", "gameTime", "sceneLighting", "sceneBackground", "tileImage", "hurtHeal", "random", "tags", "visibility", "door", "move", "rotate", "delete", "chat", "sequence", "script", "summon", "rollTable", "landing", "jump", "stop"];
   const ADD_KINDS = KINDS.filter((kind) => kind !== "endEach");
-  const KIND_LABEL: Record<string, string> = { stopMovement: "Stop Token Movement", batchFlush: "Run All Batch Actions", gameTime: "Game Time",
+  const KIND_LABEL: Record<string, string> = { stopMovement: "Stop Token Movement", checkScriptResult: "Check Script Result",
+    batchFlush: "Run All Batch Actions", gameTime: "Game Time",
     sceneLighting: "Scene Lighting", sceneBackground: "Scene Background", tileImage: "Switch Tile Image",
     hurtHeal: "Hurt / Heal", move: "Move", rotate: "Rotation", delete: "Delete Entities", rollTable: "Roll Table" };
   const kindLabel = (kind: string): string => KIND_LABEL[kind] ?? kind;
+  const methodLabel = (method: AutomationMethod): string => method === "rightClick" ? "right click"
+    : method === "doubleClick" ? "double click" : method === "hoverIn" ? "hover in"
+      : method === "hoverOut" ? "hover out" : method === "sceneChange" ? "scene change" : method;
+  const firstSimulatableMethod = (methods: readonly AutomationMethod[]): AutomationMethod | undefined =>
+    methods.find((method) => method !== "sceneChange");
   const canEdit = $derived(client.user?.role === "GM" || client.user?.role === "ASSISTANT");
   let scenes = $state<SceneDocument[]>([]);
   let macros = $state<MacroDocument[]>([]);
@@ -86,7 +92,7 @@
     sceneId = checked.definition.sceneId;
     sourceKind = checked.definition.sourceKind ?? "tile";
     tileId = checked.definition.tileId;
-    triggerMethod = checked.definition.methods[0] ?? "manual";
+    triggerMethod = firstSimulatableMethod(checked.definition.methods) ?? "sceneChange";
     error = "";
     status = "Editing saved graph (history is kept separately)";
   }
@@ -105,6 +111,8 @@
   function toggle(method: AutomationMethod): void {
     definition.methods = definition.methods.includes(method)
       ? definition.methods.filter((m) => m !== method) : [...definition.methods, method];
+    if (!definition.methods.includes(triggerMethod) || triggerMethod === "sceneChange")
+      triggerMethod = firstSimulatableMethod(definition.methods) ?? "sceneChange";
   }
   function newStep(kind: AutomationStep["kind"], id = `step-${crypto.randomUUID().slice(0, 8)}`): AutomationStep {
     switch (kind) {
@@ -112,6 +120,9 @@
       case "filter": return { id, kind, test: { kind: "count", min: 1 } };
       case "checkVariable": return { id, kind, name: "charge", compare: "gte", value: 1 };
       case "checkValue": return { id, kind, source: "darkness", compare: "gte", value: 0.5 };
+      case "checkScriptResult": return { id, kind,
+        scriptStepId: definition.steps.find((step) => step.kind === "script" && step.captureResult)?.id ?? "",
+        path: "ok", compare: "eq", value: true };
       case "shuffle": return { id, kind };
       case "position": return { id, kind, index: 1 };
       case "distance": return { id, kind, from: "tile", max: 30 };
@@ -324,7 +335,7 @@
   function setOptionalLanding(index: number, field: "otherwise" | "gm" | "player", input: string): void {
     const step = definition.steps[index];
     if (!step || !(step.kind === "filter" || step.kind === "checkVariable" || step.kind === "checkValue" ||
-        step.kind === "checkData" || step.kind === "routeMethod" || step.kind === "routeUser") ||
+        step.kind === "checkScriptResult" || step.kind === "checkData" || step.kind === "routeMethod" || step.kind === "routeUser") ||
         (field !== "otherwise" && step.kind !== "routeUser")) return;
     const value = input.trim();
     const next = { ...step };
@@ -435,6 +446,36 @@
   }
   function scriptFor(step: Extract<AutomationStep, { kind: "script" }>): MacroDocument | undefined {
     return scripts.find((macro) => macro._id === step.macroId);
+  }
+  function resultCaptureSteps(): Array<Extract<AutomationStep, { kind: "script" }>> {
+    return definition.steps.filter((step): step is Extract<AutomationStep, { kind: "script" }> =>
+      step.kind === "script" && step.captureResult === true);
+  }
+  function setScriptRunAs(index: number, runAs: "approved" | "caller" | "gm"): void {
+    const step = definition.steps[index];
+    if (step?.kind === "script") step.runAs = runAs;
+  }
+  function setPostActionErrorPolicy(index: number, onError: "stop" | "continue"): void {
+    const step = definition.steps[index];
+    if (step?.kind === "script" || step?.kind === "summon") step.onError = onError;
+  }
+  function setScriptCaptureResult(index: number, enabled: boolean): void {
+    const step = definition.steps[index];
+    if (step?.kind !== "script") return;
+    if (enabled) step.captureResult = true;
+    else Reflect.deleteProperty(step, "captureResult");
+  }
+  function setScriptResultValueType(index: number, kind: "string" | "number" | "boolean" | "null"): void {
+    const step = definition.steps[index];
+    if (step?.kind !== "checkScriptResult") return;
+    if (kind !== "number" && !["eq", "ne"].includes(step.compare)) step.compare = "eq";
+    step.value = kind === "number" ? 0 : kind === "boolean" ? false : kind === "null" ? null : "";
+  }
+  function changeScriptResultValue(index: number, input: string): void {
+    const step = definition.steps[index];
+    if (step?.kind !== "checkScriptResult") return;
+    step.value = typeof step.value === "number" ? Number(input)
+      : typeof step.value === "boolean" ? input === "true" : step.value === null ? null : input;
   }
   function changeScriptMacro(index: number, macroId: string): void {
     const step = definition.steps[index];
@@ -613,6 +654,7 @@
   }
   function invoke(id: string, dryRun = false, method = triggerMethod): void {
     error = "";
+    if (method === "sceneChange") { error = "Scene change fires automatically when this scene becomes active"; return; }
     if (!sceneId) { error = "Choose a scene"; return; }
     client.requestAutomation(id, sceneId, method, tokenId || undefined, dryRun);
     status = dryRun ? "Host planning dry-run…" : "Requested saved graph…";
@@ -693,7 +735,7 @@
           <input type="checkbox" bind:checked={tileHidden} />Concealed trap tile</label>
         <button type="button" data-zone-create-tile disabled={tileCreating} onclick={createTile}>{tileCreating ? "Reading trigger image…" : "Create zone tile"}</button>
       </div>
-      <p class="hint">Visible tiles can receive player clicks on the canvas; concealed tiles trigger movement without exposing their zone or media to players. Image alpha is sampled at tile creation into a bounded 64×64 mask, saved with its source hash, and host-validated; later art changes do not reshape this authored trigger mask.</p>
+      <p class="hint">Visible tiles can receive published left-, right- and double-click triggers on the canvas; concealed tiles trigger movement without exposing their zone or media to players. Image alpha is sampled at tile creation into a bounded 64×64 mask, saved with its source hash, and host-validated; later art changes do not reshape this authored trigger mask.</p>
     </details>
     {:else}
     <details data-zone-region-create><summary>Create a convex scene region</summary>
@@ -722,12 +764,12 @@
     {/if}
     <div class="methods">Methods:
       {#each METHODS as method (method)}
-        <label><input type="checkbox" checked={definition.methods.includes(method)} onchange={() => toggle(method)} />{method}</label>
+        <label><input type="checkbox" checked={definition.methods.includes(method)} onchange={() => toggle(method)} />{methodLabel(method)}</label>
       {/each}
     </div>
     <div class="row gates">
       <label><input type="checkbox" checked={definition.gates?.paused ?? false} onchange={(e) => setGate("paused", e.currentTarget.checked)} /> Paused</label>
-      <label><input type="checkbox" checked={definition.gates?.playerRunnable ?? false} onchange={(e) => setGate("playerRunnable", e.currentTarget.checked)} /> Player click (published)</label>
+      <label><input type="checkbox" checked={definition.gates?.playerRunnable ?? false} onchange={(e) => setGate("playerRunnable", e.currentTarget.checked)} /> Player canvas triggers (published)</label>
       <label><input type="checkbox" checked={definition.gates?.oncePerToken ?? false} onchange={(e) => setGate("oncePerToken", e.currentTarget.checked)} /> Once per token</label>
       <label>Cooldown ms <input type="number" min="0" max="86400000" value={definition.gates?.cooldownMs ?? 0} onchange={(e) => setGate("cooldownMs", Number(e.currentTarget.value))} /></label>
       <label>Chance 0–1 <input type="number" min="0" max="1" step="0.05" value={definition.gates?.chance ?? 1} onchange={(e) => setGate("chance", Number(e.currentTarget.value))} /></label>
@@ -805,7 +847,7 @@
               <label>At least <input type="number" min="0" bind:value={step.test.min} /></label>
               <label>At most <input type="number" min="0" value={step.test.max ?? ""} placeholder="Any" onchange={(e) => setCountMax(i, e.currentTarget.value)} /></label>
             {/if}
-            {#if step.test.kind === "method"}<label>Method <select bind:value={step.test.method}>{#each METHODS as method (method)}<option value={method}>{method}</option>{/each}</select></label>{/if}
+            {#if step.test.kind === "method"}<label>Method <select bind:value={step.test.method}>{#each METHODS as method (method)}<option value={method}>{methodLabel(method)}</option>{/each}</select></label>{/if}
             {#if step.test.kind === "variable"}
               <label>Variable <input bind:value={step.test.name} /></label>
               <label>Compare as <select value={typeof step.test.equals} onchange={(e) => changeEqualsType(i, e.currentTarget.value as "string" | "number" | "boolean")}>
@@ -927,6 +969,38 @@
             <label>On failure jump to <input aria-label="Check Value failure landing" value={step.otherwise ?? ""}
               onchange={(e) => setOptionalLanding(i, "otherwise", e.currentTarget.value)} placeholder="(stop) or landing name" /></label>
             <small>Checks committed scene darkness, the replicated world clock or a host-observed token movement vector. Time defaults to midnight if unset and wraps each day; a click has no movement direction. Client-provided key presses are not trusted Check Value inputs.</small>
+          {:else if step.kind === "checkScriptResult"}
+            <label>Awaited script result
+              <select aria-label="Check Script Result source" bind:value={step.scriptStepId}>
+                <option value="">Choose a result-capturing script…</option>
+                {#each resultCaptureSteps() as source (source.id)}<option value={source.id}>{source.id} · {scriptFor(source)?.name ?? source.macroId}</option>{/each}
+              </select>
+            </label>
+            <label>Result path <input aria-label="Check Script Result path" bind:value={step.path}
+              placeholder="ok, error, value.hit" /></label>
+            <label>Compare <select aria-label="Check Script Result comparison" bind:value={step.compare}>
+              <option value="eq">Equals</option><option value="ne">Not equal</option>
+              <option value="gt">Greater than</option><option value="gte">At least</option>
+              <option value="lt">Less than</option><option value="lte">At most</option>
+            </select></label>
+            <label>Value type <select aria-label="Check Script Result value type"
+              value={step.value === null ? "null" : typeof step.value}
+              onchange={(e) => setScriptResultValueType(i, e.currentTarget.value as "string" | "number" | "boolean" | "null")}>
+              <option value="boolean">Boolean</option><option value="number">Number</option>
+              <option value="string">Text</option><option value="null">Null</option>
+            </select></label>
+            {#if typeof step.value === "boolean"}
+              <label>Value <select aria-label="Check Script Result value" value={String(step.value)}
+                onchange={(e) => changeScriptResultValue(i, e.currentTarget.value)}>
+                <option value="true">True</option><option value="false">False</option>
+              </select></label>
+            {:else if step.value !== null}
+              <label>Value <input aria-label="Check Script Result value" type={typeof step.value === "number" ? "number" : "text"}
+                value={String(step.value)} onchange={(e) => changeScriptResultValue(i, e.currentTarget.value)} /></label>
+            {/if}
+            <label>On failure jump to <input aria-label="Check Script Result failure landing" value={step.otherwise ?? ""}
+              onchange={(e) => setOptionalLanding(i, "otherwise", e.currentTarget.value)} placeholder="(stop) or landing name" /></label>
+            <small>Run Macro must enable “Expose result to later branches” before this step. The graph commits before invoking the reviewed script, then resumes at this branch with the returned JSON or an opted-in ordinary error. Paths are bounded own properties only (no expressions or prototype keys); script-result data is never interpolated into player-visible chat.</small>
           {:else if step.kind === "shuffle"}
             <small>Fisher–Yates shuffle of the current collection using host randomness; dry-runs use a stable preview seed.</small>
           {:else if step.kind === "position"}
@@ -993,7 +1067,7 @@
             <small>Filters the current scene's token collection by how often each token has triggered this graph, including this fire. Unseen tokens have count zero. This is different from “This token/user trigger count,” which checks only the caller's history. Non-token targets fail the entire plan. Add an Entity count filter to branch; reset-history clears these counts but not tile variables.</small>
           {:else if step.kind === "routeMethod"}
             {#each METHODS as method (method)}
-              <label>{method} → landing <input aria-label={`${method} landing`} value={step.routes[method] ?? ""} placeholder="(fall through)"
+              <label>{methodLabel(method)} → landing <input aria-label={`${methodLabel(method)} landing`} value={step.routes[method] ?? ""} placeholder="(fall through)"
                 onchange={(e) => setMethodRoute(i, method, e.currentTarget.value)} /></label>
             {/each}
             <label>Other → landing <input value={step.otherwise ?? ""} placeholder="(fall through)"
@@ -1544,7 +1618,25 @@
                 </label>
               {/each}
             {/if}
-            <small>Runs after the graph commits. Host actions make their own commits; failures appear only in GM trace.</small>
+            <label><input type="checkbox" aria-label={`Expose script result ${step.id}`}
+              checked={step.captureResult ?? false} onchange={(e) => setScriptCaptureResult(i, e.currentTarget.checked)} />
+              Expose awaited result to later branches</label>
+            <label>Run as
+              <select aria-label={`Run as ${step.id}`} value={step.runAs ?? "approved"}
+                onchange={(e) => setScriptRunAs(i, e.currentTarget.value as "approved" | "caller" | "gm")}>
+                <option value="approved">Saved macro policy ({scriptFor(step)?.script?.runAs ?? "unavailable"})</option>
+                <option value="caller">Invoking user</option>
+                <option value="gm">GM (only if the saved policy approves it)</option>
+              </select>
+            </label>
+            <label>If this action fails
+              <select aria-label={`On failure ${step.id}`} value={step.onError ?? "stop"}
+                onchange={(e) => setPostActionErrorPolicy(i, e.currentTarget.value as "stop" | "continue")}>
+                <option value="stop">Cancel remaining actions</option>
+                <option value="continue">Continue remaining authorized actions</option>
+              </select>
+            </label>
+            <small>Runs after the graph commits and is awaited. Results and errors go to the GM trace. Enabling result branching yields at this step, then resumes the remaining graph in a new host transaction; earlier commits are not rolled back. To branch on an ordinary failure, select Continue and check the result’s `ok` path. A step can only narrow the saved macro's approved run-as; it cannot turn a caller-only script into GM code. Continuing never overrides disconnect, timeout, graph revocation or stale authorization.</small>
           {:else if step.kind === "summon"}
             <label>Saved summon preset <select data-zone-summon-preset bind:value={step.presetId}>
               <option value="">Choose approved preset…</option>
@@ -1556,6 +1648,13 @@
               <option value="tile">Tile center</option><option value="trigger">Triggering token</option>
               <option value="current">First selected token</option>
             </select></label>
+            <label>If this action fails
+              <select aria-label={`On failure ${step.id}`} value={step.onError ?? "stop"}
+                onchange={(e) => setPostActionErrorPolicy(i, e.currentTarget.value as "stop" | "continue")}>
+                <option value="stop">Cancel remaining actions</option>
+                <option value="continue">Continue remaining authorized actions</option>
+              </select>
+            </label>
             <small>GM-approved preset ID; players cannot choose the actor or override its data. A player-triggered graph requires an owned caster token. The summon is a separate host commit after the graph, bounded by the preset's range/LOS and still private when its source is private. Failed source lookup produces a GM-only trace, not a rolled-back graph.</small>
           {:else if step.kind === "stopMovement"}
             <label><input type="checkbox" aria-label="Stop movement snap to grid" checked={step.snapToGrid ?? false}
@@ -1572,9 +1671,13 @@
     <p class="hint">Counts include this fire; a missing trigger token uses the caller's history key. Loops snapshot the selection, use bounded host execution and restore it after the closing step. Graph mutations commit atomically; reviewed scripts and saved-preset summons run separately in authored order after commit.</p>
     <div class="row">
       <button type="button" data-zone-save onclick={save}>Save graph</button>
-      <label>Simulate method <select bind:value={triggerMethod}>{#each definition.methods as method (method)}<option value={method}>{method}</option>{/each}</select></label>
-      {#if editing}<button type="button" data-zone-dry-run onclick={() => invoke(editing, true)}>Dry-run saved</button>
-        <button type="button" data-zone-run onclick={() => invoke(editing)}>Fire saved manually</button>{/if}
+      {#if firstSimulatableMethod(definition.methods)}
+        <label>Simulate method <select bind:value={triggerMethod}>{#each definition.methods.filter((method) => method !== "sceneChange") as method (method)}<option value={method}>{methodLabel(method)}</option>{/each}</select></label>
+      {:else if definition.methods.includes("sceneChange")}
+        <small>Scene change fires automatically when this scene becomes active.</small>
+      {/if}
+      {#if editing}<button type="button" data-zone-dry-run disabled={!firstSimulatableMethod(definition.methods)} onclick={() => invoke(editing, true)}>Dry-run saved</button>
+        <button type="button" data-zone-run disabled={!firstSimulatableMethod(definition.methods)} onclick={() => invoke(editing)}>Fire saved manually</button>{/if}
     </div>
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     {#if status}<p role="status">{status}</p>{/if}
@@ -1587,8 +1690,8 @@
       <li>{doc.name} · {checked.ok ? checked.definition.methods.join("/") : "Invalid imported graph"} · {doc.state?.count ?? 0} run(s)
         {#if checked.ok}
           <button type="button" onclick={() => pick(doc)}>Edit</button>
-          <button type="button" onclick={() => { sceneId = checked.definition.sceneId; invoke(doc._id, true, checked.definition.methods[0] ?? "manual"); }}>Dry-run</button>
-          <button type="button" onclick={() => { sceneId = checked.definition.sceneId; invoke(doc._id, false, checked.definition.methods[0] ?? "manual"); }}>Fire</button>
+          <button type="button" disabled={!firstSimulatableMethod(checked.definition.methods)} onclick={() => { sceneId = checked.definition.sceneId; invoke(doc._id, true, firstSimulatableMethod(checked.definition.methods) ?? "sceneChange"); }}>Dry-run</button>
+          <button type="button" disabled={!firstSimulatableMethod(checked.definition.methods)} onclick={() => { sceneId = checked.definition.sceneId; invoke(doc._id, false, firstSimulatableMethod(checked.definition.methods) ?? "sceneChange"); }}>Fire</button>
           {#if doc.state?.count}
             <button type="button" data-zone-reset-history={doc._id} onclick={() => resetHistory(doc)}>Reset gates/history</button>
             <details data-zone-history={doc._id}>

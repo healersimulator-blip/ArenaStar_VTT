@@ -3,9 +3,13 @@
  * drive the real bundled modules (WebRTC loopback, §14). Inert otherwise.
  */
 import type { LoopbackResult } from "../net/webrtc";
+import { RendererType } from "pixi.js";
 import { makeToken, type HostApp } from "./hostBoot";
 import type {
   ActorDocument,
+  AutomationDocument,
+  FxInstanceDocument,
+  MacroDocument,
   MessageDocument,
   RegionDocument,
   CombatDocument,
@@ -16,7 +20,8 @@ import type {
   TokenDocument,
 } from "../core/documents";
 import type { DocId } from "../core/ids";
-import type { FlatDiff } from "../core/ops";
+import type { AutomationTraceMsg } from "../core/messages";
+import type { FlatDiff, Op } from "../core/ops";
 import type { PlayerApp } from "./joinBoot";
 import type { HostShare } from "./hostShare";
 import { sightSegments } from "../canvas/vision/wallSight";
@@ -114,8 +119,94 @@ export interface ModelsSmokeResult {
   error?: string;
 }
 
+/** Browser/runtime measurements for the opt-in A41 reference profile harness. */
+export interface A41RuntimeSnapshot {
+  userAgent: string;
+  platform: string;
+  browserVersion: string | null;
+  hardwareConcurrency: number;
+  deviceMemoryGiB: number | null;
+  viewport: { width: number; height: number; deviceScaleFactor: number };
+  renderer: {
+    name: string;
+    type: string;
+    backend: "webgl" | "webgpu" | "canvas" | "unknown";
+    gpuVendor: string | null;
+    gpuRenderer: string | null;
+    canvasWidth: number;
+    canvasHeight: number;
+    cssWidth: number;
+    cssHeight: number;
+  };
+  stage: {
+    tokenViews: number;
+    tileViews: number;
+    renderedTileImages: number;
+    fxVisuals: number;
+    adaptiveQuality: {
+      targetFrameMs: number;
+      resolution: number;
+      level: number;
+      levels: number[];
+      samples: number;
+      recentP95FrameMs: number;
+      resolutionChanges: number;
+      slowWindows: number;
+      recoveryWindows: number;
+    };
+  };
+  fixture: { taggedTokens: number; taggedTiles: number; fxInstances: number };
+}
+
+export interface A41WorkloadSeed {
+  sceneId: string;
+  tokenIds: string[];
+  tileIds: string[];
+  triggerTileId: string;
+  clickAutomationId: string;
+  longAutomationId: string;
+  fxMacroIds: string[];
+  tag: string;
+  fxSectionPartition: number[];
+  taggedPlaceables: number;
+  activeTiles: number;
+  longGraphSteps: number;
+}
+
+export interface A41FxCycleReport {
+  cycles: number;
+  effectsPerCycle: number;
+  peakVisuals: number;
+  activeVisualCounts: number[];
+  startStopIntentCount: number;
+  durationMs: number;
+  cycleDurationsMs: number[];
+  allStopped: boolean;
+}
+
+export interface A41TriggerSample {
+  elapsedMs: number;
+  result: "committed" | "skipped" | "rejected" | "post-commit-failed";
+  detail: string;
+  selectedTargets: number | null;
+  sequence: number | null;
+  traceEntries: number;
+}
+
 /** Live app introspection (null when boot failed). */
 export interface AppSurface {
+  /** A41 only: fail-closed hardware/runtime readback from the actual production stage. */
+  a41RuntimeSnapshot(): A41RuntimeSnapshot;
+  /** A41 only: reconcile 800 tokens, 200 image-backed tiles, 2 automation graphs and 7 FX macros. */
+  a41SeedWorkload(mediaHash: string): Promise<A41WorkloadSeed>;
+  /** A41 only: force the exact imported test-media bytes through the real per-client fetcher. */
+  a41CacheMedia(mediaHash: string): Promise<{ hash: string; mime: string; bytes: number; width: number | null; height: number | null; fetchMs: number }>;
+  /** A41 only: execute/measure the exact 50 cycles using real host requests and rendered visuals. */
+  a41RunFxCycles(args: { sceneId: string; macroIds: string[]; cycles: number }): Promise<A41FxCycleReport>;
+  /** A41 only: one 600-step acyclic graph through normal host dispatch and private trace delivery. */
+  a41RunLongGraph(args: { automationId: string; sceneId: string }): Promise<A41TriggerSample>;
+  /** A41 only: 100 visible-tile clicks through the real host path, collecting dispatch samples. */
+  a41RunSimpleTriggers(args: { sceneId: string; tileId: string; automationId: string; count: number }): Promise<A41TriggerSample[]>;
   worldId(): string;
   seq(): number;
   /** Committed replica chat contents, for undo/projection UI regressions. */
@@ -252,6 +343,7 @@ export interface AppSurface {
     id: string;
     name: string;
     active: boolean;
+    scale: "tactical" | "strategic";
     img: string | null;
     width: number;
     height: number;
@@ -264,7 +356,7 @@ export interface AppSurface {
       disposition: string;
       img: string;
     }>;
-    walls: Array<{ id: string; c: [number, number, number, number]; door: number }>;
+    walls: Array<{ id: string; c: [number, number, number, number]; door: number; kind: "wall" | "door" | "window" }>;
     tiles: Array<{ id: string; name: string; x: number; y: number; width: number; height: number;
       rotation: number; img: string; triggerZone?: TileDocument["triggerZone"];
       triggerElevation?: TileDocument["triggerElevation"] }>;
@@ -1842,7 +1934,416 @@ function appSurface(app: HostApp): AppSurface {
     };
   }
 
+  type A41StageReadback = {
+    app: {
+      canvas: HTMLCanvasElement;
+      renderer: { type?: unknown; resolution?: number; gl?: WebGLRenderingContext };
+    };
+    drawnTokenIds(): string[];
+    getTilesLayer(): { count: number; renderedImageCount: number };
+    getFxLayer(): { count: number };
+    getAdaptiveQuality(): A41RuntimeSnapshot["stage"]["adaptiveQuality"];
+  };
+  const a41Stage = (): A41StageReadback => {
+    const stage = (globalThis as unknown as { __stage?: A41StageReadback }).__stage;
+    if (!stage) throw new Error("A41 requires the live production canvas stage");
+    return stage;
+  };
+  const a41Wait = async (condition: () => boolean, label: string, timeoutMs = 30_000): Promise<void> => {
+    const deadline = performance.now() + timeoutMs;
+    while (!condition()) {
+      if (performance.now() >= deadline) throw new Error(`A41 timed out waiting for ${label}`);
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 10));
+    }
+  };
+  const a41SubmitAndReconcile = (ops: Op[], label: string): Promise<number> => new Promise((resolve, reject) => {
+    let txId: string | null = null;
+    let settled = false;
+    let offOps = () => {};
+    let offRejected = () => {};
+    const timer = window.setTimeout(() => finish(new Error(`A41 timed out reconciling ${label}`)), 60_000);
+    const finish = (error?: Error, seq?: number): void => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      offOps();
+      offRejected();
+      if (error) reject(error);
+      else resolve(seq ?? client.store.seq);
+    };
+    offOps = app.gm.bus.on("ops", ({ envelope }) => {
+      if (txId !== null && envelope.txId === txId) finish(undefined, envelope.seq);
+    });
+    offRejected = app.gm.bus.on("rejected", (message) => {
+      if (txId !== null && message.txId === txId)
+        finish(new Error(`A41 ${label} was rejected: ${message.detail}`));
+    });
+    try { txId = client.submit(ops); }
+    catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
+  });
+  const a41WaitAutomationTrace = (
+    automationId: string,
+    method: AutomationTraceMsg["method"],
+    timeoutMs = 60_000,
+  ): Promise<AutomationTraceMsg> => new Promise((resolve, reject) => {
+    let off = () => {};
+    const timer = window.setTimeout(() => {
+      off();
+      reject(new Error(`A41 timed out waiting for ${method} trace from ${automationId}`));
+    }, timeoutMs);
+    off = app.gm.bus.on("automationTrace", (message) => {
+      if (message.automationId !== automationId || message.method !== method) return;
+      window.clearTimeout(timer);
+      off();
+      resolve(message);
+    });
+  });
+  const a41TraceSample = (elapsedMs: number, message: AutomationTraceMsg): A41TriggerSample => {
+    const selected = message.trace.map((line) => /^selected (\d+) tag target\(s\)$/.exec(line))
+      .find((match) => match !== null)?.[1];
+    return {
+      elapsedMs,
+      result: message.result,
+      detail: message.detail,
+      selectedTargets: selected === undefined ? null : Number(selected),
+      sequence: message.seq ?? null,
+      traceEntries: message.trace.length,
+    };
+  };
+
   return {
+    a41RuntimeSnapshot: () => {
+      const stage = a41Stage();
+      const canvas = stage.app.canvas;
+      const renderer = stage.app.renderer;
+      const gl = renderer.gl;
+      let gpuVendor: string | null = null;
+      let gpuRenderer: string | null = null;
+      const rendererType = Number(renderer.type);
+      if (gl) {
+        try {
+          const debug = gl.getExtension("WEBGL_debug_renderer_info") as
+            ({ UNMASKED_VENDOR_WEBGL: number; UNMASKED_RENDERER_WEBGL: number } | null);
+          gpuVendor = String(gl.getParameter(debug?.UNMASKED_VENDOR_WEBGL ?? gl.VENDOR));
+          gpuRenderer = String(gl.getParameter(debug?.UNMASKED_RENDERER_WEBGL ?? gl.RENDERER));
+        } catch { /* Profile preflight rejects absent/unreadable GPU identity. */ }
+      } else if (rendererType === RendererType.WEBGPU) {
+        const gpu = (renderer as unknown as { gpu?: { adapter?: { info?: {
+          vendor?: string; architecture?: string; device?: string; description?: string;
+        } } } }).gpu;
+        const info = gpu?.adapter?.info;
+        gpuVendor = info?.vendor || null;
+        gpuRenderer = info?.description || [info?.architecture, info?.device].filter(Boolean).join(" ") || null;
+      }
+      const rendererName = renderer.constructor.name || "unknown";
+      const backend: A41RuntimeSnapshot["renderer"]["backend"] = rendererType === RendererType.WEBGL ? "webgl"
+        : rendererType === RendererType.WEBGPU ? "webgpu"
+          : rendererType === RendererType.CANVAS ? "canvas" : "unknown";
+      const browserVersion = /(?:Chrome|Chromium)\/([\d.]+)/.exec(navigator.userAgent)?.[1] ?? null;
+      const deviceMemoryGiB = (navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? null;
+      const bounds = canvas.getBoundingClientRect();
+      const activeScene = client.store.getAll("scenes").find((item) => item.active) ?? client.store.getAll("scenes")[0];
+      const active = activeScene ? client.store.get("scenes", activeScene._id) : undefined;
+      const tag = "a41-load";
+      const taggedTokens = active?.tokens.filter((doc) => doc.taggerTags?.includes(tag)).length ?? 0;
+      const taggedTiles = active?.tiles.filter((doc) => doc.taggerTags?.includes(tag)).length ?? 0;
+      const fxMacroIds = new Set(client.store.getAll("macros")
+        .filter((macro) => macro.name.startsWith("A41 visual ")).map((macro) => macro._id));
+      return {
+        userAgent: navigator.userAgent,
+        platform: navigator.platform,
+        browserVersion,
+        hardwareConcurrency: navigator.hardwareConcurrency,
+        deviceMemoryGiB,
+        viewport: { width: window.innerWidth, height: window.innerHeight, deviceScaleFactor: window.devicePixelRatio },
+        renderer: {
+          name: rendererName,
+          type: String(renderer.type ?? "unknown"),
+          backend,
+          gpuVendor,
+          gpuRenderer,
+          canvasWidth: canvas.width,
+          canvasHeight: canvas.height,
+          cssWidth: bounds.width,
+          cssHeight: bounds.height,
+        },
+        stage: {
+          tokenViews: stage.drawnTokenIds().length,
+          tileViews: stage.getTilesLayer().count,
+          renderedTileImages: stage.getTilesLayer().renderedImageCount,
+          fxVisuals: stage.getFxLayer().count,
+          adaptiveQuality: stage.getAdaptiveQuality(),
+        },
+        fixture: {
+          taggedTokens,
+          taggedTiles,
+          fxInstances: client.store.getAll("fxInstances")
+            .filter((instance) => fxMacroIds.has(instance.macroId)).length,
+        },
+      };
+    },
+    a41SeedWorkload: async (mediaHash) => {
+      if (!/^[a-f0-9]{64}$/.test(mediaHash)) throw new Error("A41 media hash is invalid");
+      const active = client.store.getAll("scenes").find((item) => item.active) ?? client.store.getAll("scenes")[0];
+      if (!active) throw new Error("A41 needs an active scene");
+      if (active.width < 1_500 || active.height < 1_000)
+        throw new Error("A41 reference scene is smaller than the published fixture bounds");
+      const media = await app.assets.meta(mediaHash);
+      if (!media || media.mime !== "image/png")
+        throw new Error("A41 requires the cached PNG test asset");
+      const mediaBytes = await app.gm.fetcher.request(mediaHash, "preload", media.mime);
+      const decodeBytes = new Uint8Array(mediaBytes.byteLength);
+      decodeBytes.set(mediaBytes);
+      const decodedMedia = await createImageBitmap(new Blob([decodeBytes.buffer], { type: media.mime }));
+      const decodedWidth = decodedMedia.width;
+      const decodedHeight = decodedMedia.height;
+      decodedMedia.close();
+      if (decodedWidth !== 64 || decodedHeight !== 64)
+        throw new Error("A41 requires the cached 64×64 PNG test asset");
+      const tag = "a41-load";
+      const ownership: Ownership = { default: 0 };
+      const tokenIds = Array.from({ length: 800 }, (_, index) => `a41-token-${String(index).padStart(4, "0")}`);
+      const tileIds = Array.from({ length: 200 }, (_, index) => `a41-tile-${String(index).padStart(3, "0")}`);
+      const tokenOps: Op[] = tokenIds.map((id, index) => {
+        const token = makeToken(id, 20 + (index % 64) * 30, 900 + Math.floor(index / 64) * 40, id);
+        const data: TokenDocument = {
+          ...token,
+          ownership,
+          width: 24,
+          height: 24,
+          vision: false,
+          taggerTags: [tag],
+        };
+        return { kind: "create", coll: "tokens", parent: { coll: "scenes", id: active._id }, data };
+      });
+      const tileOps: Op[] = tileIds.map((id, index) => {
+        const col = index % 20;
+        const row = Math.floor(index / 20);
+        const data: TileDocument = {
+          _id: id,
+          type: "tile",
+          name: `A41 active tile ${index + 1}`,
+          ownership,
+          flags: {},
+          system: {},
+          taggerTags: [tag],
+          x: 100 + col * 70,
+          y: 100 + row * 70,
+          width: 64,
+          height: 64,
+          img: mediaHash,
+          above: false,
+          occlusion: { mode: "fade", alpha: 0.5 },
+        };
+        return { kind: "create", coll: "tiles", parent: { coll: "scenes", id: active._id }, data };
+      });
+      await a41SubmitAndReconcile(tokenOps, "800 tagged tokens");
+      await a41SubmitAndReconcile(tileOps, "200 image-backed tiles");
+
+      const clickAutomationId = "a41-simple-click";
+      const longAutomationId = "a41-long-graph";
+      const triggerTileId = tileIds[0];
+      if (!triggerTileId) throw new Error("A41 trigger tile fixture is missing");
+      const clickGraph: AutomationDocument = {
+        _id: clickAutomationId,
+        type: "automation",
+        name: "A41 simple tagged-placeable trigger",
+        ownership,
+        flags: {},
+        system: {},
+        definition: {
+          version: 1,
+          sceneId: active._id,
+          tileId: triggerTileId,
+          methods: ["click"],
+          steps: [
+            { id: "a41-select-tagged", kind: "select", selector: { kind: "tag", query: tag, collections: ["tokens", "tiles"] } },
+            { id: "a41-verify-count", kind: "filter", test: { kind: "count", min: 1_000, max: 1_000 } },
+            { id: "a41-trigger-end", kind: "stop" },
+          ],
+        },
+      };
+      const longSteps = Array.from({ length: 600 }, (_, index) => ({
+        id: `a41-long-${String(index).padStart(3, "0")}`,
+        kind: "set" as const,
+        name: "a41-run-local",
+        value: index,
+        scope: "run" as const,
+        operation: "assign" as const,
+      }));
+      const longGraph: AutomationDocument = {
+        _id: longAutomationId,
+        type: "automation",
+        name: "A41 600-step acyclic graph",
+        ownership,
+        flags: {},
+        system: {},
+        definition: {
+          version: 1,
+          sceneId: active._id,
+          tileId: triggerTileId,
+          methods: ["manual"],
+          steps: [...longSteps, { id: "a41-long-finish", kind: "stop" }],
+        },
+      };
+      const fxSectionPartition = [15, 15, 15, 15, 15, 15, 10];
+      const fxMacroIds = fxSectionPartition.map((_, index) => `a41-fx-${index}`);
+      const fxMacros: MacroDocument[] = fxSectionPartition.map((count, macroIndex) => ({
+        _id: fxMacroIds[macroIndex] ?? `a41-fx-${macroIndex}`,
+        type: "macro",
+        name: `A41 visual ${String(macroIndex).padStart(2, "0")}`,
+        kind: "sequence",
+        command: "",
+        ownership,
+        flags: {},
+        system: {},
+        sequence: {
+          version: 1,
+          persistent: true,
+          audience: "gm",
+          sections: Array.from({ length: count }, (_, sectionIndex) => ({
+            id: `a41-visual-${macroIndex}-${sectionIndex}`,
+            kind: "image" as const,
+            assetId: mediaHash,
+            at: { kind: "point" as const, x: 140 + macroIndex * 90 + sectionIndex % 5 * 18,
+              y: 120 + Math.floor(sectionIndex / 5) * 18 + macroIndex * 22 },
+            startMs: 0,
+            durationMs: 30_000,
+            layer: "aboveTokens" as const,
+          })),
+        },
+      }));
+      const definitionOps: Op[] = [
+        { kind: "create", coll: "automations", data: clickGraph },
+        { kind: "create", coll: "automations", data: longGraph },
+        ...fxMacros.map((data) => ({ kind: "create" as const, coll: "macros" as const, data })),
+      ];
+      await a41SubmitAndReconcile(definitionOps, "A41 automation and FX fixtures");
+      await a41Wait(() => {
+        const current = client.store.get("scenes", active._id);
+        return current?.tokens.length === 800 && current.tiles.length === 200 &&
+          client.store.get("automations", clickAutomationId) !== undefined &&
+          client.store.get("automations", longAutomationId) !== undefined &&
+          fxMacroIds.every((id) => client.store.get("macros", id) !== undefined);
+      }, "committed workload documents");
+      return {
+        sceneId: active._id,
+        tokenIds,
+        tileIds,
+        triggerTileId,
+        clickAutomationId,
+        longAutomationId,
+        fxMacroIds,
+        tag,
+        fxSectionPartition,
+        taggedPlaceables: tokenIds.length + tileIds.length,
+        activeTiles: tileIds.length,
+        // The fixed A41 workload counts its 600 run-scope work steps; the terminal stop is separate.
+        longGraphSteps: longSteps.length,
+      };
+    },
+    a41CacheMedia: async (mediaHash) => {
+      const metadata = await app.assets.meta(mediaHash);
+      if (!metadata) throw new Error("A41 test-media asset is absent from the world manifest");
+      const startedAt = performance.now();
+      const bytes = await app.gm.fetcher.request(mediaHash, "preload", metadata.mime);
+      const fetchMs = performance.now() - startedAt;
+      if (bytes.byteLength !== metadata.size) throw new Error("A41 cached test media has the wrong byte length");
+      const hashBytes = new Uint8Array(bytes.byteLength);
+      hashBytes.set(bytes);
+      const digest = await crypto.subtle.digest("SHA-256", hashBytes.buffer);
+      const actualHash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+      if (actualHash !== mediaHash) throw new Error("A41 cached test media does not match its content hash");
+      const decoded = await createImageBitmap(new Blob([hashBytes.buffer], { type: metadata.mime }));
+      const width = decoded.width;
+      const height = decoded.height;
+      decoded.close();
+      return { hash: mediaHash, mime: metadata.mime, bytes: bytes.byteLength,
+        width, height, fetchMs };
+    },
+    a41RunFxCycles: async ({ sceneId, macroIds, cycles }) => {
+      if ((cycles !== 1 && cycles !== 50) || macroIds.length !== 7)
+        throw new Error("A41 FX workload permits one uncounted warm-up cycle or exactly 50 measured cycles across 7 sequences");
+      const macroSections = macroIds.map((id) => client.store.get("macros", id)?.sequence?.sections.length ?? 0);
+      if (macroSections.join(",") !== "15,15,15,15,15,15,10" || macroSections.reduce((sum, count) => sum + count, 0) !== 100)
+        throw new Error("A41 FX fixture does not contain exactly 100 simultaneous image sections");
+      const stage = a41Stage();
+      const instances = (): FxInstanceDocument[] => client.store.getAll("fxInstances")
+        .filter((instance) => macroIds.includes(instance.macroId) && instance.sceneId === sceneId);
+      if (instances().length !== 0 || stage.getFxLayer().count !== 0)
+        throw new Error("A41 FX cycle precondition requires no active fixture instances or visuals");
+      const startedAt = performance.now();
+      const cycleDurationsMs: number[] = [];
+      const activeVisualCounts: number[] = [];
+      let peakVisuals = 0;
+      let startStopIntentCount = 0;
+      const stopFixture = async (): Promise<void> => {
+        for (const macroId of macroIds) {
+          client.requestFxStopMatching(sceneId, { macroId });
+          startStopIntentCount += 1;
+        }
+        await a41Wait(() => instances().length === 0 && stage.getFxLayer().count === 0,
+          "fixture FX stop and texture cleanup", 10_000);
+      };
+      try {
+        for (let cycle = 0; cycle < cycles; cycle += 1) {
+          const cycleStarted = performance.now();
+          for (const macroId of macroIds) {
+            client.requestSequence(macroId, sceneId);
+            startStopIntentCount += 1;
+          }
+          await a41Wait(() => instances().length === 7, `cycle ${cycle + 1} host-approved FX instances`, 10_000);
+          await a41Wait(() => stage.getFxLayer().count === 100, `cycle ${cycle + 1} 100 decoded FX visuals`, 15_000);
+          const active = stage.getFxLayer().count;
+          activeVisualCounts.push(active);
+          peakVisuals = Math.max(peakVisuals, active);
+          // Keep all 100 real Pixi visuals on screen for multiple visible frames, not just
+          // long enough to observe an FX document in the store.
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 250));
+          await stopFixture();
+          cycleDurationsMs.push(performance.now() - cycleStarted);
+          // 14 FX intents per cycle: stay below the host's 30-intent/second bucket.
+          if (cycle + 1 < cycles) await new Promise<void>((resolve) => window.setTimeout(resolve, 750));
+        }
+      } finally {
+        if (instances().length > 0 || stage.getFxLayer().count > 0) await stopFixture();
+      }
+      const allStopped = instances().length === 0 && stage.getFxLayer().count === 0;
+      return { cycles, effectsPerCycle: 100, peakVisuals, activeVisualCounts,
+        startStopIntentCount, durationMs: performance.now() - startedAt, cycleDurationsMs, allStopped };
+    },
+    a41RunLongGraph: async ({ automationId, sceneId }) => {
+      const graph = client.store.get("automations", automationId);
+      if (!graph || graph.definition.steps.length !== 601)
+        throw new Error("A41 long graph must contain 600 run-scope steps followed by a terminal stop");
+      const tracePromise = a41WaitAutomationTrace(automationId, "manual", 120_000);
+      const startedAt = performance.now();
+      client.requestAutomation(automationId, sceneId, "manual");
+      const trace = await tracePromise;
+      return a41TraceSample(performance.now() - startedAt, trace);
+    },
+    a41RunSimpleTriggers: async ({ sceneId, tileId, automationId, count }) => {
+      if (count !== 1 && count !== 100)
+        throw new Error("A41 simple-trigger workload permits one warm-up run or exactly 100 measured runs");
+      const active = client.store.get("scenes", sceneId);
+      const tile = active?.tiles.find((item) => item._id === tileId);
+      if (!active || !tile ||
+          !client.store.get("automations", automationId)?.definition.steps.some((step) => step.kind === "select"))
+        throw new Error("A41 visible click trigger fixture is not ready");
+      const point = { x: tile.x + tile.width / 2, y: tile.y + tile.height / 2 };
+      const samples: A41TriggerSample[] = [];
+      for (let index = 0; index < count; index += 1) {
+        const tracePromise = a41WaitAutomationTrace(automationId, "click", 10_000);
+        const startedAt = performance.now();
+        client.requestAutomationClick(sceneId, tileId, point);
+        const trace = await tracePromise;
+        samples.push(a41TraceSample(performance.now() - startedAt, trace));
+        // There is one committed host intent per run. Pace well below the 30/s limit;
+        // the latency sample above excludes this inter-run pacing delay.
+        if (index + 1 < count) await new Promise<void>((resolve) => window.setTimeout(resolve, 45));
+      }
+      return samples;
+    },
     worldId: () => app.worldId,
     seq: () => client.store.seq,
     chatLines: () => client.store.getAll("messages").map((message) => message.content),
@@ -1909,6 +2410,7 @@ function appSurface(app: HostApp): AppSurface {
         id: doc._id,
         name: doc.name,
         active: doc.active === true,
+        scale: (doc.flags.core as { scale?: unknown } | undefined)?.scale === "strategic" ? "strategic" : "tactical",
         img: doc.img ?? null,
         width: doc.width,
         height: doc.height,
@@ -1921,7 +2423,7 @@ function appSurface(app: HostApp): AppSurface {
           disposition: t.disposition,
           img: t.img,
         })),
-        walls: (doc.walls ?? []).map((w) => ({ id: w._id, c: w.c, door: w.door })),
+        walls: (doc.walls ?? []).map((w) => ({ id: w._id, c: w.c, door: w.door, kind: wallKindOf(w) })),
         tiles: (doc.tiles ?? []).map((tile) => ({ id: tile._id, name: tile.name, x: tile.x, y: tile.y,
           width: tile.width, height: tile.height, rotation: tile.rotation ?? 0, img: tile.img,
           ...(tile.triggerZone ? { triggerZone: tile.triggerZone } : {}),

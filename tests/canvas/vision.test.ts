@@ -139,13 +139,12 @@ describe("wall restriction semantics (§9 / D-009)", () => {
       wall({ _id: "d", c: [0, 30, 10, 30], sight: 0, sound: 1, door: 0 }), // closed door
       wall({ _id: "e", c: [0, 40, 10, 40], sight: 0, sound: 2 }), // and the light-only case
     ];
-    // A window is the D-009 case that makes this whole distinction load-bearing: sight
-    // passes, sound is conditional, and a closed window is where a listener cannot see
-    // what they hear.
-    const window = wall({ _id: "w", c: [0, 50, 10, 50], sight: 2, light: 2, move: 0, sound: 1, door: 0 });
-    // Three of the five walls stop sound (a: opaque, d: closed door, the window: closed and
-    // conditional on the sound axis), while sight — asked the same question — keeps a
-    // different three: the two answers are genuinely different, which is the point.
+    // A standard window is open on sight/light but blocks movement and sound
+    // unconditionally; custom wall axes remain independent of its visual kind.
+    const window = wall({ _id: "w", c: [0, 50, 10, 50], sight: 2, light: 2, move: 0, sound: 0, door: 0 });
+    // Three of the five walls stop sound (a: opaque, d: closed door, the window: opaque
+    // on the sound axis), while sight — asked the same question — keeps a different three:
+    // the two answers are genuinely different, which is the point.
     expect(soundSegments([...walls, window]).map((s) => s.y1)).toEqual([0, 30, 50]);
     expect(sightSegments(walls).map((s) => s.y1)).toEqual([10, 20, 30, 40]);
     expect(soundSegments([])).toEqual([]);

@@ -10,6 +10,7 @@
 import type { AssetId, DocId, PeerId, TxId, UserId, WorldId } from "./ids";
 import type { AssetManifest, Json, Role, RollMode } from "./documents";
 import type { Op, OpEnvelope } from "./ops";
+import type { TagRef } from "./tags";
 import type { ModelColumnType, TurnMode, TurnPhase } from "./strategic";
 import type { SimEvent, TurnReport } from "./sim";
 
@@ -215,24 +216,26 @@ export interface AutomationRequestMsg {
   dryRun?: boolean;
 }
 
-/** Click a *visible* tile; the client does not know private graph IDs or submit actions.
- * Host checks the rotated hit, scene, publication, optional owned token and dedup. */
+/** Invoke a *visible* tile from a pointer gesture; the client never knows private graph IDs or submits actions.
+ * Host checks the pointer method, rotated hit, scene, publication, optional owned token and dedup. */
 export interface AutomationClickMsg {
   kind: "automation.click";
   requestId: string;
   sceneId: DocId;
   tileId: DocId;
   point: { x: number; y: number };
+  /** Left-click is the legacy/default trigger; the other values are explicit pointer gestures. */
+  method?: import("./automation").AutomationPointerMethod;
   tokenId?: DocId;
 }
 
-/** GM/assistant-only Tagger rule expansion. Send exact, scene-qualified refs,
- * NEVER client-computed ordinals or final tags; the host allocates against live
- * tags in every referenced scene in one authoritative undoable transaction. */
+/** GM/assistant-only Tagger rule expansion. Send exact scene-qualified or explicit
+ * world-document refs, NEVER client-computed ordinals or final tags; the host
+ * allocates against live tags in each scene or in the world namespace, atomically. */
 export interface TaggerRulesMsg {
   kind: "tagger.rules";
   requestId: string;
-  refs: import("./documents").DocRef[];
+  refs: TagRef[];
 }
 
 export interface TaggerRulesResultMsg {

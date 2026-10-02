@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "id": "REPLACE_WITH_PUBLISHED_REFERENCE_PROFILE_ID",
+  "publishedAt": "1970-01-01T00:00:00.000Z",
+  "hardware": {
+    "deviceId": "REPLACE_WITH_REFERENCE_DEVICE_ID",
+    "cpuModel": "REPLACE_WITH_EXACT_CPU_MODEL",
+    "systemMemoryGiB": 0,
+    "logicalCpuThreads": 0
+  },
+  "browser": {
+    "name": "chromium",
+    "version": "REPLACE_WITH_PLAYWRIGHT_CHROMIUM_VERSION",
+    "userAgent": "REPLACE_WITH_EXACT_BROWSER_USER_AGENT",
+    "platform": "REPLACE_WITH_NAVIGATOR_PLATFORM",
+    "headless": true,
+    "hardwareConcurrency": 0,
+    "deviceMemoryGiB": null,
+    "viewport": {
+      "width": 1280,
+      "height": 960,
+      "deviceScaleFactor": 1
+    },
+    "backend": "webgl",
+    "gpuVendor": "REPLACE_WITH_UNMASKED_GPU_VENDOR",
+    "gpuRenderer": "REPLACE_WITH_UNMASKED_GPU_RENDERER"
+  },
+  "workload": {
+    "effects": 100,
+    "taggedPlaceables": 1000,
+    "tokens": 800,
+    "activeTiles": 200,
+    "longGraphSteps": 600,
+    "simpleTriggerRuns": 100,
+    "fxCycles": 50,
+    "fxSectionPartition": [15, 15, 15, 15, 15, 15, 10],
+    "media": {
+      "sha256": "REPLACE_WITH_DETERMINISTIC_FIXTURE_SHA256",
+      "mime": "image/png",
+      "bytes": 0,
+      "width": 64,
+      "height": 64,
+      "codec": "PNG",
+      "frames": 1
+    }
+  },
+  "acceptance": {
+    "visibleFrameP95Ms": 50,
+    "simpleTriggerDispatchP95Ms": 100,
+    "stabilizedHeapRatio": 1.1
+  }
+}

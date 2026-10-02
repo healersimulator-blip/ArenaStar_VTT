@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://arenastar-vtt.local/schemas/a41-reference-profile.schema.json",
+  "title": "ArenaStar VTT A41 reference performance profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "publishedAt", "hardware", "browser", "workload", "acceptance"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "type": "string", "minLength": 1, "pattern": "^(?!.*(?:REPLACE|TEMPLATE|EXAMPLE)).+$" },
+    "publishedAt": { "type": "string", "format": "date-time" },
+    "hardware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deviceId", "cpuModel", "systemMemoryGiB", "logicalCpuThreads"],
+      "properties": {
+        "deviceId": { "type": "string", "minLength": 1 },
+        "cpuModel": { "type": "string", "minLength": 1 },
+        "systemMemoryGiB": { "type": "number", "exclusiveMinimum": 0 },
+        "logicalCpuThreads": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "browser": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "userAgent", "platform", "headless", "hardwareConcurrency", "deviceMemoryGiB", "viewport", "backend", "gpuVendor", "gpuRenderer"],
+      "properties": {
+        "name": { "const": "chromium" },
+        "version": { "type": "string", "minLength": 1 },
+        "userAgent": { "type": "string", "minLength": 1 },
+        "platform": { "type": "string", "minLength": 1 },
+        "headless": { "type": "boolean" },
+        "hardwareConcurrency": { "type": "integer", "minimum": 1 },
+        "deviceMemoryGiB": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+        "viewport": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["width", "height", "deviceScaleFactor"],
+          "properties": {
+            "width": { "type": "integer", "minimum": 1 },
+            "height": { "type": "integer", "minimum": 1 },
+            "deviceScaleFactor": { "type": "number", "exclusiveMinimum": 0 }
+          }
+        },
+        "backend": { "enum": ["webgl", "webgpu"] },
+        "gpuVendor": { "type": "string", "minLength": 1 },
+        "gpuRenderer": { "type": "string", "minLength": 1 }
+      }
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["effects", "taggedPlaceables", "tokens", "activeTiles", "longGraphSteps", "simpleTriggerRuns", "fxCycles", "fxSectionPartition", "media"],
+      "properties": {
+        "effects": { "const": 100 },
+        "taggedPlaceables": { "const": 1000 },
+        "tokens": { "const": 800 },
+        "activeTiles": { "const": 200 },
+        "longGraphSteps": { "const": 600 },
+        "simpleTriggerRuns": { "const": 100 },
+        "fxCycles": { "const": 50 },
+        "fxSectionPartition": { "const": [15, 15, 15, 15, 15, 15, 10] },
+        "media": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sha256", "mime", "bytes", "width", "height", "codec", "frames"],
+          "properties": {
+            "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "mime": { "const": "image/png" },
+            "bytes": { "type": "integer", "minimum": 1 },
+            "width": { "const": 64 },
+            "height": { "const": 64 },
+            "codec": { "const": "PNG" },
+            "frames": { "const": 1 }
+          }
+        }
+      }
+    },
+    "acceptance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["visibleFrameP95Ms", "simpleTriggerDispatchP95Ms", "stabilizedHeapRatio"],
+      "properties": {
+        "visibleFrameP95Ms": { "const": 50 },
+        "simpleTriggerDispatchP95Ms": { "const": 100 },
+        "stabilizedHeapRatio": { "const": 1.1 }
+      }
+    }
+  }
+}

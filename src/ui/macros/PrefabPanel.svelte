@@ -3,7 +3,7 @@
   import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
-  import type { AutomationDocument, PrefabDocument, SceneDocument } from "../../core/documents";
+  import type { AutomationDocument, PrefabDocument, RegionDocument, SceneDocument } from "../../core/documents";
   import type { Op } from "../../core/ops";
   import { listTaggable } from "../../core/tags";
   import { PREFAB_COLLECTIONS, planPrefabPlacement, validatePrefab,
@@ -31,7 +31,7 @@
   const instances = $derived.by(() => {
     if (!scene) return [] as Array<{ id: string; rootId: string; parts: number }>;
     const found = new SvelteMap<string, { id: string; rootId: string; parts: number }>();
-    for (const coll of PREFAB_COLLECTIONS) for (const doc of scene[coll]) {
+    for (const coll of PREFAB_COLLECTIONS) for (const doc of scene[coll] ?? []) {
       const marker = doc.flags?.prefab as { instanceId?: string; rootId?: string } | undefined;
       if (!marker?.instanceId || !marker.rootId) continue;
       const row = found.get(marker.instanceId) ?? { id: marker.instanceId, rootId: marker.rootId, parts: 0 };
@@ -64,6 +64,10 @@
     }
   }
   function anchor(doc: PrefabPlaceable, coll: PrefabCollection): { x: number; y: number } {
+    if (coll === "regions") {
+      const region = doc as RegionDocument;
+      return { x: region.x + region.width / 2, y: region.y + region.height / 2 };
+    }
     if (coll === "walls") {
       const c = (doc as Extract<PrefabPlaceable, { type: "wall" }>).c;
       return { x: (c[0] + c[2]) / 2, y: (c[1] + c[3]) / 2 };
@@ -88,8 +92,9 @@
         ...(parentId ? { parentId } : {}), ...(locked.has(row.doc._id) ? { locked: true } : {}),
         doc: $state.snapshot(row.doc) as PrefabPlaceable };
     });
-    const tileIds = new Set(parts.filter((p) => p.coll === "tiles").map((p) => p.id));
-    const linked = graphs.filter((g) => g.definition?.sceneId === sceneId && tileIds.has(g.definition.tileId))
+    const linked = graphs.filter((g) => g.definition?.sceneId === sceneId &&
+      parts.some((part) => part.id === g.definition?.tileId && part.coll ===
+        (g.definition?.sourceKind === "region" ? "regions" : "tiles")))
       .map((g) => {
         const doc = $state.snapshot(g);
         delete doc.state; // graph copies start with fresh once/cooldown history
@@ -120,7 +125,7 @@
     const ops: Op[] = [];
     for (const graph of graphs) if ((graph.flags.prefab as { instanceId?: string } | undefined)?.instanceId === instanceId)
       ops.push({ kind: "delete", ref: { coll: "automations", id: graph._id } });
-    for (const coll of PREFAB_COLLECTIONS) for (const doc of scene[coll]) {
+    for (const coll of PREFAB_COLLECTIONS) for (const doc of scene[coll] ?? []) {
       if ((doc.flags.prefab as { instanceId?: string } | undefined)?.instanceId === instanceId)
         ops.push({ kind: "delete", ref: { coll, id: doc._id, parent: { coll: "scenes", id: scene._id } } });
     }
@@ -198,7 +203,7 @@
         </div>
       </details>
     {/if}
-    <p class="hint">Use the Tags tab to add source placeable tags first; select every target object. Included graphs must be saved on included tiles. Parent transforms carry all descendants in one undoable host transaction; a locked child cannot be edited directly by players. A cyclic hierarchy is rejected at save.</p>
+    <p class="hint">Use the Tags tab to add source placeable tags first; select every target object. Included graphs must be saved on included tiles or regions. Parent transforms carry all descendants in one undoable host transaction; a locked child cannot be edited directly by players. A cyclic hierarchy is rejected at save.</p>
     <h4>Place saved prefab</h4>
     <div class="row"><label>Template <select bind:value={placeId} data-prefab-list><option value="">Select…</option>
       {#each prefabs as prefab (prefab._id)}<option value={prefab._id}>{prefab.name} ({prefab.definition.parts.length} parts)</option>{/each}
@@ -219,7 +224,7 @@
     {/if}
     {#if status}<p role="status">{status}</p>{/if}
     {#if error}<p role="alert" class="error">{error}</p>{/if}
-    <p class="hint">Token/tile roots move, uniformly resize and rotate their nested descendants atomically; other root geometries and attach/detach, nested persistent FX and summon hooks are still being implemented. This is not full Token Attacher parity.</p>
+    <p class="hint">Token/tile, wall, template and region roots carry nested descendants through movement, uniform resize and rotation. Light/sound/drawing/note roots support translation; supported light/sound/drawing sizes and point-drawing rotation are carried too. Interactive attach/detach, FX-emitter roots and nested persistent FX/summons remain open. This is not full Token Attacher parity.</p>
   {/if}
 </section>
 

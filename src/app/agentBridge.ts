@@ -62,6 +62,7 @@ import type {
   PageOptions,
 } from "../core/agents/types";
 import type { Op } from "../core/ops";
+import { prototypeTokenTagsOf } from "../core/tags";
 import type { DocumentStore } from "../core/store";
 import type { CellDocument, CellFeature } from "../core/documents";
 import { cellCenterOf, cellsOf } from "../core/hexcrawl/cells";
@@ -1673,8 +1674,10 @@ export function agentWorldView(
         if (!actor) {
           return { error: `no actor "${entry.actorId}" — document.list actors names them` };
         }
+        const taggerTags = prototypeTokenTagsOf(actor);
         for (let i = 0; i < Math.min(entry.count, 25); i++) {
-          entries.push({ actorId: actor._id, name: actor.name, img: "" });
+          entries.push({ actorId: actor._id, name: actor.name, img: "",
+            ...(taggerTags.length > 0 ? { taggerTags } : {}) });
         }
       }
       // Every branch below assigns; the `if (!origin)` after them is the exhaustiveness check.
@@ -2267,6 +2270,7 @@ export function agentWorldView(
         ...(spec.actorId === null || spec.actorId === undefined
           ? {}
           : { actorId: spec.actorId }),
+        ...(spec.taggerTags && spec.taggerTags.length > 0 ? { taggerTags: [...spec.taggerTags] } : {}),
       };
       return {
         kind: "create",
