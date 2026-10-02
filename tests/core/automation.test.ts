@@ -117,6 +117,35 @@ describe("host-side active-zone graph", () => {
     expect(new Set(SIMULATABLE_METHODS).size).toBe(SIMULATABLE_METHODS.length);
   });
 
+  test("lighting and time changes are host-dispatched, routable methods with no manual simulation", () => {
+    const definition: AutomationDefinition = { ...base,
+      methods: ["lightingChange", "timeChange"], gates: {},
+      steps: [
+        { id: "router", kind: "routeMethod", routes: { timeChange: "arrival" }, otherwise: "other" },
+        { id: "arrival", kind: "landing", name: "arrival" },
+        { id: "notice", kind: "chat", audience: "gm", content: "{{method}} by {{user}}" },
+        { id: "done", kind: "stop" },
+        { id: "other", kind: "landing", name: "other" },
+        { id: "fallback", kind: "chat", audience: "gm", content: "{{method}} ignored" },
+      ] };
+    expect(validateAutomation(definition).ok).toBe(true);
+    const unrelated = planAutomation(world, automation(definition), { scene, tile, method: "manual",
+      caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    expect(unrelated).toMatchObject({ ok: true, skipped: "method/anchor mismatch" });
+    const message = (method: "lightingChange" | "timeChange") => {
+      const outcome = planAutomation(world, automation(definition), { scene, tile, method,
+        caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+      return outcome.ok && "plan" in outcome
+        ? outcome.plan.ops.find((op) => op.kind === "create" && op.coll === "messages") : undefined;
+    };
+    expect(message("timeChange")).toMatchObject({ data: { content: "timeChange by p1" } });
+    expect(message("lightingChange")).toMatchObject({ data: { content: "lightingChange ignored" } });
+    for (const method of ["lightingChange", "timeChange"] as const) {
+      expect(isHostDispatchedMethod(method)).toBe(true);
+      expect(SIMULATABLE_METHODS).not.toContain(method);
+    }
+  });
+
   test("the five combat kinds are host-dispatched methods, routable and never simulatable", () => {
     const definition: AutomationDefinition = { ...base,
       methods: ["combatStart", "combatRound", "combatTurnStart", "combatTurnEnd", "combatEnd"], gates: {},

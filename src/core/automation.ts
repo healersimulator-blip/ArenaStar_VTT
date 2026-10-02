@@ -32,7 +32,7 @@ import { getByTag, listTaggable, normalizeTags, tagMatcher, tagsOf, TAGGABLE_COL
   type TagEdit, type TagMatchMode, type TagPattern, type TagSearchCollection } from "./tags";
 import { COMBAT_TRIGGER_METHODS, type CombatTriggerMethod } from "./combat";
 
-export type AutomationMethod = "enter" | "exit" | "stop" | "elevation" | "create" | "sceneChange" | "rotate" | "click" | "rightClick" | "doubleClick" | "hoverIn" | "hoverOut" | "doorOpen" | "doorClose" | "doorLock" | "doorUnlock" | CombatTriggerMethod | "manual";
+export type AutomationMethod = "enter" | "exit" | "stop" | "elevation" | "create" | "sceneChange" | "rotate" | "click" | "rightClick" | "doubleClick" | "hoverIn" | "hoverOut" | "doorOpen" | "doorClose" | "doorLock" | "doorUnlock" | CombatTriggerMethod | "lightingChange" | "timeChange" | "manual";
 export type AutomationCombatMethod = CombatTriggerMethod;
 export type AutomationPointerMethod = Extract<AutomationMethod, "click" | "rightClick" | "doubleClick" | "hoverIn" | "hoverOut">;
 /** Explicitly bound event fields, never arbitrary code/field paths from a player request. */
@@ -311,18 +311,20 @@ export type AutomationOutcome =
   | { ok: false; error: string; trace: string[] }
   | { ok: true; skipped: string; trace: string[] };
 
-const METHODS: readonly AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "sceneChange", "rotate", "click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "doorOpen", "doorClose", "doorLock", "doorUnlock", ...COMBAT_TRIGGER_METHODS, "manual"];
+const METHODS: readonly AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "sceneChange", "rotate", "click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "doorOpen", "doorClose", "doorLock", "doorUnlock", ...COMBAT_TRIGGER_METHODS, "lightingChange", "timeChange", "manual"];
 
 /**
  * Events the host observes from committed world state and dispatches itself. They are valid
  * graph methods (authorable, routable, filterable and visible in history) but are never
  * simulated by a client request: `automation.request` and the module API refuse them, so a
  * forged payload cannot manufacture an event the world did not produce. TR-01 lists the
- * family; scene changes, the four door changes and the five combat changes are the
- * implemented children today.
+ * family; scene changes, the four door changes, the five combat changes and the two
+ * environment changes (committed scene darkness, committed world clock) are the implemented
+ * children today.
  */
 export const HOST_DISPATCHED_METHODS: readonly AutomationMethod[] =
-  ["sceneChange", "doorOpen", "doorClose", "doorLock", "doorUnlock", ...COMBAT_TRIGGER_METHODS];
+  ["sceneChange", "doorOpen", "doorClose", "doorLock", "doorUnlock", ...COMBAT_TRIGGER_METHODS,
+    "lightingChange", "timeChange"];
 export function isHostDispatchedMethod(method: AutomationMethod): boolean {
   return HOST_DISPATCHED_METHODS.includes(method);
 }

@@ -1227,3 +1227,73 @@ test("GM combat start/round/turn/end fires combat-method graphs in the encounter
   await expect(history.locator("li").filter({ hasText: /: combatStart · gm · .+$/ })).toHaveCount(1);
   await expect(history.locator("li").filter({ hasText: /: combatEnd · gm · .+$/ })).toHaveCount(1);
 });
+
+test("GM lighting and world-clock changes fire their host-dispatched graph, once per committed change", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+
+  // Author a scene graph that hears both environment kinds.
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-zones-tab]").click();
+  const zones = page.locator("[data-active-zones]");
+  await zones.locator("[data-zone-tile-create] summary").click();
+  const tile = zones.locator("[data-zone-tile-create]");
+  await tile.getByLabel("Tile name").fill("Dawn plate");
+  await tile.getByLabel("X", { exact: true }).fill("300");
+  await tile.getByLabel("Y", { exact: true }).fill("300");
+  await tile.getByLabel("Width").fill("200");
+  await tile.getByLabel("Height").fill("200");
+  await tile.locator("[data-zone-create-tile]").click();
+  await expect(zones.locator("[data-zone-tile] option").filter({ hasText: "Dawn plate" })).toHaveCount(1);
+  await zones.locator("[data-zone-name]").fill("Environment alarm");
+  for (const method of ["enter", "stop", "manual"])
+    await zones.locator(".methods label").filter({ hasText: new RegExp(`^${method}$`) })
+      .locator("input").uncheck();
+  await zones.locator(".methods label").filter({ hasText: "lighting change" }).locator("input").check();
+  await zones.locator(".methods label").filter({ hasText: "time change" }).locator("input").check();
+  await zones.locator("[data-zone-save]").click();
+  await expect(zones.locator("li").filter({ hasText: "Environment alarm" })).toHaveCount(1);
+  await zones.locator("li").filter({ hasText: "Environment alarm" }).getByRole("button", { name: "Edit" }).click();
+  await expect(zones.locator(".methods ~ small, small").filter({ hasText: "fire automatically" })).toHaveCount(1);
+  await expect(zones.getByText("Simulate method")).toHaveCount(0);
+  await page.locator('[data-window="macros"] [data-window-close]').click();
+
+  // Settings → Ambient darkness is a committed scene value; the clock buttons commit the
+  // replicated world clock. Both are real world edits, not simulations.
+  await page.locator("#gm-settings").click();
+  const settings = page.locator('[data-window="settings"]');
+  await settings.locator("[data-scene-darkness]").fill("0.4");
+  await settings.locator("[data-scene-darkness]").dispatchEvent("change");
+  const log = async (needle: string) => {
+    await page.click('[data-tab="chat"]');
+    await expect(page.locator("#chat-log")).toContainText(needle);
+  };
+  await log("lightingChange by");
+  await settings.locator("[data-clock-hour]").click();
+  await log("timeChange by");
+  const chatText = async () => {
+    await page.click('[data-tab="chat"]');
+    return page.locator("#chat-log").innerText();
+  };
+  const occurrences = async (needle: string) => (await chatText()).split(needle).length - 1;
+  expect(await occurrences("lightingChange by")).toBe(1);
+  expect(await occurrences("timeChange by")).toBe(1);
+
+  // A second darkness edit at the same value is not an event; a different one is.
+  await settings.locator("[data-scene-darkness]").fill("0.4");
+  await settings.locator("[data-scene-darkness]").dispatchEvent("change");
+  await page.waitForTimeout(150);
+  expect(await occurrences("lightingChange by")).toBe(1);
+  await settings.locator("[data-scene-darkness]").fill("0.6");
+  await settings.locator("[data-scene-darkness]").dispatchEvent("change");
+  await expect.poll(() => occurrences("lightingChange by")).toBe(2);
+
+  // Host history keeps one entry per change, keyed by the method name.
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-zones-tab]").click();
+  const history = page.locator("[data-zone-history]");
+  await history.locator("summary").click();
+  // Environment events carry no triggering token, so the row ends at the user.
+  await expect(history.locator("li").filter({ hasText: /: lightingChange · gm$/ })).toHaveCount(2);
+  await expect(history.locator("li").filter({ hasText: /: timeChange · gm$/ })).toHaveCount(1);
+});

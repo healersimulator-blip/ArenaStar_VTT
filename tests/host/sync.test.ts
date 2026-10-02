@@ -18,9 +18,10 @@ import { describe, expect, test, vi } from "vitest";
 import { HostSync, gmSessionUser, type HostEvents } from "../../src/host/sync";
 import type { ScriptRunner } from "../../src/host/scriptWorker";
 import { scriptApprovalHash, type ScriptPolicy } from "../../src/core/scriptMacros";
-import { worldSettingsDoc } from "../../src/core/worldSettings";
+import { worldSettingsDoc, worldSettingsOps } from "../../src/core/worldSettings";
 import type { AutomationDefinition } from "../../src/core/automation";
 import { COMBAT_TRIGGER_METHODS } from "../../src/core/combat";
+import { readWorldClock } from "../../src/packages/pf1e/worldClock";
 import { ClientSync, type ClientEvents } from "../../src/client/sync";
 import { createTransportPair, flushMicrotasks } from "../../src/net/memory";
 import { createEventBus, type EventBus } from "../../src/core/events";
@@ -8167,4 +8168,102 @@ test("HostSync dispatches the five combat changes to the encounter scene's graph
   }
   expect(h.hostStore.get("combats", "fight")).toBeUndefined();
   expect(messages()).toEqual(snapshot);
+});
+
+test("HostSync dispatches lightingChange for a committed darkness edit and timeChange for a committed clock write", async () => {
+  const h = await setup();
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: zoneTile() }]);
+  await flushMicrotasks();
+  const chat = (content: string): AutomationDefinition["steps"] =>
+    [{ id: "notice", kind: "chat", audience: "gm", content }];
+  const environment: AutomationDocument = { ...zoneDoc(), _id: "environment", name: "Environment",
+    definition: { ...zoneDoc().definition, tileId: "zone",
+      methods: ["lightingChange", "timeChange"], gates: {}, steps: chat("{{method}} by {{user}}") } };
+  const lightingOnly: AutomationDocument = { ...zoneDoc(), _id: "lighting-only", name: "Lighting only",
+    definition: { ...zoneDoc().definition, tileId: "zone",
+      methods: ["lightingChange"], gates: {}, steps: [{ id: "select", kind: "select", selector: { kind: "triggering" } },
+        { id: "mark", kind: "tags", edit: "add", tags: ["lit"] }] } };
+  h.gm.submit([{ kind: "create", coll: "automations", data: environment },
+    { kind: "create", coll: "automations", data: lightingOnly }]);
+  await flushMicrotasks();
+  const messages = () => h.hostStore.getAll("messages").map((message) => message.content);
+  const darknessOf = (id: string) => (h.hostStore.get("scenes", id) as SceneDocument).darkness;
+  const clock = () => readWorldClock(h.hostStore.getAll("settings"));
+
+  // A committed ambient-darkness edit is MATT's On Lighting Change; a no-op write is not.
+  h.gm.submit([{ kind: "update", ref: { coll: "scenes", id: "s1" }, diff: { darkness: 0.4 } }]);
+  await flushMicrotasks();
+  expect(darknessOf("s1")).toBeCloseTo(0.4, 5);
+  expect(messages()).toEqual(["lightingChange by gm-key"]);
+  const beforeNoop = messages().length;
+  h.gm.submit([{ kind: "update", ref: { coll: "scenes", id: "s1" }, diff: { darkness: 0.4 } }]);
+  await flushMicrotasks();
+  expect(messages().length).toBe(beforeNoop);
+  expect(h.hostStore.get("automations", "environment")?.state?.recent?.map((entry) => entry.method))
+    .toEqual(["lightingChange"]);
+
+  // A committed world-clock write is MATT's On Time Change — including the creating envelope
+  // that installs a world-settings document for the first time.
+  h.gm.submit(worldSettingsOps(h.hostStore.getAll("settings"), { clockSeconds: 3_600 }));
+  await flushMicrotasks();
+  expect(clock()).toBe(3_600);
+  expect(messages().slice(beforeNoop)).toEqual(["timeChange by gm-key"]);
+  expect(h.hostStore.get("automations", "environment")?.state?.recent?.map((entry) => entry.method))
+    .toEqual(["lightingChange", "timeChange"]);
+  // Updating only an unrelated setting does not touch the clock and fires nothing.
+  const beforeUnrelated = messages().length;
+  h.gm.submit(worldSettingsOps(h.hostStore.getAll("settings"), { detectionMultiplier: 2 }));
+  await flushMicrotasks();
+  expect(messages().length).toBe(beforeUnrelated);
+
+  // Neither GM nor player can manufacture either event.
+  const rejected: ClientEvents["rejected"][] = [];
+  h.gmBus.on("rejected", (event) => rejected.push(event));
+  const beforeSpoof = h.hostStore.seq;
+  h.gm.requestAutomation("environment", "s1", "lightingChange");
+  await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(beforeSpoof);
+  expect(rejected.at(-1)?.reason).toBe("invalid_schema");
+  const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const playerRejected: ClientEvents["rejected"][] = [];
+  playerBus.on("rejected", (event) => playerRejected.push(event));
+  expect(player.store.getAll("automations")).toEqual([]);
+  player.requestAutomation("environment", "s1", "timeChange");
+  await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(beforeSpoof);
+  expect(playerRejected.at(-1)?.reason).toBe("invalid_schema");
+  expect(player.store.getAll("messages")).toEqual([]);
+  // A player cannot write the replicated clock either.
+  player.submit([{ kind: "update", ref: { coll: "settings", id: "world-settings" },
+    diff: { "system.clockSeconds": 900 } }]);
+  await flushMicrotasks();
+  expect(clock()).toBe(3_600);
+  expect(playerRejected.at(-1)?.reason).toBe("forbidden");
+
+  // A graph's own Scene Lighting action commits a real change: the destination graph fires, and
+  // the reentry budget bounds a self-retriggering pair instead of growing the call stack.
+  const lightingAction: AutomationDocument = { ...zoneDoc(), _id: "lighting-action", name: "Dimmer",
+    definition: { ...zoneDoc().definition, tileId: "zone", methods: ["manual"], gates: {},
+      steps: [{ id: "dim", kind: "sceneLighting", mode: "set", darkness: 0.8 }] } };
+  h.gm.submit([{ kind: "create", coll: "automations", data: lightingAction }]);
+  await flushMicrotasks();
+  const beforeActionMessages = messages();
+  h.gm.requestAutomation("lighting-action", "s1", "manual");
+  await flushMicrotasks();
+  expect(darknessOf("s1")).toBeCloseTo(0.8, 5);
+  expect(messages().slice(beforeActionMessages.length)).toEqual(["lightingChange by gm-key"]);
+  // No triggering token rides an environment event, so the token-tag graph has nothing to tag.
+  expect((h.hostStore.get("scenes", "s1") as SceneDocument).tokens.filter((t) => t.taggerTags?.includes("lit")))
+    .toHaveLength(0);
+  expect(h.hostStore.get("automations", "lighting-only")?.state?.recent?.at(-1)?.tokenId).toBeUndefined();
+
+  // Restore never replays: undoing the graph's own darkness change puts the scene back and
+  // reverts the graph's chat row with it, without appending a new lightingChange.
+  let guard = 0;
+  while (darknessOf("s1") > 0.4 && guard++ < 6) {
+    expect(h.host.undo().ok).toBe(true);
+    await flushMicrotasks();
+  }
+  expect(darknessOf("s1")).toBeCloseTo(0.4, 5);
+  expect(messages()).toEqual(beforeActionMessages);
 });

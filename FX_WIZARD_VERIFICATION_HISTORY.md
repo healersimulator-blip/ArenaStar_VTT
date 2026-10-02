@@ -1,6 +1,6 @@
 # FX Wizard Verification History
 
-Consolidated historical archive through D-372, with the D-374 double-click, D-375 hover, D-376 scene-change, D-377 door-change and D-378 combat-change follow-ups appended below. D-373 remains the latest standalone verification report.
+Consolidated historical archive through D-372, with the D-374 double-click, D-375 hover, D-376 scene-change, D-377 door-change, D-378 combat-change and D-379 environment-change follow-ups appended below. D-373 remains the latest standalone verification report.
 
 **Recovery note:** the former archive body was unavailable after an overwrite. D-293–D-346 below are reconstructed from the preserved, detailed `DECISIONS.md` records, rather than copied from the original report bodies. D-347 is retained from its original standalone verification report. Existing status summaries and verification counts remain available in `MACROS_FX_WIZARD_IMPLEMENTATION_STATUS.md`.
 
@@ -39,6 +39,7 @@ Consolidated historical archive through D-372, with the D-374 double-click, D-37
 - [D-376 archived verification report](#report-d376)
 - [D-377 archived verification report](#report-d377)
 - [D-378 archived verification report](#report-d378)
+- [D-379 archived verification report](#report-d379)
 
 <a id="report-d293-d319"></a>
 
@@ -4216,4 +4217,29 @@ The browser cases used npm-provisioned Chromium 153 for functional input coverag
 ### Remaining acceptance work
 
 - This closes only the five committed combat-change slices. MATT's combatant-list token context for start/round/end is narrowed to the single current combatant; PF1e adapters that drive encounter state through real rules, `sceneLoad`, time, journal/macro, lighting/game-time and region-initiated methods remain open, as do the full MATT overlap/guard matrix and cross-browser coverage.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d379"></a>
+
+## D379 — Host-dispatched lighting and time triggers (2026-10-02)
+
+**Scope:** Add MATT's two environment trigger kinds — On Lighting Change and On Time Change — as host-dispatched active-zone methods. This covers only that event family; the rest of TR-01/A19 and A01–A41 remain open.
+
+### Implemented
+
+- `lightingChange` fires on a committed change to a scene's ambient darkness (`SceneDocument.darkness`, written by Settings → Ambient darkness or a graph's own Scene Lighting action) and `timeChange` on a committed change to the replicated world clock (`settings.system.clockSeconds` via `worldSettingsOps`, so the creating envelope, updates, PF1e round wraps and graph Game Time steps all count). Both join `HOST_DISPATCHED_METHODS`/`METHODS` and stay out of `SIMULATABLE_METHODS`.
+- HostSync captures the pre-images before apply — a scene's `darkness` for scene updates; the merged `readWorldClock` value for any `settings` write, including creates and deletes that would revert the key — and compares after apply, so a real change is required and a same-value write is silent.
+- Dispatch follows MATT's scene-wide scope, generalised into one shared `fireSceneGraphs` loop now used by combat, lighting and time (and the door/scene-change paths keep their own geometry-based dispatchers): every graph anchored in the scene whose method list contains the event, ordered by descending Sort then stable IDs, with the live re-validation pattern used before every fire. A lighting change targets **the changed scene** (active or not, as MATT reads the changed scene's tiles); a clock change targets the **active scene** (MATT's time trigger watches the scene the table is looking at). Neither carries a triggering token — MATT passes controlled canvas tokens, a client-side selection with no host equivalent — and both share one depth-8 reentry budget because a graph's own environment action re-enters. Restores (Undo/Redo/Revert) never replay.
+- The refactor of the verified combat dispatch onto the shared loop was re-checked by the existing 201-test host suite and the browser combat case in the same run.
+
+### Verification
+
+- `tests/host/sync.test.ts` — **201 passed**. The new case: a committed darkness edit fires once with the method in the host history; a same-value write is silent; a `worldSettingsOps` clock write fires once (its document-creation path included); an unrelated settings edit fires nothing; GM and player `automation.request` spoofs of both methods are rejected `invalid_schema` with an unchanged host sequence; a player clock write is rejected `forbidden` with the clock unchanged; a graph's own Scene Lighting action fires the destination graph (`lightingChange by gm-key`) with no triggering token recorded; and an Undo restores the darkness and reverts the graph's own chat row without appending a new event.
+- `tests/core/automation.test.ts` — **95 passed**: both methods validate, route through `routeMethod` (with an unmatched `lightingChange` falling through), refuse an unrelated manual simulation as a method/anchor mismatch, and are host-dispatched and absent from `SIMULATABLE_METHODS`.
+- Production `file://` Chromium 153: the new `e2e/active_zones.spec.ts:1231` case authored a two-method graph, confirmed the host-only hint and absent Simulate control, changed **Settings → Ambient darkness** to 0.4, repeated the same value, then changed it to 0.6, and advanced the clock with the hour button — asserting one chat row per real change, silence for the repeat, one history row per change (`lightingChange · gm` twice, `timeChange · gm` once, no token field). `active_zones.spec.ts` (23 cases) + `settings.spec.ts`: **23/23 passed in 3.0 min** (one worker, zero retries).
+- Full `corepack pnpm test` — **4,676 passed / 12 skipped** across 325 passing / 2 skipped files (**92.92 s**). `pnpm typecheck` — 64 Svelte components, 0 blocking, 1 existing advisory at `src/ui/sim/ReplayPanel.svelte:29`; lint clean. `pnpm size` — **3.862 MB raw / 1.105 MB gzip** (4,049,125 / 1,158,490 bytes), within the 6 MB budget; `git diff --check` clean.
+
+### Remaining acceptance work
+
+- This closes only the two committed environment-change slices. MATT's per-percent **Lighting Animation** (a local canvas animation tick, not a world-state change) and its controlled-token context for these triggers are not modelled. `sceneLoad`, journal/macro and region-initiated methods are still open, as are the full MATT overlap/guard matrix and cross-browser coverage.
 - A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**

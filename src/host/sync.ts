@@ -116,7 +116,8 @@ import { canFetchAsset, projectAssetManifest } from "../core/assetAccess";
 import { fxAudienceAllows, fxSectionsForViewer, resolveFxSequence, validateFxSequence,
   type FxAudience } from "../core/fx";
 import type { ResolvedFxSection } from "../core/fx";
-import { combatTriggerEvents, type CombatTriggerEvent } from "../core/combat";
+import { combatTriggerEvents } from "../core/combat";
+import { readWorldClock } from "../packages/pf1e/worldClock";
 import { automationImageError, doorTransitionMethod, pinnedSelectorError, planAutomation, SIMULATABLE_METHODS, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState,
   type AutomationContinuation, type AutomationEvent, type AutomationMethod, type AutomationPointerMethod, type AutomationOutcome,
   type AutomationScriptResult } from "../core/automation";
@@ -2215,6 +2216,24 @@ export class HostSync {
       if (!before && op.kind !== "create") continue;
       if (!combats.has(ref.id)) combats.set(ref.id, { combatId: ref.id, ...(before ? { before } : {}) });
     }
+    // Ambient darkness is a committed scene value (Settings → Ambient darkness, or a graph's own
+    // Scene Lighting action) and the world clock is a committed settings value. Capture both
+    // pre-images here so a real change — never a client claim or a no-op write — decides.
+    const lighting = new Map<string, { sceneId: string; before: number }>();
+    for (const op of ops) {
+      const ref = op.kind === "create" ? { coll: op.coll, id: op.data._id, parent: op.parent } : op.ref;
+      if (ref.coll !== "scenes" || op.kind !== "update" || !Object.hasOwn(op.diff, "darkness")) continue;
+      const before = this.store.resolve(op.ref) as SceneDocument | undefined;
+      if (!before || lighting.has(ref.id)) continue;
+      lighting.set(ref.id, { sceneId: ref.id, before: before.darkness });
+    }
+    const clockTouched = ops.some((op) => {
+      const ref = op.kind === "create" ? { coll: op.coll, id: op.data._id, parent: op.parent } : op.ref;
+      if (ref.coll !== "settings") return false;
+      if (op.kind !== "update") return true;
+      return Object.keys(op.diff).some((key) => key === "system" || key.startsWith("system.clockSeconds"));
+    });
+    const clockBefore = clockTouched ? readWorldClock(this.store.getAll("settings")) : null;
     // Scene activation is a document update, not a separate protocol message. Compare the
     // authoritative active scene around this envelope so retries, snapshots and client-provided
     // trigger claims cannot synthesize scene-change events.
@@ -2283,9 +2302,42 @@ export class HostSync {
       if (changes.length > 0 && this.combatAutomationDepth < HostSync.COMBAT_AUTOMATION_DEPTH) {
         this.combatAutomationDepth++;
         try {
-          this.fireCombatAutomations(changes, by);
+          for (const change of changes) {
+            const scene = this.store.get("scenes", change.sceneId) as SceneDocument | undefined;
+            if (!scene) continue;
+            for (const event of change.events)
+              this.fireSceneGraphs(scene, event.method, by, event.tokenId ?? undefined);
+          }
         } finally {
           this.combatAutomationDepth--;
+        }
+      }
+    }
+    // Lighting and time share MATT's scene-wide scope and one reentry budget: a graph's own Scene
+    // Lighting or Game Time action commits another environment change, whose scene graphs may do
+    // the same again.
+    const lightingChanges = [...lighting.values()].filter(({ sceneId, before }) => {
+      const scene = this.store.get("scenes", sceneId) as SceneDocument | undefined;
+      return !!scene && scene.darkness !== before;
+    });
+    if ((lightingChanges.length > 0 || clockBefore !== null) && !restoring) {
+      if (this.environmentAutomationDepth >= HostSync.ENVIRONMENT_AUTOMATION_DEPTH) {
+        // Bounded: the reentrant chain stops committing further trigger work at this depth.
+      } else {
+        this.environmentAutomationDepth++;
+        try {
+          for (const change of lightingChanges) {
+            const scene = this.store.get("scenes", change.sceneId) as SceneDocument | undefined;
+            if (scene) this.fireSceneGraphs(scene, "lightingChange", by);
+          }
+          if (clockBefore !== null && readWorldClock(this.store.getAll("settings")) !== clockBefore) {
+            // MATT's time trigger watches the scene the table is looking at; the host's
+            // equivalent is the active scene, which is also what a fresh player loads.
+            const active = this.activeSceneDocument();
+            if (active) this.fireSceneGraphs(active, "timeChange", by);
+          }
+        } finally {
+          this.environmentAutomationDepth--;
         }
       }
     }
@@ -3344,6 +3396,10 @@ export class HostSync {
    * encounter (a later PF1e adapter), whose turn/round graphs then fire again. */
   private combatAutomationDepth = 0;
   private static readonly COMBAT_AUTOMATION_DEPTH = 8;
+  /** Reentry depth of the lighting/time family, which share one budget: a graph's own Scene
+   * Lighting or Game Time action commits another environment change. */
+  private environmentAutomationDepth = 0;
+  private static readonly ENVIRONMENT_AUTOMATION_DEPTH = 8;
 
   /** The encounter's own scene: its `flags.core.sceneId` binding, or — for a document saved
    * before the binding — the scene whose active encounter pointer names it. */
@@ -3356,68 +3412,6 @@ export class HostSync {
       if (active === combatId) return scene._id;
     }
     return null;
-  }
-
-  /**
-   * MATT fires combat triggers on the encounter scene's tiles — no geometric anchor test, the
-   * whole scene subscribes. Order is deterministic: one authored change at a time (turn end,
-   * then round, then turn start), and within a change the scene's anchors by descending Sort,
-   * then stable IDs. Each graph's method list decides what it hears; a graph that declares
-   * both `combatRound` and `combatTurnStart` hears both, because this engine treats every
-   * declared method as its own subscription (MATT's per-hook if/else would give one of them).
-   */
-  private fireCombatAutomations(
-    changes: Array<{ sceneId: string; events: CombatTriggerEvent[] }>, by: UserId,
-  ): void {
-    const caller = this.sessionUsers().find((user) => user.id === by) ??
-      { id: by, role: "GM" as const, name: "System" };
-    const gm = caller.role === "GM" || caller.role === "ASSISTANT";
-    for (const change of changes) {
-      const scene = this.store.get("scenes", change.sceneId) as SceneDocument | undefined;
-      if (!scene || !can(caller, "read", scene, "scenes")) continue;
-      for (const event of change.events) {
-        const anchors = this.store.getAll("automations").flatMap((doc) => {
-          const checked = validateAutomation(doc.definition);
-          if (!checked.ok || checked.definition.sceneId !== scene._id ||
-              !checked.definition.methods.includes(event.method) ||
-              (!gm && checked.definition.gates?.playerRunnable !== true)) return [];
-          const sourceKind = checked.definition.sourceKind ?? "tile";
-          const source = sourceKind === "region"
-            ? scene.regions?.find((region) => region._id === checked.definition.tileId)
-            : scene.tiles.find((tile) => tile._id === checked.definition.tileId);
-          const tile = automationSourceTile(scene, checked.definition.tileId, sourceKind);
-          const collection = sourceKind === "region" ? "regions" : "tiles";
-          if (!source || !tile || !can(caller, "read", source, collection, { parent: scene }) ||
-              !docVisibleTo(caller, source, scene)) return [];
-          return [{ docId: doc._id, tileId: tile._id,
-            sort: typeof tile.sort === "number" && Number.isFinite(tile.sort) ? tile.sort : 0 }];
-        }).sort((a, b) => b.sort - a.sort || a.tileId.localeCompare(b.tileId) ||
-          a.docId.localeCompare(b.docId));
-        for (const anchor of anchors) {
-          // Re-validate against the live documents immediately before firing, exactly like the
-          // scene-change and door paths; an earlier graph in this loop may have changed them.
-          const liveScene = this.store.get("scenes", change.sceneId) as SceneDocument | undefined;
-          if (!liveScene || !can(caller, "read", liveScene, "scenes")) break;
-          const liveDoc = this.store.get("automations", anchor.docId) as AutomationDocument | undefined;
-          const checked = liveDoc ? validateAutomation(liveDoc.definition) : null;
-          if (!liveDoc || !checked?.ok || checked.definition.sceneId !== liveScene._id ||
-              !checked.definition.methods.includes(event.method) ||
-              (!gm && checked.definition.gates?.playerRunnable !== true)) continue;
-          const sourceKind = checked.definition.sourceKind ?? "tile";
-          const source = sourceKind === "region"
-            ? liveScene.regions?.find((region) => region._id === checked.definition.tileId)
-            : liveScene.tiles.find((tile) => tile._id === checked.definition.tileId);
-          const tile = automationSourceTile(liveScene, checked.definition.tileId, sourceKind);
-          const collection = sourceKind === "region" ? "regions" : "tiles";
-          if (!source || !tile || !can(caller, "read", source, collection, { parent: liveScene }) ||
-              !docVisibleTo(caller, source, liveScene)) continue;
-          const token = event.tokenId
-            ? liveScene.tokens.find((candidate) => candidate._id === event.tokenId) : undefined;
-          this.fireAutomation(liveDoc, { method: event.method, scene: liveScene, tile, caller,
-            ...(token ? { token } : {}), at: this.now(), rng: this.rng });
-        }
-      }
-    }
   }
 
   /** A committed change in the active scene fires destination-scene graphs once, host-side. */
@@ -3524,6 +3518,63 @@ export class HostSync {
           !docVisibleTo(caller, source, liveScene) || !tileContainsPoint(tile, hit.at)) continue;
       this.fireAutomation(liveDoc, { scene: liveScene, tile, caller, method: hit.method,
         at: this.now(), rng: this.rng });
+    }
+  }
+
+  /**
+   * MATT fires several trigger families on **every** tile of the scene — combat turns, darkness
+   * and world time — with no geometric anchor test (unlike doors, which need the midpoint).
+   * This is that dispatch: each graph anchored in the scene whose method list contains the
+   * event, one authored change at a time, ordered by descending Sort then stable IDs, with the
+   * same live re-validation before every fire that the scene-change and door paths use. The
+   * optional triggering token is the current combatant for combat kinds.
+   */
+  private fireSceneGraphs(
+    scene: SceneDocument, method: AutomationMethod, by: UserId, tokenId?: string,
+  ): void {
+    const caller = this.sessionUsers().find((user) => user.id === by) ??
+      { id: by, role: "GM" as const, name: "System" };
+    if (!can(caller, "read", scene, "scenes")) return;
+    const gm = caller.role === "GM" || caller.role === "ASSISTANT";
+    const anchors = this.store.getAll("automations").flatMap((doc) => {
+      const checked = validateAutomation(doc.definition);
+      if (!checked.ok || checked.definition.sceneId !== scene._id ||
+          !checked.definition.methods.includes(method) ||
+          (!gm && checked.definition.gates?.playerRunnable !== true)) return [];
+      const sourceKind = checked.definition.sourceKind ?? "tile";
+      const source = sourceKind === "region"
+        ? scene.regions?.find((region) => region._id === checked.definition.tileId)
+        : scene.tiles.find((tile) => tile._id === checked.definition.tileId);
+      const tile = automationSourceTile(scene, checked.definition.tileId, sourceKind);
+      const collection = sourceKind === "region" ? "regions" : "tiles";
+      if (!source || !tile || !can(caller, "read", source, collection, { parent: scene }) ||
+          !docVisibleTo(caller, source, scene)) return [];
+      return [{ docId: doc._id, tileId: tile._id,
+        sort: typeof tile.sort === "number" && Number.isFinite(tile.sort) ? tile.sort : 0 }];
+    }).sort((a, b) => b.sort - a.sort || a.tileId.localeCompare(b.tileId) ||
+      a.docId.localeCompare(b.docId));
+    for (const anchor of anchors) {
+      // Re-validate against the live documents immediately before firing; an earlier graph in
+      // this loop may have changed them.
+      const liveScene = this.store.get("scenes", scene._id) as SceneDocument | undefined;
+      if (!liveScene || !can(caller, "read", liveScene, "scenes")) break;
+      const liveDoc = this.store.get("automations", anchor.docId) as AutomationDocument | undefined;
+      const checked = liveDoc ? validateAutomation(liveDoc.definition) : null;
+      if (!liveDoc || !checked?.ok || checked.definition.sceneId !== liveScene._id ||
+          !checked.definition.methods.includes(method) ||
+          (!gm && checked.definition.gates?.playerRunnable !== true)) continue;
+      const sourceKind = checked.definition.sourceKind ?? "tile";
+      const source = sourceKind === "region"
+        ? liveScene.regions?.find((region) => region._id === checked.definition.tileId)
+        : liveScene.tiles.find((tile) => tile._id === checked.definition.tileId);
+      const tile = automationSourceTile(liveScene, checked.definition.tileId, sourceKind);
+      const collection = sourceKind === "region" ? "regions" : "tiles";
+      if (!source || !tile || !can(caller, "read", source, collection, { parent: liveScene }) ||
+          !docVisibleTo(caller, source, liveScene)) continue;
+      const token = tokenId
+        ? liveScene.tokens.find((candidate) => candidate._id === tokenId) : undefined;
+      this.fireAutomation(liveDoc, { method, scene: liveScene, tile, caller,
+        ...(token ? { token } : {}), at: this.now(), rng: this.rng });
     }
   }
 
@@ -3693,7 +3744,8 @@ export class HostSync {
     const methodOrder: Record<AutomationMethod, number> = {
       enter: 0, exit: 1, stop: 2, elevation: 3, create: 4, sceneChange: 5, rotate: 6, click: 7, rightClick: 8, doubleClick: 9,
       hoverIn: 10, hoverOut: 11, doorOpen: 12, doorClose: 13, doorLock: 14, doorUnlock: 15,
-      combatStart: 16, combatRound: 17, combatTurnStart: 18, combatTurnEnd: 19, combatEnd: 20, manual: 21,
+      combatStart: 16, combatRound: 17, combatTurnStart: 18, combatTurnEnd: 19, combatEnd: 20,
+      lightingChange: 21, timeChange: 22, manual: 23,
     };
     candidates.sort((a, b) => a.sceneId.localeCompare(b.sceneId) ||
       a.fraction - b.fraction || a.tokenId.localeCompare(b.tokenId) ||
