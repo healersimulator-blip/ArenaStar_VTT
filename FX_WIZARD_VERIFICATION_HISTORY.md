@@ -37,6 +37,7 @@ Consolidated historical archive through D-372, with the D-374 double-click, D-37
 - [D-374 archived verification report](#report-d374)
 - [D-375 archived verification report](#report-d375)
 - [D-376 archived verification report](#report-d376)
+- [D-377 archived verification report](#report-d377)
 
 <a id="report-d293-d319"></a>
 
@@ -4164,4 +4165,29 @@ The browser cases used npm-provisioned Chromium 153 for functional input coverag
 ### Remaining acceptance work
 
 - This closes only the host-observed active-scene-transition slice. `sceneLoad`, combat/time/document, door/journal/macro, lighting/game-time, additional region triggers, complete MATT overlap/priority/guard behavior and cross-browser coverage remain incomplete.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d377"></a>
+
+## D377 — Host-dispatched door triggers (2026-10-02)
+
+**Scope:** Add the four door changes as host-dispatched active-zone methods. This covers only that event family; the rest of TR-01/A19 and A01–A41 remain open.
+
+### Implemented
+
+- `doorOpen`, `doorClose`, `doorLock` and `doorUnlock` are validated automation methods, following MATT's separate door-trigger kinds rather than one method plus a payload. The wizard labels each, method filters/`routeMethod`/`{{method}}` cover them, and `HOST_DISPATCHED_METHODS`/`SIMULATABLE_METHODS` now split host-observed events from caller-simulated ones; `automation.request` and the module `automation.fire` path accept only the simulatable set, so neither a GM nor a player can manufacture a door event.
+- A shared classifier owns the transition rule: state `0` closed, `1` open, `2` locked; into `2` = lock, out of `2` = unlock, `0↔1` = open/close, and same-value, malformed or any other pair yields null.
+- HostSync captures a wall's `door` pre-image for update ops before applying the envelope, compares it with the live document after apply and dispatches only on a real change. Anchors are the tiles/regions that contain the door's **midpoint** (MATT's "Tiles Under Door" equivalents), ordered by descending Sort then stable IDs, with scene/anchor visibility and the graph's `playerRunnable` gate re-checked immediately before each fire in the same live-document pattern as `sceneChange`. Restores (Undo/Redo/Revert) never replay. A graph's own `door` action commits under the host's own system identity, so that identity is synthesized as the caller (as the movement path does) and door→door chains share the movement dispatch's depth-8 host reentry cap.
+
+### Verification
+
+- Focused HostSync integration test — **1/1 passed**. All four transitions fire with exact `{{method}} by {{user}}` messages and history entries; a same-value update and a non-door wall edit fire nothing; a direct `doorOpen` request is rejected `invalid_schema` without a sequence change; two graphs anchored on the same door each fire once in deterministic document order; Undo of the change and of its fires reopens the door without replaying `doorOpen` (their counts shrink with the restored history); a published player plate toggles the door with a real `requestAutomationClick`, the GM-authored rule fires for the authoritative host commit while the player's replica receives neither graph nor GM-only message.
+- Core tests include the classifier's full truth table, the four methods' validation/routing (`doorOpen` routes to its landing while `doorLock` falls through), a `click` simulation being skipped as a method/anchor mismatch, and the host-dispatched/simulatable partition invariants.
+- Production `file://` Chromium 153 `e2e/active_zones.spec.ts` — **21/21 passed in 4.5 min** (one worker, zero retries). The new case probes the starter map for a clear sight lane, places a real door (closed) through the rail, authors a door-only graph on a wizard tile covering the door's midpoint, verifies the host-only graph shows no Simulate control and explains itself, then opens and closes the door with the canvas wall tool and reads one `doorOpen` and one `doorClose` message and history entry. This is functional browser evidence, not cross-browser or A41 performance evidence.
+- Full `corepack pnpm test` — **4,662 passed / 12 skipped**; 325 files passed / 2 skipped; 113.11 s. `corepack pnpm typecheck` — pass (64 Svelte components, zero blocking, one existing advisory at `src/ui/sim/ReplayPanel.svelte:29`); `corepack pnpm lint` — pass. Production app/system/available-starter builds pass; `pnpm size` — **3.857 MB raw / 1.104 MB gzip** (4,044,225 / 1,157,257 bytes), within the 6 MB budget; `git diff --check` — pass.
+- Regression batch of the final artifact — `e2e/automation_appearance.spec.ts` + `e2e/movement_actions.spec.ts` + `e2e/action_revert.spec.ts` — **36/36 passed in 11.9 min** (one worker, zero retries), and `e2e/active_zones.spec.ts` re-run on the same final artifact — **21/21 passed in 4.5 min**, including the door case at line 1048.
+
+### Remaining acceptance work
+
+- This closes only the four committed door-change slices. Door *interaction attempts* (MATT's "On Check Lock"), secret-door transitions and door-specific context fields in graph templates are not modelled. `sceneLoad`, combat/time/document/journal/macro triggers, lighting/game-time changes, region initiation/hover, the complete MATT overlap/priority/guard matrix and cross-browser coverage remain incomplete.
 - A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**

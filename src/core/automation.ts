@@ -31,7 +31,7 @@ import type { PermissionUser } from "./ownership";
 import { getByTag, listTaggable, normalizeTags, tagMatcher, tagsOf, TAGGABLE_COLLECTIONS, validSceneTagRefs,
   type TagEdit, type TagMatchMode, type TagPattern, type TagSearchCollection } from "./tags";
 
-export type AutomationMethod = "enter" | "exit" | "stop" | "elevation" | "create" | "sceneChange" | "rotate" | "click" | "rightClick" | "doubleClick" | "hoverIn" | "hoverOut" | "manual";
+export type AutomationMethod = "enter" | "exit" | "stop" | "elevation" | "create" | "sceneChange" | "rotate" | "click" | "rightClick" | "doubleClick" | "hoverIn" | "hoverOut" | "doorOpen" | "doorClose" | "doorLock" | "doorUnlock" | "manual";
 export type AutomationPointerMethod = Extract<AutomationMethod, "click" | "rightClick" | "doubleClick" | "hoverIn" | "hoverOut">;
 /** Explicitly bound event fields, never arbitrary code/field paths from a player request. */
 export type AutomationScriptBinding = "triggerToken" | "currentToken" | "method" | "user" | "scene" | "tile" | "count";
@@ -309,7 +309,45 @@ export type AutomationOutcome =
   | { ok: false; error: string; trace: string[] }
   | { ok: true; skipped: string; trace: string[] };
 
-const METHODS: readonly AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "sceneChange", "rotate", "click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "manual"];
+const METHODS: readonly AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "sceneChange", "rotate", "click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "doorOpen", "doorClose", "doorLock", "doorUnlock", "manual"];
+
+/**
+ * Events the host observes from committed world state and dispatches itself. They are valid
+ * graph methods (authorable, routable, filterable and visible in history) but are never
+ * simulated by a client request: `automation.request` and the module API refuse them, so a
+ * forged payload cannot manufacture an event the world did not produce. TR-01 lists the
+ * family; scene changes and the four door changes are the implemented children today.
+ */
+export const HOST_DISPATCHED_METHODS: readonly AutomationMethod[] =
+  ["sceneChange", "doorOpen", "doorClose", "doorLock", "doorUnlock"];
+export function isHostDispatchedMethod(method: AutomationMethod): boolean {
+  return HOST_DISPATCHED_METHODS.includes(method);
+}
+/** Methods a caller may ask the host to simulate directly (author/debug path). */
+export const SIMULATABLE_METHODS: readonly AutomationMethod[] =
+  METHODS.filter((method) => !isHostDispatchedMethod(method));
+
+export type AutomationDoorMethod = Extract<AutomationMethod,
+  "doorOpen" | "doorClose" | "doorLock" | "doorUnlock">;
+/**
+ * MATT models door triggers as separate change kinds ("On Open Door", "On Close Door", …),
+ * and ArenaStar keeps them as distinct methods rather than one method plus a payload: a
+ * graph subscribes to exactly the changes it wants, `routeMethod`/method filters and the
+ * `{{method}}` template need no extra fields, and each change gets its own history entry.
+ *
+ * Door state is the wall's own encoding: 0 = closed, 1 = open, 2 = locked. Only the four
+ * named changes produce an event — a same-value update, an unlock that leaves a door open
+ * (`2 → 1`) versus a plain close (`1 → 0`), or a malformed pair yields null. A transition
+ * into `2` is always a lock; any transition out of `2` is an unlock.
+ */
+export function doorTransitionMethod(before: number, after: number): AutomationDoorMethod | null {
+  if (![0, 1, 2].includes(before) || ![0, 1, 2].includes(after) || before === after) return null;
+  if (after === 2) return "doorLock";
+  if (before === 2) return "doorUnlock";
+  if (before === 0 && after === 1) return "doorOpen";
+  if (before === 1 && after === 0) return "doorClose";
+  return null;
+}
 const SCRIPT_BINDINGS: readonly AutomationScriptBinding[] = ["triggerToken", "currentToken", "method", "user", "scene", "tile", "count"];
 const IDENT = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
 const INPUT_NAME = /^[a-zA-Z][a-zA-Z0-9_]{0,31}$/;

@@ -34,6 +34,7 @@ import type {
   SceneDocument,
   TileDocument,
   TokenDocument,
+  WallDocument,
 } from "../core/documents";
 import type { Op, OpEnvelope } from "../core/ops";
 import type {
@@ -114,7 +115,7 @@ import { canFetchAsset, projectAssetManifest } from "../core/assetAccess";
 import { fxAudienceAllows, fxSectionsForViewer, resolveFxSequence, validateFxSequence,
   type FxAudience } from "../core/fx";
 import type { ResolvedFxSection } from "../core/fx";
-import { automationImageError, pinnedSelectorError, planAutomation, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState,
+import { automationImageError, doorTransitionMethod, pinnedSelectorError, planAutomation, SIMULATABLE_METHODS, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState,
   type AutomationContinuation, type AutomationEvent, type AutomationMethod, type AutomationPointerMethod, type AutomationOutcome,
   type AutomationScriptResult } from "../core/automation";
 import { attachedDeletionOps, attachedMovementOps, planPrefabPlacement, PREFAB_COLLECTIONS, validatePrefab } from "../core/prefabs";
@@ -2186,6 +2187,19 @@ export class HostSync {
           ...(before ? { before } : {}) });
       }
     }
+    // A door change is a document update on a wall, exactly like any other edit. Capture the
+    // pre-image (0 closed / 1 open / 2 locked) here so the post-commit comparison — never a
+    // client claim — decides which of the four door events actually happened.
+    const doors = new Map<string, { sceneId: string; wallId: string; before: number }>();
+    for (const op of ops) {
+      const ref = op.kind === "create" ? { coll: op.coll, id: op.data._id, parent: op.parent } : op.ref;
+      if (ref.coll !== "walls" || ref.parent?.coll !== "scenes" ||
+          op.kind !== "update" || !Object.hasOwn(op.diff, "door")) continue;
+      const before = this.store.resolve(op.ref) as WallDocument | undefined;
+      if (!before) continue;
+      const key = `${ref.parent.id}\u0000${ref.id}`;
+      if (!doors.has(key)) doors.set(key, { sceneId: ref.parent.id, wallId: ref.id, before: before.door });
+    }
     // Scene activation is a document update, not a separate protocol message. Compare the
     // authoritative active scene around this envelope so retries, snapshots and client-provided
     // trigger claims cannot synthesize scene-change events.
@@ -2232,6 +2246,16 @@ export class HostSync {
       const activeSceneAfter = this.activeSceneDocument();
       if (activeSceneAfter && activeSceneAfter._id !== activeSceneBefore._id)
         this.fireSceneChangeAutomations(activeSceneAfter, by);
+    }
+    if (doors.size > 0 && !restoring) {
+      if (this.doorAutomationDepth < HostSync.DOOR_AUTOMATION_DEPTH) {
+        this.doorAutomationDepth++;
+        try {
+          this.fireDoorAutomations([...doors.values()], by);
+        } finally {
+          this.doorAutomationDepth--;
+        }
+      }
     }
     // F03: prune expired pending rolls (T+2 window) when a combat round/turn advanced
     try {
@@ -2974,7 +2998,7 @@ export class HostSync {
       return { instanceId: placed.instanceId, rootId: placed.rootId, seq: placed.seq };
     }
     if (method === "automation.fire") {
-      if (typeof payload.automationId !== "string" || !["click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "manual", "enter", "exit", "stop", "elevation", "create", "rotate"].includes(String(payload.method)) ||
+      if (typeof payload.automationId !== "string" || !SIMULATABLE_METHODS.includes(payload.method as AutomationMethod) ||
           (payload.tokenId !== undefined && typeof payload.tokenId !== "string"))
         throw new Error("Invalid automation call");
       const graph = this.store.get("automations", payload.automationId) as AutomationDocument | undefined;
@@ -3280,6 +3304,10 @@ export class HostSync {
    * bounded at the host, not by each plan's own invocation budget. */
   private movementAutomationDepth = 0;
   private static readonly MOVEMENT_AUTOMATION_DEPTH = 8;
+  /** Reentry depth of door-trigger dispatch: a graph's own door action commits another
+   * state change, whose destination graphs may operate a further door. */
+  private doorAutomationDepth = 0;
+  private static readonly DOOR_AUTOMATION_DEPTH = 8;
 
   /** A committed change in the active scene fires destination-scene graphs once, host-side. */
   private fireSceneChangeAutomations(scene: SceneDocument, by: UserId): void {
@@ -3320,6 +3348,70 @@ export class HostSync {
       if (!source || !tile || !can(caller, "read", source, collection, { parent: liveScene }) ||
           !docVisibleTo(caller, source, liveScene)) continue;
       this.fireAutomation(liveDoc, { method: "sceneChange", scene: liveScene, tile, caller,
+        at: this.now(), rng: this.rng });
+    }
+  }
+
+  /**
+   * A committed door change fires graphs anchored on the tiles/regions that cover the door,
+   * mirroring MATT's "Tiles Under Door" targeting: the door's midpoint decides which source
+   * zones own the event. Ordering is deterministic (descending Sort, then stable IDs) and
+   * nothing about the graph or its trace reaches a caller who may not run it.
+   */
+  private fireDoorAutomations(
+    changes: Array<{ sceneId: string; wallId: string; before: number }>, by: UserId,
+  ): void {
+    // A graph's own door action commits as the system identity, which has no session of its
+    // own; synthesize it exactly like the movement path does so host work still fires rules.
+    const caller = this.sessionUsers().find((user) => user.id === by) ??
+      { id: by, role: "GM" as const, name: "System" };
+    const gm = caller.role === "GM" || caller.role === "ASSISTANT";
+    const hits: Array<{ docId: string; sceneId: string; tileId: string; method: AutomationMethod;
+      sort: number; at: { x: number; y: number } }> = [];
+    for (const change of changes) {
+      const scene = this.store.get("scenes", change.sceneId) as SceneDocument | undefined;
+      const wall = scene?.walls.find((candidate) => candidate._id === change.wallId);
+      if (!scene || !scene.active || !wall || !can(caller, "read", scene, "scenes")) continue;
+      const method = doorTransitionMethod(change.before, wall.door);
+      if (!method) continue;
+      const at = { x: (wall.c[0] + wall.c[2]) / 2, y: (wall.c[1] + wall.c[3]) / 2 };
+      for (const doc of this.store.getAll("automations")) {
+        const checked = validateAutomation(doc.definition);
+        if (!checked.ok || checked.definition.sceneId !== scene._id ||
+            !checked.definition.methods.includes(method) ||
+            (!gm && checked.definition.gates?.playerRunnable !== true)) continue;
+        const sourceKind = checked.definition.sourceKind ?? "tile";
+        const source = sourceKind === "region"
+          ? scene.regions?.find((region) => region._id === checked.definition.tileId)
+          : scene.tiles.find((tile) => tile._id === checked.definition.tileId);
+        const tile = automationSourceTile(scene, checked.definition.tileId, sourceKind);
+        const collection = sourceKind === "region" ? "regions" : "tiles";
+        if (!source || !tile || !can(caller, "read", source, collection, { parent: scene }) ||
+            !docVisibleTo(caller, source, scene) || !tileContainsPoint(tile, at)) continue;
+        hits.push({ docId: doc._id, sceneId: scene._id, tileId: tile._id, method, at,
+          sort: typeof tile.sort === "number" && Number.isFinite(tile.sort) ? tile.sort : 0 });
+      }
+    }
+    hits.sort((a, b) => a.sceneId.localeCompare(b.sceneId) || b.sort - a.sort ||
+      a.tileId.localeCompare(b.tileId) || a.docId.localeCompare(b.docId) ||
+      a.method.localeCompare(b.method));
+    for (const hit of hits) {
+      const liveScene = this.store.get("scenes", hit.sceneId) as SceneDocument | undefined;
+      if (!liveScene?.active || !can(caller, "read", liveScene, "scenes")) continue;
+      const liveDoc = this.store.get("automations", hit.docId) as AutomationDocument | undefined;
+      const checked = liveDoc ? validateAutomation(liveDoc.definition) : null;
+      if (!liveDoc || !checked?.ok || checked.definition.sceneId !== liveScene._id ||
+          !checked.definition.methods.includes(hit.method) ||
+          (!gm && checked.definition.gates?.playerRunnable !== true)) continue;
+      const sourceKind = checked.definition.sourceKind ?? "tile";
+      const source = sourceKind === "region"
+        ? liveScene.regions?.find((region) => region._id === checked.definition.tileId)
+        : liveScene.tiles.find((tile) => tile._id === checked.definition.tileId);
+      const tile = automationSourceTile(liveScene, checked.definition.tileId, sourceKind);
+      const collection = sourceKind === "region" ? "regions" : "tiles";
+      if (!source || !tile || !can(caller, "read", source, collection, { parent: liveScene }) ||
+          !docVisibleTo(caller, source, liveScene) || !tileContainsPoint(tile, hit.at)) continue;
+      this.fireAutomation(liveDoc, { scene: liveScene, tile, caller, method: hit.method,
         at: this.now(), rng: this.rng });
     }
   }
@@ -3395,7 +3487,7 @@ export class HostSync {
     }
     if (typeof msg.requestId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.requestId) ||
         typeof msg.automationId !== "string" || typeof msg.sceneId !== "string" ||
-        !["enter", "exit", "stop", "elevation", "create", "rotate", "click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "manual"].includes(msg.method) ||
+        !SIMULATABLE_METHODS.includes(msg.method as AutomationMethod) ||
         (msg.tokenId !== undefined && typeof msg.tokenId !== "string") ||
         (msg.dryRun !== undefined && typeof msg.dryRun !== "boolean") ||
         Object.keys(msg).some((key) => !["kind", "requestId", "automationId", "sceneId", "method", "tokenId", "dryRun"].includes(key))) {
@@ -3489,7 +3581,7 @@ export class HostSync {
     // descending tile Sort (not elevation), then stable IDs. No player sets priority.
     const methodOrder: Record<AutomationMethod, number> = {
       enter: 0, exit: 1, stop: 2, elevation: 3, create: 4, sceneChange: 5, rotate: 6, click: 7, rightClick: 8, doubleClick: 9,
-      hoverIn: 10, hoverOut: 11, manual: 12,
+      hoverIn: 10, hoverOut: 11, doorOpen: 12, doorClose: 13, doorLock: 14, doorUnlock: 15, manual: 16,
     };
     candidates.sort((a, b) => a.sceneId.localeCompare(b.sceneId) ||
       a.fraction - b.fraction || a.tokenId.localeCompare(b.tokenId) ||

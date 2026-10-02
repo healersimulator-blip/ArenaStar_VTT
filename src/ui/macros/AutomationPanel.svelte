@@ -6,7 +6,7 @@
     RegionDocument, TileDocument } from "../../core/documents";
   import { listTaggable } from "../../core/tags";
   import {
-    PINNABLE_COLLECTIONS, automationImageError, validateAutomation, type AutomationDefinition, type AutomationGates, type AutomationMethod,
+    PINNABLE_COLLECTIONS, automationImageError, isHostDispatchedMethod, validateAutomation, type AutomationDefinition, type AutomationGates, type AutomationMethod,
     type AutomationSelector, type AutomationStep, type AutomationScriptBinding, type AutomationTileTarget,
   } from "../../core/automation";
   import { tileAlphaMaskFromRgba, tileTriggerCirclePolygon, type TileTriggerZone } from "../../core/tileTriggerZone";
@@ -14,7 +14,7 @@
 
   let { client, bus, getAsset = null }: { client: ClientSync; bus: EventBus<ClientEvents>;
     getAsset?: ((hash: string) => Promise<Uint8Array | undefined>) | null } = $props();
-  const METHODS: AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "sceneChange", "rotate", "click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "manual"];
+  const METHODS: AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "sceneChange", "rotate", "click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "doorOpen", "doorClose", "doorLock", "doorUnlock", "manual"];
   const KINDS: AutomationStep["kind"][] = ["select", "filter", "checkVariable", "checkValue", "checkScriptResult", "shuffle", "position", "distance", "attributes", "checkData", "condition", "inventory", "tokenTriggerCount", "routeMethod", "routeUser", "forEach", "endEach", "resetHistory", "batchFlush", "collection", "triggerTile", "setActive", "stopOthers", "stopMovement", "set", "gameTime", "sceneLighting", "sceneBackground", "tileImage", "hurtHeal", "random", "tags", "visibility", "door", "move", "rotate", "delete", "chat", "sequence", "script", "summon", "rollTable", "landing", "jump", "stop"];
   const ADD_KINDS = KINDS.filter((kind) => kind !== "endEach");
   const KIND_LABEL: Record<string, string> = { stopMovement: "Stop Token Movement", checkScriptResult: "Check Script Result",
@@ -24,9 +24,16 @@
   const kindLabel = (kind: string): string => KIND_LABEL[kind] ?? kind;
   const methodLabel = (method: AutomationMethod): string => method === "rightClick" ? "right click"
     : method === "doubleClick" ? "double click" : method === "hoverIn" ? "hover in"
-      : method === "hoverOut" ? "hover out" : method === "sceneChange" ? "scene change" : method;
+      : method === "hoverOut" ? "hover out" : method === "sceneChange" ? "scene change"
+        : method === "doorOpen" ? "door open" : method === "doorClose" ? "door close"
+          : method === "doorLock" ? "door lock" : method === "doorUnlock" ? "door unlock" : method;
   const firstSimulatableMethod = (methods: readonly AutomationMethod[]): AutomationMethod | undefined =>
-    methods.find((method) => method !== "sceneChange");
+    methods.find((method) => !isHostDispatchedMethod(method));
+  /** What the wizard says instead of offering a Simulate control for host-observed events. */
+  const hostEventHint = (methods: readonly AutomationMethod[]): string => {
+    const events = methods.filter(isHostDispatchedMethod).map(methodLabel);
+    return `${events.join(", ")} fire${events.length === 1 ? "s" : ""} automatically from committed world state; no manual simulation is offered.`;
+  };
   const canEdit = $derived(client.user?.role === "GM" || client.user?.role === "ASSISTANT");
   let scenes = $state<SceneDocument[]>([]);
   let macros = $state<MacroDocument[]>([]);
@@ -111,7 +118,7 @@
   function toggle(method: AutomationMethod): void {
     definition.methods = definition.methods.includes(method)
       ? definition.methods.filter((m) => m !== method) : [...definition.methods, method];
-    if (!definition.methods.includes(triggerMethod) || triggerMethod === "sceneChange")
+    if (!definition.methods.includes(triggerMethod) || isHostDispatchedMethod(triggerMethod))
       triggerMethod = firstSimulatableMethod(definition.methods) ?? "sceneChange";
   }
   function newStep(kind: AutomationStep["kind"], id = `step-${crypto.randomUUID().slice(0, 8)}`): AutomationStep {
@@ -654,7 +661,7 @@
   }
   function invoke(id: string, dryRun = false, method = triggerMethod): void {
     error = "";
-    if (method === "sceneChange") { error = "Scene change fires automatically when this scene becomes active"; return; }
+    if (isHostDispatchedMethod(method)) { error = hostEventHint([method]); return; }
     if (!sceneId) { error = "Choose a scene"; return; }
     client.requestAutomation(id, sceneId, method, tokenId || undefined, dryRun);
     status = dryRun ? "Host planning dry-run…" : "Requested saved graph…";
@@ -1672,9 +1679,9 @@
     <div class="row">
       <button type="button" data-zone-save onclick={save}>Save graph</button>
       {#if firstSimulatableMethod(definition.methods)}
-        <label>Simulate method <select bind:value={triggerMethod}>{#each definition.methods.filter((method) => method !== "sceneChange") as method (method)}<option value={method}>{methodLabel(method)}</option>{/each}</select></label>
-      {:else if definition.methods.includes("sceneChange")}
-        <small>Scene change fires automatically when this scene becomes active.</small>
+        <label>Simulate method <select bind:value={triggerMethod}>{#each definition.methods.filter((method) => !isHostDispatchedMethod(method)) as method (method)}<option value={method}>{methodLabel(method)}</option>{/each}</select></label>
+      {:else if definition.methods.some((method) => isHostDispatchedMethod(method))}
+        <small>{hostEventHint(definition.methods)}</small>
       {/if}
       {#if editing}<button type="button" data-zone-dry-run disabled={!firstSimulatableMethod(definition.methods)} onclick={() => invoke(editing, true)}>Dry-run saved</button>
         <button type="button" data-zone-run disabled={!firstSimulatableMethod(definition.methods)} onclick={() => invoke(editing)}>Fire saved manually</button>{/if}

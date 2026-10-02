@@ -3000,6 +3000,111 @@ test("HostSync dispatches sceneChange only on a real switch into its destination
   expect(h.hostStore.getAll("messages")).toEqual([]);
 });
 
+test("HostSync dispatches the four door changes to graphs over the door and restore never replays them", async () => {
+  const h = await setup();
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: zoneTile() }]);
+  await flushMicrotasks();
+  // The door's midpoint (200, 250) lies inside the zone tile, which owns the event.
+  const door: WallDocument = { _id: "gate", type: "wall", name: "Gate", ownership: { default: 0 },
+    flags: {}, system: {}, taggerTags: ["door-1"], c: [150, 250, 250, 250],
+    move: 1, sight: 1, sound: 1, light: 1, door: 0, oneWay: false };
+  h.gm.submit([{ kind: "create", coll: "walls", parent: { coll: "scenes", id: "s1" }, data: door }]);
+  await flushMicrotasks();
+  const openClose: AutomationDocument = { ...zoneDoc(), _id: "door-events", name: "Door events",
+    definition: { ...zoneDoc().definition, tileId: "zone",
+      methods: ["doorOpen", "doorClose", "doorLock", "doorUnlock"],
+      gates: {}, steps: [{ id: "notice", kind: "chat", audience: "gm", content: "{{method}} by {{user}}" }] } };
+  const closeOnly: AutomationDocument = { ...zoneDoc(), _id: "close-only", name: "Close only",
+    definition: { ...zoneDoc().definition, tileId: "zone", methods: ["doorClose"],
+      gates: {}, steps: [{ id: "notice", kind: "chat", audience: "gm", content: "closed by {{user}}" }] } };
+  h.gm.submit([{ kind: "create", coll: "automations", data: openClose },
+    { kind: "create", coll: "automations", data: closeOnly }]);
+  await flushMicrotasks();
+  const doorOf = () => (h.hostStore.get("scenes", "s1") as SceneDocument).walls.find((w) => w._id === "gate")?.door;
+  const messages = () => h.hostStore.getAll("messages").map((message) => message.content);
+  const setDoor = async (state: 0 | 1 | 2) => {
+    h.gm.submit([{ kind: "update", ref: { coll: "walls", id: "gate", parent: { coll: "scenes", id: "s1" } },
+      diff: { door: state } }]);
+    await flushMicrotasks();
+  };
+
+  await setDoor(1);
+  expect(doorOf()).toBe(1);
+  expect(messages()).toEqual(["doorOpen by gm-key"]);
+  expect(h.hostStore.get("automations", "door-events")?.state?.recent?.map((entry) => entry.method))
+    .toEqual(["doorOpen"]);
+  expect(h.hostStore.get("automations", "close-only")?.state?.count ?? 0).toBe(0);
+
+  // The same value and non-door edits are not events.
+  await setDoor(1);
+  h.gm.submit([{ kind: "update", ref: { coll: "walls", id: "gate", parent: { coll: "scenes", id: "s1" } },
+    diff: { oneWay: true } }]);
+  await flushMicrotasks();
+  expect(messages()).toEqual(["doorOpen by gm-key"]);
+
+  // Neither GM nor player can ask for a door event directly.
+  const rejected: ClientEvents["rejected"][] = [];
+  h.gmBus.on("rejected", (event) => rejected.push(event));
+  const beforeSpoof = h.hostStore.seq;
+  h.gm.requestAutomation("door-events", "s1", "doorOpen");
+  await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(beforeSpoof);
+  expect(rejected.at(-1)?.reason).toBe("invalid_schema");
+
+  await setDoor(2);
+  await setDoor(0);
+  expect(messages().slice(1)).toEqual(["doorLock by gm-key", "doorUnlock by gm-key"]);
+
+  await setDoor(1);
+  const messagesBeforeClose = messages();
+  await setDoor(0);
+  // Both published graphs fire once on the close, in deterministic anchor order.
+  expect(messages().slice(4)).toEqual(["closed by gm-key", "doorClose by gm-key"]);
+  const counts = { events: h.hostStore.get("automations", "door-events")?.state?.count ?? 0,
+    close: h.hostStore.get("automations", "close-only")?.state?.count ?? 0 };
+  let guard = 0;
+  while (doorOf() === 0 && guard++ < 5) {
+    expect(h.host.undo().ok).toBe(true);
+    await flushMicrotasks();
+  }
+  expect(doorOf()).toBe(1); // the close was undone; the restore reopened it…
+  expect(messages()).toEqual(messagesBeforeClose); // …without firing doorOpen again
+  expect(h.hostStore.get("automations", "door-events")?.state?.count ?? 0).toBeLessThan(counts.events);
+  expect(h.hostStore.get("automations", "close-only")?.state?.count ?? 0).toBeLessThan(counts.close);
+
+  // A published player plate can operate the door. The plate's plan commits as authoritative
+  // host work (the system identity), so the door change is a world event that fires published
+  // rules exactly like a host-driven movement; the player still receives neither the door
+  // graph, its history nor the GM-only message.
+  const plate: AutomationDocument = { ...zoneDoc(), _id: "door-plate", name: "Door plate",
+    definition: { ...zoneDoc().definition, tileId: "zone", methods: ["click"],
+      gates: { playerRunnable: true }, steps: [
+        { id: "find", kind: "select", selector: { kind: "tag", query: "door-1", collections: ["walls"] } },
+        { id: "toggle", kind: "door", mode: "toggle" }] } };
+  h.gm.submit([{ kind: "create", coll: "automations", data: plate }]);
+  await flushMicrotasks();
+  await setDoor(0);
+  const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const playerRejected: ClientEvents["rejected"][] = [];
+  playerBus.on("rejected", (event) => playerRejected.push(event));
+  expect(player.store.getAll("automations")).toEqual([]);
+  const countBeforePlayer = h.hostStore.get("automations", "door-events")?.state?.count ?? 0;
+  player.requestAutomationClick("s1", "zone", { x: 150, y: 150 }, "t-pl");
+  await flushMicrotasks();
+  expect(doorOf()).toBe(1); // the published plate operated the door…
+  expect(h.hostStore.get("automations", "door-events")?.state?.count).toBe(countBeforePlayer + 1); // …and the door graph ran
+  expect(messages().at(-1)).toMatch(/^doorOpen by /);
+  expect(player.store.getAll("messages")).toEqual([]);
+  expect(playerRejected).toEqual([]);
+
+  player.requestAutomationClick("s1", "zone", { x: 150, y: 150 }, "t-pl");
+  await flushMicrotasks();
+  expect(doorOf()).toBe(0); // toggle closed it again
+  expect(h.hostStore.get("automations", "door-events")?.state?.recent?.at(-1)?.method).toBe("doorClose");
+  expect(messages().at(-1)).toMatch(/^doorClose by /);
+  expect(player.store.getAll("messages")).toEqual([]);
+});
+
 test("HostSync dispatches host-observed elevation changes through active-zone methods", async () => {
   const h = await setup();
   const tile = { ...zoneTile(), triggerElevation: { min: 5, max: 10 } };

@@ -1044,3 +1044,96 @@ test("wizard deletes one persistent variable, keeps its sibling, undoes and relo
   await expect.poll(() => hostCall<number>(page, "seq")).toBe(reloadedSeq + 1);
   await expect(zones.locator("[data-zone-variables] li")).toHaveText(["keep: 9"]);
 });
+
+test("GM door open/close fires a door-method graph anchored over the door, once per change", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  // Find a clear sight lane on the starter map, so the door cannot be confused with an existing
+  // wall when the canvas tool later clicks it (the same probe walls.spec.ts uses).
+  let lane: { x: number; y: number } | null = null;
+  for (let x = 200; x <= 1800 && !lane; x += 200) {
+    for (let y = 300; y <= 1100 && !lane; y += 200) {
+      const probe = await surfaceCallArg<{ sees: boolean }>(page, "app", "wallSightProbe",
+        { from: { x, y }, to: { x, y: y + 200 }, radius: 500 });
+      if (probe.sees) lane = { x, y: y + 100 };
+    }
+  }
+  if (!lane) throw new Error("no open lane found on the starter map");
+  const doorMid = { x: lane.x, y: lane.y };
+
+  // Place a real door (closed) across that lane through the rail, then click it with the same
+  // tool: the second click is what the graph must see.
+  await page.locator('[data-canvas-layer="gm"]').click();
+  await page.locator('[data-canvas-tool="wall"]').click();
+  await page.locator('[data-canvas-wall-kind="door"]').click();
+  await page.locator('[data-canvas-door-state="closed"]').click();
+  const screenOf = async (point: { x: number; y: number }) => {
+    const at = await surfaceCallArg<{ x: number; y: number } | null>(page, "app", "screenOf", point);
+    if (!at) throw new Error("screenOf returned null");
+    return at;
+  };
+  const from = await screenOf({ x: doorMid.x - 100, y: doorMid.y });
+  const to = await screenOf({ x: doorMid.x + 100, y: doorMid.y });
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(to.x, to.y, { steps: 6 });
+  await page.mouse.up();
+  await expect.poll(async () => (await hostCall<Array<{ door: number }>>(page, "walls")).length)
+    .toBeGreaterThan(0);
+  const placed = (await hostCall<Array<{ id: string; c: [number, number, number, number]; door: number }>>(page, "walls"))
+    .find((wall) => Math.abs((wall.c[0] + wall.c[2]) / 2 - doorMid.x) < 1 &&
+      Math.abs((wall.c[1] + wall.c[3]) / 2 - doorMid.y) < 1);
+  if (!placed) throw new Error("the door was not placed at the probed lane");
+  expect(placed.door).toBe(0);
+
+  // Author the graph anchored on a tile that covers the door midpoint.
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-zones-tab]").click();
+  const zones = page.locator("[data-active-zones]");
+  await zones.locator("[data-zone-tile-create] summary").click();
+  const tile = zones.locator("[data-zone-tile-create]");
+  await tile.getByLabel("Tile name").fill("Door plate");
+  await tile.getByLabel("X", { exact: true }).fill(String(doorMid.x - 100));
+  await tile.getByLabel("Y", { exact: true }).fill(String(doorMid.y - 80));
+  await tile.getByLabel("Width").fill("200");
+  await tile.getByLabel("Height").fill("160");
+  await tile.locator("[data-zone-create-tile]").click();
+  await expect(zones.locator("[data-zone-tile] option").filter({ hasText: "Door plate" })).toHaveCount(1);
+  await zones.locator("[data-zone-name]").fill("Door bell");
+  // A door-only graph: drop the fresh-draft enter/stop/manual defaults, then subscribe to the
+  // two change kinds the canvas click can produce.
+  for (const method of ["enter", "stop", "manual"])
+    await zones.locator(".methods label").filter({ hasText: new RegExp(`^${method}$`) })
+      .locator("input").uncheck();
+  await zones.locator(".methods label").filter({ hasText: "door open" }).locator("input").check();
+  await zones.locator(".methods label").filter({ hasText: "door close" }).locator("input").check();
+  await zones.locator("[data-zone-save]").click();
+  await expect(zones.locator("li").filter({ hasText: "Door bell" })).toHaveCount(1);
+  // A graph whose only methods are host-observed offers no Simulate control, and says why.
+  await zones.locator("li").filter({ hasText: "Door bell" }).getByRole("button", { name: "Edit" }).click();
+  await expect(zones.locator(".methods ~ small, small").filter({ hasText: "fire automatically" })).toHaveCount(1);
+  await expect(zones.getByText("Simulate method")).toHaveCount(0);
+  await page.locator('[data-window="macros"] [data-window-close]').click();
+
+  // Clicking the door is the real door change: open, then close.
+  const clickDoor = async () => {
+    const at = await screenOf(doorMid);
+    await page.mouse.click(at.x, at.y);
+  };
+  const doorOf = async () =>
+    (await hostCall<Array<{ id: string; door: number }>>(page, "walls")).find((wall) => wall.id === placed.id)?.door;
+  await clickDoor();
+  await expect.poll(doorOf).toBe(1);
+  await expect(page.locator("#chat-log")).toContainText("doorOpen by");
+  await clickDoor();
+  await expect.poll(doorOf).toBe(0);
+  await expect(page.locator("#chat-log")).toContainText("doorClose by");
+
+  // The host history keeps one entry per change, and it is reset separately from the door state.
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-zones-tab]").click();
+  const history = page.locator("[data-zone-history]");
+  await history.locator("summary").click();
+  await expect(history.locator("li").filter({ hasText: /: doorOpen · gm$/ })).toHaveCount(1);
+  await expect(history.locator("li").filter({ hasText: /: doorClose · gm$/ })).toHaveCount(1);
+});

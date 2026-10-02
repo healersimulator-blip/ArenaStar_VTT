@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { planAutomation, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState, type AutomationDefinition } from "../../src/core/automation";
+import { doorTransitionMethod, isHostDispatchedMethod, planAutomation, SIMULATABLE_METHODS, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState, type AutomationDefinition } from "../../src/core/automation";
 import type { ActorDocument, AutomationDocument, EffectDocument, ItemDocument, MessageDocument, SceneDocument, TileDocument, TokenDocument, WallDocument } from "../../src/core/documents";
 import { emptyWorld } from "../net/fixtures";
 import { worldSettingsDoc } from "../../src/core/worldSettings";
@@ -68,6 +68,52 @@ describe("host-side active-zone graph", () => {
     for (const method of ["click", "doubleClick", "hoverIn", "hoverOut"] as const)
       expect(message(method)).toMatchObject({ kind: "create", coll: "messages", data: { content: method } });
     expect(fire("enter")).toMatchObject({ ok: true, skipped: "method/anchor mismatch" });
+  });
+
+  test("door changes are four distinct host-dispatched methods with a closed classifier", () => {
+    const definition: AutomationDefinition = { ...base,
+      methods: ["doorOpen", "doorClose", "doorLock", "doorUnlock"], gates: {},
+      steps: [
+        { id: "router", kind: "routeMethod", routes: { doorOpen: "arrival" }, otherwise: "other" },
+        { id: "arrival", kind: "landing", name: "arrival" },
+        { id: "notice", kind: "chat", audience: "gm", content: "{{method}} by {{user}}" },
+        { id: "done", kind: "stop" },
+        { id: "other", kind: "landing", name: "other" },
+        { id: "fallback", kind: "chat", audience: "gm", content: "{{method}} ignored" },
+      ] };
+    expect(validateAutomation(definition).ok).toBe(true);
+    // A manual/click simulation is not one of the four events; the plan refuses the anchor.
+    const unrelated = planAutomation(world, automation(definition), { scene, tile, method: "click",
+      caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    expect(unrelated).toMatchObject({ ok: true, skipped: "method/anchor mismatch" });
+    const message = (method: "doorOpen" | "doorClose" | "doorLock" | "doorUnlock") => {
+      const outcome = planAutomation(world, automation(definition), { scene, tile, method,
+        caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+      return outcome.ok && "plan" in outcome
+        ? outcome.plan.ops.find((op) => op.kind === "create" && op.coll === "messages") : undefined;
+    };
+    expect(message("doorOpen")).toMatchObject({ data: { content: "doorOpen by p1" } });
+    expect(message("doorLock")).toMatchObject({ data: { content: "doorLock ignored" } });
+
+    expect(doorTransitionMethod(0, 1)).toBe("doorOpen");
+    expect(doorTransitionMethod(1, 0)).toBe("doorClose");
+    expect(doorTransitionMethod(0, 2)).toBe("doorLock");
+    expect(doorTransitionMethod(1, 2)).toBe("doorLock");
+    expect(doorTransitionMethod(2, 0)).toBe("doorUnlock");
+    expect(doorTransitionMethod(2, 1)).toBe("doorUnlock");
+    expect(doorTransitionMethod(0, 0)).toBeNull();
+    expect(doorTransitionMethod(1, 1)).toBeNull();
+    expect(doorTransitionMethod(2, 2)).toBeNull();
+    expect(doorTransitionMethod(3, 1)).toBeNull();
+    expect(doorTransitionMethod(0, -1)).toBeNull();
+    expect(doorTransitionMethod(Number.NaN, 1)).toBeNull();
+
+    for (const method of ["doorOpen", "doorClose", "doorLock", "doorUnlock", "sceneChange"] as const) {
+      expect(isHostDispatchedMethod(method)).toBe(true);
+      expect(SIMULATABLE_METHODS).not.toContain(method);
+    }
+    for (const method of SIMULATABLE_METHODS) expect(isHostDispatchedMethod(method)).toBe(false);
+    expect(new Set(SIMULATABLE_METHODS).size).toBe(SIMULATABLE_METHODS.length);
   });
 
   test("Filter by Token Trigger Count uses each selected token's staged per-graph history, not a global count", () => {
