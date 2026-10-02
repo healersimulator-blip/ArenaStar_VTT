@@ -20,6 +20,7 @@ import type { ScriptRunner } from "../../src/host/scriptWorker";
 import { scriptApprovalHash, type ScriptPolicy } from "../../src/core/scriptMacros";
 import { worldSettingsDoc } from "../../src/core/worldSettings";
 import type { AutomationDefinition } from "../../src/core/automation";
+import { COMBAT_TRIGGER_METHODS } from "../../src/core/combat";
 import { ClientSync, type ClientEvents } from "../../src/client/sync";
 import { createTransportPair, flushMicrotasks } from "../../src/net/memory";
 import { createEventBus, type EventBus } from "../../src/core/events";
@@ -31,6 +32,8 @@ import type {
   ActorDocument,
   AssetManifest,
   AutomationDocument,
+  CombatantDocument,
+  CombatDocument,
   DrawingDocument,
   ItemDocument,
   Json,
@@ -8060,4 +8063,108 @@ test("chat retention evicts an old trap card without preventing GM Revert of its
   expect((h.hostStore.get("automations", "zone-graph") as AutomationDocument).state).toBeUndefined();
   expect(h.hostStore.getAll("messages")).toHaveLength(100);
   expect(h.hostStore.getAll("messages")[0]?.content).toBe("Later chat 0");
+});
+
+test("HostSync dispatches the five combat changes to the encounter scene's graphs and restore never replays them", async () => {
+  const h = await setup();
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: zoneTile() }]);
+  await flushMicrotasks();
+  const combatant = (id: string, tokenId: string, initiative: number): CombatantDocument => ({
+    _id: id, type: "combatant", name: id, ownership: { default: 3 }, flags: {}, system: {},
+    tokenId, actorId: null, initiative, hidden: false, defeated: false });
+  const fight: CombatDocument = { _id: "fight", type: "combat", name: "Fight", ownership: { default: 3 },
+    flags: { core: { sceneId: "s1" } }, system: {}, round: 0, turn: 0,
+    combatants: [combatant("c-a", "t-pl", 20), combatant("c-b", "t-ivy", 10)] };
+  const chat = (content: string): AutomationDefinition["steps"] =>
+    [{ id: "notice", kind: "chat", audience: "gm", content }];
+  const tag = (name: string): AutomationDefinition["steps"] => [
+    { id: "select", kind: "select", selector: { kind: "triggering" } },
+    { id: "mark", kind: "tags", edit: "add", tags: [name] }];
+  const events: AutomationDocument = { ...zoneDoc(), _id: "fight-events", name: "Fight events",
+    definition: { ...zoneDoc().definition, tileId: "zone",
+      methods: [...COMBAT_TRIGGER_METHODS], gates: {}, steps: chat("{{method}} by {{user}}") } };
+  const endedGraph: AutomationDocument = { ...zoneDoc(), _id: "turn-end", name: "Turn end",
+    definition: { ...zoneDoc().definition, tileId: "zone",
+      methods: ["combatTurnEnd"], gates: {}, steps: tag("ended") } };
+  const startedGraph: AutomationDocument = { ...zoneDoc(), _id: "turn-start", name: "Turn start",
+    definition: { ...zoneDoc().definition, tileId: "zone",
+      methods: ["combatTurnStart"], gates: {}, steps: tag("started") } };
+  h.gm.submit([{ kind: "create", coll: "automations", data: events },
+    { kind: "create", coll: "automations", data: endedGraph },
+    { kind: "create", coll: "automations", data: startedGraph }]);
+  await flushMicrotasks();
+  const messages = () => h.hostStore.getAll("messages").map((message) => message.content);
+  const tagsOf = (tokenId: string) =>
+    (h.hostStore.get("scenes", "s1") as SceneDocument).tokens.find((t) => t._id === tokenId)?.taggerTags ?? [];
+  const setCombat = async (diff: Record<string, Json | null>) => {
+    h.gm.submit([{ kind: "update", ref: { coll: "combats", id: "fight" }, diff }]);
+    await flushMicrotasks();
+  };
+
+  // Creating an unstarted encounter (round 0) is not an event; the tracker's Start button
+  // reaches round 1 with a real committed round/turn change.
+  h.gm.submit([{ kind: "create", coll: "combats", data: fight }]);
+  await flushMicrotasks();
+  expect(messages()).toEqual([]);
+  await setCombat({ round: 1, turn: 0, combatants: fight.combatants as unknown as Json });
+  expect(messages()).toEqual(["combatStart by gm-key", "combatRound by gm-key", "combatTurnStart by gm-key"]);
+  expect(tagsOf("t-pl")).toContain("started"); // the first current combatant's token
+
+  // Advancing a turn ends the outgoing combatant and starts the incoming one, on the right tokens.
+  await setCombat({ round: 1, turn: 1 });
+  expect(messages().slice(3)).toEqual(["combatTurnEnd by gm-key", "combatTurnStart by gm-key"]);
+  expect(tagsOf("t-pl")).toContain("ended");
+  expect(tagsOf("t-ivy")).toContain("started");
+
+  // Wrapping a round is the ordered trio; a combatant-only edit is not an event.
+  const beforeWrap = messages().length;
+  await setCombat({ round: 2, turn: 0 });
+  expect(messages().slice(beforeWrap)).toEqual(["combatTurnEnd by gm-key", "combatRound by gm-key", "combatTurnStart by gm-key"]);
+  const beforeRoster = messages().length;
+  await setCombat({ combatants: [...fight.combatants, combatant("c-c", "t-pl", 5)] as unknown as Json });
+  expect(messages().length).toBe(beforeRoster);
+  expect(h.hostStore.get("automations", "fight-events")?.state?.recent?.map((entry) => entry.method))
+    .toEqual(["combatStart", "combatRound", "combatTurnStart", "combatTurnEnd", "combatTurnStart",
+      "combatTurnEnd", "combatRound", "combatTurnStart"]);
+
+  // Neither GM nor player can manufacture a combat event through the request path.
+  const rejected: ClientEvents["rejected"][] = [];
+  h.gmBus.on("rejected", (event) => rejected.push(event));
+  const beforeSpoof = h.hostStore.seq;
+  h.gm.requestAutomation("fight-events", "s1", "combatStart");
+  await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(beforeSpoof);
+  expect(rejected.at(-1)?.reason).toBe("invalid_schema");
+  const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const playerRejected: ClientEvents["rejected"][] = [];
+  playerBus.on("rejected", (event) => playerRejected.push(event));
+  expect(player.store.getAll("automations")).toEqual([]);
+  player.requestAutomation("fight-events", "s1", "combatRound");
+  await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(beforeSpoof);
+  expect(playerRejected.at(-1)?.reason).toBe("invalid_schema");
+  expect(player.store.getAll("messages")).toEqual([]);
+
+  // Deleting a running encounter is MATT's combatend.
+  const beforeDelete = messages().length;
+  h.gm.submit([{ kind: "delete", ref: { coll: "combats", id: "fight" } }]);
+  await flushMicrotasks();
+  expect(messages().slice(beforeDelete)).toEqual(["combatEnd by gm-key"]);
+  expect(h.hostStore.get("combats", "fight")).toBeUndefined();
+
+  // Restoring the encounter must not replay any of it: undo back to "no encounter" and the
+  // message log is exactly the snapshot taken before the re-created encounter existed.
+  const snapshot = messages();
+  const restarted: CombatDocument = { ...fight, round: 1, turn: 0 };
+  h.gm.submit([{ kind: "create", coll: "combats", data: restarted }]);
+  await flushMicrotasks();
+  expect(messages().slice(snapshot.length))
+    .toEqual(["combatStart by gm-key", "combatRound by gm-key", "combatTurnStart by gm-key"]);
+  let guard = 0;
+  while (h.hostStore.get("combats", "fight") && guard++ < 6) {
+    expect(h.host.undo().ok).toBe(true);
+    await flushMicrotasks();
+  }
+  expect(h.hostStore.get("combats", "fight")).toBeUndefined();
+  expect(messages()).toEqual(snapshot);
 });

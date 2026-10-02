@@ -10,6 +10,8 @@ import {
   sortCombatants,
   startCombat,
   endCombat,
+  combatTriggerEvents,
+  COMBAT_TRIGGER_METHODS,
   type CombatTransition,
 } from "../../src/core/combat";
 import type {
@@ -246,5 +248,86 @@ describe("combat tracker (§10)", () => {
     const t = nextTurn(combat(combatant("a", 5)));
     expect(t.combat.round).toBe(1);
     expect(t.hooks).toContain("combat:start");
+  });
+});
+
+describe("combat trigger classification (MATT's five kinds)", () => {
+  const member = (id: string, initiative: number, tokenId: string) =>
+    ({ ...combatant(id, initiative), tokenId });
+  const started = (round = 1, turn = 0) =>
+    ({ ...combat(member("a", 20, "t-a"), member("b", 10, "t-b")), round, turn });
+
+  test("a started encounter appearing begins with start, round and turn", () => {
+    expect(combatTriggerEvents(undefined, started()).map((e) => e.method))
+      .toEqual(["combatStart", "combatRound", "combatTurnStart"]);
+    // The triggering token is the current combatant at that moment.
+    expect(combatTriggerEvents(undefined, started()).map((e) => e.tokenId))
+      .toEqual(["t-a", "t-a", "t-a"]);
+  });
+
+  test("creating an unstarted encounter (round 0) is not an event", () => {
+    expect(combatTriggerEvents(undefined, combat(combatant("a", 20)))).toEqual([]);
+  });
+
+  test("starting from round 0 fires the same three kinds", () => {
+    expect(combatTriggerEvents(combat(combatant("a", 20), combatant("b", 10)), started())
+      .map((e) => e.method)).toEqual(["combatStart", "combatRound", "combatTurnStart"]);
+  });
+
+  test("a turn advance ends the old turn before starting the new one", () => {
+    const events = combatTriggerEvents(started(1, 0), started(1, 1));
+    expect(events.map((e) => e.method)).toEqual(["combatTurnEnd", "combatTurnStart"]);
+    // Turn end reports the combatant that left; turn start the one that arrived.
+    expect(events.map((e) => e.tokenId)).toEqual(["t-a", "t-b"]);
+    expect(events[0]).toMatchObject({ round: 1, turn: 1 - 1 });
+  });
+
+  test("a round wrap ends the turn, then announces the round and the new turn", () => {
+    const events = combatTriggerEvents(started(1, 1), started(2, 0));
+    expect(events.map((e) => e.method))
+      .toEqual(["combatTurnEnd", "combatRound", "combatTurnStart"]);
+    expect(events.map((e) => e.tokenId)).toEqual(["t-b", "t-a", "t-a"]);
+    expect(events[1]).toMatchObject({ round: 2, turn: 0 });
+  });
+
+  test("stepping back fires only the turn that starts again, matching previousTurn", () => {
+    expect(combatTriggerEvents(started(1, 1), started(1, 0)).map((e) => e.method))
+      .toEqual(["combatTurnStart"]);
+    expect(combatTriggerEvents(started(2, 0), started(1, 1)).map((e) => e.method))
+      .toEqual(["combatTurnStart"]);
+  });
+
+  test("a jump back to round 1 turn 0 is a restart, not a rewind", () => {
+    expect(combatTriggerEvents(started(3, 2), started(1, 0)).map((e) => e.method))
+      .toEqual(["combatStart", "combatRound", "combatTurnStart"]);
+  });
+
+  test("ending or deleting a running encounter fires combatEnd with the last current", () => {
+    const ended = combatTriggerEvents(started(2, 1), { ...started(2, 1), round: 0, turn: 0 });
+    expect(ended.map((e) => e.method)).toEqual(["combatEnd"]);
+    expect(ended[0]?.tokenId).toBe("t-b");
+    expect(combatTriggerEvents(started(2, 1), undefined).map((e) => e.method)).toEqual(["combatEnd"]);
+    // Deleting or ending an encounter that never started is not an event.
+    expect(combatTriggerEvents(combat(combatant("a", 20)), undefined)).toEqual([]);
+    expect(combatTriggerEvents(combat(combatant("a", 20)), combat(combatant("a", 20)))).toEqual([]);
+  });
+
+  test("combatant-only edits, same-value updates and an empty roster are quiet", () => {
+    const before = started(1, 0);
+    const roster = { ...before, combatants: [...before.combatants, combatant("c", 5)] };
+    expect(combatTriggerEvents(before, roster)).toEqual([]);
+    expect(combatTriggerEvents(before, started(1, 0))).toEqual([]);
+    // A round advance with no combatants still announces the round, but there is no
+    // current combatant for the turn kinds.
+    const empty = combat();
+    expect(combatTriggerEvents({ ...empty, round: 1 }, { ...empty, round: 2 }).map((e) => e.method))
+      .toEqual(["combatTurnEnd", "combatRound"]);
+    expect(combatTriggerEvents(undefined, { ...empty, round: 1 }).map((e) => e.method))
+      .toEqual(["combatStart", "combatRound"]);
+  });
+
+  test("the method names are the shared combat trigger contract", () => {
+    expect([...COMBAT_TRIGGER_METHODS])
+      .toEqual(["combatStart", "combatRound", "combatTurnStart", "combatTurnEnd", "combatEnd"]);
   });
 });

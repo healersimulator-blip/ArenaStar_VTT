@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { doorTransitionMethod, isHostDispatchedMethod, planAutomation, SIMULATABLE_METHODS, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState, type AutomationDefinition } from "../../src/core/automation";
+import { COMBAT_TRIGGER_METHODS } from "../../src/core/combat";
 import type { ActorDocument, AutomationDocument, EffectDocument, ItemDocument, MessageDocument, SceneDocument, TileDocument, TokenDocument, WallDocument } from "../../src/core/documents";
 import { emptyWorld } from "../net/fixtures";
 import { worldSettingsDoc } from "../../src/core/worldSettings";
@@ -114,6 +115,37 @@ describe("host-side active-zone graph", () => {
     }
     for (const method of SIMULATABLE_METHODS) expect(isHostDispatchedMethod(method)).toBe(false);
     expect(new Set(SIMULATABLE_METHODS).size).toBe(SIMULATABLE_METHODS.length);
+  });
+
+  test("the five combat kinds are host-dispatched methods, routable and never simulatable", () => {
+    const definition: AutomationDefinition = { ...base,
+      methods: ["combatStart", "combatRound", "combatTurnStart", "combatTurnEnd", "combatEnd"], gates: {},
+      steps: [
+        { id: "router", kind: "routeMethod", routes: { combatStart: "arrival" }, otherwise: "other" },
+        { id: "arrival", kind: "landing", name: "arrival" },
+        { id: "notice", kind: "chat", audience: "gm", content: "{{method}} by {{user}}" },
+        { id: "done", kind: "stop" },
+        { id: "other", kind: "landing", name: "other" },
+        { id: "fallback", kind: "chat", audience: "gm", content: "{{method}} ignored" },
+      ] };
+    expect(validateAutomation(definition).ok).toBe(true);
+    // An ordinary click is not one of the five events; the plan refuses the anchor.
+    const unrelated = planAutomation(world, automation(definition), { scene, tile, method: "click",
+      caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    expect(unrelated).toMatchObject({ ok: true, skipped: "method/anchor mismatch" });
+    const message = (method: "combatStart" | "combatRound" | "combatTurnStart" | "combatTurnEnd" | "combatEnd") => {
+      const outcome = planAutomation(world, automation(definition), { scene, tile, method,
+        caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+      return outcome.ok && "plan" in outcome
+        ? outcome.plan.ops.find((op) => op.kind === "create" && op.coll === "messages") : undefined;
+    };
+    expect(message("combatStart")).toMatchObject({ data: { content: "combatStart by p1" } });
+    expect(message("combatTurnEnd")).toMatchObject({ data: { content: "combatTurnEnd ignored" } });
+
+    for (const method of COMBAT_TRIGGER_METHODS) {
+      expect(isHostDispatchedMethod(method)).toBe(true);
+      expect(SIMULATABLE_METHODS).not.toContain(method);
+    }
   });
 
   test("Filter by Token Trigger Count uses each selected token's staged per-graph history, not a global count", () => {

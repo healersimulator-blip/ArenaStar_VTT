@@ -1137,3 +1137,93 @@ test("GM door open/close fires a door-method graph anchored over the door, once 
   await expect(history.locator("li").filter({ hasText: /: doorOpen · gm$/ })).toHaveCount(1);
   await expect(history.locator("li").filter({ hasText: /: doorClose · gm$/ })).toHaveCount(1);
 });
+
+test("GM combat start/round/turn/end fires combat-method graphs in the encounter scene, once per change", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.click("#add-token");
+  await page.click("#add-token");
+
+  // Author a scene graph that hears all five MATT combat kinds.
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-zones-tab]").click();
+  const zones = page.locator("[data-active-zones]");
+  await zones.locator("[data-zone-tile-create] summary").click();
+  const tile = zones.locator("[data-zone-tile-create]");
+  await tile.getByLabel("Tile name").fill("Combat plate");
+  await tile.getByLabel("X", { exact: true }).fill("300");
+  await tile.getByLabel("Y", { exact: true }).fill("300");
+  await tile.getByLabel("Width").fill("200");
+  await tile.getByLabel("Height").fill("200");
+  await tile.locator("[data-zone-create-tile]").click();
+  await expect(zones.locator("[data-zone-tile] option").filter({ hasText: "Combat plate" })).toHaveCount(1);
+  await zones.locator("[data-zone-name]").fill("Combat alarm");
+  // Drop the fresh-draft defaults, then subscribe to the five combat kinds.
+  for (const method of ["enter", "stop", "manual"])
+    await zones.locator(".methods label").filter({ hasText: new RegExp(`^${method}$`) })
+      .locator("input").uncheck();
+  for (const method of ["combat start", "combat round", "combat turn start", "combat turn end", "combat end"])
+    await zones.locator(".methods label").filter({ hasText: method }).locator("input").check();
+  await zones.locator("[data-zone-save]").click();
+  await expect(zones.locator("li").filter({ hasText: "Combat alarm" })).toHaveCount(1);
+  // Combat-only graphs are host-observed: no Simulate control, and the panel says why.
+  await zones.locator("li").filter({ hasText: "Combat alarm" }).getByRole("button", { name: "Edit" }).click();
+  await expect(zones.locator(".methods ~ small, small").filter({ hasText: "fire automatically" })).toHaveCount(1);
+  await expect(zones.getByText("Simulate method")).toHaveCount(0);
+  await page.locator('[data-window="macros"] [data-window-close]').click();
+
+  // Starting the tracker encounter is the real host commit: start, round and turn all begin.
+  // The chat log and the tracker are separate sidebar tabs, so read each where it renders.
+  const chat = async (needle: string) => {
+    await page.click('[data-tab="chat"]');
+    await expect(page.locator("#chat-log")).toContainText(needle);
+  };
+  const chatText = async () => {
+    await page.click('[data-tab="chat"]');
+    return page.locator("#chat-log").innerText();
+  };
+  const occurrences = async (needle: string) => (await chatText()).split(needle).length - 1;
+  const tracker = async () => page.click('[data-tab="combat"]');
+  await tracker();
+  await page.click("#combat-start");
+  await chat("combatStart by");
+  expect(await occurrences("combatStart by")).toBe(1);
+  expect(await occurrences("combatRound by")).toBe(1);
+  expect(await occurrences("combatTurnStart by")).toBe(1);
+  expect(await occurrences("combatTurnEnd by")).toBe(0);
+
+  // One next-turn: the outgoing combatant ends and the next one starts — once each.
+  await tracker();
+  await page.click("#combat-next");
+  await chat("combatTurnEnd by");
+  expect(await occurrences("combatTurnEnd by")).toBe(1);
+  expect(await occurrences("combatTurnStart by")).toBe(2);
+
+  // Walk to the next round: the wrap adds exactly one round announcement.
+  await tracker();
+  for (let i = 0; i < 12; i++) {
+    if ((await page.locator(".combat .round").innerText()).includes("Round 2")) break;
+    await page.click("#combat-next");
+  }
+  await expect(page.locator(".combat .round")).toContainText("Round 2");
+  expect(await occurrences("combatRound by")).toBe(2);
+  const text = await chatText();
+  expect(text.indexOf("combatStart by")).toBeLessThan(text.indexOf("combatRound by"));
+  expect(text.indexOf("combatRound by")).toBeLessThan(text.indexOf("combatTurnStart by"));
+  expect(text.indexOf("combatTurnStart by")).toBeLessThan(text.indexOf("combatTurnEnd by"));
+
+  // Ending the encounter fires combatEnd once.
+  await tracker();
+  await page.click("#combat-end");
+  await chat("combatEnd by");
+  expect(await occurrences("combatEnd by")).toBe(1);
+
+  // Host history keeps one entry per change, keyed by the method name.
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-zones-tab]").click();
+  const history = page.locator("[data-zone-history]");
+  await history.locator("summary").click();
+  // Every fire carries the current combatant's token id, so the row ends with a third field.
+  await expect(history.locator("li").filter({ hasText: /: combatStart · gm · .+$/ })).toHaveCount(1);
+  await expect(history.locator("li").filter({ hasText: /: combatEnd · gm · .+$/ })).toHaveCount(1);
+});

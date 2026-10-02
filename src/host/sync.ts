@@ -29,6 +29,7 @@ import {
 } from "../core/documents";
 import type {
   ActorDocument,
+  CombatDocument,
   DocRef,
   Json,
   SceneDocument,
@@ -115,6 +116,7 @@ import { canFetchAsset, projectAssetManifest } from "../core/assetAccess";
 import { fxAudienceAllows, fxSectionsForViewer, resolveFxSequence, validateFxSequence,
   type FxAudience } from "../core/fx";
 import type { ResolvedFxSection } from "../core/fx";
+import { combatTriggerEvents, type CombatTriggerEvent } from "../core/combat";
 import { automationImageError, doorTransitionMethod, pinnedSelectorError, planAutomation, SIMULATABLE_METHODS, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState,
   type AutomationContinuation, type AutomationEvent, type AutomationMethod, type AutomationPointerMethod, type AutomationOutcome,
   type AutomationScriptResult } from "../core/automation";
@@ -2200,6 +2202,19 @@ export class HostSync {
       const key = `${ref.parent.id}\u0000${ref.id}`;
       if (!doors.has(key)) doors.set(key, { sceneId: ref.parent.id, wallId: ref.id, before: before.door });
     }
+    // Combat changes are round/turn edits on an encounter document. The tracker's push()
+    // always sends both fields, so only the committed pre-image comparison (never the
+    // presence of a diff key) can tell which of MATT's five combat kinds actually happened.
+    const combats = new Map<string, { combatId: string; before?: CombatDocument }>();
+    for (const op of ops) {
+      const ref = op.kind === "create" ? { coll: op.coll, id: op.data._id, parent: op.parent } : op.ref;
+      if (ref.coll !== "combats") continue;
+      if (op.kind === "update" &&
+          !["round", "turn", "combatants"].some((key) => Object.hasOwn(op.diff, key))) continue;
+      const before = op.kind === "create" ? undefined : this.store.resolve(op.ref) as CombatDocument | undefined;
+      if (!before && op.kind !== "create") continue;
+      if (!combats.has(ref.id)) combats.set(ref.id, { combatId: ref.id, ...(before ? { before } : {}) });
+    }
     // Scene activation is a document update, not a separate protocol message. Compare the
     // authoritative active scene around this envelope so retries, snapshots and client-provided
     // trigger claims cannot synthesize scene-change events.
@@ -2254,6 +2269,23 @@ export class HostSync {
           this.fireDoorAutomations([...doors.values()], by);
         } finally {
           this.doorAutomationDepth--;
+        }
+      }
+    }
+    if (combats.size > 0 && !restoring) {
+      const changes = [...combats.values()].flatMap(({ combatId, before }) => {
+        const after = this.store.get("combats", combatId) as CombatDocument | undefined;
+        const events = combatTriggerEvents(before, after);
+        if (!events.length) return [];
+        const sceneId = this.sceneIdForCombat(combatId, after ?? before);
+        return sceneId ? [{ sceneId, events }] : [];
+      });
+      if (changes.length > 0 && this.combatAutomationDepth < HostSync.COMBAT_AUTOMATION_DEPTH) {
+        this.combatAutomationDepth++;
+        try {
+          this.fireCombatAutomations(changes, by);
+        } finally {
+          this.combatAutomationDepth--;
         }
       }
     }
@@ -3308,6 +3340,85 @@ export class HostSync {
    * state change, whose destination graphs may operate a further door. */
   private doorAutomationDepth = 0;
   private static readonly DOOR_AUTOMATION_DEPTH = 8;
+  /** Reentry depth of combat-trigger dispatch: a graph's own committed work can advance the
+   * encounter (a later PF1e adapter), whose turn/round graphs then fire again. */
+  private combatAutomationDepth = 0;
+  private static readonly COMBAT_AUTOMATION_DEPTH = 8;
+
+  /** The encounter's own scene: its `flags.core.sceneId` binding, or — for a document saved
+   * before the binding — the scene whose active encounter pointer names it. */
+  private sceneIdForCombat(combatId: string, fallback?: CombatDocument | undefined): string | null {
+    const combat = (this.store.get("combats", combatId) as CombatDocument | undefined) ?? fallback;
+    const bound = (combat?.flags as { core?: { sceneId?: unknown } } | undefined)?.core?.sceneId;
+    if (typeof bound === "string" && this.store.get("scenes", bound)) return bound;
+    for (const scene of this.store.getAll("scenes") as SceneDocument[]) {
+      const active = (scene.flags as { core?: { activeCombatId?: unknown } } | undefined)?.core?.activeCombatId;
+      if (active === combatId) return scene._id;
+    }
+    return null;
+  }
+
+  /**
+   * MATT fires combat triggers on the encounter scene's tiles — no geometric anchor test, the
+   * whole scene subscribes. Order is deterministic: one authored change at a time (turn end,
+   * then round, then turn start), and within a change the scene's anchors by descending Sort,
+   * then stable IDs. Each graph's method list decides what it hears; a graph that declares
+   * both `combatRound` and `combatTurnStart` hears both, because this engine treats every
+   * declared method as its own subscription (MATT's per-hook if/else would give one of them).
+   */
+  private fireCombatAutomations(
+    changes: Array<{ sceneId: string; events: CombatTriggerEvent[] }>, by: UserId,
+  ): void {
+    const caller = this.sessionUsers().find((user) => user.id === by) ??
+      { id: by, role: "GM" as const, name: "System" };
+    const gm = caller.role === "GM" || caller.role === "ASSISTANT";
+    for (const change of changes) {
+      const scene = this.store.get("scenes", change.sceneId) as SceneDocument | undefined;
+      if (!scene || !can(caller, "read", scene, "scenes")) continue;
+      for (const event of change.events) {
+        const anchors = this.store.getAll("automations").flatMap((doc) => {
+          const checked = validateAutomation(doc.definition);
+          if (!checked.ok || checked.definition.sceneId !== scene._id ||
+              !checked.definition.methods.includes(event.method) ||
+              (!gm && checked.definition.gates?.playerRunnable !== true)) return [];
+          const sourceKind = checked.definition.sourceKind ?? "tile";
+          const source = sourceKind === "region"
+            ? scene.regions?.find((region) => region._id === checked.definition.tileId)
+            : scene.tiles.find((tile) => tile._id === checked.definition.tileId);
+          const tile = automationSourceTile(scene, checked.definition.tileId, sourceKind);
+          const collection = sourceKind === "region" ? "regions" : "tiles";
+          if (!source || !tile || !can(caller, "read", source, collection, { parent: scene }) ||
+              !docVisibleTo(caller, source, scene)) return [];
+          return [{ docId: doc._id, tileId: tile._id,
+            sort: typeof tile.sort === "number" && Number.isFinite(tile.sort) ? tile.sort : 0 }];
+        }).sort((a, b) => b.sort - a.sort || a.tileId.localeCompare(b.tileId) ||
+          a.docId.localeCompare(b.docId));
+        for (const anchor of anchors) {
+          // Re-validate against the live documents immediately before firing, exactly like the
+          // scene-change and door paths; an earlier graph in this loop may have changed them.
+          const liveScene = this.store.get("scenes", change.sceneId) as SceneDocument | undefined;
+          if (!liveScene || !can(caller, "read", liveScene, "scenes")) break;
+          const liveDoc = this.store.get("automations", anchor.docId) as AutomationDocument | undefined;
+          const checked = liveDoc ? validateAutomation(liveDoc.definition) : null;
+          if (!liveDoc || !checked?.ok || checked.definition.sceneId !== liveScene._id ||
+              !checked.definition.methods.includes(event.method) ||
+              (!gm && checked.definition.gates?.playerRunnable !== true)) continue;
+          const sourceKind = checked.definition.sourceKind ?? "tile";
+          const source = sourceKind === "region"
+            ? liveScene.regions?.find((region) => region._id === checked.definition.tileId)
+            : liveScene.tiles.find((tile) => tile._id === checked.definition.tileId);
+          const tile = automationSourceTile(liveScene, checked.definition.tileId, sourceKind);
+          const collection = sourceKind === "region" ? "regions" : "tiles";
+          if (!source || !tile || !can(caller, "read", source, collection, { parent: liveScene }) ||
+              !docVisibleTo(caller, source, liveScene)) continue;
+          const token = event.tokenId
+            ? liveScene.tokens.find((candidate) => candidate._id === event.tokenId) : undefined;
+          this.fireAutomation(liveDoc, { method: event.method, scene: liveScene, tile, caller,
+            ...(token ? { token } : {}), at: this.now(), rng: this.rng });
+        }
+      }
+    }
+  }
 
   /** A committed change in the active scene fires destination-scene graphs once, host-side. */
   private fireSceneChangeAutomations(scene: SceneDocument, by: UserId): void {
@@ -3581,7 +3692,8 @@ export class HostSync {
     // descending tile Sort (not elevation), then stable IDs. No player sets priority.
     const methodOrder: Record<AutomationMethod, number> = {
       enter: 0, exit: 1, stop: 2, elevation: 3, create: 4, sceneChange: 5, rotate: 6, click: 7, rightClick: 8, doubleClick: 9,
-      hoverIn: 10, hoverOut: 11, doorOpen: 12, doorClose: 13, doorLock: 14, doorUnlock: 15, manual: 16,
+      hoverIn: 10, hoverOut: 11, doorOpen: 12, doorClose: 13, doorLock: 14, doorUnlock: 15,
+      combatStart: 16, combatRound: 17, combatTurnStart: 18, combatTurnEnd: 19, combatEnd: 20, manual: 21,
     };
     candidates.sort((a, b) => a.sceneId.localeCompare(b.sceneId) ||
       a.fraction - b.fraction || a.tokenId.localeCompare(b.tokenId) ||

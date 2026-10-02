@@ -1,6 +1,6 @@
 # FX Wizard Verification History
 
-Consolidated historical archive through D-372, with the D-374 double-click, D-375 hover and D-376 scene-change follow-ups appended below. D-373 remains the latest standalone verification report.
+Consolidated historical archive through D-372, with the D-374 double-click, D-375 hover, D-376 scene-change, D-377 door-change and D-378 combat-change follow-ups appended below. D-373 remains the latest standalone verification report.
 
 **Recovery note:** the former archive body was unavailable after an overwrite. D-293–D-346 below are reconstructed from the preserved, detailed `DECISIONS.md` records, rather than copied from the original report bodies. D-347 is retained from its original standalone verification report. Existing status summaries and verification counts remain available in `MACROS_FX_WIZARD_IMPLEMENTATION_STATUS.md`.
 
@@ -38,6 +38,7 @@ Consolidated historical archive through D-372, with the D-374 double-click, D-37
 - [D-375 archived verification report](#report-d375)
 - [D-376 archived verification report](#report-d376)
 - [D-377 archived verification report](#report-d377)
+- [D-378 archived verification report](#report-d378)
 
 <a id="report-d293-d319"></a>
 
@@ -4190,4 +4191,29 @@ The browser cases used npm-provisioned Chromium 153 for functional input coverag
 ### Remaining acceptance work
 
 - This closes only the four committed door-change slices. Door *interaction attempts* (MATT's "On Check Lock"), secret-door transitions and door-specific context fields in graph templates are not modelled. `sceneLoad`, combat/time/document/journal/macro triggers, lighting/game-time changes, region initiation/hover, the complete MATT overlap/priority/guard matrix and cross-browser coverage remain incomplete.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d378"></a>
+
+## D378 — Host-dispatched combat triggers (2026-10-02)
+
+**Scope:** Add MATT's five combat trigger kinds as host-dispatched active-zone methods. This covers only that event family; the rest of TR-01/A19 and A01–A41 remain open.
+
+### Implemented
+
+- `COMBAT_TRIGGER_METHODS` in `src/core/combat.ts` is the single name contract — `combatStart`, `combatRound`, `combatTurnStart`, `combatTurnEnd`, `combatEnd` — consumed by the automation union, the `METHODS`/`HOST_DISPATCHED_METHODS`/`SIMULATABLE_METHODS` split, the host's method-order map and the wizard, so no list can drift.
+- `combatTriggerEvents(before, after)` classifies a committed round/turn change host-side: a started encounter appearing (created at round ≥ 1) fires start → round → turn start; round 0 → ≥ 1 fires the same; a round advance fires turn end → round → turn start; a turn advance fires turn end → turn start; `previousTurn` back-steps fire a turn start only; a running encounter reset to round 0 or deleted fires `combatEnd`; combatant-only edits, same-value updates and unstarted (round 0) edits are not events. The event carries the current combatant as a single triggering token (`combatTurnEnd`/`combatEnd` report the combatant being left), documented as this engine's deviation from MATT's combatant-list context for start/round/end.
+- HostSync captures a `combats` pre-image for round/turn/combatant updates, creates and deletes before applying the envelope — never from diff-key presence, because the tracker's `push()` sends `round` and `turn` together on every change — and dispatches after commit, skipping restores. The encounter's scene resolves from its own `flags.core.sceneId` binding or the scene whose active-encounter pointer names it. Every graph anchored in that scene whose method list contains the event hears it (MATT's scene-wide combat scope; no midpoint/anchor geometry test), re-validated live, ordered one authored change at a time and within a change by descending Sort then stable IDs, with a depth-8 reentry cap and the system-caller synthesis used by the movement and door paths. `automation.request`/`automation.fire` refuse all five kinds.
+
+### Verification
+
+- `tests/core/combat.test.ts` — **23 passed**, including a ten-case truth table for the classifier: started create and round-0 create, a round-0 create staying quiet, turn advance and its two token contexts, the round-wrap trio, step-back-only turn start, a round 3 → 1 restart, end/delete with the last current combatant, combatant-only and same-value silence, an empty roster, and the shared-name contract.
+- `tests/core/automation.test.ts` — **94 passed**: the five kinds validate as graph methods, route through `routeMethod` (with an unmatched `combatTurnEnd` falling through), refuse an ordinary click simulation as a method/anchor mismatch, and are all host-dispatched and absent from `SIMULATABLE_METHODS`.
+- `tests/host/sync.test.ts` — **200 passed**. The new case walks create(round 0) → start → turn advance → round wrap → roster-only edit → GM and player spoof refusals → delete → re-create → Undo, asserting the exact ordered chat rows (`combatStart`, `combatRound`, `combatTurnStart`, `combatTurnEnd`, …), the per-graph `state.recent` method sequence, the two combatants' `ended`/`started` tags proving turn-end/turn-start token context, silence for roster-only edits, `invalid_schema` with an unchanged host sequence for forged requests, and a restore that leaves the message log exactly at its pre-create snapshot.
+- Production `file://` Chromium 153: new case `e2e/active_zones.spec.ts:1141` authors a five-method graph in the wizard (tile anchor anywhere in the scene), checks the host-only hint and the absent Simulate control, starts the tracker encounter, advances one turn, walks to round 2 and ends the encounter — asserting one chat row per change, exact occurrence counts, the ordered start/round/turn/turn-end sequence and one history row per method. Combined `active_zones.spec.ts` (22 cases) + `combat.spec.ts` run: **25/25 passed in 3.5 min** (one worker, zero retries).
+- Full `corepack pnpm test` — **4,674 passed / 12 skipped** across 325 passing / 2 skipped files (**105.33 s**). `pnpm typecheck` — 64 Svelte components, 0 blocking, 1 existing advisory at `src/ui/sim/ReplayPanel.svelte:29`; lint clean. `pnpm size` — **3.860 MB raw / 1.104 MB gzip** (4,047,837 / 1,158,077 bytes), within the 6 MB budget; `git diff --check` clean.
+
+### Remaining acceptance work
+
+- This closes only the five committed combat-change slices. MATT's combatant-list token context for start/round/end is narrowed to the single current combatant; PF1e adapters that drive encounter state through real rules, `sceneLoad`, time, journal/macro, lighting/game-time and region-initiated methods remain open, as do the full MATT overlap/guard matrix and cross-browser coverage.
 - A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**

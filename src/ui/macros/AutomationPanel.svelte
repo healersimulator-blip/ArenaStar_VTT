@@ -5,6 +5,7 @@
   import type { AssetManifest, AutomationDocument, DocRef, Json, MacroDocument, RollTableDocument, SceneDocument,
     RegionDocument, TileDocument } from "../../core/documents";
   import { listTaggable } from "../../core/tags";
+  import { COMBAT_TRIGGER_METHODS } from "../../core/combat";
   import {
     PINNABLE_COLLECTIONS, automationImageError, isHostDispatchedMethod, validateAutomation, type AutomationDefinition, type AutomationGates, type AutomationMethod,
     type AutomationSelector, type AutomationStep, type AutomationScriptBinding, type AutomationTileTarget,
@@ -14,7 +15,7 @@
 
   let { client, bus, getAsset = null }: { client: ClientSync; bus: EventBus<ClientEvents>;
     getAsset?: ((hash: string) => Promise<Uint8Array | undefined>) | null } = $props();
-  const METHODS: AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "sceneChange", "rotate", "click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "doorOpen", "doorClose", "doorLock", "doorUnlock", "manual"];
+  const METHODS: AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "sceneChange", "rotate", "click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "doorOpen", "doorClose", "doorLock", "doorUnlock", ...COMBAT_TRIGGER_METHODS, "manual"];
   const KINDS: AutomationStep["kind"][] = ["select", "filter", "checkVariable", "checkValue", "checkScriptResult", "shuffle", "position", "distance", "attributes", "checkData", "condition", "inventory", "tokenTriggerCount", "routeMethod", "routeUser", "forEach", "endEach", "resetHistory", "batchFlush", "collection", "triggerTile", "setActive", "stopOthers", "stopMovement", "set", "gameTime", "sceneLighting", "sceneBackground", "tileImage", "hurtHeal", "random", "tags", "visibility", "door", "move", "rotate", "delete", "chat", "sequence", "script", "summon", "rollTable", "landing", "jump", "stop"];
   const ADD_KINDS = KINDS.filter((kind) => kind !== "endEach");
   const KIND_LABEL: Record<string, string> = { stopMovement: "Stop Token Movement", checkScriptResult: "Check Script Result",
@@ -26,7 +27,10 @@
     : method === "doubleClick" ? "double click" : method === "hoverIn" ? "hover in"
       : method === "hoverOut" ? "hover out" : method === "sceneChange" ? "scene change"
         : method === "doorOpen" ? "door open" : method === "doorClose" ? "door close"
-          : method === "doorLock" ? "door lock" : method === "doorUnlock" ? "door unlock" : method;
+          : method === "doorLock" ? "door lock" : method === "doorUnlock" ? "door unlock"
+            : method === "combatStart" ? "combat start" : method === "combatRound" ? "combat round"
+              : method === "combatTurnStart" ? "combat turn start" : method === "combatTurnEnd" ? "combat turn end"
+                : method === "combatEnd" ? "combat end" : method;
   const firstSimulatableMethod = (methods: readonly AutomationMethod[]): AutomationMethod | undefined =>
     methods.find((method) => !isHostDispatchedMethod(method));
   /** What the wizard says instead of offering a Simulate control for host-observed events. */
