@@ -107,7 +107,8 @@ export function validateFxInstance(
       const { x: _x, y: _y, toX: _toX, toY: _toY, mask: _mask,
         followTokenId: _follow, followToTokenId: _followTo, mime, ...authored } = section;
       void _x; void _y; void _toX; void _toY; void _mask; void _follow; void _followTo;
-      if (manifest[section.assetId]?.mime !== mime) return false;
+      if (manifest[section.assetId]?.mime !== mime ||
+          section.playbackRate !== undefined && !mime.startsWith("video/")) return false;
       sections.push({ ...authored, at, ...to });
     } else if (section.kind === "text") {
       const { x: _x, y: _y, toX: _toX, toY: _toY, mask: _mask,

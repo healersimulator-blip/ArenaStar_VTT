@@ -26,6 +26,35 @@ import type { EventBus } from "../core/events";
  * about. Above it, a viewer is looking at a cue that did not arrive on time.
  */
 const LATE_TOLERANCE_MS = 120;
+/** Avoid Blob-URL decoder task deferral for small sprites without blocking on large base64 work. */
+const STATIC_IMAGE_DATA_URL_MAX_BYTES = 512 * 1024;
+const staticImageDataUrl = (bytes: Uint8Array, mime: string): string | undefined => {
+  if (bytes.byteLength > STATIC_IMAGE_DATA_URL_MAX_BYTES || typeof window === "undefined" ||
+      typeof btoa !== "function") return undefined;
+  let binary = "";
+  for (let at = 0; at < bytes.byteLength; at += 0x8000)
+    binary += String.fromCharCode(...bytes.subarray(at, Math.min(bytes.byteLength, at + 0x8000)));
+  return `data:${mime};base64,${btoa(binary)}`;
+};
+const decoderUnsupported = (error: unknown): boolean =>
+  /unsupported|format|decode|not supported/i.test(String(error));
+
+interface FxPrefetchRecord {
+  /** The D-308 receipt stays byte-scoped; decoder usability is tracked separately. */
+  done: boolean;
+  failed: boolean;
+  work: Promise<void>;
+  startedAt: number;
+  /** Byte availability; final image readiness may be later. */
+  readyAtHost?: number;
+  /** Static images are decoded during their lead window, not for the first time at cue time. */
+  decodeWork?: Promise<void>;
+  decodeFailed: boolean;
+  decodeError?: unknown;
+  decodeReadyAtHost?: number;
+  image?: HTMLImageElement;
+  objectUrl?: string;
+}
 
 export interface FxPlayerOptions {
   client: ClientSync;
@@ -85,8 +114,7 @@ export class FxPlayer {
    * though its media was already in hand, and that scheduler delay must not be misreported as
    * late media.
    */
-  private readonly prefetched = new Map<string, { done: boolean; failed: boolean; work: Promise<void>;
-    startedAt: number; readyAtHost?: number }>();
+  private readonly prefetched = new Map<string, FxPrefetchRecord>();
   /** Per-run delivery entries plus how many media cues are still unresolved. */
   private readonly delivery = new Map<string, { macroId: string; entries: FxDeliveryEntry[];
     pending: number; reported: boolean }>();
@@ -107,6 +135,13 @@ export class FxPlayer {
     if (this.scene) options.client.requestFxSync(this.scene);
   }
 
+  /** Release decoder resources only when the whole scene/cache is leaving. */
+  private releasePrefetch(record: FxPrefetchRecord): void {
+    if (record.objectUrl) URL.revokeObjectURL(record.objectUrl);
+    delete record.objectUrl;
+    delete record.image;
+  }
+
   private clearLocal(): void {
     this.generation++;
     for (const timer of this.timers.keys()) clearTimeout(timer);
@@ -121,6 +156,7 @@ export class FxPlayer {
     this.cameraTakenBack.clear();
     this.runEpoch.clear();
     this.delivery.clear();
+    for (const record of this.prefetched.values()) this.releasePrefetch(record);
     this.prefetched.clear();
     this.mediaAcks.clear();
   }
@@ -178,7 +214,9 @@ export class FxPlayer {
     this.flushDelivery(runId); // a stopped run still reports what it never managed to show
     this.delivery.delete(runId);
     this.mediaAcks.delete(runId);
-    this.prefetched.clear(); // a stopped run's warm promises are its own
+    // Prefetch records are shared by overlapping runs for the same asset. Stopping one run
+    // must not discard another run's readiness timestamp; scene/reconnect teardown owns the
+    // full clear, while a failed record is replaced on the next prefetch below.
     if (this.view?.runId === runId) this.releaseCamera(true);
     this.runEpoch.set(runId, (this.runEpoch.get(runId) ?? 0) + 1);
     this.seenRuns.delete(runId);
@@ -236,7 +274,7 @@ export class FxPlayer {
         undecodable.add(item.assetId);
         this.ackMedia(cue.runId, item.assetId, "unsupported");
       } else if (held?.done === true) {
-        this.ackMedia(cue.runId, item.assetId, "ready"); // already in hand: no fetch to time
+        this.ackMedia(cue.runId, item.assetId, "ready"); // bytes already in hand
       } else if (held?.failed === true) {
         this.ackMedia(cue.runId, item.assetId, "failed", { reason: "fetch" });
       }
@@ -252,7 +290,7 @@ export class FxPlayer {
       // that will be skipped (D-295/D-297).
       include: (media) => !undecodable.has(media.assetId) &&
         (media.kind !== "sound" || this.audible(cue.sections[media.index])) })) {
-      const start = () => { void this.prefetch(plan.assetId, cue.runId); };
+      const start = () => { void this.prefetch(plan.assetId, plan.mime, cue.runId); };
       if (plan.waitMs <= 0) { start(); continue; }
       const timer = setTimeout(() => {
         this.timers.delete(timer);
@@ -345,35 +383,83 @@ export class FxPlayer {
       y: camera.y + viewport.height / (2 * camera.scale) };
   }
 
-  private async prefetch(assetId: string, runId: string): Promise<void> {
+  private async prefetch(assetId: string, mime: string, runId: string): Promise<void> {
     const generation = this.generation;
     const epoch = this.runEpoch.get(runId);
     let record = this.prefetched.get(assetId);
-    if (!record) {
-      const fresh: { done: boolean; failed: boolean; work: Promise<void>; startedAt: number;
-        readyAtHost?: number } = {
-        done: false, failed: false, work: Promise.resolve(), startedAt: Date.now(),
+    // A fetch/decode failure is not a permanent property of the asset. The real fetcher
+    // drops rejected memo entries so a later run can retry; mirror that lifecycle here.
+    if (!record || record.failed || record.decodeFailed) {
+      if (record) this.releasePrefetch(record);
+      const fresh: FxPrefetchRecord = {
+        done: false, failed: false, decodeFailed: false,
+        work: Promise.resolve(), startedAt: Date.now(),
       };
       this.prefetched.set(assetId, fresh);
       fresh.work = (async () => {
+        let bytes: Uint8Array;
         try {
-          await this.options.fetchAsset(assetId);
-          // Stamp availability here, at fetch settlement. `play` can run much later when a
-          // backgrounded or overloaded browser finally services its section timer.
+          bytes = await this.options.fetchAsset(assetId);
+          // Keep the receipt's established meaning: `ready` says the bytes arrived. Image
+          // decode begins in the same continuation but has its own shared promise below.
           fresh.readyAtHost = this.hostNow();
           fresh.done = true;
         } catch {
-          fresh.failed = true; // the section still reports its own failure when it plays
+          fresh.failed = true;
+          return;
+        }
+        if (mime.startsWith("image/") && typeof Image !== "undefined") {
+          fresh.decodeWork = (async () => {
+            try {
+              const blob = new Blob([new Uint8Array(bytes)], { type: mime });
+              // A Blob URL dispatches image decode through a later browser task; under load
+              // that can waste the whole lead window. Small sprites can safely take this
+              // bounded synchronous conversion and begin decoding in the current task.
+              const dataUrl = staticImageDataUrl(bytes, mime);
+              const image = new Image();
+              image.decoding = "sync";
+              if (dataUrl) {
+                image.src = dataUrl;
+                try {
+                  await image.decode();
+                } catch {
+                  // A browser/CSP that refuses data images still gets the portable path;
+                  // only refusal of both sources becomes an unsupported decoder report.
+                  fresh.objectUrl = URL.createObjectURL(blob);
+                  image.src = fresh.objectUrl;
+                  await image.decode();
+                }
+              } else {
+                fresh.objectUrl = URL.createObjectURL(blob);
+                image.src = fresh.objectUrl;
+                await image.decode();
+              }
+              fresh.image = image;
+              fresh.decodeReadyAtHost = this.hostNow();
+            } catch (cause) {
+              fresh.decodeFailed = true; // cue-time decode gets one honest retry/report
+              fresh.decodeError = cause;
+            }
+          })();
         }
       })();
       record = fresh;
     }
-    // The bytes are shared, but the answer belongs to EVERY waiting run, not just
-    // the first requester. A cancelled/replaced run must never answer for its successor.
+    // The bytes are shared, but the answer belongs to EVERY waiting run. A
+    // cancelled/replaced run must never answer for its successor.
     await record.work;
     if (this.disposed || generation !== this.generation || this.runEpoch.get(runId) !== epoch) return;
     if (record.done) this.ackMedia(runId, assetId, "ready", { ms: Math.max(0, Date.now() - record.startedAt) });
     else this.ackMedia(runId, assetId, "failed", { reason: "fetch" });
+    // D-308 keeps `ready` byte-scoped, but a decoder refusal is still a later, truer
+    // answer. Every run sharing this record observes the same predecode settlement.
+    if (!record.done || !record.decodeWork) return;
+    await record.decodeWork;
+    if (this.disposed || generation !== this.generation || this.runEpoch.get(runId) !== epoch ||
+        this.prefetched.get(assetId) !== record || !record.decodeFailed) return;
+    const unsupported = decoderUnsupported(record.decodeError);
+    this.ackMedia(runId, assetId, unsupported ? "unsupported" : "failed",
+      unsupported ? {} : { reason: "decode" });
   }
 
   /**
@@ -519,6 +605,7 @@ export class FxPlayer {
     // is about.
     const preload = this.prefetched.get(section.assetId);
     const landed = preload?.done === true;
+    const decodedAtDispatch = preload?.image !== undefined;
     const scheduledFor = cue.atHostTime + section.startMs;
     const fetchStarted = this.hostNow();
     try {
@@ -536,50 +623,77 @@ export class FxPlayer {
       const locallyOwned = this.options.isAssetLocal?.(section.assetId) === true;
       const mediaLateMs = landed || locallyOwned ? 0
         : Math.max(0, readyAtHost - Math.max(scheduledFor, fetchStarted));
+      /** Apply this viewer's strict-sync choice to media that was not usable in time. */
+      const skipLate = (lateMs: number): boolean => {
+        if (lateMs <= LATE_TOLERANCE_MS) return false;
+        const decision = lateMediaDecision(this.prefs.lateMedia, lateMs);
+        if (decision.start) return false;
+        this.noteDelivery(cue.runId, { index, kind: section.kind, state: "skipped",
+          reason: decision.reason, assetId: section.assetId, lateMs });
+        this.ackMedia(cue.runId, section.assetId, "late", { ms: Math.round(lateMs) });
+        this.settleCue(cue.runId);
+        return true;
+      };
+      /** Record success only once the browser can actually use the decoded media. */
+      const reportUsable = (lateMs: number): void => {
+        const late = lateMs > LATE_TOLERANCE_MS;
+        this.noteDelivery(cue.runId, { index, kind: section.kind, assetId: section.assetId,
+          state: late ? "late" : "ready",
+          ...(late ? { reason: "not-ready" as const, lateMs }
+            : landed ? { reason: "preload" as const } : {}) });
+        if (late) this.ackMedia(cue.runId, section.assetId, "late", { ms: Math.round(lateMs) });
+        else this.ackMedia(cue.runId, section.assetId, "ready",
+          { ms: Math.max(0, Math.round(readyAtHost - fetchStarted)) });
+      };
       // Cancellation belongs to this invocation, not only to the run's reusable ID.
-      // Check before *any* late/failure reporting can touch a replacement run.
-      if (!active() || skipExpired(mediaLateMs)) return;
-      if (mediaLateMs > LATE_TOLERANCE_MS) {
-        const decision = lateMediaDecision(this.prefs.lateMedia, mediaLateMs);
-        if (!decision.start) {
-          this.noteDelivery(cue.runId, { index, kind: section.kind, state: "skipped",
-            reason: decision.reason, assetId: section.assetId, lateMs: mediaLateMs });
-          // D-308: the bytes are here, they just missed the cue — the requester needs
-          // exactly that sentence, not silence, because it is the timeline's own timing
-          // that was wrong rather than this viewer's connection.
-          this.ackMedia(cue.runId, section.assetId, "late", { ms: Math.round(mediaLateMs) });
-          this.settleCue(cue.runId);
-          return;
+      // Check before *any* late/failure reporting can touch a replacement run. Bytes that
+      // are already late can honor strict sync without spending another decode.
+      if (!active() || skipExpired(mediaLateMs) || skipLate(mediaLateMs)) return;
+      const decoderStartedAt = this.hostNow();
+      // `mediaLateMs` is the fetch contribution. Add only decoder/startup time that extends
+      // past cue dispatch; a delayed section timer itself remains excluded. Static-image
+      // predecode starts in the lead window, so only any unfinished tail is awaited here.
+      const usableLateMs = (): number => mediaLateMs +
+        Math.max(0, this.hostNow() - decoderStartedAt);
+      const staticImage = section.kind === "image" && section.mime.startsWith("image/");
+      let staticImageLateMs: number | undefined;
+      /**
+       * A decoded source that existed when the cue callback got its turn added no media
+       * wait, even if the browser/OS later pauses synchronous Pixi setup. If playback had
+       * to await predecode, add only the decoder tail after both bytes and callback were
+       * available; fetch and decode are sequential, so this composes without double count.
+       */
+      const predecodeLateMs = (): number => decodedAtDispatch ? mediaLateMs : mediaLateMs +
+        Math.max(0, (preload?.decodeReadyAtHost ?? this.hostNow()) -
+          Math.max(scheduledFor, fetchStarted, preload?.readyAtHost ?? fetchStarted));
+      if (staticImage && preload?.decodeWork && !preload.image && !preload.decodeFailed) {
+        await preload.decodeWork;
+        if (!active()) return;
+        // A failed predecode gets the established cue-time retry below. Do not relabel a
+        // known decoder refusal as mere lateness before that retry can recover or report it.
+        if (!preload.decodeFailed) {
+          staticImageLateMs = predecodeLateMs();
+          if (skipExpired(staticImageLateMs) || skipLate(staticImageLateMs)) return;
         }
       }
-      if (!active() || skipExpired(mediaLateMs)) return;
-      const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: section.mime }));
-      const late = mediaLateMs > LATE_TOLERANCE_MS;
-      this.noteDelivery(cue.runId, { index, kind: section.kind, assetId: section.assetId,
-        state: late ? "late" : "ready",
-        ...(late ? { reason: "not-ready" as const, lateMs: mediaLateMs }
-          : landed ? { reason: "preload" as const } : {}) });
-      // D-308: this viewer's word — late by how much, or (when nothing was preloaded and
-      // nothing has been said yet) simply that the bytes were in hand when they were
-      // needed, with the fetch it took to get them.
-      if (late) this.ackMedia(cue.runId, section.assetId, "late", { ms: Math.round(mediaLateMs) });
-      else if (this.mediaAcks.get(cue.runId)?.get(section.assetId) === undefined)
-        this.ackMedia(cue.runId, section.assetId, "ready",
-          { ms: Math.max(0, Math.round(readyAtHost - fetchStarted)) });
+      const warmedImage = staticImage ? preload?.image : undefined;
+      if (warmedImage && staticImageLateMs === undefined) staticImageLateMs = predecodeLateMs();
+      // A retained decoded source needs no second blob URL. Audio, video and lazy/static
+      // fallback paths own a cue-local URL that is revoked with their playback resource.
+      const ownsUrl = !warmedImage;
+      const url = ownsUrl
+        ? URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: section.mime })) : "";
+      const revokeUrl = () => { if (ownsUrl) URL.revokeObjectURL(url); };
       if (section.kind === "sound") {
         const channel = soundChannelOf(section);
         const audio = new Audio(url);
         audio.loop = cue.persistent === true;
-        const startedAt = Date.now();
         // D-309: pan and muffle are the two things an element cannot do; a device that
         // cannot do them plays everything else and *says* so (once, in this viewer's own
         // report) rather than pretending the author's placement took effect.
         const wants = soundNeedsGraph(section);
         const spatialNodes: SpatialAudioNodes | null = wants ? attachSpatialAudio(audio) : null;
-        if (wants && !spatialNodes) {
-          this.noteDelivery(cue.runId, { index, kind: "sound", state: "reduced",
-            reason: "spatial-unavailable", assetId: section.assetId });
-        }
+        const spatialReduced = wants && !spatialNodes;
         // Starting the element is asynchronous too. Do not settle before play() can
         // reject; otherwise the local report has already forgotten this section.
         let settled = false;
@@ -618,10 +732,16 @@ export class FxPlayer {
         // The epoch is part of the key: a run that restarts (or reuses its ID after a
         // stop) is a different element, and its row must not be mistaken for this one's.
         const soundId = `${cue.runId}:${index}:${epoch}`;
-        applyGain();
+        // Keep startup silent until `play()` proves the decoder can begin and the late-media
+        // policy has had its say. A strict-sync viewer must not hear a blip from a cue that
+        // is discarded because startup itself was late.
+        const playbackRate = section.playbackRate ?? 1;
+        audio.volume = 0;
+        audio.playbackRate = playbackRate;
         const duration = Number.isFinite(audio.duration) && audio.duration > 0
           ? audio.duration : section.durationMs / 1000;
-        audio.currentTime = cue.persistent ? (elapsed() / 1000) % duration : elapsed() / 1000;
+        const mediaElapsed = (elapsed() / 1000) * playbackRate;
+        audio.currentTime = cue.persistent ? mediaElapsed % duration : mediaElapsed;
         let timer: ReturnType<typeof setTimeout> | null = null;
         let ramp: ReturnType<typeof setInterval> | null = null;
         let unregister: (() => void) | null = null;
@@ -633,7 +753,7 @@ export class FxPlayer {
           if (ramp !== null) clearInterval(ramp);
           audio.pause();
           audio.src = "";
-          URL.revokeObjectURL(url);
+          revokeUrl();
           spatialNodes?.dispose();
           unregister?.();
           const stops = this.stopAudio.get(cue.runId);
@@ -645,20 +765,16 @@ export class FxPlayer {
         stops.add(stop);
         this.stopAudio.set(cue.runId, stops);
         audio.onended = () => stop();
-        // A fade needs a fast ramp; a *positioned* sound needs a tick for as long as it
-        // plays, because the listener can walk (or pan the view) while it sounds. A plain
-        // global sound with no fade is set once and left alone — nothing about it changes.
-        const fading = (section.fadeInMs ?? 0) > 0 || (section.fadeOutMs ?? 0) > 0;
-        if (fading || section.radiusPx !== undefined) {
-          const everyMs = fading ? 40 : 100;
-          ramp = setInterval(() => { if (stopped || !active()) stop(); else applyGain(); }, everyMs);
-        }
-        if (!cue.persistent) timer = setTimeout(stop, Math.max(0, section.durationMs - elapsed()));
-        // The device-local list: this element exists here and now, whoever else may
-        // also be hearing the timeline. Stopping from that list silences this device.
+        if (!cue.persistent) timer = setTimeout(() => {
+          if (stopped) return;
+          if (!settled && active() && !skipExpired(usableLateMs())) settle();
+          stop(false);
+        }, Math.max(0, section.durationMs - elapsed()));
+        // Register the silent, pending element too: "Stop here" must be able to interrupt
+        // a decoder/autoplay promise rather than waiting for it to become audible first.
         unregister = registerFxSound({ id: soundId, runId: cue.runId, index, channel,
           name: this.options.assetName?.(section.assetId) ?? null,
-          gain: audio.volume, persistent: cue.persistent === true, startedAt, stop });
+          gain: 0, persistent: cue.persistent === true, startedAt: Date.now(), stop });
         try {
           await audio.play();
         } catch (err) {
@@ -668,6 +784,24 @@ export class FxPlayer {
           return; // interruption after host/device stop is not a playback failure
         }
         if (!active() || stopped) { stop(); return; }
+        const lateMs = usableLateMs();
+        if (skipExpired(lateMs) || skipLate(lateMs)) { stop(false); return; }
+        reportUsable(lateMs);
+        if (spatialReduced) {
+          this.noteDelivery(cue.runId, { index, kind: "sound", state: "reduced",
+            reason: "spatial-unavailable", assetId: section.assetId });
+        }
+        // The decoder has started and policy kept the cue: only now make it audible. The
+        // already-registered pending row is updated to the gain this device applies.
+        applyGain();
+        // A fade needs a fast ramp; a *positioned* sound needs a tick for as long as it
+        // plays, because the listener can walk (or pan the view) while it sounds. A plain
+        // global sound with no fade is set once and left alone — nothing about it changes.
+        const fading = (section.fadeInMs ?? 0) > 0 || (section.fadeOutMs ?? 0) > 0;
+        if (fading || section.radiusPx !== undefined) {
+          const everyMs = fading ? 40 : 100;
+          ramp = setInterval(() => { if (stopped || !active()) stop(); else applyGain(); }, everyMs);
+        }
         settle();
         return;
       }
@@ -680,52 +814,68 @@ export class FxPlayer {
           video.muted = true; // sound is an explicit sound section, not an autoplay side effect
           video.playsInline = true;
           video.loop = true;
+          video.playbackRate = section.playbackRate ?? 1;
           video.src = url;
           await new Promise<void>((resolve, reject) => {
             if (!video) return reject(new Error("video released"));
             video.onloadeddata = () => resolve();
             video.onerror = () => reject(new Error("video format unsupported"));
           });
-          if (!active() || skipExpired(mediaLateMs)) {
+          const loadedLateMs = usableLateMs();
+          if (!active() || skipExpired(loadedLateMs) || skipLate(loadedLateMs)) {
             video.pause();
-            URL.revokeObjectURL(url);
+            revokeUrl();
             return;
           }
           // Restored instances may have started hours ago. Seek into the
           // decoded clip's actual loop, not past EOF (which can stall WebM).
-          const seconds = elapsed() / 1000;
+          const seconds = (elapsed() / 1000) * (section.playbackRate ?? 1);
           video.currentTime = cue.persistent && Number.isFinite(video.duration) && video.duration > 0
             ? seconds % video.duration : seconds;
           await video.play();
           texture = Texture.from(video);
         } else {
-          const image = new Image();
-          image.src = url;
-          await image.decode();
-          texture = Texture.from(image);
+          let image: HTMLImageElement;
+          if (warmedImage) image = warmedImage;
+          else {
+            const freshImage = new Image();
+            freshImage.decoding = "sync";
+            freshImage.src = url;
+            await freshImage.decode();
+            image = freshImage;
+            // Capture actual decoder settlement before synchronous texture construction.
+            // A browser/OS scheduler pause in `Texture.from` is not media startup delay.
+            staticImageLateMs = usableLateMs();
+          }
+          // Each layer owns its own texture lifetime even when runs share the decoded source.
+          // Skipping Pixi's source cache prevents one run's destroy from invalidating an
+          // overlapping run (or the retained predecode record).
+          texture = Texture.from(image, true);
         }
-        if (!active() || skipExpired(mediaLateMs)) {
+        const lateMs = staticImageLateMs ?? usableLateMs();
+        if (!active() || skipExpired(lateMs) || skipLate(lateMs)) {
           video?.pause();
           texture.destroy(true);
-          URL.revokeObjectURL(url);
+          revokeUrl();
           return;
         }
+        reportUsable(lateMs);
         const media = video;
         this.options.stage.getFxLayer().spawn(cue.runId, section, elapsed(), texture, () => {
           media?.pause();
           texture.destroy(true);
-          URL.revokeObjectURL(url);
+          revokeUrl();
         }, cue.persistent === true);
         this.settleCue(cue.runId);
       } catch (err) {
         video?.pause();
-        URL.revokeObjectURL(url);
+        revokeUrl();
         throw err;
       }
     } catch (err) {
       if (!active()) return; // a dead fetch/decode must not report into a reused run ID
       const detail = String(err);
-      const unsupported = /unsupported|format|decode|not supported/i.test(detail);
+      const unsupported = decoderUnsupported(err);
       this.noteDelivery(cue.runId, { index, kind: section.kind, state: "failed", assetId: section.assetId,
         reason: unsupported ? "unsupported-codec" : "error", detail });
       // D-308: the bytes arrived and this browser could not use them — the one case the

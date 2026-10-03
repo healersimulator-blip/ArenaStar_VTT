@@ -3513,7 +3513,8 @@ export class HostSync {
       // An awaited short sequence must be safe to finish before this reviewed
       // Worker expires. Fail BEFORE emitting anything, including a persistent
       // loop or a 60-second cue that the 10-second Worker cannot await.
-      if (payload.waitForEnd === true && (prepared.cue.persistent || durationMs + HostSync.FX_LEAD_MS > 7000))
+      if (payload.waitForEnd === true && (prepared.cue.persistent ||
+          prepared.cue.atHostTime + durationMs - this.now() > 7000))
         throw new Error("Awaited FX must be nonpersistent and finish within 7 seconds");
       if (!this.emitPreparedFx(prepared)) throw new Error("FX instance could not be committed");
       return { runId: prepared.cue.runId, atHostTime: prepared.cue.atHostTime,
@@ -4614,7 +4615,14 @@ export class HostSync {
   private readonly seenFxRequests = new Map<string, number>();
   /** Per-session delivery ledger: revocation/end is sent only to past recipients. */
   private readonly fxViewers = new Map<string, { sceneId: string; peers: Set<string> }>();
+  /** Non-media cues need only enough lead for every viewer to schedule the host clock. */
   private static readonly FX_LEAD_MS = 300;
+  /**
+   * Active-scene asset request/response plus browser decode can cross the base scheduler
+   * lead even for a tiny image. Media runs receive a bounded extra head start; honest
+   * late reporting still applies when fetch/decode exceeds this window.
+   */
+  private static readonly FX_MEDIA_LEAD_MS = 750;
   /** How many runs' worth of media expectations the host remembers (oldest evicted). */
   private static readonly FX_MEDIA_RUNS = 32;
   /** The shortest wait for viewer answers: a cue with everything due at once still gets this. */
@@ -4894,9 +4902,11 @@ export class HostSync {
     if (macro.sequence.persistent && (this.store.getAll("fxInstances").length >= 64 ||
         this.store.getAll("fxInstances").filter((entry) => entry.sceneId === scene._id).length >= 24))
       return invalid("persistent FX instance limit reached; stop an effect first");
+    const leadMs = resolved.sections.some((section) => section.kind === "image" || section.kind === "sound")
+      ? HostSync.FX_MEDIA_LEAD_MS : HostSync.FX_LEAD_MS;
     const cue: FxStartMsg = {
       kind: "fx.start", runId: randomId(), macroId: macro._id, sceneId: scene._id,
-      atHostTime: this.now() + HostSync.FX_LEAD_MS, sections: resolved.sections,
+      atHostTime: this.now() + leadMs, sections: resolved.sections,
       ...(macro.sequence.persistent ? { persistent: true } : {}),
     };
     const recipients: Session[] = [];

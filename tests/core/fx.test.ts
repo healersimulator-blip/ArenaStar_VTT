@@ -47,6 +47,37 @@ describe("versioned audiovisual timeline", () => {
       channel: "music", fadeInMs: 200, fadeOutMs: 300 });
   });
 
+  test("video and sound playback rates are bounded, preserved and never accepted for a still", () => {
+    const rated: FxSequence = { version: 1, sections: [
+      { kind: "image", id: "video", assetId: hash, at: { kind: "point", x: 100, y: 100 },
+        startMs: 0, durationMs: 1000, playbackRate: 2 },
+      { kind: "sound", id: "sound", assetId: sound, startMs: 0, durationMs: 1000,
+        playbackRate: 0.5 },
+    ] };
+    expect(validateFxSequence(rated).ok).toBe(true);
+    const resolved = resolveFxSequence(rated, scene, undefined, undefined,
+      (id) => id === hash ? "video/webm" : "audio/ogg");
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok) expect(resolved.sections).toMatchObject([
+      { kind: "image", playbackRate: 2, mime: "video/webm" },
+      { kind: "sound", playbackRate: 0.5, mime: "audio/ogg" },
+    ]);
+    expect(resolveFxSequence(rated, scene, undefined, undefined,
+      (id) => id === hash ? "image/png" : "audio/ogg")).toEqual({
+      ok: false, error: "FX playback rate is only available for video and sound",
+    });
+    for (const playbackRate of [0, 0.24, 4.01, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(validateFxSequence(visual({ playbackRate })).ok).toBe(false);
+      expect(validateFxSequence({ version: 1, sections: [{ kind: "sound", id: "sound",
+        assetId: sound, startMs: 0, durationMs: 1000, playbackRate }] }).ok).toBe(false);
+    }
+    expect(validateFxSequence(visual({ playbackRate: 0.25 })).ok).toBe(true);
+    expect(validateFxSequence(visual({ playbackRate: 4 })).ok).toBe(true);
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "text", id: "text", text: "x",
+      at: { kind: "point", x: 100, y: 100 }, startMs: 0, durationMs: 1000,
+      playbackRate: 2 } as never] }).ok).toBe(false);
+  });
+
   test("bounded one-shot section replays expand into host-clock cues, distinct from motion cycles", () => {
     const replay: FxSequence = { version: 1, sections: [
       { kind: "text", id: "pulse", text: "Pulse", at: { kind: "source" },

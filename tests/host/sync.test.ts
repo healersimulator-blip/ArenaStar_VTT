@@ -1605,9 +1605,15 @@ describe("Macros / FX host authority and audience", () => {
   });
 
   test("multi-step timeline reaches entitled peers exactly once; forge is ignored", async () => {
+    const hostNow = 1_000_000;
     const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
-      chunks: 1, visibility: "referenced" } });
-    h.gm.submit([{ kind: "create", coll: "macros", data: fxMacro("pulse") }]);
+      chunks: 1, visibility: "referenced" } }, undefined, undefined, () => hostNow);
+    const clockOnly = fxMacro("clock-only");
+    if (!clockOnly.sequence) throw new Error("missing fixture sequence");
+    clockOnly.sequence = { ...clockOnly.sequence,
+      sections: clockOnly.sequence.sections.filter((section) => section.kind === "text") };
+    h.gm.submit([{ kind: "create", coll: "macros", data: fxMacro("pulse") },
+      { kind: "create", coll: "macros", data: clockOnly }]);
     await flushMicrotasks();
     const first = await h.addPlayer(PLAYER_ID, "Rex");
     const other = await h.addPlayer(OTHER_ID, "Ivy");
@@ -1626,7 +1632,9 @@ describe("Macros / FX host authority and audience", () => {
     expect(g).toHaveLength(1);
     expect(a[0]?.sections.map((s) => s.kind)).toEqual(["text", "image"]);
     expect(a[0]?.sections[1]).toMatchObject({ kind: "image", mime: "image/png", x: 150, y: 150, startMs: 300 });
-    expect(a[0]?.atHostTime).toBeGreaterThan(Date.now() - 1000);
+    // Media gets enough transport/decode lead to be useful; scheduler-only cues retain the
+    // shorter base lead. This remains a fixed bound, not a readiness claim.
+    expect((a[0]?.atHostTime ?? 0) - hostNow).toBe(750);
     expect(h.hostStore.seq).toBe(seq); // audiovisual cues never run mechanical ops
 
     const duplicate = { kind: "fx.request" as const, requestId: "replay", macroId: "pulse", sceneId: "s1" };
@@ -1639,6 +1647,12 @@ describe("Macros / FX host authority and audience", () => {
     first.pair.b.send("ops", frameMessage({ ...observed, runId: "forged" }));
     await flushMicrotasks();
     expect(b).toHaveLength(2); // no forged rebroadcast
+
+    h.gm.requestSequence("clock-only", "s1");
+    await flushMicrotasks();
+    const clockCue = g.at(-1);
+    expect(clockCue?.macroId).toBe("clock-only");
+    expect((clockCue?.atHostTime ?? 0) - hostNow).toBe(300);
   });
 
   /** Run the fixture's `pulse` as the GM and hand back the cue its own session received:

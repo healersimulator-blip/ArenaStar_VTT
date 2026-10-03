@@ -1523,7 +1523,8 @@ test("a visual grows and spins through its section, eased, and lands on the auth
       inspect: (runId?: string) => Array<{ scale: number; rotationDeg: number }> } } })
       .__stage?.getFxLayer();
     const seen: Array<{ scale: number; rotationDeg: number }> = [];
-    const until = performance.now() + 2_600;
+    // Includes the bounded media transport/decode lead plus the authored 2.4 s section.
+    const until = performance.now() + 3_250;
     while (performance.now() < until) {
       const [frame] = layer?.inspect() ?? [];
       if (frame) seen.push({ scale: frame.scale, rotationDeg: frame.rotationDeg });
@@ -1599,6 +1600,11 @@ test("both viewers answer, and the GM hears that the media is in hand", async ({
       { timeout: 15_000 }).toBe(1);
     await expect(notes.filter({ hasText: "media in hand" }).first())
       .toHaveText(/every viewer holds all 1 asset\(s\) × 2 viewer\(s\)/);
+    // Decoder startup may correct a byte-ready acknowledgement. Observe through the cue,
+    // rather than letting the first optimistic line race a later, truer delivery receipt.
+    await host.waitForTimeout(2_750);
+    await expect(notes.filter({ hasText: "media in hand" })).toHaveCount(1);
+    await expect(notes.filter({ hasText: "media not in hand" })).toHaveCount(0);
     expect(await hostCall<number>(host, "seq")).toBeGreaterThan(0); // the run was a real commit
     // The viewer had no complaint either: a timeline that kept up says nothing locally.
     await expect(player.locator("[data-notify]").filter({ hasText: "degraded" })).toHaveCount(0);
@@ -1825,7 +1831,7 @@ test("a mask grows through its section, and a turning one sweeps its own bearing
   // Growth: 2 units of reach becoming 8, watched as the polygon's own radius. The scene's
   // grid is 100 px per 5 units, so the drawn reach walks 40 px → 160 px.
   await wizard.locator("[data-fx-run]").click();
-  const grown = (await sample(2_300)).map((frame) => frame.radius);
+  const grown = (await sample(2_850)).map((frame) => frame.radius);
   expect(grown.length).toBeGreaterThan(MIN_ANIMATION_SAMPLES);
   const smallest = Math.min(...grown);
   const largest = Math.max(...grown);
@@ -1856,7 +1862,7 @@ test("a mask grows through its section, and a turning one sweeps its own bearing
   // Save, not draft: the Run button plays the macro the host holds (the circle, had this
   // not been saved) — which is what a GM actually gets when they press it.
   await wizard.locator("[data-fx-run]").click();
-  const sweep = await sample(2_300);
+  const sweep = await sample(2_850);
   expect(sweep.length).toBeGreaterThan(MIN_ANIMATION_SAMPLES);
   // The reach is unchanged — this cone's `lengthTo` equals its own length, so only the
   // bearing moves. A cone's far arc is symmetric about its axis, so the drawn polygon
@@ -1951,7 +1957,7 @@ test("a drawn region clips to the points the author entered, and grows by its ra
   }, windowMs);
 
   await wizard.locator("[data-fx-run]").click();
-  const grown = await sample(2_000);
+  const grown = await sample(2_450);
   expect(grown.length).toBeGreaterThan(MIN_ANIMATION_SAMPLES);
   // What is drawn is the triangle: three points, and everything it covers is in the first
   // quadrant of the anchor (the shape never crosses it, which is what the points say).
@@ -2035,7 +2041,7 @@ test("a mask widens without changing its reach, and a cone opens at the same ran
   }, windowMs);
 
   await wizard.locator("[data-fx-run]").click();
-  const opened = await sample(2_300);
+  const opened = await sample(2_850);
   expect(opened.length).toBeGreaterThan(MIN_ANIMATION_SAMPLES);
   // The radius never moves — an aperture is an angle, so the cone reaches exactly as far
   // throughout — while the arc's own extent across the axis grows from sin(26.57°) to
@@ -2068,7 +2074,7 @@ test("a mask widens without changing its reach, and a cone opens at the same ran
   await expect.poll(() => hostCall<number>(page, "seq"), { timeout: 5_000 }).toBeGreaterThan(before);
   // Saved, not drafted: Run plays what the host holds.
   await wizard.locator("[data-fx-run]").click();
-  const widened = await sample(2_300);
+  const widened = await sample(2_850);
   expect(widened.length).toBeGreaterThan(MIN_ANIMATION_SAMPLES);
   // A rect straddles its anchor: ±80 px of depth, which the width animation must not touch.
   expect(Math.min(...widened.map((frame) => frame.minX))).toBeCloseTo(-80, 0);
@@ -2132,7 +2138,8 @@ test("a visual's filter deepens through its section and lands on the authored st
       inspect: (runId?: string) => Array<{ filters: string[] }> } } })
       .__stage?.getFxLayer();
     const seen: number[] = [];
-    const until = performance.now() + 2_600;
+    // Includes the bounded media transport/decode lead plus the authored 2.4 s section.
+    const until = performance.now() + 3_250;
     while (performance.now() < until) {
       const [frame] = layer?.inspect() ?? [];
       const label = frame?.filters[0] ?? "";
@@ -2478,7 +2485,7 @@ test("a device with no Web Audio plays it anyway and says what it could not do",
 
 // D-310 (SQ-12): the other half of the on-canvas effect player — the *look*, saved once
 // and reused. A preset is the draft's sections and nothing else (no persistence, no
-// audience, no bound tokens), so this spec saves one from a two-section draft, clears the
+// audience, no bound tokens), so this spec saves one from a three-section draft, clears the
 // draft and loads it back, proves an edit reached the world and not just this panel, runs
 // the loaded timeline for real, and deletes it.
 test("a preset saves the draft's look, loads it back, updates and deletes it", async ({ page }) => {
@@ -2491,17 +2498,34 @@ test("a preset saves the draft's look, loads it back, updates and deletes it", a
   const presetRows = wizard.locator("[data-fx-preset-id]");
   await expect(wizard.locator("[data-fx-presets-empty]")).toBeVisible();
 
-  // A draft worth remembering: some text and a real imported sound.
+  // A draft worth remembering: text, a real imported sound and a still image. The dummy
+  // video is selected only long enough to prove its speed field cannot hide on the still.
   const wav = wavSilence();
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Sq9hX8AAAAASUVORK5CYII=", "base64");
   await wizard.locator("[data-fx-share]").check();
-  await wizard.locator('input[type="file"]').setInputFiles({ name: "ember.wav", mimeType: "audio/wav", buffer: wav });
+  const input = wizard.locator('input[type="file"]');
+  await input.setInputFiles({ name: "ember.wav", mimeType: "audio/wav", buffer: wav });
   await expect(wizard.getByRole("status").first()).toContainText("eligible scene viewers may fetch it");
+  await input.setInputFiles({ name: "ember.png", mimeType: "image/png", buffer: png });
+  await expect(wizard.getByRole("status").first()).toContainText("Imported ember.png");
+  await input.setInputFiles({ name: "ember.webm", mimeType: "video/webm", buffer: Buffer.from([0]) });
+  await expect(wizard.getByRole("status").first()).toContainText("Imported ember.webm");
   await wizard.getByRole("button", { name: "Text", exact: true }).click();
   await wizard.locator("[data-fx-section]").first().getByLabel("Text", { exact: true }).fill("Kindling");
   await wizard.getByRole("button", { name: "Sound", exact: true }).click();
   const soundSection = wizard.locator("[data-fx-section]").nth(1);
-  await soundSection.getByRole("combobox", { name: "Media" }).selectOption({ index: 1 });
+  await soundSection.getByRole("combobox", { name: "Media" }).selectOption({ label: "ember.wav (audio/wav)" });
   await soundSection.getByLabel("Duration ms").fill("6000");
+  await soundSection.getByLabel("Playback speed").fill("1.5");
+  await wizard.getByRole("button", { name: "Image / video", exact: true }).click();
+  const imageSection = wizard.locator("[data-fx-section]").nth(2);
+  const imageMedia = imageSection.getByRole("combobox", { name: "Media" });
+  await imageMedia.selectOption({ label: "ember.webm (video/webm)" });
+  await expect(imageSection.locator("[data-fx-playback-speed]")).toBeVisible();
+  await imageSection.getByLabel("Playback speed").fill("2");
+  await imageMedia.selectOption({ label: "ember.png (image/png)" });
+  const stillHash = await imageMedia.inputValue();
+  await expect(imageSection.locator("[data-fx-playback-speed]")).toHaveCount(0);
 
   // Saving a preset is its own act: it does not need a saved timeline, and the name is
   // the only thing the author has to type.
@@ -2509,18 +2533,22 @@ test("a preset saves the draft's look, loads it back, updates and deletes it", a
   await wizard.locator("[data-fx-preset-save]").click();
   await expect(presetRows).toHaveCount(1, { timeout: 10_000 });
   await expect(presetRows.first().locator("[data-fx-preset-rename]")).toHaveValue("Fireball look");
-  await expect(presetRows.first()).toContainText("2 sections");
+  await expect(presetRows.first()).toContainText("3 sections");
 
   // Clearing the draft and loading the preset back is the whole gesture the preset exists
   // for — and a load is a *draft* edit: no cue, no instance, nothing for a player.
   await wizard.getByRole("button", { name: "New", exact: true }).click();
   await expect(wizard.locator("[data-fx-section]")).toHaveCount(0);
   await presetRows.first().locator("[data-fx-preset-load]").click();
-  await expect(wizard.locator("[data-fx-section]")).toHaveCount(2);
+  await expect(wizard.locator("[data-fx-section]")).toHaveCount(3);
   await expect(wizard.locator("[data-fx-section]").first().getByLabel("Text", { exact: true })).toHaveValue("Kindling");
   await expect(wizard.locator("[data-fx-section]").nth(1).getByRole("combobox", { name: "Media" }))
     .not.toHaveValue("");
   await expect(wizard.locator("[data-fx-section]").nth(1).getByLabel("Duration ms")).toHaveValue("6000");
+  await expect(wizard.locator("[data-fx-section]").nth(1).getByLabel("Playback speed")).toHaveValue("1.5");
+  await expect(wizard.locator("[data-fx-section]").nth(2).getByRole("combobox", { name: "Media" }))
+    .toHaveValue(stillHash);
+  await expect(wizard.locator("[data-fx-section]").nth(2).locator("[data-fx-playback-speed]")).toHaveCount(0);
   await expect(wizard.locator("[data-fx-status]")).toContainText('Loaded preset "Fireball look"');
 
   // Edit: change the draft, push the change onto the preset, and prove it landed in the

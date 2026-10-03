@@ -689,6 +689,8 @@ interface FxLocated extends FxBase {
 /** The animation a located visual's transform is built from, both ends. */
 export const FX_SCALE_LIMITS = { min: 0.05, max: 10 } as const;
 export const FX_SPIN_LIMIT = 3_600;
+/** SQ-02: bounded browser media speed; 1 is native speed. */
+export const FX_PLAYBACK_RATE_LIMITS = { min: 0.25, max: 4 } as const;
 /**
  * A camera section claims the **viewer's own view** for its duration. It is not a
  * document change: the host resolves and authorizes the destination exactly as it
@@ -737,9 +739,13 @@ export interface FxCameraPathSection extends FxCameraBase {
 export type FxCameraSection = FxCameraPanSection | FxCameraShakeSection | FxCameraPathSection;
 
 export type FxSection =
-  | (FxLocated & { kind: "image"; assetId: string; stretch?: boolean; tint?: string }) // image/* and alpha video
+  | (FxLocated & { kind: "image"; assetId: string; stretch?: boolean; tint?: string;
+      /** Video speed multiplier; the host rejects it when this asset is a still image. */
+      playbackRate?: number }) // image/* and alpha video
   | (FxLocated & { kind: "text"; text: string; color?: string })
   | (FxBase & { kind: "sound"; assetId: string; volume?: number;
+      /** Audio speed multiplier; 1 is the browser's native speed. */
+      playbackRate?: number;
       /** Which fader this sound belongs to (viewer-local mix, D-297). */
       channel?: FxSoundChannel;
       /** Ramp 0→1 over this many ms at the start of the section. */
@@ -847,8 +853,8 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
     const repeatFields = section.kind === "wait" || section.kind === "camera"
       ? [] : ["repeatCount", "repeatDelayMs"];
     const fields = section.kind === "sound"
-      ? ["assetId", "volume", "channel", "fadeInMs", "fadeOutMs", "at", "radius", "pan", "muffle"] :
-      section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "filters", "mask", "scaleTo", "spinDeg"] :
+      ? ["assetId", "volume", "channel", "fadeInMs", "fadeOutMs", "at", "radius", "pan", "muffle", "playbackRate"] :
+      section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "filters", "mask", "scaleTo", "spinDeg", "playbackRate"] :
       section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "filters", "mask", "scaleTo", "spinDeg"] :
       section.kind === "camera" ? ["mode", "to", "easing", "zoom", "intensity", "points", "audience"] : [];
     if (Object.keys(section).some((key) => !["id", "kind", "startMs", "durationMs", ...fields, ...repeatFields].includes(key)) ||
@@ -903,6 +909,9 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
         (section.volume !== undefined && !inRange(section.volume, 0, 1))) {
         return { ok: false, error: "FX sound needs an imported hash and volume 0–1" };
       }
+      if (section.playbackRate !== undefined &&
+          !inRange(section.playbackRate, FX_PLAYBACK_RATE_LIMITS.min, FX_PLAYBACK_RATE_LIMITS.max))
+        return { ok: false, error: `FX playback rate must be ${FX_PLAYBACK_RATE_LIMITS.min}–${FX_PLAYBACK_RATE_LIMITS.max}` };
       // A channel is a closed set, not a free-text field: an unknown one would be
       // silently treated as an effect everywhere and mix wrongly by accident.
       if (section.channel !== undefined && !isSoundChannel(section.channel))
@@ -930,6 +939,9 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
       }
       continue;
     }
+    if (section.kind === "image" && section.playbackRate !== undefined &&
+        !inRange(section.playbackRate, FX_PLAYBACK_RATE_LIMITS.min, FX_PLAYBACK_RATE_LIMITS.max))
+      return { ok: false, error: `FX playback rate must be ${FX_PLAYBACK_RATE_LIMITS.min}–${FX_PLAYBACK_RATE_LIMITS.max}` };
     if ((section.kind !== "image" && section.kind !== "text") || !validAnchor(section.at) ||
       (section.to !== undefined && !validAnchor(section.to)) ||
       (section.easing !== undefined && !isEasing(section.easing)) ||
@@ -1234,6 +1246,10 @@ export function resolveFxSequence(
     const mime = mimeOf(section.assetId);
     if (!mime || !VISUAL_MIME.has(mime))
       return { ok: false, error: `missing/unsupported visual: ${section.assetId}` };
+    // `image` is the visual section discriminator and includes alpha video. A playback
+    // speed on a still would be a valid-looking control that does nothing, so refuse it.
+    if (section.playbackRate !== undefined && !mime.startsWith("video/"))
+      return { ok: false, error: "FX playback rate is only available for video and sound" };
     const { at: _anchor, to: _to, mask: _mask, repeatCount: _count, repeatDelayMs: _gap, ...projected } = section;
     void _anchor; void _to; void _mask; void _count; void _gap;
     sections.push({ ...projected, ...coords, ...(mask.mask ? { mask: mask.mask } : {}), mime });

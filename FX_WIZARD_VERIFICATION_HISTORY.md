@@ -1,6 +1,6 @@
 # FX Wizard Verification History
 
-Consolidated historical archive through D-394, including the incremental trigger, macro and FX audience follow-ups below. D-373 remains the latest standalone verification report.
+Consolidated historical archive through D-395, including the incremental trigger, macro and FX audience follow-ups below. D-373 remains the latest standalone verification report.
 
 **Recovery note:** the former archive body was unavailable after an overwrite. D-293–D-346 below are reconstructed from the preserved, detailed `DECISIONS.md` records, rather than copied from the original report bodies. D-347 is retained from its original standalone verification report. Existing status summaries and verification counts remain available in `MACROS_FX_WIZARD_IMPLEMENTATION_STATUS.md`.
 
@@ -55,6 +55,7 @@ Consolidated historical archive through D-394, including the incremental trigger
 - [D-392 archived verification report](#report-d392)
 - [D-393 archived verification report](#report-d393)
 - [D-394 archived verification report](#report-d394)
+- [D-395 archived verification report](#report-d395)
 
 <a id="report-d293-d319"></a>
 
@@ -4642,3 +4643,32 @@ To distinguish the feature from an already-present environmental failure, export
 Integration caught (and fixed) User snapshot/live-op visibility inconsistency: private ownership on public User documents had suppressed capability changes, now covered in pure projection, live host and production browser tests. The archive fixture initially tried to create a User through a generic GM intent, which the existing host correctly forbids; it now uses trusted host user allocation before authenticated peer saves. A core fixture's flag namespace shape was corrected after a TS error, then full typecheck/lint passed. Browser fixture corrections use non-exact option-containing labels, normally close the GM source window before it covers Permissions, and call the existing chat API with valid `scene` rather than invalid `all` audience. Product privacy/execution assertions were not relaxed.
 
 Other player-authored macro kinds, hotbar layout cross-device/world synchronization, generalized context/helpers/continuations, templating, full common invocation matrix, remaining trigger/action/library/environment scenarios and full MC-01/MC-02/A01–A41 stay open. **A41 remains unaccepted** without a qualifying pre-published hardware-GPU reference run. D373 remains the latest standalone report; this appended report is incremental evidence, not full parity or remote CI success.
+
+<a id="report-d395"></a>
+
+## D-395 — Playback speed and honest usable-media readiness (2026-10-03)
+
+### Scope and audit findings
+
+This increment audits the FX delivery path for defects analogous to D394's scheduler/media attribution gap, then advances one bounded SQ-02 control. It does not redefine SQ-02/SQ-13 or claim complete Sequencer parity. The audit found real lifecycle/readiness defects: byte arrival could settle a cue before browser decode/startup; strict-sync audio could become audible before startup lateness was judged; one stopped run cleared an asset record shared with another run; failed records were permanent; late async work could report into a reused run id; and warmed static images were decoded again at cue time. The retained fixes keep D-308's `ready` acknowledgement byte-scoped, but allow a later decoder/startup outcome to correct it.
+
+Static images now begin one asset-scoped decode during their preload lead and reuse that decoded browser source across runs, with a distinct uncached Pixi texture per playback. Small images (≤512 KiB) synchronously become a data image so decoding starts in the current browser task; larger images, nonbrowser tests and data-image refusal use the Blob-URL fallback. Scene/reconnect teardown releases retained sources/URLs; stopping one run does not. Fetch/decode failure is retryable and generation/run-epoch checks suppress stale completion. The accounting separates genuine media tail from event-loop scheduling: an unfinished fetch/decode/startup counts only after the cue callback and prerequisite bytes are available; a source already decoded when the callback runs incurs no new media lateness from synchronous texture setup. Genuine tails still produce `late`, requester correction and strict-sync suppression; decoder refusal/failure remains visible.
+
+Audio/video now wait for real startup before success. Pending audio is registered silently so device-local stop can cancel it, but gain is applied only after `play()` resolves and late policy keeps the cue; strict sync therefore emits no rejected blip. Expiry, stop and startup rejection each settle once. Live FX transfers use the current-scene lane. Runtime evidence showed that a real joined viewer's tiny asset request plus decode could exceed the old 300 ms transport lead even when all accounting was correct. Media-bearing table runs therefore receive a fixed 750 ms lead; scheduler-only runs remain at 300 ms. This is a bounded scheduling window, not a success declaration: synthetic slow-fetch/decode/startup cases still report or skip honestly beyond it. Awaited script FX use the cue's actual lead in their seven-second safety gate.
+
+SQ-02 gains optional `playbackRate` for sound and video, range **0.25–4×**. Authoring shows **Playback speed** only where it has meaning, stores 1× as absence and clears it when video changes to a still. Host validation, resolution and durable instance reconstruction reject out-of-range or still-image rates; presets preserve valid values. Real audio/video elements receive the rate and restored/late seeking multiplies media phase by it, while section duration, fades, repeats and scheduling remain on the shared host clock.
+
+### Regression integrity and browser investigation
+
+The original two-viewer browser assertion could pass on the first “media in hand” line and close both contexts before a later corrective receipt. It was strengthened to observe through the cue and require **zero** `media not in hand` correction; no tolerance or delivery assertion was relaxed. That stronger form initially failed **8/8**, proving the earlier nominal passes were not sufficient. Trace instrumentation then distinguished callback, byte, decode and texture times. Direct `createImageBitmap(blob)` and asynchronous FileReader conversion did not help under traced Chromium; synchronous bounded data conversion removed task-dispatch loss, while the longer media-only host lead covered the separately observed real transport/decode budget. Temporary logs/traces were removed. Animation browser tests retain every existing endpoint/easing assertion; only their observation windows include the intentional extra media lead.
+
+### Final verification
+
+- Focused `tests/client/fxDeliveryFlow.test.ts`, `tests/core/fx.test.ts`, `tests/core/fxInstances.test.ts`, `tests/core/fxPresets.test.ts`: **114/114**. With `tests/host/sync.test.ts`: **366/366**. Coverage includes shared-run answers and teardown, retry/cancellation, data-image/no-second-URL behavior, warmed decoder reuse, scheduler-delay exclusion, honest fetch/decode/startup lateness, strict suppression, expiry, playback failure, pending-audio stop, audio/video rate propagation, still-MIME refusal and preset/durable preservation.
+- Full `corepack pnpm test`: **4,904 passed / 12 skipped**, **334 passing / 2 skipped files**, **119.26 s**. Typecheck: **69 components / 0 blocking / 1 existing ReplayPanel advisory**. ESLint and `git diff --check` pass.
+- Final production preparation succeeded (optional PF1e content starter absent). `dist/index.html`: **4,135,329 raw / 1,181,179 gzip bytes**, within 6 MB; SHA-256 **`1c0aa8f002b7fe35cbc829c9b259d5c0b079fde79f3584ff3252b7111dfdcc8b`**.
+- Production `file://` Chromium **153.0.8010.0**, one worker, zero retries: strengthened `e2e/fx_sequence.spec.ts` **35/35 in 8.4 min** on that artifact. The corrected two-viewer readiness case then passed **10/10 repeated exact-artifact runs in 3.2 min**. The preset scenario drives the real Playback speed controls, persists a sound rate, switches a video to a still and proves the hidden rate is removed.
+
+### Remaining scope
+
+This closes the audited readiness/ownership/cancellation defects and one bounded SQ-02 field only. It does not complete random/group timing, clip windows, conditional lanes, generalized cancellation, cache quota/eviction, cross-browser codec/transparency evidence or the rest of SQ-02/SQ-13. Remaining MC/TR/A19–A40 work is unchanged. A41 still requires the pre-published hardware-GPU profile and a qualifying run; functional fallback Chromium evidence is not that acceptance. **Full A01–A41 parity is not established.**

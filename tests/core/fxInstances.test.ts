@@ -5,8 +5,11 @@ import type { Op } from "../../src/core/ops";
 import { emptyWorld } from "../net/fixtures";
 
 const hash = "a".repeat(64);
-const manifest: AssetManifest = { [hash]: { name: "owned.png", mime: "image/png", size: 5,
-  chunks: 1, visibility: "referenced" } };
+const videoHash = "c".repeat(64);
+const manifest: AssetManifest = {
+  [hash]: { name: "owned.png", mime: "image/png", size: 5, chunks: 1, visibility: "referenced" },
+  [videoHash]: { name: "owned.webm", mime: "video/webm", size: 5, chunks: 1, visibility: "referenced" },
+};
 const scene: SceneDocument = { _id: "scene-a", type: "scene", name: "Scene", flags: {}, system: {},
   ownership: { default: 2 }, active: true, img: null, width: 1000, height: 1000, darkness: 0,
   grid: { type: "square", size: 100, distance: 5, units: "ft", diagonals: "555", hexLayout: "oddQ" },
@@ -55,6 +58,11 @@ describe("private durable FX records", () => {
     void _missingY;
     expect(validateFxInstance({ ...instance, sections: [missingY] }, scene, manifest)).toBe(false);
     expect(validateFxInstance({ ...instance, sections: [{ ...visual, durationMs: 1 }] }, scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...instance, sections: [{ ...visual, assetId: videoHash,
+      mime: "video/webm", playbackRate: 2 }] }, scene, manifest)).toBe(true);
+    expect(validateFxInstance({ ...instance, sections: [{ ...visual, playbackRate: 2 }] }, scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...instance, sections: [{ ...visual, assetId: videoHash,
+      mime: "video/webm", playbackRate: 4.01 }] }, scene, manifest)).toBe(false);
     expect(validateFxInstance({ ...instance, sections: [{ ...visual, evil: "op" } as typeof instance.sections[number]] }, scene, manifest))
       .toBe(false);
     expect(validateFxInstance({ ...instance, sections: [{ ...visual, follow: true, followTokenId: "source" }] }, scene, manifest))

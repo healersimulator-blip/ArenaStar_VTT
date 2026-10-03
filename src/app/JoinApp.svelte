@@ -792,7 +792,10 @@
         if (fetcher) {
           fxPlayer = new FxPlayer({
             client, bus: current.bus, stage: view,
-            fetchAsset: (hash) => fetcher.request(hash, "ui"),
+            // An imminent cue is current-scene work, not background/UI prefetch. Giving it
+            // the scene lane prevents a newly joined viewer's remaining asset queue from
+            // spending the whole FX lead window before this request is even served.
+            fetchAsset: (hash) => fetcher.request(hash, "scene"),
             sceneId: () => activeScene()?._id ?? null,
             onError: (message) => console.warn(message),
             // A player whose device could not show a cue on time is told so here;

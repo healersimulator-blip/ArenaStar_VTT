@@ -2985,7 +2985,9 @@ const WALL_PICK_RADIUS = 12;
         stage = view;
         fxPlayer = new FxPlayer({
           client: current.gm.client, bus: current.gm.bus, stage: view,
-          fetchAsset: (hash) => current.gm.fetcher.request(hash, "ui"),
+          // Live FX are imminent current-scene work; do not leave their lead window behind
+          // lower-priority UI/background transfers. Draft preview keeps its separate UI lane.
+          fetchAsset: (hash) => current.gm.fetcher.request(hash, "scene"),
           // The GM is the server in this serverless VTT: manifest assets originate in this
           // tab's own store even though its player path deliberately fetches over loopback.
           isAssetLocal: (hash) => current.gm.client.store.world.assetManifest[hash] !== undefined,

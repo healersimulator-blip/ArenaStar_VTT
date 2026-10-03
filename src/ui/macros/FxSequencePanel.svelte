@@ -5,7 +5,7 @@
   import type { ActorDocument, AssetManifest, MacroDocument, SceneDocument,
     UserDocument } from "../../core/documents";
   import { FX_AUDIENCE_PLAYERS_MAX, FX_FILTER_CHAIN_MAX, FX_FILTER_RANGES, FX_MASK_LIMITS,
-    FX_POLYGON_POINTS, FX_SCALE_LIMITS, FX_SPIN_LIMIT,
+    FX_PLAYBACK_RATE_LIMITS, FX_POLYGON_POINTS, FX_SCALE_LIMITS, FX_SPIN_LIMIT,
     fxAudiencePlayers, fxAuthoredFilters, fxFilterFields, fxMaskError, fxMaskFromCrosshair,
     resolveFxSequence,
     validateFxSequence, type FxAnchor,
@@ -218,10 +218,25 @@
     const index = draft.sections.findLastIndex((section) => section.kind === kind);
     if (index < 0) add(kind);
     const selected = index < 0 ? draft.sections.length - 1 : index;
-    draft = { ...draft, sections: draft.sections.map((section, i) => i === selected &&
-      (section.kind === "image" || section.kind === "sound")
-      ? { ...section, assetId: hash } : section) };
+    changeMedia(selected, hash);
     status = `${entry.name} selected for the ${kind} section; save the timeline to publish`;
+  }
+  const mediaMime = (hash: string): string | undefined =>
+    media.find((asset) => asset.hash === hash)?.mime ?? client.store.world.assetManifest[hash]?.mime;
+  /** A still cannot retain a hidden video-only speed when the selected asset changes. */
+  function changeMedia(index: number, hash: string): void {
+    const before = draft.sections[index];
+    if (!before || (before.kind !== "image" && before.kind !== "sound")) return;
+    const mime = mediaMime(hash);
+    if (before.kind === "image" && !mime?.startsWith("video/")) {
+      const { playbackRate: _rate, ...still } = before;
+      void _rate;
+      draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+        ? { ...still, assetId: hash } as FxSection : old) };
+      return;
+    }
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      ? { ...before, assetId: hash } as FxSection : old) };
   }
   // The browser's "Use in timeline" action is a new object for each click.
   // Untrack the editor draft so subsequent typing never re-applies the choice.
@@ -308,6 +323,19 @@
     const zoom = value.trim() === "" ? undefined : Number(value);
     draft = { ...draft, sections: draft.sections.map((old, i) => i === index
       ? { ...before, ...(zoom === undefined ? {} : { zoom }) } as FxSection : old) };
+  }
+
+  /** Native speed is canonical absence; authored rates are clamped to the host contract. */
+  function changePlaybackRate(index: number, value: string): void {
+    const before = draft.sections[index];
+    if (!before || (before.kind !== "image" && before.kind !== "sound")) return;
+    const entered = value.trim() === "" ? 1 : Number(value);
+    const rate = Number.isFinite(entered)
+      ? Math.min(FX_PLAYBACK_RATE_LIMITS.max, Math.max(FX_PLAYBACK_RATE_LIMITS.min, entered)) : 1;
+    const { playbackRate: _rate, ...remaining } = before;
+    void _rate;
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      ? (rate === 1 ? remaining : { ...remaining, playbackRate: rate }) as FxSection : old) };
   }
 
   /**
@@ -1185,12 +1213,23 @@
           </div>
         {/if}
         {#if section.kind === "image" || section.kind === "sound"}
-          <label>Media <select bind:value={section.assetId}>
+          <label>Media <select value={section.assetId}
+            onchange={(e) => changeMedia(i, e.currentTarget.value)}>
             <option value="">Choose imported file…</option>
             {#each media.filter((m) => section.kind === "sound" ? m.mime.startsWith("audio/") : !m.mime.startsWith("audio/")) as asset (asset.hash)}
               <option value={asset.hash}>{asset.name} ({asset.mime})</option>
             {/each}
           </select></label>
+        {/if}
+        {#if section.kind === "sound" || (section.kind === "image" &&
+            mediaMime(section.assetId)?.startsWith("video/"))}
+          <div class="controls" data-fx-playback-speed>
+            <label>Playback speed <input type="number" data-fx-playback-rate
+              min={FX_PLAYBACK_RATE_LIMITS.min} max={FX_PLAYBACK_RATE_LIMITS.max} step="0.05"
+              value={section.playbackRate ?? 1}
+              oninput={(e) => changePlaybackRate(i, e.currentTarget.value)} /></label>
+            <small>1× is native speed; section timing, fades and replays stay on the shared timeline clock.</small>
+          </div>
         {/if}
         {#if section.kind === "text"}
           <label>Text <input maxlength="256" bind:value={section.text} /></label>
