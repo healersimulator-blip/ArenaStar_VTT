@@ -28,12 +28,24 @@ export function runChatMacro(client: ClientSync, macro: MacroDocument): void {
  * Chat macros keep their pure-chat path; an automation macro asks the **host** to
  * fire the graph it references — the client never sees that graph's id.
  */
-export function runSavedMacro(client: ClientSync, macro: MacroDocument): void {
+export function runSavedMacro(
+  client: ClientSync,
+  macro: MacroDocument,
+): { ok: boolean; error?: string; requestId?: string } {
   if (macro.kind === "automation") {
-    client.invokeMacro(macro._id);
-    return;
+    // The caller may track the request id to show the host's own result line.
+    return { ok: true, requestId: client.invokeMacro(macro._id) };
   }
-  runChatMacro(client, macro);
+  if (macro.kind === "chat") {
+    runChatMacro(client, macro);
+    return { ok: true };
+  }
+  // Script/sequence/summon macros have their own surfaces (reviewed Worker,
+  // FX timeline, summon picker); the command line says so instead of doing nothing.
+  const label = { script: "script", sequence: "FX sequence", summon: "summon", fxPreset: "FX preset" }[
+    macro.kind
+  ];
+  return { ok: false, error: `Cannot run ${label} macros from chat yet` };
 }
 
 /** Macros bound to a hotbar slot (flags.core.slot, §10). */

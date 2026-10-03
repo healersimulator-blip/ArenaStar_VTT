@@ -3,8 +3,15 @@
   import type { ClientSync } from "../../client/sync";
   import type { ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
-  import type { MessageDocument, UserDocument } from "../../core/documents";
+  import type { MacroDocument, MessageDocument, UserDocument } from "../../core/documents";
   import { buildChatMessage, parseChatCommand } from "../../core/chat";
+  import {
+    MACRO_COMMAND_USAGE,
+    parseMacroCommand,
+    resolveMacroByName,
+  } from "../../core/macroCommand";
+  import { runSavedMacro } from "../macros/run";
+  import { SvelteSet } from "svelte/reactivity";
   import { renderMarkdown } from "../../core/markdown";
   import RollCard from "./RollCard.svelte";
   import ActionRevertPanel from "./ActionRevertPanel.svelte";
@@ -54,6 +61,9 @@
 
   let messages = $state<MessageDocument[]>([]);
   let draft = $state("");
+  /** MC-01: the caller-local result line for `/run` (never a chat message op). */
+  let commandStatus = $state("");
+  let pendingInvokes = new SvelteSet<string>();
   let logEl: HTMLDivElement;
 
   // F01/F03 2-round window clock — same helper the host uses (max live encounter round).
@@ -228,6 +238,30 @@
     const text = draft.trim();
     if (!text) return;
     draft = "";
+    // MC-01/MC-03: `/run <macro name>` dispatches like the directory and the hotbar.
+    // Its feedback stays local to the caller: a GM's "Fired <graph>" line must never
+    // become a table-visible message, and a player's refusal is already neutral.
+    const macroCommand = parseMacroCommand(text);
+    if (macroCommand) {
+      const macro = resolveMacroByName(
+        client.store.getAll("macros") as readonly MacroDocument[],
+        macroCommand.name,
+      );
+      if (!macroCommand.name) {
+        commandStatus = MACRO_COMMAND_USAGE;
+      } else if (!macro) {
+        commandStatus = `no macro named "${macroCommand.name}"`;
+      } else {
+        const outcome = runSavedMacro(client, macro);
+        if (!outcome.ok) commandStatus = outcome.error ?? "that macro cannot run here";
+        else if (outcome.requestId) {
+          pendingInvokes.add(outcome.requestId);
+          commandStatus = `Requested ${macro.name}…`;
+        } else commandStatus = `Ran ${macro.name}`;
+      }
+      return;
+    }
+    commandStatus = "";
     const parsed = parseChatCommand(text);
     // Roll commands ride the §11 host-crypto path (client.roll).
     if (
@@ -272,6 +306,11 @@
   }
 
   onMount(() => {
+    const offResult = bus.on("macroResult", (msg) => {
+      if (!pendingInvokes.has(msg.requestId)) return;
+      pendingInvokes.delete(msg.requestId);
+      commandStatus = msg.ok ? msg.detail : `Refused: ${msg.detail}`;
+    });
     const offSnapshot = bus.on("snapshot", refresh);
     // Only re-render when messages actually changed — the handshake streams
     // many unrelated op envelopes and full re-renders keep the input row
@@ -286,6 +325,7 @@
     return () => {
       offSnapshot();
       offOps();
+      offResult();
     };
   });
 
@@ -415,6 +455,9 @@
       {/if}
     {/each}
   </div>
+  {#if commandStatus}
+    <p class="commandstatus" data-chat-command-status aria-live="polite">{commandStatus}</p>
+  {/if}
   <form
     onsubmit={(event) => {
       event.preventDefault();
@@ -425,7 +468,7 @@
       id="chat-input"
       type="text"
       bind:value={draft}
-      placeholder="Message — /roll 1d20+5 · /gmroll · /emote · /w <name>"
+      placeholder="Message — /roll 1d20+5 · /emote · /w <name> · /run <macro>"
       autocomplete="off"
     />
     <button id="chat-send" type="submit">Send</button>
@@ -433,6 +476,14 @@
 </section>
 
 <style>
+  .commandstatus {
+    margin: 0;
+    padding: 2px 6px;
+    font-size: 0.8125rem;
+    color: #9fb6c6;
+    border-left: 2px solid #344957;
+  }
+
   .chat {
     display: flex;
     flex-direction: column;

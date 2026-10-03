@@ -1618,3 +1618,133 @@ test("a published automation macro runs its graph from the directory for the GM 
     await hostCtx.close();
   }
 });
+
+test("the /run chat command fires a published macro for the GM and for a player, and refuses an unpublished one", async ({ browser }: { browser: Browser }) => {
+  test.setTimeout(150_000); // two shells, a manual-signaling join and the publish/unpublish cycle
+  const hostCtx = await browser.newContext();
+  const playerCtx = await browser.newContext();
+  try {
+    const host = await hostCtx.newPage();
+    const player = await playerCtx.newPage();
+    await host.goto(entry + "?e2e=1");
+    await waitForSurface(host, "app");
+
+    // A manual-only, published graph anchored on a fresh tile — exactly what a macro may reference.
+    await host.locator("#gm-macros").click();
+    await host.locator("[data-macro-zones-tab]").click();
+    const zones = host.locator("[data-active-zones]");
+    await zones.locator("[data-zone-tile-create] summary").click();
+    const tile = zones.locator("[data-zone-tile-create]");
+    await tile.getByLabel("Tile name").fill("Command plate");
+    await tile.getByLabel("X", { exact: true }).fill("350");
+    await tile.getByLabel("Y", { exact: true }).fill("400");
+    await tile.getByLabel("Width").fill("200");
+    await tile.getByLabel("Height").fill("160");
+    await tile.locator("[data-zone-create-tile]").click();
+    await expect(zones.locator("[data-zone-tile] option").filter({ hasText: "Command plate" })).toHaveCount(1);
+    await zones.locator("[data-zone-name]").fill("Command bell");
+    for (const method of ["enter", "stop"])
+      await zones.locator(".methods label").filter({ hasText: new RegExp(`^${method}$`) })
+        .locator("input").uncheck();
+    await zones.getByLabel("Player canvas triggers (published)").check();
+    await zones.getByPlaceholder("{{user}}, {{count}}, {{method}}").fill("Command {{method}} {{user}}");
+    await zones.locator("[data-zone-save]").click();
+    const graphRow = zones.locator("li").filter({ hasText: "Command bell" });
+    await expect(graphRow).toHaveCount(1);
+    await graphRow.locator("[data-zone-macro]").click();
+    await expect(zones.getByText(/Published automation macro/)).toHaveCount(1);
+    const graphId = await graphRow.locator("[data-zone-macro]").getAttribute("data-zone-macro");
+    expect(graphId).toBeTruthy();
+
+    // A second, deliberately unpublished graph: its macro is delivered like any other,
+    // so the refusal has to come from the host. `New` clears the editor (otherwise Save
+    // updates the graph just saved) and resets the methods to enter/stop/manual.
+    await zones.getByRole("button", { name: "New" }).click();
+    // The tile <details> is left open by the first create — only toggle it when closed.
+    if (!(await zones.locator("[data-zone-create-tile]").isVisible()))
+      await zones.locator("[data-zone-tile-create] summary").click();
+    const draftTile = zones.locator("[data-zone-tile-create]");
+    await draftTile.getByLabel("Tile name").fill("Draft plate");
+    await draftTile.getByLabel("X", { exact: true }).fill("650");
+    await draftTile.getByLabel("Y", { exact: true }).fill("400");
+    await draftTile.getByLabel("Width").fill("200");
+    await draftTile.getByLabel("Height").fill("160");
+    await draftTile.locator("[data-zone-create-tile]").click();
+    const draftOption = zones.locator("[data-zone-tile] option").filter({ hasText: "Draft plate" });
+    await expect(draftOption).toHaveCount(1);
+    const draftTileId = await draftOption.getAttribute("value");
+    if (!draftTileId) throw new Error("the draft tile did not receive a host ID");
+    await zones.locator("[data-zone-tile]").selectOption(draftTileId);
+    await zones.locator("[data-zone-name]").fill("Command draft");
+    for (const method of ["enter", "stop"])
+      await zones.locator(".methods label").filter({ hasText: new RegExp(`^${method}$`) })
+        .locator("input").uncheck();
+    await zones.getByLabel("Player canvas triggers (published)").uncheck();
+    await zones.locator('[data-zone-step="notice"]').getByLabel("Text").fill("Draft {{method}} {{user}}");
+    await zones.locator("[data-zone-save]").click();
+    const draftRow = zones.locator("li").filter({ hasText: "Command draft" });
+    await expect(draftRow).toHaveCount(1);
+    await draftRow.locator("[data-zone-macro]").click();
+    await expect(zones.getByText(/Published automation macro "Command draft"/)).toHaveCount(1);
+    const draftGraphId = await draftRow.locator("[data-zone-macro]").getAttribute("data-zone-macro");
+    expect(draftGraphId).toBeTruthy();
+    await host.locator('[data-window="macros"] [data-window-close]').click();
+
+    // The GM's command line: discoverable usage, an unknown name, then a real fire.
+    await host.locator('[data-tab="chat"]').click();
+    const gmStatus = host.locator("[data-chat-command-status]");
+    await host.locator("#chat-input").fill("/run");
+    await host.locator("#chat-send").click();
+    await expect(gmStatus).toHaveText("usage: /run <macro name>");
+    await host.locator("#chat-input").fill("/run Nothing here");
+    await host.locator("#chat-send").click();
+    await expect(gmStatus).toHaveText('no macro named "Nothing here"');
+    await host.locator("#chat-input").fill("/run Command bell");
+    await host.locator("#chat-send").click();
+    await expect(gmStatus).toHaveText("Fired Command bell");
+    await expect(host.locator("#chat-log")).toContainText("Command manual gm");
+    const gmRuns = (await host.locator("#chat-log").innerText()).split("Command manual gm").length - 1;
+    expect(gmRuns).toBe(1);
+    // The command itself never becomes a chat message.
+    expect(await host.locator("#chat-log").innerText()).not.toContain("/run");
+
+    // A joined player runs the same command from their own chat dock.
+    await host.locator("#share").click();
+    const fragment = manualFragment(await host.locator("#invite-link").inputValue());
+    await player.goto(`${entry}?e2e=1&join=1#${fragment}`);
+    await expect.poll(() => player.locator("#offer-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await host.locator("#peer-code").fill(await player.locator("#offer-out").inputValue());
+    await host.locator("#code-apply").click();
+    await expect.poll(() => host.locator("#share-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await player.locator("#answer-input").fill(await host.locator("#share-out").inputValue());
+    await player.locator("#answer-apply").click();
+    await expect.poll(() => playerCall<boolean>(player, "connected"), { timeout: 30_000 }).toBe(true);
+    await waitForSurface(player, "playerCanvas");
+    const playerId = await playerCall<string>(player, "userId");
+
+    const playerStatus = player.locator("[data-chat-command-status]");
+    await player.locator("#chat-input").fill("/run Command bell");
+    await player.locator("#chat-send").click();
+    await expect(playerStatus).toHaveText("Automation fired");
+    await expect(host.locator("#chat-log")).toContainText(`Command manual ${playerId}`);
+    const playerRuns = (await host.locator("#chat-log").innerText()).split(`Command manual ${playerId}`).length - 1;
+    expect(playerRuns).toBe(1);
+    expect(await player.content()).not.toContain(graphId as string);
+    expect(await player.locator("#chat-log").innerText()).not.toContain("Command manual");
+    expect(await player.locator("#chat-log").innerText()).not.toContain("/run");
+
+    // The unpublished graph's macro is delivered, and the host refuses it: no fire,
+    // no line, and no refusal reason beyond the neutral one a player may hear.
+    await player.locator("#chat-input").fill("/run Command draft");
+    await player.locator("#chat-send").click();
+    await expect(playerStatus).toHaveText("Refused: automation macro unavailable");
+    expect(await host.locator("#chat-log").innerText()).not.toContain("Draft manual");
+    expect(await player.content()).not.toContain(draftGraphId as string);
+    // The published graph fired exactly once for each caller — the refusal added nothing.
+    expect((await host.locator("#chat-log").innerText()).split("Command manual gm").length - 1).toBe(1);
+    expect((await host.locator("#chat-log").innerText()).split(`Command manual ${playerId}`).length - 1).toBe(1);
+  } finally {
+    await playerCtx.close();
+    await hostCtx.close();
+  }
+});
