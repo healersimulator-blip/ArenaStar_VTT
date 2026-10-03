@@ -46,6 +46,7 @@ import { validateScriptMacro } from "./scriptMacros";
 import { summonMarker, validateSummon } from "./summons";
 import { maskJournalLinkTargets } from "./journalLinks";
 import { macroAutomationInputs } from "./macroAutomation";
+import { projectPlayerMacroAuthoring } from "./playerMacros";
 
 export interface ProjectedWorld {
   seq: number;
@@ -136,6 +137,8 @@ export function docVisibleTo(
   parent?: BaseDocument,
 ): boolean {
   if (isGm(user)) return true;
+  // D-021/D-394: User documents are the public player list in snapshots AND live ops.
+  if (doc.type === "user") return true;
   if (doc.type === "automation" || doc.type === "prefab" || doc.type === "fxInstance") return false; // host-owned definitions and instances
   // A GM-audience timeline's authored media names/hashes are also private;
   // omitting just its cue while publishing its sequence would leak assets.
@@ -289,7 +292,15 @@ function projectScene(user: PermissionUser, scene: SceneDocument): SceneDocument
     ...(cells ? { cells } : {}) };
 }
 
-function projectMacro(macro: MacroDocument): MacroDocument {
+function projectMacro(macro: MacroDocument, user: PermissionUser): MacroDocument {
+  // D-394: retain ONLY this author's original submission, never the GM's later source/policy.
+  if (macro.playerAuthoring !== undefined) {
+    const original = projectPlayerMacroAuthoring(macro, user);
+    const safe = { ...macro };
+    delete safe.playerAuthoring;
+    if (original) safe.playerAuthoring = original;
+    macro = safe;
+  }
   // MC-02 (D-387): a caller needs the declared input schema to call the macro; see the
   // automation branch below, where the graph id is dropped and only `inputs` survives.
   if (macro.kind === "summon") {
@@ -397,7 +408,7 @@ export function projectWorld(
           break;
         }
         case "macros":
-          kept.push(projectMacro(doc as MacroDocument));
+          kept.push(projectMacro(doc as MacroDocument, user));
           break;
         case "actors":
           kept.push(stripPrefabMarker(doc));
@@ -455,6 +466,7 @@ function createVisible(
   resolver?: ProjectionResolver,
 ): Op | null {
   if (op.coll === "automations" || op.coll === "actionReceipts" || op.coll === "prefabs" || op.coll === "fxInstances") return null;
+  if (op.coll === "users") return op; // keep live membership/capabilities consistent with snapshot users
   if (op.coll === "macros" && !docVisibleTo(user, op.data)) return null;
   if (op.coll === "walls" || op.coll === "lights") return projectPrefabCreate(op); // §5/D-022
   // D-019 accepts creates without common fields; DocumentStore adds private ownership
@@ -498,7 +510,7 @@ function createVisible(
     return projected === null ? null : { ...op, data: projected as BaseDocument };
   }
   if (getEffectiveOwnership(user, data, parent) >= OWNERSHIP_LEVELS.LIMITED) {
-    if (op.coll === "macros") return { ...op, data: projectMacro(data as MacroDocument) };
+    if (op.coll === "macros") return { ...op, data: projectMacro(data as MacroDocument, user) };
     if (op.coll === "scenes") return { ...op, data: projectScene(user, data as SceneDocument) };
     if (op.coll === "journals") return { ...op, data: projectJournal(data as JournalDocument) };
     return projectPrefabCreate(op);
@@ -518,7 +530,7 @@ function stripMacroBindingDiff(
 ): Record<string, Json | null> {
   const keys = Object.keys(diff).filter((key) =>
     ["automation", "composite"].includes(key) || key.startsWith("automation.") ||
-    key.startsWith("composite."));
+    key.startsWith("composite.") || /^(?:-=)?playerAuthoring(?:\.|$)/.test(key));
   if (keys.length === 0) return diff;
   const safe = { ...diff };
   for (const key of keys) safe[key] = null;
@@ -531,6 +543,7 @@ function updateVisible(
   resolver?: ProjectionResolver,
 ): Op | null {
   if (op.ref.coll === "automations" || op.ref.coll === "actionReceipts" || op.ref.coll === "prefabs" || op.ref.coll === "fxInstances") return null;
+  if (op.ref.coll === "users") return op; // D-394: opt-in/revocation must reach the actual player's UI live
   if (op.ref.coll === "walls" || op.ref.coll === "lights") return projectPrefabDiff(op);
   if (op.ref.coll === "macros") {
     const stripped = stripMacroBindingDiff(op.diff);
@@ -541,7 +554,19 @@ function updateVisible(
     if (projected !== op.diff) op = { ...op, diff: projected };
   }
   const doc = resolver?.resolve(op.ref);
-  if (!doc) return projectPrefabDiff(op); // envelope-only mode (D-023): host always passes a resolver
+  if (!doc) {
+    // D-394: without a live macro we cannot distinguish a chat command from private
+    // executable source. Fail closed on all source/policy paths (host always resolves).
+    if (op.ref.coll === "macros") {
+      const safe = { ...op.diff };
+      let changed = false;
+      for (const key of Object.keys(safe)) if (/^(?:-=)?(?:command|script|scriptState|sequence|summon|preset|fxItem|flags|system)(?:\.|$)/.test(key)) {
+        safe[key] = null; changed = true;
+      }
+      if (changed) op = { ...op, diff: safe };
+    }
+    return projectPrefabDiff(op);
+  }
   if (op.ref.coll === "macros" && !docVisibleTo(user, doc)) return null;
   const parent = op.ref.parent !== undefined ? resolver?.resolve(op.ref.parent) : undefined;
   if (op.ref.coll === "messages") {
@@ -562,9 +587,11 @@ function updateVisible(
   if ((op.ref.coll === "tiles" || op.ref.coll === "regions") && !docVisibleTo(user, doc, parent)) return null;
   if (getEffectiveOwnership(user, doc, parent) < OWNERSHIP_LEVELS.LIMITED) return null;
   if (op.ref.coll === "scenes") return projectSceneEmbedUpdate(user, op, doc as SceneDocument);
-  if (op.ref.coll === "macros" && (["script", "summon", "automation", "composite"].includes((doc as MacroDocument).kind) ||
-      Object.keys(op.diff).some((key) => ["kind", "script", "scriptState", "summon", "automation", "composite"].includes(key)))) {
-    const safe = projectMacro(doc as MacroDocument);
+  if (op.ref.coll === "macros" && ((doc as MacroDocument).playerAuthoring !== undefined ||
+      ["script", "summon", "automation", "composite"].includes((doc as MacroDocument).kind) ||
+      Object.keys(op.diff).some((key) => ["kind", "script", "scriptState", "summon", "automation", "composite"].includes(key) ||
+        /^(?:-=)?playerAuthoring(?:\.|$)/.test(key)))) {
+    const safe = projectMacro(doc as MacroDocument, user);
     // A kind transition can leave a previous script's code — or a graph binding — in a
     // client's replica; replace all macro-specific fields rather than forwarding a partial diff.
     return { ...op, diff: { name: safe.name, kind: safe.kind, command: safe.command,
@@ -573,7 +600,8 @@ function updateVisible(
       summon: (safe.summon as unknown as Json | undefined) ?? null,
       automation: (safe.automation as unknown as Json | undefined) ?? null,
       composite: (safe.composite as unknown as Json | undefined) ?? null,
-      flags: safe.flags, system: safe.system, ownership: safe.ownership } };
+      flags: safe.flags, system: safe.system, ownership: safe.ownership,
+      playerAuthoring: safe.playerAuthoring as unknown as Json ?? null } };
   }
 
   if (op.ref.coll === "cells") {
@@ -647,6 +675,7 @@ function deleteVisible(
   resolver?: ProjectionResolver,
 ): Op | null {
   if (op.ref.coll === "automations" || op.ref.coll === "actionReceipts" || op.ref.coll === "prefabs" || op.ref.coll === "fxInstances") return null;
+  if (op.ref.coll === "users") return op;
   if (op.ref.coll === "walls" || op.ref.coll === "lights") return op;
   const doc = resolver?.resolve(op.ref);
   if (!doc) return op;

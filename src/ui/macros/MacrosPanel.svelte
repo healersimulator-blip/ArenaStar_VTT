@@ -32,6 +32,8 @@
   import type { CompendiumPack } from "../../core/compendium";
   import type { RequestSummonPick } from "./summonPicker";
   import ScriptMacroPanel from "./ScriptMacroPanel.svelte";
+  import MyWorldMacrosPanel from "./MyWorldMacrosPanel.svelte";
+  import { canSaveWorldMacros, playerMacroAuthoring } from "../../core/playerMacros";
   import type { AssetManifest } from "../../core/documents";
   import type { FxImportPermissions } from "../../core/fx";
 
@@ -69,7 +71,7 @@
     onPreviewFx?: PreviewFxSequence | null;
     onStopFxPreview?: (() => void) | null;
   } = $props();
-  let tab = $state<"chat" | "fx" | "assets" | "manager" | "zones" | "tags" | "prefabs" | "summons" | "scripts" | "automations">("chat");
+  let tab = $state<"chat" | "fx" | "assets" | "manager" | "zones" | "tags" | "prefabs" | "summons" | "scripts" | "automations" | "personal">("chat");
   let pickedAsset = $state<{ hash: string } | null>(null);
 
   function useAsset(hash: string): void {
@@ -77,6 +79,7 @@
     tab = "fx";
   }
   let viewerRole = $state("");
+  let personalAvailable = $state(false);
   const gm = $derived(viewerRole === "GM" || viewerRole === "ASSISTANT");
 
   let macros = $state<MacroDocument[]>([]);
@@ -110,7 +113,10 @@
 
   function refresh(): void {
     viewerRole = client.user?.role ?? "";
-    if (viewerRole !== "GM" && viewerRole !== "ASSISTANT" && !["scripts", "automations", "summons"].includes(tab)) tab = "scripts";
+    personalAvailable = canSaveWorldMacros(client.user, client.store.getAll("users")) ||
+      client.store.getAll("macros").some((macro) => playerMacroAuthoring(macro)?.userId === client.user?.id);
+    if (viewerRole !== "GM" && viewerRole !== "ASSISTANT" && !["scripts", "automations", "summons", "personal"].includes(tab))
+      tab = personalAvailable ? "personal" : "scripts";
     storeRevision++;
     itemChoices = macroItemChoices(client.store.world, client.user);
     macros = [...(client.store.getAll("macros") as readonly MacroDocument[])].filter((m) => m.kind === "chat");
@@ -318,6 +324,9 @@
       <button type="button" data-macro-tags-tab aria-pressed={tab === "tags"} onclick={() => tab = "tags"}>Tags</button>
       <button type="button" data-macro-prefabs-tab aria-pressed={tab === "prefabs"} onclick={() => tab = "prefabs"}>Prefabs</button>
     {/if}
+    {#if personalAvailable || tab === "personal"}
+      <button type="button" data-my-world-macros-tab aria-pressed={tab === "personal"} onclick={() => tab = "personal"}>My world macros</button>
+    {/if}
     <button type="button" data-macro-summons-tab aria-pressed={tab === "summons"} onclick={() => tab = "summons"}>Summons</button>
     <button type="button" data-macro-script-tab aria-pressed={tab === "scripts"} onclick={() => tab = "scripts"}>Script macros</button>
     <button type="button" data-macro-automations-tab aria-pressed={tab === "automations"} onclick={() => tab = "automations"}>Automation macros</button>
@@ -381,6 +390,9 @@
   </div>
   <div class="tab-page" hidden={tab !== "summons"}>
     <SummonsPanel {client} {bus} {listCompendia} {activeSceneId} {onPickSummon} />
+  </div>
+  <div class="tab-page" hidden={tab !== "personal"}>
+    <MyWorldMacrosPanel {client} {bus} />
   </div>
   <div class="tab-page" hidden={tab !== "scripts"}>
     <ScriptMacroPanel {client} {bus} />

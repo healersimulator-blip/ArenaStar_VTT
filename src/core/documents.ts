@@ -423,6 +423,8 @@ export interface MacroDocument extends BaseDocument {
   type: "macro";
   kind: "chat" | "script" | "sequence" | "summon" | "fxPreset" | "automation" | "composite";
   command: string;
+  /** D-394: host-stamped original player draft; owner-only, never GM executable source. */
+  playerAuthoring?: import("./playerMacros").PlayerMacroAuthoring;
   /** TR-12/MC-01 (D-381): a GM-authored reference to one saved graph. The binding is
    * private state — players receive the macro as a callable entry, never this id. */
   automation?: import("./macroAutomation").MacroAutomationBinding
@@ -532,6 +534,8 @@ export interface MessageDocument extends BaseDocument {
 
 export interface UserDocument extends BaseDocument {
   type: "user";
+  /** D-394: GM-controlled opt-in to save personal chat macros / unapproved script drafts. */
+  canSaveMacros?: boolean;
   role: Role;
   character: DocId | null;
   color: string;

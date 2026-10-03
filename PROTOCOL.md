@@ -415,6 +415,42 @@ interface MacroInvokeMsg {
 }
 ```
 
+### macros.save (0x51 · client → host · ops)
+
+D-394: save personal chat/roll macros or unapproved script drafts in the GM's durable world,
+only when the GM has enabled `UserDocument.canSaveMacros` for that actual caller (off by default).
+The bounded content request contains no ownership, grants, approval, bindings or execution history.
+The host stamps author/ownership (private to the author and GM), checks existing author+owner rights,
+visible script scene, per-author quota and replay ID, and commits one undoable world envelope.
+A player cannot overwrite another author's or GM's macro, grant their own saving permission,
+edit the host-owned author metadata through raw intents or assign a global hotbar slot. Each
+player revision clears script review/publication/grants; only normal GM review can enable execution.
+The original submitted draft is projected only to its author; later GM executable source/policy
+remain redacted even from that author. Replies use the existing caller-only `macro.result`.
+Saving places documents in the host world/oplog and next world export, not automatic disk overwrite.
+
+Limits: 64-character normalized names, 4,096 chat / 16,384 script characters, actual serialized
+UTF-8 draft ≤32,768 bytes, ≤16 declared script inputs, 64 personal documents per author, and
+ASCII request/macro IDs of 1–128 characters. The shared per-session intent bucket rate-limits
+requests; the host retains 256 caller-scoped save/delete replies for idempotent acknowledgements
+(including reconnects within that bounded window). Host script invocation history survives revisions
+and kind switches. Existing valid GM hotbar slots may survive, but cannot be assigned by this request.
+The GM/assistant alone changes saving permission or user roles; malformed self-owned User documents
+do not allow a player to promote themselves or opt in. Public User list ops now match snapshot
+visibility, so saving enablement/revocation reaches the UI immediately. Loss of OWNER rights clears
+the original-author DTO while the macro remains readable; loss of read visibility removes it through
+the existing host boundary-crossing mechanism. Resolver-less macro diffs conservatively blank all
+original-author and executable source/policy paths rather than forwarding unverified content.
+
+```ts
+type MacroSaveMsg = { kind: "macros.save"; requestId: string; macroId: DocId } & (
+  { action: "save"; draft: PlayerMacroDraft } | { action: "delete" }
+);
+type PlayerMacroDraft = { name: string; command: string } & (
+  { kind: "chat" } | { kind: "script"; sceneId: DocId; inputs: ScriptInput[] }
+);
+```
+
 ### journal.trigger (0x50 · client → host · ops)
 
 TR-12: a journal page's MATT-style tile link (`@Tile[<anchorId> landing:<name>]{Label}`). The client

@@ -56,6 +56,7 @@ import type { ModelPool } from "../core/strategic";
 import type { SimDelta } from "../core/sim";
 import type { DocId } from "../core/ids";
 import type { FxInstanceFilter } from "../core/fxInstances";
+import type { PlayerMacroDraft } from "../core/playerMacros";
 import type { TagRef } from "../core/tags";
 import type { SysSchema } from "../sim/pool";
 import type { RollHighlightRequest } from "./rollHighlight";
@@ -473,6 +474,19 @@ export class ClientSync {
     return requestId;
   }
 
+  /** D-394: ask to store personal content in the host world; no grants or ownership supplied. */
+  saveWorldMacro(macroId: DocId, draft: PlayerMacroDraft): string {
+    const requestId = globalThis.crypto.randomUUID();
+    this.send({ kind: "macros.save", requestId, macroId, action: "save", draft });
+    return requestId;
+  }
+
+  deleteWorldMacro(macroId: DocId): string {
+    const requestId = globalThis.crypto.randomUUID();
+    this.send({ kind: "macros.save", requestId, macroId, action: "delete" });
+    return requestId;
+  }
+
   /** Request a host-approved saved sequence. No client-authored cue or audience travels. */
   requestSequence(macroId: DocId, sceneId: DocId, sourceTokenId?: DocId, targetTokenId?: DocId): string {
     const requestId = globalThis.crypto.randomUUID();
@@ -609,6 +623,7 @@ export class ClientSync {
       case "prefab.place":
       case "macro.request":
       case "macros.invoke":
+      case "macros.save":
       case "fx.request":
       case "fx.sync":
       case "fx.stop":

@@ -1,6 +1,6 @@
 # FX Wizard Verification History
 
-Consolidated historical archive through D-393, including the incremental trigger, macro and FX audience follow-ups below. D-373 remains the latest standalone verification report.
+Consolidated historical archive through D-394, including the incremental trigger, macro and FX audience follow-ups below. D-373 remains the latest standalone verification report.
 
 **Recovery note:** the former archive body was unavailable after an overwrite. D-293–D-346 below are reconstructed from the preserved, detailed `DECISIONS.md` records, rather than copied from the original report bodies. D-347 is retained from its original standalone verification report. Existing status summaries and verification counts remain available in `MACROS_FX_WIZARD_IMPLEMENTATION_STATUS.md`.
 
@@ -54,6 +54,7 @@ Consolidated historical archive through D-393, including the incremental trigger
 - [D-391 archived verification report](#report-d391)
 - [D-392 archived verification report](#report-d392)
 - [D-393 archived verification report](#report-d393)
+- [D-394 archived verification report](#report-d394)
 
 <a id="report-d293-d319"></a>
 
@@ -4594,3 +4595,50 @@ The `/tmp` fallback is disposable; a standard installed Playwright Chromium can 
 ### Still open
 
 Imports/reusable helpers, generalized context and continuation-carried values; full common-directory/chat/item/cast/tile execution and awaits across every macro kind; MC-03 full templating; named-user run-as identity; broader elevated-macro/editor/module/extension/compensation behavior; per-invocation targets; MATT per-percent lighting and door interaction attempts/secret doors; remaining TR/A19–A40 scenarios. Local hotbar preferences are not cross-device sync, drag-and-drop or per-slot argument presets. **A41 remains unaccepted** pending a qualifying pre-published hardware-GPU reference run. D373 remains the latest standalone report. **Full A01–A41 parity is not established.**
+
+
+<a id="report-d394"></a>
+
+## D-394 — GM-enabled player personal macros in the durable world (2026-10-03)
+
+### Delivered scope and authority
+
+GM Permissions has a per-player **Save macros in world** checkbox, disabled by default for players/trusted users; GM/assistant retain authoring authority. The player's **My world macros** tab edits original personal chat/roll macros and unapproved script drafts with typed inputs/visible scene. Documents enter the host's normal store/oplog, persistence and next GM ZIP export; this is not automatic disk overwrite and not device-hotbar layout synchronization. Saves/deletes re-read actual authenticated user opt-in, live authorship/OWNER rights and supported kind. Permission/ownership revocation keeps the editor buffer and prevents further management; execution remains its independent existing policy. Run saved chat uses the committed macro rather than that buffer.
+
+`macros.save` uses the next byte **0x51**, reliable ops channel, content-only save/delete shape and existing caller-only `macro.result`. Name/command/schema/UTF-8 limits, 64/user quota, ASCII IDs, actual caller and readable scene checks reject invalid/foreign/legacy/unsupported references before committing. The intent bucket rate-limits; 256 caller/request-ID responses provide bounded idempotent acknowledgements across reconnects. Generic macro creation remains GM-only; raw player intents cannot mutate/delete personal records or author fields, opt themselves in, or promote an imported self-owned User. User list ops now agree with its public snapshot visibility, so permission changes propagate live rather than awaiting reconnect.
+
+The host stamps private default 0 + author OWNER 3 and `playerAuthoring:{version:1,userId,draft}`. Every personal script revision resets approval/publication, grants and GM elevation. Host invocation history survives revisions and script/chat kind switches; only an existing valid GM slot is retained. GM ScriptMacroPanel review preserves the author's existing individual ownership. Original player source is an owner-only validated DTO; GM's later executable source/policy/history never enters it or another player's replica. Snapshot, create and resolved-update shapes agree, lost OWNER clears the DTO, read loss uses host visibility-boundary deletion, and resolver-less diffs conservatively blank all original-source / executable policy paths.
+
+### Final gates on the D394 artifact
+
+- `corepack pnpm test:fx:prepare`: app, system packages and available starter built; optional PF1e content-based starter skipped because content is absent.
+- Artifact SHA-256: **`32874e58d013626648ad8b87b5f5d4a9d3aa371284d4e32306878bb15d2477df`**.
+- Full Vitest: **4,887 passed / 12 skipped**, **334 passing / 2 skipped files**, **171.19 s**. Adds 51 core draft/capability/canonicalization/DTO checks, 28 host save/authority/replay/quota/history checks and one actual ZIP copy/restore persistence case.
+- Focused: **363/363 / 7 files, 10.17 s** — playerMacros 51, HostSync 252, projection 27, worldFile 9, contracts 12, frame 9, protocol 3.
+- Typecheck: **69 components / 0 blocking / 1 existing advisory**, ReplayPanel.svelte:29.
+- Full ESLint and `git diff --check`: pass.
+- Size: **3.940 MB raw / 1.126 MB gzip**, **4,131,484 / 1,180,223 bytes**, within 6 MB.
+
+### Production browser evidence (functional, not A41 qualification)
+
+Chromium **153.0.8010.0**, npm-provisioned executable plus AL2023 libraries; real `file://` production artifact, one worker and **zero retries**. Read-only shell hooks inspect committed/projected documents; authoring/permissions/review/revocation/export/restore are ordinary product UI, with real signed joins and WebRTC rather than mocked DOM/net execution.
+
+**Completed personal-save/script/archive batch: 15/15 in 6.0 min**: `player_world_macros` **3/3**, `script_macros` **9/9**, `script_result_branch` **1/1**, `worldfile` **2/2**. The new cases cover:
+
+1. Two independently joined players; one GM opt-in, private personal roll, no global slot assignment or peer document disclosure; capability revocation disables writes/deletion immediately while preserving a newer unsaved buffer; Run saved still executes the older stored roll; re-enable/save, actual downloaded `documents.json` with macro/capability, deletion, and normal GM Close/Open/Restore recovering the export point.
+2. Personal script/source/input authoring commits an unapproved, noncallable draft with no APIs; no runner is offered until GM review. GM edits private code, publishes reviewed elevation/chat grant and a slot without losing author ownership. Only the author receives their **original** draft; both players receive blank executable command, and the other player never receives original source. Saving opt-out does not stop a separately approved real Worker from running. Re-enabled player revision resets all approval/grants/elevation/publication, keeps invocation history and existing slot, and removes the other player's catalog entry.
+3. Independent GM ownership downgrade in the now-live Permissions macro editor disables personal management, clears the owner DTO and preserves unsaved text; restored ownership enables saving that same buffer.
+
+### Non-green browser regression and baseline control
+
+The combined selected **90-case** regression exceeded its **1,400 s** global budget: **75 passed, 1 failed, 14 not run**, plus suite/teardown timeout errors (**23.3 min**). It completed Active Zones 34, item binding 1, join 1, hotbar 2 and item arguments 2, most FX cases and the first new personal-save case. The missing personal/script/archive cases subsequently completed in the 15-case batch above. A full FX timeline-only rerun completed **34 passed / 1 failed in 8.2 min**, zero retries.
+
+The retained failure is `e2e/fx_sequence.spec.ts:1615`, **a viewer that cannot decode the media says so, by section**, at line 1667: expected `media not in hand for 1 of 2 viewer(s) … 1 cannot decode this format (corrected)`; actual `media not in hand for 2 of 2 viewer(s) … 1 cannot decode this format; started late for 1 (corrected)`. Unsupported-codec detection/early correction occurred, but the GM also started late in this functional fallback, invalidating that exact no-lateness expectation.
+
+To distinguish the feature from an already-present environmental failure, exported **unchanged D393 HEAD `92d0f2b`** read-only with `git archive` into an isolated temporary directory, used the same dependencies/browser, built it, and ran that one test with zero retries. It failed **identically (20.5 s)**. Its artifact SHA **`b875db68e1db5a7042aa0c28612ee26c9bdfd99a6eaa2a0e64e160e58da33ad3`** exactly matches shipped D393. No branch checkout/reset occurred; genuine edits remained intact. Thus this is a **reproduced baseline timing gap in the current fallback environment**; D394 neither introduces a claimed fix nor weakens the test/assertion/runtime timing. Across bounded runs **89/90 distinct selected cases passed**, not a green single full-browser run. Keep this regression open.
+
+### Earlier corrections and remaining scope
+
+Integration caught (and fixed) User snapshot/live-op visibility inconsistency: private ownership on public User documents had suppressed capability changes, now covered in pure projection, live host and production browser tests. The archive fixture initially tried to create a User through a generic GM intent, which the existing host correctly forbids; it now uses trusted host user allocation before authenticated peer saves. A core fixture's flag namespace shape was corrected after a TS error, then full typecheck/lint passed. Browser fixture corrections use non-exact option-containing labels, normally close the GM source window before it covers Permissions, and call the existing chat API with valid `scene` rather than invalid `all` audience. Product privacy/execution assertions were not relaxed.
+
+Other player-authored macro kinds, hotbar layout cross-device/world synchronization, generalized context/helpers/continuations, templating, full common invocation matrix, remaining trigger/action/library/environment scenarios and full MC-01/MC-02/A01–A41 stay open. **A41 remains unaccepted** without a qualifying pre-published hardware-GPU reference run. D373 remains the latest standalone report; this appended report is incremental evidence, not full parity or remote CI success.

@@ -80,6 +80,7 @@ describe("channelFor (§6.1)", () => {
       "tagger.rules.result": "ops",
       "macro.request": "ops",
       "macros.invoke": "ops",
+      "macros.save": "ops",
       "journal.trigger": "ops",
       "macro.result": "ops",
       "prefab.place": "ops",

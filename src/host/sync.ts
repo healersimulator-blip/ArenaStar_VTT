@@ -56,6 +56,7 @@ import type {
   SummonResultMsg,
   JournalTriggerMsg,
   MacroInvokeMsg,
+  MacroSaveMsg,
   MacroRequestMsg,
   MacroResultMsg,
   FxRequestMsg,
@@ -136,6 +137,8 @@ import { macroCompositeDocumentError, macroCompositeMacroIds,
   macroStrayCompositeError } from "../core/macroComposite";
 import { validateMacroArgs, type MacroArgs } from "../core/macroArgs";
 import { macroItemReadable } from "../core/macroItems";
+import { buildPlayerMacro, canSaveWorldMacros, ownsPlayerMacro, playerMacroAuthoring, PLAYER_MACRO_LIMITS,
+  validatePlayerMacroDraft } from "../core/playerMacros";
 import { fxBindingDeletionOps, fxBindingEvents, fxItemBindingError } from "../core/fxBinding";
 import { planSummon, summonDeletionOps, summonMarker, summonPlacementError, validateSummon,
   type SummonSource } from "../core/summons";
@@ -994,6 +997,9 @@ export class HostSync {
         return;
       case "macros.invoke":
         this.handleMacroInvoke(session, msg);
+        return;
+      case "macros.save":
+        this.handleMacroSave(session, msg);
         return;
       case "journal.trigger":
         this.handleJournalTrigger(session, msg);
@@ -2074,6 +2080,22 @@ export class HostSync {
               error: `update ${op.ref.coll}/${op.ref.id}`,
             };
           }
+          // D-394: a self-owned imported User cannot promote its role to bypass the GM opt-in.
+          if (op.ref.coll === "users" && user.role !== "GM" && user.role !== "ASSISTANT" &&
+              Object.keys(op.diff).some((key) => /^(?:-=)?role(?:\.|$)/.test(key)))
+            return { ok: false, reason: "forbidden", error: "user roles are GM-controlled" };
+          // D-394: permission and author metadata are not caller-editable via raw intents.
+          if (op.ref.coll === "users" && Object.keys(op.diff).some((key) =>
+              /^(?:-=)?canSaveMacros(?:\.|$)/.test(key))) {
+            if (user.role !== "GM" && user.role !== "ASSISTANT")
+              return { ok: false, reason: "forbidden", error: "macro-saving permission is GM-controlled" };
+            if (op.diff.canSaveMacros !== undefined && typeof op.diff.canSaveMacros !== "boolean")
+              return { ok: false, reason: "invalid_schema", error: "macro-saving permission must be boolean" };
+          }
+          if (op.ref.coll === "macros" && user.role !== "GM" && user.role !== "ASSISTANT" &&
+              ((doc as MacroDocument).playerAuthoring !== undefined || Object.keys(op.diff).some((key) =>
+                /^(?:-=)?playerAuthoring(?:\.|$)/.test(key))))
+            return { ok: false, reason: "forbidden", error: "personal macro changes use the authorized save path" };
           if (op.ref.coll === "tiles" &&
               (Object.hasOwn(op.diff, "triggerZone") || Object.hasOwn(op.diff, "triggerElevation"))) {
             const shapeError = tileTriggerZoneError(op.diff.triggerZone) ?? tileTriggerElevationError(op.diff.triggerElevation);
@@ -2205,6 +2227,9 @@ export class HostSync {
               reason: "invalid_schema",
               error: `delete: target not found`,
             };
+          if (op.ref.coll === "macros" && (doc as MacroDocument).playerAuthoring !== undefined &&
+              user.role !== "GM" && user.role !== "ASSISTANT")
+            return { ok: false, reason: "forbidden", error: "personal macro deletion uses the authorized save path" };
           if (op.ref.coll === "automations" && user.role !== "GM" && user.role !== "ASSISTANT")
             return { ok: false, reason: "forbidden", error: "only GMs delete active zones" };
           if (op.ref.coll === "prefabs" && user.role !== "GM" && user.role !== "ASSISTANT")
@@ -2799,6 +2824,68 @@ export class HostSync {
    * an authority of its own. All children are pre-flighted before the first one fires, so
    * a caller who may not run one of them gets nothing at all.
    */
+  /** D-394: personal authoring is one authenticated, undoable world operation, never a grant. */
+  private handleMacroSave(session: Session, msg: MacroSaveMsg): void {
+    const caller = session.user;
+    if (!caller || typeof msg.requestId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(msg.requestId) ||
+        typeof msg.macroId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(msg.macroId)) return;
+    const base = { kind: "macro.result" as const, requestId: msg.requestId, macroId: msg.macroId, callerId: caller.id };
+    if (!session.intentBucket.tryRemove()) {
+      this.send(session, { ...base, ok: false, detail: "macro saving rate-limited" }); return;
+    }
+    const key = `${caller.id}\u0000${msg.requestId}`;
+    const prior = this.seenMacroSaves.get(key);
+    if (prior) { this.send(session, prior); return; }
+    const reply = (ok: boolean, detail: string): void => {
+      const result = { ...base, ok, detail };
+      this.seenMacroSaves.set(key, result);
+      if (this.seenMacroSaves.size > 256) {
+        const first = this.seenMacroSaves.keys().next().value;
+        if (first) this.seenMacroSaves.delete(first);
+      }
+      this.send(session, result);
+    };
+    if (!["save", "delete"].includes(msg.action) || Object.keys(msg).some((field) =>
+        !["kind", "requestId", "macroId", "action", ...(msg.action === "save" ? ["draft"] : [])].includes(field))) {
+      reply(false, "invalid personal macro request"); return;
+    }
+    if (!canSaveWorldMacros(caller, this.store.getAll("users"))) {
+      reply(false, "GM has not enabled world macro saving for you"); return;
+    }
+    const previous = this.store.get("macros", msg.macroId) as MacroDocument | undefined;
+    // Existing foreign, private, revoked and unsupported-kind refs are indistinguishable.
+    if (previous && !ownsPlayerMacro(caller, previous) || msg.action === "delete" && !previous) {
+      reply(false, "personal macro unavailable"); return;
+    }
+    let ops: Op[];
+    if (msg.action === "delete") ops = [{ kind: "delete", ref: { coll: "macros", id: msg.macroId } }];
+    else {
+      const checked = validatePlayerMacroDraft(msg.draft);
+      if (!checked.ok) { reply(false, checked.error); return; }
+      if (!previous && this.store.getAll("macros").filter((macro) =>
+          playerMacroAuthoring(macro)?.userId === caller.id).length >= PLAYER_MACRO_LIMITS.perUser) {
+        reply(false, "limit of 64 personal macros per player"); return;
+      }
+      if (checked.draft.kind === "script") {
+        const scene = this.store.get("scenes", checked.draft.sceneId);
+        if (!scene || !docVisibleTo(caller, scene)) { reply(false, "script draft scene unavailable"); return; }
+      }
+      const doc = buildPlayerMacro(msg.macroId, caller.id, checked.draft, previous);
+      if (previous) {
+        // Explicit clears prevent a kind switch from retaining reviewed source/policy/bindings.
+        ops = [{ kind: "update", ref: { coll: "macros", id: msg.macroId }, diff: {
+          kind: doc.kind, name: doc.name, command: doc.command, ownership: doc.ownership,
+          flags: doc.flags, system: doc.system, playerAuthoring: doc.playerAuthoring as unknown as Json,
+          script: doc.script as unknown as Json ?? null, scriptState: doc.scriptState as unknown as Json ?? null,
+          sequence: null, summon: null, preset: null, fxItem: null, automation: null, composite: null,
+        } }];
+      } else ops = [{ kind: "create", coll: "macros", data: doc }];
+    }
+    const committed = this.commitOps(ops, caller.id, `macro-save-${msg.requestId}`);
+    reply(committed.ok, committed.ok ? (msg.action === "delete" ? "Deleted from GM world" : "Saved in GM world — included in next world export")
+      : "world macro save failed");
+  }
+
   private handleMacroInvoke(session: Session, msg: MacroInvokeMsg): void {
     const caller = session.user;
     if (!caller) return;
@@ -3841,6 +3928,8 @@ export class HostSync {
   private readonly seenAutomationRequests = new Map<string, number>();
   /** TR-12/MC-01: one fire per (caller, requestId) for macro-initiated graphs. */
   private readonly seenMacroInvokes = new Map<string, number>();
+  /** D-394: bounded idempotent save replies, scoped to the authenticated author. */
+  private readonly seenMacroSaves = new Map<string, MacroResultMsg>();
   /** TR-12: one fire per (caller, requestId) for journal-link triggers. */
   private readonly seenJournalTriggers = new Map<string, number>();
   /** Reentry depth of movement-trigger dispatch. A graph's committed Move/Rotation

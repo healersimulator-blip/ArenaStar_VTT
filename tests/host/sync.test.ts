@@ -18,6 +18,7 @@ import { describe, expect, test, vi } from "vitest";
 import { HostSync, gmSessionUser, type HostEvents } from "../../src/host/sync";
 import type { ScriptRunner } from "../../src/host/scriptWorker";
 import { scriptApprovalHash, type ScriptPolicy } from "../../src/core/scriptMacros";
+import { buildPlayerMacro, UNAPPROVED_SCRIPT_HASH, type PlayerMacroDraft } from "../../src/core/playerMacros";
 import { worldSettingsDoc, worldSettingsOps } from "../../src/core/worldSettings";
 import type { AutomationDefinition } from "../../src/core/automation";
 import { COMBAT_TRIGGER_METHODS } from "../../src/core/combat";
@@ -9690,4 +9691,369 @@ test("the called macro's reference and arguments are checked where they are auth
   // The host re-validates on update, so a smuggled argument never reaches a plan either.
   expect(h.hostStore.get("automations", "parent-graph")?.definition.steps[0])
     .toMatchObject({ kind: "callMacro", args: { rounds: "2" } });
+});
+
+// D-394: personal document saves are content requests, never generic macro authoring grants.
+describe("D-394 GM-enabled player macro saves", () => {
+  const personalChat: PlayerMacroDraft = { kind: "chat", name: "Personal roll", command: "/roll 1d20" };
+  const personalScript: PlayerMacroDraft = { kind: "script", name: "Personal script", command: "return { mine: true };",
+    sceneId: "s1", inputs: [] };
+  async function permit(h: Harness, id = PLAYER_ID, enabled = true): Promise<void> {
+    h.gm.submit([{ kind: "update", ref: { coll: "users", id }, diff: { canSaveMacros: enabled } }]);
+    await flushMicrotasks();
+  }
+
+  test("disabled by default; GM opt-in commits one private, undoable document as actual caller", async () => {
+    const h = await setup();
+    const p = await h.addPlayer(PLAYER_ID, "Rex");
+    const peer = await h.addPlayer(OTHER_ID, "Ivy");
+    const gmReplies: ClientEvents["macroResult"][] = [];
+    const otherReplies: ClientEvents["macroResult"][] = [];
+    h.gmBus.on("macroResult", (message) => gmReplies.push(message));
+    peer.bus.on("macroResult", (message) => otherReplies.push(message));
+    let before = h.hostStore.seq;
+    expect((await awaitMacroResult(p.bus, p.client.saveWorldMacro("personal", personalChat))).ok).toBe(false);
+    expect(h.hostStore.seq).toBe(before);
+    expect(h.hostStore.get("macros", "personal")).toBeUndefined();
+    await permit(h);
+    expect(p.client.store.get("users", PLAYER_ID)?.canSaveMacros).toBe(true);
+    before = h.hostStore.seq;
+    const saved = await awaitMacroResult(p.bus, p.client.saveWorldMacro("personal", personalChat));
+    await flushMicrotasks();
+    expect(saved).toMatchObject({ ok: true, macroId: "personal", callerId: PLAYER_ID });
+    expect(saved.detail).toMatch(/next world export/);
+    expect(h.hostStore.seq).toBe(before + 1);
+    const doc = h.hostStore.get("macros", "personal");
+    expect(doc).toMatchObject({ command: personalChat.command, ownership: { default: 0, [PLAYER_ID]: 3 },
+      playerAuthoring: { version: 1, userId: PLAYER_ID, draft: personalChat } });
+    expect(p.client.store.get("macros", "personal")?.playerAuthoring?.draft).toEqual(personalChat);
+    expect(peer.client.store.get("macros", "personal")).toBeUndefined();
+    expect(h.gm.store.get("macros", "personal")?.command).toBe(personalChat.command);
+    expect(h.hostLog.at(h.hostStore.seq)?.env.by).toBe(PLAYER_ID);
+    expect(h.hostLog.at(h.hostStore.seq)?.inverses).toEqual([{ kind: "delete", ref: { coll: "macros", id: "personal" } }]);
+    expect(gmReplies).toEqual([]);
+    expect(otherReplies).toEqual([]);
+    expect(h.host.undo().ok).toBe(true);
+    await flushMicrotasks();
+    expect(p.client.store.get("macros", "personal")).toBeUndefined();
+    expect(h.host.redo().ok).toBe(true);
+    await flushMicrotasks();
+    expect(p.client.store.get("macros", "personal")?.playerAuthoring?.draft).toEqual(personalChat);
+  });
+
+  test("own updates/delete use live opt-in; revoking it preserves documents and prevents both writes", async () => {
+    const h = await setup();
+    const p = await h.addPlayer(PLAYER_ID, "Rex");
+    await permit(h);
+    expect((await awaitMacroResult(p.bus, p.client.saveWorldMacro("personal", personalChat))).ok).toBe(true);
+    const changed = { ...personalChat, name: "Updated personal roll", command: "/roll 2d20" };
+    expect((await awaitMacroResult(p.bus, p.client.saveWorldMacro("personal", changed))).ok).toBe(true);
+    expect(h.hostStore.get("macros", "personal")?.playerAuthoring?.draft).toEqual(changed);
+    await permit(h, PLAYER_ID, false);
+    expect(p.client.store.get("users", PLAYER_ID)?.canSaveMacros).toBe(false);
+    const before = h.hostStore.seq;
+    const prior = structuredClone(h.hostStore.get("macros", "personal"));
+    expect((await awaitMacroResult(p.bus, p.client.saveWorldMacro("personal", personalChat))).ok).toBe(false);
+    expect((await awaitMacroResult(p.bus, p.client.deleteWorldMacro("personal"))).ok).toBe(false);
+    expect(h.hostStore.seq).toBe(before);
+    expect(h.hostStore.get("macros", "personal")).toEqual(prior);
+    expect(p.client.store.get("macros", "personal")?.playerAuthoring?.draft).toEqual(changed);
+    await permit(h);
+    expect((await awaitMacroResult(p.bus, p.client.deleteWorldMacro("personal"))).ok).toBe(true);
+    expect(h.hostStore.get("macros", "personal")).toBeUndefined();
+    expect(p.client.store.get("macros", "personal")).toBeUndefined();
+    expect(h.host.undo().ok).toBe(true);
+    await flushMicrotasks();
+    expect(p.client.store.get("macros", "personal")?.playerAuthoring?.draft).toEqual(changed);
+  });
+
+  test("GM ownership revocation removes the original-source DTO live and prevents management", async () => {
+    const h = await setup();
+    const p = await h.addPlayer(PLAYER_ID, "Rex");
+    const peer = await h.addPlayer(OTHER_ID, "Ivy");
+    await permit(h);
+    expect((await awaitMacroResult(p.bus, p.client.saveWorldMacro("personal", personalScript))).ok).toBe(true);
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: "personal" }, diff: { ownership: { default: 1 } } }]);
+    await flushMicrotasks();
+    expect(p.client.store.get("macros", "personal")?.playerAuthoring).toBeNull();
+    expect(p.client.store.get("macros", "personal")?.command).toBe("");
+    expect(peer.client.store.get("macros", "personal")?.playerAuthoring).toBeUndefined();
+    const before = h.hostStore.seq;
+    expect((await awaitMacroResult(p.bus, p.client.saveWorldMacro("personal", personalScript))).detail).toBe("personal macro unavailable");
+    expect((await awaitMacroResult(p.bus, p.client.deleteWorldMacro("personal"))).detail).toBe("personal macro unavailable");
+    expect(h.hostStore.seq).toBe(before);
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: "personal" }, diff: { ownership: { default: 0 } } }]);
+    await flushMicrotasks();
+    expect(p.client.store.get("macros", "personal")).toBeUndefined();
+    expect(peer.client.store.get("macros", "personal")).toBeUndefined();
+  });
+
+  test("can never adopt a legacy GM macro, a foreign authored macro or an unsupported-kind import", async () => {
+    const h = await setup();
+    const p = await h.addPlayer(PLAYER_ID, "Rex");
+    await permit(h);
+    const ownedLegacy = buildPlayerMacro("legacy-owned", PLAYER_ID, personalChat);
+    delete ownedLegacy.playerAuthoring;
+    const foreign = buildPlayerMacro("foreign", OTHER_ID, personalChat);
+    const privateGM = { ...ownedLegacy, _id: "gm-private", ownership: { default: 0 as const, [GM_ID]: 3 as const } };
+    const unsupported = { ...buildPlayerMacro("unsupported", PLAYER_ID, personalChat), kind: "sequence" as const };
+    // Trusted fixture for a malformed imported document: callers must still not manage it.
+    expect(h.host.commitSystem([
+      { kind: "create", coll: "macros", data: ownedLegacy }, { kind: "create", coll: "macros", data: foreign },
+      { kind: "create", coll: "macros", data: privateGM }, { kind: "create", coll: "macros", data: unsupported },
+    ]).ok).toBe(true);
+    await flushMicrotasks();
+    const before = h.hostStore.seq;
+    for (const id of ["legacy-owned", "foreign", "gm-private", "unsupported"]) {
+      expect((await awaitMacroResult(p.bus, p.client.saveWorldMacro(id, personalChat))).detail).toBe("personal macro unavailable");
+      expect((await awaitMacroResult(p.bus, p.client.deleteWorldMacro(id))).detail).toBe("personal macro unavailable");
+    }
+    expect((await awaitMacroResult(p.bus, p.client.deleteWorldMacro("missing"))).detail).toBe("personal macro unavailable");
+    expect(h.hostStore.seq).toBe(before);
+  });
+
+  test.each(["command", "flags", "ownership", "playerAuthoring", "playerAuthoring.userId", "-=playerAuthoring",
+    "-=playerAuthoring.draft.command", "playerAuthoring.-=draft"])(
+    "raw player intents cannot mutate protected personal %s, even while saving is enabled", async (path) => {
+      const h = await setup();
+      const p = await h.addPlayer(PLAYER_ID, "Rex");
+      await permit(h);
+      expect((await awaitMacroResult(p.bus, p.client.saveWorldMacro("personal", personalChat))).ok).toBe(true);
+      const rejected: ClientEvents["rejected"][] = [];
+      p.bus.on("rejected", (message) => rejected.push(message));
+      const before = h.hostStore.seq;
+      p.client.submit([{ kind: "update", ref: { coll: "macros", id: "personal" }, diff: { [path]: "forged" } }]);
+      await flushMicrotasks();
+      expect(rejected.at(-1)?.reason).toBe("forbidden");
+      expect(h.hostStore.seq).toBe(before);
+      expect(h.hostStore.get("macros", "personal")?.command).toBe(personalChat.command);
+    });
+
+  test("generic creation/deletion and author metadata forgery on a legacy owned chat remain forbidden", async () => {
+    const h = await setup();
+    const p = await h.addPlayer(PLAYER_ID, "Rex");
+    await permit(h);
+    const legacy = buildPlayerMacro("legacy", PLAYER_ID, personalChat);
+    delete legacy.playerAuthoring;
+    h.gm.submit([{ kind: "create", coll: "macros", data: legacy }]);
+    await flushMicrotasks();
+    expect((await awaitMacroResult(p.bus, p.client.saveWorldMacro("personal", personalChat))).ok).toBe(true);
+    const rejected: ClientEvents["rejected"][] = [];
+    p.bus.on("rejected", (message) => rejected.push(message));
+    const before = h.hostStore.seq;
+    p.client.submit([{ kind: "create", coll: "macros", data: buildPlayerMacro("forged", PLAYER_ID, personalChat) }]);
+    p.client.submit([{ kind: "delete", ref: { coll: "macros", id: "personal" } }]);
+    for (const path of ["playerAuthoring", "playerAuthoring.userId", "-=playerAuthoring", "-=playerAuthoring.draft.command"]) {
+      p.client.submit([{ kind: "update", ref: { coll: "macros", id: "legacy" }, diff: { [path]: { version: 1, userId: PLAYER_ID } } }]);
+    }
+    await flushMicrotasks();
+    expect(rejected).toHaveLength(6);
+    expect(rejected.every((message) => message.reason === "forbidden")).toBe(true);
+    expect(h.hostStore.seq).toBe(before);
+    expect(h.hostStore.get("macros", "legacy")?.playerAuthoring).toBeUndefined();
+  });
+
+  test("self-owned imported User cannot grant saving or promote its own role to bypass GM opt-in", async () => {
+    const h = await setup();
+    const p = await h.addPlayer(PLAYER_ID, "Rex");
+    h.gm.submit([{ kind: "update", ref: { coll: "users", id: PLAYER_ID }, diff: { ownership: { default: 0, [PLAYER_ID]: 3 } } }]);
+    await flushMicrotasks();
+    const rejected: ClientEvents["rejected"][] = [];
+    p.bus.on("rejected", (message) => rejected.push(message));
+    const before = h.hostStore.seq;
+    for (const path of ["canSaveMacros", "-=canSaveMacros", "canSaveMacros.enabled", "-=canSaveMacros.enabled", "role", "role.name", "-=role"]) {
+      p.client.submit([{ kind: "update", ref: { coll: "users", id: PLAYER_ID }, diff: { [path]: path.startsWith("role") ? "GM" : true } }]);
+    }
+    await flushMicrotasks();
+    expect(rejected).toHaveLength(7);
+    expect(rejected.every((message) => message.reason === "forbidden")).toBe(true);
+    expect(h.hostStore.seq).toBe(before);
+    expect(h.hostStore.get("users", PLAYER_ID)?.canSaveMacros).toBeUndefined();
+    expect(h.hostStore.get("users", PLAYER_ID)?.role).toBe("PLAYER");
+    expect((await awaitMacroResult(p.bus, p.client.saveWorldMacro("personal", personalChat))).ok).toBe(false);
+    await permit(h);
+    expect((await awaitMacroResult(p.bus, p.client.saveWorldMacro("personal", personalChat))).ok).toBe(true);
+  });
+
+  test.each(["callerId", "role", "ownership", "grants", "approvedHash", "scriptState", "flags", "command", "args"])(
+    "save wire body rejects spoofed %s and never commits it", async (field) => {
+      const h = await setup();
+      const p = await h.addPlayer(PLAYER_ID, "Rex");
+      await permit(h);
+      const before = h.hostStore.seq;
+      const requestId = `spoof_${field}`;
+      const result = awaitMacroResult(p.bus, requestId);
+      p.pair.b.send("ops", frameMessage({ kind: "macros.save", requestId, macroId: "personal", action: "save", draft: personalChat,
+        [field]: "GM_AUTHORITY" } as never));
+      expect((await result).ok).toBe(false);
+      expect(h.hostStore.seq).toBe(before);
+      expect(h.hostStore.get("macros", "personal")).toBeUndefined();
+    });
+
+  test("script scene and draft payload are checked live; delete requests cannot smuggle a draft", async () => {
+    const h = await setup();
+    const p = await h.addPlayer(PLAYER_ID, "Rex");
+    await permit(h);
+    h.gm.submit([{ kind: "create", coll: "scenes", data: { ...sceneDoc("private-scene"), ownership: { default: 0 } } }]);
+    await flushMicrotasks();
+    const before = h.hostStore.seq;
+    for (const sceneId of ["private-scene", "absent"]) {
+      const draft = { ...personalScript, sceneId };
+      expect((await awaitMacroResult(p.bus, p.client.saveWorldMacro("personal", draft))).detail).toBe("script draft scene unavailable");
+    }
+    expect((await awaitMacroResult(p.bus, p.client.saveWorldMacro("personal", { ...personalChat, command: "x".repeat(4097) }))).ok).toBe(false);
+    const result = awaitMacroResult(p.bus, "delete-with-draft");
+    p.pair.b.send("ops", frameMessage({ kind: "macros.save", requestId: "delete-with-draft", macroId: "personal", action: "delete", draft: personalChat } as never));
+    expect((await result).ok).toBe(false);
+    expect(h.hostStore.seq).toBe(before);
+    h.gm.submit([{ kind: "update", ref: { coll: "scenes", id: "s1" }, diff: { ownership: { default: 0 } } }]);
+    await flushMicrotasks();
+    expect((await awaitMacroResult(p.bus, p.client.saveWorldMacro("personal", personalScript))).ok).toBe(false);
+  });
+
+  test("only new documents consume the 64/user quota; own revisions and deletion still work at the limit", async () => {
+    const h = await setup();
+    const p = await h.addPlayer(PLAYER_ID, "Rex");
+    await permit(h);
+    h.gm.submit(Array.from({ length: 64 }, (_, index) => ({ kind: "create" as const, coll: "macros" as const,
+      data: buildPlayerMacro(`personal-${index}`, PLAYER_ID, personalChat) })));
+    await flushMicrotasks();
+    const before = h.hostStore.seq;
+    expect((await awaitMacroResult(p.bus, p.client.saveWorldMacro("over-limit", personalChat))).detail).toMatch(/64/);
+    expect(h.hostStore.seq).toBe(before);
+    expect((await awaitMacroResult(p.bus, p.client.saveWorldMacro("personal-0", { ...personalChat, command: "/roll 2d20" }))).ok).toBe(true);
+    expect((await awaitMacroResult(p.bus, p.client.deleteWorldMacro("personal-1"))).ok).toBe(true);
+    expect((await awaitMacroResult(p.bus, p.client.saveWorldMacro("after-delete", personalChat))).ok).toBe(true);
+    expect(h.hostStore.getAll("macros")).toHaveLength(64);
+  });
+
+  test("caller-scoped replay acknowledgements survive reconnect, never double-commit or cross authors", async () => {
+    const h = await setup();
+    let p = await h.addPlayer(PLAYER_ID, "Rex");
+    const peer = await h.addPlayer(OTHER_ID, "Ivy");
+    await permit(h);
+    await permit(h, OTHER_ID);
+    const requestId = "shared-save-request";
+    const send = (pair: ReturnType<typeof createTransportPair>, id: string) => pair.b.send("ops", frameMessage({
+      kind: "macros.save", requestId, macroId: id, action: "save", draft: personalChat }));
+    const original = awaitMacroResult(p.bus, requestId); send(p.pair, "first-author");
+    expect((await original).ok).toBe(true);
+    let before = h.hostStore.seq;
+    const replay = awaitMacroResult(p.bus, requestId); send(p.pair, "attempt-different-id");
+    expect((await replay).macroId).toBe("first-author");
+    expect(h.hostStore.seq).toBe(before);
+    expect(h.hostStore.get("macros", "attempt-different-id")).toBeUndefined();
+    h.host.removeSession(`peer-${PLAYER_ID}`);
+    p = await h.addPlayer(PLAYER_ID, "Rex", { lastSeq: before - 1 });
+    expect(p.client.store.get("macros", "first-author")?.playerAuthoring?.draft).toEqual(personalChat);
+    const reconnected = awaitMacroResult(p.bus, requestId); send(p.pair, "first-author");
+    expect((await reconnected).ok).toBe(true);
+    expect(h.hostStore.seq).toBe(before);
+    const otherSave = awaitMacroResult(peer.bus, requestId); send(peer.pair, "second-author");
+    expect((await otherSave).callerId).toBe(OTHER_ID);
+    before++;
+    expect(h.hostStore.seq).toBe(before);
+    expect(peer.client.store.get("macros", "first-author")).toBeUndefined();
+    expect(p.client.store.get("macros", "second-author")).toBeUndefined();
+  });
+
+  test("request IDs are bounded, shared intent bucket limits saves, and cached acknowledgements are bounded to 256", async () => {
+    let now = 1000;
+    const h = await setup({}, undefined, undefined, () => now);
+    const p = await h.addPlayer(PLAYER_ID, "Rex");
+    await permit(h);
+    const results: ClientEvents["macroResult"][] = [];
+    p.bus.on("macroResult", (message) => results.push(message));
+    const send = (requestId: string, macroId = "personal", action: "save" | "delete" = "save") =>
+      p.pair.b.send("ops", frameMessage(action === "save"
+        ? { kind: "macros.save", requestId, macroId, action, draft: personalChat }
+        : { kind: "macros.save", requestId, macroId, action }));
+    for (const [requestId, macroId] of [["invalid/id", "personal"], ["x".repeat(129), "personal"],
+      ["valid-request", "invalid/id"], ["valid-request", "x".repeat(129)]]) send(requestId ?? "", macroId ?? "");
+    await flushMicrotasks();
+    expect(results).toEqual([]);
+    const before = h.hostStore.seq;
+    for (let i = 0; i < 31; i++) send(`limited-${i}`, `missing-${i}`, "delete");
+    await flushMicrotasks();
+    expect(results.at(-1)?.detail).toMatch(/rate-limited/);
+    expect(h.hostStore.seq).toBe(before);
+    now += 1000;
+    let result = awaitMacroResult(p.bus, "cached-origin"); send("cached-origin");
+    expect((await result).ok).toBe(true);
+    for (let i = 0; i < 255; i++) {
+      now += 200;
+      result = awaitMacroResult(p.bus, `cached-${i}`); send(`cached-${i}`, "missing", "delete");
+      expect((await result).ok).toBe(false);
+    }
+    const cachedSeq = h.hostStore.seq;
+    now += 200;
+    result = awaitMacroResult(p.bus, "cached-origin"); send("cached-origin");
+    expect((await result).ok).toBe(true);
+    expect(h.hostStore.seq).toBe(cachedSeq); // original + 255 = 256 retained responses
+    now += 200;
+    result = awaitMacroResult(p.bus, "evict-oldest"); send("evict-oldest", "missing", "delete");
+    expect((await result).ok).toBe(false);
+    now += 200;
+    result = awaitMacroResult(p.bus, "cached-origin"); send("cached-origin");
+    expect((await result).ok).toBe(true);
+    expect(h.hostStore.seq).toBe(cachedSeq + 1); // outside the explicitly bounded replay window
+  });
+
+  test("script saving never executes/approves; later GM source stays private; any player revision revokes review but preserves history", async () => {
+    let runs = 0;
+    const h = await setup({}, async (source) => { runs++; expect(source).toContain("GM_PRIVATE_SOURCE"); return { private: true }; });
+    const p = await h.addPlayer(PLAYER_ID, "Rex");
+    const peer = await h.addPlayer(OTHER_ID, "Ivy");
+    await permit(h);
+    expect((await awaitMacroResult(p.bus, p.client.saveWorldMacro("personal", personalScript))).ok).toBe(true);
+    expect(runs).toBe(0);
+    expect(h.hostStore.get("macros", "personal")?.script).toMatchObject({ approvedHash: UNAPPROVED_SCRIPT_HASH,
+      playerCallable: false, grants: [], runAs: "caller" });
+    expect((await awaitMacroResult(p.bus, p.client.requestMacro("personal", {}))).ok).toBe(false);
+    expect(runs).toBe(0);
+    const privateSource = "// GM_PRIVATE_SOURCE\nreturn { private: true };";
+    const policy: Omit<ScriptPolicy, "approvedHash"> = { version: 1, sceneId: "s1", runAs: "gm", playerCallable: true, grants: [], inputs: [] };
+    const reviewed = { ...policy, approvedHash: await scriptApprovalHash(privateSource, policy) };
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: "personal" }, diff: {
+      command: privateSource, script: reviewed as unknown as Json,
+      flags: { core: { playerCallable: true, slot: 2 } }, ownership: { default: 1, [PLAYER_ID]: 3 },
+    } }]);
+    await flushMicrotasks();
+    expect(p.client.store.get("macros", "personal")?.playerAuthoring?.draft.command).toBe(personalScript.command);
+    expect(p.client.store.get("macros", "personal")?.command).toBe("");
+    expect(JSON.stringify(p.client.store.get("macros", "personal"))).not.toContain("GM_PRIVATE_SOURCE");
+    expect(peer.client.store.get("macros", "personal")?.playerAuthoring).toBeUndefined();
+    const invocationId = p.client.requestMacro("personal", {});
+    expect((await awaitMacroResult(p.bus, invocationId)).ok).toBe(true);
+    expect(runs).toBe(1);
+    await permit(h, PLAYER_ID, false);
+    expect((await awaitMacroResult(p.bus, p.client.requestMacro("personal", {}))).ok).toBe(true);
+    expect(runs).toBe(2); // saving permission is NOT an execution revocation
+    const history = structuredClone(h.hostStore.get("macros", "personal")?.scriptState);
+    expect(history?.recent).toHaveLength(2);
+    await permit(h);
+    const revised = { ...personalScript, command: "return { revision: 2 };" };
+    expect((await awaitMacroResult(p.bus, p.client.saveWorldMacro("personal", revised))).ok).toBe(true);
+    const updated = h.hostStore.get("macros", "personal");
+    expect(updated?.script).toMatchObject({ approvedHash: UNAPPROVED_SCRIPT_HASH, runAs: "caller", grants: [], playerCallable: false });
+    expect(updated?.flags).toEqual({ core: { slot: 2, playerCallable: false } });
+    expect(updated?.ownership).toEqual({ default: 0, [PLAYER_ID]: 3 });
+    expect(updated?.scriptState).toEqual(history);
+    expect(peer.client.store.get("macros", "personal")).toBeUndefined();
+    expect((await awaitMacroResult(p.bus, p.client.requestMacro("personal", {}))).ok).toBe(false);
+    expect(runs).toBe(2);
+    expect((await awaitMacroResult(p.bus, p.client.saveWorldMacro("personal", personalChat))).ok).toBe(true);
+    expect(h.hostStore.get("macros", "personal")?.script).toBeNull();
+    expect(h.hostStore.get("macros", "personal")?.scriptState).toEqual(history);
+    expect(p.client.store.get("macros", "personal")?.scriptState).toBeNull();
+    expect((await awaitMacroResult(p.bus, p.client.saveWorldMacro("personal", personalScript))).ok).toBe(true);
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: "personal" }, diff: {
+      command: privateSource, script: reviewed as unknown as Json, flags: { core: { playerCallable: true } },
+    } }]);
+    await flushMicrotasks();
+    const replay = awaitMacroResult(p.bus, invocationId);
+    p.pair.b.send("ops", frameMessage({ kind: "macro.request", requestId: invocationId, macroId: "personal", args: {} }));
+    expect((await replay).ok).toBe(false);
+    expect(runs).toBe(2); // script → chat → script did not erase invocation replay protection
+  });
 });

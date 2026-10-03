@@ -72,6 +72,8 @@ export const MsgKind = {
   "macros.invoke": 0x4f,
   // TR-12 (D-383) — a journal page's \`@Tile[…]{}` link fires the graphs on its anchor
   "journal.trigger": 0x50,
+  // D-394 — permitted personal macro authoring in the GM world (not execution).
+  "macros.save": 0x51,
   // D-250 — explored fog restore: the client asks, the host answers from its fog store
   "fog.get": 0x0e,
   // host → client
@@ -320,6 +322,13 @@ export interface MacroInvokeMsg {
   requestId: string;
   macroId: DocId;
 }
+
+/** D-394: content only; the host stamps creator/ownership and removes all execution grants. */
+export type MacroSaveMsg = {
+  kind: "macros.save";
+  requestId: string;
+  macroId: DocId;
+} & ({ action: "save"; draft: import("./playerMacros").PlayerMacroDraft } | { action: "delete" });
 
 /**
  * A journal handout link (MATT's \`@Tile[…]{}`). The client names the page and the
@@ -761,6 +770,7 @@ export type WireMessage =
   | SummonResultMsg
   | MacroRequestMsg
   | MacroInvokeMsg
+  | MacroSaveMsg
   | JournalTriggerMsg
   | MacroResultMsg
   | FxRequestMsg

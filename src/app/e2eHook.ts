@@ -213,6 +213,8 @@ export interface AppSurface {
   chatLines(): string[];
   /** MC-02 probe: the automation macro this shell holds — id and callable metadata as JSON. */
   macroCallable(): string;
+  /** D-394 read-only: documents actually present in this shell, including projected owner DTOs. */
+  worldMacros(): string;
   /** Test-only durability barrier: await the queued IDB oplog append before navigating away. */
   drainOps(): Promise<number>;
   tokenCount(): number;
@@ -1038,6 +1040,8 @@ export interface PlayerSurface {
   /** MC-02 probe: the automation macro a shell actually holds — its id and the callable
    * metadata delivered with it, as JSON. Never contains a graph id. */
   macroCallable(): string;
+  /** D-394 read-only: documents actually present in this shell, including projected owner DTOs. */
+  worldMacros(): string;
   connected(): boolean;
   /** Test-only direct manual-signaling access (atomic code exchange). */
   takeOutbox(): string[];
@@ -1613,6 +1617,7 @@ function playerSurface(playerApp: PlayerApp): PlayerSurface {
         : null;
     },
     role: () => client()?.user?.role ?? null,
+    worldMacros: () => JSON.stringify(client()?.store.getAll("macros") ?? []),
     macroCallable: () => {
       const found = client()?.store.getAll("macros").find((m) => m.kind === "automation");
       return JSON.stringify(found ? { id: found._id, automation: found.automation ?? null } : null);
@@ -2356,6 +2361,7 @@ function appSurface(app: HostApp): AppSurface {
     worldId: () => app.worldId,
     seq: () => client.store.seq,
     chatLines: () => client.store.getAll("messages").map((message) => message.content),
+    worldMacros: () => JSON.stringify(client.store.getAll("macros")),
     macroCallable: () => {
       const found = client.store.getAll("macros").find((m) => m.kind === "automation");
       return JSON.stringify(found ? { id: found._id, automation: found.automation ?? null } : null);

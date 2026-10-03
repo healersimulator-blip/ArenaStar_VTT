@@ -35,24 +35,26 @@
     "items",
     "journals",
     "rollTables",
+    "macros", // D-394: GM may revoke an author's per-document management rights.
     "factions", // §4A: OBSERVER+ grants strategic frames (§5A projection)
     "armies", // ownership cascades to embedded units
   ];
 
   let users = $state<UserDocument[]>([]);
+  let revision = $state(0);
   let coll = $state<CollectionName>("actors");
   let docId = $state<string>("");
-  const docs = $derived(
-    ((client.store.getAll(coll) ?? []) as readonly BaseDocument[]).map((d) => ({
-      id: d._id,
-      name: d.name,
-    })),
-  );
-  const doc = $derived(
-    docId ? ((client.store.get(coll, docId) as BaseDocument | undefined) ?? null) : null,
-  );
+  const docs = $derived.by(() => {
+    void revision;
+    return ((client.store.getAll(coll) ?? []) as readonly BaseDocument[]).map((d) => ({ id: d._id, name: d.name }));
+  });
+  const doc = $derived.by(() => {
+    void revision;
+    return docId ? ((client.store.get(coll, docId) as BaseDocument | undefined) ?? null) : null;
+  });
 
   function refresh(): void {
+    revision++;
     users = [...(client.store.getAll("users") as readonly UserDocument[])];
     if (docId && !docs.some((d) => d.id === docId)) docId = docs[0]?.id ?? "";
     if (!docId && docs[0]) docId = docs[0].id;
@@ -60,6 +62,10 @@
 
   function setRole(user: UserDocument, role: UserDocument["role"]): void {
     client.submit([{ kind: "update", ref: { coll: "users", id: user._id }, diff: { role } }]);
+  }
+
+  function setMacroSaving(user: UserDocument, enabled: boolean): void {
+    client.submit([{ kind: "update", ref: { coll: "users", id: user._id }, diff: { canSaveMacros: enabled } }]);
   }
 
   function setDefault(level: number): void {
@@ -98,7 +104,7 @@
   <h4>Players</h4>
   <table class="users" data-perm-users>
     <thead>
-      <tr><th>Name</th><th>Role</th></tr>
+      <tr><th>Name</th><th>Role</th><th>Save macros in world</th></tr>
     </thead>
     <tbody>
       {#each users as u (u._id)}
@@ -116,10 +122,18 @@
               {/each}
             </select>
           </td>
+          <td>
+            <input type="checkbox" data-perm-macro-save
+              aria-label={`Save macros in world for ${u.name}`}
+              checked={u.canSaveMacros === true || u.role === "GM" || u.role === "ASSISTANT"}
+              disabled={u.role === "GM" || u.role === "ASSISTANT"}
+              onchange={(event) => setMacroSaving(u, event.currentTarget.checked)} />
+          </td>
         </tr>
       {/each}
     </tbody>
   </table>
+  <p class="hint">Per-player opt-in: saves personal macros into this world for the next export. Script drafts still require separate GM review; turning this off prevents further saves/deletes, not existing execution.</p>
 
   <h4>Document ownership</h4>
   <div class="picker">
@@ -157,6 +171,7 @@
             <td>{u.name}</td>
             <td>
               <select
+                data-perm-owner={u._id}
                 value={doc.ownership[u._id] ?? -1}
                 aria-label={`Ownership for ${u.name}`}
                 onchange={(e) => setUserLevel(u._id, Number((e.target as HTMLSelectElement).value))}
@@ -200,6 +215,7 @@
     display: flex;
     gap: 4px;
   }
+  .hint { color: #99b4c5; font-size: 0.8rem; margin: 0; }
   .empty {
     opacity: 0.7;
     font-size: 0.875rem;
