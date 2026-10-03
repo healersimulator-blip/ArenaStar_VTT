@@ -17,12 +17,13 @@
   let { client, bus, getAsset = null }: { client: ClientSync; bus: EventBus<ClientEvents>;
     getAsset?: ((hash: string) => Promise<Uint8Array | undefined>) | null } = $props();
   const METHODS: AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "sceneChange", "sceneLoad", "rotate", "click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "doorOpen", "doorClose", "doorLock", "doorUnlock", ...COMBAT_TRIGGER_METHODS, "lightingChange", "timeChange", "manual"];
-  const KINDS: AutomationStep["kind"][] = ["select", "filter", "checkVariable", "checkValue", "checkScriptResult", "shuffle", "position", "distance", "attributes", "checkData", "condition", "inventory", "tokenTriggerCount", "routeMethod", "routeUser", "forEach", "endEach", "resetHistory", "batchFlush", "collection", "triggerTile", "setActive", "stopOthers", "stopMovement", "set", "gameTime", "sceneLighting", "sceneBackground", "tileImage", "hurtHeal", "random", "tags", "visibility", "door", "move", "rotate", "delete", "chat", "sequence", "script", "summon", "rollTable", "landing", "jump", "stop"];
+  const KINDS: AutomationStep["kind"][] = ["select", "filter", "checkVariable", "checkValue", "checkScriptResult", "shuffle", "position", "distance", "attributes", "checkData", "condition", "inventory", "tokenTriggerCount", "routeMethod", "routeUser", "forEach", "endEach", "resetHistory", "batchFlush", "collection", "triggerTile", "redirect", "setActive", "stopOthers", "stopMovement", "set", "gameTime", "sceneLighting", "sceneBackground", "tileImage", "hurtHeal", "random", "tags", "visibility", "door", "move", "rotate", "delete", "chat", "sequence", "script", "summon", "rollTable", "landing", "jump", "stop"];
   const ADD_KINDS = KINDS.filter((kind) => kind !== "endEach");
   const KIND_LABEL: Record<string, string> = { stopMovement: "Stop Token Movement", checkScriptResult: "Check Script Result",
     batchFlush: "Run All Batch Actions", gameTime: "Game Time",
     sceneLighting: "Scene Lighting", sceneBackground: "Scene Background", tileImage: "Switch Tile Image",
-    hurtHeal: "Hurt / Heal", move: "Move", rotate: "Rotation", delete: "Delete Entities", rollTable: "Roll Table" };
+    hurtHeal: "Hurt / Heal", move: "Move", rotate: "Rotation", delete: "Delete Entities", rollTable: "Roll Table",
+    redirect: "Trigger Automation", triggerTile: "Trigger Tile at Anchor" };
   const kindLabel = (kind: string): string => KIND_LABEL[kind] ?? kind;
   const methodLabel = (method: AutomationMethod): string => method === "rightClick" ? "right click"
     : method === "doubleClick" ? "double click" : method === "hoverIn" ? "hover in"
@@ -157,6 +158,8 @@
       case "collection": return { id, kind, mode: "add", selector: { kind: "inside" } };
       case "triggerTile": return { id, kind, target: { kind: "id", tileId: scene?.tiles.find((t) => t._id !== tileId)?._id ?? "" },
         tokens: "triggering" };
+      case "redirect": return { id, kind, method: "inherit", tokens: "triggering",
+        automationId: saved.find((doc) => doc._id !== editing && doc.definition.sceneId === sceneId)?._id ?? "" };
       case "setActive": return { id, kind, mode: "deactivate",
         target: { kind: "id", tileId: scene?.tiles.find((t) => t._id !== tileId)?._id ?? tileId } };
       case "stopOthers": return { id, kind };
@@ -1275,6 +1278,30 @@
               </select></label>
             {/if}
             <small>Changes the host-published paused gate on all graphs bound to each matching tile (up to 32 tiles / 128 graphs). It does not hide the tile. Later Trigger Tile calls in this plan see the new gate; the entire plan is undoable. Changing this graph's own gate does not interrupt the current fire.</small>
+          {:else if step.kind === "redirect"}
+            <label>Target graph <select aria-label="Redirect target graph" value={step.automationId}
+              onchange={(e) => { if (step.kind === "redirect") step.automationId = e.currentTarget.value; }}>
+              <option value="">Choose a saved graph…</option>
+              {#each saved.filter((doc) => doc._id !== editing && doc.definition.sceneId === sceneId) as doc (doc._id)}
+                <option value={doc._id}>{doc.name}</option>
+              {/each}
+            </select></label>
+            <label>Invoke as <select aria-label="Redirect method" value={step.method ?? "inherit"}
+              onchange={(e) => { if (step.kind === "redirect") step.method = e.currentTarget.value === "manual" ? "manual" : "inherit"; }}>
+              <option value="inherit">This trigger's own method</option>
+              <option value="manual">Manual</option>
+            </select></label>
+            <label>Token <select aria-label="Redirect token source" value={step.tokens ?? "triggering"}
+              onchange={(e) => { if (step.kind === "redirect") step.tokens = e.currentTarget.value as "triggering" | "current" | "inside"; }}>
+              <option value="triggering">Triggering token</option>
+              <option value="current">Current collection</option>
+              <option value="inside">Tokens inside the target's anchor</option>
+            </select></label>
+            <label>Start at landing <input aria-label="Redirect landing" value={step.landing ?? ""}
+              onchange={(e) => { if (step.kind === "redirect") { const value = e.currentTarget.value.trim(); step.landing = value || undefined; } }} /></label>
+            <label><input type="checkbox" aria-label="Redirect propagate stop" checked={step.propagateStop ?? false}
+              onchange={(e) => { if (step.kind === "redirect") step.propagateStop = e.currentTarget.checked; }} /> Let the target's Stop also stop this tile chain</label>
+            <small>Fires a named saved graph instead of a tile anchor — the target keeps its own gates, history and landing names, and runs inside this graph's single atomic envelope. <strong>This trigger's own method</strong> hands the target the real method (a door graph redirecting on doorOpen reaches a graph subscribed to doorOpen, which is how a region fires a tile graph); it fails the whole plan when the target does not accept that method. Manual always needs the target's manual method. Only graphs in this scene are listed, the target must exist and validate when you save, and only the triggering token, the current collection or the target's own anchor contents are offered — never a client-supplied token or a cross-scene id.</small>
           {:else if step.kind === "stopOthers"}
             <small>After a successful movement-trigger commit, suppress later tiles for this moving token; already-committed tiles and other tokens are unaffected. Canvas click currently dispatches only one tile.</small>
           {:else if step.kind === "set"}

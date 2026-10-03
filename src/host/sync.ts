@@ -1806,6 +1806,23 @@ export class HostSync {
         return `${step.id}: Move destination entity is unavailable`;
       if (step.kind === "sceneBackground" && step.targetSceneId && !sceneById(step.targetSceneId))
         return `${step.id}: Scene Background target scene is unavailable`;
+      // TR-12: a redirect names its graph, so the reference can be checked now — the
+      // target must exist, validate, share this scene and own a real anchor. The invoked
+      // method is only knowable at trigger time when it is inherited.
+      if (step.kind === "redirect") {
+        if (step.automationId === doc._id) return `${step.id}: a redirect cannot target its own graph`;
+        const target = this.store.get("automations", step.automationId) as AutomationDocument | undefined;
+        const targetChecked = target ? validateAutomation(target.definition) : null;
+        if (!target || !targetChecked?.ok)
+          return `${step.id}: redirect target is not a saved graph in this world`;
+        if (targetChecked.definition.sceneId !== checked.definition.sceneId)
+          return `${step.id}: a redirect fires a graph in this scene only`;
+        const targetScene = sceneById(targetChecked.definition.sceneId);
+        if (!targetScene || !automationSourceTile(targetScene, targetChecked.definition.tileId,
+          targetChecked.definition.sourceKind)) return `${step.id}: redirect target has no anchor in this scene`;
+        if (step.method === "manual" && !targetChecked.definition.methods.includes("manual"))
+          return `${step.id}: redirect target does not accept the manual method`;
+      }
       if (step.kind === "sceneBackground" || step.kind === "tileImage") {
         const images = step.kind === "tileImage" && step.images ? step.images : step.image ? [step.image] : [];
         for (const image of images) {

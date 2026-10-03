@@ -8597,3 +8597,165 @@ test("only a GM may author an automation macro, and only over a real manual grap
   expect(results.at(-1)?.ok).toBe(false);
   expect(results.at(-1)?.detail).toBe("macro unavailable");
 });
+// ─── TR-12 (D-382): redirects — regions and door triggers fire a NAMED graph ──────
+
+/** A tile the sweep never touches, so a child anchored here runs only by redirect. */
+const farPlate = (): TileDocument => ({ ...zoneTile(), _id: "far-plate", name: "Far plate",
+  x: 0, y: 400, width: 200, height: 200 });
+
+/** Author a named graph from `zoneDoc()`'s shell, overriding only what the case needs. */
+const auto = (id: string, over: Partial<AutomationDefinition>): AutomationDocument =>
+  ({ ...zoneDoc(), _id: id, name: id, definition: { ...zoneDoc().definition, ...over } });
+
+test("a region fires a named tile graph, which keeps the real method and the region as its origin", async () => {
+  const h = await setup();
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: farPlate() },
+    { kind: "create", coll: "regions", parent: { coll: "scenes", id: "s1" },
+      data: { _id: "crossing", type: "region", name: "Crossing", ownership: { default: 0 }, flags: {}, system: {},
+        x: 300, y: 100, width: 200, height: 200,
+        shape: { kind: "polygon", points: [[0, 0], [1, 0], [1, 1], [0, 1]] } } as RegionDocument }]);
+  await flushMicrotasks();
+  // The child is anchored on a plate the token never visits: the region reaches it by
+  // name, and nothing here recreates the child's graph.
+  h.gm.submit([{ kind: "create", coll: "automations", data: auto("tile-child", { tileId: "far-plate",
+    methods: ["enter"], gates: {}, steps: [
+      { id: "notice", kind: "chat", audience: "gm",
+        content: "child {{method}} <- {{originMethod}}@{{originSource}} on {{originTile}}" }] }) }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "automations", data: auto("region-parent", { sourceKind: "region",
+    tileId: "crossing", methods: ["enter"], gates: {}, steps: [
+      { id: "own", kind: "chat", audience: "gm", content: "parent {{method}}" },
+      { id: "go", kind: "redirect", automationId: "tile-child", method: "inherit", tokens: "triggering" }] }) }]);
+  await flushMicrotasks();
+  expect(h.hostStore.get("automations", "region-parent")?.definition.sourceKind).toBe("region");
+
+  // The runner walks into the region; its path never touches far-plate.
+  h.gm.submit([{ kind: "update", ref: tokenRef, diff: { x: 400, y: 200 } }]);
+  await flushMicrotasks();
+  expect(h.hostStore.getAll("messages").map((message) => message.content))
+    .toEqual(["parent enter", "child enter <- enter@region on crossing"]);
+  const child = h.hostStore.get("automations", "tile-child");
+  expect(child?.state?.recent?.map((entry) => entry.method)).toEqual(["enter"]);
+  expect(child?.state?.byToken?.["t-pl"]?.count).toBe(1);
+  // The region graph and its child share one undo step, and undo removes both.
+  expect(h.host.undo().ok).toBe(true);
+  await flushMicrotasks();
+  expect(h.hostStore.get("automations", "tile-child")?.state?.count ?? 0).toBe(0);
+});
+
+test("a door change fires a named automation that has no anchor over the door", async () => {
+  const h = await setup();
+  // `zone` carries the door; `far-plate` is where the named target lives, untouched.
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: zoneTile() },
+    { kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: farPlate() }]);
+  await flushMicrotasks();
+  const door: WallDocument = { _id: "gate", type: "wall", name: "Gate", ownership: { default: 0 },
+    flags: {}, system: {}, taggerTags: ["door-1"], c: [150, 250, 250, 250],
+    move: 1, sight: 1, sound: 1, light: 1, door: 0, oneWay: false };
+  h.gm.submit([{ kind: "create", coll: "walls", parent: { coll: "scenes", id: "s1" }, data: door }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "automations", data: auto("door-child", { tileId: "far-plate",
+    methods: ["doorOpen"], gates: {}, steps: [
+      { id: "notice", kind: "chat", audience: "gm", content: "door child {{method}}/{{originMethod}}@{{originSource}}" }] }) }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "automations", data: auto("door-parent", { tileId: "zone",
+    methods: ["doorOpen"], gates: {}, steps: [
+      { id: "go", kind: "redirect", automationId: "door-child", tokens: "triggering", method: "inherit" }] }) }]);
+  await flushMicrotasks();
+
+  h.gm.submit([{ kind: "update", ref: { coll: "walls", id: "gate", parent: { coll: "scenes", id: "s1" } },
+    diff: { door: 1 } }]);
+  await flushMicrotasks();
+  expect(h.hostStore.getAll("messages").map((message) => message.content))
+    .toEqual(["door child doorOpen/doorOpen@tile"]);
+  expect(h.hostStore.get("automations", "door-child")?.state?.recent?.map((entry) => entry.method))
+    .toEqual(["doorOpen"]);
+  // A second open (no committed change) fires nothing through the chain.
+  h.gm.submit([{ kind: "update", ref: { coll: "walls", id: "gate", parent: { coll: "scenes", id: "s1" } },
+    diff: { door: 1 } }]);
+  await flushMicrotasks();
+  expect(h.hostStore.getAll("messages")).toHaveLength(1);
+});
+
+test("a redirect is gated at authoring time and never widens a player's reach", async () => {
+  const h = await setup();
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: farPlate() }]);
+  await flushMicrotasks();
+  const rejected: ClientEvents["rejected"][] = [];
+  h.gmBus.on("rejected", (event) => rejected.push(event));
+  const redirectStep = (automationId: string,
+    over: Partial<Omit<Extract<AutomationDefinition["steps"][number], { kind: "redirect" }>, "id" | "kind" | "automationId">> = {})
+    : AutomationDefinition["steps"][number] => ({ id: "go", kind: "redirect", automationId, ...over });
+  const withRedirect = (id: string, step: AutomationDefinition["steps"][number]): AutomationDocument =>
+    auto(id, { tileId: "far-plate", methods: ["enter", "click", "manual"], gates: { playerRunnable: true },
+      steps: [step] });
+
+  // A redirect to nothing, to itself, to another scene, or to a manual step over a
+  // non-manual graph is refused before it is ever saved.
+  h.gm.submit([{ kind: "create", coll: "automations", data: withRedirect("bad-missing", redirectStep("nope")) }]);
+  await flushMicrotasks();
+  expect(rejected.at(-1)).toMatchObject({ reason: "invalid_schema" });
+  expect(rejected.at(-1)?.detail).toContain("not a saved graph");
+  h.gm.submit([{ kind: "create", coll: "automations",
+    data: withRedirect("bad-self", redirectStep("bad-self")) }]);
+  await flushMicrotasks();
+  expect(rejected.at(-1)?.detail).toContain("cannot target its own graph");
+
+  h.gm.submit([{ kind: "create", coll: "scenes", data: { ...sceneDoc("s2"), active: false } as SceneDocument }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s2" },
+    data: { ...zoneTile(), _id: "zone-two" } }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "automations", data: auto("far-child", { sceneId: "s2",
+    tileId: "zone-two", methods: ["enter"], gates: {}, steps: [
+      { id: "notice", kind: "chat", audience: "gm", content: "unreachable" }] }) }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "automations", data: withRedirect("bad-scene", redirectStep("far-child")) }]);
+  await flushMicrotasks();
+  expect(rejected.at(-1)?.detail).toContain("in this scene only");
+
+  h.gm.submit([{ kind: "create", coll: "automations", data: auto("enter-child", { tileId: "far-plate",
+    methods: ["enter"], gates: {}, steps: [
+      { id: "notice", kind: "chat", audience: "gm", content: "child {{method}}" }] }) }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "automations",
+    data: withRedirect("bad-manual", redirectStep("enter-child", { method: "manual" })) }]);
+  await flushMicrotasks();
+  expect(rejected.at(-1)?.detail).toContain("does not accept the manual method");
+  expect(h.hostStore.getAll("automations").map((doc) => doc._id)).toEqual(["far-child", "enter-child"]);
+
+  // A player's click reaches a child the player could never invoke directly: the
+  // child is not `playerRunnable` and its anchor is outside the player's reach.
+  const clickPlate: TileDocument = { ...farPlate(), _id: "click-plate",
+    ownership: { default: 0, [PLAYER_ID]: 3 } };
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: clickPlate }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "automations", data: auto("mobile-child", { tileId: "far-plate",
+    methods: ["manual"], gates: {}, steps: [
+      { id: "notice", kind: "chat", audience: "gm", content: "child {{method}} for {{user}}" }] }) }]);
+  await flushMicrotasks();
+  // A redirect only resolves a target that already exists, so the parent lands after its child
+  // (a same-submit forward reference is refused — the authoring gate reads the live store).
+  h.gm.submit([{ kind: "create", coll: "automations", data: auto("click-parent", { tileId: "click-plate",
+    methods: ["click"], gates: { playerRunnable: true }, steps: [
+      { id: "go", kind: "redirect", automationId: "mobile-child", method: "manual" }] }) }]);
+  await flushMicrotasks();
+  expect(rejected).toHaveLength(4);
+  const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const playerRejected: ClientEvents["rejected"][] = [];
+  playerBus.on("rejected", (event) => playerRejected.push(event));
+  // The child's own anchor is not clickable by a player, so the redirect is the only route.
+  player.requestAutomationClick("s1", "far-plate", { x: 100, y: 450 });
+  await flushMicrotasks();
+  expect(h.hostStore.getAll("messages")).toEqual([]);
+  player.requestAutomationClick("s1", "click-plate", { x: 100, y: 450 });
+  await flushMicrotasks();
+  expect(h.hostStore.getAll("messages").map((message) => message.content))
+    .toEqual(["child manual for " + PLAYER_ID]);
+  expect(h.hostStore.get("automations", "mobile-child")?.state?.count).toBe(1);
+  expect(h.hostStore.get("automations", "click-parent")?.state?.count).toBe(1);
+  // The player learns nothing: no GM-only line, no automations collection, no rejection.
+  expect(player.store.getAll("messages")).toEqual([]);
+  expect(player.store.getAll("automations")).toEqual([]);
+  expect(playerRejected).toEqual([]);
+});

@@ -981,6 +981,83 @@ test("wizard authors a current-collection edit and atomic Trigger Tile call with
   await expect(zones.locator("li").filter({ hasText: "Relay child graph" })).toContainText("1 run(s)");
 });
 
+test("GM binds a region to a named tile graph through the redirect step, keeping the region as origin", async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-zones-tab]").click();
+  const zones = page.locator("[data-active-zones]");
+  // The child lives on a tile the token never touches: only the region's redirect reaches it.
+  await zones.locator("[data-zone-tile-create] summary").click();
+  const tileEditor = zones.locator("[data-zone-tile-create]");
+  await tileEditor.getByLabel("Tile name").fill("Relay landing");
+  await tileEditor.getByLabel("X", { exact: true }).fill("650");
+  await tileEditor.getByLabel("Y", { exact: true }).fill("400");
+  await tileEditor.getByLabel("Width").fill("180");
+  await tileEditor.getByLabel("Height").fill("160");
+  await tileEditor.locator("[data-zone-create-tile]").click();
+  const landingOption = zones.locator("[data-zone-tile] option").filter({ hasText: "Relay landing" });
+  await expect(landingOption).toHaveCount(1);
+  const landingId = await landingOption.getAttribute("value");
+  if (!landingId) throw new Error("the created tile did not receive a host ID");
+  await zones.locator("[data-zone-tile]").selectOption(landingId);
+  await zones.locator("[data-zone-name]").fill("Landing graph");
+  await zones.locator(".methods label").filter({ hasText: "stop" }).locator("input").uncheck();
+  await zones.locator('[data-zone-step="notice"]').getByLabel("Text").fill("Child {{method}}@{{originSource}}");
+  await zones.locator("[data-zone-save]").click();
+  await expect(zones.locator("li").filter({ hasText: "Landing graph" })).toHaveCount(1);
+
+  await zones.locator("[data-zone-source-kind]").selectOption("region");
+  await zones.locator("[data-zone-region-create] summary").click();
+  const regionEditor = zones.locator("[data-zone-region-create]");
+  await regionEditor.getByLabel("Region name").fill("Relay court");
+  await regionEditor.getByLabel("X", { exact: true }).fill("300");
+  await regionEditor.getByLabel("Y", { exact: true }).fill("300");
+  await regionEditor.getByLabel("Width").fill("200");
+  await regionEditor.getByLabel("Height").fill("200");
+  await regionEditor.locator("[data-zone-create-region]").click();
+  await expect(zones.locator("[data-zone-tile] option").filter({ hasText: "Relay court" })).toHaveCount(1);
+
+  // `New` resets the source kind to a tile, so the region is re-selected for the parent graph.
+  await zones.getByRole("button", { name: "New" }).click();
+  await zones.locator("[data-zone-source-kind]").selectOption("region");
+  const courtOption = zones.locator("[data-zone-tile] option").filter({ hasText: "Relay court" });
+  await expect(courtOption).toHaveCount(1);
+  const courtId = await courtOption.getAttribute("value");
+  if (!courtId) throw new Error("the created region did not receive a host ID");
+  await zones.locator("[data-zone-tile]").selectOption(courtId);
+  await zones.locator("[data-zone-name]").fill("Court relay");
+  await zones.locator('[data-zone-step="notice"]').getByLabel("Text").fill("Parent {{method}}");
+  await zones.locator('[data-zone-add="redirect"]').click();
+  const relay = zones.locator("[data-zone-step]").last();
+  const targetOption = relay.getByLabel("Redirect target graph").locator("option")
+    .filter({ hasText: "Landing graph" });
+  await expect(targetOption).toHaveCount(1);
+  const targetId = await targetOption.getAttribute("value");
+  if (!targetId) throw new Error("the child graph has no host ID");
+  await relay.getByLabel("Redirect target graph").selectOption(targetId);
+  await relay.getByLabel("Redirect method").selectOption("inherit");
+  await relay.getByLabel("Redirect token source").selectOption("triggering");
+  await zones.locator("[data-zone-save]").click();
+  await expect(zones.locator("li").filter({ hasText: "Court relay" })).toHaveCount(1);
+  await expect(zones.getByRole("alert")).toHaveCount(0);
+
+  // Re-opening the saved graph offers the child, never the graph itself (a self-redirect loops).
+  await zones.locator("li").filter({ hasText: "Court relay" }).getByRole("button", { name: "Edit" }).click();
+  const options = zones.locator("[data-zone-step]").last().getByLabel("Redirect target graph").locator("option");
+  await expect(options.filter({ hasText: "Landing graph" })).toHaveCount(1);
+  await expect(options.filter({ hasText: "Court relay" })).toHaveCount(0);
+
+  const before = await hostCall<number>(page, "seq");
+  await zones.locator("[data-zone-run]").click();
+  await expect(page.locator("#chat-log")).toContainText("Parent enter");
+  await expect(page.locator("#chat-log")).toContainText("Child enter@region");
+  await expect.poll(() => hostCall<number>(page, "seq")).toBe(before + 1);
+  await expect(zones.locator("li").filter({ hasText: "Court relay" })).toContainText("1 run(s)");
+  await expect(zones.locator("li").filter({ hasText: "Landing graph" })).toContainText("1 run(s)");
+});
+
 test("wizard deletes one persistent variable, keeps its sibling, undoes and reloads the deletion", async ({ page }) => {
   test.setTimeout(90_000);
   await page.goto(entry + "?e2e=1");

@@ -15,7 +15,7 @@ import { healthAmountError, resolveHealthAmount, type HealthAmount } from "./hea
 import { rotationAngleError, resolveRotationAngle, type RotationAngle } from "./rotationAngle";
 import { hexCorners, snapTokenCenter, type GridSpec } from "../canvas/grid";
 import { moveTableLocation, snapshotMoveDestination, moveDestinationPoint, type MoveDestinationSnapshot } from "./moveDestination";
-import { regionTriggerTile } from "./regionGeometry";
+import { automationSourceTile, regionTriggerTile } from "./regionGeometry";
 import { MOVABLE_COLLECTIONS, applyMovePosition, moveGeometry, type MovePlaceable } from "./movePlaceable";
 import { movementWallBlocked, movementFootprintBlocked, movementSpeedDuration } from "./movementPolicy";
 import { moveCoordinatesError, resolveMoveCoordinates, type MoveCoordinates } from "./moveCoordinates";
@@ -123,6 +123,12 @@ export type AutomationStep =
   | { id: string; kind: "batchFlush" }
   /** Add/remove/replace/clear the current action collection; stable ref identity, no world writes. */
   | { id: string; kind: "collection"; mode: "add" | "remove" | "replace" | "clear"; selector?: AutomationSelector }
+  /** TR-12: fire another saved graph **by name** — no tile to recreate, no anchor to
+   * discover. The child runs inside this same plan (atomic, depth/budget bounded) with
+   * the original method and source preserved (`method: "inherit"`), or as a `manual`
+   * call (`method: "manual"`). Only same-scene GM-authored graphs. */
+  | { id: string; kind: "redirect"; automationId: string; tokens?: "triggering" | "current" | "inside";
+      landing?: string; propagateStop?: boolean; method?: "inherit" | "manual" }
   /** Calls manual-method graphs anchored to matching tiles as part of THIS atomic host plan. */
   | { id: string; kind: "triggerTile"; target: AutomationTileTarget;
       tokens: "triggering" | "current" | "inside"; landing?: string; propagateStop?: boolean }
@@ -228,6 +234,10 @@ export interface AutomationEvent {
   /** Preserved across Trigger Tile calls; child `method` is manual. */
   originMethod?: AutomationMethod;
   originTileId?: string;
+  /** Whether the origin anchor (`originTileId`) is a tile or a scene region. Preserved
+   * across redirects exactly like `originMethod`, so a redirected graph can tell where
+   * the event really came from. */
+  originSource?: "tile" | "region";
   scene: SceneDocument;
   tile: TileDocument;
   /** Original triggering token is immutable even when "current" is replaced by a selector. */
@@ -357,7 +367,7 @@ const SCRIPT_BINDINGS: readonly AutomationScriptBinding[] = ["triggerToken", "cu
 const IDENT = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
 const INPUT_NAME = /^[a-zA-Z][a-zA-Z0-9_]{0,31}$/;
 /** Runtime bindings cannot be shadowed by durable user-defined variables. */
-const RESERVED_VARIABLES = new Set(["method", "originMethod", "originTile", "user", "count", "index",
+const RESERVED_VARIABLES = new Set(["method", "originMethod", "originTile", "originSource", "user", "count", "index",
   "currentId", "constructor", "prototype", "toString", "valueOf", "hasOwnProperty"]);
 const VARIABLE_LIMIT = 64;
 const VARIABLE_NUMBER_LIMIT = 1_000_000_000;
@@ -619,6 +629,16 @@ export function validateAutomation(value: unknown): { ok: true; definition: Auto
           return bad(`invalid ${String(step.kind)} action`);
         const error = tileTargetError(step.target, value.sceneId as string);
         if (error) return bad(error);
+        break;
+      }
+      case "redirect": {
+        if (!keys(step, [...common, "automationId", "tokens", "landing", "propagateStop", "method"]) ||
+            typeof step.automationId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(step.automationId) ||
+            (step.tokens !== undefined && !["triggering", "current", "inside"].includes(String(step.tokens))) ||
+            (step.landing !== undefined && (typeof step.landing !== "string" || !IDENT.test(step.landing))) ||
+            (step.propagateStop !== undefined && typeof step.propagateStop !== "boolean") ||
+            (step.method !== undefined && !["inherit", "manual"].includes(String(step.method))))
+          return bad("redirect needs a named target graph and an optional token source/landing/method");
         break;
       }
       case "position":
@@ -1687,6 +1707,7 @@ function planGraph(
   const values: Record<string, string | number | boolean> = Object.assign(Object.create(null) as Record<string, string | number | boolean>,
     resume?.values ?? nextState.variables ?? {}, { method: event.method,
       originMethod: event.originMethod ?? event.method, originTile: event.originTileId ?? event.tile._id,
+      originSource: event.originSource ?? (d.sourceKind ?? "tile"),
       user: event.caller.id, count: nextState.count });
   let lastTableResult: string | null | undefined = resume?.tableResult.present ? resume.tableResult.value : undefined;
   let current: Target[] = resume ? resolveContinuationTargets(event.scene, resume.current)
@@ -2045,6 +2066,48 @@ function planGraph(
                 if (step.propagateStop && result.stopped) return { ok: true, stopped: true };
               }
             }
+          }
+          break;
+        }
+        case "redirect": {
+          const child = world.automations.find((candidate) => candidate._id === step.automationId);
+          if (!child) return fail(`redirect target ${step.automationId} is not in this world`);
+          const checked = validateAutomation(child.definition);
+          if (!checked.ok) return fail(`redirect target ${child._id}: ${checked.error}`);
+          const target = checked.definition;
+          if (target.sceneId !== event.scene._id)
+            return fail("a redirect fires a graph in this scene only");
+          const anchor = automationSourceTile(event.scene, target.tileId, target.sourceKind);
+          if (!anchor) return fail(`redirect target ${child._id} has no anchor in this scene`);
+          // The inherited method is the one this event really is, so the target's own
+          // method filters, `routeMethod` and `{{method}}` see the truth rather than a
+          // synthetic "someone triggered me": the region behavior / Trigger Tile shape
+          // with the method preserved instead of replaced.
+          const method: AutomationMethod = step.method === "manual" ? "manual" : event.method;
+          if (!target.methods.includes(method))
+            return fail(`redirect target ${child._id} does not accept the ${method} method`);
+          const tokens: Array<TokenDocument | undefined> = step.tokens === "inside"
+            ? select(world, { ...event, tile: anchor }, { kind: "inside" }).map(({ doc }) => doc as TokenDocument)
+            : step.tokens === "current"
+              ? current.filter(({ ref }) => ref.coll === "tokens" && ref.parent?.id === event.scene._id)
+                .map(({ doc }) => doc as TokenDocument)
+              : [event.token];
+          if (tokens.length > 32) return fail("redirect token fanout exceeds 32 tokens");
+          trace.push(`redirect to graph ${child._id} as ${method} for ${tokens.length} token slot(s)`);
+          for (const token of tokens) {
+            const result = planGraph(ctx, child, { scene: event.scene, tile: anchor, caller: event.caller,
+              at: event.at, rng: event.rng, method,
+              originMethod: event.originMethod ?? event.method,
+              originTileId: event.originTileId ?? event.tile._id,
+              originSource: event.originSource ?? (d.sourceKind ?? "tile"),
+              ...(event.direction ? { direction: event.direction } : {}),
+              ...(event.movementOriginal ? { movementOriginal: event.movementOriginal } : {}),
+              ...(event.imageAssetError ? { imageAssetError: event.imageAssetError } : {}),
+              ...(event.hurtHeal ? { hurtHeal: event.hurtHeal } : {}),
+              ...(token ? { token } : {}) }, hostUserId, step.landing);
+            if (!result.ok) return result;
+            if (result.skipped) trace.push(`graph ${child._id} skipped: ${result.skipped}`);
+            if (step.propagateStop && result.stopped) return { ok: true, stopped: true };
           }
           break;
         }

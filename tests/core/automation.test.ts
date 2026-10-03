@@ -2512,3 +2512,141 @@ describe("MATT Move / Rotation / Delete Entities / Roll Table actions", () => {
     expect(oversized).toMatchObject({ ok: false, error: expect.stringMatching(/256-character variable bound/) });
   });
 });
+
+// ─── TR-12: redirects — a named graph, the real method, the origin ───────────────
+
+describe("TR-12 redirects", () => {
+  const childGraph = (id: string, over: Partial<AutomationDefinition> = {}): AutomationDocument => ({
+    _id: id, type: "automation", name: id, ownership: { default: 0 }, flags: {}, system: {},
+    definition: { version: 1, sceneId: "s1", tileId: "zone", methods: ["enter"], gates: {}, steps: [
+      { id: "tell", kind: "chat", audience: "gm",
+        content: "child {{method}} from {{originMethod}} at {{originTile}}/{{originSource}}" },
+      { id: "mark", kind: "tags", edit: "add", tags: ["redirected"] },
+    ], ...over },
+  });
+  /** The chat line a plan writes: op `data` is a generic document, so read it structurally. */
+  const contentOf = (op: { data: unknown }): string => (op.data as { content: string }).content;
+  const parentDef = (step: Extract<AutomationDefinition["steps"][number], { kind: "redirect" }>,
+    over: Partial<AutomationDefinition> = {}): AutomationDefinition => ({
+    version: 1, sceneId: "s1", tileId: "zone", methods: ["enter"], gates: {},
+    steps: [step], ...over });
+  // The graph under test must be registered for the redirect to find its target: the
+  // world is built from the caller's own definition plus the named child.
+  function worldOf(def: AutomationDefinition, extra: AutomationDocument[] = []): ReturnType<typeof emptyWorld> {
+    const w = emptyWorld();
+    w.scenes.push(scene);
+    w.automations.push(automation(def), ...extra);
+    return w;
+  }
+  const redirect = (to: string, over: Partial<Extract<AutomationDefinition["steps"][number], { kind: "redirect" }>> = {})
+    : Extract<AutomationDefinition["steps"][number], { kind: "redirect" }> =>
+    ({ id: "go", kind: "redirect", automationId: to, ...over });
+
+  test("the step validates strictly and refuses an unknown shape", () => {
+    expect(validateAutomation(parentDef(redirect("child-1"))).ok).toBe(true);
+    expect(validateAutomation(parentDef(redirect("child-1", { method: "manual", tokens: "inside",
+      landing: "start", propagateStop: true }))).ok).toBe(true);
+    const bad = [
+      redirect(""),
+      redirect("has space"),
+      redirect("x".repeat(129)),
+      redirect("child-1", { tokens: "trigger" as never }),
+      redirect("child-1", { landing: "9bad" as never }),
+      redirect("child-1", { propagateStop: "yes" as never }),
+      redirect("child-1", { method: "trigger" as never }),
+      { id: "go", kind: "redirect", automationId: "child-1", graphId: "x" } as never,
+      { id: "go", kind: "redirect" } as never,
+    ];
+    for (const step of bad) expect(validateAutomation(parentDef(step)).ok, JSON.stringify(step)).toBe(false);
+  });
+
+  test("a redirect runs the named graph with this trigger's own method and origin", () => {
+    const def = parentDef(redirect("child-1"));
+    const w = worldOf(def, [childGraph("child-1")]);
+    const planned = planAutomation(w, automation(def), { scene, tile, token: runner, method: "enter",
+      caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    if (!planned.ok || !("plan" in planned)) throw new Error("a valid redirect must plan");
+    const messages = planned.plan.ops.filter((op) => op.kind === "create" && op.coll === "messages")
+      .map((op) => contentOf(op as Extract<typeof planned.plan.ops[number], { kind: "create" }>));
+    expect(messages).toEqual(["child enter from enter at zone/tile"]);
+    // The child's own history records the real method — not a synthetic one.
+    const childState = planned.plan.ops.flatMap((op) => op.kind === "update" && op.ref.coll === "automations" &&
+      op.ref.id === "child-1" ? [op.diff.state] : []).at(-1) as { count: number; recent?: Array<{ method: string }> };
+    expect(childState.recent?.at(-1)?.method).toBe("enter");
+    // Parent and child share one envelope: both graphs' writes are in the same op list.
+    expect(planned.plan.ops.some((op) => op.kind === "create" && op.coll === "automations")).toBe(false);
+    expect(planned.plan.ops.some((op) => op.kind === "update" && op.ref.id === "a1")).toBe(true);
+  });
+
+  test("the target must exist, validate and accept the invoked method", () => {
+    const def = parentDef(redirect("child-1"));
+    const missing = planAutomation(worldOf(def), automation(def), { scene, tile, token: runner,
+      method: "enter", caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    expect(missing).toMatchObject({ ok: false, error: expect.stringMatching(/not in this world/) });
+
+    const wrongMethod = planAutomation(worldOf(def, [childGraph("child-1", { methods: ["exit"] })]),
+      automation(def), { scene, tile, token: runner, method: "enter", caller: actor, at: 1000,
+        rng: () => 0.25 }, "gm");
+    expect(wrongMethod).toMatchObject({ ok: false, error: expect.stringMatching(/does not accept the enter method/) });
+
+    const otherScene = planAutomation(worldOf(def, [childGraph("child-1", { sceneId: "s2" })]),
+      automation(def), { scene, tile, token: runner, method: "enter", caller: actor, at: 1000,
+        rng: () => 0.25 }, "gm");
+    expect(otherScene).toMatchObject({ ok: false, error: expect.stringMatching(/in this scene only/) });
+
+    const malformed = planAutomation(worldOf(def, [{ ...childGraph("child-1"),
+      definition: { ...childGraph("child-1").definition, methods: ["nope"] } as never }]),
+      automation(def), { scene, tile, token: runner, method: "enter", caller: actor, at: 1000,
+        rng: () => 0.25 }, "gm");
+    expect(malformed).toMatchObject({ ok: false, error: expect.stringMatching(/redirect target child-1/) });
+  });
+
+  test("manual mode calls a manual graph and still reports where it came from", () => {
+    const step = redirect("child-1", { method: "manual" });
+    const def = parentDef(step);
+    const rejected = planAutomation(worldOf(def, [childGraph("child-1")]), automation(def),
+      { scene, tile, token: runner, method: "enter", caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    expect(rejected).toMatchObject({ ok: false, error: expect.stringMatching(/does not accept the manual method/) });
+
+    const manualChild = childGraph("child-1", { methods: ["manual"] });
+    const planned = planAutomation(worldOf(def, [manualChild]), automation(def), { scene, tile,
+      token: runner, method: "enter", caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    if (!planned.ok || !("plan" in planned)) throw new Error("a manual redirect must plan");
+    // `method` is what it was invoked as; `originMethod` and the source stay the truth.
+    const message = planned.plan.ops.find((op) => op.kind === "create" && op.coll === "messages");
+    expect(message ? contentOf(message as Extract<typeof planned.plan.ops[number], { kind: "create" }>) : null)
+      .toBe("child manual from enter at zone/tile");
+  });
+
+  test("a redirect chain is bounded, and a landing must exist in the target", () => {
+    // A -> B -> A: the recursion guard, not the depth cap, names the cycle.
+    const a: AutomationDefinition = parentDef(redirect("child-1"));
+    const b = childGraph("child-1", { steps: [redirect("a1")] });
+    const looped = planAutomation(worldOf(a, [b]), automation(a), { scene, tile, token: runner,
+      method: "enter", caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    expect(looped).toMatchObject({ ok: false, error: expect.stringMatching(/recursion/) });
+
+    const badLanding = planAutomation(worldOf(parentDef(redirect("child-1", { landing: "nowhere" })),
+      [childGraph("child-1")]), automation(parentDef(redirect("child-1", { landing: "nowhere" }))),
+      { scene, tile, token: runner, method: "enter", caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    expect(badLanding).toMatchObject({ ok: false, error: expect.stringMatching(/landing nowhere not found/) });
+  });
+
+  test("the target's own anchor decides `inside` tokens, never the caller's position", () => {
+    // The parent fires at `zone`, where the triggering runner stands; the child is anchored
+    // far away on `far`, which holds a different token. `inside` must read the target.
+    const far: TileDocument = { ...tile, _id: "far", x: 400, y: 300 };
+    const stale: TokenDocument = token("by-the-far-tile", 500, 400);
+    const staged: SceneDocument = { ...scene, tiles: [...scene.tiles, far], tokens: [...scene.tokens, stale] };
+    const def = parentDef(redirect("child-1", { tokens: "inside" }));
+    const w = emptyWorld();
+    w.scenes.push(staged);
+    w.automations.push(automation(def), childGraph("child-1", { tileId: "far" }));
+    const planned = planAutomation(w, automation(def), { scene: staged, tile, token: runner, method: "enter",
+      caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    if (!planned.ok || !("plan" in planned)) throw new Error(`an inside redirect must plan: ${JSON.stringify(planned)}`);
+    const childState = planned.plan.ops.flatMap((op) => op.kind === "update" && op.ref.coll === "automations" &&
+      op.ref.id === "child-1" ? [op.diff.state] : []).at(-1) as { byToken: Record<string, { count: number }> };
+    expect(Object.keys(childState.byToken)).toEqual(["by-the-far-tile"]);
+  });
+});

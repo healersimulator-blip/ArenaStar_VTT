@@ -1,6 +1,6 @@
 # FX Wizard Verification History
 
-Consolidated historical archive through D-372, with the D-374 double-click, D-375 hover, D-376 scene-change, D-377 door-change, D-378 combat-change, D-379 environment-change, D-380 scene-load and D-381 automation-macro follow-ups appended below. D-373 remains the latest standalone verification report.
+Consolidated historical archive through D-372, with the D-374 double-click, D-375 hover, D-376 scene-change, D-377 door-change, D-378 combat-change, D-379 environment-change, D-380 scene-load, D-381 automation-macro and D-382 redirect follow-ups appended below. D-373 remains the latest standalone verification report.
 
 **Recovery note:** the former archive body was unavailable after an overwrite. D-293–D-346 below are reconstructed from the preserved, detailed `DECISIONS.md` records, rather than copied from the original report bodies. D-347 is retained from its original standalone verification report. Existing status summaries and verification counts remain available in `MACROS_FX_WIZARD_IMPLEMENTATION_STATUS.md`.
 
@@ -42,6 +42,7 @@ Consolidated historical archive through D-372, with the D-374 double-click, D-37
 - [D-379 archived verification report](#report-d379)
 - [D-380 archived verification report](#report-d380)
 - [D-381 archived verification report](#report-d381)
+- [D-382 archived verification report](#report-d382)
 
 <a id="report-d293-d319"></a>
 
@@ -4290,4 +4291,25 @@ The browser cases used npm-provisioned Chromium 153 for functional input coverag
 - `tests/host/sync.test.ts` — **206/206**. New: a published macro fires for a player as that player (one `manual` history entry, neutral `Automation fired` detail, no messages in the player replica, macro delivered without binding or automations collection) and for the GM (`Fired Courtyard alert`), with Undo reverting exactly the graph's own transaction; the refusal matrix (unpublished gate, region anchor, hidden macro, missing macro, a graph in a scene the player is not in, `manual` removed then restored); authoring refusals (player-authored, missing graph, click-only graph, binding on a chat macro, command on an automation macro); a forged extra `graphId` field (`invalid_schema`) and a replayed request id (one fire). Writing those cases also pinned a real ordering rule: a graph must be committed before a macro may reference it.
 - Production `file://` Chromium 153: `e2e/active_zones.spec.ts:1371` authors the graph, publishes the macro from the zone list, runs it from the directory as the GM, then joins a real second browser context, asserts the graph id appears nowhere in the player's shell, runs the macro there and checks the host chat and per-graph history name each invoker. `active_zones.spec.ts` (25 cases) + `join.spec.ts`: **26/26 in 4.2 min**.
 - Full `corepack pnpm test` — **4,687 passed / 12 skipped** across 326 passing / 2 skipped files (**101.53 s**). `pnpm typecheck` — 64 components, 0 blocking, 1 existing advisory; lint clean. `pnpm size` — **3.870 MB raw / 1.107 MB gzip** (4,057,625 / 1,160,426 bytes), within the 6 MB budget; `git diff --check` clean. `PROTOCOL.md` documents the new kind; the wire boundary tables (`contracts`, `frame`, `fixtures`) were updated with it.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d382"></a>
+
+## D382 — Redirects: a region or door fires a named graph (2026-10-03)
+
+**Scope:** the redirect half of TR-12 — "Scene regions can fire a tile graph; door/journal/macro triggers can fire a named automation without recreating it. Preserve source/method/context through redirects." Journal initiation, chat-command invocation, the player hotbar, composite macros and per-invocation inputs stay open.
+
+### Implemented
+
+- New core step `{ id, kind: "redirect", automationId, tokens?: "triggering" | "current" | "inside", landing?, propagateStop?, method?: "inherit" | "manual" }` (`src/core/automation.ts`). `method: "manual"` (the default) is MATT's synthetic Trigger Tile: the target must subscribe to `manual`. `method: "inherit"` hands the target the **real** method — MATT's region behavior, and the reason a region can fire an `enter`-subscribed tile graph. `originMethod`, `originTileId` and the new `originSource` (`tile`/`region`) ride along, and `{{originSource}}` is a reserved binding.
+- Validation in both places: the definition check requires a bounded id and the listed enums; the runtime re-resolves the target live and refuses a missing graph, an invalid target definition, a cross-scene target, a target with no anchor in the event's scene, a `manual` step over a graph without `manual`, and an `inherit` step over a graph that does not subscribe to the real method. Token fanout ≤32; recursion stays inside the existing depth-8 / invocation / step budgets; the child shares the parent's plan, envelope and undo step.
+- Host authoring gate (`automationDocumentError`): the target must already be committed, valid, same-scene, anchored and method-compatible; a self-redirect is refused. Because the gate reads the live store, a forward reference inside a single submit is refused (the target must be saved first).
+- UI: the graph editor gains a **Trigger Automation** row (`AutomationPanel.svelte`) with target select (only saved graphs of this scene, never the graph itself), method, token source, landing and propagate-stop controls, plus the explanatory note.
+
+### Verification
+
+- `tests/core/automation.test.ts` — **102/102**, new `TR-12 redirects` group: definition validation (bounded id, method/token enums), inherit vs manual invocation, the child's own history recording the real method, same-envelope op ordering, the run-time refusal matrix (missing / invalid / cross-scene / wrong-method / anchorless targets), recursion and missing-landing errors, and `inside` resolving against the target's own anchor.
+- `tests/host/sync.test.ts` — **209/209** (three new cases). (1) A committed region entry fires a region graph whose redirect reaches a tile graph the token never visits: the child's chat names the real method and `{{originSource}}` = `region`, its history records `enter`, and one Undo removes both graphs' state. (2) A door change fires a child that has no anchor over the door, once per committed change, with a repeat same-value write firing nothing. (3) The authoring/refusal case: four refused saves (missing target, self-target, cross-scene target, manual over a non-manual graph) leave the store untouched; then a player's click on the child's own plate fires nothing, while a click on the parent's plate reaches the unpublished child exactly once — with no message, no `automations` collection and no rejection in the player's replica.
+- Production `file://` Chromium 153: `e2e/active_zones.spec.ts:984` authors a tile-anchored child and a **region** graph with a Trigger Automation row, asserts the editor offers the saved child but not the graph itself, fires the region graph and checks both chat lines (`Parent enter`, `Child enter@region`), both graphs at `1 run(s)`, and a single `seq` step for the parent and child together. `active_zones.spec.ts` (26 cases) + `join.spec.ts`: **27/27 in 4.7 min**.
+- Full `corepack pnpm test` — **4,696 passed / 12 skipped** across 326 passing / 2 skipped files (**105.56 s**). `pnpm typecheck` — 64 components, 0 blocking, 1 existing advisory (`ReplayPanel.svelte:29`); lint clean. `pnpm size` — **3.875 MB raw / 1.108 MB gzip** (4,063,666 / 1,161,546 bytes), within the 6 MB budget; `git diff --check` clean.
 - A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
