@@ -21,31 +21,38 @@
  * caller does not spell it out (`token` → the token, `actor` → the actor it links to). The
  * default is a *caller-side* convenience — the host validates the resulting id exactly like a
  * spelled-out one, so a client cannot select its way past visibility.
+ * D-393 adds `item`: a world item id or actorId/itemId, with `from: "selected"`
+ * taking the caller's most recently focused open item window, independently of tokens.
  */
+import { parseMacroItemRef } from "./macroItems";
 export const MACRO_ARG_LIMITS = { inputs: 16, bytes: 8192, string: 256, number: 1e9 } as const;
 
-export type MacroArgType = "string" | "number" | "boolean" | "token" | "actor";
+export type MacroArgType = "string" | "number" | "boolean" | "token" | "actor" | "item";
 
 export interface MacroArgInput {
   name: string;
   type: MacroArgType;
   required?: boolean;
-  /** `"selected"`: when the caller omits the value, use their current canvas selection. */
+  /** `"selected"`: omit the value to use the caller's canvas token or independent item window. */
   from?: "selected";
 }
 
-/** The caller's current canvas selection, as far as the caller's own replica knows it. */
+/** The caller's local token and item-window selection, as their own replica knows it. */
 export interface MacroSelection {
-  tokenId: string;
-  /** The actor the selected token links to, or null (an unlinked scenery token). */
+  tokenId: string | null;
+  /** The actor the selected token links to, or null (no token / an unlinked token). */
   actorId: string | null;
+  /** D-393: exact world/embedded item reference, independent of the token selection. */
+  itemRef?: string;
 }
 
-/** A selection for a single selected token; `null` when nothing (or a stale id) is selected. */
+/** Combine optional token/item context; null only when neither source is present and valid. */
 export function macroSelection(
-  token: { _id: string; actorId?: string | null } | null | undefined,
+  token: { _id: string; actorId?: string | null } | null | undefined, itemReference: string | null = null,
 ): MacroSelection | null {
-  return token ? { tokenId: token._id, actorId: token.actorId ?? null } : null;
+  const itemRef = parseMacroItemRef(itemReference) ? itemReference : null;
+  return token || itemRef ? { tokenId: token?._id ?? null, actorId: token?.actorId ?? null,
+    ...(itemRef ? { itemRef } : {}) } : null;
 }
 
 export type MacroArgValue = string | number | boolean;
@@ -72,14 +79,14 @@ export function macroArgSchemaError(inputs: unknown): string | null {
       return "invalid input schema";
     if (typeof field.name !== "string" || !NAME.test(field.name) || names.has(field.name))
       return "invalid input schema";
-    if (!["string", "number", "boolean", "token", "actor"].includes(String(field.type)))
+    if (!["string", "number", "boolean", "token", "actor", "item"].includes(String(field.type)))
       return "invalid input schema";
     if (field.required !== undefined && typeof field.required !== "boolean")
       return "invalid input schema";
-    // Only a token can be *selected*, and an actor can come from the selected token; a
-    // literal string/number/boolean has no selection to default to.
+    // Tokens/linked actors come from the canvas; an item comes from its item window.
+    // Literal string/number/boolean fields have no selection to default to.
     if (field.from !== undefined &&
-        !(field.from === "selected" && (field.type === "token" || field.type === "actor")))
+        !(field.from === "selected" && (field.type === "token" || field.type === "actor" || field.type === "item")))
       return "invalid input schema";
     names.add(field.name);
   }
@@ -95,12 +102,12 @@ export function macroArgInputs(inputs: unknown): MacroArgInput[] {
 
 /**
  * Validate a caller's argument record against the schema. `visible` is the host's live
- * read check per reference type — a caller may never name a token or actor they cannot read,
+ * read check per reference type — a caller may never name a token, actor or item they cannot read,
  * whether they spelled it out or took it from their selection.
  */
 export function validateMacroArgs(
   value: unknown, inputs: readonly MacroArgInput[],
-  visible: (type: "token" | "actor", id: string) => boolean,
+  visible: (type: "token" | "actor" | "item", id: string) => boolean,
 ): { ok: true; args: MacroArgs } | { ok: false; error: string } {
   const bad = (error: string) => ({ ok: false as const, error });
   if (value === undefined) value = {};
@@ -132,6 +139,9 @@ export function validateMacroArgs(
     if ((field.type === "token" || field.type === "actor") &&
         (typeof supplied !== "string" || !DOC_ID.test(supplied) || !visible(field.type, supplied)))
       return bad(`invalid or invisible ${field.name}`);
+    if (field.type === "item" &&
+        (typeof supplied !== "string" || !parseMacroItemRef(supplied) || !visible("item", supplied)))
+      return bad(`invalid or invisible ${field.name}`);
     args[field.name] = supplied as MacroArgValue;
   }
   return { ok: true, args };
@@ -154,6 +164,7 @@ export function coerceMacroArgText(field: MacroArgInput, raw: string): MacroArgV
     if (["false", "0", "no", "off"].includes(text.toLowerCase())) return false;
     return null;
   }
+  if (field.type === "item") return parseMacroItemRef(text) ? text : null;
   // A token/actor argument is an id; whether it is *readable* is the host's call.
   return DOC_ID.test(text) ? text : null;
 }
@@ -239,19 +250,30 @@ function fillSelection(
 ): { ok: true; args: MacroArgs } | { ok: false; error: string } {
   for (const field of inputs) {
     if (args[field.name] !== undefined || field.from !== "selected" || !selection) continue;
-    if (field.type === "token") { args[field.name] = selection.tokenId; continue; }
-    // An unlinked token has no actor to offer: optional means "simply absent", required is
-    // refused with the real reason rather than a bare "missing".
-    if (!selection.actorId) {
-      if (field.required) return { ok: false, error: "the selected token has no actor" };
+    if (field.type === "token") {
+      if (selection.tokenId) args[field.name] = selection.tokenId;
       continue;
     }
-    args[field.name] = selection.actorId;
+    if (field.type === "item") {
+      if (selection.itemRef && parseMacroItemRef(selection.itemRef)) args[field.name] = selection.itemRef;
+      continue;
+    }
+    // An unlinked token has no actor; an item-only selection does not invent one.
+    if (field.type === "actor") {
+      if (!selection.actorId) {
+        if (field.required && selection.tokenId) return { ok: false, error: "the selected token has no actor" };
+        continue;
+      }
+      args[field.name] = selection.actorId;
+    }
   }
   const missing = inputs.filter((field) => field.required && args[field.name] === undefined);
   if (missing.length === 0) return { ok: true, args };
+  const fromItems = missing.filter((field) => field.from === "selected" && field.type === "item");
+  if (fromItems.length > 0)
+    return { ok: false, error: `select an item for ${fromItems.map((field) => field.name).join(", ")}` };
   const fromSelection = missing.filter((field) => field.from === "selected");
-  if (fromSelection.length > 0 && !selection)
+  if (fromSelection.length > 0 && !selection?.tokenId)
     return { ok: false, error: `select a token for ${fromSelection.map((field) => field.name).join(", ")}` };
   return { ok: false, error: `missing ${missing.map((field) => field.name).join(", ")}` };
 }

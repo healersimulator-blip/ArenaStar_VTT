@@ -44,6 +44,7 @@
     bus,
     sceneId = null,
     selectedTokenId = null,
+    selectedItemRef = null,
     onUndo,
     onRedo,
     packages = null,
@@ -74,6 +75,8 @@
     sceneId?: string | null;
     /** D-388: the caller's single selected token, the default for a `from:"selected"` input. */
     selectedTokenId?: string | null;
+    /** D-393: most recently focused open item window, independent of token selection. */
+    selectedItemRef?: string | null;
     onUndo: () => void;
     onRedo: () => void;
     packages?: HostPackages | null;
@@ -275,7 +278,7 @@
           <PermissionsPanel {client} {bus} />
         {:else if win.kind === "macros"}
           <MacrosPanel {client} {bus} {onFxImport} {listFxAssets} {setFxAssetRights} {getFxAsset}
-            {selectedTokenId}
+            {selectedTokenId} {selectedItemRef}
             listCompendia={isGM && packages ? () => packages.compendia() : null} activeSceneId={sceneId}
             {onPickSummon} {onPickAnchor} {onPreviewFx} {onStopFxPreview} />
         {:else if win.kind === "settings"}

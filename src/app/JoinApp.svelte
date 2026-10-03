@@ -61,6 +61,7 @@
     type MacroHotbarBinding, type MacroHotbarPrefs } from "../core/macroHotbar";
   import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import { WindowManager } from "../core/windows";
+  import { selectedMacroItem } from "../core/macroItems";
   import { WindowHost } from "../ui/windows";
   import { openPF1eSheetWindow } from "../ui/sheets/pf1eSheetWindow";
   import { SheetPanel } from "../ui/sheets";
@@ -140,6 +141,13 @@
   const wmWindows = $derived.by(() => {
     void wmVersion;
     return [...wm.list()];
+  });
+  /** D-393: the last focused open item window, re-read after item/permission changes. */
+  const selectedItemRef = $derived.by(() => {
+    void wmVersion;
+    void storeVersion;
+    const client = app?.client;
+    return client ? selectedMacroItem(wm.list(), client.store.world, client.user) : null;
   });
 
   function openActorSheet(actorId: string): void {
@@ -571,8 +579,8 @@
     if (!macro || !client) return;
     const outcome = runMacroSlot(client, macro, { activeSceneId: () => activeScene()?._id ?? null,
       onNeedsInput: openMacros,
-      // D-388: a `from: "selected"` input defaults to the player's own selected token.
-      selection: () => macroSelectionOf(client, selection.length === 1 ? (selection[0] ?? null) : null) });
+      // D-388/D-393: caller-local token and item-window defaults, independently.
+      selection: () => macroSelectionOf(client, selection.length === 1 ? (selection[0] ?? null) : null, selectedItemRef) });
     hotbarRunStatus = outcome.ok ? `Requested ${macro.name}…` : `Refused: ${outcome.error}`;
     if (outcome.requestId && ["automation", "composite", "script"].includes(macro.kind)) {
       // A lost connection cannot grow the pending set forever. These are private result ids only.
@@ -1390,6 +1398,7 @@
             bus={app.bus}
             sceneId={activeScene()?._id ?? null}
             selectedTokenId={selection.length === 1 ? (selection[0] ?? null) : null}
+            {selectedItemRef}
             onPickSummon={requestSummonPick}
             onUndo={() => undefined}
             onRedo={() => undefined}
@@ -1421,7 +1430,7 @@
           {#if app?.client}
             {#if playerTab === "chat"}
               <ChatPanel client={app.client} bus={app.bus}
-                targetTokenId={selection.length === 1 ? (selection[0] ?? null) : null} />
+                targetTokenId={selection.length === 1 ? (selection[0] ?? null) : null} {selectedItemRef} />
             {:else}
               <SheetPanel client={app.client} bus={app.bus} onOpenActor={openActorSheet} />
             {/if}

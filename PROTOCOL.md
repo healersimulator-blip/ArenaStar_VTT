@@ -356,20 +356,36 @@ Denied local storage keeps the arrangement for the visit with explicit unsaved f
 it never falls back to a world write.
 
 MC-02: an automation macro may also **declare inputs** (`{ name, type, required?, from? }`, at most
-16, of type string/number/boolean/token/actor), and a caller then supplies `args`. The declared
+16, of type string/number/boolean/token/actor/item), and a caller then supplies `args`. The declared
 schema *is* projected — it is the callable metadata a directory/hotbar needs to prompt for the
 values, and it is the one part of the binding a player receives — while `graphId` and everything
 else about the binding stay GM-only. The host validates the supplied record against the declaration
 (unknown name, missing required, wrong type, over-long string, too many keys, a token the caller
-cannot see or an actor the caller cannot read all refuse; a player only ever reads the neutral
+cannot see, an actor the caller cannot read or an unreadable exact item ref all refuse; a player only reads the neutral
 "automation macro unavailable"), then exposes the values to the graph as `{{arg.<name>}}` — a dotted
 name is deliberately not a legal durable variable, so an argument can never shadow world state.
 
-`from: "selected"` (a `token` or `actor` input) is a **caller-side default**: a shell that did not
-receive an explicit value fills it from the token the caller has selected on the canvas (`actor`
-takes that token's linked actor). It changes nothing on the wire — the resulting id travels in
-`args` and the host validates it exactly like a spelled-out one, so a client cannot select its way
-past visibility. A composite takes no arguments.
+`from: "selected"` is a **caller-side default** for a `token`, `actor` or `item` input. A shell that
+received no explicit value takes the canvas token (`actor` uses its linked actor), or independently
+its most recently focused open, non-minimized PF1e item window (`item`). Focusing the macro/chat
+surface does not discard that item context; no item is guessed from the selected token's inventory.
+A stale/deleted/unreadable top item clears the default rather than falling back; explicitly closing
+or minimizing it exposes the next open item window. Item-only context invents no token or actor.
+A required blank item default refuses locally with `select an item for <name>`; optional absent
+values stay absent and explicit named/positional/picker values always win.
+
+**Item refs (D-393)** are scalar strings, never document bodies: a bare `itemId` names a WORLD item
+only, and `actorId/itemId` names exactly that actor's embedded item. Each component is 1–128 ASCII
+letters/digits/underscore/hyphen (qualified maximum 257); no inventory-wide search, name fallback,
+path traversal or parent guessing. The host re-reads the world item, or both the parent actor and
+its embedded item under the **actual caller's** live read rights, with normal parent-ownership
+inheritance. The same check runs for a nested `callMacro`, not under the graph author's GM identity.
+A local picker contains only readable world and parent-qualified embedded entries. No selection,
+picker choice or ref grants mutation/cast authority, widens projection or executes item mechanics.
+The resulting ref travels in the existing `args` record with the unchanged 16-field / 8 KiB payload
+bounds. Ordinary strings, scalar returns and saved Call Macro literals keep their 256-character
+bound; a maximal typed item ref can be forwarded as `{{arg.tool}}` rather than an oversized literal.
+A composite takes no arguments.
 
 MC-02 also lets one graph **call another saved automation macro** from inside its own envelope, so a
 GM can build a named library of small graphs and compose them. The step is
@@ -395,8 +411,9 @@ interface MacroInvokeMsg {
   kind: "macros.invoke";
   requestId: string;
   macroId: DocId;
-  args?: Record<string, Json>; // named values for the macro's declared inputs (MC-02)
+  args?: Record<string, Json>; // named scalar values, including exact item refs (MC-02)
 }
+```
 
 ### journal.trigger (0x50 · client → host · ops)
 

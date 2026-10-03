@@ -45,6 +45,7 @@
   import { JournalsPanel } from "../ui/journals";
   import { WindowHost } from "../ui/windows";
   import { WindowManager } from "../ui/windows";
+  import { selectedMacroItem } from "../core/macroItems";
   import { MacroHotbar, macroSelectionOf, macroSlots, runMacroSlot } from "../ui/macros";
   import { resolveFxSequence, type FxImportPermissions } from "../core/fx";
 import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
@@ -2149,6 +2150,13 @@ const WALL_PICK_RADIUS = 12;
     void wmVersion;
     return [...wm.list()];
   });
+  /** D-393: the last focused open item window, re-read after item/permission changes. */
+  const selectedItemRef = $derived.by(() => {
+    void wmVersion;
+    void storeVersion;
+    const client = app?.gm.client;
+    return client ? selectedMacroItem(wm.list(), client.store.world, client.user) : null;
+  });
 
   function runSlot(i: number): void {
     const macro = hotbarSlots[i];
@@ -2157,8 +2165,8 @@ const WALL_PICK_RADIUS = 12;
       // A script macro's declared inputs are collected in the macros window's script tab.
       onNeedsInput: () => openWindow("macros", "Macros", "macros"),
       activeSceneId: () => activeScene()?._id ?? null,
-      // D-388: a `from: "selected"` input defaults to the GM's selected token.
-      selection: () => macroSelectionOf(app.gm.client, singleSelectedTokenId()),
+      // D-388/D-393: caller-local token and item-window defaults, independently.
+      selection: () => macroSelectionOf(app.gm.client, singleSelectedTokenId(), selectedItemRef),
     });
   }
 
@@ -4635,6 +4643,7 @@ const WALL_PICK_RADIUS = 12;
           bus={app.gm.bus}
           sceneId={activeScene()?._id ?? null}
           selectedTokenId={singleSelectedTokenId()}
+          {selectedItemRef}
           importImage={importMapFile}
           onFxImport={importFxFile}
           onPickSummon={requestSummonPick}
@@ -4756,6 +4765,7 @@ const WALL_PICK_RADIUS = 12;
               targetTokenId={tokenSelection.ids.length === 1
                 ? (tokenSelection.ids[0] ?? null)
                 : null}
+              {selectedItemRef}
               onEncounterRoll={rollEncounterTable}
               onEncounterExplore={exploreCell}
             />

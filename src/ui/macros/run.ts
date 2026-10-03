@@ -4,24 +4,31 @@
  * system API lands (M3, D-079).
  */
 import type { ClientSync } from "../../client/sync";
-import type { MacroDocument, SceneDocument } from "../../core/documents";
+import type { MacroDocument, SceneDocument, TokenDocument } from "../../core/documents";
 import { buildChatMessage, parseChatCommand } from "../../core/chat";
 import { bindMacroArgs, macroSelection, type MacroSelection } from "../../core/macroArgs";
 import { macroAutomationInputs } from "../../core/macroAutomation";
+import { macroItemReadable } from "../../core/macroItems";
 
 /**
  * D-388: the caller's live canvas selection as a macro default source. The id is only
  * meaningful on this replica — the shells pass the token they actually selected, and
- * nothing is selected when it is not in the scene the caller has open.
+ * nothing is selected when it is not in the scene the caller has open. D-393 also
+ * carries a live readable item-window reference, independently of the canvas token.
  */
-export function macroSelectionOf(client: ClientSync, tokenId: string | null | undefined): MacroSelection | null {
-  if (!tokenId) return null;
-  const scenes = client.store.getAll("scenes") as readonly SceneDocument[];
-  for (const scene of scenes) {
-    const token = scene.tokens.find((entry) => entry._id === tokenId);
-    if (token) return macroSelection(token);
+export function macroSelectionOf(
+  client: ClientSync, tokenId: string | null | undefined, itemReference: string | null = null,
+): MacroSelection | null {
+  let token: TokenDocument | null = null;
+  if (tokenId) {
+    const scenes = client.store.getAll("scenes") as readonly SceneDocument[];
+    for (const scene of scenes) {
+      const found = scene.tokens.find((entry) => entry._id === tokenId);
+      if (found) { token = found; break; }
+    }
   }
-  return null;
+  const item = itemReference && macroItemReadable(client.store.world, client.user, itemReference) ? itemReference : null;
+  return macroSelection(token, item);
 }
 
 export function runChatMacro(client: ClientSync, macro: MacroDocument): void {

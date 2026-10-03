@@ -19,6 +19,7 @@
   } from "../../core/macroComposite";
   import { macroAutomationGraphId, macroAutomationInputs } from "../../core/macroAutomation";
   import { bindMacroArgFields, macroArgSchemaError, type MacroArgInput } from "../../core/macroArgs";
+  import { macroItemChoices, type MacroItemChoice } from "../../core/macroItems";
   import TaggerPanel from "./TaggerPanel.svelte";
   import FxSequencePanel from "./FxSequencePanel.svelte";
   import type { RequestCrosshairPick } from "./crosshairPicker";
@@ -44,6 +45,7 @@
     listCompendia = null,
     activeSceneId = null,
     selectedTokenId = null,
+    selectedItemRef = null,
     onPickSummon = null,
     onPickAnchor = null,
     onPreviewFx = null,
@@ -59,6 +61,8 @@
     activeSceneId?: string | null;
     /** D-388: the caller's single selected token, the default for a `from:"selected"` input. */
     selectedTokenId?: string | null;
+    /** D-393: the most recently focused open item window as a qualified reference. */
+    selectedItemRef?: string | null;
     onPickSummon?: RequestSummonPick | null;
     /** GM-local canvas picking/rendering for the FX tab; null on a player shell. */
     onPickAnchor?: RequestCrosshairPick | null;
@@ -88,7 +92,12 @@
   let inputEditing = $state("");
   let inputDraft = $state<MacroArgInput[]>([]);
   /** The caller's live selection: what a `from: "selected"` input defaults to. */
-  const callerSelection = $derived(macroSelectionOf(client, selectedTokenId));
+  let storeRevision = $state(0);
+  let itemChoices = $state<MacroItemChoice[]>([]);
+  const callerSelection = $derived.by(() => {
+    void storeRevision;
+    return macroSelectionOf(client, selectedTokenId, selectedItemRef);
+  });
   let inputError = $state("");
   let runEditing = $state("");
   let runValues = $state<Record<string, string>>({});
@@ -101,7 +110,9 @@
 
   function refresh(): void {
     viewerRole = client.user?.role ?? "";
-    if (viewerRole !== "GM" && viewerRole !== "ASSISTANT" && tab !== "summons") tab = "scripts";
+    if (viewerRole !== "GM" && viewerRole !== "ASSISTANT" && !["scripts", "automations", "summons"].includes(tab)) tab = "scripts";
+    storeRevision++;
+    itemChoices = macroItemChoices(client.store.world, client.user);
     macros = [...(client.store.getAll("macros") as readonly MacroDocument[])].filter((m) => m.kind === "chat");
     automationMacros = [...(client.store.getAll("macros") as readonly MacroDocument[])].filter((m) => m.kind === "automation");
     compositeMacros = [...(client.store.getAll("macros") as readonly MacroDocument[])].filter((m) => m.kind === "composite");
@@ -204,6 +215,24 @@
     inputError = "";
     inputEditing = inputEditing === macro._id ? "" : macro._id;
     inputDraft = macroAutomationInputs(macro).map((field) => ({ ...field }));
+  }
+
+  function setInputType(index: number, type: MacroArgInput["type"]): void {
+    inputDraft = inputDraft.map((field, i) => {
+      if (i !== index) return field;
+      const next = { ...field, type };
+      if (!["token", "actor", "item"].includes(type)) delete next.from;
+      return next;
+    });
+  }
+  function setInputFlag(index: number, flag: "required" | "from", enabled: boolean): void {
+    inputDraft = inputDraft.map((field, i) => {
+      if (i !== index) return field;
+      const next = { ...field };
+      if (flag === "required") { if (enabled) next.required = true; else delete next.required; }
+      else { if (enabled) next.from = "selected"; else delete next.from; }
+      return next;
+    });
   }
 
   function saveInputs(macro: MacroDocument): void {
@@ -388,23 +417,21 @@
               <input value={field.name} aria-label={`Input ${i + 1} name`} maxlength={32}
                 onchange={(e) => { inputDraft = inputDraft.map((f, at) => at === i ? { ...f, name: e.currentTarget.value } : f); }} />
               <select value={field.type} aria-label={`Input ${i + 1} type`}
-                onchange={(e) => { inputDraft = inputDraft.map((f, at) => at === i
-                  ? { ...f, type: e.currentTarget.value as MacroArgInput["type"] } : f); }}>
+                onchange={(e) => setInputType(i, e.currentTarget.value as MacroArgInput["type"])}>
                 <option value="string">string</option>
                 <option value="number">number</option>
                 <option value="boolean">boolean</option>
                 <option value="token">token</option>
                 <option value="actor">actor</option>
+                <option value="item">item</option>
               </select>
               <label><input type="checkbox" checked={field.required ?? false}
                 aria-label={`Input ${i + 1} required`}
-                onchange={(e) => { inputDraft = inputDraft.map((f, at) => at === i
-                  ? (e.currentTarget.checked ? { ...f, required: true } : { name: f.name, type: f.type }) : f); }} /> req</label>
+                onchange={(e) => setInputFlag(i, "required", e.currentTarget.checked)} /> req</label>
               <label><input type="checkbox" checked={field.from === "selected"}
-                disabled={field.type !== "token" && field.type !== "actor"}
+                disabled={field.type !== "token" && field.type !== "actor" && field.type !== "item"}
                 aria-label={`Input ${i + 1} from selection`}
-                onchange={(e) => { inputDraft = inputDraft.map((f, at) => at === i
-                  ? (e.currentTarget.checked ? { ...f, from: "selected" } : { name: f.name, type: f.type }) : f); }} /> selected</label>
+                onchange={(e) => setInputFlag(i, "from", e.currentTarget.checked)} /> selected</label>
               <button type="button" aria-label={`Remove input ${i + 1}`}
                 onclick={() => { inputDraft = inputDraft.filter((_, at) => at !== i); }}>✕</button>
             {/each}
@@ -423,6 +450,14 @@
                     <option value="false">false</option>
                     <option value="true">true</option>
                   </select>
+                {:else if field.type === "item"}
+                  <select aria-label={field.name} data-automation-item-arg={field.name} value={runValues[field.name] ?? ""}
+                    onchange={(e) => { runValues = { ...runValues, [field.name]: e.currentTarget.value }; }}>
+                    <option value="">{field.from === "selected" ? "Use selected item window" : "Choose an item"}</option>
+                    {#each itemChoices as choice (choice.reference)}
+                      <option value={choice.reference}>{choice.label}</option>
+                    {/each}
+                  </select>
                 {:else}
                   <input aria-label={field.name}
                     placeholder={field.from === "selected" ? "selected token" : field.type}
@@ -431,9 +466,15 @@
               </label>
             {/each}
             <button type="button" data-automation-run-with onclick={() => runWithInputs(m)}>Run</button>
-            {#if macroAutomationInputs(m).some((field) => field.from === "selected")}
+            {#if macroAutomationInputs(m).some((field) => field.from === "selected" && field.type !== "item")}
               <small data-automation-run-selected>
-                {callerSelection ? "a blank selection field uses your selected token" : "select a token for the blank fields"}
+                {callerSelection?.tokenId ? "a blank selection field uses your selected token" : "select a token for the blank fields"}
+              </small>
+            {/if}
+            {#if macroAutomationInputs(m).some((field) => field.from === "selected" && field.type === "item")}
+              <small data-automation-run-item-selected>Selected item:
+                {itemChoices.find((choice) => choice.reference === callerSelection?.itemRef)?.label ?? "none — open an item window"}.
+                A blank item field uses the most recently focused open item window, not the token's first item.
               </small>
             {/if}
             {#if runError}<small data-automation-run-error role="alert">{runError}</small>{/if}

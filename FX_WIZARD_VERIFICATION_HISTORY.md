@@ -1,6 +1,6 @@
 # FX Wizard Verification History
 
-Consolidated historical archive through D-392, including the incremental trigger, macro and FX audience follow-ups below. D-373 remains the latest standalone verification report.
+Consolidated historical archive through D-393, including the incremental trigger, macro and FX audience follow-ups below. D-373 remains the latest standalone verification report.
 
 **Recovery note:** the former archive body was unavailable after an overwrite. D-293–D-346 below are reconstructed from the preserved, detailed `DECISIONS.md` records, rather than copied from the original report bodies. D-347 is retained from its original standalone verification report. Existing status summaries and verification counts remain available in `MACROS_FX_WIZARD_IMPLEMENTATION_STATUS.md`.
 
@@ -53,6 +53,7 @@ Consolidated historical archive through D-392, including the incremental trigger
 - [D-390 archived verification report](#report-d390)
 - [D-391 archived verification report](#report-d391)
 - [D-392 archived verification report](#report-d392)
+- [D-393 archived verification report](#report-d393)
 
 <a id="report-d293-d319"></a>
 
@@ -4544,3 +4545,52 @@ The browser cases used npm-provisioned Chromium 153 for functional input coverag
 ### Still open
 
 No cross-device preference sync, drag-and-drop assignment or per-slot argument presets; no unified summon/FX-preset hotbar picker. Full invocation parity across the directory/chat/item/cast/tile surfaces, MC-02's selected item/context / imports / reusable helpers / continuation-carried values, MC-03's full templating, named-user run-as identity and the remaining TR/A19–A40 acceptance scenarios remain partial. A41 still requires a qualifying hardware-GPU reference-profile run. **Full A01–A41 parity is not established.**
+
+<a id="report-d393"></a>
+
+## D393 — Typed item arguments and selected-item context (2026-10-03)
+
+**Scope:** MC-02's item-reference and caller-selected PF1e item-window slice for saved automation macros and in-envelope Call Macro. No item mechanics are executed or authorized by a ref. MC-02, A34–A37 and overall parity remain partial.
+
+### Implemented
+
+- New `src/core/macroItems.ts`: a bare `itemId` names a WORLD item only; `actorId/itemId` names exactly that embedded item. Each component is 1–128 ASCII letters/digits/underscore/hyphen (qualified max 257). Malformed/object/path refs are refused; the formatter validates each component before joining, so a slash-containing world id cannot masquerade as an embedded ref. No actor-wide scan, name fallback or parent guessing. Readable choices carry only scalar refs and world/parent labels.
+- `macroItemReadable` re-reads actual-caller world-item rights, or readable parent actor **and** child read with normal inherited ownership. Both `HostSync` direct macro invocation and the core planner's nested Call Macro use it. Client selection is convenience, never authority; deleted/private refs fail live and an unreadable nested child rejects the parent's entire envelope. Player diagnostics remain neutral and do not identify the hidden item/graph.
+- `macroArgs.ts`: `item` schema/coercion/validation and optional `from:"selected"`; an item-only context carries `tokenId:null` and `actorId:null`, never inventing the item's parent as an actor selection. Named/positional/picker values precede defaults; optional absent items stay absent and required selected-item absence says `select an item for <name>`. Ordinary string, scalar-result and raw Call Macro literal bounds remain 256; a typed qualified max-257 ref can forward via `{{arg.tool}}`.
+- Both shells derive the highest-z open, non-minimized item window and re-read it after focus/store/permission changes. Macro/chat focus preserves it; a stale/unreadable top item clears context rather than selecting an older item. Closing/minimizing the top explicitly exposes the next open item. `WindowHost` → `MacrosPanel`, `ChatPanel` `/run` and both shells' shared hotbar dispatch carry this independent live ref.
+- The directory exposes `item`, a readable picker and a selected-item hint. Toggling required/selected preserves the other flag; choosing a primitive type clears `from`. Player store refresh retains the public automation tab rather than resetting it to Scripts. World items are explicit refs/picker choices; existing PF1e item windows supply embedded context. No new wire kind, item body, permission grant, world selection state or projection widening.
+
+### Verification
+
+- New `tests/core/macroItems.test.ts` — **12/12**: canonical/edge/malformed refs, world/embedded collisions, parent-plus-child inheritance, live deletion/revocation, readable labels, window focus/minimize/close and stale non-fallback, item-only context, schema/binder explicit precedence and shared hotbar scalar dispatch. Existing `tests/core/macroArgs.test.ts` — **17/17**.
+- `tests/core/automation.test.ts` — **119/119**, two new cases: nested item forwarding preserves parent identity and actual-player read rights (a public item under an unreadable parent still refuses), and a **257-character typed ref** successfully forwards through a template while oversized ordinary raw Call Macro/result literals remain invalid.
+- `tests/host/sync.test.ts` — **224/224**, two new direct/nested cases: public world and exact embedded refs run; unreadable world/parent, malformed/object/missing refs refuse neutrally without a sequence change; root deletion never falls back to an inventory with the same id; revocation/embedded deletion are rechecked live, including for the GM; refs never mutate item data. A player-triggered child cannot use a GM author's hidden item, and its failure discards staged parent chat; the GM's same call succeeds. **372 focused tests** across these four files pass.
+- New production `file://` Chromium **153.0.8010.0** `e2e/macro_item_args.spec.ts` — **2/2 alone in 17.7 s**. Real UI creates inventory items and a world item, publishes a graph, declares an item input and assigns a slot. GM case checks independent required/selected flags, primitive-type clearing, token-with-inventory non-guessing, readable picker, blank default, explicit override, focus switch, directory/chat/hotbar click/key, close and minimize. Real WebRTC player case checks private-parent omission, readable world/embedded choices, input-only callable metadata, public tab retention after committed runs, independent item-only defaults, and **ordinary GM Undo** removing the top item while an older item window stays open: hint clears, blank run commits nothing, explicit readable ref works, and explicit closing restores the older default. Authored GM-only messages never enter player chat. Existing hooks are used only for table/spell fixture setup and readbacks, not macro/schema/item-selection/invocation injection. No `tests/ui/` changes substitute for browser proof.
+- Production browser regression: `macro_item_args` (2) + `macro_hotbar` (2) + `active_zones` (34) + `fx_sequence` (35) + `fx_item_binding` (1) + `join` (1) + `script_macros` (9) + `script_result_branch` (1) — **85/85 in 5.9 min**, one worker/zero retries (**352.63 s command wall time**). npm-provisioned Chromium/al2023 fallback, container no-sandbox opt-in; no app CSP/authority gates disabled. These are functional Chromium results, not cross-browser or hardware-GPU performance acceptance.
+- Full `corepack pnpm test` — **4,807 passed / 12 skipped**, 333 passing / 2 skipped files (**116.53 s**). `corepack pnpm typecheck` — **68 components / 0 blocking / 1 existing advisory** (`src/ui/sim/ReplayPanel.svelte:29`); `pnpm lint` and `git diff --check` clean. Fresh `test:fx:prepare` ran after every source/test edit batch; app/system/available-starter preparation succeeds, optional PF1e content starter skipped because content is absent. `pnpm size` — **3.923 MB raw / 1.121 MB gzip** (4,113,784 / 1,175,470 bytes), within the 6 MB budget.
+- Final post-documentation/comment-only cleanup: **375/375** focused checks including three protocol-consistency tests, typecheck/lint/size/whitespace clean, new browser spec **2/2 in 16.9 s**. Fresh preparation produced the **byte-identical** production artifact used by the 85-case regression (`SHA-256 b875db68e1db5a7042aa0c28612ee26c9bdfd99a6eaa2a0e64e160e58da33ad3`). No behavioral source changed after the full suite.
+- Validation notes: initial browser attempts failed on fixture selectors (duplicate global Actors buttons / an exact nested Audience label) and on an incorrect assumption that a successful run keeps its input form open. The spec scopes the Sheets region, uses the existing audience label and reopens the product's intentionally collapsed form; no browser assertion was replaced by a mock or relaxed away. Final focused and complete regression batches above pass with zero retries.
+
+### Reproduction
+
+```sh
+corepack pnpm test:fx:prepare
+corepack pnpm exec vitest run tests/core/macroItems.test.ts tests/core/macroArgs.test.ts tests/core/automation.test.ts tests/host/sync.test.ts
+LD_LIBRARY_PATH=/tmp/al2023/lib \
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/chromium \
+  PLAYWRIGHT_CHROMIUM_NO_SANDBOX=1 \
+  corepack pnpm exec playwright test --project=chromium --workers=1 --retries=0 --global-timeout=1400000 \
+  e2e/macro_item_args.spec.ts e2e/macro_hotbar.spec.ts e2e/active_zones.spec.ts e2e/fx_sequence.spec.ts \
+  e2e/fx_item_binding.spec.ts e2e/join.spec.ts e2e/script_macros.spec.ts e2e/script_result_branch.spec.ts
+corepack pnpm test
+corepack pnpm typecheck
+corepack pnpm lint
+corepack pnpm size
+git diff --check
+```
+
+The `/tmp` fallback is disposable; a standard installed Playwright Chromium can run the same specs without those environment variables. Markdown-only status/protocol edits do not require artifact preparation.
+
+### Still open
+
+Imports/reusable helpers, generalized context and continuation-carried values; full common-directory/chat/item/cast/tile execution and awaits across every macro kind; MC-03 full templating; named-user run-as identity; broader elevated-macro/editor/module/extension/compensation behavior; per-invocation targets; MATT per-percent lighting and door interaction attempts/secret doors; remaining TR/A19–A40 scenarios. Local hotbar preferences are not cross-device sync, drag-and-drop or per-slot argument presets. **A41 remains unaccepted** pending a qualifying pre-published hardware-GPU reference run. D373 remains the latest standalone report. **Full A01–A41 parity is not established.**

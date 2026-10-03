@@ -9397,6 +9397,148 @@ test("a selection default is a caller-side convenience — the host validates th
   expect(messages().at(-1)).toBe("target=t-pl subject=");
 });
 
+// ─── MC-02 (D-393): exact world/embedded item args, under the caller's live rights ──
+
+const argumentItem = (id: string, ownership: Record<string, number> = { default: 0 }): ItemDocument => ({
+  _id: id, type: "item", name: id, ownership: ownership as ItemDocument["ownership"], flags: {}, system: {}, effects: [],
+});
+
+test("typed item invocation refs are exact and revalidated live — no parent guessing or authority from selection", async () => {
+  const h = await setup();
+  const hero = { ...actorFixture("item-hero", "Hero", { default: 1 }), items: [argumentItem("shared")] };
+  const secret = { ...actorFixture("item-secret", "Secret", { default: 0 }), items: [argumentItem("shared", { default: 3 })] };
+  h.gm.submit([
+    { kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: visibleZoneTile() },
+    { kind: "create", coll: "actors", data: hero },
+    { kind: "create", coll: "actors", data: secret },
+    { kind: "create", coll: "items", data: argumentItem("shared", { default: 1 }) },
+    { kind: "create", coll: "items", data: argumentItem("private-world") },
+  ]);
+  await flushMicrotasks();
+  const graph: AutomationDocument = { ...macroGraphContext(), _id: "item-graph",
+    definition: { ...macroGraphContext().definition,
+      steps: [{ id: "tell", kind: "chat", audience: "gm", content: "item={{arg.tool}}" }] } };
+  h.gm.submit([{ kind: "create", coll: "automations", data: graph }]);
+  await flushMicrotasks();
+  const inputs = [{ name: "tool", type: "item" as const, required: true, from: "selected" as const }];
+  h.gm.submit([{ kind: "create", coll: "macros", data: automationMacro("item-graph", { _id: "item-macro",
+    name: "Item bell", automation: { graphId: "item-graph", inputs } }) }]);
+  await flushMicrotasks();
+  const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const results: ClientEvents["macroResult"][] = [];
+  playerBus.on("macroResult", (event) => results.push(event));
+  const messages = () => h.hostStore.getAll("messages").map((message) => message.content);
+  expect(player.store.get("macros", "item-macro")?.automation).toEqual({ inputs });
+  expect(player.store.get("actors", "item-secret")).toBeUndefined();
+  expect(player.store.get("items", "private-world")).toBeUndefined();
+
+  player.invokeMacro("item-macro", { tool: "item-hero/shared" });
+  await flushMicrotasks();
+  expect(results.at(-1)).toMatchObject({ ok: true });
+  expect(messages()).toEqual(["item=item-hero/shared"]);
+  player.invokeMacro("item-macro", { tool: "shared" });
+  await flushMicrotasks();
+  expect(messages().at(-1)).toBe("item=shared"); // bare means WORLD item, not embedded
+  const before = h.hostStore.seq;
+  for (const value of ["item-secret/shared", "private-world", "item-hero/missing", "missing/shared",
+    "item-hero/shared/extra", { actorId: "item-hero", itemId: "shared" }]) {
+    player.invokeMacro("item-macro", { tool: value });
+    await flushMicrotasks();
+    expect(results.at(-1)).toMatchObject({ ok: false, detail: "automation macro unavailable" });
+    expect(h.hostStore.seq).toBe(before);
+  }
+  expect(messages()).toHaveLength(2);
+  // An item with public ownership beneath an unreadable parent still refuses for the player.
+  h.gm.invokeMacro("item-macro", { tool: "item-secret/shared" });
+  await flushMicrotasks();
+  expect(messages().at(-1)).toBe("item=item-secret/shared");
+
+  h.gm.submit([{ kind: "delete", ref: { coll: "items", id: "shared" } }]);
+  await flushMicrotasks();
+  const afterDelete = h.hostStore.seq;
+  player.invokeMacro("item-macro", { tool: "shared" });
+  await flushMicrotasks();
+  expect(results.at(-1)).toMatchObject({ ok: false, detail: "automation macro unavailable" });
+  expect(h.hostStore.seq).toBe(afterDelete); // do not scan inventories for a now-missing bare ref
+  player.invokeMacro("item-macro", { tool: "item-hero/shared" });
+  await flushMicrotasks();
+  expect(results.at(-1)).toMatchObject({ ok: true });
+  expect(h.hostStore.get("actors", "item-hero")?.items).toEqual(hero.items); // reference != mechanics/update grant
+
+  // A formerly valid selection is rechecked after parent ownership revocation and item deletion.
+  h.gm.submit([{ kind: "update", ref: { coll: "actors", id: "item-hero" }, diff: { ownership: { default: 0 } } }]);
+  await flushMicrotasks();
+  const revoked = h.hostStore.seq;
+  player.invokeMacro("item-macro", { tool: "item-hero/shared" });
+  await flushMicrotasks();
+  expect(results.at(-1)).toMatchObject({ ok: false, detail: "automation macro unavailable" });
+  expect(h.hostStore.seq).toBe(revoked);
+  h.gm.submit([{ kind: "delete", ref: { coll: "items", id: "shared", parent: { coll: "actors", id: "item-hero" } } }]);
+  await flushMicrotasks();
+  const removed = h.hostStore.seq;
+  h.gm.invokeMacro("item-macro", { tool: "item-hero/shared" });
+  await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(removed); // even the GM cannot reference a deleted item
+  expect(player.store.getAll("messages")).toEqual([]); // GM-only interpolation never leaks
+});
+
+test("nested Call Macro item args use the triggering player's rights and reject the entire envelope on a private item", async () => {
+  const h = await setup();
+  h.gm.submit([
+    { kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: visibleZoneTile() },
+    { kind: "create", coll: "actors", data: { ...actorFixture("call-hero", "Hero", { default: 1 }), items: [argumentItem("wand")] } as ActorDocument },
+    { kind: "create", coll: "actors", data: { ...actorFixture("call-secret", "Secret", { default: 0 }), items: [argumentItem("wand", { default: 3 })] } as ActorDocument },
+  ]);
+  await flushMicrotasks();
+  const child: AutomationDocument = { ...macroGraphContext(), _id: "item-child",
+    definition: { ...macroGraphContext().definition,
+      steps: [{ id: "tell", kind: "chat", audience: "gm", content: "child item={{arg.tool}}" }] } };
+  h.gm.submit([{ kind: "create", coll: "automations", data: child }]);
+  await flushMicrotasks();
+  const inputs = [{ name: "tool", type: "item" as const, required: true }];
+  h.gm.submit([{ kind: "create", coll: "macros", data: automationMacro("item-child", { _id: "item-child-macro",
+    automation: { graphId: "item-child", inputs } }) }]);
+  await flushMicrotasks();
+  const parent: AutomationDocument = { ...macroGraphContext(), _id: "item-parent",
+    definition: { ...macroGraphContext().definition, steps: [
+      { id: "before", kind: "chat", audience: "gm", content: "before item call" },
+      { id: "call", kind: "callMacro", macroId: "item-child-macro", args: { tool: "{{arg.tool}}" } },
+    ] } };
+  h.gm.submit([{ kind: "create", coll: "automations", data: parent }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "macros", data: automationMacro("item-parent", { _id: "item-parent-macro",
+    automation: { graphId: "item-parent", inputs } }) }]);
+  await flushMicrotasks();
+  const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const results: ClientEvents["macroResult"][] = [];
+  playerBus.on("macroResult", (event) => results.push(event));
+  const messages = () => h.hostStore.getAll("messages").map((message) => message.content);
+  const before = h.hostStore.seq;
+  player.invokeMacro("item-parent-macro", { tool: "call-hero/wand" });
+  await flushMicrotasks();
+  expect(results.at(-1)).toMatchObject({ ok: true });
+  expect(h.hostStore.seq).toBe(before + 1);
+  expect(messages()).toEqual(["before item call", "child item=call-hero/wand"]);
+  h.host.undo();
+  await flushMicrotasks();
+  expect(messages()).toEqual([]);
+
+  const privateCall = { ...parent.definition, steps: [parent.definition.steps[0] as AutomationDefinition["steps"][number],
+    { id: "call", kind: "callMacro" as const, macroId: "item-child-macro", args: { tool: "call-secret/wand" } }] };
+  h.gm.submit([{ kind: "update", ref: { coll: "automations", id: parent._id }, diff: { definition: privateCall as unknown as Json } }]);
+  await flushMicrotasks();
+  const refusedAt = h.hostStore.seq;
+  player.invokeMacro("item-parent-macro", { tool: "call-hero/wand" });
+  await flushMicrotasks();
+  expect(results.at(-1)).toMatchObject({ ok: false, detail: "automation macro unavailable" });
+  expect(h.hostStore.seq).toBe(refusedAt);
+  expect(messages()).toEqual([]); // staged parent chat rolls back along with the denied child
+  expect(JSON.stringify(results.at(-1))).not.toContain("call-secret");
+  h.gm.invokeMacro("item-parent-macro", { tool: "call-hero/wand" });
+  await flushMicrotasks();
+  expect(messages()).toEqual(["before item call", "child item=call-secret/wand"]);
+});
+
 // ─── MC-02 (D-389): a graph returns a typed value to its invoker ────────────────────
 
 /** A published manual graph that posts nothing and returns `value` to its invoker. */

@@ -135,6 +135,7 @@ import { MACRO_AUTOMATION_METHOD, macroAutomationDocumentError, macroAutomationG
 import { macroCompositeDocumentError, macroCompositeMacroIds,
   macroStrayCompositeError } from "../core/macroComposite";
 import { validateMacroArgs, type MacroArgs } from "../core/macroArgs";
+import { macroItemReadable } from "../core/macroItems";
 import { fxBindingDeletionOps, fxBindingEvents, fxItemBindingError } from "../core/fxBinding";
 import { planSummon, summonDeletionOps, summonMarker, summonPlacementError, validateSummon,
   type SummonSource } from "../core/summons";
@@ -2880,12 +2881,13 @@ export class HostSync {
     }
     // MC-02: the caller's arguments are validated against the macro's own declared schema,
     // with the target scene's live visibility for a `token` input and the caller's own read
-    // access for an `actor` one (D-388) — whether the value was spelled out or defaulted
+    // access for an `actor` one (D-388), exact world/parent item reads (D-393) — spelled out or defaulted
     // from the caller's selection. An undeclared key, a wrong type or an unreadable
     // reference never reaches the graph.
     const checkedArgs = validateMacroArgs(msg.args, macroAutomationInputs(macro),
       (type, id) => type === "token"
         ? this.tokenVisibleTo(caller, target.scene._id, id)
+        : type === "item" ? macroItemReadable(this.store.world, caller, id)
         : this.referenceVisibleTo(caller, id));
     if (!checkedArgs.ok) {
       refused(checkedArgs.error);

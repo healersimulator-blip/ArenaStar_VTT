@@ -40,6 +40,7 @@
     client,
     bus,
     targetTokenId = null,
+    selectedItemRef = null,
     onEncounterRoll = null,
     onEncounterExplore = null,
   }: {
@@ -60,6 +61,8 @@
      * roll card would write to. Null (or a multi-selection) leaves the cards verbless.
      */
     targetTokenId?: string | null;
+    /** D-393: the caller's local item-window selection for /run defaults. */
+    selectedItemRef?: string | null;
   } = $props();
 
   let messages = $state<MessageDocument[]>([]);
@@ -261,7 +264,7 @@
         // `/run Target blast` works with the canvas selection and nothing typed.
         const bound = macro.kind === "automation"
           ? bindMacroArgs(macroAutomationInputs(macro), macroCommand.tail,
-            macroSelectionOf(client, targetTokenId))
+            macroSelectionOf(client, targetTokenId, selectedItemRef))
           : macroCommand.tail
             ? { ok: false as const, error: "this macro takes no arguments" }
             : { ok: true as const, args: {} };

@@ -22,6 +22,7 @@ import { moveCoordinatesError, resolveMoveCoordinates, type MoveCoordinates } fr
 import { isDoorWall } from "./documents";
 import { tileTriggerAlphaContains, tileTriggerElevationError, tileTriggerPolygonContains, tileTriggerWorldPolygon } from "./tileTriggerZone";
 import { coerceMacroArgText, macroArgValues, validateMacroArgs, type MacroArgValue } from "./macroArgs";
+import { macroItemReadable } from "./macroItems";
 import { macroAutomationGraphId, macroAutomationInputs } from "./macroAutomation";
 import { docVisibleTo } from "./projection";
 import { resolveTileImageIndex, tileImageSelectionError, type TileImageList } from "./tileImageSelection";
@@ -2156,7 +2157,8 @@ function planGraph(
             if (coerced === null) return fail(`call ${step.macroId}: invalid ${name}`);
             supplied[name] = coerced;
           }
-          const visible = (type: "token" | "actor", id: string): boolean => {
+          const visible = (type: "token" | "actor" | "item", id: string): boolean => {
+            if (type === "item") return macroItemReadable(world, event.caller, id);
             if (type === "token")
               return event.scene.tokens.some((token) => token._id === id && docVisibleTo(event.caller, token, event.scene));
             const actor = world.actors.find((candidate) => candidate._id === id);

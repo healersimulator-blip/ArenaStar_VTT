@@ -2860,6 +2860,45 @@ describe("MC-02 Call Macro", () => {
     expect(planned.plan.trace.some((line) => line.includes("call caller-macro -> graph child-graph: 2 argument(s)"))).toBe(true);
   });
 
+  test("item arguments forwarded to a child retain their exact parent and the actual caller's visibility", () => {
+    const def = parentDef([call("item-macro", { args: { tool: "{{arg.tool}}" } })]);
+    const w = worldOf(def, [childMacro("item-macro", "item-child", [{ name: "tool", type: "item", required: true }])],
+      [childGraph("item-child", { steps: [{ id: "tell", kind: "chat", audience: "gm", content: "item={{arg.tool}}" }] })]);
+    const makeItem = (): ItemDocument => ({ _id: "same", type: "item", name: "Item", ownership: { default: 3 },
+      flags: {}, system: {}, effects: [] });
+    w.actors.push({ _id: "public", type: "actor", name: "Public", ownership: { default: 1 },
+      flags: {}, system: {}, effects: [], items: [makeItem()] },
+      { _id: "private", type: "actor", name: "Private", ownership: { default: 0 },
+        flags: {}, system: {}, effects: [], items: [makeItem()] });
+    const event = { scene, tile, token: runner, method: "manual" as const,
+      caller: { id: "p", role: "PLAYER" as const }, at: 1000, rng: () => 0.25 };
+    const good = planAutomation(w, automation(def), { ...event, args: { tool: "public/same" } }, "gm");
+    if (!good.ok || !("plan" in good)) throw new Error(`a readable item must plan: ${JSON.stringify(good)}`);
+    expect(good.plan.ops.filter((op) => op.kind === "create" && op.coll === "messages")
+      .map((op) => contentOf(op as Extract<typeof good.plan.ops[number], { kind: "create" }>))).toEqual(["item=public/same"]);
+    const denied = planAutomation(w, automation(def), { ...event, args: { tool: "private/same" } }, "gm");
+    expect(denied).toMatchObject({ ok: false, error: expect.stringContaining("call item-macro: invalid or invisible tool") });
+    expect(planAutomation(w, automation(def), { ...event, args: { tool: "same" } }, "gm"))
+      .toMatchObject({ ok: false }); // bare id cannot search actor inventories
+  });
+
+  test("a maximal qualified item ref forwards through a template without widening ordinary scalar/literal bounds", () => {
+    const actorId = "a".repeat(128), itemId = "i".repeat(128), reference = `${actorId}/${itemId}`;
+    const def = parentDef([call("item-macro", { args: { tool: "{{arg.tool}}" } })]);
+    const w = worldOf(def, [childMacro("item-macro", "item-child", [{ name: "tool", type: "item", required: true }])],
+      [childGraph("item-child", { steps: [{ id: "tell", kind: "chat", audience: "gm", content: "{{arg.tool}}" }] })]);
+    w.actors.push({ _id: actorId, type: "actor", name: "Actor", ownership: { default: 1 }, flags: {}, system: {}, effects: [],
+      items: [{ _id: itemId, type: "item", name: "Item", ownership: { default: 0 }, flags: {}, system: {}, effects: [] }] });
+    const good = planAutomation(w, automation(def), { scene, tile, method: "manual", caller: { id: "p", role: "PLAYER" },
+      args: { tool: reference }, at: 1000, rng: () => 0.25 }, "gm");
+    if (!good.ok || !("plan" in good)) throw new Error(`257-character typed ref must forward: ${JSON.stringify(good)}`);
+    expect(good.plan.ops.filter((op) => op.kind === "create" && op.coll === "messages")
+      .map((op) => contentOf(op as Extract<typeof good.plan.ops[number], { kind: "create" }>))).toEqual([reference]);
+    // Saved Call Macro literals and returned scalar values keep their pre-existing 256 bound.
+    expect(validateAutomation(parentDef([call("item-macro", { args: { tool: reference } })])).ok).toBe(false);
+    expect(validateAutomation(parentDef([{ id: "return", kind: "result", value: reference, audience: "caller" }])).ok).toBe(false);
+  });
+
   test("a refused argument, a missing target and a bad graph each fail with the call named", () => {
     const args = { rounds: "abc" };
     const typed = parentDef([call("caller-macro", { args })]);
