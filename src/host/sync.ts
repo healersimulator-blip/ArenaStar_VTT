@@ -1843,6 +1843,28 @@ export class HostSync {
         if (step.method === "manual" && !targetChecked.definition.methods.includes("manual"))
           return `${step.id}: redirect target does not accept the manual method`;
       }
+      // MC-02: a Call Macro step names a saved macro, so the reference is checkable where it
+      // is authored — and the called graph must already pass the same rules the plan will
+      // re-apply (this scene, a real anchor, `manual`).
+      if (step.kind === "callMacro") {
+        const macro = this.store.get("macros", step.macroId) as MacroDocument | undefined;
+        const graphId = macro?.kind === "automation" ? macroAutomationGraphId(macro) : null;
+        const target = graphId ? this.store.get("automations", graphId) as AutomationDocument | undefined : undefined;
+        const targetChecked = target ? validateAutomation(target.definition) : null;
+        if (!macro || !graphId || !target || !targetChecked?.ok)
+          return `${step.id}: called macro is not a saved automation macro in this world`;
+        if (graphId === doc._id) return `${step.id}: a called macro cannot call its own graph`;
+        if (targetChecked.definition.sceneId !== checked.definition.sceneId)
+          return `${step.id}: a called macro fires a graph in this scene only`;
+        const targetScene = sceneById(targetChecked.definition.sceneId);
+        if (!targetScene || !automationSourceTile(targetScene, targetChecked.definition.tileId,
+          targetChecked.definition.sourceKind)) return `${step.id}: called macro has no anchor in this scene`;
+        if (!targetChecked.definition.methods.includes("manual"))
+          return `${step.id}: called macro does not accept the manual method`;
+        const declared = new Set(macroAutomationInputs(macro).map((field) => field.name));
+        const stray = Object.keys(step.args ?? {}).find((name) => !declared.has(name));
+        if (stray) return `${step.id}: the called macro does not declare "${stray}"`;
+      }
       if (step.kind === "sceneBackground" || step.kind === "tileImage") {
         const images = step.kind === "tileImage" && step.images ? step.images : step.image ? [step.image] : [];
         for (const image of images) {

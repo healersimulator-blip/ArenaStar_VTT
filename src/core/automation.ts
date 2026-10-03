@@ -21,7 +21,9 @@ import { movementWallBlocked, movementFootprintBlocked, movementSpeedDuration } 
 import { moveCoordinatesError, resolveMoveCoordinates, type MoveCoordinates } from "./moveCoordinates";
 import { isDoorWall } from "./documents";
 import { tileTriggerAlphaContains, tileTriggerElevationError, tileTriggerPolygonContains, tileTriggerWorldPolygon } from "./tileTriggerZone";
-import { macroArgValues } from "./macroArgs";
+import { coerceMacroArgText, macroArgValues, validateMacroArgs, type MacroArgValue } from "./macroArgs";
+import { macroAutomationGraphId, macroAutomationInputs } from "./macroAutomation";
+import { docVisibleTo } from "./projection";
 import { resolveTileImageIndex, tileImageSelectionError, type TileImageList } from "./tileImageSelection";
 import { drawFromTable, validateTable } from "./rollTable";
 import { applyDiff } from "./diff";
@@ -128,6 +130,12 @@ export type AutomationStep =
    * discover. The child runs inside this same plan (atomic, depth/budget bounded) with
    * the original method and source preserved (`method: "inherit"`), or as a `manual`
    * call (`method: "manual"`). Only same-scene GM-authored graphs. */
+  /** MC-02: call another saved automation macro's graph inside this same envelope, with
+   * typed arguments, optionally capturing its returned value into a variable. A `stop`
+   * inside the called graph ends that graph only; `propagateStop` opts into letting it
+   * end this one too, the same shape `redirect`/`triggerTile` use. */
+  | { id: string; kind: "callMacro"; macroId: string; args?: Record<string, string | number | boolean>;
+      capture?: string; onError?: "stop" | "continue"; propagateStop?: boolean }
   | { id: string; kind: "redirect"; automationId: string; tokens?: "triggering" | "current" | "inside";
       landing?: string; propagateStop?: boolean; method?: "inherit" | "manual" }
   /** Calls manual-method graphs anchored to matching tiles as part of THIS atomic host plan. */
@@ -720,6 +728,18 @@ export function validateAutomation(value: unknown): { ok: true; definition: Auto
         const open = loopStack.pop();
         if (!keys(step, [...common, "startId"]) || !open || step.startId !== open.id || step.id !== open.endId)
           return bad("loop closing step does not match its opening step");
+        break;
+      }
+      case "callMacro": {
+        if (!keys(step, [...common, "macroId", "args", "capture", "onError", "propagateStop"]) || !nonEmptyId(step.macroId) ||
+            (step.args !== undefined && (!isObject(step.args) || Object.keys(step.args).length > 16 ||
+              Object.keys(step.args).some((name) => !IDENT.test(name)) ||
+              Object.values(step.args).some((value) => !validResultValue(value)))) ||
+            (step.capture !== undefined && (typeof step.capture !== "string" ||
+              !IDENT.test(step.capture) || RESERVED_VARIABLES.has(step.capture))) ||
+            (step.onError !== undefined && !["stop", "continue"].includes(String(step.onError))) ||
+            (step.propagateStop !== undefined && typeof step.propagateStop !== "boolean"))
+          return bad("Call Macro needs a saved macro id, at most 16 bounded named arguments, an optional unreserved result variable, a stop/continue error policy and a boolean stop-propagation choice");
         break;
       }
       case "set":
@@ -2101,6 +2121,78 @@ function planGraph(
               }
             }
           }
+          break;
+        }
+        case "callMacro": {
+          // MC-02: a named, saved macro called from inside this envelope — the host resolves
+          // the reference, applies the graph's own rules (same scene, real anchor, `manual`)
+          // and runs it with the caller's identity, its own declared-input schema enforced.
+          const called = world.macros.find((candidate) => candidate._id === step.macroId);
+          const calledGraphId = called?.kind === "automation" ? macroAutomationGraphId(called) : null;
+          if (!called || !calledGraphId)
+            return fail(`call ${step.macroId} is not a saved automation macro in this world`);
+          const child = world.automations.find((candidate) => candidate._id === calledGraphId);
+          const childChecked = child ? validateAutomation(child.definition) : null;
+          if (!child || !childChecked?.ok) return fail(`call ${step.macroId}: its graph is unavailable`);
+          const childDefinition = childChecked.definition;
+          if (childDefinition.sceneId !== event.scene._id)
+            return fail(`call ${step.macroId}: a called macro fires a graph in this scene only`);
+          if (!childDefinition.methods.includes("manual"))
+            return fail(`call ${step.macroId}: its graph does not accept the manual method`);
+          const childAnchor = automationSourceTile(event.scene, childDefinition.tileId, childDefinition.sourceKind);
+          if (!childAnchor) return fail(`call ${step.macroId}: its anchor is missing in this scene`);
+          // Arguments are interpolated in the CALLER's context, then coerced to the called
+          // macro's declared types and re-validated under the caller's own visibility — the
+          // same rule an invocation from the directory gets, so a macro cannot be handed data
+          // it would never accept from a caller directly.
+          const declaredInputs = macroAutomationInputs(called);
+          const inputByName = new Map(declaredInputs.map((field) => [field.name, field] as const));
+          const supplied: Record<string, string | number | boolean> = {};
+          for (const [name, raw] of Object.entries(step.args ?? {})) {
+            const text = typeof raw === "string" ? textTemplate(raw, values) : raw;
+            const field = inputByName.get(name);
+            if (!field || typeof text !== "string") { supplied[name] = text; continue; }
+            const coerced = coerceMacroArgText(field, text);
+            if (coerced === null) return fail(`call ${step.macroId}: invalid ${name}`);
+            supplied[name] = coerced;
+          }
+          const visible = (type: "token" | "actor", id: string): boolean => {
+            if (type === "token")
+              return event.scene.tokens.some((token) => token._id === id && docVisibleTo(event.caller, token, event.scene));
+            const actor = world.actors.find((candidate) => candidate._id === id);
+            return !!actor && docVisibleTo(event.caller, actor);
+          };
+          const checkedCallArgs = validateMacroArgs(supplied as Record<string, MacroArgValue>, declaredInputs, visible);
+          if (!checkedCallArgs.ok) return fail(`call ${step.macroId}: ${checkedCallArgs.error}`);
+          const callArgs = checkedCallArgs.args;
+          trace.push(`call ${step.macroId} -> graph ${child._id}: ${Object.keys(callArgs).length} argument(s)`);
+          const result = planGraph(ctx, child, { scene: event.scene, tile: childAnchor, caller: event.caller,
+            at: event.at, rng: event.rng, method: "manual",
+            originMethod: event.originMethod ?? event.method,
+            originTileId: event.originTileId ?? event.tile._id,
+            originSource: event.originSource ?? (d.sourceKind ?? "tile"),
+            ...(Object.keys(callArgs).length > 0 ? { args: callArgs } : {}),
+            ...(event.direction ? { direction: event.direction } : {}),
+            ...(event.movementOriginal ? { movementOriginal: event.movementOriginal } : {}),
+            ...(event.imageAssetError ? { imageAssetError: event.imageAssetError } : {}),
+            ...(event.hurtHeal ? { hurtHeal: event.hurtHeal } : {}),
+            ...(event.token ? { token: event.token } : {}) }, hostUserId);
+          if (!result.ok) {
+            // A transparent call stack: the step's macro, its graph and the child's own error.
+            const error = `call ${step.macroId} (graph ${child._id}): ${result.error}`;
+            if (step.onError === "continue") { trace.push(`${error} — continued`); break; }
+            return fail(error);
+          }
+          if (result.skipped) trace.push(`call ${step.macroId} skipped: ${result.skipped}`);
+          // The called graph is a subroutine: its own `stop` ends it, not the caller,
+          // unless the caller asks for the same opt-in `redirect` offers.
+          if (step.propagateStop && result.stopped) return { ok: true, stopped: true };
+          const returned = ctx.results.get(child._id);
+          if (step.capture) values[step.capture] = returned ? returned.value : "";
+          if (returned)
+            trace.push(`call ${step.macroId} returned ${String(returned.value).slice(0, 64)}` +
+              `${step.capture ? ` -> ${step.capture}` : ""}`);
+          if (step.capture) trace.push(`variable ${step.capture} = ${JSON.stringify(values[step.capture])}`);
           break;
         }
         case "redirect": {

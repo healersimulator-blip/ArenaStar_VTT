@@ -358,6 +358,25 @@ takes that token's linked actor). It changes nothing on the wire — the resulti
 `args` and the host validates it exactly like a spelled-out one, so a client cannot select its way
 past visibility. A composite takes no arguments.
 
+MC-02 also lets one graph **call another saved automation macro** from inside its own envelope, so a
+GM can build a named library of small graphs and compose them. The step is
+`{ id, kind: "callMacro", macroId, args?, capture?, onError?, propagateStop? }`, and it is authored
+against the **macro**, never a graph id: the host re-resolves `macroId` to the macro's graph on every
+run and applies that graph's own rules — same scene, a real anchor in that scene, and `manual` among
+its methods — exactly as if the graph were invoked directly. Caller-supplied `args` are interpolated
+in the **caller's** context, coerced to the called macro's declared types and re-validated by the same
+rule a directory invocation gets (`{{arg.<name>}}` inside the child), so a call cannot hand a child
+data that child would never accept from a caller. The child runs **inside this plan**: one envelope,
+one undo boundary, and the shared depth/invocation budget that already bounds trigger-tile chains, so
+an indirect cycle is refused at run time with a `parent -> child` stack. A failure is transparent —
+`call <macroId> (graph <graphId>): <reason>` — and `onError: "continue"` instead records the failure
+in the trace and carries on. `capture` stores the child's own Return Value in a run variable for later
+steps; only the **root** graph's value is the invocation's result. A `stop` inside the called graph
+ends *that graph* (a call is a subroutine, not a chain reaction); `propagateStop` opts into letting it
+end the caller as well, the same shape `redirect`/`triggerTile` already use. Nothing here widens a
+graph's audience: the whole call runs under the invoker's identity and visibility, and a player's
+replica never learns a graph id.
+
 ```ts
 interface MacroInvokeMsg {
   kind: "macros.invoke";

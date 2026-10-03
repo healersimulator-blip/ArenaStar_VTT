@@ -2264,3 +2264,102 @@ test("a graph returns a value to its invoker, and a gm-only value stays with the
     await hostCtx.close();
   }
 });
+
+test("a Call Macro step runs the named macro's graph in the same commit and captures its value", async ({ page }) => {
+  test.setTimeout(150_000);
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-zones-tab]").click();
+  const zones = page.locator("[data-active-zones]");
+  const tile = zones.locator("[data-zone-tile-create]");
+  await tile.locator("summary").click();
+  await tile.getByLabel("Tile name").fill("Call plate");
+  await tile.getByLabel("X", { exact: true }).fill("350");
+  await tile.getByLabel("Y", { exact: true }).fill("400");
+  await tile.getByLabel("Width").fill("200");
+  await tile.getByLabel("Height").fill("160");
+  await tile.locator("[data-zone-create-tile]").click();
+  await expect(zones.locator("[data-zone-tile] option").filter({ hasText: "Call plate" })).toHaveCount(1);
+
+  // The child graph: returns a value to its caller.
+  await zones.locator("[data-zone-name]").fill("Child bell");
+  for (const method of ["enter", "stop"])
+    await zones.locator(".methods label").filter({ hasText: new RegExp(`^${method}$`) })
+      .locator("input").uncheck();
+  await zones.locator('[data-zone-step="notice"]').getByLabel("Text").fill("child saw " + "{{arg.rounds}}");
+  await zones.locator('[data-zone-add="result"]').click();
+  const returned = zones.locator("[data-zone-step]").last();
+  await returned.getByLabel("Value").fill("child ok " + "{{arg.rounds}}");
+  await zones.locator('[data-zone-add="stop"]').click(); // the subroutine ends itself…
+  await zones.locator("[data-zone-save]").click();
+  const childRow = zones.locator("li").filter({ hasText: "Child bell" });
+  await expect(childRow).toHaveCount(1);
+  await childRow.locator("[data-zone-macro]").click();
+  await expect(zones.getByText(/Published automation macro "Child bell"/)).toHaveCount(1);
+
+  // Give the child macro one required number input, so the call has a typed argument to check.
+  const macros = page.locator('[data-window="macros"]');
+  await macros.locator("[data-macro-automations-tab]").click();
+  const childMacroRow = macros.locator("[data-automation-macro]").filter({ hasText: "Child bell" });
+  await childMacroRow.locator("[data-automation-inputs]").click();
+  const inputs = macros.locator("[data-automation-inputs-editor]");
+  await inputs.locator("[data-automation-input-add]").click();
+  await inputs.getByLabel("Input 1 name").fill("rounds");
+  await inputs.getByLabel("Input 1 type").selectOption("number");
+  await inputs.getByLabel("Input 1 required").check();
+  await inputs.locator("[data-automation-input-save]").click();
+  await expect(childMacroRow.locator("[data-automation-inputs]")).toContainText("Inputs (1)");
+
+  // The parent graph calls it, with an interpolated argument and a captured result.
+  // (The directory's tabs swap the panel, so come back to the zone wizard first.)
+  await page.locator("[data-macro-zones-tab]").click();
+  await zones.getByRole("button", { name: "New", exact: true }).click();
+  await zones.locator("[data-zone-name]").fill("Parent bell");
+  await zones.locator("[data-zone-tile]").selectOption(await zones.locator("[data-zone-tile] option")
+    .filter({ hasText: "Call plate" }).first().getAttribute("value") as string);
+  for (const method of ["enter", "stop"])
+    await zones.locator(".methods label").filter({ hasText: new RegExp(`^${method}$`) })
+      .locator("input").uncheck();
+  await zones.getByLabel("Player canvas triggers (published)").check();
+  await zones.locator('[data-zone-add="callMacro"]').click();
+  const call = zones.locator('[data-zone-step]').last();
+  await call.getByLabel("Called macro").selectOption({ label: "Child bell" });
+  await call.getByLabel("Call argument rounds").fill("3");
+  await call.getByLabel("Call result variable").fill("child");
+  // The call must run before the parent's own line, which quotes what it captured.
+  const propagate = call.getByLabel("Call propagate stop");
+  await propagate.check();  // …but its Stop stays inside the call unless the caller opts in
+  await propagate.uncheck();
+  await call.getByRole("button", { name: /^Move step \d+ up$/ }).click(); // the call runs before the parent's own line
+  await zones.locator('[data-zone-step="notice"]').getByLabel("Text").fill("parent heard " + "{{child}}");
+  await zones.locator("[data-zone-save]").click();
+  const parentRow = zones.locator("li").filter({ hasText: "Parent bell" });
+  await expect(parentRow).toHaveCount(1);
+  await parentRow.locator("[data-zone-macro]").click();
+  await expect(zones.getByText(/Published automation macro "Parent bell"/)).toHaveCount(1);
+
+  // One run from the directory: the child's line (it ends itself with Stop), then the parent's
+  // line quoting the value the child returned — the call is a subroutine, not a chain reaction.
+  await macros.locator("[data-macro-automations-tab]").click();
+  const parentMacroRow = macros.locator("[data-automation-macro]").filter({ hasText: "Parent bell" });
+  await parentMacroRow.locator("[data-automation-macro-run]").click();
+  await expect(macros.locator("[data-automation-status]")).toHaveText("Fired Parent bell");
+  await page.locator('[data-window="macros"] [data-window-close]').click();
+  await page.locator('[data-tab="chat"]').click();
+  const log = page.locator("#chat-log");
+  await expect.poll(async () => (await log.innerText()).split("child saw").length - 1).toBe(1);
+  await expect(log).toContainText("parent heard child ok 3");
+  expect((await log.innerText()).split("parent heard").length - 1).toBe(1);
+  // Each graph's own run counter advanced, and both live in one host commit (one undo).
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-zones-tab]").click();
+  await expect(zones.locator("li").filter({ hasText: "Child bell" })).toContainText("1 run(s)");
+  await expect(zones.locator("li").filter({ hasText: "Parent bell" })).toContainText("1 run(s)");
+  await page.locator('[data-window="macros"] [data-window-close]').click();
+  await page.locator('[data-tab="chat"]').click();
+  // A single undo removes the child's write and the parent's write together.
+  await page.locator("#gm-undo").click();
+  await expect.poll(async () => (await log.innerText()).split("child saw").length - 1).toBe(0);
+  expect((await log.innerText()).split("parent heard").length - 1).toBe(0);
+});

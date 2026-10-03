@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { doorTransitionMethod, isHostDispatchedMethod, planAutomation, SIMULATABLE_METHODS, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState, type AutomationDefinition } from "../../src/core/automation";
 import { COMBAT_TRIGGER_METHODS } from "../../src/core/combat";
-import type { ActorDocument, AutomationDocument, EffectDocument, ItemDocument, MessageDocument, SceneDocument, TileDocument, TokenDocument, WallDocument } from "../../src/core/documents";
+import type { ActorDocument, AutomationDocument, EffectDocument, ItemDocument, MacroDocument, MessageDocument, SceneDocument, TileDocument, TokenDocument, WallDocument } from "../../src/core/documents";
 import { emptyWorld } from "../net/fixtures";
 import { worldSettingsDoc } from "../../src/core/worldSettings";
 
@@ -2770,5 +2770,176 @@ describe("graph return values (MC-02)", () => {
       { id: "r", kind: "result", value: "{{wide}}{{wide}}", audience: "caller" },
     ]));
     expect(refused).toMatchObject({ ok: false, error: expect.stringMatching(/exceeded its bound/) });
+  });
+});
+
+// ─── MC-02 (D-390): a graph calls another saved macro, with typed args and a result ──
+
+describe("MC-02 Call Macro", () => {
+  const contentOf = (op: { data: unknown }): string => (op.data as { content: string }).content;
+  type CallStep = Extract<AutomationDefinition["steps"][number], { kind: "callMacro" }>;
+  const call = (macroId: string, over: Partial<CallStep> = {}): CallStep =>
+    ({ id: "call", kind: "callMacro", macroId, ...over });
+  const parentDef = (steps: AutomationDefinition["steps"]): AutomationDefinition =>
+    ({ version: 1, sceneId: "s1", tileId: "zone", methods: ["manual"], gates: {}, steps });
+  /** The child macro: a saved automation macro over `zone`, publishing a graph. */
+  const childMacro = (id: string, graphId: string, inputs?: unknown): MacroDocument => ({
+    _id: id, type: "macro", name: id, ownership: { default: 1 }, flags: {}, system: {},
+    kind: "automation", command: "", automation: { graphId, ...(inputs ? { inputs } : {}) },
+  } as unknown as MacroDocument);
+  const childGraph = (id: string, over: Partial<AutomationDefinition> = {}): AutomationDocument => ({
+    _id: id, type: "automation", name: id, ownership: { default: 0 }, flags: {}, system: {},
+    definition: { version: 1, sceneId: "s1", tileId: "zone", methods: ["manual"], gates: {},
+      steps: [{ id: "tell", kind: "chat", audience: "gm", content: "child {{method}}/{{arg.rounds}}/{{arg.label}}" }],
+      ...over },
+  });
+  function worldOf(def: AutomationDefinition, macros: MacroDocument[], graphs: AutomationDocument[]): ReturnType<typeof emptyWorld> {
+    const w = emptyWorld();
+    w.scenes.push(scene);
+    w.automations.push(automation(def), ...graphs);
+    w.macros.push(...macros);
+    return w;
+  }
+  const run = (w: ReturnType<typeof emptyWorld>, def: AutomationDefinition) =>
+    planAutomation(w, automation(def), { scene, tile, token: runner, method: "manual",
+      caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+
+  test("the step validates its id, its bounded arguments, its variable and its error policy", () => {
+    expect(validateAutomation(parentDef([call("m-1")])).ok).toBe(true);
+    expect(validateAutomation(parentDef([call("m-1", { args: { rounds: 2, label: "{{count}}" }, capture: "child", onError: "continue" })])).ok).toBe(true);
+    expect(validateAutomation(parentDef([call("", {})])).ok).toBe(false);
+    expect(validateAutomation(parentDef([call("m-1", { args: { "1bad": 1 } })])).ok).toBe(false);
+    expect(validateAutomation(parentDef([call("m-1", { args: { rounds: "x".repeat(257) } })])).ok).toBe(false);
+    expect(validateAutomation(parentDef([call("m-1", { args: Object.fromEntries(Array.from({ length: 17 }, (_, i) => [`a${i}`, 1])) })])).ok).toBe(false);
+    expect(validateAutomation(parentDef([call("m-1", { capture: "user" })])).ok).toBe(false);
+    expect(validateAutomation(parentDef([call("m-1", { onError: "ignore" } as never)])).ok).toBe(false);
+    expect(validateAutomation(parentDef([call("m-1", { propagateStop: true })])).ok).toBe(true);
+    expect(validateAutomation(parentDef([call("m-1", { propagateStop: "yes" } as never)])).ok).toBe(false);
+    expect(validateAutomation(parentDef([call("m-1", { extra: 1 } as never)])).ok).toBe(false);
+  });
+
+  test("a Stop inside the called graph ends that graph only, unless the caller opts in", () => {
+    const childWithStop = childGraph("child-graph", { steps: [
+      { id: "tell", kind: "chat", audience: "gm", content: "child spoke" },
+      { id: "halt", kind: "stop" },
+      { id: "never", kind: "chat", audience: "gm", content: "child after stop" },
+    ] } as Partial<AutomationDefinition>);
+    const def = parentDef([call("caller-macro"),
+      { id: "after", kind: "chat", audience: "gm", content: "parent done" }]);
+    const w = worldOf(def, [childMacro("caller-macro", "child-graph")], [childWithStop]);
+    const planned = run(w, def);
+    if (!planned.ok || !("plan" in planned)) throw new Error(`a stopped child must not stop the plan: ${JSON.stringify(planned)}`);
+    // Subroutine semantics: the child's Stop truncates the child, the caller carries on.
+    expect(planned.plan.ops.filter((op) => op.kind === "create" && op.coll === "messages")
+      .map((op) => contentOf(op as Extract<typeof planned.plan.ops[number], { kind: "create" }>))).toEqual(["child spoke", "parent done"]);
+    // The opt-in `redirect`/`triggerTile` already offer does propagate it.
+    const asking = parentDef([call("caller-macro", { propagateStop: true }),
+      { id: "after", kind: "chat", audience: "gm", content: "parent done" }]);
+    const prop = run(worldOf(asking, [childMacro("caller-macro", "child-graph")], [childGraph("child-graph", { steps: [
+      { id: "tell", kind: "chat", audience: "gm", content: "child spoke" },
+      { id: "halt", kind: "stop" },
+    ] } as Partial<AutomationDefinition>)]), asking);
+    if (!prop.ok || !("plan" in prop)) throw new Error(`a propagating call must still plan: ${JSON.stringify(prop)}`);
+    expect(prop.plan.ops.filter((op) => op.kind === "create" && op.coll === "messages")
+      .map((op) => contentOf(op as Extract<typeof prop.plan.ops[number], { kind: "create" }>))).toEqual(["child spoke"]);
+  });
+
+  test("the called graph runs inside the same plan, as manual, with its declared arguments", () => {
+    const def = parentDef([call("caller-macro", { args: { rounds: "{{count}}", label: "vault" } }),
+      { id: "after", kind: "chat", audience: "gm", content: "parent done" }]);
+    const w = worldOf(def, [childMacro("caller-macro", "child-graph",
+      [{ name: "rounds", type: "number", required: true }, { name: "label", type: "string" }])],
+      [childGraph("child-graph")]);
+    const planned = run(w, def);
+    if (!planned.ok || !("plan" in planned)) throw new Error(`a nested call must plan: ${JSON.stringify(planned)}`);
+    const lines = planned.plan.ops.filter((op) => op.kind === "create" && op.coll === "messages")
+      .map((op) => contentOf(op as Extract<typeof planned.plan.ops[number], { kind: "create" }>));
+    // The child ran first (its own interpolation included the typed argument), then the parent.
+    expect(lines).toEqual(["child manual/1/vault", "parent done"]);
+    // One plan, one envelope: the child's tags are inside the parent's ops, not a second commit.
+    expect(planned.plan.trace.some((line) => line.includes("call caller-macro -> graph child-graph: 2 argument(s)"))).toBe(true);
+  });
+
+  test("a refused argument, a missing target and a bad graph each fail with the call named", () => {
+    const args = { rounds: "abc" };
+    const typed = parentDef([call("caller-macro", { args })]);
+    const w = worldOf(typed, [childMacro("caller-macro", "child-graph", [{ name: "rounds", type: "number" }])],
+      [childGraph("child-graph")]);
+    expect(run(w, typed)).toMatchObject({ ok: false,
+      error: expect.stringMatching(/call caller-macro: invalid rounds/) });
+    // Undeclared name, missing required input and an unreadable token are the macro-invoke rules.
+    const stray = parentDef([call("caller-macro", { args: { nope: "1" } })]);
+    const w2 = worldOf(stray, [childMacro("caller-macro", "child-graph", [{ name: "rounds", type: "number" }])],
+      [childGraph("child-graph")]);
+    expect(run(w2, stray)).toMatchObject({ ok: false, error: expect.stringMatching(/unknown macro argument/) });
+    const missing = parentDef([call("caller-macro")]);
+    const w3 = worldOf(missing, [childMacro("caller-macro", "child-graph", [{ name: "rounds", type: "number", required: true }])],
+      [childGraph("child-graph")]);
+    expect(run(w3, missing)).toMatchObject({ ok: false, error: expect.stringMatching(/missing rounds/) });
+    // A macro that is not an automation macro, and a graph the macro does not have.
+    const chatMacro = { ...childMacro("chat-macro", "nope"), kind: "chat" } as MacroDocument;
+    const w4 = worldOf(parentDef([call("chat-macro")]), [chatMacro], [childGraph("child-graph")]);
+    expect(run(w4, parentDef([call("chat-macro")]))).toMatchObject({ ok: false,
+      error: expect.stringMatching(/is not a saved automation macro/) });
+    const w5 = worldOf(parentDef([call("caller-macro")]), [childMacro("caller-macro", "gone")], []);
+    expect(run(w5, parentDef([call("caller-macro")]))).toMatchObject({ ok: false,
+      error: expect.stringMatching(/its graph is unavailable/) });
+    // A graph that does not accept `manual`, and one whose anchor is not in this scene.
+    const w6 = worldOf(parentDef([call("caller-macro")]), [childMacro("caller-macro", "child-graph")],
+      [childGraph("child-graph", { methods: ["enter"] })]);
+    expect(run(w6, parentDef([call("caller-macro")]))).toMatchObject({ ok: false,
+      error: expect.stringMatching(/does not accept the manual method/) });
+    const w7 = worldOf(parentDef([call("caller-macro")]), [childMacro("caller-macro", "child-graph")],
+      [childGraph("child-graph", { tileId: "nowhere" })]);
+    expect(run(w7, parentDef([call("caller-macro")]))).toMatchObject({ ok: false,
+      error: expect.stringMatching(/its anchor is missing/) });
+  });
+
+  test("a child's error is reported with the call chain, and `continue` keeps the parent going", () => {
+    const failing = childGraph("child-graph", { steps: [{ id: "bad", kind: "door", mode: "open" }] });
+    const w = worldOf(parentDef([call("caller-macro")]), [childMacro("caller-macro", "child-graph")], [failing]);
+    const stacked = run(w, parentDef([call("caller-macro")]));
+    expect(stacked).toMatchObject({ ok: false,
+      error: expect.stringMatching(/call caller-macro \(graph child-graph\): door/) });
+    const soft = parentDef([call("caller-macro", { onError: "continue" }),
+      { id: "after", kind: "chat", audience: "gm", content: "kept going" }]);
+    const w2 = worldOf(soft, [childMacro("caller-macro", "child-graph")], [failing]);
+    const planned = run(w2, soft);
+    if (!planned.ok || !("plan" in planned)) throw new Error("a continued failure must still plan");
+    expect(planned.plan.trace.some((line) => line.includes("— continued"))).toBe(true);
+    expect(planned.plan.ops.filter((op) => op.kind === "create" && op.coll === "messages")
+      .map((op) => contentOf(op as Extract<typeof planned.plan.ops[number], { kind: "create" }>))).toEqual(["kept going"]);
+  });
+
+  test("the called graph's return value can be captured into a variable the parent then uses", () => {
+    const returning = childGraph("child-graph",
+      { steps: [{ id: "r", kind: "result", value: "child said {{count}}", audience: "caller" }] });
+    const def = parentDef([call("caller-macro", { capture: "child" }),
+      { id: "after", kind: "chat", audience: "gm", content: "parent heard: {{child}}" }]);
+    const w = worldOf(def, [childMacro("caller-macro", "child-graph")], [returning]);
+    const planned = run(w, def);
+    if (!planned.ok || !("plan" in planned)) throw new Error("a capture must plan");
+    expect(planned.plan.ops.filter((op) => op.kind === "create" && op.coll === "messages")
+      .map((op) => contentOf(op as Extract<typeof planned.plan.ops[number], { kind: "create" }>))).toEqual(["parent heard: child said 1"]);
+    // Only the ROOT graph's value is the invocation's result, so the child's value is not one.
+    expect(planned.plan.result).toBeUndefined();
+    // Without a Return Value action the captured variable is the empty string (never a leak).
+    const silentDef = parentDef([call("caller-macro", { capture: "child" }),
+      { id: "after", kind: "chat", audience: "gm", content: "heard [{{child}}]" }]);
+    const w2 = worldOf(silentDef, [childMacro("caller-macro", "child-graph")], [childGraph("child-graph")]);
+    const silent = run(w2, silentDef);
+    if (!silent.ok || !("plan" in silent)) throw new Error("a silent capture must plan");
+    // The child's own chat line is there; only its (absent) return value is not.
+    expect(silent.plan.ops.filter((op) => op.kind === "create" && op.coll === "messages")
+      .map((op) => contentOf(op as Extract<typeof silent.plan.ops[number], { kind: "create" }>)))
+      .toEqual(["child manual//", "heard []"]);
+  });
+
+  test("recursion is refused with the whole chain, inside the shared depth budget", () => {
+    // A macro whose graph is the graph containing the call: the stack check names both hops.
+    const def = parentDef([call("self-macro")]);
+    const w = worldOf(def, [childMacro("self-macro", "a1")], []);
+    expect(run(w, def)).toMatchObject({ ok: false,
+      error: expect.stringMatching(/call self-macro \(graph a1\): trigger tile recursion: a1 -> a1/) });
   });
 });

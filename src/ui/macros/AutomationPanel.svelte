@@ -12,18 +12,19 @@
   } from "../../core/automation";
   import { tileAlphaMaskFromRgba, tileTriggerCirclePolygon, type TileTriggerZone } from "../../core/tileTriggerZone";
   import { regionGeometryError } from "../../core/regionGeometry";
-  import { macroAutomationGraphId } from "../../core/macroAutomation";
+  import { macroAutomationGraphId, macroAutomationInputs } from "../../core/macroAutomation";
 
   let { client, bus, getAsset = null }: { client: ClientSync; bus: EventBus<ClientEvents>;
     getAsset?: ((hash: string) => Promise<Uint8Array | undefined>) | null } = $props();
   const METHODS: AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "sceneChange", "sceneLoad", "rotate", "click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "doorOpen", "doorClose", "doorLock", "doorUnlock", ...COMBAT_TRIGGER_METHODS, "lightingChange", "timeChange", "manual"];
-  const KINDS: AutomationStep["kind"][] = ["select", "filter", "checkVariable", "checkValue", "checkScriptResult", "shuffle", "position", "distance", "attributes", "checkData", "condition", "inventory", "tokenTriggerCount", "routeMethod", "routeUser", "forEach", "endEach", "resetHistory", "batchFlush", "collection", "triggerTile", "redirect", "setActive", "stopOthers", "stopMovement", "set", "gameTime", "sceneLighting", "sceneBackground", "tileImage", "hurtHeal", "random", "tags", "visibility", "door", "move", "rotate", "delete", "chat", "result", "sequence", "script", "summon", "rollTable", "landing", "jump", "stop"];
+  const KINDS: AutomationStep["kind"][] = ["select", "filter", "checkVariable", "checkValue", "checkScriptResult", "shuffle", "position", "distance", "attributes", "checkData", "condition", "inventory", "tokenTriggerCount", "routeMethod", "routeUser", "forEach", "endEach", "resetHistory", "batchFlush", "collection", "triggerTile", "redirect", "setActive", "stopOthers", "stopMovement", "set", "gameTime", "sceneLighting", "sceneBackground", "tileImage", "hurtHeal", "random", "tags", "visibility", "door", "move", "rotate", "delete", "chat", "result", "callMacro", "sequence", "script", "summon", "rollTable", "landing", "jump", "stop"];
   const ADD_KINDS = KINDS.filter((kind) => kind !== "endEach");
   const KIND_LABEL: Record<string, string> = { stopMovement: "Stop Token Movement", checkScriptResult: "Check Script Result",
     batchFlush: "Run All Batch Actions", gameTime: "Game Time",
     sceneLighting: "Scene Lighting", sceneBackground: "Scene Background", tileImage: "Switch Tile Image",
     hurtHeal: "Hurt / Heal", move: "Move", rotate: "Rotation", delete: "Delete Entities", rollTable: "Roll Table",
-    redirect: "Trigger Automation", triggerTile: "Trigger Tile at Anchor", result: "Return Value" };
+    redirect: "Trigger Automation", triggerTile: "Trigger Tile at Anchor", result: "Return Value",
+    callMacro: "Call Macro" };
   const kindLabel = (kind: string): string => KIND_LABEL[kind] ?? kind;
   const methodLabel = (method: AutomationMethod): string => method === "rightClick" ? "right click"
     : method === "doubleClick" ? "double click" : method === "hoverIn" ? "hover in"
@@ -132,6 +133,18 @@
     if (!definition.methods.includes(triggerMethod) || isHostDispatchedMethod(triggerMethod))
       triggerMethod = firstSimulatableMethod(definition.methods) ?? "sceneChange";
   }
+  /** MC-02: the saved macro a Call Macro step names, and its declared input schema. */
+  function calledMacro(step: Extract<AutomationStep, { kind: "callMacro" }>): MacroDocument | null {
+    return automationMacros.find((candidate) => candidate._id === step.macroId) ?? null;
+  }
+  function setCallArg(step: Extract<AutomationStep, { kind: "callMacro" }>, name: string, raw: string): void {
+    const args: Record<string, string | number | boolean> = {};
+    for (const [key, value] of Object.entries(step.args ?? {})) if (key !== name) args[key] = value;
+    const text = raw.trim();
+    if (text !== "") args[name] = text;
+    if (Object.keys(args).length > 0) step.args = args;
+    else delete step.args;
+  }
   function newStep(kind: AutomationStep["kind"], id = `step-${crypto.randomUUID().slice(0, 8)}`): AutomationStep {
     switch (kind) {
       case "select": return { id, kind, selector: { kind: "triggering" } };
@@ -180,6 +193,7 @@
       case "rollTable": return { id, kind, tableId: rollTables[0]?._id ?? "", audience: "scene" };
       case "chat": return { id, kind, audience: "gm", content: "{{method}} by {{user}}" };
       case "result": return { id, kind, audience: "caller", value: "{{count}}" };
+      case "callMacro": return { id, kind, macroId: automationMacros[0]?._id ?? "" };
       case "sequence": return { id, kind, macroId: macros[0]?._id ?? "", audience: "gm" };
       case "script": return { id, kind, macroId: scripts.find((m) => m.script?.sceneId === sceneId)?._id ?? "" };
       case "summon": return { id, kind, presetId: summons.find((m) => m.summon?.sceneId === sceneId)?._id ?? "",
@@ -1652,6 +1666,27 @@
             <label>Value <input bind:value={step.value} placeholder={'{{count}}'} /></label>
             <label>Audience <select bind:value={step.audience}><option value="caller">Caller only</option><option value="gm">GM only</option></select></label>
             <small>Hands a bounded string, number or boolean back to whoever invoked this graph — the caller's own status line, never a chat message. A string is interpolated; the last Return Value action the graph executes wins, and a value over 256 characters rejects the graph.</small>
+          {:else if step.kind === "callMacro"}
+            <label>Saved macro <select bind:value={step.macroId} aria-label="Called macro">
+              <option value="">Choose…</option>
+              {#each automationMacros as target (target._id)}<option value={target._id}>{target.name}</option>{/each}
+            </select></label>
+            {#each macroAutomationInputs(calledMacro(step)) as field (field.name)}
+              <label>{field.name}{field.required ? " *" : ""} ({field.type})
+                <input value={(step.args?.[field.name] ?? "") as string} aria-label={`Call argument ${field.name}`}
+                  placeholder={field.type === "string" ? "{{count}}" : field.type}
+                  onchange={(e) => setCallArg(step, field.name, e.currentTarget.value)} /></label>
+            {/each}
+            <label>Store returned value in variable (optional)
+              <input value={step.capture ?? ""} aria-label="Call result variable" placeholder="child"
+                onchange={(e) => { const value = e.currentTarget.value.trim(); if (value) step.capture = value; else delete step.capture; }} /></label>
+            <label>On error <select value={step.onError ?? "stop"} aria-label="Call error policy"
+              onchange={(e) => { step.onError = e.currentTarget.value as "stop" | "continue"; }}>
+              <option value="stop">Stop this graph</option><option value="continue">Continue</option>
+            </select></label>
+            <label><input type="checkbox" aria-label="Call propagate stop" checked={step.propagateStop ?? false}
+              onchange={(e) => { if (e.currentTarget.checked) step.propagateStop = true; else delete step.propagateStop; }} /> Let the called graph's Stop also stop this graph</label>
+            <small>Runs the named saved macro's graph inside this same envelope, as <code>manual</code>, under the invoker's identity: typed argument values are interpolated here then checked against that macro's declared inputs (the same rule the directory applies), a call stack names the failing step, and the called graph's Return Value may be captured into a variable. A macro that is not published, has no anchor in this scene or omits <code>manual</code> refuses the whole graph. By default the called graph is a subroutine: a Stop inside it ends that graph only.</small>
           {:else if step.kind === "sequence"}
             <label>Saved FX macro <select bind:value={step.macroId}><option value="">Choose…</option>{#each macros as macro (macro._id)}<option value={macro._id}>{macro.name}</option>{/each}</select></label>
             <label>Audience <select bind:value={step.audience}><option value="gm">GM only</option><option value="scene">Entitled scene viewers</option></select></label>

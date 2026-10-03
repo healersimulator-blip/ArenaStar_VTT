@@ -9386,3 +9386,102 @@ test("a macro's returned value reaches only its invoker, and only when the audie
   expect(gmResults.at(-1)).toMatchObject({ ok: true, result: expect.stringMatching(/^secret \d+$/) });
   expect(h.hostStore.getAll("messages")).toEqual([]);
 });
+
+// ─── MC-02 (D-390): a graph calls another saved macro inside its own envelope ───────
+
+/** The child macro's graph: published `manual`, posts one line, returns its own value. */
+const macroCallChildGraph = (over: Partial<AutomationDocument> = {}): AutomationDocument => ({
+  ...zoneDoc(), _id: "child-graph", name: "Child bell",
+  definition: { ...zoneDoc().definition, tileId: "zone", methods: ["manual"], gates: { playerRunnable: true },
+    steps: [{ id: "tell", kind: "chat", audience: "gm", content: "child saw {{arg.rounds}}/{{arg.label}}" },
+      { id: "r", kind: "result", value: "child ok {{arg.rounds}}", audience: "caller" }] },
+  ...over,
+});
+
+/** The parent graph: calls the child macro, captures its value and quotes it. */
+const macroCallParentGraph = (step: Record<string, unknown>): AutomationDocument => ({
+  ...zoneDoc(), _id: "parent-graph", name: "Parent bell",
+  definition: { ...zoneDoc().definition, tileId: "zone", methods: ["manual"], gates: { playerRunnable: true },
+    steps: [step as never, { id: "after", kind: "chat", audience: "gm", content: "parent heard {{child}}" }] },
+});
+
+test("a Call Macro step runs the called macro's graph in the same envelope and captures its value", async () => {
+  const h = await setup();
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: visibleZoneTile() }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "automations", data: macroCallChildGraph() }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "macros", data: automationMacro("child-graph", { _id: "child-macro",
+    name: "Child bell", automation: { graphId: "child-graph",
+      inputs: [{ name: "rounds", type: "number", required: true }, { name: "label", type: "string" }] } }) }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "automations", data: macroCallParentGraph({ id: "call", kind: "callMacro",
+    macroId: "child-macro", args: { rounds: "{{count}}", label: "vault" }, capture: "child" }) }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "macros", data: automationMacro("parent-graph", { _id: "parent-macro",
+    name: "Parent bell" }) }]);
+  await flushMicrotasks();
+  const messages = () => h.hostStore.getAll("messages").map((message) => message.content);
+
+  const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const results: ClientEvents["macroResult"][] = [];
+  playerBus.on("macroResult", (event) => { results.push(event); });
+  // One invocation: the parent's call runs the child, which sees the TYPE-checked argument, and
+  // the parent's own line quotes the child's Return Value captured into a variable.
+  const before = h.hostStore.seq;
+  player.invokeMacro("parent-macro");
+  await flushMicrotasks();
+  expect(messages()).toEqual(["child saw 1/vault", "parent heard child ok 1"]);
+  // Both graphs committed inside ONE envelope, so one undo removes every write.
+  expect(h.hostStore.seq).toBe(before + 1);
+  expect(results.at(-1)).toMatchObject({ ok: true, detail: "Automation fired" });
+  expect(h.host.undo().ok).toBe(true);
+  expect(messages()).toEqual([]);
+  expect((h.hostStore.get("automations", "child-graph") as AutomationDocument).state?.count).toBeUndefined();
+});
+
+test("the called macro's reference and arguments are checked where they are authored", async () => {
+  const h = await setup();
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: visibleZoneTile() }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "automations", data: macroCallChildGraph() }]);
+  await flushMicrotasks();
+  h.gm.submit([
+    { kind: "create", coll: "macros", data: automationMacro("child-graph", { _id: "child-macro", name: "Child bell",
+      automation: { graphId: "child-graph", inputs: [{ name: "rounds", type: "number", required: true }] } }) },
+    { kind: "create", coll: "macros", data: { _id: "chat-macro", type: "macro", name: "Chat bell",
+      ownership: { default: 1 }, flags: {}, system: {}, kind: "chat", command: "/roll 1d6" } as MacroDocument },
+  ]);
+  await flushMicrotasks();
+  const refusals: string[] = [];
+  h.gmBus.on("rejected", (event) => refusals.push(event.detail));
+  const submit = (step: Record<string, unknown>) =>
+    h.gm.submit([{ kind: "create", coll: "automations", data: macroCallParentGraph(step) }]);
+  const attempts: Array<[Record<string, unknown>, string]> = [
+    [{ id: "call", kind: "callMacro", macroId: "nope" }, "not a saved automation macro"],
+    [{ id: "call", kind: "callMacro", macroId: "chat-macro" }, "not a saved automation macro"],
+    [{ id: "call", kind: "callMacro", macroId: "child-macro", args: { stray: "1" } }, 'does not declare "stray"'],
+  ];
+  for (const [step, expected] of attempts) {
+    const before = refusals.length;
+    submit(step);
+    await flushMicrotasks();
+    // Nothing is committed on a refused attempt, and the GM reads exactly why.
+    expect(h.hostStore.get("automations", "parent-graph")).toBeUndefined();
+    expect(refusals).toHaveLength(before + 1);
+    expect(refusals.at(-1)).toContain(expected);
+  }
+  // A valid reference commits…
+  submit({ id: "call", kind: "callMacro", macroId: "child-macro", args: { rounds: "2" } });
+  await flushMicrotasks();
+  expect(h.hostStore.get("automations", "parent-graph")).toBeDefined();
+  // …but a *later* edit that smuggles an undeclared argument is refused by the same gate.
+  const strayGraph = macroCallParentGraph({ id: "call", kind: "callMacro", macroId: "child-macro",
+    args: { stray: "1" } });
+  h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "parent-graph" },
+    diff: { definition: strayGraph.definition as unknown as Json } }]);
+  await flushMicrotasks();
+  // The host re-validates on update, so a smuggled argument never reaches a plan either.
+  expect(h.hostStore.get("automations", "parent-graph")?.definition.steps[0])
+    .toMatchObject({ kind: "callMacro", args: { rounds: "2" } });
+});
