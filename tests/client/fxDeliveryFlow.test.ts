@@ -46,7 +46,7 @@ import type { FxDeliveryReport } from "../../src/core/fxDelivery";
 const SCENE = "sc-1";
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function harness(listener: { userId?: string; scenes?: unknown[] } = {}) {
+function harness(listener: { userId?: string; scenes?: unknown[]; localAssets?: readonly string[] } = {}) {
   const bus = createEventBus<ClientEvents>();
   const camera: Camera = { x: 0, y: 0, scale: 1 };
   const cameraWrites: Camera[] = [];
@@ -96,6 +96,7 @@ function harness(listener: { userId?: string; scenes?: unknown[] } = {}) {
       inFlight.set(hash, promise);
       return promise;
     },
+    isAssetLocal: (hash) => listener.localAssets?.includes(hash) === true,
     sceneId: () => SCENE,
     onError: (message) => errors.push(message),
     onDelivery: (report) => reports.push(report),
@@ -112,6 +113,14 @@ function harness(listener: { userId?: string; scenes?: unknown[] } = {}) {
       if (!job) throw new Error(`no pending fetch for ${hash}`);
       job.resolve();
       await sleep(20);
+    },
+    /** Resolve without a timer, for tests that intentionally hold timer dispatch back. */
+    resolveAssetNow: async (hash: string) => {
+      const job = pending.get(hash);
+      if (!job) throw new Error(`no pending fetch for ${hash}`);
+      job.resolve();
+      // `fetchAsset` resumes the shared prefetch, which then resumes each waiting run.
+      for (let turn = 0; turn < 4; turn++) await Promise.resolve();
     },
     rejectAsset: async (hash: string) => {
       const job = pending.get(hash);
@@ -176,6 +185,18 @@ describe("FX preload and late-media fallback (D-295)", () => {
     expect(h.reports[0]?.level).toBe("warn");
     expect(h.reports[0]?.message).toContain("Test timeline");
     expect(h.reports[0]?.entries[0]).toMatchObject({ kind: "image", state: "late", reason: "not-ready" });
+  });
+
+  test("the serverless host does not report its own loopback read as audience lateness", async () => {
+    const hash = "aa".repeat(32);
+    const h = harness({ localAssets: [hash] });
+    h.send([image(0, hash)]);
+    await sleep(200); // its normal client path is still waiting on the host-owned bytes
+    await h.resolveAsset(hash);
+    await sleep(60);
+    expect(h.spawned).toHaveLength(1);
+    expect(h.mediaAcks.map(({ state }) => state)).toEqual(["ready"]);
+    expect(h.reports).toEqual([]);
   });
 
   test("a viewer who chose strict sync skips the cue instead, and the report says so", async () => {
@@ -374,6 +395,57 @@ describe("the table answers with what it actually did (D-308, SQ-13)", () => {
       ]);
       expect(h.spawned).toEqual([]);
     } finally { h.player.dispose(); }
+  });
+
+  test("a delayed section timer cannot turn an on-time preload acknowledgement into late media", async () => {
+    // Fake only the scheduler. Keeping Date under this test's control models a browser that
+    // does not service an already-due timer until well after the cue (for example a throttled
+    // background tab), while the preload promise was allowed to settle beforehand.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let now = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const h = harness();
+    try {
+      h.send([image(300)]); // absolute section time: 1_000_340
+      expect(h.requests).toEqual(["aa".repeat(32)]);
+      await h.resolveAssetNow("aa".repeat(32)); // bytes available at 1_000_000
+      expect(h.mediaAcks.map(({ state }) => state)).toEqual(["ready"]);
+
+      now = 1_000_600; // callback wakes 260 ms late: beyond the 120 ms media tolerance
+      await vi.advanceTimersByTimeAsync(340);
+      expect(h.spawned).toHaveLength(1);
+      expect(h.spawned[0]?.elapsed).toBe(260); // playback catches up to timeline phase
+      expect(h.mediaAcks.map(({ state }) => state)).toEqual(["ready"]); // no ready → late correction
+      expect(h.reports).toEqual([]);
+    } finally {
+      h.player.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  test("a preload handled before an overdue timer is not blamed for scheduler delay", async () => {
+    // This is the loaded-browser variant: wall time has passed the cue, but the event loop
+    // handles the completed preload before it dispatches the overdue section timer. Media
+    // caused no extra wait in the turn where playback could actually proceed.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let now = 2_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const h = harness();
+    try {
+      h.send([image(300)]); // absolute section time: 2_000_340
+      now = 2_000_600;
+      await h.resolveAssetNow("aa".repeat(32)); // preload continuation wins the delayed turn
+      expect(h.mediaAcks.map(({ state }) => state)).toEqual(["ready"]);
+
+      await vi.advanceTimersByTimeAsync(340); // now dispatch that already-overdue cue timer
+      expect(h.spawned).toHaveLength(1);
+      expect(h.spawned[0]?.elapsed).toBe(260);
+      expect(h.mediaAcks.map(({ state }) => state)).toEqual(["ready"]);
+      expect(h.reports).toEqual([]);
+    } finally {
+      h.player.dispose();
+      vi.useRealTimers();
+    }
   });
 
   test("a shared failed preload answers every waiting run, not just its first requester", async () => {

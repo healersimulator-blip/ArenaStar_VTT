@@ -2986,6 +2986,9 @@ const WALL_PICK_RADIUS = 12;
         fxPlayer = new FxPlayer({
           client: current.gm.client, bus: current.gm.bus, stage: view,
           fetchAsset: (hash) => current.gm.fetcher.request(hash, "ui"),
+          // The GM is the server in this serverless VTT: manifest assets originate in this
+          // tab's own store even though its player path deliberately fetches over loopback.
+          isAssetLocal: (hash) => current.gm.client.store.world.assetManifest[hash] !== undefined,
           sceneId: () => viewAsPlayer === null ? (activeScene()?._id ?? null) : null,
           onError: (message) => console.warn(message),
           // SQ-13/A10: a GM whose own client could not keep up hears one line about

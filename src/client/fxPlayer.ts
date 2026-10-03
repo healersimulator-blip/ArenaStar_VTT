@@ -32,6 +32,11 @@ export interface FxPlayerOptions {
   bus: EventBus<ClientEvents>;
   stage: Stage;
   fetchAsset: (hash: string) => Promise<Uint8Array>;
+  /**
+   * This serverless viewer is also the host that owns the source bytes. Its client fetcher
+   * still uses the normal loopback path, but that internal hop is not audience delivery.
+   */
+  isAssetLocal?: (hash: string) => boolean;
   sceneId: () => string | null;
   onError?: (error: string) => void;
   /** SQ-13: what this viewer's delivery looked like (late, skipped, cut, failed). */
@@ -74,8 +79,14 @@ export class FxPlayer {
   /** SQ-13/A10: this device's own preferences; never sent anywhere. */
   private prefs: FxViewPrefs = fxViewPrefs();
   private readonly offPrefs: () => void;
-  /** Assets this run asked for ahead of time; `done` is the readiness signal at cue time. */
-  private readonly prefetched = new Map<string, { done: boolean; failed: boolean; work: Promise<void>; startedAt: number }>();
+  /**
+   * Assets this run asked for ahead of time. `readyAtHost` records when the bytes actually
+   * became available on the host clock: a throttled browser timer may wake after the cue even
+   * though its media was already in hand, and that scheduler delay must not be misreported as
+   * late media.
+   */
+  private readonly prefetched = new Map<string, { done: boolean; failed: boolean; work: Promise<void>;
+    startedAt: number; readyAtHost?: number }>();
   /** Per-run delivery entries plus how many media cues are still unresolved. */
   private readonly delivery = new Map<string, { macroId: string; entries: FxDeliveryEntry[];
     pending: number; reported: boolean }>();
@@ -339,11 +350,17 @@ export class FxPlayer {
     const epoch = this.runEpoch.get(runId);
     let record = this.prefetched.get(assetId);
     if (!record) {
-      const fresh = { done: false, failed: false, work: Promise.resolve(), startedAt: Date.now() };
+      const fresh: { done: boolean; failed: boolean; work: Promise<void>; startedAt: number;
+        readyAtHost?: number } = {
+        done: false, failed: false, work: Promise.resolve(), startedAt: Date.now(),
+      };
       this.prefetched.set(assetId, fresh);
       fresh.work = (async () => {
         try {
           await this.options.fetchAsset(assetId);
+          // Stamp availability here, at fetch settlement. `play` can run much later when a
+          // backgrounded or overloaded browser finally services its section timer.
+          fresh.readyAtHost = this.hostNow();
           fresh.done = true;
         } catch {
           fresh.failed = true; // the section still reports its own failure when it plays
@@ -459,13 +476,18 @@ export class FxPlayer {
     const elapsed = () => Math.max(0, this.hostNow() - cue.atHostTime - section.startMs);
     const active = () => !this.disposed && generation === this.generation &&
       this.runEpoch.get(cue.runId) === epoch && this.options.sceneId() === cue.sceneId;
-    const skipExpired = (): boolean => {
+    const skipExpired = (mediaLateMs: number): boolean => {
       if (cue.persistent || elapsed() < section.durationMs) return false;
       if (section.kind === "image" || section.kind === "sound") {
-        const lateMs = Math.round(elapsed());
-        this.noteDelivery(cue.runId, { index, kind: section.kind, state: "skipped",
-          reason: "not-ready", assetId: section.assetId, lateMs });
-        this.ackMedia(cue.runId, section.assetId, "late", { ms: lateMs });
+        // Expiry and media readiness are separate facts. If the bytes arrived on time but
+        // the browser serviced this timer after the whole section, the run is stale but the
+        // media was not late; preserve the earlier ready acknowledgement.
+        if (mediaLateMs > LATE_TOLERANCE_MS) {
+          const lateMs = Math.round(mediaLateMs);
+          this.noteDelivery(cue.runId, { index, kind: section.kind, state: "skipped",
+            reason: "not-ready", assetId: section.assetId, lateMs });
+          this.ackMedia(cue.runId, section.assetId, "late", { ms: lateMs });
+        }
         this.settleCue(cue.runId);
       }
       return true;
@@ -495,43 +517,55 @@ export class FxPlayer {
     // Readiness is a *pre-cue* fact: did the preload (or the cache) already land?
     // Asking after a fetch would always answer "yes" and hide the slow client SQ-13
     // is about.
-    const landed = this.prefetched.get(section.assetId)?.done === true;
+    const preload = this.prefetched.get(section.assetId);
+    const landed = preload?.done === true;
     const scheduledFor = cue.atHostTime + section.startMs;
     const fetchStarted = this.hostNow();
     try {
       const bytes = await this.options.fetchAsset(section.assetId);
+      // Measure the thing the delivery report names: when the bytes became available.
+      // A timer or promise continuation may wake much later without making cached media late.
+      const readyAtHost = preload?.readyAtHost ?? this.hostNow();
+      // Attribute only delay that media adds after the browser gets an opportunity to run
+      // this cue. A throttled event loop can service the preload continuation and an overdue
+      // section timer in the same turn; when the preload won that race (`landed`), it did not
+      // hold playback back. The host's own source bytes are local too: reading them through
+      // its client loopback is an implementation hop, not a failed audience delivery. If a
+      // remote viewer still lacks bytes when its timer runs, the subsequent wait remains
+      // genuine media lateness.
+      const locallyOwned = this.options.isAssetLocal?.(section.assetId) === true;
+      const mediaLateMs = landed || locallyOwned ? 0
+        : Math.max(0, readyAtHost - Math.max(scheduledFor, fetchStarted));
       // Cancellation belongs to this invocation, not only to the run's reusable ID.
       // Check before *any* late/failure reporting can touch a replacement run.
-      if (!active() || skipExpired()) return;
-      const lateMs = this.hostNow() - scheduledFor;
-      if (lateMs > LATE_TOLERANCE_MS) {
-        const decision = lateMediaDecision(this.prefs.lateMedia, lateMs);
+      if (!active() || skipExpired(mediaLateMs)) return;
+      if (mediaLateMs > LATE_TOLERANCE_MS) {
+        const decision = lateMediaDecision(this.prefs.lateMedia, mediaLateMs);
         if (!decision.start) {
           this.noteDelivery(cue.runId, { index, kind: section.kind, state: "skipped",
-            reason: decision.reason, assetId: section.assetId, lateMs });
+            reason: decision.reason, assetId: section.assetId, lateMs: mediaLateMs });
           // D-308: the bytes are here, they just missed the cue — the requester needs
           // exactly that sentence, not silence, because it is the timeline's own timing
           // that was wrong rather than this viewer's connection.
-          this.ackMedia(cue.runId, section.assetId, "late", { ms: Math.round(lateMs) });
+          this.ackMedia(cue.runId, section.assetId, "late", { ms: Math.round(mediaLateMs) });
           this.settleCue(cue.runId);
           return;
         }
       }
-      if (!active() || !cue.persistent && elapsed() >= section.durationMs) return;
+      if (!active() || skipExpired(mediaLateMs)) return;
       const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: section.mime }));
-      const arrivedMs = this.hostNow() - scheduledFor;
-      const late = arrivedMs > LATE_TOLERANCE_MS;
+      const late = mediaLateMs > LATE_TOLERANCE_MS;
       this.noteDelivery(cue.runId, { index, kind: section.kind, assetId: section.assetId,
         state: late ? "late" : "ready",
-        ...(late ? { reason: "not-ready" as const, lateMs: arrivedMs }
+        ...(late ? { reason: "not-ready" as const, lateMs: mediaLateMs }
           : landed ? { reason: "preload" as const } : {}) });
       // D-308: this viewer's word — late by how much, or (when nothing was preloaded and
       // nothing has been said yet) simply that the bytes were in hand when they were
       // needed, with the fetch it took to get them.
-      if (late) this.ackMedia(cue.runId, section.assetId, "late", { ms: Math.round(arrivedMs) });
+      if (late) this.ackMedia(cue.runId, section.assetId, "late", { ms: Math.round(mediaLateMs) });
       else if (this.mediaAcks.get(cue.runId)?.get(section.assetId) === undefined)
         this.ackMedia(cue.runId, section.assetId, "ready",
-          { ms: Math.max(0, Math.round(this.hostNow() - fetchStarted)) });
+          { ms: Math.max(0, Math.round(readyAtHost - fetchStarted)) });
       if (section.kind === "sound") {
         const channel = soundChannelOf(section);
         const audio = new Audio(url);
@@ -652,7 +686,7 @@ export class FxPlayer {
             video.onloadeddata = () => resolve();
             video.onerror = () => reject(new Error("video format unsupported"));
           });
-          if (!active() || skipExpired()) {
+          if (!active() || skipExpired(mediaLateMs)) {
             video.pause();
             URL.revokeObjectURL(url);
             return;
@@ -670,7 +704,7 @@ export class FxPlayer {
           await image.decode();
           texture = Texture.from(image);
         }
-        if (!active() || skipExpired()) {
+        if (!active() || skipExpired(mediaLateMs)) {
           video?.pause();
           texture.destroy(true);
           URL.revokeObjectURL(url);
