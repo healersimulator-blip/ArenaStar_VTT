@@ -401,29 +401,34 @@ export const FX_MASK_LIMITS = { min: 0.5, max: 5_000, spreadMin: 1, spreadMax: 3
 /**
  * Who a run — or one camera section of it — is delivered to. The words are one
  * vocabulary at both levels, so an author does not have to learn a second one for
- * "the GM's view only". SQ-18's **named recipients** are the fourth form: the words
+ * "the GM's view only". SQ-18's **named recipients** are the fifth form: the words
  * name a *rule*, and `{ players: [...] }` names users instead.
  *
+ * MC-04's five modes are exactly this vocabulary: `caller` (the invoking user),
+ * `gm` (approved GM authority), `{ players }` (named users), `scene` (all viewers)
+ * and `others` (**all viewers except the caller**) — the one word D-391 added, so an
+ * author no longer has to enumerate the table to "show everyone but me".
+
  * A list is 1–32 user ids, in the author's own order, with no repeats. Empty is
  * refused rather than read as "nobody": an audience of none is a cue with no purpose,
  * and "nobody sees this section" is what deleting the section says. Ids are the
  * world's user ids, so a cue addressed to a player who is offline, or who has not
  * joined yet, is still a cue addressed to them.
  */
-export type FxAudience = "scene" | "gm" | "caller" | { players: readonly string[] };
+export type FxAudience = "scene" | "gm" | "caller" | "others" | { players: readonly string[] };
 /** One vocabulary at both levels; the name is kept for call sites that mean one section. */
 export type FxSectionAudience = FxAudience;
 export const FX_AUDIENCE_PLAYERS_MAX = 32;
-const AUDIENCES: readonly string[] = ["scene", "gm", "caller"];
+const AUDIENCES: readonly string[] = ["scene", "gm", "caller", "others"];
 const AUDIENCE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 /** Why this is not an audience, or null when it is one. */
 export function fxAudienceError(value: unknown): string | null {
   if (typeof value === "string")
     return AUDIENCES.includes(value) ? null
-      : "an FX audience must be scene, gm, caller or a list of chosen players";
+      : "an FX audience must be scene, gm, caller, others or a list of chosen players";
   if (!isObject(value) || Array.isArray(value))
-    return "an FX audience must be scene, gm, caller or a list of chosen players";
+    return "an FX audience must be scene, gm, caller, others or a list of chosen players";
   if (Object.keys(value).length !== 1 || !Array.isArray(value.players))
     return "an FX audience takes only a `players` list of user ids";
   const players = value.players as unknown[];
@@ -453,6 +458,10 @@ export function fxAudienceAllows(
   if (audience === undefined || audience === "scene") return true;
   if (audience === "gm") return viewer.isGm;
   if (audience === "caller") return viewer.id === callerId;
+  // MC-04 (D-391): every viewer except the request's owner — the GM included, because
+  // "everyone else" excludes the caller rather than the GMs. A request with no live
+  // owner (the host's own automation context) therefore reaches every session.
+  if (audience === "others") return viewer.id !== callerId;
   return audience.players.includes(viewer.id);
 }
 
@@ -856,7 +865,7 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
       // Targeting is a camera cue's own business: a visual or sound section is still
       // delivered to every recipient, and its `audience` is an unknown field.
       if (section.audience !== undefined && !isFxSectionAudience(section.audience))
-        return { ok: false, error: "a camera section's audience must be scene, gm, caller or a list of chosen players" };
+        return { ok: false, error: "a camera section's audience must be scene, gm, caller, others or a list of chosen players" };
       if (section.mode === "pan") {
         if (!validAnchor(section.to) || section.intensity !== undefined ||
             (section.easing !== undefined && !isEasing(section.easing)) ||

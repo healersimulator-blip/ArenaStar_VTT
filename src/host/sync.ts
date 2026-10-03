@@ -4282,7 +4282,7 @@ export class HostSync {
         macroId: cue.macroId, sceneId: event.scene._id,
         ...(cue.sourceTokenId ? { sourceTokenId: cue.sourceTokenId } : {}),
         ...(cue.targetTokenId ? { targetTokenId: cue.targetTokenId } : {}),
-      }, cue.audience);
+      }, cue.audience, event.caller.id);
       if (!ready.ok) {
         const error = `FX preflight failed: ${ready.error}`;
         this.reportAutomation(doc, event.method, "rejected", error, result.plan.trace);

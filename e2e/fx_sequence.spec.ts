@@ -478,6 +478,13 @@ const sameCamera = (a: Camera | null | undefined, b: Camera | null | undefined) 
   !!a && !!b && a.x === b.x && a.y === b.y && a.scale === b.scale;
 
 /** Author one camera section into a fresh draft and save it under `name`. */
+/** The cue count a shell's own Pixi stage is drawing: the GM shell publishes `__stage`, the
+ * player shell `__canvasStage`, so one page can never be read as the other. */
+const fxVisuals = (page: import("@playwright/test").Page, key: "__stage" | "__canvasStage") =>
+  page.evaluate((name) => (
+    globalThis as unknown as Record<string, { getFxLayer?: () => { count: number } } | undefined>
+  )[name]?.getFxLayer?.().count ?? 0, key);
+
 const authorCamera = async (
   page: import("@playwright/test").Page,
   name: string,
@@ -2556,4 +2563,61 @@ test("a preset saves the draft's look, loads it back, updates and deletes it", a
   await expect(presetRows).toHaveCount(0, { timeout: 10_000 });
   await expect(wizard.locator("[data-fx-presets-empty]")).toBeVisible();
   await expect(wizard.locator("[data-fx-macro-id]")).toContainText(["Ember burst"]);
+});
+
+// D-391 (MC-04): "everybody else" is the fifth audience — the table sees the cue and the
+// runner's own screen does not, which is the case a GM-only/style word could not express.
+test("an 'everyone else' cue plays for the table and skips the runner", async ({ browser }) => {
+  test.setTimeout(150_000);
+  const hostCtx = await browser.newContext();
+  const playerCtx = await browser.newContext();
+  try {
+    const host = await hostCtx.newPage();
+    const player = await playerCtx.newPage();
+    await host.goto(entry + "?e2e=1");
+    await waitForSurface(host, "app");
+    await host.locator("#gm-macros").click();
+    await host.locator("[data-macro-fx-tab]").click();
+    const wizard = host.locator("[data-fx-wizard]");
+    await wizard.locator("[data-fx-name]").fill("Everyone but me");
+    await wizard.getByRole("button", { name: "Text", exact: true }).click();
+    await wizard.locator("[data-fx-section]").getByLabel("Text", { exact: true }).fill("Not for you");
+    await wizard.locator("[data-fx-section]").getByLabel("Duration ms").fill("6000");
+    await wizard.locator("[data-fx-audience]").selectOption("others");
+    await wizard.locator("[data-fx-save]").click();
+    await expect(wizard.locator("li")).toContainText(["Everyone but me"]);
+
+    await host.locator("#share").click();
+    const fragment = manualFragment(await host.locator("#invite-link").inputValue());
+    await player.goto(`${entry}?e2e=1&join=1#${fragment}`);
+    await expect.poll(() => player.locator("#offer-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await host.locator("#peer-code").fill(await player.locator("#offer-out").inputValue());
+    await host.locator("#code-apply").click();
+    await expect.poll(() => host.locator("#share-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await player.locator("#answer-input").fill(await host.locator("#share-out").inputValue());
+    await player.locator("#answer-apply").click();
+    await expect.poll(() => playerCall<boolean>(player, "connected"), { timeout: 30_000 }).toBe(true);
+    await waitForSurface(player, "playerCanvas");
+
+    await host.locator('[data-window="macros"] [data-window-close]').click();
+    await host.locator("#gm-macros").click();
+    await host.locator("[data-macro-fx-tab]").click();
+    await host.locator("[data-fx-wizard] li").filter({ hasText: "Everyone but me" })
+      .getByRole("button", { name: "Run" }).click();
+
+    // The joined player's own stage draws the cue…
+    await expect.poll(() => fxVisuals(player, "__canvasStage"), { timeout: 10_000 }).toBeGreaterThan(0);
+    // …and the runner's never does, while it is being told who missed it in counts.
+    expect(await fxVisuals(host, "__stage")).toBe(0);
+    const notice = host.locator("[data-notify]").filter({ hasText: "Everyone but me" });
+    await expect(notice).toHaveCount(1);
+    await expect(notice).toContainText("reached 1 viewer(s)");
+    await expect(notice).toContainText("outside its audience");
+    await host.waitForTimeout(1_000); // still running on the player's screen, still absent here
+    expect(await fxVisuals(host, "__stage")).toBe(0);
+    expect(await fxVisuals(player, "__canvasStage")).toBeGreaterThan(0);
+  } finally {
+    await playerCtx.close();
+    await hostCtx.close();
+  }
 });

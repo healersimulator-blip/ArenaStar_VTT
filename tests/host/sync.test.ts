@@ -2179,6 +2179,70 @@ player.client.requestFxSync("s1");
     expect(playerReports).toHaveLength(0);
   });
 
+  test("everybody else reaches the table but not the runner, in the directory and from a graph (D-391)", async () => {
+    const h = await setup({ [imageHash]: { name: "vfx.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } });
+    const hush = fxMacro("hush");
+    const hushFx = hush.sequence as NonNullable<MacroDocument["sequence"]>;
+    const hushMacro: MacroDocument = { ...hush, sequence: { ...hushFx, audience: "others" } };
+    h.gm.submit([{ kind: "create", coll: "macros", data: hushMacro }]);
+    await flushMicrotasks();
+    const { bus: rexBus, client: rex } = await h.addPlayer(PLAYER_ID, "Rex");
+    const { bus: ivyBus } = await h.addPlayer(OTHER_ID, "Ivy");
+    const gmCues: ClientEvents["fx"][] = [];
+    const rexCues: ClientEvents["fx"][] = [];
+    const ivyCues: ClientEvents["fx"][] = [];
+    h.gmBus.on("fx", (msg) => gmCues.push(msg));
+    rexBus.on("fx", (msg) => rexCues.push(msg));
+    ivyBus.on("fx", (msg) => ivyCues.push(msg));
+    const reports: ClientEvents["fxDelivery"][] = [];
+    h.gmBus.on("fxDelivery", (msg) => reports.push(msg));
+
+    // The GM runs it from the directory: the two players receive the cue and the GM —
+    // the request's owner — does not, even though they are the one who ran it.
+    h.gm.requestSequence("hush", "s1");
+    await flushMicrotasks();
+    expect(gmCues.filter((msg) => msg.kind === "fx.start")).toHaveLength(0);
+    expect(rexCues.filter((msg) => msg.kind === "fx.start")).toHaveLength(1);
+    expect(ivyCues.filter((msg) => msg.kind === "fx.start")).toHaveLength(1);
+    // The runner is *told* who missed it, in counts rather than names.
+    expect(reports.at(-1)?.recipients).toBe(2);
+    expect(reports.at(-1)?.skipped).toEqual({ audience: 1, rights: 0, anchor: 0, media: 0 });
+    expect(JSON.stringify(reports.at(-1))).not.toContain(PLAYER_ID);
+
+    // Firing it as a player is refused, because a player may only fire a cue that includes
+    // them (D-316) — "everyone else" is the GM's "not me", not a way to aim at the table.
+    const refused: string[] = [];
+    const rexRejected: string[] = [];
+    const gmRejected: string[] = [];
+    rexBus.on("rejected", (event) => { refused.push(event.detail); rexRejected.push(event.detail); });
+    h.gmBus.on("rejected", (event) => gmRejected.push(event.detail));
+    rex.requestSequence("hush", "s1");
+    await flushMicrotasks();
+    expect(refused).toEqual(["FX macro is not published for this caller"]);
+    expect(rexCues.filter((msg) => msg.kind === "fx.start")).toHaveLength(1); // unchanged
+
+    const hushGraph: AutomationDocument = { _id: "hush-graph", type: "automation",
+      name: "Hush plate", ownership: { default: 3 }, flags: {}, system: {},
+      definition: { version: 1, sceneId: "s1", tileId: "zone", methods: ["click", "manual"],
+        gates: { playerRunnable: true },
+        steps: [{ id: "quiet", kind: "sequence", macroId: "hush", audience: "scene" }] } };
+    // A graph's own cue carries the *triggering* caller as its owner: Rex clicks the plate,
+    // so Rex's screen is the one that does not show it, inside the same envelope.
+    // The tile lands first: a graph's anchor must exist when the graph is validated.
+    h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: visibleZoneTile() }]);
+    await flushMicrotasks();
+    h.gm.submit([{ kind: "create", coll: "automations", data: hushGraph }]);
+    await flushMicrotasks();
+    rex.requestAutomationClick("s1", "zone", { x: 150, y: 150 }, "t-pl");
+    await flushMicrotasks();
+    expect([...gmRejected, ...rexRejected].filter((detail) => detail !== "FX macro is not published for this caller"))
+      .toEqual([]);
+    expect(rexCues.filter((msg) => msg.kind === "fx.start")).toHaveLength(1); // still just the GM's run
+    expect(ivyCues.filter((msg) => msg.kind === "fx.start")).toHaveLength(2);
+    expect(gmCues.filter((msg) => msg.kind === "fx.start")).toHaveLength(1);
+  });
+
   test("a chosen-players audience reaches exactly the users it names (D-316)", async () => {
     const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
       chunks: 1, visibility: "referenced" } });

@@ -470,7 +470,7 @@
   /** One select value → the audience it means, keeping a list the author already has. */
   function sectionAudience(value: string, before: FxAudience | undefined): FxAudience {
     if (value === "players") return { players: chosenPlayers(before) };
-    return value === "gm" || value === "caller" ? value : "scene";
+    return value === "gm" || value === "caller" || value === "others" ? value : "scene";
   }
 
   /**
@@ -1141,7 +1141,8 @@
     <label>Audience <select data-fx-audience value={audienceWord(draft.audience)}
       onchange={(e) => changeRunAudience(e.currentTarget.value)}>
       <option value="scene">Entitled scene viewers</option><option value="gm">GM only</option>
-      <option value="caller">Caller only</option><option value="players">Chosen players…</option>
+      <option value="caller">Caller only</option><option value="others">Everyone else (all viewers except the caller)</option>
+      <option value="players">Chosen players…</option>
     </select></label>
     {#if audienceWord(draft.audience) === "players"}
       <div class="audience-picker" data-fx-audience-players>
@@ -1265,6 +1266,7 @@
               <option value="scene">Everyone watching this timeline</option>
               <option value="gm">GMs only</option>
               <option value="caller">Only whoever runs it</option>
+              <option value="others">Everyone else (everyone but the runner)</option>
               <option value="players">Chosen players…</option>
             </select></label>
             {#if audienceWord(section.audience) === "players"}
