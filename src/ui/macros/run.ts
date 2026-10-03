@@ -4,8 +4,25 @@
  * system API lands (M3, D-079).
  */
 import type { ClientSync } from "../../client/sync";
-import type { MacroDocument } from "../../core/documents";
+import type { MacroDocument, SceneDocument } from "../../core/documents";
 import { buildChatMessage, parseChatCommand } from "../../core/chat";
+import { bindMacroArgs, macroSelection, type MacroSelection } from "../../core/macroArgs";
+import { macroAutomationInputs } from "../../core/macroAutomation";
+
+/**
+ * D-388: the caller's live canvas selection as a macro default source. The id is only
+ * meaningful on this replica — the shells pass the token they actually selected, and
+ * nothing is selected when it is not in the scene the caller has open.
+ */
+export function macroSelectionOf(client: ClientSync, tokenId: string | null | undefined): MacroSelection | null {
+  if (!tokenId) return null;
+  const scenes = client.store.getAll("scenes") as readonly SceneDocument[];
+  for (const scene of scenes) {
+    const token = scene.tokens.find((entry) => entry._id === tokenId);
+    if (token) return macroSelection(token);
+  }
+  return null;
+}
 
 export function runChatMacro(client: ClientSync, macro: MacroDocument): void {
   if (macro.kind !== "chat") return; // script macros: M3 system API (D-079)
@@ -56,6 +73,8 @@ export interface MacroSlotHost {
   onNeedsInput?: (() => void) | undefined;
   /** The caller's active scene, for a sequence macro (a player shell has one too). */
   activeSceneId?: (() => string | null) | undefined;
+  /** D-388: the caller's selected token, for a macro input declared `from: "selected"`. */
+  selection?: (() => MacroSelection | null) | undefined;
 }
 
 /**
@@ -72,8 +91,19 @@ export function runMacroSlot(
     runChatMacro(client, macro);
     return { ok: true };
   }
-  if (macro.kind === "automation" || macro.kind === "composite")
-    return { ok: true, requestId: client.invokeMacro(macro._id) };
+  if (macro.kind === "automation") {
+    // D-388: a slot click binds the macro's own schema, so a declared selection default
+    // simply works and a missing value is refused here — the caller's precise reason,
+    // rather than the host's neutral one. Non-selection values need the run form.
+    const inputs = macroAutomationInputs(macro);
+    const bound = bindMacroArgs(inputs, "", host.selection?.() ?? null);
+    if (!bound.ok) {
+      if (inputs.some((field) => field.from !== "selected")) host.onNeedsInput?.();
+      return { ok: false, error: bound.error };
+    }
+    return { ok: true, requestId: client.invokeMacro(macro._id, bound.args) };
+  }
+  if (macro.kind === "composite") return { ok: true, requestId: client.invokeMacro(macro._id) };
   if (macro.kind === "script") {
     if (macro.script?.inputs.some((field) => field.required)) {
       host.onNeedsInput?.();

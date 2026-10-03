@@ -11,14 +11,14 @@
   import type { ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import type { MacroDocument } from "../../core/documents";
-  import { runChatMacro, runSavedMacro } from "./run";
+  import { macroSelectionOf, runChatMacro, runSavedMacro } from "./run";
   import {
     MACRO_COMPOSITE_LIMITS,
     macroCompositeDocumentError,
     macroCompositeMacroIds,
   } from "../../core/macroComposite";
   import { macroAutomationGraphId, macroAutomationInputs } from "../../core/macroAutomation";
-  import { coerceMacroArgText, macroArgSchemaError, type MacroArgInput } from "../../core/macroArgs";
+  import { bindMacroArgFields, macroArgSchemaError, type MacroArgInput } from "../../core/macroArgs";
   import TaggerPanel from "./TaggerPanel.svelte";
   import FxSequencePanel from "./FxSequencePanel.svelte";
   import type { RequestCrosshairPick } from "./crosshairPicker";
@@ -43,6 +43,7 @@
     getFxAsset = null,
     listCompendia = null,
     activeSceneId = null,
+    selectedTokenId = null,
     onPickSummon = null,
     onPickAnchor = null,
     onPreviewFx = null,
@@ -56,6 +57,8 @@
     getFxAsset?: ((hash: string) => Promise<Uint8Array | undefined>) | null;
     listCompendia?: (() => Promise<Array<{ packageId: string; packFile: string; pack: CompendiumPack }>>) | null;
     activeSceneId?: string | null;
+    /** D-388: the caller's single selected token, the default for a `from:"selected"` input. */
+    selectedTokenId?: string | null;
     onPickSummon?: RequestSummonPick | null;
     /** GM-local canvas picking/rendering for the FX tab; null on a player shell. */
     onPickAnchor?: RequestCrosshairPick | null;
@@ -84,6 +87,8 @@
   /** MC-02: the declared-input editor (GM) and the value form a caller fills in to run. */
   let inputEditing = $state("");
   let inputDraft = $state<MacroArgInput[]>([]);
+  /** The caller's live selection: what a `from: "selected"` input defaults to. */
+  const callerSelection = $derived(macroSelectionOf(client, selectedTokenId));
   let inputError = $state("");
   let runEditing = $state("");
   let runValues = $state<Record<string, string>>({});
@@ -208,7 +213,8 @@
     const problem = macroArgSchemaError($state.snapshot(inputDraft));
     if (problem) { inputError = problem; return; }
     const inputs = $state.snapshot(inputDraft).map((field) => ({ name: field.name, type: field.type,
-      ...(field.required ? { required: true as const } : {}) }));
+      ...(field.required ? { required: true as const } : {}),
+      ...(field.from === "selected" ? { from: "selected" as const } : {}) }));
     client.submit([{ kind: "update", ref: { coll: "macros", id: macro._id },
       diff: { automation: { graphId, ...(inputs.length > 0 ? { inputs } : {}) } as never } }]);
     macroStatus = inputs.length > 0
@@ -227,15 +233,11 @@
 
   function runWithInputs(macro: MacroDocument): void {
     runError = "";
-    const args: Record<string, string | number | boolean> = {};
-    for (const field of macroAutomationInputs(macro)) {
-      const raw = runValues[field.name] ?? "";
-      if (raw.trim() === "" && !field.required) continue;
-      const value = coerceMacroArgText(field, raw);
-      if (value === null) { runError = `invalid ${field.name}`; return; }
-      args[field.name] = value;
-    }
-    const outcome = runSavedMacro(client, macro, args);
+    // A blank field is "not spelled out": a `from: "selected"` input then takes the caller's
+    // selection and a required one is refused with the local reason.
+    const bound = bindMacroArgFields(macroAutomationInputs(macro), runValues, callerSelection);
+    if (!bound.ok) { runError = bound.error; return; }
+    const outcome = runSavedMacro(client, macro, bound.args);
     if (!outcome.ok) { runError = outcome.error ?? "that macro cannot run here"; return; }
     if (outcome.requestId) pendingInvokes.add(outcome.requestId);
     macroStatus = `Requested ${macro.name}…`;
@@ -392,11 +394,17 @@
                 <option value="number">number</option>
                 <option value="boolean">boolean</option>
                 <option value="token">token</option>
+                <option value="actor">actor</option>
               </select>
               <label><input type="checkbox" checked={field.required ?? false}
                 aria-label={`Input ${i + 1} required`}
                 onchange={(e) => { inputDraft = inputDraft.map((f, at) => at === i
                   ? (e.currentTarget.checked ? { ...f, required: true } : { name: f.name, type: f.type }) : f); }} /> req</label>
+              <label><input type="checkbox" checked={field.from === "selected"}
+                disabled={field.type !== "token" && field.type !== "actor"}
+                aria-label={`Input ${i + 1} from selection`}
+                onchange={(e) => { inputDraft = inputDraft.map((f, at) => at === i
+                  ? (e.currentTarget.checked ? { ...f, from: "selected" } : { name: f.name, type: f.type }) : f); }} /> selected</label>
               <button type="button" aria-label={`Remove input ${i + 1}`}
                 onclick={() => { inputDraft = inputDraft.filter((_, at) => at !== i); }}>✕</button>
             {/each}
@@ -416,12 +424,18 @@
                     <option value="true">true</option>
                   </select>
                 {:else}
-                  <input aria-label={field.name} placeholder={field.type}
+                  <input aria-label={field.name}
+                    placeholder={field.from === "selected" ? "selected token" : field.type}
                     oninput={(e) => { runValues = { ...runValues, [field.name]: e.currentTarget.value }; }} />
                 {/if}
               </label>
             {/each}
             <button type="button" data-automation-run-with onclick={() => runWithInputs(m)}>Run</button>
+            {#if macroAutomationInputs(m).some((field) => field.from === "selected")}
+              <small data-automation-run-selected>
+                {callerSelection ? "a blank selection field uses your selected token" : "select a token for the blank fields"}
+              </small>
+            {/if}
             {#if runError}<small data-automation-run-error role="alert">{runError}</small>{/if}
           </li>
         {/if}

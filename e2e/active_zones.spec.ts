@@ -1,5 +1,5 @@
 import { expect, test, type Browser } from "@playwright/test";
-import { entry, hostCall, manualFragment, playerCall, surfaceCallArg, waitForSurface } from "./lib";
+import { entry, hostCall, manualFragment, playerCall, surfaceCall, surfaceCallArg, waitForSurface } from "./lib";
 
 test("GM authors a tile graph and verifies native click/right-click/double-click and pointer hover events", async ({ page }) => {
   await page.goto(entry + "?e2e=1");
@@ -2029,6 +2029,132 @@ test("a GM declares typed inputs on a macro and a player supplies them from the 
     await expect(host.locator("#chat-log")).toContainText("rounds=7 label=door");
     // The player never sees the GM-only line, and no argument text became a message of its own.
     expect(await player.locator("#chat-log").innerText()).not.toContain("rounds=");
+  } finally {
+    await playerCtx.close();
+    await hostCtx.close();
+  }
+});
+
+test("a macro's token input defaults to the caller's selected token on both shells", async ({ browser }: { browser: Browser }) => {
+  test.setTimeout(180_000);
+  const hostCtx = await browser.newContext();
+  const playerCtx = await browser.newContext();
+  try {
+    const host = await hostCtx.newPage();
+    const player = await playerCtx.newPage();
+    await host.goto(entry + "?e2e=1");
+    await waitForSurface(host, "app");
+    // One tabletop token, at the scene centre, visible and movable by players (D-061 default).
+    await host.locator("#add-token").click();
+    await expect.poll(() => hostCall<number>(host, "tokenCount")).toBe(1);
+
+    // A published manual graph that reports the token it was handed.
+    await host.locator("#gm-macros").click();
+    await host.locator("[data-macro-zones-tab]").click();
+    const zones = host.locator("[data-active-zones]");
+    const tile = zones.locator("[data-zone-tile-create]");
+    await tile.locator("summary").click();
+    await tile.getByLabel("Tile name").fill("Selection plate");
+    await tile.getByLabel("X", { exact: true }).fill("700");
+    await tile.getByLabel("Y", { exact: true }).fill("700");
+    await tile.getByLabel("Width").fill("200");
+    await tile.getByLabel("Height").fill("160");
+    await tile.locator("[data-zone-create-tile]").click();
+    await expect(zones.locator("[data-zone-tile] option").filter({ hasText: "Selection plate" })).toHaveCount(1);
+    await zones.locator("[data-zone-name]").fill("Select bell");
+    for (const method of ["enter", "stop"])
+      await zones.locator(".methods label").filter({ hasText: new RegExp(`^${method}$`) })
+        .locator("input").uncheck();
+    await zones.getByLabel("Player canvas triggers (published)").check();
+    await zones.locator('[data-zone-step="notice"]').getByLabel("Text").fill("struck {{arg.target}}");
+    await zones.locator("[data-zone-save]").click();
+    const graphRow = zones.locator("li").filter({ hasText: "Select bell" });
+    await expect(graphRow).toHaveCount(1);
+    await graphRow.locator("[data-zone-macro]").click();
+    await expect(zones.getByText(/Published automation macro "Select bell"/)).toHaveCount(1);
+
+    // The GM declares one required token input, defaulted from the caller's selection.
+    const macros = host.locator('[data-window="macros"]');
+    await macros.locator("[data-macro-automations-tab]").click();
+    const macroRow = macros.locator("[data-automation-macro]").filter({ hasText: "Select bell" });
+    await expect(macroRow).toHaveCount(1);
+    await macroRow.locator("[data-automation-inputs]").click();
+    const editor = macros.locator("[data-automation-inputs-editor]");
+    await editor.locator("[data-automation-input-add]").click();
+    await editor.getByLabel("Input 1 name").fill("target");
+    await editor.getByLabel("Input 1 type").selectOption("token");
+    await editor.getByLabel("Input 1 from selection").check();
+    await editor.getByLabel("Input 1 required").check();
+    await editor.locator("[data-automation-input-save]").click();
+    await expect(macroRow.locator("[data-automation-inputs]")).toContainText("Inputs (1)");
+
+    // With nothing selected the run form refuses locally and fires nothing.
+    await macroRow.locator("[data-automation-macro-run]").click();
+    const runEditor = macros.locator("[data-automation-run-editor]");
+    await expect(runEditor.locator("[data-automation-run-selected]")).toContainText("select a token");
+    await runEditor.locator("[data-automation-run-with]").click();
+    await expect(runEditor.locator("[data-automation-run-error]")).toHaveText("select a token for target");
+    // Select the token on the GM canvas, then run with the field left blank.
+    await host.locator('[data-window="macros"] [data-window-close]').click();
+    const tokenWorld = await hostCall<{ x: number; y: number } | null>(host, "tokenPos");
+    if (!tokenWorld) throw new Error("the tabletop token is missing");
+    const tokenAt = await surfaceCallArg<{ x: number; y: number }>(host, "app", "screenOf",
+      { x: tokenWorld.x, y: tokenWorld.y });
+    await host.locator('[data-canvas-tool="select"]').click();
+    // A token's document point is its centre, so the canvas hit test wants that exact point.
+    await host.mouse.click(tokenAt.x, tokenAt.y);
+    await host.locator("#gm-macros").click();
+    await macros.locator("[data-macro-automations-tab]").click();
+    await expect(macroRow).toHaveCount(1);
+    await macroRow.locator("[data-automation-macro-run]").click();
+    await host.locator('[data-automation-run-editor] [data-automation-run-with]').click();
+    await host.locator('[data-window="macros"] [data-window-close]').click();
+    await host.locator('[data-tab="chat"]').click();
+    const fired = host.locator("#chat-log");
+    await expect(fired).toContainText("struck ");
+    const firstLine = (await fired.innerText()).match(/struck\s+(\S+)/)?.[1];
+    expect(firstLine).toBeTruthy();
+
+    // Clearing the selection removes the default: the same `/run` is refused locally.
+    const empty = await surfaceCallArg<{ x: number; y: number }>(host, "app", "screenOf", { x: 100, y: 100 });
+    await host.mouse.click(empty.x, empty.y);
+    await host.locator("#chat-input").fill("/run Select bell");
+    await host.locator("#chat-send").click();
+    await expect(host.locator("[data-chat-command-status]")).toHaveText("select a token for target");
+    expect((await fired.innerText()).split("struck ").length - 1).toBe(1);
+
+    // The player: no selection yet, so their own `/run` is refused with the same local reason.
+    await host.locator("#share").click();
+    const fragment = manualFragment(await host.locator("#invite-link").inputValue());
+    await player.goto(`${entry}?e2e=1&join=1#${fragment}`);
+    await expect.poll(() => player.locator("#offer-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await host.locator("#peer-code").fill(await player.locator("#offer-out").inputValue());
+    await host.locator("#code-apply").click();
+    await expect.poll(() => host.locator("#share-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await player.locator("#answer-input").fill(await host.locator("#share-out").inputValue());
+    await player.locator("#answer-apply").click();
+    await expect.poll(() => playerCall<boolean>(player, "connected"), { timeout: 30_000 }).toBe(true);
+    await waitForSurface(player, "playerCanvas");
+    const status = player.locator("[data-chat-command-status]");
+    await player.locator("#chat-input").fill("/run Select bell");
+    await player.locator("#chat-send").click();
+    await expect(status).toHaveText("select a token for target");
+
+    // Selecting the one token the player can see makes the identical command fire with *that* token.
+    const pickable = await surfaceCall<string[]>(player, "playerCanvas", "pickableTokens");
+    expect(pickable).toContain(firstLine as string);
+    const playerWorld = await playerCall<{ x: number; y: number } | null>(player, "tokenPos");
+    if (!playerWorld) throw new Error("the player replica holds no token");
+    const playerAt = await surfaceCallArg<{ x: number; y: number }>(player, "playerCanvas", "screenOf",
+      { x: playerWorld.x, y: playerWorld.y });
+    await player.mouse.click(playerAt.x, playerAt.y);
+    await player.locator("#chat-input").fill("/run Select bell");
+    await player.locator("#chat-send").click();
+    await expect(status).toHaveText("Automation fired");
+    await expect.poll(async () => (await fired.innerText()).split("struck ").length - 1).toBe(2);
+    expect((await fired.innerText()).match(/struck\s+(\S+)/g)).toEqual([
+      `struck ${firstLine as string}`, `struck ${firstLine as string}`,
+    ]);
   } finally {
     await playerCtx.close();
     await hostCtx.close();

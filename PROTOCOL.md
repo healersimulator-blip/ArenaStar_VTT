@@ -342,15 +342,21 @@ authority of its own — it is a second way to ask for an already-published trig
 widens a graph's audience. One fire per `requestId`; the result travels as `macro.result` and never
 names the graph, its id or a refusal reason to a non-GM.
 
-MC-02: an automation macro may also **declare inputs** (`{ name, type, required? }`, at most 16, of
-type string/number/boolean/token/actor/item), and a caller then supplies `args`. The declared schema
-*is* projected — it is the callable metadata a directory/hotbar needs to prompt for the values, and
-it is the one part of the binding a player receives — while `graphId` and everything else about the
-binding stay GM-only. The host validates the supplied record against the declaration (unknown name,
-missing required, wrong type, over-long string, too many keys, a token/actor/item the caller cannot
-see all refuse; a player only ever reads the neutral "automation macro unavailable"), then exposes
-the values to the graph as `{{arg.<name>}}` — a dotted name is deliberately not a legal durable
-variable, so an argument can never shadow world state. A composite takes no arguments.
+MC-02: an automation macro may also **declare inputs** (`{ name, type, required?, from? }`, at most
+16, of type string/number/boolean/token/actor), and a caller then supplies `args`. The declared
+schema *is* projected — it is the callable metadata a directory/hotbar needs to prompt for the
+values, and it is the one part of the binding a player receives — while `graphId` and everything
+else about the binding stay GM-only. The host validates the supplied record against the declaration
+(unknown name, missing required, wrong type, over-long string, too many keys, a token the caller
+cannot see or an actor the caller cannot read all refuse; a player only ever reads the neutral
+"automation macro unavailable"), then exposes the values to the graph as `{{arg.<name>}}` — a dotted
+name is deliberately not a legal durable variable, so an argument can never shadow world state.
+
+`from: "selected"` (a `token` or `actor` input) is a **caller-side default**: a shell that did not
+receive an explicit value fills it from the token the caller has selected on the canvas (`actor`
+takes that token's linked actor). It changes nothing on the wire — the resulting id travels in
+`args` and the host validates it exactly like a spelled-out one, so a client cannot select its way
+past visibility. A composite takes no arguments.
 
 ```ts
 interface MacroInvokeMsg {

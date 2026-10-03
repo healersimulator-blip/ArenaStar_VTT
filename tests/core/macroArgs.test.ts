@@ -7,14 +7,17 @@
 import { describe, expect, test } from "vitest";
 import {
   MACRO_ARG_LIMITS,
+  bindMacroArgFields,
   bindMacroArgs,
   coerceMacroArgText,
   macroArgInputs,
   macroArgSchemaError,
   macroArgValues,
+  macroSelection,
   splitMacroArgTokens,
   validateMacroArgs,
   type MacroArgInput,
+  type MacroSelection,
 } from "../../src/core/macroArgs";
 
 const schema: MacroArgInput[] = [
@@ -148,5 +151,86 @@ describe("binding `/run` text onto a schema (MC-02)", () => {
     expect(macroArgValues(undefined)).toEqual({});
     const values = macroArgValues({ rounds: 2 });
     expect(Object.getPrototypeOf(values)).toBeNull(); // no inherited keys can masquerade
+  });
+});
+
+describe("a selection default for an invocation (MC-02, D-388)", () => {
+  const selectionSchema: MacroArgInput[] = [
+    { name: "target", type: "token", required: true, from: "selected" },
+    { name: "subject", type: "actor", from: "selected" },
+  ];
+  const picked: MacroSelection = { tokenId: "tok-1", actorId: "act-1" };
+
+  test("only a token or actor input may default from the caller's selection", () => {
+    expect(macroArgSchemaError([{ name: "t", type: "token", from: "selected" }])).toBeNull();
+    expect(macroArgSchemaError([{ name: "a", type: "actor", from: "selected" }])).toBeNull();
+    expect(macroArgSchemaError([{ name: "t", type: "token", from: "caller" }])).toContain("invalid input schema");
+    expect(macroArgSchemaError([{ name: "s", type: "string", from: "selected" }])).toContain("invalid input schema");
+    expect(macroArgSchemaError([{ name: "n", type: "number", from: "selected" }])).toContain("invalid input schema");
+    expect(macroArgSchemaError([{ name: "b", type: "boolean", from: "selected" }])).toContain("invalid input schema");
+    // The default survives a validated read, or the binder could not honour it.
+    expect(macroArgInputs(selectionSchema)).toEqual(selectionSchema);
+  });
+
+  test("the host reads an actor argument under the caller's own visibility", () => {
+    const schema: MacroArgInput[] = [{ name: "subject", type: "actor" }];
+    expect(validateMacroArgs({ subject: "act-1" }, schema, (type) => type === "actor"))
+      .toEqual({ ok: true, args: { subject: "act-1" } });
+    expect(errorOf(validateMacroArgs({ subject: "act-1" }, schema, () => false)))
+      .toContain("invalid or invisible subject");
+    expect(errorOf(validateMacroArgs({ subject: "no act" }, schema, () => true)))
+      .toContain("invalid or invisible subject");
+    // A token stays a token: the actor predicate is not what a `token` input consults.
+    expect(errorOf(validateMacroArgs({ subject: "act-1" }, [{ name: "subject", type: "token" }],
+      (type) => type === "actor"))).toContain("invalid or invisible subject");
+  });
+
+  test("an omitted selection input takes the caller's selection, an explicit value wins", () => {
+    expect(bindMacroArgs(selectionSchema, "", picked))
+      .toEqual({ ok: true, args: { target: "tok-1", subject: "act-1" } });
+    expect(bindMacroArgs(selectionSchema, "target=tok-9", picked))
+      .toEqual({ ok: true, args: { target: "tok-9", subject: "act-1" } });
+    // A positional word is explicit too, and fills the first still-free input.
+    expect(bindMacroArgs(selectionSchema, "tok-9", picked))
+      .toEqual({ ok: true, args: { target: "tok-9", subject: "act-1" } });
+    expect(bindMacroArgs([{ name: "subject", type: "actor", from: "selected" }], "", picked))
+      .toEqual({ ok: true, args: { subject: "act-1" } });
+    expect(bindMacroArgs(selectionSchema, "", { tokenId: "tok-1", actorId: null }))
+      .toEqual({ ok: true, args: { target: "tok-1" } });
+  });
+
+  test("a required selection input without a selection names the remedy", () => {
+    expect(errorOf(bindMacroArgs(selectionSchema, "", null))).toContain("select a token for target");
+    expect(errorOf(bindMacroArgs(selectionSchema, "", null))).not.toContain("subject");
+    // With a selection but a required non-selection input still missing, the plain rule applies.
+    expect(errorOf(bindMacroArgs([{ name: "rounds", type: "number", required: true },
+      { name: "target", type: "token", required: true, from: "selected" }], "", picked)))
+      .toContain("missing rounds");
+  });
+
+  test("the run form binds the same way from a per-field record", () => {
+    expect(bindMacroArgFields(selectionSchema, { target: "", subject: " " }, picked))
+      .toEqual({ ok: true, args: { target: "tok-1", subject: "act-1" } });
+    expect(bindMacroArgFields(selectionSchema, { target: "tok-9" }, picked))
+      .toEqual({ ok: true, args: { target: "tok-9", subject: "act-1" } });
+    expect(errorOf(bindMacroArgFields(selectionSchema, {}, null))).toContain("select a token for target");
+    expect(errorOf(bindMacroArgFields(selectionSchema, { target: "bad id!" }, picked))).toContain("invalid target");
+    expect(errorOf(bindMacroArgFields(schema, { nope: "1" }, picked))).toContain("unknown argument nope");
+    expect(bindMacroArgFields([{ name: "label", type: "string" }], {}, null)).toEqual({ ok: true, args: {} });
+    expect(errorOf(bindMacroArgFields([{ name: "rounds", type: "number", required: true }], {}, null)))
+      .toContain("missing rounds");
+    // A required actor default on an unlinked token says what is actually wrong.
+    expect(errorOf(bindMacroArgFields([{ name: "subject", type: "actor", required: true, from: "selected" }],
+      {}, { tokenId: "tok-1", actorId: null }))).toContain("the selected token has no actor");
+    expect(bindMacroArgs([{ name: "target", type: "token", required: true, from: "selected" },
+      { name: "subject", type: "actor", required: true, from: "selected" }], "",
+      { tokenId: "tok-1", actorId: null })).toMatchObject({ ok: false });
+  });
+
+  test("a selection is read from the token the caller has on screen", () => {
+    expect(macroSelection({ _id: "tok-1", actorId: "act-1" })).toEqual({ tokenId: "tok-1", actorId: "act-1" });
+    expect(macroSelection({ _id: "tok-1" })).toEqual({ tokenId: "tok-1", actorId: null });
+    expect(macroSelection(null)).toBeNull();
+    expect(macroSelection(undefined)).toBeNull();
   });
 });

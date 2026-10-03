@@ -45,7 +45,7 @@
   import { JournalsPanel } from "../ui/journals";
   import { WindowHost } from "../ui/windows";
   import { WindowManager } from "../ui/windows";
-  import { MacroHotbar, macroSlots, runMacroSlot } from "../ui/macros";
+  import { MacroHotbar, macroSelectionOf, macroSlots, runMacroSlot } from "../ui/macros";
   import { resolveFxSequence, type FxImportPermissions } from "../core/fx";
 import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   import { gmState } from "../ui/armies/gmState.svelte";
@@ -2157,7 +2157,14 @@ const WALL_PICK_RADIUS = 12;
       // A script macro's declared inputs are collected in the macros window's script tab.
       onNeedsInput: () => openWindow("macros", "Macros", "macros"),
       activeSceneId: () => activeScene()?._id ?? null,
+      // D-388: a `from: "selected"` input defaults to the GM's selected token.
+      selection: () => macroSelectionOf(app.gm.client, singleSelectedTokenId()),
     });
+  }
+
+  /** The one token the caller has selected, or null — the shells' shared selection rule. */
+  function singleSelectedTokenId(): string | null {
+    return tokenSelection.ids.length === 1 ? (tokenSelection.ids[0] ?? null) : null;
   }
 
   /**
@@ -4627,6 +4634,7 @@ const WALL_PICK_RADIUS = 12;
           client={app.gm.client}
           bus={app.gm.bus}
           sceneId={activeScene()?._id ?? null}
+          selectedTokenId={singleSelectedTokenId()}
           importImage={importMapFile}
           onFxImport={importFxFile}
           onPickSummon={requestSummonPick}

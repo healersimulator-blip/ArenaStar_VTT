@@ -43,6 +43,7 @@
     client,
     bus,
     sceneId = null,
+    selectedTokenId = null,
     onUndo,
     onRedo,
     packages = null,
@@ -71,6 +72,8 @@
     client: ClientSync;
     bus: EventBus<ClientEvents>;
     sceneId?: string | null;
+    /** D-388: the caller's single selected token, the default for a `from:"selected"` input. */
+    selectedTokenId?: string | null;
     onUndo: () => void;
     onRedo: () => void;
     packages?: HostPackages | null;
@@ -272,6 +275,7 @@
           <PermissionsPanel {client} {bus} />
         {:else if win.kind === "macros"}
           <MacrosPanel {client} {bus} {onFxImport} {listFxAssets} {setFxAssetRights} {getFxAsset}
+            {selectedTokenId}
             listCompendia={isGM && packages ? () => packages.compendia() : null} activeSceneId={sceneId}
             {onPickSummon} {onPickAnchor} {onPreviewFx} {onStopFxPreview} />
         {:else if win.kind === "settings"}

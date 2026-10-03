@@ -9265,3 +9265,70 @@ test("a composite takes no arguments, and a declared token input must be visible
   await flushMicrotasks();
   expect(results.at(-1)).toMatchObject({ ok: false, macroId: "missing-macro" });
 });
+
+// ─── MC-02 (D-388): the caller's selection as a declared default source ─────────────
+
+/** A graph whose only action posts a GM line naming both arguments, so the values are visible. */
+const macroGraphContext = (over: Partial<AutomationDocument> = {}): AutomationDocument => ({
+  ...zoneDoc(), _id: "ctx-graph", name: "Context bell",
+  definition: { ...zoneDoc().definition, tileId: "zone", methods: ["manual"], gates: { playerRunnable: true },
+    steps: [{ id: "notice", kind: "chat", audience: "gm",
+      content: "target={{arg.target}} subject={{arg.subject}}" }] },
+  ...over,
+});
+
+const actorFixture = (id: string, name: string, ownership: Record<string, number>): ActorDocument => ({
+  _id: id, type: "actor", name, ownership, flags: {}, system: {}, items: [], effects: [],
+} as unknown as ActorDocument);
+
+test("a selection default is a caller-side convenience — the host validates the reference itself", async () => {
+  const h = await setup();
+  h.gm.submit([
+    { kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: visibleZoneTile() },
+    { kind: "create", coll: "actors", data: actorFixture("hero-actor", "Hero", { default: 0, [PLAYER_ID]: 3 }) },
+    { kind: "create", coll: "actors", data: actorFixture("secret-actor", "Secret", { default: 0 }) },
+  ]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "automations", data: macroGraphContext() }]);
+  await flushMicrotasks();
+  // The schema the caller's client fills from its own canvas selection.
+  h.gm.submit([{ kind: "create", coll: "macros", data: automationMacro("ctx-graph", { _id: "ctx-macro",
+    name: "Context bell", automation: { graphId: "ctx-graph", inputs: [
+      { name: "target", type: "token", required: true, from: "selected" },
+      { name: "subject", type: "actor", from: "selected" }] } }) }]);
+  await flushMicrotasks();
+  const messages = () => h.hostStore.getAll("messages").map((message) => message.content);
+
+  const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const results: ClientEvents["macroResult"][] = [];
+  playerBus.on("macroResult", (event) => results.push(event));
+
+  // The client sends the ids it read from its selection; they interpolate like any argument.
+  player.invokeMacro("ctx-macro", { target: "t-pl", subject: "hero-actor" });
+  await flushMicrotasks();
+  expect(messages()).toEqual(["target=t-pl subject=hero-actor"]);
+  expect(results.at(-1)).toMatchObject({ ok: true, callerId: PLAYER_ID });
+  const before = messages().length;
+
+  // An actor the player cannot read is refused even though their selected token is fine.
+  player.invokeMacro("ctx-macro", { target: "t-pl", subject: "secret-actor" });
+  await flushMicrotasks();
+  expect(results.at(-1)).toMatchObject({ ok: false, detail: "automation macro unavailable" });
+  expect(messages()).toHaveLength(before);
+  // The GM reads it, so the same invocation succeeds for them.
+  h.gm.invokeMacro("ctx-macro", { target: "t-pl", subject: "secret-actor" });
+  await flushMicrotasks();
+  expect(messages().at(-1)).toBe("target=t-pl subject=secret-actor");
+
+  // A required selection default with nothing sent is the host's plain missing-argument rule.
+  const gmResults: ClientEvents["macroResult"][] = [];
+  h.gmBus.on("macroResult", (event) => gmResults.push(event));
+  h.gm.invokeMacro("ctx-macro", {});
+  await flushMicrotasks();
+  expect(gmResults.at(-1)?.detail).toContain("missing target");
+  expect(messages().at(-1)).toBe("target=t-pl subject=secret-actor");
+  // The optional actor default stays absent when the caller has none to send.
+  h.gm.invokeMacro("ctx-macro", { target: "t-pl" });
+  await flushMicrotasks();
+  expect(messages().at(-1)).toBe("target=t-pl subject=");
+});

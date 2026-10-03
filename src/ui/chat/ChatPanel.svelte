@@ -12,6 +12,7 @@
   } from "../../core/macroCommand";
   import { runSavedMacro } from "../macros/run";
   import { bindMacroArgs } from "../../core/macroArgs";
+  import { macroSelectionOf } from "../macros/run";
   import { macroAutomationInputs } from "../../core/macroAutomation";
   import { SvelteSet } from "svelte/reactivity";
   import { renderMarkdown } from "../../core/markdown";
@@ -256,8 +257,11 @@
       } else {
         // MC-02: an automation macro may declare typed inputs; the tail is bound to that
         // schema here, so an undeclared key or a wrong type never leaves the client.
+        // D-388: a `from: "selected"` input defaults to the caller's selected token, so
+        // `/run Target blast` works with the canvas selection and nothing typed.
         const bound = macro.kind === "automation"
-          ? bindMacroArgs(macroAutomationInputs(macro), macroCommand.tail)
+          ? bindMacroArgs(macroAutomationInputs(macro), macroCommand.tail,
+            macroSelectionOf(client, targetTokenId))
           : macroCommand.tail
             ? { ok: false as const, error: "this macro takes no arguments" }
             : { ok: true as const, args: {} };

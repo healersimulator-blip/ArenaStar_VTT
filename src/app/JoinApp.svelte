@@ -54,7 +54,7 @@
   import Icon from "../ui/icons/Icon.svelte";
   import { ChatPanel } from "../ui/chat";
   import { QuickbarRow } from "../ui/quickbar";
-  import { MacroHotbar, macroSlots, runMacroSlot } from "../ui/macros";
+  import { MacroHotbar, macroSelectionOf, macroSlots, runMacroSlot } from "../ui/macros";
   import { SvelteMap } from "svelte/reactivity";
   import { WindowManager } from "../core/windows";
   import { WindowHost } from "../ui/windows";
@@ -511,7 +511,9 @@
   function runPlayerSlot(i: number): void {
     const macro = playerHotbarSlots[i];
     if (!macro || !app) return;
-    runMacroSlot(app.client, macro, { activeSceneId: () => activeScene()?._id ?? null });
+    runMacroSlot(app.client, macro, { activeSceneId: () => activeScene()?._id ?? null,
+      // D-388: a `from: "selected"` input defaults to the player's own selected token.
+      selection: () => macroSelectionOf(app.client, selection.length === 1 ? (selection[0] ?? null) : null) });
   }
 
   function activeScene(): SceneDocument | null {
@@ -1322,6 +1324,7 @@
             client={app.client}
             bus={app.bus}
             sceneId={activeScene()?._id ?? null}
+            selectedTokenId={selection.length === 1 ? (selection[0] ?? null) : null}
             onPickSummon={requestSummonPick}
             onUndo={() => undefined}
             onRedo={() => undefined}

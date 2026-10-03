@@ -15,15 +15,37 @@
  *   same rules the reviewed-script path already enforces.
  * - **Namespaced at interpolation.** Arguments surface as `{{arg.<name>}}`, which is not a
  *   legal durable-variable name, so an imported world can never shadow one.
+ *
+ * D-388 adds the caller's **selection** as a default source: an input declared
+ * `from: "selected"` is filled from the token the caller has selected on the canvas when the
+ * caller does not spell it out (`token` → the token, `actor` → the actor it links to). The
+ * default is a *caller-side* convenience — the host validates the resulting id exactly like a
+ * spelled-out one, so a client cannot select its way past visibility.
  */
 export const MACRO_ARG_LIMITS = { inputs: 16, bytes: 8192, string: 256, number: 1e9 } as const;
 
-export type MacroArgType = "string" | "number" | "boolean" | "token";
+export type MacroArgType = "string" | "number" | "boolean" | "token" | "actor";
 
 export interface MacroArgInput {
   name: string;
   type: MacroArgType;
   required?: boolean;
+  /** `"selected"`: when the caller omits the value, use their current canvas selection. */
+  from?: "selected";
+}
+
+/** The caller's current canvas selection, as far as the caller's own replica knows it. */
+export interface MacroSelection {
+  tokenId: string;
+  /** The actor the selected token links to, or null (an unlinked scenery token). */
+  actorId: string | null;
+}
+
+/** A selection for a single selected token; `null` when nothing (or a stale id) is selected. */
+export function macroSelection(
+  token: { _id: string; actorId?: string | null } | null | undefined,
+): MacroSelection | null {
+  return token ? { tokenId: token._id, actorId: token.actorId ?? null } : null;
 }
 
 export type MacroArgValue = string | number | boolean;
@@ -45,13 +67,19 @@ export function macroArgSchemaError(inputs: unknown): string | null {
     return `a macro declares at most ${MACRO_ARG_LIMITS.inputs} inputs`;
   const names = new Set<string>();
   for (const field of inputs) {
-    if (!isObject(field) || Object.keys(field).some((key) => !["name", "type", "required"].includes(key)))
+    if (!isObject(field) ||
+        Object.keys(field).some((key) => !["name", "type", "required", "from"].includes(key)))
       return "invalid input schema";
     if (typeof field.name !== "string" || !NAME.test(field.name) || names.has(field.name))
       return "invalid input schema";
-    if (!["string", "number", "boolean", "token"].includes(String(field.type)))
+    if (!["string", "number", "boolean", "token", "actor"].includes(String(field.type)))
       return "invalid input schema";
     if (field.required !== undefined && typeof field.required !== "boolean")
+      return "invalid input schema";
+    // Only a token can be *selected*, and an actor can come from the selected token; a
+    // literal string/number/boolean has no selection to default to.
+    if (field.from !== undefined &&
+        !(field.from === "selected" && (field.type === "token" || field.type === "actor")))
       return "invalid input schema";
     names.add(field.name);
   }
@@ -66,11 +94,13 @@ export function macroArgInputs(inputs: unknown): MacroArgInput[] {
 }
 
 /**
- * Validate a caller's argument record against the schema. `tokenVisible` is the host's
- * live visibility check — a caller may never name a token they cannot see.
+ * Validate a caller's argument record against the schema. `visible` is the host's live
+ * read check per reference type — a caller may never name a token or actor they cannot read,
+ * whether they spelled it out or took it from their selection.
  */
 export function validateMacroArgs(
-  value: unknown, inputs: readonly MacroArgInput[], tokenVisible: (id: string) => boolean,
+  value: unknown, inputs: readonly MacroArgInput[],
+  visible: (type: "token" | "actor", id: string) => boolean,
 ): { ok: true; args: MacroArgs } | { ok: false; error: string } {
   const bad = (error: string) => ({ ok: false as const, error });
   if (value === undefined) value = {};
@@ -99,8 +129,8 @@ export function validateMacroArgs(
           Math.abs(supplied) > MACRO_ARG_LIMITS.number))
       return bad(`invalid ${field.name}`);
     if (field.type === "boolean" && typeof supplied !== "boolean") return bad(`invalid ${field.name}`);
-    if (field.type === "token" &&
-        (typeof supplied !== "string" || !DOC_ID.test(supplied) || !tokenVisible(supplied)))
+    if ((field.type === "token" || field.type === "actor") &&
+        (typeof supplied !== "string" || !DOC_ID.test(supplied) || !visible(field.type, supplied)))
       return bad(`invalid or invisible ${field.name}`);
     args[field.name] = supplied as MacroArgValue;
   }
@@ -124,7 +154,7 @@ export function coerceMacroArgText(field: MacroArgInput, raw: string): MacroArgV
     if (["false", "0", "no", "off"].includes(text.toLowerCase())) return false;
     return null;
   }
-  // A token argument is an id; whether it is *visible* is the host's call.
+  // A token/actor argument is an id; whether it is *readable* is the host's call.
   return DOC_ID.test(text) ? text : null;
 }
 
@@ -151,20 +181,15 @@ export function splitMacroArgTokens(tail: string): { named: Array<[string, strin
 /**
  * Bind tokens onto a declared schema: named keys by name, positional words by order,
  * each coerced to its declared type. Every declared required input must receive a value,
- * and a named key that is not declared is an error (never silently dropped).
+ * and a named key that is not declared is an error (never silently dropped). A field
+ * declared `from: "selected"` that received no explicit value takes the caller's selection.
  */
 export function bindMacroArgs(
-  inputs: readonly MacroArgInput[], tail: string,
+  inputs: readonly MacroArgInput[], tail: string, selection: MacroSelection | null = null,
 ): { ok: true; args: MacroArgs } | { ok: false; error: string } {
   const { named, positional } = splitMacroArgTokens(tail);
-  if (named.length === 0 && positional.length === 0) {
-    const required = inputs.filter((field) => field.required);
-    return required.length > 0
-      ? { ok: false, error: `missing ${required.map((field) => field.name).join(", ")}` }
-      : { ok: true, args: {} };
-  }
-  const byName = new Map(inputs.map((field) => [field.name, field] as const));
   const args: MacroArgs = {};
+  const byName = new Map(inputs.map((field) => [field.name, field] as const));
   for (const [key, raw] of named) {
     const field = byName.get(key);
     if (!field) return { ok: false, error: `unknown argument ${key}` };
@@ -173,6 +198,7 @@ export function bindMacroArgs(
     args[field.name] = value;
   }
   if (positional.length > 0) {
+    // Explicit words come before the selection default, in declaration order.
     const free = inputs.filter((field) => args[field.name] === undefined);
     if (positional.length > free.length) return { ok: false, error: "too many arguments" };
     for (const [index, word] of positional.entries()) {
@@ -183,9 +209,51 @@ export function bindMacroArgs(
       args[field.name] = value;
     }
   }
+  return fillSelection(inputs, args, selection);
+}
+
+/**
+ * The run form's binder: the same rules for a per-field text record (the caller typed some
+ * values and left others blank), so a selection default works identically there.
+ */
+export function bindMacroArgFields(
+  inputs: readonly MacroArgInput[], raw: Readonly<Record<string, string>>, selection: MacroSelection | null = null,
+): { ok: true; args: MacroArgs } | { ok: false; error: string } {
+  const args: MacroArgs = {};
+  for (const field of inputs) {
+    const text = (raw[field.name] ?? "").trim();
+    if (text === "") continue; // blank means "not spelled out": the selection or required check decides
+    const value = coerceMacroArgText(field, text);
+    if (value === null) return { ok: false, error: `invalid ${field.name}` };
+    args[field.name] = value;
+  }
+  const known = new Set(inputs.map((field) => field.name));
+  const stray = Object.keys(raw).find((key) => !known.has(key) && (raw[key] ?? "").trim() !== "");
+  if (stray) return { ok: false, error: `unknown argument ${stray}` };
+  return fillSelection(inputs, args, selection);
+}
+
+/** Apply `from: "selected"` defaults, then enforce `required` with a reason that names the remedy. */
+function fillSelection(
+  inputs: readonly MacroArgInput[], args: MacroArgs, selection: MacroSelection | null,
+): { ok: true; args: MacroArgs } | { ok: false; error: string } {
+  for (const field of inputs) {
+    if (args[field.name] !== undefined || field.from !== "selected" || !selection) continue;
+    if (field.type === "token") { args[field.name] = selection.tokenId; continue; }
+    // An unlinked token has no actor to offer: optional means "simply absent", required is
+    // refused with the real reason rather than a bare "missing".
+    if (!selection.actorId) {
+      if (field.required) return { ok: false, error: "the selected token has no actor" };
+      continue;
+    }
+    args[field.name] = selection.actorId;
+  }
   const missing = inputs.filter((field) => field.required && args[field.name] === undefined);
-  if (missing.length > 0) return { ok: false, error: `missing ${missing.map((field) => field.name).join(", ")}` };
-  return { ok: true, args };
+  if (missing.length === 0) return { ok: true, args };
+  const fromSelection = missing.filter((field) => field.from === "selected");
+  if (fromSelection.length > 0 && !selection)
+    return { ok: false, error: `select a token for ${fromSelection.map((field) => field.name).join(", ")}` };
+  return { ok: false, error: `missing ${missing.map((field) => field.name).join(", ")}` };
 }
 
 /** The interpolation context a graph sees: `arg.<name>` for every supplied argument. */

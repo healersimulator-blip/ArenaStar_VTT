@@ -2857,10 +2857,14 @@ export class HostSync {
       return;
     }
     // MC-02: the caller's arguments are validated against the macro's own declared schema,
-    // with the target scene's live visibility for a `token` input. An undeclared key, a
-    // wrong type or an invisible token never reaches the graph.
+    // with the target scene's live visibility for a `token` input and the caller's own read
+    // access for an `actor` one (D-388) — whether the value was spelled out or defaulted
+    // from the caller's selection. An undeclared key, a wrong type or an unreadable
+    // reference never reaches the graph.
     const checkedArgs = validateMacroArgs(msg.args, macroAutomationInputs(macro),
-      (id) => this.tokenVisibleTo(caller, target.scene._id, id));
+      (type, id) => type === "token"
+        ? this.tokenVisibleTo(caller, target.scene._id, id)
+        : this.referenceVisibleTo(caller, id));
     if (!checkedArgs.ok) {
       refused(checkedArgs.error);
       return;
@@ -2953,6 +2957,12 @@ export class HostSync {
    * MC-02: a `token` argument is visible when the caller's **own projected view** of that
    * scene holds the token — the same predicate the reviewed-script path uses for its inputs.
    */
+  /** D-388: `actor` arguments are ids the caller must be able to read in their own replica. */
+  private referenceVisibleTo(caller: SessionUser, actorId: string): boolean {
+    const actor = this.store.get("actors", actorId);
+    return !!actor && docVisibleTo(caller, actor);
+  }
+
   private tokenVisibleTo(caller: SessionUser, sceneId: string, tokenId: string): boolean {
     const view = projectWorld(this.store.world, this.store.seq, caller).collections.scenes
       ?.find((item) => item._id === sceneId);
