@@ -48,6 +48,44 @@ export function runSavedMacro(
   return { ok: false, error: `Cannot run ${label} macros from chat yet` };
 }
 
+/** The shell hooks a hotbar slot needs that are not the client's business. */
+export interface MacroSlotHost {
+  /** GM shell: open the macros window to collect a script macro's declared inputs. */
+  onNeedsInput?: (() => void) | undefined;
+  /** The caller's active scene, for a sequence macro (a player shell has one too). */
+  activeSceneId?: (() => string | null) | undefined;
+}
+
+/**
+ * MC-01: run the macro in a hotbar slot by kind — the same dispatch the directory
+ * uses, plus the two kinds whose surfaces live in a shell (script, sequence). A
+ * player's slot runs the identical path; the host decides what may actually fire.
+ */
+export function runMacroSlot(
+  client: ClientSync,
+  macro: MacroDocument,
+  host: MacroSlotHost = {},
+): { ok: boolean; error?: string; requestId?: string } {
+  if (macro.kind === "chat") {
+    runChatMacro(client, macro);
+    return { ok: true };
+  }
+  if (macro.kind === "automation") return { ok: true, requestId: client.invokeMacro(macro._id) };
+  if (macro.kind === "script") {
+    if (macro.script?.inputs.some((field) => field.required)) {
+      host.onNeedsInput?.();
+      return { ok: false, error: "this macro needs its declared inputs" };
+    }
+    return { ok: true, requestId: client.requestMacro(macro._id) };
+  }
+  if (macro.kind === "sequence") {
+    const sceneId = host.activeSceneId?.() ?? null;
+    if (!sceneId) return { ok: false, error: "open a scene before running a sequence macro" };
+    return { ok: true, requestId: client.requestSequence(macro._id, sceneId) };
+  }
+  return { ok: false, error: `Cannot run ${macro.kind} macros from a hotbar slot` };
+}
+
 /** Macros bound to a hotbar slot (flags.core.slot, §10). */
 export function macroSlots(macros: readonly MacroDocument[]): Array<MacroDocument | null> {
   const slots: Array<MacroDocument | null> = [null, null, null, null, null];

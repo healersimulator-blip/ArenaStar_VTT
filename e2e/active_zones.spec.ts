@@ -1748,3 +1748,95 @@ test("the /run chat command fires a published macro for the GM and for a player,
     await hostCtx.close();
   }
 });
+
+test("a player's macro hotbar exposes the GM's slot assignments and answers the number keys", async ({ browser }: { browser: Browser }) => {
+  test.setTimeout(120_000);
+  const hostCtx = await browser.newContext();
+  const playerCtx = await browser.newContext();
+  try {
+    const host = await hostCtx.newPage();
+    const player = await playerCtx.newPage();
+    await host.goto(entry + "?e2e=1");
+    await waitForSurface(host, "app");
+    await host.locator("#gm-macros").click();
+    await host.locator("[data-macro-zones-tab]").click();
+    const zones = host.locator("[data-active-zones]");
+    await zones.locator("[data-zone-tile-create] summary").click();
+    const tile = zones.locator("[data-zone-tile-create]");
+    await tile.getByLabel("Tile name").fill("Slot plate");
+    await tile.getByLabel("X", { exact: true }).fill("350");
+    await tile.getByLabel("Y", { exact: true }).fill("400");
+    await tile.getByLabel("Width").fill("200");
+    await tile.getByLabel("Height").fill("160");
+    await tile.locator("[data-zone-create-tile]").click();
+    await expect(zones.locator("[data-zone-tile] option").filter({ hasText: "Slot plate" })).toHaveCount(1);
+    await zones.locator("[data-zone-name]").fill("Slot bell");
+    for (const method of ["enter", "stop"])
+      await zones.locator(".methods label").filter({ hasText: new RegExp(`^${method}$`) })
+        .locator("input").uncheck();
+    await zones.getByLabel("Player canvas triggers (published)").check();
+    await zones.locator('[data-zone-step="notice"]').getByLabel("Text").fill("Slot {{method}} {{user}}");
+    await zones.locator("[data-zone-save]").click();
+    const graphRow = zones.locator("li").filter({ hasText: "Slot bell" });
+    await expect(graphRow).toHaveCount(1);
+    await graphRow.locator("[data-zone-macro]").click();
+    await expect(zones.getByText(/Published automation macro "Slot bell"/)).toHaveCount(1);
+    const graphId = await graphRow.locator("[data-zone-macro]").getAttribute("data-zone-macro");
+    expect(graphId).toBeTruthy();
+
+    // The GM binds the macro to slot 1 in the directory; the shell's own row follows.
+    const hostMacros = host.locator('[data-window="macros"]');
+    await hostMacros.locator("[data-macro-automations-tab]").click();
+    const macroRow = hostMacros.locator("[data-automation-macro]").filter({ hasText: "Slot bell" });
+    await expect(macroRow).toHaveCount(1);
+    await macroRow.locator("[data-macro-slot]").selectOption("1");
+    await expect(macroRow.locator("[data-macro-slot]")).toHaveValue("1");
+    await host.locator('[data-window="macros"] [data-window-close]').click();
+    const gmSlot = host.locator('[data-macro-hotbar] [data-hotbar-slot="1"]');
+    await expect(gmSlot).toHaveAttribute("title", "Slot bell");
+    // An unassigned slot stays inert.
+    await expect(host.locator('[data-macro-hotbar] [data-hotbar-slot="2"]')).toBeDisabled();
+    await gmSlot.click();
+    await expect(host.locator("#chat-log")).toContainText("Slot manual gm");
+    const gmRuns = (await host.locator("#chat-log").innerText()).split("Slot manual gm").length - 1;
+    expect(gmRuns).toBe(1);
+
+    // The player gets the same row from their own delivered macros: click and key both run it.
+    await host.locator("#share").click();
+    const fragment = manualFragment(await host.locator("#invite-link").inputValue());
+    await player.goto(`${entry}?e2e=1&join=1#${fragment}`);
+    await expect.poll(() => player.locator("#offer-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await host.locator("#peer-code").fill(await player.locator("#offer-out").inputValue());
+    await host.locator("#code-apply").click();
+    await expect.poll(() => host.locator("#share-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await player.locator("#answer-input").fill(await host.locator("#share-out").inputValue());
+    await player.locator("#answer-apply").click();
+    await expect.poll(() => playerCall<boolean>(player, "connected"), { timeout: 30_000 }).toBe(true);
+    await waitForSurface(player, "playerCanvas");
+    const playerId = await playerCall<string>(player, "userId");
+
+    const playerSlot = player.locator('[data-macro-hotbar] [data-hotbar-slot="1"]');
+    await expect(playerSlot).toHaveAttribute("title", "Slot bell");
+    expect(await player.content()).not.toContain(graphId as string);
+    await playerSlot.click();
+    await expect(host.locator("#chat-log")).toContainText(`Slot manual ${playerId}`);
+    await expect.poll(() => host.locator("#chat-log").innerText()).toContain("Slot manual " + playerId);
+    // The number keys are claimed only while the slot holds a macro.
+    await player.locator("#chat-input").fill("1");
+    await player.locator("#chat-send").click();
+    await expect(host.locator("#chat-log")).toContainText("1");
+    const typedRuns = (await host.locator("#chat-log").innerText()).split(`Slot manual ${playerId}`).length - 1;
+    expect(typedRuns).toBe(1); // typing "1" into the chat box must not fire the slot
+    await player.locator("#chat-input").fill("");
+    await player.locator("#chat-input").blur();
+    await player.keyboard.press("1");
+    await expect
+      .poll(async () => (await host.locator("#chat-log").innerText()).split(`Slot manual ${playerId}`).length - 1,
+        { timeout: 20_000 })
+      .toBe(2);
+    await expect(player.locator("#chat-log")).not.toContainText("Slot manual");
+  } finally {
+    await playerCtx.close();
+    await hostCtx.close();
+  }
+});

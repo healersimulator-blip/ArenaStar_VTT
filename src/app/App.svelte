@@ -45,7 +45,7 @@
   import { JournalsPanel } from "../ui/journals";
   import { WindowHost } from "../ui/windows";
   import { WindowManager } from "../ui/windows";
-  import { macroSlots, runChatMacro, runSavedMacro } from "../ui/macros";
+  import { MacroHotbar, macroSlots, runMacroSlot } from "../ui/macros";
   import { resolveFxSequence, type FxImportPermissions } from "../core/fx";
 import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   import { gmState } from "../ui/armies/gmState.svelte";
@@ -2153,16 +2153,11 @@ const WALL_PICK_RADIUS = 12;
   function runSlot(i: number): void {
     const macro = hotbarSlots[i];
     if (!macro || !app) return;
-    if (macro.kind === "chat") runChatMacro(app.gm.client, macro);
-    else if (macro.kind === "automation") runSavedMacro(app.gm.client, macro);
-    else if (macro.kind === "script") {
-      if (macro.script?.inputs.some((field) => field.required))
-        openWindow("macros", "Macros", "macros"); // collect declared inputs in the script tab
-      else app.gm.client.requestMacro(macro._id);
-    } else if (macro.kind === "sequence") {
-      const scene = activeScene();
-      if (scene) app.gm.client.requestSequence(macro._id, scene._id);
-    }
+    runMacroSlot(app.gm.client, macro, {
+      // A script macro's declared inputs are collected in the macros window's script tab.
+      onNeedsInput: () => openWindow("macros", "Macros", "macros"),
+      activeSceneId: () => activeScene()?._id ?? null,
+    });
   }
 
   /**
@@ -4788,19 +4783,7 @@ const WALL_PICK_RADIUS = 12;
           {/if}
         </div>
         <div class="dock-footer">
-        <div class="hotbar" aria-label="Hotbar">
-          {#each hotbarSlots as macro, i (i)}
-            <button
-              type="button"
-              class="slot"
-              data-slot={i + 1}
-              title={macro?.command ?? ""}
-              onclick={() => runSlot(i)}
-            >
-              {macro ? macro.name.slice(0, 6) : i + 1}
-            </button>
-          {/each}
-        </div>
+        <MacroHotbar slots={hotbarSlots} onRun={runSlot} />
         {#if app}
           <QuickbarRow
             client={app.gm.client}
@@ -5312,8 +5295,6 @@ const WALL_PICK_RADIUS = 12;
     border-top: 1px solid #3a4b59;
     background: #192834;
   }
-  .hotbar { display: flex; gap: 3px; }
-  .hotbar .slot { flex: 1 1 0; min-width: 0; overflow: hidden; padding: 4px 0; font-size: .72rem; text-overflow: ellipsis; white-space: nowrap; }
   .board { flex: 1 1 auto; display: flex; min-width: 0; min-height: 0; }
   .toolrail { flex: 0 0 auto; display: flex; min-height: 0; }
   .canvas-host { flex: 1 1 auto; min-width: 0; min-height: 0; position: relative; background: #0d151e; }

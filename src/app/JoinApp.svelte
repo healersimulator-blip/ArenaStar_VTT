@@ -54,6 +54,7 @@
   import Icon from "../ui/icons/Icon.svelte";
   import { ChatPanel } from "../ui/chat";
   import { QuickbarRow } from "../ui/quickbar";
+  import { MacroHotbar, macroSlots, runMacroSlot } from "../ui/macros";
   import { SvelteMap } from "svelte/reactivity";
   import { WindowManager } from "../core/windows";
   import { WindowHost } from "../ui/windows";
@@ -110,6 +111,21 @@
   let wmVersion = $state(0);
   /** Bumped by `refresh()` (snapshot/ops) so `$derived` blocks re-read the store. */
   let storeVersion = $state(0);
+
+  // A player's macro hotbar answers 1-5 like the GM's keymap does. The keys are
+  // claimed only when the matching slot actually holds a macro, so an unbound key
+  // keeps its other meanings; typing targets are never intercepted.
+  $effect(() => {
+    const onMacroKey = (event: KeyboardEvent): void => {
+      if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+      if (!/^[1-5]$/.test(event.key) || isTypingTarget(event.target)) return;
+      if (!playerHotbarSlots[Number(event.key) - 1]) return;
+      event.preventDefault();
+      runPlayerSlot(Number(event.key) - 1);
+    };
+    globalThis.addEventListener("keydown", onMacroKey);
+    return () => globalThis.removeEventListener("keydown", onMacroKey);
+  });
   const wmWindows = $derived.by(() => {
     void wmVersion;
     return [...wm.list()];
@@ -484,6 +500,19 @@
     settleSummonPick(null); // starting a new gesture cancels the old one
     return new Promise((resolve) => { pendingSummonPick = { options, resolve }; });
   };
+
+  /** MC-01: the macro hotbar a player sees — the same five `flags.core.slot` slots
+   * the GM assigns in the macros window. The host still decides what may fire. */
+  const playerHotbarSlots = $derived.by(() => {
+    void storeVersion;
+    return macroSlots((app?.client.store.getAll("macros") ?? []) as Parameters<typeof macroSlots>[0]);
+  });
+
+  function runPlayerSlot(i: number): void {
+    const macro = playerHotbarSlots[i];
+    if (!macro || !app) return;
+    runMacroSlot(app.client, macro, { activeSceneId: () => activeScene()?._id ?? null });
+  }
 
   function activeScene(): SceneDocument | null {
     const client = app?.client;
@@ -1330,7 +1359,10 @@
             {/if}
           {/if}
         </div>
-        {#if app?.client}<div class="dock-footer"><QuickbarRow client={app.client} actor={quickbarActor} targets={quickbarTargets} /></div>{/if}
+        {#if app?.client}<div class="dock-footer">
+          <MacroHotbar slots={playerHotbarSlots} onRun={runPlayerSlot} />
+          <QuickbarRow client={app.client} actor={quickbarActor} targets={quickbarTargets} />
+        </div>{/if}
       </aside>
     </section>
     {#if guideOpen}

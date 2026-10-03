@@ -4357,3 +4357,23 @@ The browser cases used npm-provisioned Chromium 153 for functional input coverag
 - Production `file://` Chromium 153: the new `e2e/active_zones.spec.ts:1622` case authors a published manual graph plus its macro and a second, deliberately unpublished graph plus its macro, then drives everything from the chat line: `/run` → the usage line, `/run Nothing here` → `no macro named "Nothing here"`, `/run Command bell` → `Fired Command bell` with exactly one `Command manual gm` line and no `/run` text in the log; a joined second browser context reads `Automation fired` for its own `/run Command bell`, with exactly one `Command manual <player id>` line on the host, the anchor id absent from the player shell and no GM-only line there either; and `/run Command draft` (delivered macro, unpublished graph) → `Refused: automation macro unavailable`, no `Draft manual` line and no draft graph id in the player shell. `active_zones.spec.ts` (28 cases) + `join.spec.ts`: **29/29 in 4.5 min** (one worker, zero retries).
 - Full `corepack pnpm test` — **4,723 passed / 12 skipped** across 328 passing / 2 skipped files (**98.77 s**). `corepack pnpm typecheck` — 66 components, 0 blocking, 1 existing advisory (`src/ui/sim/ReplayPanel.svelte:29`); lint clean. `pnpm size` — **3.885 MB raw / 1.110 MB gzip** (4,073,667 / 1,164,421 bytes), within the 6 MB budget; `git diff --check` clean.
 - A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d385"></a>
+
+## D385 — A player macro hotbar (2026-10-03)
+
+**Scope:** the **hotbar** slice of MC-01 — the five macro slots for a player shell. `/run` arguments, composite macros and per-invocation inputs stay open.
+
+### Implemented
+
+- `src/ui/macros/MacroHotbar.svelte` — one five-slot row shared by both shells (`data-macro-hotbar`, `data-hotbar-slot={1..5}`, `disabled` when empty, the macro's name as the title), replacing the GM shell's inline markup and its now-dead CSS.
+- `src/ui/macros/run.ts` — `runMacroSlot(client, macro, host)` is the single per-kind dispatch: chat → the pure chat core (a `/roll` command rolls), automation → `macros.invoke` (request id returned), script → direct run or `onNeedsInput`, sequence → the caller's active scene, `summon`/`fxPreset` → named refusal. `MacroSlotHost` carries the two shell-owned hooks.
+- `src/app/App.svelte` — the GM hotbar now renders the shared row and its keymap calls the shared `runMacroSlot` (behaviour unchanged).
+- `src/app/JoinApp.svelte` — the player dock footer renders the row from their own delivered macros, and a keydown handler runs slots on keys **1–5** only when that slot holds a macro, ignoring modifiers and typing targets.
+
+### Verification
+
+- `tests/ui/macroHotbar.test.ts` — **9/9** with a recording client stub: slot binding (only 1–5, last macro wins, empty list → five empty slots); chat submit; a chat `/roll` command rolling instead of submitting; automation invoking by id and returning the request id; a script running directly, or diverting to `onNeedsInput` when it declares required inputs; a sequence requiring an active scene; `summon`/`fxPreset` refused with no client call; and a chat macro with no signed-in user still submitting.
+- Production `file://` Chromium 153: the new `e2e/active_zones.spec.ts:1752` case publishes a macro, binds slot 1 in the directory, asserts the GM's row shows the title while slot 2 stays disabled, clicks the GM slot for one run, joins a real second browser context, asserts the player row carries the same title with no graph id in that shell, clicks it (one run), types "1" into the player's chat box (no extra run) and then presses the number key with the input blurred (second run). `active_zones.spec.ts` (29 cases) + `join.spec.ts`: **30/30 in 4.8 min** (one worker, zero retries).
+- Full `corepack pnpm test` — **4,732 passed / 12 skipped** across 329 passing / 2 skipped files (**96.97 s**). `corepack pnpm typecheck` — 67 components, 0 blocking, 1 existing advisory (`src/ui/sim/ReplayPanel.svelte:29`); lint clean. `pnpm size` — **3.886 MB raw / 1.111 MB gzip** (4,074,712 / 1,164,621 bytes), within the 6 MB budget; `git diff --check` clean.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
