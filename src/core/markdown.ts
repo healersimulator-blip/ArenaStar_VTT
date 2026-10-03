@@ -100,17 +100,23 @@ export function renderMarkdown(text: string): string {
   return out.join("");
 }
 
-/** Split text into public/`<secret>` blocks (rendering + projection share it). */
-export function splitSecretBlocks(text: string): Array<{ secret: boolean; text: string }> {
-  const out: Array<{ secret: boolean; text: string }> = [];
+/**
+ * Split text into public/`<secret>` blocks (rendering + projection share it).
+ *
+ * `start` is the offset of each block's `text` inside the input — journal link rendering
+ * needs it to keep a link's page-absolute ordinal when it sits inside a secret block.
+ */
+export function splitSecretBlocks(text: string): Array<{ secret: boolean; text: string; start: number }> {
+  const out: Array<{ secret: boolean; text: string; start: number }> = [];
   const re = /<secret>([\s\S]*?)<\/secret>/g;
   let last = 0;
   for (const m of text.matchAll(re)) {
     const at = m.index ?? 0;
-    if (at > last) out.push({ secret: false, text: text.slice(last, at) });
-    out.push({ secret: true, text: m[1] ?? "" });
+    if (at > last) out.push({ secret: false, text: text.slice(last, at), start: last });
+    const inner = m[1] ?? "";
+    out.push({ secret: true, text: inner, start: at + m[0].length - inner.length - "</secret>".length });
     last = at + m[0].length;
   }
-  if (last < text.length) out.push({ secret: false, text: text.slice(last) });
+  if (last < text.length) out.push({ secret: false, text: text.slice(last), start: last });
   return out;
 }

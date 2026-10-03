@@ -446,6 +446,17 @@ export class ClientSync {
     return this.requestAutomationTileTrigger(sceneId, tileId, point, tokenId, method);
   }
 
+  /**
+   * TR-12: a journal page's `@Tile[…]{}` link. Names the page and the link's ordinal in
+   * the text this client received — never a tile, region or graph id; the host re-reads
+   * the page and resolves the anchor for this caller.
+   */
+  requestJournalTrigger(journalId: DocId, pageId: DocId, index: number): string {
+    const requestId = globalThis.crypto.randomUUID();
+    this.send({ kind: "journal.trigger", requestId, journalId, pageId, index });
+    return requestId;
+  }
+
   /** Execute a published, revision-pinned script by ID; no code/grants/ops cross the wire. */
   requestMacro(macroId: DocId, args: Record<string, Json> = {}): string {
     const requestId = globalThis.crypto.randomUUID();

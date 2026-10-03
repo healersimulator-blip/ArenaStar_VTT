@@ -505,6 +505,52 @@ describe("projectEnvelope (§5)", () => {
     }
   });
 
+  test("journal page text diffs blank tile-link targets for players (D-383)", () => {
+    const e = env([
+      {
+        kind: "update",
+        ref: { coll: "pages", id: "p1", parent: { coll: "journals", id: "j1" } },
+        diff: { text: "Open @Tile[gate-tile landing:vault]{the gate} now." },
+      },
+    ]);
+    const projected = projectEnvelope(e, player, resolver);
+    const op = projected?.ops[0];
+    expect(op?.kind).toBe("update");
+    if (op?.kind === "update") {
+      // The label survives (the reader needs a button); the anchor id, landing and scene do not.
+      expect(op.diff["text"]).toBe("Open @Tile[masked]{the gate} now.");
+    }
+  });
+
+  test("a whole pages-array save is projected page by page, not forwarded raw", () => {
+    const e = env([
+      {
+        kind: "update",
+        ref: { coll: "journals", id: "j1" },
+        diff: { pages: [
+          { _id: "p1", type: "page", name: "One", ownership: { default: 1 }, flags: {}, system: {},
+            src: null, text: "Public @Tile[gate-tile]{open} <secret>the twist</secret>" },
+          { _id: "p2", type: "page", name: "Two", ownership: { default: 1 }, flags: {}, system: {},
+            src: null, text: "Nothing hidden here." },
+        ] },
+      },
+    ]);
+    const projected = projectEnvelope(e, player, resolver);
+    const op = projected?.ops[0];
+    expect(op?.kind).toBe("update");
+    if (op?.kind === "update") {
+      const pages = op.diff["pages"] as Array<{ text: string }>;
+      expect(pages[0]?.text).toBe("Public @Tile[masked]{open} ");
+      expect(pages[1]?.text).toBe("Nothing hidden here.");
+    }
+    // The GM keeps the raw text.
+    const gmView = projectEnvelope(e, gm, resolver);
+    const gmOp = gmView?.ops[0];
+    if (gmOp?.kind === "update") {
+      expect((gmOp.diff["pages"] as Array<{ text: string }>)[0]?.text).toContain("gate-tile");
+    }
+  });
+
   test("partially visible envelopes keep seq/txId and drop only the invisible ops", () => {
     const e = env([
       { kind: "update", ref: tokenRef("t-public"), diff: { x: 5 } },

@@ -27,10 +27,14 @@ import {
   type Role,
   type UserDocument,
 } from "../core/documents";
+import { getEffectiveOwnership } from "../core/permissions";
+import { journalLinks, visibleJournalLinks, type JournalTileLink } from "../core/journalLinks";
 import type {
   ActorDocument,
   CombatDocument,
   DocRef,
+  JournalDocument,
+  JournalPageDocument,
   Json,
   SceneDocument,
   TileDocument,
@@ -50,6 +54,7 @@ import type {
   SummonPlaceMsg,
   SummonDismissMsg,
   SummonResultMsg,
+  JournalTriggerMsg,
   MacroInvokeMsg,
   MacroRequestMsg,
   MacroResultMsg,
@@ -976,6 +981,9 @@ export class HostSync {
         return;
       case "macros.invoke":
         this.handleMacroInvoke(session, msg);
+        return;
+      case "journal.trigger":
+        this.handleJournalTrigger(session, msg);
         return;
       // Host→client kinds and later-milestone kinds are never accepted here:
       case "welcome":
@@ -2786,7 +2794,7 @@ export class HostSync {
       return;
     }
     const fired = this.fireAutomation(graph, { scene, tile, caller,
-      method: MACRO_AUTOMATION_METHOD, at: this.now(), rng: this.rng });
+      method: MACRO_AUTOMATION_METHOD, originSource: "macro", at: this.now(), rng: this.rng });
     if (!fired.ok) {
       refused(fired.error);
       return;
@@ -2795,6 +2803,92 @@ export class HostSync {
     // collection), so the success line stays generic for a player.
     this.send(session, { ...base, ok: true,
       detail: isGm ? `Fired ${graph.name}` : "Automation fired" });
+  }
+
+  /**
+   * TR-12: a journal page's `@Tile[…]{}` link (MATT "Triggering a Tile via Journal").
+   * The client names a page and the link's ordinal in the text it received; the host
+   * re-reads the page and resolves the anchor itself, so no tile, region or graph id ever
+   * travels. A readable page is the publication surface — the GM chose to hand the reader
+   * that link — so the target anchor need not be visible or `playerRunnable`; the graphs
+   * still must be real, same-scene, `manual` and un-paused (the universal gate), and for a
+   * player the target scene must be the one that player currently has loaded.
+   */
+  private handleJournalTrigger(session: Session, msg: JournalTriggerMsg): void {
+    const caller = session.user;
+    if (!caller) return;
+    if (!session.intentBucket.tryRemove()) {
+      this.reject(session, String(msg.requestId), "rate_limited", "journal triggers rate-limited");
+      return;
+    }
+    if (typeof msg.requestId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.requestId) ||
+        typeof msg.journalId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.journalId) ||
+        typeof msg.pageId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.pageId) ||
+        !Number.isSafeInteger(msg.index) || msg.index < 0 || msg.index > 255 ||
+        Object.keys(msg).some((key) => !["kind", "requestId", "journalId", "pageId", "index"].includes(key))) {
+      this.reject(session, String(msg.requestId), "invalid_schema", "invalid journal trigger");
+      return;
+    }
+    const requestKey = `${caller.id}:${msg.requestId}`;
+    if (this.seenJournalTriggers.has(requestKey)) return;
+    this.seenJournalTriggers.set(requestKey, this.now());
+    if (this.seenJournalTriggers.size > 256) {
+      const first = this.seenJournalTriggers.keys().next().value;
+      if (first) this.seenJournalTriggers.delete(first);
+    }
+    const isGm = caller.role === "GM" || caller.role === "ASSISTANT";
+    const journal = this.store.get("journals", msg.journalId) as JournalDocument | undefined;
+    const page: JournalPageDocument | undefined =
+      journal?.pages.find((item) => item._id === msg.pageId);
+    // The same read boundary the projection used to deliver the page in the first place.
+    const readable = journal !== undefined && page !== undefined && docVisibleTo(caller, journal) &&
+      (isGm || (can(caller, "read", journal, "journals") &&
+        getEffectiveOwnership(caller, page, journal) >= OWNERSHIP_LEVELS.LIMITED));
+    // A player's ordinal list excludes links hidden inside `<secret>` blocks; a GM may click
+    // any link on the page (their own text is the raw one).
+    const link: JournalTileLink | undefined = readable && page
+      ? (isGm ? journalLinks(page.text) : visibleJournalLinks(page.text))[msg.index]
+      : undefined;
+    if (!readable || !page || !link || link.error !== undefined || link.tileId === "") {
+      this.reject(session, msg.requestId, "forbidden", "journal link unavailable");
+      return;
+    }
+    const sceneId = link.sceneId ?? this.loadedSceneByUser.get(caller.id) ?? this.activeSceneDocument()?._id;
+    const scene = sceneId ? this.store.get("scenes", sceneId) as SceneDocument | undefined : undefined;
+    if (!scene || (!isGm && this.loadedSceneByUser.get(caller.id) !== scene._id)) {
+      this.reject(session, msg.requestId, "forbidden", "journal link unavailable");
+      return;
+    }
+    const tile = scene.tiles.find((item) => item._id === link.tileId);
+    const region = tile ? undefined : scene.regions?.find((item) => item._id === link.tileId);
+    const sourceKind = tile ? "tile" : region ? "region" : null;
+    if (!sourceKind) {
+      this.reject(session, msg.requestId, "forbidden", "journal link unavailable");
+      return;
+    }
+    const anchor = automationSourceTile(scene, link.tileId, sourceKind);
+    if (!anchor) {
+      this.reject(session, msg.requestId, "forbidden", "journal link unavailable");
+      return;
+    }
+    const graphs = this.store.getAll("automations").flatMap((doc) => {
+      const checked = validateAutomation(doc.definition);
+      return checked.ok && checked.definition.sceneId === scene._id &&
+        checked.definition.tileId === anchor._id &&
+        (checked.definition.sourceKind ?? "tile") === sourceKind &&
+        checked.definition.methods.includes(MACRO_AUTOMATION_METHOD) ? [doc] : [];
+    }).sort((a, b) => a._id.localeCompare(b._id));
+    // A link to a plain tile (or to an unpublished graph) is indistinguishable from a
+    // no-op: never answer with whether a hidden graph exists.
+    if (!graphs.length) return;
+    for (const graph of graphs) {
+      const liveScene = this.store.get("scenes", scene._id) as SceneDocument | undefined;
+      const liveAnchor = liveScene ? automationSourceTile(liveScene, link.tileId, sourceKind) : undefined;
+      if (!liveScene || !liveAnchor) break;
+      this.fireAutomation(graph, { scene: liveScene, tile: liveAnchor, caller,
+        method: MACRO_AUTOMATION_METHOD, originSource: "journal", at: this.now(), rng: this.rng },
+        false, undefined, undefined, link.landing);
+    }
   }
 
   /** Creation/update gate: a macro may only reference a graph that exists and can be
@@ -3543,6 +3637,8 @@ export class HostSync {
   private readonly seenAutomationRequests = new Map<string, number>();
   /** TR-12/MC-01: one fire per (caller, requestId) for macro-initiated graphs. */
   private readonly seenMacroInvokes = new Map<string, number>();
+  /** TR-12: one fire per (caller, requestId) for journal-link triggers. */
+  private readonly seenJournalTriggers = new Map<string, number>();
   /** Reentry depth of movement-trigger dispatch. A graph's committed Move/Rotation
    * can land a token in another tile whose graph moves it on, so the chain is
    * bounded at the host, not by each plan's own invocation budget. */
@@ -3962,11 +4058,12 @@ export class HostSync {
 
   private fireAutomation(
     doc: AutomationDocument, event: AutomationEvent, dryRun = false, planned?: AutomationOutcome,
-    postActionRun?: AutomationPostActionRun,
+    postActionRun?: AutomationPostActionRun, landing?: string,
   ): { ok: true; stopOthers: boolean; completion?: Promise<void> } | { ok: false; error: string } {
     const result = planned ?? planAutomation(this.store.world, doc,
       { ...event, hurtHeal: planAutomationHealth,
-        imageAssetError: (hash) => automationImageError(hash, this.manifestSource()) }, this.systemUserId);
+        imageAssetError: (hash) => automationImageError(hash, this.manifestSource()) }, this.systemUserId,
+      undefined, landing);
     if (!result.ok) {
       this.reportAutomation(doc, event.method, "rejected", result.error, result.trace);
       return { ok: false, error: result.error };

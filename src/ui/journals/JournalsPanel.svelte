@@ -10,7 +10,7 @@
   import type { ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import type { JournalDocument, JournalPageDocument } from "../../core/documents";
-  import { renderMarkdown, splitSecretBlocks } from "../../core/markdown";
+  import JournalPage from "./JournalPage.svelte";
 
   let {
     client,
@@ -82,10 +82,6 @@
     editing = false;
   }
 
-  function blocks(text: string): Array<{ secret: boolean; html: string }> {
-    return splitSecretBlocks(text).map((b) => ({ secret: b.secret, html: renderMarkdown(b.text) }));
-  }
-
   onMount(() => {
     const offSnapshot = bus.on("snapshot", refresh);
     const offOps = bus.on("ops", refresh);
@@ -134,16 +130,9 @@
       <textarea id="journal-edit" rows="10" bind:value={draft}></textarea>
       <button id="journal-save" type="button" onclick={savePage}>Save</button>
     {:else}
-      <div class="page" data-page={page._id}>
-        {#each blocks(page.text) as b, i (i)}
-          {#if b.secret}
-            <!-- eslint-disable-next-line svelte/no-at-html-tags -- markdown is escaped by renderMarkdown before transform -->
-            <div class="secret" data-secret>🔒 {@html b.html}</div>
-          {:else if b.html}
-            <!-- eslint-disable-next-line svelte/no-at-html-tags -- markdown is escaped by renderMarkdown before transform -->
-            {@html b.html}
-          {/if}
-        {/each}
+      <div class="pagewrap">
+        <JournalPage client={client} journalId={journal._id} pageId={page._id} text={page.text}
+          revealSecrets />
       </div>
       {#if popout}
         <button
@@ -188,23 +177,13 @@
   button.sel {
     background: #2c4a6e;
   }
-  .page {
+  .pagewrap {
     background: #10141a;
     border: 1px solid #2a323d;
     border-radius: 4px;
     padding: 6px;
-    font-size: 13px;
     max-height: 260px;
     overflow-y: auto;
-  }
-  .page :global(p) {
-    margin: 4px 0;
-  }
-  .secret {
-    background: #3a2f16;
-    border: 1px dashed #8a7433;
-    border-radius: 3px;
-    padding: 2px 4px;
   }
   textarea {
     width: 100%;

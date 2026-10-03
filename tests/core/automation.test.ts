@@ -2650,3 +2650,56 @@ describe("TR-12 redirects", () => {
     expect(Object.keys(childState.byToken)).toEqual(["by-the-far-tile"]);
   });
 });
+
+describe("TR-12 journal invocation", () => {
+  /** A graph with two landings: a plain start and a `vault` entry point. */
+  const vaultGraph = (): AutomationDocument => ({
+    _id: "vault-graph", type: "automation", name: "Vault", ownership: { default: 0 },
+    flags: {}, system: {}, definition: { version: 1, sceneId: "s1", tileId: "zone",
+      methods: ["manual"], gates: {}, steps: [
+        { id: "start", kind: "chat", audience: "gm", content: "front door" },
+        { id: "stop", kind: "landing", name: "vault" },
+        { id: "after", kind: "chat", audience: "gm", content: "vault {{method}}/{{originSource}}" },
+      ] },
+  });
+  const contentOf = (op: { data: unknown }): string => (op.data as { content: string }).content;
+
+  test("a root invocation can start at a named landing and keeps the journal origin", () => {
+    const w = emptyWorld();
+    w.scenes.push(scene);
+    const doc = vaultGraph();
+    w.automations.push(doc);
+    const planned = planAutomation(w, doc, { scene, tile, token: runner, method: "manual",
+      caller: actor, originSource: "journal", at: 1000, rng: () => 0.25 }, "gm", undefined, "vault");
+    if (!planned.ok || !("plan" in planned)) throw new Error(`a landed invocation must plan: ${JSON.stringify(planned)}`);
+    const lines = planned.plan.ops.filter((op) => op.kind === "create" && op.coll === "messages")
+      .map((op) => contentOf(op as Extract<typeof planned.plan.ops[number], { kind: "create" }>));
+    // The steps before the landing did not run; the ones after it did, with the real origin.
+    expect(lines).toEqual(["vault manual/journal"]);
+  });
+
+  test("an unknown root landing fails the plan without touching the world", () => {
+    const w = emptyWorld();
+    w.scenes.push(scene);
+    const doc = vaultGraph();
+    w.automations.push(doc);
+    const planned = planAutomation(w, doc, { scene, tile, token: runner, method: "manual",
+      caller: actor, at: 1000, rng: () => 0.25 }, "gm", undefined, "nowhere");
+    expect(planned).toMatchObject({ ok: false, error: expect.stringMatching(/landing nowhere not found/) });
+    expect(w.scenes[0]?.tiles).toHaveLength(scene.tiles.length);
+  });
+
+  test("a landing cannot be combined with a continuation", () => {
+    const w = emptyWorld();
+    w.scenes.push(scene);
+    const doc = vaultGraph();
+    w.automations.push(doc);
+    const planned = planAutomation(w, doc, { scene, tile, token: runner, method: "manual",
+      caller: actor, at: 1000, rng: () => 0.25 }, "gm",
+      { graphId: doc._id, captureStepId: "s", stepIndex: 0, current: [], values: {}, scriptResults: {},
+        budgets: { steps: 1, invocations: 1, attributeReads: 0, actorFilterReads: 0, tileVariableReads: 0,
+          imageSelectionRolls: 0, healthRolls: 0, rotationRolls: 0, moveRolls: 0, gameTimeRolls: 0,
+          tableRolls: 0 }, postActionCount: 1, graphSteps: 1, tableResult: { present: false } }, "vault");
+    expect(planned).toMatchObject({ ok: false, error: "a landing cannot resume a continuation" });
+  });
+});

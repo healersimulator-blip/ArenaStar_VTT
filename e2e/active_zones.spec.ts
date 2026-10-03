@@ -1058,6 +1058,90 @@ test("GM binds a region to a named tile graph through the redirect step, keeping
   await expect(zones.locator("li").filter({ hasText: "Landing graph" })).toContainText("1 run(s)");
 });
 
+test("a player fires a handout's tile link from the journals window without receiving the anchor", async ({ browser }: { browser: Browser }) => {
+  test.setTimeout(180_000);
+  const hostCtx = await browser.newContext();
+  const playerCtx = await browser.newContext();
+  try {
+    const host = await hostCtx.newPage();
+    const player = await playerCtx.newPage();
+    await host.goto(entry + "?e2e=1");
+    await waitForSurface(host, "app");
+    // A CONCEALED tile with one manual graph over it: the player can never see the tile,
+    // and the graph is not published for canvas triggers — the handout is the only route.
+    await host.locator("#gm-macros").click();
+    await host.locator("[data-macro-zones-tab]").click();
+    const zones = host.locator("[data-active-zones]");
+    await zones.locator("[data-zone-tile-create] summary").click();
+    const tileEditor = zones.locator("[data-zone-tile-create]");
+    await tileEditor.getByLabel("Tile name").fill("Hidden gate");
+    await tileEditor.getByLabel("Concealed trap tile").check();
+    await tileEditor.getByLabel("X", { exact: true }).fill("350");
+    await tileEditor.getByLabel("Y", { exact: true }).fill("400");
+    await tileEditor.getByLabel("Width").fill("200");
+    await tileEditor.getByLabel("Height").fill("160");
+    await tileEditor.locator("[data-zone-create-tile]").click();
+    const gateOption = zones.locator("[data-zone-tile] option").filter({ hasText: "Hidden gate" });
+    await expect(gateOption).toHaveCount(1);
+    const gateId = await gateOption.getAttribute("value");
+    if (!gateId) throw new Error("the concealed tile did not receive a host ID");
+    await zones.locator("[data-zone-tile]").selectOption(gateId);
+    await zones.locator("[data-zone-name]").fill("Gate relay");
+    await zones.locator(".methods label").filter({ hasText: /^click$/ }).locator("input").uncheck();
+    await zones.locator(".methods label").filter({ hasText: "manual" }).locator("input").check();
+    await zones.locator('[data-zone-step="notice"]').getByLabel("Text")
+      .fill("Gate opened by {{user}} from {{originSource}}");
+    await zones.locator("[data-zone-save]").click();
+    await expect(zones.locator("li").filter({ hasText: "Gate relay" })).toHaveCount(1);
+    await host.locator('[data-window="macros"] [data-window-close]').click();
+
+    // The handout carries the MATT-style link naming that tile id.
+    await host.locator('[data-tab="journals"]').click();
+    await host.locator("#journal-create").click();
+    await host.locator("#journal-edit-btn").click();
+    await host.locator("#journal-edit")
+      .fill("# The gate\n\nSay the word, then @Tile[" + gateId + "]{open the gate}.");
+    await host.locator("#journal-save").click();
+    await expect(host.locator(".journals .page")).toContainText("open the gate");
+
+    await host.locator("#share").click();
+    const fragment = manualFragment(await host.locator("#invite-link").inputValue());
+    await player.goto(`${entry}?e2e=1&join=1#${fragment}`);
+    await expect.poll(() => player.locator("#offer-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await host.locator("#peer-code").fill(await player.locator("#offer-out").inputValue());
+    await host.locator("#code-apply").click();
+    await expect.poll(() => host.locator("#share-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await player.locator("#answer-input").fill(await host.locator("#share-out").inputValue());
+    await player.locator("#answer-apply").click();
+    await expect.poll(() => playerCall<boolean>(player, "connected"), { timeout: 30_000 }).toBe(true);
+    await waitForSurface(player, "playerCanvas");
+
+    // The player's handouts reader shows the label as a button; the anchor id is nowhere
+    // in their shell (the host blanked every link target before delivery).
+    await player.locator("[data-player-handouts]").click();
+    const handouts = player.locator('[data-window="handouts"]');
+    await handouts.locator("[data-handout-journal]").first().click();
+    const link = handouts.locator('[data-journal-tile-link="0"]');
+    await expect(link).toHaveText("open the gate");
+    const playerShell = await player.content();
+    expect(playerShell).not.toContain(gateId);
+
+    const before = await hostCall<number>(host, "seq");
+    const playerId = await playerCall<string>(player, "userId");
+    await link.click();
+    // the GM sees the line in the chat UI; the player only sees the neutral mirrored copy
+    const line = "Gate opened by " + playerId + " from journal";
+    await host.locator('[data-tab="chat"]').click();
+    await expect(host.locator("#chat-log")).toContainText(line);
+    await expect.poll(() => hostCall<number>(host, "seq"), { timeout: 20_000 }).toBe(before + 1);
+    await expect(player.locator("#chat-log")).not.toContainText("Gate opened");
+    expect(await player.content()).not.toContain(gateId);
+  } finally {
+    await playerCtx.close();
+    await hostCtx.close();
+  }
+});
+
 test("wizard deletes one persistent variable, keeps its sibling, undoes and reloads the deletion", async ({ page }) => {
   test.setTimeout(90_000);
   await page.goto(entry + "?e2e=1");

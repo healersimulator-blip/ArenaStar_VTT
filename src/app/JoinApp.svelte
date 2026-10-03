@@ -249,6 +249,15 @@
       x: 55, y: 50, width: 550, height: 580 });
   }
 
+  /** TR-12: the player's read-only handouts reader — journals shared with them, with
+   *  MATT-style `@Tile[…]{}` links as buttons (the host resolves each link's anchor). */
+  function openHandouts() {
+    const rect = canvasHost?.getBoundingClientRect();
+    if (rect) wm.setBounds({ width: rect.width, height: rect.height });
+    wm.open({ id: "handouts", title: "Handouts", kind: "journals",
+      x: 60, y: 60, width: 520, height: 560 });
+  }
+
   /** Roll20's Turn Tracker for a player: the shared list, read-only where they lack rights. */
   function openTurnOrder() {
     const rect = canvasHost?.getBoundingClientRect();
@@ -1059,6 +1068,7 @@
       </div>
       <div class="player-actions" aria-label="Player actions">
         <button data-icon-button data-player-macros type="button" aria-label="Published macros" title="Published macros" onclick={openMacros}><Icon name="macro" /></button>
+        <button data-icon-button data-player-handouts type="button" aria-label="Handouts" title="Handouts" onclick={openHandouts}><Icon name="journals" /></button>
         <button data-icon-button data-player-setup type="button" bind:this={guideTrigger} aria-expanded={guideOpen}
           aria-label="Session & guide" title="Session & guide" onclick={openGuide}><Icon name="sliders" /></button>
       </div>

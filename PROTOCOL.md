@@ -348,6 +348,30 @@ interface MacroInvokeMsg {
   requestId: string;
   macroId: DocId;
 }
+
+### journal.trigger (0x50 · client → host · ops)
+
+TR-12: a journal page's MATT-style tile link (`@Tile[<anchorId> landing:<name>]{Label}`). The client
+sends the journal id, the page id and the link's **ordinal in the text it received** — never a tile,
+region, scene or graph id. The host re-reads the page, re-derives the links the caller can click (a
+player's list excludes links inside `<secret>` blocks, and player replicas have every target payload
+blanked before delivery, so an ordinal means the same link on both sides) and resolves the anchor
+itself: every same-scene graph bound to that anchor that validates and subscribes to `manual` fires
+with method `manual`, origin source `journal`, at the named landing when the link asks for one, inside
+one atomic envelope. A readable page is the publication surface — the anchor need not be visible to
+the player or carry the `playerRunnable` gate — but a player's target scene must be the scene that
+player currently has loaded, and the paused gate still applies on the host. Silent on success (the
+graph's own chat/FX is the feedback) and indistinguishable from a plain tile when no graph matches.
+One fire per `requestId`.
+
+```ts
+interface JournalTriggerMsg {
+  kind: "journal.trigger";
+  requestId: string;
+  journalId: DocId;
+  pageId: DocId;
+  index: number;
+}
 ```
 
 ### macro.result (0x3b · host → caller and GMs · ops)

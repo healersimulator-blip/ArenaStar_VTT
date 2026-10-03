@@ -38,6 +38,7 @@ import type {
   DrawingDocument,
   ItemDocument,
   Json,
+  JournalDocument,
   MacroDocument,
   MessageDocument,
   NoteDocument,
@@ -8758,4 +8759,219 @@ test("a redirect is gated at authoring time and never widens a player's reach", 
   expect(player.store.getAll("messages")).toEqual([]);
   expect(player.store.getAll("automations")).toEqual([]);
   expect(playerRejected).toEqual([]);
+});
+
+// ─── TR-12 (D-383): journal handout links fire the graphs on their named anchor ────
+
+/** A readable handout: ownership LIMITED, one page. */
+const journalPage = (text: string, over: Partial<JournalDocument> = {}): JournalDocument => ({
+  _id: "handout", type: "journal", name: "Handout", ownership: { default: 1 }, flags: {}, system: {},
+  pages: [{ _id: "jp-1", type: "page", name: "Front", ownership: { default: 1 }, flags: {}, system: {},
+    text, src: null }], ...over,
+});
+
+test("a journal link fires the graphs on its named anchor as a manual trigger with journal origin", async () => {
+  const h = await setup();
+  const rejected: ClientEvents["rejected"][] = [];
+  h.gmBus.on("rejected", (event) => rejected.push(event));
+  h.gm.submit([
+    { kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: { ...zoneTile(), _id: "gate-plate" } },
+    { kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: { ...farPlate(), _id: "vault-plate" } },
+    { kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: { ...farPlate(), _id: "quiet-plate" } },
+  ]);
+  await flushMicrotasks();
+  h.gm.submit([
+    { kind: "create", coll: "automations", data: auto("gate-graph", { tileId: "gate-plate",
+      methods: ["manual"], gates: {}, steps: [{ id: "notice", kind: "chat", audience: "gm",
+        content: "gate {{method}} from {{originSource}} by {{user}}" }] }) },
+    { kind: "create", coll: "automations", data: auto("vault-graph", { tileId: "vault-plate",
+      methods: ["manual"], gates: {}, steps: [
+        { id: "first", kind: "chat", audience: "gm", content: "front door" },
+        { id: "land", kind: "landing", name: "vault" },
+        { id: "after", kind: "chat", audience: "gm", content: "vault door from {{originSource}}" }] }) },
+    { kind: "create", coll: "automations", data: auto("paused-graph", { tileId: "quiet-plate",
+      methods: ["manual"], gates: { paused: true }, steps: [
+        { id: "notice", kind: "chat", audience: "gm", content: "should never run" }] }) },
+  ]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "journals", data: journalPage([
+    "Read this aloud, then @Tile[gate-plate]{open the gate}.",
+    "",
+    "Vault: @Tile[vault-plate landing:vault]{the vault door}.",
+    "",
+    "Quiet: @Tile[quiet-plate active:true]{the quiet plate}.",
+    "",
+    "Nothing: @Tile[no-such-anchor]{nothing here}.",
+    "",
+    "Broken: @Tile[Scene.s1.Tile.]{broken link}.",
+  ].join("\n")) }]);
+  await flushMicrotasks();
+  const messages = () => h.hostStore.getAll("messages").map((message) => message.content);
+
+  h.gm.requestJournalTrigger("handout", "jp-1", 0);
+  await flushMicrotasks();
+  expect(messages()).toEqual(["gate manual from journal by " + GM_ID]);
+  expect(h.hostStore.get("automations", "gate-graph")?.state?.recent?.map((entry) => entry.method))
+    .toEqual(["manual"]);
+  expect(h.hostStore.get("automations", "gate-graph")?.state?.byToken?.[`user:${GM_ID}`]?.count).toBe(1);
+
+  // `landing:` starts the child at that landing: the step before it never runs.
+  h.gm.requestJournalTrigger("handout", "jp-1", 1);
+  await flushMicrotasks();
+  expect(messages().slice(1)).toEqual(["vault door from journal"]);
+  expect(h.hostStore.get("automations", "vault-graph")?.state?.count).toBe(1);
+
+  // A paused graph stays paused whatever the link says: silent, like any skipped fire
+  // (MATT's `active:true` is parsed for compatibility but cannot widen the host's gate).
+  h.gm.requestJournalTrigger("handout", "jp-1", 2);
+  await flushMicrotasks();
+  expect(messages()).toHaveLength(2);
+  expect(h.hostStore.get("automations", "paused-graph")?.state).toBeUndefined();
+  expect(rejected).toEqual([]);
+
+  // A link to an anchor that does not exist, and a malformed payload, are refused — the
+  // author learns their handout is broken, and the detail names nothing private.
+  h.gm.requestJournalTrigger("handout", "jp-1", 3);
+  h.gm.requestJournalTrigger("handout", "jp-1", 4);
+  await flushMicrotasks();
+  expect(messages()).toHaveLength(2);
+  expect(rejected.map((event) => event.detail)).toEqual(["journal link unavailable", "journal link unavailable"]);
+
+  // An index the page does not have is refused, never answered with what does exist.
+  h.gm.requestJournalTrigger("handout", "jp-1", 9);
+  await flushMicrotasks();
+  expect(rejected.at(-1)).toMatchObject({ reason: "forbidden", detail: "journal link unavailable" });
+  expect(messages()).toHaveLength(2);
+
+  // The fire is an ordinary undoable envelope like any other invocation.
+  expect(h.host.undo().ok).toBe(true);
+  await flushMicrotasks();
+  expect(h.hostStore.get("automations", "vault-graph")?.state).toBeUndefined();
+  expect(h.hostStore.get("automations", "gate-graph")?.state?.count).toBe(1);
+});
+
+test("a player fires a handout link without ever receiving the anchor, and only the links they can see", async () => {
+  const h = await setup();
+  h.gm.submit([
+    { kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" },
+      data: { ...zoneTile(), _id: "secret-plate", hidden: true, ownership: { default: 0 } } },
+    { kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" },
+      data: { ...farPlate(), _id: "public-plate", ownership: { default: 0 } } },
+  ]);
+  await flushMicrotasks();
+  h.gm.submit([
+    { kind: "create", coll: "automations", data: auto("secret-graph", { tileId: "secret-plate",
+      methods: ["manual"], gates: {}, steps: [{ id: "notice", kind: "chat", audience: "gm",
+        content: "secret door by {{user}} from {{originSource}}" }] }) },
+    { kind: "create", coll: "automations", data: auto("public-graph", { tileId: "public-plate",
+      methods: ["manual"], gates: {}, steps: [{ id: "notice", kind: "chat", audience: "gm",
+        content: "public plate by {{user}}" }] }) },
+  ]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "journals", data: journalPage(
+    "Handout: @Tile[public-plate]{press the plate} and <secret>@Tile[secret-plate]{open the vault}</secret>.") }]);
+  await flushMicrotasks();
+  const messages = () => h.hostStore.getAll("messages").map((message) => message.content);
+
+  const { client: player, bus: playerBus, pair } = await h.addPlayer(PLAYER_ID, "Rex");
+  const rejected: ClientEvents["rejected"][] = [];
+  playerBus.on("rejected", (event) => rejected.push(event));
+  // The replica holds the page without any anchor id, without the secret, and without the tile.
+  const delivered = (player.store.get("journals", "handout") as JournalDocument | undefined)?.pages[0]?.text;
+  expect(delivered).toContain("@Tile[masked]{press the plate}");
+  expect(delivered).not.toContain("public-plate");
+  expect(delivered).not.toContain("secret-plate");
+  expect(delivered).not.toContain("vault");
+  expect((player.store.get("scenes", "s1") as SceneDocument | undefined)?.tiles.map((item) => item._id))
+    .not.toContain("secret-plate");
+
+  // The player's link #0 is the only link they can see, and it fires the graph the GM routed.
+  // Neither tile is visible to them and neither graph is `playerRunnable`: the page is the
+  // publication surface, and the host still resolves everything itself.
+  player.requestJournalTrigger("handout", "jp-1", 0);
+  await flushMicrotasks();
+  expect(messages()).toEqual(["public plate by " + PLAYER_ID]);
+
+  // The link inside the secret block is not part of that viewer's list: index 1 refuses and
+  // the secret graph never fires.
+  player.requestJournalTrigger("handout", "jp-1", 1);
+  await flushMicrotasks();
+  expect(messages()).toHaveLength(1);
+  expect(rejected.map((event) => event.reason)).toEqual(["forbidden"]);
+  expect(h.hostStore.get("automations", "secret-graph")?.state).toBeUndefined();
+
+  // Nothing about the private side leaks back: no automations, no messages in the replica.
+  expect(player.store.getAll("automations")).toEqual([]);
+  expect(player.store.getAll("messages")).toEqual([]);
+
+  // A forged field is a schema refusal, and a replayed request id is a retransmit.
+  pair.b.send("ops", frameMessage({ kind: "journal.trigger", requestId: "spoof-1", journalId: "handout",
+    pageId: "jp-1", index: 0, tileId: "public-plate" } as never));
+  await flushMicrotasks();
+  expect(rejected.at(-1)?.reason).toBe("invalid_schema");
+  expect(messages()).toHaveLength(1);
+  pair.b.send("ops", frameMessage({ kind: "journal.trigger", requestId: "spoof-2", journalId: "handout",
+    pageId: "jp-1", index: 0 }));
+  await flushMicrotasks();
+  expect(messages()).toHaveLength(2);
+  pair.b.send("ops", frameMessage({ kind: "journal.trigger", requestId: "spoof-2", journalId: "handout",
+    pageId: "jp-1", index: 0 }));
+  await flushMicrotasks();
+  expect(messages()).toHaveLength(2);
+});
+
+test("a handout link cannot reach a scene the viewer is not in, and an unshared page is not a surface", async () => {
+  const h = await setup();
+  h.gm.submit([{ kind: "create", coll: "scenes", data: { ...sceneDoc("s2"), active: false } as SceneDocument },
+    { kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: { ...zoneTile(), _id: "own-plate" } }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s2" },
+    data: { ...farPlate(), _id: "far-plate-two" } }]);
+  await flushMicrotasks();
+  h.gm.submit([
+    { kind: "create", coll: "automations", data: auto("far-graph", { sceneId: "s2", tileId: "far-plate-two",
+      methods: ["manual"], gates: {}, steps: [{ id: "notice", kind: "chat", audience: "gm",
+        content: "far scene by {{user}}" }] }) },
+    { kind: "create", coll: "automations", data: auto("own-graph", { tileId: "own-plate",
+      methods: ["manual"], gates: {}, steps: [{ id: "notice", kind: "chat", audience: "gm",
+        content: "own scene by {{user}}" }] }) },
+  ]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "journals", data: journalPage([
+    "Local: @Tile[own-plate]{open locally}.",
+    "",
+    "Far: @Tile[Scene.s2.Tile.far-plate-two]{open in the other scene}.",
+    "",
+    "Private: @Tile[own-plate]{gm only}.",
+  ].join("\n")) }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "journals", data: journalPage("GM notes: @Tile[own-plate]{secret handshake}.",
+    { _id: "gm-notes", name: "GM notes", ownership: { default: 0 } }) }]);
+  await flushMicrotasks();
+  const messages = () => h.hostStore.getAll("messages").map((message) => message.content);
+
+  // The GM may address the other scene from a handout (authoring reach)…
+  h.gm.requestJournalTrigger("handout", "jp-1", 1);
+  await flushMicrotasks();
+  expect(messages()).toEqual(["far scene by " + GM_ID]);
+
+  const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const rejected: ClientEvents["rejected"][] = [];
+  playerBus.on("rejected", (event) => rejected.push(event));
+  const before = messages().length;
+  // …a player may not, and a journal they cannot read is never a surface, whatever the index.
+  player.requestJournalTrigger("handout", "jp-1", 1);
+  await flushMicrotasks();
+  expect(rejected.at(-1)).toMatchObject({ reason: "forbidden", detail: "journal link unavailable" });
+  player.requestJournalTrigger("gm-notes", "jp-1", 0);
+  await flushMicrotasks();
+  expect(rejected.at(-1)).toMatchObject({ reason: "forbidden", detail: "journal link unavailable" });
+  expect(messages()).toHaveLength(before);
+  expect(h.hostStore.get("automations", "own-graph")?.state).toBeUndefined();
+
+  // The scene they are in still works, under their own identity.
+  player.requestJournalTrigger("handout", "jp-1", 0);
+  await flushMicrotasks();
+  expect(messages().at(-1)).toBe("own scene by " + PLAYER_ID);
+  expect(player.store.getAll("automations")).toEqual([]);
 });

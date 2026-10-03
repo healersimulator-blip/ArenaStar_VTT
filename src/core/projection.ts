@@ -27,6 +27,7 @@ import {
   type CellFeature,
   type DocRef,
   type JournalDocument,
+  type JournalPageDocument,
   type MacroDocument,
   type MessageDocument,
   type NoteDocument,
@@ -43,6 +44,7 @@ import type { Json } from "./documents";
 import { openCellKeys, projectCellForViewer } from "./hexcrawl/visibility";
 import { validateScriptMacro } from "./scriptMacros";
 import { summonMarker, validateSummon } from "./summons";
+import { maskJournalLinkTargets } from "./journalLinks";
 
 export interface ProjectedWorld {
   seq: number;
@@ -67,7 +69,6 @@ export interface ProjectionFns {
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 const SECRET_BLOCK = /<secret>[\s\S]*?<\/secret>/gi;
-const HAS_SECRET = /<secret[\s>]/i;
 
 export function stripSecretText(text: string): string {
   return text.replace(SECRET_BLOCK, "");
@@ -337,14 +338,18 @@ function projectMacro(macro: MacroDocument): MacroDocument {
   return safe;
 }
 
-function projectJournal(journal: JournalDocument): JournalDocument {
+/**
+ * Non-GM journal delivery: strip `<secret>` blocks **and** blank every `@Tile[…]` link
+ * target (D-383), so a player replica never carries the id of an anchor the player was
+ * not handed. Link order and count survive masking, which is what keeps a client's click
+ * ordinal meaningful on the host.
+ */
+export function projectJournal(journal: JournalDocument): JournalDocument {
   let changed = false;
   const pages = journal.pages.map((page) => {
-    if (typeof page.text === "string" && HAS_SECRET.test(page.text)) {
-      changed = true;
-      return { ...page, text: stripSecretText(page.text) };
-    }
-    return page;
+    const projected = projectPageText(page);
+    if (projected !== page) changed = true;
+    return projected;
   });
   return changed ? { ...journal, pages } : journal;
 }
@@ -402,24 +407,39 @@ export function projectWorld(
 
 // ─── projectEnvelope ──────────────────────────────────────────────────────────
 
-function stripSecretsFromDiff(diff: Record<string, Json | null>): Record<string, Json | null> {
-  const out: Record<string, Json | null> = {};
+/** One page as a non-GM receives it: secrets out, link targets blanked (D-383). */
+function projectPageText(page: JournalPageDocument): JournalPageDocument {
+  if (typeof page.text !== "string") return page;
+  const text = maskJournalLinkTargets(stripSecretText(page.text));
+  return text === page.text ? page : { ...page, text };
+}
+
+/**
+ * D-383: a journal diff is projected before any resolver runs — a wholesale `pages` array
+ * (the panel's save shape) and a `text` leaf both carry page text, and an envelope-only
+ * path must not forward either raw. Returns the same object when nothing changed.
+ */
+function projectJournalDiff(diff: Record<string, Json | null>): Record<string, Json | null> {
   let changed = false;
+  const out: Record<string, Json | null> = {};
   for (const [key, value] of Object.entries(diff)) {
-    const path = key.startsWith("-=") ? key.slice(2) : key;
-    if (
-      path.split(".").pop() === "text" &&
-      typeof value === "string" &&
-      HAS_SECRET.test(value)
-    ) {
-      out[key] = stripSecretText(value);
-      changed = true;
+    const leaf = (key.startsWith("-=") ? key.slice(2) : key).split(".").pop();
+    if (leaf === "text" && typeof value === "string") {
+      const text = maskJournalLinkTargets(stripSecretText(value));
+      if (text !== value) changed = true;
+      out[key] = text;
+    } else if (leaf === "pages" && Array.isArray(value)) {
+      const pages = value.map((item) =>
+        item !== null && typeof item === "object" ? projectPageText(item as unknown as JournalPageDocument) : item);
+      if (pages.some((item, index) => item !== value[index])) changed = true;
+      out[key] = pages as unknown as Json;
     } else {
       out[key] = value;
     }
   }
   return changed ? out : diff;
 }
+
 
 function createVisible(
   user: PermissionUser,
@@ -506,6 +526,10 @@ function updateVisible(
     const stripped = stripMacroBindingDiff(op.diff);
     if (stripped !== op.diff) op = { ...op, diff: stripped };
   }
+  if (op.ref.coll === "pages" || op.ref.coll === "journals") {
+    const projected = projectJournalDiff(op.diff);
+    if (projected !== op.diff) op = { ...op, diff: projected };
+  }
   const doc = resolver?.resolve(op.ref);
   if (!doc) return projectPrefabDiff(op); // envelope-only mode (D-023): host always passes a resolver
   if (op.ref.coll === "macros" && !docVisibleTo(user, doc)) return null;
@@ -540,10 +564,7 @@ function updateVisible(
       automation: (safe.automation as unknown as Json | undefined) ?? null,
       flags: safe.flags, system: safe.system, ownership: safe.ownership } };
   }
-  if (op.ref.coll === "pages" || op.ref.coll === "journals") {
-    const diff = stripSecretsFromDiff(op.diff);
-    if (diff !== op.diff) return { ...op, diff };
-  }
+
   if (op.ref.coll === "cells") {
     // D-271: a cell that is closed, or has just been closed, leaves this session's replica —
     // the same rewrite D-256 gives a pin that is hidden again.

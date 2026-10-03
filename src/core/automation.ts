@@ -234,10 +234,11 @@ export interface AutomationEvent {
   /** Preserved across Trigger Tile calls; child `method` is manual. */
   originMethod?: AutomationMethod;
   originTileId?: string;
-  /** Whether the origin anchor (`originTileId`) is a tile or a scene region. Preserved
-   * across redirects exactly like `originMethod`, so a redirected graph can tell where
-   * the event really came from. */
-  originSource?: "tile" | "region";
+  /** Where this event really came from: an anchor in the world (tile/region), a journal
+   * handout link, or a macro run by reference. Preserved across redirects exactly like
+   * `originMethod`, so a redirected graph can tell a region's `enter` from a tile walk-on —
+   * or from a handout's `manual`. */
+  originSource?: "tile" | "region" | "journal" | "macro";
   scene: SceneDocument;
   tile: TileDocument;
   /** Original triggering token is immutable even when "current" is replaced by a selector. */
@@ -1560,12 +1561,16 @@ function flushBatch(ctx: PlanningContext, sceneId: string):
 export function planAutomation(
   world: Readonly<WorldCollections>, doc: AutomationDocument, event: AutomationEvent, hostUserId: string,
   resume?: AutomationContinuation,
+  /** Root invocation starts at this named landing (a journal link's `landing:` option). */
+  landing?: string,
 ): AutomationOutcome {
   const trace: string[] = [];
   const fail = (error: string): AutomationOutcome => ({ ok: false, error, trace });
   const validated = validateAutomation(doc.definition);
   if (!validated.ok) return fail(validated.error);
   if (resume) {
+    // A continuation resumes its own position; starting it at a landing is a caller bug.
+    if (landing !== undefined) return fail("a landing cannot resume a continuation");
     const source = validated.definition.steps.find((step) => step.id === resume.captureStepId);
     const sourceIndex = validated.definition.steps.findIndex((step) => step.id === resume.captureStepId);
     const budgetValues = isObject(resume.budgets) ? Object.values(resume.budgets) : [];
@@ -1625,7 +1630,7 @@ export function planAutomation(
     moveRolls: resume?.budgets.moveRolls ?? 0, gameTimeRolls: resume?.budgets.gameTimeRolls ?? 0,
     tableRolls: resume?.budgets.tableRolls ?? 0, stopOthers: false, suppressedMovement: new Set(), stoppedMovement: new Set(),
   };
-  const result = planGraph(ctx, doc, stagedEvent, hostUserId, undefined, resume);
+  const result = planGraph(ctx, doc, stagedEvent, hostUserId, landing, resume);
   if (!result.ok) return fail(result.error);
   if (result.skipped) return { ok: true, skipped: result.skipped, trace };
   const flushed = flushBatch(ctx, stagedScene._id); // implicit final batch execution

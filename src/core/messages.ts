@@ -70,6 +70,8 @@ export const MsgKind = {
   "fx.media": 0x4e,
   // TR-12/MC-01 (D-381) — run a GM-authored automation macro by reference (id only)
   "macros.invoke": 0x4f,
+  // TR-12 (D-383) — a journal page's \`@Tile[…]{}` link fires the graphs on its anchor
+  "journal.trigger": 0x50,
   // D-250 — explored fog restore: the client asks, the host answers from its fog store
   "fog.get": 0x0e,
   // host → client
@@ -315,6 +317,20 @@ export interface MacroInvokeMsg {
   kind: "macros.invoke";
   requestId: string;
   macroId: DocId;
+}
+
+/**
+ * A journal handout link (MATT's \`@Tile[…]{}`). The client names the page and the
+ * link's ordinal **in the text it received** — never a tile, region or graph id: the host
+ * re-reads the page, re-derives the visible links for that caller and resolves the anchor
+ * itself. A player's ordinal list excludes links hidden in `<secret>` blocks.
+ */
+export interface JournalTriggerMsg {
+  kind: "journal.trigger";
+  requestId: string;
+  journalId: DocId;
+  pageId: DocId;
+  index: number;
 }
 
 /** Private diagnostic for GMs; players receive only a generic status, never logs/results. */
@@ -743,6 +759,7 @@ export type WireMessage =
   | SummonResultMsg
   | MacroRequestMsg
   | MacroInvokeMsg
+  | JournalTriggerMsg
   | MacroResultMsg
   | FxRequestMsg
   | FxStartMsg

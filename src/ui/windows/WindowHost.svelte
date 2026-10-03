@@ -12,6 +12,7 @@
   import MacrosPanel from "../macros/MacrosPanel.svelte";
   import SettingsPanel from "../settings/SettingsPanel.svelte";
   import JournalPopout from "../journals/JournalPopout.svelte";
+  import HandoutsPanel from "../journals/HandoutsPanel.svelte";
   import PF1eSheetWindow from "../sheets/PF1eSheetWindow.svelte";
   import PF1eItemWindow from "../sheets/PF1eItemWindow.svelte";
   import { openPF1eItemWindow } from "../sheets/pf1eItemWindow";
@@ -265,6 +266,8 @@
           <CombatPanel {client} {bus} />
         {:else if win.kind === "help"}
           <HelpPanel {bindings} {isGM} />
+        {:else if win.kind === "journals"}
+          <HandoutsPanel {client} {bus} />
         {:else if win.kind === "permissions"}
           <PermissionsPanel {client} {bus} />
         {:else if win.kind === "macros"}
