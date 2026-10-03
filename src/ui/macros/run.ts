@@ -119,6 +119,16 @@ export function runMacroSlot(
   return { ok: false, error: `Cannot run ${macro.kind} macros from a hotbar slot` };
 }
 
+/**
+ * MC-02: the caller's own status line for a macro result. A graph may return a value; it is
+ * shown to the invoker (a `gm`-audience value only reaches a GM invoker, and the host simply
+ * omits it otherwise) and never becomes a chat message.
+ */
+export function macroResultText(msg: { ok: boolean; detail: string; result?: unknown }): string {
+  const base = msg.ok ? msg.detail : `Refused: ${msg.detail}`;
+  return msg.ok && msg.result !== undefined ? `${base} → ${String(msg.result)}` : base;
+}
+
 /** Macros bound to a hotbar slot (flags.core.slot, §10). */
 export function macroSlots(macros: readonly MacroDocument[]): Array<MacroDocument | null> {
   const slots: Array<MacroDocument | null> = [null, null, null, null, null];

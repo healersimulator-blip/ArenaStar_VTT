@@ -2703,3 +2703,72 @@ describe("TR-12 journal invocation", () => {
     expect(planned).toMatchObject({ ok: false, error: "a landing cannot resume a continuation" });
   });
 });
+
+// ─── MC-02 (D-389): a graph returns a typed value to its invoker ────────────────────
+
+describe("graph return values (MC-02)", () => {
+  const withSteps = (steps: AutomationDefinition["steps"]): AutomationDefinition =>
+    ({ ...base, gates: {}, steps });
+
+  test("a Return Value action is authored with a bounded scalar and an audience", () => {
+    expect(validateAutomation(withSteps([{ id: "r", kind: "result", value: "{{count}}", audience: "caller" }])).ok).toBe(true);
+    expect(validateAutomation(withSteps([{ id: "r", kind: "result", value: 7, audience: "gm" }])).ok).toBe(true);
+    expect(validateAutomation(withSteps([{ id: "r", kind: "result", value: false, audience: "caller" }])).ok).toBe(true);
+    // A loose field, an unknown audience and an unbounded value are refused at authoring.
+    expect(validateAutomation(withSteps([{ id: "r", kind: "result", value: 1, audience: "caller", extra: 1 } as never])).ok).toBe(false);
+    expect(validateAutomation(withSteps([{ id: "r", kind: "result", value: 1, audience: "scene" } as never])).ok).toBe(false);
+    expect(validateAutomation(withSteps([{ id: "r", kind: "result", value: "x".repeat(257), audience: "caller" }])).ok).toBe(false);
+    expect(validateAutomation(withSteps([{ id: "r", kind: "result", value: Number.POSITIVE_INFINITY, audience: "caller" }])).ok).toBe(false);
+    expect(validateAutomation(withSteps([{ id: "r", kind: "result", value: "line\nbreak", audience: "caller" }])).ok).toBe(false);
+  });
+
+  test("the plan returns the value, interpolated, with the authored audience", () => {
+    const planned = plan(withSteps([
+      { id: "edit", kind: "tags", edit: "add", tags: ["opened"] },
+      { id: "r", kind: "result", value: "moved {{count}}", audience: "caller" },
+    ]));
+    expect(planned.ok).toBe(true);
+    if (!planned.ok || !("plan" in planned)) throw new Error("expected a plan");
+    expect(planned.plan.result).toEqual({ value: "moved 1", audience: "caller" });
+    // A typed literal stays typed.
+    const numeric = plan(withSteps([{ id: "r", kind: "result", value: 42, audience: "gm" }]));
+    if (!numeric.ok || !("plan" in numeric)) throw new Error("expected a plan");
+    expect(numeric.plan.result).toEqual({ value: 42, audience: "gm" });
+  });
+
+  test("no Return Value action means no result, and a skipped graph has none either", () => {
+    const none = plan(withSteps([{ id: "edit", kind: "tags", edit: "add", tags: ["opened"] }]));
+    if (!none.ok || !("plan" in none)) throw new Error("expected a plan");
+    expect(none.plan.result).toBeUndefined();
+    const skipped = plan({ ...base, methods: ["click"], steps: [{ id: "r", kind: "result", value: 1, audience: "caller" }] });
+    expect(skipped).toMatchObject({ ok: true, skipped: "method/anchor mismatch" });
+    expect((skipped as { plan?: unknown }).plan).toBeUndefined();
+  });
+
+  test("the last Return Value action the graph executes wins, on the executed path", () => {
+    // The jump skips the second action; the landing's own action is what the caller receives.
+    const planned = plan(withSteps([
+      { id: "r1", kind: "result", value: "first", audience: "caller" },
+      { id: "jump", kind: "jump", to: "hop" },
+      { id: "skipped", kind: "result", value: "never", audience: "caller" },
+      { id: "hop", kind: "landing", name: "hop" },
+      { id: "second", kind: "result", value: "last", audience: "gm" },
+    ]));
+    if (!planned.ok || !("plan" in planned)) throw new Error("expected a plan");
+    expect(planned.plan.result).toEqual({ value: "last", audience: "gm" });
+    expect(planned.plan.trace).toContain("result caller: first");
+    expect(planned.plan.trace).not.toContain("result caller: never");
+  });
+
+  test("a value that outgrows 256 characters after interpolation rejects the graph", () => {
+    const templated = plan(withSteps([{ id: "r", kind: "result", value: "{{count}}{{count}}{{count}}", audience: "caller" }]));
+    if (!templated.ok || !("plan" in templated)) throw new Error("expected a plan");
+    expect(templated.plan.result).toEqual({ value: "111", audience: "caller" });
+    // Two 200-character variables interpolate past the bound: refused, never truncated.
+    const refused = plan(withSteps([
+      { id: "v", kind: "set", name: "wide", value: "x".repeat(200) },
+      { id: "r", kind: "result", value: "{{wide}}{{wide}}", audience: "caller" },
+    ]));
+    expect(refused).toMatchObject({ ok: false, error: expect.stringMatching(/exceeded its bound/) });
+  });
+});

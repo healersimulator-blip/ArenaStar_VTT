@@ -125,7 +125,7 @@ import type { ResolvedFxSection } from "../core/fx";
 import { combatTriggerEvents } from "../core/combat";
 import { readWorldClock } from "../packages/pf1e/worldClock";
 import { automationImageError, doorTransitionMethod, pinnedSelectorError, planAutomation, SIMULATABLE_METHODS, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState,
-  type AutomationContinuation, type AutomationEvent, type AutomationMethod, type AutomationPointerMethod, type AutomationOutcome,
+  type AutomationContinuation, type AutomationEvent, type AutomationMethod, type AutomationPointerMethod, type AutomationOutcome, type AutomationResult,
   type AutomationScriptResult } from "../core/automation";
 import { attachedDeletionOps, attachedMovementOps, planPrefabPlacement, PREFAB_COLLECTIONS, validatePrefab } from "../core/prefabs";
 import { boundFxDeletionOps, fxInstanceMatches, validateFxInstance, validateFxInstanceFilter } from "../core/fxInstances";
@@ -2875,10 +2875,15 @@ export class HostSync {
       refused(fired.error);
       return;
     }
+    // MC-02: the value the graph returned. It is private to the invoker — never a chat
+    // message and never sent to another session — and a `gm`-audience value is withheld
+    // from a non-GM invoker entirely.
+    const returned = fired.result && (fired.result.audience === "caller" || isGm) ? fired.result : undefined;
     // The graph's own name is GM-private (players never receive the automations
     // collection), so the success line stays generic for a player.
     this.send(session, { ...base, ok: true,
-      detail: isGm ? `Fired ${target.graph.name}` : "Automation fired" });
+      detail: isGm ? `Fired ${target.graph.name}` : "Automation fired",
+      ...(returned ? { result: returned.value } : {}) });
   }
 
   /**
@@ -2972,11 +2977,12 @@ export class HostSync {
   /** Fire a pre-flighted macro target under the caller's identity. */
   private fireMacroTarget(
     caller: SessionUser, target: MacroFireTarget,
-  ): { ok: true } | { ok: false; error: string } {
+  ): { ok: true; result?: AutomationResult } | { ok: false; error: string } {
     const fired = this.fireAutomation(target.graph, { scene: target.scene, tile: target.tile, caller,
       method: MACRO_AUTOMATION_METHOD, originSource: "macro", ...(target.args ? { args: target.args } : {}),
       at: this.now(), rng: this.rng });
-    return fired.ok ? { ok: true } : { ok: false, error: fired.error };
+    if (!fired.ok) return { ok: false, error: fired.error };
+    return { ok: true, ...(fired.result ? { result: fired.result } : {}) };
   }
 
   /**
@@ -4233,7 +4239,8 @@ export class HostSync {
   private fireAutomation(
     doc: AutomationDocument, event: AutomationEvent, dryRun = false, planned?: AutomationOutcome,
     postActionRun?: AutomationPostActionRun, landing?: string,
-  ): { ok: true; stopOthers: boolean; completion?: Promise<void> } | { ok: false; error: string } {
+  ): { ok: true; stopOthers: boolean; completion?: Promise<void>; result?: AutomationResult }
+    | { ok: false; error: string } {
     const result = planned ?? planAutomation(this.store.world, doc,
       { ...event, hurtHeal: planAutomationHealth,
         imageAssetError: (hash) => automationImageError(hash, this.manifestSource()) }, this.systemUserId,
@@ -4484,7 +4491,9 @@ export class HostSync {
     } else if (postActions.length) {
       this.finishActionAudit(audit, "partial");
     }
-    return { ok: true, stopOthers: result.plan.stopOthers, ...(completion ? { completion } : {}) };
+    // MC-02: a graph may hand a value back to whoever invoked it.
+    return { ok: true, stopOthers: result.plan.stopOthers, ...(completion ? { completion } : {}),
+      ...(result.plan.result ? { result: result.plan.result } : {}) };
   }
 
   // ─── Macros / FX Wizard: approved, recipient-projected timeline ─────────────

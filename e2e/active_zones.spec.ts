@@ -2160,3 +2160,107 @@ test("a macro's token input defaults to the caller's selected token on both shel
     await hostCtx.close();
   }
 });
+
+test("a graph returns a value to its invoker, and a gm-only value stays with the GM", async ({ browser }: { browser: Browser }) => {
+  test.setTimeout(180_000);
+  const hostCtx = await browser.newContext();
+  const playerCtx = await browser.newContext();
+  try {
+    const host = await hostCtx.newPage();
+    const player = await playerCtx.newPage();
+    await host.goto(entry + "?e2e=1");
+    await waitForSurface(host, "app");
+
+    // A published manual graph that posts one scene line and returns a value to its invoker.
+    await host.locator("#gm-macros").click();
+    await host.locator("[data-macro-zones-tab]").click();
+    const zones = host.locator("[data-active-zones]");
+    const tile = zones.locator("[data-zone-tile-create]");
+    await tile.locator("summary").click();
+    await tile.getByLabel("Tile name").fill("Return plate");
+    await tile.getByLabel("X", { exact: true }).fill("350");
+    await tile.getByLabel("Y", { exact: true }).fill("400");
+    await tile.getByLabel("Width").fill("200");
+    await tile.getByLabel("Height").fill("160");
+    await tile.locator("[data-zone-create-tile]").click();
+    await expect(zones.locator("[data-zone-tile] option").filter({ hasText: "Return plate" })).toHaveCount(1);
+    await zones.locator("[data-zone-name]").fill("Return bell");
+    for (const method of ["enter", "stop"])
+      await zones.locator(".methods label").filter({ hasText: new RegExp(`^${method}$`) })
+        .locator("input").uncheck();
+    await zones.getByLabel("Player canvas triggers (published)").check();
+    const notice = zones.locator('[data-zone-step="notice"]');
+    await notice.getByLabel("Text").fill("ran {{user}}");
+    await notice.getByLabel("Audience").selectOption("scene");
+    await zones.locator('[data-zone-add="result"]').click();
+    const returned = zones.locator("[data-zone-step]").last();
+    await expect(returned.locator("select").first()).toHaveValue("result");
+    await returned.getByLabel("Value").fill("quarry-9");
+    await zones.locator("[data-zone-save]").click();
+    const graphRow = zones.locator("li").filter({ hasText: "Return bell" });
+    await expect(graphRow).toHaveCount(1);
+    await graphRow.locator("[data-zone-macro]").click();
+    await expect(zones.getByText(/Published automation macro "Return bell"/)).toHaveCount(1);
+
+    // The directory's own run shows the returned value on the caller's status line…
+    const macros = host.locator('[data-window="macros"]');
+    await macros.locator("[data-macro-automations-tab]").click();
+    const macroRow = macros.locator("[data-automation-macro]").filter({ hasText: "Return bell" });
+    await macroRow.locator("[data-automation-macro-run]").click();
+    await expect(macros.locator("[data-automation-status]")).toHaveText("Fired Return bell → quarry-9");
+    await host.locator('[data-window="macros"] [data-window-close]').click();
+    await host.locator('[data-tab="chat"]').click();
+    const hostLog = host.locator("#chat-log");
+    await expect(hostLog).toContainText("ran gm");
+    // …and it is not a chat message: the graph's only published line is its own text.
+    expect(await hostLog.innerText()).not.toContain("quarry-9");
+
+    // A player invokes the same macro: the value is theirs alone, and never becomes a line.
+    await host.locator("#share").click();
+    const fragment = manualFragment(await host.locator("#invite-link").inputValue());
+    await player.goto(`${entry}?e2e=1&join=1#${fragment}`);
+    await expect.poll(() => player.locator("#offer-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await host.locator("#peer-code").fill(await player.locator("#offer-out").inputValue());
+    await host.locator("#code-apply").click();
+    await expect.poll(() => host.locator("#share-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await player.locator("#answer-input").fill(await host.locator("#share-out").inputValue());
+    await player.locator("#answer-apply").click();
+    await expect.poll(() => playerCall<boolean>(player, "connected"), { timeout: 30_000 }).toBe(true);
+    await waitForSurface(player, "playerCanvas");
+    const status = player.locator("[data-chat-command-status]");
+    await player.locator("#chat-input").fill("/run Return bell");
+    await player.locator("#chat-send").click();
+    await expect(status).toHaveText("Automation fired → quarry-9");
+    const playerLog = player.locator("#chat-log");
+    await expect(playerLog).toContainText("ran ");
+    expect(await playerLog.innerText()).not.toContain("quarry-9");
+
+    // A gm-audience value is withheld from the player while the GM still reads it.
+    await host.locator("#gm-macros").click();
+    await host.locator("[data-macro-zones-tab]").click();
+    const editRow = zones.locator("li").filter({ hasText: "Return bell" });
+    await editRow.getByRole("button", { name: "Edit" }).click();
+    const gmOnly = zones.locator("[data-zone-step]").last();
+    await expect(gmOnly.locator("select").first()).toHaveValue("result");
+    await gmOnly.getByLabel("Audience").selectOption("gm");
+    await zones.locator("[data-zone-save]").click();
+    await expect(zones.getByRole("alert")).toHaveCount(0);
+    await host.locator('[data-window="macros"] [data-window-close]').click();
+    await host.locator('[data-tab="chat"]').click();
+    await player.locator("#chat-input").fill("/run Return bell");
+    await player.locator("#chat-send").click();
+    await expect(status).toHaveText("Automation fired");
+    expect(await playerLog.innerText()).not.toContain("quarry-9");
+    // The GM's own invocation still carries it.
+    await host.locator("#gm-macros").click();
+    await macros.locator("[data-macro-automations-tab]").click();
+    await macroRow.locator("[data-automation-macro-run]").click();
+    await expect(macros.locator("[data-automation-status]")).toHaveText("Fired Return bell → quarry-9");
+    await host.locator('[data-window="macros"] [data-window-close]').click();
+    await host.locator('[data-tab="chat"]').click();
+    expect(await hostLog.innerText()).not.toContain("quarry-9");
+  } finally {
+    await playerCtx.close();
+    await hostCtx.close();
+  }
+});

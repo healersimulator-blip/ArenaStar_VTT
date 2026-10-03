@@ -186,6 +186,9 @@ export type AutomationStep =
   /** A tagged door's state, not its wall-kind/restriction axes. Locked doors reject toggle/open. */
   | { id: string; kind: "door"; mode: "open" | "close" | "lock" | "unlock" | "toggle" }
   | { id: string; kind: "chat"; content: string; audience: "scene" | "gm" }
+  /** MC-02: hand a typed value back to whoever invoked this graph. `gm` withholds it
+   * from a non-GM invoker; it is never broadcast and never becomes a chat message. */
+  | { id: string; kind: "result"; value: string | number | boolean; audience: "caller" | "gm" }
   | { id: string; kind: "sequence"; macroId: string; audience: "scene" | "gm" }
   /** Run a separate GM-reviewed, version-pinned script AFTER the graph envelope commits.
    * Its own host RPCs are independently authorized/committed; they are not part of
@@ -304,6 +307,11 @@ export type AutomationPostAction =
   | ({ kind: "script" } & AutomationScriptCall)
   | { kind: "summon"; stepId: string; presetId: string; at: { x: number; y: number };
       summonerTokenId?: string; onError?: "stop" | "continue" };
+/** MC-02: the value a graph returns to its invoker, and who may be shown it. */
+export interface AutomationResult {
+  value: string | number | boolean;
+  audience: "caller" | "gm";
+}
 export interface AutomationPlan {
   ops: Op[];
   cues: AutomationFx[];
@@ -315,6 +323,8 @@ export interface AutomationPlan {
   continuation?: AutomationContinuation;
   trace: string[];
   state: AutomationState;
+  /** Set by the last Return Value action the graph executed (MC-02). */
+  result?: AutomationResult;
   /** Suppress later tiles for this moving token after a successful host commit. */
   stopOthers: boolean;
   /** Private per-commit policy, never a document flag or caller-controlled op field. */
@@ -394,7 +404,8 @@ function validScriptResultPath(path: unknown): path is string {
   return ["ok", "error", "value"].includes(parts[0] ?? "") &&
     (parts[0] === "value" || parts.length === 1);
 }
-function validScriptResultValue(value: unknown): value is string | number | boolean {
+/** A bounded scalar: the rule a reviewed script's result and a graph's return value share. */
+function validResultValue(value: unknown): value is string | number | boolean {
   return typeof value === "boolean" || typeof value === "number" && finite(value, -1e9, 1e9) ||
     typeof value === "string" && value.length <= 256 &&
       !Array.from(value).some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127);
@@ -597,7 +608,7 @@ export function validateAutomation(value: unknown): { ok: true; definition: Auto
             typeof step.scriptStepId !== "string" || !IDENT.test(step.scriptStepId) ||
             !validScriptResultPath(step.path) ||
             !["eq", "ne", "gt", "gte", "lt", "lte"].includes(String(step.compare)) ||
-            (step.value !== null && !validScriptResultValue(step.value)) ||
+            (step.value !== null && !validResultValue(step.value)) ||
             (["gt", "gte", "lt", "lte"].includes(String(step.compare)) && typeof step.value !== "number") ||
             (step.otherwise !== undefined && (typeof step.otherwise !== "string" || !IDENT.test(step.otherwise))))
           return bad("Check Script Result needs a safe path, typed comparison and optional failure landing");
@@ -855,6 +866,11 @@ export function validateAutomation(value: unknown): { ok: true; definition: Auto
       case "chat":
         if (!keys(step, [...common, "content", "audience"]) || typeof step.content !== "string" ||
             step.content.length < 1 || step.content.length > 1000 || !["scene", "gm"].includes(String(step.audience))) return bad("invalid chat action");
+        break;
+      case "result":
+        if (!keys(step, [...common, "value", "audience"]) ||
+            !["caller", "gm"].includes(String(step.audience)) || !validResultValue(step.value))
+          return bad("a Return Value action needs a bounded string, number or boolean and a caller/gm audience");
         break;
       case "sequence":
         if (!keys(step, [...common, "macroId", "audience"]) || !nonEmptyId(step.macroId) ||
@@ -1406,6 +1422,9 @@ interface PlanningContext {
   postActions: AutomationPostAction[];
   trace: string[];
   rootAutomationId: string;
+  /** Per-graph returned values (MC-02). Scoped by graph id so a nested child's own value
+   * cannot hijack the invoker's result — the plan reports the ROOT graph's value. */
+  results: Map<string, AutomationResult>;
   scriptResults: Map<string, AutomationScriptResult>;
   postActionCount: number;
   histories: Map<string, AutomationState>;
@@ -1628,7 +1647,7 @@ export function planAutomation(
       .map(({ ref, doc: original }) => [targetKey(ref), original])),
     ops: [], cues: [], scripts: [], postActions: [], trace, rootAutomationId: doc._id,
     scriptResults: new Map(Object.entries(resume?.scriptResults ?? {})),
-    postActionCount: resume?.postActionCount ?? 0, histories: new Map(), historyOps: new Map(),
+    postActionCount: resume?.postActionCount ?? 0, results: new Map(), histories: new Map(), historyOps: new Map(),
     definitionOps: new Map(), sceneAppearanceOps: new Map(), pendingTags: new Map(), pendingVisibility: new Map(), pendingDoors: new Map(),
     stack: [], steps: resume?.budgets.steps ?? 0, invocations: resume?.budgets.invocations ?? 0,
     attributeReads: resume?.budgets.attributeReads ?? 0, actorFilterReads: resume?.budgets.actorFilterReads ?? 0,
@@ -1645,9 +1664,12 @@ export function planAutomation(
   if (ctx.ops.length > 1024) return fail("automation exceeds 1024 world operations");
   const state = ctx.histories.get(doc._id);
   if (!state) return fail("root graph did not record its history");
+  // MC-02: only the root graph's value is the invocation's result — a nested child's own
+  // value stays scoped to that child.
+  const returned = ctx.results.get(ctx.rootAutomationId);
   return { ok: true, plan: { ops: ctx.ops, cues: ctx.cues, scripts: ctx.scripts,
     postActions: ctx.postActions, ...(result.continuation ? { continuation: result.continuation } : {}),
-    trace, state, stopOthers: ctx.stopOthers,
+    trace, state, ...(returned ? { result: returned } : {}), stopOthers: ctx.stopOthers,
     suppressedMovement: [...ctx.suppressedMovement], stoppedMovement: [...ctx.stoppedMovement] } };
 }
 
@@ -2675,6 +2697,14 @@ function planGraph(
             flags: {}, system: {}, author: hostUserId, content, whisper: step.audience === "gm" ? [hostUserId] : [],
             roll: null, flavor: `Active zone: ${doc.name}`,
           } as MessageDocument });
+          break;
+        }
+        case "result": {
+          const value = typeof step.value === "string" ? textTemplate(step.value, values) : step.value;
+          if (!validResultValue(value))
+            return fail("a Return Value action exceeded its bound after interpolation");
+          ctx.results.set(doc._id, { value, audience: step.audience });
+          trace.push(`result ${step.audience}: ${String(value).slice(0, 64)}`);
           break;
         }
         case "sequence": {

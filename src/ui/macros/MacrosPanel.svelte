@@ -11,7 +11,7 @@
   import type { ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import type { MacroDocument } from "../../core/documents";
-  import { macroSelectionOf, runChatMacro, runSavedMacro } from "./run";
+  import { macroResultText, macroSelectionOf, runChatMacro, runSavedMacro } from "./run";
   import {
     MACRO_COMPOSITE_LIMITS,
     macroCompositeDocumentError,
@@ -267,7 +267,7 @@
     const offResult = bus.on("macroResult", (msg) => {
       if (!pendingInvokes.has(msg.requestId)) return;
       pendingInvokes.delete(msg.requestId);
-      macroStatus = msg.ok ? msg.detail : `Refused: ${msg.detail}`;
+      macroStatus = macroResultText(msg);
     });
     refresh();
     return () => {

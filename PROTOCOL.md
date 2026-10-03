@@ -393,7 +393,9 @@ interface JournalTriggerMsg {
 
 ### macro.result (0x3b · host → caller and GMs · ops)
 
-Other GMs see bounded execution traces, errors and JSON return values. The player caller sees only a generic completed/failed status: script output and logs are never a hidden-data read channel. No recipient executes the code again; mechanical work is singular on the host. The durable invocation marker and op log support reconnect/replay diagnostics, but there is no transactional rollback across multiple script actions yet.
+Other GMs see bounded execution traces, errors and JSON return values. The player caller sees only a generic completed/failed status: script output and logs are never a hidden-data read channel.
+
+MC-02 adds one exception that is authored rather than incidental: a graph's **Return Value action** (`{ id, kind: "result", value, audience }` with `audience` `caller` or `gm`) hands a bounded scalar back to whoever invoked the macro, delivered as this message's `result` field and shown by that caller's own status line. It is never broadcast, never becomes a chat message, and is private to the invoker's session; an `audience` of `gm` withholds it from a non-GM invoker entirely (the graph's `{{…}}` interpolation is still the author's, so a value that quotes private state is a disclosure the GM chose). A string value is interpolated and must stay ≤256 characters with no control characters, or the whole invocation is rejected. No recipient executes the code again; mechanical work is singular on the host. The durable invocation marker and op log support reconnect/replay diagnostics, but there is no transactional rollback across multiple script actions yet.
 
 ```ts
 interface MacroResultMsg {

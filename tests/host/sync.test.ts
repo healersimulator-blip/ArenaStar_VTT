@@ -9332,3 +9332,57 @@ test("a selection default is a caller-side convenience — the host validates th
   await flushMicrotasks();
   expect(messages().at(-1)).toBe("target=t-pl subject=");
 });
+
+// ─── MC-02 (D-389): a graph returns a typed value to its invoker ────────────────────
+
+/** A published manual graph that posts nothing and returns `value` to its invoker. */
+const macroGraphReturn = (value: unknown, audience: "caller" | "gm"): AutomationDocument => ({
+  ...zoneDoc(), _id: "return-graph", name: "Return bell",
+  definition: { ...zoneDoc().definition, tileId: "zone", methods: ["manual"], gates: { playerRunnable: true },
+    steps: [{ id: "r", kind: "result", value, audience } as never] },
+});
+
+test("a macro's returned value reaches only its invoker, and only when the audience allows it", async () => {
+  const h = await setup();
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: visibleZoneTile() }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "automations", data: macroGraphReturn("count {{count}}", "caller") }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "macros", data: automationMacro("return-graph",
+    { _id: "return-macro", name: "Return bell" }) }]);
+  await flushMicrotasks();
+  const { client: rex, bus: rexBus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const { bus: ivyBus } = await h.addPlayer(OTHER_ID, "Ivy");
+  const rexResults: ClientEvents["macroResult"][] = [];
+  const ivyResults: ClientEvents["macroResult"][] = [];
+  rexBus.on("macroResult", (event) => { rexResults.push(event); });
+  ivyBus.on("macroResult", (event) => { ivyResults.push(event); });
+
+  // The interpolated value comes back to the caller in their own result message.
+  rex.invokeMacro("return-macro");
+  await flushMicrotasks();
+  expect(rexResults.at(-1)).toMatchObject({ ok: true, detail: "Automation fired", result: "count 1" });
+  // The other player's session saw nothing at all, and no chat line was created.
+  expect(ivyResults).toEqual([]);
+  expect(h.hostStore.getAll("messages")).toEqual([]);
+
+  // The GM's own invocation carries the same value (the GM sees their own graph's name too).
+  const gmResults: ClientEvents["macroResult"][] = [];
+  h.gmBus.on("macroResult", (event) => gmResults.push(event));
+  h.gm.invokeMacro("return-macro");
+  await flushMicrotasks();
+  expect(gmResults.at(-1)).toMatchObject({ ok: true, detail: "Fired Return bell", result: "count 2" });
+
+  // A gm-audience value is withheld from a non-GM invoker, who still gets the neutral success.
+  h.gm.submit([{ kind: "update", ref: { coll: "automations", id: "return-graph" },
+    diff: { definition: { ...macroGraphReturn("secret {{count}}", "gm").definition } as unknown as Json } }]);
+  await flushMicrotasks();
+  rex.invokeMacro("return-macro");
+  await flushMicrotasks();
+  expect(rexResults.at(-1)).toMatchObject({ ok: true, detail: "Automation fired" });
+  expect(rexResults.at(-1)?.result).toBeUndefined();
+  h.gm.invokeMacro("return-macro");
+  await flushMicrotasks();
+  expect(gmResults.at(-1)).toMatchObject({ ok: true, result: expect.stringMatching(/^secret \d+$/) });
+  expect(h.hostStore.getAll("messages")).toEqual([]);
+});

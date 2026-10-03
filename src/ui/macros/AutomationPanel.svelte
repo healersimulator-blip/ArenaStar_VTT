@@ -17,13 +17,13 @@
   let { client, bus, getAsset = null }: { client: ClientSync; bus: EventBus<ClientEvents>;
     getAsset?: ((hash: string) => Promise<Uint8Array | undefined>) | null } = $props();
   const METHODS: AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "sceneChange", "sceneLoad", "rotate", "click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "doorOpen", "doorClose", "doorLock", "doorUnlock", ...COMBAT_TRIGGER_METHODS, "lightingChange", "timeChange", "manual"];
-  const KINDS: AutomationStep["kind"][] = ["select", "filter", "checkVariable", "checkValue", "checkScriptResult", "shuffle", "position", "distance", "attributes", "checkData", "condition", "inventory", "tokenTriggerCount", "routeMethod", "routeUser", "forEach", "endEach", "resetHistory", "batchFlush", "collection", "triggerTile", "redirect", "setActive", "stopOthers", "stopMovement", "set", "gameTime", "sceneLighting", "sceneBackground", "tileImage", "hurtHeal", "random", "tags", "visibility", "door", "move", "rotate", "delete", "chat", "sequence", "script", "summon", "rollTable", "landing", "jump", "stop"];
+  const KINDS: AutomationStep["kind"][] = ["select", "filter", "checkVariable", "checkValue", "checkScriptResult", "shuffle", "position", "distance", "attributes", "checkData", "condition", "inventory", "tokenTriggerCount", "routeMethod", "routeUser", "forEach", "endEach", "resetHistory", "batchFlush", "collection", "triggerTile", "redirect", "setActive", "stopOthers", "stopMovement", "set", "gameTime", "sceneLighting", "sceneBackground", "tileImage", "hurtHeal", "random", "tags", "visibility", "door", "move", "rotate", "delete", "chat", "result", "sequence", "script", "summon", "rollTable", "landing", "jump", "stop"];
   const ADD_KINDS = KINDS.filter((kind) => kind !== "endEach");
   const KIND_LABEL: Record<string, string> = { stopMovement: "Stop Token Movement", checkScriptResult: "Check Script Result",
     batchFlush: "Run All Batch Actions", gameTime: "Game Time",
     sceneLighting: "Scene Lighting", sceneBackground: "Scene Background", tileImage: "Switch Tile Image",
     hurtHeal: "Hurt / Heal", move: "Move", rotate: "Rotation", delete: "Delete Entities", rollTable: "Roll Table",
-    redirect: "Trigger Automation", triggerTile: "Trigger Tile at Anchor" };
+    redirect: "Trigger Automation", triggerTile: "Trigger Tile at Anchor", result: "Return Value" };
   const kindLabel = (kind: string): string => KIND_LABEL[kind] ?? kind;
   const methodLabel = (method: AutomationMethod): string => method === "rightClick" ? "right click"
     : method === "doubleClick" ? "double click" : method === "hoverIn" ? "hover in"
@@ -179,6 +179,7 @@
       case "delete": return { id, kind };
       case "rollTable": return { id, kind, tableId: rollTables[0]?._id ?? "", audience: "scene" };
       case "chat": return { id, kind, audience: "gm", content: "{{method}} by {{user}}" };
+      case "result": return { id, kind, audience: "caller", value: "{{count}}" };
       case "sequence": return { id, kind, macroId: macros[0]?._id ?? "", audience: "gm" };
       case "script": return { id, kind, macroId: scripts.find((m) => m.script?.sceneId === sceneId)?._id ?? "" };
       case "summon": return { id, kind, presetId: summons.find((m) => m.summon?.sceneId === sceneId)?._id ?? "",
@@ -1647,6 +1648,10 @@
             <label>Text <input bind:value={step.content} placeholder={'{{user}}, {{count}}, {{method}}'} /></label>
             <label>Audience <select bind:value={step.audience}><option value="gm">GM only</option><option value="scene">Scene</option></select></label>
             <small>Scene messages intentionally publish interpolated text, including IDs of selected hidden targets. Use GM only unless that disclosure is intended.</small>
+          {:else if step.kind === "result"}
+            <label>Value <input bind:value={step.value} placeholder={'{{count}}'} /></label>
+            <label>Audience <select bind:value={step.audience}><option value="caller">Caller only</option><option value="gm">GM only</option></select></label>
+            <small>Hands a bounded string, number or boolean back to whoever invoked this graph — the caller's own status line, never a chat message. A string is interpolated; the last Return Value action the graph executes wins, and a value over 256 characters rejects the graph.</small>
           {:else if step.kind === "sequence"}
             <label>Saved FX macro <select bind:value={step.macroId}><option value="">Choose…</option>{#each macros as macro (macro._id)}<option value={macro._id}>{macro.name}</option>{/each}</select></label>
             <label>Audience <select bind:value={step.audience}><option value="gm">GM only</option><option value="scene">Entitled scene viewers</option></select></label>

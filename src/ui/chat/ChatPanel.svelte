@@ -12,7 +12,7 @@
   } from "../../core/macroCommand";
   import { runSavedMacro } from "../macros/run";
   import { bindMacroArgs } from "../../core/macroArgs";
-  import { macroSelectionOf } from "../macros/run";
+  import { macroResultText, macroSelectionOf } from "../macros/run";
   import { macroAutomationInputs } from "../../core/macroAutomation";
   import { SvelteSet } from "svelte/reactivity";
   import { renderMarkdown } from "../../core/markdown";
@@ -326,7 +326,7 @@
     const offResult = bus.on("macroResult", (msg) => {
       if (!pendingInvokes.has(msg.requestId)) return;
       pendingInvokes.delete(msg.requestId);
-      commandStatus = msg.ok ? msg.detail : `Refused: ${msg.detail}`;
+      commandStatus = macroResultText(msg);
     });
     const offSnapshot = bus.on("snapshot", refresh);
     // Only re-render when messages actually changed — the handshake streams
